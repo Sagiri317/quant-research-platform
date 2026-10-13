@@ -328,23 +328,6 @@ def prepare_trade_cost(execution_date, market, side, schedule, assumptions):
     )
 
 
-def trade_cost(
-    execution_date: date,
-    market: str,
-    side: str,
-    notional: float,
-    adv20: float,
-    schedule: FeeSchedule,
-    assumptions: ExecutionAssumptions,
-    *,
-    face_value_notional: float | None = None,
-) -> TradeCostComponents:
-    """Calculate statutory and modeled costs using the prepared cost owner."""
-    return prepare_trade_cost(
-        execution_date, market, side, schedule, assumptions
-    ).trade(notional, adv20, face_value_notional=face_value_notional)
-
-
 def _validate_fee_intervals(rules: tuple[FeeRule, ...]) -> None:
     grouped: dict[tuple[str, str, str], list[FeeRule]] = {}
     for rule in rules:

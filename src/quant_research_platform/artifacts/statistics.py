@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 from types import MappingProxyType
 
@@ -18,6 +19,7 @@ from quant_research_platform.contracts.time import (
     crypto_execution_windows,
 )
 from quant_research_platform.contracts.validation import (
+    finite_exact_float,
     strict_finite_numeric_series,
     strict_integer_series,
 )
@@ -247,6 +249,8 @@ _ARROW_SCHEMAS = {
             pa.field("target_turnover", pa.float64()),
             pa.field("requested_turnover", pa.float64()),
             pa.field("realized_turnover", pa.float64()),
+            pa.field("return_status", pa.string()),
+            pa.field("return_reason", pa.string()),
             pa.field("benchmark_return", pa.float64()),
             pa.field("active_return", pa.float64()),
             pa.field("relative_wealth", pa.float64()),
@@ -268,6 +272,8 @@ _ARROW_SCHEMAS = {
                     "bootstrap_status",
                     "bootstrap_reason",
                     "fdr_method",
+                    "global_terminal_wealth_reason",
+                    "quarterly_terminal_wealth_reason",
                 )
             ),
             *(
@@ -1179,20 +1185,30 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, envelope) -> pd.DataFr
         if member == "portfolio_group_comparison.parquet" and (
             not result.comparison_role.isin(("primary", "secondary")).all()
             or result.comparison_role.eq("primary").sum() != 1
-            or result[
+            or result.loc[
+                ~result.reason.isin(("nonpositive_start_nav", "nonfinite_result")),
                 [
                     "global_mean",
                     "quarterly_mean",
                     "mean_difference",
-                    "global_terminal_wealth",
-                    "quarterly_terminal_wealth",
-                ]
+                ],
             ]
             .isna()
             .any()
             .any()
         ):
             raise ValueError("statistics_group_comparison_primary_invalid")
+    if member == "portfolio_group_comparison.parquet":
+        for group in ("global", "quarterly"):
+            column = f"{group}_terminal_wealth"
+            missing = result[column].isna()
+            if (
+                result.loc[~missing, f"{column}_reason"].ne("").any()
+                or not result.loc[missing, f"{column}_reason"]
+                .isin(("nonfinite_result", "nonpositive_start_nav"))
+                .all()
+            ):
+                raise ValueError("statistics_terminal_wealth_invalid")
     if member == "model_losses.parquet":
         if (
             not result.asset_coverage_id.str.fullmatch("[0-9a-f]{64}").all()
@@ -1262,23 +1278,30 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, envelope) -> pd.DataFr
                 | ~aggregate & ~continuous & ~valid_episode
             ).any():
                 raise ValueError("statistics_episode_id_invalid")
+            aggregate_metrics = {
+                "crypto_portfolio_statistics.parquet": (
+                    "covered_seconds",
+                    "missing_seconds",
+                    "coverage_fraction",
+                    "episode_count",
+                    "truncated_episode_count",
+                    "fees",
+                    "funding",
+                    "turnover",
+                    "fill_events",
+                    "fill_quantity",
+                ),
+                "crypto_execution_diagnostics.parquet": (
+                    "funding_required_decisions",
+                    "funding_covered_decisions",
+                    "funding_decision_coverage",
+                    "funding_selection_status",
+                ),
+            }
             if aggregate.any() and (
-                member != "crypto_portfolio_statistics.parquet"
+                member not in aggregate_metrics
                 or not result.loc[aggregate, "metric_id"]
-                .isin(
-                    (
-                        "covered_seconds",
-                        "missing_seconds",
-                        "coverage_fraction",
-                        "episode_count",
-                        "truncated_episode_count",
-                        "fees",
-                        "funding",
-                        "turnover",
-                        "fill_events",
-                        "fill_quantity",
-                    )
-                )
+                .isin(aggregate_metrics[member])
                 .all()
             ):
                 raise ValueError("statistics_cross_episode_metric_invalid")
@@ -1334,13 +1357,83 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, envelope) -> pd.DataFr
                 or result.loc[~defined, "reason"].eq("").any()
             ):
                 raise ValueError("statistics_table_status_value_invalid")
-        if member == "portfolio_daily.parquet" and (
-            result[["cash_post", "cash_weight_post", "nav_post"]].isna().any().any()
-            or result.nav_post.le(0).any()
-            or not result.cash_post.between(0, result.nav_post).all()
-            or not result.cash_weight_post.eq(result.cash_post / result.nav_post).all()
-        ):
-            raise ValueError("statistics_cash_exposure_invalid")
+        if member == "portfolio_daily.parquet":
+            if (
+                result[["cash_post", "nav_before", "nav_post", "nav_end"]]
+                .isna()
+                .any()
+                .any()
+                or result[["nav_before", "nav_post", "nav_end"]].lt(0).any().any()
+                or not result.cash_post.between(0, result.nav_post).all()
+            ):
+                raise ValueError("statistics_cash_exposure_invalid")
+            expected_cash_weight = pd.Series(
+                [
+                    finite_exact_float(Fraction(cash) / Fraction(nav))
+                    if nav > 0
+                    else None
+                    for cash, nav in zip(result.cash_post, result.nav_post, strict=True)
+                ],
+                index=result.index,
+                dtype="float64",
+            )
+            if not (
+                result.cash_weight_post.eq(expected_cash_weight)
+                | (result.cash_weight_post.isna() & expected_cash_weight.isna())
+            ).all():
+                raise ValueError("statistics_cash_exposure_invalid")
+            positive_start = result.nav_before.gt(0)
+            ratios = [
+                "net_return",
+                "gross_return",
+                "cost_drag",
+                "target_turnover",
+                "requested_turnover",
+                "realized_turnover",
+            ]
+            expected_return = pd.Series(
+                [
+                    finite_exact_float(
+                        (Fraction(end) - Fraction(start)) / Fraction(start)
+                    )
+                    if start > 0
+                    else None
+                    for start, end in zip(
+                        result.nav_before, result.nav_end, strict=True
+                    )
+                ],
+                index=result.index,
+                dtype="float64",
+            )
+            if not (
+                result.net_return.eq(expected_return)
+                | (result.net_return.isna() & expected_return.isna())
+            ).all():
+                raise ValueError("statistics_return_status_invalid")
+            defined_return = positive_start & result.net_return.notna()
+            if (
+                not result.return_status.eq(
+                    defined_return.map({True: "DEFINED", False: "UNDEFINED"})
+                ).all()
+                or not result.return_reason.eq(
+                    pd.Series(
+                        [
+                            ""
+                            if defined
+                            else "nonfinite_result"
+                            if positive
+                            else "nonpositive_start_nav"
+                            for defined, positive in zip(
+                                defined_return, positive_start, strict=True
+                            )
+                        ],
+                        index=result.index,
+                    )
+                ).all()
+                or result.loc[~positive_start, ratios].notna().any().any()
+                or result.loc[~defined_return, "active_return"].notna().any()
+            ):
+                raise ValueError("statistics_return_status_invalid")
         if "end_at" in result and (not result.entry_at.lt(result.end_at).all()):
             raise ValueError("statistics_holding_interval_invalid")
         if "decision_at" in result and (

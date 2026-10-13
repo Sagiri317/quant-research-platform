@@ -10,9 +10,10 @@ import pytest
 from quant_research_platform.artifacts.research import read_research_run_record
 from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
 from quant_research_platform.markets.implementations.a_share.fundamentals import (
+    _pit_observations,
+    _prepare_pit_fundamentals,
     construct_ttm_events,
     financial_events_from_interim,
-    materialize_pit_fundamentals,
 )
 from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.sources.choice import interim
@@ -27,8 +28,6 @@ from quant_research_platform.storage.datasets.reading import (
 )
 from quant_research_platform.storage.identity import (
     filesystem_exists,
-    filesystem_read_bytes,
-    filesystem_read_text,
     filesystem_unlink,
     filesystem_walk,
     filesystem_write_bytes,
@@ -48,7 +47,7 @@ CODE = "000001.SZ"
 def _file_hashes(root: Path) -> dict[Path, str]:
     return {
         (parent / name).relative_to(root): hashlib.sha256(
-            filesystem_read_bytes(parent / name)
+            Path(native_filesystem_path(parent / name)).read_bytes()
         ).hexdigest()
         for parent, _directories, files in filesystem_walk(root)
         for name in files
@@ -173,8 +172,10 @@ def test_native_null_revisions_preserve_history_and_next_session_visibility(
     selected = ttm.loc[ttm.metric_id.eq(column)]
     assert selected.available_at.tolist() == list(sessions[:2])
     assert selected.value.iloc[0] == 100.0 and pd.isna(selected.value.iloc[1])
-    pit = materialize_pit_fundamentals(
-        pd.DataFrame({"asset_id": ["000001"] * 2, "timestamp": sessions[:2]}), selected
+    pit = _prepare_pit_fundamentals(selected)(
+        _pit_observations(
+            pd.DataFrame({"asset_id": ["000001"] * 2, "timestamp": sessions[:2]})
+        )
     )
     assert pit.value.iloc[0] == 100.0 and pd.isna(pit.value.iloc[1])
 
@@ -808,7 +809,10 @@ def test_raw_mutation_before_publish_preserves_old_good(
         else:
             path = snapshot / "response.csv"
             filesystem_write_bytes(
-                path, filesystem_read_bytes(path).replace(b"100.0", b"101.0", 1)
+                path,
+                Path(native_filesystem_path(path))
+                .read_bytes()
+                .replace(b"100.0", b"101.0", 1),
             )
 
     monkeypatch.setattr(interim, "_rows", mutating_rows)
@@ -861,7 +865,10 @@ def test_bulk_import_uses_table_scopes_and_keeps_published_identity(
             )
             raw = snapshot / "response.csv"
             filesystem_write_bytes(
-                raw, filesystem_read_bytes(raw).replace(b"100.0", b"101.0", 1)
+                raw,
+                Path(native_filesystem_path(raw))
+                .read_bytes()
+                .replace(b"100.0", b"101.0", 1),
             )
         return result
 
@@ -879,7 +886,8 @@ def test_bulk_import_uses_table_scopes_and_keeps_published_identity(
         )
     assert all(
         (
-            hashlib.sha256(filesystem_read_bytes(path)).hexdigest() == digest
+            hashlib.sha256(Path(native_filesystem_path(path)).read_bytes()).hexdigest()
+            == digest
             for path, digest in before.items()
         )
     )
@@ -905,7 +913,9 @@ def test_raw_metadata_invalid_is_source_local(tmp_path, mutation):
     with choice_session(SDK(response())) as session:
         root, _ = _disclosure(session, layout)
     sidecar = root / "response.metadata.json"
-    payload = json.loads(filesystem_read_text(sidecar, encoding="utf-8"))
+    payload = json.loads(
+        Path(native_filesystem_path(sidecar)).read_text(encoding="utf-8")
+    )
     if mutation == "metadata_missing":
         del payload["metadata"]
     elif mutation == "metadata_type":
@@ -941,7 +951,9 @@ def test_invalid_choice_metadata_preserves_unrelated_target_and_report(tmp_path)
     with choice_session(SDK(response())) as session:
         root, _ = _disclosure(session, layout)
     sidecar = root / "response.metadata.json"
-    payload = json.loads(filesystem_read_text(sidecar, encoding="utf-8"))
+    payload = json.loads(
+        Path(native_filesystem_path(sidecar)).read_text(encoding="utf-8")
+    )
     del payload["metadata"]["request"]
     filesystem_write_text(sidecar, json.dumps(payload), encoding="utf-8")
     profile = research_profile()

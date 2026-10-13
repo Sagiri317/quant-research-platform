@@ -31,17 +31,12 @@ RUNTIME_DEPENDENCIES = {
 }
 DEV_DEPENDENCIES = {
     "matplotlib",
-    "nbformat",
-    "nbclient",
-    "jupyter-client",
-    "ipykernel",
     "pytest",
     "ruff",
 }
 CONDA_NAMES = {
     "arch": "arch-py",
     "matplotlib": "matplotlib-base",
-    "jupyter-client": "jupyter_client",
 }
 
 

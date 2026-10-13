@@ -238,9 +238,10 @@ def _fit_linear_model_result(
     weighted = np.sqrt(weights)
     target = training[spec.label_column].to_numpy(dtype="float64")
     _, target_exponent = np.frexp(float(np.max(np.abs(target))))
+    design *= weighted[:, None]
     with threadpool_limits(limits=1, user_api="blas"):
         beta = np.linalg.lstsq(
-            design * weighted[:, None],
+            design,
             np.ldexp(target, -target_exponent) * weighted,
             rcond=None,
         )[0]

@@ -22,15 +22,17 @@ from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_iterdir,
     filesystem_mkdir,
-    filesystem_read_bytes,
-    filesystem_read_text,
     filesystem_write_bytes,
+    native_filesystem_path,
 )
 from quant_research_platform.storage.semantic_artifacts import write_semantic_artifact
 
 
 def _files(root: Path) -> dict[str, bytes]:
-    return {path.name: filesystem_read_bytes(path) for path in filesystem_iterdir(root)}
+    return {
+        path.name: Path(native_filesystem_path(path)).read_bytes()
+        for path in filesystem_iterdir(root)
+    }
 
 
 def _report() -> tuple[object, dict[str, object]]:
@@ -101,7 +103,9 @@ def test_report_keeps_numeric_byte_counts_and_stock_strings(tmp_path):
         saved["sections"]["run observations"]["metrics"]["read_bytes"]["value"]
         == 393216
     )
-    assert "393,216" in filesystem_read_text(root / "report.md", encoding="utf-8")
+    assert "393,216" in Path(native_filesystem_path(root / "report.md")).read_text(
+        encoding="utf-8"
+    )
     payload["sections"]["Data/Coverage"]["sample"] = "600000.SH"
     root = write_research_report_artifact(
         tmp_path / "stock", envelope=envelope, payload=payload
@@ -163,7 +167,9 @@ def test_research_report_reader_rejects_persisted_envelope_mismatch(
         write_json_evidence(staging / "report.json", payload)
         write_markdown_evidence(
             staging / "report.md",
-            filesystem_read_text(valid_root / "report.md", encoding="utf-8"),
+            Path(native_filesystem_path(valid_root / "report.md")).read_text(
+                encoding="utf-8"
+            ),
         )
 
     invalid_root = tmp_path / "invalid"
@@ -329,7 +335,9 @@ def test_report_markdown_lists_every_formal_result_without_json_walls(tmp_path):
     root = write_research_report_artifact(
         tmp_path / "report", envelope=envelope, payload=payload
     )
-    markdown = filesystem_read_text(root / "report.md", encoding="utf-8")
+    markdown = Path(native_filesystem_path(root / "report.md")).read_text(
+        encoding="utf-8"
+    )
     assert "| candidate_id | metric_id | value | status | reason |" in markdown
     assert all(f"| candidate_{index} |" in markdown for index in range(24))
     assert (
@@ -348,7 +356,7 @@ def test_large_report_round_trip(tmp_path):
     }
     logical = tmp_path / "large"
     root = write_research_report_artifact(logical, envelope=envelope, payload=payload)
-    original = filesystem_read_bytes(root / "report.json")
+    original = Path(native_filesystem_path(root / "report.json")).read_bytes()
     assert len(original) > 1024 * 1024
     assert (
         read_research_report_artifact(
@@ -356,7 +364,7 @@ def test_large_report_round_trip(tmp_path):
         )
         == payload
     )
-    assert filesystem_read_bytes(root / "report.json") == original
+    assert Path(native_filesystem_path(root / "report.json")).read_bytes() == original
 
 
 @pytest.mark.parametrize("directory", [False, True])
@@ -381,7 +389,7 @@ def test_report_parser_binds_actual_bytes_to_verified_member(tmp_path, monkeypat
         tmp_path / "report", envelope=envelope, payload=payload
     )
     member = root / "report.json"
-    original = filesystem_read_bytes(member)
+    original = Path(native_filesystem_path(member)).read_bytes()
     replacement = original.replace(b"0.25", b"0.75")
     assert replacement != original and len(replacement) == len(original)
     original_reader = research.read_json_evidence
@@ -426,7 +434,9 @@ def test_report_status_types_reject_before_publish_and_from_verified_members(
         write_json_evidence(staging / "report.json", changed)
         write_markdown_evidence(
             staging / "report.md",
-            filesystem_read_text(good / "report.md", encoding="utf-8"),
+            Path(native_filesystem_path(good / "report.md")).read_text(
+                encoding="utf-8"
+            ),
         )
 
     forged = write_semantic_artifact(tmp_path / "forged", envelope, write)
@@ -520,13 +530,17 @@ def test_report_consumption_rechecks_snapshot(tmp_path, monkeypatch, mutation):
         result = original(*args, **kwargs)
         if mutation in {"manifest", "body"}:
             path = root / "manifest.json"
-            filesystem_write_bytes(path, filesystem_read_bytes(path) + b"\n")
+            filesystem_write_bytes(
+                path, Path(native_filesystem_path(path)).read_bytes() + b"\n"
+            )
         elif mutation == "member":
             filesystem_write_bytes(root / "unexpected", b"")
         else:
             path = root / "report.md"
             replacement = root / "replacement"
-            filesystem_write_bytes(replacement, filesystem_read_bytes(path))
+            filesystem_write_bytes(
+                replacement, Path(native_filesystem_path(path)).read_bytes()
+            )
             replacement.replace(path)
         if mutation == "body":
             filesystem_write_bytes(root / "report.md", b"changed")

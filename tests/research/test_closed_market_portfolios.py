@@ -17,6 +17,9 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioTargetBlocked,
 )
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.markets.implementations.a_share import (
+    portfolio_sessions as market_sessions,
+)
 from quant_research_platform.markets.implementations.a_share.calendar import (
     unified_trading_sessions,
 )
@@ -24,9 +27,6 @@ from quant_research_platform.markets.implementations.a_share.execution import (
     fee_schedule_from_frame,
     prepare_trade_cost,
     require_fee_coverage,
-)
-from quant_research_platform.markets.implementations.a_share.processed import (
-    producer as market_sessions,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.portfolios import production
@@ -355,7 +355,10 @@ def _ledger(layout, roots):
         iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
         candidate=candidate,
         layout=layout,
-        upstream_identities={**dict.fromkeys(roots, "a" * 64), "prediction": "b" * 64},
+        upstream_identities={
+            **{target: root.name for target, root in roots.items()},
+            "prediction": "b" * 64,
+        },
         output_window=TimeWindow("2022-12-30", "2023-01-06"),
         input_window=TimeWindow("2022-12-01", "2023-01-06"),
         formal_dataset_window=TimeWindow("2022-12-01", "2023-01-06"),
@@ -531,6 +534,16 @@ def test_research_valuation_retains_unquoted_rights_without_claiming_execution(
     tmp_path, fault
 ):
     layout, roots, _calendar, _panel = _native_inputs(tmp_path, fault=fault)
+    if fault in {
+        "unknown_barrier",
+        "missing_calendar",
+        "unknown_membership",
+        "missing_open_price",
+        "missing_open_row",
+    }:
+        with pytest.raises(PortfolioTargetBlocked):
+            list(_ledger(layout, roots))
+        return
     batches = list(_ledger(layout, roots))
     assert batches
     facts = [item for batch in batches for item in batch.diagnostics]
@@ -588,31 +601,23 @@ def test_native_partial_quote_becomes_phase_ordered_research_anchor(tmp_path, ph
         view.timestamp: marks.project(view).set_index("asset_id") for view in views
     }
     current = projected[pd.Timestamp("2023-01-05")].loc["a0"]
-    assert current.adj_open == (12.0 if phase == "open" else 11.0)
-    assert current.adj_close == 12.0
+    assert current[f"adj_{phase}"] == 12.0
+    assert pd.isna(current[f"adj_{'close' if phase == 'open' else 'open'}"])
     assert pd.isna(current[f"research_{phase}_mark_at"])
     next_day = projected[pd.Timestamp("2023-01-06")].loc["a0"]
-    assert next_day.adj_open == next_day.adj_close == 12.0
-    assert next_day.research_open_mark_at == pd.Timestamp("2023-01-05")
-    assert next_day.research_open_mark_kind == phase
+    assert pd.isna(next_day.adj_open) and pd.isna(next_day.adj_close)
     assert partial.panel.set_index("asset_id").loc["a0"].equals(raw)
-
-    batches = list(_ledger(layout, roots))
-    frames = [session_frame(batch).set_index("asset_id") for batch in batches]
-    assert [frame.loc["a0", "holding_return"] for frame in frames] == pytest.approx(
-        [
-            0.1,
-            0.0,
-            12 / 11 - 1 if phase == "open" else 0.0,
-            0.0 if phase == "open" else 12 / 11 - 1,
-        ]
-    )
     if phase == "close":
-        assert not any(
-            trade.asset_id == "a0"
-            for batch in batches
-            for trade in batch.trades
-            if pd.Timestamp(trade.timestamp_ns) == pd.Timestamp("2023-01-05")
+        with pytest.raises(
+            PortfolioTargetBlocked, match="portfolio_held_return_missing"
+        ):
+            list(_ledger(layout, roots))
+    else:
+        batches = list(_ledger(layout, roots))
+        assert all(
+            row.quantity == 0
+            for row in batches[-1].valuations
+            if row.asset_id == "a0" and row.phase != "before"
         )
 
 

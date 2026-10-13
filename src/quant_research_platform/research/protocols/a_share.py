@@ -442,6 +442,14 @@ class AShareProtocol:
                     )
                 }
             )
+            base["statistics"] = {
+                **base["statistics"],
+                "group_comparison": {
+                    key: value
+                    for key, value in base["statistics"]["group_comparison"].items()
+                    if key not in {"portfolio_ids", "primary_portfolio_id"}
+                },
+            }
             base["research_configuration"] = {
                 key: self.configuration()[key]
                 for key in (
@@ -623,6 +631,14 @@ class AShareProtocol:
             frozen_alpha=tuple((key, value[0]) for key, value in calibrations.items()),
         ), blocker
 
+    def optional_source_input_data_ids(self, target_id):
+        if any(
+            target_id == f"{self.scenario_id}_{candidate.candidate_id}_ledger"
+            for candidate in self.portfolio_candidates()
+        ):
+            return ("a_share_equity_events",)
+        return ()
+
     def target_specs(self, action: str) -> tuple[TargetSpec, ...]:
         if action != "research run":
             return ()
@@ -642,6 +658,9 @@ class AShareProtocol:
                     candidate.market_panel_target_id,
                     "market_bars_1d",
                     "stock_master",
+                    *self.optional_source_input_data_ids(
+                        f"{dataset}_{candidate.candidate_id}_ledger"
+                    ),
                     *candidate.risk_context_target_ids,
                     *(
                         (candidate.benchmark_weights_target_id,)

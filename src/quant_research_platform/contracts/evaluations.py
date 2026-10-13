@@ -63,8 +63,10 @@ EVALUATION_IC_SUMMARY_COLUMNS = (
     "positive_rankic_rate",
     "valid_rankic_count",
     "ic_reason",
+    "std_ic_reason",
     "icir_reason",
     "rankic_reason",
+    "std_rankic_reason",
     "rankicir_reason",
 )
 EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS = (

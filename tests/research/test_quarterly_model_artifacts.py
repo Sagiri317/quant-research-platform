@@ -50,7 +50,6 @@ from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_glob,
     filesystem_mkdir,
-    filesystem_read_bytes,
     filesystem_walk,
     filesystem_write_bytes,
     native_filesystem_path,
@@ -73,7 +72,9 @@ from tests.research.workflow_test_support import (
 
 def _file_bytes(root: Path) -> dict[Path, bytes]:
     return {
-        (parent / name).relative_to(root): filesystem_read_bytes(parent / name)
+        (parent / name).relative_to(root): Path(
+            native_filesystem_path(parent / name)
+        ).read_bytes()
         for parent, _directories, files in filesystem_walk(root)
         for name in files
     }
@@ -219,20 +220,26 @@ def test_quarter_resume_rejects_invalid_published_units_without_retraining(
     root = tmp_path / "candidate"
     shutil.copytree(native_filesystem_path(partial.root), native_filesystem_path(root))
     unit = next(filesystem_glob(root / "models/quarters", "*/2019Q1/instances/*"))
-    payload = json.loads(filesystem_read_bytes(unit / "quarter.json"))
+    payload = json.loads(
+        Path(native_filesystem_path(unit / "quarter.json")).read_bytes()
+    )
     if mutation == "prediction":
         prediction = (
             unit / payload["candidate_models"][0]["validation_prediction"]["path"]
         )
-        filesystem_write_bytes(prediction, filesystem_read_bytes(prediction) + b" ")
+        filesystem_write_bytes(
+            prediction, Path(native_filesystem_path(prediction)).read_bytes() + b" "
+        )
     elif mutation == "ledger":
-        manifest = json.loads(filesystem_read_bytes(unit / "manifest.json"))
+        manifest = json.loads(
+            Path(native_filesystem_path(unit / "manifest.json")).read_bytes()
+        )
         reference = manifest["operational_metadata"]["model_trial_ledgers"][0]
         ledger = StorageLayout(root).trial_ledger_root(
             reference["run_id"], reference["experiment_id"]
         )
         terminal = next(filesystem_glob(ledger / "records", "*-terminal.json"))
-        record = json.loads(filesystem_read_bytes(terminal))
+        record = json.loads(Path(native_filesystem_path(terminal)).read_bytes())
         record["metrics"]["n_train"] += 1
         filesystem_write_bytes(terminal, json.dumps(record).encode())
     else:
@@ -245,7 +252,9 @@ def test_quarter_resume_rejects_invalid_published_units_without_retraining(
         else:
             payload["selection"]["cutoff"] = "2024-01-01"
         filesystem_write_bytes(unit / "quarter.json", json.dumps(payload).encode())
-        manifest = json.loads(filesystem_read_bytes(unit / "manifest.json"))
+        manifest = json.loads(
+            Path(native_filesystem_path(unit / "manifest.json")).read_bytes()
+        )
         manifest["members"] = [
             persisted._member_record(member["path"], unit / member["path"])
             for member in manifest["members"]
@@ -886,7 +895,7 @@ def _republish(case, logical, *, mutate, operational=None):
             relative = member["path"]
             destination = stage / relative
             filesystem_mkdir(destination.parent, parents=True, exist_ok=True)
-            payload = filesystem_read_bytes(case.root / relative)
+            payload = Path(native_filesystem_path(case.root / relative)).read_bytes()
             if relative.endswith(".json"):
                 document = json.loads(payload)
                 mutate(relative, document)
@@ -968,7 +977,7 @@ def test_prediction_writer_and_reader_reject_champion_family_lineage(tmp_path):
         write_prediction_result(case.layout, conflict)
     assert _file_bytes(bundle) == old_good
     path = bundle / "manifest.json"
-    manifest = json.loads(filesystem_read_bytes(path))
+    manifest = json.loads(Path(native_filesystem_path(path)).read_bytes())
     manifest["metadata"]["model_metadata"] = conflict.model_metadata
     filesystem_write_bytes(path, json.dumps(manifest).encode())
     with pytest.raises(
@@ -1395,7 +1404,7 @@ def test_model_member_mutation_is_rejected_before_loading_predictor(
 ):
     case = shared_model_case(tmp_path)
     path = case.root / case.artifact.final_models[0]["model_member"]
-    filesystem_write_bytes(path, filesystem_read_bytes(path) + b" ")
+    filesystem_write_bytes(path, Path(native_filesystem_path(path)).read_bytes() + b" ")
     monkeypatch.setattr(
         persisted.pickle, "load", lambda *_: pytest.fail("load before identity")
     )
@@ -1421,9 +1430,11 @@ def test_model_member_io_preserves_failure_class(
             filesystem_mkdir(target.parent, parents=True)
             filesystem_write_bytes(
                 target,
-                filesystem_read_bytes(
-                    case.root / case.artifact.final_models[0]["model_member"]
-                ),
+                Path(
+                    native_filesystem_path(
+                        case.root / case.artifact.final_models[0]["model_member"]
+                    )
+                ).read_bytes(),
             )
 
         crypto_root = write_semantic_artifact(tmp_path / "crypto", case.envelope, write)
@@ -1717,7 +1728,9 @@ def test_model_selection_reuses_snapshot_and_rejects_between_scan_mutations(
                 def results(**callbacks):
                     yield from actual(**callbacks)
                     path = root / "spec.json"
-                    filesystem_write_bytes(path, filesystem_read_bytes(path) + b" ")
+                    filesystem_write_bytes(
+                        path, Path(native_filesystem_path(path)).read_bytes() + b" "
+                    )
 
                 return results
 
@@ -1740,18 +1753,24 @@ def test_model_selection_reuses_snapshot_and_rejects_between_scan_mutations(
             return ()
         if mutation == "part":
             part = session.read_paths[0]
-            filesystem_write_bytes(part, filesystem_read_bytes(part) + b" ")
+            filesystem_write_bytes(
+                part, Path(native_filesystem_path(part)).read_bytes() + b" "
+            )
         elif mutation in {"spec", "manifest"}:
             path = (
                 root / "spec.json"
                 if mutation == "spec"
                 else root / "_manifest" / "manifest.json"
             )
-            filesystem_write_bytes(path, filesystem_read_bytes(path) + b" ")
+            filesystem_write_bytes(
+                path, Path(native_filesystem_path(path)).read_bytes() + b" "
+            )
         else:
             path = root / "data" / "year=2025" / "part-00000.parquet"
             filesystem_mkdir(path.parent)
-            filesystem_write_bytes(path, filesystem_read_bytes(session.all_paths[0]))
+            filesystem_write_bytes(
+                path, Path(native_filesystem_path(session.all_paths[0])).read_bytes()
+            )
         return tuple(read())
 
     monkeypatch.setattr(production, "_build_a_share_models", exercise)
@@ -1945,7 +1964,11 @@ def test_full_scope_family_metadata_preserves_shards_and_native_model_state(
     )
     assert len(case.artifact.candidate_models) == 5 * len(specs)
     assert len(case.artifact.final_models) == 2 * len(specs)
-    shard = json.loads(filesystem_read_bytes(case.root / "models/2019Q1/metadata.json"))
+    shard = json.loads(
+        Path(
+            native_filesystem_path(case.root / "models/2019Q1/metadata.json")
+        ).read_bytes()
+    )
     assert len(shard["candidate_models"]) == len(specs)
     assert any(
         item["model_metadata"]["scaler"] is not None

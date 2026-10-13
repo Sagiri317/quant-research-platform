@@ -113,6 +113,9 @@ def research_profile(profile_id: str | None = None) -> ResearchProfile:
 
 @cache
 def _a_share_profile() -> ResearchProfile:
+    from quant_research_platform.markets.implementations.a_share import (
+        portfolio_sessions as a_share_portfolio_sessions,
+    )
     from quant_research_platform.markets.implementations.a_share.calendar import (
         unified_trading_sessions,
     )
@@ -217,7 +220,7 @@ def _a_share_profile() -> ResearchProfile:
                     ProducerKind.STATISTIC,
                     partial(
                         build_portfolio_statistics_tables,
-                        iter_portfolio_sessions=a_share_producer.iter_portfolio_sessions,
+                        iter_portfolio_sessions=a_share_portfolio_sessions.iter_portfolio_sessions,
                         unified_trading_sessions=unified_trading_sessions,
                     ),
                 )
@@ -499,6 +502,9 @@ def bind_research_configuration(
             else spec
             for spec in processed.list()
         )
+        from quant_research_platform.markets.implementations.a_share import (
+            portfolio_sessions as a_share_portfolio_sessions,
+        )
         from quant_research_platform.markets.implementations.a_share.calendar import (
             unified_trading_sessions,
         )
@@ -508,9 +514,6 @@ def bind_research_configuration(
             prepare_trade_cost,
             require_fee_coverage,
         )
-        from quant_research_platform.markets.implementations.a_share.processed import (
-            producer as a_share_producer,
-        )
         from quant_research_platform.research.portfolios.production import (
             build_portfolio_ledger,
         )
@@ -519,7 +522,7 @@ def bind_research_configuration(
             build_portfolio_ledger,
             shared_alpha_facts={},
             shared_risk_fits={},
-            iter_portfolio_sessions=a_share_producer.iter_portfolio_sessions,
+            iter_portfolio_sessions=a_share_portfolio_sessions.iter_portfolio_sessions,
             fee_schedule_from_frame=fee_schedule_from_frame,
             require_fee_coverage=require_fee_coverage,
             prepare_trade_cost=prepare_trade_cost,

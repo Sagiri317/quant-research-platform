@@ -21,8 +21,8 @@ from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_glob,
     filesystem_is_file,
-    filesystem_read_text,
     filesystem_write_text,
+    native_filesystem_path,
 )
 from tests.storage.dataset_test_support import _input_dataset_identity_payload
 from tests.storage.low_level_fixtures import (
@@ -38,10 +38,12 @@ def test_write_dataset_writes_complete_artifact_root(tmp_path: Path) -> None:
         root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
     )
     manifest = json.loads(
-        filesystem_read_text(root / "_manifest" / "manifest.json", encoding="utf-8")
+        Path(native_filesystem_path(root / "_manifest" / "manifest.json")).read_text(
+            encoding="utf-8"
+        )
     )
     spec_payload = json.loads(
-        filesystem_read_text(root / "spec.json", encoding="utf-8")
+        Path(native_filesystem_path(root / "spec.json")).read_text(encoding="utf-8")
     )
     assert result.root == root
     assert result.data_root == root / "data"
@@ -67,7 +69,9 @@ def test_write_dataset_partition_counts_and_values(tmp_path: Path) -> None:
         spec=make_processed_dataset_spec("partition_values"),
     )
     manifest = json.loads(
-        filesystem_read_text(root / "_manifest" / "manifest.json", encoding="utf-8")
+        Path(native_filesystem_path(root / "_manifest" / "manifest.json")).read_text(
+            encoding="utf-8"
+        )
     )
     assert manifest["partition_row_counts"] == {"year=2014": 1, "year=2015": 2}
 
@@ -202,7 +206,9 @@ def test_inspect_dataset_rejects_tampered_input_dataset_identity(
         },
     )
     manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(filesystem_read_text(manifest_path, encoding="utf-8"))
+    manifest = json.loads(
+        Path(native_filesystem_path(manifest_path)).read_text(encoding="utf-8")
+    )
     manifest["input_dataset_identities"]["demo_input"]["unknown"] = "x"
     filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ValueError, match="invalid_input_dataset_identities_metadata"):
@@ -219,7 +225,9 @@ def test_inspect_dataset_rejects_parallel_input_fingerprint_lineage(
         spec=make_processed_dataset_spec("parallel_fingerprint_lineage"),
     )
     manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(filesystem_read_text(manifest_path, encoding="utf-8"))
+    manifest = json.loads(
+        Path(native_filesystem_path(manifest_path)).read_text(encoding="utf-8")
+    )
     manifest["input_fingerprints"] = {}
     filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ValueError, match="dataset_manifest_fields_invalid"):
@@ -440,7 +448,9 @@ def test_write_dataset_preserves_schema_for_empty_chunks(tmp_path: Path) -> None
     empty_chunk = make_default_dataset_frame().iloc[:0].copy()
     write_dataset(root, [empty_chunk], spec=make_processed_dataset_spec("empty_schema"))
     manifest = json.loads(
-        filesystem_read_text(root / "_manifest" / "manifest.json", encoding="utf-8")
+        Path(native_filesystem_path(root / "_manifest" / "manifest.json")).read_text(
+            encoding="utf-8"
+        )
     )
     materialized = read_dataset(root)
     inspection = inspect_dataset(root)
@@ -618,7 +628,9 @@ def test_archive_source_identity_is_validated_on_write_and_read(tmp_path, mutati
     assert not candidate.exists()
     assert inspect_dataset(root).manifest["source_artifact_identity"] == identity
     manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(filesystem_read_text(manifest_path, encoding="utf-8"))
+    manifest = json.loads(
+        Path(native_filesystem_path(manifest_path)).read_text(encoding="utf-8")
+    )
     manifest["source_artifact_identity"] = invalid
     filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ValueError, match="invalid_source_artifact_identity"):

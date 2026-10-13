@@ -7,6 +7,7 @@ import hashlib
 import json
 from dataclasses import replace
 from datetime import date, timedelta
+from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -20,10 +21,6 @@ from quant_research_platform.markets.implementations.a_share.execution import (
     fee_schedule_from_frame,
     prepare_trade_cost,
     require_fee_coverage,
-    trade_cost,
-)
-from quant_research_platform.research.portfolios.accounting import (
-    drift_continuous_holdings,
 )
 from quant_research_platform.research.portfolios.accounting import (
     execute_continuous_target as _execute_continuous_target,
@@ -39,11 +36,10 @@ from quant_research_platform.sources.reference.a_share_fees import (
 )
 from quant_research_platform.storage.identity import (
     filesystem_mkdir,
-    filesystem_read_bytes,
-    filesystem_read_text,
     filesystem_stat,
     filesystem_write_bytes,
     filesystem_write_text,
+    native_filesystem_path,
     open_filesystem_file,
 )
 from tests.helpers.portfolio_ledger import execute_continuous_target
@@ -141,9 +137,9 @@ def _a_share_cost(schedule: FeeSchedule, markets: dict[str, str]):
         adv20: float,
         assumptions: ExecutionAssumptions,
     ):
-        return trade_cost(
-            execution_date, markets[asset], side, notional, adv20, schedule, assumptions
-        )
+        return prepare_trade_cost(
+            execution_date, markets[asset], side, schedule, assumptions
+        ).trade(notional, adv20)
 
     return cost_for_trade
 
@@ -271,7 +267,9 @@ def _copy_fee_source(tmp_path: Path) -> tuple[Path, Path]:
         writer.writeheader()
         writer.writerows(rows)
     metadata = {
-        "file_sha256": hashlib.sha256(filesystem_read_bytes(csv_path)).hexdigest(),
+        "file_sha256": hashlib.sha256(
+            Path(native_filesystem_path(csv_path)).read_bytes()
+        ).hexdigest(),
         "file_bytes": filesystem_stat(csv_path).st_size,
         "row_count": len(rows),
         "fields_raw": list(FEE_CSV_COLUMNS),
@@ -316,7 +314,9 @@ def _source_row(
 
 
 def _rewrite_sidecar(sidecar_path: Path, **changes: object) -> None:
-    metadata = json.loads(filesystem_read_text(sidecar_path, encoding="utf-8"))
+    metadata = json.loads(
+        Path(native_filesystem_path(sidecar_path)).read_text(encoding="utf-8")
+    )
     metadata.update(changes)
     filesystem_write_text(
         sidecar_path,
@@ -363,7 +363,9 @@ def test_fee_source_rejects_sidecar_count_and_byte_mutations(
     tmp_path: Path, field: str
 ) -> None:
     _csv_path, sidecar_path = _copy_fee_source(tmp_path)
-    metadata = json.loads(filesystem_read_text(sidecar_path, encoding="utf-8"))
+    metadata = json.loads(
+        Path(native_filesystem_path(sidecar_path)).read_text(encoding="utf-8")
+    )
     _rewrite_sidecar(sidecar_path, **{field: metadata[field] + 1})
     with pytest.raises(ValueError, match="a_share_fee_source_(row_count|metadata)"):
         load_a_share_fee_source(reference_root=_csv_path.parent.parent)
@@ -371,15 +373,19 @@ def test_fee_source_rejects_sidecar_count_and_byte_mutations(
 
 def test_fee_source_rejects_csv_hash_and_schema_mutations(tmp_path: Path) -> None:
     csv_path, sidecar_path = _copy_fee_source(tmp_path)
-    filesystem_write_bytes(csv_path, filesystem_read_bytes(csv_path) + b"\n")
+    filesystem_write_bytes(
+        csv_path, Path(native_filesystem_path(csv_path)).read_bytes() + b"\n"
+    )
     with pytest.raises(ValueError, match="a_share_fee_source_metadata_invalid"):
         load_a_share_fee_source(reference_root=csv_path.parent.parent)
     csv_path, sidecar_path = _copy_fee_source(tmp_path / "schema")
-    raw = filesystem_read_text(csv_path, encoding="utf-8-sig")
+    raw = Path(native_filesystem_path(csv_path)).read_text(encoding="utf-8-sig")
     filesystem_write_text(
         csv_path, raw.replace("市场", "市场X", 1), encoding="utf-8-sig"
     )
-    digest = hashlib.sha256(filesystem_read_bytes(csv_path)).hexdigest()
+    digest = hashlib.sha256(
+        Path(native_filesystem_path(csv_path)).read_bytes()
+    ).hexdigest()
     _rewrite_sidecar(
         sidecar_path, file_sha256=digest, file_bytes=filesystem_stat(csv_path).st_size
     )
@@ -456,12 +462,10 @@ def test_fee_rules_reject_overlap_gap_and_face_value_without_notional(
         rules=basis_mutation, content_identity=schedule.content_identity
     )
     with pytest.raises(ValueError, match="face_value_notional_required"):
-        trade_cost(
+        prepare_trade_cost(
             date(2019, 1, 1),
             "shanghai",
             "buy",
-            1000.0,
-            1000000.0,
             basis_schedule,
             ExecutionAssumptions(
                 initial_nav=1000000000.0,
@@ -470,18 +474,11 @@ def test_fee_rules_reject_overlap_gap_and_face_value_without_notional(
                 adv_participation=0.05,
                 adv_sensitivities=(0.01, 0.02, 0.05, 0.1),
             ),
-        )
+        ).trade(1000.0, 1000000.0)
     with pytest.raises(ValueError, match="face_value_notional_invalid"):
-        trade_cost(
-            date(2019, 1, 1),
-            "shanghai",
-            "buy",
-            1000.0,
-            1000000.0,
-            basis_schedule,
-            _assumptions(),
-            face_value_notional=0.0,
-        )
+        prepare_trade_cost(
+            date(2019, 1, 1), "shanghai", "buy", basis_schedule, _assumptions()
+        ).trade(1000.0, 1000000.0, face_value_notional=0.0)
     ambiguous = tuple(
         (
             *schedule.rules,
@@ -510,54 +507,24 @@ def test_fee_costs_are_side_aware_and_stamp_transition_is_exact(tmp_path: Path) 
         adv_participation=0.05,
         adv_sensitivities=(0.01, 0.02, 0.05, 0.1),
     )
-    buy = trade_cost(
-        date(2023, 8, 28),
-        "shanghai",
-        "buy",
-        100000.0,
-        10000000.0,
-        schedule,
-        assumptions,
-    )
-    old_sell = trade_cost(
-        date(2023, 8, 27),
-        "shanghai",
-        "sell",
-        100000.0,
-        10000000.0,
-        schedule,
-        assumptions,
-    )
-    new_sell = trade_cost(
-        date(2023, 8, 28),
-        "shanghai",
-        "sell",
-        100000.0,
-        10000000.0,
-        schedule,
-        assumptions,
-    )
+    buy = prepare_trade_cost(
+        date(2023, 8, 28), "shanghai", "buy", schedule, assumptions
+    ).trade(100000.0, 10000000.0)
+    old_sell = prepare_trade_cost(
+        date(2023, 8, 27), "shanghai", "sell", schedule, assumptions
+    ).trade(100000.0, 10000000.0)
+    new_sell = prepare_trade_cost(
+        date(2023, 8, 28), "shanghai", "sell", schedule, assumptions
+    ).trade(100000.0, 10000000.0)
     assert buy.commission_cost == pytest.approx(30.0)
     assert buy.stamp_duty_cost == 0.0
     assert buy.transfer_fee_cost == pytest.approx(1.0)
-    old_transfer = trade_cost(
-        date(2022, 4, 28),
-        "shanghai",
-        "buy",
-        100000.0,
-        10000000.0,
-        schedule,
-        assumptions,
-    )
-    new_transfer = trade_cost(
-        date(2022, 4, 29),
-        "shanghai",
-        "buy",
-        100000.0,
-        10000000.0,
-        schedule,
-        assumptions,
-    )
+    old_transfer = prepare_trade_cost(
+        date(2022, 4, 28), "shanghai", "buy", schedule, assumptions
+    ).trade(100000.0, 10000000.0)
+    new_transfer = prepare_trade_cost(
+        date(2022, 4, 29), "shanghai", "buy", schedule, assumptions
+    ).trade(100000.0, 10000000.0)
     assert old_transfer.transfer_fee_cost == pytest.approx(2.0)
     assert new_transfer.transfer_fee_cost == pytest.approx(1.0)
     assert old_sell.stamp_duty_cost == pytest.approx(100.0)
@@ -677,19 +644,21 @@ def test_zero_adv_is_legal_zero_fill_and_missing_adv_only_blocks_demand() -> Non
             cost_for_trade=_a_share_cost(_schedule(), {"a": "shanghai"}),
             cost_source_identity="0" * 64,
         )
-    with pytest.raises(ValueError, match="execution_adv_invalid"):
-        execute_continuous_target(
-            pd.Series({"a": 0.0}),
-            pd.Series({"a": 1.0}),
-            nav=100.0,
-            average_daily_volume=pd.Series(dtype="float64"),
-            can_enter=pd.Series({"a": True}),
-            can_exit=pd.Series({"a": True}),
-            execution_date=date(2023, 8, 28),
-            assumptions=_assumptions(),
-            cost_for_trade=_a_share_cost(_schedule(), {"a": "shanghai"}),
-            cost_source_identity="0" * 64,
-        )
+    result = execute_continuous_target(
+        pd.Series({"a": 0.0}),
+        pd.Series({"a": 1.0}),
+        nav=100.0,
+        average_daily_volume=pd.Series(dtype="float64"),
+        can_enter=pd.Series({"a": True}),
+        can_exit=pd.Series({"a": True}),
+        execution_date=date(2023, 8, 28),
+        assumptions=_assumptions(),
+        cost_for_trade=_a_share_cost(_schedule(), {"a": "shanghai"}),
+        cost_source_identity="0" * 64,
+    )
+    assert result.asset_ledger.iloc[0].reason == "adv_unavailable"
+    assert result.post_trade_cash == 100.0
+    assert _execution_cost(result) == 0.0
 
 
 def test_empty_asset_transition_is_a_cash_only_ledger() -> None:
@@ -713,7 +682,10 @@ def test_empty_asset_transition_is_a_cash_only_ledger() -> None:
 
 
 @pytest.mark.parametrize("unquoted", (False, True))
-def test_research_no_fill_cannot_release_cash_or_change_target(unquoted) -> None:
+@pytest.mark.parametrize("missing_adv", (False, True))
+def test_research_no_fill_cannot_release_cash_or_change_target(
+    unquoted, missing_adv
+) -> None:
     permission = pd.Series(
         {"a": True if unquoted else pd.NA, "b": True}, dtype="boolean"
     )
@@ -722,7 +694,9 @@ def test_research_no_fill_cannot_release_cash_or_change_target(unquoted) -> None
         pd.Series({"a": 0.8, "b": 0.0}),
         pd.Series({"a": 0.0, "b": 1.0}),
         nav=100.0,
-        average_daily_volume=pd.Series({"a": 1000.0, "b": 1000.0}),
+        average_daily_volume=pd.Series(
+            {"a": np.nan if missing_adv else 1000.0, "b": 1000.0}
+        ),
         can_enter=permission,
         can_exit=permission,
         unquoted_assets=frozenset({"a"}) if unquoted else frozenset(),
@@ -861,6 +835,21 @@ def test_cash_rotation_with_cost_keeps_target_cash_and_reconciles_delta() -> Non
     assert result.asset_ledger["executed_delta_notional"].sum() == pytest.approx(0.0)
 
 
+def test_production_units_mark_price_changes_without_changing_entitlements():
+    from quant_research_platform.research.portfolios.production import _unit_values
+
+    units = pd.Series({"a": Fraction(6), "b": Fraction(3)}, dtype=object)
+    original = units.copy(deep=True)
+    assert _unit_values(units, pd.Series({"a": 10.0, "b": 10.0})).to_dict() == {
+        "a": 60.0,
+        "b": 30.0,
+    }
+    marked = _unit_values(units, pd.Series({"a": 11.0, "b": 9.0}))
+    assert marked.to_dict() == {"a": 66.0, "b": 27.0}
+    assert marked.sum() + 10.0 == 103.0
+    pd.testing.assert_series_equal(units, original)
+
+
 def test_turnover_excludes_cost_and_drift_feeds_next_rebalance() -> None:
     schedule = _schedule()
     assumptions = _assumptions()
@@ -903,12 +892,9 @@ def test_turnover_excludes_cost_and_drift_feeds_next_rebalance() -> None:
         )
     )
     assert first.nav_after == pytest.approx(first.nav_before - _execution_cost(first))
-    drifted, drift_cash, drift_nav = drift_continuous_holdings(
-        pd.Series({"a": 60.0, "b": 30.0}), 10.0, pd.Series({"a": 0.1, "b": -0.1})
-    )
-    assert drifted.to_dict() == {"a": 66.0, "b": 27.0}
-    assert drift_cash == 10.0
-    assert drift_nav == pytest.approx(103.0)
+    # Independent valuation inputs: 60 * 1.1 + 30 * 0.9 + 10 = 103.
+    drifted = pd.Series({"a": 66.0, "b": 27.0})
+    drift_cash, drift_nav = 10.0, 103.0
     second = execute_continuous_target(
         drifted / drift_nav,
         pd.Series({"a": 0.5, "b": 0.5}),
@@ -1160,15 +1146,13 @@ def test_trade_cost_preserves_representable_scaled_costs(notional, adv, bps):
         expected_impact = float(
             amount * rate * (amount / Decimal.from_float(adv)).sqrt()
         )
-    result = trade_cost(
+    result = prepare_trade_cost(
         date(2023, 8, 28),
         "shanghai",
         "buy",
-        notional,
-        adv,
         _schedule(broker_rate=0.0, transfer_rate=0.0, stamp_rate=0.0),
         assumptions,
-    )
+    ).trade(notional, adv)
     assert result.slippage_cost == pytest.approx(expected_slippage, rel=1e-14, abs=0)
     assert result.impact_cost == pytest.approx(expected_impact, rel=1e-14, abs=0)
     prepared = prepare_trade_cost(
@@ -1268,3 +1252,60 @@ def _execution_cost(result):
         .sum()
         .sum()
     )
+
+
+@pytest.mark.parametrize("sell", (False, True))
+@pytest.mark.parametrize("order", (("a", "b", "c"), ("c", "b", "a")))
+def test_local_adv_gap_preserves_targets_and_cash_budget(sell, order):
+    current = pd.Series({"a": 0.8 if sell else 0.0, "b": 0.0, "c": 0.0})
+    target = pd.Series({"a": 0.0 if sell else 0.4, "b": 0.3, "c": 0.3})
+    result = execute_continuous_target(
+        current.reindex(order),
+        target.reindex(order),
+        nav=100.0,
+        average_daily_volume=pd.Series({"a": np.nan, "b": 1000.0, "c": 1000.0}),
+        can_enter=pd.Series(True, index=order),
+        can_exit=pd.Series(True, index=order),
+        execution_date=date(2023, 8, 28),
+        assumptions=_assumptions(),
+        cost_for_trade=_a_share_cost(_schedule(), dict.fromkeys(order, "shanghai")),
+        cost_source_identity="0" * 64,
+    )
+    rows = result.asset_ledger.set_index("asset_id")
+    assert rows.loc["a", "reason"] == "adv_unavailable"
+    assert rows.loc["a", "executed_delta_notional"] == 0.0
+    assert rows.loc["a", "post_trade_notional"] == current.a * 100
+    assert rows.loc["a", "target_notional"] == target.a * 100
+    assert rows.loc["b", "target_notional"] == rows.loc["c", "target_notional"] == 30.0
+    assert (
+        rows.loc["b", "executed_delta_notional"]
+        == rows.loc["c", "executed_delta_notional"]
+    )
+    assert rows.loc["b", "executed_delta_notional"] > 0
+    assert result.post_trade_cash >= 0
+    if sell:
+        assert (
+            rows.loc[["b", "c"], "executed_delta_notional"].sum()
+            + _execution_cost(result)
+            <= 20
+        )
+    else:
+        assert rows.loc["b", "executed_delta_notional"] == 30.0
+        assert result.post_trade_cash > 39.0
+
+
+@pytest.mark.parametrize("adv", (-1.0, np.inf, -np.inf, "unknown"))
+def test_local_adv_policy_still_rejects_invalid_values(adv):
+    with pytest.raises(ValueError, match="execution_adv_invalid"):
+        execute_continuous_target(
+            pd.Series({"a": 0.0}),
+            pd.Series({"a": 1.0}),
+            nav=100.0,
+            average_daily_volume=pd.Series({"a": adv}),
+            can_enter=pd.Series({"a": True}),
+            can_exit=pd.Series({"a": True}),
+            execution_date=date(2023, 8, 28),
+            assumptions=_assumptions(),
+            cost_for_trade=_a_share_cost(_schedule(), {"a": "shanghai"}),
+            cost_source_identity="0" * 64,
+        )

@@ -144,6 +144,46 @@ def validate_output_bundle(
     return (manifest, admitted_identities)
 
 
+class _PredictionOutputSession:
+    """Request-local full-domain admission, never a shared match-state index."""
+
+    def __init__(
+        self,
+        root,
+        *,
+        expected_output_id,
+        expected_run_id=None,
+        expected_member_identities=None,
+    ):
+        self.root = Path(root)
+        _root, self.root_identity = _validated_bundle_root(self.root)
+        _manifest, members = validate_output_bundle(
+            self.root,
+            expected_output_id=expected_output_id,
+            expected_run_id=expected_run_id,
+            expected_member_identities=expected_member_identities,
+        )
+        self.member_identities = {path.name: identity for path, identity in members}
+        self.manifest, _lookup = _validate_prediction_output_bundle(
+            self.root,
+            expected_output_id=expected_output_id,
+            expected_run_id=expected_run_id,
+            expected_member_identities=self.member_identities,
+        )
+        self.verify()
+
+    def verify(self):
+        _root, identity = _validated_bundle_root(self.root)
+        if not os.path.samestat(self.root_identity, identity):
+            raise ValueError("output_bundle_identity_changed")
+        validate_output_bundle(
+            self.root,
+            expected_output_id=self.manifest["output_id"],
+            expected_run_id=self.manifest["run_id"],
+            expected_member_identities=self.member_identities,
+        )
+
+
 class _PredictionLookup:
     def __init__(
         self,
@@ -160,6 +200,9 @@ class _PredictionLookup:
         self.family_selection = family_selection
         self.champions = champions or {}
         self.row_count = 0
+
+    def close(self) -> None:
+        self._index = None
 
     def values_for_frame(
         self, frame: pd.DataFrame, *, mark_matched: bool
@@ -193,16 +236,13 @@ class _PredictionLookup:
         values, found = self._index.lookup_float_values(
             table,
             source_namespace="prediction",
-            matched_namespace="prediction-matched" if mark_matched else None,
+            matched_namespace="prediction-matched",
+            mark_matched=mark_matched,
         )
         return (values, found)
 
     def coverage_counts(self) -> tuple[int, int]:
-        return self._index.difference_counts(
-            expected_namespace="prediction",
-            actual_namespace="prediction-matched",
-            payloads_only=True,
-        )
+        return (self._index.float_value_count(namespace="prediction"), 0)
 
 
 def read_prediction_output_bundle(
@@ -213,6 +253,7 @@ def read_prediction_output_bundle(
     expected_member_identities: Mapping[str, DatasetFileIdentity] | None = None,
     time_window=None,
     family_selection: str | None = None,
+    validation_session: _PredictionOutputSession | None = None,
 ) -> tuple[dict[str, object], _PredictionLookup]:
     manifest, lookup = _validate_prediction_output_bundle(
         root,
@@ -222,6 +263,7 @@ def read_prediction_output_bundle(
         time_window=time_window,
         family_selection=family_selection,
         collect_lookup=True,
+        validation_session=validation_session,
     )
     if lookup is None:
         raise ValueError("prediction_output_unreadable")
@@ -237,7 +279,17 @@ def _validate_prediction_output_bundle(
     time_window=None,
     family_selection: str | None = None,
     collect_lookup: bool = False,
+    validation_session: _PredictionOutputSession | None = None,
 ) -> tuple[dict[str, object], _PredictionLookup | None]:
+    if validation_session is not None:
+        if Path(root) != validation_session.root:
+            raise ValueError("output_bundle_identity_changed")
+        validation_session.verify()
+        if expected_member_identities is not None and (
+            dict(expected_member_identities) != validation_session.member_identities
+        ):
+            raise ValueError("output_bundle_identity_changed")
+        expected_member_identities = validation_session.member_identities
     lookup: _PredictionLookup | None = None
 
     def read_prediction(
@@ -310,10 +362,17 @@ def _validate_prediction_output_bundle(
                         table = pa.Table.from_batches([batch])
                         if prediction_mode == "a_share_oos":
                             frame = table.to_pandas()
+                        if (
+                            validation_session is None
+                            and prediction_mode == "a_share_oos"
+                        ):
                             validate_family_prediction_frame(
                                 frame, metadata["model_metadata"]
                             )
-                        if prediction_mode == "crypto_oos":
+                        if (
+                            validation_session is None
+                            and prediction_mode == "crypto_oos"
+                        ):
                             frame = table.to_pandas()
                             validate_crypto_prediction_frame(
                                 frame, metadata["model_metadata"]
@@ -387,6 +446,9 @@ def _validate_prediction_output_bundle(
                                 keep = pc.and_(keep, family_keep)
                         else:
                             window_rows += table.num_rows
+                        if validation_session is not None and keep is not None:
+                            table = table.filter(keep)
+                            keep = None
                         duplicates = key_index.add_float_value_table(
                             table,
                             namespace="prediction",
@@ -422,6 +484,8 @@ def _validate_prediction_output_bundle(
         expected_member_identities=expected_member_identities,
         observer=read_prediction,
     )
+    if validation_session is not None:
+        validation_session.verify()
     return (manifest, lookup)
 
 

@@ -195,11 +195,13 @@ def test_persisted_trial_correlations_obey_exact_bounds(field, sign):
         "validation_rows": 2,
         "validation_ic": 1.0,
         "validation_std_ic": 0.0,
+        "validation_std_ic_reason": None,
         "validation_icir": None,
         "validation_positive_ic_rate": 1.0,
         "validation_valid_ic_count": 1,
         "validation_icir_reason": "insufficient_observations",
         "validation_std_rankic": 0.0,
+        "validation_std_rankic_reason": None,
         "validation_rankicir": None,
         "validation_positive_rankic_rate": 1.0,
         "validation_valid_rankic_count": 1,
@@ -339,6 +341,7 @@ def test_completed_trial_keeps_representable_icir_with_unrepresentable_std():
         prediction_column="prediction",
     )
     assert metrics["validation_std_ic"] is None
+    assert metrics["validation_std_ic_reason"] == "nonfinite_result"
     assert metrics["validation_icir"] == 1.0
     assert metrics["validation_valid_ic_count"] == 2
     assert metrics["validation_icir_reason"] is None
@@ -348,6 +351,8 @@ def test_completed_trial_keeps_representable_icir_with_unrepresentable_std():
     for changed in (
         {"validation_std_ic": 0.0},
         {"validation_std_ic": -1.0},
+        {"validation_std_ic_reason": None},
+        {"validation_std_ic_reason": "zero_variance"},
         {"validation_valid_ic_count": 1},
         {"validation_icir": float("inf")},
         {"validation_icir_reason": "zero_variance"},

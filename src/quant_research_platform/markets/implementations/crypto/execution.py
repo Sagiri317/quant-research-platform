@@ -585,6 +585,7 @@ def simulate_taker(
         economics.diagnostic(dict(fill))
 
     blocked_decisions = undefined_decisions = 0
+    funding_required_decisions = 0
     orders = deque()
     reserved_buy = reserved_sell = 0.0
     created_orders = 0
@@ -978,6 +979,7 @@ def simulate_taker(
                         forecast_end = (
                             decision_time + prediction_horizon_ms
                         ) * _NANOSECONDS_PER_MILLISECOND
+                        funding_required_decisions += 1
                         funding_per_unit = None
                         if (
                             active_forecast is not None
@@ -1148,11 +1150,22 @@ def simulate_taker(
         "market_event_count": market_event_count,
         "prediction_horizon_ms": prediction_horizon_ms,
         "selection_status": "BLOCKED"
+        if blocked_decisions and blocked_decisions == funding_required_decisions
+        else "PARTIAL"
         if blocked_decisions
         else "UNDEFINED"
         if undefined_decisions
         else "COMPLETE",
         "blocked_decisions": blocked_decisions,
+        "funding_gap_policy": "causal_no_new_risk_partial_forecast_v1",
+        "funding_required_decisions": funding_required_decisions,
+        "funding_covered_decisions": funding_required_decisions - blocked_decisions,
+        "funding_decision_coverage": (
+            (funding_required_decisions - blocked_decisions)
+            / funding_required_decisions
+            if funding_required_decisions
+            else None
+        ),
         "undefined_decisions": undefined_decisions,
         "expected_gain_basis": (
             "decision_forecast_mark_minus_l2_entry_and_fee_plus_known_funding"
@@ -2021,6 +2034,7 @@ def simulate_maker(
     created_orders = filled_orders = cancelled_orders = 0
     partial_fill_events = trade_through_fill_events = post_only_rejections = 0
     equity_rows = market_event_count = blocked_decisions = undefined_decisions = 0
+    funding_required_decisions = 0
     max_abs_position = 0.0
     all_lifetime_count = all_lifetime_sum_ns = 0
     filled_lifetime_count = filled_lifetime_sum_ns = 0
@@ -2424,9 +2438,25 @@ def simulate_maker(
                 decision_time_ns
                 + CryptoMakerPlan.quote_horizon_ms * _NANOSECONDS_PER_MILLISECOND
             )
+            lifetime = CryptoMakerPlan.quote_horizon_ms * _NANOSECONDS_PER_MILLISECOND
+            if decision_windows_ns is not None:
+                lifetime = min(
+                    lifetime, decision_windows_ns[window_index][1] - decision_time_ns
+                )
             funding = []
             funding_known = True
-            if calibrations is not None and valid and gate:
+            if (
+                calibrations is not None
+                and valid
+                and gate
+                and lifetime > 0
+                and (
+                    config.latency_ms * _NANOSECONDS_PER_MILLISECOND < lifetime
+                    or active
+                    or any(order is not None for _time, _side, order in commands)
+                )
+            ):
+                funding_required_decisions += 1
                 funding_known = (
                     active_forecast is not None
                     and active_forecast.known_until_ns >= forecast_end
@@ -2450,14 +2480,6 @@ def simulate_maker(
                     ]
                 )
                 headroom = max(0.0, config.max_position - sign * economics.quantity)
-                lifetime = (
-                    CryptoMakerPlan.quote_horizon_ms * _NANOSECONDS_PER_MILLISECOND
-                )
-                if decision_windows_ns is not None:
-                    lifetime = min(
-                        lifetime,
-                        decision_windows_ns[window_index][1] - decision_time_ns,
-                    )
                 allowed = (
                     valid
                     and gate
@@ -2547,6 +2569,8 @@ def simulate_maker(
                             + config.latency_ms * _NANOSECONDS_PER_MILLISECOND
                         )
                         commands.append((effective, side, order))
+                if not funding_known:
+                    gain = None
                 reason = (
                     "decision_book_or_trade_unavailable"
                     if not valid
@@ -2713,11 +2737,22 @@ def simulate_maker(
         else "public_l2_inventory_maker_baseline",
         "maker_prediction_used": calibrations is not None,
         "selection_status": "BLOCKED"
+        if blocked_decisions and blocked_decisions == funding_required_decisions
+        else "PARTIAL"
         if blocked_decisions
         else "UNDEFINED"
         if undefined_decisions
         else "COMPLETE",
         "blocked_decisions": blocked_decisions,
+        "funding_gap_policy": "causal_no_new_risk_partial_forecast_v1",
+        "funding_required_decisions": funding_required_decisions,
+        "funding_covered_decisions": funding_required_decisions - blocked_decisions,
+        "funding_decision_coverage": (
+            (funding_required_decisions - blocked_decisions)
+            / funding_required_decisions
+            if funding_required_decisions
+            else None
+        ),
         "undefined_decisions": undefined_decisions,
         "assumption": "historical_book_zero_market_impact",
         **metrics.payload(),

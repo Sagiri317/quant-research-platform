@@ -14,7 +14,7 @@ from quant_research_platform.contracts.validation import (
 from quant_research_platform.markets.implementations.a_share.calendar import (
     CURRENT_MARKET_TYPES,
     compute_listing_session_facts,
-    market_type_trading_sessions,
+    market_type_calendar_state,
     unified_trading_sessions,
 )
 from quant_research_platform.markets.implementations.a_share.ids import MARKET_ID
@@ -58,6 +58,7 @@ def compute_market_panel(
     no_limit_history: pd.DataFrame | None = None,
     special_treatment_history: pd.DataFrame | None = None,
     session_window: pd.DatetimeIndex | None = None,
+    required_calendar_start: pd.Timestamp | None = None,
     asset_market_types: pd.Series | None = None,
     suspension_history: pd.DataFrame | None = None,
     market_history: pd.DataFrame | None = None,
@@ -83,12 +84,13 @@ def compute_market_panel(
     calendar_bars = bars
     if session_window is not None and not session_window.empty:
         calendar_bars = bars.loc[bars["timestamp"].isin(session_window)]
-    validate_market_bar_calendar(calendar_bars, trading_calendar)
+    validate_market_bar_calendar(
+        calendar_bars, trading_calendar, required_calendar_start=required_calendar_start
+    )
     if session_window is None:
-        session_window = sessions[
-            (sessions >= bars["timestamp"].min())
-            & (sessions <= bars["timestamp"].max())
-        ]
+        session_window = pd.date_range(
+            bars["timestamp"].min(), bars["timestamp"].max()
+        ).as_unit("ns")
     if session_window.empty:
         return bars.iloc[0:0].copy()
     dense = _dense_lifecycle_panel(
@@ -98,15 +100,20 @@ def compute_market_panel(
         asset_market_types=asset_market_types,
         market_history=market_history,
     )
-    open_session = dense["market_type"].isna()
+    open_session = dense["market_type"].isna() & dense["timestamp"].isin(sessions)
     for market_type, group in dense.groupby("market_type", sort=False):
-        open_session.loc[group.index] = group["timestamp"].isin(
-            market_type_trading_sessions(
-                trading_calendar,
-                market_type,
-                required_dates=pd.DatetimeIndex(group["timestamp"]),
-            )
+        state = market_type_calendar_state(trading_calendar, market_type).reindex(
+            group["timestamp"]
         )
+        required = (
+            np.ones(len(group), dtype=bool)
+            if required_calendar_start is None
+            else group["timestamp"].ge(required_calendar_start).to_numpy()
+        )
+        if (state.isna().to_numpy() & required).any():
+            raise ValueError("a_share_trading_calendar_unknown_session")
+        # Earlier unknown dates are state barriers, never published open sessions.
+        open_session.loc[group.index] = state.fillna(True).to_numpy(dtype=bool)
     dense = dense.loc[open_session].copy()
     if dense.empty:
         return dense
@@ -141,18 +148,29 @@ def compute_market_panel(
     ).reset_index(drop=True)
 
 
-def validate_market_bar_calendar(bars: pd.DataFrame, calendar: pd.DataFrame) -> None:
+def validate_market_bar_calendar(
+    bars: pd.DataFrame, calendar: pd.DataFrame, *, required_calendar_start=None
+) -> None:
     if unified_trading_sessions(calendar).empty:
         raise ValueError("a_share_trading_calendar_empty")
     for market_type, group in bars.groupby("market_type", sort=False):
-        sessions = market_type_trading_sessions(calendar, market_type)
-        if sessions.empty:
+        state = market_type_calendar_state(calendar, market_type)
+        if not state.any() and (
+            required_calendar_start is None
+            or group.timestamp.ge(required_calendar_start).any()
+        ):
             raise ValueError("a_share_trading_calendar_empty")
         holiday_fill_dates = group.loc[group["filling_flag"].eq(2), "timestamp"]
-        if bool(holiday_fill_dates.isin(sessions).any()):
+        if state.reindex(holiday_fill_dates).fillna(False).any():
             raise ValueError("holiday_fill_conflicts_with_open_session")
         observed_sessions = group.loc[group["filling_flag"].isin((0, 1)), "timestamp"]
-        if not observed_sessions.isin(sessions).all():
+        observed_state = state.reindex(observed_sessions)
+        unknown_required = observed_state.isna().to_numpy() & (
+            np.ones(len(observed_sessions), dtype=bool)
+            if required_calendar_start is None
+            else observed_sessions.ge(required_calendar_start).to_numpy()
+        )
+        if observed_state.eq(False).any() or unknown_required.any():
             raise ValueError("market_bar_session_missing_from_calendar")
 
 

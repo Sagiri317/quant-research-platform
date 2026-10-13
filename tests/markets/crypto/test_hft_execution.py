@@ -945,7 +945,7 @@ def test_taker_freezes_orders_across_overlapping_latency_and_future_book_changes
             on_ledger=ledger.append,
         )
         assert (
-            result["selection_status"] == "BLOCKED" and result["blocked_decisions"] == 1
+            result["selection_status"] == "PARTIAL" and result["blocked_decisions"] == 1
         )
         assert result["funding"] == pytest.approx(-100 * rate)
         assert result["net_pnl"] == pytest.approx(-0.5 - 0.01005 - 100 * rate)

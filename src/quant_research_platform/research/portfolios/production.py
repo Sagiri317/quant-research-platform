@@ -6,6 +6,7 @@ from collections import deque
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass, replace
+from fractions import Fraction
 from pathlib import Path
 from statistics import mean
 
@@ -25,13 +26,17 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioCashFlow,
     PortfolioDiagnostic,
     PortfolioLedgerBatch,
+    PortfolioRightsAdjustment,
     PortfolioTargetBlocked,
     PortfolioValuation,
     _portfolio_session_frame,
     portfolio_notional_tolerance,
 )
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.contracts.validation import strict_finite_float
+from quant_research_platform.contracts.validation import (
+    finite_exact_float,
+    strict_finite_float,
+)
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.features.transforms import (
     _industry_group_codes,
@@ -46,7 +51,6 @@ from quant_research_platform.research.portfolios.accounting import (
     ExecutionAccounting,
     alpha_calibration_intervals,
     calibrate_expected_alpha,
-    drift_continuous_holdings,
     execute_continuous_target,
 )
 from quant_research_platform.research.portfolios.construction import (
@@ -129,13 +133,17 @@ _ALPHA_DIAGNOSTICS = {
     "alpha_valid_dates": "valid_rebalance_dates",
     "alpha_scheduled_dates": "scheduled_rebalance_dates",
 }
-RESEARCH_VALUATION_VERSION = "RESEARCH_ESTIMATED_VALUATION_V1"
+RESEARCH_VALUATION_VERSION = "RESEARCH_DELISTING_ZERO_V1"
 
 
 class _ResearchValuationMarks:
     """Carry unquoted rights, never a tradable quote, in observation order."""
 
     def __init__(self):
+        self.rights_quotes = {}
+        self.cancelled_lifecycles = set()
+        self.converted_lifecycles = {}
+        self.zero_since = {}
         self.last = pd.DataFrame(
             {
                 "listing_date": pd.Series(dtype="datetime64[ns]"),
@@ -147,12 +155,33 @@ class _ResearchValuationMarks:
         )
 
     def project(self, view):
+        for event in view.rights_events.itertuples(index=False):
+            identity = (event.asset_id, event.listing_date)
+            if (
+                event.kind == "conversion"
+                and event.successor_asset_id == event.asset_id
+            ):
+                self.converted_lifecycles[identity] = event.successor_listing_date
+            if event.kind == "quote" and identity not in self.cancelled_lifecycles:
+                self.rights_quotes[identity] = event
+            elif (
+                event.kind != "quote"
+                and Fraction(event.remaining_old_units_per_old_unit) == 0
+            ):
+                self.cancelled_lifecycles.add(identity)
+                self.rights_quotes.pop(identity, None)
         observed = view.panel.set_index("asset_id")
         current = view.valuation.set_index("asset_id").copy()
         for frame in (observed, current):
             values = frame[["adj_open", "adj_close"]].astype("float64")
             if ((~np.isfinite(values) | values.le(0)) & values.notna()).any(axis=None):
                 raise ValueError("portfolio_return_invalid")
+        if self.rights_quotes:
+            current = current.astype({"adj_open": "object", "adj_close": "object"})
+        for asset, listing in self.rights_quotes:
+            if asset not in current.index and asset not in self.last.index:
+                current.loc[asset, "listing_date"] = listing
+                current.loc[asset, "timestamp"] = view.timestamp
         present = current.index
         assets = present.union(self.last.index, sort=False)
         current = current.reindex(assets)
@@ -162,6 +191,18 @@ class _ResearchValuationMarks:
             for column in ("listing_date", "market_type"):
                 current.loc[absent, column] = previous.loc[absent, column]
         current["timestamp"] = view.timestamp
+        for asset in assets:
+            listing = current.loc[asset, "listing_date"]
+            visited = set()
+            while (str(asset), listing) in self.converted_lifecycles:
+                if listing in visited:
+                    raise ValueError("portfolio_rights_conversion_cycle")
+                visited.add(listing)
+                listing = self.converted_lifecycles[str(asset), listing]
+            if visited:
+                current.loc[asset, "listing_date"] = listing
+                current.loc[asset, ["adj_open", "adj_close"]] = np.nan
+                current.loc[asset, "is_trading"] = False
         same_life = current.listing_date.notna() & current.listing_date.eq(
             previous.listing_date
         )
@@ -173,6 +214,17 @@ class _ResearchValuationMarks:
             & observed.listing_date.notna()
             & ~observed.index.isin(view.unproved_lifecycle_assets)
         ]
+        current["research_previous_listing_date"] = pd.Series(
+            pd.NaT, index=assets, dtype="datetime64[ns]"
+        )
+        for event in view.rights_events.itertuples(index=False):
+            if (
+                event.kind == "conversion"
+                and event.successor_asset_id == event.asset_id
+            ):
+                current.loc[event.asset_id, "research_previous_listing_date"] = (
+                    event.listing_date
+                )
         for phase in ("open", "close"):
             column = f"adj_{phase}"
             known = observed.loc[current[column].reindex(observed.index).notna()]
@@ -181,13 +233,36 @@ class _ResearchValuationMarks:
                 previous = self.last.reindex(assets)
             else:
                 previous = previous.reindex(assets)
-            missing = current[column].isna() & previous.mark_price.notna()
+            permitted_carry = current.is_trading.eq(False).fillna(False) | assets.isin(
+                view.closed_assets
+            )
+            missing = (
+                current[column].isna() & previous.mark_price.notna() & permitted_carry
+            )
             current[f"research_{phase}_mark_at"] = pd.Series(
                 pd.NaT, index=assets, dtype="datetime64[ns]"
             )
             current[f"research_{phase}_mark_kind"] = pd.Series(
                 pd.NA, index=assets, dtype="string"
             )
+            current[f"research_{phase}_evidence_identity"] = pd.Series(
+                pd.NA, index=assets, dtype="string"
+            )
+            delisted = pd.Series(
+                [
+                    (str(asset), listing) in view.confirmed_delisted_lifecycles
+                    for asset, listing in current.listing_date.items()
+                ],
+                index=assets,
+            )
+            cancelled = pd.Series(
+                [
+                    (str(asset), listing) in self.cancelled_lifecycles
+                    for asset, listing in current.listing_date.items()
+                ],
+                index=assets,
+            )
+            zero = (delisted & ~assets.isin(known.index)) | cancelled
             if missing.any():
                 current.loc[missing, column] = previous.loc[missing, "mark_price"]
                 current.loc[missing, f"research_{phase}_mark_at"] = pd.to_datetime(
@@ -196,6 +271,33 @@ class _ResearchValuationMarks:
                 current.loc[missing, f"research_{phase}_mark_kind"] = previous.loc[
                     missing, "mark_kind"
                 ]
+            if zero.any():
+                current.loc[zero, column] = 0.0
+                for asset in assets[zero]:
+                    identity = (str(asset), current.loc[asset, "listing_date"])
+                    current.loc[asset, f"research_{phase}_mark_at"] = (
+                        self.zero_since.setdefault(identity, view.timestamp)
+                    )
+                current.loc[zero, f"research_{phase}_mark_kind"] = (
+                    "confirmed_delisting_zero"
+                )
+                current.loc[cancelled, f"research_{phase}_mark_kind"] = (
+                    "extinguished_rights"
+                )
+            for asset in assets:
+                event = self.rights_quotes.get(
+                    (str(asset), current.loc[asset, "listing_date"])
+                )
+                if event is not None and asset not in known.index:
+                    current.loc[asset, column] = event.value_per_old_unit
+                    current.loc[asset, f"research_{phase}_mark_at"] = event.timestamp
+                    current.loc[asset, f"research_{phase}_mark_kind"] = (
+                        "evidenced_rights_quote"
+                    )
+                    current.loc[asset, f"research_{phase}_evidence_identity"] = (
+                        event.evidence_identity
+                    )
+            known = known.loc[~known.index.isin(assets[cancelled])]
             if not known.empty:
                 marks = known.loc[:, ["listing_date", "market_type"]].assign(
                     mark_at=view.timestamp,
@@ -206,6 +308,77 @@ class _ResearchValuationMarks:
                     (self.last.drop(marks.index, errors="ignore"), marks)
                 )
         return current.rename_axis("asset_id").reset_index()
+
+
+def _unit_values(units, prices):
+    """Keep entitlements exact; round only finite monetary valuations."""
+    try:
+        values = pd.Series(
+            {
+                asset: float(Fraction(quantity) * Fraction(prices.loc[asset]))
+                for asset, quantity in units.items()
+            },
+            dtype="float64",
+        )
+    except (OverflowError, ValueError):
+        raise ValueError("portfolio_valuation_unrepresentable") from None
+    if not np.isfinite(values).all():
+        raise ValueError("portfolio_valuation_unrepresentable")
+    return values
+
+
+def _apply_rights_events(events, units, lives, timestamp):
+    updated, identities = units.astype("object").copy(), lives.copy()
+    adjustments = []
+    cash = 0.0
+    for event in events.itertuples(index=False):
+        if event.kind == "quote":
+            continue
+        quantity = Fraction(updated.get(event.asset_id, 0))
+        if quantity == 0 or identities.get(event.asset_id) != event.listing_date:
+            continue
+        remainder = quantity * Fraction(event.remaining_old_units_per_old_unit)
+        amount = (
+            finite_exact_float(quantity * Fraction(event.value_per_old_unit))
+            if event.kind == "cash_recovery"
+            else 0.0
+        )
+        if amount is None:
+            raise PortfolioTargetBlocked("portfolio_recovery_amount_unrepresentable")
+        target = event.successor_asset_id if event.kind == "conversion" else None
+        target_life = event.successor_listing_date if target is not None else None
+        target_quantity = (
+            quantity * Fraction(event.successor_units_per_old_unit)
+            if target is not None
+            else Fraction()
+        )
+        updated.loc[event.asset_id] = remainder
+        if target is not None:
+            if updated.get(target, 0) != 0 and identities.get(target) != target_life:
+                raise PortfolioTargetBlocked(
+                    "portfolio_simultaneous_lifecycles_unrepresentable"
+                )
+            updated.loc[target] = Fraction(updated.get(target, 0)) + target_quantity
+            identities.loc[target] = target_life
+        adjustments.append(
+            PortfolioRightsAdjustment(
+                event.event_id,
+                int(timestamp.value),
+                event.asset_id,
+                event.listing_date.date().isoformat(),
+                quantity,
+                remainder,
+                amount,
+                target,
+                target_life.date().isoformat() if target is not None else None,
+                target_quantity,
+                event.evidence_identity,
+            )
+        )
+        cash += amount
+        if not np.isfinite(cash):
+            raise PortfolioTargetBlocked("portfolio_recovery_amount_unrepresentable")
+    return updated, identities, cash, tuple(adjustments)
 
 
 def _unquoted_assets(frame, phase="open"):
@@ -231,21 +404,33 @@ def _price_returns(start, end, assets, *, start_column, end_column):
         values = source[column]
         if values.isna().any():
             raise PortfolioTargetBlocked("portfolio_held_return_missing")
-        values = pd.to_numeric(values, errors="raise").astype("float64")
-        if not np.isfinite(values).all() or values.le(0).any():
+        try:
+            exact = values.map(Fraction)
+        except (ValueError, OverflowError):
+            raise ValueError("portfolio_return_invalid") from None
+        if exact.lt(0).any():
             raise ValueError("portfolio_return_invalid")
-        prices.append(values)
+        prices.append(exact)
     if (
         start.listing_date.isna().any()
         or end.listing_date.isna().any()
         or not start.listing_date.eq(end.listing_date).all()
     ):
         raise PortfolioTargetBlocked("portfolio_held_lifecycle_unproven")
-    with np.errstate(over="ignore"):
-        result = (prices[1] - prices[0]) / prices[0]
-    if not np.isfinite(result).all():
-        raise ValueError("portfolio_return_invalid")
-    return result
+    if prices[0].eq(0).any():
+        raise PortfolioTargetBlocked("portfolio_zero_mark_return_undefined")
+    try:
+        return pd.Series(
+            {
+                asset: float(
+                    (prices[1].loc[asset] - prices[0].loc[asset]) / prices[0].loc[asset]
+                )
+                for asset in assets
+            },
+            dtype="float64",
+        )
+    except OverflowError:
+        raise ValueError("portfolio_return_invalid") from None
 
 
 def build_portfolio_ledger(
@@ -401,6 +586,9 @@ def build_portfolio_ledger(
             layout, upstream_identities, candidate.benchmark_weights_target_id or ""
         )
     holdings = pd.Series(dtype="float64")
+    held_units = pd.Series(dtype="object")
+    held_lives = pd.Series(dtype="datetime64[ns]")
+    previous_values = {}
     cash = float(assumptions.initial_nav)
     nav = cash
     amount_history: dict[tuple[str, pd.Timestamp], deque[float]] = {}
@@ -523,7 +711,6 @@ def build_portfolio_ledger(
             _update_amount_history(
                 panel,
                 amount_history,
-                holdings,
                 view.closed_assets | _unquoted_assets(view.valuation),
             )
             benchmark_weights = pd.Series(dtype="float64")
@@ -533,6 +720,7 @@ def build_portfolio_ledger(
                 assert factor_risk is not None
                 observed_valuation = view.valuation.loc[
                     view.valuation.research_open_mark_at.isna()
+                    & view.valuation.adj_open.notna()
                 ]
                 risk_frames = []
                 for columns, context_frames in (
@@ -686,19 +874,14 @@ def build_portfolio_ledger(
             enhanced_decision: _EnhancedDecision | None = None
             target_override: pd.Series | None = None
             decision_reason = PORTFOLIO_DECISION_REASON_SIMPLE
-            if not holdings.empty:
-                prices = view.valuation.set_index("asset_id")
-                holdings, cash, nav = drift_continuous_holdings(
-                    holdings,
-                    cash,
-                    _price_returns(
-                        prices,
-                        prices,
-                        holdings.index,
-                        start_column="adj_open",
-                        end_column="adj_close",
-                    ),
-                )
+            if not held_units.empty:
+                prices = view.valuation.set_index("asset_id").reindex(held_units.index)
+                if not prices.listing_date.eq(held_lives).all():
+                    raise PortfolioTargetBlocked("portfolio_held_lifecycle_unproven")
+                if prices.adj_close.isna().any():
+                    raise PortfolioTargetBlocked("portfolio_held_return_missing")
+                holdings = _unit_values(held_units, prices.adj_close)
+                nav = float(holdings.sum() + cash)
             if enhanced:
                 assert alpha is not None and current_cross is not None
                 decision_reason = PORTFOLIO_DECISION_REASON_BENCHMARK
@@ -730,6 +913,25 @@ def build_portfolio_ledger(
                             "portfolio_initial_holding_unquoted"
                         )
                     holdings = benchmark_weights.multiply(nav)
+                    initial_prices = next_panel.set_index("asset_id").reindex(
+                        holdings.index
+                    )
+                    if (
+                        initial_prices.adj_open.isna().any()
+                        or initial_prices.adj_open.le(0).any()
+                    ):
+                        raise PortfolioTargetBlocked(
+                            "portfolio_initial_holding_unquoted"
+                        )
+                    held_units = pd.Series(
+                        {
+                            asset: Fraction(value)
+                            / Fraction(initial_prices.loc[asset, "adj_open"])
+                            for asset, value in holdings.items()
+                        },
+                        dtype="object",
+                    )
+                    held_lives = initial_prices.listing_date.copy()
                     cash = 0.0
                 if scheduled or maintenance:
                     if benchmark_weights.empty:
@@ -753,7 +955,11 @@ def build_portfolio_ledger(
                         target_override = benchmark_weights.copy(deep=True)
                         decision_reason = PORTFOLIO_DECISION_REASON_MAINTENANCE
                 else:
-                    target_override = holdings.div(nav).copy(deep=True)
+                    target_override = (
+                        holdings.div(nav).copy(deep=True)
+                        if nav > 0
+                        else holdings.multiply(0.0)
+                    )
                     decision_reason = PORTFOLIO_DECISION_REASON_BENCHMARK
             if enhanced:
                 required_assets = benchmark_weights.index.union(holdings.index)
@@ -762,6 +968,21 @@ def build_portfolio_ledger(
                 ).reindex(required_assets)
                 if industry.isna().any():
                     raise PortfolioTargetBlocked("portfolio_industry_context_missing")
+            execution_units, execution_lives, recoveries, adjustments = (
+                _apply_rights_events(
+                    next_view.rights_events, held_units, held_lives, next_timestamp
+                )
+            )
+            execution_marks = next_panel.set_index("asset_id")
+            active_units = execution_units.loc[execution_units.ne(0)]
+            if not active_units.index.isin(execution_marks.index).all():
+                raise PortfolioTargetBlocked("portfolio_successor_valuation_missing")
+            if (
+                not execution_marks.listing_date.reindex(active_units.index)
+                .eq(execution_lives.reindex(active_units.index))
+                .all()
+            ):
+                raise PortfolioTargetBlocked("portfolio_held_lifecycle_unproven")
             account, returns, adv, _optimization, decision_delta, asset_ledger = (
                 _build_session(
                     candidate=candidate,
@@ -774,9 +995,10 @@ def build_portfolio_ledger(
                     dataset=dataset,
                     execution=execution,
                     holdings=holdings,
+                    held_units=execution_units,
                     cash=cash,
+                    recovery_cash=recoveries,
                     nav=nav,
-                    initialize_at_execution=enhanced and (not emitted),
                     amount_history=amount_history,
                     alpha=alpha,
                     enhanced_decision=enhanced_decision,
@@ -797,7 +1019,10 @@ def build_portfolio_ledger(
                 sequence=sequence,
                 end_timestamp=endpoint_timestamp,
                 decision_timestamp=decision_timestamp,
-                returns=returns,
+                held_units=held_units,
+                execution_units=execution_units,
+                previous_values=previous_values,
+                rights_adjustments=adjustments,
                 alpha_score=alpha,
                 adv20=adv,
                 enhanced_decision=enhanced_decision,
@@ -808,8 +1033,31 @@ def build_portfolio_ledger(
                 next_panel=next_panel,
                 endpoint_panel=endpoint_panel,
             )
-            holdings = asset_ledger.set_index("asset_id")["post_trade_notional"]
-            holdings = holdings.loc[holdings.ne(0.0)]
+            held_units = pd.Series(
+                {
+                    row.asset_id: row.quantity
+                    for row in yielded_value.valuations
+                    if row.phase == "after"
+                    and row.asset_id != PORTFOLIO_CASH_ASSET_ID
+                    and row.quantity != 0.0
+                },
+                dtype="object",
+            )
+            held_lives = pd.Series(
+                {
+                    row.asset_id: pd.Timestamp(row.lifecycle_id)
+                    for row in yielded_value.valuations
+                    if row.phase == "after" and row.asset_id in held_units.index
+                }
+            )
+            previous_values = {
+                row.asset_id: row
+                for row in yielded_value.valuations
+                if row.phase == "end"
+            }
+            holdings = asset_ledger.set_index("asset_id")[
+                "post_trade_notional"
+            ].reindex(held_units.index)
             cash, nav = (account.post_trade_cash, account.nav_after)
             emitted = True
             try:
@@ -1218,9 +1466,10 @@ def _build_session(
     dataset: pd.DataFrame,
     execution: pd.DataFrame,
     holdings: pd.Series,
+    held_units: pd.Series,
     cash: float,
+    recovery_cash: float,
     nav: float,
-    initialize_at_execution: bool,
     amount_history: Mapping[tuple[str, pd.Timestamp], deque[float]],
     alpha: pd.Series,
     enhanced_decision: _EnhancedDecision | None,
@@ -1253,7 +1502,9 @@ def _build_session(
     alpha = alpha.reindex(dataset.index)
     prediction_eligible = eligible & alpha.notna()
     optimization: OptimizationResult | None = None
-    if target_override is not None:
+    if nav == 0:
+        target = pd.Series(0.0, index=holdings.index, dtype="float64")
+    elif target_override is not None:
         target = target_override.copy(deep=True)
     elif enhanced_decision is not None:
         target = enhanced_decision.benchmark_weights.copy(deep=True)
@@ -1282,25 +1533,29 @@ def _build_session(
     else:
         target = holdings.div(nav).copy(deep=True)
     target = target.loc[target.ne(0.0)]
-    current = holdings.loc[holdings.ne(0.0)].copy(deep=True)
-    assets = pd.Index(sorted(set(current.index) | set(target.index)), dtype="string")
+    current = holdings.copy(deep=True)
+    assets = pd.Index(
+        sorted(set(current.index) | set(target.index) | set(held_units.index)),
+        dtype="string",
+    )
     unquoted_assets = unquoted_assets.intersection(assets)
     if PORTFOLIO_CASH_ASSET_ID in assets:
         raise ValueError("portfolio_asset_universe_invalid")
-    panel_by_asset = panel.set_index("asset_id")
-    missing_panel = [asset for asset in assets if asset not in panel_by_asset.index]
+    execution_panel = next_panel.set_index("asset_id")
+    missing_panel = [asset for asset in assets if asset not in execution_panel.index]
     if missing_panel:
         raise PortfolioTargetBlocked("portfolio_held_asset_missing_from_panel")
     market_by_asset = {
-        str(asset): market_name_for_type(panel_by_asset.loc[asset, "market_type"])
+        str(asset): market_name_for_type(execution_panel.loc[asset, "market_type"])
         for asset in assets
+        if pd.notna(execution_panel.loc[asset, "market_type"])
     }
     adv = pd.Series(
         {
             asset: float(mean(history))
             if len(history := amount_history.get((asset, listing), ())) == 20
             else np.nan
-            for asset, listing in panel_by_asset.loc[assets, "listing_date"].items()
+            for asset, listing in execution_panel.loc[assets, "listing_date"].items()
         },
         dtype="float64",
     )
@@ -1333,7 +1588,8 @@ def _build_session(
         return totals
 
     if (
-        target_override is None
+        nav > 0
+        and target_override is None
         and enhanced_decision is not None
         and (enhanced_decision.risk is not None)
         and (not enhanced_decision.calibration.benchmark_only)
@@ -1372,23 +1628,30 @@ def _build_session(
                     )
             return sum(map(float, totals), 0.0)
 
-        optimization = optimize_portfolio(
-            assets_frame,
-            factor_covariance=risk.factor_covariance,
-            industry_columns=tuple(
-                column
-                for column in risk.factor_covariance.index
-                if column.startswith("industry_")
-            ),
-            style_columns=candidate.risk_style_columns,
-            expected_transaction_cost=expected_cost,
-            config=optimizer_config,
-            nav=float(nav),
-            assumptions=assumptions,
-            eligibility_column="eligible",
-            financial_column="is_financial",
-            cash_column="is_cash",
-        )
+        try:
+            optimization = optimize_portfolio(
+                assets_frame,
+                factor_covariance=risk.factor_covariance,
+                industry_columns=tuple(
+                    column
+                    for column in risk.factor_covariance.index
+                    if column.startswith("industry_")
+                ),
+                style_columns=candidate.risk_style_columns,
+                expected_transaction_cost=expected_cost,
+                config=optimizer_config,
+                nav=float(nav),
+                assumptions=assumptions,
+                eligibility_column="eligible",
+                financial_column="is_financial",
+                cash_column="is_cash",
+            )
+        except ValueError as error:
+            if str(error) != "optimizer_trade_adv_unavailable":
+                raise
+            raise PortfolioTargetBlocked(
+                "portfolio_optimizer_adv_unavailable"
+            ) from error
         target = optimization.weights.loc[
             optimization.weights.index != PORTFOLIO_CASH_ASSET_ID
         ]
@@ -1401,43 +1664,52 @@ def _build_session(
     decision_delta = (
         target.reindex(assets, fill_value=0.0)
         - current.div(nav).reindex(assets, fill_value=0.0)
-        if orders_requested
+        if orders_requested and nav > 0
         else pd.Series(0.0, index=assets)
     )
-    execution_holdings, execution_cash, execution_nav = (current, cash, nav)
-    if not initialize_at_execution and (not current.empty):
-        overnight = _price_returns(
-            panel_by_asset,
-            next_panel.set_index("asset_id"),
-            current.index,
-            start_column="adj_close",
-            end_column="adj_open",
-        )
-        execution_holdings, execution_cash, execution_nav = drift_continuous_holdings(
-            current, cash, overnight
-        )
-    execution_weights = execution_holdings.div(execution_nav)
+    execution_cash = cash + recovery_cash
+    entry = execution_panel.reindex(assets)
+    required = held_units.reindex(assets, fill_value=0.0).ne(0)
+    if entry.loc[required, "adj_open"].isna().any():
+        raise PortfolioTargetBlocked("portfolio_held_return_missing")
+    execution_holdings = _unit_values(
+        held_units.reindex(assets, fill_value=Fraction()), entry.adj_open.fillna(0.0)
+    )
+    execution_nav = float(execution_holdings.sum() + execution_cash)
+    execution_weights = (
+        execution_holdings.div(execution_nav)
+        if execution_nav > 0
+        else execution_holdings.multiply(0.0)
+    )
     execution_target = target if orders_requested else execution_weights
-    try:
-        account = execute_continuous_target(
-            execution_weights,
-            execution_target,
-            nav=execution_nav,
-            average_daily_volume=adv,
-            can_enter=masks["can_enter"],
-            can_exit=masks["can_exit"],
-            execution_date=next_timestamp.date(),
-            cost_for_trade=cost_for_trade,
-            cost_totals_for_buys=cost_totals_for_buys,
-            assumptions=assumptions,
-            cost_source_identity=fee_identity,
-            unquoted_assets=unquoted_assets,
-        )
-    except ValueError as error:
-        if str(error) != "execution_adv_invalid:missing_required_assets":
-            raise
-        raise PortfolioTargetBlocked("portfolio_adv_warmup_insufficient") from error
+    account = execute_continuous_target(
+        execution_weights,
+        execution_target,
+        nav=execution_nav,
+        average_daily_volume=adv,
+        can_enter=masks["can_enter"],
+        can_exit=masks["can_exit"],
+        execution_date=next_timestamp.date(),
+        cost_for_trade=cost_for_trade,
+        cost_totals_for_buys=cost_totals_for_buys,
+        assumptions=assumptions,
+        cost_source_identity=fee_identity,
+        unquoted_assets=unquoted_assets,
+    )
     asset_ledger = account.asset_ledger
+    missing_orders = asset_ledger.loc[
+        asset_ledger.reason.eq("adv_unavailable"), "asset_id"
+    ]
+    if not missing_orders.empty:
+        for asset in missing_orders:
+            history = amount_history.get(
+                (asset, execution_panel.loc[asset, "listing_date"]), ()
+            )
+            selected = asset_ledger.asset_id.eq(asset)
+            asset_ledger.loc[selected, "adv20_observation_count"] = len(history)
+            asset_ledger.loc[selected, "adv20_missing_observations"] = sum(
+                pd.isna(value) for value in history
+            )
     returns = _holding_returns(asset_ledger, next_panel, endpoint_panel)
     return (account, returns, adv, optimization, decision_delta, asset_ledger)
 
@@ -1495,7 +1767,6 @@ def _session_keys(frame: pd.DataFrame) -> set[tuple[pd.Timestamp, str]]:
 def _update_amount_history(
     panel: pd.DataFrame,
     history: dict[tuple[str, pd.Timestamp], deque[float]],
-    holdings: pd.Series,
     closed_assets: frozenset[str],
 ) -> None:
     current = dict(
@@ -1504,12 +1775,8 @@ def _update_amount_history(
     for key in tuple(history):
         asset, listing = key
         if asset in current and current[asset] != listing:
-            if float(holdings.get(asset, 0.0)) != 0.0:
-                raise PortfolioTargetBlocked("portfolio_held_lifecycle_unproven")
             del history[key]
         elif asset not in current and asset not in closed_assets:
-            if float(holdings.get(asset, 0.0)) != 0.0:
-                raise PortfolioTargetBlocked("portfolio_held_asset_missing_from_panel")
             del history[key]
     amounts = pd.to_numeric(panel["amount"], errors="raise").astype("float64")
     if not np.isfinite(amounts.dropna().to_numpy()).all() or amounts.lt(0).any():
@@ -1541,9 +1808,7 @@ def _mask_values(
     ) or not pd.api.types.is_bool_dtype(execution["can_exit"]):
         raise ValueError("portfolio_execution_mask_invalid")
     indexed = execution.set_index("asset_id")
-    if not open_assets.isin(indexed.index).all():
-        raise PortfolioTargetBlocked("portfolio_execution_mask_missing")
-    current = indexed.loc[open_assets]
+    current = indexed.reindex(open_assets)
     known_date = current.execution_at.notna()
     if not current.loc[known_date, "execution_at"].eq(execution_at).all():
         raise PortfolioTargetBlocked("portfolio_execution_date_misaligned")
@@ -1562,9 +1827,20 @@ def _holding_returns(
     selected = assets.loc[asset_ledger["post_trade_notional"].to_numpy() > 0.0]
     if selected.empty:
         return returns
+    start = next_panel.set_index("asset_id")
+    end = endpoint_panel.set_index("asset_id").copy()
+    if "research_previous_listing_date" in end:
+        conversion = (
+            end.research_previous_listing_date.notna()
+            & end.research_previous_listing_date.eq(start.listing_date)
+        )
+        end.loc[conversion, "adj_open"] = 0.0
+        end.loc[conversion, "listing_date"] = end.loc[
+            conversion, "research_previous_listing_date"
+        ]
     returns.loc[selected] = _price_returns(
-        next_panel.set_index("asset_id"),
-        endpoint_panel.set_index("asset_id"),
+        start,
+        end,
         selected,
         start_column="adj_open",
         end_column="adj_open",
@@ -1579,7 +1855,10 @@ def _ledger_batch(
     sequence: int,
     end_timestamp: pd.Timestamp,
     decision_timestamp: pd.Timestamp,
-    returns: pd.Series,
+    held_units: pd.Series,
+    execution_units: pd.Series,
+    previous_values: dict,
+    rights_adjustments: tuple[PortfolioRightsAdjustment, ...],
     alpha_score: pd.Series,
     adv20: pd.Series,
     enhanced_decision: _EnhancedDecision | None,
@@ -1598,18 +1877,101 @@ def _ledger_batch(
         "end": endpoint_panel.set_index("asset_id"),
     }
 
-    def emit(asset, before, after, holding_return, fill_id, values):
+    def emit(asset, before, after, fill_id, values):
+        if asset == PORTFOLIO_CASH_ASSET_ID:
+            entry_mark = end_mark = 1.0
+            before -= sum(event.cash_amount for event in rights_adjustments)
+            before_quantity, after_quantity = before, after
+            lifecycle = None
+            before_lifecycle = None
+            before_mark = 1.0
+        else:
+            if asset not in mark_frames["entry"].index:
+                raise PortfolioTargetBlocked("portfolio_held_lifecycle_unproven")
+            lifecycle = (
+                pd.Timestamp(mark_frames["entry"].loc[asset, "listing_date"])
+                .date()
+                .isoformat()
+            )
+            entry_mark = mark_frames["entry"].loc[asset, "adj_open"]
+            after_quantity = Fraction(execution_units.get(asset, 0)) + sum(
+                (Fraction(row.quantity) for row in trades if row.asset_id == asset),
+                Fraction(),
+            )
+            # Extinguished holdings need no quote or linkage to a later lifecycle.
+            end_mark = 0.0
+            if after_quantity:
+                if asset not in mark_frames["end"].index:
+                    raise PortfolioTargetBlocked("portfolio_held_lifecycle_unproven")
+                end_mark = mark_frames["end"].loc[asset, "adj_open"]
+            if pd.isna(entry_mark):
+                if (
+                    held_units.get(asset, 0)
+                    or execution_units.get(asset, 0)
+                    or any(row.asset_id == asset for row in trades)
+                ):
+                    raise PortfolioTargetBlocked("portfolio_held_return_missing")
+                entry_mark = 0.0
+            if after_quantity and (
+                mark_frames["entry"].loc[asset, "listing_date"]
+                != mark_frames["end"].loc[asset, "listing_date"]
+            ):
+                if (
+                    "research_previous_listing_date" not in mark_frames["end"]
+                    or mark_frames["end"].loc[asset, "research_previous_listing_date"]
+                    != mark_frames["entry"].loc[asset, "listing_date"]
+                ):
+                    raise PortfolioTargetBlocked("portfolio_held_lifecycle_unproven")
+                end_mark = 0.0
+            before_quantity = Fraction(held_units.get(asset, 0))
+            before_lifecycle = lifecycle
+            before_mark = entry_mark
+            if asset in previous_values:
+                prior = previous_values[asset]
+                before_quantity, before, before_mark = (
+                    prior.quantity,
+                    prior.value,
+                    prior.mark_price,
+                )
+                before_lifecycle = prior.lifecycle_id
+            else:
+                before = float(before_quantity * Fraction(entry_mark))
+            delta = sum(row.notional for row in trades if row.asset_id == asset)
+            if entry_mark == 0 and delta != 0:
+                raise ValueError("portfolio_zero_mark_trade_invalid")
+            after = float(after_quantity * Fraction(entry_mark))
+            if pd.isna(end_mark):
+                if after_quantity:
+                    raise PortfolioTargetBlocked("portfolio_held_return_missing")
+                end_mark = 0.0
         valuations.extend(
             (
-                PortfolioValuation(timestamp, asset, "before", before, before),
-                PortfolioValuation(timestamp, asset, "after", after, after),
+                PortfolioValuation(
+                    timestamp,
+                    asset,
+                    "before",
+                    before_quantity,
+                    before,
+                    before_mark,
+                    lifecycle_id=before_lifecycle,
+                ),
+                PortfolioValuation(
+                    timestamp,
+                    asset,
+                    "after",
+                    after_quantity,
+                    after,
+                    entry_mark,
+                    lifecycle_id=lifecycle,
+                ),
                 PortfolioValuation(
                     int(end_timestamp.value),
                     asset,
                     "end",
-                    after,
-                    after * (1.0 + holding_return),
-                    1.0 + holding_return,
+                    after_quantity,
+                    float(after_quantity * Fraction(end_mark)),
+                    end_mark,
+                    lifecycle_id=lifecycle,
                 ),
             )
         )
@@ -1644,7 +2006,17 @@ def _ledger_batch(
         fill_id = f"{sequence}:{asset}" if delta else None
         if fill_id is not None:
             trades.append(
-                ExecutedTrade(fill_id, fill_id, timestamp, asset, delta, delta)
+                ExecutedTrade(
+                    fill_id,
+                    fill_id,
+                    timestamp,
+                    asset,
+                    -Fraction(execution_units.get(asset, 0))
+                    if row.post_trade_notional == 0 and delta < 0
+                    else Fraction(delta)
+                    / Fraction(mark_frames["entry"].loc[asset, "adj_open"]),
+                    delta,
+                )
             )
             cashflows.append(
                 PortfolioCashFlow(
@@ -1673,12 +2045,17 @@ def _ledger_batch(
             asset,
             float(row.pre_trade_notional),
             float(row.post_trade_notional),
-            float(returns.get(asset, 0.0)),
             fill_id,
             {
                 "target_notional": float(row.target_notional),
                 "block_reason": row.reason,
                 "adv20": adv20.get(asset),
+                "adv20_observation_count": getattr(
+                    row, "adv20_observation_count", None
+                ),
+                "adv20_missing_observations": getattr(
+                    row, "adv20_missing_observations", None
+                ),
                 "alpha_score": alpha_score.get(asset),
                 "decision_delta_weight": float(decision_delta.loc[asset]),
                 "expected_alpha": enhanced_decision.expected_alpha.get(asset)
@@ -1695,11 +2072,24 @@ def _ledger_batch(
             },
         )
         for phase, marks in mark_frames.items():
+            if phase == "end" and valuations[-1].quantity == 0:
+                continue
             if asset not in marks.index or pd.isna(
                 mark_at := marks.loc[asset, "research_open_mark_at"]
             ):
                 continue
             at = pd.Timestamp(marks.loc[asset, "timestamp"])
+            if "research_open_evidence_identity" in marks and pd.notna(
+                marks.loc[asset, "research_open_evidence_identity"]
+            ):
+                diagnostics.append(
+                    PortfolioDiagnostic(
+                        asset,
+                        None,
+                        f"research_{phase}_evidence_identity",
+                        text=marks.loc[asset, "research_open_evidence_identity"],
+                    )
+                )
             diagnostics.extend(
                 (
                     PortfolioDiagnostic(
@@ -1732,7 +2122,6 @@ def _ledger_batch(
         PORTFOLIO_CASH_ASSET_ID,
         account.pre_trade_cash,
         account.post_trade_cash,
-        0.0,
         None,
         {
             "target_notional": max(
@@ -1766,6 +2155,18 @@ def _ledger_batch(
             else None,
         },
     )
+    for event in rights_adjustments:
+        if event.cash_amount:
+            cashflows.append(
+                PortfolioCashFlow(
+                    f"recovery:{event.event_id}",
+                    timestamp,
+                    event.asset_id,
+                    None,
+                    "recovery",
+                    event.cash_amount,
+                )
+            )
     unquoted = _unquoted_assets(endpoint_panel)
     end_values = [row for row in valuations if row.phase == "end"]
     nav_end = sum(row.value for row in end_values)
@@ -1780,7 +2181,12 @@ def _ledger_batch(
         for percent in (0, 50, 100)
     )
     return PortfolioLedgerBatch(
-        sequence, tuple(trades), tuple(cashflows), tuple(valuations), tuple(diagnostics)
+        sequence,
+        tuple(trades),
+        tuple(cashflows),
+        tuple(valuations),
+        tuple(diagnostics),
+        rights_adjustments,
     )
 
 

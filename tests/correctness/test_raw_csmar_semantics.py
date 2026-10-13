@@ -12,8 +12,6 @@ from quant_research_platform.storage.identity import (
     filesystem_glob,
     filesystem_iterdir,
     filesystem_mkdir,
-    filesystem_read_bytes,
-    filesystem_read_text,
     filesystem_rename,
     filesystem_unlink,
     filesystem_walk,
@@ -27,7 +25,9 @@ from quant_research_platform.workflows import operations
 
 def _file_bytes(root: Path) -> dict[Path, bytes]:
     return {
-        (parent / name).relative_to(root): filesystem_read_bytes(parent / name)
+        (parent / name).relative_to(root): Path(
+            native_filesystem_path(parent / name)
+        ).read_bytes()
         for parent, _directories, files in filesystem_walk(root)
         for name in files
     }
@@ -169,7 +169,7 @@ def test_analyst_raw_reports_persist_and_feed_institution_consensus(
     filesystem_mkdir(raw, parents=True)
     _write_csmar(raw, "analyst_forecast", _analyst_rows())
     raw_path = next(filesystem_glob(raw, "*.csv"))
-    original = filesystem_read_bytes(raw_path)
+    original = Path(native_filesystem_path(raw_path)).read_bytes()
     result = interim.materialize_interim_data(
         layout=layout,
         data_ids=("analyst_forecast",),
@@ -180,7 +180,9 @@ def test_analyst_raw_reports_persist_and_feed_institution_consensus(
     root = result.artifact_roots["analyst_forecast"]
     saved = read_dataset(root)
     manifest = json.loads(
-        filesystem_read_text(root / "_manifest/manifest.json", encoding="utf-8")
+        Path(native_filesystem_path(root / "_manifest/manifest.json")).read_text(
+            encoding="utf-8"
+        )
     )
     assert manifest["producer_diagnostics"]["source_row_counts"] == {
         "raw_rows": 8,
@@ -240,7 +242,7 @@ def test_analyst_raw_reports_persist_and_feed_institution_consensus(
     assert persisted.loc[1, "forecast_dispersion_fy1"] == 1.0
     assert persisted.loc[1, "log_analyst_coverage"] == pytest.approx(np.log(3))
     assert persisted.forward_earnings_yield_fy2.isna().all()
-    assert filesystem_read_bytes(raw_path) == original
+    assert Path(native_filesystem_path(raw_path)).read_bytes() == original
 
 
 def test_analyst_all_excluded_persists_zero_rows_and_counts(tmp_path):
@@ -265,7 +267,9 @@ def test_analyst_all_excluded_persists_zero_rows_and_counts(tmp_path):
     empty = read_dataset(root)
     assert empty.empty
     manifest = json.loads(
-        filesystem_read_text(root / "_manifest/manifest.json", encoding="utf-8")
+        Path(native_filesystem_path(root / "_manifest/manifest.json")).read_text(
+            encoding="utf-8"
+        )
     )
     counts = manifest["producer_diagnostics"]["source_row_counts"]
     assert counts["raw_rows"] == counts["excluded_missing_required_rows"] == 3
@@ -939,7 +943,7 @@ def test_csmar_materialization_binds_inspected_content_to_plan(
         assert set(filesystem_iterdir(target.parent)) == previous_members
         assert not filesystem_exists(target)
     assert _file_bytes(root) == old_good
-    assert filesystem_read_text(unrelated, encoding="utf-8") == "keep"
+    assert Path(native_filesystem_path(unrelated)).read_text(encoding="utf-8") == "keep"
 
 
 @pytest.mark.parametrize(
@@ -1216,7 +1220,7 @@ def test_index_info_retains_supported_rows_and_discloses_exclusions(
     )
     _write_csmar(raw, "index_info", rows, extra_columns=extra)
     raw_path = next(filesystem_glob(raw, "*.csv"))
-    original = filesystem_read_bytes(raw_path)
+    original = Path(native_filesystem_path(raw_path)).read_bytes()
     assert len(_collect_raw_export(raw_path, "index_info", chunksize=chunksize)) == len(
         rows
     )
@@ -1233,7 +1237,7 @@ def test_index_info_retains_supported_rows_and_discloses_exclusions(
         assert _semantic_failure_code(failure.value) == str(failure.value)
         assert not filesystem_exists(layout.interim_data_root("csmar", "index_info"))
         assert not tuple(filesystem_glob(tmp_path, "**/.a-*"))
-        assert filesystem_read_bytes(raw_path) == original
+        assert Path(native_filesystem_path(raw_path)).read_bytes() == original
         return
     result = interim.materialize_interim_data(
         layout=layout, data_ids=("index_info",), chunksize=chunksize
@@ -1245,7 +1249,9 @@ def test_index_info_retains_supported_rows_and_discloses_exclusions(
     assert set(saved.source_asset_id) == {item["Indexcd"] for item in supported}
     assert len(saved) == len(supported)
     manifest = json.loads(
-        filesystem_read_text(root / "_manifest/manifest.json", encoding="utf-8")
+        Path(native_filesystem_path(root / "_manifest/manifest.json")).read_text(
+            encoding="utf-8"
+        )
     )
     retained = len(supported) + 1
     assert manifest["producer_diagnostics"]["source_row_counts"] == {
@@ -1262,7 +1268,7 @@ def test_index_info_retains_supported_rows_and_discloses_exclusions(
         "excluded_date_range_rows": 0,
     }
     assert manifest["producer_diagnostics"]["exact_duplicate_count"] == 1
-    assert filesystem_read_bytes(raw_path) == original
+    assert Path(native_filesystem_path(raw_path)).read_bytes() == original
 
 
 @pytest.mark.parametrize("malformed", (False, True))
@@ -1577,7 +1583,9 @@ def test_csmar_exact_duplicates_and_unordered_chunks_persist_identical_content(
         _write_csmar(raw, data_id, rows)
         hashes.append(
             hashlib.sha256(
-                filesystem_read_bytes(next(filesystem_glob(raw, "*.csv")))
+                Path(
+                    native_filesystem_path(next(filesystem_glob(raw, "*.csv")))
+                ).read_bytes()
             ).hexdigest()
         )
         result = interim.materialize_interim_data(
@@ -1736,7 +1744,7 @@ def test_index_membership_raw_text_survives_public_materialization(
     ]
     _write_csmar(raw, "index_membership", rows)
     path = next(filesystem_glob(raw, "*.csv"))
-    original = filesystem_read_bytes(path)
+    original = Path(native_filesystem_path(path)).read_bytes()
     if bad_numeric:
         with pytest.raises(ValueError, match="invalid_csmar_numeric_value"):
             interim.materialize_interim_data(
@@ -1766,7 +1774,7 @@ def test_index_membership_raw_text_survives_public_materialization(
             "2020-01-03",
             "2020-01-04",
         ]
-    assert filesystem_read_bytes(path) == original
+    assert Path(native_filesystem_path(path)).read_bytes() == original
 
 
 @pytest.mark.parametrize("chunksize", [1, 10])
@@ -2356,7 +2364,7 @@ def test_malformed_quoted_numeric_cannot_publish_over_old_good(tmp_path):
     old_good = _file_bytes(root)
     before = read_dataset(root)
     path = next(filesystem_glob(raw, "*.csv"))
-    payload = filesystem_read_bytes(path)
+    payload = Path(native_filesystem_path(path)).read_bytes()
     assert payload.count(b",18,10") == 1
     malformed = payload.replace(b",18,10", b',"1"0,10')
     filesystem_write_bytes(path, malformed)
@@ -2369,7 +2377,7 @@ def test_malformed_quoted_numeric_cannot_publish_over_old_good(tmp_path):
     assert not filesystem_exists(candidate)
     assert _file_bytes(root) == old_good
     pd.testing.assert_frame_equal(before, read_dataset(root))
-    assert filesystem_read_bytes(path) == malformed
+    assert Path(native_filesystem_path(path)).read_bytes() == malformed
 
 
 def _short_analyst_csv_records(count):
@@ -2477,7 +2485,7 @@ def test_cr_only_physical_fragments_preserve_interim_rows(
         saved.sort_values(keys).reset_index(drop=True), expected, check_exact=True
     )
     assert interim.source_content_identity(raw_root, "analyst_forecast") == identity
-    assert filesystem_read_bytes(path) == payload
+    assert Path(native_filesystem_path(path)).read_bytes() == payload
 
 
 @pytest.mark.parametrize("ending", (b"\n", b"\r"))
@@ -2506,7 +2514,7 @@ def test_long_record_after_short_header_can_publish(tmp_path, real_csv_handles, 
     saved = read_dataset(target)
     assert len(saved) == 1
     assert saved["institution_id"].iloc[0] == row[5]
-    assert filesystem_read_bytes(path) == payload
+    assert Path(native_filesystem_path(path)).read_bytes() == payload
 
 
 def test_large_cr_reader_early_close_releases_real_handles(tmp_path, real_csv_handles):
@@ -2523,7 +2531,7 @@ def test_large_cr_reader_early_close_releases_real_handles(tmp_path, real_csv_ha
         assert record == rows[0]
     finally:
         records.close()
-    assert filesystem_read_bytes(path) == payload
+    assert Path(native_filesystem_path(path)).read_bytes() == payload
 
 
 @pytest.mark.parametrize("payload", (b"bad\xff,2\n", b'"bad\r\n\xff",2\r\n'))
@@ -2536,7 +2544,7 @@ def test_invalid_utf8_is_rejected_in_csv_records(tmp_path, real_csv_handles, pay
             next(records)
     finally:
         records.close()
-    assert filesystem_read_bytes(path) == payload
+    assert Path(native_filesystem_path(path)).read_bytes() == payload
 
 
 @pytest.mark.parametrize("ending", ("\n", "\r", "\r\n"))

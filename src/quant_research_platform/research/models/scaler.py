@@ -61,8 +61,11 @@ class ModelMatrixScaler:
         offset = center * magnitude
         normalized_scale = np.array(
             [
-                norm(column, check_finite=False)
-                for column in (root_weights[:, None] * (normalized - center)).T
+                norm(
+                    root_weights * (normalized[:, column] - center[column]),
+                    check_finite=False,
+                )
+                for column in range(len(columns))
             ]
         ) / np.sqrt(total)
         # Values are in [-1, 1], so the population deviation cannot exceed one.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from decimal import Decimal, localcontext
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -46,8 +47,6 @@ from quant_research_platform.storage.datasets.schema import (
     parse_logical_dtype_metadata,
 )
 from quant_research_platform.storage.identity import (
-    filesystem_read_bytes,
-    filesystem_read_text,
     filesystem_walk,
     filesystem_write_bytes,
     native_filesystem_path,
@@ -57,7 +56,9 @@ from tests.storage.test_semantic_artifacts import _envelope
 
 def _file_bytes(root):
     return {
-        (parent / name).relative_to(root): filesystem_read_bytes(parent / name)
+        (parent / name).relative_to(root): Path(
+            native_filesystem_path(parent / name)
+        ).read_bytes()
         for parent, _directories, files in filesystem_walk(root)
         for name in files
     }
@@ -306,7 +307,9 @@ def test_grouped_label_mean_preserves_finite_results(labels, expected):
     _, grouped = compute_ic_and_grouped_label_values(
         frame,
         ComputePanelSpec(
-            signal_columns=("signal",), label_column="label", asset_column="asset_id"
+            signal_columns=("signal",),
+            label_columns=("label",),
+            asset_column="asset_id",
         ),
         n_groups=2,
     )
@@ -597,8 +600,10 @@ def test_pearson_rounding_counterexamples_reach_published_consumers(
         assert pd.read_parquet(
             native_filesystem_path(bundle / "ic_summary.parquet")
         ).mean_ic.tolist() == [expected]
-        assert filesystem_read_text(bundle / "summary.md", encoding="utf-8").startswith(
-            "# Evaluation Summary"
+        assert (
+            Path(native_filesystem_path(bundle / "summary.md"))
+            .read_text(encoding="utf-8")
+            .startswith("# Evaluation Summary")
         )
 
 

@@ -41,7 +41,6 @@ from quant_research_platform.research.protocols.crypto_hft import (
 from quant_research_platform.storage.identity import (
     filesystem_glob,
     filesystem_is_file,
-    filesystem_read_bytes,
     native_filesystem_path,
 )
 from quant_research_platform.storage.layout import StorageLayout
@@ -189,7 +188,7 @@ def run_a_share_acceptance(project_root: Path):
     trial_root = layout.trial_ledger_root(record.run_id)
     trial_before = {
         path.relative_to(trial_root).as_posix(): sha256(
-            filesystem_read_bytes(path)
+            Path(native_filesystem_path(path)).read_bytes()
         ).hexdigest()
         for path in filesystem_glob(trial_root, "**/*")
         if filesystem_is_file(path)
@@ -220,7 +219,7 @@ def run_a_share_acceptance(project_root: Path):
     assert not held_record.trial_ledgers
     assert {
         path.relative_to(trial_root).as_posix(): sha256(
-            filesystem_read_bytes(path)
+            Path(native_filesystem_path(path)).read_bytes()
         ).hexdigest()
         for path in filesystem_glob(trial_root, "**/*")
         if filesystem_is_file(path)

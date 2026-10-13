@@ -10,6 +10,10 @@ from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.markets.implementations.a_share.execution import (
     derive_execution_mask,
 )
+from quant_research_platform.markets.implementations.a_share.fundamentals import (
+    _pit_observations,
+    _prepare_pit_fundamentals,
+)
 from quant_research_platform.research.factors.fundamental.calculations import (
     calculate_fundamental_factors,
 )
@@ -1009,11 +1013,12 @@ def test_future_execution_and_disclosure_facts_do_not_rewrite_past_facts() -> No
             "value": [100.0],
         }
     )
-    from quant_research_platform.markets.implementations.a_share.fundamentals import (
-        materialize_pit_fundamentals,
-    )
 
-    assert materialize_pit_fundamentals(observations, events)["value"].isna().all()
+    assert (
+        _prepare_pit_fundamentals(events)(_pit_observations(observations))["value"]
+        .isna()
+        .all()
+    )
 
 
 def test_enhanced_optimizer_is_deterministic_and_hard_constraint_only() -> None:

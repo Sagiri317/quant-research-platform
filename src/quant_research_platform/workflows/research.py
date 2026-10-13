@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
@@ -19,6 +19,7 @@ from quant_research_platform.artifacts.outputs import (
     write_prediction_outputs,
 )
 from quant_research_platform.artifacts.outputs.bundle_validation import (
+    _PredictionOutputSession,
     _validate_prediction_output_bundle,
 )
 from quant_research_platform.artifacts.outputs.evaluation_validation import (
@@ -370,14 +371,11 @@ def _plan_targets(
             effective_requests.append(request)
             continue
         data_spec = _catalog_data_spec(profile, spec.target_id)
-        absent = (
-            tuple(
-                name
-                for name in data_spec.optional_source_input_data_ids
-                if dependencies[name].blocker == "raw_content_identity_unavailable"
-            )
-            if isinstance(data_spec, ProcessedDataSpec)
-            else ()
+        absent = tuple(
+            name
+            for name in _optional_source_ids(profile, protocol, spec)
+            if name in dependencies
+            and dependencies[name].blocker == "raw_content_identity_unavailable"
         )
         if absent:
             spec = replace(
@@ -1052,6 +1050,7 @@ def _execute_targets(
                         )
                     target_layout = _target_layout(
                         profile=profile,
+                        protocol=protocol,
                         layout=layout,
                         spec=spec,
                         plans={
@@ -1076,6 +1075,7 @@ def _execute_targets(
                         software_identity=software,
                         target_layout=target_layout,
                         raw_root=source_root,
+                        reuse_sessions=reuse_sessions,
                     )
             except PortfolioTargetBlocked as exc:
                 result = TargetResult(
@@ -1179,6 +1179,7 @@ def _build_target(
     target_layout: StorageLayout,
     raw_root: Path,
     run_id: str | None = None,
+    reuse_sessions=None,
 ) -> TargetResult:
     if spec.target_id not in profile.producer_bindings:
         return TargetResult(
@@ -1208,6 +1209,7 @@ def _build_target(
             research_window=target_research_window,
             software_identity=software_identity,
             raw_root=raw_root,
+            reuse_sessions=reuse_sessions,
         )
     binding = profile.producer_bindings[spec.target_id]
     if binding.kind is not _producer_kind(data_spec):
@@ -1316,7 +1318,10 @@ def _build_target(
         )
     if binding.kind is ProducerKind.PROCESSED:
         _verify_absent_sources(
-            profile, data_spec, planned.upstream_identities, raw_root
+            profile,
+            _optional_source_ids(profile, protocol, spec),
+            planned.upstream_identities,
+            raw_root,
         )
         processed_spec = data_spec
         produced = producer(
@@ -1344,7 +1349,10 @@ def _build_target(
                 if verify is not None:
                     verify(receipt)
                 _verify_absent_sources(
-                    profile, data_spec, planned.upstream_identities, raw_root
+                    profile,
+                    _optional_source_ids(profile, protocol, spec),
+                    planned.upstream_identities,
+                    raw_root,
                 )
 
             # The producer may finish its diagnostics while the writer drains it.
@@ -1397,6 +1405,7 @@ def _build_semantic_target(
     software_identity: ProductionSoftwareIdentity,
     raw_root: Path,
     run_id: str | None = None,
+    reuse_sessions=None,
 ) -> TargetResult:
     binding = profile.producer_bindings.get(spec.target_id)
     if binding is None:
@@ -1423,6 +1432,12 @@ def _build_semantic_target(
             status=TargetStatus.BLOCKED,
             reason="research_window_required",
         )
+    _verify_absent_sources(
+        profile,
+        _optional_source_ids(profile, protocol, spec),
+        planned.upstream_identities,
+        raw_root,
+    )
     raw_root = binding.raw_root or raw_root
     raw_identity = (
         binding.source_identity(raw_root, spec.target_id)
@@ -1760,23 +1775,24 @@ def _build_semantic_target(
                 ),
                 expected_identity=planned.upstream_identities[global_target],
             )
-        (_manifest, prediction_lookup) = read_prediction_output_bundle(
-            prediction_root / "outputs" / prediction_target,
+        with _prediction_consumer(
+            prediction_root,
+            reuse_sessions=reuse_sessions,
             expected_output_id=prediction_target,
             expected_run_id=f"run_{prediction_target}",
             time_window=time_window,
-        )
-        tables = binding.producer(
-            layout=target_layout,
-            dataset_catalog=profile.research_datasets,
-            dataset_id=dataset_target,
-            prediction_id=prediction_target,
-            persisted_model=persisted,
-            protocol_manifest=target_protocol,
-            time_window=time_window,
-            prediction_lookup=prediction_lookup,
-            global_statistics=global_statistics,
-        )
+        ) as (_manifest, prediction_lookup):
+            tables = binding.producer(
+                layout=target_layout,
+                dataset_catalog=profile.research_datasets,
+                dataset_id=dataset_target,
+                prediction_id=prediction_target,
+                persisted_model=persisted,
+                protocol_manifest=target_protocol,
+                time_window=time_window,
+                prediction_lookup=prediction_lookup,
+                global_statistics=global_statistics,
+            )
         write_statistics_artifact(
             logical_root,
             envelope=envelope,
@@ -1829,68 +1845,77 @@ def _build_semantic_target(
             prediction_window = protocol.target_window(
                 "research run", None, time_window, candidate.prediction_target_id
             )
-        (prediction_manifest, prediction_lookup) = read_prediction_output_bundle(
-            prediction_root / "outputs" / prediction_target,
+        with _prediction_consumer(
+            prediction_root,
+            reuse_sessions=reuse_sessions,
             expected_output_id=prediction_target,
             expected_run_id=f"run_{prediction_target}",
             time_window=prediction_window,
             family_selection=candidate.prediction_selector,
-        )
-        lineage = prediction_manifest["metadata"]["model_metadata"]
-        persisted = read_quarterly_model_artifact(
-            _target_instance_root(
-                profile,
-                target_layout,
-                lineage["model_artifact_id"],
-                lineage["model_artifact_identity"],
-            ),
-            expected_identity=lineage["model_artifact_identity"],
-            trial_layout=target_layout,
-        )
-        final_calibrations = []
-        portfolio_chunks = binding.producer(
-            candidate=candidate,
-            layout=target_layout,
-            upstream_identities=planned.upstream_identities,
-            output_window=time_window,
-            input_window=protocol.data_window,
-            formal_dataset_window=protocol.formal_dataset_window,
-            prediction_window=prediction_window,
-            frozen_calibration=dict(protocol.frozen_alpha).get(
-                (
-                    candidate.selection_group,
-                    candidate.prediction_selector,
-                    candidate.rebalance_schedule,
-                )
-            ),
-            on_final_calibration=final_calibrations.append,
-            prediction_lookup=prediction_lookup,
-            persisted_model=persisted,
-            access_window=target_protocol["access_window"],
-            assumptions=protocol.execution_assumptions,
-            risk_config=protocol.risk_config,
-            optimizer_config=protocol.optimizer_config,
-        )
+        ) as (prediction_manifest, prediction_lookup):
+            lineage = prediction_manifest["metadata"]["model_metadata"]
+            persisted = read_quarterly_model_artifact(
+                _target_instance_root(
+                    profile,
+                    target_layout,
+                    lineage["model_artifact_id"],
+                    lineage["model_artifact_identity"],
+                ),
+                expected_identity=lineage["model_artifact_identity"],
+                trial_layout=target_layout,
+            )
+            final_calibrations = []
+            portfolio_chunks = binding.producer(
+                candidate=candidate,
+                layout=target_layout,
+                upstream_identities=planned.upstream_identities,
+                output_window=time_window,
+                input_window=protocol.data_window,
+                formal_dataset_window=protocol.formal_dataset_window,
+                prediction_window=prediction_window,
+                frozen_calibration=dict(protocol.frozen_alpha).get(
+                    (
+                        candidate.selection_group,
+                        candidate.prediction_selector,
+                        candidate.rebalance_schedule,
+                    )
+                ),
+                on_final_calibration=final_calibrations.append,
+                prediction_lookup=prediction_lookup,
+                persisted_model=persisted,
+                access_window=target_protocol["access_window"],
+                assumptions=protocol.execution_assumptions,
+                risk_config=protocol.risk_config,
+                optimizer_config=protocol.optimizer_config,
+            )
 
-        def produce_ledger(emit):
-            with closing_iterator(iter(portfolio_chunks)) as chunks:
-                for chunk in chunks:
-                    emit(chunk)
+            def produce_ledger(emit):
+                with closing_iterator(iter(portfolio_chunks)) as chunks:
+                    for chunk in chunks:
+                        emit(chunk)
+                    _verify_absent_sources(
+                        profile,
+                        _optional_source_ids(profile, protocol, spec),
+                        planned.upstream_identities,
+                        raw_root,
+                    )
+                    if reuse_sessions is not None and prediction_root in reuse_sessions:
+                        _verify_semantic_reuse(reuse_sessions[prediction_root])
 
-        def final_calibration():
-            if len(final_calibrations) != 1:
-                raise ValueError("portfolio_final_calibration_missing")
-            return final_calibrations[0]
+            def final_calibration():
+                if len(final_calibrations) != 1:
+                    raise ValueError("portfolio_final_calibration_missing")
+                return final_calibrations[0]
 
-        write_portfolio_ledger_artifact(
-            logical_root,
-            envelope=envelope,
-            produce=produce_ledger,
-            final_calibration=final_calibration
-            if candidate.construction == "benchmark_enhanced"
-            and target_protocol["access_window"] == "development"
-            else None,
-        )
+            write_portfolio_ledger_artifact(
+                logical_root,
+                envelope=envelope,
+                produce=produce_ledger,
+                final_calibration=final_calibration
+                if candidate.construction == "benchmark_enhanced"
+                and target_protocol["access_window"] == "development"
+                else None,
+            )
     else:
         raise ValueError("producer_binding_kind_invalid")
     output_root = _target_instance_root(
@@ -1899,14 +1924,25 @@ def _build_semantic_target(
         spec.target_id,
         envelope.instance_identity,
     )
-    _validate_semantic_target_root(
-        profile,
-        protocol,
-        spec,
-        output_root,
-        envelope.instance_identity,
-        trial_layout=target_layout,
-    )
+    if binding.kind is ProducerKind.PREDICTION and reuse_sessions is not None:
+        reuse_sessions[output_root] = _semantic_reuse_session(
+            profile,
+            protocol,
+            spec,
+            output_root,
+            envelope.instance_identity,
+            layout=target_layout,
+            reuse_sessions=reuse_sessions,
+        )
+    else:
+        _validate_semantic_target_root(
+            profile,
+            protocol,
+            spec,
+            output_root,
+            envelope.instance_identity,
+            trial_layout=target_layout,
+        )
     return TargetResult(
         target_id=spec.target_id,
         status=TargetStatus.BUILT,
@@ -1962,10 +1998,16 @@ def _semantic_failure_code(exc: BaseException) -> str:
     return reason if origin is None else f"{reason}:{origin}"
 
 
-def _verify_absent_sources(profile, data_spec, upstream_identities, raw_root):
-    if not isinstance(data_spec, ProcessedDataSpec):
-        return
-    for name in data_spec.optional_source_input_data_ids:
+def _optional_source_ids(profile, protocol, spec):
+    data_spec = _catalog_data_spec(profile, spec.target_id)
+    if isinstance(data_spec, ProcessedDataSpec):
+        return data_spec.optional_source_input_data_ids
+    selector = getattr(protocol, "optional_source_input_data_ids", None)
+    return () if data_spec is not None or selector is None else selector(spec.target_id)
+
+
+def _verify_absent_sources(profile, sources, upstream_identities, raw_root):
+    for name in sources:
         if upstream_identities.get(name) != canonical_json_hash(
             {"source_id": name, "presence": "ABSENT"}
         ):
@@ -2004,6 +2046,12 @@ def _reuse_target(
     )
     data_spec = _catalog_data_spec(profile, spec.target_id)
     if data_spec is None:
+        _verify_absent_sources(
+            profile,
+            _optional_source_ids(profile, protocol, spec),
+            planned.upstream_identities,
+            raw_root,
+        )
         binding = profile.producer_bindings[spec.target_id]
         with ExitStack() as operation:
             if binding.source_identity is not None:
@@ -2052,12 +2100,23 @@ def _reuse_target(
                 )
             else:
                 _verify_semantic_reuse(session)
+            _verify_absent_sources(
+                profile,
+                _optional_source_ids(profile, protocol, spec),
+                planned.upstream_identities,
+                raw_root,
+            )
         return TargetResult(
             target_id=spec.target_id,
             status=TargetStatus.REUSED,
             instance_identity=requested_identity,
         )
-    _verify_absent_sources(profile, data_spec, planned.upstream_identities, raw_root)
+    _verify_absent_sources(
+        profile,
+        _optional_source_ids(profile, protocol, spec),
+        planned.upstream_identities,
+        raw_root,
+    )
     envelope = _validate_published_target(root, requested_identity, session=session)
     binding = profile.producer_bindings.get(spec.target_id)
     if isinstance(data_spec, InterimDataSpec) or (
@@ -2123,7 +2182,12 @@ def _reuse_target(
         )
     else:
         session.verify()
-    _verify_absent_sources(profile, data_spec, planned.upstream_identities, raw_root)
+    _verify_absent_sources(
+        profile,
+        _optional_source_ids(profile, protocol, spec),
+        planned.upstream_identities,
+        raw_root,
+    )
     return TargetResult(
         target_id=spec.target_id,
         status=TargetStatus.REUSED,
@@ -2339,12 +2403,13 @@ def _validate_semantic_target_root(
         return
     if binding.kind is ProducerKind.PREDICTION:
         try:
-            (manifest, _lookup) = _validate_prediction_output_bundle(
+            prediction_session = _PredictionOutputSession(
                 root / "outputs" / spec.target_id,
                 expected_output_id=spec.target_id,
                 expected_run_id=f"run_{spec.target_id}",
                 expected_member_identities=output_identities(spec.target_id),
             )
+            manifest = prediction_session.manifest
             prediction_metadata = manifest["metadata"]
             lineage = prediction_metadata["model_metadata"]
             model_dependencies = tuple(
@@ -2390,7 +2455,7 @@ def _validate_semantic_target_root(
             raise ValueError(
                 f"prediction_inner_artifact_invalid:{_semantic_failure_code(exc)}"
             ) from exc
-        return
+        return prediction_session
 
 
 def _target_specs(
@@ -2857,6 +2922,37 @@ def _semantic_target_time_window(
     return protocol.target_window(action, None, window, target_spec.target_id)
 
 
+@contextmanager
+def _prediction_consumer(root, *, reuse_sessions=None, **selection):
+    """Borrow admission only; every consumer owns independent matching state."""
+    saved = None if reuse_sessions is None else reuse_sessions.get(root)
+    if saved is not None:
+        _verify_semantic_reuse(saved)
+    primary = None
+    try:
+        manifest, lookup = read_prediction_output_bundle(
+            root / "outputs" / selection["expected_output_id"],
+            validation_session=None if saved is None else saved[3],
+            **selection,
+        )
+        with closing_iterator(lookup):
+            yield manifest, lookup
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        if saved is not None:
+            try:
+                _verify_semantic_reuse(saved)
+            except BaseException as error:
+                if primary is None:
+                    raise
+                primary.add_note(
+                    "prediction snapshot verification also failed: "
+                    f"{type(error).__name__}"
+                )
+
+
 def _verify_semantic_reuse(session):
     """Keep one request's validated native result bound to all of its files."""
     _envelope, semantic_snapshots, trial_snapshots, _native = session
@@ -2864,6 +2960,46 @@ def _verify_semantic_reuse(session):
         verify_semantic_artifact_snapshot(saved_root, *snapshot)
     for saved_root, snapshot in trial_snapshots.items():
         verify_trial_ledger_snapshot(saved_root, snapshot)
+
+
+def _semantic_reuse_session(
+    profile,
+    protocol,
+    spec,
+    instance_root,
+    requested_identity,
+    *,
+    layout,
+    reuse_sessions,
+):
+    """Admit built and reused semantic outputs through the same native boundary."""
+    envelope, _members, manifest_identity, _operational = _read_artifact_manifest(
+        instance_root, expected_identity=requested_identity
+    )
+    identities = {"manifest.json": manifest_identity}
+    directories = _visit_member_paths(
+        instance_root,
+        lambda name, path, identities=identities: identities.__setitem__(
+            name, _member_identity(path)
+        ),
+    )
+    semantic_snapshots = {instance_root: (identities, directories)}
+    trial_snapshots = {}
+    native = _validate_semantic_target_root(
+        profile,
+        protocol,
+        spec,
+        instance_root,
+        requested_identity,
+        trial_layout=layout,
+        expected_member_identities=identities,
+        semantic_snapshots=semantic_snapshots,
+        trial_snapshots=trial_snapshots,
+        reuse_sessions=reuse_sessions,
+    )
+    session = (envelope, semantic_snapshots, trial_snapshots, native)
+    _verify_semantic_reuse(session)
+    return session
 
 
 def _matching_instance(
@@ -2898,34 +3034,16 @@ def _matching_instance(
             _verify_semantic_reuse(session)
             envelope = session[0]
         elif data_spec is None:
-            envelope, _members, manifest_identity, _operational = (
-                _read_artifact_manifest(
-                    instance_root, expected_identity=requested_identity
-                )
-            )
-            identities = {"manifest.json": manifest_identity}
-            directories = _visit_member_paths(
-                instance_root,
-                lambda name, path, identities=identities: identities.__setitem__(
-                    name, _member_identity(path)
-                ),
-            )
-            semantic_snapshots = {instance_root: (identities, directories)}
-            trial_snapshots = {}
-            native = _validate_semantic_target_root(
+            session = _semantic_reuse_session(
                 profile,
                 protocol,
                 spec,
                 instance_root,
                 requested_identity,
-                trial_layout=layout,
-                expected_member_identities=identities,
-                semantic_snapshots=semantic_snapshots,
-                trial_snapshots=trial_snapshots,
+                layout=layout,
                 reuse_sessions=reuse_sessions,
             )
-            session = (envelope, semantic_snapshots, trial_snapshots, native)
-            _verify_semantic_reuse(session)
+            envelope = session[0]
         else:
             session = (
                 None if reuse_sessions is None else reuse_sessions.get(instance_root)
@@ -2982,20 +3100,16 @@ def _instance_path_exists(
 def _target_layout(
     *,
     profile: ResearchProfile,
+    protocol: Any,
     layout: StorageLayout,
     spec: TargetSpec,
     plans: Mapping[str, TargetPlan],
 ) -> StorageLayout:
-    data_spec = _catalog_data_spec(profile, spec.target_id)
-    roots = (
-        {
-            name: None
-            for name in data_spec.optional_source_input_data_ids
-            if name not in spec.dependencies
-        }
-        if isinstance(data_spec, ProcessedDataSpec)
-        else {}
-    )
+    roots = {
+        name: None
+        for name in _optional_source_ids(profile, protocol, spec)
+        if name not in spec.dependencies
+    }
     for target_id in (*spec.dependencies, spec.target_id):
         planned = plans.get(target_id)
         if planned is None:

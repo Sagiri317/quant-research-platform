@@ -18,14 +18,14 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioCandidateSpec,
 )
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.markets.implementations.a_share import (
+    portfolio_sessions as market_sessions,
+)
 from quant_research_platform.markets.implementations.a_share.calendar import (
     unified_trading_sessions,
 )
 from quant_research_platform.markets.implementations.a_share.execution import (
     prepare_trade_cost,
-)
-from quant_research_platform.markets.implementations.a_share.processed import (
-    producer as market_sessions,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.portfolios import production
@@ -427,9 +427,10 @@ def test_native_simple_production_and_ledger_keep_representable_positive_target(
         dataset=dataset,
         execution=read_dataset(execution_root).assign(execution_at=dates[1]),
         holdings=pd.Series(dtype="float64"),
+        held_units=pd.Series(dtype="object"),
+        recovery_cash=0.0,
         cash=1.0,
         nav=1.0,
-        initialize_at_execution=True,
         amount_history={
             (asset, panel.listing_date.iloc[0]): deque([1000.0] * 20, maxlen=20)
             for asset in assets

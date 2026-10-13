@@ -767,8 +767,6 @@ def test_bound_crypto_direction_reaches_identity_parquet_and_report(tmp_path):
     from quant_research_platform.storage.identity import (
         filesystem_glob,
         filesystem_is_file,
-        filesystem_read_bytes,
-        filesystem_read_text,
         native_filesystem_path,
     )
     from quant_research_platform.storage.layout import StorageLayout
@@ -878,7 +876,9 @@ def test_bound_crypto_direction_reaches_identity_parquet_and_report(tmp_path):
         expected = [1.0, 1.0, 1.0] if active is old_profile else [-1.0, -1.0, 1.0]
         assert metrics.loc[factors, "ic"].tolist() == pytest.approx(expected)
         assert metrics.loc[factors, "rankic"].tolist() == pytest.approx(expected)
-        summary = filesystem_read_text(bundle / "summary.md", encoding="utf-8")
+        summary = Path(native_filesystem_path(bundle / "summary.md")).read_text(
+            encoding="utf-8"
+        )
         for factor, value in zip(factors, expected, strict=True):
             row = next(
                 line
@@ -890,7 +890,7 @@ def test_bound_crypto_direction_reaches_identity_parquet_and_report(tmp_path):
             )
         if active is old_profile:
             old_bytes = {
-                p.relative_to(root): filesystem_read_bytes(p)
+                p.relative_to(root): Path(native_filesystem_path(p)).read_bytes()
                 for p in filesystem_glob(root, "**/*")
                 if filesystem_is_file(p)
             }
@@ -904,7 +904,7 @@ def test_bound_crypto_direction_reaches_identity_parquet_and_report(tmp_path):
             )
     assert roots[0] != roots[1]
     assert {
-        p.relative_to(roots[0]): filesystem_read_bytes(p)
+        p.relative_to(roots[0]): Path(native_filesystem_path(p)).read_bytes()
         for p in filesystem_glob(roots[0], "**/*")
         if filesystem_is_file(p)
     } == old_bytes

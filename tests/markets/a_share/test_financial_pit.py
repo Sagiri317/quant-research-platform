@@ -6,9 +6,10 @@ import pytest
 
 from quant_research_platform.markets.implementations.a_share.fundamentals import (
     FINANCIAL_VALUE_COLUMNS,
+    _pit_observations,
+    _prepare_pit_fundamentals,
     construct_ttm_events,
     financial_events_from_interim,
-    materialize_pit_fundamentals,
 )
 from quant_research_platform.sources.choice.fields import FIRST_DISCLOSURE_COLUMNS
 from quant_research_platform.sources.choice.interim import (
@@ -72,8 +73,7 @@ def test_financial_versions_use_next_session_and_preserve_old_event() -> None:
             "timestamp": [sessions[0], sessions[1]],
         }
     )
-    pit = materialize_pit_fundamentals(
-        observations,
+    pit = _prepare_pit_fundamentals(
         total_assets.loc[
             :,
             [
@@ -85,8 +85,8 @@ def test_financial_versions_use_next_session_and_preserve_old_event() -> None:
                 "version_identity",
                 "value",
             ],
-        ],
-    )
+        ]
+    )(_pit_observations(observations))
 
     assert pit["value"].tolist() == [100.0, 110.0]
     assert pit["version_identity"].tolist() == [
@@ -244,14 +244,15 @@ def test_pit_exposes_beginning_quarter_and_prior_year_same_period() -> None:
             "value": [10.0, 20.0, 40.0, 50.0, 60.0],
         }
     )
-    result = materialize_pit_fundamentals(
-        pd.DataFrame(
-            {
-                "asset_id": ["asset"],
-                "timestamp": [pd.Timestamp("2020-07-02")],
-            }
-        ),
-        events,
+    result = _prepare_pit_fundamentals(events)(
+        _pit_observations(
+            pd.DataFrame(
+                {
+                    "asset_id": ["asset"],
+                    "timestamp": [pd.Timestamp("2020-07-02")],
+                }
+            )
+        )
     )
 
     row = result.iloc[0]
@@ -316,10 +317,10 @@ def test_old_period_revisions_update_dependencies_without_current_rollback() -> 
             ),
         }
     )
-    before_late_revisions = materialize_pit_fundamentals(
-        observations.iloc[:3], events.iloc[:3]
+    before_late_revisions = _prepare_pit_fundamentals(events.iloc[:3])(
+        _pit_observations(observations.iloc[:3])
     )
-    result = materialize_pit_fundamentals(observations, events)
+    result = _prepare_pit_fundamentals(events)(_pit_observations(observations))
     pd.testing.assert_frame_equal(
         result.iloc[:3], before_late_revisions, check_dtype=False
     )
@@ -612,11 +613,12 @@ def test_pit_rejects_same_availability_cross_version_ties() -> None:
     )
 
     with pytest.raises(ValueError, match="pit_revision_order_ambiguous"):
-        materialize_pit_fundamentals(
-            pd.DataFrame(
-                {"asset_id": ["asset"], "timestamp": [pd.Timestamp("2020-08-04")]}
-            ),
-            events,
+        _prepare_pit_fundamentals(events)(
+            _pit_observations(
+                pd.DataFrame(
+                    {"asset_id": ["asset"], "timestamp": [pd.Timestamp("2020-08-04")]}
+                )
+            )
         )
 
 
@@ -708,14 +710,17 @@ def test_late_original_dependency_recomputes_newer_ttm_without_lookahead():
     )
     ttm = construct_ttm_events(events)
     ttm["value"] = ttm["ttm_value"]
-    observed = materialize_pit_fundamentals(
-        pd.DataFrame(
-            {
-                "asset_id": ["asset"] * 3,
-                "timestamp": pd.to_datetime(["2020-04-22", "2020-04-28", "2020-05-05"]),
-            }
-        ),
-        ttm,
+    observed = _prepare_pit_fundamentals(ttm)(
+        _pit_observations(
+            pd.DataFrame(
+                {
+                    "asset_id": ["asset"] * 3,
+                    "timestamp": pd.to_datetime(
+                        ["2020-04-22", "2020-04-28", "2020-05-05"]
+                    ),
+                }
+            )
+        )
     )
     assert pd.isna(observed.loc[0, "value"])
     assert observed.loc[1:, "value"].tolist() == [120.0, 118.0]
@@ -858,8 +863,8 @@ def test_last_session_revision_preserves_processed_pit_ttm_and_factor_prefix():
         facts = producer._fundamental_pit_frame(
             spec,
             panel=panel.loc[panel.timestamp.isin(sessions)],
-            pit=materialize_pit_fundamentals(
-                panel.loc[panel.timestamp.isin(sessions)], events
+            pit=_prepare_pit_fundamentals(events)(
+                _pit_observations(panel.loc[panel.timestamp.isin(sessions)])
             ),
         )
         facts["total_market_cap"] = 1000.0
@@ -905,8 +910,8 @@ def test_financial_ttm_and_stock_mean_preserve_finite_results(scale) -> None:
     observations = pd.DataFrame(
         dict(asset_id=["asset"], timestamp=pd.to_datetime(["2024-05-02"]))
     )
-    materialized = materialize_pit_fundamentals(
-        observations, ttm.assign(value=ttm.ttm_value)
+    materialized = _prepare_pit_fundamentals(ttm.assign(value=ttm.ttm_value))(
+        _pit_observations(observations)
     )
     assert materialized.iloc[0].value == scale
     stocks = pd.concat(
@@ -919,7 +924,7 @@ def test_financial_ttm_and_stock_mean_preserve_finite_results(scale) -> None:
     facts = producer._fundamental_pit_frame(
         research_profile().processed.get("fundamental_pit"),
         panel=observations.assign(market_id="a_share"),
-        pit=materialize_pit_fundamentals(observations, stocks),
+        pit=_prepare_pit_fundamentals(stocks)(_pit_observations(observations)),
     )
     assert facts["average_total_assets"].iloc[0] == scale
     assert facts["average_parent_equity"].iloc[0] == scale
@@ -972,7 +977,9 @@ def test_empty_legal_financial_event_domain_persists_unknown_panel_rows(tmp_path
     actual = producer._fundamental_pit_frame(
         spec,
         panel=panel,
-        pit=materialize_pit_fundamentals(panel, construct_ttm_events(events)),
+        pit=_prepare_pit_fundamentals(construct_ttm_events(events))(
+            _pit_observations(panel)
+        ),
     )
     from quant_research_platform.storage.layout import StorageLayout
 
@@ -1043,7 +1050,8 @@ def test_pit_preparation_preserves_full_source_error_priority(damage):
         observations = observations.drop(columns="timestamp")
         error = "pit_financial_schema_invalid"
     with pytest.raises(ValueError, match=error):
-        materialize_pit_fundamentals(observations, events)
+        left = _pit_observations(observations)
+        _prepare_pit_fundamentals(events)(left)
 
 
 def test_balance_only_pit_calculates_book_to_market_and_rejects_missing_income():
@@ -1096,7 +1104,9 @@ def test_balance_only_pit_calculates_book_to_market_and_rejects_missing_income()
         source, required_sources=spec.source_input_data_ids
     )
     facts = producer._fundamental_pit_frame(
-        spec, panel=panel, pit=materialize_pit_fundamentals(panel, events)
+        spec,
+        panel=panel,
+        pit=_prepare_pit_fundamentals(events)(_pit_observations(panel)),
     )
     actual = calculate_fundamental_factors(
         facts.assign(total_market_cap=1000.0), factor_columns=("book_to_market",)

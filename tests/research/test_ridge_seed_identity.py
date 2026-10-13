@@ -1,10 +1,13 @@
 """Derived Ridge seeds survive native fitting, publication and state loading."""
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.research.models import fitting, persisted
+from quant_research_platform.storage.identity import native_filesystem_path
 from tests.research.workflow_test_support import shared_model_case
 
 
@@ -367,7 +370,6 @@ def test_model_reader_rejects_rehashed_typed_native_state_drift(tmp_path):
 
     from quant_research_platform.storage.identity import (
         filesystem_mkdir,
-        filesystem_read_bytes,
         filesystem_write_bytes,
     )
     from quant_research_platform.storage.semantic_artifacts import (
@@ -395,7 +397,7 @@ def test_model_reader_rejects_rehashed_typed_native_state_drift(tmp_path):
     def write(stage):
         for member in good.artifact.member_records:
             relative = member["path"]
-            payload = filesystem_read_bytes(good.root / relative)
+            payload = Path(native_filesystem_path(good.root / relative)).read_bytes()
             if relative.endswith(".pkl") and not changed:
                 predictor = pickle.loads(payload)
                 predictor.estimator.alpha = 1.0

@@ -185,25 +185,6 @@ def _industry_size_residuals(target, industries, sizes, *, rescale):
     return np.fromiter(map(float, residuals()), dtype="float64", count=len(target))
 
 
-def neutralize_cross_section(
-    frame: pd.DataFrame,
-    *,
-    factor_columns: tuple[str, ...],
-    industry_column: str = "industry_level1_code",
-    size_column: str = "log_float_market_cap",
-    minimum_observations: int = 100,
-) -> pd.DataFrame:
-    """Equal-weight, no-intercept industry/size residualization in original units."""
-    return _neutralize_cross_section(
-        frame,
-        factor_columns=factor_columns,
-        industry_column=industry_column,
-        size_column=size_column,
-        minimum_observations=minimum_observations,
-        rescale=False,
-    )
-
-
 def _neutralize_cross_section(
     frame,
     *,

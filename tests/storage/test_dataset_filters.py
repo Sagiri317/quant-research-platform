@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import time
 from pathlib import Path
 
@@ -15,8 +16,6 @@ from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.datasets.reading import _prepare_in_filter
 from quant_research_platform.storage.identity import (
-    filesystem_read_bytes,
-    filesystem_replace,
     filesystem_write_bytes,
     native_filesystem_path,
 )
@@ -224,8 +223,8 @@ def test_filtered_empty_chunk_rechecks_identity_after_yield(
     assert next(iterator).empty
     part = session.all_paths[0]
     replacement = tmp_path / f"replacement-{completion}.parquet"
-    filesystem_write_bytes(replacement, filesystem_read_bytes(part))
-    filesystem_replace(replacement, part)
+    filesystem_write_bytes(replacement, Path(native_filesystem_path(part)).read_bytes())
+    os.replace(native_filesystem_path(replacement), native_filesystem_path(part))
     if completion == "close":
         with pytest.raises(ValueError, match="dataset_file_identity_changed"):
             iterator.close()
@@ -255,8 +254,12 @@ def test_filtered_empty_chunk_final_verify_preserves_caller_primary(
             assert next(iterator).empty
             part = session.all_paths[0]
             replacement = tmp_path / "replacement-primary.parquet"
-            filesystem_write_bytes(replacement, filesystem_read_bytes(part))
-            filesystem_replace(replacement, part)
+            filesystem_write_bytes(
+                replacement, Path(native_filesystem_path(part)).read_bytes()
+            )
+            os.replace(
+                native_filesystem_path(replacement), native_filesystem_path(part)
+            )
             raise RuntimeError("primary_failure")
 
 

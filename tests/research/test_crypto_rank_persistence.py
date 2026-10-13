@@ -1,5 +1,6 @@
 from copy import deepcopy
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -604,7 +605,6 @@ def test_crypto_new_reader_preserves_immutable_and_lazy_acceptance_contract(
         research_run_trial_references,
     )
     from quant_research_platform.storage.identity import (
-        filesystem_read_bytes,
         filesystem_write_bytes,
         native_filesystem_path,
         open_filesystem_file,
@@ -657,7 +657,7 @@ def test_crypto_new_reader_preserves_immutable_and_lazy_acceptance_contract(
         persisted.read_crypto_model_artifact(
             case.root, expected_identity=scientific_identity, trial_layout=case.layout
         )
-    changed = filesystem_read_bytes(case.root / relative)
+    changed = Path(native_filesystem_path(case.root / relative)).read_bytes()
     for member in manifest["members"]:
         if member["path"] == relative:
             member.update(size=len(changed), sha256=hashlib.sha256(changed).hexdigest())

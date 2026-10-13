@@ -4,6 +4,8 @@ from contextlib import contextmanager
 
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.storage.identity import (
+    filesystem_exists,
+    filesystem_is_dir,
     filesystem_is_file,
     require_unaliased_path,
 )
@@ -16,6 +18,13 @@ def open_market_source(root, *, archive_paths=None, time_window=None):
     from quant_research_platform.sources.tardis.replay import open_tardis_archive
 
     root = require_unaliased_path(root, error="crypto_source_path_invalid")
+    if filesystem_exists(root) and not filesystem_is_dir(root):
+        raise ValueError("crypto_source_path_invalid")
+    if any(
+        filesystem_exists(root / name) and not filesystem_is_file(root / name)
+        for name in ("run.json", "manifest.json")
+    ):
+        raise ValueError("crypto_source_manifest_invalid")
     if archive_paths is not None:
         with open_tardis_archive(
             root, archive_paths=archive_paths, time_window=time_window
@@ -35,13 +44,24 @@ def open_market_source(root, *, archive_paths=None, time_window=None):
 
 
 def market_source_identity(root, _target_id, *, archive_paths=None, time_window=None):
+    root = require_unaliased_path(root, error="crypto_source_path_invalid")
+    if not filesystem_exists(root):
+        return None
+    if (
+        archive_paths is None
+        and filesystem_is_dir(root)
+        and not any(
+            filesystem_exists(root / name) for name in ("run.json", "manifest.json")
+        )
+    ):
+        return None
     try:
         with open_market_source(
             root, archive_paths=archive_paths, time_window=time_window
         ) as source:
             return canonical_json_hash(source.source_identity)
-    except FileNotFoundError:
-        return None
+    except FileNotFoundError as error:
+        raise ValueError("crypto_source_member_missing") from error
 
 
 def market_funding_identity(

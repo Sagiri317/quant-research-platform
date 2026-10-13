@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -26,6 +27,7 @@ from quant_research_platform.storage.datasets.reading import (
     read_dataset,
 )
 from quant_research_platform.storage.datasets.writing import write_dataset
+from quant_research_platform.storage.identity import native_filesystem_path
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows import operations
 from tests.markets.a_share.test_target_dag_chain import (
@@ -430,7 +432,10 @@ def test_processed_blocks_preserve_full_history_math(
 def test_processed_window_boundaries_preserve_publish_state(tmp_path, case):
     dates = pd.bdate_range("2020-01-02", periods=130 if case == "late_lifecycle" else 4)
     frames = _synthetic_interim_frames(dates)
-    if case == "no_lifecycle":
+    if case == "empty_window":
+        # The empty future window is proved by a terminated listing lifecycle.
+        frames["stock_master"]["delisting_date"] = dates[-1]
+    elif case == "no_lifecycle":
         frames["stock_master"]["listing_date"] = pd.Timestamp("2030-01-01")
     elif case == "late_lifecycle":
         frames["stock_master"]["listing_date"] = dates[70]
@@ -569,7 +574,11 @@ def test_panel_calendar_rejects_missing_requested_trade_dates_including_endpoint
         requested = dates[1:-1]
         source["trading_calendar"] = (
             source["trading_calendar"]
-            .loc[source["trading_calendar"].calendar_date.isin(requested)]
+            .loc[
+                source["trading_calendar"].calendar_date.between(
+                    requested[0], requested[-1]
+                )
+            ]
             .copy()
         )
     else:
@@ -744,15 +753,15 @@ def test_processed_narrow_output_uses_existing_panel_history(
     # Proven listing eligibility precedes the market-model and residual windows.
     dates = pd.bdate_range("2020-01-02", periods=620).as_unit("ns")
     source = _synthetic_interim_frames(dates)
-    calendar = pd.bdate_range(dates[0] - pd.offsets.BDay(300), dates[-1]).as_unit("ns")
+    calendar = pd.date_range(dates[0] - pd.offsets.BDay(300), dates[-1]).as_unit("ns")
     source["trading_calendar"] = pd.DataFrame(
         dict(
             timestamp=calendar,
             calendar_date=calendar,
             source_market_type=1,
-            is_trading_day=True,
+            is_trading_day=calendar.dayofweek < 5,
             source_day_of_week=calendar.dayofweek,
-            source_state="O",
+            source_state=np.where(calendar.dayofweek < 5, "O", "C"),
         )
     )
     bars = source["market_bars_1d"]
@@ -878,7 +887,6 @@ def test_financial_pit_calendar_file_order_preserves_formal_published_rows(tmp_p
     from quant_research_platform.sources.csmar import interim as csmar_interim
     from quant_research_platform.storage.identity import (
         filesystem_mkdir,
-        filesystem_read_bytes,
         filesystem_walk,
         filesystem_write_text,
     )
@@ -910,7 +918,7 @@ def test_financial_pit_calendar_file_order_preserves_formal_published_rows(tmp_p
                 ),
                 encoding="utf-8",
             )
-            originals[path] = filesystem_read_bytes(path)
+            originals[path] = Path(native_filesystem_path(path)).read_bytes()
         imported = csmar_interim.materialize_interim_data(
             layout=layout, data_ids=("trading_calendar",)
         )
@@ -986,7 +994,9 @@ def test_financial_pit_calendar_file_order_preserves_formal_published_rows(tmp_p
                             (
                                 str((parent / file).relative_to(root)),
                                 sha256(
-                                    filesystem_read_bytes(parent / file)
+                                    Path(
+                                        native_filesystem_path(parent / file)
+                                    ).read_bytes()
                                 ).hexdigest(),
                             )
                             for parent, _directories, files in filesystem_walk(
@@ -1005,7 +1015,7 @@ def test_financial_pit_calendar_file_order_preserves_formal_published_rows(tmp_p
                 outputs.append(saved)
         assert all(
             (
-                filesystem_read_bytes(path) == payload
+                Path(native_filesystem_path(path)).read_bytes() == payload
                 for path, payload in originals.items()
             )
         )
@@ -1399,7 +1409,11 @@ def test_historical_calendar_gap_keeps_exact_age_unknown_across_slabs(
         source_catalog=profile.interim,
     ) as (frames, metadata, verify):
         write_dataset(
-            root, frames, spec=spec, instance_metadata=metadata, staged_validator=verify
+            root,
+            frames,
+            spec=spec,
+            instance_metadata=metadata,
+            staged_validator=verify,
         )
     actual = read_dataset(root)
     old = actual.loc[actual.asset_id.ne("000003")]
@@ -1670,10 +1684,10 @@ def test_native_lifecycle_history_does_not_join_relisting(
                 Markettype=market,
                 Clddt=stamp.date().isoformat(),
                 Daywk=stamp.weekday() + 1,
-                State="O",
+                State="O" if stamp in dates else "C",
             )
             for market in (1, 4, 16, 32)
-            for stamp in dates
+            for stamp in pd.date_range(dates[0], dates[-1])
         ],
     )
     imported = {"stock_master", "market_bars_1d", "trading_calendar"}

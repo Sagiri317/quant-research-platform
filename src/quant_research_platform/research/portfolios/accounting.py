@@ -31,6 +31,7 @@ from quant_research_platform.contracts.portfolios import (
     portfolio_notional_tolerance,
 )
 from quant_research_platform.contracts.validation import (
+    finite_exact_float,
     strict_finite_float,
     strict_finite_numeric_series,
     strict_real_numeric_series,
@@ -330,7 +331,7 @@ class ExecutionAccounting:
             raise ValueError("execution_ledger_notional_invalid")
         if (numeric.loc[:, list(PORTFOLIO_LEDGER_COST_COLUMNS)] < 0.0).any().any():
             raise ValueError("execution_ledger_cost_invalid")
-        nav_before = _finite_positive(self._nav_before, "execution_nav_invalid")
+        nav_before = _finite_nonnegative(self._nav_before, "execution_nav_invalid")
         tolerance = portfolio_notional_tolerance(nav_before)
         desired = numeric["target_notional"] - numeric["pre_trade_notional"]
         executed = numeric["executed_delta_notional"]
@@ -690,7 +691,7 @@ def execute_continuous_target(
         assumptions, ExecutionAssumptions
     ):
         raise ValueError("execution_inputs_invalid")
-    nav_value = _finite_positive(nav, "execution_nav_invalid")
+    nav_value = _finite_nonnegative(nav, "execution_nav_invalid")
     assets = _canonical_assets(current_weights, target_weights, allow_empty=True)
     current = _weight_values(current_weights, assets, "current_weights_invalid")
     target = _weight_values(target_weights, assets, "target_weights_invalid")
@@ -715,23 +716,14 @@ def execute_continuous_target(
             return "research_unquoted_valuation"
         if pd.isna(permission):
             return "execution_fact_unknown"
-        return None if permission else "market_blocked"
+        if not permission:
+            return "market_blocked"
+        return "adv_unavailable" if pd.isna(adv[asset]) else None
 
     pre_notional = current * nav_value
     target_notional = target * nav_value
     desired = target_notional - pre_notional
-    trading_assets = {
-        str(asset)
-        for asset in assets
-        if (desired[asset] < 0.0 and blocked_reason(asset, exit_[asset]) is None)
-        or (desired[asset] > 0.0 and blocked_reason(asset, enter[asset]) is None)
-    }
-    adv = _asset_values(
-        average_daily_volume,
-        assets,
-        "execution_adv_invalid",
-        required_assets=trading_assets,
-    )
+    adv = _asset_values(average_daily_volume, assets, "execution_adv_invalid")
     participation = assumptions.adv_participation
     capacity = adv * participation
     records = {
@@ -875,7 +867,7 @@ def execute_continuous_target(
     post_trade = pre_notional + sell_delta + buy_delta
     nav_after = float(post_trade.sum() + post_trade_cash)
     expected_nav_after = nav_value - total_cost
-    if post_trade_cash < -tolerance or not np.isfinite(nav_after) or nav_after <= 0.0:
+    if post_trade_cash < -tolerance or not np.isfinite(nav_after) or nav_after < 0.0:
         raise ValueError("execution_cash_invalid")
     if not np.isclose(nav_after, expected_nav_after, rtol=0.0, atol=tolerance):
         raise ValueError("execution_self_financing_invalid")
@@ -896,28 +888,6 @@ def execute_continuous_target(
         _post_trade_cash=post_trade_cash,
         cost_source_identity=cost_source_identity,
     )
-
-
-def drift_continuous_holdings(
-    holdings_notional: pd.Series,
-    cash_notional: float,
-    asset_returns: pd.Series,
-) -> tuple[pd.Series, float, float]:
-    """Mark continuous holdings by adjusted-price returns without a trade."""
-
-    if set(holdings_notional.index) != set(asset_returns.index):
-        raise ValueError("drift_inputs_invalid")
-    assets = _canonical_assets(holdings_notional, asset_returns, allow_empty=True)
-    holdings = _weight_values(holdings_notional, assets, "drift_holdings_invalid")
-    returns = _numeric_series(asset_returns, assets, "drift_returns_invalid")
-    cash = _finite_nonnegative(cash_notional, "drift_cash_invalid")
-    if (returns < -1.0).any():
-        raise ValueError("drift_returns_invalid")
-    drifted = (holdings * (1.0 + returns)).sort_index()
-    nav = float(drifted.sum() + cash)
-    if not np.isfinite(nav) or nav <= 0.0:
-        raise ValueError("drift_nav_invalid")
-    return drifted.copy(deep=True), cash, nav
 
 
 def _empty_ledger_row(
@@ -982,19 +952,13 @@ def _asset_values(
     values: pd.Series,
     assets: pd.Index,
     error: str,
-    *,
-    required_assets: set[str],
 ) -> pd.Series:
     if not isinstance(values, pd.Series) or not values.index.is_unique:
         raise ValueError(error)
     result = strict_finite_numeric_series(
         values.reindex(assets), error=error, allow_null=True
     ).astype("float64")
-    present = pd.Series(assets.isin(values.index), index=assets)
-    required_missing = result.isna() & present.index.to_series().isin(required_assets)
-    if required_missing.any():
-        raise ValueError(f"{error}:missing_required_assets")
-    present_values = result.loc[present & result.notna()]
+    present_values = result.dropna()
     if (
         present_values.isna().any()
         or not np.isfinite(present_values.to_numpy()).all()
@@ -1044,13 +1008,6 @@ def _validated_trade_cost(
     if value.source_identity != source_identity or value.notional != notional:
         raise ValueError("execution_cost_provider_identity_mismatch")
     return value
-
-
-def _finite_positive(value: float, error: str) -> float:
-    numeric = strict_finite_float(value, error=error)
-    if numeric <= 0.0:
-        raise ValueError(error)
-    return numeric
 
 
 def _finite_nonnegative(value: float, error: str) -> float:
@@ -1107,12 +1064,42 @@ def portfolio_interval_economics(batch: PortfolioLedgerBatch) -> dict[str, objec
     other_flows = [
         row
         for row in batch.cashflows
-        if row.kind not in {*PORTFOLIO_LEDGER_COST_COLUMNS, "principal"}
+        if row.kind not in {*PORTFOLIO_LEDGER_COST_COLUMNS, "principal", "recovery"}
     ]
-    if other_flows or endpoint <= entry or b <= 0 or a <= 0 or e <= 0:
+    if other_flows or endpoint <= entry or b < 0 or a < 0 or e < 0:
         raise ValueError("portfolio_interval_economic_scope_invalid")
     tolerance = portfolio_notional_tolerance(b)
-    if not np.isclose(a, b - costs, rtol=0, atol=tolerance):
+    rights_change = 0.0
+    if batch.rights_adjustments:
+        initial = {
+            row.asset_id: row for row in batch.valuations if row.phase == "before"
+        }
+        post = {row.asset_id: row for row in batch.valuations if row.phase == "after"}
+        rights_change = sum(
+            float(
+                (
+                    Fraction(post[asset].quantity)
+                    - sum(
+                        (
+                            Fraction(trade.quantity)
+                            for trade in batch.trades
+                            if trade.asset_id == asset
+                        ),
+                        Fraction(),
+                    )
+                )
+                * Fraction(post[asset].mark_price)
+            )
+            - initial[asset].value
+            for asset in initial
+            if asset != PORTFOLIO_CASH_ASSET_ID
+        ) + sum(row.amount for row in batch.cashflows if row.kind == "recovery")
+    if not np.isclose(
+        a,
+        b + rights_change - costs,
+        rtol=0,
+        atol=max(tolerance, portfolio_notional_tolerance(a)),
+    ):
         raise ValueError("portfolio_interval_cost_reconciliation_invalid")
     diagnostics = {(row.asset_id, row.name): row for row in batch.diagnostics}
     target = {asset: diagnostics[(asset, "target_notional")].number for asset in before}
@@ -1124,10 +1111,26 @@ def portfolio_interval_economics(batch: PortfolioLedgerBatch) -> dict[str, objec
     executed = {}
     for trade in batch.trades:
         executed[trade.asset_id] = executed.get(trade.asset_id, 0.0) + trade.notional
-    actual_turnover = (
-        0.5
-        * (sum(abs(value) for value in executed.values()) + abs(sum(executed.values())))
-        / b
+
+    def ratio(numerator, denominator):
+        if denominator == 0:
+            return np.nan
+        value = finite_exact_float(Fraction(numerator) / Fraction(denominator))
+        return np.nan if value is None else value
+
+    turnover = (
+        sum((abs(Fraction(value)) for value in executed.values()), Fraction())
+        + abs(sum((Fraction(value) for value in executed.values()), Fraction()))
+    ) / 2
+    requested = (
+        sum(
+            (
+                abs(Fraction(target[asset]) - Fraction(before[asset]))
+                for asset in before
+            ),
+            Fraction(),
+        )
+        / 2
     )
     return {
         "entry_at": entry,
@@ -1135,16 +1138,16 @@ def portfolio_interval_economics(batch: PortfolioLedgerBatch) -> dict[str, objec
         "nav_before": b,
         "nav_post": a,
         "cash_post": after[PORTFOLIO_CASH_ASSET_ID],
-        "cash_weight_post": after[PORTFOLIO_CASH_ASSET_ID] / a,
+        "cash_weight_post": ratio(after[PORTFOLIO_CASH_ASSET_ID], a),
         "nav_end": e,
-        "gross_return": (e - a) / b,
-        "net_return": (e - b) / b,
-        "cost_drag": float(costs / b),
-        "target_turnover": 0.5 * sum(abs(value) for value in decision.values()),
-        "requested_turnover": 0.5
-        * sum(abs(target[asset] - before[asset]) for asset in before)
-        / b,
-        "realized_turnover": actual_turnover,
+        "gross_return": ratio(Fraction(e) - Fraction(b) + Fraction(costs), b),
+        "net_return": ratio(Fraction(e) - Fraction(b), b),
+        "cost_drag": ratio(costs, b),
+        "target_turnover": 0.5 * sum(abs(value) for value in decision.values())
+        if b > 0
+        else np.nan,
+        "requested_turnover": ratio(requested, b),
+        "realized_turnover": ratio(turnover, b),
     }
 
 

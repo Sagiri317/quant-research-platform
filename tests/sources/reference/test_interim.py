@@ -27,8 +27,6 @@ from quant_research_platform.storage.identity import (
     filesystem_glob,
     filesystem_iterdir,
     filesystem_mkdir,
-    filesystem_read_bytes,
-    filesystem_read_text,
     filesystem_stat,
     filesystem_walk,
     filesystem_write_bytes,
@@ -43,7 +41,9 @@ from quant_research_platform.workflows import operations
 
 def _file_bytes(root: Path) -> dict[Path, bytes]:
     return {
-        (parent / name).relative_to(root): filesystem_read_bytes(parent / name)
+        (parent / name).relative_to(root): Path(
+            native_filesystem_path(parent / name)
+        ).read_bytes()
         for parent, _directories, files in filesystem_walk(root)
         for name in files
     }
@@ -72,7 +72,9 @@ def _write_reference_root(root: Path, *, commission: float = 0.0003) -> Path:
         writer.writeheader()
         writer.writerows(rows)
     sidecar = {
-        "file_sha256": hashlib.sha256(filesystem_read_bytes(csv_path)).hexdigest(),
+        "file_sha256": hashlib.sha256(
+            Path(native_filesystem_path(csv_path)).read_bytes()
+        ).hexdigest(),
         "file_bytes": filesystem_stat(csv_path).st_size,
         "row_count": len(rows),
         "fields_raw": list(FEE_CSV_COLUMNS),
@@ -174,7 +176,9 @@ def test_fee_interim_target_routes_build_reuse_and_identity_invalidation(
     sidecar_path = (
         raw_root / "reference" / "a_share_fee_schedule" / A_SHARE_FEE_SIDECAR_NAME
     )
-    sidecar = json.loads(filesystem_read_text(sidecar_path, encoding="utf-8"))
+    sidecar = json.loads(
+        Path(native_filesystem_path(sidecar_path)).read_text(encoding="utf-8")
+    )
     sidecar["notes"] = "identity mutation"
     filesystem_write_text(
         sidecar_path, json.dumps(sidecar, ensure_ascii=False), encoding="utf-8"
@@ -253,7 +257,7 @@ def test_fee_source_identity_race_preserves_old_good(
         )
     assert _file_bytes(root) == old_good
     assert set(filesystem_iterdir(target.parent)) == previous_members
-    assert filesystem_read_text(unrelated, encoding="utf-8") == "keep"
+    assert Path(native_filesystem_path(unrelated)).read_text(encoding="utf-8") == "keep"
     if not existing_target:
         assert not filesystem_exists(target)
 
@@ -267,7 +271,9 @@ def test_fee_identity_rechecks_sidecar_after_rows(tmp_path, monkeypatch):
 
     def read_then_change(*args):
         rows = original(*args)
-        filesystem_write_bytes(sidecar, filesystem_read_bytes(sidecar) + b" ")
+        filesystem_write_bytes(
+            sidecar, Path(native_filesystem_path(sidecar)).read_bytes() + b" "
+        )
         return rows
 
     monkeypatch.setattr(a_share_fees, "_read_rows", read_then_change)
@@ -377,7 +383,9 @@ def test_public_industry_source_reaches_interim_and_real_panel(tmp_path):
     )
     snapshots = read_dataset(root)
     assert str(snapshots["timestamp"].dtype) == "datetime64[ns]"
-    spec = json.loads(filesystem_read_text(root / "spec.json", encoding="utf-8"))
+    spec = json.loads(
+        Path(native_filesystem_path(root / "spec.json")).read_text(encoding="utf-8")
+    )
     assert spec["primary_key"] == ["source_asset_id", "timestamp", "snapshot_id"]
     assert snapshots["observation_date"].tolist() == [pd.Timestamp("2019-12-31")]
     assert snapshots["timestamp"].tolist() == [pd.Timestamp("2020-01-04")]
@@ -489,7 +497,7 @@ def test_industry_reference_boundary_rejects_unproved_source(tmp_path, failure):
         tmp_path / "raw", observations=_industry_observations()
     )
     metadata = json.loads(
-        filesystem_read_text(root / "metadata.json", encoding="utf-8")
+        Path(native_filesystem_path(root / "metadata.json")).read_text(encoding="utf-8")
     )
     if failure == "missing_member":
         metadata["snapshots"][0]["document_file"] = "missing.pdf"
@@ -501,14 +509,16 @@ def test_industry_reference_boundary_rejects_unproved_source(tmp_path, failure):
         metadata["snapshots"][0]["publication_date"] = "2019-12-01"
     else:
         candidate = json.loads(
-            filesystem_read_text(root / "snapshot.json", encoding="utf-8")
+            Path(native_filesystem_path(root / "snapshot.json")).read_text(
+                encoding="utf-8"
+            )
         )
         candidate["records"].append(candidate["records"][0])
         filesystem_write_text(
             root / "snapshot.json", json.dumps(candidate), encoding="utf-8"
         )
         metadata["files"]["snapshot.json"] = hashlib.sha256(
-            filesystem_read_bytes(root / "snapshot.json")
+            Path(native_filesystem_path(root / "snapshot.json")).read_bytes()
         ).hexdigest()
     filesystem_write_text(
         root / "metadata.json", json.dumps(metadata), encoding="utf-8"

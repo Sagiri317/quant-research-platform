@@ -87,17 +87,6 @@ def data_frequency_slug(value: DataFrequency | str) -> str:
     return normalize_data_frequency(value).value
 
 
-def horizon_unit_suffix(value: DataFrequency | str) -> str:
-    frequency = normalize_data_frequency(value)
-    if frequency is DataFrequency.DAILY:
-        return "d"
-    if frequency is DataFrequency.MINUTE:
-        return "m"
-    if frequency is DataFrequency.TICK:
-        return "tick"
-    raise ValueError(f"unsupported_data_frequency: {frequency}")
-
-
 def require_supported_data_frequency(
     value: DataFrequency | str,
     *,

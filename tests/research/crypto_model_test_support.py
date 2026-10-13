@@ -1,6 +1,7 @@
 """Production-fold boundary checks using the workflow's published dataset."""
 
 from copy import deepcopy
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -21,11 +22,10 @@ from quant_research_platform.storage.experiments import read_trial_ledger_refere
 from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_iterdir,
-    filesystem_read_bytes,
-    filesystem_read_text,
     filesystem_walk,
     filesystem_write_bytes,
     filesystem_write_text,
+    native_filesystem_path,
 )
 
 
@@ -397,16 +397,20 @@ def check_crypto_model_staging(*, layout, profile, saved):
             native_filesystem_path(saved.instance_root), native_filesystem_path(copied)
         )
         manifest_path = copied / "manifest.json"
-        manifest = json.loads(filesystem_read_text(manifest_path, encoding="utf-8"))
+        manifest = json.loads(
+            Path(native_filesystem_path(manifest_path)).read_text(encoding="utf-8")
+        )
         manifest["operational_metadata"]["model_trial_ledgers"][0] = reference
         relative = f"models/{saved.models[0]['fold_id']}/metadata.json"
         metadata_path = copied / relative
-        metadata = json.loads(filesystem_read_text(metadata_path, encoding="utf-8"))
+        metadata = json.loads(
+            Path(native_filesystem_path(metadata_path)).read_text(encoding="utf-8")
+        )
         metadata["models"][0]["trial_semantic_identity"] = reference[
             "semantic_identity"
         ]
         filesystem_write_text(metadata_path, json.dumps(metadata), encoding="utf-8")
-        raw = filesystem_read_bytes(metadata_path)
+        raw = Path(native_filesystem_path(metadata_path)).read_bytes()
         member = next(row for row in manifest["members"] if row["path"] == relative)
         member.update(size=len(raw), sha256=hashlib.sha256(raw).hexdigest())
         filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
@@ -429,7 +433,9 @@ def check_crypto_model_staging(*, layout, profile, saved):
     raw = pickle.dumps(wrong, protocol=pickle.HIGHEST_PROTOCOL)
     filesystem_write_bytes(copied / relative, raw)
     manifest_path = copied / "manifest.json"
-    manifest = json.loads(filesystem_read_text(manifest_path, encoding="utf-8"))
+    manifest = json.loads(
+        Path(native_filesystem_path(manifest_path)).read_text(encoding="utf-8")
+    )
     member = next(row for row in manifest["members"] if row["path"] == relative)
     member.update(size=len(raw), sha256=hashlib.sha256(raw).hexdigest())
     filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
@@ -844,7 +850,7 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
     def file_hashes(root):
         return {
             (parent / name).relative_to(root): hashlib.sha256(
-                filesystem_read_bytes(parent / name)
+                Path(native_filesystem_path(parent / name)).read_bytes()
             ).hexdigest()
             for parent, _directories, files in filesystem_walk(root)
             for name in files
@@ -991,7 +997,7 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
         mutate_source = None
         session = opened_sessions[-1]
         part = session.read_paths[0]
-        payload = filesystem_read_bytes(part)
+        payload = Path(native_filesystem_path(part)).read_bytes()
         filesystem_write_bytes(part, payload[:-1] + bytes((payload[-1] ^ 1,)))
 
     def fit_scaler(cls, matrix, **kwargs):
@@ -1227,7 +1233,7 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
             if name.endswith(".parquet")
         )
     )
-    original_part = filesystem_read_bytes(part)
+    original_part = Path(native_filesystem_path(part)).read_bytes()
     payload = envelope.payload()
     for index, phase in enumerate(
         ("selection", "refit", "member_write", "staged_validation"), start=3
@@ -1246,7 +1252,9 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
             with pytest.raises(ValueError, match="dataset_file_identity_changed"):
                 publish(changed_source_envelope, "run_crypto_source_changed_" + phase)
             assert mutation_points[-1] == phase
-            assert len(filesystem_read_bytes(part)) == len(original_part)
+            assert len(Path(native_filesystem_path(part)).read_bytes()) == len(
+                original_part
+            )
         finally:
             filesystem_write_bytes(part, original_part)
         if phase != "selection":

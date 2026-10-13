@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -18,9 +19,6 @@ from quant_research_platform.storage.datasets import (
 )
 from quant_research_platform.storage.identity import (
     filesystem_glob,
-    filesystem_read_bytes,
-    filesystem_read_text,
-    filesystem_replace,
     filesystem_unlink,
     filesystem_write_bytes,
     filesystem_write_text,
@@ -106,8 +104,8 @@ def test_dataset_session_rejects_same_bytes_metadata_replacement(
     session = dataset_reading.open_dataset_session(root, columns=None, time_window=None)
     path = root / relative_path
     replacement = path.with_name(f"{path.name}.replacement")
-    filesystem_write_bytes(replacement, filesystem_read_bytes(path))
-    filesystem_replace(replacement, path)
+    filesystem_write_bytes(replacement, Path(native_filesystem_path(path)).read_bytes())
+    os.replace(native_filesystem_path(replacement), native_filesystem_path(path))
     with pytest.raises(ValueError, match=error):
         session.verify()
 
@@ -176,7 +174,9 @@ def test_writer_observes_each_closed_part_once_and_passes_live_receipt(
     assert receipt_checks == [True]
     assert len(observed_paths) == len(set(observed_paths))
     manifest = json.loads(
-        filesystem_read_text(root / "_manifest" / "manifest.json", encoding="utf-8")
+        Path(native_filesystem_path(root / "_manifest" / "manifest.json")).read_text(
+            encoding="utf-8"
+        )
     )
     assert len(observed_paths) == manifest["file_count"]
 
@@ -322,9 +322,9 @@ def test_dataset_global_nullable_integer_plan_is_chunk_order_independent(
         assert str(read_dataset(root)["value"].dtype) == "Int64"
         manifests.append(
             json.loads(
-                filesystem_read_text(
-                    root / "_manifest" / "manifest.json", encoding="utf-8"
-                )
+                Path(
+                    native_filesystem_path(root / "_manifest" / "manifest.json")
+                ).read_text(encoding="utf-8")
             )
         )
     assert manifests[0]["logical_dtypes"] == manifests[1]["logical_dtypes"]
@@ -366,9 +366,9 @@ def test_all_empty_logical_dtype_plan_is_chunk_order_independent(
         assert str(frame["value"].dtype) == "Int64"
         observed.append(
             json.loads(
-                filesystem_read_text(
-                    root / "_manifest" / "manifest.json", encoding="utf-8"
-                )
+                Path(
+                    native_filesystem_path(root / "_manifest" / "manifest.json")
+                ).read_text(encoding="utf-8")
             )["logical_dtypes"]
         )
     assert observed[0] == observed[1]
@@ -442,7 +442,9 @@ def test_full_inspection_rejects_summary_outside_partition_dates(
         spec=make_processed_dataset_spec("forged_dates"),
     )
     manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(filesystem_read_text(manifest_path, encoding="utf-8"))
+    manifest = json.loads(
+        Path(native_filesystem_path(manifest_path)).read_text(encoding="utf-8")
+    )
     manifest["date_min"] = "1900-01-01"
     filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ValueError, match="manifest_partition_date_mismatch"):
@@ -484,15 +486,15 @@ def test_persisted_identity_rejects_same_statistics_member_replacement(
     pd.testing.assert_frame_equal(read_dataset(root), frame, check_dtype=False)
     (member,) = filesystem_glob(root / "data", "**/*.parquet")
     (other,) = filesystem_glob(replacement / "data", "**/*.parquet")
-    original = filesystem_read_bytes(member)
-    substituted = filesystem_read_bytes(other)
+    original = Path(native_filesystem_path(member)).read_bytes()
+    substituted = Path(native_filesystem_path(other)).read_bytes()
     assert len(original) == len(substituted) and original != substituted
     manifest_path = root / "_manifest" / "manifest.json"
-    manifest = filesystem_read_bytes(manifest_path)
+    manifest = Path(native_filesystem_path(manifest_path)).read_bytes()
     filesystem_write_bytes(member, substituted)
     with pytest.raises(ValueError, match="dataset_content_identity_changed"):
         operation(root)
-    assert filesystem_read_bytes(manifest_path) == manifest
+    assert Path(native_filesystem_path(manifest_path)).read_bytes() == manifest
 
 
 @pytest.mark.parametrize("changed", (False, True))

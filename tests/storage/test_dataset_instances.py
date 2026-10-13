@@ -27,7 +27,6 @@ from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_is_dir,
     filesystem_mkdir,
-    filesystem_read_bytes,
     filesystem_rename,
     filesystem_unlink,
     filesystem_write_bytes,
@@ -94,7 +93,9 @@ def test_discovery_during_real_dataset_publication_keeps_published_instances(tmp
     spec = make_processed_dataset_spec("demo")
     logical_root = make_dataset_artifact_root(tmp_path, "demo")
     first = _write_instance(logical_root, spec, _envelope(spec, seed=1))
-    old_manifest = filesystem_read_bytes(first / "_manifest/manifest.json")
+    old_manifest = Path(
+        native_filesystem_path(first / "_manifest/manifest.json")
+    ).read_bytes()
     second_envelope = _envelope(spec, seed=2)
     second = StorageLayout().instance_root(
         logical_root, second_envelope.instance_identity
@@ -112,7 +113,10 @@ def test_discovery_during_real_dataset_publication_keeps_published_instances(tmp
     )
     published = tuple(sorted((first, second), key=lambda path: path.name))
     assert discover_dataset_instances(logical_root) == published
-    assert filesystem_read_bytes(first / "_manifest/manifest.json") == old_manifest
+    assert (
+        Path(native_filesystem_path(first / "_manifest/manifest.json")).read_bytes()
+        == old_manifest
+    )
     for root in published:
         assert len(read_dataset(root)) == len(make_default_dataset_frame())
     third_envelope = _envelope(spec, seed=3)
@@ -132,7 +136,10 @@ def test_discovery_during_real_dataset_publication_keeps_published_instances(tmp
             instance_metadata={"common_manifest": third_envelope},
         )
     assert discover_dataset_instances(logical_root) == published
-    assert filesystem_read_bytes(first / "_manifest/manifest.json") == old_manifest
+    assert (
+        Path(native_filesystem_path(first / "_manifest/manifest.json")).read_bytes()
+        == old_manifest
+    )
 
 
 @pytest.mark.parametrize(

@@ -62,9 +62,65 @@ def test_a_share_factor_only_report_uses_evaluation_without_model_blockers():
     assert result["sections"]["factor diagnostics"]["inference"]["identity"] == "f" * 64
     for key in ("model selection", "OOS prediction", "portfolio", "risk", "robustness"):
         assert result["sections"][key] == unavailable
-    _check_notebook_unrequested_diagnostics(
-        result, is_crypto=False, sections=("cost", "risk")
+
+
+@pytest.mark.parametrize("access", ["development", "holdout"])
+def test_a_share_report_preserves_evidence_without_narrative_conclusions(access):
+    run = record()
+    run.research_window = {"access": access}
+    run.protocol["research_configuration"].update(
+        stage="research", portfolios=[{"candidate_id": "candidate"}]
     )
+    performance = [
+        {"metric_id": metric, "value": value, "status": "DEFINED", "reason": ""}
+        for metric, value in (("net_pnl", -3.0), ("cost", 2.0), ("sharpe", -0.5))
+    ]
+    capacity = [{"status": "UNDEFINED", "reason": "missing_volume", "value": None}]
+    attribution = [{"status": "DEFINED", "net_pnl": -3.0}]
+    paired = [{"status": "DEFINED", "difference": -0.1}]
+    portfolios = [{"candidate_id": "candidate", "net_pnl": -3.0}]
+    evaluation = {"status": "DEFINED", "tables": {"ic_summary": [{"mean_ic": -0.2}]}}
+    result = build_a_share_report(
+        record=run,
+        evidence={
+            "references": {},
+            "statistics": {},
+            "portfolio_statistics": {
+                "status": "DEFINED",
+                "performance": performance,
+                "capacity": capacity,
+                "attribution": attribution,
+                "group_comparison": paired,
+                "robustness": [],
+            },
+            "coverage": {"status": "DEFINED", "observation_count": 12},
+            "portfolios": portfolios,
+            "issues": [],
+            "selections": {},
+            "factor_evaluation": evaluation,
+            "factor_statistics": {"status": "DEFINED", "identity": "f" * 64},
+        },
+    )
+    sections = result["sections"]
+    assert result["access_window"] == access
+    assert sections["factor diagnostics"]["evaluation"] == evaluation
+    assert sections["portfolio"]["results"] == portfolios
+    assert sections["portfolio"]["paired_comparison"] == paired
+    assert sections["cost"]["results"] == performance[:2]
+    assert sections["risk"]["results"] == performance[2:]
+    assert sections["capacity"]["results"] == capacity
+    assert sections["attribution"]["results"] == attribution
+    assert "comparison_interpretation" not in sections["portfolio"]
+    for group in ("global", "quarterly"):
+        prediction = sections["OOS prediction"][group]
+        assert "interpretation" not in prediction
+        blocked = access == "development" and group == "global"
+        assert prediction["inference_qualification"] == {
+            "status": "UNDEFINED" if blocked else "ELIGIBLE",
+            "reason": "global_development_selection_reuses_validation"
+            if blocked
+            else None,
+        }
 
 
 def test_crypto_factor_only_report_does_not_claim_missing_unrequested_models():
@@ -95,54 +151,24 @@ def test_crypto_factor_only_report_does_not_claim_missing_unrequested_models():
             "status": "UNDEFINED",
             "reason": "not_requested",
         }
-    _check_notebook_unrequested_diagnostics(
-        result, is_crypto=True, sections=("daily statistics",)
-    )
-
-
-def _check_notebook_unrequested_diagnostics(result, *, is_crypto, sections):
-    import json
-    from pathlib import Path
-
-    import pandas as pd
-    from IPython.display import Markdown
-
-    notebook_path = (
-        Path(__file__).resolve().parents[2] / "notebooks/research-interview-demo.ipynb"
-    )
-    notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
-    diagnostic_cell = next(
-        "".join(cell["source"])
-        for cell in notebook["cells"]
-        if cell["cell_type"] == "code"
-        and any("metric_rows =" in line for line in cell["source"])
-    )
-    displayed = []
-    namespace = {
-        "report": result,
-        "is_crypto": is_crypto,
-        "pd": pd,
-        "Markdown": Markdown,
-        "display": displayed.append,
-    }
-    exec(compile(diagnostic_cell, str(notebook_path), "exec"), namespace)
-    assert namespace["metric_rows"] == []
-    assert [
-        view.to_dict("records") for view in displayed if isinstance(view, pd.DataFrame)
-    ] == [
-        [{"section": name, "status": "UNDEFINED", "reason": "not_requested"}]
-        for name in sections
-    ]
 
 
 @pytest.mark.parametrize("stage", ["dataset", "evaluation"])
-def test_a_share_evidence_loads_only_requested_targets(monkeypatch, tmp_path, stage):
+@pytest.mark.parametrize("configured_portfolios", [False, True])
+def test_a_share_evidence_loads_only_requested_targets(
+    monkeypatch, tmp_path, stage, configured_portfolios
+):
     from quant_research_platform.artifacts import research
     from quant_research_platform.research.protocols import a_share
     from quant_research_platform.storage.layout import StorageLayout
 
     run = record()
     run.protocol["research_configuration"]["stage"] = stage
+    if configured_portfolios:
+        run.protocol["portfolio_candidates"] = ("global_configured_only",)
+        run.protocol["research_configuration"]["portfolios"] = [
+            {"candidate_id": "configured_only"}
+        ]
     run.target_results = tuple(
         (
             SimpleNamespace(
@@ -233,6 +259,12 @@ def test_a_share_evidence_loads_only_requested_targets(monkeypatch, tmp_path, st
         value["reason"] == "not_requested" for value in evidence["statistics"].values()
     )
     assert evidence["portfolio_statistics"]["reason"] == "not_requested"
+    report = build_a_share_report(record=run, evidence=evidence)
+    for section in ("portfolio", "cost", "risk", "capacity", "attribution"):
+        assert report["sections"][section] == {
+            "status": "UNDEFINED",
+            "reason": "not_requested",
+        }
 
 
 def test_report_rebuild_uses_run_configuration_instead_of_current_selection(
@@ -601,7 +633,7 @@ def test_a_share_report_rechecks_consumed_model_snapshot(
 
 
 @pytest.mark.parametrize("field", ("target_id", "schema_identity", "instance_identity"))
-def test_a_share_report_rejects_model_reference_mismatch(
+def test_a_share_report_marks_model_reference_mismatch_failed(
     a_share_model_report_case, field
 ):
     from quant_research_platform.artifacts import research
@@ -611,9 +643,14 @@ def test_a_share_report_rejects_model_reference_mismatch(
 
     case, run = a_share_model_report_case
     setattr(run.target_results[0], field, "f" * 64)
-    with pytest.raises((ValueError, FileNotFoundError)):
-        research.produce_a_share_report(
-            layout=case.layout,
-            record=run,
-            read_model_artifact=read_quarterly_model_artifact,
-        )
+    report = research.produce_a_share_report(
+        layout=case.layout,
+        record=run,
+        read_model_artifact=read_quarterly_model_artifact,
+    )
+    assert report["report_status"] == "FAILED"
+    assert {
+        "target_id": run.target_results[0].target_id,
+        "status": "FAILED",
+        "reason": "model_reference_invalid",
+    } in report["sections"]["readiness/blockers"]["issues"]

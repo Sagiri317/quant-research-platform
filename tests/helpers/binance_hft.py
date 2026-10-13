@@ -20,7 +20,6 @@ from quant_research_platform.sources.binance.ids import (
 )
 from quant_research_platform.storage.identity import (
     filesystem_mkdir,
-    filesystem_read_bytes,
     filesystem_write_text,
     native_filesystem_path,
 )
@@ -446,7 +445,7 @@ def write_binance_hft_run(
         for interval in connection_intervals:
             handle.write(json.dumps(interval, separators=(",", ":")))
             handle.write("\n")
-    sidecar_bytes = filesystem_read_bytes(sidecar)
+    sidecar_bytes = Path(native_filesystem_path(sidecar)).read_bytes()
     manifest = {
         "schema_id": "qrp-binance-recorder",
         "run_id": "workflow-run",
@@ -532,7 +531,7 @@ def _write_file(
             line = json.dumps(row, separators=(",", ":")).encode() + b"\n"
             maximum = max(maximum, len(line))
             handle.write(line)
-    raw = filesystem_read_bytes(path)
+    raw = Path(native_filesystem_path(path)).read_bytes()
     return {
         "path": path.relative_to(root).as_posix(),
         "venue": "binance",

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from fractions import Fraction
+
 import numpy as np
 import pandas as pd
 
@@ -51,11 +53,18 @@ def session_frame(batch):
         "after": "post_trade_notional",
         "end": "end_notional",
     }
+    after_marks = {
+        row.asset_id: row.mark_price for row in batch.valuations if row.phase == "after"
+    }
     for value in batch.valuations:
         row = rows.setdefault(value.asset_id, {"asset_id": value.asset_id})
         row[phases[value.phase]] = value.value
         if value.phase == "end":
-            row["holding_return"] = value.mark_price - 1.0
+            row["holding_return"] = (
+                float(value.mark_price / after_marks[value.asset_id] - 1.0)
+                if after_marks[value.asset_id]
+                else np.nan
+            )
         else:
             row["execution_date"] = pd.Timestamp(value.timestamp_ns)
     for asset, row in rows.items():
@@ -90,16 +99,20 @@ def session_frame(batch):
 
 def write_test_sessions(root, *, envelope, ledger_chunks, final_calibration=None):
     def produce(emit):
+        previous = {}
         for sequence, frame in enumerate(ledger_chunks):
-            emit(
-                continuous_ledger_batch(
-                    frame,
-                    sequence,
-                    end_timestamp=frame.attrs.get(
-                        "end_timestamp", pd.Timestamp(frame["execution_date"].iloc[0])
-                    ),
-                )
+            batch = continuous_ledger_batch(
+                frame,
+                sequence,
+                previous=previous,
+                end_timestamp=frame.attrs.get(
+                    "end_timestamp", pd.Timestamp(frame["execution_date"].iloc[0])
+                ),
             )
+            emit(batch)
+            previous = {
+                row.asset_id: row for row in batch.valuations if row.phase == "end"
+            }
 
     return write_portfolio_ledger_artifact(
         root, envelope=envelope, produce=produce, final_calibration=final_calibration
@@ -183,7 +196,7 @@ CONTINUOUS_EXECUTION_COLUMNS = (
 
 
 def continuous_ledger_batch(
-    frame: pd.DataFrame, sequence: int, *, end_timestamp: pd.Timestamp
+    frame: pd.DataFrame, sequence: int, *, end_timestamp: pd.Timestamp, previous=None
 ) -> PortfolioLedgerBatch:
     """Project the continuous execution transition into canonical economic facts."""
     if tuple(frame.columns) != CONTINUOUS_EXECUTION_COLUMNS:
@@ -208,6 +221,12 @@ def continuous_ledger_batch(
     for row in frame.to_dict("records"):
         asset = str(row["asset_id"])
         timestamp = int(pd.Timestamp(row["execution_date"]).value)
+        prior = (previous or {}).get(asset)
+        entry_mark = (
+            prior.mark_price
+            if prior is not None and asset != PORTFOLIO_CASH_ASSET_ID
+            else 1.0
+        )
         fill_id = None
         delta = strict_finite_float(
             row["executed_delta_notional"], error="portfolio_ledger_numeric_invalid"
@@ -215,7 +234,9 @@ def continuous_ledger_batch(
         if asset != PORTFOLIO_CASH_ASSET_ID and delta:
             fill_id = f"{sequence}:{asset}"
             trades.append(
-                ExecutedTrade(fill_id, fill_id, timestamp, asset, delta, delta)
+                ExecutedTrade(
+                    fill_id, fill_id, timestamp, asset, delta / entry_mark, delta
+                )
             )
             cashflows.append(
                 PortfolioCashFlow(
@@ -253,19 +274,29 @@ def continuous_ledger_batch(
                 row[column], error="portfolio_ledger_numeric_invalid"
             )
             quantity = (
-                strict_finite_float(
-                    row["post_trade_notional"], error="portfolio_ledger_numeric_invalid"
+                value
+                if asset == PORTFOLIO_CASH_ASSET_ID
+                else (
+                    prior.quantity
+                    if phase == "before" and prior is not None
+                    else (
+                        float(row["post_trade_notional"]) if phase == "end" else value
+                    )
+                    / entry_mark
                 )
-                if phase == "end"
-                else value
             )
             mark = (
                 1.0
-                + strict_finite_float(
-                    row["holding_return"], error="portfolio_ledger_numeric_invalid"
+                if asset == PORTFOLIO_CASH_ASSET_ID
+                else entry_mark
+                * (
+                    1.0
+                    + strict_finite_float(
+                        row["holding_return"], error="portfolio_ledger_numeric_invalid"
+                    )
                 )
                 if phase == "end"
-                else 1.0
+                else entry_mark
             )
             valuations.append(
                 PortfolioValuation(
@@ -309,20 +340,33 @@ def continuous_ledger_batch(
 def ledger_frame(*, account, **kwargs):
     from quant_research_platform.research.portfolios.production import _ledger_batch
 
+    returns = kwargs.pop("returns")
     quoted = pd.DataFrame(
         {
             "asset_id": account.asset_ledger.asset_id,
             "research_open_mark_at": pd.NaT,
+            "listing_date": pd.Timestamp("2000-01-01"),
+            "adj_open": 1.0,
         }
     )
+    endpoint = quoted.copy()
+    endpoint["adj_open"] = 1.0 + endpoint.asset_id.map(returns).fillna(0.0)
     return session_frame(
         _ledger_batch(
             account=account,
             asset_ledger=account.asset_ledger,
+            held_units=account.asset_ledger.set_index(
+                "asset_id"
+            ).pre_trade_notional.map(Fraction),
+            execution_units=account.asset_ledger.set_index(
+                "asset_id"
+            ).pre_trade_notional.map(Fraction),
+            previous_values={},
+            rights_adjustments=(),
             sequence=0,
             end_timestamp=pd.Timestamp(account.execution_date),
             next_panel=quoted,
-            endpoint_panel=quoted,
+            endpoint_panel=endpoint,
             **kwargs,
         )
     )

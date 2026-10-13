@@ -772,3 +772,51 @@ def test_scientific_preparation_and_production_remain_in_artifact_identity(
     assert before in content
     scientific.write_text(content.replace(before, after, 1), encoding="utf-8")
     assert research._target_software_identity(binding, _identity(package)) != original
+
+
+def test_portfolio_session_changes_preserve_upstream_software_identity(tmp_path):
+    import shutil
+
+    from quant_research_platform.contracts.targets import ProducerKind
+    from quant_research_platform.profiles.research import (
+        bind_research_configuration,
+        research_profile,
+    )
+    from quant_research_platform.workflows import research
+    from tests.helpers.research_configuration import research_configuration
+
+    profile = bind_research_configuration(research_profile(), research_configuration())
+    protocol = profile.protocol("pv_all")
+    targets = research.resolve_target_graph(
+        research._target_specs(profile, action="research run", protocol=protocol),
+        protocol.terminal_targets("research run"),
+    )
+    package = tmp_path / "package"
+    shutil.copytree(
+        Path(research.__file__).resolve().parents[1],
+        package,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+
+    def identities():
+        software = _identity(package)
+        return {
+            target.target_id: research._target_software_identity(
+                profile.producer_bindings[target.target_id], software
+            )
+            for target in targets
+        }
+
+    before = identities()
+    owner = package / "markets/implementations/a_share/portfolio_sessions.py"
+    owner.write_bytes(
+        owner.read_bytes() + b"\n# Portfolio valuation session behavior change.\n"
+    )
+    after = identities()
+    for target in targets:
+        kind = profile.producer_bindings[target.target_id].kind
+        changed = after[target.target_id] != before[target.target_id]
+        assert changed is (
+            kind is ProducerKind.PORTFOLIO
+            or target.target_id == "pv_all_portfolio_statistics"
+        ), target.target_id

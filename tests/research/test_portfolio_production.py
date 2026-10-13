@@ -26,6 +26,9 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioTargetBlocked,
 )
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.markets.implementations.a_share import (
+    portfolio_sessions as market_sessions,
+)
 from quant_research_platform.markets.implementations.a_share.calendar import (
     unified_trading_sessions,
 )
@@ -33,9 +36,6 @@ from quant_research_platform.markets.implementations.a_share.execution import (
     fee_schedule_from_frame,
     prepare_trade_cost,
     require_fee_coverage,
-)
-from quant_research_platform.markets.implementations.a_share.processed import (
-    producer as market_sessions,
 )
 from quant_research_platform.research.portfolios import accounting, production
 from quant_research_platform.research.portfolios.risk import (
@@ -274,6 +274,7 @@ def _build_producer(
     shared_risk_fits=None,
     identity_overrides=None,
     raw_bar_orders=None,
+    initial_nav=100.0,
 ):
     final_calibrations = [] if final_calibrations is None else final_calibrations
     enhanced = candidate is not None and candidate.construction == "benchmark_enhanced"
@@ -310,7 +311,9 @@ def _build_producer(
         frames["panel"]
         .loc[:, ["asset_id", "timestamp", "market_type"]]
         .rename(columns={"asset_id": "source_asset_id"})
-        .assign(filling_flag=0)
+        .assign(
+            filling_flag=frames["panel"].is_trading.map({True: 0, False: 1}).to_numpy()
+        )
     )
     identities = {
         target_id: ("a" if target_id not in {"fee", "calendar"} else "f") * 64
@@ -422,7 +425,7 @@ def _build_producer(
                 asset: tuple(sorted(group.timestamp.unique()))
                 for asset, group in panel.groupby("asset_id", sort=False)
             },
-            panels._canonical_stock_master(stocks),
+            panels._canonical_stock_master(frames.get("stock_master", stocks)),
             (
                 tuple(sorted(frames["market_bars_1d"].timestamp.unique())),
                 frozenset(frames["market_bars_1d"].source_asset_id),
@@ -449,7 +452,7 @@ def _build_producer(
     monkeypatch.setattr(dataset_reading, "iter_dataset_file_batches", file_batches)
     monkeypatch.setattr(production, "read_dataset", fake_read_dataset)
     assumptions = ExecutionAssumptions(
-        initial_nav=100.0,
+        initial_nav=initial_nav,
         slippage_bps=0.0,
         impact_bps=0.0,
         adv_participation=1.0,
@@ -1461,8 +1464,12 @@ def test_optimizer_assets_keep_residual_cash_as_explicit_current_weight(
 
 
 @pytest.mark.parametrize("retain_cash", [False, True])
+@pytest.mark.parametrize(
+    "optimizer_error",
+    (None, "optimizer_trade_adv_unavailable", "optimizer_failed_closed"),
+)
 def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
-    tmp_path: Path, retain_cash: bool
+    tmp_path: Path, retain_cash: bool, optimizer_error, monkeypatch
 ) -> None:
     frames, fee_frame, _window = _inputs()
     panel = frames["panel"].assign(
@@ -1522,41 +1529,66 @@ def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
         risk_context_target_ids=("risk",),
     )
     assumptions = ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,))
-    account, returns, adv, optimized, delta, _snapshot = production._build_session(
-        candidate=candidate,
-        decision_timestamp=pd.Timestamp("2023-01-06"),
-        next_timestamp=pd.Timestamp("2023-01-09"),
-        panel=production._portfolio_session_frame(
-            at_date(panel, "2023-01-06"), production._ENHANCED_PANEL_COLUMNS
-        ),
-        next_panel=at_date(panel, "2023-01-09"),
-        endpoint_panel=at_date(panel, "2023-01-10"),
-        closed_assets=frozenset(),
-        dataset=production._portfolio_session_frame(
-            at_date(frames["dataset"], "2023-01-06"), production._DATASET_COLUMNS
-        ),
-        execution=production._portfolio_session_frame(
-            at_date(frames["execution"], "2023-01-06"),
-            market_sessions._EXECUTION_COLUMNS,
-        ).assign(execution_at=pd.Timestamp("2023-01-09")),
-        holdings=pd.Series({"a": 45.0, "b": 45.0}),
-        cash=10.0,
-        nav=100.0,
-        initialize_at_execution=False,
-        amount_history={
-            (asset, panel.listing_date.iloc[0]): deque([1000.0] * 20, maxlen=20)
-            for asset in ("a", "b")
-        },
-        alpha=alpha,
-        enhanced_decision=enhanced,
-        target_override=None,
-        decision_reason=PORTFOLIO_DECISION_REASON_ENHANCED,
-        assumptions=assumptions,
-        fee_schedule=fee_schedule_from_frame(fee_frame, content_identity="f" * 64),
-        fee_identity="f" * 64,
-        prepare_trade_cost=prepare_trade_cost,
-        market_name_for_type=lambda _market: "shanghai",
-    )
+
+    def build():
+        return production._build_session(
+            candidate=candidate,
+            decision_timestamp=pd.Timestamp("2023-01-06"),
+            next_timestamp=pd.Timestamp("2023-01-09"),
+            panel=production._portfolio_session_frame(
+                at_date(panel, "2023-01-06"), production._ENHANCED_PANEL_COLUMNS
+            ),
+            next_panel=at_date(panel, "2023-01-09"),
+            endpoint_panel=at_date(panel, "2023-01-10"),
+            closed_assets=frozenset(),
+            dataset=production._portfolio_session_frame(
+                at_date(frames["dataset"], "2023-01-06"), production._DATASET_COLUMNS
+            ),
+            execution=production._portfolio_session_frame(
+                at_date(frames["execution"], "2023-01-06"),
+                market_sessions._EXECUTION_COLUMNS,
+            ).assign(execution_at=pd.Timestamp("2023-01-09")),
+            holdings=pd.Series({"a": 45.0, "b": 45.0}),
+            recovery_cash=0.0,
+            held_units=pd.Series({"a": 45.0, "b": 45.0})
+            / at_date(panel, "2023-01-06").set_index("asset_id").adj_close,
+            cash=10.0,
+            nav=100.0,
+            amount_history={
+                (asset, panel.listing_date.iloc[0]): deque([1000.0] * 20, maxlen=20)
+                for asset in ("a", "b")
+            },
+            alpha=alpha,
+            enhanced_decision=enhanced,
+            target_override=None,
+            decision_reason=PORTFOLIO_DECISION_REASON_ENHANCED,
+            assumptions=assumptions,
+            fee_schedule=fee_schedule_from_frame(fee_frame, content_identity="f" * 64),
+            fee_identity="f" * 64,
+            prepare_trade_cost=prepare_trade_cost,
+            market_name_for_type=lambda _market: "shanghai",
+        )
+
+    if optimizer_error is not None:
+
+        def fail_optimizer(*args, **kwargs):
+            raise ValueError(optimizer_error)
+
+        monkeypatch.setattr(production, "optimize_portfolio", fail_optimizer)
+        error = (
+            PortfolioTargetBlocked
+            if optimizer_error == "optimizer_trade_adv_unavailable"
+            else ValueError
+        )
+        reason = (
+            "portfolio_optimizer_adv_unavailable"
+            if optimizer_error == "optimizer_trade_adv_unavailable"
+            else optimizer_error
+        )
+        with pytest.raises(error, match=f"^{reason}$"):
+            build()
+        return
+    account, returns, adv, optimized, delta, _snapshot = build()
     assert optimized is not None and "__cash__" in optimized.weights
     assert "__cash__" not in set(account.asset_ledger.asset_id)
     if retain_cash:
@@ -1651,7 +1683,7 @@ def test_simple_producer_prediction_coverage_fails_closed(
 
 
 @pytest.mark.parametrize("unknown_quote", (False, True))
-def test_simple_producer_missing_held_quote_retains_estimated_rights(
+def test_simple_producer_unknown_held_quote_blocks_without_fabricated_return(
     tmp_path: Path, monkeypatch, unknown_quote
 ) -> None:
     frames, fee_frame, output_window = _inputs()
@@ -1681,25 +1713,20 @@ def test_simple_producer_missing_held_quote_retains_estimated_rights(
         output_window=output_window,
         typed_batches=True,
     )
-    batches = list(output)
-    assert len(batches) == 2
-    before_gap, gap = map(session_frame, batches)
-    first = before_gap.set_index("asset_id").loc["b"]
-    second = gap.set_index("asset_id").loc["b"]
-    assert first.end_notional == pytest.approx(first.post_trade_notional)
-    assert second.pre_trade_notional == pytest.approx(first.end_notional)
-    assert second.post_trade_notional == pytest.approx(second.pre_trade_notional)
-    assert not batches[1].trades and not batches[1].cashflows
-    assert second.holding_return == pytest.approx(112 / 108 - 1)
-    facts = {(row.asset_id, row.name): row for row in batches[1].diagnostics}
-    assert facts["b", "research_entry_mark_age_days"].number == 1
-    assert facts["b", "research_entry_mark_kind"].text == "close"
-    assert facts["__cash__", "research_valuation_version"].text == (
-        production.RESEARCH_VALUATION_VERSION
-    )
+    with pytest.raises(PortfolioTargetBlocked, match="portfolio_held_return_missing"):
+        list(output)
 
 
-def _mark_view(day, opening, closing, *, present=True, life="2020-01-01"):
+def _mark_view(
+    day,
+    opening,
+    closing,
+    *,
+    present=True,
+    life="2020-01-01",
+    trading=True,
+    closed=False,
+):
     frame = pd.DataFrame(
         {
             "asset_id": ["a"],
@@ -1708,7 +1735,7 @@ def _mark_view(day, opening, closing, *, present=True, life="2020-01-01"):
             "market_type": pd.Series([1], dtype="Int64"),
             "adj_open": [opening],
             "adj_close": [closing],
-            "is_trading": pd.Series([True], dtype="boolean"),
+            "is_trading": pd.Series([trading], dtype="boolean"),
         }
     )
     if not present:
@@ -1718,16 +1745,21 @@ def _mark_view(day, opening, closing, *, present=True, life="2020-01-01"):
         panel=frame,
         valuation=frame.copy(),
         unproved_lifecycle_assets=frozenset(),
+        confirmed_delisted_lifecycles=frozenset(),
+        rights_events=pd.DataFrame(),
+        closed_assets=frozenset({"a"}) if closed else frozenset(),
     )
 
 
 def test_research_marks_are_phase_ordered_and_preserve_life_and_source():
     marks = production._ResearchValuationMarks()
     first = marks.project(_mark_view("2023-01-04", 10.0, 11.0))
-    missing = _mark_view("2023-01-05", np.nan, np.nan)
+    missing = _mark_view("2023-01-05", np.nan, np.nan, trading=False)
     original = missing.panel.copy(deep=True)
     gap = marks.project(missing)
-    absent = marks.project(_mark_view("2023-01-06", np.nan, np.nan, present=False))
+    absent = marks.project(
+        _mark_view("2023-01-06", np.nan, np.nan, present=False, closed=True)
+    )
     restored = marks.project(_mark_view("2023-01-09", 12.0, 12.0))
     pd.testing.assert_frame_equal(missing.panel, original)
     assert first.adj_open.iloc[0] == 10.0
@@ -1748,9 +1780,9 @@ def test_missing_open_cannot_borrow_its_future_close():
     marks = production._ResearchValuationMarks()
     marks.project(_mark_view("2023-01-04", 10.0, 11.0))
     output = marks.project(_mark_view("2023-01-05", np.nan, 12.0))
-    assert output.adj_open.iloc[0] == 11.0
+    assert pd.isna(output.adj_open.iloc[0])
     assert output.adj_close.iloc[0] == 12.0
-    assert output.research_open_mark_kind.iloc[0] == "close"
+    assert pd.isna(output.research_open_mark_kind.iloc[0])
     fresh = production._ResearchValuationMarks().project(
         _mark_view("2023-01-05", np.nan, 12.0)
     )
@@ -1793,14 +1825,13 @@ def test_multiple_unquoted_sessions_native_roundtrip_and_absolute_nav_stresses(
     frames["panel"].loc[
         b & frames["panel"].timestamp.ge("2023-01-09"), ["adj_open", "adj_close"]
     ] = 12.0
-    for name in ("panel", "dataset", "execution"):
-        data = frames[name]
-        frames[name] = data.loc[
-            ~(
-                data.asset_id.eq("b")
-                & data.timestamp.isin(pd.to_datetime(["2023-01-05", "2023-01-06"]))
-            )
-        ].copy()
+    suspended = frames["panel"].asset_id.eq("b") & frames["panel"].timestamp.isin(
+        pd.to_datetime(["2023-01-05", "2023-01-06"])
+    )
+    frames["panel"].loc[suspended, ["adj_open", "adj_close", "amount"]] = np.nan
+    frames["panel"].loc[suspended, "is_trading"] = False
+    frames["dataset"].loc[suspended, "eligible"] = False
+    frames["execution"].loc[suspended, ["can_enter", "can_exit"]] = False
     chunks, _calls = _build_producer(
         tmp_path,
         monkeypatch,
@@ -1974,7 +2005,7 @@ def test_multiple_unquoted_sessions_native_roundtrip_and_absolute_nav_stresses(
         assert unavailable.value.isna().all()
 
 
-def test_simple_producer_blocks_when_adv_warmup_is_short(
+def test_simple_producer_keeps_short_adv_history_unknown(
     tmp_path: Path, monkeypatch
 ) -> None:
     frames, fee_frame, output_window = _inputs()
@@ -1987,10 +2018,18 @@ def test_simple_producer_blocks_when_adv_warmup_is_short(
         input_window=TimeWindow("2023-01-03", "2023-01-06"),
         formal_dataset_window=TimeWindow("2023-01-03", "2023-01-06"),
     )
-    with pytest.raises(
-        PortfolioTargetBlocked, match="portfolio_adv_warmup_insufficient"
-    ):
-        list(output)
+    batches = list(output)
+    assert batches
+    for batch in batches:
+        requested = batch.loc[batch.asset_id.eq("b")].iloc[0]
+        assert requested.block_reason == "adv_unavailable"
+        assert pd.isna(requested.adv20)
+        assert requested.target_notional == 100.0
+        assert requested.executed_delta_notional == 0.0
+        assert (
+            batch.loc[batch.asset_id.eq("__cash__"), "post_trade_notional"].item()
+            == 100.0
+        )
 
 
 def test_simple_producer_distinguishes_fee_coverage_from_malformed_fee(
@@ -2812,14 +2851,11 @@ def test_amount_history_rejects_invalid_present_amounts(invalid):
         }
     )
     with pytest.raises(ValueError, match="portfolio_amount_invalid"):
-        production._update_amount_history(
-            panel, {}, pd.Series(dtype="float64"), frozenset()
-        )
+        production._update_amount_history(panel, {}, frozenset())
 
 
 def test_amount_history_keeps_unknown_session_until_it_leaves_adv_window():
     history = {}
-    holdings = pd.Series(dtype="float64")
     for index in range(40):
         amount = np.nan if index == 20 else 1000.0
         production._update_amount_history(
@@ -2831,7 +2867,6 @@ def test_amount_history_keeps_unknown_session_until_it_leaves_adv_window():
                 }
             ),
             history,
-            holdings,
             frozenset(),
         )
         assert np.mean(history[("known", pd.Timestamp("2000-01-01"))]) == 1000.0
@@ -2847,18 +2882,23 @@ def test_amount_history_keeps_unknown_session_until_it_leaves_adv_window():
             }
         ),
         history,
-        holdings,
         frozenset(),
     )
     assert np.mean(history[("unrelated", pd.Timestamp("2000-01-01"))]) == 1000.0
 
 
-def test_simple_producer_blocks_when_required_adv_contains_unknown_session(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize("missing_count", (1, 12))
+def test_simple_producer_retains_order_and_unknown_adv_window(
+    tmp_path, monkeypatch, missing_count
 ):
     frames, fee_frame, output_window = _inputs()
-    unknown = frames["panel"].asset_id.eq("b") & frames["panel"].timestamp.eq(
-        pd.Timestamp("2022-12-28")
+    gap_dates = (
+        pd.DatetimeIndex(["2022-12-28"])
+        if missing_count == 1
+        else pd.bdate_range(end=output_window.start, periods=20)[:12]
+    )
+    unknown = frames["panel"].asset_id.eq("b") & frames["panel"].timestamp.isin(
+        gap_dates
     )
     frames["panel"].loc[unknown, "amount"] = np.nan
     output, _calls = _build_producer(
@@ -2867,11 +2907,24 @@ def test_simple_producer_blocks_when_required_adv_contains_unknown_session(
         frames=frames,
         fee_frame=fee_frame,
         output_window=output_window,
+        typed_batches=True,
     )
-    with pytest.raises(
-        PortfolioTargetBlocked, match="portfolio_adv_warmup_insufficient"
-    ):
-        list(output)
+    typed = list(output)
+    facts = {(row.asset_id, row.name): row for row in typed[0].diagnostics}
+    assert facts["b", "adv20_observation_count"].number == 20
+    assert facts["b", "adv20_missing_observations"].number == missing_count
+    batches = [session_frame(batch) for batch in typed]
+    assert batches
+    for batch in batches:
+        requested = batch.loc[batch.asset_id.eq("b")].iloc[0]
+        assert requested.block_reason == "adv_unavailable"
+        assert pd.isna(requested.adv20)
+        assert requested.target_notional == 100.0
+        assert requested.executed_delta_notional == 0.0
+        assert (
+            batch.loc[batch.asset_id.eq("__cash__"), "post_trade_notional"].item()
+            == 100.0
+        )
 
 
 def test_half_step_rebalance_uses_existing_ledger_and_preserves_residual_cash(
@@ -3001,7 +3054,6 @@ def test_empty_selection_executes_zero_target_without_bypassing_market_facts(
         else pd.Series({"b": 50.0}),
         cash=100.0 if state == "cash" else 50.0,
         nav=100.0,
-        initialize_at_execution=False,
         amount_history={
             (asset, panel(stamp).listing_date.iloc[0]): deque([1000.0] * 20, maxlen=20)
             for asset in ("a", "b")
@@ -3016,6 +3068,10 @@ def test_empty_selection_executes_zero_target_without_bypassing_market_facts(
         prepare_trade_cost=prepare_trade_cost,
         market_name_for_type=lambda _: "shanghai",
     )
+    kwargs["recovery_cash"] = 0.0
+    kwargs["held_units"] = kwargs["holdings"] / kwargs["panel"].set_index(
+        "asset_id"
+    ).adj_close.reindex(kwargs["holdings"].index)
     account, *_ = production._build_session(**kwargs)
     ledger = account.asset_ledger
     assert ledger.target_notional.eq(0.0).all()
@@ -3103,6 +3159,8 @@ def test_cash_exposure_is_post_execution_ledger_cash(
         )
     row.update(
         candidate_id="cash_probe",
+        return_status="DEFINED",
+        return_reason="",
         benchmark_return=np.nan,
         active_return=np.nan,
         relative_wealth=np.nan,
@@ -3472,15 +3530,12 @@ def test_adv_history_restarts_for_new_listing_but_survives_same_life_closure():
     old, new = pd.to_datetime(["2020-01-02", "2024-01-02"])
     history = {}
     panel = pd.DataFrame({"asset_id": ["asset"], "listing_date": old, "amount": 10.0})
-    holdings = pd.Series(dtype="float64")
     for _ in range(20):
-        production._update_amount_history(panel, history, holdings, frozenset())
-    production._update_amount_history(
-        panel.iloc[:0], history, holdings, frozenset({"asset"})
-    )
+        production._update_amount_history(panel, history, frozenset())
+    production._update_amount_history(panel.iloc[:0], history, frozenset({"asset"}))
     assert len(history[("asset", old)]) == 20
     production._update_amount_history(
-        panel.assign(listing_date=new, amount=100.0), history, holdings, frozenset()
+        panel.assign(listing_date=new, amount=100.0), history, frozenset()
     )
     assert set(history) == {("asset", new)}
     assert list(history[("asset", new)]) == [100.0]
@@ -3506,3 +3561,238 @@ def test_positive_held_price_returns_distinguish_adjacent_endpoints():
     )
     assert actual.tolist() == [float((Fraction(value) - 3) / 3) for value in end_prices]
     assert actual.iloc[0] < actual.iloc[1] < actual.iloc[2]
+
+
+def test_confirmed_delisting_zero_mark_preserves_reliable_same_life_quote():
+    marks = production._ResearchValuationMarks()
+    marks.project(_mark_view("2023-01-04", 10.0, 11.0))
+    unknown = _mark_view("2023-01-05", np.nan, np.nan, present=False)
+    unknown.confirmed_delisted_lifecycles = frozenset(
+        {("a", pd.Timestamp("2020-01-01"))}
+    )
+    zero = marks.project(unknown)
+    assert zero.adj_open.iloc[0] == zero.adj_close.iloc[0] == 0.0
+    assert zero.research_open_mark_kind.iloc[0] == "confirmed_delisting_zero"
+    quote = _mark_view("2023-01-06", 2.0, 3.0)
+    quote.confirmed_delisted_lifecycles = unknown.confirmed_delisted_lifecycles
+    observed = marks.project(quote)
+    assert observed.adj_open.iloc[0] == 2.0
+    assert observed.adj_close.iloc[0] == 3.0
+    assert observed.research_open_mark_at.isna().all()
+
+
+def test_portfolio_delisting_zero_nav_retains_units_and_recovers_amounts(
+    tmp_path, monkeypatch
+):
+    from quant_research_platform.compute.portfolio_economics import _LedgerEconomics
+    from quant_research_platform.contracts.portfolios import (
+        PortfolioCapital,
+        validate_portfolio_transition,
+    )
+    from quant_research_platform.research.portfolios.accounting import (
+        portfolio_interval_economics,
+    )
+
+    frames, fee, _ = _inputs()
+    fee["rate"] = 0.0
+    listing = frames["panel"].listing_date.iloc[0]
+    frames["stock_master"] = pd.DataFrame(
+        {
+            "source_asset_id": ["a", "b"],
+            "timestamp": listing,
+            "listing_date": listing,
+            "delisting_date": [pd.NaT, pd.Timestamp("2023-01-05")],
+        }
+    )
+    frames["panel"].loc[:, ["adj_open", "adj_close"]] = 10.0
+    frames["panel"].loc[
+        frames["panel"].timestamp.ge("2023-01-09"), ["adj_open", "adj_close"]
+    ] = 2.0
+    for name in ("panel", "dataset", "execution"):
+        frame = frames[name]
+        frames[name] = frame.loc[
+            ~(
+                frame.asset_id.eq("b")
+                & frame.timestamp.isin(pd.to_datetime(["2023-01-05", "2023-01-06"]))
+            )
+        ].copy()
+    chunks, _ = _build_producer(
+        tmp_path,
+        monkeypatch,
+        frames=frames,
+        fee_frame=fee,
+        output_window=TimeWindow("2023-01-03", "2023-01-09"),
+        typed_batches=True,
+    )
+    batches = list(chunks)
+    capital = PortfolioCapital(
+        "synthetic_top20_equal_weight", 100.0, "CNY", "adjusted_notional"
+    )
+    previous = None
+    economy = _LedgerEconomics(capital)
+    intervals = []
+    for batch in batches:
+        previous = validate_portfolio_transition(batch, capital, previous)
+        economy.consume(batch)
+        intervals.append(portfolio_interval_economics(batch))
+    assert intervals[0]["nav_end"] == 0.0
+    assert intervals[1]["nav_before"] == intervals[1]["nav_end"] == 0.0
+    assert np.isnan(intervals[1]["net_return"])
+    assert intervals[2]["nav_before"] == 0.0
+    assert intervals[2]["nav_end"] == pytest.approx(20.0)
+    assert np.isnan(intervals[2]["net_return"])
+    assert economy.summary()["nav"] == pytest.approx(20.0)
+    for batch in batches[1:3]:
+        assert not batch.trades and not batch.cashflows
+        b = [row for row in batch.valuations if row.asset_id == "b"]
+        assert all(row.quantity == pytest.approx(10.0) for row in b)
+    assert all(
+        row.value == 0.0
+        for batch in batches[1:]
+        for row in batch.valuations
+        if row.asset_id == "__cash__"
+    )
+
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id=capital.candidate_id,
+        schema_identity="a" * 64,
+        protocol_or_spec_identity="b" * 64,
+        software_identity="c" * 64,
+        research_window={
+            "start": "2023-01-03",
+            "end": "2023-01-09",
+            "access": "development",
+        },
+        upstream_identities={},
+        semantic_metadata={
+            "portfolio_capital": {
+                "candidate_id": capital.candidate_id,
+                "initial_capital": 100.0,
+                "valuation_currency": "CNY",
+                "valuation_method": "adjusted_notional",
+            }
+        },
+    )
+    root = write_portfolio_ledger_artifact(
+        tmp_path / "zero-artifact",
+        envelope=envelope,
+        produce=lambda emit: [emit(batch) for batch in batches],
+    )
+    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    assert list(artifact.iter_chunks()) == batches
+    assert sum(
+        row.value
+        for row in list(artifact.iter_chunks())[-1].valuations
+        if row.phase == "end"
+    ) == pytest.approx(20.0)
+    changed_life = replace(
+        batches[1],
+        valuations=tuple(
+            replace(row, lifecycle_id="2023-01-05") if row.asset_id == "b" else row
+            for row in batches[1].valuations
+        ),
+    )
+    previous = validate_portfolio_transition(batches[0], capital, None)
+    with pytest.raises(ValueError, match="portfolio_held_lifecycle_unproven"):
+        validate_portfolio_transition(changed_life, capital, previous)
+
+
+def test_cancelled_life_stale_quote_cannot_revive_rights_or_execution():
+    from fractions import Fraction
+
+    marks = production._ResearchValuationMarks()
+    marks.project(_mark_view("2023-01-04", 10.0, 11.0))
+    cancelled = _mark_view("2023-01-05", 12.0, 13.0)
+    cancelled.rights_events = pd.DataFrame(
+        [
+            {
+                "event_id": "cancel",
+                "asset_id": "a",
+                "listing_date": pd.Timestamp("2020-01-01"),
+                "kind": "cancel",
+                "remaining_old_units_per_old_unit": Fraction(),
+                "successor_asset_id": None,
+            }
+        ]
+    )
+    first = marks.project(cancelled)
+    later = marks.project(_mark_view("2023-01-06", 14.0, 15.0))
+    assert first.adj_open.iloc[0] == later.adj_open.iloc[0] == 0.0
+    assert production._unquoted_assets(later) == frozenset({"a"})
+    new_life = marks.project(_mark_view("2023-01-07", 20.0, 21.0, life="2023-01-07"))
+    assert new_life.adj_open.iloc[0] == 20.0
+    assert not production._unquoted_assets(new_life)
+
+
+@pytest.mark.parametrize("corruption", ("known_adv", "complete_window", "fee", "trade"))
+def test_persisted_adv_unavailable_rejects_fabricated_evidence(
+    tmp_path, monkeypatch, corruption
+):
+    from fractions import Fraction
+
+    from quant_research_platform.contracts.portfolios import (
+        ExecutedTrade,
+        PortfolioCapital,
+        PortfolioCashFlow,
+        PortfolioDiagnostic,
+        validate_portfolio_transition,
+    )
+
+    frames, fee, window = _inputs()
+    frames["panel"].loc[
+        frames["panel"].asset_id.eq("b") & frames["panel"].timestamp.eq("2022-12-28"),
+        "amount",
+    ] = np.nan
+    producer, _ = _build_producer(
+        tmp_path,
+        monkeypatch,
+        frames=frames,
+        fee_frame=fee,
+        output_window=window,
+        typed_batches=True,
+    )
+    batches = list(producer)
+    batch = batches[0]
+    capital = PortfolioCapital(
+        "synthetic_top20_equal_weight", 100.0, "CNY", "adjusted_notional"
+    )
+    validate_portfolio_transition(batch, capital, None)
+    timestamp = next(
+        row.timestamp_ns for row in batch.valuations if row.phase == "after"
+    )
+    with pytest.raises(ValueError):
+        if corruption == "known_adv":
+            batch = replace(
+                batch,
+                diagnostics=(
+                    *batch.diagnostics,
+                    PortfolioDiagnostic("b", None, "adv20", number=1000.0),
+                ),
+            )
+        elif corruption == "complete_window":
+            batch = replace(
+                batch,
+                diagnostics=tuple(
+                    replace(row, number=0.0)
+                    if row.asset_id == "b" and row.name == "adv20_missing_observations"
+                    else row
+                    for row in batch.diagnostics
+                ),
+            )
+        elif corruption == "fee":
+            batch = replace(
+                batch,
+                cashflows=(
+                    PortfolioCashFlow(
+                        "fake_fee", timestamp, "b", None, "commission_cost", -1.0
+                    ),
+                ),
+            )
+        else:
+            batch = replace(
+                batch,
+                trades=(
+                    ExecutedTrade("fake", "fake", timestamp, "b", Fraction(1), 1.0),
+                ),
+            )
+        validate_portfolio_transition(batch, capital, None)

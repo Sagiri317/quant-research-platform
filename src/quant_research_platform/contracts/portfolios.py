@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, replace
+from fractions import Fraction
 from math import fma, isclose, isfinite, ulp
 from typing import Literal
 
@@ -11,6 +12,28 @@ import pandas as pd
 
 from quant_research_platform.contracts.validation import (
     strict_finite_float,
+)
+
+A_SHARE_EQUITY_EVENTS_DATA_ID = "a_share_equity_events"
+EQUITY_EVENT_COLUMNS = (
+    "source_asset_id",
+    "asset_id",
+    "listing_date",
+    "timestamp",
+    "event_id",
+    "kind",
+    "effective_at",
+    "available_at",
+    "observed_at",
+    "currency",
+    "value_per_old_unit",
+    "remaining_old_units_per_old_unit",
+    "successor_asset_id",
+    "successor_listing_date",
+    "successor_units_per_old_unit",
+    "panel_content_hash",
+    "evidence_identity",
+    "source_locator",
 )
 
 REBALANCE_SCHEDULES = {
@@ -25,6 +48,7 @@ PORTFOLIO_ECONOMIC_SUMMARY_FIELDS = frozenset(
         "net_pnl",
         "nav",
         "capital_return",
+        "capital_return_reason",
         "initial_capital",
         "valuation_currency",
         "candidate_id",
@@ -33,6 +57,7 @@ PORTFOLIO_ECONOMIC_SUMMARY_FIELDS = frozenset(
         "turnover",
         "fill_events",
         "fill_quantity",
+        "fill_quantity_reason",
         "valuation_timestamp_ns",
         "inventory_revaluation_pnl",
     }
@@ -46,6 +71,7 @@ PORTFOLIO_BLOCK_REASONS = frozenset(
         "market_blocked",
         "execution_fact_unknown",
         "research_unquoted_valuation",
+        "adv_unavailable",
         "adv_capacity",
         "cash_pro_rata",
         "adv_capacity+cash_pro_rata",
@@ -107,7 +133,7 @@ class ExecutedTrade:
     order_id: str
     timestamp_ns: int
     asset_id: str
-    quantity: float
+    quantity: float | Fraction
     notional: float
 
 
@@ -126,10 +152,11 @@ class PortfolioValuation:
     timestamp_ns: int
     asset_id: str
     phase: Literal["before", "after", "end"]
-    quantity: float
+    quantity: float | Fraction
     value: float
-    mark_price: float = 1.0
+    mark_price: float | Fraction = 1.0
     cost_basis: float = 0.0
+    lifecycle_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +169,23 @@ class PortfolioDiagnostic:
 
 
 @dataclass(frozen=True, slots=True)
+class PortfolioRightsAdjustment:
+    """Evidence-linked nontrade change of an existing adjusted-unit entitlement."""
+
+    event_id: str
+    timestamp_ns: int
+    asset_id: str
+    lifecycle_id: str
+    quantity_before: float | Fraction
+    quantity_after: float | Fraction
+    cash_amount: float
+    target_asset_id: str | None
+    target_lifecycle_id: str | None
+    target_quantity: float | Fraction
+    evidence_identity: str
+
+
+@dataclass(frozen=True, slots=True)
 class PortfolioLedgerBatch:
     """One bounded economic transition and its linked market diagnostics."""
 
@@ -150,6 +194,7 @@ class PortfolioLedgerBatch:
     cashflows: tuple[PortfolioCashFlow, ...]
     valuations: tuple[PortfolioValuation, ...]
     diagnostics: tuple[PortfolioDiagnostic, ...]
+    rights_adjustments: tuple[PortfolioRightsAdjustment, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.sequence) is not int or self.sequence < 0:
@@ -159,6 +204,7 @@ class PortfolioLedgerBatch:
             (self.cashflows, PortfolioCashFlow),
             (self.valuations, PortfolioValuation),
             (self.diagnostics, PortfolioDiagnostic),
+            (self.rights_adjustments, PortfolioRightsAdjustment),
         ):
             if type(rows) is not tuple or any(type(row) is not kind for row in rows):
                 raise ValueError("portfolio_ledger_table_invalid")
@@ -173,12 +219,24 @@ class PortfolioLedgerBatch:
                     "mark_price",
                     "cost_basis",
                     "number",
+                    "quantity_before",
+                    "quantity_after",
+                    "cash_amount",
+                    "target_quantity",
                 ):
                     if not hasattr(row, name):
                         continue
                     value = getattr(row, name)
                     if value is None and name != "number":
                         raise ValueError("portfolio_ledger_numeric_invalid")
+                    if isinstance(value, Fraction) and name in {
+                        "quantity",
+                        "quantity_before",
+                        "quantity_after",
+                        "target_quantity",
+                        "mark_price",
+                    }:
+                        continue
                     if value is not None and (
                         isinstance(value, bool)
                         or not isinstance(value, int | float)
@@ -205,6 +263,7 @@ class PortfolioLedgerBatch:
                 "principal",
                 "realized_pnl",
                 "funding",
+                "recovery",
                 "commission_cost",
                 "stamp_duty_cost",
                 "transfer_fee_cost",
@@ -212,11 +271,16 @@ class PortfolioLedgerBatch:
                 "impact_cost",
             }
             or (row.fill_id is not None and row.fill_id not in fills)
-            or ((row.kind == "funding") != (row.fill_id is None))
+            or ((row.kind in {"funding", "recovery"}) != (row.fill_id is None))
             for row in self.cashflows
         ):
             raise ValueError("portfolio_ledger_cashflow_invalid")
-        for row in (*self.trades, *self.cashflows, *self.valuations):
+        for row in (
+            *self.trades,
+            *self.cashflows,
+            *self.valuations,
+            *self.rights_adjustments,
+        ):
             if type(row.timestamp_ns) is not int or row.timestamp_ns < 0:
                 raise ValueError("portfolio_ledger_timestamp_invalid")
         phases = {
@@ -226,8 +290,19 @@ class PortfolioLedgerBatch:
         if sum(map(len, phases.values())) != len(self.valuations):
             raise ValueError("portfolio_ledger_valuation_invalid")
         for row in self.valuations:
+            if row.lifecycle_id is not None and (
+                type(row.lifecycle_id) is not str or not row.lifecycle_id
+            ):
+                raise ValueError("portfolio_ledger_lifecycle_invalid")
             try:
-                expected = fma(row.quantity, row.mark_price, -row.cost_basis)
+                expected = (
+                    float(
+                        row.quantity * Fraction(row.mark_price)
+                        - Fraction(row.cost_basis)
+                    )
+                    if isinstance(row.quantity, Fraction)
+                    else fma(row.quantity, row.mark_price, -row.cost_basis)
+                )
             except OverflowError:
                 raise ValueError("portfolio_ledger_valuation_invalid") from None
             # Cost and final values round independently; the product need not fit.
@@ -276,7 +351,89 @@ class PortfolioLedgerBatch:
             or end[PORTFOLIO_CASH_ASSET_ID].value != cash_after
         ):
             raise ValueError("portfolio_ledger_cash_reconciliation_invalid")
-        deltas = defaultdict(lambda: [0.0, 0.0])
+        deltas = defaultdict(lambda: [0, 0])
+        quantities = {asset: value.quantity for asset, value in before.items()}
+        lives = {asset: value.lifecycle_id for asset, value in before.items()}
+        event_ids = set()
+        recovery = defaultdict(float)
+        for event in self.rights_adjustments:
+            if (
+                type(event.event_id) is not str
+                or not event.event_id
+                or type(event.lifecycle_id) is not str
+                or not event.lifecycle_id
+                or type(event.evidence_identity) is not str
+                or event.event_id in event_ids
+                or event.asset_id not in assets
+                or event.timestamp_ns != after[event.asset_id].timestamp_ns
+                or event.quantity_before <= 0
+                or event.quantity_after < 0
+                or event.cash_amount < 0
+                or event.target_quantity < 0
+                or len(event.evidence_identity) != 64
+                or any(c not in "0123456789abcdef" for c in event.evidence_identity)
+                or event.lifecycle_id != lives[event.asset_id]
+                or not _quantity_equal(
+                    event.quantity_before, quantities[event.asset_id]
+                )
+            ):
+                raise ValueError("portfolio_rights_adjustment_invalid")
+            event_ids.add(event.event_id)
+            event_flows = [
+                flow
+                for flow in self.cashflows
+                if flow.kind == "recovery"
+                and flow.flow_id == f"recovery:{event.event_id}"
+            ]
+            if (
+                (event.cash_amount > 0) != bool(event_flows)
+                or len(event_flows) > 1
+                or any(
+                    flow.asset_id != event.asset_id or flow.amount != event.cash_amount
+                    for flow in event_flows
+                )
+            ):
+                raise ValueError("portfolio_recovery_reconciliation_invalid")
+            change = event.quantity_after - event.quantity_before
+            quantities[event.asset_id] = event.quantity_after
+            deltas[event.asset_id][0] += change
+            deltas[event.asset_id][1] = max(deltas[event.asset_id][1], abs(change))
+            recovery[event.asset_id] += event.cash_amount
+            if event.target_asset_id is None:
+                if event.target_lifecycle_id is not None or event.target_quantity != 0:
+                    raise ValueError("portfolio_rights_conversion_invalid")
+            else:
+                target = event.target_asset_id
+                if (
+                    target not in assets
+                    or not event.target_lifecycle_id
+                    or event.target_quantity <= 0
+                    or (
+                        quantities[target] != 0
+                        and lives[target] != event.target_lifecycle_id
+                    )
+                ):
+                    raise ValueError("portfolio_rights_conversion_invalid")
+                quantities[target] = (
+                    Fraction(quantities[target]) + event.target_quantity
+                )
+                lives[target] = event.target_lifecycle_id
+                deltas[target][0] += event.target_quantity
+                deltas[target][1] = max(deltas[target][1], event.target_quantity)
+        for asset in assets:
+            if not isclose(
+                recovery[asset],
+                sum(
+                    row.amount
+                    for row in self.cashflows
+                    if row.asset_id == asset and row.kind == "recovery"
+                ),
+                rel_tol=0,
+                abs_tol=tolerance,
+            ):
+                raise ValueError("portfolio_recovery_reconciliation_invalid")
+            if lives[asset] != after[asset].lifecycle_id:
+                raise ValueError("portfolio_rights_lifecycle_invalid")
         for trade in self.trades:
             deltas[trade.asset_id][0] += trade.quantity
             deltas[trade.asset_id][1] = max(
@@ -289,16 +446,10 @@ class PortfolioLedgerBatch:
                 raise ValueError("portfolio_ledger_cashflow_timing_invalid")
         for asset in before.keys() - {PORTFOLIO_CASH_ASSET_ID}:
             delta, trade_quantity_scale = deltas[asset]
-            if not isclose(
+            if not _quantity_equal(
                 before[asset].quantity + delta,
                 after[asset].quantity,
-                rel_tol=0.0,
-                abs_tol=_quantity_tolerance(
-                    before[asset].quantity,
-                    delta,
-                    trade_quantity_scale,
-                    after[asset].quantity,
-                ),
+                trade_quantity_scale,
             ):
                 raise ValueError("portfolio_ledger_position_reconciliation_invalid")
         if any(
@@ -387,8 +538,22 @@ def portfolio_notional_tolerance(nav: float) -> float:
     return min(ulp(nav) * 512.0, abs(nav) * (ulp(1.0) * 512.0))
 
 
-def _quantity_tolerance(*quantities: float) -> float:
-    return max(ulp(value) for value in quantities) * 512.0
+def _quantity_tolerance(*quantities: float | Fraction) -> float:
+    return (
+        max(
+            (ulp(value) for value in quantities if not isinstance(value, Fraction)),
+            default=0.0,
+        )
+        * 512.0
+    )
+
+
+def _quantity_equal(left, right, *scales):
+    if isinstance(left, Fraction) or isinstance(right, Fraction):
+        return Fraction(left) == Fraction(right)
+    return isclose(
+        left, right, rel_tol=0.0, abs_tol=_quantity_tolerance(left, right, *scales)
+    )
 
 
 def validate_portfolio_transition(
@@ -419,26 +584,17 @@ def validate_portfolio_transition(
         try:
             for asset in before.keys() | previous.keys():
                 old, current = previous.get(asset), before.get(asset)
-                previous_quantity = (
-                    (
-                        old.value
-                        if capital.valuation_method == "adjusted_notional"
-                        else old.quantity
-                    )
-                    if old
-                    else 0.0
-                )
+                previous_quantity = old.quantity if old else 0.0
                 current_quantity = current.quantity if current else 0.0
-                if not isclose(
-                    previous_quantity,
-                    current_quantity,
-                    rel_tol=0.0,
-                    abs_tol=(
-                        tolerance
-                        if capital.valuation_method == "adjusted_notional"
-                        or asset == PORTFOLIO_CASH_ASSET_ID
-                        else _quantity_tolerance(previous_quantity, current_quantity)
-                    ),
+                if not (
+                    isclose(
+                        previous_quantity,
+                        current_quantity,
+                        rel_tol=0.0,
+                        abs_tol=tolerance,
+                    )
+                    if asset == PORTFOLIO_CASH_ASSET_ID
+                    else _quantity_equal(previous_quantity, current_quantity)
                 ):
                     raise ValueError("portfolio_ledger_cross_session_state_invalid")
                 if (
@@ -453,6 +609,13 @@ def validate_portfolio_transition(
                     and old.cost_basis != current.cost_basis
                 ):
                     raise ValueError("portfolio_ledger_cost_basis_invalid")
+                if (
+                    old is not None
+                    and current is not None
+                    and old.quantity != 0
+                    and old.lifecycle_id != current.lifecycle_id
+                ):
+                    raise ValueError("portfolio_held_lifecycle_unproven")
         finally:
             previous = old = None
     trades_by_asset = defaultdict(list)
@@ -477,6 +640,19 @@ def validate_portfolio_transition(
         flows = flows_by_asset[asset]
         if capital.valuation_method == "adjusted_notional":
             diagnostics = diagnostics_by_asset[asset]
+            rights_quantity = sum(
+                (
+                    event.quantity_after - event.quantity_before
+                    if event.asset_id == asset
+                    else 0
+                )
+                + (event.target_quantity if event.target_asset_id == asset else 0)
+                for event in batch.rights_adjustments
+            )
+            executable_value = float(
+                (Fraction(initial.quantity) + rights_quantity)
+                * Fraction(post.mark_price)
+            )
             for name in ("alpha_valid_dates", "alpha_scheduled_dates"):
                 diagnostic = diagnostics.get(name)
                 if diagnostic is not None and (
@@ -502,7 +678,37 @@ def validate_portfolio_transition(
                     trades and (adv is None or adv.number is None or adv.number <= 0)
                 ):
                     raise ValueError("portfolio_ledger_adv_invalid")
-                desired = target.number - initial.value
+                if (
+                    reason is not None
+                    and reason.text == "adv_unavailable"
+                    and (
+                        adv is not None
+                        or trades
+                        or any(flow.kind != "recovery" for flow in flows)
+                    )
+                ):
+                    raise ValueError("portfolio_ledger_adv_unavailable_invalid")
+                counts = [
+                    diagnostics.get(name)
+                    for name in (
+                        "adv20_observation_count",
+                        "adv20_missing_observations",
+                    )
+                ]
+                if any(count is not None for count in counts) and (
+                    any(
+                        count is None
+                        or count.number is None
+                        or not 0 <= count.number <= 20
+                        or count.number != int(count.number)
+                        for count in counts
+                    )
+                    or counts[1].number > counts[0].number
+                    or (counts[0].number == 20 and counts[1].number == 0)
+                    or adv is not None
+                ):
+                    raise ValueError("portfolio_ledger_adv_history_invalid")
+                desired = target.number - executable_value
                 executed = sum(row.notional for row in trades)
                 if (
                     (desired > 0 and executed < 0)
@@ -514,7 +720,9 @@ def validate_portfolio_transition(
                 ):
                     raise ValueError("portfolio_ledger_direction_invalid")
             if any(
-                row.value < -tolerance or row.cost_basis != 0.0
+                (asset != PORTFOLIO_CASH_ASSET_ID and row.quantity < 0)
+                or row.value < -tolerance
+                or row.cost_basis != 0.0
                 for row in (initial, post, final)
             ):
                 raise ValueError("portfolio_ledger_notional_invalid")
@@ -529,13 +737,26 @@ def validate_portfolio_transition(
             if any(
                 row.kind in {"funding", "realized_pnl"} or row.amount > 0.0
                 for row in flows
-                if row.kind != "principal"
+                if row.kind not in {"principal", "recovery"}
             ):
                 raise ValueError("portfolio_ledger_cost_invalid")
             if (
-                initial.quantity != initial.value
-                or post.quantity != post.value
+                (
+                    initial.quantity != 0
+                    and initial.mark_price != post.mark_price
+                    and not batch.rights_adjustments
+                )
+                or post.lifecycle_id != final.lifecycle_id
                 or final.quantity != post.quantity
+                or any(
+                    not isclose(
+                        trade.notional,
+                        float(Fraction(trade.quantity) * Fraction(post.mark_price)),
+                        rel_tol=0.0,
+                        abs_tol=tolerance,
+                    )
+                    for trade in trades
+                )
             ):
                 raise ValueError("portfolio_ledger_return_state_invalid")
         elif asset != PORTFOLIO_CASH_ASSET_ID:
@@ -555,9 +776,17 @@ def validate_portfolio_transition(
                 raise ValueError("portfolio_ledger_cost_basis_invalid")
     if capital.valuation_method == "adjusted_notional" and not isclose(
         sum(diagnostics_by_asset[asset]["target_notional"].number for asset in before),
-        sum(row.value for row in before.values()),
+        sum(row.value for row in after.values())
+        - sum(
+            row.amount
+            for row in batch.cashflows
+            if row.kind in PORTFOLIO_LEDGER_COST_COLUMNS
+        ),
         rel_tol=0.0,
-        abs_tol=tolerance,
+        abs_tol=max(
+            tolerance,
+            portfolio_notional_tolerance(sum(row.value for row in after.values())),
+        ),
     ):
         raise ValueError("portfolio_ledger_target_state_invalid")
     return {asset: replace(row) for asset, row in end.items()}

@@ -268,16 +268,8 @@ def open_filesystem_file(
     )
 
 
-def filesystem_read_bytes(path: Path) -> bytes:
-    return Path(native_filesystem_path(path)).read_bytes()
-
-
 def filesystem_write_bytes(path: Path, data: bytes) -> int:
     return Path(native_filesystem_path(path)).write_bytes(data)
-
-
-def filesystem_read_text(path: Path, *, encoding: str) -> str:
-    return Path(native_filesystem_path(path)).read_text(encoding=encoding)
 
 
 def filesystem_write_text(path: Path, data: str, *, encoding: str) -> int:
@@ -286,10 +278,6 @@ def filesystem_write_text(path: Path, data: str, *, encoding: str) -> int:
 
 def filesystem_rename(source: Path, target: Path) -> None:
     os.rename(native_filesystem_path(source), native_filesystem_path(target))
-
-
-def filesystem_replace(source: Path, target: Path) -> None:
-    os.replace(native_filesystem_path(source), native_filesystem_path(target))
 
 
 def filesystem_unlink(path: Path, *, missing_ok: bool = False) -> None:

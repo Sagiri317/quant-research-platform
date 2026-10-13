@@ -49,8 +49,6 @@ from quant_research_platform.storage.identity import (
     filesystem_is_file,
     filesystem_iterdir,
     filesystem_mkdir,
-    filesystem_read_bytes,
-    filesystem_read_text,
     filesystem_stat,
     filesystem_unlink,
     filesystem_write_bytes,
@@ -75,7 +73,7 @@ def _old_good_snapshot(root: Path) -> tuple[tuple[str, bytes, int, int, int], ..
     return tuple(
         (
             path.relative_to(root).as_posix(),
-            filesystem_read_bytes(path),
+            Path(native_filesystem_path(path)).read_bytes(),
             info.st_ino,
             info.st_size,
             info.st_mtime_ns,
@@ -353,7 +351,9 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
     )
 
     model_payload = json.loads(
-        filesystem_read_text(model_root / "model.json", encoding="utf-8")
+        Path(native_filesystem_path(model_root / "model.json")).read_text(
+            encoding="utf-8"
+        )
     )
     assert set(model_payload) == {
         "schema_id",
@@ -473,7 +473,9 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
     layout = StorageLayout(tmp_path)
     first_record = read_research_run_record(layout.research_run_path(result["run_id"]))
     assert first_record.trial_ledgers
-    model_before = filesystem_read_bytes(model_root / "manifest.json")
+    model_before = Path(
+        native_filesystem_path(model_root / "manifest.json")
+    ).read_bytes()
     reused = operations.research_run(
         profile=profile,
         layout=layout,
@@ -499,7 +501,10 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
         layout.research_run_path(rebuilt["run_id"])
     )
     assert not rebuild_record.trial_ledgers
-    assert filesystem_read_bytes(model_root / "manifest.json") == model_before
+    assert (
+        Path(native_filesystem_path(model_root / "manifest.json")).read_bytes()
+        == model_before
+    )
     comparisons = {
         item["target_id"]: item["comparison_status"]
         for item in rebuilt["rebuild_evidence"]
@@ -811,6 +816,7 @@ def test_protocol_owns_formal_research_and_report_graphs() -> None:
             "market_panel_1d",
             "market_bars_1d",
             "stock_master",
+            "a_share_equity_events",
             *first.risk_context_target_ids,
         )
         for candidate in selected:
@@ -1416,7 +1422,7 @@ def test_plan_reuse_requires_native_physical_members(tmp_path):
         built["target_results"][0]["instance_identity"],
     )
     manifest = root / "_manifest" / "manifest.json"
-    before = filesystem_read_bytes(manifest)
+    before = Path(native_filesystem_path(manifest)).read_bytes()
     qualified = operations.data_materialize(**request, plan=True)
     assert qualified["status"] == "COMPLETE"
     assert qualified["targets"][0]["decision"] == "REUSE"
@@ -1429,7 +1435,7 @@ def test_plan_reuse_requires_native_physical_members(tmp_path):
     executed = operations.data_materialize(**request)
     assert executed["status"] == "BLOCKED"
     assert executed["target_results"][0]["reason"] == "persisted_instance_invalid"
-    assert filesystem_read_bytes(manifest) == before
+    assert Path(native_filesystem_path(manifest)).read_bytes() == before
     assert calls["count"] == 1
 
 
@@ -1472,7 +1478,9 @@ def test_reuse_retains_one_native_qualification_and_rejects_later_change(
     def mutate_after_plan(**kwargs):
         result = plan(**kwargs)
         (member,) = tuple(filesystem_glob(root / "data", "**/*.parquet"))
-        filesystem_write_bytes(member, filesystem_read_bytes(member) + b"\0")
+        filesystem_write_bytes(
+            member, Path(native_filesystem_path(member)).read_bytes() + b"\0"
+        )
         return result
 
     monkeypatch.setattr(research, "_plan_targets", mutate_after_plan)
@@ -2103,7 +2111,7 @@ def test_rebuild_reuses_published_upstream_unless_explicitly_requested(
         assert results[source_id]["reason"] == "persisted_instance_invalid"
         assert results[descendant_id]["status"] == "BLOCKED"
         assert source_calls["count"] == descendant_calls["count"] == 1
-        assert filesystem_read_bytes(manifest) == b"{}"
+        assert Path(native_filesystem_path(manifest)).read_bytes() == b"{}"
         return
     if not rebuild_upstream:
         assert failed["status"] == "COMPLETE"
@@ -2324,9 +2332,9 @@ def test_research_run_records_unexpected_failure_without_masking_primary(
     assert record.failure_reason == "research_run_failed:runtimeerror"
     assert record.operation_evidence["reason"] == "operation_incomplete"
     assert record.operation_evidence["sample_count"] == 1
-    assert "SYNTHETIC_ROW_VALUE_X" not in filesystem_read_text(
-        records[0], encoding="utf-8"
-    )
+    assert "SYNTHETIC_ROW_VALUE_X" not in Path(
+        native_filesystem_path(records[0])
+    ).read_text(encoding="utf-8")
     monkeypatch.setattr(observations, "perf_counter", actual_clock)
 
     monkeypatch.setattr(
@@ -2648,7 +2656,7 @@ def test_target_local_validation_preserves_independent_production(
         root = research._target_instance_root(profile, kwargs["layout"], a, identity)
         if primary is None:
             part = next(filesystem_glob(root, "**/*.parquet"))
-            content = bytearray(filesystem_read_bytes(part))
+            content = bytearray(Path(native_filesystem_path(part)).read_bytes())
             content[4] ^= 1
             filesystem_write_bytes(part, bytes(content))
         planned = operations.data_materialize(**kwargs, plan=True)
@@ -2986,10 +2994,11 @@ def test_prediction_lineage_requires_exact_model_dependency_identity(
         lambda *_args, **_kwargs: (envelope, {}),
     )
 
-    def bundle(*_args, **_kwargs):  # noqa: ANN002, ANN003
-        return manifest, None
-
-    monkeypatch.setattr(research, "_validate_prediction_output_bundle", bundle)
+    monkeypatch.setattr(
+        research,
+        "_PredictionOutputSession",
+        lambda *_args, **_kwargs: SimpleNamespace(manifest=manifest),
+    )
     monkeypatch.setattr(
         research, "_target_instance_root", lambda *_args: tmp_path / "model"
     )
@@ -3212,7 +3221,7 @@ def test_evaluation_result_is_owned_before_atomic_publication_callback(
     assert isinstance(observed[0], OutputAlreadyExistsError)
     assert created == closed == [True]
     assert callbacks == consumed == []
-    assert filesystem_read_bytes(marker) == b"unchanged"
+    assert Path(native_filesystem_path(marker)).read_bytes() == b"unchanged"
 
 
 @pytest.mark.parametrize(
@@ -3553,4 +3562,106 @@ def test_dataset_run_keeps_declarations_but_has_no_model_preflight(
             layout=layout,
             research_plan=config,
             holdout=True,
+        )
+
+
+def test_optional_equity_events_bind_only_portfolio_consumers(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    from quant_research_platform.profiles.research import bind_research_configuration
+    from tests.helpers.research_configuration import research_configuration
+
+    profile = bind_research_configuration(research_profile(), research_configuration())
+    state = {"events": None}
+
+    def source_identity(_root, target):
+        if target == "a_share_equity_events":
+            if state["events"] == "corrupt":
+                raise ValueError("equity_source_invalid")
+            return state["events"]
+        return "a" * 64
+
+    profile = replace(
+        profile,
+        producer_bindings={
+            target: replace(binding, source_identity=source_identity)
+            if binding.source_identity is not None
+            else binding
+            for target, binding in profile.producer_bindings.items()
+        },
+    )
+    monkeypatch.setattr(
+        research,
+        "_matching_instance",
+        lambda **kwargs: (kwargs["requested_identity"], None),
+    )
+    protocol = profile.protocol("pv_all")
+    layout = StorageLayout(tmp_path)
+
+    def plan():
+        return research._plan_targets(
+            profile=profile,
+            protocol=protocol,
+            layout=layout,
+            action="research run",
+            terminal_targets=protocol.terminal_targets("research run"),
+            research_window={
+                "start": "2019-01-01",
+                "end": "2023-12-31",
+                "access": "development",
+            },
+        )[0]
+
+    absent = {request.spec.target_id: (request, item) for request, item in plan()}
+    assert "a_share_equity_events" not in absent
+    for target, (request, item) in absent.items():
+        kind = profile.producer_bindings[target].kind
+        if kind is ProducerKind.PORTFOLIO:
+            assert item.upstream_identities[
+                "a_share_equity_events"
+            ] == research.canonical_json_hash(
+                {"source_id": "a_share_equity_events", "presence": "ABSENT"}
+            )
+            assert "a_share_equity_events" not in request.spec.dependencies
+            target_layout = research._target_layout(
+                profile=profile,
+                protocol=protocol,
+                layout=layout,
+                spec=request.spec,
+                plans={name: pair[1] for name, pair in absent.items()},
+            )
+            assert (
+                target_layout.target_root("a_share_equity_events", Path("fallback"))
+                is None
+            )
+    state["events"] = "b" * 64
+    present = {request.spec.target_id: item for request, item in plan()}
+    assert "a_share_equity_events" in present
+    for target, (_, item) in absent.items():
+        assert (present[target].requested_identity != item.requested_identity) is (
+            profile.producer_bindings[target].kind is ProducerKind.PORTFOLIO
+            or target == "pv_all_portfolio_statistics"
+        ), target
+    state["events"] = "corrupt"
+    corrupt = {request.spec.target_id: item for request, item in plan()}
+    assert corrupt["a_share_equity_events"].blocker == "source_identity_invalid"
+    assert all(
+        item.blocker == "dependency_blocked: a_share_equity_events"
+        for target, item in corrupt.items()
+        if profile.producer_bindings[target].kind is ProducerKind.PORTFOLIO
+    )
+    state["events"] = "b" * 64
+    with pytest.raises(
+        research.PortfolioTargetBlocked, match="optional_source_presence_changed"
+    ):
+        request, item = next(
+            pair
+            for target, pair in absent.items()
+            if profile.producer_bindings[target].kind is ProducerKind.PORTFOLIO
+        )
+        research._verify_absent_sources(
+            profile,
+            research._optional_source_ids(profile, protocol, request.spec),
+            item.upstream_identities,
+            tmp_path / "raw",
         )

@@ -600,6 +600,7 @@ _MODEL_SELECTION_TRIAL_METRIC_KEYS = frozenset(
     for prefix in ("ic", "rankic")
     for suffix in (
         f"std_{prefix}",
+        f"std_{prefix}_reason",
         f"{prefix}ir",
         f"positive_{prefix}_rate",
         f"valid_{prefix}_count",
@@ -796,6 +797,7 @@ def _validate_model_selection_trial_record(trial: object) -> None:
     for prefix in ("ic", "rankic"):
         count = trial[f"validation_valid_{prefix}_count"]
         std = trial[f"validation_std_{prefix}"]
+        std_reason = trial[f"validation_std_{prefix}_reason"]
         ratio = trial[f"validation_{prefix}ir"]
         positive = trial[f"validation_positive_{prefix}_rate"]
         reason = trial[f"validation_{prefix}ir_reason"]
@@ -807,7 +809,30 @@ def _validate_model_selection_trial_record(trial: object) -> None:
             ):
                 raise ValueError("invalid_model_metadata")
         if (
-            (std is not None and std < 0)
+            ((std is None) != (std_reason is not None))
+            or (
+                std_reason is not None
+                and (
+                    type(std_reason) is not str
+                    or std_reason
+                    not in {
+                        "no_valid_observations",
+                        "nonfinite_result",
+                        "not_applicable",
+                    }
+                )
+            )
+            or (count > 0 and std_reason in {"no_valid_observations", "not_applicable"})
+            or (
+                count == 0
+                and std_reason
+                != (
+                    "not_applicable"
+                    if trial[f"validation_{prefix}_reason"] == "not_applicable"
+                    else "no_valid_observations"
+                )
+            )
+            or (std is not None and std < 0)
             or (positive is not None and not 0 <= positive <= 1)
             or (count == 0 and any(v is not None for v in (std, ratio, positive)))
             or (count > 0 and positive is None)

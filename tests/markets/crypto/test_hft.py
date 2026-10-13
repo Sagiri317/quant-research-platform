@@ -13,10 +13,11 @@ from quant_research_platform.contracts.order_book import (
 )
 from quant_research_platform.markets.implementations.crypto.hft import (
     HFT_GRID_MS,
+    _ofi_units,
+    _quantity_units,
     iter_factor_frames,
     iter_label_frames,
     iter_panel_frames,
-    l1_ofi,
 )
 from quant_research_platform.markets.implementations.crypto.processed.catalog import (
     hft_processed_catalog,
@@ -122,7 +123,16 @@ def _trade(timestamp_ms: int, quantity: float, *, maker_buyer: bool) -> TradeEve
 
 
 def test_l1_ofi_uses_exact_integer_tick_identity() -> None:
-    assert l1_ofi((1000, 2.0), (1010, 3.0), (1020, 1.0), (1020, 2.0)) == 2.0
+    assert (
+        _ofi_units(
+            (1000, _quantity_units(2.0)),
+            (1010, _quantity_units(3.0)),
+            (1020, _quantity_units(1.0)),
+            (1020, _quantity_units(2.0)),
+        )
+        / (1 << 1074)
+        == 2.0
+    )
 
 
 def test_panel_frames_preserve_batch_rows_and_identity() -> None:
@@ -1046,8 +1056,26 @@ def test_panel_exact_cancellation_survives_events_and_batches(batch_rows):
     row = pd.concat(frames).iloc[-1]
     assert row.book_ofi_100ms == 1e308
     assert row.observed_signed_trade_volume_100ms == 1.0
-    assert l1_ofi((1, 1.0), (1, 1e308), (3, 1.0), (3, 1e308)) == 0.0
-    assert l1_ofi((1, 1e308), (1, 1.0), (3, 1e308), (3, 2.0)) == -1.0
+    assert (
+        _ofi_units(
+            (1, _quantity_units(1.0)),
+            (1, _quantity_units(1e308)),
+            (3, _quantity_units(1.0)),
+            (3, _quantity_units(1e308)),
+        )
+        / (1 << 1074)
+        == 0.0
+    )
+    assert (
+        _ofi_units(
+            (1, _quantity_units(1e308)),
+            (1, _quantity_units(1.0)),
+            (3, _quantity_units(1e308)),
+            (3, _quantity_units(2.0)),
+        )
+        / (1 << 1074)
+        == -1.0
+    )
     # A segment boundary must discard its predecessor's exact aggregate.
     reset = [*books[:3], _boundary(25), replace(books[-1], segment_id="s2")]
     row = pd.concat(

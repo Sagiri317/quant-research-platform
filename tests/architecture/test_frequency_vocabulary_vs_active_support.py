@@ -7,7 +7,6 @@ def test_data_frequency_helpers_define_reserved_vocabulary_and_active_support() 
     from quant_research_platform.contracts.data import (
         DataFrequency,
         data_frequency_slug,
-        horizon_unit_suffix,
         normalize_data_frequency,
         require_supported_data_frequency,
     )
@@ -15,7 +14,6 @@ def test_data_frequency_helpers_define_reserved_vocabulary_and_active_support() 
     assert {item.name for item in DataFrequency} >= {"DAILY", "MINUTE", "TICK"}
     assert normalize_data_frequency("1d") is DataFrequency.DAILY
     assert data_frequency_slug(DataFrequency.DAILY) == "1d"
-    assert horizon_unit_suffix(DataFrequency.DAILY) == "d"
     with pytest.raises(ValueError, match="unsupported_data_frequency"):
         require_supported_data_frequency(
             DataFrequency.MINUTE,

@@ -54,6 +54,7 @@ from quant_research_platform.reports.a_share import build_a_share_report
 from quant_research_platform.reports.crypto_hft import build_crypto_research_report
 from quant_research_platform.storage.datasets.reading import (
     iter_declared_parquet_member_batches,
+    open_dataset_session,
 )
 from quant_research_platform.storage.datasets.schema import COMMON_MANIFEST_METADATA_KEY
 from quant_research_platform.storage.experiments import (
@@ -199,6 +200,12 @@ def load_a_share_run_evidence(
         for result in record.target_results
         if result.status in {TargetStatus.BLOCKED, TargetStatus.FAILED}
     ]
+    if model_artifacts is not None:
+        issues.extend(
+            _issue(target_id, "FAILED", "model_reference_invalid")
+            for target_id, artifact in model_artifacts.items()
+            if artifact is None
+        )
     loaded: dict[str, ResearchRunTargetResult] = {}
     captured = {}
     operations = {}
@@ -223,6 +230,8 @@ def load_a_share_run_evidence(
             return result
         if model_artifacts is not None and target_id in model_artifacts:
             artifact = model_artifacts[target_id]
+            if artifact is None:
+                return None
             _validate_reference_envelope(result, artifact.envelope)
             captured[target_id] = artifact.member_identities
             operations[target_id] = artifact.operational_metadata
@@ -481,6 +490,8 @@ def load_a_share_run_evidence(
         type(item) is not str for item in candidates
     ):
         raise ValueError("research_run_protocol_portfolios_invalid")
+    if configuration["stage"] != "research":
+        candidates = ()
     portfolios: list[dict[str, object]] = []
     portfolio_target = f"{scenario}_portfolio_statistics"
     portfolio_ref = load(portfolio_target, native=True) if candidates else None
@@ -723,13 +734,17 @@ def produce_a_share_report(
                 TargetStatus.FAILED,
             }:
                 continue
-            persisted = read_model_artifact(
-                _instance_root(layout, result),
-                expected_identity=result.instance_identity,
-                trial_layout=layout,
-            )
+            try:
+                persisted = read_model_artifact(
+                    _instance_root(layout, result),
+                    expected_identity=result.instance_identity,
+                    trial_layout=layout,
+                )
+                _validate_reference_envelope(result, persisted.envelope)
+            except (FileNotFoundError, OSError, KeyError, TypeError, ValueError):
+                models[result.target_id] = None
+                continue
             models[result.target_id] = persisted
-            _validate_reference_envelope(result, persisted.envelope)
             selections = persisted.selections
         return build_a_share_report(
             record=record,
@@ -745,6 +760,8 @@ def produce_a_share_report(
         raise
     finally:
         for artifact in models.values():
+            if artifact is None:
+                continue
             try:
                 verify_semantic_artifact_snapshot(
                     artifact.instance_root,
@@ -776,6 +793,7 @@ def read_validated_reference(
         ProducerKind.PROCESSED,
         ProducerKind.DATASET,
     }:
+        session = open_dataset_session(root, columns=None, time_window=None)
         envelope = validate_business_manifest_envelope(
             read_dataset_manifest_evidence(
                 root,
@@ -783,6 +801,7 @@ def read_validated_reference(
                 expected_member_identities=expected_member_identities,
             )[COMMON_MANIFEST_METADATA_KEY]
         )
+        session.verify()
     else:
         envelope, _members = read_semantic_artifact_record(
             root,
@@ -1349,6 +1368,7 @@ def produce_crypto_report(
                     result = {
                         "episode_id": "continuous",
                         "economics": economics["economics"],
+                        "execution": economics["execution"],
                         "funding_qualification": economics["funding_qualification"]
                         or {
                             "status": "UNDEFINED",
@@ -1384,6 +1404,7 @@ def produce_crypto_report(
                             "termination": index["termination"],
                             "stop_reasons": index["stop_reasons"],
                             "economics": summary["economics"],
+                            "execution": summary["execution"],
                             "funding_qualification": summary["funding_qualification"]
                             or {
                                 "status": "UNDEFINED",

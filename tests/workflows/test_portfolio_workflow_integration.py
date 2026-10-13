@@ -67,7 +67,6 @@ from quant_research_platform.storage.identity import (
     filesystem_glob,
     filesystem_is_file,
     filesystem_mkdir,
-    filesystem_read_text,
     filesystem_rename,
     filesystem_write_bytes,
     filesystem_write_text,
@@ -133,7 +132,12 @@ def _interim_specs() -> InterimDataCatalog:
             fee,
             *(
                 research_profile().interim.get(target)
-                for target in ("index_market", "market_bars_1d", "stock_master")
+                for target in (
+                    "index_market",
+                    "market_bars_1d",
+                    "stock_master",
+                    "a_share_equity_events",
+                )
             ),
         )
     )
@@ -585,6 +589,7 @@ def _profile(
         )
         for spec in interim.list()
     }
+    bindings["a_share_equity_events"] = base.producer_bindings["a_share_equity_events"]
     bindings.update(
         {
             spec.data_id: ProducerBinding(ProducerKind.PROCESSED, processed_producer)
@@ -1887,7 +1892,9 @@ def test_native_prediction_missing_family_is_rejected(
         native_filesystem_path(damaged / "prediction.parquet"), index=False
     )
     manifest = json.loads(
-        filesystem_read_text(damaged / "manifest.json", encoding="utf-8")
+        Path(native_filesystem_path(damaged / "manifest.json")).read_text(
+            encoding="utf-8"
+        )
     )
     manifest["metadata"]["prediction_metadata"]["prediction_rows"] = len(values)
     filesystem_write_text(
@@ -2756,3 +2763,249 @@ def test_holdout_alpha_source_identity_invalidates_only_its_consumers(
             for row in batch.diagnostics
             if row.name == "alpha_slope"
         } == {calibration["calibration"]["slope"]}
+
+
+def test_nonportfolio_statistics_ignore_portfolio_selection():
+    from copy import deepcopy
+
+    from quant_research_platform.profiles.research import bind_research_configuration
+
+    configuration = research_configuration()
+    changed = deepcopy(configuration)
+    changed["portfolios"] = changed["portfolios"][:2]
+    changed["primary_portfolio_id"] = changed["portfolios"][0]["candidate_id"]
+    protocols = [
+        bind_research_configuration(research_profile(), config).protocol("pv_all")
+        for config in (configuration, changed)
+    ]
+    first, second = protocols
+    for target in (first.factor_statistics_target_id, *first.statistics_target_ids):
+        assert first.target_manifest(target, "STATISTIC") == second.target_manifest(
+            target, "STATISTIC"
+        )
+    target = "pv_all_portfolio_statistics"
+    assert first.target_manifest(target, "STATISTIC") != second.target_manifest(
+        target, "STATISTIC"
+    )
+
+
+@_both_groups_windows()
+@pytest.mark.parametrize("build_predictions", [False, True])
+def test_prediction_admission_shared_by_native_consumers(
+    both_groups_case, monkeypatch, build_predictions
+):
+    import quant_research_platform.artifacts.outputs.bundle_validation as bundles
+
+    case = both_groups_case
+    for target, result in case.results.items():
+        kind = case.profile.producer_bindings[target].kind
+        if kind in {ProducerKind.STATISTIC, ProducerKind.PORTFOLIO} or (
+            build_predictions and kind is ProducerKind.PREDICTION
+        ):
+            root = research._target_instance_root(
+                case.profile, case.layout, target, result["instance_identity"]
+            )
+            shutil.rmtree(root)
+    admissions = []
+    consumers = []
+    original = bundles._validate_prediction_output_bundle
+
+    def observed(root, **kwargs):
+        result = original(root, **kwargs)
+        (admissions if kwargs.get("validation_session") is None else consumers).append(
+            Path(root).name
+        )
+        return result
+
+    monkeypatch.setattr(bundles, "_validate_prediction_output_bundle", observed)
+    result = operations.research_run(
+        profile=case.profile, layout=case.layout, research_plan=case.configuration
+    )
+    assert result["status"] == "COMPLETE", result["blockers"]
+    targets = {item["target_id"]: item for item in result["target_results"]}
+    for target in case.protocol.prediction_target_ids:
+        assert targets[target]["status"] == ("BUILT" if build_predictions else "REUSED")
+        assert admissions.count(target) == 1
+        assert consumers.count(target) >= 2
+    assert all(targets[target]["status"] == "BUILT" for target in case.portfolio_ids)
+
+
+@_both_groups_windows()
+@pytest.mark.parametrize("kind", [ProducerKind.STATISTIC, ProducerKind.PORTFOLIO])
+def test_prediction_mutation_blocks_downstream_publication(
+    both_groups_case, monkeypatch, kind
+):
+    case = both_groups_case
+    target = (
+        case.protocol.statistics_target_ids[0]
+        if kind is ProducerKind.STATISTIC
+        else case.portfolio_ids[0]
+    )
+    prediction_id = (
+        case.protocol.prediction_target_ids[0]
+        if kind is ProducerKind.STATISTIC
+        else case.protocol.portfolio_candidate_for_target(target).prediction_target_id
+    )
+    prediction_root = research._target_instance_root(
+        case.profile,
+        case.layout,
+        prediction_id,
+        case.results[prediction_id]["instance_identity"],
+    )
+    original = case.profile.producer_bindings[target]
+    shutil.rmtree(
+        research._target_instance_root(
+            case.profile, case.layout, target, case.results[target]["instance_identity"]
+        )
+    )
+
+    def mutate():
+        # Fixture directories are distinct; do not modify any hardlinked member.
+        (prediction_root / "unexpected-member").write_text("changed after read")
+
+    def statistics(**kwargs):
+        tables = original.producer(**kwargs)
+        mutate()
+        return tables
+
+    def portfolio(**kwargs):
+        yield from original.producer(**kwargs)
+        mutate()
+
+    profile = replace(
+        case.profile,
+        producer_bindings={
+            **case.profile.producer_bindings,
+            target: replace(
+                original,
+                producer=statistics if kind is ProducerKind.STATISTIC else portfolio,
+            ),
+        },
+    )
+    planned = operations.research_run(
+        profile=profile, layout=case.layout, research_plan=case.configuration, plan=True
+    )
+    plan = next(item for item in planned["targets"] if item["target_id"] == target)
+    output = research._target_instance_root(
+        profile, case.layout, target, plan["requested_identity"]
+    )
+    assert not output.exists()
+    result = operations.research_run(
+        profile=profile, layout=case.layout, research_plan=case.configuration
+    )
+    item = next(
+        item for item in result["target_results"] if item["target_id"] == target
+    )
+    assert item["status"] == "FAILED"
+    assert not output.exists()
+
+
+def test_native_adv_gap_preserves_portfolio_statistics_and_report(
+    tmp_path, monkeypatch
+):
+    import sys
+
+    import numpy as np
+
+    original = _frames
+
+    def frames_with_gap(dates=None):
+        frames = original(dates)
+        panel = frames["market_panel_1d"]
+        panel.loc[
+            panel.asset_id.eq("b") & panel.timestamp.eq("2019-01-02"), "amount"
+        ] = np.nan
+        return frames
+
+    monkeypatch.setattr(sys.modules[__name__], "_frames", frames_with_gap)
+    case = _build_both_groups_baseline(tmp_path, monkeypatch)
+    candidate_id = "global_ew_rank_top20_equal_weight"
+    target_id = f"pv_all_{candidate_id}_ledger"
+    identity = case.results[target_id]["instance_identity"]
+    ledger = read_portfolio_ledger_artifact(
+        case.layout.instance_root(
+            case.layout.semantic_artifact_root("a_share", target_id), identity
+        ),
+        expected_identity=identity,
+    )
+    batches = list(ledger.iter_chunks())
+    missing_dates = []
+    for batch in batches:
+        facts = {(row.asset_id, row.name): row for row in batch.diagnostics}
+        reason = facts.get(("b", "block_reason"))
+        if reason is not None and reason.text == "adv_unavailable":
+            missing_dates.append(pd.Timestamp(facts["b", "decision_timestamp"].text))
+            assert ("b", "adv20") not in facts
+            assert facts["b", "adv20_observation_count"].number == 20
+            assert facts["b", "adv20_missing_observations"].number == 1
+            assert not any(row.asset_id == "b" for row in batch.trades)
+            assert not any(row.asset_id == "b" for row in batch.cashflows)
+    assert missing_dates
+    assert max(missing_dates) < pd.Timestamp("2019-01-31")
+    assert any(
+        row.asset_id == "b"
+        and pd.Timestamp(row.timestamp_ns) >= pd.Timestamp("2019-02-01")
+        for batch in batches
+        for row in batch.trades
+    )
+    stat_id = "pv_all_portfolio_statistics"
+    stat_identity = case.results[stat_id]["instance_identity"]
+    statistics = read_statistics_artifact(
+        case.layout.instance_root(
+            case.layout.semantic_artifact_root("a_share", stat_id), stat_identity
+        ),
+        expected_identity=stat_identity,
+    )
+    with statistics.table("portfolio_daily.parquet") as daily:
+        assert daily.loc[daily.candidate_id.eq(candidate_id)].shape[0] == len(batches)
+        assert daily.groupby("candidate_id").entry_at.nunique().nunique() == 1
+    with statistics.table("portfolio_capacity.parquet") as capacity:
+        affected = capacity.loc[
+            capacity.candidate_id.eq(candidate_id)
+            & capacity.decision_timestamp.isin(missing_dates)
+        ]
+        assert not affected.empty
+        assert affected.status.eq("UNDEFINED").all()
+        assert affected.capacity.isna().all()
+        assert affected.reason.eq("capacity_required_adv_missing").all()
+        assert (
+            capacity.loc[
+                capacity.candidate_id.eq(candidate_id)
+                & capacity.decision_timestamp.ge("2019-02-01")
+            ]
+            .status.eq("DEFINED")
+            .all()
+        )
+    with statistics.table("portfolio_capacity_summary.parquet") as capacity:
+        selected = capacity.loc[capacity.candidate_id.eq(candidate_id)]
+        assert set(selected.period) == {"all", "2019"}
+        assert selected.status.eq("UNDEFINED").all()
+        assert selected.value.isna().all()
+    with statistics.table("portfolio_performance.parquet") as metrics:
+        selected = metrics.loc[metrics.candidate_id.eq(candidate_id)].set_index(
+            "metric_id"
+        )
+        assert selected.loc["adv_unavailable_intervals", "value"] == len(missing_dates)
+        assert selected.loc["adv_unavailable_buy_orders", "value"] == len(missing_dates)
+        assert selected.loc["adv_unavailable_buy_target_notional", "value"] > 0
+        assert selected.loc["adv_unavailable_sell_orders", "value"] == 0
+    report = operations.report_build(
+        profile=case.profile, layout=case.layout, run_id=case.record.run_id
+    )["report"]
+    result = next(
+        row
+        for row in report["sections"]["portfolio"]["results"]
+        if row["candidate_id"] == candidate_id
+    )
+    assert result["ledger_identity"] == identity
+    assert result["economics"]["nav"] > 0
+    assert next(
+        row["value"]
+        for row in result["metrics"]
+        if row["metric_id"] == "adv_unavailable_buy_orders"
+    ) == len(missing_dates)
+    assert all(
+        row["status"] == "UNDEFINED" and row["value"] is None
+        for row in report["sections"]["capacity"]["results"]
+        if row["candidate_id"] == candidate_id
+    )

@@ -513,11 +513,12 @@ def test_industry_history_uses_effective_standard_and_set_hierarchy(tmp_path) ->
             "a_float_shares": [100.0],
         }
     )
+    calendar_dates = pd.date_range(sessions[0], sessions[-1]).as_unit("ns")
     calendar = pd.DataFrame(
         {
-            "calendar_date": sessions,
+            "calendar_date": calendar_dates,
             "source_market_type": 1,
-            "is_trading_day": True,
+            "is_trading_day": calendar_dates.isin(sessions),
         }
     )
     history = pd.DataFrame(
@@ -1417,11 +1418,14 @@ def test_listing_age_history_accepts_calendar_codes_and_absent_closed_assets():
     )
 
     dates = pd.bdate_range("2020-01-02", periods=3).as_unit("ns")
+    calendar_dates = pd.date_range(dates[0], dates[-1]).as_unit("ns")
     calendar = pd.DataFrame(
         {
-            "calendar_date": dates.tolist() * 2,
-            "source_market_type": ["1"] * 3 + ["4"] * 3,
-            "is_trading_day": [False] * 3 + [True] * 3,
+            "calendar_date": calendar_dates.tolist() * 2,
+            "source_market_type": ["1"] * len(calendar_dates)
+            + ["4"] * len(calendar_dates),
+            "is_trading_day": [False] * len(calendar_dates)
+            + calendar_dates.isin(dates).tolist(),
         }
     )
     observed = pd.DataFrame(

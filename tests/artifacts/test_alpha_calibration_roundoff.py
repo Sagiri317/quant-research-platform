@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -19,7 +20,7 @@ from quant_research_platform.research.portfolios.production import (
     _completed_calibration_rows,
 )
 from quant_research_platform.research.predictions.outputs import _add_a_share_scores
-from quant_research_platform.storage.identity import filesystem_read_bytes
+from quant_research_platform.storage.identity import native_filesystem_path
 from tests.artifacts.test_portfolio_ledger_artifact import (
     _alpha_envelope,
     _alpha_payload,
@@ -113,7 +114,9 @@ def test_rank_and_open_return_roundoff_survives_final_json_and_freeze(
         ledger_chunks=(frame,),
         final_calibration=lambda: _alpha_payload(calibration, envelope),
     )
-    before = filesystem_read_bytes(root / "final_alpha_calibration.json")
+    before = Path(
+        native_filesystem_path(root / "final_alpha_calibration.json")
+    ).read_bytes()
     saved = json.loads(before)
     assert (
         saved["calibration"]["slope_standard_error"] == calibration.slope_standard_error
@@ -130,4 +133,7 @@ def test_rank_and_open_return_roundoff_survives_final_json_and_freeze(
     assert (
         summary["alpha_calibration"]["inference_status"] == calibration.inference_status
     )
-    assert filesystem_read_bytes(root / "final_alpha_calibration.json") == before
+    assert (
+        Path(native_filesystem_path(root / "final_alpha_calibration.json")).read_bytes()
+        == before
+    )

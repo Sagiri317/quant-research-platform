@@ -20,8 +20,6 @@ from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_glob,
     filesystem_mkdir,
-    filesystem_read_bytes,
-    filesystem_read_text,
     filesystem_rename,
     filesystem_write_bytes,
     filesystem_write_text,
@@ -77,7 +75,9 @@ def test_dataset_session_inventory_preserves_numeric_part_order(tmp_path: Path) 
     for path, part_index in zip(parts, part_indices, strict=True):
         filesystem_rename(path, path.with_name(f"part-{part_index}.parquet"))
     manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(filesystem_read_text(manifest_path, encoding="utf-8"))
+    manifest = json.loads(
+        Path(native_filesystem_path(manifest_path)).read_text(encoding="utf-8")
+    )
     manifest["content_hash"] = fixture_dataset_content_hash(root)
     filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
     session = dataset_reading.open_dataset_session(root, columns=None, time_window=None)
@@ -182,8 +182,13 @@ def test_private_writer_releases_result_when_publish_loses_race(
             (make_default_dataset_frame(),),
             spec=make_processed_dataset_spec("publish_race"),
         )
-    assert filesystem_read_text(root / "winner", encoding="utf-8") == "winner"
-    assert filesystem_read_bytes(unrelated / "old-good") == b"old-good"
+    assert (
+        Path(native_filesystem_path(root / "winner")).read_text(encoding="utf-8")
+        == "winner"
+    )
+    assert (
+        Path(native_filesystem_path(unrelated / "old-good")).read_bytes() == b"old-good"
+    )
     assert set(filesystem_glob(root.parent, ".a-*")) == before_staging, (
         "publication_staging_not_cleaned"
     )

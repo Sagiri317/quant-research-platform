@@ -25,7 +25,7 @@
 | 研究数据 | 持久化100ms PANEL；微观结构、衍生品状态、现货/永续、跨资产、外部价格发现五类因子 | 按配置选择输入；来源缺失阻塞依赖分支，局部缺口和不完整窗口按各因子合同保留 NULL |
 | 模型 | 配置选择模型算法、参数、标签及训练/OOS资产范围，包含 LightGBM/XGBoost 和排名集成 | 训练拟合与标定随模型冻结；proxy不是成交概率，也不能推断未观测队列 |
 | 执行 | Binance BTC/ETH perpetual 的 taker/maker 候选，显式成本/延迟，continuous 与 independent_segments 两种账本模式 | 队列和流动性为公开L2近似；所需覆盖不足阻塞相应净结果，不跨缺口拼接收益 |
-| 展示 | 唯一目标DAG、统计、指定run报告、CLI/API、只读Notebook | 合成与读取验证不证明真实OOS获利或充分日频覆盖 |
+| 展示 | 唯一目标DAG、统计、指定run报告、CLI/API、只读研究图片 | 合成与读取验证不证明真实OOS获利或充分日频覆盖 |
 
 信息来源与执行场所分别绑定：现货/永续上下文、BTC/ETH/SOL 跨资产信息和 Bybit/OKX 外部价格发现均有生产入口；执行组合只允许 Binance BTC/ETH perpetual。SOL 可用于训练、评估和预测，不能加入执行组合。
 
@@ -503,6 +503,20 @@ XOOMAR 的 `data.history` 最多 5000 条、跨场所并按时间倒序；原响
 `cashflows` 是按时间严格递增的 `[event_ns, signed_USDT_per_long_asset_unit]`。
 两类记录的非适用字段为 `null`。预测值为 `null` 表示该笔预期现金流未知。
 只有决策时已经可得、覆盖预测终点且相关现金流均已知的 forecast 才参与增量下单。
+局部预测过期、覆盖末端不足或预期现金流未知时，该决策不新增订单；
+使用 `causal_no_new_risk_partial_forecast_v1` 合同。taker 已发出的订单仍按原延迟到达，
+不能事后撤销其承诺；校准 maker 对既有/待生效挂单发出原延迟撤单，撤单生效前及同刻的
+先序市场事件仍可成交，风险预留及订单期限保持原规则。有效预测恢复后重新计算新决策。
+实际持仓结算与预测资格独立，不延长预测覆盖，不用未来更新或实际结算反填预测。
+`blocked_decisions` 保留缺失决策数，`funding_required_decisions` 只计市场/模型门槛合格且
+确有新增或维持订单决策需要的资金预测检查；`funding_covered_decisions` 及
+`funding_decision_coverage` 披露有效数及比例，无需检查时比例为 null，不能称为全覆盖。
+部分检查有效则选择状态为 `PARTIAL`，全部所需检查无效仍阻塞目标发布。
+独立分段按整个目标判断后一条件：局部全缺段保留 `BLOCKED`/零预测覆盖诊断，其他段有效时
+可一起发布，但不拼接收益；STAT 同时保留逐段和全目标资金预测覆盖诊断，报告披露原执行资格。
+预测覆盖与真实盘口/成交/结算覆盖分开，后者不足仍阻塞对应连续账本或限制合法独立段。
+新执行 owner 的精确软件身份仅使受影响 PORT 及其下游 STAT/报告重建；不改写旧严格阻塞原件，
+不因本政策重训 MODEL/PRED，也不按留出收益选择缺失策略。
 实际结算不能反向影响下单量；显式完整覆盖内的空事件表才能表示无结算，
 没有输入不能当作零资金费。本模块消费外部归档，不新增联网采集端点。
 账本summary与报告保留`funding_qualification.sources`中的coverage、settlement_source及verification。
@@ -643,9 +657,9 @@ markout 在时钟越过目标纳秒或确认该时刻事件已耗尽后结算，
 费用敏感性、库存、日频统计、development/holdout 证据、readiness/blockers 和运行资源观测。
 Crypto 的日频统计为经济描述，不发布 SPA、StepM、MCS、PSR、DSR 或 PBO 推断矩阵。
 
-[只读研究 Notebook](../notebooks/research-interview-demo.ipynb) 通过明确的 profile、run_id 和 report_identity 读取已发布产物，
+研究图片通过明确的 profile、run_id 和 report_identity 引用已发布产物，
 使用同一查询入口显示持久化统计与账本曲线。连续曲线和各独立段分别展示，Crypto 时间轴使用 UTC；
-完整日不足时保留原指标的 UNDEFINED 原因，不从展示曲线重新计算年化，也不在 Notebook 内训练或发布。
+完整日不足时保留原指标的 UNDEFINED 原因，不从展示曲线重新计算年化，绘图过程不训练或发布研究产物。
 
 ## 研究操作与证据验收
 

@@ -44,22 +44,6 @@ HFT_GRID_MS = 100
 _NANOSECONDS_PER_MILLISECOND = 1_000_000
 
 
-def l1_ofi(
-    previous_bid: tuple[int, float],
-    current_bid: tuple[int, float],
-    previous_ask: tuple[int, float],
-    current_ask: tuple[int, float],
-) -> float:
-    """Cont-style L1 OFI over exact integer price ticks."""
-
-    return _ofi_units(
-        (previous_bid[0], _quantity_units(previous_bid[1])),
-        (current_bid[0], _quantity_units(current_bid[1])),
-        (previous_ask[0], _quantity_units(previous_ask[1])),
-        (current_ask[0], _quantity_units(current_ask[1])),
-    ) / (1 << 1074)
-
-
 def _quantity_units(value):
     # Every finite binary64 quantity is an integer multiple of 2**-1074.
     numerator, denominator = value.as_integer_ratio()

@@ -337,10 +337,12 @@ def _cross_sectional_metric_summary(
             else:
                 summary["mean"], summary["reason"] = None, "not_applicable"
                 summary["ratio_reason"] = "not_applicable"
+                summary["std_reason"] = "not_applicable"
         for suffix, key in (
             (prefix, "mean"),
             (f"{prefix}_reason", "reason"),
             (f"std_{prefix}", "std"),
+            (f"std_{prefix}_reason", "std_reason"),
             (f"{prefix}ir", "ratio"),
             (f"positive_{prefix}_rate", "positive_rate"),
             (f"valid_{prefix}_count", "valid_count"),

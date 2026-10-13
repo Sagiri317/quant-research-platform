@@ -10,7 +10,6 @@ QRP 是本地量化研究平台，主线为 A 股低频研究和 Binance BTC/ETH
 - [Crypto：研究范围、功能与事件合同](docs/crypto.md)
 - [架构与工程合同](docs/architecture.md)
 - [数据布局与来源边界](docs/data.md)
-- [只读研究演示 Notebook](notebooks/research-interview-demo.ipynb)
 
 代码、配置和长期文档一并纳入 Git；功能实现、合成验证和真实数据验收分别表述。
 本机采集操作、SSH 配置、验收记录和交付副本保存在被忽略的 .run/，不提交 Git。
@@ -53,11 +52,48 @@ runs/{run_id}/reports/{report_identity} 和 runs/{run_id}/portfolios/{target_id}
 API 使用 profile 查询参数选择市场。报告查询核对 run 与 report_identity 来源关系，
 直接返回保存的 Markdown；查询不重新生成报告正文。
 
-Notebook 使用 quantlab313 kernel，填写项目、profile、run_id 和 report_identity 后运行。
-它只读取已有诊断和聚合 NAV；A 股采用交易日/CNY，Crypto 采用 UTC/USDT 并区分 OOS 与空档。
-独立分段各自绘图，不连接成跨缺口资金曲线。
-NAV_STRIDE 只改变图形采样，同时显示源点数和显示点数；短区间不冒充正式日频统计。
-核心 CLI/API 不需要导入 Notebook 的 Matplotlib/Jupyter 开发依赖。
+研究者或获授权 agent 通过现有只读查询读取明确的 profile、run_id 和 report_identity，
+按需制作研究图片与分析。正式数值、适用范围、状态及缺失原因以已发布证据为准。
+A 股采用交易日/CNY，Crypto 采用 UTC/USDT 并区分 OOS 与空档；独立分段不连接。
+曲线采样不改变正式统计，事件级 NAV 不替代日频收益；零 NAV 后的金额恢复不使未定义收益率变为有效。
+Matplotlib 是可选开发依赖，核心 CLI/API 不依赖绘图环境。
+
+`reports.plots` 提供纯绘图函数，返回 `(figure, axes)`，不读取磁盘、不生成研究结论、
+不改变正式指标。绘图时才加载 Matplotlib；使用本机已有 Noto Sans CJK SC、思源黑体、
+微软雅黑等中文字体，缺少可用字体时明确报错，不静默输出方框字。
+
+- `plot_portfolio_curve(curve, access_window=..., timezone=...)`：直接接收
+  `queries.portfolio_curve(...)` 的返回值，绘制金额净值、OOS/空档与逐段回撤。
+  仅完整未抽样曲线提供描述性回撤路径；正式最大回撤仍以统计产物为准。
+- `plot_metric_comparison(rows, metric_id="sharpe", units="无量纲", ...)`：
+  显示已发布 Sharpe、风险、成本或换手指标，保留不可用状态；调用方须先选择可比较的范围。
+  不同货币、执行模式、覆盖区间不能仅因画在一起就解释为可比。
+- `plot_returns(rows, ...)`：各期净收益散点与描述性分布，不补零、不复利、不推断缺失日期。
+- `plot_factor_ic(rows, summary=True, ...)`：IC/Rank IC 因子横向比较；
+  `summary=False` 消费真实逐时点评估行，不能把摘要伪装成时序。
+- `plot_portfolio_activity(rows, ...)`：A 股已发布日表的成本拖累与实际换手，分轴标明比例。
+
+除净值函数外须显式传入 `source_identity` 与 `access_window`；含时间的函数还须传 `timezone`。
+时区应来自对应市场合同：A 股通常 `Asia/Shanghai`，Crypto 为 `UTC`。
+无时区时间戳保留来源时钟含义，只标注传入时区，不擅自转换；有时区时间戳才转换。
+调用方使用已校验报告/产物中的相同身份与访问范围，且传入行的有效值必须有限。
+极端有限值仅按图中标明的十进制倍率显示，不改变原始统计。
+
+报告直接提供 A 股指标/IC 摘要及 Crypto 完整 UTC 日收益；A 股日收益、成本/换手与 IC 时序
+应从已有校验读取器消费 `portfolio_daily.parquet` 或 `metrics.parquet`，转换为记录后传入。
+这些数据不在报告摘要中时不回退拼造，也不新增查询端点。
+
+~~~python
+from quant_research_platform.reports.plots import plot_portfolio_curve
+
+figure, axes = plot_portfolio_curve(
+    curve, access_window="holdout", timezone="UTC"
+)
+figure.savefig("nav.png", dpi=220, bbox_inches="tight")
+figure.savefig("nav.svg", bbox_inches="tight")
+# 批量生成时由调用方 plt.close(figure)，及时释放图形资源。
+~~~
+
 
 ## 开发验证
 

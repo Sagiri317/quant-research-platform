@@ -33,7 +33,6 @@ from quant_research_platform.storage.datasets.schema import (
 from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_mkdir,
-    filesystem_read_text,
     native_filesystem_path,
 )
 from tests.storage.dataset_test_support import (
@@ -943,7 +942,9 @@ def test_empty_unordered_category_domain_unions_with_nonempty_domain(
         chunks = (nonempty, empty) if reverse else (empty, nonempty)
         write_dataset(root, chunks, spec=make_processed_dataset_spec(name))
         manifest = json.loads(
-            filesystem_read_text(root / "_manifest" / "manifest.json", encoding="utf-8")
+            Path(
+                native_filesystem_path(root / "_manifest" / "manifest.json")
+            ).read_text(encoding="utf-8")
         )
         session = dataset_reading.open_dataset_session(
             root, columns=None, time_window=None

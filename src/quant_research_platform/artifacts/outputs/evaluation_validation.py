@@ -342,6 +342,29 @@ def validate_evaluation_artifact_structure(
             error="invalid_evaluation_summary_values",
         )
     for column in ("std_ic", "std_rankic"):
+        _validate_reason_pair(
+            ic_summary[column],
+            ic_summary[f"{column}_reason"],
+            allowed=frozenset(
+                {"no_valid_observations", "nonfinite_result", "not_applicable"}
+            ),
+        )
+        prefix = column.removeprefix("std_")
+        for count, reason in zip(
+            ic_summary[f"valid_{prefix}_count"],
+            ic_summary[f"{column}_reason"],
+            strict=True,
+        ):
+            expected_empty = (
+                "not_applicable"
+                if prefix == "rankic"
+                and spec.evaluation_axis == "single_asset_time_series"
+                else "no_valid_observations"
+            )
+            if (count == 0 and reason != expected_empty) or (
+                count > 0 and not pd.isna(reason) and reason != "nonfinite_result"
+            ):
+                raise ValueError("invalid_evaluation_statistic_reason")
         if bool(ic_summary[column].dropna().lt(0).any()):
             raise ValueError("invalid_evaluation_summary_values")
     for column in ("positive_ic_rate", "positive_rankic_rate"):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import math
+import struct
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -22,6 +23,103 @@ from tests.storage.low_level_fixtures import (
     make_default_dataset_frame,
     make_processed_dataset_spec,
 )
+
+
+@pytest.mark.parametrize("selected", (None, [True, True, False]))
+def test_float_lookup_partitions_keys_without_consuming_values(selected):
+    module = importlib.import_module("quant_research_platform.storage.exact_keys")
+    index = module.ExactPrimaryKeyIndex(primary_key=("key",))
+    source = pa.table({"key": ["a", "b", "c"], "value": [-0.0, 1.25, 2.5]})
+    assert (
+        index.add_float_value_table(
+            source,
+            namespace="source",
+            value_column="value",
+            selected=None if selected is None else pa.array(selected),
+        )
+        == 0
+    )
+    payloads = tuple(index._namespaces["source"].values())
+    expected_count = 3 if selected is None else 2
+    query = pa.table({"key": ["a", "a", "absent"]})
+    for mark, remaining in (
+        (False, expected_count),
+        (True, expected_count - 1),
+        (False, expected_count - 1),
+        (True, expected_count - 1),
+    ):
+        values, found = index.lookup_float_values(
+            query,
+            source_namespace="source",
+            matched_namespace="matched",
+            mark_matched=mark,
+        )
+        assert list(found) == [1, 1, 0]
+        assert struct.pack(">d", values[0]) == struct.pack(">d", -0.0)
+        assert math.isnan(values[2])
+        assert index.float_value_count(namespace="source") == remaining
+    for mark in (True, False, True):
+        values, found = index.lookup_float_values(
+            source,
+            source_namespace="source",
+            matched_namespace="matched",
+            mark_matched=mark,
+        )
+        assert list(found) == [1, 1, int(selected is None)]
+        assert values[1] == 1.25
+        assert index.float_value_count(namespace="source") == 0
+    unmatched, matched = index._namespaces["source"], index._namespaces["matched"]
+    assert not unmatched.keys() & matched.keys()
+    assert len(unmatched) + len(matched) == 3
+    assert all(
+        any(value is original for original in payloads) for value in matched.values()
+    )
+    assert all(value is None for value in unmatched.values())
+    if selected is None:
+        assert unmatched.__sizeof__() == {}.__sizeof__()
+
+
+@pytest.mark.parametrize("invalid", ("key", "payload"))
+def test_float_lookup_bad_late_row_keeps_match_batch_atomic(invalid):
+    module = importlib.import_module("quant_research_platform.storage.exact_keys")
+    index = module.ExactPrimaryKeyIndex(primary_key=("key",))
+    index.add_float_value_table(
+        pa.table({"key": [[1.0], [2.0]], "value": [2.0, 3.0]}),
+        namespace="source",
+        value_column="value",
+    )
+    if invalid == "payload":
+        source = index._namespaces["source"]
+        source[next(reversed(source))] = b"invalid"
+    error = (
+        "invalid_dataset_primary_key_value"
+        if invalid == "key"
+        else "invalid_exact_float_value"
+    )
+    with pytest.raises(ValueError, match=f"^{error}$"):
+        index.lookup_float_values(
+            pa.table({"key": [[1.0], [float("inf") if invalid == "key" else 2.0]]}),
+            source_namespace="source",
+            matched_namespace="matched",
+            mark_matched=True,
+        )
+    assert index.float_value_count(namespace="source") == 2
+    assert index.identity_payload_count(namespace="matched") == 0
+
+
+@pytest.mark.parametrize(
+    "source,matched", (("", "matched"), ("source", ""), ("same", "same"))
+)
+def test_float_lookup_requires_valid_distinct_namespaces(source, matched):
+    module = importlib.import_module("quant_research_platform.storage.exact_keys")
+    index = module.ExactPrimaryKeyIndex(primary_key=("key",))
+    with pytest.raises(ValueError, match="^invalid_exact_key_namespace$"):
+        index.lookup_float_values(
+            pa.table({"key": ["a"]}),
+            source_namespace=source,
+            matched_namespace=matched,
+            mark_matched=False,
+        )
 
 
 def test_writer_rejects_inconsistent_ordered_categorical_domains(

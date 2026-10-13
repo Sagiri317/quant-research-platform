@@ -772,3 +772,160 @@ def test_output_destination_uses_layout_relationship_not_name(tmp_path, alias):
             derive_output_bundle_root(**kwargs)
     else:
         assert derive_output_bundle_root(**kwargs) == root / "outputs" / "pred-run"
+
+
+def test_prediction_session_keeps_consumer_matches_independent(tmp_path, monkeypatch):
+    from quant_research_platform.artifacts.outputs.prediction import (
+        write_prediction_outputs,
+    )
+    from quant_research_platform.storage.layout import StorageLayout
+    from quant_research_platform.workflows import research
+
+    frame = make_price_volume_prediction_output_frame()
+    spec = make_price_volume_prediction_spec()
+    root = write_prediction_outputs(
+        spec=spec,
+        output_spec=make_prediction_report_spec(),
+        layout=StorageLayout(tmp_path),
+        output_chunks=(frame,),
+        model_metadata=frame.attrs["model_metadata"],
+        prediction_metadata_factory=lambda: frame.attrs["prediction_metadata"],
+    )
+    session = bundle_validation._PredictionOutputSession(
+        root, expected_output_id=spec.prediction_id
+    )
+    first = bundle_validation.read_prediction_output_bundle(
+        root, expected_output_id=spec.prediction_id, validation_session=session
+    )[1]
+    second = bundle_validation.read_prediction_output_bundle(
+        root, expected_output_id=spec.prediction_id, validation_session=session
+    )[1]
+    assert first.coverage_counts() == second.coverage_counts() == (1, 0)
+    first.values_for_frame(frame, mark_matched=True)
+    assert first.coverage_counts() == (0, 0)
+    assert second.coverage_counts() == (1, 0)
+    for mark_matched in (False, True):
+        values, found = first.values_for_frame(frame, mark_matched=mark_matched)
+        assert list(found) == [1]
+        assert list(values) == frame["prediction_score"].tolist()
+        assert first.coverage_counts() == (0, 0)
+        assert second.coverage_counts() == (1, 0)
+    first.close()
+    assert first._index is None
+    second.values_for_frame(frame, mark_matched=True)
+    assert second.coverage_counts() == (0, 0)
+    second.close()
+    assert second._index is None
+
+    saved = ({}, {}, {}, session)
+    semantic_root = root.parent.parent
+    monkeypatch.setattr(
+        research, "_verify_semantic_reuse", lambda saved: saved[3].verify()
+    )
+    with research._prediction_consumer(
+        semantic_root,
+        reuse_sessions={semantic_root: saved},
+        expected_output_id=spec.prediction_id,
+    ) as (_, lookup):
+        assert lookup.row_count == 1
+    assert lookup._index is None
+    primary = KeyboardInterrupt("consumer interrupted")
+    with pytest.raises(KeyboardInterrupt) as caught:
+        with research._prediction_consumer(
+            semantic_root,
+            reuse_sessions={semantic_root: saved},
+            expected_output_id=spec.prediction_id,
+        ) as (_, lookup):
+            (root / "unexpected").write_text("mutation")
+            raise primary
+    assert caught.value is primary
+    assert lookup._index is None
+    assert any("snapshot verification" in note for note in primary.__notes__)
+    with pytest.raises(ValueError, match="output_member_set_mismatch"):
+        bundle_validation.read_prediction_output_bundle(
+            root, expected_output_id=spec.prediction_id, validation_session=session
+        )
+
+
+def test_prediction_session_validates_all_keys_then_indexes_selected_window(
+    tmp_path, monkeypatch
+):
+    from dataclasses import replace
+
+    import pandas as pd
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from quant_research_platform.artifacts.outputs.prediction import (
+        write_prediction_outputs,
+    )
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.storage.layout import StorageLayout
+
+    frame = make_price_volume_prediction_output_frame()
+    frame = frame.loc[frame.index.repeat(3)].reset_index(drop=True)
+    frame["timestamp"] = pd.date_range("2014-01-03", periods=3)
+    spec = replace(make_price_volume_prediction_spec(), test_end="2014-01-05")
+    model = {
+        **frame.attrs["model_metadata"],
+        "test_end": spec.test_end,
+        "oos_end": spec.test_end,
+    }
+    metadata = {
+        **frame.attrs["prediction_metadata"],
+        "requested_test_end": spec.test_end,
+        "effective_test_end": spec.test_end,
+    }
+    for name in (
+        "rows_input",
+        "rows_after_filter_mode",
+        "rows_after_input_dropna",
+        "prediction_rows",
+    ):
+        metadata[name] = 3
+    root = write_prediction_outputs(
+        spec=spec,
+        output_spec=make_prediction_report_spec(),
+        layout=StorageLayout(tmp_path),
+        output_chunks=(frame,),
+        model_metadata=model,
+        prediction_metadata_factory=lambda: metadata,
+    )
+    calls = []
+    original = bundle_validation.ExactPrimaryKeyIndex.add_float_value_table
+
+    def observed(self, table, **kwargs):
+        calls.append(table.num_rows)
+        return original(self, table, **kwargs)
+
+    monkeypatch.setattr(
+        bundle_validation.ExactPrimaryKeyIndex, "add_float_value_table", observed
+    )
+    session = bundle_validation._PredictionOutputSession(
+        root, expected_output_id=spec.prediction_id
+    )
+    _, lookup = bundle_validation.read_prediction_output_bundle(
+        root,
+        expected_output_id=spec.prediction_id,
+        validation_session=session,
+        time_window=TimeWindow("2014-01-04", "2014-01-04"),
+    )
+    assert calls == [3, 1]
+    assert lookup.row_count == 1
+    assert lookup.coverage_counts() == (1, 0)
+    # Corruption outside the selection cannot hide behind request-local admission.
+    frame.loc[2, "timestamp"] = frame.loc[0, "timestamp"]
+    pq.write_table(
+        pa.Table.from_pandas(frame, preserve_index=False), root / "prediction.parquet"
+    )
+    with pytest.raises(ValueError, match="output_bundle_identity_changed"):
+        bundle_validation.read_prediction_output_bundle(
+            root,
+            expected_output_id=spec.prediction_id,
+            validation_session=session,
+            time_window=TimeWindow("2014-01-04", "2014-01-04"),
+        )
+    with pytest.raises(ValueError, match="duplicate_persisted_prediction_keys"):
+        bundle_validation._PredictionOutputSession(
+            root, expected_output_id=spec.prediction_id
+        )

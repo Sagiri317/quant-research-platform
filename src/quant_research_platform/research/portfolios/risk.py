@@ -166,6 +166,10 @@ def holding_attribution(
     values = dict.fromkeys(components)
     reasons = {}
     values["benchmark"] = 0.0 if benchmark_id is None else benchmark_return
+    if nav_before <= 0 or nav_post <= 0:
+        reason = "nonpositive_start_nav" if nav_before <= 0 else "nonpositive_post_nav"
+        reasons.update({name: reason for name in components if name != "benchmark"})
+        return values, reasons, pd.Series(dtype="float64")
     fitted = inputs.fitted
     if fitted is None:
         reasons.update(

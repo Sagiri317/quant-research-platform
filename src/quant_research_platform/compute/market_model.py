@@ -93,7 +93,7 @@ class MarketModelRiskState:
             ) & known
             frame.loc[~known, ["period_return", "float_market_cap"]] = np.nan
         eligible = frame.loc[frame.eligible] if "eligible" in frame else frame
-        if eligible[["period_return", "float_market_cap"]].isna().any().any():
+        if eligible["float_market_cap"].isna().any():
             raise ValueError("market_model_risk_numeric_invalid")
         frame = frame.sort_values("asset_id", kind="mergesort").reset_index(drop=True)
         if open_market_types is not None and asset_market_types is not None:
@@ -146,6 +146,10 @@ class MarketModelRiskState:
         market_total = Fraction()
         for _, value, weight, _, eligible in weighted:
             if eligible and weight is not None:
+                if np.isnan(value):
+                    # A required member makes the whole session unknown.
+                    market_weight = Fraction()
+                    break
                 exact_weight = Fraction(weight)
                 market_weight += exact_weight
                 market_total += exact_weight * Fraction(value)

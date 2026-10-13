@@ -209,6 +209,7 @@ class _EvaluationStreamingState:
                     "positive_rate": np.nan,
                     "count": 0,
                     "reason": "not_applicable",
+                    "std_reason": "not_applicable",
                     "ratio_reason": "not_applicable",
                 }
             records.append(
@@ -226,8 +227,10 @@ class _EvaluationStreamingState:
                     "positive_rankic_rate": rankic["positive_rate"],
                     "valid_rankic_count": rankic["count"],
                     "ic_reason": ic["reason"],
+                    "std_ic_reason": ic["std_reason"],
                     "icir_reason": ic["ratio_reason"],
                     "rankic_reason": rankic["reason"],
+                    "std_rankic_reason": rankic["std_reason"],
                     "rankicir_reason": rankic["ratio_reason"],
                 }
             )
@@ -636,44 +639,19 @@ def _evaluate_filtered_frame(
     )
     timestamp_count = int(timestamps.nunique())
     skipped_timestamps: set[pd.Timestamp] = set()
-    label_metrics = []
-    label_grouped = []
-    for label_column in label_columns:
-        compute_spec = ComputePanelSpec(
-            signal_columns=signal_columns,
-            label_column=label_column,
-            timestamp_column="timestamp",
-            asset_column=asset_column,
-        )
-        columns = (
-            compute_spec.timestamp_column,
-            compute_spec.asset_column,
-            *compute_spec.signal_columns,
-            compute_spec.label_column,
-        )
-        metrics, grouped = compute_ic_and_grouped_label_values(
-            filtered.loc[:, list(columns)], compute_spec, n_groups=n_groups
-        )
-        n_obs = strict_non_negative_count_series(metrics["n_obs"])
-        skipped_timestamps.update(
-            pd.Timestamp(value)
-            for value in metrics.loc[n_obs.lt(2), "timestamp"].drop_duplicates()
-        )
-        label_metrics.append(metrics)
-        label_grouped.append(grouped)
-    metrics = (
-        label_metrics[0]
-        if len(label_metrics) == 1
-        else pd.concat(label_metrics, ignore_index=True).sort_values(
-            "timestamp", kind="mergesort", ignore_index=True
-        )
+    compute_spec = ComputePanelSpec(
+        signal_columns=signal_columns,
+        label_columns=label_columns,
+        asset_column=asset_column,
     )
-    grouped = (
-        label_grouped[0]
-        if len(label_grouped) == 1
-        else pd.concat(label_grouped, ignore_index=True).sort_values(
-            "timestamp", kind="mergesort", ignore_index=True
-        )
+    columns = ("timestamp", asset_column, *signal_columns, *label_columns)
+    metrics, grouped = compute_ic_and_grouped_label_values(
+        filtered.loc[:, list(columns)], compute_spec, n_groups=n_groups
+    )
+    n_obs = strict_non_negative_count_series(metrics["n_obs"])
+    skipped_timestamps.update(
+        pd.Timestamp(value)
+        for value in metrics.loc[n_obs.lt(2), "timestamp"].drop_duplicates()
     )
     metadata = {
         "rows_input": strict_non_negative_count_value(filter_metadata["rows_input"]),

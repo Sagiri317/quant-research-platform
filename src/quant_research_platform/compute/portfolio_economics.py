@@ -3,6 +3,7 @@
 from fractions import Fraction
 
 from quant_research_platform.contracts.portfolios import PORTFOLIO_CASH_ASSET_ID
+from quant_research_platform.contracts.validation import finite_exact_float
 
 
 class _LedgerEconomics:
@@ -63,11 +64,26 @@ class _LedgerEconomics:
         net, fees, funding = (
             self.totals[name] for name in ("net_pnl", "fees", "funding")
         )
+        fill_quantity = finite_exact_float(self.totals["fill_quantity"])
+        capital_return = finite_exact_float(
+            net / Fraction(self.capital.initial_capital)
+        )
         return {
-            **{name: float(value) for name, value in self.totals.items()},
+            **{
+                name: float(value)
+                for name, value in self.totals.items()
+                if name != "fill_quantity"
+            },
+            "fill_quantity": fill_quantity,
+            "fill_quantity_reason": "nonfinite_result"
+            if fill_quantity is None
+            else None,
             "gross_pnl": float(net + fees - funding),
             "nav": float(Fraction(self.capital.initial_capital) + net),
-            "capital_return": float(net / Fraction(self.capital.initial_capital)),
+            "capital_return": capital_return,
+            "capital_return_reason": "nonfinite_result"
+            if capital_return is None
+            else None,
             "fill_events": self.fill_events,
             "valuation_timestamp_ns": self.timestamp_ns,
         }

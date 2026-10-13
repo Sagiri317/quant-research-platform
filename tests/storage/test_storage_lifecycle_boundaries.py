@@ -898,7 +898,7 @@ def test_persisted_storage_boundaries_preserve_serious_io(
         root = _write_artifact(tmp_path)
         logical = root.parent.parent
     before = {
-        path: identity.filesystem_read_bytes(path)
+        path: Path(identity.native_filesystem_path(path)).read_bytes()
         for path in identity.filesystem_glob(root, "**/*")
         if identity.filesystem_is_file(path)
     }
@@ -989,7 +989,7 @@ def test_persisted_storage_boundaries_preserve_serious_io(
         assert caught.value is primary
     assert all(
         (
-            identity.filesystem_read_bytes(path) == value
+            Path(identity.native_filesystem_path(path)).read_bytes() == value
             for path, value in before.items()
         )
     )

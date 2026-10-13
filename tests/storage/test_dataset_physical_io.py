@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import importlib
 import json
+import os
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -27,11 +28,9 @@ from quant_research_platform.storage.datasets.reading import _prepare_in_filter
 from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_glob,
-    filesystem_read_bytes,
-    filesystem_read_text,
     filesystem_rename,
-    filesystem_replace,
     filesystem_write_bytes,
+    native_filesystem_path,
 )
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
@@ -231,7 +230,7 @@ def test_session_detects_part_manifest_and_same_size_identity_changes(
     filesystem_write_bytes(manifest_path, session.manifest_bytes)
     session = dataset_reading.open_dataset_session(root, columns=None, time_window=None)
     part = session.all_paths[0]
-    raw = bytearray(filesystem_read_bytes(part))
+    raw = bytearray(Path(native_filesystem_path(part)).read_bytes())
     raw[len(raw) // 2] ^= 1
     filesystem_write_bytes(part, raw)
     with pytest.raises(ValueError, match="dataset_file_identity_changed"):
@@ -248,8 +247,8 @@ def test_session_detects_part_replacement_after_issue(tmp_path: Path) -> None:
     session = dataset_reading.open_dataset_session(root, columns=None, time_window=None)
     part = session.all_paths[0]
     replacement = tmp_path / "replacement.parquet"
-    filesystem_write_bytes(replacement, filesystem_read_bytes(part))
-    filesystem_replace(replacement, part)
+    filesystem_write_bytes(replacement, Path(native_filesystem_path(part)).read_bytes())
+    os.replace(native_filesystem_path(replacement), native_filesystem_path(part))
     with pytest.raises(ValueError, match="dataset_file_identity_changed"):
         session.verify()
 
@@ -528,9 +527,13 @@ def test_manifest_structural_truth_rejects_impossible_counts_and_dates(
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec("manifest_truth"),
     )
-    spec = json.loads(filesystem_read_text(root / "spec.json", encoding="utf-8"))
+    spec = json.loads(
+        Path(native_filesystem_path(root / "spec.json")).read_text(encoding="utf-8")
+    )
     manifest = json.loads(
-        filesystem_read_text(root / "_manifest" / "manifest.json", encoding="utf-8")
+        Path(native_filesystem_path(root / "_manifest" / "manifest.json")).read_text(
+            encoding="utf-8"
+        )
     )
     manifest.update(mutation)
     with pytest.raises(ValueError, match=error):
@@ -587,7 +590,7 @@ def test_dataset_native_disk_failure_removes_partial_candidate_and_preserves_pub
         spec=make_processed_dataset_spec("published"),
     )
     original = {
-        path: filesystem_read_bytes(path)
+        path: Path(native_filesystem_path(path)).read_bytes()
         for path in filesystem_glob(published, "**/*")
         if path.is_file()
     }
@@ -612,7 +615,9 @@ def test_dataset_native_disk_failure_removes_partial_candidate_and_preserves_pub
     assert partial_paths and all(not path.exists() for path in partial_paths)
     assert not filesystem_exists(candidate)
     assert tuple(candidate.parent.glob(".a-*")) == ()
-    assert {path: filesystem_read_bytes(path) for path in original} == original
+    assert {
+        path: Path(native_filesystem_path(path)).read_bytes() for path in original
+    } == original
 
 
 @pytest.mark.parametrize("variant", ("normal", "empty", "override"))

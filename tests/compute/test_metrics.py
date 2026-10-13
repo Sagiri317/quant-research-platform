@@ -15,7 +15,9 @@ from tests.helpers.compute_inputs import make_perfect_cross_section_compute_pane
 
 
 def test_validate_compute_panel_normalizes_and_sorts_valid_panel() -> None:
-    spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(
+        signal_columns=("factor",), label_columns=("forward_return",)
+    )
 
     result = validate_compute_panel(
         make_perfect_cross_section_compute_panel().iloc[::-1],
@@ -27,7 +29,9 @@ def test_validate_compute_panel_normalizes_and_sorts_valid_panel() -> None:
 
 
 def test_validate_compute_panel_rejects_missing_signal_column() -> None:
-    spec = ComputePanelSpec(signal_columns=("missing",), label_column="forward_return")
+    spec = ComputePanelSpec(
+        signal_columns=("missing",), label_columns=("forward_return",)
+    )
 
     with pytest.raises(ValueError, match="panel is missing columns"):
         validate_compute_panel(
@@ -37,7 +41,9 @@ def test_validate_compute_panel_rejects_missing_signal_column() -> None:
 
 
 def test_validate_compute_panel_rejects_duplicate_timestamp_asset_keys() -> None:
-    spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(
+        signal_columns=("factor",), label_columns=("forward_return",)
+    )
     panel = pd.concat(
         [
             make_perfect_cross_section_compute_panel(),
@@ -51,7 +57,9 @@ def test_validate_compute_panel_rejects_duplicate_timestamp_asset_keys() -> None
 
 
 def test_compute_ic_by_timestamp_computes_pearson_and_rankic() -> None:
-    spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(
+        signal_columns=("factor",), label_columns=("forward_return",)
+    )
 
     result, _ = compute_ic_and_grouped_label_values(
         make_perfect_cross_section_compute_panel(),
@@ -66,7 +74,9 @@ def test_compute_ic_by_timestamp_computes_pearson_and_rankic() -> None:
 
 
 def test_compute_grouped_label_values_assigns_timestamp_level_groups() -> None:
-    spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(
+        signal_columns=("factor",), label_columns=("forward_return",)
+    )
 
     _, result = compute_ic_and_grouped_label_values(
         make_perfect_cross_section_compute_panel(),
@@ -86,7 +96,7 @@ def test_compute_grouped_label_values_assigns_timestamp_level_groups() -> None:
 
 
 def test_grouped_label_values_keep_tie_classes_and_real_tiny_variation() -> None:
-    spec = ComputePanelSpec(signal_columns=("factor",), label_column="label")
+    spec = ComputePanelSpec(signal_columns=("factor",), label_columns=("label",))
     frame = pd.DataFrame(
         {
             "timestamp": ["2026-01-01"] * 4,
@@ -112,3 +122,11 @@ def test_grouped_label_values_keep_tie_classes_and_real_tiny_variation() -> None
     assert grouped["n_obs"].tolist() == [1, 2, 1]
     pd.testing.assert_frame_equal(grouped, permuted)
     assert tiny["group"].tolist() == [1, 2]
+
+
+@pytest.mark.parametrize(
+    "labels", [(), ("label", "label"), ("",), ("factor",), ("timestamp",), ("asset",)]
+)
+def test_compute_panel_rejects_invalid_label_columns(labels):
+    with pytest.raises(ValueError):
+        ComputePanelSpec(signal_columns=("factor",), label_columns=labels)

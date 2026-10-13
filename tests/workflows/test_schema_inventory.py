@@ -28,7 +28,6 @@ from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.datasets.schema import data_spec_payload
 from quant_research_platform.storage.identity import (
     filesystem_mkdir,
-    filesystem_read_text,
     filesystem_rename,
     filesystem_write_text,
     native_filesystem_path,
@@ -158,7 +157,10 @@ def test_inventory_ignores_only_unpublished_atomic_directory(tmp_path, instances
         )
     assert len(observed) == 2
     assert len(_collect_inventory(tmp_path)["datasets"]) == 2
-    assert filesystem_read_text(ordinary_file, encoding="utf-8") == "ordinary file"
+    assert (
+        Path(native_filesystem_path(ordinary_file)).read_text(encoding="utf-8")
+        == "ordinary file"
+    )
 
 
 @pytest.mark.parametrize(
@@ -181,7 +183,9 @@ def test_schema_inventory_uses_full_posix_path_order_for_prefix_names(tmp_path, 
         )
     output = tmp_path / "inventory.json"
     schema_inventory.write_schema_inventory(tmp_path, output)
-    items = json.loads(filesystem_read_text(output, encoding="utf-8"))["datasets"]
+    items = json.loads(
+        Path(native_filesystem_path(output)).read_text(encoding="utf-8")
+    )["datasets"]
     assert [item["logical_relative_root"] for item in items] == sorted(
         root.relative_to(tmp_path).as_posix() for root in roots
     )
@@ -284,7 +288,9 @@ def test_schema_inventory_keeps_all_current_roots_and_instances(
     schema_inventory.write_schema_inventory(
         tmp_path, output, important_null_count_columns=("value",)
     )
-    items = json.loads(filesystem_read_text(output, encoding="utf-8"))["datasets"]
+    items = json.loads(
+        Path(native_filesystem_path(output)).read_text(encoding="utf-8")
+    )["datasets"]
     assert len(items) == 9
     assert sum(item["row_count"] for item in items) == 18
     assert [item["logical_relative_root"] for item in items] == sorted(expected)
@@ -303,9 +309,9 @@ def test_schema_inventory_keeps_all_current_roots_and_instances(
         private_cli.app, ["--project-root", str(tmp_path), "--output", str(cli_output)]
     )
     assert result.exit_code == 0, result.output
-    cli_items = json.loads(filesystem_read_text(cli_output, encoding="utf-8"))[
-        "datasets"
-    ]
+    cli_items = json.loads(
+        Path(native_filesystem_path(cli_output)).read_text(encoding="utf-8")
+    )["datasets"]
     assert [item["logical_relative_root"] for item in cli_items] == sorted(expected)
 
 
@@ -583,7 +589,9 @@ def test_schema_inventory_rejects_forged_storage_summary(
         spec=spec,
     )
     manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(filesystem_read_text(manifest_path, encoding="utf-8"))
+    manifest = json.loads(
+        Path(native_filesystem_path(manifest_path)).read_text(encoding="utf-8")
+    )
     manifest.update(forged_summary)
     filesystem_write_text(manifest_path, json.dumps(manifest) + "\n", encoding="utf-8")
 
@@ -686,7 +694,9 @@ def test_inventory_nonkey_time_does_not_define_year_axis(tmp_path, forged):
     )
     if forged:
         path = root / "_manifest" / "manifest.json"
-        manifest = json.loads(filesystem_read_text(path, encoding="utf-8"))
+        manifest = json.loads(
+            Path(native_filesystem_path(path)).read_text(encoding="utf-8")
+        )
         manifest["null_count_summary"]["asset_id"] = 1
         filesystem_write_text(path, json.dumps(manifest) + "\n", encoding="utf-8")
     if forged:

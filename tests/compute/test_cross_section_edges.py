@@ -18,7 +18,7 @@ from tests.helpers.compute_inputs import make_cross_section_compute_panel
 def test_dataframe_cross_section_metrics() -> None:
     spec = ComputePanelSpec(
         signal_columns=("factor", "factor_alt"),
-        label_column="forward_return",
+        label_columns=("forward_return",),
     )
     frame = make_cross_section_compute_panel()
 
@@ -33,7 +33,9 @@ def test_dataframe_cross_section_metrics() -> None:
 
 
 def test_dataframe_cross_section_accepts_ignored_extra_columns() -> None:
-    spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(
+        signal_columns=("factor",), label_columns=("forward_return",)
+    )
     frame = make_cross_section_compute_panel().assign(
         segment=["a", "a", "a", "b", "b", "b"]
     )
@@ -51,7 +53,9 @@ def test_dataframe_cross_section_accepts_ignored_extra_columns() -> None:
 
 
 def test_dataframe_cross_section_rejects_invalid_group_counts_and_columns() -> None:
-    spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(
+        signal_columns=("factor",), label_columns=("forward_return",)
+    )
 
     with pytest.raises(ValueError, match="panel is missing columns"):
         compute_ic_and_grouped_label_values(

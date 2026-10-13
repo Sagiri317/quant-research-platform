@@ -38,13 +38,8 @@ def unified_trading_sessions(
     return _sorted_unique_sessions(normalized.loc[mask, "calendar_date"])
 
 
-def market_type_trading_sessions(
-    calendar: pd.DataFrame,
-    market_type: int,
-    *,
-    required_dates: pd.DatetimeIndex | None = None,
-) -> pd.DatetimeIndex:
-    """Return open sessions and reject unknown required dates."""
+def market_type_calendar_state(calendar: pd.DataFrame, market_type: int) -> pd.Series:
+    """Return explicit O/C facts; reindexing an absent date preserves unknown."""
 
     normalized = _require_normalized_calendar(calendar)
     source_market_types = strict_integer_series(
@@ -60,13 +55,10 @@ def market_type_trading_sessions(
         error="invalid_source_market_type",
     ).iloc[0]
     selected = source_market_types.eq(requested_market_type)
-    if (
-        required_dates is not None
-        and not required_dates.isin(normalized.loc[selected, "calendar_date"]).all()
-    ):
-        raise ValueError("a_share_trading_calendar_unknown_session")
-    mask = selected & trading
-    return _sorted_unique_sessions(normalized.loc[mask, "calendar_date"])
+    dates = pd.DatetimeIndex(normalized.loc[selected, "calendar_date"])
+    if dates.has_duplicates:
+        raise ValueError("duplicate_trading_calendar_key")
+    return pd.Series(trading.loc[selected].to_numpy(), index=dates, dtype="boolean")
 
 
 def compute_listing_session_facts(
@@ -115,13 +107,11 @@ def compute_listing_session_facts(
         )
         for market in market_types.unique()
     }
-    calendar_dates = pd.DatetimeIndex(sorted(normalized["calendar_date"].unique()))
     unconfirmed_sessions = {}
     for market, observed in (observed_market_sessions or {}).items():
         original = sessions_by_market.get(market, pd.DatetimeIndex([]))
         unconfirmed_sessions[market] = observed.difference(original)
         sessions_by_market[market] = original.union(observed)
-        calendar_dates = calendar_dates.union(observed)
     dates_by_market = {
         market: pd.DatetimeIndex(
             sorted(normalized.loc[market_types.eq(market), "calendar_date"].unique())
@@ -175,9 +165,7 @@ def compute_listing_session_facts(
                 exact &= ~active
                 continue
             known_dates = dates_by_market[record.market_type]
-            required_count = calendar_dates.searchsorted(
-                ends, side="right"
-            ) - calendar_dates.searchsorted(starts, side="left")
+            required_count = (ends - starts).dt.days + 1
             covered_count = known_dates.searchsorted(
                 ends, side="right"
             ) - known_dates.searchsorted(starts, side="left")

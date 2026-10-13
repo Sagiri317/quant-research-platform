@@ -17,10 +17,9 @@ from quant_research_platform.sources.choice.raw_exports import (
 from quant_research_platform.storage.identity import (
     filesystem_glob,
     filesystem_iterdir,
-    filesystem_read_bytes,
-    filesystem_read_text,
     filesystem_write_bytes,
     filesystem_write_text,
+    native_filesystem_path,
 )
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import read_manifest
@@ -29,7 +28,10 @@ from tests.helpers.choice_raw import response as _response
 
 
 def _immediate_file_bytes(root: Path) -> dict[str, bytes]:
-    return {path.name: filesystem_read_bytes(path) for path in filesystem_iterdir(root)}
+    return {
+        path.name: Path(native_filesystem_path(path)).read_bytes()
+        for path in filesystem_iterdir(root)
+    }
 
 
 def _request(endpoint: str = "ctr") -> ChoiceRequest:
@@ -75,14 +77,16 @@ def test_official_shapes_roundtrip_and_exact_reuse(
     with choice_session(sdk) as session:
         root = session.fetch(layout, request)
         assert root.is_relative_to(tmp_path / "data/raw/choice")
-        original = filesystem_read_bytes(root / "response.csv")
+        original = Path(native_filesystem_path(root / "response.csv")).read_bytes()
         assert session.fetch(layout, request) == root
         assert sdk.calls == 1
         restored = read_choice_response(root, request)
         assert restored == vars(response)
         actual = copy.deepcopy(restored)
         assert actual == vars(response)
-        assert filesystem_read_bytes(root / "response.csv") == original
+        assert (
+            Path(native_filesystem_path(root / "response.csv")).read_bytes() == original
+        )
     assert sdk.stops == 1
     metadata = read_manifest(root / "response.metadata.json")
     assert metadata["columns"][2:] == response.Indicators
@@ -149,11 +153,14 @@ def test_corrupt_completed_response_refuses_reuse_without_overwriting(
     with choice_session(sdk) as session:
         root = session.fetch(StorageLayout(tmp_path), request)
         sidecar = root / "response.metadata.json"
-        metadata = json.loads(filesystem_read_text(sidecar, encoding="utf-8"))
+        metadata = json.loads(
+            Path(native_filesystem_path(sidecar)).read_text(encoding="utf-8")
+        )
         if corruption == "value":
             csv = root / "response.csv"
             filesystem_write_bytes(
-                csv, filesystem_read_bytes(csv).replace(b"12", b"13")
+                csv,
+                Path(native_filesystem_path(csv)).read_bytes().replace(b"12", b"13"),
             )
         elif corruption == "request":
             metadata["metadata"]["request"]["sdk_version"] = "different-sdk"
@@ -211,18 +218,22 @@ def test_invalid_shape_preserves_old_good_and_long_cell_is_accepted(
     sdk = SDK(_response(Indicators=["QKMZ"], Data={"0": [1]}))
     with choice_session(sdk) as session:
         root = session.fetch(StorageLayout(tmp_path), request)
-        original = filesystem_read_bytes(root / "response.csv")
+        original = Path(native_filesystem_path(root / "response.csv")).read_bytes()
         different = replace(request, sdk_version="other-sdk")
         sdk.response = _response(Indicators=["QKMZ"], Data={"0": [1, 2]})
         with pytest.raises(ValueError):
             session.fetch(StorageLayout(tmp_path), different)
-        assert filesystem_read_bytes(root / "response.csv") == original
+        assert (
+            Path(native_filesystem_path(root / "response.csv")).read_bytes() == original
+        )
         assert len(list(filesystem_iterdir(root.parent))) == 1
         values = ["x" * (1024 * 1024 + 1)]
         sdk.response = _response(Indicators=["QKMZ"], Data={"0": values})
         published = session.fetch(StorageLayout(tmp_path), different)
         assert read_choice_response(published, different)["Data"]["0"] == values
-        assert filesystem_read_bytes(root / "response.csv") == original
+        assert (
+            Path(native_filesystem_path(root / "response.csv")).read_bytes() == original
+        )
 
 
 def test_atomic_failure_preserves_primary_and_session_exclusivity(
@@ -291,19 +302,19 @@ def test_scalar_saved_metadata_preserves_primary_error_at_read_and_reuse(
     with choice_session(sdk) as session:
         root = session.fetch(layout, request)
         path = root / "response.metadata.json"
-        original = filesystem_read_bytes(path)
+        original = Path(native_filesystem_path(path)).read_bytes()
         manifest = json.loads(original)
         manifest["metadata"] = metadata
         filesystem_unlink(path)
         filesystem_write_text(path, json.dumps(manifest), encoding="utf-8")
-        corrupt = filesystem_read_bytes(path)
+        corrupt = Path(native_filesystem_path(path)).read_bytes()
         with pytest.raises(ValueError, match="^choice_saved_metadata_invalid$"):
             read_choice_response(root, request)
             pytest.fail("invalid metadata admitted")
         with pytest.raises(ValueError, match="^choice_saved_metadata_invalid$"):
             session.fetch(layout, request)
         assert sdk.calls == 1
-        assert filesystem_read_bytes(path) == corrupt
+        assert Path(native_filesystem_path(path)).read_bytes() == corrupt
 
 
 def test_documented_index_weight_request_preserves_index_and_date(tmp_path):

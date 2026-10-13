@@ -115,31 +115,48 @@ class ExactPrimaryKeyIndex:
         return table.num_rows - self._insert_rows(rows())
 
     def lookup_float_values(
-        self, table: pa.Table, *, source_namespace: str, matched_namespace: str | None
+        self,
+        table: pa.Table,
+        *,
+        source_namespace: str,
+        matched_namespace: str,
+        mark_matched: bool,
     ):
         source = self._namespace(source_namespace)
-        if matched_namespace is not None:
-            self._namespace(matched_namespace)
+        matched = self._namespace(matched_namespace)
+        if source_namespace == matched_namespace:
+            raise ValueError("invalid_exact_key_namespace")
         values, found = (
             array("d", [math.nan]) * table.num_rows,
             bytearray(table.num_rows),
         )
-        matched = []
+        pending: dict[bytes, bytes] = {}
         rows = self._prepared_comparison_rows(
             table, namespace=source_namespace, value_columns=()
         )
         for position, (_, key, _) in enumerate(rows):
-            payload = source.get(bytes(key))
+            key = bytes(key)
+            payload = source.get(key)
+            if payload is None:
+                payload = matched.get(key)
             if payload is None:
                 continue
             if len(payload) != 8:
                 raise ValueError("invalid_exact_float_value")
             values[position], found[position] = (struct.unpack(">d", payload)[0], 1)
-            if matched_namespace is not None:
-                matched.append((matched_namespace, key, payload))
-        if matched:
-            self._insert_rows(matched)
+            if mark_matched and key not in matched:
+                pending.setdefault(key, payload)
+        if pending:
+            # Validate the complete batch before moving keys between partitions.
+            self._namespaces.setdefault(matched_namespace, {}).update(pending)
+            for key in pending:
+                del source[key]
+            if not source:
+                source.clear()
         return (values, found)
+
+    def float_value_count(self, *, namespace: str) -> int:
+        return sum(value is not None for value in self._namespace(namespace).values())
 
     def add_comparison_table(
         self, table: pa.Table, *, namespace: str, value_columns: Sequence[str]

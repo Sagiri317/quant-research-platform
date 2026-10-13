@@ -759,7 +759,12 @@ def _model_trials(persisted_model, selection_group) -> pd.DataFrame:
                     ("validation_rankic", "validation_rankic_reason"),
                     ("validation_mse", None),
                     *(
-                        (f"validation_{suffix}", f"validation_{prefix}ir_reason")
+                        (
+                            f"validation_{suffix}",
+                            f"validation_std_{prefix}_reason"
+                            if suffix == f"std_{prefix}"
+                            else f"validation_{prefix}ir_reason",
+                        )
                         for prefix in ("ic", "rankic")
                         for suffix in (
                             f"std_{prefix}",

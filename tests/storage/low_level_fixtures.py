@@ -34,7 +34,6 @@ from quant_research_platform.storage.datasets.schema import (
 )
 from quant_research_platform.storage.identity import (
     filesystem_mkdir,
-    filesystem_read_text,
     filesystem_stat,
     filesystem_write_text,
     native_filesystem_path,
@@ -161,7 +160,9 @@ def make_dataset_artifact_root(
 
 def fixture_dataset_content_hash(root: Path) -> str:
     """Give crafted physical fixtures an honest outer content binding."""
-    spec = json.loads(filesystem_read_text(root / "spec.json", encoding="utf-8"))
+    spec = json.loads(
+        Path(native_filesystem_path(root / "spec.json")).read_text(encoding="utf-8")
+    )
     inventory = DatasetSessionInventory(data_root=root / "data")
     inventory.discover(spec)
     for path in inventory.paths:

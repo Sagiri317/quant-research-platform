@@ -7,6 +7,7 @@ import warnings
 from collections.abc import Iterable
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+from fractions import Fraction
 from typing import Any
 
 import numpy as np
@@ -406,3 +407,46 @@ def _null_mask(series: pd.Series) -> pd.Series:
             index=series.index,
             dtype="bool",
         )
+
+
+def encode_exact_numeric(value):
+    """Persist exact rationals and binary floats without losing their type."""
+    if type(value) is int:
+        value = Fraction(value)
+    if isinstance(value, Fraction):
+        return f"q:{hex(value.numerator)}/{hex(value.denominator)}"
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError("exact_numeric_encoding_invalid")
+    try:
+        numeric = float(value)
+    except OverflowError:
+        raise ValueError("exact_numeric_encoding_invalid") from None
+    if not math.isfinite(numeric):
+        raise ValueError("exact_numeric_encoding_invalid")
+    return f"f:{numeric.hex()}"
+
+
+def decode_exact_numeric(value):
+    """Reject alternate spellings so persisted exact values have one identity."""
+    try:
+        if value.startswith("q:"):
+            numerator, denominator = value[2:].split("/")
+            result = Fraction(int(numerator, 16), int(denominator, 16))
+        elif value.startswith("f:"):
+            result = float.fromhex(value[2:])
+        else:
+            raise ValueError
+        if encode_exact_numeric(result) != value:
+            raise ValueError
+    except (AttributeError, TypeError, ValueError, ZeroDivisionError, OverflowError):
+        raise ValueError("exact_numeric_encoding_invalid") from None
+    return result
+
+
+def finite_exact_float(value):
+    """Return a representable float, or None for overflow/nonzero underflow."""
+    try:
+        result = float(value)
+    except OverflowError:
+        return None
+    return result if math.isfinite(result) and (result != 0 or value == 0) else None

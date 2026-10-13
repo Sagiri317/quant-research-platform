@@ -37,58 +37,58 @@ def compute_ic_and_grouped_label_values(
     ic_records: list[dict[str, object]] = []
     grouped_records: list[dict[str, object]] = []
     for timestamp, timestamp_frame in panel.groupby(spec.timestamp_column, sort=True):
-        for signal in spec.signal_columns:
-            signal_values = timestamp_frame[signal].to_numpy(
-                dtype="float64",
-                copy=False,
-            )
-            label_values = timestamp_frame[spec.label_column].to_numpy(
-                dtype="float64",
-                copy=False,
-            )
-            valid_mask = np.isfinite(signal_values) & np.isfinite(label_values)
-            signal_valid = signal_values[valid_mask]
-            label_valid = label_values[valid_mask]
-            n_obs = len(signal_valid)
-            ic = np.nan
-            rankic = np.nan
-            ic_reason = "insufficient_observations"
-            rankic_reason = "insufficient_observations"
-            if n_obs >= 2:
-                ic, ic_reason = _pearson_correlation_result(
-                    signal_valid,
-                    label_valid,
+        for label in spec.label_columns:
+            label_values = timestamp_frame[label].to_numpy(dtype="float64", copy=False)
+            for signal in spec.signal_columns:
+                signal_values = timestamp_frame[signal].to_numpy(
+                    dtype="float64",
+                    copy=False,
                 )
-                signal_ranks = _average_ranks(signal_valid)
-                rankic, rankic_reason = _pearson_correlation_result(
-                    signal_ranks,
-                    _average_ranks(label_valid),
-                )
-                groups = _assign_groups_from_ranks(signal_ranks, n_groups)
-                for group in np.unique(groups):
-                    group_mask = groups == group
-                    grouped_records.append(
-                        {
-                            "timestamp": timestamp,
-                            "signal": signal,
-                            "label": spec.label_column,
-                            "group": group,
-                            "mean_label_value": float(mean(label_valid[group_mask])),
-                            "n_obs": int(group_mask.sum()),
-                        }
+                valid_mask = np.isfinite(signal_values) & np.isfinite(label_values)
+                signal_valid = signal_values[valid_mask]
+                label_valid = label_values[valid_mask]
+                n_obs = len(signal_valid)
+                ic = np.nan
+                rankic = np.nan
+                ic_reason = "insufficient_observations"
+                rankic_reason = "insufficient_observations"
+                if n_obs >= 2:
+                    ic, ic_reason = _pearson_correlation_result(
+                        signal_valid,
+                        label_valid,
                     )
-            ic_records.append(
-                {
-                    "timestamp": timestamp,
-                    "signal": signal,
-                    "label": spec.label_column,
-                    "ic": ic,
-                    "rankic": rankic,
-                    "n_obs": n_obs,
-                    "ic_reason": ic_reason,
-                    "rankic_reason": rankic_reason,
-                }
-            )
+                    signal_ranks = _average_ranks(signal_valid)
+                    rankic, rankic_reason = _pearson_correlation_result(
+                        signal_ranks,
+                        _average_ranks(label_valid),
+                    )
+                    groups = _assign_groups_from_ranks(signal_ranks, n_groups)
+                    for group in np.unique(groups):
+                        group_mask = groups == group
+                        grouped_records.append(
+                            {
+                                "timestamp": timestamp,
+                                "signal": signal,
+                                "label": label,
+                                "group": group,
+                                "mean_label_value": float(
+                                    mean(label_valid[group_mask])
+                                ),
+                                "n_obs": int(group_mask.sum()),
+                            }
+                        )
+                ic_records.append(
+                    {
+                        "timestamp": timestamp,
+                        "signal": signal,
+                        "label": label,
+                        "ic": ic,
+                        "rankic": rankic,
+                        "n_obs": n_obs,
+                        "ic_reason": ic_reason,
+                        "rankic_reason": rankic_reason,
+                    }
+                )
 
     metrics = pd.DataFrame.from_records(ic_records, columns=EVALUATION_METRICS_COLUMNS)
     metrics["timestamp"] = metrics["timestamp"].astype("datetime64[ns]")
@@ -311,6 +311,7 @@ def _summarize_correlation_aggregates(
             "positive_rate": np.nan,
             "valid_count": 0,
             "reason": "no_valid_observations",
+            "std_reason": "no_valid_observations",
             "ratio_reason": "no_valid_observations",
         }
     variance = m2 / count
@@ -329,7 +330,8 @@ def _summarize_correlation_aggregates(
     mean = float(mean)
     return {
         "mean": mean,
-        "std": std,
+        "std": std if np.isfinite(std) else np.nan,
+        "std_reason": None if np.isfinite(std) else "nonfinite_result",
         "ratio": ratio,
         "positive_rate": positive_count / count,
         "valid_count": count,

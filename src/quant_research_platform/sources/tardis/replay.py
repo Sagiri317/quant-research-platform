@@ -257,7 +257,7 @@ class TardisArchive:
     _coverage_index: ObservationCoverageIndex
     _replay_resources: ExitStack
     _verify_source: object
-    _replay_error: Exception | None = field(default=None, init=False)
+    _replay_error: BaseException | None = field(default=None, init=False)
     _records_by_stream: dict = field(default_factory=dict)
     _native_records: object = field(init=False)
     _sequence_offset: int = 0
@@ -408,7 +408,7 @@ class TardisArchive:
                     self._records_by_stream[key] = buffered, buffered.tell()
                     if key != requested:
                         continue
-            except Exception as error:
+            except BaseException as error:
                 # A failed lazy decoder must never become a valid truncated EOF.
                 self._replay_error = error
                 raise

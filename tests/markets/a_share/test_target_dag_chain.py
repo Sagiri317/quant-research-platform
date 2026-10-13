@@ -408,14 +408,16 @@ def _synthetic_interim_frames(sessions: pd.DatetimeIndex) -> dict[str, pd.DataFr
             "a_float_shares": 100000.0,
         }
     )
+    calendar_dates = pd.date_range(sessions[0], sessions[-1]).as_unit("ns")
+    opened = calendar_dates.isin(sessions)
     calendar = pd.DataFrame(
         {
-            "timestamp": sessions,
-            "calendar_date": sessions,
+            "timestamp": calendar_dates,
+            "calendar_date": calendar_dates,
             "source_market_type": 1,
-            "is_trading_day": True,
-            "source_day_of_week": sessions.dayofweek,
-            "source_state": "O",
+            "is_trading_day": opened,
+            "source_day_of_week": calendar_dates.dayofweek,
+            "source_state": np.where(opened, "O", "C"),
         }
     )
     industry = pd.DataFrame(
@@ -530,7 +532,7 @@ def _windowed_source_profile(frames, calls, *, reject_before=None, reject_at=Non
     base = research_profile()
     frames = dict(frames)
     sessions = pd.DatetimeIndex(frames["trading_calendar"].calendar_date)
-    calendar = pd.bdate_range(sessions[0] - pd.offsets.BDay(300), sessions[-1]).as_unit(
+    calendar = pd.date_range(sessions[0] - pd.offsets.BDay(300), sessions[-1]).as_unit(
         "ns"
     )
     history_calendar = pd.DataFrame(
@@ -538,9 +540,9 @@ def _windowed_source_profile(frames, calls, *, reject_before=None, reject_at=Non
             timestamp=calendar,
             calendar_date=calendar,
             source_market_type=1,
-            is_trading_day=True,
+            is_trading_day=calendar.dayofweek < 5,
             source_day_of_week=calendar.dayofweek,
-            source_state="O",
+            source_state=np.where(calendar.dayofweek < 5, "O", "C"),
         )
     )
     frames["trading_calendar"] = pd.concat(

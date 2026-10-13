@@ -1,6 +1,7 @@
 """Actual run-id report publication, reuse, partial evidence, and resource faults."""
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -12,9 +13,9 @@ from quant_research_platform.markets.implementations.crypto.ids import (
 from quant_research_platform.storage.identity import (
     filesystem_is_file,
     filesystem_iterdir,
-    filesystem_read_bytes,
     filesystem_write_bytes,
     filesystem_write_text,
+    native_filesystem_path,
 )
 from quant_research_platform.workflows import operations
 
@@ -25,7 +26,7 @@ def check_crypto_report_lifecycle(
 
     def files(root):
         return {
-            path.name: filesystem_read_bytes(path)
+            path.name: Path(native_filesystem_path(path)).read_bytes()
             for path in filesystem_iterdir(root)
             if filesystem_is_file(path)
         }
@@ -84,7 +85,7 @@ def check_crypto_report_lifecycle(
         targets[HFT_PANEL_DATA_ID]["instance_identity"],
     )
     metadata = root / "_manifest" / "manifest.json"
-    saved = filesystem_read_bytes(metadata)
+    saved = Path(native_filesystem_path(metadata)).read_bytes()
     changed = json.loads(saved)
     changed.pop("producer_diagnostics")
     filesystem_write_text(metadata, json.dumps(changed), encoding="utf-8")

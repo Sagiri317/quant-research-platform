@@ -32,8 +32,6 @@ from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_glob,
     filesystem_iterdir,
-    filesystem_read_bytes,
-    filesystem_read_text,
     filesystem_stat,
     filesystem_walk,
     filesystem_write_bytes,
@@ -51,7 +49,9 @@ from tests.storage.low_level_fixtures import (
 
 def _file_bytes(root: Path) -> dict[Path, bytes]:
     return {
-        (parent / name).relative_to(root): filesystem_read_bytes(parent / name)
+        (parent / name).relative_to(root): Path(
+            native_filesystem_path(parent / name)
+        ).read_bytes()
         for parent, _directories, files in filesystem_walk(root)
         for name in files
     }
@@ -330,7 +330,7 @@ def test_dictionary_reader_closes_same_handle_and_native_iterator(
     pq.write_table(
         pa.table({"value": ["x" * (32 * 1024)] * 256}), native_filesystem_path(path)
     )
-    original_bytes = filesystem_read_bytes(path)
+    original_bytes = Path(native_filesystem_path(path)).read_bytes()
     open_file = dataset_physical.open_filesystem_file
     constructor = pq.ParquetFile
     handles = []
@@ -385,7 +385,7 @@ def test_dictionary_reader_closes_same_handle_and_native_iterator(
     assert len(handles) == 1 and handles[0].closed
     assert iterator_closed == [True]
     assert reader_closed == [True]
-    assert filesystem_read_bytes(path) == original_bytes
+    assert Path(native_filesystem_path(path)).read_bytes() == original_bytes
 
 
 @pytest.mark.parametrize(
@@ -674,7 +674,9 @@ def test_reads_reject_nonnull_category_outside_declared_domain(
         compression="zstd",
     )
     manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(filesystem_read_text(manifest_path, encoding="utf-8"))
+    manifest = json.loads(
+        Path(native_filesystem_path(manifest_path)).read_text(encoding="utf-8")
+    )
     manifest["file_size_bytes"] = sum(
         filesystem_stat(path).st_size
         for path in filesystem_glob(root / "data", "**/part-*.parquet")
@@ -794,7 +796,9 @@ def test_physical_values_cannot_be_reinterpreted_by_forged_logical_dtype(
             forged, logical = forge(parquet.read())
         pq.write_table(forged, native_filesystem_path(part), compression="zstd")
         manifest_path = root / "_manifest" / "manifest.json"
-        manifest = json.loads(filesystem_read_text(manifest_path, encoding="utf-8"))
+        manifest = json.loads(
+            Path(native_filesystem_path(manifest_path)).read_text(encoding="utf-8")
+        )
         manifest["logical_dtypes"] = logical
         manifest["logical_dtype_hash"] = canonical_json_hash(logical)
         manifest["file_size_bytes"] = filesystem_stat(part).st_size
@@ -884,7 +888,9 @@ def test_nonnullable_boolean_rejects_physical_null_values(
     )
     pq.write_table(table, native_filesystem_path(part), compression="zstd")
     manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(filesystem_read_text(manifest_path, encoding="utf-8"))
+    manifest = json.loads(
+        Path(native_filesystem_path(manifest_path)).read_text(encoding="utf-8")
+    )
     manifest["file_size_bytes"] = filesystem_stat(part).st_size
     manifest["content_hash"] = fixture_dataset_content_hash(root)
     filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
@@ -992,7 +998,9 @@ def test_parquet_early_close_propagates_cleanup_and_identity_failures(
                 use_dictionary=use_dictionary,
             )
             prediction_paths.append((model["quarter_id"], model["family_id"], member))
-            prediction_originals[member] = filesystem_read_bytes(member)
+            prediction_originals[member] = Path(
+                native_filesystem_path(member)
+            ).read_bytes()
         filesystem_write_bytes(original, prediction_originals[path])
     else:
         pq.write_table(
@@ -1007,8 +1015,10 @@ def test_parquet_early_close_propagates_cleanup_and_identity_failures(
             use_dictionary=use_dictionary,
             row_group_size=1,
         )
-        filesystem_write_bytes(path, filesystem_read_bytes(original))
-    original_bytes = filesystem_read_bytes(original)
+        filesystem_write_bytes(
+            path, Path(native_filesystem_path(original)).read_bytes()
+        )
+    original_bytes = Path(native_filesystem_path(original)).read_bytes()
     open_file = dataset_physical.open_filesystem_file
     constructor = pq.ParquetFile
     handles, reader_closed, iterator_closed = ([], [], [])
@@ -1086,13 +1096,13 @@ def test_parquet_early_close_propagates_cleanup_and_identity_failures(
     assert len(handles) == readers and all(handle.closed for handle in handles)
     assert reader_closed == [True] * readers
     assert iterator_closed == [True] * readers
-    assert filesystem_read_bytes(original) == original_bytes
+    assert Path(native_filesystem_path(original)).read_bytes() == original_bytes
     if failure != "identity":
-        assert filesystem_read_bytes(path) == original_bytes
+        assert Path(native_filesystem_path(path)).read_bytes() == original_bytes
     if reader_kind == "prediction":
         for member, payload in prediction_originals.items():
             if member != path or failure != "identity":
-                assert filesystem_read_bytes(member) == payload
+                assert Path(native_filesystem_path(member)).read_bytes() == payload
 
 
 @pytest.mark.parametrize("observer_kind", ("persisted", "batch"))
@@ -1101,7 +1111,7 @@ def test_declared_reader_preserves_observer_generator_exit(
 ):
     path = tmp_path / "observer.parquet"
     pq.write_table(pa.table({"value": [1, 2, 3]}), native_filesystem_path(path))
-    original = filesystem_read_bytes(path)
+    original = Path(native_filesystem_path(path)).read_bytes()
     constructor = pq.ParquetFile
     closed = []
 
@@ -1135,7 +1145,7 @@ def test_declared_reader_preserves_observer_generator_exit(
     assert caught.value is primary
     assert any("OSError" in note for note in getattr(primary, "__notes__", ()))
     assert closed == [True]
-    assert filesystem_read_bytes(path) == original
+    assert Path(native_filesystem_path(path)).read_bytes() == original
 
 
 @pytest.mark.parametrize("unit", ("ms", "us", "ns"))

@@ -20,8 +20,13 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioCashFlow,
     PortfolioDiagnostic,
     PortfolioLedgerBatch,
+    PortfolioRightsAdjustment,
     PortfolioValuation,
     validate_portfolio_transition,
+)
+from quant_research_platform.contracts.validation import (
+    decode_exact_numeric,
+    encode_exact_numeric,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
@@ -48,15 +53,22 @@ _TABLE_TYPES = {
     "cashflows": PortfolioCashFlow,
     "valuations": PortfolioValuation,
     "diagnostics": PortfolioDiagnostic,
+    "rights_adjustments": PortfolioRightsAdjustment,
+}
+_EXACT_FIELDS = {
+    "quantity",
+    "quantity_before",
+    "quantity_after",
+    "target_quantity",
+    "mark_price",
 }
 _NUMERIC = {
-    "quantity",
     "notional",
     "amount",
     "value",
     "number",
-    "mark_price",
     "cost_basis",
+    "cash_amount",
 }
 PORTFOLIO_LEDGER_TABLE_COLUMNS = {
     name: ("sequence", *(field.name for field in fields(kind)))
@@ -164,7 +176,16 @@ def write_portfolio_ledger_artifact(
                 if not records:
                     return
                 frame = pd.DataFrame.from_records(
-                    records, columns=PORTFOLIO_LEDGER_TABLE_COLUMNS[name]
+                    (
+                        {
+                            key: encode_exact_numeric(value)
+                            if key in _EXACT_FIELDS
+                            else value
+                            for key, value in record.items()
+                        }
+                        for record in records
+                    ),
+                    columns=PORTFOLIO_LEDGER_TABLE_COLUMNS[name],
                 )
                 table = pa.Table.from_pandas(
                     frame, schema=_SCHEMAS[name], preserve_index=False
@@ -341,6 +362,8 @@ def _table_records(
                 raise ValueError("portfolio_ledger_schema_invalid")
             records = chunk.to_pylist()
             for yielded_value in records:
+                for column in _EXACT_FIELDS.intersection(yielded_value):
+                    yielded_value[column] = decode_exact_numeric(yielded_value[column])
                 try:
                     yield yielded_value
                 except GeneratorExit:
@@ -436,6 +459,15 @@ def _iter_batches(
                         payload=diagnostic.fill_id.encode("utf-8"),
                     ) != order_id.encode("utf-8"):
                         raise ValueError("portfolio_ledger_diagnostic_order_mismatch")
+            inserted = key_index.add_identity_payloads(
+                namespace="rights_adjustments",
+                payloads=(
+                    (row.event_id.encode("utf-8"), row.asset_id.encode("utf-8"))
+                    for row in batch.rights_adjustments
+                ),
+            )
+            if inserted != len(batch.rights_adjustments):
+                raise ValueError("portfolio_ledger_duplicate_rights_adjustment")
             inserted = key_index.add_identity_payloads(
                 namespace="cashflows",
                 payloads=(

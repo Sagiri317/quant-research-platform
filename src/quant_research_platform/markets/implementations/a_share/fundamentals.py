@@ -355,23 +355,9 @@ _PIT_EVENT_COLUMNS = {
 }
 
 
-def materialize_pit_fundamentals(
-    observations: pd.DataFrame,
-    events: pd.DataFrame,
-) -> pd.DataFrame:
-    """As-of select the latest legal report period and its latest available revision."""
-
-    required_observations = {"asset_id", "timestamp"}
-    if not required_observations.issubset(
-        observations.columns
-    ) or not _PIT_EVENT_COLUMNS.issubset(events.columns):
-        raise ValueError("pit_financial_schema_invalid")
-    left = _pit_observations(observations)
-    calculate = _prepare_pit_fundamentals(events)
-    return calculate(left)
-
-
 def _pit_observations(observations):
+    if not {"asset_id", "timestamp"}.issubset(observations.columns):
+        raise ValueError("pit_financial_schema_invalid")
     left = observations.loc[:, ("asset_id", "timestamp")].copy()
     left["asset_id"] = strict_string_series(left["asset_id"], error="pit_asset_invalid")
     left["timestamp"] = strict_timestamp_series(
@@ -384,6 +370,8 @@ def _pit_observations(observations):
 
 def _prepare_pit_fundamentals(events):
     """Validate all source events and order each stream once per request."""
+    if not _PIT_EVENT_COLUMNS.issubset(events.columns):
+        raise ValueError("pit_financial_schema_invalid")
     right = events.loc[:, list(_PIT_EVENT_COLUMNS)].copy()
     right["asset_id"] = strict_string_series(
         right["asset_id"], error="pit_asset_invalid"

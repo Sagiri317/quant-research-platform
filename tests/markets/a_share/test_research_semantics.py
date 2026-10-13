@@ -16,8 +16,8 @@ from quant_research_platform.research.datasets.assembler import (
 )
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
 from quant_research_platform.research.features.transforms import (
+    _neutralize_cross_section,
     a_share_feature_pipeline,
-    neutralize_cross_section,
 )
 from quant_research_platform.research.protocols.a_share import (
     LABEL_HORIZONS,
@@ -150,9 +150,18 @@ def test_missing_factor_in_other_industry_does_not_change_valid_neutralization()
         }
     )
     valid = frame.iloc[:200].copy()
-    for operation in (neutralize_cross_section, a_share_feature_pipeline):
-        expected = operation(valid, factor_columns=("factor",))
-        result = operation(frame, factor_columns=("factor",))
+    for operation in (_neutralize_cross_section, a_share_feature_pipeline):
+        kwargs = (
+            {
+                "industry_column": "industry_level1_code",
+                "size_column": "log_float_market_cap",
+                "rescale": False,
+            }
+            if operation is _neutralize_cross_section
+            else {}
+        )
+        expected = operation(valid, factor_columns=("factor",), **kwargs)
+        result = operation(frame, factor_columns=("factor",), **kwargs)
         pd.testing.assert_frame_equal(result.iloc[:200], expected)
         if operation is a_share_feature_pipeline:
             assert result.feature_observed_factor.iloc[:200].eq(1).all()
@@ -330,7 +339,6 @@ def test_exact_industry_size_span_is_zero_but_one_ulp_signal_survives(
 ):
     from quant_research_platform.research.features.transforms import (
         a_share_feature_pipeline,
-        neutralize_cross_section,
     )
 
     index = np.arange(120)
@@ -349,7 +357,13 @@ def test_exact_industry_size_span_is_zero_but_one_ulp_signal_survives(
     )
     if reverse:
         frame = frame.iloc[::-1]
-    residual = neutralize_cross_section(frame, factor_columns=("factor",))
+    residual = _neutralize_cross_section(
+        frame,
+        factor_columns=("factor",),
+        industry_column="industry_level1_code",
+        size_column="log_float_market_cap",
+        rescale=False,
+    )
     assert residual.factor.eq(0.0).all()
     actual = a_share_feature_pipeline(frame, factor_columns=("factor",))
     assert actual.feature_factor.eq(0.0).all()
@@ -369,7 +383,6 @@ def test_neutralization_preserves_single_ulp_projection(offset, changed):
 
     from quant_research_platform.research.features.transforms import (
         a_share_feature_pipeline,
-        neutralize_cross_section,
     )
 
     n = 128
@@ -399,7 +412,13 @@ def test_neutralization_preserves_single_ulp_projection(offset, changed):
             "eligible": True,
         }
     )
-    actual = neutralize_cross_section(frame, factor_columns=("factor",))
+    actual = _neutralize_cross_section(
+        frame,
+        factor_columns=("factor",),
+        industry_column="industry_level1_code",
+        size_column="log_float_market_cap",
+        rescale=False,
+    )
     np.testing.assert_array_equal(actual["factor"], residuals)
     features = a_share_feature_pipeline(frame, factor_columns=("factor",))
     np.testing.assert_allclose(
@@ -449,11 +468,25 @@ def test_exact_nonzero_size_variation_is_not_svd_rank_failure():
             "factor": np.resize([1.0, 3.0], 120),
         }
     )
-    result = neutralize_cross_section(frame, factor_columns=("factor",))
+    result = _neutralize_cross_section(
+        frame,
+        factor_columns=("factor",),
+        industry_column="industry_level1_code",
+        size_column="log_float_market_cap",
+        rescale=False,
+    )
     assert result.factor.eq(0.0).all()
     frame["log_float_market_cap"] = 1.0
     assert (
-        neutralize_cross_section(frame, factor_columns=("factor",)).factor.isna().all()
+        _neutralize_cross_section(
+            frame,
+            factor_columns=("factor",),
+            industry_column="industry_level1_code",
+            size_column="log_float_market_cap",
+            rescale=False,
+        )
+        .factor.isna()
+        .all()
     )
 
 
@@ -528,9 +561,21 @@ def test_native_neutralization_zscore_publishes_representable_extreme_cross_sect
     if scale == 1e308 and not cancellation:
         assert max(map(abs, residual)) > Fraction(float(np.finfo("float64").max))
         with pytest.raises(OverflowError):
-            neutralize_cross_section(frame, factor_columns=("earnings_yield",))
+            _neutralize_cross_section(
+                frame,
+                factor_columns=("earnings_yield",),
+                industry_column="industry_level1_code",
+                size_column="log_float_market_cap",
+                rescale=False,
+            )
     else:
-        actual_raw = neutralize_cross_section(frame, factor_columns=("earnings_yield",))
+        actual_raw = _neutralize_cross_section(
+            frame,
+            factor_columns=("earnings_yield",),
+            industry_column="industry_level1_code",
+            size_column="log_float_market_cap",
+            rescale=False,
+        )
         np.testing.assert_array_equal(
             actual_raw.earnings_yield, [float(v) for v in residual]
         )

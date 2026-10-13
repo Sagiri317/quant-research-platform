@@ -39,7 +39,6 @@ from quant_research_platform.sources.binance.replay import (
 from quant_research_platform.storage.identity import (
     filesystem_glob,
     filesystem_mkdir,
-    filesystem_read_bytes,
     filesystem_rename,
     filesystem_stat,
     filesystem_unlink,
@@ -290,7 +289,7 @@ def _write_file(
             )
             max_record_bytes = max(max_record_bytes, len(line))
             handle.write(line)
-    raw = filesystem_read_bytes(path)
+    raw = Path(native_filesystem_path(path)).read_bytes()
     return {
         "path": path.relative_to(root).as_posix(),
         "venue": "binance",
@@ -347,7 +346,7 @@ def _write_run(
         for interval in connection_intervals:
             handle.write(json.dumps(interval, separators=(",", ":")))
             handle.write("\n")
-    sidecar_bytes = filesystem_read_bytes(sidecar)
+    sidecar_bytes = Path(native_filesystem_path(sidecar)).read_bytes()
     market_types = sorted({market for market, *_ in files})
     recording_scope = (
         SPOT_L2_RECORDING_SCOPE
@@ -622,7 +621,9 @@ def test_run_rejects_unlisted_or_hash_mismatched_file(tmp_path: Path) -> None:
         for path in filesystem_glob(root, "**/*.jsonl.gz")
         if path.name == "usd_s_m_futures_depth.jsonl.gz"
     )
-    filesystem_write_bytes(declared, filesystem_read_bytes(declared) + b"tampered")
+    filesystem_write_bytes(
+        declared, Path(native_filesystem_path(declared)).read_bytes() + b"tampered"
+    )
     with pytest.raises(ValueError, match="file_identity_mismatch"):
         with open_recorder_run(root):
             pass
@@ -1004,7 +1005,9 @@ def test_hourly_owner_files_merge_transitive_ranges_with_bounded_handles(
         item["path"] = item["path"].replace("hour=00", "hour=01")
         target = root / item["path"]
         filesystem_mkdir(target.parent, parents=True, exist_ok=True)
-        filesystem_write_bytes(target, filesystem_read_bytes(original))
+        filesystem_write_bytes(
+            target, Path(native_filesystem_path(original)).read_bytes()
+        )
         manifest["files"].append(item)
     sidecar = root / "connection_intervals.jsonl.gz"
     with gzip.open(native_filesystem_path(sidecar), "rt", encoding="utf-8") as handle:
@@ -1014,7 +1017,7 @@ def test_hourly_owner_files_merge_transitive_ranges_with_bounded_handles(
             row["closed_at"] = "2026-08-27T01:00:01.000000Z"
             row["closed_monotonic_ns"] = 3601000000000
             handle.write(json.dumps(row) + "\n")
-    raw = filesystem_read_bytes(sidecar)
+    raw = Path(native_filesystem_path(sidecar)).read_bytes()
     manifest["capture"]["connection_intervals"].update(
         compressed_bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest()
     )
@@ -1103,7 +1106,7 @@ def test_recorder_run_rejects_replaced_root_and_preserves_primary(
     _write_run(
         root, [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])]
     )
-    original = filesystem_read_bytes(root / "run.json")
+    original = Path(native_filesystem_path(root / "run.json")).read_bytes()
     moved = tmp_path / "moved"
     primary = KeyboardInterrupt("consumer_primary")
     with pytest.raises(KeyboardInterrupt if consumer_primary else ValueError) as raised:
@@ -1117,7 +1120,7 @@ def test_recorder_run_rejects_replaced_root_and_preserves_primary(
         assert any("ValueError" in note for note in primary.__notes__)
     else:
         assert str(raised.value) == "binance_raw_export_identity_changed"
-    assert filesystem_read_bytes(moved / "run.json") == original
+    assert Path(native_filesystem_path(moved / "run.json")).read_bytes() == original
 
 
 def test_recorder_run_rejects_member_replacement_between_capture_and_open(
@@ -1128,7 +1131,7 @@ def test_recorder_run_rejects_member_replacement_between_capture_and_open(
         root, [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])]
     )
     member = root / manifest["files"][0]["path"]
-    original = filesystem_read_bytes(member)
+    original = Path(native_filesystem_path(member)).read_bytes()
     original_open = replay.open_filesystem_file
     mutated = []
 
@@ -1147,7 +1150,7 @@ def test_recorder_run_rejects_member_replacement_between_capture_and_open(
         with open_recorder_run(root):
             pytest.fail("replaced recorder member admitted")
     assert mutated == [True]
-    assert filesystem_read_bytes(member) == original
+    assert Path(native_filesystem_path(member)).read_bytes() == original
 
 
 @pytest.mark.parametrize("consumer_primary", (False, True))
@@ -1161,7 +1164,7 @@ def test_recorder_run_checks_consumed_handle_identity_and_preserves_primary(
         root, [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])]
     )
     member = root / manifest["files"][0]["path"]
-    original = filesystem_read_bytes(member)
+    original = Path(native_filesystem_path(member)).read_bytes()
     primary = KeyboardInterrupt("consumer_primary")
     with pytest.raises(KeyboardInterrupt if consumer_primary else ValueError) as raised:
         with open_recorder_run(root) as run:
@@ -1181,7 +1184,7 @@ def test_recorder_run_checks_consumed_handle_identity_and_preserves_primary(
         assert any("ValueError" in note for note in primary.__notes__)
     else:
         assert str(raised.value) == "binance_raw_export_identity_changed"
-    assert filesystem_read_bytes(member) == original
+    assert Path(native_filesystem_path(member)).read_bytes() == original
 
 
 def test_connection_queries_scan_each_interval_once(tmp_path):
@@ -1356,7 +1359,9 @@ def test_default_multisymbol_reader_merges_same_named_rest_streams(tmp_path):
                 item["path"] = "eth/" + item["path"]
                 target = root / item["path"]
                 filesystem_mkdir(target.parent, parents=True, exist_ok=True)
-                filesystem_write_bytes(target, filesystem_read_bytes(original))
+                filesystem_write_bytes(
+                    target, Path(native_filesystem_path(original)).read_bytes()
+                )
         manifests.append(manifest)
     intervals = []
     for source in (root, tmp_path / "eth"):
@@ -1370,7 +1375,7 @@ def test_default_multisymbol_reader_merges_same_named_rest_streams(tmp_path):
             handle.write(json.dumps(row) + "\n")
     manifest = manifests[0]
     manifest["files"].extend(manifests[1]["files"])
-    payload = filesystem_read_bytes(sidecar)
+    payload = Path(native_filesystem_path(sidecar)).read_bytes()
     manifest["capture"]["connection_intervals"].update(
         record_count=len(intervals),
         compressed_bytes=len(payload),
@@ -1460,7 +1465,9 @@ def test_native_connection_must_match_record_symbol_and_stream(
             handle.write(json.dumps(interval) + "\n")
     member = manifest["capture"]["connection_intervals"]
     member["compressed_bytes"] = filesystem_stat(sidecar).st_size
-    member["sha256"] = hashlib.sha256(filesystem_read_bytes(sidecar)).hexdigest()
+    member["sha256"] = hashlib.sha256(
+        Path(native_filesystem_path(sidecar)).read_bytes()
+    ).hexdigest()
     filesystem_write_text(root / "run.json", json.dumps(manifest), encoding="utf-8")
     error = (
         "binance_replay_connection_coverage_invalid"
@@ -1659,7 +1666,9 @@ def _write_coverage_history(root, count, width):
         "path": source.name,
         "compressed_bytes": filesystem_stat(source).st_size,
         "record_count": count,
-        "sha256": hashlib.sha256(filesystem_read_bytes(source)).hexdigest(),
+        "sha256": hashlib.sha256(
+            Path(native_filesystem_path(source)).read_bytes()
+        ).hexdigest(),
     }
 
 
@@ -1700,7 +1709,9 @@ def test_coverage_empty_connections_keep_facts_without_sweep_contribution(
                 )
                 + "\n"
             )
-    raw_hash = hashlib.sha256(filesystem_read_bytes(source)).hexdigest()
+    raw_hash = hashlib.sha256(
+        Path(native_filesystem_path(source)).read_bytes()
+    ).hexdigest()
     descriptor.update(
         record_count=len(bounds),
         compressed_bytes=filesystem_stat(source).st_size,
@@ -1741,7 +1752,10 @@ def test_coverage_empty_connections_keep_facts_without_sweep_contribution(
             reader.covering(start.value + opened * 10**9, start.value + closed * 10**9)
             == expected_covering
         )
-    assert hashlib.sha256(filesystem_read_bytes(source)).hexdigest() == raw_hash
+    assert (
+        hashlib.sha256(Path(native_filesystem_path(source)).read_bytes()).hexdigest()
+        == raw_hash
+    )
 
 
 @pytest.mark.parametrize("overlap", (False, True))
@@ -1786,7 +1800,9 @@ def test_partial_connection_overlap_has_one_panel_and_execution_domain(
     descriptor.update(
         record_count=len(intervals),
         compressed_bytes=filesystem_stat(source).st_size,
-        sha256=hashlib.sha256(filesystem_read_bytes(source)).hexdigest(),
+        sha256=hashlib.sha256(
+            Path(native_filesystem_path(source)).read_bytes()
+        ).hexdigest(),
     )
     index = replay.ObservationCoverageIndex(
         tmp_path,
@@ -1876,14 +1892,13 @@ def test_manifest_race_is_bounded_and_rejected_before_decode(
     tmp_path, monkeypatch, change
 ):
     from quant_research_platform.sources.market import open_market_source
-    from quant_research_platform.storage.identity import filesystem_replace
 
     root = tmp_path / "run"
     _write_run(
         root, [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])]
     )
     path = root / "run.json"
-    original = filesystem_read_bytes(path)
+    original = Path(native_filesystem_path(path)).read_bytes()
     original_open = storage_manifests.open_filesystem_file
     reads, handles, decodes = ([], [], [])
 
@@ -1914,7 +1929,9 @@ def test_manifest_race_is_bounded_and_rejected_before_decode(
         if change == "replace":
             replacement = root / "replacement.json"
             filesystem_write_bytes(replacement, original.replace(b"run-1", b"run-2"))
-            filesystem_replace(replacement, path)
+            os.replace(
+                native_filesystem_path(replacement), native_filesystem_path(path)
+            )
         reader = ObservedReader(original_open(candidate, *args, **kwargs))
         handles.append(reader.handle)
         return reader
@@ -1952,7 +1969,7 @@ def test_manifest_read_failure_preserves_primary_and_closes_handle(
         root, [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])]
     )
     path = root / "run.json"
-    original = filesystem_read_bytes(path)
+    original = Path(native_filesystem_path(path)).read_bytes()
     original_open = storage_manifests.open_filesystem_file
     primary = OSError(errno.EIO, "manifest_read_primary")
     handles = []
@@ -2023,7 +2040,9 @@ def test_manifest_growth_blocks_materialization_and_preserves_old_good(
 
     def published_bytes():
         return {
-            (parent / name).relative_to(instances): filesystem_read_bytes(parent / name)
+            (parent / name).relative_to(instances): Path(
+                native_filesystem_path(parent / name)
+            ).read_bytes()
             for parent, _directories, files in filesystem_walk(instances)
             for name in files
         }
@@ -2031,14 +2050,16 @@ def test_manifest_growth_blocks_materialization_and_preserves_old_good(
     old_good = published_bytes()
     assert old_good
     manifest_path = raw_root / "run.json"
-    original = filesystem_read_bytes(manifest_path)
+    original = Path(native_filesystem_path(manifest_path)).read_bytes()
     read_manifest = replay.read_qrp_json_file
     attempts = []
 
     def grow_after_admission(path, **options):
         if path == manifest_path:
             attempts.append(options["expected_identity"].size)
-            filesystem_write_bytes(path, filesystem_read_bytes(path) + b" ")
+            filesystem_write_bytes(
+                path, Path(native_filesystem_path(path)).read_bytes() + b" "
+            )
         return read_manifest(path, **options)
 
     monkeypatch.setattr(replay, "read_qrp_json_file", grow_after_admission)

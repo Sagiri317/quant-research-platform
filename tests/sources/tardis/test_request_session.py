@@ -180,9 +180,14 @@ def test_each_lease_rechecks_source_before_return(archive, phase, member):
     assert replay._REQUEST_ARCHIVES.get() is None
 
 
-def test_failed_lazy_decoder_cannot_be_reused_as_truncated_eof(archive, monkeypatch):
+@pytest.mark.parametrize(
+    "failure", [ValueError, KeyboardInterrupt, GeneratorExit, SystemExit]
+)
+def test_failed_lazy_decoder_cannot_be_reused_as_truncated_eof(
+    archive, monkeypatch, failure
+):
     original = replay.iter_native_slice
-    primary = ValueError("controlled_native_decode_failure")
+    primary = failure("controlled_native_decode_failure")
     calls = 0
 
     def broken(*args, **kwargs):
@@ -195,7 +200,7 @@ def test_failed_lazy_decoder_cannot_be_reused_as_truncated_eof(archive, monkeypa
     monkeypatch.setattr(replay, "iter_native_slice", broken)
     with _request():
         for _ in range(2):
-            with pytest.raises(ValueError) as caught:
+            with pytest.raises(failure) as caught:
                 with open_market_source(archive) as source:
                     list(_records(source))
             assert caught.value is primary
@@ -231,4 +236,74 @@ def test_each_lease_checks_declared_but_excluded_manifests(tmp_path, phase, chan
             with open_market_source(root, archive_paths=paths, time_window=window):
                 assert phase == "exit"
                 excluded.write_bytes(replacement)
+    assert replay._REQUEST_ARCHIVES.get() is None
+
+
+@pytest.mark.parametrize("failure", [KeyboardInterrupt, GeneratorExit])
+def test_interrupted_decoder_blocks_native_panel_retry(
+    archive, tmp_path, monkeypatch, failure
+):
+    from functools import partial
+
+    from quant_research_platform.contracts.json_codec import canonical_json_hash
+    from quant_research_platform.markets.implementations.crypto.processed import (
+        catalog,
+        producer,
+    )
+    from quant_research_platform.sources.binance.replay import (
+        ReconstructionStats,
+        iter_agg_trades,
+        iter_reconstructed_depth,
+    )
+    from quant_research_platform.storage.datasets import write_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+
+    window = TimeWindow("2026-09-01T00:00:00", "2026-09-01T00:00:03")
+    opener = partial(open_market_source, time_window=window)
+    with opener(archive) as source:
+        identity = canonical_json_hash(source.source_identity)
+    original = replay.iter_native_slice
+    primary = failure("controlled_native_decode_interruption")
+
+    def interrupted(*args, **kwargs):
+        with replay.closing_iterator(original(*args, **kwargs)) as rows:
+            yield next(rows)
+            raise primary
+
+    monkeypatch.setattr(replay, "iter_native_slice", interrupted)
+    layout = StorageLayout(tmp_path / "candidate")
+    specs = catalog.hft_processed_catalog()
+    spec = specs.get("binance_futures_l2_panel_100ms")
+    target = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+    with _request():
+        with pytest.raises(failure) as caught:
+            with opener(archive) as source:
+                list(_records(source))
+        assert caught.value is primary
+        owner = source.archives[0]
+        assert owner._replay_error is primary
+        with pytest.raises(failure) as retried:
+            with producer.produce_hft_processed_data(
+                spec,
+                layout=layout,
+                time_window=window,
+                processed_catalog=specs,
+                source_catalog=None,
+                open_run=opener,
+                reconstruct_depth=iter_reconstructed_depth,
+                read_trades=iter_agg_trades,
+                make_stats=ReconstructionStats,
+                raw_root=archive,
+                expected_source_identity=identity,
+            ) as (data, metadata, verify):
+                write_dataset(
+                    target,
+                    data,
+                    spec=spec,
+                    instance_metadata=metadata,
+                    staged_validator=verify,
+                )
+        assert retried.value is primary
+        assert not target.exists()
+    assert all(handle.closed for handle, _end in owner._records_by_stream.values())
     assert replay._REQUEST_ARCHIVES.get() is None

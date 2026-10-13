@@ -135,6 +135,7 @@ def test_portfolio_curve_hashes_each_member_once_and_preserves_sampled_points(
         "cashflows.parquet": 1,
         "valuations.parquet": 1,
         "diagnostics.parquet": 1,
+        "rights_adjustments.parquet": 1,
     }
     assert curve["status"] == "DEFINED"
     assert curve["source_point_count"] == 9

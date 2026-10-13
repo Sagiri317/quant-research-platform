@@ -82,13 +82,6 @@ def build_a_share_report(
                     else "ELIGIBLE",
                     "reason": inference_blockers[group],
                 },
-                "interpretation": (
-                    "retrospective_validation_selected_at_development_end"
-                    if inference_blockers[group] is not None
-                    else "causal_quarterly_validation"
-                    if record.research_window["access"] == "development"
-                    else "frozen_final_test"
-                ),
             }
             for group in ("global", "quarterly")
         },
@@ -164,11 +157,6 @@ def build_a_share_report(
     sections["OOS prediction"]["paired_family_rankic"] = statistics.get(
         "quarterly", {}
     ).get("model_group_comparison", [])
-    sections["portfolio"]["comparison_interpretation"] = (
-        "Frozen final test compares development selection and calibration pipelines; "
-        "it does not estimate test-time adaptation. Choosing a winner on this test "
-        "does not create independent validation of that winner."
-    )
     sections["run observations"] = {
         "run": run_payload["operation_evidence"],
         "model_phases": evidence.get("model_costs", []),
@@ -227,7 +215,7 @@ def build_a_share_report(
     if configuration["stage"] in {"dataset", "evaluation"}:
         for name in ("model selection", "OOS prediction", "robustness"):
             sections[name] = {"status": "UNDEFINED", "reason": "not_requested"}
-    if not configuration["portfolios"]:
+    if configuration["stage"] != "research" or not configuration["portfolios"]:
         for name in ("portfolio", "cost", "risk", "capacity", "attribution"):
             sections[name] = {"status": "UNDEFINED", "reason": "not_requested"}
     sections["development vs holdout"]["stage_selection"] = configuration.get(

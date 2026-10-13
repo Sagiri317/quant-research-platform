@@ -374,11 +374,13 @@ def _execute_episodes(
         cursor = _EpisodeCursor(iterator, key, sticky=sticky)
         streams[name] = cursor
     count = 0
+    funding_required = funding_covered = 0
     for start, stop, termination, reasons in _qualified_episodes(
         coverage, trade_coverage, funding, bounds
     ):
 
         def produce(emit, start=start, stop=stop):
+            nonlocal funding_required, funding_covered
             kwargs = {
                 "book_events": streams["books"].window(start, stop, bootstrap=True),
                 "funding_events": tuple(
@@ -397,8 +399,8 @@ def _execute_episodes(
             else:
                 kwargs["decisions"] = streams["decisions"].window(start, stop)
             result = execute(**kwargs)
-            if result["selection_status"] == "BLOCKED":
-                raise PortfolioTargetBlocked("portfolio_expected_funding_missing")
+            funding_required += result["funding_required_decisions"]
+            funding_covered += result["funding_covered_decisions"]
             if result["net_pnl"] is None:
                 raise PortfolioTargetBlocked("portfolio_terminal_valuation_missing")
             return result
@@ -413,6 +415,8 @@ def _execute_episodes(
         count += 1
     if not count:
         raise PortfolioTargetBlocked("crypto_execution_qualified_episode_missing")
+    if funding_required and not funding_covered:
+        raise PortfolioTargetBlocked("portfolio_expected_funding_missing")
     return {"episode_count": count}
 
 

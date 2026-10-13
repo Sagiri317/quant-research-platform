@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -10,8 +11,6 @@ from quant_research_platform.contracts.business_manifest import (
 from quant_research_platform.storage.identity import (
     filesystem_iterdir,
     filesystem_mkdir,
-    filesystem_read_bytes,
-    filesystem_replace,
     filesystem_stat,
     filesystem_write_bytes,
     native_filesystem_path,
@@ -24,7 +23,10 @@ from quant_research_platform.storage.semantic_artifacts import (
 
 
 def _immediate_file_bytes(root: Path) -> dict[str, bytes]:
-    return {path.name: filesystem_read_bytes(path) for path in filesystem_iterdir(root)}
+    return {
+        path.name: Path(native_filesystem_path(path)).read_bytes()
+        for path in filesystem_iterdir(root)
+    }
 
 
 def _envelope(*, seed=None) -> object:
@@ -203,7 +205,7 @@ def test_exact_comparison_keeps_attempt_provenance_outside_model_semantics(
 
     old = build("first")
     same = build("retry", threads=2)
-    before = filesystem_read_bytes(old / "manifest.json")
+    before = Path(native_filesystem_path(old / "manifest.json")).read_bytes()
     assert (
         storage.compare_semantic_artifacts(old, same, trial_layout=layout).status
         == "MATCH"
@@ -227,7 +229,7 @@ def test_exact_comparison_keeps_attempt_provenance_outside_model_semantics(
         ).status
         == "MATCH"
     )
-    assert filesystem_read_bytes(old / "manifest.json") == before
+    assert Path(native_filesystem_path(old / "manifest.json")).read_bytes() == before
     import hashlib
 
     real_sha256 = hashlib.sha256
@@ -472,7 +474,10 @@ def test_inventory_rejects_child_alias_before_scanning_external_content(
     monkeypatch.setattr(storage, "filesystem_scandir", scan)
     with pytest.raises(ValueError, match="semantic_artifact_member_invalid"):
         storage.read_semantic_artifact_record(root)
-    assert filesystem_read_bytes(payload) == b"external synthetic content"
+    assert (
+        Path(native_filesystem_path(payload)).read_bytes()
+        == b"external synthetic content"
+    )
 
 
 @pytest.mark.parametrize("operation", ("discovery", "publication"))
@@ -563,9 +568,11 @@ def test_comparison_rechecks_the_complete_round_before_match(
                     replacement,
                     b"CCCC"
                     if mutation == "earlier_member"
-                    else filesystem_read_bytes(target) + b" ",
+                    else Path(native_filesystem_path(target)).read_bytes() + b" ",
                 )
-                filesystem_replace(replacement, target)
+                os.replace(
+                    native_filesystem_path(replacement), native_filesystem_path(target)
+                )
         return original(path, *args, **kwargs)
 
     monkeypatch.setattr(storage, "open_filesystem_file", opening)
@@ -616,10 +623,10 @@ def test_semantic_parquet_comparison_uses_exact_logical_rows(tmp_path, change):
             row_group_size=1,
         ),
     )
-    before = filesystem_read_bytes(old / "manifest.json")
+    before = Path(native_filesystem_path(old / "manifest.json")).read_bytes()
     expected = "MATCH" if change == "encoding" else "CONTENT_MISMATCH"
     assert compare_semantic_artifacts(old, new).status == expected
-    assert filesystem_read_bytes(old / "manifest.json") == before
+    assert Path(native_filesystem_path(old / "manifest.json")).read_bytes() == before
 
 
 def test_identical_parquet_copy_compares_exact_bytes(tmp_path):
@@ -717,8 +724,8 @@ def test_parent_capture_is_preserved_even_for_same_content_replacement(
     read_semantic_artifact_record(root, expected_member_identities=identities)
     path = root / member
     replacement = tmp_path / "replacement"
-    filesystem_write_bytes(replacement, filesystem_read_bytes(path))
-    filesystem_replace(replacement, path)
+    filesystem_write_bytes(replacement, Path(native_filesystem_path(path)).read_bytes())
+    os.replace(native_filesystem_path(replacement), native_filesystem_path(path))
     with pytest.raises(ValueError, match="identity_changed"):
         read_semantic_artifact_record(root, expected_member_identities=identities)
 
@@ -770,7 +777,7 @@ def test_operational_metadata_schema_rejects_absolute_keys_before_write_and_read
         ValueError, match="^semantic_artifact_operational_metadata_invalid$"
     ):
         read_semantic_artifact_record(root)
-    assert filesystem_read_bytes(manifest_path) == forged_bytes
+    assert Path(native_filesystem_path(manifest_path)).read_bytes() == forged_bytes
 
 
 @pytest.mark.parametrize("bad", ([], {}))
@@ -885,7 +892,10 @@ def test_operational_metadata_rejects_wrong_enum_types_without_mutating_good(
     with pytest.raises(ValueError, match=f"^{error}$"):
         read_semantic_artifact_record(candidate)
     assert compare_semantic_artifacts(good, candidate).status == "INSPECTION_FAILED"
-    assert filesystem_read_bytes(candidate / "manifest.json") == forged_bytes
+    assert (
+        Path(native_filesystem_path(candidate / "manifest.json")).read_bytes()
+        == forged_bytes
+    )
     assert _immediate_file_bytes(good) == before
 
 
@@ -1009,7 +1019,7 @@ def test_trial_enum_types_reject_in_native_ledger_and_compare_without_mutating_g
         compare_semantic_artifacts(good, candidate, trial_layout=layout).status
         == "INSPECTION_FAILED"
     )
-    assert filesystem_read_bytes(changed) == forged_bytes
+    assert Path(native_filesystem_path(changed)).read_bytes() == forged_bytes
     assert _immediate_file_bytes(good) == artifact_before
     assert {
         path.relative_to(good_ledger): path.read_bytes()
@@ -1190,7 +1200,7 @@ def test_invalid_operational_metrics_reject_before_publication_and_native_compar
     with pytest.raises(ValueError, match=f"^{error}$"):
         read_semantic_artifact_record(candidate)
     assert compare_semantic_artifacts(good, candidate).status == "INSPECTION_FAILED"
-    assert filesystem_read_bytes(manifest_path) == raw
+    assert Path(native_filesystem_path(manifest_path)).read_bytes() == raw
     assert _immediate_file_bytes(good) == before
 
 

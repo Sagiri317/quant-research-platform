@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from pathlib import Path
 
 import pandas as pd
 import pyarrow as pa
@@ -15,7 +16,6 @@ from quant_research_platform.contracts.business_manifest import (
 from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_glob,
-    filesystem_read_bytes,
     filesystem_stat,
     filesystem_write_bytes,
     native_filesystem_path,
@@ -167,7 +167,7 @@ def test_table_rechecks_artifact_snapshot_on_consumption_exit(
             path = root / ("manifest.json" if mutation == "manifest" else "extra.bin")
             filesystem_write_bytes(
                 path,
-                filesystem_read_bytes(path) + b"\n"
+                Path(native_filesystem_path(path)).read_bytes() + b"\n"
                 if mutation == "manifest"
                 else b"extra",
             )
@@ -1275,7 +1275,7 @@ def test_streamed_calibration_rechecks_member_bytes_after_consumption(
             changed = True
             path = root / "crypto_maker_calibration.parquet"
             before = filesystem_stat(path)
-            content = bytearray(filesystem_read_bytes(path))
+            content = bytearray(Path(native_filesystem_path(path)).read_bytes())
             content[4] ^= 1
             filesystem_write_bytes(path, content)
             os.utime(
@@ -1419,7 +1419,7 @@ def test_maker_history_reads_real_artifact_once_and_rechecks_source(
             if finish != "normal":
                 path = root / "crypto_maker_events.parquet"
                 before = filesystem_stat(path)
-                payload = bytearray(filesystem_read_bytes(path))
+                payload = bytearray(Path(native_filesystem_path(path)).read_bytes())
                 payload[4] ^= 1
                 filesystem_write_bytes(path, payload)
                 os.utime(
@@ -1734,7 +1734,7 @@ def test_maker_validator_closes_native_stream_and_preserves_primary(
         validate_tables=portfolio.validate_maker_calibration,
     )
     before = {
-        path.name: filesystem_read_bytes(path)
+        path.name: Path(native_filesystem_path(path)).read_bytes()
         for path in root.iterdir()
         if path.is_file()
     }
@@ -1774,7 +1774,7 @@ def test_maker_validator_closes_native_stream_and_preserves_primary(
     if finish == "cancel":
         assert any("RuntimeError" in note for note in primary.__notes__)
     assert {
-        path.name: filesystem_read_bytes(path)
+        path.name: Path(native_filesystem_path(path)).read_bytes()
         for path in root.iterdir()
         if path.is_file()
     } == before
@@ -2217,3 +2217,48 @@ def test_paired_rankic_and_champion_diagnostics_reach_native_report(
         )
     # Unrelated targets are absent in this focused native publication fixture.
     assert report["report_status"] == "BLOCKED"
+
+
+def test_native_model_persistence_preserves_std_reason_in_statistics(
+    tmp_path, tables, envelope
+):
+    import numpy as np
+
+    from quant_research_platform.contracts.models import ModelSpec
+    from quant_research_platform.research.statistics_production import _model_trials
+    from tests.research.workflow_test_support import (
+        shared_model_case,
+        shared_model_rows,
+    )
+
+    spec = ModelSpec(
+        model_id="rank",
+        model_algorithm="equal_weight_rank_ensemble",
+        input_factor_columns=("x",),
+        label_column="label",
+    )
+    frame = shared_model_rows((spec,), assets=3)
+    frame["x"] = np.tile([-1.0, 0.0, 1.0], len(frame) // 3)
+    frame["label"] = np.tile([0.0, 1.0, 0.0], len(frame) // 3)
+    frame.loc[
+        frame.groupby("timestamp", sort=False).ngroup().mod(2).eq(1)
+        & frame.asset_id.eq("asset_2"),
+        "label",
+    ] = np.nextafter(0.0, 1.0)
+    case = shared_model_case(tmp_path, specs=(spec,), frame=frame)
+    tables["model_trials"] = _model_trials(case.artifact, "global").loc[
+        :, list(statistics.STATISTICS_TABLE_COLUMNS["model_trials.parquet"])
+    ]
+    root = statistics.write_statistics_artifact(
+        tmp_path / "statistics", envelope=envelope, tables=tables
+    )
+    artifact = statistics.read_statistics_artifact(
+        root, expected_identity=envelope.instance_identity
+    )
+    with artifact.table("model_trials.parquet") as persisted:
+        rows = persisted.set_index("metric_id")
+    assert rows.loc["validation_std_ic", "status"] == "UNDEFINED"
+    assert rows.loc["validation_std_ic", "reason"] == "nonfinite_result"
+    assert rows.loc["validation_icir", "status"] == "DEFINED"
+    assert rows.loc["validation_icir", "value"] == 1.0
+    assert rows.loc["validation_icir", "reason"] == ""

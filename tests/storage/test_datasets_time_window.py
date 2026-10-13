@@ -29,8 +29,8 @@ from quant_research_platform.storage.datasets.reading import (
 )
 from quant_research_platform.storage.identity import (
     filesystem_is_file,
-    filesystem_read_text,
     filesystem_write_text,
+    native_filesystem_path,
 )
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
@@ -305,7 +305,9 @@ def test_selected_operations_reject_structurally_forged_full_history_summary(
         spec=make_processed_dataset_spec("selected_forged_summary"),
     )
     manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(filesystem_read_text(manifest_path, encoding="utf-8"))
+    manifest = json.loads(
+        Path(native_filesystem_path(manifest_path)).read_text(encoding="utf-8")
+    )
     manifest["date_min"] = "1900-01-01"
     manifest["date_max"] = "2099-12-31"
     filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")

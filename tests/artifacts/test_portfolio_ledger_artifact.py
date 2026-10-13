@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -28,9 +29,6 @@ from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_iterdir,
-    filesystem_read_bytes,
-    filesystem_read_text,
-    filesystem_replace,
     filesystem_stat,
     filesystem_walk,
     filesystem_write_bytes,
@@ -48,7 +46,9 @@ from tests.helpers.portfolio_ledger import (
 
 def _file_bytes(root: Path) -> dict[Path, bytes]:
     return {
-        (parent / name).relative_to(root): filesystem_read_bytes(parent / name)
+        (parent / name).relative_to(root): Path(
+            native_filesystem_path(parent / name)
+        ).read_bytes()
         for parent, _directories, files in filesystem_walk(root)
         for name in files
     }
@@ -371,7 +371,7 @@ def test_perpetual_execution_roundtrip_keeps_collateral_funding_and_delayed_fill
         and any(row.fill_id == fill_id for row in batch.diagnostics)
         for batch in batches
     )
-    old_manifest = filesystem_read_bytes(root / "manifest.json")
+    old_manifest = Path(native_filesystem_path(root / "manifest.json")).read_bytes()
     with pytest.raises(
         PortfolioTargetBlocked, match="portfolio_required_funding_missing"
     ):
@@ -380,7 +380,10 @@ def test_perpetual_execution_roundtrip_keeps_collateral_funding_and_delayed_fill
             envelope=envelope,
             produce=lambda emit: run(emit, None),
         )
-    assert filesystem_read_bytes(root / "manifest.json") == old_manifest
+    assert (
+        Path(native_filesystem_path(root / "manifest.json")).read_bytes()
+        == old_manifest
+    )
 
 
 def test_orphan_fill_and_unknown_delayed_fill_fail_closed(tmp_path):
@@ -923,7 +926,9 @@ def test_portfolio_ledger_rechecks_outer_manifest_and_member_set_each_iteration(
     artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
     if mutation == "manifest":
         manifest_path = root / "manifest.json"
-        manifest = json.loads(filesystem_read_text(manifest_path, encoding="utf-8"))
+        manifest = json.loads(
+            Path(native_filesystem_path(manifest_path)).read_text(encoding="utf-8")
+        )
         manifest["members"].append(
             {"path": "extra.parquet", "size": 0, "sha256": "0" * 64}
         )
@@ -1085,7 +1090,8 @@ def test_portfolio_reader_early_close_reports_identity_failures(
     )
     artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
     original = {
-        path.name: filesystem_read_bytes(path) for path in filesystem_iterdir(root)
+        path.name: Path(native_filesystem_path(path)).read_bytes()
+        for path in filesystem_iterdir(root)
     }
     copied = tmp_path / "copy" / root.name
     shutil.copytree(native_filesystem_path(root), native_filesystem_path(copied))
@@ -1129,7 +1135,8 @@ def test_portfolio_reader_early_close_reports_identity_failures(
             else "semantic_artifact_member_set_changed"
         )
     assert {
-        path.name: filesystem_read_bytes(path) for path in filesystem_iterdir(root)
+        path.name: Path(native_filesystem_path(path)).read_bytes()
+        for path in filesystem_iterdir(root)
     } == original
 
 
@@ -1299,9 +1306,9 @@ def test_degenerate_alpha_diagnostics_survive_ledger_and_freeze(
         saved["sections"]["portfolio"]["results"][0]["alpha_calibration"]
         == summary["alpha_calibration"]
     )
-    assert "alpha_calibration_zero_standard_error" in filesystem_read_text(
-        report_root / "report.md", encoding="utf-8"
-    )
+    assert "alpha_calibration_zero_standard_error" in Path(
+        native_filesystem_path(report_root / "report.md")
+    ).read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("engine", ("taker", "maker"))
@@ -1559,13 +1566,13 @@ def test_verified_member_identity_reaches_ledger_decoder(tmp_path, monkeypatch, 
         for row in rows:
             if row["phase"] == "end" and row["asset_id"] == "asset":
                 row["value"] = 120.0
-                row["mark_price"] = 1.2
+                row["mark_price"] = "f:" + (1.2).hex()
         replacement = tmp_path / "replacement.parquet"
         pq.write_table(
             pa.Table.from_pylist(rows, schema=table.schema),
             native_filesystem_path(replacement),
         )
-        filesystem_replace(replacement, member)
+        os.replace(native_filesystem_path(replacement), native_filesystem_path(member))
         return result
 
     monkeypatch.setattr(
@@ -1695,19 +1702,23 @@ def test_report_reuses_native_ledger_validation_and_checks_consumption_exit(
         result = summarize(*args)
         if mutation == "manifest":
             path = root / "manifest.json"
-            filesystem_write_bytes(path, filesystem_read_bytes(path) + b"\n")
+            filesystem_write_bytes(
+                path, Path(native_filesystem_path(path)).read_bytes() + b"\n"
+            )
         elif mutation == "extra":
             filesystem_write_bytes(root / "extra.bin", b"extra")
         elif mutation == "same_size":
             path = root / "valuations.parquet"
             other = tmp_path / "replacement"
-            filesystem_write_bytes(other, filesystem_read_bytes(path))
-            filesystem_replace(other, path)
+            filesystem_write_bytes(
+                other, Path(native_filesystem_path(path)).read_bytes()
+            )
+            os.replace(native_filesystem_path(other), native_filesystem_path(path))
         return result
 
     monkeypatch.setattr(research, "summarize_portfolio_ledger", consume_then_change)
     protocol = {
-        "research_configuration": {"stage": "dataset"},
+        "research_configuration": {"stage": "research"},
         "portfolio_candidates": ("synthetic_portfolio",),
     }
     record = SimpleNamespace(
@@ -1863,7 +1874,9 @@ def test_source_backed_reuse_binds_one_content_check_to_native_consumption(
         path = root / (
             "manifest.json" if mutation == "manifest" else "valuations.parquet"
         )
-        filesystem_write_bytes(path, filesystem_read_bytes(path) + b"broken")
+        filesystem_write_bytes(
+            path, Path(native_filesystem_path(path)).read_bytes() + b"broken"
+        )
         with pytest.raises(ValueError):
             reuse()
         assert research._matching_instance(

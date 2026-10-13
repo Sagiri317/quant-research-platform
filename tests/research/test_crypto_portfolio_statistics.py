@@ -21,6 +21,7 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioDiagnostic,
 )
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.interfaces import queries
 from quant_research_platform.markets.implementations.crypto.execution import (
     _record_execution_result,
 )
@@ -844,69 +845,7 @@ def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav
         1099.0,
         1048.0,
     ]
-    import hashlib
-    import json
-    from io import BytesIO
-    from pathlib import Path
-
-    from quant_research_platform.interfaces import queries
-
-    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "matplotlib"))
-    import matplotlib
-
-    matplotlib.use("Agg")
-    from matplotlib import pyplot as plt
-    from matplotlib.dates import AutoDateLocator, ConciseDateFormatter
-    from matplotlib.ticker import StrMethodFormatter
-
-    notebook_path = (
-        Path(__file__).resolve().parents[2]
-        / "notebooks"
-        / "research-interview-demo.ipynb"
-    )
-    notebook_source = notebook_path.read_bytes()
-    notebook = json.loads(notebook_source)
-    data_before = {
-        member.relative_to(tmp_path): hashlib.sha256(member.read_bytes()).digest()
-        for member in (tmp_path / "data").rglob("*")
-        if member.is_file()
-    }
-    plot = next(cell for cell in notebook["cells"] if cell["id"] == "research-cell-11")
-    namespace = {
-        "selected_targets": [descriptor.target_id],
-        "queries": queries,
-        "profile": profile,
-        "layout": layout,
-        "RUN_ID": run.run_id,
-        "NAV_STRIDE": 1,
-        "np": np,
-        "pd": pd,
-        "plt": plt,
-        "is_crypto": True,
-        "display": lambda value: None,
-        "AutoDateLocator": AutoDateLocator,
-        "ConciseDateFormatter": ConciseDateFormatter,
-        "StrMethodFormatter": StrMethodFormatter,
-    }
-    exec(
-        compile("".join(plot["source"]), "research-interview-demo.ipynb", "exec"),
-        namespace,
-    )
-    figure = namespace["figure"]
-    figure.canvas.draw()
-    assert len(figure.axes) == 2
-    assert [axis.lines[0].get_ydata()[0] for axis in figure.axes] == [1000.0, 1000.0]
-    assert [axis.lines[0].get_ydata()[-1] for axis in figure.axes] == [1099.0, 1048.0]
-    png = BytesIO()
-    figure.savefig(png, format="png")
-    assert png.getvalue().startswith(b"\x89PNG\r\n\x1a\n")
-    assert notebook_path.read_bytes() == notebook_source
-    assert {
-        member.relative_to(tmp_path): hashlib.sha256(member.read_bytes()).digest()
-        for member in (tmp_path / "data").rglob("*")
-        if member.is_file()
-    } == data_before
-    figure = namespace = curve = None
+    curve = None
     report = report_build(profile=profile, layout=layout, run_id=run.run_id, plan=False)
     result = report["target_result"]
     saved = read_research_report_artifact(
@@ -966,10 +905,16 @@ def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav
 
 
 @pytest.mark.parametrize(
-    "initial", (1000.0, np.nextafter(0.0, 1.0), np.finfo(float).max)
+    "initial,terminal_price",
+    (
+        (1000.0, None),
+        (np.nextafter(0.0, 1.0), None),
+        (np.finfo(float).max, None),
+        (1e-300, 1e100),
+    ),
 )
-def test_cash_ledger_nav_endpoints_publish_undefined_risk_without_mutation(
-    tmp_path, initial
+def test_ledger_nav_endpoints_publish_undefined_risk_without_mutation(
+    tmp_path, initial, terminal_price
 ):
     import hashlib
 
@@ -1014,17 +959,26 @@ def test_cash_ledger_nav_endpoints_publish_undefined_risk_without_mutation(
         economics = PortfolioEconomics(capital, candidate.asset_id, emit)
         economics.mark(
             start,
-            1.0,
+            initial if terminal_price is not None else 1.0,
             diagnostics=(
                 PortfolioDiagnostic(
                     candidate.asset_id, None, "oos_window_start", number=0.0
                 ),
             ),
         )
+        if terminal_price is not None:
+            economics.fill(
+                timestamp_ns=start,
+                order_id="entry",
+                quantity=1.0,
+                price=initial,
+                mark_price=initial,
+                fee=0.0,
+            )
         for offset in (day, 2 * day):
             economics.mark(
                 start + offset,
-                1.0,
+                terminal_price if terminal_price is not None else 1.0,
                 diagnostics=(
                     PortfolioDiagnostic(
                         candidate.asset_id,
@@ -1036,7 +990,7 @@ def test_cash_ledger_nav_endpoints_publish_undefined_risk_without_mutation(
             )
         economics.mark(
             start + 2 * day,
-            1.0,
+            terminal_price if terminal_price is not None else 1.0,
             diagnostics=(
                 PortfolioDiagnostic(
                     candidate.asset_id, None, "oos_window_end", number=0.0
@@ -1047,13 +1001,13 @@ def test_cash_ledger_nav_endpoints_publish_undefined_risk_without_mutation(
             economics,
             {
                 "simulation": "cash_only",
-                "net_pnl": 0.0,
-                "created_orders": 0,
-                "filled_orders": 0,
+                "net_pnl": 0.0 if terminal_price is None else terminal_price - initial,
+                "created_orders": int(terminal_price is not None),
+                "filled_orders": int(terminal_price is not None),
                 "selection_status": "COMPLETE",
             },
             start + 2 * day,
-            1.0,
+            terminal_price if terminal_price is not None else 1.0,
         )
 
     root = write_portfolio_ledger_artifact(
@@ -1104,18 +1058,136 @@ def test_cash_ledger_nav_endpoints_publish_undefined_risk_without_mutation(
         risk = metrics.loc[
             metrics.metric_id.isin(("annualized_volatility", "sharpe"))
         ].set_index("metric_id")
-        assert risk.observation_count.eq(2).all()
+        assert risk.observation_count.eq(2 if terminal_price is None else 1).all()
         assert risk.loc["sharpe", "status"] == "UNDEFINED"
-        if initial == 1000.0:
+        if terminal_price is not None:
+            assert risk.status.eq("UNDEFINED").all()
+            assert risk.reason.eq("planned_utc_day_valuation_undefined").all()
+            indexed = metrics.set_index("metric_id")
+            assert indexed.loc["planned_complete_utc_days", "value"] == 2
+            assert indexed.loc["defined_complete_utc_days", "value"] == 1
+            assert indexed.loc["terminal_nav", "value"] == terminal_price
+            assert indexed.loc["net_pnl", "value"] == terminal_price - initial
+            assert indexed.loc["oos_mean_daily_return", "status"] == "UNDEFINED"
+        elif initial == 1000.0:
             assert risk.loc["annualized_volatility", "value"] == 0.0
             assert risk.loc["annualized_volatility", "status"] == "DEFINED"
         else:
             assert risk.status.eq("UNDEFINED").all()
             assert risk.value.isna().all()
             assert risk.reason.eq("return_risk_unresolved").all()
+    with artifact.table("crypto_portfolio_daily.parquet") as daily:
+        assert len(daily) == 2
+        if terminal_price is not None:
+            assert daily.start_nav.tolist() == [initial, terminal_price]
+            assert daily.end_nav.tolist() == [terminal_price, terminal_price]
+            assert daily.status.tolist() == ["UNDEFINED", "DEFINED"]
+            assert daily.reason.tolist() == ["nonfinite_result", ""]
+            assert pd.isna(daily.net_return.iloc[0])
+            assert daily.net_return.iloc[1] == 0.0
+    if terminal_price is not None:
+        from types import SimpleNamespace
+
+        from quant_research_platform.contracts.targets import RunStatus
+        from quant_research_platform.reports.crypto_hft import (
+            build_crypto_research_report,
+        )
+
+        tables = {}
+        for name in owned:
+            with artifact.table(f"{name}.parquet") as frame:
+                tables[name] = frame.to_dict("records")
+        record = SimpleNamespace(
+            run_id="overflow_daily",
+            scenario_id=configuration["scenario_id"],
+            status=RunStatus.COMPLETE,
+            research_window=research_window,
+            payload=lambda: {"protocol": protocol.manifest(), "operation_evidence": {}},
+        )
+        report = build_crypto_research_report(
+            record=record,
+            evidence={
+                "statistics": [
+                    {
+                        "candidate_id": candidate.candidate_id,
+                        "execution_mode": "continuous",
+                        "status": "DEFINED",
+                        "tables": tables,
+                    }
+                ],
+                "portfolios": [
+                    {
+                        "candidate_id": candidate.candidate_id,
+                        "asset_id": candidate.asset_id,
+                        "status": "DEFINED",
+                    }
+                ],
+                "data": {},
+                "evaluations": [],
+                "models": {},
+                "predictions": {},
+                "model_comparisons": [],
+                "calibrations": [],
+                "issues": [],
+            },
+        )
+        section = report["sections"]["daily statistics"]
+        rows = {row["metric_id"]: row for row in section["results"]}
+        assert rows["defined_complete_utc_days"]["value"] == 1
+        assert rows["planned_complete_utc_days"]["value"] == 2
+        assert (
+            rows["oos_mean_daily_return"]["reason"]
+            == "planned_utc_day_valuation_undefined"
+        )
+        assert section["daily_returns"]["results"][0]["reason"] == "nonfinite_result"
     after = {
         p.relative_to(root): hashlib.sha256(p.read_bytes()).hexdigest()
         for p in root.rglob("*")
         if p.is_file()
     }
     assert before == after
+
+
+@pytest.mark.parametrize(
+    "start_nav,end_nav,expected",
+    (
+        (1e308, -1e308, -2.0),
+        (1e308, 1e-300, -1.0),
+        (1e-300, 2e-300, 1.0),
+        (1000.0, 1100.0, 0.1),
+    ),
+)
+def test_daily_return_uses_representable_final_ratio(start_nav, end_nav, expected):
+    from types import SimpleNamespace
+
+    from quant_research_platform.research.portfolios.diagnostics import (
+        _crypto_observations,
+    )
+
+    window = TimeWindow("1970-01-01T00:00:00", "1970-01-02T00:00:00")
+    ledger = SimpleNamespace(capital=SimpleNamespace(initial_capital=start_nav))
+    observe, finish = _crypto_observations(ledger, (("test", window),), 1.0)
+    for timestamp, nav, name in (
+        (0, start_nav, "oos_window_start"),
+        (86400000000000, end_nav, "oos_window_end"),
+    ):
+        observe(
+            SimpleNamespace(
+                valuations=(
+                    SimpleNamespace(
+                        phase="end",
+                        timestamp_ns=timestamp,
+                        value=nav,
+                        quantity=0.0,
+                        asset_id="cash",
+                    ),
+                ),
+                diagnostics=(PortfolioDiagnostic("btc_usdt", None, name, number=0.0),),
+                trades=(),
+            )
+        )
+    rows, _, _ = finish()
+    assert len(rows) == 1
+    assert rows[0]["status"] == "DEFINED"
+    assert rows[0]["reason"] == ""
+    assert rows[0]["net_return"] == expected

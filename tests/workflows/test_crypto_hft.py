@@ -49,7 +49,6 @@ from quant_research_platform.storage.datasets.reading import (
 )
 from quant_research_platform.storage.identity import (
     filesystem_glob,
-    filesystem_read_bytes,
     filesystem_stat,
     filesystem_unlink,
     filesystem_write_bytes,
@@ -802,7 +801,7 @@ def test_crypto_funding_qualification_is_asset_scoped(crypto_case, monkeypatch):
     case = crypto_case
     before = _trial_records(case.layout.project_root)
     eth_metadata = case.raw.parent / "funding/ETHUSDT/response.metadata.json"
-    saved_metadata = filesystem_read_bytes(eth_metadata)
+    saved_metadata = Path(native_filesystem_path(eth_metadata)).read_bytes()
     filesystem_unlink(eth_metadata)
     try:
         with monkeypatch.context() as patch:
@@ -845,22 +844,25 @@ def incomplete_funding_case(crypto_case, monkeypatch):
     case = crypto_case
     before = _trial_records(case.layout.project_root)
     btc_metadata = case.raw.parent / "funding/BTCUSDT/response.metadata.json"
-    saved_metadata = filesystem_read_bytes(btc_metadata)
+    saved_metadata = Path(native_filesystem_path(btc_metadata)).read_bytes()
     incomplete = json.loads(saved_metadata)
     incomplete["metadata"]["coverage"]["end_ns"] = 8_950_000_000
     filesystem_write_text(btc_metadata, json.dumps(incomplete), encoding="utf-8")
     old_good = {
-        case.execution_targets[candidate.candidate_id].target_id: filesystem_read_bytes(
-            case.layout.instance_root(
-                case.layout.semantic_artifact_root(
-                    "crypto", case.execution_targets[candidate.candidate_id].target_id
-                ),
-                case.targets[case.execution_targets[candidate.candidate_id].target_id][
-                    "instance_identity"
-                ],
+        case.execution_targets[candidate.candidate_id].target_id: Path(
+            native_filesystem_path(
+                case.layout.instance_root(
+                    case.layout.semantic_artifact_root(
+                        "crypto",
+                        case.execution_targets[candidate.candidate_id].target_id,
+                    ),
+                    case.targets[
+                        case.execution_targets[candidate.candidate_id].target_id
+                    ]["instance_identity"],
+                )
+                / "manifest.json"
             )
-            / "manifest.json"
-        )
+        ).read_bytes()
         for candidate in case.takers
     }
     try:
@@ -912,7 +914,7 @@ def incomplete_funding_case(crypto_case, monkeypatch):
                 old_identity,
             )
             assert (
-                filesystem_read_bytes(old_root / "manifest.json")
+                Path(native_filesystem_path(old_root / "manifest.json")).read_bytes()
                 == old_good[case.execution_targets[candidate.candidate_id].target_id]
             )
             read_portfolio_ledger_artifact(old_root, expected_identity=old_identity)
@@ -1144,7 +1146,7 @@ def test_future_source_gap_preserves_maker_prefix_through_research_and_report(
             descriptor = manifest["capture"]["connection_intervals"]
             descriptor["compressed_bytes"] = filesystem_stat(sidecar).st_size
             descriptor["sha256"] = hashlib.sha256(
-                filesystem_read_bytes(sidecar)
+                Path(native_filesystem_path(sidecar)).read_bytes()
             ).hexdigest()
             filesystem_write_text(
                 raw / "run.json", json.dumps(manifest), encoding="utf-8"
@@ -1475,7 +1477,7 @@ def test_tardis_cross_midnight_development_and_frozen_holdout(
     monkeypatch.setattr(fitting, "_fit_model_result", forbidden)
     monkeypatch.setattr(portfolio, "produce_maker_calibration", forbidden)
     trials = {
-        path: filesystem_read_bytes(path)
+        path: Path(native_filesystem_path(path)).read_bytes()
         for path in _trial_records(layout.project_root)
     }
     development = read_research_run_record(layout.research_run_path(result["run_id"]))
@@ -1493,7 +1495,7 @@ def test_tardis_cross_midnight_development_and_frozen_holdout(
             assert item["status"] == "REUSED"
             assert item["instance_identity"] == targets[key]["instance_identity"]
     assert {
-        path: filesystem_read_bytes(path)
+        path: Path(native_filesystem_path(path)).read_bytes()
         for path in _trial_records(layout.project_root)
     } == trials
     if gap_kind is None:

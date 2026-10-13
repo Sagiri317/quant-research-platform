@@ -4,8 +4,8 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.contracts.targets import unmeasured_operation_evidence
-from quant_research_platform.markets.implementations.a_share.processed import (
-    producer as market_sessions,
+from quant_research_platform.markets.implementations.a_share import (
+    portfolio_sessions as market_sessions,
 )
 from tests.helpers.statistics_artifacts import statistics_envelope
 
@@ -608,8 +608,8 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
             patch.setattr(PortfolioLedgerArtifact, "iter_chunks", altered)
             if mode == "missing_adv":
                 owned = produce()
-                assert owned["portfolio_capacity"].status.eq("BLOCKED").all()
-                assert owned["portfolio_capacity_summary"].status.eq("BLOCKED").all()
+                assert owned["portfolio_capacity"].status.eq("UNDEFINED").all()
+                assert owned["portfolio_capacity_summary"].status.eq("UNDEFINED").all()
             else:
                 expected_error = (
                     KeyboardInterrupt if mode == "interrupt" else ValueError
@@ -1585,7 +1585,7 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
     layout = StorageLayout(tmp_path)
     roots = {}
     for spec in (*_interim_specs().list(), *_processed_specs().list()):
-        if spec.data_id == "index_market":
+        if spec.data_id in {"index_market", "a_share_equity_events"}:
             continue
         root = (
             layout.interim_data_root(spec.source_id, spec.data_id)

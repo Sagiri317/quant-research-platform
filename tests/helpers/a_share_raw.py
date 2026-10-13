@@ -25,9 +25,9 @@ from quant_research_platform.sources.reference.a_share_fees import (
 )
 from quant_research_platform.storage.identity import (
     filesystem_mkdir,
-    filesystem_read_bytes,
     filesystem_stat,
     filesystem_write_text,
+    native_filesystem_path,
     open_filesystem_file,
 )
 from quant_research_platform.storage.layout import StorageLayout
@@ -141,9 +141,9 @@ def write_a_share_raw_fixture(
                 "Markettype": 4,
                 "Clddt": timestamp.date().isoformat(),
                 "Daywk": timestamp.weekday() + 1,
-                "State": "O",
+                "State": "O" if timestamp in sessions else "C",
             }
-            for timestamp in sessions
+            for timestamp in pd.date_range(sessions[0], history_end)
         ),
     )
     _write_csmar(
@@ -349,7 +349,7 @@ def write_a_share_raw_fixture(
         json.dumps(
             {
                 "file_sha256": hashlib.sha256(
-                    filesystem_read_bytes(schedule)
+                    Path(native_filesystem_path(schedule)).read_bytes()
                 ).hexdigest(),
                 "file_bytes": filesystem_stat(schedule).st_size,
                 "row_count": len(rows),
@@ -439,7 +439,7 @@ def write_industry_reference_fixture(raw_root, *, observations, document_suffix=
         candidate = {
             "source": document_name,
             "source_sha256": hashlib.sha256(
-                filesystem_read_bytes(root / document_name)
+                Path(native_filesystem_path(root / document_name)).read_bytes()
             ).hexdigest(),
             "records": rows,
         }
@@ -449,7 +449,9 @@ def write_industry_reference_fixture(raw_root, *, observations, document_suffix=
             encoding="utf-8",
         )
         for name in (document_name, page_name, candidate_name):
-            files[name] = hashlib.sha256(filesystem_read_bytes(root / name)).hexdigest()
+            files[name] = hashlib.sha256(
+                Path(native_filesystem_path(root / name)).read_bytes()
+            ).hexdigest()
         host = "www.csrc.gov.cn" if standard == "CSRC2012" else "www.capco.org.cn"
         snapshots.append(
             {
