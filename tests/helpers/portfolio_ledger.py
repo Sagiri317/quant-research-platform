@@ -309,12 +309,20 @@ def continuous_ledger_batch(
 def ledger_frame(*, account, **kwargs):
     from quant_research_platform.research.portfolios.production import _ledger_batch
 
+    quoted = pd.DataFrame(
+        {
+            "asset_id": account.asset_ledger.asset_id,
+            "research_open_mark_at": pd.NaT,
+        }
+    )
     return session_frame(
         _ledger_batch(
             account=account,
             asset_ledger=account.asset_ledger,
             sequence=0,
             end_timestamp=pd.Timestamp(account.execution_date),
+            next_panel=quoted,
+            endpoint_panel=quoted,
             **kwargs,
         )
     )

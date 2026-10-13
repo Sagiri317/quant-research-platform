@@ -940,6 +940,7 @@ class _PortfolioSession:
     valuation: pd.DataFrame
     closed_assets: frozenset[str]
     execution: pd.DataFrame
+    unproved_lifecycle_assets: frozenset[str]
 
 
 def _portfolio_session_evidence(
@@ -1087,6 +1088,7 @@ def iter_portfolio_sessions(
                 if pd.Timestamp(pending_panel.timestamp.iloc[0]) == timestamp:
                     raw = _portfolio_session_frame(pending_panel, panel_columns)
                 pending_panel = next(panel_frames, None)
+            current_trading_assets = frozenset()
             if not raw.empty:
                 indexed = raw.set_index("asset_id", drop=False)
                 if set(indexed.index.astype(str)) & closed:
@@ -1095,6 +1097,9 @@ def iter_portfolio_sessions(
                 valid = np.isfinite(prices).all(axis=1) & prices.gt(0).all(axis=1)
                 flags = day_bars.filling_flag.reindex(indexed.index)
                 known = flags.isin((0, 1)) & ~indexed.index.isin(unknown_membership)
+                current_trading_assets = frozenset(
+                    indexed.index[known & flags.eq(0)].astype(str)
+                )
                 blocked.update(indexed.index[~valid | ~known].astype(str))
                 real = valid & known & flags.eq(0)
                 blocked.difference_update(indexed.index[real].astype(str))
@@ -1138,22 +1143,32 @@ def iter_portfolio_sessions(
                 ].astype("boolean")
             if timestamp not in sessions or timestamp < pd.Timestamp(time_window.start):
                 continue
+            life_marks = last.loc[
+                last.index.isin(closed)
+                | last.index.isin(blocked)
+                | ~last.index.isin(raw.asset_id)
+            ]
+            unproved_lifecycle = frozenset()
             carried = last.loc[last.index.isin(closed)].copy()
-            if not carried.empty:
+            if not life_marks.empty:
                 facts = panels._asof_join_stock_master(
                     pd.DataFrame(
                         {
-                            "asset_id": carried.index.astype(stocks.asset_id.dtype),
+                            "asset_id": life_marks.index.astype(stocks.asset_id.dtype),
                             "timestamp": timestamp,
                         }
                     ),
                     stocks,
                 ).set_index("asset_id")
+                same_life = facts.listing_date.notna() & facts.listing_date.eq(
+                    life_marks.listing_date
+                )
+                unproved_lifecycle = frozenset(same_life.index[~same_life].astype(str))
                 alive = (
-                    facts.listing_date.notna()
+                    same_life
                     & facts.listing_date.le(timestamp)
                     & facts.delisting_date.ge(timestamp)
-                    & facts.listing_date.le(carried.timestamp)
+                    & facts.listing_date.le(life_marks.timestamp)
                 )
                 carried = carried.loc[alive.reindex(carried.index).fillna(False)]
                 carried["timestamp"] = timestamp
@@ -1163,8 +1178,10 @@ def iter_portfolio_sessions(
                     np.nan
                 )
             valuation = raw.copy()
+            # A missing side does not invalidate the other observed trading phase.
             valuation.loc[
-                valuation.asset_id.isin(blocked), ["adj_open", "adj_close"]
+                valuation.asset_id.isin(blocked - current_trading_assets),
+                ["adj_open", "adj_close"],
             ] = np.nan
             if not carried.empty:
                 valuation = (
@@ -1175,7 +1192,12 @@ def iter_portfolio_sessions(
                     )
                 )
             result = _PortfolioSession(
-                timestamp, raw, valuation, closed, masks.reset_index(drop=True).copy()
+                timestamp,
+                raw,
+                valuation,
+                closed,
+                masks.reset_index(drop=True).copy(),
+                unproved_lifecycle,
             )
             try:
                 yield result

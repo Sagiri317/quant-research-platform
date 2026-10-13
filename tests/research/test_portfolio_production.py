@@ -1148,6 +1148,61 @@ def _enhanced_inputs(monkeypatch):
     return frames, fee_frame, output_window, candidate
 
 
+def test_enhanced_calibration_excludes_research_marks(tmp_path, monkeypatch):
+    frames, fees, window, candidate = _enhanced_inputs(monkeypatch)
+    gap = pd.Timestamp("2022-12-05")
+    endpoint_gap = pd.Timestamp("2023-01-02")
+    mask = frames["panel"].asset_id.eq("b") & frames["panel"].timestamp.isin(
+        [gap, endpoint_gap]
+    )
+    frames["panel"].loc[mask, ["adj_open", "adj_close"]] = np.nan
+    actual = production._completed_calibration_rows
+    checked = {"entry": False, "endpoint": False}
+
+    def observe(pending, panel):
+        if panel.timestamp.eq(endpoint_gap).any():
+            assert not panel.asset_id.eq("b").any()
+            checked["endpoint"] = True
+        if pending[2] == pd.Timestamp("2022-12-02"):
+            assert "b" not in pending[1].index.get_level_values("asset_id")
+            checked["entry"] = True
+        return actual(pending, panel)
+
+    monkeypatch.setattr(production, "_completed_calibration_rows", observe)
+    chunks, _calls = _build_producer(
+        tmp_path,
+        monkeypatch,
+        frames=frames,
+        fee_frame=fees,
+        output_window=window,
+        candidate=candidate,
+        prediction_window=TimeWindow("2022-11-14", "2023-01-10"),
+    )
+    assert list(chunks)
+    assert all(checked.values())
+
+
+def test_enhanced_initial_allocation_cannot_create_unquoted_rights(
+    tmp_path, monkeypatch
+):
+    frames, fees, window, candidate = _enhanced_inputs(monkeypatch)
+    mask = frames["panel"].asset_id.eq("b") & frames["panel"].timestamp.eq("2023-01-04")
+    frames["panel"].loc[mask, ["adj_open", "adj_close"]] = np.nan
+    chunks, _calls = _build_producer(
+        tmp_path,
+        monkeypatch,
+        frames=frames,
+        fee_frame=fees,
+        output_window=window,
+        candidate=candidate,
+        prediction_window=TimeWindow("2022-11-14", "2023-01-10"),
+    )
+    with pytest.raises(
+        PortfolioTargetBlocked, match="portfolio_initial_holding_unquoted"
+    ):
+        list(chunks)
+
+
 def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1596,7 +1651,7 @@ def test_simple_producer_prediction_coverage_fails_closed(
 
 
 @pytest.mark.parametrize("unknown_quote", (False, True))
-def test_simple_producer_missing_held_return_is_blocked(
+def test_simple_producer_missing_held_quote_retains_estimated_rights(
     tmp_path: Path, monkeypatch, unknown_quote
 ) -> None:
     frames, fee_frame, output_window = _inputs()
@@ -1607,15 +1662,316 @@ def test_simple_producer_missing_held_return_is_blocked(
         frames["panel"].loc[unknown, ["amount", "adj_open", "adj_close"]] = np.nan
     else:
         frames["panel"] = frames["panel"].loc[~unknown].copy()
+        for key in ("dataset", "execution"):
+            frames[key] = (
+                frames[key]
+                .loc[
+                    ~(
+                        frames[key].asset_id.eq("b")
+                        & frames[key].timestamp.eq(pd.Timestamp("2023-01-05"))
+                    )
+                ]
+                .copy()
+            )
     output, _calls = _build_producer(
         tmp_path,
         monkeypatch,
         frames=frames,
         fee_frame=fee_frame,
         output_window=output_window,
+        typed_batches=True,
     )
+    batches = list(output)
+    assert len(batches) == 2
+    before_gap, gap = map(session_frame, batches)
+    first = before_gap.set_index("asset_id").loc["b"]
+    second = gap.set_index("asset_id").loc["b"]
+    assert first.end_notional == pytest.approx(first.post_trade_notional)
+    assert second.pre_trade_notional == pytest.approx(first.end_notional)
+    assert second.post_trade_notional == pytest.approx(second.pre_trade_notional)
+    assert not batches[1].trades and not batches[1].cashflows
+    assert second.holding_return == pytest.approx(112 / 108 - 1)
+    facts = {(row.asset_id, row.name): row for row in batches[1].diagnostics}
+    assert facts["b", "research_entry_mark_age_days"].number == 1
+    assert facts["b", "research_entry_mark_kind"].text == "close"
+    assert facts["__cash__", "research_valuation_version"].text == (
+        production.RESEARCH_VALUATION_VERSION
+    )
+
+
+def _mark_view(day, opening, closing, *, present=True, life="2020-01-01"):
+    frame = pd.DataFrame(
+        {
+            "asset_id": ["a"],
+            "timestamp": [pd.Timestamp(day)],
+            "listing_date": [pd.Timestamp(life)],
+            "market_type": pd.Series([1], dtype="Int64"),
+            "adj_open": [opening],
+            "adj_close": [closing],
+            "is_trading": pd.Series([True], dtype="boolean"),
+        }
+    )
+    if not present:
+        frame = frame.iloc[:0].copy()
+    return SimpleNamespace(
+        timestamp=pd.Timestamp(day),
+        panel=frame,
+        valuation=frame.copy(),
+        unproved_lifecycle_assets=frozenset(),
+    )
+
+
+def test_research_marks_are_phase_ordered_and_preserve_life_and_source():
+    marks = production._ResearchValuationMarks()
+    first = marks.project(_mark_view("2023-01-04", 10.0, 11.0))
+    missing = _mark_view("2023-01-05", np.nan, np.nan)
+    original = missing.panel.copy(deep=True)
+    gap = marks.project(missing)
+    absent = marks.project(_mark_view("2023-01-06", np.nan, np.nan, present=False))
+    restored = marks.project(_mark_view("2023-01-09", 12.0, 12.0))
+    pd.testing.assert_frame_equal(missing.panel, original)
+    assert first.adj_open.iloc[0] == 10.0
+    assert gap.adj_open.iloc[0] == absent.adj_open.iloc[0] == 11.0
+    assert gap.research_open_mark_at.iloc[0] == pd.Timestamp("2023-01-04")
+    assert gap.research_open_mark_kind.iloc[0] == "close"
+    assert restored.adj_open.iloc[0] == 12.0
+    assert restored.research_open_mark_at.isna().all()
+    assert gap.adj_open.iloc[0] == 11.0
+    new_life = marks.project(
+        _mark_view("2023-01-10", np.nan, np.nan, life="2023-01-10")
+    )
+    assert new_life.adj_open.isna().all()
+    assert marks.last.empty
+
+
+def test_missing_open_cannot_borrow_its_future_close():
+    marks = production._ResearchValuationMarks()
+    marks.project(_mark_view("2023-01-04", 10.0, 11.0))
+    output = marks.project(_mark_view("2023-01-05", np.nan, 12.0))
+    assert output.adj_open.iloc[0] == 11.0
+    assert output.adj_close.iloc[0] == 12.0
+    assert output.research_open_mark_kind.iloc[0] == "close"
+    fresh = production._ResearchValuationMarks().project(
+        _mark_view("2023-01-05", np.nan, 12.0)
+    )
+    assert fresh.adj_open.isna().all()
     with pytest.raises(PortfolioTargetBlocked, match="portfolio_held_return_missing"):
-        list(output)
+        production._price_returns(
+            fresh.set_index("asset_id"),
+            output.set_index("asset_id"),
+            ["a"],
+            start_column="adj_open",
+            end_column="adj_open",
+        )
+
+
+@pytest.mark.parametrize("invalid", (0.0, -1.0, np.inf, -np.inf))
+def test_research_marks_reject_invalid_raw_price_before_projection(invalid):
+    marks = production._ResearchValuationMarks()
+    marks.project(_mark_view("2023-01-04", 10.0, 11.0))
+    view = _mark_view("2023-01-05", invalid, np.nan)
+    view.valuation.loc[:, ["adj_open", "adj_close"]] = np.nan
+    with pytest.raises(ValueError, match="portfolio_return_invalid"):
+        marks.project(view)
+
+
+def test_multiple_unquoted_sessions_native_roundtrip_and_absolute_nav_stresses(
+    tmp_path, monkeypatch
+):
+    from quant_research_platform.research.portfolios.diagnostics import (
+        _research_valuation_observation,
+    )
+
+    frames, fee, _window = _inputs()
+    window = TimeWindow("2023-01-03", "2023-01-09")
+    fee["rate"] = 0.0
+    b = frames["panel"].asset_id.eq("b")
+    frames["panel"].loc[b, ["adj_open", "adj_close"]] = 10.0
+    frames["panel"].loc[b & frames["panel"].timestamp.eq("2023-01-04"), "adj_close"] = (
+        11.0
+    )
+    frames["panel"].loc[
+        b & frames["panel"].timestamp.ge("2023-01-09"), ["adj_open", "adj_close"]
+    ] = 12.0
+    for name in ("panel", "dataset", "execution"):
+        data = frames[name]
+        frames[name] = data.loc[
+            ~(
+                data.asset_id.eq("b")
+                & data.timestamp.isin(pd.to_datetime(["2023-01-05", "2023-01-06"]))
+            )
+        ].copy()
+    chunks, _calls = _build_producer(
+        tmp_path,
+        monkeypatch,
+        frames=frames,
+        fee_frame=fee,
+        output_window=window,
+        typed_batches=True,
+    )
+    batches = list(chunks)
+    assert len(batches) == 3
+    rows = [session_frame(batch).set_index("asset_id") for batch in batches]
+    assert [row.loc["b", "holding_return"] for row in rows] == pytest.approx(
+        [0.1, 0.0, 12 / 11 - 1]
+    )
+    assert rows[-1].loc["b", "end_notional"] == pytest.approx(120.0)
+    assert all(
+        row.loc["__cash__", "end_notional"] == pytest.approx(0.0) for row in rows
+    )
+    assert all(not batch.trades and not batch.cashflows for batch in batches[1:])
+    observations = [
+        _research_valuation_observation(
+            batch, accounting.portfolio_interval_economics(batch)
+        )
+        for batch in batches
+    ]
+    assert [row["nav_0pct"] for row in observations] == pytest.approx([0.0, 0.0, 120.0])
+    assert [row["nav_50pct"] for row in observations] == pytest.approx(
+        [55.0, 55.0, 120.0]
+    )
+    assert [row["nav_100pct"] for row in observations] == pytest.approx(
+        [110.0, 110.0, 120.0]
+    )
+    assert observations[1]["maximum_mark_age_days"] == 2
+    assert observations[2]["estimated_held_assets"] == 1
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id="synthetic_research_valuation",
+        schema_identity="a" * 64,
+        protocol_or_spec_identity="b" * 64,
+        software_identity="c" * 64,
+        research_window={
+            "start": window.start.isoformat(),
+            "end": window.end.isoformat(),
+            "access": "development",
+        },
+        upstream_identities={},
+        semantic_metadata={
+            "portfolio_capital": {
+                "candidate_id": "synthetic_research_valuation",
+                "initial_capital": 100.0,
+                "valuation_currency": "CNY",
+                "valuation_method": "adjusted_notional",
+            }
+        },
+    )
+
+    def produce(emit):
+        for batch in batches:
+            emit(batch)
+
+    root = write_portfolio_ledger_artifact(
+        tmp_path / "estimated", envelope=envelope, produce=produce
+    )
+    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    assert list(artifact.iter_chunks()) == batches
+
+    from quant_research_platform.artifacts.statistics import (
+        read_statistics_artifact,
+        write_statistics_artifact,
+    )
+    from quant_research_platform.profiles.research import (
+        bind_research_configuration,
+        research_profile,
+    )
+    from quant_research_platform.research.portfolios.diagnostics import (
+        _portfolio_statistics_tables,
+    )
+    from quant_research_platform.research.portfolios.risk import HoldingFactorInputs
+    from tests.helpers.research_configuration import research_configuration
+    from tests.helpers.statistics_artifacts import statistics_envelope
+
+    configuration = research_configuration()
+    configuration["portfolios"] = configuration["portfolios"][:1]
+    configuration["primary_portfolio_id"] = configuration["portfolios"][0][
+        "candidate_id"
+    ]
+    protocol = bind_research_configuration(research_profile(), configuration).protocol(
+        "pv_all"
+    )
+    candidates = protocol.portfolio_candidates()
+    ledgers = {}
+    for candidate in candidates:
+        owned = build_business_manifest_envelope(
+            logical_artifact_id=candidate.candidate_id,
+            schema_identity=envelope.schema_identity,
+            protocol_or_spec_identity=envelope.protocol_or_spec_identity,
+            software_identity=envelope.software_identity,
+            research_window=envelope.research_window,
+            upstream_identities={},
+            semantic_metadata={
+                "portfolio_capital": {
+                    **envelope.payload()["semantic_metadata"]["portfolio_capital"],
+                    "candidate_id": candidate.candidate_id,
+                }
+            },
+        )
+        owned_root = write_portfolio_ledger_artifact(
+            tmp_path / candidate.candidate_id, envelope=owned, produce=produce
+        )
+        ledgers[candidate.candidate_id] = read_portfolio_ledger_artifact(
+            owned_root, expected_identity=owned_root.name
+        )
+    intervals = production.holding_intervals(
+        pd.bdate_range(window.start, window.end), window
+    )
+    holding_inputs = [
+        HoldingFactorInputs(
+            row.decision_at,
+            row.entry_at,
+            row.end_at,
+            None,
+            pd.Series(dtype="float64"),
+            pd.Series(dtype="float64"),
+            pd.DataFrame(columns=("benchmark_id", "asset_id", "weight")),
+            "synthetic_no_risk_fit",
+        )
+        for row in intervals.itertuples(index=False)
+    ]
+    tables = _portfolio_statistics_tables(
+        ledgers=ledgers,
+        candidates=candidates,
+        protocol_manifest=protocol.manifest(),
+        time_window=window,
+        benchmark_opens=pd.DataFrame(columns=("benchmark_id", "timestamp", "open")),
+        calendar=pd.DataFrame(
+            {"calendar_date": pd.bdate_range(window.start, window.end)}
+        ),
+        unified_trading_sessions=lambda frame: pd.DatetimeIndex(frame.calendar_date),
+        holding_inputs={
+            candidate.risk_style_columns: iter(holding_inputs)
+            for candidate in candidates
+        },
+    )
+    stat_envelope = statistics_envelope(
+        envelope, group="portfolio", protocol=protocol.manifest()
+    )
+    stat_root = write_statistics_artifact(
+        tmp_path / "statistics",
+        envelope=stat_envelope,
+        tables=tables,
+        table_group="portfolio",
+    )
+    saved = read_statistics_artifact(stat_root, expected_identity=stat_root.name)
+    with saved.table("portfolio_performance.parquet") as performance:
+        metrics = performance.loc[
+            performance.candidate_id.eq(candidates[0].candidate_id)
+        ].set_index("metric_id")
+        assert metrics.loc["research_valuation_0pct_max_drawdown", "value"] == -1.0
+        assert metrics.loc[
+            "research_valuation_50pct_max_drawdown", "value"
+        ] == pytest.approx(-0.45)
+        assert metrics.loc[
+            "research_valuation_100pct_terminal_nav", "value"
+        ] == pytest.approx(120.0)
+        assert metrics.loc["maximum_estimated_mark_age_days", "value"] == 2
+    with saved.table("portfolio_attribution.parquet") as attribution:
+        unavailable = attribution.loc[
+            ~attribution.component_id.isin(["benchmark", "cost"])
+        ]
+        assert unavailable.status.eq("UNDEFINED").all()
+        assert unavailable.reason.eq("research_estimated_valuation").all()
+        assert unavailable.value.isna().all()
 
 
 def test_simple_producer_blocks_when_adv_warmup_is_short(
@@ -1992,10 +2348,6 @@ def test_structurally_invalid_held_asset_exits_under_existing_execution_rules(
         model_inputs=("feature_missing_x",),
         model_algorithm="linear_regression",
     )
-    if can_exit is None:
-        with pytest.raises(PortfolioTargetBlocked, match="unknown"):
-            list(chunks)
-        return
     output = pd.concat(list(chunks), ignore_index=True)
     held = output.loc[output.asset_id.eq("b")]
     assert held.iloc[0].end_notional > 0.0
@@ -2011,6 +2363,9 @@ def test_structurally_invalid_held_asset_exits_under_existing_execution_rules(
         assert later.post_trade_notional.gt(0.0).all()
         assert later.executed_delta_notional.eq(0.0).all()
         assert later.target_notional.eq(0.0).all()
+        assert later.block_reason.eq(
+            "execution_fact_unknown" if can_exit is None else "market_blocked"
+        ).all()
     cash = output.loc[output.asset_id.eq("__cash__")]
     assert cash.end_notional.ge(0.0).all()
     for _date, session in output.groupby("decision_timestamp"):
@@ -2661,10 +3016,6 @@ def test_empty_selection_executes_zero_target_without_bypassing_market_facts(
         prepare_trade_cost=prepare_trade_cost,
         market_name_for_type=lambda _: "shanghai",
     )
-    if state == "unknown":
-        with pytest.raises(PortfolioTargetBlocked, match="unknown"):
-            production._build_session(**kwargs)
-        return
     account, *_ = production._build_session(**kwargs)
     ledger = account.asset_ledger
     assert ledger.target_notional.eq(0.0).all()
@@ -2677,6 +3028,8 @@ def test_empty_selection_executes_zero_target_without_bypassing_market_facts(
     else:
         assert ledger.executed_delta_notional.eq(0.0).all()
         assert ledger.post_trade_notional.tolist() == [50.0]
+        if state == "unknown":
+            assert ledger.reason.tolist() == ["execution_fact_unknown"]
 
 
 @pytest.mark.parametrize("problem", ("missing", "nan", "infinite"))

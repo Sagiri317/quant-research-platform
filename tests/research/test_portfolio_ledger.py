@@ -712,6 +712,59 @@ def test_empty_asset_transition_is_a_cash_only_ledger() -> None:
     assert _execution_cost(result) == pytest.approx(0.0)
 
 
+@pytest.mark.parametrize("unquoted", (False, True))
+def test_research_no_fill_cannot_release_cash_or_change_target(unquoted) -> None:
+    permission = pd.Series(
+        {"a": True if unquoted else pd.NA, "b": True}, dtype="boolean"
+    )
+    before = permission.copy()
+    result = execute_continuous_target(
+        pd.Series({"a": 0.8, "b": 0.0}),
+        pd.Series({"a": 0.0, "b": 1.0}),
+        nav=100.0,
+        average_daily_volume=pd.Series({"a": 1000.0, "b": 1000.0}),
+        can_enter=permission,
+        can_exit=permission,
+        unquoted_assets=frozenset({"a"}) if unquoted else frozenset(),
+        execution_date=date(2023, 8, 28),
+        assumptions=_assumptions(),
+        cost_for_trade=_a_share_cost(_schedule(), {"a": "shanghai", "b": "shanghai"}),
+        cost_source_identity="0" * 64,
+    )
+    rows = result.asset_ledger.set_index("asset_id")
+    assert rows.loc["a", "post_trade_notional"] == 80.0
+    assert rows.loc["a", "executed_delta_notional"] == 0.0
+    assert rows.loc["a", "target_notional"] == 0.0
+    assert rows.loc["b", "target_notional"] == 100.0
+    assert rows.loc["a", "reason"] == (
+        "research_unquoted_valuation" if unquoted else "execution_fact_unknown"
+    )
+    assert rows.loc["b", "reason"] == "cash_pro_rata"
+    assert 0 < rows.loc["b", "post_trade_notional"] < 20.0
+    assert rows.loc["b", "post_trade_notional"] + _execution_cost(result) <= 20.0
+    assert result.post_trade_cash >= 0.0
+    pd.testing.assert_series_equal(permission, before)
+
+
+def test_unknown_buy_preserves_cash_and_an_actual_order_reason() -> None:
+    result = execute_continuous_target(
+        pd.Series({"a": 0.0}),
+        pd.Series({"a": 1.0}),
+        nav=100.0,
+        average_daily_volume=pd.Series({"a": 1000.0}),
+        can_enter=pd.Series({"a": pd.NA}, dtype="boolean"),
+        can_exit=pd.Series({"a": True}, dtype="boolean"),
+        execution_date=date(2023, 8, 28),
+        assumptions=_assumptions(),
+        cost_for_trade=_a_share_cost(_schedule(), {"a": "shanghai"}),
+        cost_source_identity="0" * 64,
+    )
+    assert result.post_trade_cash == 100.0
+    assert result.asset_ledger.iloc[0].executed_delta_notional == 0.0
+    assert result.asset_ledger.iloc[0].reason == "execution_fact_unknown"
+    assert _execution_cost(result) == 0.0
+
+
 def test_blocked_sell_cannot_fund_buy_and_cash_partial_is_pro_rata() -> None:
     blocked = execute_continuous_target(
         pd.Series({"a": 0.5, "b": 0.0}),

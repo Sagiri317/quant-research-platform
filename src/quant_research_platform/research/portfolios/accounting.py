@@ -680,6 +680,7 @@ def execute_continuous_target(
     ],
     assumptions: ExecutionAssumptions,
     cost_source_identity: str,
+    unquoted_assets: frozenset[str] = frozenset(),
 ) -> ExecutionAccounting:
     """Execute sell-first, cash-constrained continuous-weight orders."""
 
@@ -704,14 +705,26 @@ def execute_continuous_target(
     tolerance = portfolio_notional_tolerance(nav_value)
     enter = _bool_values(can_enter, assets, "execution_entry_mask_invalid")
     exit_ = _bool_values(can_exit, assets, "execution_exit_mask_invalid")
+    if not isinstance(unquoted_assets, frozenset) or not unquoted_assets.issubset(
+        assets
+    ):
+        raise ValueError("execution_unquoted_assets_invalid")
+
+    def blocked_reason(asset, permission):
+        if asset in unquoted_assets:
+            return "research_unquoted_valuation"
+        if pd.isna(permission):
+            return "execution_fact_unknown"
+        return None if permission else "market_blocked"
+
     pre_notional = current * nav_value
     target_notional = target * nav_value
     desired = target_notional - pre_notional
     trading_assets = {
         str(asset)
         for asset in assets
-        if (desired[asset] < 0.0 and bool(exit_[asset]))
-        or (desired[asset] > 0.0 and bool(enter[asset]))
+        if (desired[asset] < 0.0 and blocked_reason(asset, exit_[asset]) is None)
+        or (desired[asset] > 0.0 and blocked_reason(asset, enter[asset]) is None)
     }
     adv = _asset_values(
         average_daily_volume,
@@ -734,8 +747,8 @@ def execute_continuous_target(
         if desired_delta >= 0.0:
             continue
         record = records[str(asset)]
-        if not bool(exit_[asset]):
-            record["reason"] = "market_blocked"
+        if reason := blocked_reason(asset, exit_[asset]):
+            record["reason"] = reason
             continue
         amount = min(-desired_delta, float(capacity[asset]))
         cost = None
@@ -772,8 +785,8 @@ def execute_continuous_target(
         if desired_delta <= 0.0:
             continue
         record = records[str(asset)]
-        if not bool(enter[asset]):
-            record["reason"] = "market_blocked"
+        if reason := blocked_reason(asset, enter[asset]):
+            record["reason"] = reason
             continue
         buy_candidates[str(asset)] = min(desired_delta, float(capacity[asset]))
 
@@ -999,10 +1012,9 @@ def _bool_values(values: pd.Series, assets: pd.Index, error: str) -> pd.Series:
         or any(type(asset) is not str or not asset for asset in values.index)
     ):
         raise ValueError(error)
-    result = values.reindex(assets)
-    if result.isna().any():
+    if not assets.isin(values.index).all():
         raise ValueError(error)
-    return result.astype(bool)
+    return values.reindex(assets).astype("boolean")
 
 
 def _validated_trade_cost(

@@ -168,6 +168,14 @@ def _native_inputs(tmp_path, *, fault=None, open_assets=6):
             0
         ] - pd.Timedelta(days=1)
         stocks = pd.concat((stocks, new), ignore_index=True)
+    if fault == "future_lifecycle_append":
+        selected = stocks.source_asset_id.eq("a0")
+        new = stocks.loc[selected].assign(
+            timestamp=pd.Timestamp("2023-01-09"),
+            listing_date=pd.Timestamp("2023-01-09"),
+        )
+        stocks.loc[selected, "delisting_date"] = pd.Timestamp("2023-01-08")
+        stocks = pd.concat((stocks, new), ignore_index=True)
     if fault == "unknown_before_suspension":
         calendar = calendar.loc[
             ~(calendar.source_market_type.eq(1) & calendar.calendar_date.eq(closed[0]))
@@ -231,6 +239,17 @@ def _native_inputs(tmp_path, *, fault=None, open_assets=6):
         panel.loc[rows, ["adj_open", "adj_close"]] = 100.0
         panel.loc[rows, "has_252_trading_sessions"] = False
         panel.loc[rows, "listing_age_trading_days"] = 1
+    if fault in {"partial_open_quote", "partial_close_quote"}:
+        selected = panel.asset_id.eq("a0")
+        panel.loc[selected, ["adj_open", "adj_close"]] = 10.0
+        panel.loc[selected & panel.timestamp.eq("2023-01-02"), "adj_close"] = 11.0
+        partial = selected & panel.timestamp.eq("2023-01-05")
+        panel.loc[partial, ["adj_open", "adj_close"]] = np.nan
+        phase = "open" if fault == "partial_open_quote" else "close"
+        panel.loc[partial, f"adj_{phase}"] = 12.0
+        panel.loc[
+            selected & panel.timestamp.eq("2023-01-06"), ["adj_open", "adj_close"]
+        ] = np.nan
     execution = panel[["market_id", "asset_id", "timestamp"]].assign(
         can_enter=True, can_exit=True
     )
@@ -502,18 +521,120 @@ def test_closed_market_ledger_reopens_on_current_target_and_keeps_native_endpoin
         "missing_calendar",
         "unknown_membership",
         "delisted",
-        "future_lifecycle",
         "missing_open_price",
         "missing_open_row",
         "unknown_reopen_mask",
-        "new_lifecycle",
         "unknown_before_suspension",
     ],
 )
-def test_closed_market_never_recovers_unproved_holding_or_execution(tmp_path, fault):
+def test_research_valuation_retains_unquoted_rights_without_claiming_execution(
+    tmp_path, fault
+):
+    layout, roots, _calendar, _panel = _native_inputs(tmp_path, fault=fault)
+    batches = list(_ledger(layout, roots))
+    assert batches
+    facts = [item for batch in batches for item in batch.diagnostics]
+    assert any(item.name == "research_valuation_version" for item in facts)
+    if fault == "unknown_reopen_mask":
+        assert any(
+            item.name == "block_reason" and item.text == "execution_fact_unknown"
+            for item in facts
+        )
+    else:
+        assert any(item.name == "research_end_mark_at" for item in facts)
+    for batch in batches:
+        frame = session_frame(batch).set_index("asset_id")
+        assert np.isfinite(frame.end_notional).all()
+        assert frame.loc["__cash__", "end_notional"] >= 0.0
+        if any(
+            item.asset_id == "a0" and item.name == "research_entry_mark_at"
+            for item in batch.diagnostics
+        ):
+            assert all(trade.asset_id != "a0" for trade in batch.trades)
+
+
+@pytest.mark.parametrize("fault", ["future_lifecycle", "new_lifecycle"])
+def test_research_valuation_still_blocks_unproved_listing_life(tmp_path, fault):
     layout, roots, _calendar, _panel = _native_inputs(tmp_path, fault=fault)
     with pytest.raises(PortfolioTargetBlocked):
         list(_ledger(layout, roots))
+
+
+@pytest.mark.parametrize("phase", ["open", "close"])
+def test_native_partial_quote_becomes_phase_ordered_research_anchor(tmp_path, phase):
+    layout, roots, calendar, _panel = _native_inputs(
+        tmp_path, fault=f"partial_{phase}_quote"
+    )
+    with closing_iterator(
+        market_sessions.iter_portfolio_sessions(
+            layout=layout,
+            panel_root=roots["market_panel_1d"],
+            panel_columns=production._PANEL_COLUMNS,
+            calendar=calendar,
+            time_window=TimeWindow("2022-12-30", "2023-01-06"),
+        )
+    ) as source:
+        views = list(source)
+    partial = next(
+        view for view in views if view.timestamp == pd.Timestamp("2023-01-05")
+    )
+    raw = partial.panel.set_index("asset_id").loc["a0"]
+    assert raw[f"adj_{phase}"] == 12.0
+    assert pd.isna(raw[f"adj_{'close' if phase == 'open' else 'open'}"])
+    assert partial.valuation.set_index("asset_id").loc["a0", f"adj_{phase}"] == 12.0
+
+    marks = production._ResearchValuationMarks()
+    projected = {
+        view.timestamp: marks.project(view).set_index("asset_id") for view in views
+    }
+    current = projected[pd.Timestamp("2023-01-05")].loc["a0"]
+    assert current.adj_open == (12.0 if phase == "open" else 11.0)
+    assert current.adj_close == 12.0
+    assert pd.isna(current[f"research_{phase}_mark_at"])
+    next_day = projected[pd.Timestamp("2023-01-06")].loc["a0"]
+    assert next_day.adj_open == next_day.adj_close == 12.0
+    assert next_day.research_open_mark_at == pd.Timestamp("2023-01-05")
+    assert next_day.research_open_mark_kind == phase
+    assert partial.panel.set_index("asset_id").loc["a0"].equals(raw)
+
+    batches = list(_ledger(layout, roots))
+    frames = [session_frame(batch).set_index("asset_id") for batch in batches]
+    assert [frame.loc["a0", "holding_return"] for frame in frames] == pytest.approx(
+        [
+            0.1,
+            0.0,
+            12 / 11 - 1 if phase == "open" else 0.0,
+            0.0 if phase == "open" else 12 / 11 - 1,
+        ]
+    )
+    if phase == "close":
+        assert not any(
+            trade.asset_id == "a0"
+            for batch in batches
+            for trade in batch.trades
+            if pd.Timestamp(trade.timestamp_ns) == pd.Timestamp("2023-01-05")
+        )
+
+
+def test_future_lifecycle_append_cannot_change_previous_ledger_prefix(tmp_path):
+    original, original_roots, calendar, _panel = _native_inputs(tmp_path / "original")
+    appended, appended_roots, _calendar, _panel = _native_inputs(
+        tmp_path / "appended", fault="future_lifecycle_append"
+    )
+    assert list(_ledger(original, original_roots)) == list(
+        _ledger(appended, appended_roots)
+    )
+    for layout in (original, appended):
+        with closing_iterator(
+            market_sessions.iter_portfolio_sessions(
+                layout=layout,
+                panel_root=layout.target_root("market_panel_1d", None),
+                panel_columns=production._PANEL_COLUMNS,
+                calendar=calendar,
+                time_window=TimeWindow("2022-12-30", "2023-01-06"),
+            )
+        ) as source:
+            assert all(not view.unproved_lifecycle_assets for view in source)
 
 
 def test_closed_calendar_rejects_real_activity_even_in_future_source(tmp_path):

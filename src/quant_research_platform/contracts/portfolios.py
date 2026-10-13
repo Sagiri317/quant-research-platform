@@ -44,6 +44,8 @@ PORTFOLIO_DECISION_REASON_MAINTENANCE = "benchmark_maintenance"
 PORTFOLIO_BLOCK_REASONS = frozenset(
     {
         "market_blocked",
+        "execution_fact_unknown",
+        "research_unquoted_valuation",
         "adv_capacity",
         "cash_pro_rata",
         "adv_capacity+cash_pro_rata",

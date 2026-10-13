@@ -21,7 +21,6 @@ from quant_research_platform.research.models.scaler import (
     ModelMatrixScaler,
 )
 from quant_research_platform.research.portfolios.production import (
-    PortfolioTargetBlocked,
     _mask_values,
 )
 from quant_research_platform.research.protocols.a_share import label_definitions
@@ -60,7 +59,7 @@ def _panel():
 @pytest.mark.parametrize(
     "column,value", [("limit_status", np.nan), ("is_trading", None), ("open", np.nan)]
 )
-def test_unknown_execution_survives_persistence_and_blocks_portfolio(
+def test_unknown_execution_survives_persistence_as_unknown_portfolio_permission(
     tmp_path, column, value
 ):
     panel = _panel().astype({"is_trading": "boolean"})
@@ -73,12 +72,11 @@ def test_unknown_execution_survives_persistence_and_blocks_portfolio(
     mask.to_parquet(path)
     loaded = pd.read_parquet(path)
     pd.testing.assert_frame_equal(mask, loaded)
-    with pytest.raises(
-        PortfolioTargetBlocked, match="^portfolio_execution_fact_unknown$"
-    ):
-        _mask_values(
-            loaded.iloc[:1], pd.Index(["a"]), panel.timestamp.iloc[1], frozenset()
-        )
+    permissions = _mask_values(
+        loaded.iloc[:1], pd.Index(["a"]), panel.timestamp.iloc[1], frozenset()
+    )
+    assert permissions["can_enter"].isna().all()
+    assert permissions["can_exit"].isna().all()
     labeled = calculate_labels_for_panel(
         panel.merge(mask),
         definitions=label_definitions(),

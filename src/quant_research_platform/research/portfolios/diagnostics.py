@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import ExitStack
+from dataclasses import replace
 from fractions import Fraction
 from statistics import mean
 
@@ -61,6 +62,65 @@ def _nav_return_roundoff(start: object, end: object, returns: object) -> np.ndar
         upper = np.nextafter(upper - 1.0, np.inf)
         data = np.asarray(returns, dtype="float64")
         return np.maximum(np.abs(data - lower), np.abs(upper - data))
+
+
+def _research_valuation_observation(batch, economics):
+    """Summarize explicit research marks without changing the execution path."""
+    from quant_research_platform.research.portfolios.production import (
+        RESEARCH_VALUATION_VERSION,
+    )
+
+    facts = {(item.asset_id, item.name): item for item in batch.diagnostics}
+    version = facts.get((PORTFOLIO_CASH_ASSET_ID, "research_valuation_version"))
+    if version is None:
+        return None
+    if version.text != RESEARCH_VALUATION_VERSION:
+        raise ValueError("portfolio_research_valuation_version_invalid")
+    values = {
+        phase: {
+            row.asset_id: row.value
+            for row in batch.valuations
+            if row.phase == phase and row.asset_id != PORTFOLIO_CASH_ASSET_ID
+        }
+        for phase in ("after", "end")
+    }
+    marked = {
+        phase: {
+            asset
+            for asset, value in values[valuation_phase].items()
+            if value > 0.0 and (asset, f"research_{phase}_mark_at") in facts
+        }
+        for phase, valuation_phase in (("entry", "after"), ("end", "end"))
+    }
+    amount = sum(values["end"][asset] for asset in marked["end"])
+    return {
+        "entry_at": economics["entry_at"],
+        "end_at": economics["end_at"],
+        "estimated_held_assets": len(marked["entry"] | marked["end"]),
+        "estimated_value_end": amount,
+        "estimated_weight_end": amount / economics["nav_end"],
+        "maximum_mark_age_days": max(
+            (
+                facts[asset, f"research_{phase}_mark_age_days"].number
+                for phase, assets in marked.items()
+                for asset in assets
+            ),
+            default=0.0,
+        ),
+        **{
+            reason: sum(
+                item.name == "block_reason" and item.text == reason
+                for item in batch.diagnostics
+            )
+            for reason in ("execution_fact_unknown", "research_unquoted_valuation")
+        },
+        **{
+            f"nav_{percent}pct": facts[
+                PORTFOLIO_CASH_ASSET_ID, f"research_valuation_nav_{percent}pct"
+            ].number
+            for percent in (0, 50, 100)
+        },
+    }
 
 
 def fixed_turnover_cost_sensitivity(
@@ -1001,6 +1061,7 @@ def _portfolio_statistics_tables(
     ) = ([], [], [], [], [], [])
     exposure_rows, factor_rows = ([], [])
     daily_by_candidate = {candidate_id: [] for candidate_id in ids}
+    valuation_by_candidate = {candidate_id: [] for candidate_id in ids}
     benchmarks = {}
     for benchmark_id in dict.fromkeys(
         candidate.benchmark_id
@@ -1130,6 +1191,15 @@ def _portfolio_statistics_tables(
                     }
                 )
                 held_returns = endpoint.div(after.where(after.ne(0))) - 1.0
+                valuation = _research_valuation_observation(batch, row)
+                if valuation is not None:
+                    valuation_by_candidate[candidate_id].append(valuation)
+                    if valuation["estimated_held_assets"]:
+                        holding_input = replace(
+                            holding_input,
+                            fitted=None,
+                            reason="research_estimated_valuation",
+                        )
                 components, reasons, exposures = holding_attribution(
                     holding_input,
                     after_notionals=after,
@@ -1287,6 +1357,39 @@ def _portfolio_statistics_tables(
             "net_pnl": previous_nav - artifact.capital.initial_capital,
             "cost": float((selected.cost_drag * selected.nav_before).sum()),
         }
+        valuation = pd.DataFrame(valuation_by_candidate[candidate_id])
+        if not valuation.empty:
+            values.update(
+                unknown_execution_no_fill_orders=float(
+                    valuation.execution_fact_unknown.sum()
+                ),
+                unquoted_valuation_no_fill_orders=float(
+                    valuation.research_unquoted_valuation.sum()
+                ),
+                estimated_held_asset_intervals=float(
+                    valuation.estimated_held_assets.sum()
+                ),
+                terminal_estimated_value=float(valuation.estimated_value_end.iloc[-1]),
+                terminal_estimated_weight=float(
+                    valuation.estimated_weight_end.iloc[-1]
+                ),
+                maximum_estimated_weight=float(valuation.estimated_weight_end.max()),
+                maximum_estimated_mark_age_days=float(
+                    valuation.maximum_mark_age_days.max()
+                ),
+            )
+            for percent in (0, 50, 100):
+                stressed = (
+                    valuation[f"nav_{percent}pct"] / artifact.capital.initial_capital
+                )
+                prefix = f"research_valuation_{percent}pct"
+                values[f"{prefix}_terminal_nav"] = float(
+                    valuation[f"nav_{percent}pct"].iloc[-1]
+                )
+                values[f"{prefix}_capital_return"] = float(stressed.iloc[-1] - 1)
+                values[f"{prefix}_max_drawdown"] = float(
+                    (stressed / stressed.cummax().clip(lower=1) - 1).min()
+                )
         if candidate.benchmark_id is not None:
             if selected.benchmark_status.eq("DEFINED").all():
                 relative = wealth / (1 + selected.benchmark_return).cumprod()

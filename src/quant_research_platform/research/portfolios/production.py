@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from statistics import mean
 
@@ -87,6 +87,7 @@ _PANEL_COLUMNS = (
     "adj_close",
     "amount",
     "market_type",
+    "is_trading",
 )
 _ENHANCED_PANEL_COLUMNS = (
     "asset_id",
@@ -128,6 +129,89 @@ _ALPHA_DIAGNOSTICS = {
     "alpha_valid_dates": "valid_rebalance_dates",
     "alpha_scheduled_dates": "scheduled_rebalance_dates",
 }
+RESEARCH_VALUATION_VERSION = "RESEARCH_ESTIMATED_VALUATION_V1"
+
+
+class _ResearchValuationMarks:
+    """Carry unquoted rights, never a tradable quote, in observation order."""
+
+    def __init__(self):
+        self.last = pd.DataFrame(
+            {
+                "listing_date": pd.Series(dtype="datetime64[ns]"),
+                "market_type": pd.Series(dtype="Int64"),
+                "mark_at": pd.Series(dtype="datetime64[ns]"),
+                "mark_price": pd.Series(dtype="float64"),
+                "mark_kind": pd.Series(dtype="string"),
+            }
+        )
+
+    def project(self, view):
+        observed = view.panel.set_index("asset_id")
+        current = view.valuation.set_index("asset_id").copy()
+        for frame in (observed, current):
+            values = frame[["adj_open", "adj_close"]].astype("float64")
+            if ((~np.isfinite(values) | values.le(0)) & values.notna()).any(axis=None):
+                raise ValueError("portfolio_return_invalid")
+        present = current.index
+        assets = present.union(self.last.index, sort=False)
+        current = current.reindex(assets)
+        previous = self.last.reindex(assets)
+        absent = ~assets.isin(present)
+        if absent.any():
+            for column in ("listing_date", "market_type"):
+                current.loc[absent, column] = previous.loc[absent, column]
+        current["timestamp"] = view.timestamp
+        same_life = current.listing_date.notna() & current.listing_date.eq(
+            previous.listing_date
+        )
+        same_life &= ~assets.isin(view.unproved_lifecycle_assets)
+        previous = previous.loc[same_life].copy()
+        self.last = previous.copy()
+        observed = observed.loc[
+            observed.is_trading.eq(True).fillna(False)
+            & observed.listing_date.notna()
+            & ~observed.index.isin(view.unproved_lifecycle_assets)
+        ]
+        for phase in ("open", "close"):
+            column = f"adj_{phase}"
+            known = observed.loc[current[column].reindex(observed.index).notna()]
+            # Today's close cannot fill today's missing open.
+            if phase == "close":
+                previous = self.last.reindex(assets)
+            else:
+                previous = previous.reindex(assets)
+            missing = current[column].isna() & previous.mark_price.notna()
+            current[f"research_{phase}_mark_at"] = pd.Series(
+                pd.NaT, index=assets, dtype="datetime64[ns]"
+            )
+            current[f"research_{phase}_mark_kind"] = pd.Series(
+                pd.NA, index=assets, dtype="string"
+            )
+            if missing.any():
+                current.loc[missing, column] = previous.loc[missing, "mark_price"]
+                current.loc[missing, f"research_{phase}_mark_at"] = pd.to_datetime(
+                    previous.loc[missing, "mark_at"]
+                )
+                current.loc[missing, f"research_{phase}_mark_kind"] = previous.loc[
+                    missing, "mark_kind"
+                ]
+            if not known.empty:
+                marks = known.loc[:, ["listing_date", "market_type"]].assign(
+                    mark_at=view.timestamp,
+                    mark_price=known[column],
+                    mark_kind=phase,
+                )
+                self.last = pd.concat(
+                    (self.last.drop(marks.index, errors="ignore"), marks)
+                )
+        return current.rename_axis("asset_id").reset_index()
+
+
+def _unquoted_assets(frame, phase="open"):
+    return frozenset(
+        frame.loc[frame[f"research_{phase}_mark_at"].notna(), "asset_id"].astype(str)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,6 +447,7 @@ def build_portfolio_ledger(
     previous_benchmark_assets: frozenset[str] | None = None
     emitted = False
     sequence = 0
+    research_marks = _ResearchValuationMarks()
     with ExitStack() as input_channels:
         history = TimeWindow(sessions[0], sessions[-1])
         panel_columns = _ENHANCED_PANEL_COLUMNS if enhanced else _PANEL_COLUMNS
@@ -406,6 +491,7 @@ def build_portfolio_ledger(
         def panel_at(timestamp):
             if timestamp not in panel_window:
                 for view in panel_frames:
+                    view = replace(view, valuation=research_marks.project(view))
                     panel_window[view.timestamp] = view
                     if view.timestamp == timestamp:
                         break
@@ -434,12 +520,20 @@ def build_portfolio_ledger(
             panel = view.panel
             if panel.empty and view.valuation.empty:
                 raise PortfolioTargetBlocked("portfolio_panel_session_missing")
-            _update_amount_history(panel, amount_history, holdings, view.closed_assets)
+            _update_amount_history(
+                panel,
+                amount_history,
+                holdings,
+                view.closed_assets | _unquoted_assets(view.valuation),
+            )
             benchmark_weights = pd.Series(dtype="float64")
             alpha: pd.Series | None = None
             current_cross: pd.DataFrame | None = None
             if enhanced:
                 assert factor_risk is not None
+                observed_valuation = view.valuation.loc[
+                    view.valuation.research_open_mark_at.isna()
+                ]
                 risk_frames = []
                 for columns, context_frames in (
                     risk_inputs.values() if not panel.empty else ()
@@ -492,7 +586,9 @@ def build_portfolio_ledger(
                     == calibration_dates.loc[pending_calibration[2], "available_at"]
                 ):
                     calibration_rows.extend(
-                        _completed_calibration_rows(pending_calibration, view.valuation)
+                        _completed_calibration_rows(
+                            pending_calibration, observed_valuation
+                        )
                     )
                     pending_calibration = None
                 if (
@@ -502,7 +598,7 @@ def build_portfolio_ledger(
                 ):
                     pending_calibration = (
                         waiting_alpha[0],
-                        view.valuation.set_index(["asset_id", "listing_date"])[
+                        observed_valuation.set_index(["asset_id", "listing_date"])[
                             "adj_open"
                         ].astype("float64"),
                         waiting_alpha[1],
@@ -629,6 +725,10 @@ def build_portfolio_ledger(
                         raise PortfolioTargetBlocked(
                             "portfolio_initial_holding_market_closed"
                         )
+                    if set(benchmark_weights.index) & _unquoted_assets(next_panel):
+                        raise PortfolioTargetBlocked(
+                            "portfolio_initial_holding_unquoted"
+                        )
                     holdings = benchmark_weights.multiply(nav)
                     cash = 0.0
                 if scheduled or maintenance:
@@ -688,6 +788,7 @@ def build_portfolio_ledger(
                     fee_identity=fee_identity,
                     prepare_trade_cost=prepare_trade_cost,
                     market_name_for_type=market_name_for_type,
+                    unquoted_assets=_unquoted_assets(next_panel),
                 )
             )
             yielded_value = _ledger_batch(
@@ -704,6 +805,8 @@ def build_portfolio_ledger(
                 optimization_result=_optimization,
                 decision_reason=decision_reason,
                 decision_delta=decision_delta,
+                next_panel=next_panel,
+                endpoint_panel=endpoint_panel,
             )
             holdings = asset_ledger.set_index("asset_id")["post_trade_notional"]
             holdings = holdings.loc[holdings.ne(0.0)]
@@ -1129,6 +1232,7 @@ def _build_session(
     fee_identity: str,
     prepare_trade_cost: Callable[..., object],
     market_name_for_type: Callable[[object], str],
+    unquoted_assets: frozenset[str] = frozenset(),
 ) -> tuple[
     ExecutionAccounting,
     pd.Series,
@@ -1180,6 +1284,7 @@ def _build_session(
     target = target.loc[target.ne(0.0)]
     current = holdings.loc[holdings.ne(0.0)].copy(deep=True)
     assets = pd.Index(sorted(set(current.index) | set(target.index)), dtype="string")
+    unquoted_assets = unquoted_assets.intersection(assets)
     if PORTFOLIO_CASH_ASSET_ID in assets:
         raise ValueError("portfolio_asset_universe_invalid")
     panel_by_asset = panel.set_index("asset_id")
@@ -1199,7 +1304,9 @@ def _build_session(
         },
         dtype="float64",
     )
-    masks = _mask_values(execution, assets, next_timestamp, closed_assets)
+    masks = _mask_values(
+        execution, assets, next_timestamp, closed_assets, unquoted_assets
+    )
     prepared = {
         (market, side): prepare_trade_cost(
             next_timestamp.date(), market, side, fee_schedule, assumptions
@@ -1324,6 +1431,7 @@ def _build_session(
             cost_totals_for_buys=cost_totals_for_buys,
             assumptions=assumptions,
             cost_source_identity=fee_identity,
+            unquoted_assets=unquoted_assets,
         )
     except ValueError as error:
         if str(error) != "execution_adv_invalid:missing_required_assets":
@@ -1417,12 +1525,15 @@ def _mask_values(
     assets: pd.Index,
     execution_at: pd.Timestamp,
     closed_assets: frozenset[str],
+    unquoted_assets: frozenset[str] = frozenset(),
 ) -> dict[str, pd.Series]:
     masks = {
-        column: pd.Series(False, index=assets, dtype="bool")
+        column: pd.Series(False, index=assets, dtype="boolean")
         for column in ("can_enter", "can_exit")
     }
-    open_assets = assets[~assets.isin(closed_assets)]
+    for values in masks.values():
+        values.loc[values.index.isin(unquoted_assets)] = pd.NA
+    open_assets = assets[~assets.isin(closed_assets | unquoted_assets)]
     if open_assets.empty:
         return masks
     if not pd.api.types.is_bool_dtype(
@@ -1433,12 +1544,13 @@ def _mask_values(
     if not open_assets.isin(indexed.index).all():
         raise PortfolioTargetBlocked("portfolio_execution_mask_missing")
     current = indexed.loc[open_assets]
-    if current[["can_enter", "can_exit", "execution_at"]].isna().any().any():
-        raise PortfolioTargetBlocked("portfolio_execution_fact_unknown")
-    if not current.execution_at.eq(execution_at).all():
+    known_date = current.execution_at.notna()
+    if not current.loc[known_date, "execution_at"].eq(execution_at).all():
         raise PortfolioTargetBlocked("portfolio_execution_date_misaligned")
     for column in masks:
-        masks[column].loc[open_assets] = current[column].astype(bool)
+        masks[column].loc[open_assets] = (
+            current[column].where(known_date).astype("boolean")
+        )
     return masks
 
 
@@ -1475,10 +1587,16 @@ def _ledger_batch(
     optimization_result: OptimizationResult | None,
     decision_reason: str,
     decision_delta: pd.Series,
+    next_panel: pd.DataFrame,
+    endpoint_panel: pd.DataFrame,
 ) -> PortfolioLedgerBatch:
     """Build economic facts directly from one isolated accounting snapshot."""
     trades, cashflows, valuations, diagnostics = [], [], [], []
     timestamp = int(pd.Timestamp(account.execution_date).value)
+    mark_frames = {
+        "entry": next_panel.set_index("asset_id"),
+        "end": endpoint_panel.set_index("asset_id"),
+    }
 
     def emit(asset, before, after, holding_return, fill_id, values):
         valuations.extend(
@@ -1576,6 +1694,40 @@ def _ledger_batch(
                 else None,
             },
         )
+        for phase, marks in mark_frames.items():
+            if asset not in marks.index or pd.isna(
+                mark_at := marks.loc[asset, "research_open_mark_at"]
+            ):
+                continue
+            at = pd.Timestamp(marks.loc[asset, "timestamp"])
+            diagnostics.extend(
+                (
+                    PortfolioDiagnostic(
+                        asset,
+                        None,
+                        f"research_{phase}_mark_at",
+                        text=mark_at.isoformat(),
+                    ),
+                    PortfolioDiagnostic(
+                        asset,
+                        None,
+                        f"research_{phase}_mark_age_days",
+                        number=float((at - mark_at).days),
+                    ),
+                    PortfolioDiagnostic(
+                        asset,
+                        None,
+                        f"research_{phase}_mark_kind",
+                        text=str(marks.loc[asset, "research_open_mark_kind"]),
+                    ),
+                    PortfolioDiagnostic(
+                        asset,
+                        None,
+                        f"research_{phase}_listing_date",
+                        text=marks.loc[asset, "listing_date"].isoformat(),
+                    ),
+                )
+            )
     emit(
         PORTFOLIO_CASH_ASSET_ID,
         account.pre_trade_cash,
@@ -1591,6 +1743,7 @@ def _ledger_batch(
             if optimization_result is not None
             and decision_reason == PORTFOLIO_DECISION_REASON_BENCHMARK
             else decision_reason,
+            "research_valuation_version": RESEARCH_VALUATION_VERSION,
             **(
                 {
                     name: getattr(enhanced_decision.calibration, field)
@@ -1612,6 +1765,19 @@ def _ledger_batch(
             if optimization_result
             else None,
         },
+    )
+    unquoted = _unquoted_assets(endpoint_panel)
+    end_values = [row for row in valuations if row.phase == "end"]
+    nav_end = sum(row.value for row in end_values)
+    unquoted_value = sum(row.value for row in end_values if row.asset_id in unquoted)
+    diagnostics.extend(
+        PortfolioDiagnostic(
+            PORTFOLIO_CASH_ASSET_ID,
+            None,
+            f"research_valuation_nav_{percent}pct",
+            number=nav_end - (1 - percent / 100) * unquoted_value,
+        )
+        for percent in (0, 50, 100)
     )
     return PortfolioLedgerBatch(
         sequence, tuple(trades), tuple(cashflows), tuple(valuations), tuple(diagnostics)
