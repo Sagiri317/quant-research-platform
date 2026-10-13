@@ -12,7 +12,7 @@ from quant_research_platform.storage.raw_snapshots import (
 @pytest.mark.parametrize("outer_handled", [False, True])
 @pytest.mark.parametrize("changed", [False, True])
 @pytest.mark.parametrize("termination", ["exhaust", "close", "primary"])
-def test_csv_consumed_digest_is_verified_on_every_exit(
+def test_csv_acceptance_verifies_consumed_digest_without_draining_on_close(
     tmp_path, changed, termination, outer_handled
 ):
     root = tmp_path / "snapshot"
@@ -44,8 +44,8 @@ def test_csv_consumed_digest_is_verified_on_every_exit(
             with pytest.raises(KeyboardInterrupt) as caught:
                 rows.throw(primary)
             assert caught.value is primary
-            assert bool(getattr(primary, "__notes__", [])) == changed
-        elif changed:
+            assert not getattr(primary, "__notes__", [])
+        elif changed and termination == "exhaust":
             with pytest.raises(ValueError, match="raw_csv_content_invalid"):
                 list(rows) if termination == "exhaust" else rows.close()
         elif termination == "exhaust":

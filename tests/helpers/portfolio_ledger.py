@@ -97,7 +97,9 @@ def session_frame(batch):
     return frame
 
 
-def write_test_sessions(root, *, envelope, ledger_chunks, final_calibration=None):
+def write_test_sessions(
+    root, *, capital, metadata, ledger_chunks, final_calibration=None
+):
     def produce(emit):
         previous = {}
         for sequence, frame in enumerate(ledger_chunks):
@@ -115,13 +117,17 @@ def write_test_sessions(root, *, envelope, ledger_chunks, final_calibration=None
             }
 
     return write_portfolio_ledger_artifact(
-        root, envelope=envelope, produce=produce, final_calibration=final_calibration
+        root,
+        capital=capital,
+        metadata=metadata,
+        produce=produce,
+        final_calibration=final_calibration,
     )
 
 
-def write_market_evidence(layout, panel, *, bars=None, stocks=None):
+def write_market_evidence(root, panel, *, bars=None, stocks=None):
     """Write actual synthetic source facts for portfolio valuation qualification."""
-    from quant_research_platform.profiles.research import research_profile
+    from quant_research_platform.sources.csmar.interim import interim_catalog
     from quant_research_platform.storage.datasets import write_dataset
 
     if bars is None:
@@ -143,12 +149,12 @@ def write_market_evidence(layout, panel, *, bars=None, stocks=None):
         )
     roots = {}
     for target, frame in (("market_bars_1d", bars), ("stock_master", stocks)):
-        spec = research_profile().interim.get(target)
-        root = layout.target_root(
-            target, layout.interim_data_root(spec.source_id, target)
+        spec = interim_catalog().get(target)
+        destination = root / target
+        write_dataset(
+            destination, frame.reindex(columns=spec.required_columns), spec=spec
         )
-        write_dataset(root, frame.reindex(columns=spec.required_columns), spec=spec)
-        roots[target] = root
+        roots[target] = destination
     return roots
 
 
@@ -165,7 +171,7 @@ CONTINUOUS_EXECUTION_COLUMNS = (
     *PORTFOLIO_LEDGER_COST_COLUMNS,
     "block_reason",
     "adv20",
-    "alpha_score",
+    "prediction_rank_score",
     "decision_delta_weight",
     "expected_alpha",
     "benchmark_weight",

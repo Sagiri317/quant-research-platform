@@ -24,7 +24,13 @@ from quant_research_platform.contracts.filtering import (
 from quant_research_platform.contracts.json_codec import (
     canonical_identity_bytes,
     parse_qrp_json_object,
+    qrp_json_mapping_snapshot,
     render_qrp_json_object,
+)
+from quant_research_platform.contracts.time import (
+    TimeWindow,
+    is_datetime_value,
+    time_value_isoformat,
 )
 from quant_research_platform.contracts.validation import (
     _validate_column_tuple,
@@ -66,9 +72,6 @@ MODEL_SELECTION_METRIC_DIRECTIONS = {
     "validation_rankic": "maximize",
     "validation_mse": "minimize",
 }
-A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID = (
-    "qrp-a-share-shared-validation-final-models"
-)
 _PARALLEL_MODEL_ALGORITHMS = frozenset(
     algorithm for algorithm, facts in _MODEL_ALGORITHM_FACTS.items() if facts.parallel
 )
@@ -181,20 +184,20 @@ class TrainingWeighting:
     """Equal timestamp mass, optionally decayed in observed training periods."""
 
     method: str = "equal_timestamp"
-    half_life: float | None = None
+    half_life_periods: float | None = None
 
     def __post_init__(self):
         if self.method != "equal_timestamp":
             raise ValueError("training_weighting_method_invalid")
-        if self.half_life is not None and (
-            type(self.half_life) not in {int, float}
-            or not isfinite(self.half_life)
-            or self.half_life <= 0
+        if self.half_life_periods is not None and (
+            type(self.half_life_periods) not in {int, float}
+            or not isfinite(self.half_life_periods)
+            or self.half_life_periods <= 0
         ):
-            raise ValueError("training_weighting_half_life_invalid")
+            raise ValueError("training_weighting_half_life_periods_invalid")
 
     def payload(self):
-        return {"method": self.method, "half_life": self.half_life}
+        return {"method": self.method, "half_life_periods": self.half_life_periods}
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -205,7 +208,7 @@ class ModelSpec:
     model_algorithm: str
     input_factor_columns: tuple[str, ...] = ()
     input_feature_columns: tuple[str, ...] = ()
-    label_column: str
+    target_column: str
     sample_filter_mode: SampleFilterMode = "eligible"
     hyperparameters: Mapping[str, object] = field(default_factory=dict)
     random_seed: int | None = None
@@ -240,7 +243,7 @@ class ModelSpec:
             "input_feature_columns",
             required=False,
         )
-        _validate_non_empty_string(self.label_column, "model_label_column_required")
+        _validate_non_empty_string(self.target_column, "model_target_column_required")
         if not self.input_factor_columns and not self.input_feature_columns:
             raise ValueError("model_input_columns_required")
         overlap = sorted(
@@ -250,8 +253,8 @@ class ModelSpec:
             raise ValueError("model_factor_feature_overlap: " + ", ".join(overlap))
         reject_filter_input_columns(self.input_factor_columns)
         reject_filter_input_columns(self.input_feature_columns)
-        if self.label_column in self.input_columns:
-            raise ValueError("model_label_column_in_inputs")
+        if self.target_column in self.input_columns:
+            raise ValueError("model_target_column_in_inputs")
         if self.random_seed is not None and (
             type(self.random_seed) is not int or isinstance(self.random_seed, bool)
         ):
@@ -279,7 +282,6 @@ class ModelSpec:
 def validate_model_metadata_core(
     value: object,
     *,
-    quarterly: bool = False,
     rank_calibration: bool = False,
 ) -> dict[str, object]:
     """Validate the shared persisted model metadata contract."""
@@ -296,7 +298,7 @@ def validate_model_metadata_core(
         "input_feature_columns",
         "input_columns",
         "input_count",
-        "label_column",
+        "target_column",
         "sample_filter_mode",
         "hyperparameters",
         "resolved_hyperparameters",
@@ -307,12 +309,20 @@ def validate_model_metadata_core(
         "rows_after_filter_mode",
         "rows_after_input_label_dropna",
         "train_start",
+        "training_asset_ids",
         "train_end",
         "filter_columns_used",
         "filter_definition",
         "training_weighting",
         "scaler",
     }
+    assets = metadata.get("training_asset_ids")
+    if (
+        type(assets) is not list
+        or any(type(asset) is not str or not asset for asset in assets)
+        or len(assets) != len(set(assets))
+    ):
+        raise ValueError("invalid_model_training_asset_ids")
     if not required.issubset(metadata):
         raise ValueError("invalid_model_metadata")
     allowed = required | {
@@ -320,29 +330,8 @@ def validate_model_metadata_core(
         "feature_importance_status",
         "rank_parameters",
     }
-    if quarterly:
-        allowed = allowed | {
-            "fit_cutoff",
-            "rank_parameters",
-            "fit_coverage_id",
-        }
     if set(metadata).difference(allowed):
         raise ValueError("invalid_model_metadata")
-    if quarterly and type(metadata.get("fit_cutoff")) is not str:
-        raise ValueError("invalid_model_metadata")
-    if quarterly and (
-        type(metadata.get("fit_coverage_id")) is not str
-        or len(metadata["fit_coverage_id"]) != 64
-        or any(c not in "0123456789abcdef" for c in metadata["fit_coverage_id"])
-    ):
-        raise ValueError("invalid_model_metadata")
-    if quarterly and (
-        type(metadata.get("random_seed")) is not int or metadata["random_seed"] < 0
-    ):
-        raise ValueError("invalid_model_metadata")
-    if type(metadata["training_weighting"]) is not dict:
-        raise ValueError("invalid_model_metadata")
-    TrainingWeighting(**metadata["training_weighting"])
     for key in (
         "rows_input",
         "rows_after_filter_mode",
@@ -426,7 +415,7 @@ def validate_model_metadata_core(
             model_algorithm=metadata["model_algorithm"],
             input_factor_columns=tuple(metadata["input_factor_columns"]),
             input_feature_columns=tuple(metadata["input_feature_columns"]),
-            label_column=metadata["label_column"],
+            target_column=metadata["target_column"],
             sample_filter_mode=metadata["sample_filter_mode"],
             hyperparameters=metadata["hyperparameters"],
             random_seed=metadata["random_seed"],
@@ -435,7 +424,7 @@ def validate_model_metadata_core(
         )
     except (TypeError, ValueError) as exc:
         raise ValueError("invalid_model_metadata") from exc
-    for key in ("train_start", "train_end", *(("fit_cutoff",) if quarterly else ())):
+    for key in ("train_start", "train_end"):
         if type(metadata[key]) is not str:
             raise ValueError("invalid_model_metadata")
         try:
@@ -447,8 +436,6 @@ def validate_model_metadata_core(
     train_start = pd.Timestamp(metadata["train_start"])
     train_end = pd.Timestamp(metadata["train_end"])
     if train_start > train_end:
-        raise ValueError("invalid_model_metadata")
-    if quarterly and train_end > pd.Timestamp(metadata["fit_cutoff"]):
         raise ValueError("invalid_model_metadata")
     scaler = metadata["scaler"]
     if scaler is not None:
@@ -615,151 +602,6 @@ def _validate_a_share_model_family_ids(family_ids) -> None:
         raise ValueError("a_share_model_id_reserved")
 
 
-def validate_a_share_model_selection_metadata(value: object) -> None:
-    """Validate one cutoff-bound decision over immutable candidate predictions."""
-    required = {
-        "status",
-        "selection_group",
-        "decision_id",
-        "cutoff",
-        "selection_metric",
-        "selection_direction",
-        "validation_start",
-        "validation_end",
-        "candidate_family_ids",
-        "tie_break_order",
-        "selected_family_id",
-        "selected_model_id",
-        "families",
-        "common_validation_coverage",
-        "selection_ledger_semantic_identities",
-        "prediction_members",
-        "label_dataset_identity",
-    }
-    if (
-        type(value) is not dict
-        or set(value) != required
-        or value["status"] != "selected"
-        or type(value["selection_group"]) is not str
-        or value["selection_group"] not in {"global", "quarterly"}
-        or value["selection_metric"] != "validation_rankic"
-        or value["selection_direction"] != "maximize"
-        or type(value["decision_id"]) is not str
-        or not value["decision_id"]
-    ):
-        raise ValueError("invalid_model_metadata")
-
-    def identity(item):
-        return (
-            type(item) is str
-            and len(item) == 64
-            and all(character in "0123456789abcdef" for character in item)
-        )
-
-    coverage = value["common_validation_coverage"]
-    if (
-        type(coverage) is not dict
-        or set(coverage) != {"semantic_identity", "row_count"}
-        or not identity(coverage["semantic_identity"])
-        or type(coverage["row_count"]) is not int
-        or coverage["row_count"] < 1
-        or not identity(value["label_dataset_identity"])
-    ):
-        raise ValueError("invalid_model_metadata")
-    parents = value["selection_ledger_semantic_identities"]
-    if (
-        type(parents) is not list
-        or not parents
-        or not all(identity(item) for item in parents)
-        or parents != sorted(set(parents))
-    ):
-        raise ValueError("invalid_model_metadata")
-    members = value["prediction_members"]
-    if type(members) is not list or not members:
-        raise ValueError("invalid_model_metadata")
-    paths = []
-    for member in members:
-        if (
-            type(member) is not dict
-            or set(member) != {"path", "size", "sha256"}
-            or type(member["path"]) is not str
-            or not member["path"]
-            or type(member["size"]) is not int
-            or member["size"] <= 0
-            or not identity(member["sha256"])
-        ):
-            raise ValueError("invalid_model_metadata")
-        paths.append(member["path"])
-    if paths != sorted(set(paths)):
-        raise ValueError("invalid_model_metadata")
-    try:
-        start, end, cutoff = (
-            pd.Timestamp(value[key])
-            for key in ("validation_start", "validation_end", "cutoff")
-        )
-        if (
-            any(pd.isna(stamp) for stamp in (start, end, cutoff))
-            or not start <= end <= cutoff
-        ):
-            raise ValueError("invalid_model_metadata")
-    except (TypeError, ValueError) as exc:
-        raise ValueError("invalid_model_metadata") from exc
-    family_ids, tie_order = value["candidate_family_ids"], value["tie_break_order"]
-    if (
-        type(family_ids) is not list
-        or not family_ids
-        or any(type(item) is not str or not item for item in family_ids)
-        or len(set(family_ids)) != len(family_ids)
-        or tie_order != family_ids
-        or value["selected_family_id"] not in family_ids
-    ):
-        raise ValueError("invalid_model_metadata")
-    families = value["families"]
-    if type(families) is not list or len(families) != len(family_ids):
-        raise ValueError("invalid_model_metadata")
-    for family, family_id in zip(families, family_ids, strict=True):
-        if (
-            type(family) is not dict
-            or set(family)
-            != {
-                "family_id",
-                "config_tie_break_order",
-                "selected_config_id",
-                "trial_metrics",
-            }
-            or family["family_id"] != family_id
-        ):
-            raise ValueError("invalid_model_metadata")
-        candidate_ids = family["config_tie_break_order"]
-        if (
-            type(candidate_ids) is not list
-            or not candidate_ids
-            or any(type(item) is not str or not item for item in candidate_ids)
-            or len(set(candidate_ids)) != len(candidate_ids)
-            or family["selected_config_id"] not in candidate_ids
-            or type(family["trial_metrics"]) is not list
-            or len(family["trial_metrics"]) != len(candidate_ids)
-        ):
-            raise ValueError("invalid_model_metadata")
-        for trial, candidate_id in zip(
-            family["trial_metrics"], candidate_ids, strict=True
-        ):
-            _validate_model_selection_trial_record(trial)
-            if (
-                trial["model_id"] != candidate_id
-                or trial["validation_rows"] != coverage["row_count"]
-            ):
-                raise ValueError("invalid_model_metadata")
-    selected = next(
-        family
-        for family in families
-        if family["family_id"] == value["selected_family_id"]
-    )
-    if selected["selected_config_id"] != value["selected_model_id"]:
-        raise ValueError("invalid_model_metadata")
-    _validate_a_share_model_family_ids(family_ids)
-
-
 def _validate_model_selection_trial_record(trial: object) -> None:
     if type(trial) is not dict or set(trial) != _MODEL_SELECTION_TRIAL_METRIC_KEYS:
         raise ValueError("invalid_model_metadata")
@@ -861,7 +703,7 @@ def model_spec_payload(spec: object) -> dict[str, object]:
         "model_algorithm": spec.model_algorithm,
         "input_factor_columns": list(spec.input_factor_columns),
         "input_feature_columns": list(spec.input_feature_columns),
-        "label_column": spec.label_column,
+        "target_column": spec.target_column,
         "sample_filter_mode": spec.sample_filter_mode,
         "hyperparameters": _thaw_model_hyperparameters(spec.hyperparameters),
         "random_seed": spec.random_seed,
@@ -886,4 +728,75 @@ def validate_completed_model_trial_metrics(
     _validate_model_selection_trial_record(trial)
 
 
-CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID = "qrp-crypto-fold-predictor-artifact"
+def _strict_config(config, required, optional=()):
+    value = qrp_json_mapping_snapshot(config)
+    if set(value) - set(required) - set(optional) or set(required) - set(value):
+        raise ValueError("operation_config_fields_invalid")
+    return value
+
+
+def _model_spec(value):
+    if not isinstance(value, Mapping):
+        raise ValueError("model_spec_required")
+    value = dict(value)
+    for name in ("input_factor_columns", "input_feature_columns"):
+        if name in value:
+            if not isinstance(value[name], (list, tuple)):
+                raise ValueError("model_input_columns_invalid")
+            value[name] = tuple(value[name])
+    return ModelSpec(**value)
+
+
+def _window_payload(window):
+    return {
+        "start": time_value_isoformat(
+            window.start, preserve_datetime=is_datetime_value(window.start)
+        ),
+        "end": None
+        if window.end is None
+        else time_value_isoformat(
+            window.end, preserve_datetime=is_datetime_value(window.start)
+        ),
+    }
+
+
+def _fit_windows(values, cutoff):
+    if not isinstance(values, (list, tuple)) or not values:
+        raise ValueError("fit_windows_required")
+    windows = tuple(
+        TimeWindow(**item) if isinstance(item, Mapping) else item for item in values
+    )
+    last = None
+    for window in windows:
+        if not isinstance(window, TimeWindow) or window.end is None:
+            raise ValueError("finite_fit_window_required")
+        start, end = pd.Timestamp(window.start), pd.Timestamp(window.end)
+        if end > cutoff:
+            raise ValueError("fit_window_after_cutoff")
+        if last is not None and start <= last:
+            raise ValueError("fit_windows_must_be_ordered_disjoint")
+        last = end
+    return windows
+
+
+def _resolve_candidate_parameters(algorithm, parameters, n_train):
+    values = dict(parameters)
+    for name, target, algorithms in (
+        ("regularization_strength", "alpha", {"ridge_regression", "huber_regression"}),
+        ("min_child_weight_fraction", "min_child_weight", {"xgboost_regressor"}),
+    ):
+        if name not in values:
+            continue
+        value = values.pop(name)
+        if (
+            algorithm not in algorithms
+            or target in values
+            or type(value) not in {int, float}
+            or not np.isfinite(value)
+            or value < 0
+        ):
+            raise ValueError("model_sample_scaled_parameters_invalid")
+        values[target] = n_train * value
+        if not np.isfinite(values[target]):
+            raise ValueError("model_sample_scaled_parameters_unrepresentable")
+    return values

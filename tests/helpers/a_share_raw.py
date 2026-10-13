@@ -14,7 +14,6 @@ import pandas as pd
 from quant_research_platform.markets.implementations.a_share.ids import (
     FORMAL_BENCHMARKS,
 )
-from quant_research_platform.research.protocols import a_share
 from quant_research_platform.sources.choice.fields import FINANCIAL_FIELDS
 from quant_research_platform.sources.choice.raw_exports import choice_session
 from quant_research_platform.sources.csmar.field_mappings import RAW_TABLE_CONTRACTS
@@ -47,19 +46,21 @@ def write_a_share_raw_fixture(
     layout: StorageLayout,
     *,
     benchmark_total_return_indices: Mapping[str, str],
+    formal_dataset_start="2014-01-01",
+    history_end="2025-12-31",
+    validation_start="2019-01-01",
 ) -> None:
     """Keep real source, processed, dataset, model, and portfolio bindings intact."""
     raw_root = layout.raw_source_root("csmar").parent
     root = Path(raw_root) / "csmar"
     filesystem_mkdir(root, parents=True)
     # Preserve the production factor owner's 312-session warm-up.
-    history_end = a_share.HOLDOUT_END
     sessions = pd.bdate_range(
-        pd.Timestamp(a_share.FORMAL_DATASET_START) - pd.offsets.BDay(312),
+        pd.Timestamp(formal_dataset_start) - pd.offsets.BDay(312),
         history_end,
     )
     benchmark_dates = pd.bdate_range(
-        pd.Timestamp(a_share.DEVELOPMENT_START) - pd.offsets.BDay(1), history_end
+        pd.Timestamp(validation_start) - pd.offsets.BDay(1), history_end
     )
     # Active enhancement requires the risk owner's 100-asset cross-section floor.
     assets = tuple(f"{index:06}" for index in range(1, 101))

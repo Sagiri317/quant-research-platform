@@ -58,34 +58,14 @@ LAYER_BOUNDARIES = {
         "quant_research_platform.sources",
     ),
     "runtime": ("quant_research_platform.reports",),
-    "research": (
-        "quant_research_platform.artifacts",
-        "quant_research_platform.markets.implementations",
-        "quant_research_platform.reports",
-        "quant_research_platform.sources",
-    ),
-    "reports": (
-        "quant_research_platform.compute",
-        "quant_research_platform.research",
-        "quant_research_platform.artifacts",
-        "quant_research_platform.workflows",
-        "quant_research_platform.interfaces",
-        "quant_research_platform.markets.implementations",
-        "quant_research_platform.storage",
-    ),
-    "artifacts": (
-        "quant_research_platform.research",
-        "quant_research_platform.markets.implementations",
-    ),
+    # Direct operation owners may compose science, native readers and writers.
+    "research": ("quant_research_platform.reports", "quant_research_platform.sources"),
+    "reports": ("quant_research_platform.research", "quant_research_platform.sources"),
     "compute": (
         "quant_research_platform.reports",
         "quant_research_platform.artifacts",
         "quant_research_platform.workflows",
         "quant_research_platform.interfaces",
-    ),
-    "interfaces": (
-        "quant_research_platform.sources",
-        "quant_research_platform.markets.implementations",
     ),
 }
 
@@ -141,13 +121,13 @@ def test_owner_layer_import_boundaries_are_enforced(
         ),
         (
             SOURCE_ROOT / "research/example.py",
-            "from ..markets.implementations import a_share\n",
-            "quant_research_platform.markets.implementations.a_share",
+            "from ..sources import tardis\n",
+            "quant_research_platform.sources.tardis",
         ),
         (
             SOURCE_ROOT / "reports/example.py",
-            "from quant_research_platform.storage import layout\n",
-            "quant_research_platform.storage.layout",
+            "from quant_research_platform.research import models\n",
+            "quant_research_platform.research.models",
         ),
     ),
 )

@@ -14,7 +14,7 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.storage import manifests
 
 
-@pytest.mark.parametrize("bound", ["not-a-date", pd.NaT])
+@pytest.mark.parametrize("bound", ["not-a-date", "NaT", pd.NaT])
 def test_time_window_invalid_bound_raises_stable_error(bound) -> None:
     with pytest.raises(ValueError, match="invalid_time_window_bound"):
         TimeWindow(bound, "2026-07-06")

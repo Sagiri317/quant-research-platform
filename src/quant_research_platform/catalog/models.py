@@ -11,10 +11,10 @@ from quant_research_platform.contracts.models import ModelSpec
 
 def _effective_model_configurations(items):
     """Project fitted candidates without changing submitted provenance."""
-    return [
-        {**item, "hyperparameters": {}} if "parameter_candidates" in item else item
-        for item in items
-    ]
+    for item in items:
+        if "parameter_candidates" in item and "hyperparameters" in item:
+            raise ValueError("model_parameters_have_multiple_sources")
+    return [dict(item) for item in items]
 
 
 class ModelCatalog(ImmutableCatalog[ModelSpec]):
@@ -46,9 +46,8 @@ class ModelCatalog(ImmutableCatalog[ModelSpec]):
                 }
             }
             if "parameter_candidates" in item:
-                fields["hyperparameters"] = _effective_model_configurations([item])[0][
-                    "hyperparameters"
-                ]
+                _effective_model_configurations([item])
+                fields["hyperparameters"] = {}
             for key in ("input_factor_columns", "input_feature_columns"):
                 if type(fields.get(key)) is not list:
                     raise ValueError("research_model_input_selection_invalid")

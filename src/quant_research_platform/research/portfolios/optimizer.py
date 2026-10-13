@@ -125,24 +125,40 @@ def optimize_portfolio(
     if not np.isclose(current.sum(), 1.0) or not np.isclose(benchmark.sum(), 1.0):
         raise ValueError("optimizer_weight_sum_invalid")
     valid_adv = np.isfinite(data["adv"]) & data["adv"].gt(0.0)
-    unavailable_trade_adv = ~valid_adv & (current != benchmark)
-    if cash_column is not None:
-        unavailable_trade_adv &= ~data[cash_column]
-    if unavailable_trade_adv.any():
-        raise ValueError("optimizer_trade_adv_unavailable")
-    incomplete = (
-        ~np.isfinite(data["expected_alpha"])
-        | ~np.isfinite(data["specific_variance"])
+    cash = (
+        data[cash_column].to_numpy(dtype=bool)
+        if cash_column is not None
+        else np.zeros(len(data), dtype=bool)
+    )
+    frozen = ~valid_adv.to_numpy(dtype=bool) & ~cash
+    for column in ("can_enter", "can_exit"):
+        if column in data:
+            if not pd.api.types.is_bool_dtype(data[column]):
+                raise ValueError("optimizer_boolean_column_invalid")
+    risk_missing = (
+        ~np.isfinite(data["specific_variance"])
         | data["specific_variance"].lt(0.0)
-        | ~np.isfinite(data["adv"])
-        | data["adv"].le(0.0)
         | ~np.isfinite(data.loc[:, columns]).all(axis=1)
     )
+    incomplete = risk_missing | ~np.isfinite(data["expected_alpha"])
+    # Frozen holdings remain real active risk. Missing volume never authorizes
+    # replacing their exposures or specific variance with zero.
+    cannot_reach_benchmark = frozen.copy()
+    if "can_enter" in data:
+        cannot_reach_benchmark |= (current < benchmark) & ~data.can_enter.fillna(
+            False
+        ).to_numpy(dtype=bool)
+    if "can_exit" in data:
+        cannot_reach_benchmark |= (current > benchmark) & ~data.can_exit.fillna(
+            False
+        ).to_numpy(dtype=bool)
+    if (risk_missing & (current != benchmark) & cannot_reach_benchmark).any():
+        raise ValueError("optimizer_held_risk_unavailable")
     data["expected_alpha"] = data["expected_alpha"].where(~incomplete, 0.0)
-    data["specific_variance"] = data["specific_variance"].where(~incomplete, 0.0)
+    data["specific_variance"] = data["specific_variance"].where(~risk_missing, 0.0)
     data["adv"] = data["adv"].where(valid_adv, np.inf)
     exposure = (
-        data.loc[:, columns].where(~incomplete, 0.0, axis=0).to_numpy(dtype="float64")
+        data.loc[:, columns].where(~risk_missing, 0.0, axis=0).to_numpy(dtype="float64")
     )
     expected_alpha = data["expected_alpha"].to_numpy(dtype="float64")
     specific = data["specific_variance"].to_numpy(dtype="float64")
@@ -154,6 +170,7 @@ def optimize_portfolio(
         cash_column=cash_column,
         eligibility_column=eligibility_column,
         incomplete=incomplete.to_numpy(dtype=bool),
+        frozen=frozen,
         config=config,
     )
 
@@ -279,12 +296,16 @@ def _bounds(
     cash_column: str | None,
     eligibility_column: str | None,
     incomplete: np.ndarray,
+    frozen: np.ndarray,
     config: OptimizerConfig,
 ) -> tuple[tuple[float, float], ...]:
     bounds: list[tuple[float, float]] = []
     for position, row in data.iterrows():
         if cash_column is not None and bool(row[cash_column]):
             bounds.append((0.0, 1.0))
+            continue
+        if frozen[position]:
+            bounds.append((float(row.current_weight), float(row.current_weight)))
             continue
         fixed = (
             financial_column is not None
@@ -302,6 +323,16 @@ def _bounds(
                 min(1.0, float(benchmark[position]) + config.active_name_limit),
             )
         )
+    for position, row in data.iterrows():
+        lower, upper = bounds[position]
+        current = float(row.current_weight)
+        if "can_enter" in data and (pd.isna(row.can_enter) or not bool(row.can_enter)):
+            upper = min(upper, current)
+        if "can_exit" in data and (pd.isna(row.can_exit) or not bool(row.can_exit)):
+            lower = max(lower, current)
+        if lower > upper:
+            raise ValueError("optimizer_frozen_constraints_infeasible")
+        bounds[position] = (lower, upper)
     return tuple(bounds)
 
 

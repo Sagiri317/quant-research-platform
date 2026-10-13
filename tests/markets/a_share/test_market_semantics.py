@@ -19,7 +19,6 @@ from quant_research_platform.markets.implementations.a_share.processed.panels im
 )
 from quant_research_platform.research.labels.engine import calculate_labels_for_panel
 from quant_research_platform.research.protocols.a_share import label_definitions
-from quant_research_platform.workflows import operations
 
 
 @pytest.mark.parametrize("has_raw_history", [False, True])
@@ -607,10 +606,10 @@ def test_industry_history_uses_effective_standard_and_set_hierarchy(tmp_path) ->
         .all()
     )
 
-    from quant_research_platform.profiles.research import research_profile
     from quant_research_platform.storage.datasets import read_dataset, write_dataset
+    from tests.helpers.a_share_catalogs import scientific_catalogs
 
-    spec = research_profile().processed.get("market_panel_1d")
+    spec = scientific_catalogs().processed.get("market_panel_1d")
     from quant_research_platform.storage.layout import StorageLayout
 
     root = StorageLayout(tmp_path).processed_data_root(
@@ -1019,9 +1018,7 @@ def test_special_treatment_pit_and_late_older_events_persist(tmp_path, reverse):
     )
     spec = interim_catalog().get("special_treatment_changes")
     layout = StorageLayout(project_root=tmp_path)
-    root = layout.target_root(
-        spec.data_id, layout.interim_data_root(spec.source_id, spec.data_id)
-    )
+    root = layout.interim_data_root(spec.source_id, spec.data_id)
     write_dataset(
         root,
         history,
@@ -1262,9 +1259,9 @@ def test_industry_mapping_gap_preserves_panel_but_rejects_structural_damage(
     from quant_research_platform.markets.implementations.a_share.processed import (
         producer,
     )
-    from quant_research_platform.profiles.research import research_profile
     from quant_research_platform.storage.datasets import read_dataset, write_dataset
-    from tests.markets.a_share.test_target_dag_chain import _synthetic_interim_frames
+    from tests.helpers.a_share_catalogs import scientific_catalogs
+    from tests.helpers.a_share_sources import _synthetic_interim_frames
 
     dates = pd.bdate_range("2020-01-02", periods=3)
     source = _synthetic_interim_frames(dates)
@@ -1285,7 +1282,7 @@ def test_industry_mapping_gap_preserves_panel_but_rejects_structural_damage(
         source["industry_classification_sets"] = pd.concat(
             [dictionary, dictionary.assign(industry_name="conflict")], ignore_index=True
         )
-    spec = research_profile().processed.get("market_panel_1d")
+    spec = scientific_catalogs().processed.get("market_panel_1d")
 
     def compute():
         return producer._compute_processed_frame(
@@ -1337,10 +1334,8 @@ def test_industry_mapping_gap_preserves_panel_but_rejects_structural_damage(
 
 def test_public_suspension_placeholders_keep_fixed_horizon_returns(tmp_path):
     from quant_research_platform.storage.datasets import read_dataset
-    from quant_research_platform.storage.layout import StorageLayout
-    from tests.markets.a_share.test_target_dag_chain import (
+    from tests.helpers.a_share_sources import (
         _synthetic_interim_frames,
-        _windowed_source_profile,
     )
 
     dates = pd.bdate_range("2020-01-02", periods=9).as_unit("ns")
@@ -1353,27 +1348,54 @@ def test_public_suspension_placeholders_keep_fixed_horizon_returns(tmp_path):
     bars.loc[suspended, "filling_flag"] = 1
     bars.loc[suspended, prices] = 50.0
     bars.loc[asset & bars.timestamp.ge(dates[5]), prices] = 120.0
-    profile = _windowed_source_profile(frames, [])
-    layout = StorageLayout(tmp_path)
-    result = operations.data_materialize(
-        profile=profile,
-        layout=layout,
-        raw_root=tmp_path / "raw",
-        start_date=str(dates[0].date()),
-        end_date=str(dates[-1].date()),
-        data_ids=("forward_returns",),
+    from quant_research_platform.markets.prepare import prepare
+    from quant_research_platform.storage.datasets import write_dataset
+    from tests.helpers.a_share_catalogs import scientific_catalogs
+
+    profile = scientific_catalogs()
+    paths = {}
+    for data_id, frame in frames.items():
+        spec = profile.interim.get(data_id)
+        path = tmp_path / data_id
+        write_dataset(path, frame.loc[:, list(spec.required_columns)], spec=spec)
+        paths[data_id] = str(path)
+    window = {"start": str(dates[0].date()), "end": str(dates[-1].date())}
+    panel_spec = profile.processed.get("market_panel_1d")
+    panel = prepare(
+        {
+            "market_id": "a_share",
+            "data_id": "market_panel_1d",
+            "inputs": {
+                key: paths[key]
+                for key in panel_spec.source_input_data_ids
+                if key in paths
+            },
+            "time_window": window,
+            "output_root": str(tmp_path / "panel"),
+        }
     )
-    assert result["status"] == "COMPLETE", result["blockers"]
-    item = next(
-        row for row in result["target_results"] if row["target_id"] == "forward_returns"
+    execution = prepare(
+        {
+            "market_id": "a_share",
+            "data_id": "execution_mask",
+            "inputs": {"market_panel_1d": str(panel)},
+            "time_window": window,
+            "output_root": str(tmp_path / "execution"),
+        }
     )
-    spec = profile.processed.get("forward_returns")
-    saved = read_dataset(
-        layout.instance_root(
-            layout.processed_data_root(spec.market_id, spec.kind, spec.data_id),
-            item["instance_identity"],
-        )
+    root = prepare(
+        {
+            "market_id": "a_share",
+            "data_id": "forward_returns",
+            "inputs": {
+                "market_panel_1d": str(panel),
+                "execution_mask": str(execution),
+            },
+            "time_window": window,
+            "output_root": str(tmp_path / "labels"),
+        }
     )
+    saved = read_dataset(root)
     row = saved.loc[saved.asset_id.eq("000001") & saved.timestamp.eq(dates[0])].iloc[0]
     assert row.forward_return_1d == 0.0
     assert row.forward_return_1d_available_at == dates[2]

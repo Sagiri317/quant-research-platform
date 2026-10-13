@@ -146,7 +146,7 @@ def test_linear_training_large_target_retains_representable_coefficients():
         model_id="probe",
         model_algorithm="linear_regression",
         input_factor_columns=("x",),
-        label_column="y",
+        target_column="y",
     )
     result = _fit_linear_model_result(
         _collect_training_frame((frame,), spec, fitting_cutoff="2020-01-03"), spec
@@ -363,18 +363,12 @@ def test_rank_label_calibration_matches_full_fraction_accumulation(mode):
 def test_native_linear_fit_and_reload_preserves_finite_extrapolation(
     tmp_path, identity, scale
 ):
-    import pickle
-
+    from quant_research_platform.artifacts.outputs.prediction import (
+        read_prediction_output_bundle,
+    )
     from quant_research_platform.contracts.models import ModelSpec
-    from quant_research_platform.research.models.fitting import (
-        _collect_training_frame,
-        _fit_model_result,
-        prediction_callable,
-        validate_model_state,
-    )
-    from quant_research_platform.research.models.supervised import (
-        build_estimator_from_model_spec,
-    )
+    from quant_research_platform.research.models.fitting import prediction_callable
+    from tests.research.direct_model_test_support import fit_frame, predict_frame
 
     stamps = pd.to_datetime(["2020-01-01"] * 2 + ["2020-01-02"] * 2)
     frame = pd.DataFrame(
@@ -391,28 +385,11 @@ def test_native_linear_fit_and_reload_preserves_finite_extrapolation(
         model_id="probe",
         model_algorithm="linear_regression",
         input_factor_columns=("x",),
-        label_column="y",
+        target_column="y",
     )
-    result = _fit_model_result(
-        _collect_training_frame((frame,), spec, fitting_cutoff="2020-01-03"),
-        spec,
-        estimator=build_estimator_from_model_spec(spec),
-    )
-    path = tmp_path / "model.pkl"
-    path.write_bytes(pickle.dumps(result.prediction_model))
-    predictor = pickle.loads(path.read_bytes())
-    validate_model_state(predictor, result.metadata)
-    from quant_research_platform.artifacts.outputs import write_prediction_outputs
-    from quant_research_platform.artifacts.outputs.bundle_validation import (
-        read_prediction_output_bundle,
-    )
-    from quant_research_platform.contracts.predictions import PredictionSpec
-    from quant_research_platform.research.predictions.outputs import (
-        build_prediction_result_from_frames,
-    )
-    from quant_research_platform.storage.layout import StorageLayout
-    from tests.helpers.output_frames import make_prediction_report_spec
-
+    case = fit_frame(tmp_path / "fit", frame, spec, cutoff=pd.Timestamp("2020-01-03"))
+    assert (case.root / "predictor.pkl").is_file()
+    predictor = case.result.prediction_model
     inputs = pd.DataFrame(
         {
             "timestamp": pd.Timestamp("2020-01-04"),
@@ -438,30 +415,14 @@ def test_native_linear_fit_and_reload_preserves_finite_extrapolation(
     )
     scores = prediction_callable(("x",), predictor)(inputs[["x"]])
     np.testing.assert_allclose(scores, expected, rtol=1e-14, atol=0)
-    prediction_spec = PredictionSpec(
-        prediction_id="pred-run",
-        model_id="probe",
-        research_dataset_id="demo",
-        train_end="2020-01-02",
-        test_start="2020-01-04",
-        test_end="2020-01-04",
+    prediction, root, _metadata = predict_frame(
+        tmp_path / "future",
+        inputs,
+        case,
+        window={"start": "2020-01-04", "end": "2020-01-04"},
     )
-    with build_prediction_result_from_frames(
-        (inputs,),
-        prediction_spec,
-        ("x",),
-        prediction_model=predictor,
-        model_metadata=result.metadata,
-    ) as output:
-        root = write_prediction_outputs(
-            spec=prediction_spec,
-            output_spec=make_prediction_report_spec(),
-            layout=StorageLayout(tmp_path),
-            output_chunks=output.output_chunks,
-            model_metadata=output.model_metadata,
-            prediction_metadata_factory=output.prediction_metadata_factory,
-        )
-    _, lookup = read_prediction_output_bundle(root, expected_output_id="pred-run")
+    np.testing.assert_array_equal(prediction.prediction_score, scores)
+    _, lookup = read_prediction_output_bundle(root)
     values, found = lookup.values_for_frame(
         inputs[["timestamp", "asset_id"]], mark_matched=True
     )

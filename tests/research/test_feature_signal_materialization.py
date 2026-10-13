@@ -15,7 +15,7 @@ from quant_research_platform.contracts.signals import (
 from quant_research_platform.research.features.transforms import (
     apply_feature_transforms,
 )
-from quant_research_platform.research.signals.materialization import (
+from quant_research_platform.research.signals.normalization import (
     normalize_signal_frame,
 )
 

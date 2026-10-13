@@ -1,447 +1,409 @@
-"""Executable acceptance using only real QRP production bindings."""
+"""Explicit A-share source-to-account acceptance with real production operations."""
 
-from __future__ import annotations
-
-from datetime import date
-from hashlib import sha256
-from math import isclose
+import json
+from dataclasses import asdict
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
 
 import pandas as pd
 
-from quant_research_platform.artifacts.crypto_hft import summarize_crypto_ledger
+from quant_research_platform.artifacts.outputs.prediction import read_predictions
 from quant_research_platform.artifacts.portfolio_ledger import (
     read_portfolio_ledger_artifact,
     summarize_portfolio_ledger,
 )
-from quant_research_platform.artifacts.research import read_research_run_record
-from quant_research_platform.contracts.portfolios import (
-    PORTFOLIO_DECISION_REASON_ENHANCED,
+from quant_research_platform.markets.implementations.a_share.processed.catalog import (
+    processed_catalog,
 )
-from quant_research_platform.contracts.targets import ProducerKind
-from quant_research_platform.markets.implementations.crypto.ids import (
-    HFT_RESEARCH_DATASET_ID,
+from quant_research_platform.markets.prepare import prepare
+from quant_research_platform.research.datasets.assembler import assemble
+from quant_research_platform.research.models.persisted import load_model
+from quant_research_platform.research.models.production import fit
+from quant_research_platform.research.models.trial_selection import (
+    read_selection,
+    score,
+    select,
 )
-from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.profiles.research import (
-    CRYPTO_PROFILE_ID,
-    bind_research_configuration,
-    research_profile,
-)
-from quant_research_platform.research.models.persisted import (
-    read_crypto_model_artifact,
-    read_quarterly_model_artifact,
-)
+from quant_research_platform.research.portfolios.production import backtest, calibrate
+from quant_research_platform.research.predictions.runner import predict
 from quant_research_platform.research.protocols import a_share
-from quant_research_platform.research.protocols.crypto_hft import (
-    CryptoMakerCandidate,
-    CryptoTakerCandidate,
-)
-from quant_research_platform.storage.identity import (
-    filesystem_glob,
-    filesystem_is_file,
-    native_filesystem_path,
-)
+from quant_research_platform.sources.prepare import prepare_source
+from quant_research_platform.storage.datasets import read_dataset
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.workflows import operations
 from tests.helpers.a_share_raw import write_a_share_raw_fixture
-from tests.helpers.binance_hft import (
-    hft_research_plan,
-    write_binance_hft_run,
-    write_hft_funding_fixture,
-)
-from tests.helpers.research_configuration import (
-    compact_a_share_configuration,
-    compact_a_share_windows,
-    research_configuration,
-)
+from tests.helpers.research_configuration import research_configuration
 
 
-@compact_a_share_windows()
-@patch.multiple(
-    a_share,
-    DATA_END=date(2019, 10, 31),
-    FORMAL_DATASET_END=date(2019, 10, 31),
-    DEVELOPMENT_END=date(2019, 3, 1),
-    HOLDOUT_START=date(2019, 9, 2),
-    HOLDOUT_END=date(2019, 10, 31),
-)
-def run_a_share_acceptance(project_root: Path):
-    """Exercise real source bindings, competing groups, and frozen holdout."""
-    layout = StorageLayout(project_root=project_root)
-    raw_root = project_root / "data/raw"
-    profile = research_profile()
-    configuration = compact_a_share_configuration()
-    assert configuration["windows"]["development"] == {
-        "start": "2019-01-01",
-        "end": "2019-03-01",
-    }
-    assert configuration["windows"]["holdout"] == {
-        "start": "2019-09-02",
-        "end": "2019-10-31",
-    }
-    # Backend and portfolio matrices have separate real-producer coverage.
-    # This source chain keeps both groups and the unmodified factor-risk floors.
-    configuration["models"] = [
-        model
-        for model in configuration["models"]
-        if model["model_algorithm"]
-        in {"equal_weight_rank_ensemble", "ridge_regression"}
-    ]
-    configuration["portfolios"] = [
-        candidate
-        for candidate in configuration["portfolios"]
-        if candidate["candidate_id"] == "champion_csi500_enhanced"
-    ]
-    configuration["primary_portfolio_id"] = "champion_csi500_enhanced"
-    bound_profile = bind_research_configuration(profile, configuration)
-    protocol = bound_profile.protocol(configuration["scenario_id"])
-    assert protocol.data_window.end == date(2019, 10, 31)
-    assert protocol.formal_dataset_window.end == date(2019, 10, 31)
-    assert protocol.risk_config.minimum_factor_dates == 252
-    assert protocol.risk_config.minimum_cross_section == 100
-    # The bounded calendar must supply listing age, market beta, residual
-    # volatility, then lagged factor-risk observations before the active test.
-    first_identifiable_risk = pd.bdate_range(
-        protocol.data_window.start,
-        periods=(252 - 1)
-        + (252 - 1)
-        + (60 - 1)
-        + protocol.risk_config.minimum_factor_dates
-        + 1,
-    )[-1]
-    assert first_identifiable_risk == pd.Timestamp("2019-09-03")
-    assert (
-        len(
-            pd.bdate_range(
-                first_identifiable_risk, configuration["windows"]["holdout"]["end"]
-            )
-        )
-        >= 20
-    )
+def prepare_a_share_acceptance(root: Path):
+    """Normalize provider-shaped bytes and explicitly prepare each chosen input."""
+    root = Path(root)
+    indices = {"csi500": "H00905", "csi1000": "H00852"}
     write_a_share_raw_fixture(
-        layout,
-        benchmark_total_return_indices=bound_profile.protocol(
-            configuration["scenario_id"]
-        ).manifest()["benchmark_total_return_indices"],
+        StorageLayout(root),
+        benchmark_total_return_indices=indices,
+        formal_dataset_start="2017-10-01",
+        history_end="2019-10-31",
+        validation_start="2019-01-01",
     )
-    result = operations.research_run(
-        profile=profile,
-        layout=layout,
-        research_plan=configuration,
-        raw_root=raw_root,
+    processed_names = (
+        "market_panel_1d",
+        "execution_mask",
+        "price_volume_facts",
+        "forward_returns",
+        "market_model_factors",
+        "fundamental_pit",
+        "fundamental_factors",
+        "benchmark_weights",
     )
-    profile = bound_profile
-    assert result["status"] == "COMPLETE", [
-        (row["target_id"], row["status"], row["reason"])
-        for row in result["target_results"]
-        if row["status"] not in {"BUILT", "REUSED"}
-    ]
-    record = read_research_run_record(layout.research_run_path(result["run_id"]))
-    targets = {row.target_id: row for row in record.target_results}
-    model = targets["pv_all_model_selection_refit"]
-    model_root = layout.instance_root(
-        project_root / model.artifact_root, model.instance_identity
-    )
-    artifact = read_quarterly_model_artifact(
-        model_root, expected_identity=model.instance_identity, trial_layout=layout
-    )
-    families = {item["model_id"] for item in configuration["models"]}
-    assert len(families) == 2
-    assert {item["family_id"] for item in artifact.candidate_models} == families
-    assert {item["quarter_id"] for item in artifact.candidate_models} == {
-        str(period) for period in pd.period_range("2018Q1", "2019Q1", freq="Q")
+    catalog = processed_catalog()
+    required_sources = {
+        name
+        for target in processed_names
+        for name in catalog.get(target).source_input_data_ids
+    } | {"a_share_fee_schedule", "index_market"}
+    source_groups = {
+        "choice": {
+            "financial_balance",
+            "financial_income",
+            "financial_cashflow",
+            "financial_first_disclosure",
+        },
+        "reference": {"a_share_fee_schedule", "a_share_industry_snapshots"},
     }
-    assert set(artifact.selections["global"]) == {"final"}
-    assert set(artifact.selections["quarterly"]) == {
-        "2019Q1",
-        "final",
-    }
-    assert len(artifact.candidate_models) == 25
-    assert len(artifact.final_models) == 4
-    assert {
-        (item["selection_group"], item["family_id"]) for item in artifact.final_models
-    } == {(group, family) for group in ("global", "quarterly") for family in families}
-    assert all(
-        pd.Timestamp(item["fit_cutoff"]) == pd.Timestamp("2019-03-01")
-        for item in artifact.final_models
-    )
-    global_decision = artifact.selections["global"]["final"]
-    quarterly_decision = artifact.selections["quarterly"]["2019Q1"]
-    assert global_decision["validation_start"] == "2019-01-01"
-    assert global_decision["validation_end"] == "2019-03-01"
-    assert pd.Timestamp(quarterly_decision["validation_end"]) < pd.Timestamp(
-        "2019-01-01"
-    )
-    for decision in (global_decision, quarterly_decision):
-        assert set(decision["candidate_family_ids"]) == families
-        assert decision["common_validation_coverage"]["row_count"] > 0
-        assert len(decision["families"]) == 2
-        assert all(family["trial_metrics"] for family in decision["families"])
-    for entry in (*artifact.candidate_models, *artifact.final_models):
-        assert entry["model_metadata"]["rows_after_input_label_dropna"] > 0
-    for entry in artifact.candidate_models:
-        assert pd.Timestamp(entry["model_metadata"]["train_end"]) < pd.Timestamp(
-            entry["validation_window"]["start"]
+    source_groups["csmar"] = required_sources - set.union(*source_groups.values())
+    paths = {}
+    for source, names in source_groups.items():
+        outputs = {name: str(root / "normalized" / name) for name in sorted(names)}
+        requests = (
+            [{name: path} for name, path in outputs.items()]
+            if source == "reference"
+            else [outputs]
         )
-    trial_root = layout.trial_ledger_root(record.run_id)
-    trial_before = {
-        path.relative_to(trial_root).as_posix(): sha256(
-            Path(native_filesystem_path(path)).read_bytes()
-        ).hexdigest()
-        for path in filesystem_glob(trial_root, "**/*")
-        if filesystem_is_file(path)
-    }
-    assert trial_before and record.trial_ledgers
-    development_report = operations.report_build(
-        profile=profile, layout=layout, run_id=record.run_id
-    )
-    assert development_report["status"] == "COMPLETE"
-    result = operations.research_run(
-        profile=research_profile(),
-        layout=layout,
-        research_plan=configuration,
-        raw_root=raw_root,
-        holdout=True,
-        development_run_id=record.run_id,
-    )
-    assert result["status"] == "COMPLETE", [
-        (row["target_id"], row["status"], row["reason"])
-        for row in result["target_results"]
-        if row["status"] not in {"BUILT", "REUSED"}
-    ]
-    held_record = read_research_run_record(layout.research_run_path(result["run_id"]))
-    targets = {row.target_id: row for row in held_record.target_results}
-    held_model = targets["pv_all_model_selection_refit"]
-    assert held_model.status.value == "REUSED"
-    assert held_model.instance_identity == model.instance_identity
-    assert not held_record.trial_ledgers
-    assert {
-        path.relative_to(trial_root).as_posix(): sha256(
-            Path(native_filesystem_path(path)).read_bytes()
-        ).hexdigest()
-        for path in filesystem_glob(trial_root, "**/*")
-        if filesystem_is_file(path)
-    } == trial_before
-    assert held_record.research_window["access"] == "holdout"
-    assert held_record.research_window["start"] == "2019-09-02"
-    assert held_record.research_window["end"] == "2019-10-31"
-    record = held_record
-    for candidate in profile.protocol("pv_all").portfolio_candidates():
-        target = targets[f"pv_all_{candidate.candidate_id}_ledger"]
-        root = layout.instance_root(
-            project_root / target.artifact_root, target.instance_identity
-        )
-        ledger = read_portfolio_ledger_artifact(
-            root, expected_identity=target.instance_identity
-        )
-        summary = summarize_portfolio_ledger(ledger.capital, ledger.iter_chunks())
-        assert summary["fill_events"] > 0
-        if candidate.construction == "benchmark_enhanced":
-            with closing_iterator(ledger.iter_chunks()) as chunks:
-                diagnostics = [item for batch in chunks for item in batch.diagnostics]
-            assert any(
-                item.name == "decision_reason"
-                and item.text == PORTFOLIO_DECISION_REASON_ENHANCED
-                for item in diagnostics
+        for requested in requests:
+            receipt = prepare_source(
+                {
+                    "source_id": source,
+                    "raw_root": str(root / "data/raw" / source),
+                    "outputs": requested,
+                }
             )
-            assert any(
-                item.name == "alpha_slope" and item.number > 0 for item in diagnostics
+            assert not receipt.skipped, receipt.skipped
+        paths.update({name: Path(path) for name, path in outputs.items()})
+    history = {"start": "2016-07-21", "end": "2019-10-31"}
+    for name in processed_names:
+        spec = catalog.get(name)
+        selected = (*spec.source_input_data_ids, *spec.processed_input_data_ids)
+        options = {}
+        if name in {"fundamental_pit", "fundamental_factors"}:
+            options["factor_columns"] = ["earnings_yield"]
+            selected = tuple(
+                key
+                for key in selected
+                if key not in {"financial_balance", "financial_cashflow"}
             )
-    assert (
-        sum(
-            row.producer_kind is ProducerKind.PORTFOLIO for row in record.target_results
+        paths[name] = prepare(
+            {
+                **options,
+                "market_id": "a_share",
+                "data_id": name,
+                "inputs": {key: str(paths[key]) for key in selected},
+                "output_root": str(root / "prepared" / name),
+                "time_window": history,
+            }
         )
-        == 2
+    risk_rows = read_dataset(
+        paths["market_model_factors"],
+        columns=("timestamp", "asset_id", "beta_252d", "residual_volatility_60d"),
     )
+    complete_crosses = risk_rows.dropna().groupby("timestamp").asset_id.nunique()
+    assert complete_crosses.loc[complete_crosses.eq(100)].index.min() == pd.Timestamp(
+        "2018-09-14"
+    )
+    factors = research_configuration()["evaluation"]["factors"]
+    dataset = assemble(
+        {
+            "market_id": "a_share",
+            "dataset_id": "pv_all",
+            "inputs": {
+                key: str(paths[key])
+                for key in ("market_panel_1d", "price_volume_facts", "forward_returns")
+            },
+            "output_root": str(root / "assembled"),
+            "time_window": {"start": "2017-10-02", "end": "2019-10-31"},
+            "factor_columns": factors,
+            "label_columns": ["model_target", "forward_return_20d"],
+        }
+    )
+    return SimpleNamespace(
+        root=root,
+        paths=paths,
+        dataset=dataset,
+        history=history,
+        formal={"start": "2017-10-02", "end": "2019-10-31"},
+        indices=indices,
+        factors=factors,
+    )
+
+
+def run_a_share_acceptance(project_root: Path):
+    """Exercise saved models, complete selection, frozen test and native accounts."""
+    case = prepare_a_share_acceptance(project_root)
+    train = {"start": "2017-10-02", "end": "2018-12-31"}
+    validation = {"start": "2019-01-01", "end": "2019-08-30"}
+    test = {"start": "2019-09-02", "end": "2019-10-31"}
+    model_specs = [
+        dict(item)
+        for item in research_configuration()["models"]
+        if item["model_algorithm"] in {"equal_weight_rank_ensemble", "ridge_regression"}
+    ]
+    models, predictions, configurations = {}, {}, {}
+    for model in model_specs:
+        candidates = model.pop("parameter_candidates", None)
+        config = {
+            "market_id": "a_share",
+            "inputs": str(case.dataset),
+            "model": model,
+            "output": str(case.root / "models" / model["model_id"]),
+            "fit_windows": [train],
+            "fit_cutoff": train["end"],
+            "label_unit": "cross_sectional_zscore",
+        }
+        if candidates is not None:
+            config["candidate_parameters"] = candidates[0]
+        identifier = model["model_id"]
+        configurations[identifier] = config
+        models[identifier] = fit(config)
+        predictions[identifier] = predict(
+            {
+                "model": str(models[identifier]),
+                "inputs": str(case.dataset),
+                "output": str(case.root / "validation" / identifier),
+                "prediction_window": validation,
+                "sample_role": "validation",
+            }
+        )
+    case.models, case.validation_predictions = models, predictions
+    case.test, case.validation = test, validation
+    case.selections, case.final_models, case.test_predictions, case.ledgers = (
+        {},
+        {},
+        {},
+        {},
+    )
+    case.enhanced_ledgers, case.portfolio_configs, case.enhanced_configs = {}, {}, {}
     for group in ("global", "quarterly"):
-        assert targets[f"pv_all_{group}_persisted_predictions"].status.value == "BUILT"
-        assert targets[f"pv_all_{group}_statistics"].status.value == "BUILT"
-    report = operations.report_build(
-        profile=profile, layout=layout, run_id=record.run_id
-    )
-    assert report["target_result"]["status"] == "BUILT"
-    assert report["status"] == "COMPLETE", report["report"]["sections"][
-        "readiness/blockers"
-    ]
-    return result, report
-
-
-def run_crypto_acceptance(project_root: Path):
-    """Exercise recorder bytes through actual fold models and all selected ledgers."""
-    layout = StorageLayout(project_root)
-    raw = project_root / "raw/recorder"
-    write_binance_hft_run(raw, count=90, maker_liquidity=True)
-    write_hft_funding_fixture(raw, test_settlement_ns=8_900_000_000)
-    profile = research_profile(CRYPTO_PROFILE_ID)
-    configuration = research_configuration(
-        "crypto",
-        "baseline",
-        small_models=True,
-        plan=hft_research_plan(),
-        development=("1970-01-01T00:00:04", "1970-01-01T00:00:08.500000"),
-    )
-    development = operations.research_run(
-        profile=profile, layout=layout, raw_root=raw, research_plan=configuration
-    )
-    assert development["status"] == "COMPLETE", development["target_results"]
-    development_targets = {
-        item["target_id"]: item for item in development["target_results"]
-    }
-    assert f"{HFT_RESEARCH_DATASET_ID}_models" in development_targets
-    assert f"{HFT_RESEARCH_DATASET_ID}_predictions" not in development_targets
-    assert not any(
-        item["target_id"].endswith(("_ledger", "_episodes", "_continuous_statistics"))
-        for item in development["target_results"]
-    )
-    development_report = operations.report_build(
-        profile=profile, layout=layout, run_id=development["run_id"]
-    )
-    assert development_report["status"] == "COMPLETE"
-    for section in ("OOS prediction", "model comparison"):
-        assert (
-            development_report["report"]["sections"][section]["reason"]
-            == "not_requested"
+        scored = score(
+            {
+                "predictions": list(map(str, predictions.values())),
+                "labels": str(case.dataset),
+                "candidate_ids": list(models),
+                "validation_windows": [validation],
+                "scoring_window": validation,
+                "cutoff": validation["end"],
+                "test_window": test,
+                "selection_group": group,
+                "validation_axis": "cross_sectional",
+                "label_unit": "cross_sectional_zscore",
+                "output": str(case.root / group / "scores.json"),
+            }
         )
-    result = operations.research_run(
-        profile=profile,
-        layout=layout,
-        raw_root=raw,
-        research_plan=configuration,
-        holdout=True,
-        development_run_id=development["run_id"],
-    )
-    profile = bind_research_configuration(profile, configuration)
-    targets = {item["target_id"]: item for item in result["target_results"]}
-    assert result["status"] == "COMPLETE", [
-        (row["target_id"], row["status"], row["reason"])
-        for row in result["target_results"]
-        if row["status"] not in {"BUILT", "REUSED"}
-    ]
-    model_id = f"{HFT_RESEARCH_DATASET_ID}_models"
-    prediction_id = f"{HFT_RESEARCH_DATASET_ID}_predictions"
-    assert targets[model_id]["status"] == "REUSED"
-    assert targets[prediction_id]["status"] == "BUILT"
-    evaluations = profile.evaluations.list()
-    assert len(evaluations) == 2 * len(configuration["models"]) - 1
-    assert all(targets[item.evaluation_id]["status"] == "BUILT" for item in evaluations)
-    protocol = profile.protocol(HFT_RESEARCH_DATASET_ID)
-    candidates = protocol.portfolio_candidates()
-    execution_targets = {
-        target.candidate.candidate_id: target for target in protocol.execution_targets()
-    }
-    makers = tuple(
-        item for item in candidates if isinstance(item, CryptoMakerCandidate)
-    )
-    takers = tuple(
-        item for item in candidates if isinstance(item, CryptoTakerCandidate)
-    )
-    for candidate in makers:
-        if candidate.calibrated:
-            assert (
-                development_targets[candidate.calibration_target_id]["status"]
-                == "BUILT"
+        refit_window = {"start": train["start"], "end": validation["end"]}
+        selected = select(
+            {
+                "scores": str(scored),
+                "output": str(case.root / group / "selection.json"),
+                "selection_metric": "validation_rankic",
+                "selection_direction": "maximize",
+                "tie_break_order": list(models),
+                "refit_windows": [refit_window],
+                "refit_cutoff": validation["end"],
+            }
+        )
+        case.selections[group] = selected
+        decision = read_selection(selected)
+        assert {row["family_id"] for row in decision["families"]} == set(models)
+        for identifier, original in configurations.items():
+            final = fit(
+                {
+                    **original,
+                    "output": str(case.root / group / "final" / identifier),
+                    "fit_windows": [refit_window],
+                    "fit_cutoff": validation["end"],
+                    "selection": str(selected),
+                    "test_window": test,
+                }
             )
-            assert targets[candidate.calibration_target_id]["status"] == "REUSED"
-    assert all(
-        targets[target.statistics_target_id]["status"] == "BUILT"
-        for target in execution_targets.values()
-    )
-    report = operations.report_build(
-        profile=profile, layout=layout, run_id=result["run_id"]
-    )
-    assert report["status"] == "COMPLETE"
-    sections = report["report"]["sections"]
-    assert sorted(
-        (item["candidate_id"], item["execution_mode"], item["target_id"])
-        for item in sections["portfolio"]["candidates"]
-    ) == sorted(
-        (target.candidate.candidate_id, target.execution_mode, target.target_id)
-        for target in execution_targets.values()
-    )
-    assert len(sections["models and validation"]["fold_models"]) == 2 * len(
-        configuration["models"]
-    )
-    assert len(sections["OOS prediction"]["outputs"]) == len(configuration["models"])
-    assert (
-        len(sections["factor diagnostics"]["evaluations"])
-        == len(configuration["models"]) + 1
-    )
-    assert len(sections["model comparison"]["evaluations"]) == 8
-    for comparison in sections["model comparison"]["evaluations"]:
-        evaluation_id = comparison["evaluation_id"]
-        target = targets[evaluation_id]
-        evaluation_root = layout.instance_root(
-            layout.semantic_artifact_root("crypto", evaluation_id),
-            target["instance_identity"],
-        )
-        metrics = pd.read_parquet(
-            native_filesystem_path(
-                evaluation_root / "outputs" / evaluation_id / "metrics.parquet"
+            _, facts = load_model(final)
+            assert facts["fit_windows"] == [refit_window]
+            predicted = predict(
+                {
+                    "model": str(final),
+                    "inputs": str(case.dataset),
+                    "output": str(case.root / group / "test" / identifier),
+                    "prediction_window": test,
+                    "sample_role": "test",
+                }
             )
+            case.final_models[group, identifier] = final
+            case.test_predictions[group, identifier] = predicted
+        champion = decision["selected_model_id"]
+        inputs = {
+            "dataset": str(case.dataset),
+            **{
+                role: str(case.paths[name])
+                for role, name in {
+                    "panel": "market_panel_1d",
+                    "execution": "execution_mask",
+                    "calendar": "trading_calendar",
+                    "fees": "a_share_fee_schedule",
+                    "market_bars": "market_bars_1d",
+                    "stock_master": "stock_master",
+                }.items()
+            },
+        }
+        # Keep all compared accounts at equal synthetic capital; ADV binds first.
+        config = {
+            "candidate": {
+                "candidate_id": group + "_champion_top20",
+                "selection_group": group,
+                "construction": "top20_equal_weight",
+                "prediction_selector": "champion",
+                "top_quantile": 0.2,
+                "rebalance_schedule": "weekly-last-trading-day",
+                "benchmark_id": None,
+            },
+            "inputs": inputs,
+            "predictions": [
+                {
+                    "path": str(case.test_predictions[group, champion]),
+                    "model": str(case.final_models[group, champion]),
+                    "selection": str(selected),
+                    "window": test,
+                }
+            ],
+            "output": str(case.root / group / "ledger"),
+            "output_window": test,
+            "input_window": {"start": "2019-08-01", "end": "2019-10-31"},
+            "formal_dataset_window": case.formal,
+            "prediction_window": test,
+            "sample_role": "test",
+            "assumptions": {
+                **asdict(a_share.EXECUTION_ASSUMPTIONS),
+                "initial_nav": 1e12,
+            },
+        }
+        config["assumptions"]["adv_sensitivities"] = list(
+            config["assumptions"]["adv_sensitivities"]
         )
-        if metrics.empty:
-            assert comparison["status"] == "UNDEFINED"
-            assert (
-                comparison["metadata"]["evaluation_diagnostics"]["timestamp_count"] == 0
-            )
-        else:
-            counts = metrics.groupby("signal").n_obs.sum()
-            assert len(counts) == 2
-            assert counts.nunique() == 1
-
-    assert sections["daily statistics"]["status"] == "UNDEFINED"
-    assert all(
-        row["status"] == "UNDEFINED"
-        for row in sections["daily statistics"]["results"]
-        if row["metric_id"] == "sharpe"
-    )
-    assert len(candidates) == 46 and len(takers) == 44 and len(makers) == 2
-    for candidate in (*takers, *makers):
-        target = targets[execution_targets[candidate.candidate_id].target_id]
-        assert target["status"] == "BUILT"
-        root = layout.instance_root(
-            layout.semantic_artifact_root(
-                "crypto", execution_targets[candidate.candidate_id].target_id
-            ),
-            target["instance_identity"],
-        )
-        ledger = read_portfolio_ledger_artifact(
-            root, expected_identity=target["instance_identity"]
-        )
+        ledger_root = backtest(config)
+        ledger = read_portfolio_ledger_artifact(ledger_root)
         summary = summarize_portfolio_ledger(ledger.capital, ledger.iter_chunks())
-        assert summary["fill_events"] > 0
-        assert summary["initial_capital"] == 1000.0
-        assert summary["valuation_timestamp_ns"] == 9_000_000_000
-        intervals = summarize_crypto_ledger(
-            ledger,
-            ledger.iter_chunks(),
-            windows_ns=((8_600_000_000, 9_000_000_000),),
-        )["intervals"]
-        assert [row["kind"] for row in intervals] == ["oos"]
-        for key in (
-            "net_pnl",
-            "gross_pnl",
-            "fees",
-            "funding",
-            "turnover",
-            "fill_events",
-        ):
-            assert isclose(
-                sum(row[key] for row in intervals),
-                summary[key],
-                rel_tol=1e-6,
-                abs_tol=1e-12,
-            )
-    model = targets[model_id]
-    root = layout.instance_root(
-        layout.semantic_artifact_root("crypto", model_id), model["instance_identity"]
+        assert summary["fill_events"] > 0 and summary["fees"] > 0 and summary["nav"] > 0
+        assert ledger.metadata["initial_holding_convention"] == "cash"
+        case.ledgers[group] = ledger_root
+        case.portfolio_configs[group] = config
+        enhanced = {
+            **config,
+            "input_window": {"start": "2018-09-14", "end": "2019-10-31"},
+            "candidate": {
+                **config["candidate"],
+                "candidate_id": group + "_champion_enhanced",
+                "construction": "benchmark_enhanced",
+                "benchmark_id": "csi500",
+                "top_quantile": None,
+                "risk_style_columns": list(a_share.RISK_STYLE_COLUMNS),
+            },
+            "inputs": {
+                **inputs,
+                "benchmark": str(case.paths["benchmark_weights"]),
+                "risk_context": [
+                    str(case.paths[name])
+                    for name in (
+                        "price_volume_facts",
+                        "market_model_factors",
+                        "fundamental_factors",
+                    )
+                ],
+            },
+        }
+        observations, intervals = source_alpha_observations(
+            case, predictions[champion], "weekly-last-trading-day"
+        )
+        calibration_root = case.root / group / "alpha"
+        calibration_root.mkdir()
+        observations.to_parquet(calibration_root / "observations.parquet", index=False)
+        intervals.to_parquet(calibration_root / "intervals.parquet", index=False)
+        calibration = calibrate(
+            {
+                "observations": str(calibration_root / "observations.parquet"),
+                "scheduled_intervals": str(calibration_root / "intervals.parquet"),
+                "cutoff": validation["end"],
+                "selection_group": group,
+                "output": str(calibration_root / "calibration.json"),
+            }
+        )
+        frozen = json.loads(calibration.read_text())
+        assert frozen["calibration"]["valid_rebalance_dates"] >= 6
+        assert frozen["calibration"]["coverage"] >= 0.8
+        enhanced["calibration"] = str(calibration)
+        enhanced["output"] = str(case.root / group / "enhanced-ledger")
+        case.enhanced_configs[group] = enhanced
+        enhanced_root = backtest(enhanced)
+        account = read_portfolio_ledger_artifact(enhanced_root)
+        diagnostics = [
+            item for batch in account.iter_chunks() for item in batch.diagnostics
+        ]
+        assert any(
+            item.name == "decision_reason" and item.text == "enhanced_optimizer"
+            for item in diagnostics
+        )
+        assert {item.number for item in diagnostics if item.name == "alpha_slope"} == {
+            frozen["calibration"]["slope"]
+        }
+        assert frozen["calibration"]["slope"] > 0
+        assert account.metadata["initial_holding_convention"] == "preheld_benchmark"
+        assert (
+            summarize_portfolio_ledger(account.capital, account.iter_chunks())[
+                "fill_events"
+            ]
+            > 0
+        )
+        case.enhanced_ledgers[group] = enhanced_root
+    return case
+
+
+def source_alpha_observations(case, prediction_path, schedule):
+    """Pair actual native predictions and execution opens on the declared schedule."""
+    from quant_research_platform.research.portfolios.accounting import (
+        alpha_calibration_intervals,
     )
-    saved = read_crypto_model_artifact(
-        root, expected_identity=model["instance_identity"], trial_layout=layout
+
+    calendar = read_dataset(
+        case.paths["trading_calendar"], columns=("calendar_date", "is_trading_day")
     )
-    assert len(saved.models) == 2 * len(configuration["models"])
-    assert len(saved.final_models) == len(configuration["models"])
-    assert {entry["fold_id"] for entry in saved.final_models} == {"fold_2"}
-    return result, report
+    sessions = pd.DatetimeIndex(
+        calendar.loc[calendar.is_trading_day, "calendar_date"]
+    ).sort_values()
+    sessions = sessions[sessions >= pd.Timestamp(case.validation["start"])]
+    prices = (
+        read_dataset(
+            case.paths["market_panel_1d"], columns=("timestamp", "asset_id", "adj_open")
+        )
+        .set_index(["timestamp", "asset_id"])
+        .adj_open
+    )
+    intervals = alpha_calibration_intervals(sessions, schedule)
+    predictions = read_predictions(prediction_path)[0]
+    joined = predictions.merge(
+        intervals, on="timestamp", how="inner", validate="many_to_one"
+    )
+    entry = prices.reindex(
+        pd.MultiIndex.from_frame(joined[["entry_at", "asset_id"]])
+    ).to_numpy()
+    end = prices.reindex(
+        pd.MultiIndex.from_frame(joined[["available_at", "asset_id"]])
+    ).to_numpy()
+    observations = joined[["timestamp", "prediction_rank_score"]].assign(
+        holding_return=end / entry - 1
+    )
+    return observations, intervals

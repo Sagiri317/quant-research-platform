@@ -8,6 +8,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from fractions import Fraction
 from functools import cached_property
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -24,7 +25,10 @@ from quant_research_platform.contracts.experiments import (
     training_availability_columns,
 )
 from quant_research_platform.contracts.filtering import required_filter_columns
-from quant_research_platform.contracts.json_codec import canonical_identity_bytes
+from quant_research_platform.contracts.json_codec import (
+    canonical_identity_bytes,
+    parse_qrp_json_object,
+)
 from quant_research_platform.contracts.models import (
     ModelSpec,
     TrainingWeighting,
@@ -103,7 +107,7 @@ def validate_model_state(predictor: object, metadata: dict[str, object]) -> None
         model_algorithm=metadata["model_algorithm"],
         input_factor_columns=tuple(metadata["input_factor_columns"]),
         input_feature_columns=tuple(metadata["input_feature_columns"]),
-        label_column=metadata["label_column"],
+        target_column=metadata["target_column"],
         sample_filter_mode=metadata["sample_filter_mode"],
         hyperparameters=metadata["hyperparameters"],
         random_seed=metadata["random_seed"],
@@ -236,7 +240,7 @@ def _fit_linear_model_result(
     transformed = matrix.to_numpy(dtype="float64")
     design = np.column_stack((np.ones(len(transformed)), transformed))
     weighted = np.sqrt(weights)
-    target = training[spec.label_column].to_numpy(dtype="float64")
+    target = training[spec.target_column].to_numpy(dtype="float64")
     _, target_exponent = np.frexp(float(np.max(np.abs(target))))
     design *= weighted[:, None]
     with threadpool_limits(limits=1, user_api="blas"):
@@ -282,13 +286,14 @@ def model_metadata(
         "rows_after_input_label_dropna": _strict_non_negative_count_value(
             row_counts["rows_after_input_label_dropna"]
         ),
+        "training_asset_ids": row_counts.get("training_asset_ids", []),
         "train_start": row_counts["train_start"],
         "train_end": row_counts["train_end"],
         "input_factor_columns": list(spec.input_factor_columns),
         "input_feature_columns": list(spec.input_feature_columns),
         "input_columns": list(spec.input_columns),
         "input_count": len(spec.input_columns),
-        "label_column": spec.label_column,
+        "target_column": spec.target_column,
         "hyperparameters": _thaw_model_hyperparameters(spec.hyperparameters),
         "resolved_hyperparameters": supervised.resolved_model_hyperparameters(spec)
         if resolved_hyperparameters is None
@@ -358,10 +363,10 @@ def _collect_training_frame(
         spec.input_columns, spec.model_algorithm
     )
     required = set((*spec.input_columns, *validity_columns))
-    required.add(spec.label_column)
+    required.add(spec.target_column)
     required.add("timestamp")
     required.add("eligible")
-    availability_columns = training_availability_columns(spec.label_column)
+    availability_columns = training_availability_columns(spec.target_column)
     work_columns = tuple(
         dict.fromkeys(
             (
@@ -369,7 +374,7 @@ def _collect_training_frame(
                 "asset_id",
                 *spec.input_columns,
                 *validity_columns,
-                spec.label_column,
+                spec.target_column,
                 "eligible",
                 *availability_columns,
                 *required_filter_columns(spec.sample_filter_mode),
@@ -393,10 +398,10 @@ def _collect_training_frame(
                 chunk,
                 fitting_cutoff=fitting_cutoff,
                 availability_column=resolve_training_availability_column(
-                    chunk, label_column=spec.label_column
+                    chunk, label_column=spec.target_column
                 ),
                 feature_columns=validity_columns,
-                target_column=spec.label_column,
+                target_column=spec.target_column,
             )
             filtered, metadata = apply_filter_mode(
                 chunk, mode=spec.sample_filter_mode, metadata_key="sample_filter_mode"
@@ -411,7 +416,7 @@ def _collect_training_frame(
                 "timestamp",
                 *(("asset_id",) if "asset_id" in filtered.columns else ()),
                 *spec.input_columns,
-                spec.label_column,
+                spec.target_column,
             ]
             usable = filtered.loc[keep.loc[filtered.index], selected_columns].copy()
             if usable.empty:
@@ -446,6 +451,9 @@ def _collect_training_frame(
         "rows_input": rows_input,
         "rows_after_filter_mode": rows_after_filter,
         "rows_after_input_label_dropna": int(len(training)),
+        "training_asset_ids": sorted(training.asset_id.unique())
+        if "asset_id" in training
+        else [],
         "train_start": train_start,
         "train_end": train_end,
     }
@@ -474,7 +482,7 @@ def _fit_predictor(
     estimator: object,
     threads: int,
 ) -> object:
-    y = prepared_training.training[spec.label_column].to_numpy(
+    y = prepared_training.training[spec.target_column].to_numpy(
         dtype="float64", copy=True
     )
     weights, scaler, matrix = prepared_training.preprocessing
@@ -590,3 +598,48 @@ def _apply_training_controls(frame: pd.DataFrame, spec: ModelSpec) -> pd.DataFra
     if spec.max_train_rows is not None:
         result = result.tail(spec.max_train_rows)
     return result.reset_index(drop=True)
+
+
+def _read_model_input(
+    path, *, columns, input_spec=None, time_window=None, model_spec=None, chunked=False
+):
+    """Project declared columns and necessary scientific context."""
+    from quant_research_platform.contracts.data import DataSpec
+    from quant_research_platform.storage.datasets.reading import read_dataset
+
+    path = Path(path)
+    if path.is_file():
+        if type(input_spec) is not dict:
+            raise ValueError("parquet_semantic_spec_required")
+        values = dict(input_spec)
+        for name in ("primary_key", "partition_columns"):
+            values[name] = tuple(values[name])
+        declared = DataSpec(**values)
+        roles = {key: str(value) for key, value in declared.column_roles.items()}
+    else:
+        if input_spec is not None:
+            raise ValueError("dataset_spec_already_declared")
+        payload = parse_qrp_json_object((path / "spec.json").read_bytes())
+        roles = payload["column_roles"]
+        declared = None
+    if model_spec is not None:
+        for column in model_spec.input_factor_columns:
+            if roles.get(column) != "factor":
+                raise ValueError("model_factor_role_mismatch")
+        for column in model_spec.input_feature_columns:
+            if roles.get(column) != "feature":
+                raise ValueError("model_feature_role_mismatch")
+        if (
+            model_spec.target_column in columns
+            and roles.get(model_spec.target_column) != "label"
+        ):
+            raise ValueError("model_target_role_mismatch")
+    from quant_research_platform.storage.datasets.types import DatasetReadMode
+
+    return read_dataset(
+        path,
+        columns=columns,
+        time_window=time_window,
+        spec=declared,
+        mode=DatasetReadMode.CHUNKED if chunked else DatasetReadMode.MATERIALIZED,
+    )

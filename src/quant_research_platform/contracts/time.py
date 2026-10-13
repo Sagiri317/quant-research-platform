@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 
@@ -96,6 +95,8 @@ def _coerce_bound(value: date | datetime | str) -> date | datetime:
         try:
             if "T" in value or " " in value:
                 parsed = pd.to_datetime(value, format="ISO8601")
+                if parsed is pd.NaT:
+                    raise ValueError("invalid_time_window_bound")
                 return _normalize_datetime(parsed)
             return date.fromisoformat(value)
         except ValueError as exc:
@@ -109,26 +110,9 @@ def _normalize_datetime(value: datetime) -> datetime:
     return value.astimezone(UTC).replace(tzinfo=None)
 
 
-def a_share_analysis_windows(
-    manifest: Mapping[str, object], requested: TimeWindow
-) -> tuple[TimeWindow, TimeWindow]:
-    """Resolve full-development factor history and out-of-sample model dates."""
-    if manifest["access_window"] != "development":
-        return requested, requested
-    development = TimeWindow(**manifest["development_window"])
-    factor_history = TimeWindow(
-        manifest["formal_dataset_window"]["start"], development.end
-    )
-    if pd.Timestamp(requested.end) == pd.Timestamp(development.end) and pd.Timestamp(
-        requested.start
-    ) in {pd.Timestamp(development.start), pd.Timestamp(factor_history.start)}:
-        return factor_history, development
-    return requested, requested
-
-
-def crypto_execution_windows(plan, output_window, *, access_window):
+def crypto_execution_windows(plan, output_window, *, sample_role):
     """Execution consumes the frozen final test and never validation."""
-    if access_window != "holdout":
+    if sample_role != "test":
         raise PermissionError("crypto_execution_requires_frozen_test")
     boundary = TimeWindow(**plan["test"])
     if pd.Timestamp(output_window.start) < pd.Timestamp(boundary.start) or pd.Timestamp(

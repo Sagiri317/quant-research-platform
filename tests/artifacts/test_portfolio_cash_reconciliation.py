@@ -7,31 +7,23 @@ from fractions import Fraction
 import pytest
 
 import quant_research_platform.artifacts.portfolio_ledger as ledger
-from quant_research_platform.contracts.business_manifest import (
-    build_business_manifest_envelope,
-)
-from quant_research_platform.contracts.portfolios import (
-    PortfolioCapital,
-)
+from quant_research_platform.contracts.portfolios import PortfolioCapital
 from quant_research_platform.research.portfolios.accounting import PortfolioEconomics
 from quant_research_platform.storage.identity import filesystem_exists
 from tests.artifacts.test_portfolio_ledger_artifact import _file_bytes
 
 
 def _envelope(capital):
-    return build_business_manifest_envelope(
-        logical_artifact_id=capital.candidate_id,
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": "1970-01-01",
-            "end": "1970-01-02",
-            "access": "development",
+    return {
+        "capital": PortfolioCapital(**asdict(capital)),
+        "metadata": {
+            "window": {
+                "start": "1970-01-01",
+                "end": "1970-01-02",
+                "access": "validation",
+            }
         },
-        upstream_identities={},
-        semantic_metadata={"portfolio_capital": asdict(capital)},
-    )
+    }
 
 
 @pytest.mark.parametrize("capital_amount", (1700.0, 1.7e308))
@@ -68,12 +60,10 @@ def test_finite_offset_cash_reconciliation_survives_real_publication(
             emit(batch)
 
     old_root = ledger.write_portfolio_ledger_artifact(
-        tmp_path / "old", envelope=envelope, produce=produce
+        tmp_path / "old", **envelope, produce=produce
     )
     original = _file_bytes(old_root)
-    artifact = ledger.read_portfolio_ledger_artifact(
-        old_root, expected_identity=envelope.instance_identity
-    )
+    artifact = ledger.read_portfolio_ledger_artifact(old_root)
     batches = tuple(artifact.iter_chunks())
     assert len(batches) == 4
     values = {
@@ -102,9 +92,7 @@ def test_finite_offset_cash_reconciliation_survives_real_publication(
         ValueError, match="^portfolio_ledger_cash_reconciliation_invalid$"
     ):
         ledger.write_portfolio_ledger_artifact(
-            tmp_path / "invalid", envelope=envelope, produce=corrupt
+            tmp_path / "invalid", **envelope, produce=corrupt
         )
-    assert not filesystem_exists(
-        tmp_path / "invalid" / "instances" / envelope.instance_identity
-    )
+    assert not filesystem_exists(tmp_path / "invalid")
     assert _file_bytes(old_root) == original

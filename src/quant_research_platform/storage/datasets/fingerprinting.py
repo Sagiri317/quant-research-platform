@@ -19,7 +19,7 @@ from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
     iter_dataset_file_batches,
     open_dataset_session,
-    read_columns_for_time_window,
+    projection_columns_for_window,
 )
 from quant_research_platform.storage.datasets.schema import physical_schema_from_schema
 from quant_research_platform.storage.datasets.types import DatasetFingerprint
@@ -61,7 +61,7 @@ def comparison_schema(context: DatasetSession) -> dict[str, Any]:
 def fingerprint_dataset_session(context: DatasetSession) -> DatasetFingerprint:
     key_columns = tuple(str(column) for column in context.spec["primary_key"])
     hash_columns = tuple(dict.fromkeys((*key_columns, *context.logical_columns)))
-    hash_physical_columns = read_columns_for_time_window(
+    hash_physical_columns = projection_columns_for_window(
         hash_columns, spec=context.spec, time_window=context.time_window
     )
     output_columns = tuple(context.logical_columns)

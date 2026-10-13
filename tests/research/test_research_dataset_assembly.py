@@ -26,12 +26,16 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.datasets.assembler import (
     assemble_research_dataset,
 )
-from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
 from quant_research_platform.research.datasets.validation import (
     validate_evaluation_input,
     validate_research_input,
 )
-from quant_research_platform.storage.datasets import inspect_dataset, write_dataset
+from quant_research_platform.storage.datasets import (
+    DatasetReadMode,
+    inspect_dataset,
+    read_dataset,
+    write_dataset,
+)
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.research_processed_inputs import (
     _demo_research_rows,
@@ -39,10 +43,6 @@ from tests.helpers.research_processed_inputs import (
     write_demo_processed_inputs,
 )
 from tests.helpers.research_specs import make_research_dataset_catalog
-from tests.research.workflow_test_support import (
-    _passthrough_session,
-    _research_rows_for_dates,
-)
 
 
 def test_research_dataset_assembles_from_processed_inputs(tmp_path: Path) -> None:
@@ -53,18 +53,26 @@ def test_research_dataset_assembles_from_processed_inputs(tmp_path: Path) -> Non
     )
     write_demo_processed_inputs(layout, processed_catalog)
     root = assemble_research_dataset(
-        layout=layout,
+        inputs={
+            item.data_id: layout.processed_data_root(
+                item.market_id, item.kind, item.data_id
+            )
+            for item in processed_catalog.list()
+            if item.data_id in dataset_catalog.get("demo").input_data_ids
+        },
+        output_root=layout.research_dataset_root(
+            dataset_catalog.get("demo").market_id, "demo"
+        ),
         dataset_catalog=dataset_catalog,
         processed_catalog=processed_catalog,
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-03"),
     )
     result = pd.concat(
-        iter_research_dataset_chunks(
-            layout,
-            market_id=MarketId("a_share"),
-            dataset_id="demo",
+        read_dataset(
+            layout.research_dataset_root(MarketId("a_share"), "demo"),
             time_window=TimeWindow("2014-01-02", "2014-01-03"),
+            mode=DatasetReadMode.CHUNKED,
         ),
         ignore_index=True,
     )
@@ -82,7 +90,7 @@ def test_research_dataset_assembles_from_processed_inputs(tmp_path: Path) -> Non
         "market_type",
     ]
     assert len(result) == 4
-    assert set(inspection.manifest["input_dataset_identities"]) == {
+    assert set(inspection.manifest["inputs"]) == {
         "demo_factors",
         "demo_labels",
         "demo_annotations",
@@ -118,7 +126,17 @@ def test_non_a_share_named_scenario_keeps_input_semantics_and_requires_real_colu
     spec = make_dummy_research_dataset_spec(data_id=scenario)
     write_dummy_processed_inputs(layout, processed)
     root = assemble_research_dataset(
-        layout=layout,
+        inputs={
+            item.data_id: layout.processed_data_root(
+                item.market_id, item.kind, item.data_id
+            )
+            for item in processed.list()
+            if item.data_id
+            in ResearchDatasetCatalog((spec,)).get(scenario).input_data_ids
+        },
+        output_root=layout.research_dataset_root(
+            ResearchDatasetCatalog((spec,)).get(scenario).market_id, scenario
+        ),
         dataset_catalog=ResearchDatasetCatalog((spec,)),
         processed_catalog=processed,
         dataset_id=scenario,
@@ -373,18 +391,26 @@ def test_research_dataset_assembles_intraday_timestamp_window(tmp_path: Path) ->
             spec=spec,
         )
     assemble_research_dataset(
-        layout=layout,
+        inputs={
+            item.data_id: layout.processed_data_root(
+                item.market_id, item.kind, item.data_id
+            )
+            for item in processed_catalog.list()
+            if item.data_id in dataset_catalog.get("minute_research").input_data_ids
+        },
+        output_root=layout.research_dataset_root(
+            dataset_catalog.get("minute_research").market_id, "minute_research"
+        ),
         dataset_catalog=dataset_catalog,
         processed_catalog=processed_catalog,
         dataset_id="minute_research",
         time_window=TimeWindow("2026-07-06T00:01:00", "2026-07-06T00:02:00"),
     )
     result = pd.concat(
-        iter_research_dataset_chunks(
-            layout,
-            market_id=MarketId("crypto"),
-            dataset_id="minute_research",
+        read_dataset(
+            layout.research_dataset_root(MarketId("crypto"), "minute_research"),
             time_window=TimeWindow("2026-07-06T00:01:00", "2026-07-06T00:02:00"),
+            mode=DatasetReadMode.CHUNKED,
         ),
         ignore_index=True,
     )
@@ -441,7 +467,16 @@ def test_assembly_keeps_nanosecond_windows_through_persisted_inputs(
     )
     window = TimeWindow(times[0], times[-1])
     assemble_research_dataset(
-        layout=layout,
+        inputs={
+            item.data_id: layout.processed_data_root(
+                item.market_id, item.kind, item.data_id
+            )
+            for item in ProcessedDataCatalog((source,)).list()
+            if item.data_id in dataset.get("nanosecond_research").input_data_ids
+        },
+        output_root=layout.research_dataset_root(
+            dataset.get("nanosecond_research").market_id, "nanosecond_research"
+        ),
         dataset_catalog=dataset,
         processed_catalog=ProcessedDataCatalog((source,)),
         dataset_id="nanosecond_research",
@@ -449,11 +484,10 @@ def test_assembly_keeps_nanosecond_windows_through_persisted_inputs(
     )
     result = pd.concat(
         tuple(
-            iter_research_dataset_chunks(
-                layout,
-                market_id=MarketId("crypto"),
-                dataset_id="nanosecond_research",
+            read_dataset(
+                layout.research_dataset_root(MarketId("crypto"), "nanosecond_research"),
                 time_window=window,
+                mode=DatasetReadMode.CHUNKED,
             )
         ),
         ignore_index=True,
@@ -501,34 +535,50 @@ def test_research_dataset_session_complete_chunks_preserve_output(
     assert all(len(batch) == 1 for batch in batches)
     assert batches[0].timestamp.iloc[0] == batches[1].timestamp.iloc[0]
     default_root = assemble_research_dataset(
-        layout=default_layout,
+        inputs={
+            item.data_id: default_layout.processed_data_root(
+                item.market_id, item.kind, item.data_id
+            )
+            for item in processed_catalog.list()
+            if item.data_id in dataset_catalog.get("demo").input_data_ids
+        },
+        output_root=default_layout.research_dataset_root(
+            dataset_catalog.get("demo").market_id, "demo"
+        ),
         dataset_catalog=dataset_catalog,
         processed_catalog=processed_catalog,
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
     )
     tiny_root = assemble_research_dataset(
-        layout=tiny_layout,
+        inputs={
+            item.data_id: tiny_layout.processed_data_root(
+                item.market_id, item.kind, item.data_id
+            )
+            for item in processed_catalog.list()
+            if item.data_id in dataset_catalog.get("demo").input_data_ids
+        },
+        output_root=tiny_layout.research_dataset_root(
+            dataset_catalog.get("demo").market_id, "demo"
+        ),
         dataset_catalog=dataset_catalog,
         processed_catalog=processed_catalog,
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
     )
     default = pd.concat(
-        iter_research_dataset_chunks(
-            default_layout,
-            market_id=MarketId("a_share"),
-            dataset_id="demo",
+        read_dataset(
+            default_layout.research_dataset_root(MarketId("a_share"), "demo"),
             time_window=TimeWindow("2014-01-02", "2014-01-08"),
+            mode=DatasetReadMode.CHUNKED,
         ),
         ignore_index=True,
     ).sort_values(["market_id", "asset_id", "timestamp"])
     tiny = pd.concat(
-        iter_research_dataset_chunks(
-            tiny_layout,
-            market_id=MarketId("a_share"),
-            dataset_id="demo",
+        read_dataset(
+            tiny_layout.research_dataset_root(MarketId("a_share"), "demo"),
             time_window=TimeWindow("2014-01-02", "2014-01-08"),
+            mode=DatasetReadMode.CHUNKED,
         ),
         ignore_index=True,
     ).sort_values(["market_id", "asset_id", "timestamp"])
@@ -567,197 +617,6 @@ def test_research_chunk_view_prunes_top_level_multi_year_physical_paths(
     assert len(session.read_paths) == 2
 
 
-def test_research_assembly_rejects_dependency_replacement_after_identity_capture(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    layout = StorageLayout(project_root=tmp_path / "current")
-    replacement_layout = StorageLayout(project_root=tmp_path / "replacement")
-    processed_catalog = make_demo_processed_catalog()
-    dataset_catalog = make_research_dataset_catalog(
-        filter_column_roles={"eligible": ColumnRole.UNIVERSE}
-    )
-    write_demo_processed_inputs(layout, processed_catalog)
-    write_demo_processed_inputs(
-        replacement_layout,
-        processed_catalog,
-        frame=_research_rows_for_dates(["2014-01-02", "2014-01-03", "2014-01-04"]),
-    )
-    factor_spec = processed_catalog.get("demo_factors")
-    current_root = layout.processed_data_root(
-        factor_spec.market_id, factor_spec.kind, factor_spec.data_id
-    )
-    replacement_root = replacement_layout.processed_data_root(
-        factor_spec.market_id, factor_spec.kind, factor_spec.data_id
-    )
-    backup_root = current_root.with_name(current_root.name + "-before-replacement")
-    real_identity = assembler_module.dataset_identity_payload
-    real_open = assembler_module.open_dataset_session
-    opened_roots: list[Path] = []
-    replaced = False
-
-    def record_open(root: Path, **kwargs):
-        opened_roots.append(Path(root))
-        return real_open(root, **kwargs)
-
-    def replace_after_identity(spec, manifest):
-        nonlocal replaced
-        identity = real_identity(spec, manifest)
-        if spec["data_id"] == factor_spec.data_id and (not replaced):
-            current_root.rename(backup_root)
-            replacement_root.rename(current_root)
-            replaced = True
-        return identity
-
-    monkeypatch.setattr(assembler_module, "open_dataset_session", record_open)
-    monkeypatch.setattr(
-        assembler_module, "dataset_identity_payload", replace_after_identity
-    )
-    with pytest.raises(ValueError, match="dataset_(spec|manifest)_identity_changed"):
-        assemble_research_dataset(
-            layout=layout,
-            dataset_catalog=dataset_catalog,
-            processed_catalog=processed_catalog,
-            dataset_id="demo",
-            time_window=TimeWindow("2014-01-02", "2014-01-03"),
-        )
-    assert replaced
-    assert len(opened_roots) == len(processed_catalog.list())
-    assert len(opened_roots) == len(set(opened_roots))
-
-
-def test_research_assembly_verifies_every_input_inside_staged_boundary(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    layout = StorageLayout(project_root=tmp_path)
-    processed_catalog = make_demo_processed_catalog()
-    dataset_catalog = make_research_dataset_catalog(
-        filter_column_roles={"eligible": ColumnRole.UNIVERSE}
-    )
-    write_demo_processed_inputs(layout, processed_catalog)
-    real_open = assembler_module.open_dataset_session
-    real_write = assembler_module.write_dataset
-    real_verify = assembler_module.DatasetSession.verify
-    opened_roots: list[Path] = []
-    opened_sessions: list[assembler_module.DatasetSession] = []
-    staged_verified_roots: list[Path] = []
-    post_publish_verified_roots: list[Path] = []
-    inside_staged_validator = False
-    writer_returned = False
-
-    def record_open(root: Path, **kwargs):
-        opened_roots.append(Path(root))
-        session = real_open(root, **kwargs)
-        opened_sessions.append(session)
-        return session
-
-    def record_verify(session) -> None:
-        if inside_staged_validator:
-            staged_verified_roots.append(session.root)
-        elif writer_returned and session.root in opened_roots:
-            post_publish_verified_roots.append(session.root)
-        real_verify(session)
-
-    def record_write(root, data, *, staged_validator, **kwargs):
-        nonlocal inside_staged_validator, writer_returned
-        assert staged_validator is not None
-
-        def record_staged(receipt) -> None:
-            nonlocal inside_staged_validator
-            inside_staged_validator = True
-            try:
-                staged_validator(receipt)
-            finally:
-                inside_staged_validator = False
-
-        result = real_write(root, data, staged_validator=record_staged, **kwargs)
-        writer_returned = True
-        return result
-
-    monkeypatch.setattr(assembler_module, "open_dataset_session", record_open)
-    monkeypatch.setattr(assembler_module.DatasetSession, "verify", record_verify)
-    monkeypatch.setattr(assembler_module, "write_dataset", record_write)
-    artifact_root = assemble_research_dataset(
-        layout=layout,
-        dataset_catalog=dataset_catalog,
-        processed_catalog=processed_catalog,
-        dataset_id="demo",
-        time_window=TimeWindow("2014-01-02", "2014-01-03"),
-    )
-    assert artifact_root.is_dir()
-    assert len(opened_roots) == len(processed_catalog.list())
-    assert len(opened_roots) == len(set(opened_roots))
-    assert staged_verified_roots == opened_roots
-    assert post_publish_verified_roots == []
-
-
-def test_research_assembly_rejects_replacement_before_publish_and_cleans_stage(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    layout = StorageLayout(project_root=tmp_path / "current")
-    replacement_layout = StorageLayout(project_root=tmp_path / "replacement")
-    processed_catalog = make_demo_processed_catalog()
-    dataset_catalog = make_research_dataset_catalog(
-        filter_column_roles={"eligible": ColumnRole.UNIVERSE}
-    )
-    write_demo_processed_inputs(layout, processed_catalog)
-    write_demo_processed_inputs(
-        replacement_layout,
-        processed_catalog,
-        frame=_research_rows_for_dates(["2014-01-02", "2014-01-03", "2014-01-04"]),
-    )
-    factor_spec = processed_catalog.get("demo_factors")
-    current_root = layout.processed_data_root(
-        factor_spec.market_id, factor_spec.kind, factor_spec.data_id
-    )
-    replacement_root = replacement_layout.processed_data_root(
-        factor_spec.market_id, factor_spec.kind, factor_spec.data_id
-    )
-    backup_root = current_root.with_name(current_root.name + "-before-replacement")
-    artifact_root = layout.research_dataset_root(MarketId("a_share"), "demo")
-    real_open = assembler_module.open_dataset_session
-    real_joined_chunks = assembler_module._iter_joined_processed_chunks
-    real_write = assembler_module.write_dataset
-    opened_roots: list[Path] = []
-    replaced = False
-    staged_validator_supplied = False
-
-    def record_open(root: Path, **kwargs):
-        opened_roots.append(Path(root))
-        return real_open(root, **kwargs)
-
-    def replace_after_last_input(**kwargs):
-        nonlocal replaced
-        yield from real_joined_chunks(**kwargs)
-        current_root.rename(backup_root)
-        replacement_root.rename(current_root)
-        replaced = True
-
-    def record_write(root, data, *, staged_validator, **kwargs):
-        nonlocal staged_validator_supplied
-        staged_validator_supplied = staged_validator is not None
-        return real_write(root, data, staged_validator=staged_validator, **kwargs)
-
-    monkeypatch.setattr(assembler_module, "open_dataset_session", record_open)
-    monkeypatch.setattr(
-        assembler_module, "_iter_joined_processed_chunks", replace_after_last_input
-    )
-    monkeypatch.setattr(assembler_module, "write_dataset", record_write)
-    with pytest.raises(ValueError, match="dataset_(spec|manifest)_identity_changed"):
-        assemble_research_dataset(
-            layout=layout,
-            dataset_catalog=dataset_catalog,
-            processed_catalog=processed_catalog,
-            dataset_id="demo",
-            time_window=TimeWindow("2014-01-02", "2014-01-03"),
-        )
-    assert replaced
-    assert staged_validator_supplied
-    assert len(opened_roots) == len(processed_catalog.list())
-    assert len(opened_roots) == len(set(opened_roots))
-    assert not artifact_root.exists()
-    assert list(artifact_root.parent.glob(".a-*")) == []
-
-
 def test_sparse_research_dataset_left_joins_missing_non_base_input_key(
     tmp_path: Path,
 ) -> None:
@@ -771,18 +630,26 @@ def test_sparse_research_dataset_left_joins_missing_non_base_input_key(
     labels = frame.drop(index=frame.index[-1]).reset_index(drop=True)
     write_demo_processed_inputs(layout, processed_catalog, label_frame=labels)
     assemble_research_dataset(
-        layout=layout,
+        inputs={
+            item.data_id: layout.processed_data_root(
+                item.market_id, item.kind, item.data_id
+            )
+            for item in processed_catalog.list()
+            if item.data_id in dataset_catalog.get("demo").input_data_ids
+        },
+        output_root=layout.research_dataset_root(
+            dataset_catalog.get("demo").market_id, "demo"
+        ),
         dataset_catalog=dataset_catalog,
         processed_catalog=processed_catalog,
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-03"),
     )
     result = pd.concat(
-        iter_research_dataset_chunks(
-            layout,
-            market_id=MarketId("a_share"),
-            dataset_id="demo",
+        read_dataset(
+            layout.research_dataset_root(MarketId("a_share"), "demo"),
             time_window=TimeWindow("2014-01-02", "2014-01-03"),
+            mode=DatasetReadMode.CHUNKED,
         ),
         ignore_index=True,
     )
@@ -825,7 +692,16 @@ def test_research_dataset_role_validation_rejects_wrong_factor_source(
     write_demo_processed_inputs(layout, processed_catalog)
     with pytest.raises(ValueError, match="invalid_research_factor_columns"):
         assemble_research_dataset(
-            layout=layout,
+            inputs={
+                item.data_id: layout.processed_data_root(
+                    item.market_id, item.kind, item.data_id
+                )
+                for item in processed_catalog.list()
+                if item.data_id in dataset_catalog.get("bad_demo").input_data_ids
+            },
+            output_root=layout.research_dataset_root(
+                dataset_catalog.get("bad_demo").market_id, "bad_demo"
+            ),
             dataset_catalog=dataset_catalog,
             processed_catalog=processed_catalog,
             dataset_id="bad_demo",
@@ -900,7 +776,18 @@ def test_full_request_key_domain_is_independent_of_base_file_boundaries(
 
     def assemble():
         return assemble_research_dataset(
-            layout=layout,
+            inputs={
+                item.data_id: layout.processed_data_root(
+                    item.market_id, item.kind, item.data_id
+                )
+                for item in processed.list()
+                if item.data_id
+                in ResearchDatasetCatalog((spec,)).get(spec.data_id).input_data_ids
+            },
+            output_root=layout.research_dataset_root(
+                ResearchDatasetCatalog((spec,)).get(spec.data_id).market_id,
+                spec.data_id,
+            ),
             dataset_catalog=ResearchDatasetCatalog((spec,)),
             processed_catalog=processed,
             dataset_id=spec.data_id,
@@ -1084,18 +971,26 @@ def test_named_feature_recipe_assembles_complete_sessions_and_persists_identity(
     )
     window = TimeWindow("2020-01-03", "2020-01-03")
     assemble_research_dataset(
-        layout=layout,
+        inputs={
+            item.data_id: layout.processed_data_root(
+                item.market_id, item.kind, item.data_id
+            )
+            for item in ProcessedDataCatalog((source,)).list()
+            if item.data_id in datasets.get("recipe_case").input_data_ids
+        },
+        output_root=layout.research_dataset_root(
+            datasets.get("recipe_case").market_id, "recipe_case"
+        ),
         dataset_catalog=datasets,
         processed_catalog=ProcessedDataCatalog((source,)),
         dataset_id="recipe_case",
         time_window=window,
     )
     saved = pd.concat(
-        iter_research_dataset_chunks(
-            layout,
-            market_id=MarketId("a_share"),
-            dataset_id="recipe_case",
+        read_dataset(
+            layout.research_dataset_root(MarketId("a_share"), "recipe_case"),
             time_window=window,
+            mode=DatasetReadMode.CHUNKED,
         ),
         ignore_index=True,
     )
@@ -1110,3 +1005,33 @@ def test_named_feature_recipe_assembles_complete_sessions_and_persists_identity(
     assert data_spec_payload(datasets.get("recipe_case"))["feature_transforms"] == [
         {"recipe_id": recipe, "source_columns": ["factor"]},
     ]
+
+
+def _passthrough_session(**attributes):
+    session = SimpleNamespace(**attributes)
+
+    def filtered_view(_time_window):
+        return session
+
+    session.filtered_view = filtered_view
+    return session
+
+
+def _research_rows_for_dates(dates: list[str]) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for date_index, timestamp in enumerate(pd.to_datetime(dates), start=1):
+        for asset_index, asset_id in enumerate(("000001", "000002"), start=1):
+            rows.append(
+                {
+                    "market_id": "a_share",
+                    "asset_id": asset_id,
+                    "timestamp": timestamp,
+                    "momentum_20d": float(date_index + asset_index),
+                    "forward_return_20d": 0.01 * (date_index + asset_index),
+                    "eligible": True,
+                    "can_enter": True,
+                    "can_exit": True,
+                    "market_type": 4,
+                }
+            )
+    return pd.DataFrame(rows)

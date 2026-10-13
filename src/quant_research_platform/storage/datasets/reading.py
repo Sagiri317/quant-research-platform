@@ -14,9 +14,10 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
+import pyarrow.dataset as ds
 
+from quant_research_platform.contracts.data import DataSpec
 from quant_research_platform.contracts.json_codec import (
-    canonical_json_hash,
     parse_qrp_json_object,
 )
 from quant_research_platform.contracts.time import (
@@ -36,6 +37,8 @@ from quant_research_platform.storage.datasets.paths import (
     timestamp_column_from_spec_payload,
 )
 from quant_research_platform.storage.datasets.schema import (
+    arrow_schema_from_payload,
+    data_spec_payload,
     logical_dtype_metadata_bytes,
     merge_logical_dtype_payloads,
     pandas_dtype_overrides_from_logical_payload,
@@ -48,9 +51,6 @@ from quant_research_platform.storage.datasets.schema import (
 )
 from quant_research_platform.storage.datasets.types import DatasetReadMode
 from quant_research_platform.storage.identity import (
-    DatasetFileIdentity,
-    _file_identity_bytes,
-    dataset_file_identity,
     filesystem_is_dir,
     filesystem_is_file,
     require_artifact_root,
@@ -61,7 +61,6 @@ from quant_research_platform.storage.parquet import (
     DatasetPartMetadata,
     PreparedMembershipValues,
     _physical_filter_scalar,
-    inspect_dataset_part,
     iter_dataset_part_batches,
 )
 
@@ -71,10 +70,7 @@ class DatasetSession:
     root: Path
     data_root: Path
     spec_bytes: bytes
-    spec_identity_bytes: bytes
     manifest_bytes: bytes
-    manifest_identity_bytes: bytes
-    inventory: DatasetSessionInventory
     logical_columns: tuple[str, ...]
     physical_columns: tuple[str, ...]
     timestamp_column: str | None
@@ -102,31 +98,6 @@ class DatasetSession:
     def logical_dtypes(self) -> dict[str, Any]:
         return parse_logical_dtype_metadata(self.logical_dtype_bytes)
 
-    def metadata_for(self, path: Path) -> DatasetPartMetadata:
-        return self.inventory.metadata_for(path)
-
-    def verify(self) -> None:
-        spec_identity = dataset_file_identity(self.root / "spec.json")
-        if _file_identity_bytes(spec_identity) != self.spec_identity_bytes:
-            raise ValueError("dataset_spec_identity_changed")
-        spec_bytes, _ = read_qrp_json_file(
-            self.root / "spec.json", expected_identity=spec_identity
-        )
-        if spec_bytes != self.spec_bytes:
-            raise ValueError("dataset_spec_identity_changed")
-        manifest_identity = dataset_file_identity(
-            self.root / "_manifest" / "manifest.json"
-        )
-        if _file_identity_bytes(manifest_identity) != self.manifest_identity_bytes:
-            raise ValueError("dataset_manifest_identity_changed")
-        manifest_bytes, _ = read_qrp_json_file(
-            self.root / "_manifest" / "manifest.json",
-            expected_identity=manifest_identity,
-        )
-        if manifest_bytes != self.manifest_bytes:
-            raise ValueError("dataset_manifest_identity_changed")
-        self.inventory.verify_filesystem(self.spec)
-
     def filtered_view(self, time_window: TimeWindow) -> DatasetSession:
         spec = self.spec
         return replace(
@@ -148,7 +119,7 @@ class DatasetSession:
                 dict.fromkeys(
                     (
                         *self.physical_columns,
-                        *read_columns_for_time_window(
+                        *projection_columns_for_window(
                             self.logical_columns, spec=spec, time_window=time_window
                         ),
                     )
@@ -163,7 +134,22 @@ def read_dataset(
     columns=None,
     time_window=None,
     mode=DatasetReadMode.MATERIALIZED,
+    spec: DataSpec | None = None,
 ):
+    if Path(dataset_root).is_file():
+        if spec is None:
+            raise ValueError("parquet_semantic_spec_required")
+        chunks = _iter_parquet_projection(
+            Path(dataset_root), spec=spec, columns=columns, time_window=time_window
+        )
+        if mode is DatasetReadMode.CHUNKED:
+            return chunks
+        if mode is not DatasetReadMode.MATERIALIZED:
+            raise ValueError("unsupported_dataset_read_mode")
+        with closing_iterator(chunks) as owned:
+            return pd.concat(list(owned), ignore_index=True)
+    if spec is not None:
+        raise ValueError("dataset_spec_already_declared")
     if mode is DatasetReadMode.CHUNKED:
 
         def activate():
@@ -179,6 +165,65 @@ def read_dataset(
         dataset_root, columns=columns, time_window=time_window
     )
     return materialize_dataset_session(context, batch_rows=DEFAULT_BATCH_ROWS)
+
+
+def _iter_parquet_projection(path: Path, *, spec: DataSpec, columns, time_window):
+    """Read a supplied bare file with explicit semantic roles using Arrow projection."""
+    require_unaliased_path(path, error="invalid_dataset_part_files")
+    payload = data_spec_payload(spec)
+    dataset = ds.dataset(path, format="parquet")
+    requested = resolve_columns_from_schema(
+        tuple(dataset.schema.names), spec=payload, columns=columns
+    )
+    timestamp = timestamp_column_from_spec_payload(payload)
+    filters = parquet_filters_for_time_window(
+        timestamp_column=timestamp, time_window=time_window
+    )
+    predicate = None
+    for column, operator, value in filters or ():
+        field = ds.field(column)
+        value = _physical_filter_scalar(dataset.schema.field(column), value)
+        condition = (
+            field >= value
+            if operator == ">="
+            else field <= value
+            if operator == "<="
+            else field < value
+        )
+        predicate = condition if predicate is None else predicate & condition
+    scanner = dataset.scanner(
+        columns=list(requested), filter=predicate, batch_size=DEFAULT_BATCH_ROWS
+    )
+    raw = (dataset.schema.metadata or {}).get(b"qrp.logical-dtypes")
+    overrides = (
+        pandas_dtype_overrides_from_logical_payload(
+            parse_logical_dtype_metadata(raw), columns=requested
+        )
+        if raw
+        else None
+    )
+    yielded = False
+    empty_batch = None
+    with closing_iterator(scanner.to_batches()) as batches:
+        for batch in batches:
+            if batch.num_rows == 0 and empty_batch is None:
+                empty_batch = batch
+            for frame in _arrow_batch_to_bounded_pandas(
+                batch, dtype_overrides=overrides
+            ):
+                yielded = True
+                yield frame
+    if not yielded:
+        schema = scanner.projected_schema
+        batch = (
+            empty_batch
+            if empty_batch is not None
+            else pa.RecordBatch.from_arrays(
+                [pa.array([], type=field.type) for field in schema], schema=schema
+            )
+        )
+        empty = _arrow_slice_to_pandas(batch, dtype_overrides=overrides)
+        yield empty.astype(overrides) if overrides else empty
 
 
 def materialize_dataset_session(
@@ -219,19 +264,10 @@ def open_dataset_session(
         raise ValueError("dataset_data_dir_missing")
     if not filesystem_is_file(manifest_path):
         raise ValueError("dataset_manifest_missing")
-    try:
-        spec_identity = dataset_file_identity(spec_path)
-        manifest_identity = dataset_file_identity(manifest_path)
-    except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
-        raise ValueError("dataset_metadata_file_invalid") from exc
-    spec_bytes, spec_payload = read_qrp_json_file(
-        spec_path, expected_identity=spec_identity
-    )
+    spec_bytes, spec_payload = read_qrp_json_file(spec_path)
     if spec_payload.get("schema_id") != "qrp-dataset-spec":
         raise ValueError("dataset_spec_schema_id_invalid")
-    manifest_bytes, manifest = read_qrp_json_file(
-        manifest_path, expected_identity=manifest_identity
-    )
+    manifest_bytes, manifest = read_qrp_json_file(manifest_path)
     if manifest.get("schema_id") != "qrp-dataset-manifest":
         raise ValueError("dataset_manifest_schema_id_invalid")
     validate_dataset_manifest_payload(manifest, spec=spec_payload)
@@ -244,18 +280,12 @@ def open_dataset_session(
     paths = inventory.paths
     if not paths:
         raise ValueError("dataset_data_dir_missing")
-    for path in paths:
-        inventory.observe(path, inspect_dataset_part(path))
-    if inventory.content_hash() != manifest["content_hash"]:
-        raise ValueError("dataset_content_identity_changed")
     session = _build_dataset_session(
         root=root,
         data_root=data_root,
         spec_bytes=spec_bytes,
-        spec_identity_bytes=_file_identity_bytes(spec_identity),
         spec_payload=spec_payload,
         manifest_bytes=manifest_bytes,
-        manifest_identity_bytes=_file_identity_bytes(manifest_identity),
         manifest=manifest,
         inventory=inventory,
         columns=columns,
@@ -282,30 +312,18 @@ def dataset_session_from_inventory(
     require_unaliased_path(data_root, error="invalid_dataset_part_files")
     require_unaliased_path(spec_path, error="dataset_metadata_file_invalid")
     require_unaliased_path(manifest_path, error="dataset_metadata_file_invalid")
-    try:
-        spec_identity = dataset_file_identity(spec_path)
-        manifest_identity = dataset_file_identity(manifest_path)
-    except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
-        raise ValueError("dataset_metadata_file_invalid") from exc
-    spec_bytes, spec_payload = read_qrp_json_file(
-        spec_path, expected_identity=spec_identity
-    )
-    manifest_bytes, manifest = read_qrp_json_file(
-        manifest_path, expected_identity=manifest_identity
-    )
+    spec_bytes, spec_payload = read_qrp_json_file(spec_path)
+    manifest_bytes, manifest = read_qrp_json_file(manifest_path)
     validate_dataset_manifest_payload(manifest, spec=spec_payload)
     validate_dataset_manifest_consumable(
         manifest, primary_key=spec_payload["primary_key"]
     )
-    inventory.verify_filesystem(spec_payload)
     return _build_dataset_session(
         root=root,
         data_root=data_root,
         spec_bytes=spec_bytes,
-        spec_identity_bytes=_file_identity_bytes(spec_identity),
         spec_payload=spec_payload,
         manifest_bytes=manifest_bytes,
-        manifest_identity_bytes=_file_identity_bytes(manifest_identity),
         manifest=manifest,
         inventory=inventory,
         columns=columns,
@@ -319,10 +337,8 @@ def _build_dataset_session(
     root: Path,
     data_root: Path,
     spec_bytes: bytes,
-    spec_identity_bytes: bytes,
     spec_payload: dict[str, Any],
     manifest_bytes: bytes,
-    manifest_identity_bytes: bytes,
     manifest: dict[str, Any],
     inventory: DatasetSessionInventory,
     columns: tuple[str, ...] | list[str] | None,
@@ -332,72 +348,18 @@ def _build_dataset_session(
     all_paths = inventory.paths
     if not all_paths:
         raise ValueError("dataset_data_dir_missing")
-    first_path = all_paths[0]
-    first_metadata = inventory.metadata_for(first_path)
-    schema = physical_schema_from_schema(first_metadata.schema)
-    logical_dtypes: dict[str, Any] | None = None
-    observed_dtypes: dict[bytes, dict[str, Any]] = {}
-    observed_dtype_schemas: set[tuple[bytes, pa.Schema]] = set()
-    observed_rows = 0
-    observed_file_bytes = 0
-    observed_partition_rows: dict[str, int] = {}
-    for path, metadata in inventory.iter_entries():
-        if physical_schema_from_schema(metadata.schema) != schema:
-            raise ValueError("dataset_schema_mismatch")
-        raw = metadata.logical_dtype_payload
-        if raw not in observed_dtypes:
-            current_dtypes = parse_logical_dtype_metadata(raw)
-            observed_dtypes[raw] = current_dtypes
-            logical_dtypes = (
-                merge_logical_dtype_payloads([current_dtypes])
-                if logical_dtypes is None
-                else merge_logical_dtype_payloads([logical_dtypes, current_dtypes])
-            )
-        dtype_schema = (raw, metadata.schema.remove_metadata())
-        if dtype_schema not in observed_dtype_schemas:
-            validate_persisted_logical_schema(metadata.schema, observed_dtypes[raw])
-            observed_dtype_schemas.add(dtype_schema)
-        observed_rows += metadata.row_count
-        observed_file_bytes += metadata.file_size_bytes
-        partition = relative_partition_label(data_root, path)
-        observed_partition_rows[partition] = (
-            observed_partition_rows.get(partition, 0) + metadata.row_count
-        )
-        if (
-            tuple(spec_payload["partition_columns"]) == ("year",)
-            and path.parent == data_root
-            and (metadata.row_count != 0)
-        ):
-            raise ValueError("invalid_dataset_part_files")
-    assert logical_dtypes is not None
+    schema = manifest["physical_schema"]
+    arrow_schema = arrow_schema_from_payload(schema)
     schema_columns = physical_schema_columns(schema)
-    schema_hash = canonical_json_hash(schema)
-    if int(manifest["file_count"]) != len(all_paths):
-        raise ValueError("manifest_file_count_mismatch")
-    if set(manifest["partition_row_counts"]) != set(observed_partition_rows):
-        raise ValueError("manifest_partition_row_counts_mismatch")
-    if int(manifest["row_count"]) != observed_rows:
-        raise ValueError("manifest_row_count_mismatch")
-    if dict(sorted(observed_partition_rows.items())) != dict(
-        sorted(manifest["partition_row_counts"].items())
-    ):
-        raise ValueError("manifest_partition_row_counts_mismatch")
-    if int(manifest["file_size_bytes"]) != observed_file_bytes:
-        raise ValueError("manifest_file_size_bytes_mismatch")
-    if manifest["logical_dtypes"] != logical_dtypes:
-        raise ValueError("manifest_logical_dtypes_mismatch")
+    schema_hash = manifest["schema_hash"]
+    logical_dtypes = manifest["logical_dtypes"]
+    validate_persisted_logical_schema(arrow_schema, logical_dtypes)
     logical_dtype_bytes = logical_dtype_metadata_bytes(logical_dtypes)
-    if tuple(str(column) for column in manifest["columns"]) != schema_columns:
-        raise ValueError("manifest_columns_mismatch")
-    if manifest["physical_schema"] != schema:
-        raise ValueError("manifest_physical_schema_mismatch")
-    if str(manifest["schema_hash"]) != schema_hash:
-        raise ValueError("manifest_schema_hash_mismatch")
     logical_columns = resolve_columns_from_schema(
         schema_columns, spec=spec_payload, columns=columns
     )
     timestamp_column = timestamp_column_from_spec_payload(spec_payload)
-    physical_columns = read_columns_for_time_window(
+    physical_columns = projection_columns_for_window(
         logical_columns, spec=spec_payload, time_window=time_window
     )
     physical_columns = tuple(
@@ -414,7 +376,7 @@ def _build_dataset_session(
             raise ValueError("dataset_filter_column_not_found")
         if operator not in {"==", "in"}:
             raise ValueError("unsupported_dataset_physical_filter")
-        field = first_metadata.schema.field(column)
+        field = arrow_schema.field(column)
         if operator == "in":
             if type(value) is not tuple or not value:
                 raise ValueError("invalid_dataset_physical_filter_value")
@@ -430,16 +392,13 @@ def _build_dataset_session(
         root=root,
         data_root=data_root,
         spec_bytes=spec_bytes,
-        spec_identity_bytes=spec_identity_bytes,
         manifest_bytes=manifest_bytes,
-        manifest_identity_bytes=manifest_identity_bytes,
-        inventory=inventory,
         logical_columns=logical_columns,
         physical_columns=physical_columns,
         timestamp_column=timestamp_column,
         time_window=time_window,
         schema_hash=schema_hash,
-        arrow_schema=first_metadata.schema,
+        arrow_schema=arrow_schema,
         logical_dtype_bytes=logical_dtype_bytes,
         parquet_filters=tuple(
             (
@@ -449,7 +408,6 @@ def _build_dataset_session(
         )
         or None,
     )
-    session.verify()
     return session
 
 
@@ -461,18 +419,7 @@ def iter_dataset_chunks(
 ) -> Iterator[pd.DataFrame]:
     rows_per_batch = _validated_batch_rows(batch_rows)
     if not context.read_paths:
-        primary = None
-        try:
-            empty = _empty_frame(context, context.logical_columns)
-            try:
-                yield empty
-            except GeneratorExit:
-                return
-        except BaseException as body_error:
-            primary = body_error
-            raise
-        finally:
-            _verify_preserving_primary(context, primary)
+        yield _empty_frame(context, context.logical_columns)
         return
     yielded = False
     with closing_iterator(
@@ -493,25 +440,13 @@ def iter_dataset_chunks(
             except GeneratorExit:
                 return
     if not yielded:
-        primary = None
-        try:
-            empty = _empty_frame(context, context.logical_columns)
-            try:
-                yield empty
-            except GeneratorExit:
-                return
-        except BaseException as body_error:
-            primary = body_error
-            raise
-        finally:
-            _verify_preserving_primary(context, primary)
+        yield _empty_frame(context, context.logical_columns)
 
 
 def iter_declared_parquet_member_batches(
     path: Path,
     *,
     batch_rows: int = DEFAULT_BATCH_ROWS,
-    expected_identity: DatasetFileIdentity,
     columns: tuple[str, ...] | None = None,
     parquet_filters: list[tuple[str, str, Any]] | None = None,
     dtype_overrides: Mapping[str, object] | None = None,
@@ -524,7 +459,6 @@ def iter_declared_parquet_member_batches(
     with closing_iterator(
         iter_dataset_part_batches(
             Path(path),
-            expected_identity=expected_identity,
             batch_rows=rows_per_batch,
             columns=columns,
             parquet_filters=parquet_filters,
@@ -558,51 +492,33 @@ def iter_dataset_file_batches(
     dtype_overrides = pandas_dtype_overrides_from_logical_payload(
         context.logical_dtypes, columns=columns
     )
-    context.verify()
-    primary = None
-    try:
-        for path in context.read_paths:
-            metadata = context.metadata_for(path)
-            with closing_iterator(
-                iter_declared_parquet_member_batches(
-                    path,
-                    expected_identity=metadata.identity,
-                    columns=columns,
-                    parquet_filters=context.parquet_filters,
-                    batch_rows=rows_per_batch,
-                    dtype_overrides=dtype_overrides,
-                    batch_observer=batch_observer,
-                )
-            ) as member_batches:
-                while True:
-                    try:
-                        frame = next(member_batches)
-                    except StopIteration:
-                        break
-                    value = (path, frame)
-                    try:
-                        yield value
-                    except GeneratorExit:
-                        return
-    except BaseException as body_error:
-        primary = body_error
-        raise
-    finally:
-        _verify_preserving_primary(context, primary)
 
+    def validate_metadata(metadata):
+        if physical_schema_from_schema(metadata.schema) != context.schema:
+            raise ValueError("dataset_schema_mismatch")
+        current = parse_logical_dtype_metadata(metadata.logical_dtype_payload)
+        validate_persisted_logical_schema(metadata.schema, current)
+        merged = merge_logical_dtype_payloads([context.logical_dtypes, current])
+        if merged != context.logical_dtypes:
+            raise ValueError("manifest_logical_dtypes_mismatch")
 
-def _verify_preserving_primary(
-    context: DatasetSession, primary: BaseException | None
-) -> None:
-    if primary is None:
-        context.verify()
-        return
-    try:
-        context.verify()
-    except BaseException as verification_error:
-        primary.add_note(
-            f"dataset verification also failed: {type(verification_error).__name__}"
-        )
+    for path in context.read_paths:
+        with closing_iterator(
+            iter_declared_parquet_member_batches(
+                path,
+                columns=columns,
+                parquet_filters=context.parquet_filters,
+                batch_rows=rows_per_batch,
+                dtype_overrides=dtype_overrides,
+                metadata_observer=validate_metadata,
+                batch_observer=batch_observer,
+            )
+        ) as member_batches:
+            for frame in member_batches:
+                try:
+                    yield path, frame
+                except GeneratorExit:
+                    return
 
 
 def dataset_primary_key_schema(
@@ -907,7 +823,7 @@ def resolve_columns_from_schema(
     return requested
 
 
-def read_columns_for_time_window(
+def projection_columns_for_window(
     columns: tuple[str, ...], *, spec: Mapping[str, Any], time_window: TimeWindow | None
 ) -> tuple[str, ...]:
     if time_window is None:

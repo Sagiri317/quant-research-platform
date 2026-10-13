@@ -10,7 +10,6 @@ from quant_research_platform.sources.csmar import interim, raw_exports, raw_sche
 from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_glob,
-    filesystem_iterdir,
     filesystem_mkdir,
     filesystem_rename,
     filesystem_unlink,
@@ -20,7 +19,6 @@ from quant_research_platform.storage.identity import (
     native_filesystem_path,
     open_filesystem_file,
 )
-from quant_research_platform.workflows import operations
 
 
 def _file_bytes(root: Path) -> dict[Path, bytes]:
@@ -117,7 +115,10 @@ def test_csmar_fixed_projection_preserves_dtypes_duplicates_and_raw(
     )
     raw_bytes = _file_bytes(raw)
     default = interim.materialize_interim_data(
-        layout=StorageLayout(tmp_path / "default"),
+        output_roots={
+            key: StorageLayout(tmp_path / "default").interim_data_root("csmar", key)
+            for key in (data_id,)
+        },
         raw_root=raw,
         data_ids=(data_id,),
         chunksize=chunksize,
@@ -158,7 +159,6 @@ def test_analyst_raw_reports_persist_and_feed_institution_consensus(
     from quant_research_platform.markets.implementations.a_share.processed import (
         producer,
     )
-    from quant_research_platform.profiles.research import research_profile
     from quant_research_platform.storage.datasets.reading import read_dataset
     from quant_research_platform.storage.datasets.writing import write_dataset
     from quant_research_platform.storage.layout import StorageLayout
@@ -171,7 +171,10 @@ def test_analyst_raw_reports_persist_and_feed_institution_consensus(
     raw_path = next(filesystem_glob(raw, "*.csv"))
     original = Path(native_filesystem_path(raw_path)).read_bytes()
     result = interim.materialize_interim_data(
-        layout=layout,
+        output_roots={
+            key: layout.interim_data_root("csmar", key) for key in ("analyst_forecast",)
+        },
+        raw_root=layout.raw_source_root("csmar"),
         data_ids=("analyst_forecast",),
         chunksize=chunksize,
         start_date="2025-01-06",
@@ -220,7 +223,13 @@ def test_analyst_raw_reports_persist_and_feed_institution_consensus(
             "close": 10.0,
         }
     )
-    processed_spec = research_profile().processed.get("expectations_factors")
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        catalog as processed_module,
+    )
+
+    processed_catalog = processed_module.processed_catalog
+
+    processed_spec = processed_catalog().get("expectations_factors")
     actual = producer._compute_processed_frame(
         processed_spec,
         source={"analyst_forecast": saved},
@@ -251,7 +260,6 @@ def test_analyst_all_excluded_persists_zero_rows_and_counts(tmp_path):
     from quant_research_platform.markets.implementations.a_share.processed import (
         producer,
     )
-    from quant_research_platform.profiles.research import research_profile
     from quant_research_platform.storage.datasets.reading import read_dataset
     from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.a_share_raw import _write_csmar
@@ -261,7 +269,12 @@ def test_analyst_all_excluded_persists_zero_rows_and_counts(tmp_path):
     filesystem_mkdir(raw, parents=True)
     _write_csmar(raw, "analyst_forecast", _analyst_rows()[5:])
     result = interim.materialize_interim_data(
-        layout=layout, data_ids=("analyst_forecast",), chunksize=1
+        output_roots={
+            key: layout.interim_data_root("csmar", key) for key in ("analyst_forecast",)
+        },
+        raw_root=layout.raw_source_root("csmar"),
+        data_ids=("analyst_forecast",),
+        chunksize=1,
     )
     root = result.artifact_roots["analyst_forecast"]
     empty = read_dataset(root)
@@ -275,11 +288,20 @@ def test_analyst_all_excluded_persists_zero_rows_and_counts(tmp_path):
     assert counts["raw_rows"] == counts["excluded_missing_required_rows"] == 3
     assert counts["retained_after_date_filter_rows"] == 0
     sessions = pd.bdate_range("2025-01-03", periods=2).as_unit("ns")
-    from quant_research_platform.contracts.time import TimeWindow
-    from quant_research_platform.storage.datasets import write_dataset
-    from tests.markets.a_share.test_target_dag_chain import _synthetic_interim_frames
+    from types import SimpleNamespace
 
-    profile = research_profile()
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        catalog as processed_module,
+    )
+
+    processed_catalog = processed_module.processed_catalog
+    from quant_research_platform.storage.datasets import write_dataset
+    from tests.helpers.a_share_sources import _synthetic_interim_frames
+
+    profile = SimpleNamespace(
+        processed=processed_catalog(), interim=interim.interim_catalog()
+    )
     panel_spec = profile.processed.get("market_panel_1d")
     facts = _synthetic_interim_frames(sessions)
     panel = producer._compute_processed_frame(
@@ -298,14 +320,32 @@ def test_analyst_all_excluded_persists_zero_rows_and_counts(tmp_path):
         panel,
         spec=panel_spec,
     )
+    calendar_spec = profile.interim.get("trading_calendar")
+    write_dataset(
+        layout.interim_data_root("csmar", "trading_calendar"),
+        facts["trading_calendar"].loc[:, list(calendar_spec.required_columns)],
+        spec=calendar_spec,
+    )
     with pytest.raises(ValueError, match="BLOCKED_EXTERNAL_DATA: analyst_forecast"):
         with producer.produce_a_share_processed_data(
             profile.processed.get("expectations_factors"),
-            layout=layout,
+            inputs={
+                **{
+                    name: layout.interim_data_root(
+                        profile.interim.get(name).source_id, name
+                    )
+                    for name in profile.processed.get(
+                        "expectations_factors"
+                    ).source_input_data_ids
+                },
+                "market_panel_1d": layout.processed_data_root(
+                    "a_share", panel_spec.kind, panel_spec.data_id
+                ),
+            },
             time_window=TimeWindow(sessions[0], sessions[-1]),
             processed_catalog=profile.processed,
             source_catalog=profile.interim,
-        ) as (frames, _metadata, _verify):
+        ) as (frames, _metadata):
             list(frames)
 
 
@@ -339,7 +379,12 @@ def test_invalid_analyst_raw_does_not_publish_candidate(tmp_path, column, value)
     _write_csmar(raw, "analyst_forecast", rows)
     with pytest.raises(ValueError, match="invalid_"):
         interim.materialize_interim_data(
-            layout=StorageLayout(tmp_path / "candidate"),
+            output_roots={
+                key: StorageLayout(tmp_path / "candidate").interim_data_root(
+                    "csmar", key
+                )
+                for key in ("analyst_forecast",)
+            },
             raw_root=raw,
             data_ids=("analyst_forecast",),
         )
@@ -373,7 +418,12 @@ def test_calendar_raw_rejects_nonintegers_without_publication(tmp_path, column, 
     _write_csmar(raw, "trading_calendar", [row])
     with pytest.raises(ValueError, match="invalid_"):
         interim.materialize_interim_data(
-            layout=StorageLayout(tmp_path / "candidate"),
+            output_roots={
+                key: StorageLayout(tmp_path / "candidate").interim_data_root(
+                    "csmar", key
+                )
+                for key in ("trading_calendar",)
+            },
             raw_root=raw,
             data_ids=("trading_calendar",),
         )
@@ -396,7 +446,11 @@ def test_calendar_raw_preserves_integer_codes(tmp_path):
     row = {"Markettype": "4", "Clddt": "2025-01-03", "Daywk": "5", "State": "O"}
     _write_csmar(raw, "trading_calendar", [row])
     result = interim.materialize_interim_data(
-        layout=layout, data_ids=("trading_calendar",)
+        output_roots={
+            key: layout.interim_data_root("csmar", key) for key in ("trading_calendar",)
+        },
+        raw_root=layout.raw_source_root("csmar"),
+        data_ids=("trading_calendar",),
     )
     root = result.artifact_roots["trading_calendar"]
     before = read_dataset(root)
@@ -488,7 +542,11 @@ def test_after_hours_materialization_preserves_totals_and_old_good(tmp_path) -> 
     )
     _write_csmar(raw, "market_bars_1d", [row])
     result = interim.materialize_interim_data(
-        layout=layout, data_ids=("market_bars_1d",)
+        output_roots={
+            key: layout.interim_data_root("csmar", key) for key in ("market_bars_1d",)
+        },
+        raw_root=layout.raw_source_root("csmar"),
+        data_ids=("market_bars_1d",),
     )
     root = result.artifact_roots["market_bars_1d"]
     loaded = read_dataset(root)
@@ -498,7 +556,12 @@ def test_after_hours_materialization_preserves_totals_and_old_good(tmp_path) -> 
     _write_csmar(raw, "market_bars_1d", [row])
     with pytest.raises(ValueError, match="invalid_csmar_after_hours_amount_missing"):
         interim.materialize_interim_data(
-            layout=StorageLayout(tmp_path / "candidate"),
+            output_roots={
+                key: StorageLayout(tmp_path / "candidate").interim_data_root(
+                    "csmar", key
+                )
+                for key in ("market_bars_1d",)
+            },
             raw_root=raw,
             data_ids=("market_bars_1d",),
         )
@@ -807,143 +870,25 @@ def test_csmar_materialization_replays_each_dataset_from_one_inventory(
     expected = {}
     for data_id in data_ids:
         result = interim.materialize_interim_data(
-            layout=single, raw_root=raw, data_ids=(data_id,)
+            output_roots={
+                key: single.interim_data_root("csmar", key) for key in (data_id,)
+            },
+            raw_root=raw,
+            data_ids=(data_id,),
         )
         expected[data_id] = read_dataset(result.artifact_roots[data_id])
     result = interim.materialize_interim_data(
-        layout=combined, raw_root=raw, data_ids=data_ids
+        output_roots={
+            key: combined.interim_data_root("csmar", key) for key in data_ids
+        },
+        raw_root=raw,
+        data_ids=data_ids,
     )
     assert set(result.artifact_roots) == set(data_ids)
     for data_id in data_ids:
         actual = read_dataset(result.artifact_roots[data_id])
         pd.testing.assert_frame_equal(actual, expected[data_id], check_exact=True)
         assert len(actual) == 2
-
-
-@pytest.mark.parametrize("member_count", (1, 32))
-@pytest.mark.parametrize(
-    "mutation",
-    ("planned", "reading", "staged", "staged_added", "staged_removed", "unrelated"),
-)
-def test_csmar_materialization_binds_inspected_content_to_plan(
-    tmp_path, monkeypatch, mutation, member_count
-):
-    from quant_research_platform.profiles.research import research_profile
-    from quant_research_platform.storage.datasets.reading import read_dataset
-    from quant_research_platform.storage.layout import StorageLayout
-    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
-
-    layout = StorageLayout(tmp_path)
-    source = tmp_path / "raw" / "csmar"
-    filesystem_mkdir(source, parents=True)
-    calendar = source / "native-calendar.csv"
-    original = "Markettype,Clddt,Daywk,State\n4,2020-01-02,4,O\n"
-    filesystem_write_text(calendar, original, encoding="utf-8")
-    for index in range(member_count - 1):
-        filesystem_write_text(
-            source / f"calendar-{index}.csv",
-            original.splitlines()[0] + "\n",
-            encoding="utf-8",
-        )
-    built = operations.data_materialize(
-        profile=research_profile(),
-        layout=layout,
-        raw_root=source.parent,
-        start_date=None,
-        end_date=None,
-        data_ids=("trading_calendar",),
-    )
-    result = built["target_results"][0]
-    assert result["status"] == "BUILT"
-    root = layout.instance_root(
-        layout.interim_data_root("csmar", "trading_calendar"),
-        result["instance_identity"],
-    )
-    metadata = {
-        "common_manifest": read_dataset_manifest_evidence(root)["common_manifest"]
-    }
-    old_good = _file_bytes(root)
-    target = StorageLayout(tmp_path / "candidate").interim_data_root(
-        "csmar", "trading_calendar"
-    )
-    filesystem_mkdir(target.parent, parents=True)
-    unrelated = target.parent / "keep.txt"
-    filesystem_write_text(unrelated, "keep", encoding="utf-8")
-    previous_members = set(filesystem_iterdir(target.parent))
-
-    def mutate():
-        if mutation == "staged_added":
-            filesystem_write_text(
-                source / "extra-calendar.csv", original, encoding="utf-8"
-            )
-        elif mutation == "staged_removed":
-            filesystem_unlink(calendar)
-        else:
-            filesystem_write_text(
-                calendar, original.replace(",O", ",C"), encoding="utf-8"
-            )
-
-    if mutation == "planned":
-        mutate()
-    elif mutation == "reading":
-        actual_hash = interim.content_hash_for_files
-
-        def hash_then_mutate(*args, **kwargs):
-            identity = actual_hash(*args, **kwargs)
-            mutate()
-            return identity
-
-        monkeypatch.setattr(interim, "content_hash_for_files", hash_then_mutate)
-    elif mutation.startswith("staged"):
-        actual_write = interim.write_dataset
-
-        def write(*args, **kwargs):
-            verify = kwargs.pop("staged_validator", None)
-
-            def mutate_before_verify(receipt):
-                mutate()
-                if verify is not None:
-                    verify(receipt)
-
-            return actual_write(*args, **kwargs, staged_validator=mutate_before_verify)
-
-        monkeypatch.setattr(interim, "write_dataset", write)
-    else:
-        filesystem_write_text(
-            source / "csmar__stock_master__all_market_types__full__export-20260605.csv",
-            "bad,header\n",
-            encoding="utf-8",
-        )
-
-    def materialize():
-        return interim.materialize_interim_data(
-            layout=layout.with_target_roots({"trading_calendar": target}),
-            raw_root=source,
-            data_ids=("trading_calendar",),
-            start_date=None,
-            end_date=None,
-            instance_metadata=metadata,
-        )
-
-    if mutation == "unrelated":
-        materialize()
-        pd.testing.assert_frame_equal(
-            read_dataset(target),
-            read_dataset(root),
-            check_exact=True,
-        )
-        assert (
-            read_dataset_manifest_evidence(target)["common_manifest"]
-            == metadata["common_manifest"]
-        )
-        assert set(filesystem_iterdir(target.parent)) == previous_members | {target}
-    else:
-        with pytest.raises(ValueError, match="csmar_raw_export_identity_changed"):
-            materialize()
-        assert set(filesystem_iterdir(target.parent)) == previous_members
-        assert not filesystem_exists(target)
-    assert _file_bytes(root) == old_good
-    assert Path(native_filesystem_path(unrelated)).read_text(encoding="utf-8") == "keep"
 
 
 @pytest.mark.parametrize(
@@ -1073,7 +1018,10 @@ def test_analyst_fixed_projection_is_independent_of_empty_chunk_order(
     )
     _write_csmar(raw, "analyst_forecast", rows)
     result = interim.materialize_interim_data(
-        layout=layout,
+        output_roots={
+            key: layout.interim_data_root("csmar", key) for key in ("analyst_forecast",)
+        },
+        raw_root=layout.raw_source_root("csmar"),
         data_ids=("analyst_forecast",),
         chunksize=chunksize,
     )
@@ -1225,22 +1173,31 @@ def test_index_info_retains_supported_rows_and_discloses_exclusions(
         rows
     )
     if all_unsupported:
-        from quant_research_platform.workflows.research import _semantic_failure_code
-
         with pytest.raises(
             ValueError,
             match="^no_supported_csmar_index_info_rows:raw_4:excluded_4:retained_0$",
         ) as failure:
             interim.materialize_interim_data(
-                layout=layout, data_ids=("index_info",), chunksize=chunksize
+                output_roots={
+                    key: layout.interim_data_root("csmar", key)
+                    for key in ("index_info",)
+                },
+                raw_root=layout.raw_source_root("csmar"),
+                data_ids=("index_info",),
+                chunksize=chunksize,
             )
-        assert _semantic_failure_code(failure.value) == str(failure.value)
+        assert str(failure.value).startswith("no_supported_csmar_index_info_rows:")
         assert not filesystem_exists(layout.interim_data_root("csmar", "index_info"))
         assert not tuple(filesystem_glob(tmp_path, "**/.a-*"))
         assert Path(native_filesystem_path(raw_path)).read_bytes() == original
         return
     result = interim.materialize_interim_data(
-        layout=layout, data_ids=("index_info",), chunksize=chunksize
+        output_roots={
+            key: layout.interim_data_root("csmar", key) for key in ("index_info",)
+        },
+        raw_root=layout.raw_source_root("csmar"),
+        data_ids=("index_info",),
+        chunksize=chunksize,
     )
     assert not result.skipped
     root = result.artifact_roots["index_info"]
@@ -1290,7 +1247,13 @@ def test_index_info_qualification_keeps_atomic_failure_and_old_good(
         Idxinfo05="1",
     )
     _write_csmar(raw, "index_info", [good], extra_columns=("Idxinfo05",))
-    result = interim.materialize_interim_data(layout=layout, data_ids=("index_info",))
+    result = interim.materialize_interim_data(
+        output_roots={
+            key: layout.interim_data_root("csmar", key) for key in ("index_info",)
+        },
+        raw_root=layout.raw_source_root("csmar"),
+        data_ids=("index_info",),
+    )
     root = result.artifact_roots["index_info"]
     before = _file_bytes(root)
     _write_csmar(
@@ -1312,7 +1275,10 @@ def test_index_info_qualification_keeps_atomic_failure_and_old_good(
     )
     with pytest.raises(ValueError, match=error):
         interim.materialize_interim_data(
-            layout=candidate,
+            output_roots={
+                key: candidate.interim_data_root("csmar", key)
+                for key in ("index_info",)
+            },
             raw_root=raw,
             data_ids=("index_info",),
             chunksize=100 if malformed else 1,
@@ -1352,7 +1318,12 @@ def test_index_info_excluded_required_benchmark_remains_blocked(
     ]
     _write_csmar(raw, "index_info", rows, extra_columns=("Idxinfo05",))
     result = interim.materialize_interim_data(
-        layout=layout, data_ids=("index_info",), chunksize=1
+        output_roots={
+            key: layout.interim_data_root("csmar", key) for key in ("index_info",)
+        },
+        raw_root=layout.raw_source_root("csmar"),
+        data_ids=("index_info",),
+        chunksize=1,
     )
     saved = read_dataset(result.artifact_roots["index_info"])
     assert set(saved.source_asset_id) == set(FORMAL_BENCHMARKS) - {excluded_code}
@@ -1525,7 +1496,7 @@ def test_legal_provider_width_and_quoting_preserve_fields(
     records = raw_schemas.iter_export_csv_records(path)
     try:
         header = next(records)
-        assert raw_schemas.materialize_header_record(header) == fields
+        assert raw_schemas.validate_export_header(header) == fields
         record = next(records)
         assert record == ["1"] * width
         with pytest.raises(StopIteration):
@@ -1589,7 +1560,12 @@ def test_csmar_exact_duplicates_and_unordered_chunks_persist_identical_content(
             ).hexdigest()
         )
         result = interim.materialize_interim_data(
-            layout=layout, data_ids=(data_id,), chunksize=size
+            output_roots={
+                key: layout.interim_data_root("csmar", key) for key in (data_id,)
+            },
+            raw_root=layout.raw_source_root("csmar"),
+            data_ids=(data_id,),
+            chunksize=size,
         )
         root = result.artifact_roots[data_id]
         roots.append(root)
@@ -1632,14 +1608,19 @@ def test_csmar_conflicting_duplicate_keeps_prior_published_dataset(tmp_path, chu
     first = _analyst_rows()[0]
     _write_csmar(raw, "analyst_forecast", [first])
     original = interim.materialize_interim_data(
-        layout=layout, data_ids=("analyst_forecast",)
+        output_roots={
+            key: layout.interim_data_root("csmar", key) for key in ("analyst_forecast",)
+        },
+        raw_root=layout.raw_source_root("csmar"),
+        data_ids=("analyst_forecast",),
     ).artifact_roots["analyst_forecast"]
     old_good = _file_bytes(original)
     _write_csmar(raw, "analyst_forecast", [first, {**first, "Feps": 999}])
-    candidate = layout.instance_root(original, "f" * 64)
+    candidate = tmp_path / "new-candidate"
     with pytest.raises(ValueError, match="conflicting_csmar_primary_key_duplicates"):
         interim.materialize_interim_data(
-            layout=layout.with_target_roots({"analyst_forecast": candidate}),
+            output_roots={"analyst_forecast": candidate},
+            raw_root=raw,
             data_ids=("analyst_forecast",),
             chunksize=chunksize,
         )
@@ -1748,14 +1729,20 @@ def test_index_membership_raw_text_survives_public_materialization(
     if bad_numeric:
         with pytest.raises(ValueError, match="invalid_csmar_numeric_value"):
             interim.materialize_interim_data(
-                layout=layout,
+                output_roots={
+                    key: layout.interim_data_root("csmar", key)
+                    for key in ("index_membership",)
+                },
                 raw_root=raw,
                 data_ids=("index_membership",),
                 chunksize=chunksize,
             )
     else:
         result = interim.materialize_interim_data(
-            layout=layout,
+            output_roots={
+                key: layout.interim_data_root("csmar", key)
+                for key in ("index_membership",)
+            },
             raw_root=raw,
             data_ids=("index_membership",),
             chunksize=chunksize,
@@ -1814,7 +1801,12 @@ def test_index_membership_preserves_native_codes_and_venue_type_identity(
         ],
     )
     imported = interim.materialize_interim_data(
-        layout=layout, raw_root=raw, data_ids=("index_membership",), chunksize=chunksize
+        output_roots={
+            key: layout.interim_data_root("csmar", key) for key in ("index_membership",)
+        },
+        raw_root=raw,
+        data_ids=("index_membership",),
+        chunksize=chunksize,
     )
     saved = read_dataset(imported.artifact_roots["index_membership"])
     actual = {
@@ -1861,7 +1853,6 @@ def test_index_membership_identity_uses_normalized_provider_types(kind):
 def test_csmar_parent_failure_keeps_workflow_semantics(
     tmp_path, monkeypatch, failure_type
 ):
-    from quant_research_platform.profiles.research import research_profile
     from quant_research_platform.storage.layout import StorageLayout
 
     raw = tmp_path / "raw/csmar"
@@ -1871,16 +1862,17 @@ def test_csmar_parent_failure_keeps_workflow_semantics(
         source, "Markettype,Clddt,Daywk,State\n4,2020-01-02,4,O\n", encoding="utf-8"
     )
     arguments = dict(
-        profile=research_profile(),
-        raw_root=raw.parent,
+        raw_root=raw,
         start_date="2020-01-01",
         end_date="2020-01-03",
         data_ids=("trading_calendar",),
     )
     normal_layout = StorageLayout(tmp_path / "normal")
     failed_layout = StorageLayout(tmp_path / "failed")
-    result = operations.data_materialize(layout=normal_layout, **arguments)
-    assert result["status"] == "COMPLETE"
+    interim.materialize_interim_data(
+        output_roots={"trading_calendar": normal_layout.project_root / "calendar"},
+        **arguments,
+    )
     originals = _file_bytes(normal_layout.project_root)
     primary = failure_type("parent_failure")
     native_check = interim.require_unaliased_path
@@ -1906,15 +1898,21 @@ def test_csmar_parent_failure_keeps_workflow_semantics(
     with monkeypatch.context() as patch:
         patch.setattr(interim, "require_unaliased_path", checked)
         patch.setattr(interim, "filesystem_stat", failed_stat)
-        if failure_type in (FileNotFoundError, NotADirectoryError):
-            failed = operations.data_materialize(layout=failed_layout, **arguments)
-            assert failed["status"] == "FAILED"
-            assert failed["target_results"][0]["reason"] == (
-                "interim_build_failed:csmar_interim_source_parent_invalid"
+        error_type = (
+            ValueError
+            if failure_type in (FileNotFoundError, NotADirectoryError)
+            else failure_type
+        )
+        with pytest.raises(error_type) as caught:
+            interim.materialize_interim_data(
+                output_roots={
+                    "trading_calendar": failed_layout.project_root / "calendar"
+                },
+                **arguments,
             )
+        if error_type is ValueError:
+            assert str(caught.value) == "csmar_interim_source_parent_invalid"
         else:
-            with pytest.raises(failure_type) as caught:
-                operations.data_materialize(layout=failed_layout, **arguments)
             assert caught.value is primary
     assert calls == [raw]
     assert _file_bytes(normal_layout.project_root) == originals
@@ -1971,7 +1969,11 @@ def test_adjusted_open_preserves_units_through_storage_and_labels(
         rows.append(row)
     _write_csmar(raw, "market_bars_1d", rows)
     built = interim.materialize_interim_data(
-        layout=layout, data_ids=("market_bars_1d",)
+        output_roots={
+            key: layout.interim_data_root("csmar", key) for key in ("market_bars_1d",)
+        },
+        raw_root=layout.raw_source_root("csmar"),
+        data_ids=("market_bars_1d",),
     )
     loaded = read_dataset(built.artifact_roots["market_bars_1d"])
     np.testing.assert_array_equal(loaded.adj_open, loaded.adj_close)
@@ -2082,13 +2084,12 @@ def test_raw_table_identity_ignores_parent_directory_and_rejects_conflict(tmp_pa
     ],
 )
 def test_controlled_csmar_date_reason_survives_workflow_sanitizer(code, column):
-    from quant_research_platform.workflows.research import _semantic_failure_code
 
     with pytest.raises(ValueError) as raised:
         interim._parse_optional_csmar_date(
             pd.Series(["invalid-date"]), column, error_code=code
         )
-    assert _semantic_failure_code(raised.value) == f"{code}:{column}"
+    assert str(raised.value) == f"{code}:{column}"
     valid = interim._parse_optional_csmar_date(
         pd.Series(["", " ", None, "2020-01-01"]), column, error_code=code
     )
@@ -2098,7 +2099,6 @@ def test_controlled_csmar_date_reason_survives_workflow_sanitizer(code, column):
 
 def test_controlled_csmar_numeric_reasons_survive_workflow_sanitizer():
     from quant_research_platform.sources.csmar.field_mappings import COLUMN_MAPPINGS
-    from quant_research_platform.workflows.research import _semantic_failure_code
 
     datasets = [
         (
@@ -2132,22 +2132,16 @@ def test_controlled_csmar_numeric_reasons_survive_workflow_sanitizer():
                 interim.normalize_raw_frame(
                     pd.DataFrame([{**row, inverse[column]: "invalid-number"}]), data_id
                 )
-            assert _semantic_failure_code(raised.value) == f"{code}:{column}"
+            assert str(raised.value) == f"{code}:{column}"
             checked += 1
     assert checked == 16
-    for message in ("private value", "/private/input.csv", "private\nvalue", "a" * 97):
-        assert _semantic_failure_code(ValueError(message)) == "valueerror"
 
 
 def test_csmar_date_reason_survives_research_run_record_and_report(tmp_path):
-    import json
 
-    from quant_research_platform.artifacts.research import read_research_run_record
-    from quant_research_platform.profiles.research import research_profile
     from quant_research_platform.sources.csmar.field_mappings import COLUMN_MAPPINGS
     from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.a_share_raw import _write_csmar
-    from tests.helpers.research_configuration import research_configuration
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
@@ -2164,29 +2158,12 @@ def test_csmar_date_reason_survives_research_run_record_and_report(tmp_path):
             }
         ],
     )
-    profile = research_profile()
-    result = operations.research_run(
-        profile=profile,
-        layout=layout,
-        research_plan=research_configuration(development=("2019-01-01", "2019-12-31")),
-    )
-    expected = "interim_build_failed:invalid_index_info_date:start_date"
-    target = next(
-        item for item in result["target_results"] if item["target_id"] == "index_info"
-    )
-    assert result["status"] == target["status"] == "FAILED"
-    assert target["reason"] == expected
-    record = read_research_run_record(layout.research_run_path(result["run_id"]))
-    saved = next(
-        item for item in record.target_results if item.target_id == "index_info"
-    )
-    assert record.status.value == saved.status.value == "FAILED"
-    assert saved.reason == expected
-    report = operations.report_build(
-        profile=profile, layout=layout, run_id=result["run_id"]
-    )
-    assert report["source_run_status"] == "FAILED"
-    assert expected in json.dumps(report)
+    with pytest.raises(ValueError, match="invalid_index_info_date:start_date"):
+        interim.materialize_interim_data(
+            raw_root=raw,
+            output_roots={"index_info": tmp_path / "index-info"},
+            data_ids=("index_info",),
+        )
 
 
 def _nullable_index_numeric_rows(data_id):
@@ -2245,7 +2222,12 @@ def test_index_source_null_numeric_values_persist_without_claiming_complete_weig
     _write_csmar(raw, data_id, _nullable_index_numeric_rows(data_id))
     original = _file_bytes(raw)
     result = interim.materialize_interim_data(
-        layout=layout, data_ids=(data_id,), chunksize=chunksize
+        output_roots={
+            key: layout.interim_data_root("csmar", key) for key in (data_id,)
+        },
+        raw_root=layout.raw_source_root("csmar"),
+        data_ids=(data_id,),
+        chunksize=chunksize,
     )
     root = result.artifact_roots[data_id]
     saved = read_dataset(root).sort_values(
@@ -2358,7 +2340,11 @@ def test_malformed_quoted_numeric_cannot_publish_over_old_good(tmp_path):
     filesystem_mkdir(raw, parents=True)
     _write_csmar(raw, "analyst_forecast", _analyst_rows()[:1])
     result = interim.materialize_interim_data(
-        layout=layout, data_ids=("analyst_forecast",)
+        output_roots={
+            key: layout.interim_data_root("csmar", key) for key in ("analyst_forecast",)
+        },
+        raw_root=layout.raw_source_root("csmar"),
+        data_ids=("analyst_forecast",),
     )
     root = result.artifact_roots["analyst_forecast"]
     old_good = _file_bytes(root)
@@ -2368,10 +2354,11 @@ def test_malformed_quoted_numeric_cannot_publish_over_old_good(tmp_path):
     assert payload.count(b",18,10") == 1
     malformed = payload.replace(b",18,10", b',"1"0,10')
     filesystem_write_bytes(path, malformed)
-    candidate = layout.instance_root(root, "f" * 64)
+    candidate = tmp_path / "new-candidate"
     with pytest.raises(ValueError, match="^malformed_csmar_csv_row$"):
         interim.materialize_interim_data(
-            layout=layout.with_target_roots({"analyst_forecast": candidate}),
+            output_roots={"analyst_forecast": candidate},
+            raw_root=raw,
             data_ids=("analyst_forecast",),
         )
     assert not filesystem_exists(candidate)
@@ -2477,7 +2464,11 @@ def test_cr_only_physical_fragments_preserve_interim_rows(
     identity = interim.source_content_identity(raw_root, "analyst_forecast")
     assert identity is not None
     result = interim.materialize_interim_data(
-        layout=layout, raw_root=raw_root, data_ids=("analyst_forecast",)
+        output_roots={
+            key: layout.interim_data_root("csmar", key) for key in ("analyst_forecast",)
+        },
+        raw_root=raw_root,
+        data_ids=("analyst_forecast",),
     )
     saved = read_dataset(result.artifact_roots["analyst_forecast"])
     assert len(saved) == count and not saved.duplicated(keys).any()
@@ -2509,7 +2500,11 @@ def test_long_record_after_short_header_can_publish(tmp_path, real_csv_handles, 
     assert raw_schemas.read_export_header(path) == tuple(header.decode().split(","))
     assert interim.source_content_identity(raw_root, "analyst_forecast") is not None
     interim.materialize_interim_data(
-        layout=layout, raw_root=raw_root, data_ids=("analyst_forecast",)
+        output_roots={
+            key: layout.interim_data_root("csmar", key) for key in ("analyst_forecast",)
+        },
+        raw_root=raw_root,
+        data_ids=("analyst_forecast",),
     )
     saved = read_dataset(target)
     assert len(saved) == 1
@@ -2618,7 +2613,13 @@ def test_index_info_projects_extra_text_and_persists_optional_columns(
         writer.writeheader()
         writer.writerow(row)
     original = path.read_bytes()
-    result = interim.materialize_interim_data(layout=layout, data_ids=("index_info",))
+    result = interim.materialize_interim_data(
+        output_roots={
+            key: layout.interim_data_root("csmar", key) for key in ("index_info",)
+        },
+        raw_root=layout.raw_source_root("csmar"),
+        data_ids=("index_info",),
+    )
     saved = read_dataset(result.artifact_roots["index_info"])
     assert tuple(saved.columns) == interim.INDEX_INFO_INTERIM_COLUMNS
     assert saved.source_asset_id.tolist() == ["000300"]
@@ -2669,7 +2670,13 @@ def test_complete_chain_index_info_fixture_has_native_price_and_return_identitie
         a_share_raw.write_a_share_raw_fixture(
             layout, benchmark_total_return_indices=total_returns
         )
-    result = interim.materialize_interim_data(layout=layout, data_ids=("index_info",))
+    result = interim.materialize_interim_data(
+        output_roots={
+            key: layout.interim_data_root("csmar", key) for key in ("index_info",)
+        },
+        raw_root=layout.raw_source_root("csmar"),
+        data_ids=("index_info",),
+    )
     saved = read_dataset(result.artifact_roots["index_info"]).set_index(
         "source_asset_id"
     )

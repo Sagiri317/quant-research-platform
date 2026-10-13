@@ -101,12 +101,10 @@ def test_session_consuming_inspection_does_not_reopen_dataset(
 
 
 @pytest.mark.parametrize("consumer", ("public-partition", "frame-observer"))
-@pytest.mark.parametrize("identity_changed", (False, True))
 def test_inspection_closes_native_iterator_and_preserves_consumer_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     consumer: str,
-    identity_changed: bool,
 ) -> None:
     root = make_dataset_artifact_root(tmp_path)
     write_dataset(
@@ -127,11 +125,6 @@ def test_inspection_closes_native_iterator_and_preserves_consumer_failure(
         return iterator
 
     def fail_consumer(*_args):
-        if identity_changed:
-            os.utime(
-                path,
-                ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns + 1_000_000),
-            )
         raise primary
 
     monkeypatch.setattr(dataset_inspection, "iter_dataset_file_batches", capture_native)
@@ -151,40 +144,9 @@ def test_inspection_closes_native_iterator_and_preserves_consumer_failure(
         assert len(created) == 1
         assert created[0].gi_frame is None
         notes = getattr(primary, "__notes__", [])
-        if identity_changed:
-            assert notes == ["iterator close also failed: ValueError"]
-        else:
-            assert not notes
+        assert not notes
         assert not unraisable
     finally:
         os.utime(path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
         for iterator in created:
             iterator.close()
-    session.verify()
-
-
-def test_inspection_surfaces_native_final_identity_failure_without_consumer_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = make_dataset_artifact_root(tmp_path)
-    write_dataset(
-        root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
-    )
-    session = dataset_reading.open_dataset_session(root, columns=None, time_window=None)
-    path = session.read_paths[0]
-    original_stat = path.stat()
-    original_partition_label = dataset_inspection.relative_partition_label
-
-    def change_identity(data_root, current):
-        os.utime(
-            path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns + 1_000_000)
-        )
-        return original_partition_label(data_root, current)
-
-    monkeypatch.setattr(dataset_inspection, "relative_partition_label", change_identity)
-    try:
-        with pytest.raises(ValueError, match="dataset_file_identity_changed"):
-            inspect_dataset(root)
-    finally:
-        os.utime(path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
-    session.verify()

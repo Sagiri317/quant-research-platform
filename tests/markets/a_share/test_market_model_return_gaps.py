@@ -7,11 +7,10 @@ import pytest
 from quant_research_platform.compute.market_model import MarketModelRiskState
 from quant_research_platform.research.portfolios.risk import FactorRiskState
 from quant_research_platform.storage.datasets import read_dataset
-from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.workflows import operations
-from tests.markets.a_share.test_target_dag_chain import (
+from tests.helpers.a_share_sources import (
+    _prepare,
     _synthetic_interim_frames,
-    _windowed_source_profile,
+    _write_inputs,
 )
 
 
@@ -29,27 +28,14 @@ def test_native_market_model_return_gap_persists_and_recovers_complete_windows(
         bars.source_asset_id.eq("000001") & bars.timestamp.eq(dates[gap]),
         "period_return",
     ] = np.nan
-    profile = _windowed_source_profile(frames, [])
-    layout = StorageLayout(tmp_path)
-    result = operations.data_materialize(
-        profile=profile,
-        layout=layout,
-        raw_root=tmp_path / "raw",
-        start_date=str(dates[0].date()),
-        end_date=str(dates[-1].date()),
-        data_ids=("market_panel_1d", "market_model_factors"),
-    )
-    assert result["status"] == "COMPLETE", result.get("blockers")
-    targets = {item["target_id"]: item for item in result["target_results"]}
+    inputs = _write_inputs(tmp_path / "source", frames)
+    for name in ("market_panel_1d", "market_model_factors"):
+        inputs[name] = _prepare(
+            tmp_path / "prepared", name, inputs, dates[0], dates[-1]
+        )
 
     def saved(data_id):
-        spec = profile.processed.get(data_id)
-        return read_dataset(
-            layout.instance_root(
-                layout.processed_data_root(spec.market_id, spec.kind, spec.data_id),
-                targets[data_id]["instance_identity"],
-            )
-        )
+        return read_dataset(inputs[data_id])
 
     panel, factors = saved("market_panel_1d"), saved("market_model_factors")
     keys = ["market_id", "asset_id", "timestamp"]

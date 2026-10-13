@@ -1,10 +1,367 @@
-"""Full synthetic source-to-report acceptance without substitute producers."""
+"""Provider bytes to frozen models, actual accounts and native inference tables."""
 
+from dataclasses import asdict
+
+import pandas as pd
 import pytest
 
+from quant_research_platform.artifacts.outputs.prediction import read_predictions
+from quant_research_platform.artifacts.portfolio_ledger import (
+    read_portfolio_ledger_artifact,
+    summarize_portfolio_ledger,
+)
+from quant_research_platform.artifacts.statistics import read_statistics_artifact
+from quant_research_platform.research.models.trial_selection import (
+    read_selection,
+    select,
+)
+from quant_research_platform.research.portfolios.diagnostics import portfolio_statistics
+from quant_research_platform.research.portfolios.production import backtest
+from quant_research_platform.research.portfolios.risk import FactorRiskConfig
+from quant_research_platform.research.statistics_production import model_statistics
 from tests.helpers.research_acceptance import run_a_share_acceptance
+from tests.helpers.statistics_artifacts import (
+    portfolio_statistics_config,
+    statistics_config,
+)
+
+pytestmark = pytest.mark.complete_chain
 
 
-@pytest.mark.complete_chain
-def test_a_share_real_source_model_portfolio_report_chain(tmp_path):
-    run_a_share_acceptance(tmp_path)
+@pytest.fixture(scope="module")
+def source_chain(tmp_path_factory):
+    return run_a_share_acceptance(tmp_path_factory.mktemp("source-acceptance"))
+
+
+def test_a_share_real_source_model_portfolio_chain(source_chain):
+    case = source_chain
+    assert set(case.selections) == {"global", "quarterly"}
+    assert len(case.final_models) == len(case.test_predictions) == 4
+    assert len(case.ledgers) == len(case.enhanced_ledgers) == 2
+    for (group, family), path in case.test_predictions.items():
+        frame, metadata = read_predictions(path)
+        assert metadata["sample_role"] == "test"
+        assert frame.timestamp.min() == pd.Timestamp(case.test["start"])
+        assert frame.timestamp.max() == pd.Timestamp(case.test["end"])
+        assert frame.groupby("timestamp").asset_id.nunique().eq(100).all()
+        assert metadata["model"] == str(case.final_models[group, family])
+
+
+def test_native_enhancement_is_capacity_limited_and_postcost_feasible(source_chain):
+    from quant_research_platform.research.portfolios.optimizer import OptimizerConfig
+
+    limits = OptimizerConfig()
+    for path in source_chain.enhanced_ledgers.values():
+        ledger = read_portfolio_ledger_artifact(path)
+        assert ledger.capital.initial_capital == 1e12
+        participation, active = [], []
+        optimized = 0
+        for batch in ledger.iter_chunks():
+            rows = {(item.asset_id, item.name): item for item in batch.diagnostics}
+            adv = {
+                asset: item.number
+                for (asset, name), item in rows.items()
+                if name == "adv20"
+            }
+            participation.extend(
+                abs(item.notional) / adv[item.asset_id] for item in batch.trades
+            )
+            tracking = [
+                item.number
+                for item in batch.diagnostics
+                if item.name == "predicted_tracking_error"
+            ]
+            if not tracking:
+                continue
+            optimized += 1
+            assert 0 < tracking[0] <= limits.tracking_error_limit + 1e-8
+            after = {
+                item.asset_id: item.value
+                for item in batch.valuations
+                if item.phase == "after"
+            }
+            nav = sum(after.values())
+            deviation = [
+                after[asset] / nav - item.number
+                for (asset, name), item in rows.items()
+                if name == "benchmark_weight"
+            ]
+            assert max(map(abs, deviation)) <= limits.active_name_limit + 1e-8
+            active.extend(deviation)
+        assert optimized > 0
+        assert max(map(abs, active)) > 1e-6
+        assert max(participation) == pytest.approx(0.05, abs=1e-8)
+        assert all(value <= 0.05 + 1e-8 for value in participation)
+
+
+def test_native_postcost_boundary_is_rejected_without_output(source_chain, tmp_path):
+    from quant_research_platform.research.portfolios.production import (
+        PortfolioTargetBlocked,
+    )
+
+    original = source_chain.enhanced_configs["global"]
+    destination = tmp_path / "infeasible"
+    config = {
+        **original,
+        "assumptions": {**original["assumptions"], "initial_nav": 1e9},
+        "output": str(destination),
+    }
+    with pytest.raises(
+        PortfolioTargetBlocked, match="portfolio_post_trade_constraints_infeasible"
+    ):
+        backtest(config)
+    assert not destination.exists()
+
+
+def test_source_models_reach_paired_native_test_statistics(source_chain, tmp_path):
+    case = source_chain
+    previous = None
+    for group in ("global", "quarterly"):
+        config = statistics_config(
+            factors=case.factors, sample_role="test", selection_group=group
+        )
+        config["evaluation"] = {"primary_label": config["evaluation"]["primary_label"]}
+        config["statistics"] = {
+            key: value
+            for key, value in config["statistics"].items()
+            if key in {"hac_lag", "bootstrap_block", "bootstrap_repetitions"}
+            or key == "group_comparison"
+            and group == "quarterly"
+        }
+        config["statistics"]["bootstrap_repetitions"] = 32
+        config.update(
+            dataset=str(case.dataset),
+            output=str(tmp_path / group),
+            window=case.test,
+            prediction_id="source_predictions",
+            comparison_model_id=next(iter(case.models)),
+            periods=[
+                {
+                    "period_id": "frozen_test",
+                    "window": case.test,
+                    "selection": str(case.selections[group]),
+                    "predictions": [
+                        str(case.test_predictions[group, model])
+                        for model in case.models
+                    ],
+                }
+            ],
+        )
+        if previous is not None:
+            config["global_statistics"] = str(previous)
+        previous = model_statistics(config)
+        saved = read_statistics_artifact(previous)
+        with saved.table("prediction_diagnostics.parquet") as diagnostics:
+            assert diagnostics.observation_count.gt(20).all()
+            assert not diagnostics.reason.eq(
+                "global_validation_selection_reuses_validation"
+            ).any()
+        with saved.table("model_losses.parquet") as losses:
+            assert set(losses.family_id) == set(case.models)
+            assert losses.period_id.eq("frozen_test").all()
+        if group == "quarterly":
+            with saved.table("model_group_comparison.parquet") as paired:
+                assert set(paired.family_id) == set(case.models)
+                assert paired.observation_count.gt(20).all()
+
+
+def test_source_accounts_reconcile_native_portfolio_statistics(source_chain, tmp_path):
+    case = source_chain
+    _, defaults = portfolio_statistics_config(sample_role="test")
+    policy = {
+        key: value
+        for key, value in defaults["statistics"].items()
+        if key
+        in {
+            "cscv_blocks",
+            "hac_lag",
+            "bootstrap_block",
+            "bootstrap_repetitions",
+            "group_comparison",
+        }
+    }
+    policy["bootstrap_repetitions"] = 32
+    policy["group_comparison"].update(
+        portfolio_ids=["champion_top20", "champion_enhanced"],
+        primary_portfolio_id="champion_top20",
+    )
+    inputs = {
+        **case.portfolio_configs["global"]["inputs"],
+        "index_market": str(case.paths["index_market"]),
+        "benchmark": str(case.paths["benchmark_weights"]),
+        "risk_context": [
+            str(case.paths[name])
+            for name in (
+                "price_volume_facts",
+                "market_model_factors",
+                "fundamental_factors",
+            )
+        ],
+    }
+    paths = [*case.ledgers.values(), *case.enhanced_ledgers.values()]
+    output = portfolio_statistics(
+        {
+            "ledgers": list(map(str, paths)),
+            "inputs": inputs,
+            "output": str(tmp_path / "statistics"),
+            "window": case.test,
+            "sample_role": "test",
+            "benchmark_total_return_indices": case.indices,
+            "risk": asdict(FactorRiskConfig()),
+            "adv_sensitivities": case.portfolio_configs["global"]["assumptions"][
+                "adv_sensitivities"
+            ],
+            "statistics": policy,
+        }
+    )
+    statistics = read_statistics_artifact(output)
+    with statistics.table("portfolio_performance.parquet") as metrics:
+        assert set(metrics.candidate_id) == {
+            "global_champion_top20",
+            "quarterly_champion_top20",
+            "global_champion_enhanced",
+            "quarterly_champion_enhanced",
+        }
+        for path in paths:
+            ledger = read_portfolio_ledger_artifact(path)
+            assert ledger.capital.initial_capital == 1e12
+            actual = summarize_portfolio_ledger(ledger.capital, ledger.iter_chunks())
+            selected = metrics.loc[
+                metrics.candidate_id.eq(ledger.capital.candidate_id)
+            ].set_index("metric_id")
+            assert selected.loc["cost", "value"] == pytest.approx(actual["fees"])
+            assert selected.loc["net_pnl", "value"] == pytest.approx(actual["net_pnl"])
+    with statistics.table("portfolio_group_comparison.parquet") as pairs:
+        assert set(pairs.portfolio_id) == {"champion_top20", "champion_enhanced"}
+
+
+@pytest.mark.parametrize(
+    "mutation", ["missing_selection", "wrong_model", "wrong_group", "same_id_selection"]
+)
+def test_test_account_rejects_unfrozen_or_wrong_model_input(
+    source_chain, tmp_path, mutation
+):
+    case = source_chain
+    config = {**case.portfolio_configs["global"], "output": str(tmp_path / "bad")}
+    item = dict(config["predictions"][0])
+    if mutation == "missing_selection":
+        del item["selection"]
+        reason = "portfolio_frozen_selection_required"
+    elif mutation == "wrong_model":
+        winner = read_selection(case.selections["global"])["selected_model_id"]
+        other = next(model for model in case.models if model != winner)
+        item["model"] = str(case.final_models["global", other])
+        reason = "portfolio_prediction_model_mismatch"
+    elif mutation == "same_id_selection":
+        original = read_selection(case.selections["global"])
+        other = select(
+            {
+                "scores": original["scores"],
+                "output": str(tmp_path / "other-selection.json"),
+                "selection_metric": original["selection_metric"],
+                "selection_direction": original["selection_direction"],
+                "tie_break_order": original["tie_break_order"],
+                "refit_windows": original["refit_windows"],
+                "refit_cutoff": "2019-08-31",
+            }
+        )
+        assert (
+            read_selection(other)["selected_model_id"] == original["selected_model_id"]
+        )
+        item["selection"] = str(other)
+        reason = "portfolio_test_selection_mismatch"
+    else:
+        item["selection"] = str(case.selections["quarterly"])
+        reason = "portfolio_prediction_selection_mismatch"
+    config["predictions"] = [item]
+    with pytest.raises(ValueError, match=reason):
+        backtest(config)
+    assert not (tmp_path / "bad").exists()
+
+
+def test_frozen_alpha_schedules_use_real_mature_prediction_returns(
+    source_chain, tmp_path
+):
+    import json
+
+    from quant_research_platform.research.portfolios.accounting import (
+        alpha_calibration_intervals,
+        frozen_alpha_calibration,
+    )
+    from quant_research_platform.research.portfolios.production import calibrate
+    from quant_research_platform.storage.datasets import read_dataset
+
+    case = source_chain
+    calendar = read_dataset(
+        case.paths["trading_calendar"], columns=("calendar_date", "is_trading_day")
+    )
+    sessions = pd.DatetimeIndex(
+        calendar.loc[calendar.is_trading_day, "calendar_date"]
+    ).sort_values()
+    sessions = sessions[sessions >= pd.Timestamp(case.validation["start"])]
+    prices = (
+        read_dataset(
+            case.paths["market_panel_1d"], columns=("timestamp", "asset_id", "adj_open")
+        )
+        .set_index(["timestamp", "asset_id"])
+        .adj_open
+    )
+    counts = {}
+    for group in ("global", "quarterly"):
+        champion = read_selection(case.selections[group])["selected_model_id"]
+        predictions = read_predictions(case.validation_predictions[champion])[0]
+        for schedule in ("weekly-last-trading-day", "monthly-last-trading-day"):
+            intervals = alpha_calibration_intervals(sessions, schedule)
+            joined = predictions.merge(
+                intervals, on="timestamp", how="inner", validate="many_to_one"
+            )
+            entry = prices.reindex(
+                pd.MultiIndex.from_frame(joined[["entry_at", "asset_id"]])
+            ).to_numpy()
+            end = prices.reindex(
+                pd.MultiIndex.from_frame(joined[["available_at", "asset_id"]])
+            ).to_numpy()
+            observations = joined[["timestamp", "prediction_rank_score"]].assign(
+                holding_return=end / entry - 1
+            )
+            root = tmp_path / group / schedule
+            root.mkdir(parents=True)
+            observations.to_parquet(root / "observations.parquet", index=False)
+            intervals.to_parquet(root / "intervals.parquet", index=False)
+            config = {
+                "observations": str(root / "observations.parquet"),
+                "scheduled_intervals": str(root / "intervals.parquet"),
+                "cutoff": case.validation["end"],
+                "selection_group": group,
+                "output": str(root / "calibration.json"),
+            }
+            output = calibrate(config)
+            payload = json.loads(output.read_text())
+            frozen, cutoff = frozen_alpha_calibration(
+                payload, cutoff=case.validation["end"], selection_group=group
+            )
+            assert frozen.coverage >= 0.8 and frozen.valid_rebalance_dates >= 6
+            assert pd.Timestamp(cutoff) == pd.Timestamp(case.validation["end"])
+            counts[group, schedule] = frozen.valid_rebalance_dates
+            # Raw future returns exist, but are unavailable at freeze.
+            future = joined.available_at.gt(case.validation["end"])
+            assert future.any()
+            observations.loc[future.to_numpy(), "holding_return"] += 1000
+            observations.to_parquet(root / "future-observations.parquet", index=False)
+            perturbed = calibrate(
+                {
+                    **config,
+                    "observations": str(root / "future-observations.parquet"),
+                    "output": str(root / "future-calibration.json"),
+                }
+            )
+            assert (
+                json.loads(perturbed.read_text())["calibration"]
+                == payload["calibration"]
+            )
+    for group in ("global", "quarterly"):
+        assert (
+            counts[group, "weekly-last-trading-day"]
+            > counts[group, "monthly-last-trading-day"]
+            >= 6
+        )

@@ -1,6 +1,6 @@
 """Pure plots of validated query/report rows; no reads or statistical inference.
 
-Callers supply exact source identities and access scope from the same validated
+Callers supply actual source references and the sample role from the consumed
 artifact. Figures are caller-owned: save with ``figure.savefig`` and close them.
 Naive timestamps retain their source wall-clock meaning; ``timezone`` labels it.
 """
@@ -74,10 +74,10 @@ def _styled(function):
     return render
 
 
-def _figure(count, *, title, source_identity, access_window, ratios=None):
+def _figure(count, *, title, source_reference, sample_role, ratios=None):
     import matplotlib.pyplot as plt
 
-    if not source_identity or access_window not in {"development", "holdout"}:
+    if not source_reference or sample_role not in {"train", "validation", "test"}:
         raise ValueError("plot_provenance_invalid")
     figure, axes = plt.subplots(
         max(1, count),
@@ -89,8 +89,8 @@ def _figure(count, *, title, source_identity, access_window, ratios=None):
     )
     figure.suptitle(title, fontsize=14)
     figure.supxlabel(
-        f"{'开发集' if access_window == 'development' else '留出集'} | "
-        f"来源：{fill(str(source_identity), 110)}",
+        f"{dict(train='训练集', validation='验证集', test='测试集')[sample_role]} | "
+        f"来源：{fill(str(source_reference), 110)}",
         fontsize=8,
     )
     return figure, axes[:, 0]
@@ -184,27 +184,32 @@ def _times(values, timezone):
 
 
 @_styled
-def plot_portfolio_curve(curve, *, access_window, timezone):
+def plot_portfolio_curve(curve, *, sample_role, timezone):
     """Plot query NAV with OOS markers and full-resolution descriptive drawdown.
 
     Independent episodes stay in separate panels. Sampled curves cannot supply
     a drawdown path. This plot never estimates the official max-drawdown metric.
     """
+    if "sample_role" in curve and curve["sample_role"] != sample_role:
+        raise ValueError("plot_sample_role_mismatch")
+    epoch_timezone = (
+        "UTC" if curve.get("valuation_method") == "linear_perpetual" else None
+    )
     parts = curve.get("episodes", [curve])
     figure, axes = _figure(
         2 * len(parts),
         ratios=[3, 1] * len(parts) if parts else None,
-        title=f"净值与回撤 | {curve['target_id']} | "
+        title=f"净值与回撤 | {curve['candidate_id']} | "
         + {
             "DEFINED": "已定义",
             "UNDEFINED": "未定义",
             "BLOCKED": "受阻",
             "FAILED": "失败",
         }.get(curve["status"], curve["status"]),
-        source_identity=curve.get(
-            "instance_identity", f"请求目标 {curve['target_id']}（无产物）"
+        source_reference=curve.get(
+            "source_reference", f"候选 {curve['candidate_id']}（无产物）"
         ),
-        access_window=access_window,
+        sample_role=sample_role,
     )
     if curve["status"] != "DEFINED":
         for axis in axes:
@@ -214,10 +219,16 @@ def plot_portfolio_curve(curve, *, access_window, timezone):
         nav_axis, dd_axis = axes[2 * index : 2 * index + 2]
         points = part["points"]
         values = [_number(row["nav"]) for row in points]
-        if any(value < 0 for value in values):
+        if curve.get(
+            "valuation_method", "adjusted_notional"
+        ) != "linear_perpetual" and any(value < 0 for value in values):
             raise ValueError("plot_nav_negative")
         times = _times(
-            [pd.Timestamp(row["timestamp_ns"], unit="ns") for row in points], timezone
+            [
+                pd.Timestamp(row["timestamp_ns"], unit="ns", tz=epoch_timezone)
+                for row in points
+            ],
+            timezone,
         )
         if not times.is_monotonic_increasing:
             raise ValueError("plot_timestamp_order_invalid")
@@ -225,8 +236,6 @@ def plot_portfolio_curve(curve, *, access_window, timezone):
             "连续回测" if part["episode_id"] == "continuous" else part["episode_id"]
         )
         label = f"{curve['candidate_id']} | {episode}"
-        if curve["execution_mode"] == "independent_segments":
-            label += "\n实例：" + fill(part["instance_identity"], 90)
         nav_axis.set_title(label, fontsize=9)
         displayed, scale = _scale(values)
         nav_axis.plot(
@@ -290,8 +299,8 @@ def plot_portfolio_curve(curve, *, access_window, timezone):
             for position, window in enumerate(indices):
                 start, stop = _times(
                     [
-                        pd.Timestamp(starts[window], unit="ns"),
-                        pd.Timestamp(ends[window], unit="ns"),
+                        pd.Timestamp(starts[window], unit="ns", tz=epoch_timezone),
+                        pd.Timestamp(ends[window], unit="ns", tz=epoch_timezone),
                     ],
                     timezone,
                 )
@@ -300,7 +309,7 @@ def plot_portfolio_curve(curve, *, access_window, timezone):
                     stop,
                     color="#a7d8be",
                     alpha=0.25,
-                    label="样本外 OOS" if position == 0 else None,
+                    label="预测窗口" if position == 0 else None,
                 )
             for position, (left, right) in enumerate(
                 zip(indices, indices[1:], strict=False)
@@ -308,8 +317,8 @@ def plot_portfolio_curve(curve, *, access_window, timezone):
                 if ends[left] < starts[right]:
                     start, stop = _times(
                         [
-                            pd.Timestamp(ends[left], unit="ns"),
-                            pd.Timestamp(starts[right], unit="ns"),
+                            pd.Timestamp(ends[left], unit="ns", tz=epoch_timezone),
+                            pd.Timestamp(starts[right], unit="ns", tz=epoch_timezone),
                         ],
                         timezone,
                     )
@@ -327,14 +336,14 @@ def plot_portfolio_curve(curve, *, access_window, timezone):
 
 
 @_styled
-def plot_metric_comparison(rows, *, metric_id, units, source_identity, access_window):
+def plot_metric_comparison(rows, *, metric_id, units, source_reference, sample_role):
     """Compare existing performance/statistic rows, e.g. Sharpe, fees or turnover.
 
     Rows must be selected for an economically comparable population by callers.
     No rankings, significance, annualization or cross-currency conversion occurs.
     """
     selected = [row for row in rows if row["metric_id"] == metric_id]
-    _groups(selected, access_window)
+    _groups(selected, sample_role)
     title = {
         "sharpe": "夏普比率 Sharpe",
         "max_drawdown": "最大回撤",
@@ -349,14 +358,14 @@ def plot_metric_comparison(rows, *, metric_id, units, source_identity, access_wi
         "episode_max_drawdown": "独立区段最大回撤",
     }.get(metric_id, metric_id)
     figure, axes = _figure(
-        1, title=title, source_identity=source_identity, access_window=access_window
+        1, title=title, source_reference=source_reference, sample_role=sample_role
     )
     figure.set_figheight(max(3.5, 0.5 * len(selected) + 2))
     axis = axes[0]
     labels = [
         " | ".join(
             str(row[key])
-            for key in ("candidate_id", "execution_mode", "episode_id", "access_window")
+            for key in ("candidate_id", "execution_mode", "episode_id", "sample_role")
             if key in row
         )
         for row in selected
@@ -397,11 +406,11 @@ def plot_metric_comparison(rows, *, metric_id, units, source_identity, access_wi
     return figure, axes
 
 
-def _groups(rows, access_window):
+def _groups(rows, sample_role):
     groups = defaultdict(list)
     for row in rows:
-        if "access_window" in row and row["access_window"] != access_window:
-            raise ValueError("plot_access_window_mismatch")
+        if "sample_role" in row and row["sample_role"] != sample_role:
+            raise ValueError("plot_sample_role_mismatch")
         key = tuple(
             str(row[name])
             for name in ("candidate_id", "execution_mode", "episode_id")
@@ -412,18 +421,18 @@ def _groups(rows, access_window):
 
 
 @_styled
-def plot_returns(rows, *, source_identity, access_window, timezone):
+def plot_returns(rows, *, source_reference, sample_role, timezone):
     """Plot persisted periodic net returns and their descriptive distribution.
 
     Accept portfolio_daily or crypto_portfolio_daily rows. Undefined returns are
     omitted from the distribution and explicitly counted; never fill or compound.
     """
-    groups = _groups(rows, access_window)
+    groups = _groups(rows, sample_role)
     figure, axes = _figure(
         2 * len(groups),
         title="各期净收益与收益分布（描述性统计）",
-        source_identity=source_identity,
-        access_window=access_window,
+        source_reference=source_reference,
+        sample_role=sample_role,
     )
     if not groups:
         _note(axes[0], "UNDEFINED：没有各期收益数据")
@@ -466,7 +475,7 @@ def plot_returns(rows, *, source_identity, access_window, timezone):
 
 
 @_styled
-def plot_factor_ic(rows, *, source_identity, access_window, timezone, summary=False):
+def plot_factor_ic(rows, *, source_reference, sample_role, timezone, summary=False):
     """Plot validated metrics or ic_summary rows without recomputing IC/RankIC.
 
     IC summaries are descriptive means, not inferential diagnostics. The source
@@ -474,12 +483,14 @@ def plot_factor_ic(rows, *, source_identity, access_window, timezone, summary=Fa
     """
     groups = defaultdict(list)
     for row in rows:
+        if "sample_role" in row and row["sample_role"] != sample_role:
+            raise ValueError("plot_sample_role_mismatch")
         groups[(row["signal"], row["label"])].append(row)
     figure, axes = _figure(
         2 if summary else 2 * len(groups),
         title="IC / Rank IC（描述性统计）",
-        source_identity=source_identity,
-        access_window=access_window,
+        source_reference=source_reference,
+        sample_role=sample_role,
     )
     if summary:
         figure.set_figheight(max(6, len(groups) + 3))
@@ -572,14 +583,14 @@ def plot_factor_ic(rows, *, source_identity, access_window, timezone, summary=Fa
 
 
 @_styled
-def plot_portfolio_activity(rows, *, source_identity, access_window, timezone):
+def plot_portfolio_activity(rows, *, source_reference, sample_role, timezone):
     """Plot A-share persisted cost drag and realized turnover, in separate panels."""
-    groups = _groups(rows, access_window)
+    groups = _groups(rows, sample_role)
     figure, axes = _figure(
         2 * len(groups),
         title="成本拖累与实际换手",
-        source_identity=source_identity,
-        access_window=access_window,
+        source_reference=source_reference,
+        sample_role=sample_role,
     )
     if not groups:
         _note(axes[0], "UNDEFINED：没有各期收益数据")
@@ -619,3 +630,185 @@ def plot_portfolio_activity(rows, *, source_identity, access_window, timezone):
                 _note(axis, f"UNDEFINED：{metric} 缺失值 {unavailable} 个")
             _time_axis(axis, timezone)
     return figure, axes
+
+
+@_styled
+def plot_series(
+    rows,
+    *,
+    x_column,
+    value_columns,
+    title,
+    units,
+    source_reference,
+    sample_role,
+    timezone,
+    categorical=False,
+):
+    """Display declared numerical columns without rolling or aggregating them.
+
+    This covers persisted benchmark/drawdown, periodic return, rolling risk,
+    exposure/attribution, coverage/valuation and ON/ID/intraday series. The
+    producer owns the mathematics; nulls remain visible gaps.
+    """
+    if (
+        type(value_columns) is not list
+        or not value_columns
+        or any(type(value) is not str or not value for value in value_columns)
+        or len(set(value_columns)) != len(value_columns)
+        or type(categorical) is not bool
+    ):
+        raise ValueError("plot_columns_invalid")
+    groups = _groups(list(rows), sample_role)
+    if not groups:
+        raise ValueError("plot_columns_missing")
+    figure, axes = _figure(
+        len(groups),
+        title=title,
+        source_reference=source_reference,
+        sample_role=sample_role,
+    )
+    for axis, (key, items) in zip(axes, groups, strict=True):
+        frame = pd.DataFrame(items)
+        if set([x_column, *value_columns]) - set(frame):
+            raise ValueError("plot_columns_missing")
+        if frame[x_column].isna().any() or frame[x_column].duplicated().any():
+            raise ValueError("plot_axis_invalid")
+        x = (
+            frame[x_column].astype(str).tolist()
+            if categorical
+            else _times(frame[x_column], timezone)
+        )
+        if not categorical and not x.is_monotonic_increasing:
+            raise ValueError("plot_timestamp_order_invalid")
+        if key:
+            axis.set_title(" | ".join(key), fontsize=9)
+        for column in value_columns:
+            values = [
+                math.nan if pd.isna(value) else _number(value)
+                for value in frame[column].tolist()
+            ]
+            axis.plot(x, values, label=column, marker=".", linewidth=1)
+            missing = sum(not math.isfinite(value) for value in values)
+            if missing:
+                _note(axis, f"UNDEFINED：{column} 缺失 {missing} 个，不连接缺口")
+        axis.set_ylabel(units)
+        if categorical:
+            axis.set_xlabel(x_column)
+            axis.tick_params(axis="x", labelrotation=45)
+        else:
+            _time_axis(axis, timezone)
+        axis.legend()
+    return figure, axes
+
+
+def plot(config):
+    """Render one explicitly selected persisted numerical input to a new image."""
+    from io import BytesIO
+    from pathlib import Path
+
+    from quant_research_platform.contracts.json_codec import qrp_json_mapping_snapshot
+    from quant_research_platform.storage.atomic import (
+        atomic_write_bytes,
+        reject_if_exists,
+    )
+    from quant_research_platform.storage.manifests import read_qrp_json_file
+
+    config = qrp_json_mapping_snapshot(config)
+    required = {"kind", "inputs", "output", "sample_role"}
+    optional = {
+        "curve": {"execution_mode"},
+        "metrics": {"metric_id", "units"},
+        "returns": set(),
+        "factor_ic": {"summary"},
+        "activity": set(),
+        "series": {"x_column", "value_columns", "title", "units", "categorical"},
+    }
+    kind = config.get("kind")
+    if kind in {"curve", "returns", "factor_ic", "activity"} or (
+        kind == "series" and config.get("categorical", False) is not True
+    ):
+        required.add("timezone")
+    if kind == "metrics":
+        required.update(("metric_id", "units"))
+    elif kind == "series":
+        required.update(("x_column", "value_columns", "title", "units"))
+    if (
+        type(kind) is not str
+        or kind not in optional
+        or set(config) - required - optional[kind]
+        or required - set(config)
+    ):
+        raise ValueError("plot_config_fields_invalid")
+    for key in (
+        "inputs",
+        "output",
+        "sample_role",
+        *(["timezone"] if "timezone" in required else []),
+        *(key for key in ("metric_id", "units", "title", "x_column") if key in config),
+    ):
+        if type(config[key]) is not str or not config[key]:
+            raise ValueError("plot_config_value_invalid")
+    output = Path(config["output"])
+    if output.suffix not in {".png", ".svg", ".pdf"}:
+        raise ValueError("plot_output_format_invalid")
+    reject_if_exists(output)
+    source = Path(config["inputs"])
+    if kind == "curve":
+        from quant_research_platform.interfaces.queries import portfolio_curve
+
+        curve = portfolio_curve(
+            source, execution_mode=config.get("execution_mode", "continuous")
+        )
+        figure, _axes = plot_portfolio_curve(
+            curve, sample_role=config["sample_role"], timezone=config["timezone"]
+        )
+    else:
+        if source.suffix == ".parquet":
+            rows = pd.read_parquet(source).to_dict("records")
+        elif source.suffix == ".json":
+            payload = read_qrp_json_file(source)[1]
+            if set(payload) != {"rows"} or type(payload["rows"]) is not list:
+                raise ValueError("plot_numeric_rows_required")
+            rows = payload["rows"]
+        else:
+            raise ValueError("plot_numeric_file_required")
+        common = {"source_reference": str(source), "sample_role": config["sample_role"]}
+        if kind == "metrics":
+            figure, _axes = plot_metric_comparison(
+                rows, metric_id=config["metric_id"], units=config["units"], **common
+            )
+        elif kind == "returns":
+            figure, _axes = plot_returns(rows, timezone=config["timezone"], **common)
+        elif kind == "factor_ic":
+            if type(config.get("summary", False)) is not bool:
+                raise ValueError("plot_summary_flag_invalid")
+            figure, _axes = plot_factor_ic(
+                rows,
+                summary=config.get("summary", False),
+                timezone=config["timezone"],
+                **common,
+            )
+        elif kind == "activity":
+            figure, _axes = plot_portfolio_activity(
+                rows, timezone=config["timezone"], **common
+            )
+        else:
+            figure, _axes = plot_series(
+                rows,
+                timezone=config.get("timezone"),
+                **common,
+                **{
+                    key: config[key]
+                    for key in ("x_column", "value_columns", "title", "units")
+                },
+                categorical=config.get("categorical", False),
+            )
+    import matplotlib.pyplot as plt
+
+    try:
+        data = BytesIO()
+        figure.savefig(data, format=output.suffix[1:])
+        return atomic_write_bytes(output, data.getvalue())
+    finally:
+        plt.close(figure)

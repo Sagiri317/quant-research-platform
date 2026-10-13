@@ -16,7 +16,7 @@ import pytest
 
 from quant_research_platform.reports import plots
 
-PROVENANCE = dict(source_identity="validated-artifact", access_window="holdout")
+PROVENANCE = dict(source_reference="validated-artifact", sample_role="test")
 TIMED = {**PROVENANCE, "timezone": "UTC"}
 
 
@@ -31,7 +31,7 @@ def curve(values=(100, 0, 25), *, stride=1):
         target_id="test_ledger",
         candidate_id="candidate",
         status="DEFINED",
-        instance_identity="ledger-identity",
+        source_reference="ledger-identity",
         initial_capital=values[0],
         valuation_currency="CNY",
         execution_mode="continuous",
@@ -55,9 +55,7 @@ def curve(values=(100, 0, 25), *, stride=1):
 def test_zero_nav_duplicate_times_and_full_drawdown(tmp_path):
     data = curve()
     data["points"][1]["timestamp_ns"] = data["points"][0]["timestamp_ns"]
-    fig, axes = plots.plot_portfolio_curve(
-        data, access_window="holdout", timezone="UTC"
-    )
+    fig, axes = plots.plot_portfolio_curve(data, sample_role="test", timezone="UTC")
     np.testing.assert_array_equal(axes[0].lines[0].get_ydata(), [100, 0, 25])
     np.testing.assert_array_equal(axes[1].lines[0].get_ydata(), [0, -1, -0.75])
     assert axes[0].get_yscale() == "linear"
@@ -77,9 +75,7 @@ def test_independent_episodes_and_sampled_drawdown():
             {**curve((1000, 1048), stride=2), "episode_id": "second"},
         ],
     )
-    fig, axes = plots.plot_portfolio_curve(
-        data, access_window="holdout", timezone="UTC"
-    )
+    fig, axes = plots.plot_portfolio_curve(data, sample_role="test", timezone="UTC")
     assert len(axes) == 4
     np.testing.assert_array_equal(axes[0].lines[0].get_ydata(), [1000, 1099])
     np.testing.assert_array_equal(axes[2].lines[0].get_ydata(), [1000, 1048])
@@ -90,8 +86,8 @@ def test_independent_episodes_and_sampled_drawdown():
 
 def test_blocked_curve_and_metric_availability():
     _, axes = plots.plot_portfolio_curve(
-        dict(target_id="blocked", status="BLOCKED", reason="missing_source"),
-        access_window="holdout",
+        dict(candidate_id="blocked", status="BLOCKED", reason="missing_source"),
+        sample_role="test",
         timezone="UTC",
     )
     assert "missing_source" in axes[0].texts[0].get_text()
@@ -121,7 +117,7 @@ def daily(value, *, status="DEFINED", reason="", **kwargs):
         net_return=value,
         return_status=status,
         return_reason=reason,
-        access_window="holdout",
+        sample_role="test",
         cost_drag=0.001,
         realized_turnover=0.25,
         **kwargs,
@@ -184,7 +180,7 @@ def test_factor_summary_missing_reason_and_na_and_series_gap():
 @pytest.mark.parametrize("value", [1e308, 5e-324])
 def test_extreme_finite_data_renders_without_overflow(value):
     fig, axes = plots.plot_portfolio_curve(
-        curve((value, value, value)), access_window="holdout", timezone="UTC"
+        curve((value, value, value)), sample_role="test", timezone="UTC"
     )
     fig.canvas.draw()
     fig, axes = plots.plot_returns([daily(value)], **TIMED)
@@ -215,8 +211,8 @@ def test_scope_rejected_and_failed_render_does_not_leak():
             **PROVENANCE,
         )
     assert plt.get_fignums() == before
-    with pytest.raises(ValueError, match="plot_access_window_mismatch"):
-        plots.plot_returns([{**daily(0.1), "access_window": "development"}], **TIMED)
+    with pytest.raises(ValueError, match="plot_sample_role_mismatch"):
+        plots.plot_returns([{**daily(0.1), "sample_role": "validation"}], **TIMED)
     with pytest.raises(ValueError, match="plot_duplicate_factor_identity"):
         plots.plot_factor_ic(
             [dict(signal="a", label="b", mean_ic=0.1, mean_rankic=0.2)] * 2,
@@ -259,7 +255,7 @@ def test_missing_chinese_font_fails_explicitly(monkeypatch):
 
 
 def test_long_source_footer_present_and_inside_every_figure():
-    provenance = {**PROVENANCE, "source_identity": "a" * 128}
+    provenance = {**PROVENANCE, "source_reference": "a" * 128}
     timed = {**provenance, "timezone": "UTC"}
     figures = [
         plots.plot_returns([daily(0.1)], **timed)[0],
@@ -279,7 +275,177 @@ def test_long_source_footer_present_and_inside_every_figure():
     for figure in figures:
         figure.canvas.draw()
         footer = figure._supxlabel
-        assert provenance["source_identity"] in footer.get_text().replace("\n", "")
+        assert provenance["source_reference"] in footer.get_text().replace("\n", "")
         box = footer.get_window_extent(figure.canvas.get_renderer())
         assert 0 <= box.x0 < box.x1 <= figure.bbox.width
         assert 0 <= box.y0 < box.y1 <= figure.bbox.height
+
+
+def test_crypto_negative_equity_is_displayed_without_clipping():
+    data = {**curve((100, -20, -5)), "valuation_method": "linear_perpetual"}
+    _, axes = plots.plot_portfolio_curve(data, sample_role="test", timezone="UTC")
+    np.testing.assert_array_equal(axes[0].lines[0].get_ydata(), [100, -20, -5])
+    np.testing.assert_allclose(axes[1].lines[0].get_ydata(), [0, -1.2, -1.05])
+    with pytest.raises(ValueError, match="plot_nav_negative"):
+        plots.plot_portfolio_curve(
+            curve((100, -20)), sample_role="test", timezone="UTC"
+        )
+
+
+def test_direct_plot_preserves_null_gap_and_refuses_overwrite(tmp_path):
+    source = tmp_path / "risk.parquet"
+    pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2025-01-01", periods=3),
+            "tracking_error": [0.02, None, 0.03],
+        }
+    ).to_parquet(source)
+    output = tmp_path / "risk.png"
+    config = {
+        "kind": "series",
+        "inputs": str(source),
+        "output": str(output),
+        "sample_role": "test",
+        "timezone": "UTC",
+        "x_column": "timestamp",
+        "value_columns": ["tracking_error"],
+        "title": "滚动风险",
+        "units": "年化比例",
+    }
+    assert plots.plot(config) == output
+    original = output.read_bytes()
+    assert len(original) > 1000
+    with pytest.raises(Exception, match="output_already_exists"):
+        plots.plot(config)
+    assert output.read_bytes() == original
+    assert plt.get_fignums() == []
+
+
+def test_direct_plot_rejects_unused_or_missing_configuration_before_read(tmp_path):
+    base = {
+        "kind": "metrics",
+        "inputs": str(tmp_path / "absent.parquet"),
+        "output": str(tmp_path / "new.png"),
+        "sample_role": "test",
+        "metric_id": "fees",
+        "units": "USDT",
+    }
+    with pytest.raises(ValueError, match="plot_config_fields_invalid"):
+        plots.plot({**base, "timezone": "UTC"})
+    del base["metric_id"]
+    with pytest.raises(ValueError, match="plot_config_fields_invalid"):
+        plots.plot(base)
+
+
+def test_native_plot_preserves_uncomputable_daily_reason(tmp_path):
+    rows = [
+        dict(
+            candidate_id="candidate",
+            metric_id="daily_mean_return",
+            value=None,
+            status="UNDEFINED",
+            reason="insufficient_complete_utc_days",
+        )
+    ]
+    source = tmp_path / "daily.parquet"
+    pd.DataFrame(rows).to_parquet(source, index=False)
+    output = plots.plot(
+        {
+            "kind": "metrics",
+            "inputs": str(source),
+            "output": str(tmp_path / "daily.svg"),
+            "sample_role": "test",
+            "metric_id": "daily_mean_return",
+            "units": "dimensionless",
+        }
+    )
+    text = output.read_text()
+    assert "insufficient_complete_utc_days" in text
+    restored = pd.read_parquet(source)
+    assert restored.value.isna().all()
+    assert restored.reason.tolist() == ["insufficient_complete_utc_days"]
+
+
+@pytest.mark.parametrize("field,value", [("metric_id", []), ("units", 7)])
+def test_plot_rejects_invalid_text_fields_before_read(tmp_path, field, value):
+    config = {
+        "kind": "metrics",
+        "inputs": "missing.parquet",
+        "output": str(tmp_path / "result.png"),
+        "sample_role": "test",
+        "metric_id": "net_pnl",
+        "units": "CNY",
+    }
+    config[field] = value
+    with pytest.raises(ValueError, match="plot_config_value_invalid"):
+        plots.plot(config)
+    assert not (tmp_path / "result.png").exists()
+
+
+def test_categorical_series_does_not_require_an_unused_timezone(tmp_path):
+    source = tmp_path / "exposure.parquet"
+    pd.DataFrame({"style": ["size", "value"], "exposure": [0.2, -0.3]}).to_parquet(
+        source, index=False
+    )
+    config = {
+        "kind": "series",
+        "inputs": str(source),
+        "output": str(tmp_path / "exposure.png"),
+        "sample_role": "test",
+        "x_column": "style",
+        "value_columns": ["exposure"],
+        "title": "风险暴露",
+        "units": "无量纲",
+        "categorical": True,
+    }
+    assert plots.plot(config).is_file()
+    config.update(output=str(tmp_path / "unused.png"), timezone="UTC")
+    with pytest.raises(ValueError, match="plot_config_fields_invalid"):
+        plots.plot(config)
+
+
+def test_plot_cannot_relabel_a_native_validation_curve_as_test():
+    data = {**curve(), "sample_role": "validation"}
+    with pytest.raises(ValueError, match="plot_sample_role_mismatch"):
+        plots.plot_portfolio_curve(data, sample_role="test", timezone="UTC")
+
+
+def test_ic_cannot_relabel_validation_as_test():
+    with pytest.raises(ValueError, match="plot_sample_role_mismatch"):
+        plots.plot_factor_ic(
+            [{"signal": "factor", "label": "return", "sample_role": "validation"}],
+            **TIMED,
+        )
+
+
+def test_series_keeps_independent_episodes_in_separate_panels():
+    rows = [
+        dict(timestamp="2026-01-01", value=value, candidate_id="c", episode_id=episode)
+        for episode, value in (("one", 1), ("two", 2))
+    ]
+    _, axes = plots.plot_series(
+        rows,
+        x_column="timestamp",
+        value_columns=["value"],
+        title="原生统计",
+        units="数值",
+        **TIMED,
+    )
+    assert len(axes) == 2
+    for axis, value in zip(axes, (1, 2), strict=True):
+        np.testing.assert_array_equal(axis.lines[0].get_ydata(), [value])
+
+
+@pytest.mark.parametrize(
+    "valuation_method,expected_hour",
+    [("linear_perpetual", 8), ("adjusted_notional", 0)],
+)
+def test_curve_clock_distinguishes_crypto_epoch_from_daily_civil_dates(
+    valuation_method, expected_hour
+):
+    data = curve((100, 110))
+    data["valuation_method"] = valuation_method
+    _, axes = plots.plot_portfolio_curve(
+        data, sample_role="test", timezone="Asia/Shanghai"
+    )
+    assert pd.Timestamp(axes[0].lines[0].get_xdata()[0]).hour == expected_hour

@@ -687,14 +687,11 @@ def test_maker_observed_trade_gap_discards_active_and_pending_before_new_quote(
 def test_quiet_tail_matures_markout_at_reached_clock_and_persists(
     tmp_path, kind, stop_ms, expected
 ):
-    from dataclasses import asdict, replace
+    from dataclasses import replace
 
     from quant_research_platform.artifacts.portfolio_ledger import (
         read_portfolio_ledger_artifact,
         write_portfolio_ledger_artifact,
-    )
-    from quant_research_platform.contracts.business_manifest import (
-        build_business_manifest_envelope,
     )
 
     capital = PortfolioCapital("quiet_tail", 1000.0, "USDT", "linear_perpetual")
@@ -705,19 +702,13 @@ def test_quiet_tail_matures_markout_at_reached_clock_and_persists(
             books.append(_state(175))
         fills = []
         results = []
-        envelope = build_business_manifest_envelope(
-            logical_artifact_id="quiet_tail",
-            schema_identity="a" * 64,
-            protocol_or_spec_identity="b" * 64,
-            software_identity="c" * 64,
-            research_window={
+        metadata = {
+            "window": {
                 "start": "1970-01-01T00:00:00",
                 "end": "1970-01-01T00:00:00.180",
-                "access": "holdout",
             },
-            upstream_identities={},
-            semantic_metadata={"portfolio_capital": asdict(capital)},
-        )
+            "sample_role": "test",
+        }
 
         def produce(emit, books=books, fills=fills, results=results):
             common = dict(
@@ -753,11 +744,12 @@ def test_quiet_tail_matures_markout_at_reached_clock_and_persists(
             results.append(result)
 
         root = write_portfolio_ledger_artifact(
-            tmp_path / str(has_later_book), envelope=envelope, produce=produce
+            tmp_path / str(has_later_book),
+            capital=capital,
+            metadata=metadata,
+            produce=produce,
         )
-        artifact = read_portfolio_ledger_artifact(
-            root, expected_identity=envelope.instance_identity
-        )
+        artifact = read_portfolio_ledger_artifact(root)
         trades, cashflows, markouts = ([], [], [])
         for batch in artifact.iter_chunks():
             trades.extend(batch.trades)
@@ -781,30 +773,16 @@ def test_quiet_tail_matures_markout_at_reached_clock_and_persists(
 def test_maker_visible_quantity_controls_persisted_fill_and_nav(
     tmp_path, quantity, visible, expected_fill
 ):
-    from dataclasses import asdict
-
     from quant_research_platform.artifacts.portfolio_ledger import (
         read_portfolio_ledger_artifact,
         write_portfolio_ledger_artifact,
     )
-    from quant_research_platform.contracts.business_manifest import (
-        build_business_manifest_envelope,
-    )
 
     capital = PortfolioCapital("visible_quantity", 1000.0, "USDT", "linear_perpetual")
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="visible_quantity",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": "1970-01-01T00:00:00",
-            "end": "1970-01-01T00:00:00.200",
-            "access": "holdout",
-        },
-        upstream_identities={},
-        semantic_metadata={"portfolio_capital": asdict(capital)},
-    )
+    metadata = {
+        "window": {"start": "1970-01-01T00:00:00", "end": "1970-01-01T00:00:00.200"},
+        "sample_role": "test",
+    }
     result = []
 
     def produce(emit):
@@ -824,11 +802,9 @@ def test_maker_visible_quantity_controls_persisted_fill_and_nav(
         )
 
     root = write_portfolio_ledger_artifact(
-        tmp_path / "ledger", envelope=envelope, produce=produce
+        tmp_path / "ledger", capital=capital, metadata=metadata, produce=produce
     )
-    artifact = read_portfolio_ledger_artifact(
-        root, expected_identity=envelope.instance_identity
-    )
+    artifact = read_portfolio_ledger_artifact(root)
     trades = []
     persisted_nav = None
     for batch in artifact.iter_chunks():

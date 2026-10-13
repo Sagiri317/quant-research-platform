@@ -1,7 +1,6 @@
 """Native numeric boundaries from the HEAD270 audit."""
 
 from contextlib import closing, nullcontext
-from dataclasses import asdict
 from fractions import Fraction
 
 import numpy as np
@@ -140,7 +139,7 @@ def test_weighted_scaler_finite_population_bound(half_life):
     frame = pd.DataFrame({"x": [-magnitude, magnitude, -magnitude, magnitude]})
     weights = equal_timestamp_sample_weights(
         pd.to_datetime(["2024-01-02"] * 2 + ["2024-01-03"] * 2),
-        TrainingWeighting(half_life=half_life),
+        TrainingWeighting(half_life_periods=half_life),
     )
     scaler = ModelMatrixScaler.fit(frame, sample_weight=weights)
     assert scaler.mean_ == (0.0,)
@@ -201,9 +200,6 @@ def test_perpetual_published_pnl_keeps_small_cost_and_funding(tmp_path, capital_
         summarize_portfolio_ledger,
         write_portfolio_ledger_artifact,
     )
-    from quant_research_platform.contracts.business_manifest import (
-        build_business_manifest_envelope,
-    )
     from quant_research_platform.contracts.portfolios import (
         FundingEvent,
         PortfolioCapital,
@@ -213,19 +209,10 @@ def test_perpetual_published_pnl_keeps_small_cost_and_funding(tmp_path, capital_
     )
 
     capital = PortfolioCapital("fee", capital_value, "USDT", "linear_perpetual")
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="fee",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": "1970-01-01",
-            "end": "1970-01-02",
-            "access": "development",
-        },
-        upstream_identities={},
-        semantic_metadata={"portfolio_capital": asdict(capital)},
-    )
+    metadata = {
+        "sample_role": "validation",
+        "window": {"start": "1970-01-01", "end": "1970-01-02"},
+    }
 
     def produce(emit):
         economics = PortfolioEconomics(capital, "asset", emit)
@@ -244,9 +231,9 @@ def test_perpetual_published_pnl_keeps_small_cost_and_funding(tmp_path, capital_
         assert summary["gross_pnl"] == 0.0
 
     root = write_portfolio_ledger_artifact(
-        tmp_path / "ledger", envelope=envelope, produce=produce
+        tmp_path / "ledger", capital=capital, metadata=metadata, produce=produce
     )
-    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    artifact = read_portfolio_ledger_artifact(root)
     result = summarize_portfolio_ledger(artifact.capital, artifact.iter_chunks())
     assert result["net_pnl"] == -3.0
     assert result["gross_pnl"] == 0.0
@@ -263,9 +250,6 @@ def test_public_builder_small_nav_cash_and_fee_publish(
         read_portfolio_ledger_artifact,
         summarize_portfolio_ledger,
         write_portfolio_ledger_artifact,
-    )
-    from quant_research_platform.contracts.business_manifest import (
-        build_business_manifest_envelope,
     )
     from quant_research_platform.contracts.portfolios import (
         ExecutionAssumptions,
@@ -293,19 +277,10 @@ def test_public_builder_small_nav_cash_and_fee_publish(
     capital = PortfolioCapital(
         "synthetic_top20_equal_weight", initial_nav, "CNY", "adjusted_notional"
     )
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id=capital.candidate_id,
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": str(window.start),
-            "end": str(window.end),
-            "access": "development",
-        },
-        upstream_identities={},
-        semantic_metadata={"portfolio_capital": asdict(capital)},
-    )
+    metadata = {
+        "sample_role": "validation",
+        "window": {"start": str(window.start), "end": str(window.end)},
+    }
 
     def produce(emit):
         with closing(chunks):
@@ -313,9 +288,9 @@ def test_public_builder_small_nav_cash_and_fee_publish(
                 emit(batch)
 
     root = write_portfolio_ledger_artifact(
-        tmp_path / "ledger", envelope=envelope, produce=produce
+        tmp_path / "ledger", capital=capital, metadata=metadata, produce=produce
     )
-    ledger = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    ledger = read_portfolio_ledger_artifact(root)
     batches = list(ledger.iter_chunks())
     assert len(batches) == 2
     for batch in batches:
@@ -341,24 +316,20 @@ def test_public_builder_small_nav_cash_and_fee_publish(
 def test_factor_inference_counts_original_dates_with_no_mature_or_finite_factor(
     tmp_path,
 ):
-    from quant_research_platform.artifacts.research import _report_rows
     from quant_research_platform.artifacts.statistics import (
         read_statistics_artifact,
         write_statistics_artifact,
     )
-    from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
-    from quant_research_platform.contracts.business_manifest import (
-        build_business_manifest_envelope,
-    )
     from quant_research_platform.contracts.time import TimeWindow
-    from quant_research_platform.research.protocols import a_share
     from quant_research_platform.research.statistics_production import (
         build_a_share_factor_statistics_tables,
     )
     from quant_research_platform.storage.datasets import write_dataset
-    from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.research_specs import make_demo_research_dataset_spec
-    from tests.helpers.statistics_artifacts import statistics_envelope
+    from tests.helpers.statistics_artifacts import (
+        statistics_config,
+        statistics_metadata,
+    )
 
     dates = pd.bdate_range("2023-01-02", periods=26)
     frame = pd.DataFrame(
@@ -390,50 +361,23 @@ def test_factor_inference_counts_original_dates_with_no_mature_or_finite_factor(
         filter_columns=("eligible",),
         context_columns=("total_market_cap",),
     )
-    layout = StorageLayout(tmp_path)
-    write_dataset(
-        layout.research_dataset_root("a_share", spec.data_id), frame, spec=spec
-    )
-    import json
-
-    from tests.helpers.research_configuration import research_configuration
-
-    protocol = a_share.AShareProtocol(
-        "pv_all", configuration_json=json.dumps(research_configuration(name="pv25"))
-    ).manifest()
-    protocol["research_configuration"]["evaluation"].update(
-        factors=["factor"],
-        primary_label="forward_return_20d",
-    )
-    protocol["statistics"].update(
-        factor_fdr_families={"fixture": ["factor"]}, fama_macbeth_core_factors=[]
-    )
+    dataset_path = tmp_path / "factor-input"
+    write_dataset(dataset_path, frame, spec=spec)
+    config = statistics_config(factors=["factor"])
+    config["evaluation"]["primary_label"] = "forward_return_20d"
+    config["statistics"]["fama_macbeth_core_factors"] = []
     window = TimeWindow(dates[0].date(), dates[-1].date())
     tables = build_a_share_factor_statistics_tables(
-        layout=layout,
-        dataset_catalog=ResearchDatasetCatalog((spec,)),
-        dataset_id=spec.data_id,
-        protocol_manifest=protocol,
+        dataset_path=dataset_path,
+        dataset_spec=spec,
+        config=config,
         time_window=window,
     )
-    base = build_business_manifest_envelope(
-        logical_artifact_id="factor_clock",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": str(window.start),
-            "end": str(window.end),
-            "access": "development",
-        },
-        upstream_identities={},
-        semantic_metadata={},
-    )
-    bound = statistics_envelope(base, group="factor", protocol=protocol)
+    metadata = statistics_metadata(window)
     root = write_statistics_artifact(
-        tmp_path / "statistics", envelope=bound, tables=tables, table_group="factor"
+        tmp_path / "statistics", metadata=metadata, tables=tables, table_group="factor"
     )
-    artifact = read_statistics_artifact(root, expected_identity=root.name)
+    artifact = read_statistics_artifact(root)
     for member, effective in (
         ("factor_diagnostics.parquet", "observation_count"),
         ("fama_macbeth.parquet", "period_count"),
@@ -441,9 +385,7 @@ def test_factor_inference_counts_original_dates_with_no_mature_or_finite_factor(
         with artifact.table(member) as actual:
             assert actual.input_date_count.eq(26).all()
             assert actual[effective].eq(24).all()
-            assert all(
-                row["missing_observation_count"] == 2 for row in _report_rows(actual)
-            )
+            assert (actual.input_date_count - actual[effective]).eq(2).all()
 
 
 def test_valid_observation_clock_keeps_order_under_date_gaps():
@@ -501,42 +443,7 @@ def test_ordinary_exact_fit_with_zero_coefficient_keeps_numeric_path(
     np.testing.assert_allclose(actual.coefficients, [2, 1, 0], rtol=1e-14, atol=1e-14)
 
 
-@pytest.mark.parametrize("case", ("ordered_dates", "empty", "invalid"))
-def test_dataset_session_extraction_keeps_close_and_errors(case):
-    from quant_research_platform.research.models.production import _dataset_sessions
-
-    closed = []
-
-    def source():
-        try:
-            if case == "ordered_dates":
-                yield pd.DataFrame(
-                    {
-                        "timestamp": pd.to_datetime(
-                            ["2024-01-03 12:00", "2024-01-02 13:00", "2024-01-03 12:00"]
-                        )
-                    }
-                )
-                yield pd.DataFrame({"timestamp": pd.to_datetime(["2024-01-02 15:00"])})
-            elif case == "invalid":
-                yield pd.DataFrame({"timestamp": ["not-a-date"]})
-        finally:
-            closed.append(True)
-
-    if case == "ordered_dates":
-        pd.testing.assert_index_equal(
-            _dataset_sessions(source()), pd.to_datetime(["2024-01-02", "2024-01-03"])
-        )
-    else:
-        with pytest.raises(
-            ValueError, match="sessions_empty" if case == "empty" else None
-        ):
-            _dataset_sessions(source())
-    assert closed == [True]
-
-
-def test_staged_holdout_keeps_rankic_by_and_development_exclusion():
-    import json
+def test_test_set_keeps_rankic_by_and_explicit_exploratory_exclusion():
     from contextlib import contextmanager
     from copy import deepcopy
 
@@ -544,16 +451,12 @@ def test_staged_holdout_keeps_rankic_by_and_development_exclusion():
     from quant_research_platform.research.statistics_production import (
         _paired_group_rankic,
     )
-    from tests.helpers.research_configuration import research_configuration
+    from tests.helpers.research_configuration import A_SHARE_MODEL_ALGORITHMS
+    from tests.helpers.statistics_artifacts import statistics_config
 
-    protocol = a_share.AShareProtocol(
-        "pv_all",
-        access_window="holdout",
-        configuration_json=json.dumps(research_configuration()),
-    )
-    manifest = protocol.target_manifest(protocol.statistics_target_ids[1], "STATISTIC")
+    manifest = statistics_config(sample_role="test", selection_group="quarterly")
     manifest["statistics"]["bootstrap_repetitions"] = 199
-    families = protocol.model_ids_for_target(protocol.model_selection_target_id)
+    families = tuple(A_SHARE_MODEL_ALGORITHMS)
     dates = pd.bdate_range("2024-01-02", periods=64)
     rng = np.random.default_rng(918)
     global_losses = pd.DataFrame(
@@ -563,7 +466,8 @@ def test_staged_holdout_keeps_rankic_by_and_development_exclusion():
                 family_id=family,
                 asset_coverage_id="a" * 64,
                 observation_count=100,
-                access_window="holdout",
+                sample_role="test",
+                status="DEFINED",
                 loss=rng.normal(0, 0.1),
             )
             for family in families
@@ -585,22 +489,20 @@ def test_staged_holdout_keeps_rankic_by_and_development_exclusion():
             global_statistics=GlobalStatistics(),
             selection_group="quarterly",
             family_ids=families,
-            protocol_manifest=value,
+            config=value,
         )
 
     ordinary = compare(manifest)
     selected = deepcopy(manifest)
-    selected["stage_selection"] = {"sources": [{"run_id": "earlier_development"}]}
     actual = compare(selected)
     pd.testing.assert_frame_equal(actual, ordinary)
     assert actual.fdr_method.eq("BY").all()
     assert actual.fdr_adjusted_p_value.notna().all()
-    selected["access_window"] = "development"
-    assert (
-        a_share._inference_blocker(selected)
-        == "development_stage_selection_exploratory"
-    )
-    selected["access_window"] = "holdout"
+    selected["sample_role"] = "validation"
+    selected["selection_is_exploratory"] = True
+    assert a_share._inference_blocker(selected) == "exploratory_selection_excluded"
+    selected["selection_is_exploratory"] = False
+    selected["sample_role"] = "test"
     selected["feature_recipe"] = {"role": "robustness"}
     assert a_share._inference_blocker(selected) == "feature_recipe_robustness_excluded"
 

@@ -300,47 +300,32 @@ def _iter_records(root, *, expected_manifest_hash):
     if identity != expected_manifest_hash:
         raise ValueError("tardis_normalized_selection_identity_changed")
     path = root / "data.csv.gz"
-    primary = None
-    try:
-        with closing_iterator(
-            _rows(
-                path,
-                exchange=manifest["exchange"],
-                dataset_type=manifest["dataset_type"],
-                symbol=manifest["symbol"],
-                date=manifest["date"],
-                sha256=manifest["sha256"],
-            )
-        ) as rows:
-            count = 0
-            first = last = None
-            for number, row in rows:
-                count = number
-                if first is None:
-                    first = row["local_timestamp"]
-                last = row["local_timestamp"]
-                try:
-                    yield row
-                except GeneratorExit:
-                    return
-            if count != manifest["row_count"] or (
-                first != manifest["first_observed_us"]
-                or last != manifest["last_observed_us"]
-            ):
-                raise ValueError("tardis_normalized_coverage_changed")
-    except BaseException as body_error:
-        primary = body_error
-        raise
-    finally:
-        try:
-            if canonical_json_hash(read_manifest(root / "manifest.json")) != identity:
-                raise ValueError("tardis_normalized_manifest_changed")
-        except BaseException as error:
-            if primary is None:
-                raise
-            primary.add_note(
-                "Normalized manifest verification also failed: " + type(error).__name__
-            )
+    with closing_iterator(
+        _rows(
+            path,
+            exchange=manifest["exchange"],
+            dataset_type=manifest["dataset_type"],
+            symbol=manifest["symbol"],
+            date=manifest["date"],
+            sha256=manifest["sha256"],
+        )
+    ) as rows:
+        count = 0
+        first = last = None
+        for number, row in rows:
+            count = number
+            if first is None:
+                first = row["local_timestamp"]
+            last = row["local_timestamp"]
+            try:
+                yield row
+            except GeneratorExit:
+                return
+        if count != manifest["row_count"] or (
+            first != manifest["first_observed_us"]
+            or last != manifest["last_observed_us"]
+        ):
+            raise ValueError("tardis_normalized_coverage_changed")
 
 
 def _selected_archives(root, archive_paths, time_window):
@@ -398,8 +383,8 @@ def source_identity(root, _target_id, *, exchange, archives, time_window=None):
                         raise ValueError("tardis_normalized_scope_invalid")
                     with _verified_file(
                         path / "data.csv.gz", expected_sha256=manifest["sha256"]
-                    ):
-                        pass
+                    ) as raw:
+                        raw.drain()
                     identities[symbol][kind].append(canonical_json_hash(manifest))
     except FileNotFoundError:
         return None

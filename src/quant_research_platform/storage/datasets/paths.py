@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterator, Mapping
 from datetime import date
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -13,12 +13,8 @@ import pandas as pd
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataSpec,
-    InterimDataSpec,
-    ProcessedDataSpec,
 )
-from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.validation import strict_timestamp_series
-from quant_research_platform.storage.identity import validate_instance_identity
 
 _YEAR_PARTITION_PATTERN = re.compile("^year=([0-9]{4})$")
 
@@ -85,78 +81,6 @@ def partition_part_path(root: Path, partition: str, part_index: int) -> Path:
     if partition:
         return root / partition / f"part-{part_index:03d}.parquet"
     return root / f"part-{part_index:03d}.parquet"
-
-
-def validate_dataset_artifact_root(root: Path, spec: DataSpec) -> None:
-    path_parts = tuple(
-        part for part in PurePosixPath(root.as_posix()).parts if part != "/"
-    )
-    if isinstance(spec, InterimDataSpec):
-        prefix = ("data", "interim", str(spec.source_id))
-        error = "invalid_interim_dataset_root"
-    elif isinstance(spec, ProcessedDataSpec):
-        prefix = ("data", "processed", str(spec.market_id), spec.kind.value)
-        error = "invalid_processed_dataset_root"
-    elif isinstance(spec, ResearchDatasetSpec):
-        prefix = ("data", "research", str(spec.market_id))
-        error = "invalid_research_dataset_root"
-    else:
-        raise ValueError("unsupported_data_spec_type")
-    if (
-        _unique_matching_suffix(
-            path_parts,
-            lambda candidate: _matches_artifact_path(candidate, prefix, spec.data_id),
-        )
-        is None
-    ):
-        raise ValueError(error)
-
-
-def _unique_matching_suffix(
-    parts: tuple[str, ...], predicate: Any
-) -> tuple[str, ...] | None:
-    candidates = [parts[index:] for index, part in enumerate(parts) if part == "data"]
-    matches = [candidate for candidate in candidates if predicate(candidate)]
-    storage_like_invalid = [
-        candidate
-        for candidate in candidates
-        if _starts_storage_layout(candidate) and (not predicate(candidate))
-    ]
-    if len(matches) != 1 or storage_like_invalid:
-        return None
-    return matches[0]
-
-
-def _starts_storage_layout(parts: tuple[str, ...]) -> bool:
-    return (
-        len(parts) >= 2
-        and parts[0] == "data"
-        and (parts[1] in {"interim", "processed", "research"})
-    )
-
-
-def _matches_artifact_path(
-    parts: tuple[str, ...], prefix: tuple[str, ...], expected: str
-) -> bool:
-    if parts[: len(prefix)] != prefix:
-        return False
-    suffix = parts[len(prefix) :]
-    if len(suffix) == 1:
-        return suffix[0] == expected
-    return (
-        len(suffix) == 3
-        and suffix[0] == expected
-        and (suffix[1] == "instances")
-        and _valid_instance_segment(suffix[2])
-    )
-
-
-def _valid_instance_segment(value: str) -> bool:
-    try:
-        validate_instance_identity(value)
-    except ValueError:
-        return False
-    return True
 
 
 def timestamp_primary_key_column_from_spec(spec: DataSpec) -> str | None:

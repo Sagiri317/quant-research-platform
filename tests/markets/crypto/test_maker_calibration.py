@@ -37,7 +37,10 @@ def _run_calibrated(paths, errors, *, books, trades, quotes, latency):
             for stamp, prediction, gate in quotes
         ],
         config=replace(
-            _maker_config(), max_position=3.0, maker_fee_bps=0.0, latency_ms=latency
+            _maker_config(calibrated=True),
+            max_position=3.0,
+            maker_fee_bps=0.0,
+            latency_ms=latency,
         ),
         observed_coverage={"s1": (0, 2000000000)},
         trade_coverage={"trade-connection-1": (0, 2000000000)},
@@ -478,7 +481,9 @@ def test_calibrated_maker_compares_old_expiry_with_real_cancel_replace(
             for stamp in (0, decision_ms)
         ],
         config=replace(
-            _maker_config(), maker_fee_bps=0.0, latency_ms=300 if pending else 0
+            _maker_config(calibrated=True),
+            maker_fee_bps=0.0,
+            latency_ms=300 if pending else 0,
         ),
         observed_coverage={"s1": (0, 1000000000)},
         trade_coverage={"trade-connection-1": (0, 1000000000)},
@@ -616,7 +621,9 @@ def test_future_coverage_end_cannot_change_earlier_maker_decision(
                 }
                 for timestamp in (0, 100)
             ],
-            config=replace(_maker_config(), maker_fee_bps=0.0, latency_ms=0),
+            config=replace(
+                _maker_config(calibrated=calibrated), maker_fee_bps=0.0, latency_ms=0
+            ),
             observed_coverage={
                 "s1": (0, end if short_source == "book" else 1000000000)
             },

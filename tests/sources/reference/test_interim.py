@@ -10,7 +10,6 @@ import pytest
 from quant_research_platform.markets.implementations.a_share.processed.panels import (
     _canonical_stock_master,
 )
-from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.sources.reference import interim
 from quant_research_platform.sources.reference.a_share_fees import (
     FEE_CSV_COLUMNS,
@@ -23,9 +22,7 @@ from quant_research_platform.sources.reference.interim import (
 )
 from quant_research_platform.storage.datasets.reading import read_dataset
 from quant_research_platform.storage.identity import (
-    filesystem_exists,
     filesystem_glob,
-    filesystem_iterdir,
     filesystem_mkdir,
     filesystem_stat,
     filesystem_walk,
@@ -36,7 +33,6 @@ from quant_research_platform.storage.identity import (
 )
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
-from quant_research_platform.workflows import operations
 
 
 def _file_bytes(root: Path) -> dict[Path, bytes]:
@@ -108,158 +104,26 @@ def _row(
     return row
 
 
-def test_fee_interim_target_routes_build_reuse_and_identity_invalidation(
-    tmp_path: Path,
-) -> None:
-    raw_root = _write_reference_root(tmp_path / "raw")
-    raw_identity = load_a_share_fee_source(
-        reference_root=raw_root / "reference"
-    ).source_identity
-    layout = StorageLayout(project_root=tmp_path)
-    profile = research_profile()
-    plan = operations.plan_targets(
-        profile=profile,
-        action="data materialize",
-        terminal_targets=(A_SHARE_FEE_SCHEDULE_DATA_ID,),
-        layout=layout,
-        raw_root=raw_root,
+def test_fee_source_publishes_explicit_path_and_records_source_evidence(tmp_path):
+    raw = _write_reference_root(tmp_path / "raw") / "reference"
+    output = tmp_path / "fees"
+    result = interim.materialize_interim_data(
+        raw_root=raw, output_roots={A_SHARE_FEE_SCHEDULE_DATA_ID: output}
     )
-    planned = plan["targets"][0]
-    assert planned["decision"] == "BUILD"
-    assert planned["requested_identity"]
-    first = operations.data_materialize(
-        profile=profile,
-        layout=layout,
-        raw_root=raw_root,
-        start_date=None,
-        end_date=None,
-        data_ids=(A_SHARE_FEE_SCHEDULE_DATA_ID,),
-    )
-    first_target = first["target_results"][0]
-    assert first_target["status"] == "BUILT"
-    first_frame = read_dataset(
-        layout.instance_root(
-            layout.interim_data_root("reference", A_SHARE_FEE_SCHEDULE_DATA_ID),
-            first_target["instance_identity"],
-        )
-    )
-    manifest = read_dataset_manifest_evidence(
-        layout.instance_root(
-            layout.interim_data_root("reference", A_SHARE_FEE_SCHEDULE_DATA_ID),
-            first_target["instance_identity"],
-        )
-    )
+    assert result.artifact_roots[A_SHARE_FEE_SCHEDULE_DATA_ID] == output
+    frame = read_dataset(output)
+    assert tuple(frame.columns) == interim.FEE_SCHEDULE_COLUMNS
+    manifest = read_dataset_manifest_evidence(output)
     assert (
-        manifest["common_manifest"]["semantic_metadata"]["raw_content_identity"]
-        == raw_identity
+        manifest["source_evidence"]["content_hash"]
+        == load_a_share_fee_source(reference_root=raw).source_identity
     )
-    assert tuple(first_frame.columns) == (
-        "fee_code",
-        "effective_date",
-        "end_date",
-        "market",
-        "side",
-        "basis",
-        "rate",
-        "included_in_ledger",
-        "included_in",
-    )
-    second = operations.data_materialize(
-        profile=profile,
-        layout=layout,
-        raw_root=raw_root,
-        start_date=None,
-        end_date=None,
-        data_ids=(A_SHARE_FEE_SCHEDULE_DATA_ID,),
-    )
-    assert second["target_results"][0]["status"] == "REUSED"
-    sidecar_path = (
-        raw_root / "reference" / "a_share_fee_schedule" / A_SHARE_FEE_SIDECAR_NAME
-    )
-    sidecar = json.loads(
-        Path(native_filesystem_path(sidecar_path)).read_text(encoding="utf-8")
-    )
-    sidecar["notes"] = "identity mutation"
-    filesystem_write_text(
-        sidecar_path, json.dumps(sidecar, ensure_ascii=False), encoding="utf-8"
-    )
-    third = operations.data_materialize(
-        profile=profile,
-        layout=layout,
-        raw_root=raw_root,
-        start_date=None,
-        end_date=None,
-        data_ids=(A_SHARE_FEE_SCHEDULE_DATA_ID,),
-    )
-    assert third["target_results"][0]["status"] == "BUILT"
-    assert (
-        third["target_results"][0]["instance_identity"]
-        != first_target["instance_identity"]
-    )
-
-
-@pytest.mark.parametrize("mutation", ("planned", "staged"))
-@pytest.mark.parametrize("existing_target", (False, True))
-def test_fee_source_identity_race_preserves_old_good(
-    tmp_path, monkeypatch, mutation, existing_target
-):
-    raw_root = _write_reference_root(tmp_path / "raw")
-    layout = StorageLayout(project_root=tmp_path)
-    built = operations.data_materialize(
-        profile=research_profile(),
-        layout=layout,
-        raw_root=raw_root,
-        start_date=None,
-        end_date=None,
-        data_ids=(A_SHARE_FEE_SCHEDULE_DATA_ID,),
-    )
-    identity = built["target_results"][0]["instance_identity"]
-    root = layout.instance_root(
-        layout.interim_data_root("reference", A_SHARE_FEE_SCHEDULE_DATA_ID), identity
-    )
-    metadata = {
-        "common_manifest": read_dataset_manifest_evidence(root)["common_manifest"]
-    }
-    old_good = _file_bytes(root)
-    target = (
-        root
-        if existing_target
-        else StorageLayout(tmp_path / "candidate").interim_data_root(
-            "reference", A_SHARE_FEE_SCHEDULE_DATA_ID
-        )
-    )
-    target_layout = layout.with_target_roots({A_SHARE_FEE_SCHEDULE_DATA_ID: target})
-    filesystem_mkdir(target.parent, parents=True, exist_ok=True)
-    unrelated = target.parent / "unrelated.txt"
-    filesystem_write_text(unrelated, "keep", encoding="utf-8")
-    previous_members = set(filesystem_iterdir(target.parent))
-    if mutation == "planned":
-        _write_reference_root(raw_root, commission=0.0004)
-    else:
-        original_frame = interim._frame_from_rows
-
-        def frame(rows):
-            value = original_frame(rows)
-            _write_reference_root(raw_root, commission=0.0004)
-            return value
-
-        monkeypatch.setattr(interim, "_frame_from_rows", frame)
-    expected_error = (
-        "dataset_exists"
-        if existing_target and mutation == "staged"
-        else "reference_raw_identity_changed"
-    )
-    with pytest.raises(ValueError, match=expected_error):
+    before = _file_bytes(output)
+    with pytest.raises((ValueError, FileExistsError)):
         interim.materialize_interim_data(
-            layout=target_layout,
-            raw_root=raw_root / "reference",
-            instance_metadata=metadata,
+            raw_root=raw, output_roots={A_SHARE_FEE_SCHEDULE_DATA_ID: output}
         )
-    assert _file_bytes(root) == old_good
-    assert set(filesystem_iterdir(target.parent)) == previous_members
-    assert Path(native_filesystem_path(unrelated)).read_text(encoding="utf-8") == "keep"
-    if not existing_target:
-        assert not filesystem_exists(target)
+    assert _file_bytes(output) == before
 
 
 def test_fee_identity_rechecks_sidecar_after_rows(tmp_path, monkeypatch):
@@ -361,25 +225,18 @@ def test_public_industry_source_reaches_interim_and_real_panel(tmp_path):
 
     from quant_research_platform.markets.implementations.a_share.processed import panels
     from tests.helpers.a_share_raw import write_industry_reference_fixture
-    from tests.markets.a_share.test_target_dag_chain import _synthetic_interim_frames
+    from tests.helpers.a_share_sources import _synthetic_interim_frames
 
     raw_root = tmp_path / "raw"
     write_industry_reference_fixture(raw_root, observations=_industry_observations())
-    layout = StorageLayout(tmp_path)
     data_id = interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
-    profile = research_profile()
-    result = operations.data_materialize(
-        profile=profile,
-        layout=layout,
-        raw_root=raw_root,
+    root = tmp_path / "industry"
+    interim.materialize_interim_data(
+        raw_root=raw_root / "reference",
+        output_roots={data_id: root},
+        data_ids=(data_id,),
         start_date="2019-01-01",
         end_date="2020-12-31",
-        data_ids=(data_id,),
-    )
-    target = result["target_results"][0]
-    assert target["status"] == "BUILT"
-    root = layout.instance_root(
-        layout.interim_data_root("reference", data_id), target["instance_identity"]
     )
     snapshots = read_dataset(root)
     assert str(snapshots["timestamp"].dtype) == "datetime64[ns]"
@@ -390,8 +247,8 @@ def test_public_industry_source_reaches_interim_and_real_panel(tmp_path):
     assert snapshots["observation_date"].tolist() == [pd.Timestamp("2019-12-31")]
     assert snapshots["timestamp"].tolist() == [pd.Timestamp("2020-01-04")]
     manifest = read_dataset_manifest_evidence(root)
-    assert manifest["common_manifest"]["semantic_metadata"][
-        "raw_content_identity"
+    assert manifest["source_evidence"][
+        "content_hash"
     ] == interim.source_content_identity(raw_root / "reference", data_id)
     dates = pd.bdate_range("2020-01-02", periods=5)
     inputs = _synthetic_interim_frames(dates)
@@ -432,15 +289,6 @@ def test_public_industry_source_reaches_interim_and_real_panel(tmp_path):
     assert (
         panel.loc[~panel["asset_id"].eq("000001"), "industry_level1_code"].isna().all()
     )
-    again = operations.data_materialize(
-        profile=profile,
-        layout=layout,
-        raw_root=raw_root,
-        start_date="2019-01-01",
-        end_date="2020-12-31",
-        data_ids=(data_id,),
-    )
-    assert again["target_results"][0]["status"] == "REUSED"
 
 
 def test_industry_snapshot_range_uses_publication_not_observation(tmp_path):
@@ -469,7 +317,9 @@ def test_industry_snapshot_range_uses_publication_not_observation(tmp_path):
     layout = StorageLayout(tmp_path)
     data_id = interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
     interim.materialize_interim_data(
-        layout=layout,
+        output_roots={
+            key: layout.interim_data_root("reference", key) for key in (data_id,)
+        },
         raw_root=root / "reference",
         data_ids=(data_id,),
         start_date="2011-01-01",
@@ -525,45 +375,13 @@ def test_industry_reference_boundary_rejects_unproved_source(tmp_path, failure):
     )
     with pytest.raises(ValueError, match="industry_snapshot_"):
         interim.materialize_interim_data(
-            layout=StorageLayout(tmp_path),
+            output_roots={
+                key: StorageLayout(tmp_path).interim_data_root("reference", key)
+                for key in (interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID,)
+            },
             raw_root=root.parent,
             data_ids=(interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID,),
         )
-
-
-def test_industry_source_change_before_publish_preserves_old_good(
-    tmp_path, monkeypatch
-):
-    from tests.helpers.a_share_raw import write_industry_reference_fixture
-
-    root = write_industry_reference_fixture(
-        tmp_path / "raw", observations=_industry_observations()
-    )
-    data_id = interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
-    layout = StorageLayout(tmp_path)
-    interim.materialize_interim_data(
-        layout=layout, raw_root=root.parent, data_ids=(data_id,)
-    )
-    output = layout.interim_data_root("reference", data_id)
-    before = _file_bytes(output)
-    candidate_layout = StorageLayout(tmp_path / "candidate")
-    candidate_root = candidate_layout.interim_data_root("reference", data_id)
-    writer = interim.write_dataset
-
-    def mutate_source(*args, **kwargs):
-        filesystem_write_text(
-            root / "snapshot.html", "<html>changed</html>", encoding="utf-8"
-        )
-        return writer(*args, **kwargs)
-
-    monkeypatch.setattr(interim, "write_dataset", mutate_source)
-    with pytest.raises(ValueError, match="industry_snapshot_member_hash_mismatch"):
-        interim.materialize_interim_data(
-            layout=candidate_layout, raw_root=root.parent, data_ids=(data_id,)
-        )
-    assert not filesystem_exists(candidate_root)
-    assert _file_bytes(output) == before
-    assert read_dataset(output)["snapshot_id"].tolist() == ["snapshot"]
 
 
 @pytest.mark.parametrize("document_suffix", [".docx", ".xls"])
@@ -578,7 +396,11 @@ def test_industry_reference_preserves_table_row_locator(tmp_path, document_suffi
     data_id = interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
     layout = StorageLayout(tmp_path)
     interim.materialize_interim_data(
-        layout=layout, raw_root=root.parent, data_ids=(data_id,)
+        output_roots={
+            key: layout.interim_data_root("reference", key) for key in (data_id,)
+        },
+        raw_root=root.parent,
+        data_ids=(data_id,),
     )
     frame = read_dataset(layout.interim_data_root("reference", data_id))
     assert frame["source_locator"].tolist() == ["table:2;row:7"]
@@ -588,7 +410,13 @@ def test_industry_reference_preserves_table_row_locator(tmp_path, document_suffi
 def test_invalid_fee_csv_header_preserves_previous_artifact(tmp_path):
     raw = _write_reference_root(tmp_path / "raw") / "reference"
     layout = StorageLayout(project_root=tmp_path / "project")
-    result = interim.materialize_interim_data(layout=layout, raw_root=raw)
+    result = interim.materialize_interim_data(
+        output_roots={
+            key: layout.interim_data_root("reference", key)
+            for key in ("a_share_fee_schedule",)
+        },
+        raw_root=raw,
+    )
     root = result.artifact_roots[A_SHARE_FEE_SCHEDULE_DATA_ID]
     before = _file_bytes(root)
     source = raw / "a_share_fee_schedule"
@@ -602,7 +430,13 @@ def test_invalid_fee_csv_header_preserves_previous_artifact(tmp_path):
     metadata["file_bytes"] = len(hostile)
     sidecar.write_text(json.dumps(metadata), encoding="utf-8")
     with pytest.raises(ValueError, match="a_share_fee_source_schema_invalid"):
-        interim.materialize_interim_data(layout=layout, raw_root=raw)
+        interim.materialize_interim_data(
+            output_roots={
+                key: layout.interim_data_root("reference", key)
+                for key in ("a_share_fee_schedule",)
+            },
+            raw_root=raw,
+        )
     assert _file_bytes(root) == before
 
 
@@ -615,7 +449,13 @@ def test_malformed_fee_csv_is_source_local_and_preserves_old_good(
 
     raw = _write_reference_root(tmp_path / "raw")
     layout = StorageLayout(project_root=tmp_path / "project")
-    result = interim.materialize_interim_data(layout=layout, raw_root=raw / "reference")
+    result = interim.materialize_interim_data(
+        output_roots={
+            key: layout.interim_data_root("reference", key)
+            for key in ("a_share_fee_schedule",)
+        },
+        raw_root=raw / "reference",
+    )
     old_root = result.artifact_roots[A_SHARE_FEE_SCHEDULE_DATA_ID]
     before = _file_bytes(old_root)
     source = raw / "reference" / "a_share_fee_schedule"
@@ -647,35 +487,9 @@ def test_malformed_fee_csv_is_source_local_and_preserves_old_good(
     assert isinstance(caught.value.__cause__, csv.Error)
     write_industry_reference_fixture(raw, observations=_industry_observations())
     target = interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
-    profile = research_profile()
-    requested = (A_SHARE_FEE_SCHEDULE_DATA_ID, target)
-    plan = operations.plan_targets(
-        profile=profile,
-        action="data materialize",
-        terminal_targets=requested,
-        layout=layout,
-        raw_root=raw,
-    )
-    planned = {row["target_id"]: row for row in plan["targets"]}
-    assert planned[A_SHARE_FEE_SCHEDULE_DATA_ID]["decision"] == "BLOCKED"
-    assert planned[A_SHARE_FEE_SCHEDULE_DATA_ID]["blocker"] == "source_identity_invalid"
-    assert planned[target]["decision"] == "BUILD"
-    result = operations.data_materialize(
-        profile=profile,
-        layout=layout,
-        raw_root=raw,
-        start_date=None,
-        end_date=None,
-        data_ids=requested,
-    )
-    targets = {row["target_id"]: row for row in result["target_results"]}
-    assert result["status"] == "BLOCKED"
-    assert targets[A_SHARE_FEE_SCHEDULE_DATA_ID]["status"] == "BLOCKED"
-    assert targets[A_SHARE_FEE_SCHEDULE_DATA_ID]["reason"] == "source_identity_invalid"
-    assert targets[target]["status"] == "BUILT"
-    root = layout.instance_root(
-        layout.interim_data_root("reference", target),
-        targets[target]["instance_identity"],
+    root = tmp_path / "unaffected-industry"
+    interim.materialize_interim_data(
+        raw_root=raw / "reference", output_roots={target: root}, data_ids=(target,)
     )
     assert len(read_dataset(root)) == 1
     assert _file_bytes(old_root) == before
@@ -722,7 +536,10 @@ def test_industry_future_bad_row_precedes_date_projection(tmp_path, publication)
     )
     with pytest.raises(ValueError, match="^industry_snapshot_row_invalid$"):
         interim.materialize_interim_data(
-            layout=StorageLayout(tmp_path),
+            output_roots={
+                key: StorageLayout(tmp_path).interim_data_root("reference", key)
+                for key in (interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID,)
+            },
             raw_root=root.parent,
             data_ids=(interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID,),
             end_date="2020-12-31",

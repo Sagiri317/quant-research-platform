@@ -100,23 +100,21 @@ def _native_taker_projection_case(tmp_path, monkeypatch, *, count=300):
     )
     initial = ReconstructionStats()
     with open_market_source(root) as source:
-        source_identity = source.source_identity
         for _event in iter_reconstructed_depth(
             source, FUTURES_MARKET_TYPE, symbol="BTCUSDT", stats=initial
         ):
             pass
+    with open_market_source(root) as source:
+        source_metadata = source.market_metadata(FUTURES_MARKET_TYPE, "BTCUSDT")
     coverage = initial.coverage_segments
     window = TimeWindow(
         (start + pd.Timedelta(milliseconds=100)).isoformat(), end.isoformat()
     )
-    candidate = SimpleNamespace(
-        candidate_id="fixture", model_id="model", asset_id="btc_usdt"
-    )
     monkeypatch.setattr(
         portfolio,
-        "_panel",
+        "read_dataset_manifest_evidence",
         lambda *_args: {
-            "source_artifact_identity": source_identity,
+            "source_evidence": {"market_metadata": {"BTCUSDT": source_metadata}},
             "producer_diagnostics": {
                 "reconstruction": {"BTCUSDT": {"coverage_segments": coverage}}
             },
@@ -141,7 +139,7 @@ def _native_taker_projection_case(tmp_path, monkeypatch, *, count=300):
         summaries, batches = [], []
 
         @contextmanager
-        def open_run(_root):
+        def open_run(_root, **_kwargs):
             with open_market_source(root) as source:
                 try:
                     yield SimpleNamespace(
@@ -181,7 +179,7 @@ def _native_taker_projection_case(tmp_path, monkeypatch, *, count=300):
             finally:
                 closed.append("funding")
 
-        def reconstruct(source, *, output_levels=None, **kwargs):
+        def reconstruct(source, *, output_levels=None, market_type=None, **kwargs):
             if projection != "native":
                 output_levels = None if projection == "full" else 1
             if fault is not None:
@@ -231,47 +229,71 @@ def _native_taker_projection_case(tmp_path, monkeypatch, *, count=300):
             result = kwargs.pop("produce")(batches.append)
             summaries.append((kwargs, result))
 
-        manifest = {
-            "scenario_id": "fixture",
-            "access_window": "holdout",
-            "research_plan": {
-                "execution": {
-                    "latency_ms": latency,
-                    "taker_fee_bps": 2.0,
-                    "markout_horizon_ms": 100,
-                },
-                "exposure_limits": {
-                    "btc_usdt": {
-                        "max_order_quantity": 3.0,
-                        "max_position_quantity": 6.0,
+        config = {
+            "output": str(tmp_path / "unused"),
+            "inputs": "explicit-dataset",
+            "panel": "explicit-panel",
+            "source": str(root),
+            "asset_id": "btc_usdt",
+            "symbol": "BTCUSDT",
+            "model": "explicit-model",
+            "predictions": "explicit-predictions",
+            "chronology": {
+                "folds": [
+                    {
+                        "fold_id": "fold",
+                        "train": {
+                            "start": "2026-08-01T00:00:00",
+                            "end": "2026-08-02T00:00:00",
+                        },
+                        "validation": {
+                            "start": "2026-08-03T00:00:00",
+                            "end": "2026-08-04T00:00:00",
+                        },
                     }
-                },
+                ],
+                "test": {"start": start.isoformat(), "end": end.isoformat()},
+            },
+            "prediction_window": {
+                "start": window.start.isoformat(),
+                "end": window.end.isoformat(),
+            },
+            "execution_mode": mode,
+            "capital": {
+                "candidate_id": "fixture",
                 "initial_capital": 1e6,
                 "valuation_currency": "USDT",
-                "test": {"start": start.isoformat(), "end": end.isoformat()},
-                "folds": [{"fold_id": "fold"}],
+                "valuation_method": "linear_perpetual",
             },
-            "model_scopes": {"model": {"label_horizon_ms": horizon}},
+            "execution": {
+                "latency_ms": latency,
+                "taker_fee_bps": 2.0,
+                "markout_horizon_ms": 100,
+                "order_quantity": 3.0,
+                "position_size": 6.0,
+            },
         }
+        monkeypatch.setattr(portfolio, "open_market_source", open_run)
+        monkeypatch.setattr(portfolio, "iter_reconstructed_depth", reconstruct)
+        monkeypatch.setattr(portfolio, "read_funding_observations", funding)
+        monkeypatch.setattr(
+            portfolio,
+            "_model_evidence",
+            lambda *args, **kwargs: (
+                {},
+                {"model": {"target_column": f"future_mid_return_{horizon}ms"}},
+                None,
+            ),
+        )
+        monkeypatch.setattr(
+            portfolio,
+            "_write_backtest",
+            lambda config, capital, produce: produce(
+                on_ledger=batches.append, on_episode=episode
+            ),
+        )
         try:
-            result = portfolio.produce_taker_ledger(
-                layout=None,
-                candidate=candidate,
-                protocol_manifest=manifest,
-                dataset_catalog=SimpleNamespace(get=lambda _key: None),
-                output_window=window,
-                upstream_identities={},
-                expected_funding_identity="f" * 64,
-                raw_root=root,
-                execution_mode=mode,
-                on_ledger=batches.append,
-                on_episode=episode,
-                symbol="BTCUSDT",
-                open_run=open_run,
-                reconstruct_depth=reconstruct,
-                read_funding=funding,
-                read_prediction_bundle=None,
-            )
+            result = portfolio.backtest_taker(config)
         except (ValueError, PortfolioTargetBlocked) as error:
             result = (type(error).__name__, str(error))
         assert sorted(closed) == ["books", "funding", "source"]
@@ -360,7 +382,10 @@ def test_zero_latency_maker_replacement_releases_old_reservation() -> None:
             for stamp in (0, 200)
         ],
         config=replace(
-            _maker_config(), max_position=1.0, maker_fee_bps=0.0, latency_ms=0
+            _maker_config(calibrated=True),
+            max_position=1.0,
+            maker_fee_bps=0.0,
+            latency_ms=0,
         ),
         observed_coverage={"s1": (0, 1000000000)},
         trade_coverage={"trade-connection-1": (0, 1000000000)},
@@ -472,14 +497,14 @@ def _taker_config(*, latency_ms: int = 0, order_quantity: float = 1.0) -> TakerC
     )
 
 
-def _maker_config() -> MakerConfig:
+def _maker_config(*, calibrated=False) -> MakerConfig:
     return MakerConfig(
         latency_ms=0,
         order_quantity=1.0,
         max_position=2.0,
         maker_fee_bps=-1.0,
-        inventory_target=0.0,
-        inventory_skew=0.0,
+        inventory_target=None if calibrated else 0.0,
+        inventory_skew=None if calibrated else 0.0,
         markout_horizon_ms=100,
     )
 
@@ -524,22 +549,13 @@ def test_common_panel_maker_quotes_use_raw_execution_identities(wrong_identity) 
     if wrong_identity is not None:
         panel[wrong_identity] = "wrong-raw-identity"
 
-    class ValidationArtifact:
-        models = tuple(
-            {
-                "fold_id": "fold",
-                "model_id": model_id,
-                "model_metadata": {"model_algorithm": "linear_regression"},
-            }
-            for model_id in ("price_model", "pressure_model")
-        )
-
-        def validation_chunks(self, *, fold_id, model_id):
-            yield panel
-
     quotes = list(
         _paired_validation(
-            ValidationArtifact(), "fold", "btc_usdt", ("price_model", "pressure_model")
+            [
+                panel.loc[panel.asset_id.eq("btc_usdt")].itertuples(index=False)
+                for _ in range(2)
+            ],
+            asset_id="btc_usdt",
         )
     )
     assert len(quotes) == 1
@@ -1287,31 +1303,20 @@ def test_capture_fill_rows_keeps_delayed_identity_without_derived_fees(
 
 
 def test_truncated_pending_cancels_survive_native_ledger_summary(tmp_path):
-    from dataclasses import asdict
 
     from quant_research_platform.artifacts.portfolio_ledger import (
         read_portfolio_ledger_artifact,
         summarize_portfolio_ledger,
         write_portfolio_ledger_artifact,
     )
-    from quant_research_platform.contracts.business_manifest import (
-        build_business_manifest_envelope,
-    )
 
     capital = PortfolioCapital("pending-cancels", 1000.0, "USDT", "linear_perpetual")
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id=capital.candidate_id,
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
+    metadata = {
+        "window": {
             "start": "1970-01-01",
             "end": "1970-01-02",
-            "access": "development",
-        },
-        upstream_identities={},
-        semantic_metadata={"portfolio_capital": asdict(capital)},
-    )
+        }
+    }
     results = []
 
     def produce(emit):
@@ -1335,9 +1340,9 @@ def test_truncated_pending_cancels_survive_native_ledger_summary(tmp_path):
         results.append(result)
 
     root = write_portfolio_ledger_artifact(
-        tmp_path / "ledger", envelope=envelope, produce=produce
+        tmp_path / "ledger", capital=capital, metadata=metadata, produce=produce
     )
-    saved = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    saved = read_portfolio_ledger_artifact(root)
     summary = summarize_portfolio_ledger(saved.capital, saved.iter_chunks())
     assert results[0]["censored_pending_command_count"] == 2
     assert results[0]["cancelled_orders"] == results[0]["filled_orders"] == 0
@@ -1357,33 +1362,22 @@ def test_truncated_pending_cancels_survive_native_ledger_summary(tmp_path):
 
 
 def _persist_execution(tmp_path, capital, produce):
-    from dataclasses import asdict
 
     from quant_research_platform.artifacts.portfolio_ledger import (
         read_portfolio_ledger_artifact,
         write_portfolio_ledger_artifact,
     )
-    from quant_research_platform.contracts.business_manifest import (
-        build_business_manifest_envelope,
-    )
 
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="fixture",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
+    metadata = {
+        "window": {
             "start": pd.Timestamp(0).isoformat(),
             "end": pd.Timestamp(201_000_000).isoformat(),
-            "access": "development",
-        },
-        upstream_identities={},
-        semantic_metadata={"portfolio_capital": asdict(capital)},
-    )
+        }
+    }
     root = write_portfolio_ledger_artifact(
-        tmp_path / "ledger", envelope=envelope, produce=produce
+        tmp_path / "ledger", capital=capital, metadata=metadata, produce=produce
     )
-    return read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    return read_portfolio_ledger_artifact(root)
 
 
 @pytest.mark.parametrize("quantity,unit", [(1.0, "0.001"), (1e308, "1e-311")])
@@ -1392,35 +1386,17 @@ def test_taker_weighted_diagnostics_survive_unit_scaling(tmp_path, quantity, uni
     from decimal import Decimal
     from fractions import Fraction
 
-    from quant_research_platform.profiles.research import (
-        bind_research_configuration,
-        research_profile,
-    )
     from quant_research_platform.sources.binance.replay import (
         DepthReconstructor,
         ReconstructionStats,
     )
-    from tests.helpers.research_configuration import research_configuration
 
-    configuration = research_configuration("crypto", "baseline")
-    plan = configuration["research_plan"]
-    plan["exposure_limits"]["btc_usdt"] = {
-        "max_order_quantity": quantity,
-        "max_position_quantity": quantity,
-    }
-    plan["execution"].update(taker_fee_bps=0.0, latency_ms=0, markout_horizon_ms=100)
-    bound = bind_research_configuration(
-        research_profile(configuration["profile_id"]), configuration
-    )
-    plan = bound.protocol(configuration["scenario_id"]).manifest()["research_plan"]
-    limits = plan["exposure_limits"]["btc_usdt"]
-    execution = plan["execution"]
     config = TakerConfig(
-        order_quantity=limits["max_order_quantity"],
-        position_size=limits["max_position_quantity"],
-        latency_ms=execution["latency_ms"],
-        taker_fee_bps=execution["taker_fee_bps"],
-        markout_horizon_ms=execution["markout_horizon_ms"],
+        order_quantity=quantity,
+        position_size=quantity,
+        latency_ms=0,
+        taker_fee_bps=0.0,
+        markout_horizon_ms=100,
     )
     identity = {
         "market_type": FUTURES_MARKET_TYPE,
@@ -1584,35 +1560,18 @@ def test_taker_weighted_markout_preserves_small_quantity_contribution(
     from decimal import Decimal
     from fractions import Fraction
 
-    from quant_research_platform.profiles.research import (
-        bind_research_configuration,
-        research_profile,
-    )
     from quant_research_platform.sources.binance.replay import (
         DepthReconstructor,
         ReconstructionStats,
     )
-    from tests.helpers.research_configuration import research_configuration
 
     quantity, scale, tick = 1e308, 10**304, Decimal(unit)
-    configuration = research_configuration("crypto", "baseline")
-    plan = configuration["research_plan"]
-    plan["exposure_limits"]["btc_usdt"] = {
-        "max_order_quantity": quantity,
-        "max_position_quantity": quantity,
-    }
-    plan["execution"].update(taker_fee_bps=0.0, latency_ms=0, markout_horizon_ms=40)
-    bound = bind_research_configuration(
-        research_profile(configuration["profile_id"]), configuration
-    )
-    plan = bound.protocol(configuration["scenario_id"]).manifest()["research_plan"]
-    limits, execution = plan["exposure_limits"]["btc_usdt"], plan["execution"]
     config = TakerConfig(
-        order_quantity=limits["max_order_quantity"],
-        position_size=limits["max_position_quantity"],
-        latency_ms=execution["latency_ms"],
-        taker_fee_bps=execution["taker_fee_bps"],
-        markout_horizon_ms=execution["markout_horizon_ms"],
+        order_quantity=quantity,
+        position_size=quantity,
+        latency_ms=0,
+        taker_fee_bps=0.0,
+        markout_horizon_ms=40,
     )
     identity = {
         "market_type": FUTURES_MARKET_TYPE,
@@ -1708,7 +1667,10 @@ def test_taker_weighted_markout_preserves_small_quantity_contribution(
         )
 
     saved = _persist_execution(tmp_path, capital, produce)
-    assert [fill["fill_qty"] for fill in fills] == [first_quantity, quantity]
+    # A positive first fill consumes headroom even below the limit's float ULP.
+    second_quantity = math.nextafter(quantity, 0.0)
+    assert [fill["fill_qty"] for fill in fills] == [first_quantity, second_quantity]
+    assert sum(Fraction(fill["fill_qty"]) for fill in fills) <= Fraction(quantity)
     price = Fraction(float(1005 * tick))
     source_bps = [
         (Fraction(float(index * tick)) - price) / price * 10000
@@ -1716,7 +1678,7 @@ def test_taker_weighted_markout_preserves_small_quantity_contribution(
     ]
     for fill, expected in zip(fills, source_bps, strict=True):
         assert fill["markout_bps"] == pytest.approx(float(expected), rel=1e-12, abs=0)
-    weights = [Fraction(first_quantity), Fraction(quantity)]
+    weights = [Fraction(first_quantity), Fraction(second_quantity)]
     source_oracle = sum(
         weight * value for weight, value in zip(weights, source_bps, strict=True)
     ) / sum(weights)
@@ -1860,7 +1822,7 @@ def test_taker_actual_depth_survives_large_frozen_order_and_roundtrip(
     assert total <= Fraction(requested)
     (fill,) = fills
     assert fill["requested_quantity"] == requested
-    assert fill["fill_qty"] == float(total)
+    assert fill["fill_qty"] == total
     assert fill["notional"] == float(notional)
     assert fill["fill_price"] == float(notional / total)
     assert (
@@ -1875,7 +1837,7 @@ def test_taker_actual_depth_survives_large_frozen_order_and_roundtrip(
     batches = list(artifact.iter_chunks())
     trades = [trade for batch in batches for trade in batch.trades]
     assert len(trades) == 1
-    assert trades[0].quantity == sign * float(total)
+    assert trades[0].quantity == sign * total
     cash = [
         flow.amount
         for batch in batches
@@ -1884,10 +1846,8 @@ def test_taker_actual_depth_survives_large_frozen_order_and_roundtrip(
     ]
     assert cash == [-fee]
     economics = summarize_crypto_ledger(artifact, artifact.iter_chunks())["economics"]
-    expected_pnl = float(
-        Fraction(sign * float(total)) * (Fraction(100.0) - Fraction(fill["fill_price"]))
-        - Fraction(fee)
-    )
+    # Use actual depth consideration, before the diagnostic VWAP is rounded.
+    expected_pnl = float(sign * (total * Fraction(100) - notional) - Fraction(fee))
     assert economics["net_pnl"] == pytest.approx(expected_pnl, rel=2e-15, abs=1e-15)
 
 
@@ -2038,7 +1998,7 @@ def test_calibrated_maker_extreme_fee_survives_native_ledger(tmp_path, quantity,
                 }
             ],
             config=replace(
-                _maker_config(),
+                _maker_config(calibrated=True),
                 maker_fee_bps=-1e308,
                 order_quantity=quantity,
                 max_position=2 * quantity,

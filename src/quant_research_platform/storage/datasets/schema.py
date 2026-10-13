@@ -12,9 +12,6 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
-from quant_research_platform.contracts.business_manifest import (
-    validate_business_manifest_envelope,
-)
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -41,18 +38,8 @@ from quant_research_platform.storage.datasets.paths import (
     timestamp_column_from_spec_payload,
 )
 
-COMMON_MANIFEST_METADATA_KEY = "common_manifest"
-_DATASET_INSTANCE_METADATA_ALLOWED_KEYS = frozenset(
-    {
-        "input_dataset_identities",
-        "source_artifact_identity",
-        "producer_diagnostics",
-        COMMON_MANIFEST_METADATA_KEY,
-    }
-)
-_DATASET_INPUT_IDENTITY_KEYS = frozenset({"data_id", "manifest_hash", "spec_hash"})
-_SOURCE_ARTIFACT_IDENTITY_KEYS = frozenset(
-    {"schema_id", "artifact_id", "manifest_hash"}
+_DATASET_METADATA_ALLOWED_KEYS = frozenset(
+    {"producer_diagnostics", "inputs", "parameters", "source_evidence"}
 )
 _DATASET_SPEC_COMMON_KEYS = frozenset(
     {
@@ -99,7 +86,6 @@ _DATASET_MANIFEST_RUNTIME_KEYS = frozenset(
         "row_count",
         "file_count",
         "file_size_bytes",
-        "content_hash",
         "columns",
         "physical_schema",
         "schema_hash",
@@ -118,189 +104,33 @@ _DATASET_MANIFEST_RUNTIME_KEYS = frozenset(
         "validation_status",
     }
 )
-_DATASET_MANIFEST_RESERVED_KEYS = frozenset.union(
-    _DATASET_MANIFEST_RUNTIME_KEYS, *_DATASET_SPEC_VARIANT_KEYS, {"spec_identity"}
-)
 _LOWER_HEX = frozenset("0123456789abcdef")
 
 
-def merge_dataset_instance_metadata(
+def merge_dataset_metadata(
     payload: Mapping[str, Any],
-    instance_metadata: Mapping[str, Any] | None,
-    *,
-    spec: Mapping[str, Any] | None = None,
+    metadata: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     result = dict(payload)
-    if instance_metadata is None:
-        return result
-    if not isinstance(instance_metadata, Mapping):
-        raise TypeError("invalid_dataset_instance_metadata")
-    metadata: dict[str, Any] = {}
-    for key, value in instance_metadata.items():
-        if not isinstance(key, str):
-            raise ValueError("unsupported_dataset_instance_metadata_key")
-        if key in _DATASET_MANIFEST_RESERVED_KEYS or key in result:
-            raise ValueError(f"reserved_dataset_instance_metadata_key: {key}")
-        if key not in _DATASET_INSTANCE_METADATA_ALLOWED_KEYS:
-            raise ValueError(f"unsupported_dataset_instance_metadata_key: {key}")
-        if key == "input_dataset_identities":
-            metadata[key] = _validate_input_dataset_identities_metadata(value)
-        elif key == "source_artifact_identity":
-            metadata[key] = _validate_source_artifact_identity(value)
-        elif key == "producer_diagnostics":
-            metadata[key] = qrp_json_object_snapshot(value)
-        elif key == COMMON_MANIFEST_METADATA_KEY:
-            metadata[key] = validate_business_manifest_envelope(value)
-    result.update(metadata)
-    if spec is not None and COMMON_MANIFEST_METADATA_KEY in result:
-        _validate_common_manifest_binding(result[COMMON_MANIFEST_METADATA_KEY], spec)
+    if metadata is not None:
+        if not isinstance(metadata, Mapping):
+            raise TypeError("invalid_dataset_metadata")
+        unknown = set(metadata) - _DATASET_METADATA_ALLOWED_KEYS
+        if unknown:
+            raise ValueError("unsupported_dataset_metadata_key")
+        for key, value in metadata.items():
+            result[key] = qrp_json_object_snapshot(value)
     return result
-
-
-def _validate_input_dataset_identities_metadata(value: Any) -> dict[str, Any]:
-    if not isinstance(value, Mapping) or not value:
-        raise ValueError("invalid_input_dataset_identities_metadata")
-    identities: dict[str, Any] = {}
-    for data_id, identity in value.items():
-        if not isinstance(data_id, str) or not data_id:
-            raise ValueError("invalid_input_dataset_identities_metadata")
-        identities[data_id] = _validate_input_dataset_identity_payload(
-            identity, expected_data_id=data_id
-        )
-    return identities
-
-
-def _validate_input_dataset_identity_payload(
-    value: Any, *, expected_data_id: str
-) -> dict[str, str]:
-    if not isinstance(value, Mapping) or set(value) != _DATASET_INPUT_IDENTITY_KEYS:
-        raise ValueError("invalid_input_dataset_identities_metadata")
-    data_id = value["data_id"]
-    if data_id != expected_data_id:
-        raise ValueError("invalid_input_dataset_identities_metadata")
-    spec_hash = _require_identity_hash(
-        value["spec_hash"], error="invalid_input_dataset_identities_metadata"
-    )
-    manifest_hash = _require_identity_hash(
-        value["manifest_hash"], error="invalid_input_dataset_identities_metadata"
-    )
-    return {
-        "data_id": expected_data_id,
-        "spec_hash": spec_hash,
-        "manifest_hash": manifest_hash,
-    }
-
-
-def _validate_source_artifact_identity(value: Any) -> dict[str, Any]:
-    if isinstance(value, Mapping) and set(value) == {"schema_id", "archives"}:
-        members = value["archives"]
-        if type(members) is not list or not members:
-            raise ValueError("invalid_source_artifact_identity")
-        archives = []
-        identities = set()
-        for member in members:
-            if not isinstance(member, Mapping) or set(
-                member
-            ) != _SOURCE_ARTIFACT_IDENTITY_KEYS | {"date"}:
-                raise ValueError("invalid_source_artifact_identity")
-            day = member["date"]
-            try:
-                valid_date = (
-                    type(day) is str and date.fromisoformat(day).isoformat() == day
-                )
-            except ValueError:
-                valid_date = False
-            if not valid_date:
-                raise ValueError("invalid_source_artifact_identity")
-            identity = _validate_source_artifact_identity(
-                {key: member[key] for key in _SOURCE_ARTIFACT_IDENTITY_KEYS}
-            )
-            key = (identity["artifact_id"], identity["manifest_hash"])
-            if identity["schema_id"] != value["schema_id"] or key in identities:
-                raise ValueError("invalid_source_artifact_identity")
-            identities.add(key)
-            archives.append({"date": day, **identity})
-        return {"schema_id": value["schema_id"], "archives": archives}
-    if not isinstance(value, Mapping) or set(value) != _SOURCE_ARTIFACT_IDENTITY_KEYS:
-        raise ValueError("invalid_source_artifact_identity")
-    schema_id = value["schema_id"]
-    artifact_id = value["artifact_id"]
-    if (
-        not isinstance(schema_id, str)
-        or not schema_id
-        or "/" in schema_id
-        or (not isinstance(artifact_id, str))
-        or (not artifact_id)
-    ):
-        raise ValueError("invalid_source_artifact_identity")
-    manifest_hash = _require_identity_hash(
-        value["manifest_hash"], error="invalid_source_artifact_identity"
-    )
-    return {
-        "schema_id": schema_id,
-        "artifact_id": artifact_id,
-        "manifest_hash": manifest_hash,
-    }
 
 
 def _require_identity_hash(value: Any, error: str) -> str:
     if (
-        not isinstance(value, str)
+        type(value) is not str
         or len(value) != 64
-        or any(character not in _LOWER_HEX for character in value)
+        or any(c not in _LOWER_HEX for c in value)
     ):
         raise ValueError(error)
     return value
-
-
-def dataset_identity_payload(
-    spec: Mapping[str, Any], manifest: Mapping[str, Any]
-) -> dict[str, str]:
-    data_id = spec.get("data_id")
-    if not isinstance(data_id, str) or not data_id:
-        raise ValueError("invalid_dataset_identity")
-    return {
-        "data_id": data_id,
-        "spec_hash": canonical_json_hash(spec),
-        "manifest_hash": canonical_json_hash(manifest),
-    }
-
-
-def validate_dataset_manifest_instance_metadata(
-    manifest: Mapping[str, Any], *, spec: Mapping[str, Any] | None = None
-) -> None:
-    unknown = set(manifest).difference(
-        _DATASET_MANIFEST_RESERVED_KEYS,
-        _DATASET_INSTANCE_METADATA_ALLOWED_KEYS,
-        {"schema_id"},
-    )
-    if unknown:
-        raise ValueError(
-            "unsupported_dataset_instance_metadata_key: " + ", ".join(sorted(unknown))
-        )
-    if "input_dataset_identities" in manifest:
-        _validate_input_dataset_identities_metadata(
-            manifest["input_dataset_identities"]
-        )
-    if "source_artifact_identity" in manifest:
-        _validate_source_artifact_identity(manifest["source_artifact_identity"])
-    if "producer_diagnostics" in manifest:
-        qrp_json_object_snapshot(manifest["producer_diagnostics"])
-    if COMMON_MANIFEST_METADATA_KEY in manifest:
-        envelope = validate_business_manifest_envelope(
-            manifest[COMMON_MANIFEST_METADATA_KEY]
-        )
-        if spec is not None:
-            _validate_common_manifest_binding(envelope, spec)
-
-
-def _validate_common_manifest_binding(
-    envelope: Mapping[str, Any], spec: Mapping[str, Any]
-) -> None:
-    if envelope["logical_artifact_id"] != spec["data_id"]:
-        raise ValueError("dataset_manifest_common_logical_id_mismatch")
-    if envelope["schema_identity"] != canonical_json_hash(spec):
-        raise ValueError("dataset_manifest_common_schema_identity_mismatch")
 
 
 def validate_dataset_spec(spec: DataSpec) -> None:
@@ -840,6 +670,69 @@ def _physical_type_payload(data_type: pa.DataType) -> dict[str, Any]:
     raise ValueError("unsupported_dataset_arrow_type")
 
 
+def arrow_schema_from_payload(value: list[dict[str, Any]]) -> pa.Schema:
+    """Restore the writer-declared Arrow schema without scanning unrelated files."""
+
+    def field(item):
+        return pa.field(item["name"], dtype(item["type"]), nullable=item["nullable"])
+
+    def dtype(item):
+        kind = item["kind"]
+        if kind == "integer":
+            return getattr(
+                pa, ("int" if item["signed"] else "uint") + str(item["bit_width"])
+            )()
+        if kind == "float":
+            return getattr(pa, "float" + str(item["bit_width"]))()
+        if kind == "decimal":
+            return getattr(pa, "decimal" + str(item["bit_width"]))(
+                item["precision"], item["scale"]
+            )
+        if kind == "date":
+            return pa.date32()
+        if kind == "time":
+            return (pa.time32 if item["unit"] in {"s", "ms"} else pa.time64)(
+                item["unit"]
+            )
+        if kind == "timestamp":
+            return pa.timestamp(item["unit"], tz=item["timezone"])
+        if kind == "duration":
+            return pa.duration(item["unit"])
+        if kind == "fixed_size_binary":
+            return pa.binary(item["byte_width"])
+        if kind == "struct":
+            return pa.struct([field(child) for child in item["fields"]])
+        if kind in {"list", "large_list", "fixed_size_list"}:
+            return (
+                pa.list_(field(item["value_field"]), item["list_size"])
+                if kind == "fixed_size_list"
+                else (pa.large_list if kind == "large_list" else pa.list_)(
+                    field(item["value_field"])
+                )
+            )
+        if kind == "map":
+            return pa.map_(
+                field(item["key_field"]),
+                field(item["item_field"]),
+                keys_sorted=item["keys_sorted"],
+            )
+        if kind == "dictionary":
+            return pa.dictionary(
+                dtype(item["index_type"]),
+                dtype(item["value_type"]),
+                ordered=item["ordered"],
+            )
+        return {
+            "bool": pa.bool_,
+            "string": pa.string,
+            "large_string": pa.large_string,
+            "binary": pa.binary,
+            "large_binary": pa.large_binary,
+        }[kind]()
+
+    return pa.schema([field(item) for item in value])
+
+
 def data_spec_payload(spec: DataSpec) -> dict[str, Any]:
     validate_dataset_spec(spec)
     payload: dict[str, Any] = {
@@ -1069,7 +962,7 @@ def validate_dataset_manifest_payload(
     actual_keys = set(manifest)
     if not expected_keys.issubset(actual_keys) or not (
         actual_keys - expected_keys
-    ).issubset(_DATASET_INSTANCE_METADATA_ALLOWED_KEYS):
+    ).issubset(_DATASET_METADATA_ALLOWED_KEYS):
         raise ValueError("dataset_manifest_fields_invalid")
     if manifest["spec_identity"] != canonical_json_hash(spec):
         raise ValueError("dataset_manifest_spec_mismatch")
@@ -1083,9 +976,6 @@ def validate_dataset_manifest_payload(
         value = manifest.get(key)
         if not _is_exact_int(value) or value < 0:
             raise ValueError(f"manifest_{key}_invalid")
-    _require_identity_hash(
-        manifest.get("content_hash"), "manifest_content_hash_invalid"
-    )
     columns = _require_string_list(
         manifest.get("columns"), "manifest_columns_invalid", allow_empty=False
     )
@@ -1213,7 +1103,14 @@ def validate_dataset_manifest_payload(
         "BLOCKED",
     ):
         raise ValueError("manifest_validation_status_invalid")
-    validate_dataset_manifest_instance_metadata(manifest, spec=spec)
+    merge_dataset_metadata(
+        {},
+        {
+            key: manifest[key]
+            for key in _DATASET_METADATA_ALLOWED_KEYS
+            if key in manifest
+        },
+    )
 
 
 def validate_dataset_primary_key_null_summary(

@@ -3,7 +3,6 @@ from __future__ import annotations
 import io
 import os
 import subprocess
-from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -210,14 +209,6 @@ def _install_parquet_stubs(monkeypatch, handle, parquet):
     metadata = SimpleNamespace(st_dev=1, st_ino=2, st_size=3, st_mtime_ns=4)
     monkeypatch.setattr(physical, "open_filesystem_file", lambda *_a, **_k: handle)
     monkeypatch.setattr(physical.os, "fstat", lambda _fd: metadata)
-    monkeypatch.setattr(
-        physical,
-        "dataset_file_identity",
-        lambda _path: identity.dataset_file_identity_from_stat(metadata),
-    )
-    monkeypatch.setattr(
-        identity, "dataset_file_identity", physical.dataset_file_identity
-    )
     monkeypatch.setattr(physical.pq, "ParquetFile", lambda _handle, **_kwargs: parquet)
 
 
@@ -257,7 +248,7 @@ def test_opened_parquet_close_preserves_generator_exit(
     _install_parquet_stubs(monkeypatch, Handle(), Parquet())
     primary = GeneratorExit()
     with pytest.raises(GeneratorExit) as caught:
-        with physical._opened_parquet(Path("part.parquet"), expected_identity=None):
+        with physical._opened_parquet(Path("part.parquet")):
             raise primary
     assert caught.value is primary
 
@@ -296,9 +287,6 @@ def test_write_dataset_activates_and_closes_caller_iterator(
 
     monkeypatch.setattr(
         dataset_writing, "data_spec_payload", lambda _spec, **_kwargs: {}
-    )
-    monkeypatch.setattr(
-        dataset_writing, "validate_dataset_artifact_root", lambda *_args: None
     )
     monkeypatch.setattr(
         dataset_writing,
@@ -351,7 +339,7 @@ def test_opened_parquet_raw_handle_close_preserves_active_primary(
 
     _install_parquet_stubs(monkeypatch, Handle(), Parquet())
     with pytest.raises(primary_type) as raised:
-        with physical._opened_parquet(Path("part.parquet"), expected_identity=None):
+        with physical._opened_parquet(Path("part.parquet")):
             raise primary
     assert raised.value is primary
 
@@ -394,7 +382,7 @@ def test_opened_parquet_raw_handle_close_propagates_without_primary(
 
     _install_parquet_stubs(monkeypatch, Handle(), Parquet())
     with pytest.raises(OSError, match="raw_close_failed"):
-        with physical._opened_parquet(Path("part.parquet"), expected_identity=None):
+        with physical._opened_parquet(Path("part.parquet")):
             pass
 
 
@@ -423,14 +411,12 @@ def test_bounded_manifest_read_preserves_body_primary_over_handle_close(
 ) -> None:
     path = tmp_path / "manifest.json"
     identity.filesystem_write_text(path, '{"schema_id":"qrp-test"}', encoding="utf-8")
-    metadata = identity.filesystem_stat(path)
     primary = primary_type("body_primary")
     monkeypatch.setattr(
         manifests,
         "open_filesystem_file",
         lambda *_args, **_kwargs: _BodyAndCloseFailingHandle(primary),
     )
-    monkeypatch.setattr(manifests.os, "fstat", lambda _fd: metadata)
     with pytest.raises(primary_type, match="body_primary"):
         manifests.read_qrp_json_file(path)
 
@@ -561,9 +547,6 @@ def test_write_dataset_requires_artifact_root_before_writer_or_data_pull(
 ) -> None:
     monkeypatch.setattr(
         dataset_writing, "data_spec_payload", lambda _spec, **_kwargs: {}
-    )
-    monkeypatch.setattr(
-        dataset_writing, "validate_dataset_artifact_root", lambda *_args: None
     )
     monkeypatch.setattr(
         dataset_writing,
@@ -860,139 +843,27 @@ def test_source_identity_preserves_serious_io(tmp_path, monkeypatch, source, bou
         assert caught.value is primary
 
 
-@pytest.mark.parametrize(
-    "boundary",
-    (
-        "dataset_inventory",
-        "dataset_inventory_next",
-        "dataset_instances_scan",
-        "dataset_instances_stat",
-        "dataset_instances_manifest",
-        "semantic_instances_scan",
-        "semantic_instances_stat",
-        "semantic_members_scan",
-        "semantic_member_stat",
-        "semantic_member_hash",
-    ),
-)
 @pytest.mark.parametrize("error_type", (OSError, PermissionError))
-def test_persisted_storage_boundaries_preserve_serious_io(
-    tmp_path, monkeypatch, boundary, error_type
-):
-    from quant_research_platform.storage import semantic_artifacts as semantic
-    from quant_research_platform.storage.datasets import instances
-    from quant_research_platform.storage.datasets.reading import read_dataset
+def test_dataset_inventory_preserves_serious_io(tmp_path, monkeypatch, error_type):
     from tests.storage.low_level_fixtures import (
         make_dataset_artifact_root,
+        make_default_dataset_frame,
         make_processed_dataset_spec,
     )
-    from tests.storage.test_dataset_instances import _envelope, _write_instance
-    from tests.storage.test_semantic_artifacts import _write_artifact
 
+    root = make_dataset_artifact_root(tmp_path, "io")
+    dataset_writing.write_dataset(
+        root, make_default_dataset_frame(), spec=make_processed_dataset_spec("io")
+    )
     primary = error_type(5, "synthetic_storage_io")
-    if boundary.startswith("dataset"):
-        logical = make_dataset_artifact_root(tmp_path, "io")
-        spec = make_processed_dataset_spec("io")
-        root = _write_instance(logical, spec, _envelope(spec, seed=1))
-    else:
-        root = _write_artifact(tmp_path)
-        logical = root.parent.parent
-    before = {
-        path: Path(identity.native_filesystem_path(path)).read_bytes()
-        for path in identity.filesystem_glob(root, "**/*")
-        if identity.filesystem_is_file(path)
-    }
 
     def fail(*args, **kwargs):
         raise primary
 
-    with monkeypatch.context() as patch:
-        if boundary.endswith("instances_stat"):
-            owner = instances if boundary.startswith("dataset") else semantic
-            original = owner.filesystem_stat
-
-            def selected_stat(path, *args, **kwargs):
-                if path == logical / "instances":
-                    raise primary
-                return original(path, *args, **kwargs)
-
-            patch.setattr(owner, "filesystem_stat", selected_stat)
-        elif boundary == "dataset_inventory_next":
-            original = inventory_owner.filesystem_scandir
-
-            class BrokenEntries:
-                def __init__(self, entries):
-                    self.entries = entries
-
-                def __next__(self):
-                    raise primary
-
-                def close(self):
-                    self.entries.close()
-
-            def scan(path):
-                entries = original(path)
-                return BrokenEntries(entries) if path == root / "data" else entries
-
-            patch.setattr(inventory_owner, "filesystem_scandir", scan)
-        elif boundary in {
-            "dataset_inventory",
-            "dataset_instances_scan",
-            "semantic_instances_scan",
-            "semantic_members_scan",
-        }:
-            owner = (
-                inventory_owner
-                if boundary == "dataset_inventory"
-                else instances
-                if boundary == "dataset_instances_scan"
-                else semantic
-            )
-            original = owner.filesystem_scandir
-            target = (
-                root / "data"
-                if boundary == "dataset_inventory"
-                else root
-                if boundary == "semantic_members_scan"
-                else logical / "instances"
-            )
-
-            def selected(path):
-                if path == target:
-                    raise primary
-                return original(path)
-
-            patch.setattr(owner, "filesystem_scandir", selected)
-        elif boundary == "dataset_instances_manifest":
-            patch.setattr(instances, "read_dataset_manifest_evidence", fail)
-        elif boundary == "semantic_member_hash":
-            patch.setattr(semantic, "_hash_file_content", fail)
-        else:
-            assert boundary == "semantic_member_stat"
-            original = semantic.filesystem_stat
-
-            def selected(path, *args, **kwargs):
-                if path == root / "model.pkl":
-                    raise primary
-                return original(path, *args, **kwargs)
-
-            patch.setattr(semantic, "filesystem_stat", selected)
-        with pytest.raises(type(primary)) as caught:
-            if boundary in {"dataset_inventory", "dataset_inventory_next"}:
-                read_dataset(root)
-            elif boundary.startswith("dataset"):
-                instances.discover_dataset_instances(logical)
-            elif "instances" in boundary:
-                semantic.discover_semantic_artifact_instances(logical)
-            else:
-                semantic.read_semantic_artifact(root)
-        assert caught.value is primary
-    assert all(
-        (
-            Path(identity.native_filesystem_path(path)).read_bytes() == value
-            for path, value in before.items()
-        )
-    )
+    monkeypatch.setattr(inventory_owner, "filesystem_scandir", fail)
+    with pytest.raises(error_type) as caught:
+        dataset_reading.read_dataset(root)
+    assert caught.value is primary
 
 
 @pytest.mark.parametrize("operation", ("read", "inspect", "fingerprint"))
@@ -1087,55 +958,8 @@ def test_verified_file_handle_binds_decoder_and_preserves_primary(tmp_path, phas
         assert not handle.closed
 
 
-def test_parquet_writer_finalizes_deferred_mtime_before_read(tmp_path, monkeypatch):
-    import pyarrow as pa
-
-    pending_update = False
-    original_write = dataset_writing.pq.write_table
-    original_utime = os.utime
-    original_verify = physical.verified_file_handle
-
-    def deferred_write(*args, **kwargs):
-        nonlocal pending_update
-        original_write(*args, **kwargs)
-        pending_update = True
-
-    def commit_metadata(*args, **kwargs):
-        nonlocal pending_update
-        original_utime(*args, **kwargs)
-        pending_update = False
-
-    @contextmanager
-    def read_with_deferred_update(path, handle, **kwargs):
-        nonlocal pending_update
-        with original_verify(path, handle, **kwargs):
-            yield handle
-            if pending_update:
-                before = identity.filesystem_stat(path)
-                original_utime(
-                    identity.native_filesystem_path(path),
-                    ns=(before.st_atime_ns, before.st_mtime_ns + 1000000),
-                )
-                pending_update = False
-
-    monkeypatch.setattr(dataset_writing.pq, "write_table", deferred_write)
-    monkeypatch.setattr(dataset_writing.os, "utime", commit_metadata)
-    monkeypatch.setattr(physical, "verified_file_handle", read_with_deferred_update)
-    path = tmp_path / "part.parquet"
-    table = pa.table({"value": [1.0, 2.0, 3.0]})
-    dataset_writing.write_parquet_file(table, path)
-    with physical._opened_parquet(path, expected_identity=None) as (parquet, _, _):
-        assert parquet.read().equals(table)
-    pending_update = True
-    with pytest.raises(ValueError, match="dataset_file_identity_changed"):
-        with physical._opened_parquet(path, expected_identity=None) as (parquet, _, _):
-            parquet.read()
-
-
-@pytest.mark.parametrize(
-    "operation", ["file_identity", "csv_records", "choice_logout", "rebuild_cleanup"]
-)
-def test_cleanup_scope_ignores_handled_outer(tmp_path, monkeypatch, operation):
+@pytest.mark.parametrize("operation", ["file_identity", "csv_records", "choice_logout"])
+def test_cleanup_scope_ignores_handled_outer(tmp_path, operation):
     path = tmp_path / "member.csv"
     identity.filesystem_write_bytes(path, b"value\n1\n")
     try:
@@ -1172,15 +996,4 @@ def test_cleanup_scope_ignores_handled_outer(tmp_path, monkeypatch, operation):
                 with choice_session(sdk) as session:
                     assert session.active
             assert sdk.stops == 1 and not session.active
-        else:
-            import quant_research_platform.storage.rebuild as rebuild
-            from quant_research_platform.storage.layout import StorageLayout
-
-            def fail_cleanup(_root):
-                raise OSError("scratch_cleanup_failed")
-
-            monkeypatch.setattr(rebuild, "remove_owned_scratch", fail_cleanup)
-            with pytest.raises(OSError, match="scratch_cleanup_failed"):
-                with rebuild.rebuild_candidate_workspace(StorageLayout(tmp_path)):
-                    pass
         assert not getattr(outer, "__notes__", [])

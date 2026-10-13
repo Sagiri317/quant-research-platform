@@ -27,10 +27,8 @@ from quant_research_platform.sources.binance.validation import (
     strict_positive_float,
 )
 from quant_research_platform.storage.identity import (
-    _hash_file_content,
     dataset_file_identity,
     filesystem_is_file,
-    filesystem_iterdir,
     open_filesystem_file,
     require_unaliased_path,
     verified_file_handle,
@@ -353,24 +351,6 @@ def read_funding_observations(funding_roots, *, symbol):
     for value in funding_roots:
         root = Path(value)
         manifest, settlements, original_identity = _manifest(root, symbol)
-        sidecar = root / "response.metadata.json"
-        sidecar_identity = dataset_file_identity(sidecar)
-        files = (
-            (
-                root / "response.csv",
-                dataset_file_identity(root / "response.csv"),
-                manifest["sha256"],
-                "raw_csv_content_invalid",
-            ),
-            (
-                sidecar,
-                sidecar_identity,
-                _hash_file_content(
-                    sidecar, sidecar_identity, "binance_funding_identity_changed"
-                ),
-                "binance_funding_identity_changed",
-            ),
-        )
         interval = manifest["metadata"]["coverage"]
         start, end = interval["start_ns"], interval["end_ns"]
         if coverage and start <= coverage[-1][1]:
@@ -383,33 +363,14 @@ def read_funding_observations(funding_roots, *, symbol):
                 manifest,
                 settlements,
                 original_identity,
-                files,
             )
         )
         del manifest, interval
     identity = canonical_json_hash({"sources": [item[1] for item in sources]})
 
-    def verify(root, expected, manifest, original_identity, *, content=False):
-        if (
-            canonical_json_hash(read_manifest(root / "response.metadata.json"))
-            != expected
-        ):
-            raise ValueError("binance_funding_identity_changed")
-        if original_identity is not None:
-            path = root.parent / "settlements.json"
-            if dataset_file_identity(path) != original_identity or (
-                content
-                and _hash_file_content(
-                    path, original_identity, "binance_funding_settlement_source_changed"
-                )
-                != manifest["metadata"]["settlement_source"]["sha256"]
-            ):
-                raise ValueError("binance_funding_settlement_source_changed")
-
     def records():
         previous = {FundingEvent: -1, FundingForecast: -1}
-        for root, expected, manifest, settlements, original_identity, _files in sources:
-            verify(root, expected, manifest, original_identity)
+        for root, _expected, manifest, settlements, _original_identity in sources:
             rows = _records(root, manifest, settlements=settlements)
             with closing_iterator(rows):
                 for item in rows:
@@ -426,7 +387,6 @@ def read_funding_observations(funding_roots, *, symbol):
                         yield item
                     except GeneratorExit:
                         return
-            verify(root, expected, manifest, original_identity)
 
     events = []
     with closing_iterator(records()) as rows:
@@ -443,60 +403,27 @@ def read_funding_observations(funding_roots, *, symbol):
                     except GeneratorExit:
                         return
 
-    primary = None
-    try:
-        with closing_iterator(forecasts()) as source:
-            qualification = []
-            for _root, _expected, manifest, *_rest in sources:
-                metadata = manifest["metadata"]
-                native = metadata["settlement_source"]
-                qualification.append(
-                    {
-                        "coverage": metadata["coverage"],
-                        "settlement_source": native,
-                        "verification": "declared_archive_not_independently_verified"
-                        if native is None
-                        else "official_response_validated"
-                        if native["source_id"] == "binance"
-                        else (
-                            "supplier_completeness_assumption_"
-                            "not_independently_verified"
-                        ),
-                    }
-                )
-            yield FundingObservations(
-                identity, tuple(coverage), tuple(events), source, tuple(qualification)
+    with closing_iterator(forecasts()) as source:
+        qualification = []
+        for _root, _expected, manifest, *_rest in sources:
+            metadata = manifest["metadata"]
+            native = metadata["settlement_source"]
+            qualification.append(
+                {
+                    "coverage": metadata["coverage"],
+                    "settlement_source": native,
+                    "verification": "declared_archive_not_independently_verified"
+                    if native is None
+                    else "official_response_validated"
+                    if native["source_id"] == "binance"
+                    else (
+                        "supplier_completeness_assumption_not_independently_verified"
+                    ),
+                }
             )
-    except BaseException as body_error:
-        primary = body_error
-        raise
-    finally:
-        try:
-            # Bind every source to its fully decoded bytes, including unread forecasts.
-            for (
-                root,
-                expected,
-                manifest,
-                _settlements,
-                original_identity,
-                files,
-            ) in sources:
-                verify(root, expected, manifest, original_identity, content=True)
-                require_unaliased_path(root, error="raw_csv_path_invalid")
-                if {path.name for path in filesystem_iterdir(root)} != {
-                    "response.csv",
-                    "response.metadata.json",
-                }:
-                    raise ValueError("raw_csv_members_invalid")
-                for path, captured, digest, error in files:
-                    if _hash_file_content(path, captured, error) != digest:
-                        raise ValueError(error)
-        except BaseException as error:
-            if primary is None:
-                raise
-            primary.add_note(
-                "Funding source verification also failed: " + type(error).__name__
-            )
+        yield FundingObservations(
+            identity, tuple(coverage), tuple(events), source, tuple(qualification)
+        )
 
 
 def funding_source_identity(funding_roots, _target_id, *, symbol):

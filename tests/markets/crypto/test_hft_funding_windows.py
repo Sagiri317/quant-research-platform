@@ -1,5 +1,5 @@
 from contextlib import ExitStack
-from dataclasses import asdict, replace
+from dataclasses import replace
 
 import pytest
 
@@ -25,9 +25,6 @@ def test_taker_known_funding_and_continuous_gap_have_hand_calculated_economics(
     from quant_research_platform.artifacts.portfolio_ledger import (
         read_portfolio_ledger_artifact,
         write_portfolio_ledger_artifact,
-    )
-    from quant_research_platform.contracts.business_manifest import (
-        build_business_manifest_envelope,
     )
 
     decisions = [
@@ -98,31 +95,20 @@ def test_taker_known_funding_and_continuous_gap_have_hand_calculated_economics(
     if initial_capital == 1000.0:
         assert boundaries == pytest.approx([1000, 1000.48995, 1003.49095, 1003.7705])
         assert boundaries[2] - boundaries[1] == pytest.approx(3.001)
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="fixture",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
+    metadata = {
+        "window": {
             "start": "1970-01-01T00:00:00",
             "end": "1970-01-01T00:00:00.100",
-            "access": "development",
-        },
-        upstream_identities={},
-        semantic_metadata={
-            "portfolio_capital": asdict(
-                PortfolioCapital("fixture", initial_capital, "USDT", "linear_perpetual")
-            )
-        },
-    )
+        }
+    }
+    capital = PortfolioCapital("fixture", initial_capital, "USDT", "linear_perpetual")
     root = write_portfolio_ledger_artifact(
         tmp_path / "ledger",
-        envelope=envelope,
+        capital=capital,
+        metadata=metadata,
         produce=lambda emit: [emit(batch) for batch in batches],
     )
-    artifact = read_portfolio_ledger_artifact(
-        root, expected_identity=envelope.instance_identity
-    )
+    artifact = read_portfolio_ledger_artifact(root)
     intervals = summarize_crypto_ledger(
         artifact,
         artifact.iter_chunks(),
@@ -192,9 +178,6 @@ def test_independent_episode_collection_resets_capital_and_funding_boundaries(tm
         read_crypto_episode_artifact,
         write_crypto_episode_artifact,
     )
-    from quant_research_platform.contracts.business_manifest import (
-        build_business_manifest_envelope,
-    )
     from quant_research_platform.markets.implementations.crypto.portfolio import (
         _execute_portfolio,
     )
@@ -202,19 +185,13 @@ def test_independent_episode_collection_resets_capital_and_funding_boundaries(tm
     from tests.markets.crypto.test_hft import _boundary
 
     capital = PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual")
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="fixture_episodes",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
+    metadata = {
+        "window": {
             "start": pd.Timestamp(0).isoformat(),
             "end": pd.Timestamp(70000000).isoformat(),
-            "access": "development",
-        },
-        upstream_identities={},
-        semantic_metadata={"portfolio_capital": asdict(capital)},
-    )
+        }
+    }
+    capital = capital
     coverage = {"s1": (0, 30000000), "s2": (40000000, 60000000)}
     trade_coverage = SimpleNamespace(intervals=lambda: iter(coverage.values()))
     decisions = [
@@ -269,7 +246,8 @@ def test_independent_episode_collection_resets_capital_and_funding_boundaries(tm
     )
     root = write_crypto_episode_artifact(
         tmp_path / "result",
-        envelope=envelope,
+        capital=capital,
+        metadata=metadata,
         produce=lambda emit: _execute_portfolio(
             execution_mode="independent_segments",
             execute=execute,
@@ -277,7 +255,6 @@ def test_independent_episode_collection_resets_capital_and_funding_boundaries(tm
             trades=None,
             decisions=iter(decisions),
             funding=funding,
-            expected_funding_identity=funding.identity,
             coverage=coverage,
             trade_coverage=trade_coverage,
             bounds=((0, 70000000),),
@@ -285,9 +262,7 @@ def test_independent_episode_collection_resets_capital_and_funding_boundaries(tm
             on_episode=emit,
         ),
     )
-    artifact = read_crypto_episode_artifact(
-        root, expected_identity=envelope.instance_identity
-    )
+    artifact = read_crypto_episode_artifact(root)
     summaries = []
     with closing_iterator(artifact.iter_episodes()) as rows:
         for index, ledger in rows:
@@ -319,174 +294,64 @@ def test_independent_episode_collection_resets_capital_and_funding_boundaries(tm
     assert read_count == len(book_rows)
 
 
-def test_episode_publication_cancel_preserves_old_and_parent_capture_rejects_child_swap(
-    tmp_path, monkeypatch
-):
-    import hashlib
-
+def test_episode_atomic_publication_cancel_and_no_overwrite(tmp_path):
     import pandas as pd
 
-    import quant_research_platform.artifacts.crypto_hft as episodes
-    from quant_research_platform.artifacts.portfolio_ledger import (
-        write_portfolio_ledger_artifact,
-    )
-    from quant_research_platform.contracts.business_manifest import (
-        BusinessManifestEnvelope,
-        build_business_manifest_envelope,
+    from quant_research_platform.artifacts.crypto_hft import (
+        write_crypto_episode_artifact,
     )
     from quant_research_platform.research.portfolios.accounting import (
         PortfolioEconomics,
     )
-    from quant_research_platform.storage.identity import open_filesystem_file
-    from quant_research_platform.storage.semantic_artifacts import (
-        read_semantic_artifact_record,
-    )
+    from quant_research_platform.storage.errors import OutputAlreadyExistsError
 
     capital = PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual")
-
-    def envelope(software):
-        return build_business_manifest_envelope(
-            logical_artifact_id="fixture_episodes",
-            schema_identity="a" * 64,
-            protocol_or_spec_identity="b" * 64,
-            software_identity=software * 64,
-            research_window={
-                "start": pd.Timestamp(0).isoformat(),
-                "end": pd.Timestamp(30000000).isoformat(),
-                "access": "development",
-            },
-            upstream_identities={},
-            semantic_metadata={"portfolio_capital": asdict(capital)},
-        )
-
-    def economic_path(mark):
-
-        def produce(emit):
-            account = PortfolioEconomics(capital, "btc_usdt", emit)
-            account.mark(0, 100.0)
-            account.fill(
-                timestamp_ns=10000000,
-                order_id="one",
-                quantity=1.0,
-                price=100.0,
-                mark_price=100.0,
-                fee=0.0,
-            )
-            account.mark(20000000, mark)
-
-        return produce
+    metadata = {
+        "window": {
+            "start": pd.Timestamp(0).isoformat(),
+            "end": pd.Timestamp(30_000_000).isoformat(),
+        }
+    }
 
     def produce(emit):
         emit(
             start_ns=0,
-            stop_ns=30000001,
+            stop_ns=30_000_001,
             termination="PLANNED_END",
             stop_reasons=("planned_oos_end",),
-            produce=economic_path(110.0),
+            produce=lambda sink: PortfolioEconomics(capital, "btc_usdt", sink).mark(
+                0, 100.0
+            ),
         )
 
-    original = envelope("c")
-    old = episodes.write_crypto_episode_artifact(
-        tmp_path / "collection", envelope=original, produce=produce
+    old = write_crypto_episode_artifact(
+        tmp_path / "old", capital=capital, metadata=metadata, produce=produce
     )
     before = {
-        path.relative_to(old): hashlib.sha256(path.read_bytes()).hexdigest()
+        path.relative_to(old): path.read_bytes()
         for path in old.rglob("*")
         if path.is_file()
     }
-    other = envelope("d")
 
     def cancel(emit):
         produce(emit)
         raise KeyboardInterrupt("cancel_after_complete_child")
 
     with pytest.raises(KeyboardInterrupt, match="cancel_after_complete_child"):
-        episodes.write_crypto_episode_artifact(
-            tmp_path / "collection", envelope=other, produce=cancel
+        write_crypto_episode_artifact(
+            tmp_path / "new", capital=capital, metadata=metadata, produce=cancel
         )
-    assert not (
-        tmp_path / "collection" / "instances" / other.instance_identity
-    ).exists()
+    assert not (tmp_path / "new").exists()
+    with pytest.raises(OutputAlreadyExistsError):
+        write_crypto_episode_artifact(
+            old, capital=capital, metadata=metadata, produce=produce
+        )
     assert before == {
-        path.relative_to(old): hashlib.sha256(path.read_bytes()).hexdigest()
+        path.relative_to(old): path.read_bytes()
         for path in old.rglob("*")
         if path.is_file()
     }
-    make_child = episodes._episode_envelope
-    child_calls = 0
-
-    def wrong_parent_once(parent, start, stop):
-        nonlocal child_calls
-        child_calls += 1
-        child = make_child(parent, start, stop)
-        if child_calls != 1:
-            return child
-        payload = child.payload()
-        return build_business_manifest_envelope(
-            **{
-                key: value
-                for key, value in payload.items()
-                if key not in {"instance_identity", "status", "upstream_identities"}
-            },
-            upstream_identities={"episode_parent": "e" * 64},
-        )
-
-    with monkeypatch.context() as patch:
-        patch.setattr(episodes, "_episode_envelope", wrong_parent_once)
-        with pytest.raises(ValueError, match="crypto_episode_child_contract_invalid"):
-            episodes.write_crypto_episode_artifact(
-                tmp_path / "collection", envelope=other, produce=produce
-            )
-    assert child_calls >= 2
-    assert not (
-        tmp_path / "collection" / "instances" / other.instance_identity
-    ).exists()
-    assert before == {
-        path.relative_to(old): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in old.rglob("*")
-        if path.is_file()
-    }
-    real = episodes.read_portfolio_ledger_artifact
-    replaced = False
-    consumed = 0
-
-    def swap(root, **kwargs):
-        nonlocal replaced
-        if not replaced:
-            child, _ = read_semantic_artifact_record(root)
-            alternative = write_portfolio_ledger_artifact(
-                tmp_path / "replacement",
-                envelope=BusinessManifestEnvelope(**child),
-                produce=economic_path(120.0),
-            )
-            with open_filesystem_file(
-                alternative / "valuations.parquet", "rb"
-            ) as source:
-                with open_filesystem_file(root / "valuations.parquet", "r+b") as target:
-                    target.write(source.read())
-                    target.truncate()
-            replaced = True
-        consume = kwargs.pop("consume_batches")
-
-        def counted(artifact, batches):
-
-            def rows():
-                nonlocal consumed
-                for batch in batches:
-                    consumed += 1
-                    yield batch
-
-            return consume(artifact, rows())
-
-        return real(root, consume_batches=counted, **kwargs)
-
-    monkeypatch.setattr(episodes, "read_portfolio_ledger_artifact", swap)
-    with pytest.raises(ValueError, match="identity|changed"):
-        episodes.read_crypto_episode_artifact(
-            old, expected_identity=original.instance_identity
-        )
-    assert replaced
-    assert consumed == 0
+    assert not list(tmp_path.glob(".a-*"))
 
 
 def test_funding_cut_between_books_carries_information_without_account_state():
@@ -548,7 +413,6 @@ def test_funding_cut_between_books_carries_information_without_account_state():
             ({"timestamp_ms": 10, "score": 0.02}, {"timestamp_ms": 40, "score": -0.02})
         ),
         funding=funding,
-        expected_funding_identity=funding.identity,
         coverage=coverage,
         trade_coverage=SimpleNamespace(intervals=lambda: iter(coverage.values())),
         bounds=((0, 60000000),),
@@ -684,7 +548,7 @@ def test_persisted_funding_days_intersect_market_coverage_without_bridging(tmp_p
         with pytest.raises(
             PortfolioTargetBlocked, match="binance_funding_coverage_incomplete"
         ):
-            _funding_check(source, source.identity, bounds)
+            _funding_check(source, bounds)
         episodes = list(_qualified_episodes(books, trades, source, bounds))
         assert [(row[0], row[1]) for row in episodes] == [
             (5, 10),
@@ -714,12 +578,12 @@ def test_funding_nanosecond_adjacency_keeps_maximal_episode(next_start, continuo
     trades = SimpleNamespace(intervals=lambda: iter(((0, 21),)))
     bounds = ((0, 20),)
     if continuous:
-        _funding_check(source, source.identity, bounds)
+        _funding_check(source, bounds)
     else:
         with pytest.raises(
             PortfolioTargetBlocked, match="binance_funding_coverage_incomplete"
         ):
-            _funding_check(source, source.identity, bounds)
+            _funding_check(source, bounds)
     episodes = list(_qualified_episodes(books, trades, source, bounds))
     assert [(row[0], row[1]) for row in episodes] == (
         [(0, 21)] if continuous else [(0, 10), (11, 21)]

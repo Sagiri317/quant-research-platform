@@ -7,10 +7,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from quant_research_platform.artifacts.outputs.prediction import read_predictions
 from quant_research_platform.artifacts.portfolio_ledger import (
     read_portfolio_ledger_artifact,
     summarize_portfolio_ledger,
 )
+from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.research.portfolios.accounting import (
     calibrate_expected_alpha,
     frozen_alpha_calibration,
@@ -19,14 +21,15 @@ from quant_research_platform.research.portfolios.production import (
     _ALPHA_DIAGNOSTICS,
     _completed_calibration_rows,
 )
-from quant_research_platform.research.predictions.outputs import _add_a_share_scores
+from quant_research_platform.research.predictions.runner import predict
 from quant_research_platform.storage.identity import native_filesystem_path
 from tests.artifacts.test_portfolio_ledger_artifact import (
-    _alpha_envelope,
+    _alpha_metadata,
     _alpha_payload,
     _session,
 )
 from tests.helpers.portfolio_ledger import write_test_sessions
+from tests.research.direct_model_test_support import fit_frame
 
 
 @pytest.mark.parametrize("intercept,noise", ((0.25, 0.0), (0.25, 0.001), (0.01, 0.0)))
@@ -34,15 +37,60 @@ def test_rank_and_open_return_roundoff_survives_final_json_and_freeze(
     tmp_path, intercept, noise
 ):
     dates = pd.date_range("2023-07-07", periods=8, freq="7D")
+    training = pd.DataFrame(
+        {
+            "timestamp": pd.Timestamp("2023-06-01"),
+            "asset_id": [f"synthetic_{index:06d}" for index in range(12)],
+            "signal": np.arange(12, dtype=float),
+            "eligible": True,
+            "label": np.arange(12, dtype=float) * 0.1,
+            "label_available_at": pd.Timestamp("2023-06-01"),
+        }
+    )
+    fitted_model = fit_frame(
+        tmp_path / "fit",
+        training,
+        ModelSpec(
+            model_id="ridge",
+            model_algorithm="ridge_regression",
+            input_factor_columns=("signal",),
+            target_column="label",
+            random_seed=42,
+        ),
+        market_id="a_share",
+    )
+    prediction_input = pd.concat(
+        [
+            training.iloc[: offset + 3].assign(timestamp=timestamp)
+            for offset, timestamp in enumerate(dates)
+        ],
+        ignore_index=True,
+    )
+    prediction_path = tmp_path / "prediction-input.parquet"
+    prediction_input.to_parquet(prediction_path, index=False)
+    published = predict(
+        {
+            "model": str(fitted_model.root),
+            "inputs": str(prediction_path),
+            "input_spec": fitted_model.config["input_spec"],
+            "output": str(tmp_path / "prediction"),
+            "prediction_window": {
+                "start": dates[0].isoformat(),
+                "end": dates[-1].isoformat(),
+            },
+            "sample_role": "validation",
+        }
+    )
+    prediction, _ = read_predictions(published)
     rows = []
     for offset, timestamp in enumerate(dates):
         count = offset + 3
         assets = [f"synthetic_{index:06d}" for index in range(count)]
-        prediction = pd.DataFrame(
-            {"timestamp": timestamp, "family_id": "a_share", "asset_id": assets}
+        alpha = (
+            prediction.loc[prediction.timestamp.eq(timestamp)]
+            .set_index("asset_id")["prediction_rank_score"]
+            .reindex(assets)
         )
-        _add_a_share_scores(prediction, np.arange(count, dtype="float64"))
-        alpha = prediction.set_index("asset_id")["alpha_score"]
         returns = (
             intercept
             + 0.2 * alpha.to_numpy()
@@ -71,7 +119,10 @@ def test_rank_and_open_return_roundoff_survives_final_json_and_freeze(
         inputs, as_of=pd.Timestamp("2023-12-31"), scheduled_intervals=intervals
     )
     actual = inputs.holding_return.to_numpy()
-    fitted = calibration.intercept + calibration.slope * inputs.alpha_score.to_numpy()
+    fitted = (
+        calibration.intercept
+        + calibration.slope * inputs.prediction_rank_score.to_numpy()
+    )
     within_resolution = np.abs(actual - fitted) <= 8 * np.finfo(
         np.float64
     ).eps * np.maximum(np.abs(actual), np.abs(fitted))
@@ -107,10 +158,10 @@ def test_rank_and_open_return_roundoff_survives_final_json_and_freeze(
     for column, field in _ALPHA_DIAGNOSTICS.items():
         frame[column] = pd.Series([None] * len(frame), dtype=object)
         frame.loc[frame.asset_id.eq("__cash__"), column] = getattr(calibration, field)
-    envelope = _alpha_envelope("2023-12-31")
+    envelope = _alpha_metadata("2023-12-31")
     root = write_test_sessions(
         tmp_path / "portfolio",
-        envelope=envelope,
+        **envelope,
         ledger_chunks=(frame,),
         final_calibration=lambda: _alpha_payload(calibration, envelope),
     )
@@ -122,7 +173,7 @@ def test_rank_and_open_return_roundoff_survives_final_json_and_freeze(
         saved["calibration"]["slope_standard_error"] == calibration.slope_standard_error
     )
     assert saved["calibration"]["slope_t_statistic"] == calibration.slope_t_statistic
-    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    artifact = read_portfolio_ledger_artifact(root)
     frozen, _ = frozen_alpha_calibration(
         artifact.final_alpha_calibration,
         cutoff=pd.Timestamp("2023-12-31"),

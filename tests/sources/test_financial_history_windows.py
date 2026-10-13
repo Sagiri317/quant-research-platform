@@ -1,71 +1,41 @@
-from __future__ import annotations
-
-import hashlib
-from dataclasses import replace
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
-from quant_research_platform.contracts.targets import ProducerBinding, ProducerKind
-from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.profiles.research import research_profile
-from quant_research_platform.research.protocols.a_share import DATA_START
 from quant_research_platform.sources.choice.fields import FINANCIAL_FIELDS
 from quant_research_platform.sources.choice.raw_exports import choice_session
-from quant_research_platform.sources.csmar.interim import InterimImportResult
-from quant_research_platform.storage.datasets.reading import (
-    open_dataset_session,
-    read_dataset,
-)
-from quant_research_platform.storage.datasets.writing import write_dataset
+from quant_research_platform.sources.prepare import prepare_source
+from quant_research_platform.storage.datasets import read_dataset
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.workflows import operations
+from tests.helpers.a_share_sources import (
+    _prepare,
+    _synthetic_interim_frames,
+    _write_inputs,
+)
 from tests.helpers.choice_raw import SDK, response, write_css
-from tests.markets.a_share.test_target_dag_chain import _synthetic_interim_frames
 
 
-def test_financial_history_window_preserves_formal_research_and_early_requests():
-    profile = research_profile()
-    protocol = profile.protocol("fusion_nf_core")
-    spec = profile.interim.get("financial_income")
-    window = TimeWindow("2020-01-01", "2020-05-08")
-    assert protocol.target_window("data materialize", spec, window) == TimeWindow(
-        DATA_START, window.end
-    )
-    timestamps = TimeWindow(pd.Timestamp(window.start), pd.Timestamp(window.end))
-    assert protocol.target_window("data materialize", spec, timestamps) == TimeWindow(
-        pd.Timestamp(DATA_START), pd.Timestamp(window.end)
-    )
-    early = TimeWindow("2010-01-01", "2010-12-31")
-    assert protocol.target_window("dataset build", spec, early) == early
-    assert protocol.target_window("research run", spec, window) == TimeWindow(
-        "2011-01-01", "2023-12-31"
-    )
-    assert (
-        protocol.target_window(
-            "dataset build", profile.processed.get("fundamental_pit"), window
-        )
-        == window
-    )
-
-
-@pytest.mark.parametrize("action", ["data materialize", "dataset build"])
-def test_public_financial_windows_keep_choice_history_and_output_identity(
-    tmp_path, action
+@pytest.mark.parametrize("year", (2010, 2020))
+def test_explicit_financial_windows_keep_choice_history_and_point_in_time_revisions(
+    tmp_path,
+    year,
 ):
-    base = research_profile()
+    previous = year - 1
     raw_layout = StorageLayout(tmp_path / "raw-project")
     fields = tuple(field for mapping in FINANCIAL_FIELDS.values() for field in mapping)
     with choice_session(SDK(response())) as session:
         for period, first, value in (
-            ("2019-03-31", "2019-04-20", 1.0),
-            ("2019-12-31", "2020-04-20", 4.0),
-            ("2020-03-31", "2020-04-30", 5.0),
+            (f"{previous}-03-31", f"{previous}-04-20", 1.0),
+            (f"{previous}-12-31", f"{year}-04-20", 4.0),
+            (f"{year}-03-31", f"{year}-04-30", 5.0),
         ):
             codes = (
-                ("000001.SZ",) if period == "2019-03-31" else ("000001.SZ", "000002.SZ")
+                ("000001.SZ",)
+                if period == f"{previous}-03-31"
+                else ("000001.SZ", "000002.SZ")
             )
-            correction = "2020-05-05" if period == "2019-12-31" else None
+            correction = f"{year}-05-05" if period == f"{previous}-12-31" else None
             write_css(
                 session,
                 raw_layout,
@@ -91,102 +61,71 @@ def test_public_financial_windows_keep_choice_history_and_output_identity(
                         },
                         branch=branch,
                     )
-    sessions = pd.bdate_range("2019-01-02", "2020-05-08")
+    sessions = pd.bdate_range(f"{previous}-01-02", f"{year}-05-08")
     frames = _synthetic_interim_frames(sessions)
 
-    def producer(**kwargs):
-        data_id = kwargs["data_ids"][0]
-        spec = base.interim.get(data_id)
-        layout = kwargs["layout"]
-        root = layout.target_root(
-            data_id, layout.interim_data_root(spec.source_id, data_id)
-        )
-        write_dataset(
-            root,
-            frames[data_id],
-            spec=spec,
-            instance_metadata=kwargs["instance_metadata"],
-        )
-        return InterimImportResult({data_id: root}, ())
-
-    bindings = {
-        data_id: ProducerBinding(
-            ProducerKind.INTERIM,
-            producer,
-            source_identity=lambda _root, selected: hashlib.sha256(
-                selected.encode()
-            ).hexdigest(),
-        )
-        for data_id in frames
-    }
-    profile = replace(base, producer_bindings={**base.producer_bindings, **bindings})
-    layout = StorageLayout(tmp_path / "output")
+    inputs = _write_inputs(tmp_path / "source", frames)
+    financial_ids = (
+        "financial_income",
+        "financial_balance",
+        "financial_cashflow",
+        "financial_first_disclosure",
+    )
+    financial_paths = {name: str(tmp_path / "choice" / name) for name in financial_ids}
+    prepare_source(
+        {
+            "source_id": "choice",
+            "raw_root": str(raw_layout.raw_source_root("choice")),
+            "outputs": financial_paths,
+            "start_date": f"{previous}-01-01",
+            "end_date": f"{year}-05-08",
+        }
+    )
+    inputs.update({key: Path(value) for key, value in financial_paths.items()})
+    income = read_dataset(inputs["financial_income"])
+    assert income.report_period.min() == pd.Timestamp(f"{previous}-03-31")
+    assert income.is_corrected.any()
     observations = []
-    source_identities = []
-    for start in ("2019-01-01", "2020-01-01"):
-        request = dict(
-            profile=profile,
-            layout=layout,
-            raw_root=raw_layout.project_root / "data/raw",
-            start_date=start,
-            end_date="2020-05-08",
+    common_outputs = []
+    for index, start in enumerate((f"{previous}-01-01", f"{year}-01-01")):
+        prepared = dict(inputs)
+        for name in ("market_panel_1d", "fundamental_pit"):
+            prepared[name] = _prepare(
+                tmp_path / f"prepared-{index}",
+                name,
+                prepared,
+                pd.Timestamp(start),
+                sessions[-1],
+            )
+        saved = read_dataset(prepared["fundamental_pit"])
+        assert saved.timestamp.ge(start).all()
+        assert saved.timestamp.le(f"{year}-05-08").all()
+        common_outputs.append(
+            saved.loc[saved.timestamp.ge(f"{year}-01-01")].reset_index(drop=True)
         )
-        result = (
-            operations.data_materialize(**request, data_ids=("fundamental_pit",))
-            if action == "data materialize"
-            else operations.dataset_build(**request, dataset_id="fusion_nf_core")
+        selected = saved.loc[saved.asset_id.eq("000001")].set_index("timestamp")
+        observations.append(
+            selected.loc[
+                pd.to_datetime([f"{year}-05-04", f"{year}-05-05", f"{year}-05-06"]),
+                "operating_revenue_ttm",
+            ].tolist()
         )
-        assert result["status"] == "COMPLETE", result["status"]
-        targets = {item["target_id"]: item for item in result["target_results"]}
-        source_identities.append(targets["financial_income"]["instance_identity"])
-        for data_id, expected_start in (
-            ("financial_income", "2011-01-01"),
-            ("fundamental_pit", start),
-        ):
-            spec = (
-                profile.interim if data_id == "financial_income" else profile.processed
-            ).get(data_id)
-            logical = (
-                layout.interim_data_root(spec.source_id, data_id)
-                if data_id == "financial_income"
-                else layout.processed_data_root(spec.market_id, spec.kind, data_id)
-            )
-            root = layout.instance_root(logical, targets[data_id]["instance_identity"])
-            persisted = open_dataset_session(root, columns=None, time_window=None)
-            envelope = persisted.manifest["common_manifest"]
-            assert (
-                envelope["instance_identity"] == targets[data_id]["instance_identity"]
-            )
-            assert envelope["research_window"]["start"] == expected_start
-            assert envelope["research_window"]["end"] == "2020-05-08"
-            saved = read_dataset(root)
-            if data_id == "financial_income":
-                assert saved.report_period.min() == pd.Timestamp("2019-03-31")
-                assert saved.is_corrected.any()
-            else:
-                assert saved.timestamp.ge(start).all()
-                assert saved.timestamp.le("2020-05-08").all()
-                selected = saved.loc[saved.asset_id.eq("000001")].set_index("timestamp")
-                observations.append(
-                    selected.loc[
-                        pd.to_datetime(["2020-05-04", "2020-05-05", "2020-05-06"]),
-                        "operating_revenue_ttm",
-                    ].tolist()
-                )
-                incomplete = saved.loc[
-                    saved.asset_id.eq("000002") & saved.timestamp.ge("2020-05-04")
-                ]
-                assert not incomplete.empty
-                assert incomplete.operating_revenue_ttm.isna().all()
-        if action == "dataset build":
-            root = layout.instance_root(
-                layout.research_dataset_root("a_share", "fusion_nf_core"),
-                targets["fusion_nf_core"]["instance_identity"],
-            )
-            dataset = read_dataset(root)
-            assert (
-                dataset.timestamp.ge(start).all()
-                and dataset.timestamp.le("2020-05-08").all()
-            )
+        incomplete = saved.loc[
+            saved.asset_id.eq("000002") & saved.timestamp.ge(f"{year}-05-04")
+        ]
+        assert not incomplete.empty
+        assert incomplete.operating_revenue_ttm.isna().all()
+    pd.testing.assert_frame_equal(*common_outputs, check_exact=True)
     assert observations == [[8.0, 8.0, 10.0], [8.0, 8.0, 10.0]]
-    assert source_identities[0] == source_identities[1]
+    early = read_dataset(
+        _prepare(
+            tmp_path / "before-correction",
+            "fundamental_pit",
+            prepared,
+            pd.Timestamp(f"{year}-05-04"),
+            pd.Timestamp(f"{year}-05-04"),
+        )
+    )
+    expected = saved.loc[saved.timestamp.eq(f"{year}-05-04")].reset_index(drop=True)
+    pd.testing.assert_frame_equal(early, expected, check_exact=True)
+    assert early.loc[early.asset_id.eq("000001"), "operating_revenue_ttm"].eq(8.0).all()

@@ -17,11 +17,8 @@ from quant_research_platform.contracts.evaluations import (
     EvaluationSpec,
 )
 from quant_research_platform.contracts.outputs import (
-    OutputSpec,
     validate_output_identifier,
 )
-from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.policy.share_safety import (
     evidence_json_value_unsafe_reason,
 )
@@ -29,9 +26,7 @@ from quant_research_platform.policy.share_safety import (
 _OUTPUT_MANIFEST_KEYS = frozenset(
     {
         "schema_id",
-        "output_id",
         "output_definition_id",
-        "run_id",
         "metadata",
         "files",
     }
@@ -43,7 +38,7 @@ _OUTPUT_DEFINITION_FILES = {
 }
 
 
-def validate_output_manifest_business_envelope(
+def validate_output_manifest(
     value: object,
 ) -> dict[str, object]:
     """Validate the persisted output-manifest business envelope."""
@@ -53,14 +48,6 @@ def validate_output_manifest_business_envelope(
     if value["schema_id"] != "qrp-output-manifest":
         raise ValueError("output_manifest_schema_id_mismatch")
 
-    output_id = value["output_id"]
-    if type(output_id) is not str:
-        raise ValueError("output_manifest_output_id_invalid")
-    try:
-        validate_output_identifier(output_id)
-    except ValueError as exc:
-        raise ValueError("output_manifest_output_id_invalid") from exc
-
     output_definition_id = value["output_definition_id"]
     if type(output_definition_id) is not str:
         raise ValueError("output_manifest_definition_id_invalid")
@@ -68,18 +55,8 @@ def validate_output_manifest_business_envelope(
         validate_output_identifier(output_definition_id)
     except ValueError as exc:
         raise ValueError("output_manifest_definition_id_invalid") from exc
-    if output_id == output_definition_id:
-        raise ValueError("output_manifest_output_id_invalid")
     if output_definition_id not in _OUTPUT_DEFINITION_FILES:
         raise ValueError("output_manifest_definition_id_invalid")
-
-    run_id = value["run_id"]
-    if type(run_id) is not str:
-        raise ValueError("output_manifest_run_id_invalid")
-    try:
-        validate_run_id(run_id)
-    except ValueError as exc:
-        raise ValueError("output_manifest_run_id_invalid") from exc
 
     metadata = value["metadata"]
     if type(metadata) is not dict or _metadata_contains_schema_id(metadata):
@@ -99,17 +76,11 @@ def validate_output_manifest_business_envelope(
     evidence_payload: dict[str, object] = {}
     if output_definition_id == "prediction_outputs":
         model_metadata = metadata["model_metadata"]
-        if "model_artifact_id" in model_metadata:
-            evidence_payload = {
-                "model_artifact_id": model_metadata["model_artifact_id"],
-                "model_artifact_identity": model_metadata["model_artifact_identity"],
-            }
-        else:
-            evidence_payload = {
-                "hyperparameters": model_metadata["hyperparameters"],
-                "resolved_hyperparameters": model_metadata["resolved_hyperparameters"],
-                "dependency_status": model_metadata["dependency_status"],
-            }
+        evidence_payload = {
+            "hyperparameters": model_metadata["hyperparameters"],
+            "resolved_hyperparameters": model_metadata["resolved_hyperparameters"],
+            "dependency_status": model_metadata["dependency_status"],
+        }
     if evidence_json_value_unsafe_reason(evidence_payload) is not None:
         raise ValueError("output_manifest_metadata_invalid")
 
@@ -149,19 +120,17 @@ def _metadata_contains_schema_id(value: object) -> bool:
 
 def output_manifest_payload(
     *,
-    output_spec: OutputSpec,
+    definition_id: str,
     metadata: Mapping[str, object],
     files: Iterable[str],
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "schema_id": "qrp-output-manifest",
-        "output_id": output_spec.output_id,
-        "output_definition_id": output_spec.output_definition_id,
-        "run_id": output_spec.run_id,
+        "output_definition_id": definition_id,
         "metadata": dict(metadata),
         "files": list(files),
     }
-    validate_output_manifest_business_envelope(payload)
+    validate_output_manifest(payload)
     return payload
 
 
@@ -187,38 +156,14 @@ def _evaluation_diagnostics_payload(
     }
 
 
-def prediction_output_metadata(
-    *,
-    spec: PredictionSpec,
-    model_metadata: dict[str, object],
-    prediction_metadata: dict[str, object],
-) -> dict[str, object]:
-    return {
-        "prediction_id": spec.prediction_id,
-        "model_id": spec.model_id,
-        "research_dataset_id": spec.research_dataset_id,
-        "prediction_mode": spec.prediction_mode,
-        "is_oos": spec.is_oos,
-        "train_end": spec.train_end,
-        "test_start": spec.test_start,
-        "test_end": spec.test_end,
-        "is_final_oos_window": spec.is_final_oos_window,
-        "training_asset_ids": list(spec.training_asset_ids),
-        "evaluation_asset_ids": list(spec.evaluation_asset_ids),
-        "prediction_column": spec.prediction_column,
-        "primary_key": list(spec.primary_key),
-        "sample_filter_mode": spec.sample_filter_mode,
-        "model_metadata": model_metadata,
-        "prediction_metadata": prediction_metadata,
-    }
-
-
 def evaluation_output_metadata(
     *,
     spec: EvaluationSpec,
     evaluation_diagnostics: EvaluationDiagnostics,
+    science: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     return {
+        **(dict(science) if science is not None else {}),
         "evaluation_id": spec.evaluation_id,
         "run_type": spec.run_type,
         "market_id": str(spec.market_id),

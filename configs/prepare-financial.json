@@ -1,0 +1,18 @@
+{
+  "market_id": "a_share",
+  "data_id": "fundamental_pit",
+  "inputs": {
+    "financial_balance": "results/financial-balance",
+    "trading_calendar": "results/calendar",
+    "financial_first_disclosure": "results/first-disclosure",
+    "market_panel_1d": "results/panel"
+  },
+  "factor_columns": [
+    "book_to_market"
+  ],
+  "time_window": {
+    "start": "2014-01-01",
+    "end": "2025-12-31"
+  },
+  "output_root": "results/book-to-market-pit"
+}

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from collections import UserDict
 from dataclasses import replace
 from datetime import date
 from decimal import Decimal, localcontext
@@ -339,14 +338,10 @@ def test_physical_schema_payload_rejects_invalid_contract_shapes() -> None:
 
 
 def test_dataset_schema_validators_reject_mutated_runtime_contracts() -> None:
-    with pytest.raises(TypeError, match="invalid_dataset_instance_metadata"):
-        dataset_schema.merge_dataset_instance_metadata({}, [])
-    with pytest.raises(ValueError, match="unsupported_dataset_instance_metadata_key"):
-        dataset_schema.merge_dataset_instance_metadata({}, {1: "value"})
-    with pytest.raises(ValueError, match="invalid_dataset_identity"):
-        dataset_schema.dataset_identity_payload({}, {})
-    with pytest.raises(ValueError, match="unsupported_dataset_instance_metadata_key"):
-        dataset_schema.validate_dataset_manifest_instance_metadata({"unknown": True})
+    with pytest.raises(TypeError, match="invalid_dataset_metadata"):
+        dataset_schema.merge_dataset_metadata({}, [])
+    with pytest.raises(ValueError, match="unsupported_dataset_metadata_key"):
+        dataset_schema.merge_dataset_metadata({}, {1: "value"})
     with pytest.raises(ValueError, match="dataset_spec_type_invalid"):
         dataset_schema.validate_dataset_spec(object())
     for manifest in (
@@ -960,7 +955,10 @@ def test_empty_unordered_category_domain_unions_with_nonempty_domain(
         ]
         assert len({path.parent for path in session.all_paths}) == 1
         assert tuple(
-            session.metadata_for(path).row_count for path in session.all_paths
+            __import__("pyarrow.parquet", fromlist=["ParquetFile"])
+            .read_metadata(path)
+            .num_rows
+            for path in session.all_paths
         ) == (1, 0)
         assert session.logical_dtypes == manifest["logical_dtypes"]
         assert read_dataset(root)["asset_id"].astype("string").tolist() == ["live-only"]
@@ -1054,48 +1052,6 @@ def test_unordered_category_domain_uses_live_exact_index_namespace(
     )
     assert observed_counts == [len(categories)]
     assert len(read_dataset(root)["asset_id"].cat.categories) == len(categories)
-
-
-def test_instance_metadata_preserves_typed_mapping_and_error_order() -> None:
-    identities = UserDict(
-        {
-            "input": UserDict(
-                {"data_id": "input", "spec_hash": "a" * 64, "manifest_hash": "b" * 64}
-            )
-        }
-    )
-    archive = UserDict(
-        {"schema_id": "archive", "artifact_id": "first", "manifest_hash": "c" * 64}
-    )
-    metadata = UserDict(
-        {"input_dataset_identities": identities, "source_artifact_identity": archive}
-    )
-    expected = {
-        "input_dataset_identities": {
-            "input": {
-                "data_id": "input",
-                "spec_hash": "a" * 64,
-                "manifest_hash": "b" * 64,
-            }
-        },
-        "source_artifact_identity": {
-            "schema_id": "archive",
-            "artifact_id": "first",
-            "manifest_hash": "c" * 64,
-        },
-    }
-    actual = dataset_schema.merge_dataset_instance_metadata({}, metadata)
-    assert actual == expected
-    actual["input_dataset_identities"]["input"]["spec_hash"] = "d" * 64
-    assert identities["input"]["spec_hash"] == "a" * 64
-    with pytest.raises(ValueError, match="invalid_input_dataset_identities_metadata"):
-        dataset_schema.merge_dataset_instance_metadata(
-            {},
-            {
-                "input_dataset_identities": UserDict({"input": {"data_id": "wrong"}}),
-                "producer_diagnostics": object(),
-            },
-        )
 
 
 @pytest.mark.parametrize(

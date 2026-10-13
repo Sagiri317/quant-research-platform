@@ -417,6 +417,20 @@ def _execution_fee(quantity, price, fee_bps):
     return fee
 
 
+def _position_headroom(limit, quantity, reserved=0):
+    """Round the exact remaining exposure down to an admissible float order size."""
+    capacity = max(
+        Fraction(), Fraction(limit) - Fraction(quantity) - Fraction(reserved)
+    )
+    try:
+        rounded = float(capacity)
+    except OverflowError:
+        return math.nextafter(math.inf, 0.0)
+    if Fraction(rounded) > capacity:
+        rounded = math.nextafter(rounded, 0.0)
+    return rounded
+
+
 def _taker_order_quantity(
     state, *, prediction, config, buy_limit, sell_limit, funding_per_unit
 ):
@@ -587,7 +601,7 @@ def simulate_taker(
     blocked_decisions = undefined_decisions = 0
     funding_required_decisions = 0
     orders = deque()
-    reserved_buy = reserved_sell = 0.0
+    reserved_buy = reserved_sell = Fraction()
     created_orders = 0
     filled_orders = 0
     unfilled_quantity = 0.0
@@ -694,9 +708,9 @@ def simulate_taker(
             ) = order
             effective_time_ns = effective_time * _NANOSECONDS_PER_MILLISECOND
             if signed_quantity > 0:
-                reserved_buy -= signed_quantity
+                reserved_buy -= Fraction(signed_quantity)
             else:
-                reserved_sell -= -signed_quantity
+                reserved_sell += Fraction(signed_quantity)
             apply_funding(effective_time_ns)
             requested = abs(signed_quantity)
             remaining = requested
@@ -726,53 +740,40 @@ def simulate_taker(
                         break
                 levels_consumed = len(takes)
                 if takes:
-                    amounts = [float(quantity) * price for quantity, price in takes]
-                    exact_totals = exact_remaining or any(
-                        not math.isfinite(amount)
-                        or abs(amount) < float.fromhex("0x1p-1022")
-                        for amount in amounts
+                    exact_filled = sum(
+                        (Fraction(quantity) for quantity, _ in takes), Fraction()
                     )
-                    if not exact_totals:
-                        filled = math.fsum(quantity for quantity, _ in takes)
-                        try:
-                            notional = math.fsum(amounts)
-                        except OverflowError:
-                            exact_totals = True
-                        else:
-                            fill_price = (
-                                takes[0][1] if len(takes) == 1 else notional / filled
-                            )
-                    if exact_totals:
-                        exact_filled = sum(Fraction(quantity) for quantity, _ in takes)
-                        exact_notional = sum(
+                    exact_notional = sum(
+                        (
                             Fraction(quantity) * Fraction(price)
                             for quantity, price in takes
-                        )
-                        try:
-                            filled = float(exact_filled)
-                            notional = float(exact_notional)
-                            fill_price = float(exact_notional / exact_filled)
-                        except OverflowError:
-                            raise ValueError(
-                                "portfolio_execution_fill_invalid"
-                            ) from None
+                        ),
+                        Fraction(),
+                    )
+                    execution_price = exact_notional / exact_filled
+                    try:
+                        filled = float(exact_filled)
+                        notional = float(exact_notional)
+                        fill_price = float(execution_price)
+                    except OverflowError:
+                        raise ValueError("portfolio_execution_fill_invalid") from None
                     filled_orders += 1
                     try:
                         fee = float(
                             _execution_fee(
-                                exact_notional if exact_totals else notional,
+                                exact_notional,
                                 1.0,
                                 config.taker_fee_bps,
                             )
                         )
                     except OverflowError:
                         raise ValueError("hft_execution_fee_unrepresentable") from None
-                    signed = 1.0 if signed_quantity > 0 else -1.0
+                    signed = 1 if signed_quantity > 0 else -1
                     fill_id = economics.fill(
                         timestamp_ns=effective_time_ns,
                         order_id=str(order_id),
-                        quantity=signed * filled,
-                        price=fill_price,
+                        quantity=signed * exact_filled,
+                        price=execution_price,
                         mark_price=current_mid,
                         fee=fee,
                     )
@@ -847,7 +848,7 @@ def simulate_taker(
                 cancelled_orders += len(orders)
                 unfilled_quantity += cancelled_quantity
                 orders.clear()
-                reserved_buy = reserved_sell = 0.0
+                reserved_buy = reserved_sell = Fraction()
             mark = (
                 _mid(latest_state)
                 if latest_state is not None
@@ -1003,17 +1004,15 @@ def simulate_taker(
                                 latest_state,
                                 prediction=prediction,
                                 config=config,
-                                buy_limit=max(
-                                    0.0,
-                                    config.position_size
-                                    - economics.quantity
-                                    - reserved_buy,
+                                buy_limit=_position_headroom(
+                                    config.position_size,
+                                    economics.quantity,
+                                    reserved_buy,
                                 ),
-                                sell_limit=max(
-                                    0.0,
-                                    config.position_size
-                                    + economics.quantity
-                                    - reserved_sell,
+                                sell_limit=_position_headroom(
+                                    config.position_size,
+                                    -economics.quantity,
+                                    reserved_sell,
                                 ),
                                 funding_per_unit=funding_per_unit,
                             )
@@ -1075,9 +1074,9 @@ def simulate_taker(
                     )
                 )
                 if selected > 0:
-                    reserved_buy += selected
+                    reserved_buy += Fraction(selected)
                 else:
-                    reserved_sell -= selected
+                    reserved_sell -= Fraction(selected)
                 advance(decision_ns)
         if decision_windows_ns is not None:
             while window_index < len(decision_windows_ns):
@@ -1146,7 +1145,7 @@ def simulate_taker(
         "no_eligible_decisions": equity_rows == 0,
         "gross_pnl": last_gross,
         "net_pnl": last_net,
-        "max_abs_position": max_abs_position,
+        "max_abs_position": float(max_abs_position),
         "market_event_count": market_event_count,
         "prediction_horizon_ms": prediction_horizon_ms,
         "selection_status": "BLOCKED"
@@ -1197,9 +1196,9 @@ class _MakerOrder:
     order_id: int
     side: str
     price_index: int
-    remaining: float
-    queue_ahead: float
-    initial_queue_ahead: float
+    remaining: Fraction
+    queue_ahead: Fraction
+    initial_queue_ahead: Fraction
     segment_id: str
     trade_observation_id: str
     price_unit: str
@@ -1229,7 +1228,8 @@ def _maker_join(order, state, observed_coverage, trade_coverage):
     ):
         return "activation_queue_depth_unknown"
     order.queue_ahead = sum(
-        quantity for tick, quantity in levels if tick == order.price_index
+        (Fraction(quantity) for tick, quantity in levels if tick == order.price_index),
+        Fraction(),
     )
     order.initial_queue_ahead = order.queue_ahead
     return None
@@ -1249,15 +1249,14 @@ def _maker_trade_fill(order, trade):
         order.side == "sell" and trade.price_index > order.price_index
     )
     if through:
-        order.queue_ahead = 0.0
+        order.queue_ahead = Fraction()
         return order.remaining, "trade_through"
     if trade.price_index != order.price_index:
         return 0.0, "different_trade_price"
-    consumed = min(order.queue_ahead, trade.visible_quantity)
+    visible = Fraction(trade.visible_quantity)
+    consumed = min(order.queue_ahead, visible)
     order.queue_ahead -= consumed
-    return min(
-        order.remaining, trade.visible_quantity - consumed
-    ), "same_price_depletion"
+    return min(order.remaining, visible - consumed), "same_price_depletion"
 
 
 def _maker_next_time(event_time, command_time):
@@ -1298,9 +1297,9 @@ def _maker_new_order(order_id, side, quantity, state, row, latency_ms):
         order_id=order_id,
         side=side,
         price_index=(state.bids if side == "buy" else state.asks)[0][0],
-        remaining=quantity,
-        queue_ahead=0.0,
-        initial_queue_ahead=0.0,
+        remaining=Fraction(quantity),
+        queue_ahead=Fraction(),
+        initial_queue_ahead=Fraction(),
         segment_id=row["book_segment_id"],
         trade_observation_id=row["trade_observation_id"],
         price_unit=state.price_unit,
@@ -1406,7 +1405,7 @@ class MakerCalibration:
         if replace_quantity is not None:
             candidate = mapped(new_order) if replace_quantity > 0 else None
             if candidate is not None:
-                candidate.remaining = replace_quantity
+                candidate.remaining = Fraction(replace_quantity)
             pending.append(
                 (start + new_order.effective_at_ns - decision_ns, side, candidate)
             )
@@ -1545,8 +1544,13 @@ class MakerCalibration:
         exact = isinstance(fee_per_unit, Fraction)
         keep_gain = cancel_gain = 0.0
         sample_count = 0
-        # Nested source windows make the current unit divide the frozen unit.
-        history_scale = (self.price_unit / Fraction(new_order.price_unit)).numerator
+        # Explicit source collections need not be nested. Historical integer
+        # coordinates are reusable only when the current unit exactly divides
+        # their frozen unit; taking a fractional ratio's numerator loses prices.
+        ratio = self.price_unit / Fraction(new_order.price_unit)
+        if ratio.denominator != 1:
+            raise ValueError("hft_maker_calibration_price_unit_incompatible")
+        history_scale = ratio.numerator
 
         def records():
             nonlocal keep_gain, cancel_gain, sample_count, exact
@@ -1561,7 +1565,7 @@ class MakerCalibration:
                 for replacement in (None, limit):
                     if replacement is None and active_order is None and not commands:
                         continue
-                    cumulative = 0.0
+                    cumulative = Fraction()
                     response = self._response(
                         sample,
                         state=state,
@@ -1749,7 +1753,7 @@ def replay_maker_calibration(
                 available_ns=sample["available_ns"],
                 prediction=sample["prediction"],
                 observed_return=sample["observed_return"],
-                filled=order_quantity - order.remaining,
+                filled=float(Fraction(order_quantity) - order.remaining),
                 quote_quantity=order_quantity,
                 terminal_reason=sample["terminal_reason"] or "expired",
                 book_segment_id=order.segment_id,
@@ -2008,6 +2012,10 @@ def simulate_maker(
         config.inventory_target is None or config.inventory_skew is None
     ):
         raise ValueError("hft_maker_inventory_parameters_required")
+    if calibrations is not None and (
+        config.inventory_target is not None or config.inventory_skew is not None
+    ):
+        raise ValueError("hft_maker_calibrated_inventory_parameters_invalid")
     observation_start = (
         None if observation_window_ns is None else observation_window_ns[0]
     )
@@ -2177,7 +2185,7 @@ def simulate_maker(
                 if quantity <= 0:
                     continue
                 price = index_to_price(order.price_index, order.price_unit)
-                sign = 1.0 if side == "buy" else -1.0
+                sign = 1 if side == "buy" else -1
                 try:
                     fee = float(_execution_fee(quantity, price, config.maker_fee_bps))
                 except OverflowError:
@@ -2191,11 +2199,11 @@ def simulate_maker(
                     "side": side,
                     "fill_reason": reason,
                     "fill_price": price,
-                    "fill_qty": quantity,
-                    "notional": quantity * price,
+                    "fill_qty": float(quantity),
+                    "notional": float(quantity * Fraction(price)),
                     "fee": fee,
-                    "estimated_queue_ahead_at_join": order.initial_queue_ahead,
-                    "estimated_queue_ahead_before_fill": order.queue_ahead,
+                    "estimated_queue_ahead_at_join": float(order.initial_queue_ahead),
+                    "estimated_queue_ahead_before_fill": float(order.queue_ahead),
                     "spread_capture_per_unit": sign * (mid - price),
                     "markout_target_time_ms": trade.observed_time_ns
                     // _NANOSECONDS_PER_MILLISECOND
@@ -2344,7 +2352,7 @@ def simulate_maker(
                                 diagnostic_asset,
                                 None,
                                 "cancelled_order_quantity",
-                                number=quantity,
+                                number=float(quantity),
                             ),
                         )
                         if closing
@@ -2471,7 +2479,7 @@ def simulate_maker(
                 if not funding_known:
                     blocked_decisions += 1
             diagnostics = []
-            for side, sign in (("buy", 1.0), ("sell", -1.0)):
+            for side, sign in (("buy", 1), ("sell", -1)):
                 desired_price = (
                     None
                     if not valid
@@ -2479,7 +2487,9 @@ def simulate_maker(
                         0
                     ]
                 )
-                headroom = max(0.0, config.max_position - sign * economics.quantity)
+                headroom = _position_headroom(
+                    config.max_position, sign * economics.quantity
+                )
                 allowed = (
                     valid
                     and gate
@@ -2495,9 +2505,10 @@ def simulate_maker(
                     if not allowed:
                         return 0.0, 0.0
                     limit = min(config.order_quantity, limit)
-                    skew = (
-                        economics.quantity - config.inventory_target
-                    ) / config.max_position
+                    skew = float(
+                        (economics.quantity - Fraction(config.inventory_target))
+                        / Fraction(config.max_position)
+                    )
                     return min(
                         limit,
                         config.order_quantity
@@ -2511,12 +2522,20 @@ def simulate_maker(
                 pending_side = [order for _time, _side, order in side_commands]
                 current = pending_side[-1] if pending_side else active.get(side)
                 reserved = sum(
-                    order.remaining for order in pending_side if order is not None
+                    (
+                        Fraction(order.remaining)
+                        for order in pending_side
+                        if order is not None
+                    ),
+                    Fraction(),
                 )
                 if side in active:
-                    reserved += active[side].remaining
+                    reserved += Fraction(active[side].remaining)
                 if config.latency_ms == 0:
-                    reserved = 0.0
+                    reserved = Fraction()
+                available = _position_headroom(
+                    config.max_position, sign * economics.quantity, reserved
+                )
                 keep = (
                     current is not None
                     and quantity > 0
@@ -2529,9 +2548,7 @@ def simulate_maker(
                         proposed = _maker_new_order(
                             0,
                             side,
-                            min(config.order_quantity, max(0.0, headroom - reserved))
-                            if allowed
-                            else 0.0,
+                            min(config.order_quantity, available) if allowed else 0.0,
                             latest_state,
                             row,
                             config.latency_ms,
@@ -2551,7 +2568,7 @@ def simulate_maker(
                             quantity = current.remaining
                 if not keep:
                     if calibrations is None:
-                        quantity, gain = choose(max(0.0, headroom - reserved))
+                        quantity, gain = choose(available)
                     if quantity > 0 or current is not None:
                         order = None
                         if quantity > 0:
@@ -2599,7 +2616,7 @@ def simulate_maker(
                             diagnostic_asset,
                             None,
                             f"maker_{side}_requested_quantity",
-                            number=quantity,
+                            number=float(quantity),
                         ),
                         PortfolioDiagnostic(
                             diagnostic_asset,
@@ -2640,7 +2657,7 @@ def simulate_maker(
             censored_count = len(censored_orders)
             censored_pending = len(commands)
             censored_zero_fill = sum(not order.had_fill for order in censored_orders)
-            censored_quantity = sum(order.remaining for order in censored_orders)
+            censored_quantity = float(sum(order.remaining for order in censored_orders))
             end_timestamp = max(
                 economics.last_timestamp, last_event_time_ns, observation_start or 0
             )
@@ -2691,7 +2708,7 @@ def simulate_maker(
         "no_eligible_decisions": equity_rows == 0,
         "gross_pnl": last_gross,
         "net_pnl": last_net,
-        "max_abs_position": max_abs_position,
+        "max_abs_position": float(max_abs_position),
         "inventory_revaluation_pnl": None
         if last_gross is None
         else last_gross - metrics.spread_capture_pnl,

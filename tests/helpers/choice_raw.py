@@ -66,4 +66,7 @@ def write_css(session, layout, *, period, end_date, indicators, data, branch="1"
         "synthetic-official-shape",
         date(2025, 12, 31),
     )
-    return session.fetch(layout, request), request
+    return session.fetch(
+        layout.raw_source_root("choice") / request.endpoint / request.identity(),
+        request,
+    ), request

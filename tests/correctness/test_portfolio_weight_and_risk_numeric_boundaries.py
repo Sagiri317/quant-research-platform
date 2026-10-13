@@ -9,13 +9,11 @@ import pytest
 from quant_research_platform.artifacts.portfolio_ledger import (
     read_portfolio_ledger_artifact,
 )
-from quant_research_platform.contracts.business_manifest import (
-    build_business_manifest_envelope,
-)
 from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_DECISION_REASON_SIMPLE,
     ExecutionAssumptions,
     PortfolioCandidateSpec,
+    PortfolioCapital,
 )
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share import (
@@ -42,6 +40,7 @@ from quant_research_platform.research.portfolios.risk import (
 )
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
 from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers.portfolio_inputs import _processed_specs
 from tests.helpers.portfolio_ledger import (
     ledger_frame,
     write_market_evidence,
@@ -49,7 +48,6 @@ from tests.helpers.portfolio_ledger import (
 )
 from tests.helpers.research_specs import make_demo_research_dataset_spec
 from tests.research.test_portfolio_ledger import _real_fee_schedule
-from tests.workflows.test_portfolio_workflow_integration import _processed_specs
 
 
 @pytest.mark.parametrize("mode", ["long_only", "long_short"])
@@ -327,16 +325,19 @@ def test_native_panel_feeds_risk_state_and_holding_attribution(tmp_path):
     calendar = pd.DataFrame(
         {"calendar_date": dates, "source_market_type": 1, "is_trading_day": True}
     )
+    evidence = write_market_evidence(tmp_path / "source", panel)
     stream = iter_holding_factor_inputs(
         iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
-        layout=layout.with_target_roots(
-            {"market_panel_1d": root, **write_market_evidence(layout, panel)}
-        ),
+        inputs={
+            "panel": root,
+            "market_bars": evidence["market_bars_1d"],
+            "stock_master": evidence["stock_master"],
+            "risk_context": (),
+        },
         calendar=calendar,
         time_window=TimeWindow(dates[0], dates[-1]),
         unified_trading_sessions=unified_trading_sessions,
         style_columns=(),
-        risk_context_target_ids=(),
         benchmark_required=False,
     )
     with closing_iterator(stream):
@@ -403,20 +404,13 @@ def test_native_simple_production_and_ledger_keep_representable_positive_target(
         candidate_id="extreme_capitalization",
         selection_group="global",
         construction="top20_float_cap",
-        prediction_target_id="prediction",
         prediction_selector="champion",
         rebalance_schedule="daily",
         top_quantile=1.0,
         benchmark_id=None,
-        benchmark_weights_target_id=None,
-        research_dataset_id="dataset",
-        market_panel_target_id="panel",
-        execution_mask_target_id="execution",
-        trading_calendar_target_id="calendar",
-        fee_schedule_target_id="fee",
     )
     alpha = dataset.set_index("asset_id").signal
-    account, returns, adv, optimized, delta, _snapshot = production._build_session(
+    account, adv, optimized, delta, _snapshot = production._build_session(
         candidate=candidate,
         decision_timestamp=dates[0],
         next_timestamp=dates[1],
@@ -451,8 +445,8 @@ def test_native_simple_production_and_ledger_keep_representable_positive_target(
     frame = ledger_frame(
         account=account,
         decision_timestamp=dates[0],
-        returns=returns,
-        alpha_score=alpha,
+        returns=pd.Series(0.0, index=alpha.index),
+        prediction_rank_score=alpha,
         adv20=adv,
         enhanced_decision=None,
         benchmark_weights=None,
@@ -460,32 +454,15 @@ def test_native_simple_production_and_ledger_keep_representable_positive_target(
         decision_reason=PORTFOLIO_DECISION_REASON_SIMPLE,
         decision_delta=delta,
     )
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="extreme_capitalization",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": "2023-01-02",
-            "end": "2023-01-04",
-            "access": "development",
-        },
-        upstream_identities={},
-        semantic_metadata={
-            "portfolio_capital": {
-                "candidate_id": "extreme_capitalization",
-                "initial_capital": 1.0,
-                "valuation_currency": "CNY",
-                "valuation_method": "adjusted_notional",
-            }
-        },
-    )
     ledger_root = write_test_sessions(
-        tmp_path / "ledger", envelope=envelope, ledger_chunks=iter((frame,))
+        tmp_path / "ledger",
+        capital=PortfolioCapital(
+            "extreme_capitalization", 1.0, "CNY", "adjusted_notional"
+        ),
+        metadata={"window": {"start": "2023-01-02", "end": "2023-01-04"}},
+        ledger_chunks=iter((frame,)),
     )
-    artifact = read_portfolio_ledger_artifact(
-        ledger_root, expected_identity=ledger_root.name
-    )
+    artifact = read_portfolio_ledger_artifact(ledger_root)
     (batch,) = tuple(artifact.iter_chunks())
     diagnostics = {
         row.name: row.number for row in batch.diagnostics if row.asset_id == "small"

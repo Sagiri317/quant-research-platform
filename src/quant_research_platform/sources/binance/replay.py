@@ -7,6 +7,7 @@ import hashlib
 import heapq
 import json
 import os
+import re
 import stat
 from bisect import bisect_left, insort
 from collections.abc import Callable, Iterator, Sequence
@@ -31,7 +32,6 @@ from quant_research_platform.contracts.order_book import (
     price_to_index,
     validate_price_unit,
 )
-from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.sources.binance.ids import (
     FUTURES_HFT_RECORDING_SCOPE,
@@ -465,54 +465,18 @@ class RecorderRun:
         return ObservationCoverage(self._coverage_index, market_type, data_kind, symbol)
 
 
-@contextmanager
-def _raw_path_session(root: Path) -> Iterator[Callable[[], None]]:
-    raw_root = Path(root)
-
-    def read_root_identity() -> os.stat_result | None:
-        require_unaliased_path(raw_root, error=_RAW_IDENTITY_ERROR)
-        try:
-            metadata = filesystem_stat(raw_root, follow_symlinks=False)
-        except NotADirectoryError as error:
-            raise ValueError(_RAW_IDENTITY_ERROR) from error
-        except FileNotFoundError:
-            return None
-        _reject_raw_reparse(metadata)
-        if not stat.S_ISDIR(metadata.st_mode):
-            raise ValueError(_RAW_IDENTITY_ERROR)
-        return metadata
-
-    root_identity = read_root_identity()
-
-    def verify_root() -> None:
-        current = read_root_identity()
-        if root_identity is None:
-            if current is not None:
-                raise ValueError(_RAW_IDENTITY_ERROR)
-            return
-        if current is None:
-            raise ValueError(_RAW_IDENTITY_ERROR)
-        unchanged = os.path.samestat(root_identity, current)
-        if not unchanged:
-            raise ValueError(_RAW_IDENTITY_ERROR)
-
-    primary = None
+def _validate_raw_path(root: Path) -> None:
+    """Validate the selected source path once, without a lifetime snapshot."""
+    raw_root = require_unaliased_path(Path(root), error=_RAW_IDENTITY_ERROR)
     try:
-        yield verify_root
-    except BaseException as body_error:
-        primary = body_error
-        raise
-    finally:
-        try:
-            verify_root()
-        except BaseException as verify_error:
-            if primary is not None:
-                primary.add_note(
-                    "Binance raw root verification also failed: "
-                    f"{type(verify_error).__name__}"
-                )
-            else:
-                raise
+        metadata = filesystem_stat(raw_root, follow_symlinks=False)
+    except NotADirectoryError as error:
+        raise ValueError(_RAW_IDENTITY_ERROR) from error
+    except FileNotFoundError:
+        return
+    _reject_raw_reparse(metadata)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise ValueError(_RAW_IDENTITY_ERROR)
 
 
 def _capture_raw_file_identity(
@@ -564,58 +528,29 @@ def _reject_raw_reparse(metadata: os.stat_result) -> None:
 
 @contextmanager
 def open_recorder_run(root: Path) -> Iterator[RecorderRun]:
-    """Bind one exact recorder run and verify it before and after use."""
+    """Admit one declared recorder source and yield its native observations."""
     run_root = Path(root)
-    with _raw_path_session(run_root) as verify_root:
-        manifest, manifest_identity = _read_run_manifest(run_root)
-        coverage_index = ObservationCoverageIndex(
-            run_root,
-            manifest["capture"]["connection_intervals"],
-            markets=set(manifest["market_types"]),
-            decode_interval=_decode_recorder_interval,
-        )
-        files = _capture_run_files(run_root, manifest, coverage_index=coverage_index)
-        run = RecorderRun(
-            root=run_root,
-            manifest=manifest,
-            source_identity={
-                "schema_id": "qrp-binance-recorder",
-                "artifact_id": manifest["run_id"],
-                "manifest_hash": canonical_json_hash(manifest),
-            },
-            _files=files,
-            _coverage_index=coverage_index,
-        )
-        primary = None
-        try:
-            yield run
-        except BaseException as body_error:
-            primary = body_error
-            raise
-        finally:
-            try:
-                verify_root()
-                current_manifest, current_identity = _read_run_manifest(run_root)
-                if (
-                    current_identity != manifest_identity
-                    or canonical_json_hash(current_manifest)
-                    != run.source_identity["manifest_hash"]
-                ):
-                    raise ValueError("binance_replay_run_identity_changed")
-                current_files = _capture_run_files(
-                    run_root, current_manifest, coverage_index=coverage_index
-                )
-                if tuple(item.identity for item in current_files) != tuple(
-                    item.identity for item in files
-                ):
-                    raise ValueError("binance_replay_file_identity_changed")
-            except BaseException as error:
-                if primary is None:
-                    raise
-                primary.add_note(
-                    "Binance recorder run verification also failed: "
-                    + type(error).__name__
-                )
+    _validate_raw_path(run_root)
+    manifest, manifest_identity = _read_run_manifest(run_root)
+    coverage_index = ObservationCoverageIndex(
+        run_root,
+        manifest["capture"]["connection_intervals"],
+        markets=set(manifest["market_types"]),
+        decode_interval=_decode_recorder_interval,
+    )
+    files = _capture_run_files(run_root, manifest, coverage_index=coverage_index)
+    run = RecorderRun(
+        root=run_root,
+        manifest=manifest,
+        source_identity={
+            "schema_id": "qrp-binance-recorder",
+            "artifact_id": manifest["run_id"],
+            "manifest_hash": canonical_json_hash(manifest),
+        },
+        _files=files,
+        _coverage_index=coverage_index,
+    )
+    yield run
 
 
 def _read_run_manifest(
@@ -627,7 +562,7 @@ def _read_run_manifest(
         raise ValueError("binance_replay_run_manifest_invalid")
     manifest: dict[str, Any] | None = None
     try:
-        manifest = read_qrp_json_file(path, expected_identity=identity)[1]
+        manifest = read_qrp_json_file(path)[1]
     except (
         FileNotFoundError,
         NotADirectoryError,
@@ -658,10 +593,9 @@ def _validate_run_manifest(value: object) -> None:
     ):
         if not isinstance(value.get(key), str) or not value[key]:
             raise ValueError("binance_replay_run_manifest_invalid")
-    try:
-        validate_run_id(value["run_id"])
-    except ValueError as exc:
-        raise ValueError("binance_replay_run_manifest_invalid") from exc
+    # This is the recorder vendor manifest identifier, not a research run.
+    if re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", value["run_id"]) is None:
+        raise ValueError("binance_replay_run_manifest_invalid")
     if (
         value["venue"] != "binance"
         or not isinstance(value.get("symbols"), list)
@@ -743,7 +677,7 @@ def _validate_file_manifest(
     path = Path(value["path"]) if isinstance(value.get("path"), str) else None
     if (
         path is None
-        or path.is_absolute()
+        or path.anchor
         or ".." in path.parts
         or not path.name.endswith(".jsonl.gz")
         or value.get("venue") != "binance"
@@ -793,7 +727,7 @@ def _validate_connection_interval_descriptor(
     path = Path(value["path"]) if isinstance(value.get("path"), str) else None
     if (
         path is None
-        or path.is_absolute()
+        or path.anchor
         or ".." in path.parts
         or path.as_posix() != value["path"]
         or path.name != "connection_intervals.jsonl.gz"

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
-from pathlib import Path
 
 import pandas as pd
 import pyarrow as pa
@@ -10,25 +8,6 @@ import pyarrow.parquet as pq
 import pytest
 
 from quant_research_platform.artifacts import statistics
-from quant_research_platform.contracts.business_manifest import (
-    build_business_manifest_envelope,
-)
-from quant_research_platform.storage.identity import (
-    filesystem_exists,
-    filesystem_glob,
-    filesystem_stat,
-    filesystem_write_bytes,
-    native_filesystem_path,
-)
-from quant_research_platform.storage.semantic_artifacts import write_semantic_artifact
-from tests.helpers.research_configuration import research_configuration
-from tests.helpers.statistics_artifacts import statistics_envelope
-
-MAKER_MODEL_IDS = next(
-    (item["price_model_id"], item["proxy_model_id"])
-    for item in research_configuration("crypto", "baseline")["portfolios"]
-    if item.get("price_model_id") is not None
-)
 
 
 @pytest.fixture
@@ -53,7 +32,7 @@ def tables(request):
         family_id="family",
         factor_id="factor",
         prediction_id="prediction",
-        quarter_id="2023Q1",
+        period_id="2023Q1",
         selection_group="global",
         decision_id="final",
         config_id="config",
@@ -61,7 +40,7 @@ def tables(request):
         test_id="spa_reality_check",
         regression_id="single:factor",
         coefficient_id="factor",
-        access_window="development",
+        sample_role="validation",
         benchmark_id="benchmark",
         statistic_id="p_value",
         selection_status="CHAMPION",
@@ -125,363 +104,24 @@ def tables(request):
 
 
 @pytest.fixture
-def envelope(tables):
-    base = build_business_manifest_envelope(
-        logical_artifact_id="statistics",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": "2023-01-02",
-            "end": "2023-03-31",
-            "access": "development",
-        },
-        upstream_identities={},
-        semantic_metadata={},
-    )
-    return statistics_envelope(
-        base,
-        group="factor" if "factor_diagnostics" in tables else "research",
-        protocol={
-            "access_window": "development",
-            "formal_dataset_window": {"start": "2023-01-02", "end": "2023-03-31"},
-            "development_window": {"start": "2023-01-02", "end": "2023-03-31"},
-            "holdout_window": {"start": "2023-01-02", "end": "2023-03-31"},
-        },
-    )
+def metadata(tables):
+    return {
+        "sample_role": "validation",
+        "window": {"start": "2023-01-02", "end": "2023-03-31"},
+    }
 
 
-@pytest.mark.parametrize("mutation", ("manifest", "extra"))
-@pytest.mark.parametrize("primary_failure", (False, True))
-def test_table_rechecks_artifact_snapshot_on_consumption_exit(
-    tmp_path, tables, envelope, mutation, primary_failure
-):
+def test_table_consumer_primary_exception_is_preserved(tmp_path, tables, metadata):
     root = statistics.write_statistics_artifact(
-        tmp_path, envelope=envelope, tables=tables
+        tmp_path / "statistics", metadata=metadata, tables=tables
     )
-    artifact = statistics.read_statistics_artifact(root, expected_identity=root.name)
+    artifact = statistics.read_statistics_artifact(root)
     primary = KeyboardInterrupt("consumer_primary")
-    with pytest.raises(KeyboardInterrupt if primary_failure else ValueError) as caught:
+    with pytest.raises(KeyboardInterrupt) as caught:
         with artifact.table("model_trials.parquet") as frame:
             assert not frame.empty
-            path = root / ("manifest.json" if mutation == "manifest" else "extra.bin")
-            filesystem_write_bytes(
-                path,
-                Path(native_filesystem_path(path)).read_bytes() + b"\n"
-                if mutation == "manifest"
-                else b"extra",
-            )
-            if primary_failure:
-                raise primary
-    if primary_failure:
-        assert caught.value is primary
-        assert any("ValueError" in note for note in primary.__notes__)
-    else:
-        assert str(caught.value).startswith("semantic_artifact_member_")
-
-
-@pytest.fixture
-def maker_calibration_tables():
-    from quant_research_platform.markets.implementations.crypto.execution import (
-        replay_maker_calibration,
-    )
-    from quant_research_platform.markets.implementations.crypto.ids import (
-        HFT_RESEARCH_DATASET_ID,
-    )
-    from quant_research_platform.research.protocols.crypto_hft import (
-        CryptoMakerCandidate,
-        protocol,
-    )
-    from tests.helpers.binance_hft import _quote, hft_research_plan
-    from tests.markets.crypto.calibration_test_support import maker_event_rows
-    from tests.markets.crypto.test_hft_execution import _state, _trade
-
-    plan = hft_research_plan()
-    plan["folds"][0]["validation"] = {
-        "start": "1970-01-01T00:00:02.100000",
-        "end": "1970-01-01T00:00:03.500000",
-    }
-    research_protocol = replace(
-        protocol(HFT_RESEARCH_DATASET_ID, research_plan=plan),
-        configuration_json=json.dumps(
-            research_configuration("crypto", "baseline", plan=plan)
-        ),
-    )
-    candidate = next(
-        candidate
-        for candidate in research_protocol.portfolio_candidates()
-        if isinstance(candidate, CryptoMakerCandidate)
-        and candidate.asset_id == "btc_usdt"
-        and (candidate.model_ids == MAKER_MODEL_IDS)
-    )
-    manifest = research_protocol.target_manifest(
-        candidate.calibration_target_id, "STATISTIC"
-    )
-    reference = manifest["research_plan"]["execution"]["maker"]
-    samples, events = ([], [])
-
-    def on_sample(**sample):
-        samples.append(
-            {
-                "fold_id": "fold_1",
-                "side": sample["side"],
-                "sample_id": sample["sample_id"],
-                "decision_at": sample["decision_ns"],
-                "prediction_end": sample["prediction_end_ns"],
-                "label_available_at": sample["available_ns"],
-                "price_prediction": sample["prediction"],
-                "observed_return": sample["observed_return"],
-                "forecast_error": sample["observed_return"] - sample["prediction"],
-                "filled_quantity": sample["filled"],
-                "quote_quantity": sample["quote_quantity"],
-                "terminal_reason": sample["terminal_reason"],
-                "book_segment_id": sample["book_segment_id"],
-                "trade_observation_id": sample["trade_observation_id"],
-                "initial_book_event_id": sample["initial_book_event_id"],
-                "initial_bid_index": sample["initial_bid_index"],
-                "initial_ask_index": sample["initial_ask_index"],
-                "event_start": sample["event_start"],
-                "event_end": sample["event_end"],
-            }
-        )
-
-    def on_event(*, event_id, event):
-        events.extend(
-            {"fold_id": "fold_1", **row} for row in maker_event_rows(event_id, event)
-        )
-
-    replay_maker_calibration(
-        [_state(stamp) for stamp in (2100, 2150, 2650, 2700)],
-        [
-            _trade(stamp, price="99.5", quantity="3", maker_buyer=True)
-            for stamp in (2180, 2400)
-        ],
-        [
-            {
-                **_quote(stamp, book_segment_id="s1"),
-                "price_prediction": 0.0,
-                "price_label": 0.0,
-                "proxy_prediction": 1.0,
-                "label_available_at_ns": (stamp + 500) * 1000000,
-            }
-            for stamp in (2100, 2200)
-        ],
-        order_quantity=reference["order_quantity"],
-        latency_ms=reference["latency_ms"],
-        observed_coverage={"s1": (2100000000, 2800000000)},
-        trade_coverage={"trade-connection-1": (2100000000, 2800000000)},
-        cutoff_ns=3500000000,
-        on_sample=on_sample,
-        on_event=on_event,
-    )
-    frames = {
-        "crypto_maker_samples": pd.DataFrame(
-            samples,
-            columns=statistics.STATISTICS_TABLE_COLUMNS["crypto_maker_samples.parquet"],
-        ),
-        "crypto_maker_events": pd.DataFrame(
-            events,
-            columns=statistics.STATISTICS_TABLE_COLUMNS["crypto_maker_events.parquet"],
-        ),
-        "crypto_maker_calibration": pd.DataFrame(
-            [
-                {
-                    "fold_id": "fold_1",
-                    "side": side,
-                    "price_unit": "0.1",
-                    "sample_count": 2,
-                    "zero_fill_count": 0 if side == "buy" else 2,
-                    "post_only_rejection_count": 0,
-                    "excluded_decisions": 0,
-                    "minimum_samples": 2,
-                    "status": "DEFINED",
-                    "reason": "",
-                }
-                for side in ("buy", "sell")
-            ],
-            columns=statistics.STATISTICS_TABLE_COLUMNS[
-                "crypto_maker_calibration.parquet"
-            ],
-        ),
-    }
-    for column in ("decision_at", "prediction_end", "label_available_at"):
-        frames["crypto_maker_samples"][column] = pd.to_datetime(
-            frames["crypto_maker_samples"][column], unit="ns"
-        )
-    frames["crypto_maker_events"]["event_at"] = pd.to_datetime(
-        frames["crypto_maker_events"]["event_at"], unit="ns"
-    )
-    assert frames["crypto_maker_events"].event_id.nunique() == 5
-    assert len(frames["crypto_maker_samples"]) == 4
-    assert frames["crypto_maker_samples"].loc[
-        lambda frame: frame.side.eq("buy"), "filled_quantity"
-    ].tolist() == [1.0, 1.0]
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id=candidate.calibration_target_id,
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": "1970-01-01T00:00:02.100000",
-            "end": "1970-01-01T00:00:03.500000",
-            "access": "development",
-        },
-        upstream_identities={},
-        semantic_metadata={"target_contract": {"protocol": manifest}},
-    )
-    envelope = statistics_envelope(
-        envelope, group="crypto_maker_calibration", protocol=manifest
-    )
-    return (frames, envelope)
-
-
-@pytest.mark.parametrize(
-    "mutation",
-    [
-        None,
-        "truncate",
-        "immature",
-        "coordinate",
-        "book_zero",
-        "level_order",
-        "reference",
-        "pair",
-        "unit_invalid",
-        "unit_mixed",
-        "tail",
-        "empty",
-    ],
-)
-def test_mature_shared_maker_tape_round_trip_and_rejects_corruption(
-    tmp_path, maker_calibration_tables, mutation
-):
-    tables, envelope = maker_calibration_tables
-
-    def produce(on_table):
-        for name, frame in tables.items():
-            on_table(name, frame)
-
-    from quant_research_platform.markets.implementations.crypto.portfolio import (
-        validate_maker_calibration,
-    )
-    from quant_research_platform.storage.semantic_artifacts import (
-        read_semantic_artifact_record,
-    )
-
-    root = statistics.write_statistics_artifact(
-        tmp_path / "valid",
-        envelope=envelope,
-        tables=produce,
-        table_group="crypto_maker_calibration",
-        validate_tables=validate_maker_calibration,
-    )
-    original = read_semantic_artifact_record(root)
-    artifact = statistics.read_statistics_artifact(
-        root,
-        expected_identity=envelope.instance_identity,
-        validate_tables=validate_maker_calibration,
-    )
-    for member in statistics.STATISTICS_TABLE_GROUPS["crypto_maker_calibration"]:
-        with artifact.table(member) as actual:
-            pd.testing.assert_frame_equal(
-                actual, tables[member.removesuffix(".parquet")]
-            )
-    assert "crypto_maker_fills.parquet" not in artifact._members
-    if mutation is None:
-        for missing_validator in (None, object()):
-            with pytest.raises(
-                ValueError, match="statistics_business_validator_required"
-            ):
-                statistics.write_statistics_artifact(
-                    tmp_path / "missing-validator",
-                    envelope=envelope,
-                    tables=produce,
-                    table_group="crypto_maker_calibration",
-                    validate_tables=missing_validator,
-                )
-            with pytest.raises(
-                ValueError, match="statistics_business_validator_required"
-            ):
-                statistics.read_statistics_artifact(
-                    root,
-                    expected_identity=envelope.instance_identity,
-                    validate_tables=missing_validator,
-                )
-        assert not filesystem_exists(tmp_path / "missing-validator")
-        return
-    if mutation == "truncate":
-        tables["crypto_maker_events"] = (
-            tables["crypto_maker_events"].loc[lambda frame: frame.event_id.lt(4)].copy()
-        )
-    elif mutation == "tail":
-        extra = (
-            tables["crypto_maker_events"].loc[lambda frame: frame.event_id.eq(4)].copy()
-        )
-        extra.event_id = 5
-        extra.event_at += pd.Timedelta(milliseconds=100)
-        tables["crypto_maker_events"] = pd.concat(
-            [tables["crypto_maker_events"], extra], ignore_index=True
-        )
-    elif mutation == "empty":
-        tables["crypto_maker_samples"] = tables["crypto_maker_samples"].iloc[:0]
-    elif mutation == "immature":
-        tables["crypto_maker_samples"].loc[0, "label_available_at"] = pd.Timestamp(
-            "1970-01-01T00:00:04"
-        )
-    elif mutation == "coordinate":
-        tables["crypto_maker_samples"].loc[0, "initial_book_event_id"] = 2
-    elif mutation == "book_zero":
-        tables["crypto_maker_events"].loc[0, "quantity"] = 0.0
-    elif mutation == "level_order":
-        tables["crypto_maker_events"].loc[1, "price_index"] = 1000
-    elif mutation == "reference":
-        tables["crypto_maker_samples"].loc[0, "filled_quantity"] = 0.5
-    elif mutation == "unit_invalid":
-        tables["crypto_maker_calibration"]["price_unit"] = "invalid"
-    elif mutation == "unit_mixed":
-        tables["crypto_maker_calibration"].loc[0, "price_unit"] = "0.01"
-    else:
-        tables["crypto_maker_samples"].loc[1, "price_prediction"] = 0.001
-        tables["crypto_maker_samples"].loc[1, "forecast_error"] = -0.001
-    with pytest.raises(
-        ValueError,
-        match="order_book_price_unit_invalid"
-        if mutation == "unit_invalid"
-        else "crypto_calibration_",
-    ):
-        statistics.write_statistics_artifact(
-            tmp_path / "rejected",
-            envelope=envelope,
-            tables=produce,
-            table_group="crypto_maker_calibration",
-            validate_tables=validate_maker_calibration,
-        )
-    assert not tuple(filesystem_glob(tmp_path / "rejected" / "instances", "*"))
-
-    def write_corruption(staging):
-        for name, frame in tables.items():
-            pq.write_table(
-                pa.Table.from_pandas(
-                    frame,
-                    schema=statistics._ARROW_SCHEMAS[f"{name}.parquet"],
-                    preserve_index=False,
-                ),
-                native_filesystem_path(staging / f"{name}.parquet"),
-            )
-
-    bad = write_semantic_artifact(tmp_path / "corrupted", envelope, write_corruption)
-    with pytest.raises(
-        ValueError,
-        match="order_book_price_unit_invalid"
-        if mutation == "unit_invalid"
-        else "crypto_calibration_",
-    ):
-        statistics.read_statistics_artifact(
-            bad,
-            expected_identity=envelope.instance_identity,
-            validate_tables=validate_maker_calibration,
-        )
-    assert read_semantic_artifact_record(root) == original
+            raise primary
+    assert caught.value is primary
 
 
 @pytest.mark.parametrize(
@@ -493,7 +133,7 @@ def test_mature_shared_maker_tape_round_trip_and_rejects_corruption(
 )
 @pytest.mark.parametrize("mutation", ["status", "reason", "count", "undefined"])
 def test_research_table_rejects_invalid_values_at_write_and_read(
-    tmp_path, tables, envelope, member, mutation
+    tmp_path, tables, metadata, member, mutation
 ):
     name = member.removesuffix(".parquet")
     if name == "model_group_comparison":
@@ -517,18 +157,12 @@ def test_research_table_rejects_invalid_values_at_write_and_read(
         else "statistics_table_status_value_invalid"
     )
     _assert_rejected_at_write_and_read(
-        tmp_path, tables, envelope, member, error=f"^{error}$"
+        tmp_path, tables, metadata, member, error=f"^{error}$"
     )
 
 
 def _assert_rejected_at_write_and_read(
-    tmp_path,
-    tables,
-    envelope,
-    member,
-    *,
-    table_group=None,
-    error="statistics_table_",
+    tmp_path, tables, metadata, member, *, table_group=None, error="statistics_table_"
 ):
     if table_group is None:
         table_group = (
@@ -539,27 +173,32 @@ def _assert_rejected_at_write_and_read(
     with pytest.raises(ValueError, match=error):
         statistics.write_statistics_artifact(
             tmp_path / "rejected",
-            envelope=envelope,
+            metadata=metadata,
             tables=tables,
             table_group=table_group,
         )
-
-    def write_unvalidated(staging):
-        for table_name, frame in tables.items():
-            table_member = f"{table_name}.parquet"
-            pq.write_table(
-                pa.Table.from_pandas(
-                    frame,
-                    schema=statistics._ARROW_SCHEMAS[table_member],
-                    preserve_index=False,
-                ),
-                native_filesystem_path(staging / table_member),
-            )
-
-    root = write_semantic_artifact(tmp_path / "persisted", envelope, write_unvalidated)
-    artifact = statistics.read_statistics_artifact(
-        root, expected_identity=envelope.instance_identity
+    root = tmp_path / "persisted"
+    root.mkdir()
+    for name, frame in tables.items():
+        pq.write_table(
+            pa.Table.from_pandas(
+                frame,
+                schema=statistics._ARROW_SCHEMAS[name + ".parquet"],
+                preserve_index=False,
+            ),
+            root / (name + ".parquet"),
+        )
+    (root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_id": "qrp-statistics",
+                "table_group": table_group,
+                "metadata": metadata,
+                "members": list(statistics.STATISTICS_TABLE_GROUPS[table_group]),
+            }
+        )
     )
+    artifact = statistics.read_statistics_artifact(root)
     with pytest.raises(ValueError, match=error):
         with artifact.table(member):
             pytest.fail("invalid persisted values must not reach the consumer")
@@ -579,10 +218,10 @@ def _assert_rejected_at_write_and_read(
     ],
 )
 def test_defined_research_measurements_cannot_be_missing(
-    tmp_path, tables, envelope, name, column
+    tmp_path, tables, metadata, name, column
 ):
     tables[name].loc[0, column] = float("nan")
-    _assert_rejected_at_write_and_read(tmp_path, tables, envelope, f"{name}.parquet")
+    _assert_rejected_at_write_and_read(tmp_path, tables, metadata, f"{name}.parquet")
 
 
 @pytest.mark.parametrize(
@@ -594,7 +233,7 @@ def test_defined_research_measurements_cannot_be_missing(
 )
 @pytest.mark.parametrize("value", [True, 1.5, 2**63])
 def test_research_table_counts_reject_lossy_coercion(
-    tmp_path, tables, envelope, member, value
+    tmp_path, tables, metadata, member, value
 ):
     name = member.removesuffix(".parquet")
     if name == "model_group_comparison":
@@ -604,28 +243,26 @@ def test_research_table_counts_reject_lossy_coercion(
     with pytest.raises(ValueError, match="statistics_table_count_invalid"):
         statistics.write_statistics_artifact(
             tmp_path / "rejected",
-            envelope=envelope,
+            metadata=metadata,
             tables=tables,
             table_group="factor" if "factor_diagnostics" in tables else "research",
         )
 
 
 @pytest.mark.parametrize("count", (32, 64))
-def test_group_comparison_integral_counts_round_trip(tmp_path, tables, envelope, count):
-    envelope = _holdout_statistics_envelope(envelope, tables)
+def test_group_comparison_integral_counts_round_trip(tmp_path, tables, metadata, count):
+    metadata = _test_statistics_metadata(metadata, tables)
     tables["model_group_comparison"] = pd.DataFrame([_defined_group_comparison_row()])
     tables["model_group_comparison"]["observation_count"] = pd.Series(
         [count], dtype=object
     )
     root = statistics.write_statistics_artifact(
         tmp_path / "valid",
-        envelope=envelope,
+        metadata=metadata,
         tables=tables,
         table_group="factor" if "factor_diagnostics" in tables else "research",
     )
-    artifact = statistics.read_statistics_artifact(
-        root, expected_identity=envelope.instance_identity
-    )
+    artifact = statistics.read_statistics_artifact(root)
     with artifact.table("model_group_comparison.parquet") as frame:
         assert frame.observation_count.tolist() == [count]
         assert frame.calendar_count.tolist() == [64]
@@ -646,16 +283,16 @@ def test_group_comparison_integral_counts_round_trip(tmp_path, tables, envelope,
         ("model_reality_checks", "statistic_id", "superior"),
     ],
 )
-def test_research_measurement_domains(tmp_path, tables, envelope, table, column, value):
+def test_research_measurement_domains(tmp_path, tables, metadata, table, column, value):
     tables[table].loc[0, column] = value
-    _assert_rejected_at_write_and_read(tmp_path, tables, envelope, f"{table}.parquet")
+    _assert_rejected_at_write_and_read(tmp_path, tables, metadata, f"{table}.parquet")
 
 
 @pytest.mark.parametrize(
     "factor_case", ["formal", "diagnostic_only", "no_factor_columns"]
 )
 def test_research_statistics_tables_round_trip_by_factor_case(
-    tmp_path, tables, envelope, factor_case
+    tmp_path, tables, metadata, factor_case
 ):
     factor = tables["factor_diagnostics"]
     if factor_case != "formal":
@@ -688,13 +325,11 @@ def test_research_statistics_tables_round_trip_by_factor_case(
         ] = 0
     root = statistics.write_statistics_artifact(
         tmp_path / "statistics",
-        envelope=envelope,
+        metadata=metadata,
         tables=tables,
         table_group="factor" if "factor_diagnostics" in tables else "research",
     )
-    artifact = statistics.read_statistics_artifact(
-        root, expected_identity=envelope.instance_identity
-    )
+    artifact = statistics.read_statistics_artifact(root)
     for member in statistics.STATISTICS_TABLE_GROUPS["factor"]:
         with artifact.table(member) as actual:
             pd.testing.assert_frame_equal(
@@ -702,7 +337,7 @@ def test_research_statistics_tables_round_trip_by_factor_case(
             )
 
 
-def test_writer_cleanup_preserves_primary(tmp_path, tables, envelope, monkeypatch):
+def test_writer_cleanup_preserves_primary(tmp_path, tables, metadata, monkeypatch):
     primary = KeyboardInterrupt("write_interrupted")
     original = pq.ParquetWriter.close
 
@@ -718,12 +353,13 @@ def test_writer_cleanup_preserves_primary(tmp_path, tables, envelope, monkeypatc
     with pytest.raises(KeyboardInterrupt) as caught:
         statistics.write_statistics_artifact(
             tmp_path / "statistics",
-            envelope=envelope,
+            metadata=metadata,
             tables=tables,
             table_group="factor" if "factor_diagnostics" in tables else "research",
         )
     assert caught.value is primary
     assert any("RuntimeError" in note for note in primary.__notes__)
+    assert not (tmp_path / "statistics").exists()
 
 
 @pytest.fixture
@@ -789,7 +425,7 @@ def crypto_tables():
     "mutation", ("defined_null", "undefined_value", "reason", "status")
 )
 def test_crypto_status_measurements_are_rejected_at_write_and_read(
-    tmp_path, crypto_tables, crypto_envelope, member, mutation
+    tmp_path, crypto_tables, crypto_metadata, member, mutation
 ):
     frame = crypto_tables[member.removesuffix(".parquet")]
     if mutation == "defined_null":
@@ -805,12 +441,12 @@ def test_crypto_status_measurements_are_rejected_at_write_and_read(
     else:
         frame.loc[0, "status"] = "UNKNOWN"
     _assert_rejected_at_write_and_read(
-        tmp_path, crypto_tables, crypto_envelope, member, table_group="crypto_portfolio"
+        tmp_path, crypto_tables, crypto_metadata, member, table_group="crypto_portfolio"
     )
 
 
 def test_crypto_text_diagnostics_and_undefined_daily_are_preserved(
-    tmp_path, crypto_tables, crypto_envelope
+    tmp_path, crypto_tables, crypto_metadata
 ):
     daily = crypto_tables["crypto_portfolio_daily"]
     daily.loc[0, ["end_nav", "net_return", "status", "reason"]] = [
@@ -821,13 +457,11 @@ def test_crypto_text_diagnostics_and_undefined_daily_are_preserved(
     ]
     root = statistics.write_statistics_artifact(
         tmp_path / "crypto",
-        envelope=crypto_envelope,
+        metadata=crypto_metadata,
         tables=crypto_tables,
         table_group="crypto_portfolio",
     )
-    artifact = statistics.read_statistics_artifact(
-        root, expected_identity=crypto_envelope.instance_identity
-    )
+    artifact = statistics.read_statistics_artifact(root)
     with artifact.table("crypto_execution_diagnostics.parquet") as frame:
         assert frame.loc[0, "status"] == "DEFINED"
         assert pd.isna(frame.loc[0, "value"])
@@ -839,614 +473,13 @@ def test_crypto_text_diagnostics_and_undefined_daily_are_preserved(
         assert frame.loc[0, "benchmark_return"] == 0.0
 
 
-@pytest.mark.parametrize("finish", ["normal", "writer_failure"])
-def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
-    tmp_path, monkeypatch, maker_calibration_tables, finish
-):
-    from contextlib import nullcontext
-    from types import SimpleNamespace
-
-    from quant_research_platform.contracts.time import TimeWindow
-    from quant_research_platform.markets.implementations.crypto import portfolio
-    from quant_research_platform.storage.layout import StorageLayout
-    from quant_research_platform.storage.semantic_artifacts import (
-        compare_semantic_artifacts,
-    )
-    from tests.markets.crypto.test_hft_execution import _state, _trade
-
-    expected, envelope = maker_calibration_tables
-    manifest = envelope.payload()["semantic_metadata"]["target_contract"]["protocol"]
-    source_identity = "d" * 64
-    coverage = {"s1": (2100000000, 2800000000)}
-    run = SimpleNamespace(
-        source_identity=source_identity,
-        market_metadata=lambda *_: {"price_unit": "0.1"},
-        observation_coverage=lambda **kwargs: {
-            "trade-connection-1": (2100000000, 2800000000)
-        },
-    )
-    monkeypatch.setattr(
-        portfolio,
-        "_panel",
-        lambda *_: {
-            "source_artifact_identity": source_identity,
-            "producer_diagnostics": {
-                "reconstruction": {"BTCUSDT": {"coverage_segments": coverage}}
-            },
-        },
-    )
-
-    def validation_chunks(*, fold_id, model_id):
-        assert fold_id == "fold_1"
-        try:
-            yield pd.DataFrame(
-                {
-                    "asset_id": ["btc_usdt"] * 2,
-                    "timestamp": pd.to_datetime([2100, 2200], unit="ms"),
-                    "label_available_at": pd.to_datetime([2600, 2700], unit="ms"),
-                    "book_segment_id": ["s1"] * 2,
-                    "trade_observation_id": ["trade-connection-1"] * 2,
-                    "segment_id": ["segment"] * 2,
-                    "prediction_score": [0.0 if model_id == MAKER_MODEL_IDS[0] else 1.0]
-                    * 2,
-                    "label": [0.0] * 2,
-                }
-            )
-        finally:
-            closed.append(model_id)
-
-    models = SimpleNamespace(
-        models=tuple(
-            {
-                "fold_id": "fold_1",
-                "model_id": model_id,
-                "model_metadata": {
-                    "model_algorithm": manifest["model_scopes"][model_id][
-                        "model_algorithm"
-                    ]
-                },
-            }
-            for model_id in MAKER_MODEL_IDS
-        ),
-        validation_chunks=validation_chunks,
-    )
-    primary = KeyboardInterrupt("synthetic_maker_writer_failure")
-    roots, group_counts = ([], [])
-    for build in (1, 2) if finish == "normal" else (1,):
-        closed, emitted, frames = ([], [], [])
-
-        def books(*_args, closed=closed, **_kwargs):
-            try:
-                yield from (_state(stamp) for stamp in (2100, 2150, 2650, 2700))
-            finally:
-                closed.append("books")
-
-        def trades(*_args, closed=closed, **_kwargs):
-            try:
-                yield from (
-                    _trade(stamp, price="99.5", quantity="3", maker_buyer=True)
-                    for stamp in (2180, 2400)
-                )
-            finally:
-                closed.append("trades")
-
-        def produce(on_table, emitted=emitted, frames=frames):
-
-            def append(table_name, output_frame):
-                emitted.append((table_name, len(output_frame)))
-                if finish == "writer_failure" and len(emitted) == 2:
-                    raise primary
-                on_table(table_name, output_frame)
-
-            portfolio.produce_maker_calibration(
-                asset_id="btc_usdt",
-                model_ids=MAKER_MODEL_IDS,
-                on_table=append,
-                layout=StorageLayout(tmp_path),
-                protocol_manifest=manifest,
-                time_window=TimeWindow(
-                    "1970-01-01T00:00:02.100000", "1970-01-01T00:00:03.500000"
-                ),
-                upstream_identities={f"{manifest['scenario_id']}_models": "e" * 64},
-                raw_root=tmp_path / "raw",
-                open_run=lambda *_: nullcontext(run),
-                reconstruct_depth=books,
-                read_trades=trades,
-                read_model_artifact=lambda *_args, **_kwargs: models,
-                symbol="BTCUSDT",
-                market_type="futures",
-            )
-
-        logical = tmp_path / f"build_{build}"
-
-        def write(logical=logical):
-            return statistics.write_statistics_artifact(
-                logical,
-                envelope=envelope,
-                tables=produce,
-                table_group="crypto_maker_calibration",
-                validate_tables=portfolio.validate_maker_calibration,
-            )
-
-        if finish != "normal":
-            with pytest.raises(KeyboardInterrupt) as caught:
-                write()
-            assert caught.value is primary and len(emitted) == 2
-            assert sorted(closed) == sorted(["books", "trades", *MAKER_MODEL_IDS])
-            assert not tuple(filesystem_glob(logical / "instances", "*"))
-            return
-        root = write()
-        artifact = statistics.read_statistics_artifact(
-            root,
-            expected_identity=envelope.instance_identity,
-            validate_tables=portfolio.validate_maker_calibration,
-        )
-        for name, frame in expected.items():
-            with artifact.table(f"{name}.parquet") as actual:
-                pd.testing.assert_frame_equal(actual, frame)
-            with pq.ParquetFile(
-                native_filesystem_path(root / f"{name}.parquet")
-            ) as parquet:
-                assert parquet.schema_arrow.equals(
-                    statistics._ARROW_SCHEMAS[f"{name}.parquet"]
-                )
-        assert sorted(closed) == sorted(["books", "trades", *MAKER_MODEL_IDS])
-        roots.append(root)
-        with pq.ParquetFile(
-            native_filesystem_path(root / "crypto_maker_events.parquet")
-        ) as parquet:
-            group_counts.append(parquet.num_row_groups)
-    assert group_counts[0] == group_counts[1]
-    assert all(root.name == envelope.instance_identity for root in roots)
-    for root in roots[1:]:
-        assert compare_semantic_artifacts(roots[0], root).status == "MATCH"
-
-
-@pytest.mark.parametrize("failure", ("disk_full", "interrupted", "writer_failed"))
-def test_incremental_maker_publication_preserves_old_good_and_primary(
-    tmp_path, monkeypatch, maker_calibration_tables, failure
-):
-    import errno
-
-    from quant_research_platform.markets.implementations.crypto import portfolio
-    from quant_research_platform.storage.semantic_artifacts import (
-        read_semantic_artifact_record,
-    )
-
-    tables, envelope = maker_calibration_tables
-
-    def produce(on_table):
-        for name, frame in tables.items():
-            on_table(name, frame)
-
-    primary = {
-        "disk_full": OSError(errno.ENOSPC, "synthetic_disk_full"),
-        "interrupted": KeyboardInterrupt("synthetic_interruption"),
-        "writer_failed": RuntimeError("synthetic_writer_failure"),
-    }[failure]
-    good = statistics.write_statistics_artifact(
-        tmp_path / "good",
-        envelope=envelope,
-        tables=produce,
-        table_group="crypto_maker_calibration",
-        validate_tables=portfolio.validate_maker_calibration,
-    )
-    before = read_semantic_artifact_record(good)
-    native = pq.ParquetWriter.write_table
-    written = 0
-
-    def fail_after_progress(writer, *args, **kwargs):
-        nonlocal written
-        written += 1
-        if written == 2:
-            raise primary
-        return native(writer, *args, **kwargs)
-
-    monkeypatch.setattr(pq.ParquetWriter, "write_table", fail_after_progress)
-    with pytest.raises(type(primary)) as caught:
-        statistics.write_statistics_artifact(
-            tmp_path / "candidate",
-            envelope=envelope,
-            tables=produce,
-            table_group="crypto_maker_calibration",
-            validate_tables=portfolio.validate_maker_calibration,
-        )
-    assert caught.value is primary and written == 2
-    assert read_semantic_artifact_record(good) == before
-    assert not tuple(filesystem_glob(tmp_path / "candidate" / "instances", "*"))
-    statistics.read_statistics_artifact(
-        good,
-        expected_identity=envelope.instance_identity,
-        validate_tables=portfolio.validate_maker_calibration,
-    )
-
-
-def test_maker_calibration_streams_many_events_without_full_table_reads(
-    tmp_path, monkeypatch, record_testsuite_property
-):
-    from contextlib import nullcontext
-    from types import SimpleNamespace
-
-    from quant_research_platform.contracts.time import TimeWindow
-    from quant_research_platform.markets.implementations.crypto import portfolio
-    from quant_research_platform.markets.implementations.crypto.ids import (
-        HFT_RESEARCH_DATASET_ID,
-    )
-    from quant_research_platform.research.protocols.crypto_hft import (
-        CryptoMakerCandidate,
-        protocol,
-    )
-    from quant_research_platform.storage.layout import StorageLayout
-    from tests.helpers.binance_hft import hft_research_plan
-    from tests.markets.crypto.test_hft_execution import _state
-
-    count, depth = (129, 512)
-    first, last = (2100, 2100 + (count - 1) * 1000)
-
-    def iso(stamp):
-        return pd.Timestamp(stamp, unit="ms").isoformat()
-
-    plan = hft_research_plan()
-    fold = plan["folds"][0]
-    fold["validation"] = {"start": iso(first), "end": iso(last + 600)}
-    plan["folds"] = [fold]
-    plan["test"] = {"start": iso(last + 2100), "end": iso(last + 3000)}
-    research_protocol = replace(
-        protocol(HFT_RESEARCH_DATASET_ID, research_plan=plan),
-        configuration_json=json.dumps(
-            research_configuration("crypto", "baseline", plan=plan)
-        ),
-    )
-    candidate = next(
-        candidate
-        for candidate in research_protocol.portfolio_candidates()
-        if isinstance(candidate, CryptoMakerCandidate)
-        and candidate.asset_id == "btc_usdt"
-        and (candidate.model_ids == MAKER_MODEL_IDS)
-    )
-    manifest = research_protocol.target_manifest(
-        candidate.calibration_target_id, "STATISTIC"
-    )
-    window = fold["validation"]
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id=candidate.calibration_target_id,
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={**window, "access": "development"},
-        upstream_identities={},
-        semantic_metadata={"target_contract": {"protocol": manifest}},
-    )
-    envelope = statistics_envelope(
-        envelope, group="crypto_maker_calibration", protocol=manifest
-    )
-    coverage = {"s1": (first * 1000000, (last + 600) * 1000000)}
-    run = SimpleNamespace(
-        source_identity="d" * 64,
-        market_metadata=lambda *_: {"price_unit": "0.1"},
-        observation_coverage=lambda **kwargs: {
-            "trade-connection-1": (first * 1000000, (last + 600) * 1000000)
-        },
-    )
-    monkeypatch.setattr(
-        portfolio,
-        "_panel",
-        lambda *_: {
-            "source_artifact_identity": run.source_identity,
-            "producer_diagnostics": {
-                "reconstruction": {"BTCUSDT": {"coverage_segments": coverage}}
-            },
-        },
-    )
-
-    def validation_chunks(*, fold_id, model_id):
-        assert fold_id == "fold_1"
-        for start in range(0, count, 64):
-            stamps = [
-                first + index * 1000 for index in range(start, min(count, start + 64))
-            ]
-            yield pd.DataFrame(
-                {
-                    "asset_id": ["btc_usdt"] * len(stamps),
-                    "timestamp": pd.to_datetime(stamps, unit="ms"),
-                    "label_available_at": pd.to_datetime(
-                        [stamp + 500 for stamp in stamps], unit="ms"
-                    ),
-                    "book_segment_id": ["s1"] * len(stamps),
-                    "trade_observation_id": ["trade-connection-1"] * len(stamps),
-                    "segment_id": ["segment"] * len(stamps),
-                    "prediction_score": [0.0 if model_id == MAKER_MODEL_IDS[0] else 1.0]
-                    * len(stamps),
-                    "label": [0.0] * len(stamps),
-                }
-            )
-
-    models = SimpleNamespace(
-        models=tuple(
-            {
-                "fold_id": "fold_1",
-                "model_id": model_id,
-                "model_metadata": {
-                    "model_algorithm": manifest["model_scopes"][model_id][
-                        "model_algorithm"
-                    ]
-                },
-            }
-            for model_id in MAKER_MODEL_IDS
-        ),
-        validation_chunks=validation_chunks,
-    )
-    bids = tuple((995 - index, 1.0) for index in range(depth))
-    asks = tuple((1005 + index, 1.0) for index in range(depth))
-    table_read = statistics.StatisticsArtifact.table
-
-    def summary_only(artifact, member):
-        assert member == "crypto_maker_calibration.parquet"
-        return table_read(artifact, member)
-
-    monkeypatch.setattr(statistics.StatisticsArtifact, "table", summary_only)
-    emitted = dict.fromkeys(
-        ("crypto_maker_samples", "crypto_maker_events", "crypto_maker_calibration"), 0
-    )
-
-    event_batch_rows = []
-
-    def produce(on_table):
-
-        def append(name, frame):
-            emitted[name] += len(frame)
-            if name == "crypto_maker_events":
-                event_batch_rows.append(len(frame))
-            on_table(name, frame)
-
-        portfolio.produce_maker_calibration(
-            asset_id="btc_usdt",
-            model_ids=MAKER_MODEL_IDS,
-            on_table=append,
-            layout=StorageLayout(tmp_path),
-            protocol_manifest=manifest,
-            time_window=TimeWindow(window["start"], window["end"]),
-            upstream_identities={f"{HFT_RESEARCH_DATASET_ID}_models": "e" * 64},
-            raw_root=tmp_path / "raw",
-            open_run=lambda *_: nullcontext(run),
-            reconstruct_depth=lambda *_args, **_kwargs: (
-                _state(first + index * 1000, bid_levels=bids, ask_levels=asks)
-                for index in range(count)
-            ),
-            read_trades=lambda *_args, **_kwargs: iter(()),
-            read_model_artifact=lambda *_args, **_kwargs: models,
-            symbol="BTCUSDT",
-            market_type="futures",
-        )
-
-    root = statistics.write_statistics_artifact(
-        tmp_path / "bounded",
-        envelope=envelope,
-        tables=produce,
-        table_group="crypto_maker_calibration",
-        validate_tables=portfolio.validate_maker_calibration,
-    )
-    artifact = statistics.read_statistics_artifact(
-        root,
-        expected_identity=envelope.instance_identity,
-        validate_tables=portfolio.validate_maker_calibration,
-    )
-    with artifact.table("crypto_maker_calibration.parquet") as summary:
-        assert summary.sample_count.tolist() == [count, count]
-        assert summary.zero_fill_count.tolist() == [count, count]
-    assert artifact._row_counts["crypto_maker_samples.parquet"] == count * 2
-    assert artifact._row_counts["crypto_maker_events.parquet"] == count * depth * 2
-    assert emitted == {
-        "crypto_maker_samples": count * 2,
-        "crypto_maker_events": count * depth * 2,
-        "crypto_maker_calibration": 2,
-    }
-    assert event_batch_rows == [65_536, 65_536, 1_024]
-    record_testsuite_property("maker_event_rows", emitted["crypto_maker_events"])
-
-
-def test_streamed_calibration_rechecks_member_bytes_after_consumption(
-    tmp_path, monkeypatch, maker_calibration_tables
-):
-    import os
-
-    from quant_research_platform.markets.implementations.crypto import portfolio
-
-    tables, envelope = maker_calibration_tables
-
-    def produce(on_table):
-        for name, frame in tables.items():
-            on_table(name, frame)
-
-    root = statistics.write_statistics_artifact(
-        tmp_path / "calibration",
-        envelope=envelope,
-        tables=produce,
-        table_group="crypto_maker_calibration",
-        validate_tables=portfolio.validate_maker_calibration,
-    )
-    original = portfolio._calibration_headers
-    changed = False
-
-    def mutate_after_headers(*args):
-        nonlocal changed
-        yield from original(*args)
-        if not changed:
-            changed = True
-            path = root / "crypto_maker_calibration.parquet"
-            before = filesystem_stat(path)
-            content = bytearray(Path(native_filesystem_path(path)).read_bytes())
-            content[4] ^= 1
-            filesystem_write_bytes(path, content)
-            os.utime(
-                native_filesystem_path(path),
-                ns=(before.st_atime_ns, before.st_mtime_ns),
-            )
-            assert filesystem_stat(path).st_mtime_ns == before.st_mtime_ns
-
-    monkeypatch.setattr(portfolio, "_calibration_headers", mutate_after_headers)
-    with pytest.raises(ValueError, match="semantic_artifact_member_integrity_invalid"):
-        statistics.read_statistics_artifact(
-            root,
-            expected_identity=envelope.instance_identity,
-            validate_tables=portfolio.validate_maker_calibration,
-        )
-
-
-def test_maker_calibration_uses_declared_asset_without_btc_limits(
-    tmp_path, maker_calibration_tables
-):
-    from quant_research_platform.markets.implementations.crypto.portfolio import (
-        validate_maker_calibration,
-    )
-
-    tables, original = maker_calibration_tables
-    payload = original.payload()
-    metadata = payload["semantic_metadata"]
-    contract = metadata["target_contract"]["protocol"]
-    candidate = contract["portfolio_candidates"][0]
-    candidate["asset_id"] = "eth_usdt"
-    candidate["candidate_id"] = "eth_fixture_maker"
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="eth_fixture_maker_calibration",
-        schema_identity=payload["schema_identity"],
-        protocol_or_spec_identity=payload["protocol_or_spec_identity"],
-        software_identity=payload["software_identity"],
-        research_window=payload["research_window"],
-        upstream_identities=payload["upstream_identities"],
-        semantic_metadata=metadata,
-    )
-
-    def produce(on_table):
-        for name, frame in tables.items():
-            on_table(name, frame)
-
-    root = statistics.write_statistics_artifact(
-        tmp_path / "eth",
-        envelope=envelope,
-        tables=produce,
-        table_group="crypto_maker_calibration",
-        validate_tables=validate_maker_calibration,
-    )
-    statistics.read_statistics_artifact(
-        root,
-        expected_identity=envelope.instance_identity,
-        validate_tables=validate_maker_calibration,
-    )
-
-
-@pytest.mark.parametrize("finish", ["normal", "source_changed", "cancel"])
-def test_maker_history_reads_real_artifact_once_and_rechecks_source(
-    tmp_path, monkeypatch, maker_calibration_tables, finish
-):
-    import os
-    from collections import Counter
-    from contextlib import ExitStack
-    from functools import partial
-
-    from quant_research_platform.markets.implementations.crypto import (
-        execution,
-        portfolio,
-    )
-    from quant_research_platform.policy.lifecycle import closing_iterator
-    from tests.helpers.binance_hft import _quote
-    from tests.markets.crypto.test_hft_execution import _maker_config, _state
-
-    tables, envelope = maker_calibration_tables
-
-    def produce(on_table):
-        for name, frame in tables.items():
-            on_table(name, frame)
-
-    root = statistics.write_statistics_artifact(
-        tmp_path / "calibration",
-        envelope=envelope,
-        tables=produce,
-        table_group="crypto_maker_calibration",
-        validate_tables=portfolio.validate_maker_calibration,
-    )
-    artifact = statistics.read_statistics_artifact(
-        root,
-        expected_identity=envelope.instance_identity,
-        validate_tables=portfolio.validate_maker_calibration,
-    )
-    batches = statistics.StatisticsArtifact._batches
-    reads = Counter()
-
-    def counted_batches(owner, member, **kwargs):
-        reads[member] += 1
-        yield from batches(owner, member, **kwargs)
-
-    monkeypatch.setattr(statistics.StatisticsArtifact, "_batches", counted_batches)
-    model = execution.MakerCalibration(
-        partial(portfolio._calibration_samples, artifact, "fold_1"),
-        partial(portfolio._calibration_events, artifact, "fold_1"),
-        price_unit="0.1",
-    )
-    primary = KeyboardInterrupt("consumer_cancel")
-    caught = None
-    try:
-        with closing_iterator(ExitStack()) as resources:
-            resources.callback(artifact._verify)
-            state = _state(0)
-            answers = []
-            for side in ("buy", "sell", "buy"):
-                answers.append(
-                    model.select(
-                        state=state,
-                        decision_ns=0,
-                        new_order=execution._maker_new_order(
-                            0,
-                            side,
-                            1.0,
-                            state,
-                            _quote(0, book_segment_id="s1"),
-                            _maker_config().latency_ms,
-                        ),
-                        active_order=None,
-                        commands=(),
-                        lifetime_ns=500000000,
-                        prediction=0.0,
-                        fee_bps=0.0,
-                        funding=[],
-                    )
-                )
-            assert answers[0] == answers[2]
-            assert reads == {
-                "crypto_maker_samples.parquet": 1,
-                "crypto_maker_events.parquet": 1,
-            }
-            if finish != "normal":
-                path = root / "crypto_maker_events.parquet"
-                before = filesystem_stat(path)
-                payload = bytearray(Path(native_filesystem_path(path)).read_bytes())
-                payload[4] ^= 1
-                filesystem_write_bytes(path, payload)
-                os.utime(
-                    native_filesystem_path(path),
-                    ns=(before.st_atime_ns, before.st_mtime_ns),
-                )
-                assert filesystem_stat(path).st_mtime_ns == before.st_mtime_ns
-            if finish == "cancel":
-                raise primary
-    except (ValueError, KeyboardInterrupt) as error:
-        caught = error
-    if finish == "normal":
-        assert caught is None
-    elif finish == "source_changed":
-        assert str(caught) == "semantic_artifact_member_integrity_invalid"
-    else:
-        assert caught is primary
-        assert any("ValueError" in note for note in primary.__notes__)
-
-
 @pytest.mark.parametrize("name", ("prediction_diagnostics", "model_comparison"))
 def test_undefined_model_inference_preserves_descriptive_mean(
-    tmp_path, tables, envelope, name
+    tmp_path, tables, metadata, name
 ):
     frame = tables[name]
     frame.loc[0, "status"] = "UNDEFINED"
-    frame.loc[0, "reason"] = "global_development_selection_reuses_validation"
+    frame.loc[0, "reason"] = "global_validation_selection_reuses_validation"
     inference_columns = [
         "standard_error",
         "t_statistic",
@@ -1459,13 +492,11 @@ def test_undefined_model_inference_preserves_descriptive_mean(
     frame.loc[0, inference_columns] = float("nan")
     root = statistics.write_statistics_artifact(
         tmp_path / "descriptive",
-        envelope=envelope,
+        metadata=metadata,
         tables=tables,
         table_group="factor" if "factor_diagnostics" in tables else "research",
     )
-    artifact = statistics.read_statistics_artifact(
-        root, expected_identity=envelope.instance_identity
-    )
+    artifact = statistics.read_statistics_artifact(root)
     with artifact.table(f"{name}.parquet") as result:
         assert result["mean"].iloc[0] == 0.2
         assert result.observation_count.iloc[0] == 32
@@ -1476,11 +507,11 @@ def test_undefined_model_inference_preserves_descriptive_mean(
 @pytest.mark.parametrize("name", ("prediction_diagnostics", "model_comparison"))
 @pytest.mark.parametrize("corruption", ("p_value", "mean_missing", "empty_mean"))
 def test_undefined_model_inference_rejects_inferential_values_and_false_means(
-    tmp_path, tables, envelope, name, corruption
+    tmp_path, tables, metadata, name, corruption
 ):
     frame = tables[name]
     frame.loc[0, "status"] = "UNDEFINED"
-    frame.loc[0, "reason"] = "global_development_selection_reuses_validation"
+    frame.loc[0, "reason"] = "global_validation_selection_reuses_validation"
     frame.loc[
         0,
         [
@@ -1499,7 +530,7 @@ def test_undefined_model_inference_rejects_inferential_values_and_false_means(
         frame.loc[0, "mean"] = float("nan")
     else:
         frame.loc[0, "observation_count"] = 0
-    _assert_rejected_at_write_and_read(tmp_path, tables, envelope, f"{name}.parquet")
+    _assert_rejected_at_write_and_read(tmp_path, tables, metadata, f"{name}.parquet")
 
 
 @pytest.mark.parametrize(
@@ -1510,20 +541,20 @@ def test_undefined_model_inference_rejects_inferential_values_and_false_means(
         "quarterly_mean",
         "mean_difference",
         "observation_count",
-        "access_window",
+        "sample_role",
     ),
 )
 @pytest.mark.parametrize("fdr_method", ("BY", "NOT_APPLICABLE"))
 def test_defined_group_comparison_requires_descriptive_facts(
-    tmp_path, tables, envelope, corruption, fdr_method
+    tmp_path, tables, metadata, corruption, fdr_method
 ):
-    envelope = _holdout_statistics_envelope(envelope, tables)
+    metadata = _test_statistics_metadata(metadata, tables)
     row = _defined_group_comparison_row()
     row["fdr_method"] = fdr_method
     if fdr_method == "NOT_APPLICABLE":
         row["fdr_adjusted_p_value"] = float("nan")
-    if corruption == "access_window":
-        row[corruption] = "development"
+    if corruption == "sample_role":
+        row[corruption] = "validation"
     elif corruption != "none":
         row[corruption] = 0 if corruption == "observation_count" else float("nan")
     tables["model_group_comparison"] = pd.DataFrame([row])
@@ -1531,20 +562,18 @@ def test_defined_group_comparison_requires_descriptive_facts(
         _assert_rejected_at_write_and_read(
             tmp_path,
             tables,
-            envelope,
+            metadata,
             "model_group_comparison.parquet",
             error="^statistics_group_comparison_invalid$",
         )
     else:
         root = statistics.write_statistics_artifact(
             tmp_path / "group",
-            envelope=envelope,
+            metadata=metadata,
             tables=tables,
             table_group="factor" if "factor_diagnostics" in tables else "research",
         )
-        artifact = statistics.read_statistics_artifact(
-            root, expected_identity=envelope.instance_identity
-        )
+        artifact = statistics.read_statistics_artifact(root)
         with artifact.table("model_group_comparison.parquet") as frame:
             assert frame.global_mean.iloc[0] == 0.2
             assert frame.observation_count.iloc[0] == 64
@@ -1557,7 +586,7 @@ def test_defined_group_comparison_requires_descriptive_facts(
 def _defined_group_comparison_row():
     return dict(
         family_id="family",
-        access_window="holdout",
+        sample_role="test",
         status="DEFINED",
         reason="",
         fdr_method="BY",
@@ -1586,391 +615,62 @@ def _defined_group_comparison_row():
     )
 
 
-@pytest.mark.parametrize("boundary", [False, True])
-def test_maker_validator_reuses_overlapping_and_adjacent_native_paths(
-    tmp_path, monkeypatch, maker_calibration_tables, boundary
-):
-    from collections import deque
-
-    from quant_research_platform.markets.implementations.crypto import portfolio
-
-    tables, envelope = maker_calibration_tables
-    if boundary:
-        from tests.markets.crypto.calibration_test_support import maker_event_rows
-        from tests.markets.crypto.test_hft_execution import _boundary
-
-        events = tables["crypto_maker_events"]
-        rows = pd.DataFrame(
-            [
-                {"fold_id": "fold_1", **row}
-                for row in maker_event_rows(3, _boundary(2250))
-            ],
-            columns=events.columns,
-        )
-        rows.event_at = pd.to_datetime(rows.event_at, unit="ns")
-        events.loc[events.event_id.ge(3), "event_id"] += 1
-        tables["crypto_maker_events"] = pd.concat(
-            [
-                events.loc[events.event_id.lt(3)],
-                rows,
-                events.loc[events.event_id.gt(3)],
-            ],
-            ignore_index=True,
-        )
-        samples = tables["crypto_maker_samples"]
-        samples.event_end += 1
-        samples.loc[
-            samples.sample_id.eq(1) & samples.side.eq("buy"), "filled_quantity"
-        ] = 0.0
-        samples.loc[
-            samples.sample_id.eq(1) | samples.side.eq("sell"), "terminal_reason"
-        ] = "book_boundary"
-        summary = tables["crypto_maker_calibration"]
-        summary.loc[summary.side.eq("buy"), "zero_fill_count"] += 1
-    event_count = tables["crypto_maker_events"].event_id.nunique()
-    for name in ("crypto_maker_samples", "crypto_maker_events"):
-        frame = tables[name]
-        later = frame.copy()
-        for column in (
-            "decision_at",
-            "prediction_end",
-            "label_available_at",
-            "event_at",
-        ):
-            if column in later:
-                later[column] += pd.Timedelta(milliseconds=600)
-        for column in ("initial_book_event_id", "event_start", "event_end", "event_id"):
-            if column in later:
-                later[column] += event_count
-        if "sample_id" in later:
-            later.sample_id += 2
-        tables[name] = pd.concat([frame, later], ignore_index=True)
-    summary = tables["crypto_maker_calibration"]
-    for column in ("sample_count", "zero_fill_count", "post_only_rejection_count"):
-        summary[column] *= 2
-
-    paths, decoded, closed, maxima = [], [], [], []
-    native_events = portfolio._calibration_events
-    native_response = portfolio.MakerCalibration._response
-
-    def events(*args):
-        count = 0
-        try:
-            for event in native_events(*args):
-                count += 1
-                yield event
-        finally:
-            decoded.append(count)
-            closed.append(True)
-
-    def response(model, sample, **kwargs):
-        path = tuple(kwargs.pop("events"))
-        paths.append((sample["sample_id"], sample["side"], path))
-        return (yield from native_response(model, sample, events=iter(path), **kwargs))
-
-    class Window(deque):
-        def append(self, event):
-            super().append(event)
-            maxima.append(len(self))
-
-    def no_full_history(_model):
-        pytest.fail("validator materialized a full fold history")
-
-    monkeypatch.setattr(portfolio, "deque", Window, raising=False)
-    monkeypatch.setattr(portfolio, "_calibration_events", events)
-    monkeypatch.setattr(portfolio.MakerCalibration, "_response", response)
-    monkeypatch.setattr(portfolio.MakerCalibration, "_load", no_full_history)
-
-    def produce(on_table):
-        for name, frame in tables.items():
-            on_table(name, frame)
-
-    root = statistics.write_statistics_artifact(
-        tmp_path / "paths",
-        envelope=envelope,
-        tables=produce,
-        table_group="crypto_maker_calibration",
-        validate_tables=portfolio.validate_maker_calibration,
-    )
-    statistics.read_statistics_artifact(
-        root,
-        expected_identity=envelope.instance_identity,
-        validate_tables=portfolio.validate_maker_calibration,
-    )
-    assert decoded == [event_count * 2] * 2 and len(closed) == 2
-    assert max(maxima) < event_count * 2
-    assert len(paths) == 16
-    for first in (0, 8):
-        for index in range(first, first + 8, 2):
-            buy, sell = paths[index : index + 2]
-            assert (buy[1], sell[1]) == ("buy", "sell")
-            assert len(buy[2]) == len(sell[2])
-            assert all(
-                left is right for left, right in zip(buy[2], sell[2], strict=True)
-            )
-        previous = {event.event_id: event for event in paths[first][2]}
-        overlap = [event for event in paths[first + 2][2] if event.event_id in previous]
-        assert overlap and all(event is previous[event.event_id] for event in overlap)
-        assert paths[first + 4][2][0].event_id > paths[first + 2][2][-1].event_id
-
-
-@pytest.mark.parametrize("finish", ["close_failed", "cancel"])
-def test_maker_validator_closes_native_stream_and_preserves_primary(
-    tmp_path, monkeypatch, maker_calibration_tables, finish
-):
-    from quant_research_platform.markets.implementations.crypto import portfolio
-
-    tables, envelope = maker_calibration_tables
-
-    def produce(on_table):
-        for name, frame in tables.items():
-            on_table(name, frame)
-
-    root = statistics.write_statistics_artifact(
-        tmp_path / "good",
-        envelope=envelope,
-        tables=produce,
-        table_group="crypto_maker_calibration",
-        validate_tables=portfolio.validate_maker_calibration,
-    )
-    before = {
-        path.name: Path(native_filesystem_path(path)).read_bytes()
-        for path in root.iterdir()
-        if path.is_file()
-    }
-    native_events = portfolio._calibration_events
-    primary = KeyboardInterrupt("synthetic_reference_cancel")
-    cleanup = RuntimeError("synthetic_native_close_failure")
-    closed, opened = [], 0
-
-    def events(*args):
-        nonlocal opened
-        opened += 1
-        number = opened
-        try:
-            yield from native_events(*args)
-        finally:
-            closed.append(number)
-            if number == 1:
-                raise cleanup
-
-    def cancel(*_args, **_kwargs):
-        raise primary
-
-    with monkeypatch.context() as patch:
-        patch.setattr(portfolio, "_calibration_events", events)
-        if finish == "cancel":
-            patch.setattr(portfolio.MakerCalibration, "_response", cancel)
-        with pytest.raises(
-            KeyboardInterrupt if finish == "cancel" else RuntimeError
-        ) as caught:
-            statistics.read_statistics_artifact(
-                root,
-                expected_identity=envelope.instance_identity,
-                validate_tables=portfolio.validate_maker_calibration,
-            )
-        assert caught.value is (primary if finish == "cancel" else cleanup)
-    assert closed == [1]
-    if finish == "cancel":
-        assert any("RuntimeError" in note for note in primary.__notes__)
-    assert {
-        path.name: Path(native_filesystem_path(path)).read_bytes()
-        for path in root.iterdir()
-        if path.is_file()
-    } == before
-    statistics.read_statistics_artifact(
-        root,
-        expected_identity=envelope.instance_identity,
-        validate_tables=portfolio.validate_maker_calibration,
-    )
-
-
-@pytest.mark.parametrize(
-    "damage",
-    [
-        "side",
-        "events_side",
-        "ordinal",
-        "generic_before_ordinal",
-        "book_cross_batch",
-        "trade_cross_batch",
-    ],
-)
-def test_maker_validator_rejects_compound_damage_without_error_priority(
-    tmp_path, monkeypatch, maker_calibration_tables, damage
-):
-    from functools import partial
-
-    from quant_research_platform.markets.implementations.crypto import portfolio
-
-    tables, envelope = maker_calibration_tables
-    tables["crypto_maker_samples"].loc[0, "filled_quantity"] = 0.5
-    if damage in ("side", "events_side", "generic_before_ordinal"):
-        extra = tables["crypto_maker_samples"].iloc[[0]].copy()
-        extra.side = "events" if damage == "events_side" else "unknown"
-        if damage == "generic_before_ordinal":
-            extra.sample_id = -1
-        tables["crypto_maker_samples"] = pd.concat(
-            [tables["crypto_maker_samples"], extra], ignore_index=True
-        )
-    if damage in ("ordinal", "generic_before_ordinal"):
-        extra = (
-            tables["crypto_maker_events"].loc[lambda frame: frame.event_id.eq(4)].copy()
-        )
-        extra.event_id = 6
-        extra.event_at += pd.Timedelta(milliseconds=500)
-        tables["crypto_maker_events"] = pd.concat(
-            [tables["crypto_maker_events"], extra], ignore_index=True
-        )
-
-    if damage in ("book_cross_batch", "trade_cross_batch"):
-        events = tables["crypto_maker_events"]
-        extra = events.loc[
-            events.event_id.eq(4 if damage == "book_cross_batch" else 2)
-        ].copy()
-        if damage == "trade_cross_batch":
-            extra = pd.concat([extra, extra], ignore_index=True)
-        extra.event_id = 6
-        extra.event_at = pd.Timestamp("1970-01-01T00:00:03.150000")
-        extra.iloc[-1, extra.columns.get_loc("quantity")] = float("inf")
-        tables["crypto_maker_events"] = pd.concat([events, extra], ignore_index=True)
-        monkeypatch.setattr(
-            statistics,
-            "iter_declared_parquet_member_batches",
-            partial(statistics.iter_declared_parquet_member_batches, batch_rows=1),
-        )
-
-    def write(staging):
-        for name, frame in tables.items():
-            pq.write_table(
-                pa.Table.from_pandas(
-                    frame,
-                    schema=statistics._ARROW_SCHEMAS[f"{name}.parquet"],
-                    preserve_index=False,
-                ),
-                native_filesystem_path(staging / f"{name}.parquet"),
-            )
-
-    root = write_semantic_artifact(tmp_path / "compound", envelope, write)
-    before = {path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}
-    with pytest.raises(ValueError):
-        statistics.read_statistics_artifact(
-            root,
-            expected_identity=envelope.instance_identity,
-            validate_tables=portfolio.validate_maker_calibration,
-        )
-    assert {
-        path.name: path.read_bytes() for path in root.iterdir() if path.is_file()
-    } == before
-
-
-def _holdout_statistics_envelope(envelope, tables):
+def _test_statistics_metadata(metadata, tables):
     for frame in tables.values():
-        if "access_window" in frame:
-            frame["access_window"] = "holdout"
-    payload = envelope.payload()
-    protocol = payload["semantic_metadata"]["target_contract"]["protocol"]
-    protocol["access_window"] = "holdout"
-    base = build_business_manifest_envelope(
-        logical_artifact_id=envelope.logical_artifact_id,
-        schema_identity=envelope.schema_identity,
-        protocol_or_spec_identity=envelope.protocol_or_spec_identity,
-        software_identity=envelope.software_identity,
-        research_window={**payload["research_window"], "access": "holdout"},
-        upstream_identities=payload["upstream_identities"],
-        semantic_metadata=payload["semantic_metadata"],
-    )
-    return statistics_envelope(base, group="research", protocol=protocol)
+        if "sample_role" in frame:
+            frame["sample_role"] = "test"
+    return {**metadata, "sample_role": "test"}
 
 
 @pytest.fixture
-def crypto_envelope(envelope):
-    payload = envelope.payload()
-    window = {**payload["research_window"], "access": "holdout"}
-    base = build_business_manifest_envelope(
-        **{
-            key: value
-            for key, value in payload.items()
-            if key not in {"instance_identity", "status", "research_window"}
-        },
-        research_window=window,
-    )
-    return statistics_envelope(
-        base,
-        group="crypto_portfolio",
-        protocol={
-            "access_window": "holdout",
-            "execution_mode": "continuous",
-            "portfolio_candidates": [{"candidate_id": "candidate"}],
-            "research_plan": {
-                "test": {"start": window["start"], "end": window["end"]},
-                "folds": [{"fold_id": "fold_1"}],
-            },
-        },
-    )
+def crypto_metadata(metadata):
+    return {
+        **metadata,
+        "sample_role": "test",
+        "execution_mode": "continuous",
+        "candidate_ids": ["candidate"],
+    }
 
 
 @pytest.mark.parametrize("boundary", ("access", "outside", "factor_history"))
-def test_research_statistics_bind_access_and_model_role_window(
-    tmp_path, tables, envelope, boundary
+def test_research_statistics_bind_sample_role_and_explicit_window(
+    tmp_path, tables, metadata, boundary
 ):
-    member = "model_losses.parquet"
     if boundary == "access":
-        tables["model_losses"]["access_window"] = "holdout"
-        error = "statistics_access_window_mismatch"
+        tables["model_losses"]["sample_role"] = "test"
+        error = "statistics_sample_role_mismatch"
     else:
         tables["model_losses"]["timestamp"] = pd.Timestamp(
             "2030-01-02" if boundary == "outside" else "2014-01-02"
         )
         error = "statistics_table_window_mismatch"
-    if boundary == "factor_history":
-        payload = envelope.payload()
-        protocol = payload["semantic_metadata"]["target_contract"]["protocol"]
-        protocol["formal_dataset_window"]["start"] = "2014-01-02"
-        base = build_business_manifest_envelope(
-            **{
-                key: value
-                for key, value in payload.items()
-                if key not in {"instance_identity", "status", "research_window"}
-            },
-            research_window={**payload["research_window"], "start": "2014-01-02"},
-        )
-        envelope = statistics_envelope(base, group="research", protocol=protocol)
-    _assert_rejected_at_write_and_read(tmp_path, tables, envelope, member, error=error)
-
-
-def test_statistics_table_group_matches_declared_target_at_write_and_read(
-    tmp_path, tables, envelope
-):
-    envelope = statistics_envelope(
-        envelope,
-        group="factor",
-        protocol=envelope.payload()["semantic_metadata"]["target_contract"]["protocol"],
+    _assert_rejected_at_write_and_read(
+        tmp_path, tables, metadata, "model_losses.parquet", error=error
     )
-    with pytest.raises(ValueError, match="statistics_artifact_contract_mismatch"):
+
+
+def test_statistics_table_group_matches_declared_members(tmp_path, tables, metadata):
+    with pytest.raises(ValueError, match="statistics_tables_invalid"):
         statistics.write_statistics_artifact(
-            tmp_path / "rejected", envelope=envelope, tables=tables
+            tmp_path / "rejected",
+            metadata=metadata,
+            tables=tables,
+            table_group="factor",
         )
-
-    def write(staging):
-        for name, frame in tables.items():
-            pq.write_table(
-                pa.Table.from_pandas(
-                    frame,
-                    schema=statistics._ARROW_SCHEMAS[name + ".parquet"],
-                    preserve_index=False,
-                ),
-                native_filesystem_path(staging / (name + ".parquet")),
-            )
-
-    root = write_semantic_artifact(tmp_path / "unchecked", envelope, write)
+    root = statistics.write_statistics_artifact(
+        tmp_path / "valid", metadata=metadata, tables=tables
+    )
+    path = root / "manifest.json"
+    manifest = json.loads(path.read_text())
+    manifest["members"] = list(statistics.STATISTICS_TABLE_GROUPS["factor"])
+    path.write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="statistics_artifact_members_invalid"):
-        statistics.read_statistics_artifact(root, expected_identity=root.name)
+        statistics.read_statistics_artifact(root)
 
 
 @pytest.mark.parametrize("boundary", ("candidate", "execution_mode", "date"))
 def test_crypto_statistics_bind_candidate_mode_and_window(
-    tmp_path, crypto_tables, crypto_envelope, boundary
+    tmp_path, crypto_tables, crypto_metadata, boundary
 ):
     frame = crypto_tables["crypto_portfolio_daily"]
     if boundary == "candidate":
@@ -1978,7 +678,7 @@ def test_crypto_statistics_bind_candidate_mode_and_window(
         error = "statistics_candidate_id_mismatch"
     elif boundary == "execution_mode":
         frame["execution_mode"] = "independent_segments"
-        frame["episode_id"] = "a" * 64
+        frame["episode_id"] = "1672617600000000000_1672704000000000000"
         error = "statistics_execution_mode_mismatch"
     else:
         frame["end_at"] = pd.Timestamp("2030-01-01")
@@ -1986,7 +686,7 @@ def test_crypto_statistics_bind_candidate_mode_and_window(
     _assert_rejected_at_write_and_read(
         tmp_path,
         crypto_tables,
-        crypto_envelope,
+        crypto_metadata,
         "crypto_portfolio_daily.parquet",
         table_group="crypto_portfolio",
         error=error,
@@ -1994,7 +694,7 @@ def test_crypto_statistics_bind_candidate_mode_and_window(
 
 
 def test_legal_internal_model_name_survives_joint_test_publication(
-    tmp_path, tables, envelope
+    tmp_path, tables, metadata
 ):
     import numpy as np
 
@@ -2013,7 +713,7 @@ def test_legal_internal_model_name_survives_joint_test_publication(
         rank,
         family_ids=("baseline", family),
         benchmark_id="baseline",
-        access_window="development",
+        sample_role="validation",
         inference_blocker=None,
         max_lags=2,
         block_size=3,
@@ -2027,11 +727,9 @@ def test_legal_internal_model_name_survives_joint_test_publication(
         model_comparison=comparison, model_reality_checks=checks, robustness=robustness
     )
     root = statistics.write_statistics_artifact(
-        tmp_path / "joint", envelope=envelope, tables=tables
+        tmp_path / "joint", metadata=metadata, tables=tables
     )
-    artifact = statistics.read_statistics_artifact(
-        root, expected_identity=envelope.instance_identity
-    )
+    artifact = statistics.read_statistics_artifact(root)
     with artifact.table("model_reality_checks.parquet") as actual:
         pd.testing.assert_frame_equal(
             actual, checks.assign(reason=checks.reason.fillna("")), check_dtype=False
@@ -2039,23 +737,13 @@ def test_legal_internal_model_name_survives_joint_test_publication(
         assert family in set(actual.family_id)
 
 
-@pytest.mark.parametrize("access", ("development", "holdout"))
-def test_paired_rankic_and_champion_diagnostics_reach_native_report(
-    tmp_path, tables, envelope, access
+@pytest.mark.parametrize("access", ("validation", "test"))
+def test_paired_rankic_and_champion_diagnostics_reach_native_artifacts(
+    tmp_path, tables, metadata, access
 ):
     import numpy as np
 
-    from quant_research_platform.artifacts.research import load_a_share_run_evidence
-    from quant_research_platform.contracts.targets import (
-        ProducerKind,
-        ResearchRunTargetResult,
-        TargetStatus,
-    )
-    from quant_research_platform.reports.a_share import build_a_share_report
     from quant_research_platform.research import statistics_production as production
-    from quant_research_platform.research.protocols import a_share
-    from quant_research_platform.storage.layout import StorageLayout
-    from tests.research.test_report_selection import record as report_record
 
     dates = pd.bdate_range("2023-01-02", periods=5)
     permutations = {
@@ -2083,8 +771,8 @@ def test_paired_rankic_and_champion_diagnostics_reach_native_report(
         group: pd.DataFrame(
             dict(
                 timestamp=dates,
-                access_window=access,
-                quarter_id="2023Q1",
+                sample_role=access,
+                period_id="2023Q1",
                 family_id="family",
                 config_id="config",
                 loss=-values.to_numpy(),
@@ -2098,51 +786,34 @@ def test_paired_rankic_and_champion_diagnostics_reach_native_report(
         )
         for group, values in ranks.items()
     }
-    protocol = a_share.protocol("pv_all").manifest()
-    protocol.update(access_window=access)
-    protocol["statistics"].update(
-        hac_lag=1, bootstrap_block=2, bootstrap_repetitions=32
-    )
-    record = report_record()
-    record.protocol["research_configuration"]["stage"] = "models"
-    record.research_window["access"] = access
-    layout = StorageLayout(tmp_path)
-    references = []
+    config = {
+        "sample_role": access,
+        "statistics": {
+            "hac_lag": 1,
+            "bootstrap_block": 2,
+            "bootstrap_repetitions": 32,
+            "group_comparison": {
+                "fdr_method": "BY",
+                "alpha": 0.05,
+                "seed": 42,
+                "confidence": 0.95,
+            },
+        },
+    }
     expected = {}
     global_artifact = None
     for group in ("global", "quarterly"):
-        target = f"factors_only_{group}_statistics"
-        base = build_business_manifest_envelope(
-            logical_artifact_id=target,
-            schema_identity="a" * 64,
-            protocol_or_spec_identity="b" * 64,
-            software_identity="c" * 64,
-            research_window={
-                "start": "2023-01-02",
-                "end": "2023-03-31",
-                "access": access,
-            },
-            upstream_identities={},
-            semantic_metadata={},
-        )
-        declaration = {
-            **protocol,
-            "selection_group": group,
-            "formal_dataset_window": {"start": "2023-01-02", "end": "2023-03-31"},
-            "development_window": {"start": "2023-01-02", "end": "2023-03-31"},
-            "holdout_window": {"start": "2023-01-02", "end": "2023-03-31"},
-        }
-        bound = statistics_envelope(base, group="research", protocol=declaration)
+        bound = {**metadata, "sample_role": access}
         selected = {name: table.copy(deep=True) for name, table in tables.items()}
         for table in selected.values():
-            if "access_window" in table:
-                table["access_window"] = access
+            if "sample_role" in table:
+                table["sample_role"] = access
         selected["model_losses"] = losses[group]
         selected["prediction_diagnostics"] = production._prediction_summary(
             ranks[group].to_frame(production._PREDICTION_COLUMN),
             prediction_id=f"factors_only_{group}_persisted_predictions",
-            inference_blocker="global_development_selection_reuses_validation"
-            if group == "global" and access == "development"
+            inference_blocker="global_validation_selection_reuses_validation"
+            if group == "global" and access == "validation"
             else None,
             max_lags=1,
             block_size=2,
@@ -2155,15 +826,13 @@ def test_paired_rankic_and_champion_diagnostics_reach_native_report(
                 global_statistics=global_artifact,
                 selection_group=group,
                 family_ids=("family",),
-                protocol_manifest=declaration,
+                config=config,
             )
-        logical = tmp_path / "data/artifacts/a_share" / target
+        logical = tmp_path / group
         root = statistics.write_statistics_artifact(
-            logical, envelope=bound, tables=selected
+            logical, metadata=bound, tables=selected
         )
-        artifact = statistics.read_statistics_artifact(
-            root, expected_identity=root.name
-        )
+        artifact = statistics.read_statistics_artifact(root)
         if group == "global":
             global_artifact = artifact
         else:
@@ -2177,7 +846,7 @@ def test_paired_rankic_and_champion_diagnostics_reach_native_report(
                 )
                 assert row.fdr_family_size == 1
                 assert row.status == (
-                    "UNDEFINED" if access == "development" else "DEFINED"
+                    "UNDEFINED" if access == "validation" else "DEFINED"
                 )
         with artifact.table("prediction_diagnostics.parquet") as diagnostic:
             expected[group] = (
@@ -2185,80 +854,144 @@ def test_paired_rankic_and_champion_diagnostics_reach_native_report(
                 .where(diagnostic.notna(), None)
                 .to_dict("records")
             )
-        references.append(
-            ResearchRunTargetResult(
-                target_id=target,
-                producer_kind=ProducerKind.STATISTIC,
-                status=TargetStatus.BUILT,
-                instance_identity=root.name,
-                schema_identity=bound.schema_identity,
-                artifact_root=logical.relative_to(tmp_path).as_posix(),
-            )
-        )
-    record.target_results = tuple(references)
-    evidence = load_a_share_run_evidence(layout=layout, record=record, selections={})
-    report = build_a_share_report(record=record, evidence=evidence)
-    for group, reference in zip(("global", "quarterly"), references, strict=True):
-        shown = report["sections"]["OOS prediction"][group]
-        for row in expected[group]:
-            row["missing_observation_count"] = (
-                row["input_date_count"] - row["observation_count"]
-            )
-        assert shown["prediction_diagnostics"] == expected[group]
-        assert shown["inference_clock"] == "ordered_defined_observations"
-        assert shown["inference_population"] == "dates_with_defined_statistic"
-        assert shown["prediction_diagnostics"][0]["input_date_count"] == 5
-        assert shown["prediction_diagnostics"][0]["missing_observation_count"] == (
+    for group in ("global", "quarterly"):
+        rows = expected[group]
+        assert rows[0]["input_date_count"] == 5
+        assert rows[0]["input_date_count"] - rows[0]["observation_count"] == (
             1 if group == "global" else 0
         )
-        assert shown["statistics_identity"] == reference.instance_identity
-        assert shown["prediction_diagnostics"][0]["status"] == (
-            "UNDEFINED" if group == "global" and access == "development" else "DEFINED"
+        assert rows[0]["status"] == (
+            "UNDEFINED" if group == "global" and access == "validation" else "DEFINED"
         )
-    # Unrelated targets are absent in this focused native publication fixture.
-    assert report["report_status"] == "BLOCKED"
 
 
 def test_native_model_persistence_preserves_std_reason_in_statistics(
-    tmp_path, tables, envelope
+    tmp_path, tables, metadata
 ):
     import numpy as np
 
     from quant_research_platform.contracts.models import ModelSpec
-    from quant_research_platform.research.statistics_production import _model_trials
-    from tests.research.workflow_test_support import (
-        shared_model_case,
-        shared_model_rows,
+    from quant_research_platform.research.models.trial_selection import (
+        read_selection,
+        score,
+        select,
     )
+    from quant_research_platform.research.predictions.runner import predict
+    from quant_research_platform.research.statistics_production import (
+        _selection_trial_rows,
+    )
+    from tests.research.direct_model_test_support import fit_frame
 
-    spec = ModelSpec(
-        model_id="rank",
-        model_algorithm="equal_weight_rank_ensemble",
-        input_factor_columns=("x",),
-        label_column="label",
+    dates = pd.date_range("2020-01-01", periods=5)
+    frame = pd.DataFrame(
+        {
+            "timestamp": dates.repeat(3),
+            "asset_id": ["asset_0", "asset_1", "asset_2"] * 5,
+            "eligible": True,
+            "x": np.tile([-1.0, 0.0, 1.0], 5),
+            "label": np.tile([0.0, 1.0, 0.0], 5),
+        }
     )
-    frame = shared_model_rows((spec,), assets=3)
-    frame["x"] = np.tile([-1.0, 0.0, 1.0], len(frame) // 3)
-    frame["label"] = np.tile([0.0, 1.0, 0.0], len(frame) // 3)
+    frame["label_available_at"] = frame.timestamp
     frame.loc[
         frame.groupby("timestamp", sort=False).ngroup().mod(2).eq(1)
         & frame.asset_id.eq("asset_2"),
         "label",
     ] = np.nextafter(0.0, 1.0)
-    case = shared_model_case(tmp_path, specs=(spec,), frame=frame)
-    tables["model_trials"] = _model_trials(case.artifact, "global").loc[
-        :, list(statistics.STATISTICS_TABLE_COLUMNS["model_trials.parquet"])
-    ]
+    spec = ModelSpec(
+        model_id="rank",
+        model_algorithm="equal_weight_rank_ensemble",
+        input_factor_columns=("x",),
+        target_column="label",
+    )
+    trained = fit_frame(
+        tmp_path / "train",
+        frame.loc[frame.timestamp.eq(dates[0])].copy(),
+        spec,
+        market_id="a_share",
+    )
+    source = tmp_path / "validation.parquet"
+    frame.to_parquet(source, index=False)
+    window = {"start": "2020-01-02", "end": "2020-01-05"}
+    prediction = predict(
+        {
+            "model": str(trained.root),
+            "inputs": str(source),
+            "input_spec": trained.config["input_spec"],
+            "output": str(tmp_path / "prediction"),
+            "prediction_window": window,
+            "sample_role": "validation",
+        }
+    )
+    scored = score(
+        {
+            "predictions": [str(prediction)],
+            "labels": str(source),
+            "label_spec": trained.config["input_spec"],
+            "candidate_ids": ["rank"],
+            "scoring_window": window,
+            "validation_windows": [window],
+            "cutoff": "2020-01-05",
+            "test_window": {"start": "2020-01-06", "end": "2020-01-07"},
+            "selection_group": "global",
+            "validation_axis": "cross_sectional",
+            "output": str(tmp_path / "scores.json"),
+            "label_unit": "decimal_return",
+        }
+    )
+    selected = select(
+        {
+            "scores": str(scored),
+            "output": str(tmp_path / "selection.json"),
+            "selection_metric": "validation_rankic",
+            "selection_direction": "maximize",
+            "tie_break_order": ["rank"],
+            "refit_windows": [*trained.config["fit_windows"], window],
+            "refit_cutoff": "2020-01-05",
+        }
+    )
+    tables["model_trials"] = _selection_trial_rows(
+        {"final": read_selection(selected)}, "global"
+    )
     root = statistics.write_statistics_artifact(
-        tmp_path / "statistics", envelope=envelope, tables=tables
+        tmp_path / "statistics", metadata=metadata, tables=tables
     )
-    artifact = statistics.read_statistics_artifact(
-        root, expected_identity=envelope.instance_identity
-    )
-    with artifact.table("model_trials.parquet") as persisted:
+    with statistics.read_statistics_artifact(root).table(
+        "model_trials.parquet"
+    ) as persisted:
         rows = persisted.set_index("metric_id")
     assert rows.loc["validation_std_ic", "status"] == "UNDEFINED"
     assert rows.loc["validation_std_ic", "reason"] == "nonfinite_result"
     assert rows.loc["validation_icir", "status"] == "DEFINED"
     assert rows.loc["validation_icir", "value"] == 1.0
     assert rows.loc["validation_icir", "reason"] == ""
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        "model_trials",
+        "prediction_diagnostics",
+        "robustness",
+        "factor_diagnostics",
+        "fama_macbeth",
+        "fama_macbeth_periods",
+    ],
+)
+def test_statistics_all_numeric_tables_reject_duplicate_primary_keys(
+    tmp_path, tables, metadata, member
+):
+    tables[member] = pd.concat([tables[member], tables[member]], ignore_index=True)
+    group = (
+        "factor"
+        if member in {"factor_diagnostics", "fama_macbeth", "fama_macbeth_periods"}
+        else "research"
+    )
+    with pytest.raises(ValueError, match="statistics_table_duplicate_keys"):
+        statistics.write_statistics_artifact(
+            tmp_path / "unpublished",
+            metadata=metadata,
+            tables=tables,
+            table_group=group,
+        )
+    assert not (tmp_path / "unpublished").exists()

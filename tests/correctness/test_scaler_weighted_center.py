@@ -82,7 +82,8 @@ def test_center_with_native_equal_timestamp_extreme_weights():
     )
 
     weights = equal_timestamp_sample_weights(
-        pd.date_range("2020-01-01", periods=2), TrainingWeighting(half_life=1 / 1075)
+        pd.date_range("2020-01-01", periods=2),
+        TrainingWeighting(half_life_periods=1 / 1075),
     )
     np.testing.assert_array_equal(weights, [np.nextafter(0.0, 1.0), 2.0])
     fitted = ModelMatrixScaler.fit(

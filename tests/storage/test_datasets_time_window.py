@@ -177,7 +177,6 @@ def test_dataset_session_filtered_view_keeps_parent_paths(tmp_path: Path) -> Non
     assert session.read_paths == original_paths
     assert view.all_paths == session.all_paths
     assert isinstance(view.read_paths, tuple)
-    session.verify()
 
 
 def test_read_dataset_datetime_time_window_filters_intraday_precisely(

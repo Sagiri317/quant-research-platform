@@ -91,13 +91,16 @@ def test_external_units_clocks_windows_and_chunk_invariance():
 
 
 @pytest.mark.parametrize("venue", ("bybit", "okx"))
-def test_external_archive_collection_identity_persists_and_guards_publication(
+def test_external_archive_units_clocks_and_invalid_rows_reach_publication(
     tmp_path, monkeypatch, venue
 ):
     import gzip
     import hashlib
     import io
     import json
+    from dataclasses import replace
+    from functools import partial
+    from types import SimpleNamespace
 
     from quant_research_platform.contracts.json_codec import canonical_json_hash
     from quant_research_platform.contracts.time import TimeWindow
@@ -105,10 +108,14 @@ def test_external_archive_collection_identity_persists_and_guards_publication(
     from quant_research_platform.markets.implementations.crypto.hft import (
         iter_panel_frames,
     )
-    from quant_research_platform.profiles.research import (
-        bind_research_configuration,
-        research_profile,
+    from quant_research_platform.markets.implementations.crypto.processed import (
+        catalog as processed_module,
     )
+    from quant_research_platform.markets.implementations.crypto.processed import (
+        producer,
+    )
+
+    hft_processed_catalog = processed_module.hft_processed_catalog
     from quant_research_platform.sources.tardis import normalized
     from quant_research_platform.storage.datasets.reading import (
         iter_dataset_chunks,
@@ -117,23 +124,73 @@ def test_external_archive_collection_identity_persists_and_guards_publication(
     from quant_research_platform.storage.datasets.writing import write_dataset
     from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.binance_hft import _coverage, coverage_lookup
-    from tests.helpers.research_configuration import research_configuration
     from tests.markets.crypto.test_hft import _state
 
     class Response(io.BytesIO):
         status = 200
 
     layout = StorageLayout(tmp_path / "project")
-    config = research_configuration("crypto", "external_context")
-    profile = bind_research_configuration(
-        research_profile(config["profile_id"]),
-        config,
-        tardis_root=layout.raw_source_root("tardis"),
+    symbols = (
+        ("BTCUSDT", "ETHUSDT")
+        if venue == "bybit"
+        else ("BTC-USDT-SWAP", "ETH-USDT-SWAP")
     )
+    config = {
+        "research_plan": {"folds": [{"train": {"start": "2026-07-01T00:00:00"}}]},
+        "windows": {"development": {"end": "2026-08-01T00:00:10"}},
+        "auxiliary_sources": {
+            venue: {
+                "archives": {
+                    symbol: {
+                        kind: [
+                            f"{date}-{symbol}-{kind}"
+                            for date in ("2026-07-01", "2026-08-01", "2026-09-01")
+                        ]
+                        for kind in ("quotes", "trades")
+                    }
+                    for symbol in symbols
+                }
+            }
+        },
+    }
+    processed = hft_processed_catalog()
     data_id = ids.HFT_EXTERNAL_DATA_IDS[venue]
-    binding = profile.producer_bindings[data_id]
-    spec = profile.processed.get(data_id)
-    panel_spec = profile.processed.get(ids.HFT_PANEL_DATA_ID)
+    instrument = producer.EXTERNAL_INSTRUMENTS[venue]
+    archives = config["auxiliary_sources"][venue]["archives"]
+    source_window = TimeWindow(
+        min(fold["train"]["start"] for fold in config["research_plan"]["folds"]),
+        config["windows"]["development"]["end"],
+    )
+    identity_reader = partial(
+        normalized.source_identity,
+        exchange=instrument["exchange"],
+        archives=archives,
+        time_window=source_window,
+    )
+    binding = SimpleNamespace(
+        raw_root=layout.raw_source_root("tardis") / instrument["exchange"],
+        source_identity=identity_reader,
+        producer=partial(
+            producer.produce_normalized_context,
+            read_records=normalized.iter_records,
+            source_identity=identity_reader,
+            source_schema_id=normalized.SCHEMA_ID,
+            archives=archives,
+        ),
+    )
+    spec = replace(
+        processed.get(data_id),
+        parameters_json=json.dumps(
+            {
+                "venue": venue,
+                "symbols": instrument["symbols"],
+                "base_units_per_amount": instrument["base_units_per_amount"],
+                "max_age_ms": 200,
+                "input_delay_ms": 0,
+            }
+        ),
+    )
+    panel_spec = processed.get(ids.HFT_PANEL_DATA_ID)
     start = pd.Timestamp("2026-08-01T00:00:01")
     start_ms = start.value // 1000000
     window = TimeWindow(start, start + pd.Timedelta(milliseconds=600))
@@ -246,23 +303,25 @@ def test_external_archive_collection_identity_persists_and_guards_publication(
     panel = None
     output_root = layout.processed_data_root(spec.market_id, spec.kind, data_id)
     request = dict(
-        layout=layout,
+        inputs={
+            ids.HFT_PANEL_DATA_ID: layout.processed_data_root(
+                panel_spec.market_id, panel_spec.kind, panel_spec.data_id
+            )
+        },
         time_window=window,
-        processed_catalog=profile.processed,
-        source_catalog=profile.interim,
+        processed_catalog=processed,
+        source_catalog=None,
         raw_root=binding.raw_root,
-        expected_source_identity=expected_hash,
     )
-    with binding.producer(spec, **request) as (chunks, metadata, verify):
+    with binding.producer(spec, **request) as (chunks, metadata):
         write_dataset(
             output_root,
             chunks,
             spec=spec,
-            instance_metadata=metadata,
-            staged_validator=verify,
+            metadata=metadata,
         )
     session = open_dataset_session(output_root, columns=None, time_window=None)
-    assert session.manifest["source_artifact_identity"] == {
+    assert session.manifest["source_evidence"] == {
         "schema_id": normalized.SCHEMA_ID,
         "artifact_id": data_id,
         "manifest_hash": expected_hash,
@@ -335,23 +394,11 @@ def test_external_archive_collection_identity_persists_and_guards_publication(
     rejected_root = StorageLayout(tmp_path / "rejected").processed_data_root(
         spec.market_id, spec.kind, data_id
     )
+    guard_manifest.write_text(json.dumps(changed))
     try:
-        with binding.producer(spec, **request) as (chunks, metadata, verify):
-
-            def mutate_before_publication(receipt):
-                guard_manifest.write_text(json.dumps(changed))
-                verify(receipt)
-
-            with pytest.raises(
-                ValueError, match="hft_external_source_identity_changed"
-            ):
-                write_dataset(
-                    rejected_root,
-                    chunks,
-                    spec=spec,
-                    instance_metadata=metadata,
-                    staged_validator=mutate_before_publication,
-                )
+        with pytest.raises(ValueError, match="tardis_normalized_coverage_changed"):
+            with binding.producer(spec, **request) as (chunks, metadata):
+                write_dataset(rejected_root, chunks, spec=spec, metadata=metadata)
     finally:
         guard_manifest.write_bytes(original)
     assert not rejected_root.exists()
@@ -378,9 +425,13 @@ def test_okx_dated_face_value_native_csv_to_persisted_flow(
     import hashlib
 
     from quant_research_platform.markets.implementations.crypto.processed import (
+        catalog as processed_module,
+    )
+    from quant_research_platform.markets.implementations.crypto.processed import (
         producer as crypto_producer,
     )
-    from quant_research_platform.profiles.research import research_profile
+
+    hft_processed_catalog = processed_module.hft_processed_catalog
     from quant_research_platform.sources.tardis.normalized import _rows
     from quant_research_platform.storage.datasets import read_dataset, write_dataset
     from quant_research_platform.storage.layout import StorageLayout
@@ -449,9 +500,7 @@ def test_okx_dated_face_value_native_csv_to_persisted_flow(
         ):
             list(output)
         return
-    spec = research_profile("crypto_binance_hft").processed.get(
-        "okx_perpetual_context_100ms"
-    )
+    spec = hft_processed_catalog().get("okx_perpetual_context_100ms")
     root = StorageLayout(tmp_path).processed_data_root(
         spec.market_id, spec.kind, spec.data_id
     )

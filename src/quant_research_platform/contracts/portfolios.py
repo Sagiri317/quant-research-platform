@@ -31,7 +31,11 @@ EQUITY_EVENT_COLUMNS = (
     "successor_asset_id",
     "successor_listing_date",
     "successor_units_per_old_unit",
-    "panel_content_hash",
+    "shares_per_old_unit",
+    "unit_basis_date",
+    "successor_shares_per_unit",
+    "successor_unit_basis_date",
+    "unit_source_locator",
     "evidence_identity",
     "source_locator",
 )
@@ -42,6 +46,7 @@ REBALANCE_SCHEDULES = {
     "monthly-last-trading-day",
 }
 PORTFOLIO_CASH_ASSET_ID = "__cash__"
+RESEARCH_VALUATION_VERSION = "RESEARCH_DELISTING_ZERO_V1"
 PORTFOLIO_ECONOMIC_SUMMARY_FIELDS = frozenset(
     {
         "gross_pnl",
@@ -618,6 +623,19 @@ def validate_portfolio_transition(
                     raise ValueError("portfolio_held_lifecycle_unproven")
         finally:
             previous = old = None
+    research_marks = [
+        row for row in batch.diagnostics if row.name.startswith("research_")
+    ]
+    if research_marks:
+        policy = [
+            row for row in research_marks if row.name == "research_valuation_version"
+        ]
+        if (
+            len(policy) != 1
+            or policy[0].asset_id != PORTFOLIO_CASH_ASSET_ID
+            or policy[0].text != RESEARCH_VALUATION_VERSION
+        ):
+            raise ValueError("portfolio_research_valuation_version_invalid")
     trades_by_asset = defaultdict(list)
     flows_by_asset = defaultdict(list)
     diagnostics_by_asset = defaultdict(dict)
@@ -762,14 +780,22 @@ def validate_portfolio_transition(
         elif asset != PORTFOLIO_CASH_ASSET_ID:
             if any(row.kind == "principal" for row in flows):
                 raise ValueError("portfolio_perpetual_principal_cashflow_invalid")
-            realized = sum(row.amount for row in flows if row.kind == "realized_pnl")
+            terms = (
+                initial.cost_basis,
+                *(row.notional for row in trades),
+                *(row.amount for row in flows if row.kind == "realized_pnl"),
+            )
+            # Each stored monetary term rounds independently; add without cancellation.
+            rounding = sum(
+                (Fraction(ulp(value)) / 2 for value in (*terms, post.cost_basis)),
+                Fraction(),
+            )
             if (
-                not isclose(
-                    post.cost_basis,
-                    initial.cost_basis + sum(row.notional for row in trades) + realized,
-                    rel_tol=0.0,
-                    abs_tol=tolerance,
+                abs(
+                    Fraction(post.cost_basis)
+                    - sum((Fraction(value) for value in terms), Fraction())
                 )
+                > max(Fraction(tolerance), rounding)
                 or final.quantity != post.quantity
                 or final.cost_basis != post.cost_basis
             ):
@@ -804,19 +830,11 @@ class PortfolioCandidateSpec:
         "top20_float_cap",
         "benchmark_enhanced",
     ]
-    prediction_target_id: str
     prediction_selector: str
     rebalance_schedule: str
     top_quantile: float | None
     benchmark_id: str | None
-    benchmark_weights_target_id: str | None
-    research_dataset_id: str
-    market_panel_target_id: str
-    execution_mask_target_id: str
-    trading_calendar_target_id: str
-    fee_schedule_target_id: str
     risk_style_columns: tuple[str, ...] = ()
-    risk_context_target_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.selection_group) is not str or self.selection_group not in {
@@ -826,13 +844,7 @@ class PortfolioCandidateSpec:
             raise ValueError("portfolio_selection_group_invalid")
         for value in (
             self.candidate_id,
-            self.prediction_target_id,
             self.prediction_selector,
-            self.research_dataset_id,
-            self.market_panel_target_id,
-            self.execution_mask_target_id,
-            self.trading_calendar_target_id,
-            self.fee_schedule_target_id,
         ):
             if type(value) is not str or not value:
                 raise ValueError("portfolio_candidate_dependency_invalid")
@@ -852,23 +864,6 @@ class PortfolioCandidateSpec:
             type(self.benchmark_id) is not str or not self.benchmark_id
         ):
             raise ValueError("portfolio_candidate_benchmark_invalid")
-        if self.benchmark_weights_target_id is not None and (
-            type(self.benchmark_weights_target_id) is not str
-            or not self.benchmark_weights_target_id
-        ):
-            raise ValueError("portfolio_candidate_benchmark_dependency_invalid")
-        if (self.benchmark_id is None) != (self.benchmark_weights_target_id is None):
-            raise ValueError("portfolio_candidate_benchmark_dependency_invalid")
-        if (
-            type(self.risk_context_target_ids) is not tuple
-            or any(
-                type(target) is not str or not target
-                for target in self.risk_context_target_ids
-            )
-            or len(set(self.risk_context_target_ids))
-            != len(self.risk_context_target_ids)
-        ):
-            raise ValueError("portfolio_candidate_risk_context_invalid")
         if (
             type(self.risk_style_columns) is not tuple
             or any(
@@ -877,8 +872,6 @@ class PortfolioCandidateSpec:
             )
             or len(set(self.risk_style_columns)) != len(self.risk_style_columns)
         ):
-            raise ValueError("portfolio_candidate_risk_styles_invalid")
-        if bool(self.risk_style_columns) != bool(self.risk_context_target_ids):
             raise ValueError("portfolio_candidate_risk_styles_invalid")
         if self.construction == "benchmark_enhanced":
             if self.top_quantile is not None or self.benchmark_id is None:
@@ -990,14 +983,7 @@ class TradeCostComponents:
             for value in numeric
         ):
             raise ValueError("trade_cost_components_invalid")
-        if (
-            type(self.source_identity) is not str
-            or len(self.source_identity) != 64
-            or any(
-                character not in "0123456789abcdef"
-                for character in self.source_identity
-            )
-        ):
+        if type(self.source_identity) is not str or not self.source_identity:
             raise ValueError("trade_cost_components_invalid")
 
     @property

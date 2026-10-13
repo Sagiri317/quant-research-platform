@@ -19,10 +19,7 @@ from quant_research_platform.runtime.resources import (
     DEFAULT_BATCH_ROWS,
 )
 from quant_research_platform.storage.identity import (
-    DatasetFileIdentity,
-    dataset_file_identity,
     open_filesystem_file,
-    verified_file_handle,
 )
 
 _PARQUET_MAX_ROW_GROUP_ROWS = 64 * 1024 * 1024
@@ -30,7 +27,6 @@ _PARQUET_MAX_ROW_GROUP_ROWS = 64 * 1024 * 1024
 
 @dataclass(frozen=True, slots=True)
 class DatasetPartMetadata:
-    identity: DatasetFileIdentity
     schema: pa.Schema
     row_count: int
     file_size_bytes: int
@@ -42,18 +38,15 @@ class PreparedMembershipValues:
     values: pa.Array
 
 
-def inspect_dataset_part(
-    path: Path, *, expected_identity: DatasetFileIdentity | None = None
-) -> DatasetPartMetadata:
-    with _opened_parquet(path, expected_identity=expected_identity) as opened:
-        parquet_file, identity, _handle = opened
-        return _part_metadata(parquet_file, identity=identity)
+def inspect_dataset_part(path: Path) -> DatasetPartMetadata:
+    with _opened_parquet(path) as opened:
+        parquet_file, handle = opened
+        return _part_metadata(parquet_file, handle=handle)
 
 
 def iter_dataset_part_batches(
     path: Path,
     *,
-    expected_identity: DatasetFileIdentity | None,
     batch_rows: int = DEFAULT_BATCH_ROWS,
     columns: tuple[str, ...] | None = None,
     parquet_filters: list[tuple[str, str, Any]] | None = None,
@@ -63,11 +56,11 @@ def iter_dataset_part_batches(
     """Stream native Arrow batches while binding metadata and bytes to one handle."""
     if type(batch_rows) is not int or batch_rows <= 0:
         raise ValueError("invalid_batch_rows")
-    with _opened_parquet(path, expected_identity=expected_identity) as opened:
-        parquet_file, identity, _ = opened
+    with _opened_parquet(path) as opened:
+        parquet_file, handle = opened
         metadata = _part_metadata(
             parquet_file,
-            identity=identity,
+            handle=handle,
             require_logical_dtypes=False,
         )
         if metadata_observer is not None:
@@ -105,23 +98,19 @@ def iter_dataset_part_batches(
 
 
 @contextmanager
-def _opened_parquet(path: Path, *, expected_identity: DatasetFileIdentity | None):
-    resolved = Path(path)
-    identity = dataset_file_identity(resolved)
-    if expected_identity is not None and identity != expected_identity:
-        raise ValueError("dataset_file_identity_changed")
-    with closing_iterator(open_filesystem_file(resolved)) as handle:
-        with verified_file_handle(resolved, handle, expected_identity=identity):
-            footer_length = _parquet_footer_length(handle)
-            with closing_iterator(
-                pq.ParquetFile(
-                    handle,
-                    thrift_string_size_limit=max(1, footer_length),
-                    thrift_container_size_limit=max(1, footer_length),
-                    pre_buffer=False,
-                )
-            ) as parquet:
-                yield (parquet, identity, handle)
+def _opened_parquet(path: Path):
+    """Open one selected member; decoding errors propagate without a recheck."""
+    with closing_iterator(open_filesystem_file(Path(path))) as handle:
+        footer_length = _parquet_footer_length(handle)
+        with closing_iterator(
+            pq.ParquetFile(
+                handle,
+                thrift_string_size_limit=max(1, footer_length),
+                thrift_container_size_limit=max(1, footer_length),
+                pre_buffer=False,
+            )
+        ) as parquet:
+            yield (parquet, handle)
 
 
 def _parquet_footer_length(handle: Any) -> int:
@@ -144,7 +133,7 @@ def _parquet_footer_length(handle: Any) -> int:
 def _part_metadata(
     parquet_file: pq.ParquetFile,
     *,
-    identity: DatasetFileIdentity,
+    handle: Any,
     require_logical_dtypes: bool = True,
 ) -> DatasetPartMetadata:
     schema = parquet_file.schema.to_arrow_schema()
@@ -153,10 +142,9 @@ def _part_metadata(
     if logical_dtype_payload is None and require_logical_dtypes:
         raise ValueError("dataset_logical_dtypes_missing")
     return DatasetPartMetadata(
-        identity=identity,
         schema=schema.remove_metadata(),
         row_count=int(parquet_file.metadata.num_rows),
-        file_size_bytes=identity.size,
+        file_size_bytes=os.fstat(handle.fileno()).st_size,
         logical_dtype_payload=b""
         if logical_dtype_payload is None
         else bytes(logical_dtype_payload),

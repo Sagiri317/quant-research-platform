@@ -148,11 +148,11 @@ def test_expectations_processed_producer_persists_latest_declaration(
     from quant_research_platform.markets.implementations.a_share.processed import (
         producer,
     )
-    from quant_research_platform.profiles.research import research_profile
     from quant_research_platform.storage.datasets.reading import read_dataset
     from quant_research_platform.storage.datasets.writing import write_dataset
+    from tests.helpers.a_share_catalogs import scientific_catalogs
 
-    profile = research_profile()
+    profile = scientific_catalogs()
     spec = profile.processed.get("expectations_factors")
     records = pd.DataFrame(
         {
@@ -273,9 +273,9 @@ def test_fiscal_year_coverage_is_independent_in_persisted_producer(
     from quant_research_platform.markets.implementations.a_share.processed import (
         producer,
     )
-    from quant_research_platform.profiles.research import research_profile
     from quant_research_platform.storage.datasets.reading import read_dataset
     from quant_research_platform.storage.datasets.writing import write_dataset
+    from tests.helpers.a_share_catalogs import scientific_catalogs
 
     records = pd.DataFrame(
         [
@@ -302,7 +302,7 @@ def test_fiscal_year_coverage_is_independent_in_persisted_producer(
             "close": 10.0,
         }
     )
-    spec = research_profile().processed.get("expectations_factors")
+    spec = scientific_catalogs().processed.get("expectations_factors")
     actual = producer._compute_processed_frame(
         spec,
         source={"analyst_forecast": records},
@@ -342,8 +342,8 @@ def test_extreme_finite_eps_medians_and_mad_persist_without_intermediate_overflo
     from quant_research_platform.markets.implementations.a_share.processed import (
         producer,
     )
-    from quant_research_platform.profiles.research import research_profile
     from quant_research_platform.storage.datasets import read_dataset, write_dataset
+    from tests.helpers.a_share_catalogs import scientific_catalogs
 
     values = [-scale, -scale, scale, scale] if symmetric else [scale] * 4
     dates = pd.bdate_range("2020-01-02", periods=3).as_unit("ns")
@@ -372,7 +372,7 @@ def test_extreme_finite_eps_medians_and_mad_persist_without_intermediate_overflo
             "close": scale,
         }
     )
-    spec = research_profile().processed.get("expectations_factors")
+    spec = scientific_catalogs().processed.get("expectations_factors")
     actual = producer._compute_processed_frame(
         spec,
         source={"analyst_forecast": records},
@@ -403,9 +403,9 @@ def test_half_subnormal_forecast_centers_survive_both_medians(
     from quant_research_platform.markets.implementations.a_share.processed import (
         producer,
     )
-    from quant_research_platform.profiles.research import research_profile
     from quant_research_platform.storage.datasets import read_dataset, write_dataset
     from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.a_share_catalogs import scientific_catalogs
 
     small = np.nextafter(0.0, 1.0)
     dates = pd.bdate_range("2020-01-02", periods=2).as_unit("ns")
@@ -438,7 +438,7 @@ def test_half_subnormal_forecast_centers_survive_both_medians(
             "close": close,
         }
     )
-    spec = research_profile().processed.get("expectations_factors")
+    spec = scientific_catalogs().processed.get("expectations_factors")
     output = producer._compute_processed_frame(
         spec,
         source={"analyst_forecast": records},
@@ -461,60 +461,32 @@ def test_half_subnormal_forecast_centers_survive_both_medians(
 
 @pytest.mark.parametrize("batch_rows", (3, 10000))
 @pytest.mark.parametrize("freshness", (90, 180))
-def test_bound_freshness_drives_native_source_window_and_processed_identity(
+def test_explicit_freshness_controls_native_source_history_and_values(
     tmp_path, freshness, batch_rows, monkeypatch
 ):
-    import json
-
-    from quant_research_platform.contracts.time import TimeWindow
     from quant_research_platform.markets.implementations.a_share.processed import (
         producer,
     )
-    from quant_research_platform.profiles.research import (
-        bind_research_configuration,
-        research_profile,
+    from quant_research_platform.markets.prepare import prepare
+    from quant_research_platform.storage.datasets import read_dataset
+    from tests.helpers.a_share_sources import (
+        _prepare,
+        _synthetic_interim_frames,
+        _write_inputs,
     )
-    from quant_research_platform.storage.datasets import read_dataset, write_dataset
-    from quant_research_platform.storage.layout import StorageLayout
-    from tests.helpers.research_configuration import research_configuration
-    from tests.markets.a_share.test_target_dag_chain import _synthetic_interim_frames
 
     monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", batch_rows)
     prepared = []
-    prepare = producer._prepare_expectations
+    actual_prepare = producer._prepare_expectations
 
     def counted_prepare(*args, **kwargs):
         prepared.append(True)
-        return prepare(*args, **kwargs)
+        return actual_prepare(*args, **kwargs)
 
     monkeypatch.setattr(producer, "_prepare_expectations", counted_prepare)
-    config = research_configuration("a_share", "fusion_nf_expectations")
-    config["evaluation"]["forecast_freshness_days"] = freshness
-    profile = bind_research_configuration(research_profile(), config)
-    spec = profile.processed.get("expectations_factors")
-    assert json.loads(spec.parameters_json)["freshness_days"] == freshness
     dates = pd.bdate_range("2020-06-02", periods=2).as_unit("ns")
-    window = TimeWindow(dates[0], dates[-1])
-    layout = StorageLayout(tmp_path)
-    source = _synthetic_interim_frames(dates)
-    panel_spec = profile.processed.get("market_panel_1d")
-    panel = producer._compute_processed_frame(
-        panel_spec,
-        source={
-            **producer._prepare_panel_source(
-                source, producer.panels._canonical_stock_master(source["stock_master"])
-            ),
-            "market_bars_1d": source["market_bars_1d"],
-        },
-        dependencies={},
-        trading_sessions=dates,
-    )
-    write_dataset(
-        layout.processed_data_root(
-            panel_spec.market_id, panel_spec.kind, panel_spec.data_id
-        ),
-        panel,
-        spec=panel_spec,
+    source = _synthetic_interim_frames(
+        pd.bdate_range(dates[0] - pd.Timedelta(days=180), dates[-1]).as_unit("ns")
     )
     records = pd.DataFrame(
         [
@@ -532,35 +504,28 @@ def test_bound_freshness_drives_native_source_window_and_processed_identity(
             for i, age in enumerate((120, 120, 120, 1))
         ]
     )
-    calendar_spec = profile.interim.get("trading_calendar")
-    write_dataset(
-        layout.interim_data_root(calendar_spec.source_id, calendar_spec.data_id),
-        _synthetic_interim_frames(
-            pd.bdate_range(dates[0] - pd.Timedelta(days=180), dates[-1]).as_unit("ns")
-        )["trading_calendar"],
-        spec=calendar_spec,
+    source["analyst_forecast"] = records
+    inputs = _write_inputs(tmp_path / "source", source)
+    inputs["market_panel_1d"] = _prepare(
+        tmp_path / "prepared", "market_panel_1d", inputs, dates[0], dates[-1]
     )
-    source_spec = profile.interim.get("analyst_forecast")
-    write_dataset(
-        layout.interim_data_root(source_spec.source_id, source_spec.data_id),
-        records,
-        spec=source_spec,
+    panel = read_dataset(inputs["market_panel_1d"])
+    root = prepare(
+        {
+            "market_id": "a_share",
+            "data_id": "expectations_factors",
+            "inputs": {
+                key: str(inputs[key])
+                for key in ("market_panel_1d", "analyst_forecast", "trading_calendar")
+            },
+            "time_window": {
+                "start": str(dates[0].date()),
+                "end": str(dates[-1].date()),
+            },
+            "parameters": {"freshness_days": freshness},
+            "output_root": str(tmp_path / "expectations"),
+        }
     )
-    planned = profile.protocol(config["scenario_id"]).target_window(
-        "data materialize", source_spec, window
-    )
-    assert planned.start == dates[0] - pd.Timedelta(days=freshness)
-    root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
-    with producer.produce_a_share_processed_data(
-        spec,
-        layout=layout,
-        time_window=window,
-        processed_catalog=profile.processed,
-        source_catalog=profile.interim,
-    ) as (frames, metadata, verify):
-        write_dataset(
-            root, frames, spec=spec, instance_metadata=metadata, staged_validator=verify
-        )
     saved = read_dataset(root).query("asset_id == '000001'")
     assert prepared == [True]
     if freshness == 90:
@@ -570,9 +535,6 @@ def test_bound_freshness_drives_native_source_window_and_processed_identity(
         np.testing.assert_array_equal(
             saved.forward_earnings_yield_fy1, 2.5 / expected_close
         )
-    assert profile.protocol(config["scenario_id"]).manifest()["expectations"][
-        "role"
-    ] == ("primary" if freshness == 90 else "robustness")
 
 
 @pytest.mark.parametrize("failure", ("source", "schema", "parameter"))

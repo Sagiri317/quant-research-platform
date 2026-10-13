@@ -54,7 +54,7 @@ def test_model_threads_bind_affinity_and_cgroup_bandwidth(
         model_id="capacity_model",
         model_algorithm="random_forest_regressor",
         input_feature_columns=("feature",),
-        label_column="label",
+        target_column="label",
         hyperparameters={"n_jobs": 16},
     )
     if expected is None:

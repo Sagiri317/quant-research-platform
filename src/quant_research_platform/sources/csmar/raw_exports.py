@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import os
 import re
 import stat
-from collections.abc import Callable, Iterable, Iterator
-from contextlib import contextmanager
+from collections.abc import Iterable, Iterator
 from itertools import groupby, islice
 from pathlib import Path
 
@@ -28,10 +26,10 @@ from .raw_schemas import (
     infer_dataset_from_native_export,
     inspect_raw_export_file,
     iter_export_csv_records,
-    materialize_header_record,
     parse_raw_filename,
     raw_export_file_identity,
     read_export_header,
+    validate_export_header,
 )
 
 SUPPORTED_RAW_EXPORT_SUFFIXES = {".csv"}
@@ -147,82 +145,41 @@ def _join_continuations(current: str, continuations: list[str]) -> str:
     return "\n".join(parts)
 
 
-@contextmanager
-def _raw_export_path_session(
-    root: Path,
-) -> Iterator[tuple[Iterator[Path], Callable[[], None]]]:
-    root = Path(root)
-
-    def read_root_identity() -> os.stat_result:
-        try:
-            metadata = filesystem_stat(root, follow_symlinks=False)
-        except (FileNotFoundError, NotADirectoryError) as error:
-            raise ValueError("csmar_raw_export_identity_changed") from error
-        reparse_flag = getattr(metadata, "st_file_attributes", 0) & getattr(
-            stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0
-        )
-        if not stat.S_ISDIR(metadata.st_mode) or reparse_flag:
-            raise ValueError("csmar_raw_export_identity_changed")
-        return metadata
-
-    root_identity = read_root_identity()
-
-    def verify_root() -> None:
-        current = read_root_identity()
-        if not os.path.samestat(root_identity, current):
-            raise ValueError("csmar_raw_export_identity_changed")
+def _iter_raw_export_paths(root: Path) -> Iterator[Path]:
+    root = require_unaliased_path(Path(root), error="csmar_raw_export_identity_changed")
+    metadata = filesystem_stat(root, follow_symlinks=False)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise ValueError("csmar_raw_export_identity_changed")
 
     def fail_walk(error: OSError) -> None:
         if isinstance(error, (FileNotFoundError, NotADirectoryError)):
             raise ValueError("csmar_raw_export_identity_changed") from error
         raise error
 
-    def iter_paths() -> Iterator[Path]:
-        walker = iter(filesystem_walk(root, follow_symlinks=False, on_error=fail_walk))
-        while True:
-            try:
-                parent, dirnames, filenames = next(walker)
-            except StopIteration:
-                return
-            require_unaliased_path(parent, error="csmar_raw_export_identity_changed")
-            for name in dirnames:
-                require_unaliased_path(
-                    parent / name, error="csmar_raw_export_identity_changed"
-                )
-            dirnames[:] = sorted(
-                name for name in dirnames if name.casefold() != "raw_only"
+    walker = iter(filesystem_walk(root, follow_symlinks=False, on_error=fail_walk))
+    while True:
+        try:
+            parent, dirnames, filenames = next(walker)
+        except StopIteration:
+            return
+        require_unaliased_path(parent, error="csmar_raw_export_identity_changed")
+        for name in dirnames:
+            require_unaliased_path(
+                parent / name, error="csmar_raw_export_identity_changed"
             )
-            for name in sorted(filenames):
-                path = parent / name
-                if path.suffix.lower() not in SUPPORTED_RAW_EXPORT_SUFFIXES:
-                    continue
-                require_unaliased_path(path, error="csmar_raw_export_identity_changed")
-                if (
-                    "[DES]" in path.name
-                    or "__description__" in path.name
-                    or ".metadata." in path.name
-                ):
-                    continue
-                yield path
-
-    primary = None
-    try:
-        require_unaliased_path(root, error="csmar_raw_export_identity_changed")
-        yield (iter_paths(), verify_root)
-    except BaseException as body_error:
-        primary = body_error
-        raise
-    finally:
-        if primary is None:
-            verify_root()
-        else:
-            try:
-                verify_root()
-            except BaseException as verify_error:
-                primary.add_note(
-                    "CSMAR raw export root verification also failed: "
-                    f"{type(verify_error).__name__}"
-                )
+        dirnames[:] = sorted(name for name in dirnames if name.casefold() != "raw_only")
+        for name in sorted(filenames):
+            path = parent / name
+            if path.suffix.lower() not in SUPPORTED_RAW_EXPORT_SUFFIXES:
+                continue
+            require_unaliased_path(path, error="csmar_raw_export_identity_changed")
+            if (
+                "[DES]" in path.name
+                or "__description__" in path.name
+                or ".metadata." in path.name
+            ):
+                continue
+            yield path
 
 
 def iter_index_info_rows(
@@ -455,6 +412,7 @@ def iter_private_export_chunks(
             expected_identity=expected_identity,
         )
     )
+    emitted = False
     with closing_iterator(rows):
         while True:
             pending = []
@@ -466,6 +424,14 @@ def iter_private_export_chunks(
                     break
                 pending.append(row)
             if not pending:
+                if not emitted:
+                    header = read_export_header(
+                        export_path, expected_identity=expected_identity
+                    )
+                    from .field_mappings import validate_raw_column_names
+
+                    validate_raw_column_names(tuple(header), dataset)
+                    yield _raw_frame([], header)
                 return
             if dataset == "index_info":
                 from .field_mappings import COLUMN_MAPPINGS, validate_raw_column_names
@@ -478,6 +444,7 @@ def iter_private_export_chunks(
                 ]
                 header = [header[i] for i in positions]
                 pending = [[row[i] for i in positions] for row in pending]
+            emitted = True
             frame = _raw_frame(pending, header)
             try:
                 yield frame
@@ -498,7 +465,7 @@ def _iter_csv_records(
         header_record = next(rows, None)
         if header_record is None:
             return
-        physical_header = materialize_header_record(header_record)
+        physical_header = validate_export_header(header_record)
         physical_width = len(physical_header)
         selected_positions: frozenset[int] | None = None
         header = physical_header
@@ -577,7 +544,7 @@ def dataset_files_with_identity_by_id(
     requested = _requested_raw_datasets(requested_datasets)
 
     def iter_files() -> Iterator[tuple[str, Path, DatasetFileIdentity]]:
-        with _raw_export_path_session(root) as (paths, verify_root):
+        with closing_iterator(_iter_raw_export_paths(root)) as paths:
             if identity_index is None:
                 index = ExactPrimaryKeyIndex(primary_key=("dataset_path",))
             else:
@@ -618,7 +585,6 @@ def dataset_files_with_identity_by_id(
                             yield _yield_value
                         except GeneratorExit:
                             return
-                    verify_root()
 
     return iter_files()
 
@@ -726,40 +692,6 @@ def _raw_dataset_candidate(
     ):
         return None
     return _infer_dataset_from_header(columns)
-
-
-def _verify_csmar_member_set(
-    root: Path,
-    index: ExactPrimaryKeyIndex,
-    *,
-    namespace: str = "csmar-dataset-physical-exports-paths",
-    requested_datasets: Iterable[str] | None = None,
-) -> None:
-    requested = _requested_raw_datasets(requested_datasets)
-    with _raw_export_path_session(root) as (paths, _verify_root):
-        current_count = 0
-        for path in paths:
-            identity = raw_export_file_identity(path)
-            if (
-                requested is not None
-                and _raw_dataset_candidate(path, expected_identity=identity)
-                not in requested
-            ):
-                continue
-            relative = path.relative_to(root).as_posix().encode("utf-8")
-            expected = index.identity_payload_value(
-                namespace=namespace, payload=relative
-            )
-            actual = (
-                relative
-                + b"\x00"
-                + _file_identity_bytes(raw_export_file_identity(path))
-            )
-            if expected != actual:
-                raise ValueError("csmar_raw_export_identity_changed")
-            current_count += 1
-    if current_count != index.identity_payload_count(namespace=namespace):
-        raise ValueError("csmar_raw_export_identity_changed")
 
 
 def _raw_export_physical_key(identity: DatasetFileIdentity) -> bytes:

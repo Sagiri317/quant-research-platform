@@ -5,13 +5,13 @@ from __future__ import annotations
 from bisect import bisect_right
 from contextlib import ExitStack
 from dataclasses import dataclass
+from fractions import Fraction
 
 import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.portfolios import (
     _EXECUTION_COLUMNS,
-    A_SHARE_EQUITY_EVENTS_DATA_ID,
     EQUITY_EVENT_COLUMNS,
     _portfolio_session_frame,
 )
@@ -53,13 +53,14 @@ class _PortfolioSession:
     unproved_lifecycle_assets: frozenset[str]
     confirmed_delisted_lifecycles: frozenset[tuple[str, pd.Timestamp]]
     rights_events: pd.DataFrame
+    unit_unproved_assets: frozenset[str] = frozenset()
 
 
 def _portfolio_session_evidence(
-    layout, panel_root, calendar, *, include_asset_sessions
+    market_bars_root, stock_master_root, panel_root, calendar, *, include_asset_sessions
 ):
     bars = open_dataset_session(
-        layout.target_root("market_bars_1d", None),
+        market_bars_root,
         columns=_MARKET_FACT_COLUMNS,
         time_window=None,
     )
@@ -72,7 +73,7 @@ def _portfolio_session_evidence(
     stocks = panels._canonical_stock_master(
         materialize_dataset_session(
             open_dataset_session(
-                layout.target_root("stock_master", None),
+                stock_master_root,
                 columns=_STOCK_FACT_COLUMNS,
                 time_window=None,
             )
@@ -85,18 +86,27 @@ def _portfolio_session_evidence(
 
 
 def iter_portfolio_sessions(
-    *, layout, panel_root, panel_columns, calendar, time_window, execution_root=None
+    *,
+    market_bars_root,
+    stock_master_root,
+    panel_root,
+    panel_columns,
+    calendar,
+    time_window,
+    execution_root=None,
+    equity_events_root=None,
 ):
     """Project proved closed-market marks without changing materialized inputs."""
     bars, panel, membership, asset_sessions, stocks, raw_axis = (
         _portfolio_session_evidence(
-            layout,
+            market_bars_root,
+            stock_master_root,
             panel_root,
             calendar,
             include_asset_sessions=execution_root is not None,
         )
     )
-    rights_root = layout.target_root(A_SHARE_EQUITY_EVENTS_DATA_ID, None)
+    rights_root = equity_events_root
     rights_session = (
         open_dataset_session(
             rights_root, columns=EQUITY_EVENT_COLUMNS, time_window=None
@@ -109,21 +119,33 @@ def iter_portfolio_sessions(
         if rights_session is not None
         else pd.DataFrame(columns=EQUITY_EVENT_COLUMNS)
     )
-    if (
-        not rights.empty
-        and not rights.panel_content_hash.eq(panel.manifest["content_hash"]).all()
-    ):
-        raise ValueError("equity_event_panel_unit_basis_mismatch")
     for column in (
         "value_per_old_unit",
         "remaining_old_units_per_old_unit",
         "successor_units_per_old_unit",
+        "shares_per_old_unit",
+        "successor_shares_per_unit",
     ):
         rights[column] = rights[column].map(
             lambda value: None if pd.isna(value) else decode_exact_numeric(value)
         )
+    if rights.timestamp.isna().any():
+        raise ValueError("equity_event_timestamp_invalid")
+    rights = rights.loc[rights.timestamp.le(pd.Timestamp(time_window.end))].copy()
+    rights = (
+        _prove_equity_units(rights, panel_root, panel.arrow_schema.names)
+        if not rights.empty
+        else rights.assign(unit_basis_proved=True)
+    )
     pending_rights = rights
     rights_lineage = {}
+    returning_units = {}
+    unit_columns = (
+        tuple(name for name in ("open", "close") if name in panel.arrow_schema.names)
+        if not rights.empty
+        else ()
+    )
+    panel_columns = tuple(dict.fromkeys((*panel_columns, *unit_columns)))
     sessions = unified_trading_sessions(calendar)
     calendar = calendar.set_index(["calendar_date", "source_market_type"])[
         "is_trading_day"
@@ -152,8 +174,6 @@ def iter_portfolio_sessions(
                 yield day
 
     with closing_iterator(ExitStack()) as channels:
-        if rights_session is not None:
-            channels.callback(rights_session.verify)
         bar_frames = channels.enter_context(closing_iterator(ordered_bars()))
         panel_frames = channels.enter_context(
             closing_iterator(_iter_dataset_session_frames(panel, panel_columns))
@@ -365,8 +385,32 @@ def iter_portfolio_sessions(
                 current_rights = _qualify_equity_events(
                     current_rights, recognition.recognition_at, stocks, rights_lineage
                 )
-            if rights_session is not None:
-                rights_session.verify()
+            for event in current_rights.itertuples(index=False):
+                if (
+                    event.kind == "conversion"
+                    and event.unit_basis_proved
+                    and event.entitlement_proved
+                ):
+                    returning_units[
+                        (event.successor_asset_id, event.successor_listing_date)
+                    ] = Fraction(event.successor_shares_per_unit)
+            unit_unproved = set()
+            for row in raw.itertuples(index=False):
+                key = (row.asset_id, row.listing_date)
+                if key not in returning_units:
+                    continue
+                opening = getattr(row, "open", np.nan)
+                if (
+                    pd.isna(opening)
+                    or pd.isna(row.adj_open)
+                    or opening <= 0
+                    or row.adj_open <= 0
+                ):
+                    unit_unproved.add(str(row.asset_id))
+                elif Fraction(row.adj_open) / Fraction(opening) != returning_units[key]:
+                    unit_unproved.add(str(row.asset_id))
+                else:
+                    del returning_units[key]
             result = _PortfolioSession(
                 timestamp,
                 raw,
@@ -376,6 +420,7 @@ def iter_portfolio_sessions(
                 unproved_lifecycle,
                 confirmed_delisted_lifecycles,
                 current_rights,
+                frozenset(unit_unproved),
             )
             try:
                 yield result
@@ -383,9 +428,100 @@ def iter_portfolio_sessions(
                 return
 
 
+def _prove_equity_units(rights, panel_root, panel_columns):
+    """Bind old units to actual quotes or previously proved off-market rights."""
+    rights = rights.copy()
+    rights["unit_basis_proved"] = False
+    anchors, declared = {}, {}
+
+    def panel_basis(asset, listing, at, recognized):
+        raw_column, adjusted_column = (
+            ("open", "adj_open") if at == recognized else ("close", "adj_close")
+        )
+        if raw_column not in panel_columns:
+            return None
+        key = (asset, listing, at, raw_column)
+        if key not in anchors:
+            frame = materialize_dataset_session(
+                open_dataset_session(
+                    panel_root,
+                    columns=(
+                        "asset_id",
+                        "timestamp",
+                        "listing_date",
+                        raw_column,
+                        adjusted_column,
+                    ),
+                    time_window=TimeWindow(at, at),
+                )
+            )
+            frame = frame.loc[frame.asset_id.eq(asset) & frame.listing_date.eq(listing)]
+            value = None
+            if len(frame) == 1 and frame[[raw_column, adjusted_column]].notna().all(
+                axis=None
+            ):
+                raw, adjusted = frame.iloc[0][[raw_column, adjusted_column]]
+                if raw > 0 and adjusted > 0 and np.isfinite([raw, adjusted]).all():
+                    value = Fraction(adjusted) / Fraction(raw)
+            anchors[key] = value
+        return anchors[key]
+
+    for _, group in rights.groupby("timestamp", sort=True):
+        pending = list(group.itertuples(index=False))
+        while pending:
+            unresolved = []
+            for event in pending:
+                identity = (event.asset_id, event.listing_date)
+                at = event.unit_basis_date
+                if pd.isna(at) or not event.listing_date <= at <= event.timestamp:
+                    continue
+                actual = panel_basis(*identity, at, event.timestamp)
+                basis = actual if actual is not None else declared.get(identity)
+                if basis is None:
+                    unresolved.append(event)
+                    continue
+                if basis != Fraction(event.shares_per_old_unit):
+                    continue
+                if identity in declared and declared[identity] != basis:
+                    continue
+                if event.kind == "conversion":
+                    successor = (event.successor_asset_id, event.successor_listing_date)
+                    successor_at = event.successor_unit_basis_date
+                    if (
+                        pd.isna(successor_at)
+                        or not successor[1] <= successor_at <= event.timestamp
+                    ):
+                        continue
+                    successor_basis = Fraction(event.successor_shares_per_unit)
+                    if successor_basis <= 0:
+                        continue
+                    actual_successor = panel_basis(
+                        *successor, successor_at, event.timestamp
+                    )
+                    if (
+                        actual_successor is not None
+                        and actual_successor != successor_basis
+                    ):
+                        continue
+                    if successor in declared and declared[successor] != successor_basis:
+                        continue
+                    # The accepted official source defines a new off-market unit.
+                    # It cannot be joined to a future tradable quote until checked.
+                    declared[successor] = successor_basis
+                rights.loc[rights.event_id.eq(event.event_id), "unit_basis_proved"] = (
+                    True
+                )
+            if len(unresolved) == len(pending):
+                break
+            pending = unresolved
+    return rights
+
+
 def _qualify_equity_events(events, recognition, stocks, lineage):
     """Limit reference cash and rights to terminated equities and proved successors."""
     ordered = []
+    events = events.copy()
+    events["entitlement_proved"] = True
     for recognized, positions in recognition.groupby(
         recognition, sort=True
     ).groups.items():
@@ -430,6 +566,11 @@ def _qualify_equity_events(events, recognition, stocks, lineage):
                         prior[1] | ancestors,
                     )
             if len(unresolved) == len(pending):
-                raise ValueError("equity_event_entitlement_unproved")
+                for event in unresolved:
+                    ordered.append(event.event_id)
+                    events.loc[
+                        events.event_id.eq(event.event_id), "entitlement_proved"
+                    ] = False
+                break
             pending = unresolved
     return events.set_index("event_id", drop=False).loc[ordered].reset_index(drop=True)

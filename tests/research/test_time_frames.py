@@ -188,7 +188,7 @@ def test_model_training_concat_keeps_irregularly_selected_rows(chunk_rows):
         model_id="concat_index",
         model_algorithm="linear_regression",
         input_factor_columns=("x",),
-        label_column="label",
+        target_column="label",
     )
     estimator = build_estimator_from_model_spec(spec)
     fitted = _fit_model_result(

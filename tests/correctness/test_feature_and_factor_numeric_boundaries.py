@@ -380,12 +380,17 @@ def test_canonical_degeneracy_diagnostics_accumulate_in_native_manifest(
         ),
     )
     root = assemble_research_dataset(
-        layout=layout,
+        inputs={
+            source_spec.data_id: layout.processed_data_root(
+                "a_share", source_spec.kind, source_spec.data_id
+            )
+        },
+        output_root=tmp_path / "numeric-dataset",
         dataset_catalog=ResearchDatasetCatalog((dataset_spec,)),
         processed_catalog=ProcessedDataCatalog((source_spec,)),
         dataset_id=dataset_spec.data_id,
         time_window=TimeWindow("2020-01-01", "2020-01-03"),
-        instance_metadata={"producer_diagnostics": {"existing": "preserved"}},
+        metadata={"producer_diagnostics": {"existing": "preserved"}},
     )
     result = read_dataset(root)
     diagnostic = inspect_dataset(root).manifest["producer_diagnostics"]

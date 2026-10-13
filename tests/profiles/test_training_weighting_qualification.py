@@ -1,35 +1,14 @@
-"""Formal A-share decay qualification is owned by its market protocol."""
-
-import json
+"""Formal A-share weighting qualification survives independent operation calls."""
 
 import pytest
 
-from quant_research_platform.catalog.models import ModelCatalog
-from quant_research_platform.profiles.research import (
-    bind_research_configuration,
-    research_profile,
+from quant_research_platform.contracts.models import ModelSpec, TrainingWeighting
+from quant_research_platform.research.protocols.a_share import (
+    _inference_blocker,
+    validate_model_selection,
 )
-from quant_research_platform.research.protocols import a_share
-from tests.helpers.research_configuration import research_configuration
 
 
-def _configuration(half_lives, market="a_share"):
-    config = research_configuration(
-        market, "core6" if market == "a_share" else "baseline"
-    )
-    config["models"] = config["models"][: len(half_lives)]
-    config.update(portfolios=[], comparison_model_id=config["models"][0]["model_id"])
-    if market == "a_share":
-        config["primary_portfolio_id"] = None
-    for model, half_life in zip(config["models"], half_lives, strict=True):
-        model["training_weighting"] = {
-            "method": "equal_timestamp",
-            "half_life": half_life,
-        }
-    return config
-
-
-@pytest.mark.parametrize("entrypoint", ("binding", "protocol"))
 @pytest.mark.parametrize(
     "half_lives,reason",
     [
@@ -43,44 +22,28 @@ def _configuration(half_lives, market="a_share"):
         ((756, 378), "a_share_training_weighting_research_roles_mixed"),
     ],
 )
-def test_a_share_formal_decay_admission(half_lives, reason, entrypoint):
-    config = _configuration(half_lives)
-
-    def bind():
-        if entrypoint == "protocol":
-            return a_share.AShareProtocol(
-                config["scenario_id"], configuration_json=json.dumps(config)
-            )
-        selected = bind_research_configuration(research_profile(), config)
-        return selected.protocol(config["scenario_id"])
-
-    if reason is not None:
-        with pytest.raises(ValueError, match="^" + reason + "$"):
-            bind()
-        return
-    protocol = bind()
-    role = "primary" if half_lives[0] is None else "robustness"
-    assert protocol.manifest()["training_weighting"] == {"role": role}
-    blocker = None if role == "primary" else "training_weighting_robustness_excluded"
-    for target_id in (
-        *protocol.statistics_target_ids,
-        config["scenario_id"] + "_portfolio_statistics",
-    ):
-        manifest = protocol.target_manifest(target_id, "STATISTIC")
-        assert manifest["training_weighting"] == {"role": role}
-        assert a_share._inference_blocker(manifest) == blocker
+def test_a_share_formal_decay_admission(half_lives, reason):
+    models = [
+        ModelSpec(
+            model_id=f"candidate_{i}",
+            model_algorithm="linear_regression",
+            input_factor_columns=("x",),
+            target_column="label",
+            training_weighting=TrainingWeighting(half_life_periods=value),
+        )
+        for i, value in enumerate(half_lives)
+    ]
+    if reason:
+        with pytest.raises(ValueError, match=reason):
+            validate_model_selection(models)
+    else:
+        role = validate_model_selection(models)
+        assert role == ("primary" if half_lives[0] is None else "robustness")
+        assert _inference_blocker({"training_weighting": {"role": role}}) == (
+            None if role == "primary" else "training_weighting_robustness_excluded"
+        )
 
 
-@pytest.mark.parametrize("half_lives", ((1,), (378,), (None, 378)))
-def test_generic_and_crypto_keep_other_decay_contracts(half_lives):
-    config = _configuration(half_lives, "crypto")
-    assert {
-        model.training_weighting.half_life
-        for model in ModelCatalog.from_configuration(config["models"]).list()
-    } == set(half_lives)
-    selected = bind_research_configuration(
-        research_profile(config["profile_id"]), config
-    )
-    assert {
-        model.training_weighting.half_life for model in selected.models.list()
-    } == set(half_lives)
+@pytest.mark.parametrize("periods", [1, 378, 756])
+def test_generic_weighting_keeps_other_positive_decay_contracts(periods):
+    assert TrainingWeighting(half_life_periods=periods).half_life_periods == periods

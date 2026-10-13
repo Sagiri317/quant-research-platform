@@ -66,6 +66,25 @@ def atomic_write_chunks(
     return final_path
 
 
+def atomic_write_bytes(path: Path, payload: bytes) -> Path:
+    """Publish an already-rendered binary file without replacing an earlier result."""
+    if type(payload) is not bytes:
+        raise TypeError("atomic_bytes_required")
+    final_path, temp_path = _prepare_file_target(path)
+    claimed = False
+    try:
+        with closing_iterator(open_owned_scratch_file(temp_path)) as handle:
+            claimed = True
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        publish_no_replace(temp_path, final_path)
+    except BaseException as primary:
+        _cleanup_claimed(temp_path, claimed, primary)
+        raise
+    return final_path
+
+
 def atomic_write_json(path: Path, payload: object) -> Path:
     return atomic_write_text(
         path, render_qrp_json_object(payload) + "\n", encoding="utf-8"

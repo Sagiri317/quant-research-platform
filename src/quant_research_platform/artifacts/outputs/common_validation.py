@@ -2,18 +2,13 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pandas as pd
 
 from quant_research_platform.contracts.filtering import (
     filter_definition,
     required_filter_columns,
 )
-from quant_research_platform.contracts.outputs import OutputSpec
 from quant_research_platform.contracts.signals import SignalSpec
-from quant_research_platform.storage.identity import require_unaliased_path
-from quant_research_platform.storage.layout import StorageLayout
 
 _SIGNAL_METADATA_KEYS = frozenset(
     {"signal_id", "source_kind", "source_column", "direction", "transform"}
@@ -147,20 +142,3 @@ def validate_output_frame(
         raise ValueError(f"unregistered_{error_name}_columns: {', '.join(extra)}")
     if observed != required:
         raise ValueError(f"misordered_{error_name}_columns")
-
-
-def derive_output_bundle_root(
-    *,
-    output_spec: OutputSpec,
-    layout: StorageLayout,
-    expected_definition_id: str,
-) -> Path:
-    if output_spec.output_definition_id != expected_definition_id:
-        raise ValueError("output_spec_mismatch")
-    output_bundle = Path(layout.project_root) / "outputs" / output_spec.output_id
-    require_unaliased_path(
-        output_bundle, error="output_bundle_must_not_be_dataset_root"
-    )
-    if output_bundle.resolve().is_relative_to((layout.project_root / "data").resolve()):
-        raise ValueError("output_bundle_must_not_be_dataset_root")
-    return output_bundle

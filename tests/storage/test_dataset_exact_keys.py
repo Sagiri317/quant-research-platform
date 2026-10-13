@@ -323,25 +323,3 @@ def test_write_dataset_rejects_duplicate_across_chunks_and_cleans_stage(
         )
     assert not filesystem_exists(root)
     assert not list(filesystem_glob(root.parent, ".a-*"))
-
-
-def test_write_dataset_rejects_generic_tmp_artifact_root_fail_closed(
-    tmp_path: Path,
-) -> None:
-    with pytest.raises(ValueError, match="invalid_processed_dataset_root"):
-        write_dataset(
-            tmp_path / "data" / "processed" / "a_share" / "factor" / ".tmp-user",
-            make_default_dataset_frame(),
-            spec=make_processed_dataset_spec(),
-        )
-
-
-def test_write_dataset_rejects_writer_scratch_name_as_final_artifact_root(
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "data" / "processed" / "a_share" / "factor" / ".x.tmp-user"
-    with pytest.raises(ValueError, match="invalid_processed_dataset_root"):
-        write_dataset(
-            root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
-        )
-    assert not filesystem_exists(root)

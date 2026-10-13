@@ -47,7 +47,7 @@ addopts = [
 ]
 markers = [
   "guardrails: tests that enforce approved safety and scope boundaries",
-  "complete_chain: full-scale source-to-report research acceptance",
+  "complete_chain: full-scale source-to-statistics research acceptance",
 ]
 
 [tool.ruff]

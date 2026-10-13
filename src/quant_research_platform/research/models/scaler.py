@@ -223,11 +223,13 @@ def equal_timestamp_sample_weights(
         raise ValueError("sample_weight_timestamps_invalid")
     counts = values.groupby(values, sort=False).transform("size").to_numpy()
     timestamp_count = int(values.nunique())
-    if weighting.half_life is None:
+    if weighting.half_life_periods is None:
         return len(values) / (timestamp_count * counts.astype("float64"))
     periods = pd.Index(values.unique()).sort_values()
     with np.errstate(over="ignore", under="ignore"):
-        age = (len(periods) - 1 - periods.get_indexer(values)) / weighting.half_life
+        age = (
+            len(periods) - 1 - periods.get_indexer(values)
+        ) / weighting.half_life_periods
         total_mass = float((np.exp2(-age) / counts).sum())
         weights = np.exp2(np.log2(len(values) / total_mass) - np.log2(counts) - age)
     if (weights <= 0.0).any():

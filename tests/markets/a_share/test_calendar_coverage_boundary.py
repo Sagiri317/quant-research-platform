@@ -5,10 +5,10 @@ import pytest
 
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.processed import producer
-from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
 from quant_research_platform.storage.layout import StorageLayout
-from tests.markets.a_share.test_target_dag_chain import _synthetic_interim_frames
+from tests.helpers.a_share_catalogs import scientific_catalogs
+from tests.helpers.a_share_sources import _synthetic_interim_frames
 
 
 @pytest.mark.parametrize("missing_position", [1, 3, 6])
@@ -18,7 +18,7 @@ def test_joint_calendar_quote_gap_blocks_native_publication_and_preserves_output
 ):
     dates = pd.bdate_range("2020-01-02", periods=7).as_unit("ns")
     source = _synthetic_interim_frames(dates)
-    profile = research_profile()
+    profile = scientific_catalogs()
     spec = profile.processed.get("market_panel_1d")
     layout = StorageLayout(tmp_path)
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
@@ -41,17 +41,19 @@ def test_joint_calendar_quote_gap_blocks_native_publication_and_preserves_output
     def publish():
         with producer.produce_a_share_processed_data(
             spec,
-            layout=layout,
+            inputs={
+                key: layout.interim_data_root(profile.interim.get(key).source_id, key)
+                for key in spec.source_input_data_ids
+            },
             time_window=window,
             processed_catalog=profile.processed,
             source_catalog=profile.interim,
-        ) as (frames, metadata, verify):
+        ) as (frames, metadata):
             write_dataset(
                 root,
                 frames,
                 spec=spec,
-                instance_metadata=metadata,
-                staged_validator=verify,
+                metadata=metadata,
             )
 
     persist_source()
@@ -86,7 +88,7 @@ def test_joint_missing_quotes_obeys_explicit_calendar_state(tmp_path, state):
     calendar.loc[
         calendar.calendar_date.eq(missing), ["is_trading_day", "source_state"]
     ] = [state == "O", state]
-    profile = research_profile()
+    profile = scientific_catalogs()
     spec = profile.processed.get("market_panel_1d")
     layout = StorageLayout(tmp_path)
     for data_id in spec.source_input_data_ids:
@@ -99,14 +101,15 @@ def test_joint_missing_quotes_obeys_explicit_calendar_state(tmp_path, state):
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
     with producer.produce_a_share_processed_data(
         spec,
-        layout=layout,
+        inputs={
+            key: layout.interim_data_root(profile.interim.get(key).source_id, key)
+            for key in spec.source_input_data_ids
+        },
         time_window=TimeWindow(dates[0], dates[-1]),
         processed_catalog=profile.processed,
         source_catalog=profile.interim,
-    ) as (frames, metadata, verify):
-        write_dataset(
-            root, frames, spec=spec, instance_metadata=metadata, staged_validator=verify
-        )
+    ) as (frames, metadata):
+        write_dataset(root, frames, spec=spec, metadata=metadata)
     panel = read_dataset(root)
     gap = panel.loc[panel.timestamp.eq(missing)]
     if state == "O":
@@ -175,7 +178,7 @@ def test_historical_unknown_is_a_carry_barrier_until_a_real_quote_resets_it(
     bars.loc[suspended, prices] = float("nan")
     expected = bars.loc[bars.timestamp.eq(dates[2])].set_index("source_asset_id").close
     source["market_bars_1d"] = bars.loc[bars.timestamp.ne(gap)]
-    profile = research_profile()
+    profile = scientific_catalogs()
     spec = profile.processed.get("market_panel_1d")
     layout = StorageLayout(tmp_path)
     for data_id in spec.source_input_data_ids:
@@ -189,14 +192,15 @@ def test_historical_unknown_is_a_carry_barrier_until_a_real_quote_resets_it(
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
     with producer.produce_a_share_processed_data(
         spec,
-        layout=layout,
+        inputs={
+            key: layout.interim_data_root(profile.interim.get(key).source_id, key)
+            for key in spec.source_input_data_ids
+        },
         time_window=TimeWindow(dates[3], dates[-1]),
         processed_catalog=profile.processed,
         source_catalog=profile.interim,
-    ) as (frames, metadata, verify):
-        write_dataset(
-            root, frames, spec=spec, instance_metadata=metadata, staged_validator=verify
-        )
+    ) as (frames, metadata):
+        write_dataset(root, frames, spec=spec, metadata=metadata)
     actual = read_dataset(root)
     assert len(actual) == 6
     assert actual.timestamp.ge(dates[3]).all()
@@ -213,7 +217,7 @@ def test_historical_present_closed_calendar_still_rejects_actual_trade(tmp_path)
     source["trading_calendar"].loc[
         source["trading_calendar"].calendar_date.eq(dates[1]), "is_trading_day"
     ] = False
-    profile = research_profile()
+    profile = scientific_catalogs()
     spec = profile.processed.get("market_panel_1d")
     layout = StorageLayout(tmp_path)
     for data_id in spec.source_input_data_ids:
@@ -226,9 +230,12 @@ def test_historical_present_closed_calendar_still_rejects_actual_trade(tmp_path)
     with pytest.raises(ValueError, match="market_bar_session_missing_from_calendar"):
         with producer.produce_a_share_processed_data(
             spec,
-            layout=layout,
+            inputs={
+                key: layout.interim_data_root(profile.interim.get(key).source_id, key)
+                for key in spec.source_input_data_ids
+            },
             time_window=TimeWindow(dates[3], dates[-1]),
             processed_catalog=profile.processed,
             source_catalog=profile.interim,
-        ) as (frames, _metadata, _verify):
+        ) as (frames, _metadata):
             list(frames)

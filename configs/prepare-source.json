@@ -1,0 +1,9 @@
+{
+  "source_id": "csmar",
+  "raw_root": "data/raw/csmar",
+  "outputs": {
+    "market_bars_1d": "results/market-bars"
+  },
+  "start_date": "2011-01-01",
+  "end_date": "2025-12-31"
+}

@@ -11,7 +11,6 @@ from quant_research_platform.artifacts.portfolio_ledger import (
 )
 from quant_research_platform.artifacts.statistics import (
     read_statistics_artifact,
-    write_statistics_artifact,
 )
 from quant_research_platform.contracts.portfolios import (
     FundingEvent,
@@ -19,7 +18,6 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioCapital,
     PortfolioTargetBlocked,
 )
-from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.crypto.execution import (
     TakerConfig,
     simulate_taker,
@@ -27,63 +25,45 @@ from quant_research_platform.markets.implementations.crypto.execution import (
 from quant_research_platform.markets.implementations.crypto.portfolio import (
     _execute_portfolio,
 )
-from quant_research_platform.profiles.research import (
-    CRYPTO_PROFILE_ID,
-    bind_research_configuration,
-    research_profile,
-)
-from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.storage.software_identity import (
-    production_software_identity,
-)
-from quant_research_platform.workflows.research import _target_envelope_for_spec
+from quant_research_platform.research.portfolios.diagnostics import crypto_statistics
 from tests.helpers.binance_hft import hft_research_plan
-from tests.helpers.research_configuration import research_configuration
 from tests.markets.crypto.test_hft_execution import _state
+
+
+def _metadata(plan, mode):
+    return {
+        "window": plan["test"],
+        "sample_role": "test",
+        "chronology": {"folds": plan["folds"], "test": plan["test"]},
+        "execution_mode": mode,
+        "execution_style": "taker",
+        "asset_id": "btc_usdt",
+        "symbol": "BTCUSDT",
+        "execution": {
+            "order_quantity": 1.0,
+            "position_size": 2.0,
+            "latency_ms": 50,
+            "taker_fee_bps": 0.0,
+            "markout_horizon_ms": 100,
+        },
+    }
+
+
+def _policy():
+    return {
+        "annualization_minimum_observations": 2,
+        "annualization_periods": 365.0,
+        "fee_scenarios_bps": [0.0, 1.0],
+        "additional_spread_scenarios_bps": [0.0, 1.0],
+    }
 
 
 def test_partial_funding_gap_native_port_stat_publication(tmp_path):
     plan = hft_research_plan()
-    config = research_configuration(
-        "crypto",
-        "baseline",
-        plan=plan,
-        development=(
-            plan["folds"][0]["validation"]["start"],
-            plan["folds"][-1]["validation"]["end"],
-        ),
-    )
-    config["portfolios"] = [
-        item
-        for item in config["portfolios"]
-        if item["candidate_id"] == "crypto_hft_latency_0"
-    ]
-    profile = bind_research_configuration(research_profile(CRYPTO_PROFILE_ID), config)
-    protocol = profile.protocol(config["scenario_id"], access_window="holdout")
-    descriptor = protocol.execution_targets()[0]
     capital = PortfolioCapital(
-        descriptor.candidate.candidate_id, 1000.0, "USDT", "linear_perpetual"
+        "crypto_hft_latency_0", 1000.0, "USDT", "linear_perpetual"
     )
-    software = production_software_identity()
-    layout = StorageLayout(tmp_path)
-    window = TimeWindow(**plan["test"])
-
-    def envelope(target_id, upstream):
-        spec = next(
-            x for x in protocol.target_specs("research run") if x.target_id == target_id
-        )
-        return _target_envelope_for_spec(
-            profile=profile,
-            protocol=protocol,
-            target_spec=spec,
-            data_spec=None,
-            research_window={**plan["test"], "access": "holdout"},
-            upstream_identities=upstream,
-            software_identity=software,
-            raw_content_identity=None,
-        )
-
-    port_envelope = envelope(descriptor.target_id, {})
+    metadata = _metadata(plan, "continuous")
     funding = SimpleNamespace(
         identity="f" * 64,
         coverage=((8_600_000_000, 9_001_000_000),),
@@ -115,7 +95,6 @@ def test_partial_funding_gap_native_port_stat_publication(tmp_path):
                 {"timestamp_ms": t, "prediction": 0.02} for t in (8600, 8620, 8800)
             ],
             funding=funding,
-            expected_funding_identity=funding.identity,
             coverage={"s1": (8_600_000_000, 9_001_000_000)},
             trade_coverage=SimpleNamespace(covering=lambda *_: ("trade",)),
             bounds=((8_600_000_000, 9_000_000_000),),
@@ -125,13 +104,9 @@ def test_partial_funding_gap_native_port_stat_publication(tmp_path):
         results.append(result)
 
     root = write_portfolio_ledger_artifact(
-        layout.semantic_artifact_root("crypto", descriptor.target_id),
-        envelope=port_envelope,
-        produce=produce,
+        tmp_path / "ledger", capital=capital, metadata=metadata, produce=produce
     )
-    artifact = read_portfolio_ledger_artifact(
-        root, expected_identity=port_envelope.instance_identity
-    )
+    artifact = read_portfolio_ledger_artifact(root)
     summary = summarize_crypto_ledger(artifact, artifact.iter_chunks())
     result = results[0]
     assert result["selection_status"] == "PARTIAL"
@@ -143,29 +118,27 @@ def test_partial_funding_gap_native_port_stat_publication(tmp_path):
     assert summary["economics"]["net_pnl"] == pytest.approx(-1.1)
     trades = [trade for batch in artifact.iter_chunks() for trade in batch.trades]
     assert [trade.timestamp_ns for trade in trades] == [8_650_000_000, 8_850_000_000]
-    upstream = {descriptor.target_id: port_envelope.instance_identity}
-    stat_envelope = envelope(descriptor.statistics_target_id, upstream)
-    tables = profile.producer_bindings[descriptor.statistics_target_id].producer(
-        layout=layout.with_target_roots({descriptor.target_id: root}),
-        protocol_manifest=stat_envelope.payload()["semantic_metadata"][
-            "target_contract"
-        ]["protocol"],
-        time_window=window,
-        upstream_identities=upstream,
-    )
-    stat_root = write_statistics_artifact(
-        layout.semantic_artifact_root("crypto", descriptor.statistics_target_id),
-        envelope=stat_envelope,
-        tables=tables,
-        table_group="crypto_portfolio",
-    )
     statistic = read_statistics_artifact(
-        stat_root, expected_identity=stat_envelope.instance_identity
+        crypto_statistics(
+            {
+                "ledger": str(root),
+                "output": str(tmp_path / "statistics"),
+                "statistics": _policy(),
+            }
+        )
     )
     with statistic.table("crypto_portfolio_statistics.parquet") as frame:
         assert frame.set_index("metric_id").loc[
             "terminal_nav", "value"
         ] == pytest.approx(998.9)
+        continuous = frame.loc[frame.episode_id.eq("continuous")].set_index("metric_id")
+        risk = continuous.loc[
+            ["oos_mean_daily_return", "sharpe", "annualized_volatility"]
+        ]
+        assert risk.status.eq("UNDEFINED").all()
+        assert risk.reason.eq("insufficient_complete_utc_days").all()
+        assert risk.value.isna().all()
+        assert continuous.loc["net_pnl", "value"] == pytest.approx(-1.1)
     with statistic.table("crypto_execution_diagnostics.parquet") as frame:
         rows = frame.loc[frame.episode_id.eq("continuous")].set_index("metric_id")
         assert rows.loc["selection_status", "text"] == "PARTIAL"
@@ -212,7 +185,6 @@ def test_no_covered_forecast_decision_stays_blocked(forecasts):
             trades=None,
             decisions=[{"timestamp_ms": 0, "prediction": 0.02}],
             funding=funding,
-            expected_funding_identity=funding.identity,
             coverage={"s1": (0, 101_000_000)},
             trade_coverage=SimpleNamespace(covering=lambda *_: ("trade",)),
             bounds=((0, 100_000_000),),
@@ -235,7 +207,6 @@ def test_forecast_gap_policy_does_not_relax_actual_source_coverage(missing):
             trades=None,
             decisions=(),
             funding=funding,
-            expected_funding_identity=funding.identity,
             coverage={} if missing == "book" else {"s1": (0, 101_000_000)},
             trade_coverage=SimpleNamespace(
                 covering=lambda *_: () if missing == "trade" else ("trade",)
@@ -277,7 +248,7 @@ def test_calibrated_maker_gap_cancel_respects_latency_and_settlement(gap_ms, tra
             }
             for t in (0, gap_ms, 300)
         ],
-        config=replace(_maker_config(), latency_ms=100),
+        config=replace(_maker_config(calibrated=True), latency_ms=100),
         observed_coverage={"s1": (0, 901_000_000)},
         trade_coverage={"trade-connection-1": (0, 901_000_000)},
         capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
@@ -316,46 +287,10 @@ def test_independent_episode_gap_does_not_block_covered_sibling(
     )
 
     plan = hft_research_plan()
-    plan["execution"]["backtest_modes"] = ["independent_segments"]
-    config = research_configuration(
-        "crypto",
-        "baseline",
-        plan=plan,
-        development=(
-            plan["folds"][0]["validation"]["start"],
-            plan["folds"][-1]["validation"]["end"],
-        ),
-    )
-    config["portfolios"] = [
-        item
-        for item in config["portfolios"]
-        if item["candidate_id"] == "crypto_hft_latency_0"
-    ]
-    profile = bind_research_configuration(research_profile(CRYPTO_PROFILE_ID), config)
-    protocol = profile.protocol(config["scenario_id"], access_window="holdout")
-    descriptor = protocol.execution_targets()[0]
     capital = PortfolioCapital(
-        descriptor.candidate.candidate_id, 1000.0, "USDT", "linear_perpetual"
+        "crypto_hft_latency_0", 1000.0, "USDT", "linear_perpetual"
     )
-    software = production_software_identity()
-    layout = StorageLayout(tmp_path)
-
-    def make_envelope(target_id, upstream):
-        spec = next(
-            x for x in protocol.target_specs("research run") if x.target_id == target_id
-        )
-        return _target_envelope_for_spec(
-            profile=profile,
-            protocol=protocol,
-            target_spec=spec,
-            data_spec=None,
-            research_window={**plan["test"], "access": "holdout"},
-            upstream_identities=upstream,
-            software_identity=software,
-            raw_content_identity=None,
-        )
-
-    envelope = make_envelope(descriptor.target_id, {})
+    metadata = _metadata(plan, "independent_segments")
     coverage = {
         "s1": (8_600_000_000, 8_700_000_000),
         "s2": (8_800_000_000, 9_001_000_000),
@@ -392,7 +327,6 @@ def test_independent_episode_gap_does_not_block_covered_sibling(
             trades=None,
             decisions=[{"timestamp_ms": t, "prediction": 0.02} for t in (8600, 8800)],
             funding=funding,
-            expected_funding_identity=funding.identity,
             coverage=coverage,
             trade_coverage=SimpleNamespace(intervals=lambda: iter(coverage.values())),
             bounds=((8_600_000_000, 9_000_000_000),),
@@ -405,17 +339,19 @@ def test_independent_episode_gap_does_not_block_covered_sibling(
             PortfolioTargetBlocked, match="portfolio_expected_funding_missing"
         ):
             write_crypto_episode_artifact(
-                tmp_path / "episodes", envelope=envelope, produce=produce
+                tmp_path / "episodes",
+                capital=capital,
+                metadata=metadata,
+                produce=produce,
             )
-        assert not (tmp_path / "episodes" / envelope.instance_identity).exists()
+        assert not (tmp_path / "episodes").exists()
         return
     root = write_crypto_episode_artifact(
-        tmp_path / "episodes", envelope=envelope, produce=produce
+        tmp_path / "episodes", capital=capital, metadata=metadata, produce=produce
     )
     summaries = []
     read_crypto_episode_artifact(
         root,
-        expected_identity=envelope.instance_identity,
         consume_episode=lambda episode, ledger, batches: summaries.append(
             summarize_crypto_ledger(ledger, batches)
         ),
@@ -431,24 +367,14 @@ def test_independent_episode_gap_does_not_block_covered_sibling(
     assert [s["economics"]["fill_events"] for s in summaries] == [1, 0]
     assert [s["economics"]["initial_capital"] for s in summaries] == [1000.0, 1000.0]
 
-    upstream = {descriptor.target_id: envelope.instance_identity}
-    stat_envelope = make_envelope(descriptor.statistics_target_id, upstream)
-    tables = profile.producer_bindings[descriptor.statistics_target_id].producer(
-        layout=layout.with_target_roots({descriptor.target_id: root}),
-        protocol_manifest=stat_envelope.payload()["semantic_metadata"][
-            "target_contract"
-        ]["protocol"],
-        time_window=TimeWindow(**plan["test"]),
-        upstream_identities=upstream,
-    )
-    stat_root = write_statistics_artifact(
-        layout.semantic_artifact_root("crypto", descriptor.statistics_target_id),
-        envelope=stat_envelope,
-        tables=tables,
-        table_group="crypto_portfolio",
-    )
     statistic = read_statistics_artifact(
-        stat_root, expected_identity=stat_envelope.instance_identity
+        crypto_statistics(
+            {
+                "ledger": str(root),
+                "output": str(tmp_path / "statistics"),
+                "statistics": _policy(),
+            }
+        )
     )
     with statistic.table("crypto_execution_diagnostics.parquet") as frame:
         aggregate = frame.loc[frame.episode_id.eq("all")].set_index("metric_id")
@@ -464,75 +390,6 @@ def test_independent_episode_gap_does_not_block_covered_sibling(
             .isin(("sharpe", "net_pnl", "terminal_nav"))
             .any()
         )
-
-
-def test_forecast_policy_identity_changes_port_stat_preserving_model_prediction(
-    tmp_path,
-):
-    import shutil
-    from pathlib import Path
-
-    from quant_research_platform.contracts.targets import ProducerKind
-    from quant_research_platform.workflows import research
-    from tests.storage.test_software_identity import _identity
-
-    config = research_configuration("crypto", "baseline")
-    profile = bind_research_configuration(research_profile(CRYPTO_PROFILE_ID), config)
-    protocol = profile.protocol(config["scenario_id"])
-    targets = protocol.target_specs("research run")
-    package = tmp_path / "package"
-    shutil.copytree(
-        Path(research.__file__).resolve().parents[1],
-        package,
-        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-    )
-    before = _identity(package)
-    owner = package / "markets/implementations/crypto/execution.py"
-    owner.write_bytes(owner.read_bytes() + b"\n# Funding gap policy changes.\n")
-    after = _identity(package)
-    for target in targets:
-        binding = profile.producer_bindings[target.target_id]
-        changed = research._target_software_identity(
-            binding, before
-        ) != research._target_software_identity(binding, after)
-        if binding.kind in (
-            ProducerKind.MODEL,
-            ProducerKind.PREDICTION,
-            ProducerKind.DATASET,
-            ProducerKind.PROCESSED,
-            ProducerKind.EVALUATION,
-        ):
-            assert not changed, target.target_id
-        elif binding.kind is ProducerKind.PORTFOLIO:
-            assert changed, target.target_id
-    descriptor = protocol.execution_targets()[0]
-
-    def port_stat(software):
-        identities = []
-        upstream = {}
-        for target_id in (descriptor.target_id, descriptor.statistics_target_id):
-            target = next(item for item in targets if item.target_id == target_id)
-            envelope = _target_envelope_for_spec(
-                profile=profile,
-                protocol=protocol,
-                target_spec=target,
-                data_spec=None,
-                research_window={
-                    **config["windows"]["development"],
-                    "access": "development",
-                },
-                upstream_identities=upstream,
-                software_identity=software,
-                raw_content_identity=None,
-            )
-            identities.append(envelope.instance_identity)
-            upstream = {target_id: envelope.instance_identity}
-        return identities
-
-    assert all(
-        left != right
-        for left, right in zip(port_stat(before), port_stat(after), strict=True)
-    )
 
 
 def test_maker_impossible_new_order_without_pending_risk_needs_no_forecast():
@@ -560,7 +417,7 @@ def test_maker_impossible_new_order_without_pending_risk_needs_no_forecast():
                 "proxy_prediction": 1.0,
             }
         ],
-        config=replace(_maker_config(), latency_ms=500),
+        config=replace(_maker_config(calibrated=True), latency_ms=500),
         observed_coverage={"s1": (0, 601_000_000)},
         trade_coverage={"trade-connection-1": (0, 601_000_000)},
         capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),

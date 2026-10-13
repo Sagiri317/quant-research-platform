@@ -12,12 +12,10 @@ from quant_research_platform.artifacts.outputs.evaluation_validation import (
     validate_evaluation_artifact_structure,
 )
 from quant_research_platform.contracts.evaluations import EvaluationSpec
-from quant_research_platform.contracts.outputs import OutputSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.research.evaluations.engine import (
     build_evaluation_result_from_frames,
 )
-from quant_research_platform.storage.layout import StorageLayout
 
 
 def test_native_evaluation_persists_independent_std_reason(tmp_path):
@@ -49,13 +47,7 @@ def test_native_evaluation_persists_independent_std_reason(tmp_path):
             result.output_chunks,
             summary_factory=result.summaries,
             spec=spec,
-            output_spec=OutputSpec(
-                output_id="probe",
-                output_definition_id="evaluation_outputs",
-                run_id="probe",
-                market_id="a_share",
-            ),
-            layout=StorageLayout(tmp_path),
+            output_path=tmp_path / "evaluation",
         )
     validate_output_bundle(root)
     summary = pd.read_parquet(root / "ic_summary.parquet")
@@ -64,8 +56,12 @@ def test_native_evaluation_persists_independent_std_reason(tmp_path):
     assert row.std_ic_reason == "nonfinite_result"
     assert row.icir == 1.0
     assert pd.isna(row.icir_reason)
-    report = (root / "summary.md").read_text(encoding="utf-8")
-    assert "std_ic_reason" in report and "nonfinite_result" in report
+    from quant_research_platform.artifacts.outputs.evaluation import (
+        read_evaluation_outputs,
+    )
+
+    _, tables = read_evaluation_outputs(root, tables=("ic_summary",))
+    assert tables["ic_summary"].std_ic_reason.tolist() == ["nonfinite_result"]
     for value, reason in [
         (np.nan, None),
         (0.0, "nonfinite_result"),

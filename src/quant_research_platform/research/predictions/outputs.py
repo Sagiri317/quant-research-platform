@@ -1,334 +1,41 @@
-"""Prediction output builders."""
+"""Select each model's own eligible prediction domain."""
 
-from __future__ import annotations
-
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
-
-import numpy as np
-import pandas as pd
-
-from quant_research_platform.contracts.filtering import (
-    reject_filter_input_columns,
-    required_filter_columns,
+from quant_research_platform.contracts.predictions import prediction_window_mask
+from quant_research_platform.contracts.validation import (
+    strict_finite_numeric_series,
+    strict_timestamp_series,
 )
-from quant_research_platform.contracts.models import (
-    _model_algorithm_facts,
-    _resolved_model_hyperparameters_match,
-)
-from quant_research_platform.contracts.predictions import (
-    ALPHA_SCORE_COLUMN,
-    RAW_PREDICTION_COLUMN,
-    PredictionSpec,
-    _validate_prediction_output_values,
-    prediction_output_columns,
-)
-from quant_research_platform.contracts.time import (
-    is_datetime_value,
-    time_value_isoformat,
-)
-from quant_research_platform.contracts.validation import strict_timestamp_series
-from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.features.transforms import (
     model_input_validity_columns,
 )
 from quant_research_platform.research.filtering import apply_filter_mode
-from quant_research_platform.research.models.fitting import prediction_callable
-from quant_research_platform.runtime.dataframes import iter_complete_time_frames
 
 
-@dataclass(frozen=True)
-class PredictionResult:
-    spec: PredictionSpec
-    output_chunks: Iterable[pd.DataFrame]
-    model_metadata: dict[str, object]
-    prediction_metadata_factory: Callable[[], dict[str, object]]
-    _close: Callable[[], None] = field(default=lambda: None, repr=False, compare=False)
-
-    def close(self) -> None:
-        self._close()
-
-    def __enter__(self) -> PredictionResult:
-        return self
-
-    def __exit__(
-        self, _exception_type: object, primary: BaseException | None, _traceback: object
-    ) -> None:
-        try:
-            self.close()
-        except BaseException as cleanup_error:
-            if primary is None:
-                raise
-            primary.add_note(
-                f"prediction result cleanup also failed: {type(cleanup_error).__name__}"
-            )
-
-
-def _add_a_share_scores(output, raw_prediction):
-    """Apply the same cross-sectional alpha scaling to saved and new predictions."""
-    output[RAW_PREDICTION_COLUMN] = raw_prediction
+def prediction_rows(frame, metadata, window):
+    """The model's own economic prediction domain, independent of competitors."""
+    if (
+        frame.loc[:, ["timestamp", "asset_id"]].isna().any(axis=None)
+        or frame.duplicated(["timestamp", "asset_id"]).any()
+    ):
+        raise ValueError("invalid_prediction_keys")
     timestamps = strict_timestamp_series(
-        output["timestamp"], error="invalid_prediction_timestamp_values"
+        frame["timestamp"], error="invalid_prediction_timestamp"
     )
-    ranks = (
-        pd.Series(raw_prediction, index=output.index, dtype="float64")
-        .groupby([timestamps, output["family_id"]], sort=False)
-        .rank(method="average")
+    mask = prediction_window_mask(timestamps, window)
+    scoped = frame.loc[mask].copy()
+    scoped["timestamp"] = timestamps.loc[mask]
+    filtered, _ = apply_filter_mode(
+        scoped, mode=metadata["sample_filter_mode"], metadata_key="sample_filter_mode"
     )
-    counts = timestamps.groupby(
-        [timestamps, output["family_id"]], sort=False
-    ).transform("size")
-    output[ALPHA_SCORE_COLUMN] = (ranks - (counts + 1.0) / 2.0) / counts
-
-
-def build_prediction_result_from_frames(
-    frames: Iterable[pd.DataFrame],
-    spec: PredictionSpec,
-    input_columns: tuple[str, ...],
-    *,
-    prediction_model: object,
-    model_metadata: dict[str, object],
-    allow_empty: bool = False,
-) -> PredictionResult:
-    if type(model_metadata) is not dict:
-        raise ValueError("invalid_model_metadata")
-    model_algorithm = model_metadata.get("model_algorithm")
-    hyperparameters = model_metadata.get("hyperparameters")
-    resolved_hyperparameters = model_metadata.get("resolved_hyperparameters")
-    dependency_status = model_metadata.get("dependency_status")
-    if (
-        type(model_algorithm) is not str
-        or not model_algorithm
-        or type(hyperparameters) is not dict
-        or (type(resolved_hyperparameters) is not dict)
-        or (type(dependency_status) is not dict)
-    ):
-        raise ValueError("invalid_model_metadata")
-    try:
-        facts = _model_algorithm_facts(model_algorithm)
-    except ValueError as exc:
-        raise ValueError("invalid_model_metadata") from exc
-    expected_package = facts.dependency_package or "internal"
-    if (
-        not _resolved_model_hyperparameters_match(
-            model_algorithm, hyperparameters, resolved_hyperparameters
+    validity = model_input_validity_columns(
+        tuple(metadata["input_columns"]), metadata["model_algorithm"]
+    )
+    for column in tuple(dict.fromkeys((*metadata["input_columns"], *validity))):
+        strict_finite_numeric_series(
+            filtered[column],
+            error=f"invalid_prediction_input: {column}",
+            allow_null=True,
         )
-        or dependency_status.get("package") != expected_package
-    ):
-        raise ValueError("invalid_model_metadata")
-    reject_filter_input_columns(input_columns)
-    coordinates = ("quarter_id",) if spec.prediction_mode == "a_share_oos" else ()
-    validity_columns = model_input_validity_columns(input_columns, model_algorithm)
-    required = set((*spec.primary_key, *input_columns, *validity_columns, *coordinates))
-    work_columns = tuple(
-        dict.fromkeys(
-            (
-                *spec.primary_key,
-                *coordinates,
-                *input_columns,
-                *validity_columns,
-                *required_filter_columns(spec.sample_filter_mode),
-            )
-        )
-    )
-    build_state = _PredictionBuildState()
-    output_frames = _iter_prediction_output_frames(
-        _iter_prediction_work_frames(
-            frames, required=required, work_columns=work_columns
-        ),
-        spec=spec,
-        input_columns=input_columns,
-        predictor=prediction_callable(input_columns, prediction_model),
-        build_state=build_state,
-        validity_columns=validity_columns,
-    )
-    return PredictionResult(
-        spec=spec,
-        output_chunks=output_frames,
-        model_metadata={
-            **model_metadata,
-            "test_start": spec.test_start,
-            "test_end": spec.test_end,
-            "oos_start": spec.test_start,
-            "oos_end": None,
-        },
-        prediction_metadata_factory=lambda: build_state.prediction_metadata(
-            spec=spec, input_columns=input_columns, allow_empty=allow_empty
-        ),
-        _close=output_frames.close,
-    )
-
-
-@dataclass
-class _PredictionBuildState:
-    segments: int = 0
-    rows_input: int = 0
-    rows_after_filter: int = 0
-    rows_after_dropna: int = 0
-    prediction_rows: int = 0
-    filter_columns_used: tuple[str, ...] = ()
-    filter_definition: str = ""
-    effective_test_end: str | None = None
-
-    def add(self, metadata: dict[str, object]) -> None:
-        self.record_filter_metadata(metadata)
-        self.rows_after_dropna += int(metadata["rows_after_input_dropna"])
-        self.prediction_rows += int(metadata["prediction_rows"])
-        end = metadata["effective_test_end"]
-        if end is not None and (
-            self.effective_test_end is None
-            or pd.Timestamp(end) > pd.Timestamp(self.effective_test_end)
-        ):
-            self.effective_test_end = end
-        self.segments += 1
-
-    def record_filter_metadata(self, metadata: dict[str, object]) -> None:
-        self.rows_input += metadata["rows_input"]
-        self.rows_after_filter += metadata["rows_after_filter_mode"]
-        self.filter_columns_used = tuple(metadata["filter_columns_used"])
-        self.filter_definition = str(metadata["filter_definition"])
-
-    def record_input_dropna_rows(self, row_count: int) -> None:
-        self.rows_after_dropna += int(row_count)
-
-    def record_prediction_output(
-        self, output: pd.DataFrame, *, spec: PredictionSpec
-    ) -> None:
-        if output.empty:
-            return
-        timestamps = strict_timestamp_series(
-            output["timestamp"], error="invalid_prediction_timestamp_values"
-        )
-        current_end = time_value_isoformat(
-            pd.Timestamp(timestamps.max()),
-            date_only=not is_datetime_value(spec.test_start),
-        )
-        if self.effective_test_end is None or pd.Timestamp(current_end) > pd.Timestamp(
-            self.effective_test_end
-        ):
-            self.effective_test_end = current_end
-        self.prediction_rows += int(len(output))
-
-    def prediction_metadata(
-        self,
-        *,
-        spec: PredictionSpec,
-        input_columns: tuple[str, ...],
-        allow_empty: bool = False,
-    ) -> dict[str, object]:
-        if not allow_empty and self.prediction_rows == 0:
-            raise ValueError("empty_prediction_window")
-        return {
-            "prediction_mode": spec.prediction_mode,
-            "sample_filter_mode": spec.sample_filter_mode,
-            "filter_columns_used": list(self.filter_columns_used),
-            "filter_definition": self.filter_definition,
-            "rows_input": int(self.rows_input),
-            "rows_after_filter_mode": int(self.rows_after_filter),
-            "rows_after_input_dropna": int(self.rows_after_dropna),
-            "prediction_rows": int(self.prediction_rows),
-            "train_end": spec.train_end,
-            "test_start": spec.test_start,
-            "requested_test_end": spec.test_end,
-            "effective_test_end": time_value_isoformat(
-                pd.Timestamp(self.effective_test_end),
-                date_only=not is_datetime_value(spec.test_start),
-            )
-            if self.effective_test_end is not None
-            else None,
-            "is_oos": spec.is_oos,
-            "is_final_oos_window": spec.is_final_oos_window,
-            "input_columns": list(input_columns),
-            "input_count": len(input_columns),
-            "prediction_column": spec.prediction_column,
-        }
-
-
-def _iter_prediction_output_frames(
-    frames: Iterable[pd.DataFrame],
-    *,
-    spec: PredictionSpec,
-    input_columns: tuple[str, ...],
-    predictor: Callable[[pd.DataFrame], np.ndarray],
-    build_state: _PredictionBuildState,
-    validity_columns: tuple[str, ...],
-) -> Iterable[pd.DataFrame]:
-    usable_columns = tuple(
-        dict.fromkeys(
-            (
-                *spec.primary_key,
-                *input_columns,
-                *(("quarter_id",) if spec.prediction_mode == "a_share_oos" else ()),
-            )
-        )
-    )
-    with closing_iterator(iter(frames)) as active_frames:
-        for chunk in active_frames:
-            filtered, metadata = apply_filter_mode(
-                chunk, mode=spec.sample_filter_mode, metadata_key="sample_filter_mode"
-            )
-            build_state.record_filter_metadata(metadata)
-
-            usable_mask = filtered.loc[:, list(validity_columns)].notna().all(axis=1)
-            build_state.record_input_dropna_rows(int(usable_mask.sum()))
-            usable_mask &= filtered["timestamp"] >= pd.Timestamp(spec.test_start)
-            if spec.evaluation_asset_ids:
-                usable_mask &= filtered["asset_id"].isin(spec.evaluation_asset_ids)
-            if spec.test_end is not None:
-                usable_mask &= filtered["timestamp"] <= pd.Timestamp(spec.test_end)
-            test_frame = filtered.loc[usable_mask, list(usable_columns)]
-            if test_frame.empty:
-                continue
-            output = test_frame.loc[:, list(spec.primary_key)].copy()
-            raw_prediction = predictor(test_frame)
-            if spec.prediction_mode == "a_share_oos":
-                output["quarter_id"] = test_frame["quarter_id"]
-                output["model_id"] = spec.model_id
-                _add_a_share_scores(output, raw_prediction)
-            else:
-                output[spec.prediction_column] = raw_prediction
-            if tuple(output.columns) != prediction_output_columns(
-                spec.prediction_mode, spec.prediction_column, spec.primary_key
-            ):
-                raise ValueError("prediction_output_columns_invalid")
-            _validate_prediction_output_values(
-                output,
-                primary_key=spec.primary_key,
-                prediction_column=RAW_PREDICTION_COLUMN
-                if spec.prediction_mode == "a_share_oos"
-                else spec.prediction_column,
-            )
-            if spec.prediction_mode == "a_share_oos":
-                if any(
-                    type(value) is not str or not value for value in output["model_id"]
-                ):
-                    raise ValueError("prediction_model_id_invalid")
-                if not np.isfinite(
-                    output[ALPHA_SCORE_COLUMN].to_numpy(dtype="float64")
-                ).all():
-                    raise ValueError("invalid_prediction_alpha_scores")
-            build_state.record_prediction_output(output, spec=spec)
-
-            try:
-                yield output
-            except GeneratorExit:
-                return
-
-
-def _iter_prediction_work_frames(
-    frames: Iterable[pd.DataFrame], *, required: set[str], work_columns: tuple[str, ...]
-) -> Iterable[pd.DataFrame]:
-    complete_frames = iter_complete_time_frames(
-        iter(frames), timestamp_column="timestamp"
-    )
-    with closing_iterator(complete_frames) as active_frames:
-        for frame in active_frames:
-            missing = sorted(required.difference(frame.columns))
-            if missing:
-                raise ValueError(f"missing_prediction_columns: {', '.join(missing)}")
-            selected = [column for column in work_columns if column in frame.columns]
-            yielded_value = frame.loc[:, selected]
-            try:
-                yield yielded_value
-            except GeneratorExit:
-                return
+    return filtered.loc[
+        filtered.loc[:, list(validity)].notna().all(axis=1)
+    ].sort_values(["timestamp", "asset_id"], kind="stable")

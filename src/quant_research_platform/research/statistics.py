@@ -151,10 +151,10 @@ def aligned_candidate_matrix(
     ):
         raise ValueError("candidate_matrix_numeric_required")
     numeric = frame.astype("float64")
+    if np.isinf(numeric.to_numpy()).any():
+        raise ValueError("candidate_matrix_nonfinite")
     complete = numeric.notna().all(axis=1)
     values = numeric.loc[complete].to_numpy(dtype="float64", copy=True)
-    if values.size and (not bool(np.isfinite(values).all())):
-        raise ValueError("candidate_matrix_nonfinite")
     count = len(values)
     return AlignedCandidateMatrix(
         values=values,

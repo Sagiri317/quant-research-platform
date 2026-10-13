@@ -10,14 +10,14 @@ from quant_research_platform.research.statistics_production import (
     _fama_macbeth_period_records,
     _fama_macbeth_summary,
 )
-from tests.artifacts.test_statistics_artifact import envelope as envelope
+from tests.artifacts.test_statistics_artifact import metadata as metadata
 from tests.artifacts.test_statistics_artifact import tables as tables
 
 
 @pytest.mark.parametrize("extreme", (False, True))
 @pytest.mark.parametrize("factor_case", (True,))
 def test_fmb_exact_identity_publishes_periods_and_summary(
-    tmp_path, tables, envelope, extreme, factor_case
+    tmp_path, tables, metadata, extreme, factor_case
 ):
     values = (
         1e308 + np.arange(8) * np.spacing(1e308)
@@ -57,11 +57,9 @@ def test_fmb_exact_identity_publishes_periods_and_summary(
         periods, factors=("factor",), core_factors=(), max_lags=19
     )
     root = statistics.write_statistics_artifact(
-        tmp_path / "statistics", envelope=envelope, tables=tables, table_group="factor"
+        tmp_path / "statistics", metadata=metadata, tables=tables, table_group="factor"
     )
-    artifact = statistics.read_statistics_artifact(
-        root, expected_identity=envelope.instance_identity
-    )
+    artifact = statistics.read_statistics_artifact(root)
     with artifact.table("fama_macbeth_periods.parquet") as actual:
         assert len(actual) == 84
         assert actual.status.eq("DEFINED").all()
@@ -92,7 +90,7 @@ def test_fmb_exact_identity_publishes_periods_and_summary(
 
 @pytest.mark.parametrize("factor_case", (True,))
 def test_core_fmb_mixed_signed_integer_coordinates_survive_publication(
-    tmp_path, tables, envelope, factor_case
+    tmp_path, tables, metadata, factor_case
 ):
     from scipy.linalg import hadamard
 
@@ -129,11 +127,9 @@ def test_core_fmb_mixed_signed_integer_coordinates_survive_publication(
         periods, factors=(), core_factors=factors, max_lags=19
     )
     root = statistics.write_statistics_artifact(
-        tmp_path / "statistics", envelope=envelope, tables=tables, table_group="factor"
+        tmp_path / "statistics", metadata=metadata, tables=tables, table_group="factor"
     )
-    artifact = statistics.read_statistics_artifact(
-        root, expected_identity=envelope.instance_identity
-    )
+    artifact = statistics.read_statistics_artifact(root)
     with artifact.table("fama_macbeth_periods.parquet") as actual:
         assert len(actual) == 14
         assert actual.status.eq("DEFINED").all()

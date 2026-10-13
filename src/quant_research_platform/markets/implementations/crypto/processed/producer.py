@@ -13,8 +13,7 @@ from itertools import chain, islice
 
 import pandas as pd
 
-from quant_research_platform.contracts.json_codec import canonical_json_hash
-from quant_research_platform.contracts.time import is_datetime_window
+from quant_research_platform.contracts.time import TimeWindow, is_datetime_window
 from quant_research_platform.markets.implementations.crypto.hft import (
     HFT_GRID_MS,
     iter_cross_asset_factor_frames,
@@ -47,7 +46,6 @@ from quant_research_platform.storage.datasets.reading import (
     iter_dataset_chunks,
     open_dataset_session,
 )
-from quant_research_platform.storage.datasets.schema import dataset_identity_payload
 
 _EPOCH = dt.datetime(1970, 1, 1)
 EXTERNAL_INSTRUMENTS = {
@@ -81,7 +79,7 @@ EXTERNAL_INSTRUMENTS = {
 def produce_hft_processed_data(
     spec,
     *,
-    layout,
+    inputs,
     time_window,
     processed_catalog,
     source_catalog,
@@ -90,7 +88,6 @@ def produce_hft_processed_data(
     read_trades,
     make_stats,
     raw_root=None,
-    expected_source_identity=None,
     market_type=binance_ids.FUTURES_MARKET_TYPE,
     symbols=binance_ids.RESEARCH_SYMBOLS,
     panel_id=HFT_PANEL_DATA_ID,
@@ -102,8 +99,6 @@ def produce_hft_processed_data(
     with ExitStack() as readers:
         if spec.data_id == panel_id:
             run = readers.enter_context(open_run(raw_root))
-            if canonical_json_hash(run.source_identity) != expected_source_identity:
-                raise ValueError("hft_recorder_source_identity_changed")
             source_info = run.hft_source_info()
             start_ms, end_ms = (
                 _milliseconds(time_window.start, ceil=True),
@@ -175,24 +170,22 @@ def produce_hft_processed_data(
                     },
                 }
 
-            metadata["source_artifact_identity"] = dict(run.source_identity)
+            metadata["source_evidence"] = {
+                **run.source_identity,
+                "market_metadata": {
+                    symbol: run.market_metadata(market_type, symbol)
+                    for symbol in symbols
+                },
+            }
             data = frames()
 
-            def verify(_receipt):
-                readers.close()
         elif spec.data_id in {
             HFT_FACTOR_DATA_ID,
             HFT_LABEL_DATA_ID,
             HFT_INFORMATION_STATE_DATA_ID,
         }:
             input_id = spec.processed_input_data_ids[0]
-            panel_spec = processed_catalog.get(input_id)
-            root = layout.target_root(
-                input_id,
-                layout.processed_data_root(
-                    panel_spec.market_id, panel_spec.kind, panel_spec.data_id
-                ),
-            )
+            root = inputs[input_id]
             parameters = json.loads(spec.parameters_json)
             if spec.data_id == HFT_LABEL_DATA_ID:
                 horizons = tuple(
@@ -202,6 +195,9 @@ def produce_hft_processed_data(
                     item for item in label_catalog().list() if item.horizon in horizons
                 )
                 transform = partial(iter_label_frames, horizons_ms=horizons)
+                computation_window = _computation_window(
+                    time_window, future_ms=max(horizons)
+                )
             else:
                 factor_columns = tuple(
                     name for name in spec.required_columns if name in HFT_FACTOR_COLUMNS
@@ -210,6 +206,30 @@ def produce_hft_processed_data(
                     factor_catalog().get(name) for name in factor_columns
                 )
                 transform = partial(iter_factor_frames, columns=factor_columns)
+                # Endpoint returns need their earlier point; flow sums include
+                # the current bin, and volatility needs ten one-step returns.
+                history_ms = max(
+                    (
+                        1000
+                        if name == "realized_volatility_1s"
+                        else 500
+                        if name == "return_500ms"
+                        else 100
+                        if name == "return_100ms"
+                        else 4900
+                        if name.endswith("_5s")
+                        else 900
+                        if name.endswith("_1s")
+                        else 400
+                        if name.endswith("_500ms")
+                        else 0
+                        for name in factor_columns
+                    ),
+                    default=0,
+                )
+                computation_window = _computation_window(
+                    time_window, history_ms=history_ms
+                )
             inputs = tuple(
                 dict.fromkeys(
                     (
@@ -227,11 +247,9 @@ def produce_hft_processed_data(
                 )
             )
             session = open_dataset_session(
-                root, columns=inputs, time_window=time_window
+                root, columns=inputs, time_window=computation_window
             )
-            metadata["input_dataset_identities"] = {
-                input_id: dataset_identity_payload(session.spec, session.manifest)
-            }
+            metadata["inputs"] = {input_id: str(session.root)}
             data = _panel_frame_producer(
                 session,
                 transform=transform,
@@ -239,13 +257,30 @@ def produce_hft_processed_data(
                 asset_ids=tuple(parameters["asset_ids"]),
             )
 
-            def verify(_receipt):
-                session.verify()
-                readers.close()
         else:
             raise ValueError("hft_processed_target_invalid")
+        data = _output_frames(data, time_window)
         with closing_iterator(data):
-            yield (data, metadata, verify)
+            yield (data, metadata)
+
+
+def _computation_window(time_window, *, history_ms=0, future_ms=0):
+    """Read only the finite mathematical warmup and maturity interval."""
+    return TimeWindow(
+        max(_EPOCH, time_window.start - dt.timedelta(milliseconds=history_ms)),
+        time_window.end + dt.timedelta(milliseconds=future_ms),
+    )
+
+
+def _output_frames(frames, time_window):
+    """Project after computation without resetting state at the output boundary."""
+    with closing_iterator(iter(frames)) as active:
+        for frame in active:
+            selected = frame.loc[
+                frame["timestamp"].between(time_window.start, time_window.end)
+            ]
+            if not selected.empty:
+                yield selected
 
 
 def _common_symbol_panel_frames(
@@ -404,35 +439,32 @@ def _panel_frame_producer(
 def produce_derivative_processed_data(
     spec,
     *,
-    layout,
+    inputs,
     time_window,
     processed_catalog,
     open_archive,
-    expected_source_identity,
     source_catalog,
     raw_root=None,
 ):
     """Align auxiliary states upstream of the unchanged exact-key assembler."""
     max_age_ms = json.loads(spec.parameters_json)["max_age_ms"]
-    panel_spec = processed_catalog.get(HFT_PANEL_DATA_ID)
-    root = layout.target_root(
-        HFT_PANEL_DATA_ID,
-        layout.processed_data_root(
-            panel_spec.market_id, panel_spec.kind, panel_spec.data_id
-        ),
-    )
+    root = inputs[HFT_PANEL_DATA_ID]
     with ExitStack() as readers:
         archive = readers.enter_context(open_archive(raw_root))
-        session = open_dataset_session(root, columns=None, time_window=time_window)
-        if canonical_json_hash(archive.source_identity) != expected_source_identity:
-            raise ValueError("hft_derivative_source_identity_changed")
+        session = open_dataset_session(
+            root,
+            columns=None,
+            time_window=_computation_window(
+                time_window,
+                history_ms=max(
+                    300_000,
+                    30_000 + json.loads(spec.parameters_json).get("input_delay_ms", 0),
+                ),
+            ),
+        )
         metadata = {
-            "source_artifact_identity": dict(archive.source_identity),
-            "input_dataset_identities": {
-                HFT_PANEL_DATA_ID: dataset_identity_payload(
-                    session.spec, session.manifest
-                )
-            },
+            "source_evidence": dict(archive.source_identity),
+            "inputs": {HFT_PANEL_DATA_ID: str(session.root)},
             "producer_diagnostics": {
                 "alignment": "observed_at_lte_decision_time",
                 "max_age_ms": max_age_ms,
@@ -443,7 +475,7 @@ def produce_derivative_processed_data(
         }
 
         def transform(frames):
-            first = next(frames, None)
+            first = next((frame for frame in frames if not frame.empty), None)
             if first is None:
                 return
             symbol = {
@@ -469,35 +501,31 @@ def produce_derivative_processed_data(
             ),
         )
 
-        def verify(_receipt):
-            session.verify()
-            readers.close()
-
+        data = _output_frames(data, time_window)
         with closing_iterator(data):
-            yield (data, metadata, verify)
+            yield (data, metadata)
 
 
 @contextmanager
 def produce_spot_perp_context(
-    spec, *, layout, time_window, processed_catalog, source_catalog
+    spec, *, inputs, time_window, processed_catalog, source_catalog
 ):
     """Publish information rows on the execution panel's exact primary keys."""
     max_age_ms = json.loads(spec.parameters_json)["max_age_ms"]
     sessions = {}
     for data_id in (HFT_PANEL_DATA_ID, HFT_SPOT_PANEL_DATA_ID):
-        input_spec = processed_catalog.get(data_id)
-        root = layout.target_root(
-            data_id,
-            layout.processed_data_root(input_spec.market_id, input_spec.kind, data_id),
-        )
+        root = inputs[data_id]
         sessions[data_id] = open_dataset_session(
-            root, columns=None, time_window=time_window
+            root,
+            columns=None,
+            time_window=(
+                _computation_window(time_window, history_ms=500)
+                if data_id == HFT_PANEL_DATA_ID
+                else TimeWindow(_EPOCH, time_window.end)
+            ),
         )
     metadata = {
-        "input_dataset_identities": {
-            key: dataset_identity_payload(session.spec, session.manifest)
-            for key, session in sessions.items()
-        },
+        "inputs": {key: str(session.root) for key, session in sessions.items()},
         "producer_diagnostics": {
             "alignment": "spot_grid_available_by_perpetual_decision",
             "max_age_ms": max_age_ms,
@@ -551,12 +579,9 @@ def produce_spot_perp_context(
 
     data = frames()
 
-    def verify(_receipt):
-        for session in sessions.values():
-            session.verify()
-
+    data = _output_frames(data, time_window)
     with closing_iterator(data):
-        yield (data, metadata, verify)
+        yield (data, metadata)
 
 
 def _union_panel_frames(
@@ -613,24 +638,18 @@ def _union_panel_frames(
 
 @contextmanager
 def produce_information_panel(
-    spec, *, layout, time_window, processed_catalog, source_catalog
+    spec, *, inputs, time_window, processed_catalog, source_catalog
 ):
     """Union disjoint BTC/ETH and SOL rows, preserving native source segments."""
     sessions = []
     identities = {}
     for data_id in spec.processed_input_data_ids:
-        source_spec = processed_catalog.get(data_id)
-        root = layout.target_root(
-            data_id,
-            layout.processed_data_root(
-                source_spec.market_id, source_spec.kind, data_id
-            ),
-        )
+        root = inputs[data_id]
         session = open_dataset_session(
             root, columns=spec.required_columns, time_window=time_window
         )
         sessions.append(session)
-        identities[data_id] = dataset_identity_payload(session.spec, session.manifest)
+        identities[data_id] = str(session.root)
     batch_rows = DEFAULT_BATCH_ROWS
     frames = _union_panel_frames(
         (iter_dataset_chunks(session, batch_rows=65536) for session in sessions),
@@ -639,36 +658,31 @@ def produce_information_panel(
     )
     data = frames
 
-    def verify(_receipt):
-        for session in sessions:
-            session.verify()
-
     with closing_iterator(data):
-        yield (data, {"input_dataset_identities": identities}, verify)
+        yield (data, {"inputs": identities})
 
 
 @contextmanager
 def produce_cross_asset_context(
-    spec, *, layout, time_window, processed_catalog, source_catalog
+    spec, *, inputs, time_window, processed_catalog, source_catalog
 ):
     """Read persisted shared-kernel information without creating an execution venue."""
     parameters = json.loads(spec.parameters_json)
     target_id, information_id = spec.processed_input_data_ids
     sessions = {}
     for data_id in spec.processed_input_data_ids:
-        data_spec = processed_catalog.get(data_id)
-        root = layout.target_root(
-            data_id,
-            layout.processed_data_root(data_spec.market_id, data_spec.kind, data_id),
-        )
+        root = inputs[data_id]
         sessions[data_id] = open_dataset_session(
-            root, columns=None, time_window=time_window
+            root,
+            columns=None,
+            time_window=(
+                time_window
+                if data_id == target_id
+                else TimeWindow(_EPOCH, time_window.end)
+            ),
         )
     metadata = {
-        "input_dataset_identities": {
-            key: dataset_identity_payload(session.spec, session.manifest)
-            for key, session in sessions.items()
-        },
+        "inputs": {key: str(session.root) for key, session in sessions.items()},
         "producer_diagnostics": {
             "information_assets": parameters["information_assets"],
             "target_assets": parameters["target_assets"],
@@ -714,24 +728,20 @@ def produce_cross_asset_context(
 
     data = frames()
 
-    def verify(_receipt):
-        for session in sessions.values():
-            session.verify()
-
+    data = _output_frames(data, time_window)
     with closing_iterator(data):
-        yield (data, metadata, verify)
+        yield (data, metadata)
 
 
 @contextmanager
 def produce_normalized_context(
     spec,
     *,
-    layout,
+    inputs,
     time_window,
     processed_catalog,
     source_catalog,
     raw_root,
-    expected_source_identity,
     read_records,
     source_identity,
     source_schema_id,
@@ -739,25 +749,25 @@ def produce_normalized_context(
 ):
     """Publish source-verified external information on Binance BTC/ETH keys."""
     parameters = json.loads(spec.parameters_json)
-    if source_identity(raw_root, spec.data_id) != expected_source_identity:
-        raise ValueError("hft_external_source_identity_changed")
-    panel_spec = processed_catalog.get(HFT_PANEL_DATA_ID)
-    root = layout.target_root(
-        HFT_PANEL_DATA_ID,
-        layout.processed_data_root(
-            panel_spec.market_id, panel_spec.kind, panel_spec.data_id
-        ),
+    root = inputs[HFT_PANEL_DATA_ID]
+    computation_window = _computation_window(
+        time_window,
+        history_ms=500
+        + (-(-parameters.get("input_delay_ms", 0) // HFT_GRID_MS)) * HFT_GRID_MS,
     )
-    session = open_dataset_session(root, columns=None, time_window=time_window)
+    # Stale observed clocks remain meaningful after factor freshness expires.
+    # Keep the source prefix, including prior-day observations and native units.
+    source_window = TimeWindow(_EPOCH, time_window.end)
+    session = open_dataset_session(root, columns=None, time_window=computation_window)
     metadata = {
-        "source_artifact_identity": {
+        "source_evidence": {
             "schema_id": source_schema_id,
             "artifact_id": spec.data_id,
-            "manifest_hash": expected_source_identity,
+            "manifest_hash": source_identity(
+                raw_root, spec.data_id, time_window=source_window
+            ),
         },
-        "input_dataset_identities": {
-            HFT_PANEL_DATA_ID: dataset_identity_payload(session.spec, session.manifest)
-        },
+        "inputs": {HFT_PANEL_DATA_ID: str(session.root)},
         "producer_diagnostics": {
             "alignment": "local_timestamp_lte_decision_time",
             "coverage": "observed_only",
@@ -771,7 +781,7 @@ def produce_normalized_context(
     }
 
     def transform(frames):
-        first = next(frames, None)
+        first = next((frame for frame in frames if not frame.empty), None)
         if first is None:
             return
         asset = first["asset_id"].iloc[0]
@@ -780,10 +790,10 @@ def produce_normalized_context(
         yield from iter_external_context_frames(
             chain((first,), frames),
             quotes=read_records(
-                raw_root, archive_paths=paths["quotes"], time_window=time_window
+                raw_root, archive_paths=paths["quotes"], time_window=source_window
             ),
             trades=read_records(
-                raw_root, archive_paths=paths["trades"], time_window=time_window
+                raw_root, archive_paths=paths["trades"], time_window=source_window
             ),
             venue=parameters["venue"],
             base_units_per_amount=parameters["base_units_per_amount"][asset],
@@ -798,10 +808,6 @@ def produce_normalized_context(
         asset_ids=("btc_usdt", "eth_usdt"),
     )
 
-    def verify(_receipt):
-        session.verify()
-        if source_identity(raw_root, spec.data_id) != expected_source_identity:
-            raise ValueError("hft_external_source_identity_changed")
-
+    data = _output_frames(data, time_window)
     with closing_iterator(data):
-        yield (data, metadata, verify)
+        yield (data, metadata)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -15,7 +16,6 @@ from quant_research_platform.contracts.filtering import (
     validate_evaluation_filter_mode,
 )
 from quant_research_platform.contracts.ids import MarketId, validate_market_id
-from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.contracts.signals import (
     SignalSpec,
     _cross_signal_id_column_overlaps,
@@ -115,7 +115,11 @@ class EvaluationSpec:
     run_type: str = "evaluation"
 
     def __post_init__(self) -> None:
-        validate_run_id(self.evaluation_id)
+        if (
+            type(self.evaluation_id) is not str
+            or re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", self.evaluation_id) is None
+        ):
+            raise ValueError("invalid_evaluation_id")
         object.__setattr__(self, "market_id", validate_market_id(self.market_id))
         _validate_non_empty_string(
             self.research_dataset_id,

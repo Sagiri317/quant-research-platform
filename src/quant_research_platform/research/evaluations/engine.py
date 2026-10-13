@@ -34,7 +34,7 @@ from quant_research_platform.contracts.filtering import (
 from quant_research_platform.contracts.time import time_value_isoformat
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.research.signals.materialization import (
+from quant_research_platform.research.signals.normalization import (
     normalize_signal_frame,
 )
 from quant_research_platform.runtime.dataframes import iter_complete_time_frames
@@ -434,8 +434,6 @@ def _iter_single_asset_time_series_output_chunks(
     """Yield one bounded across-time correlation row per signal-label pair."""
     signal_columns = tuple(signal.signal_id for signal in spec.signals)
     label_columns = spec.label_columns
-    from quant_research_platform.research.filtering import apply_filter_mode
-
     numeric_columns = (*signal_columns, *label_columns)
     stats = {
         (signal, label): _CorrelationMoments()
@@ -469,10 +467,7 @@ def _iter_single_asset_time_series_output_chunks(
         source_columns_by_kind=source_columns_by_kind,
     )
     with closing_iterator(work_frames):
-        for chunk in work_frames:
-            filtered, filter_metadata = apply_filter_mode(
-                chunk, mode=spec.filter_mode, metadata_key="filter_mode"
-            )
+        for filtered, filter_metadata in work_frames:
             rows_input += strict_non_negative_count_value(filter_metadata["rows_input"])
             rows_after_filter += strict_non_negative_count_value(
                 filter_metadata["rows_after_filter_mode"]
@@ -597,8 +592,6 @@ def _iter_evaluation_output_chunks(
     summary_state: _EvaluationStreamingState | None = None,
 ) -> Iterator[_EvaluationOutputChunk]:
     """Yield bounded pairs and optionally consume them into research summaries."""
-    from quant_research_platform.research.filtering import apply_filter_mode
-
     work_frames = _iter_evaluation_work_frames(
         frames,
         spec=spec,
@@ -606,10 +599,7 @@ def _iter_evaluation_output_chunks(
         source_columns_by_kind=source_columns_by_kind,
     )
     with closing_iterator(work_frames):
-        for chunk in work_frames:
-            filtered, filter_metadata = apply_filter_mode(
-                chunk, mode=spec.filter_mode, metadata_key="filter_mode"
-            )
+        for filtered, filter_metadata in work_frames:
             output = _evaluate_filtered_frame(
                 filtered,
                 filter_metadata,
@@ -682,7 +672,9 @@ def _iter_evaluation_work_frames(
     spec: EvaluationSpec,
     asset_column: str,
     source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
-) -> Iterator[pd.DataFrame]:
+) -> Iterator[tuple[pd.DataFrame, dict[str, object]]]:
+    from quant_research_platform.research.filtering import apply_filter_mode
+
     label_columns = spec.label_columns
     required = {
         "timestamp",
@@ -711,14 +703,17 @@ def _iter_evaluation_work_frames(
                 raise ValueError(f"missing_evaluation_columns: {', '.join(missing)}")
             selected = [column for column in work_columns if column in frame.columns]
             projected = frame.loc[:, selected]
+            filtered, filter_metadata = apply_filter_mode(
+                projected, mode=spec.filter_mode, metadata_key="filter_mode"
+            )
             normalized = normalize_signal_frame(
-                projected,
+                filtered,
                 signals=spec.signals,
                 timestamp_column="timestamp",
                 source_columns_by_kind=source_columns_by_kind,
             )
 
             try:
-                yield normalized
+                yield normalized, filter_metadata
             except GeneratorExit:
                 return

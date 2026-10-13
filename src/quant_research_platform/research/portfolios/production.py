@@ -1,4 +1,4 @@
-"""Bounded production portfolio producer for the active target DAG."""
+"""Explicit-input A-share portfolio accounting and research valuation."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_DECISION_REASON_MAINTENANCE,
     PORTFOLIO_DECISION_REASON_SIMPLE,
     PORTFOLIO_LEDGER_COST_COLUMNS,
+    RESEARCH_VALUATION_VERSION,
     ExecutedTrade,
     ExecutionAssumptions,
     PortfolioCandidateSpec,
@@ -59,6 +60,7 @@ from quant_research_platform.research.portfolios.construction import (
 from quant_research_platform.research.portfolios.optimizer import (
     OptimizationResult,
     OptimizerConfig,
+    _risk_variances,
     optimize_portfolio,
 )
 from quant_research_platform.research.portfolios.risk import (
@@ -78,8 +80,6 @@ from quant_research_platform.storage.datasets.reading import (
     open_dataset_session,
     read_dataset,
 )
-from quant_research_platform.storage.identity import filesystem_exists
-from quant_research_platform.storage.layout import StorageLayout
 
 _CALENDAR_COLUMNS = ("calendar_date", "source_market_type", "is_trading_day")
 _DATASET_COLUMNS = ("asset_id", "timestamp", "eligible", "float_market_cap")
@@ -133,7 +133,6 @@ _ALPHA_DIAGNOSTICS = {
     "alpha_valid_dates": "valid_rebalance_dates",
     "alpha_scheduled_dates": "scheduled_rebalance_dates",
 }
-RESEARCH_VALUATION_VERSION = "RESEARCH_DELISTING_ZERO_V1"
 
 
 class _ResearchValuationMarks:
@@ -144,6 +143,7 @@ class _ResearchValuationMarks:
         self.cancelled_lifecycles = set()
         self.converted_lifecycles = {}
         self.zero_since = {}
+        self.unproved_rights = set()
         self.last = pd.DataFrame(
             {
                 "listing_date": pd.Series(dtype="datetime64[ns]"),
@@ -157,6 +157,12 @@ class _ResearchValuationMarks:
     def project(self, view):
         for event in view.rights_events.itertuples(index=False):
             identity = (event.asset_id, event.listing_date)
+            if not getattr(event, "unit_basis_proved", True) or not getattr(
+                event, "entitlement_proved", True
+            ):
+                self.unproved_rights.add(identity)
+                self.rights_quotes.pop(identity, None)
+                continue
             if (
                 event.kind == "conversion"
                 and event.successor_asset_id == event.asset_id
@@ -172,6 +178,11 @@ class _ResearchValuationMarks:
                 self.rights_quotes.pop(identity, None)
         observed = view.panel.set_index("asset_id")
         current = view.valuation.set_index("asset_id").copy()
+        unit_unproved = getattr(view, "unit_unproved_assets", frozenset())
+        if unit_unproved:
+            current.loc[
+                current.index.isin(unit_unproved), ["adj_open", "adj_close"]
+            ] = np.nan
         for frame in (observed, current):
             values = frame[["adj_open", "adj_close"]].astype("float64")
             if ((~np.isfinite(values) | values.le(0)) & values.notna()).any(axis=None):
@@ -191,28 +202,38 @@ class _ResearchValuationMarks:
             for column in ("listing_date", "market_type"):
                 current.loc[absent, column] = previous.loc[absent, column]
         current["timestamp"] = view.timestamp
-        for asset in assets:
-            listing = current.loc[asset, "listing_date"]
-            visited = set()
-            while (str(asset), listing) in self.converted_lifecycles:
-                if listing in visited:
-                    raise ValueError("portfolio_rights_conversion_cycle")
-                visited.add(listing)
-                listing = self.converted_lifecycles[str(asset), listing]
-            if visited:
-                current.loc[asset, "listing_date"] = listing
-                current.loc[asset, ["adj_open", "adj_close"]] = np.nan
-                current.loc[asset, "is_trading"] = False
+        if self.converted_lifecycles:
+            for asset in assets:
+                listing = current.loc[asset, "listing_date"]
+                visited = set()
+                while (str(asset), listing) in self.converted_lifecycles:
+                    if listing in visited:
+                        raise ValueError("portfolio_rights_conversion_cycle")
+                    visited.add(listing)
+                    listing = self.converted_lifecycles[str(asset), listing]
+                if visited:
+                    current.loc[asset, "listing_date"] = listing
+                    current.loc[asset, ["adj_open", "adj_close"]] = np.nan
+                    current.loc[asset, "is_trading"] = False
         same_life = current.listing_date.notna() & current.listing_date.eq(
             previous.listing_date
         )
-        same_life &= ~assets.isin(view.unproved_lifecycle_assets)
+        same_life &= ~assets.isin(view.unproved_lifecycle_assets | unit_unproved)
+        unproved_rights = pd.Series(
+            [
+                (str(asset), listing) in self.unproved_rights
+                for asset, listing in current.listing_date.items()
+            ],
+            index=assets,
+        )
+        same_life &= ~unproved_rights
+        current.loc[unproved_rights, ["adj_open", "adj_close"]] = np.nan
         previous = previous.loc[same_life].copy()
         self.last = previous.copy()
         observed = observed.loc[
             observed.is_trading.eq(True).fillna(False)
             & observed.listing_date.notna()
-            & ~observed.index.isin(view.unproved_lifecycle_assets)
+            & ~observed.index.isin(view.unproved_lifecycle_assets | unit_unproved)
         ]
         current["research_previous_listing_date"] = pd.Series(
             pd.NaT, index=assets, dtype="datetime64[ns]"
@@ -236,9 +257,7 @@ class _ResearchValuationMarks:
             permitted_carry = current.is_trading.eq(False).fillna(False) | assets.isin(
                 view.closed_assets
             )
-            missing = (
-                current[column].isna() & previous.mark_price.notna() & permitted_carry
-            )
+            missing = current[column].isna() & previous.mark_price.notna()
             current[f"research_{phase}_mark_at"] = pd.Series(
                 pd.NaT, index=assets, dtype="datetime64[ns]"
             )
@@ -262,7 +281,9 @@ class _ResearchValuationMarks:
                 ],
                 index=assets,
             )
-            zero = (delisted & ~assets.isin(known.index)) | cancelled
+            zero = (
+                (delisted & ~assets.isin(known.index)) | cancelled
+            ) & ~unproved_rights
             if missing.any():
                 current.loc[missing, column] = previous.loc[missing, "mark_price"]
                 current.loc[missing, f"research_{phase}_mark_at"] = pd.to_datetime(
@@ -271,6 +292,9 @@ class _ResearchValuationMarks:
                 current.loc[missing, f"research_{phase}_mark_kind"] = previous.loc[
                     missing, "mark_kind"
                 ]
+                current.loc[
+                    missing & ~permitted_carry, f"research_{phase}_mark_kind"
+                ] = "ordinary_missing_quote"
             if zero.any():
                 current.loc[zero, column] = 0.0
                 for asset in assets[zero]:
@@ -284,19 +308,22 @@ class _ResearchValuationMarks:
                 current.loc[cancelled, f"research_{phase}_mark_kind"] = (
                     "extinguished_rights"
                 )
-            for asset in assets:
-                event = self.rights_quotes.get(
-                    (str(asset), current.loc[asset, "listing_date"])
-                )
-                if event is not None and asset not in known.index:
-                    current.loc[asset, column] = event.value_per_old_unit
-                    current.loc[asset, f"research_{phase}_mark_at"] = event.timestamp
-                    current.loc[asset, f"research_{phase}_mark_kind"] = (
-                        "evidenced_rights_quote"
+            if self.rights_quotes:
+                for asset in assets:
+                    event = self.rights_quotes.get(
+                        (str(asset), current.loc[asset, "listing_date"])
                     )
-                    current.loc[asset, f"research_{phase}_evidence_identity"] = (
-                        event.evidence_identity
-                    )
+                    if event is not None and asset not in known.index:
+                        current.loc[asset, column] = event.value_per_old_unit
+                        current.loc[asset, f"research_{phase}_mark_at"] = (
+                            event.timestamp
+                        )
+                        current.loc[asset, f"research_{phase}_mark_kind"] = (
+                            "evidenced_rights_quote"
+                        )
+                        current.loc[asset, f"research_{phase}_evidence_identity"] = (
+                            event.evidence_identity
+                        )
             known = known.loc[~known.index.isin(assets[cancelled])]
             if not known.empty:
                 marks = known.loc[:, ["listing_date", "market_type"]].assign(
@@ -332,10 +359,14 @@ def _apply_rights_events(events, units, lives, timestamp):
     adjustments = []
     cash = 0.0
     for event in events.itertuples(index=False):
-        if event.kind == "quote":
-            continue
         quantity = Fraction(updated.get(event.asset_id, 0))
         if quantity == 0 or identities.get(event.asset_id) != event.listing_date:
+            continue
+        if not getattr(event, "unit_basis_proved", True) or not getattr(
+            event, "entitlement_proved", True
+        ):
+            raise PortfolioTargetBlocked("portfolio_held_rights_unproved")
+        if event.kind == "quote":
             continue
         remainder = quantity * Fraction(event.remaining_old_units_per_old_unit)
         amount = (
@@ -396,48 +427,10 @@ class _EnhancedDecision:
     calibration: AlphaCalibration
 
 
-def _price_returns(start, end, assets, *, start_column, end_column):
-    """Value held assets only across endpoints of the same proved listing life."""
-    start, end = start.reindex(assets), end.reindex(assets)
-    prices = []
-    for source, column in ((start, start_column), (end, end_column)):
-        values = source[column]
-        if values.isna().any():
-            raise PortfolioTargetBlocked("portfolio_held_return_missing")
-        try:
-            exact = values.map(Fraction)
-        except (ValueError, OverflowError):
-            raise ValueError("portfolio_return_invalid") from None
-        if exact.lt(0).any():
-            raise ValueError("portfolio_return_invalid")
-        prices.append(exact)
-    if (
-        start.listing_date.isna().any()
-        or end.listing_date.isna().any()
-        or not start.listing_date.eq(end.listing_date).all()
-    ):
-        raise PortfolioTargetBlocked("portfolio_held_lifecycle_unproven")
-    if prices[0].eq(0).any():
-        raise PortfolioTargetBlocked("portfolio_zero_mark_return_undefined")
-    try:
-        return pd.Series(
-            {
-                asset: float(
-                    (prices[1].loc[asset] - prices[0].loc[asset]) / prices[0].loc[asset]
-                )
-                for asset in assets
-            },
-            dtype="float64",
-        )
-    except OverflowError:
-        raise ValueError("portfolio_return_invalid") from None
-
-
-def build_portfolio_ledger(
+def backtest_a_share(
     *,
     candidate: PortfolioCandidateSpec,
-    layout: StorageLayout,
-    upstream_identities: Mapping[str, str],
+    inputs: Mapping[str, object],
     output_window: TimeWindow,
     input_window: TimeWindow,
     formal_dataset_window: TimeWindow,
@@ -449,8 +442,8 @@ def build_portfolio_ledger(
     shared_alpha_facts: dict | None = None,
     shared_risk_fits: dict | None = None,
     prediction_lookup: object,
-    persisted_model: object,
-    access_window: str,
+    prediction_domains: tuple[tuple[TimeWindow, tuple[str, ...], str], ...],
+    sample_role: str,
     assumptions: ExecutionAssumptions,
     fee_schedule_from_frame: Callable[..., object],
     require_fee_coverage: Callable[..., None],
@@ -467,14 +460,7 @@ def build_portfolio_ledger(
     _validate_windows(output_window, input_window, formal_dataset_window)
     enhanced = candidate.construction == "benchmark_enhanced"
     risk_style_columns = candidate.risk_style_columns
-    calendar_identity = _required_identity(
-        upstream_identities, candidate.trading_calendar_target_id
-    )
-    calendar_root = _required_target_root(
-        layout,
-        candidate.trading_calendar_target_id,
-        expected_identity=calendar_identity,
-    )
+    calendar_root = Path(inputs["calendar"])
     calendar = _read_materialized(calendar_root, _CALENDAR_COLUMNS, time_window=None)
     try:
         sessions = pd.DatetimeIndex(unified_trading_sessions(calendar))
@@ -487,16 +473,8 @@ def build_portfolio_ledger(
         pd.Timestamp(output_window.end).normalize(),
     )
     output_start = pd.Timestamp(output_window.start).normalize()
-    output_positions = np.flatnonzero(sessions >= output_start)
-    if len(output_positions):
-        config = risk_config or FactorRiskConfig()
-        warmup_sessions = (
-            max(19, config.factor_window, config.specific_window) + 1
-            if enhanced
-            else 19
-        )
-        warmup_start = max(0, int(output_positions[0]) - warmup_sessions)
-        session_start = max(session_start, sessions[warmup_start])
+    # Consume the declared history. Union-session slicing can discard required
+    # own-market observations when exchanges have asynchronous holidays.
     calibration_intervals = alpha_calibration_intervals(
         sessions, candidate.rebalance_schedule
     )
@@ -514,36 +492,27 @@ def build_portfolio_ledger(
         ).date(),
         pd.Timestamp(output_window.end).date(),
     )
-    validity_by_quarter = {
-        item["quarter_id"]: model_input_validity_columns(
-            item["model_metadata"]["input_columns"],
-            item["model_metadata"]["model_algorithm"],
-        )
-        for item in persisted_model.prediction_models(
-            prediction_window,
-            selection_group=candidate.selection_group,
-            access_window=access_window,
-        )
-        if item["family_id"]
-        == (
-            persisted_model.selection(
-                candidate.selection_group,
-                item["quarter_id"],
-                access_window=access_window,
-            )["selected_family_id"]
-            if candidate.prediction_selector == "champion"
-            else candidate.prediction_selector
-        )
-    }
+    domains = tuple(
+        (window, model_input_validity_columns(columns, algorithm))
+        for window, columns, algorithm in prediction_domains
+    )
+
+    def validity_at(timestamp):
+        matches = [
+            columns
+            for window, columns in domains
+            if pd.Timestamp(window.start) <= timestamp
+            and (window.end is None or timestamp <= pd.Timestamp(window.end))
+        ]
+        if len(matches) != 1:
+            raise ValueError("portfolio_prediction_domain_coverage_invalid")
+        return matches[0]
+
     dataset_columns = tuple(
         dict.fromkeys(
             (
                 *_DATASET_COLUMNS,
-                *(
-                    column
-                    for columns in validity_by_quarter.values()
-                    for column in columns
-                ),
+                *(column for _, columns in domains for column in columns),
             )
         )
     )
@@ -551,12 +520,8 @@ def build_portfolio_ledger(
     calibration_intervals = calibration_intervals.loc[
         calibration_intervals.timestamp.ge(alpha_start)
     ].copy()
-    fee_identity = _required_identity(
-        upstream_identities, candidate.fee_schedule_target_id
-    )
-    fee_root = _required_target_root(
-        layout, candidate.fee_schedule_target_id, expected_identity=fee_identity
-    )
+    fee_root = Path(inputs["fees"])
+    fee_identity = str(fee_root)
     fee_frame = _read_materialized(fee_root, None, time_window=None)
     fee_schedule = fee_schedule_from_frame(fee_frame, content_identity=fee_identity)
 
@@ -569,22 +534,10 @@ def build_portfolio_ledger(
         )
     except ValueError as exc:
         raise PortfolioTargetBlocked("portfolio_fee_coverage_missing") from exc
-    dataset_root = _required_input_root(
-        layout, upstream_identities, candidate.research_dataset_id
-    )
-    panel_root = _required_input_root(
-        layout, upstream_identities, candidate.market_panel_target_id
-    )
-    execution_root = _required_input_root(
-        layout, upstream_identities, candidate.execution_mask_target_id
-    )
-    for target_id in ("market_bars_1d", "stock_master"):
-        _required_input_root(layout, upstream_identities, target_id)
-    benchmark_root = None
-    if enhanced:
-        benchmark_root = _required_input_root(
-            layout, upstream_identities, candidate.benchmark_weights_target_id or ""
-        )
+    dataset_root = Path(inputs["dataset"])
+    panel_root = Path(inputs["panel"])
+    execution_root = Path(inputs["execution"])
+    benchmark_root = Path(inputs["benchmark"]) if enhanced else None
     holdings = pd.Series(dtype="float64")
     held_units = pd.Series(dtype="object")
     held_lives = pd.Series(dtype="datetime64[ns]")
@@ -599,31 +552,22 @@ def build_portfolio_ledger(
     )
     previous_risk_cross: pd.DataFrame | None = None
     market_facts = tuple(
-        (target_id, upstream_identities[target_id])
-        for target_id in (
-            candidate.market_panel_target_id,
-            candidate.trading_calendar_target_id,
-            "market_bars_1d",
-            "stock_master",
-        )
+        str(inputs[key]) for key in ("panel", "calendar", "market_bars", "stock_master")
     )
     alpha_fact_key = (
         market_facts,
-        upstream_identities[candidate.prediction_target_id],
-        upstream_identities[candidate.research_dataset_id],
+        prediction_lookup,
+        str(dataset_root),
         candidate.prediction_selector,
         candidate.selection_group,
         candidate.rebalance_schedule,
-        access_window,
+        sample_role,
         alpha_start,
-        tuple(sorted(validity_by_quarter.items())),
+        domains,
     )
     risk_fit_key = (
         market_facts,
-        tuple(
-            (target_id, upstream_identities[target_id])
-            for target_id in candidate.risk_context_target_ids
-        ),
+        tuple(map(str, inputs.get("risk_context", ()))),
         risk_style_columns,
         risk_config or FactorRiskConfig(),
         session_start,
@@ -642,7 +586,9 @@ def build_portfolio_ledger(
         panel_frames = input_channels.enter_context(
             closing_iterator(
                 iter_portfolio_sessions(
-                    layout=layout,
+                    market_bars_root=Path(inputs["market_bars"]),
+                    stock_master_root=Path(inputs["stock_master"]),
+                    equity_events_root=inputs.get("equity_events"),
                     panel_root=panel_root,
                     panel_columns=panel_columns,
                     calendar=calendar,
@@ -658,10 +604,7 @@ def build_portfolio_ledger(
         )
         risk_inputs = (
             _risk_context_input_sessions(
-                roots=tuple(
-                    _required_input_root(layout, upstream_identities, target_id)
-                    for target_id in candidate.risk_context_target_ids
-                ),
+                roots=tuple(Path(root) for root in inputs.get("risk_context", ())),
                 style_columns=risk_style_columns,
                 time_window=history,
                 retained=input_channels,
@@ -743,10 +686,13 @@ def build_portfolio_ledger(
                         exposures=previous_risk_cross, panel=panel
                     )
                     if shared_risk_fits is None:
-                        factor_risk.observe_return_session(risk_cross)
+                        factor_risk.observe_return_session(
+                            risk_cross, closed_assets=view.closed_assets
+                        )
                     else:
                         factor_risk.observe_return_session(
                             risk_cross,
+                            closed_assets=view.closed_assets,
                             shared_fits=shared_risk_fits,
                             fit_key=(risk_fit_key, decision_timestamp),
                         )
@@ -810,7 +756,7 @@ def build_portfolio_ledger(
                     alpha = _prediction_alpha(
                         dataset,
                         prediction_lookup,
-                        validity_by_quarter[str(decision_timestamp.to_period("Q"))],
+                        validity_at(decision_timestamp),
                     )
                     has_next_session = position + 1 < len(sessions)
                     if (
@@ -863,7 +809,7 @@ def build_portfolio_ledger(
                 alpha = _prediction_alpha(
                     dataset,
                     prediction_lookup,
-                    validity_by_quarter[str(decision_timestamp.to_period("Q"))],
+                    validity_at(decision_timestamp),
                 )
             if decision_timestamp not in output_intervals.index:
                 continue
@@ -983,35 +929,33 @@ def build_portfolio_ledger(
                 .all()
             ):
                 raise PortfolioTargetBlocked("portfolio_held_lifecycle_unproven")
-            account, returns, adv, _optimization, decision_delta, asset_ledger = (
-                _build_session(
-                    candidate=candidate,
-                    decision_timestamp=decision_timestamp,
-                    next_timestamp=next_timestamp,
-                    panel=view.valuation,
-                    next_panel=next_panel,
-                    endpoint_panel=endpoint_panel,
-                    closed_assets=next_view.closed_assets,
-                    dataset=dataset,
-                    execution=execution,
-                    holdings=holdings,
-                    held_units=execution_units,
-                    cash=cash,
-                    recovery_cash=recoveries,
-                    nav=nav,
-                    amount_history=amount_history,
-                    alpha=alpha,
-                    enhanced_decision=enhanced_decision,
-                    target_override=target_override,
-                    decision_reason=decision_reason,
-                    optimizer_config=optimizer_config,
-                    assumptions=assumptions,
-                    fee_schedule=fee_schedule,
-                    fee_identity=fee_identity,
-                    prepare_trade_cost=prepare_trade_cost,
-                    market_name_for_type=market_name_for_type,
-                    unquoted_assets=_unquoted_assets(next_panel),
-                )
+            account, adv, _optimization, decision_delta, asset_ledger = _build_session(
+                candidate=candidate,
+                decision_timestamp=decision_timestamp,
+                next_timestamp=next_timestamp,
+                panel=view.valuation,
+                next_panel=next_panel,
+                endpoint_panel=endpoint_panel,
+                closed_assets=next_view.closed_assets,
+                dataset=dataset,
+                execution=execution,
+                holdings=holdings,
+                held_units=execution_units,
+                cash=cash,
+                recovery_cash=recoveries,
+                nav=nav,
+                amount_history=amount_history,
+                alpha=alpha,
+                enhanced_decision=enhanced_decision,
+                target_override=target_override,
+                decision_reason=decision_reason,
+                optimizer_config=optimizer_config,
+                assumptions=assumptions,
+                fee_schedule=fee_schedule,
+                fee_identity=fee_identity,
+                prepare_trade_cost=prepare_trade_cost,
+                market_name_for_type=market_name_for_type,
+                unquoted_assets=_unquoted_assets(next_panel),
             )
             yielded_value = _ledger_batch(
                 account=account,
@@ -1023,7 +967,7 @@ def build_portfolio_ledger(
                 execution_units=execution_units,
                 previous_values=previous_values,
                 rights_adjustments=adjustments,
-                alpha_score=alpha,
+                prediction_rank_score=alpha,
                 adv20=adv,
                 enhanced_decision=enhanced_decision,
                 benchmark_weights=benchmark_weights if enhanced else None,
@@ -1070,7 +1014,7 @@ def build_portfolio_ledger(
             raise ValueError("misaligned_persisted_prediction_keys")
         if not emitted:
             raise PortfolioTargetBlocked("portfolio_execution_window_empty")
-        if enhanced and access_window == "development":
+        if enhanced and sample_role == "validation":
             if on_final_calibration is None:
                 raise ValueError("portfolio_final_calibration_sink_required")
             observation = {}
@@ -1087,9 +1031,13 @@ def build_portfolio_ledger(
                     "schema_id": "qrp-final-alpha-calibration",
                     "selection_group": candidate.selection_group,
                     "cutoff": pd.Timestamp(output_window.end).date().isoformat(),
-                    "upstream_identities": dict(upstream_identities),
+                    "inputs": {
+                        key: list(map(str, value))
+                        if key == "risk_context"
+                        else str(value)
+                        for key, value in inputs.items()
+                    },
                     "calibration": asdict(calibration),
-                    "observations": observation,
                 }
             )
 
@@ -1248,7 +1196,7 @@ def _completed_calibration_rows(
     return [
         {
             "timestamp": timestamp,
-            "alpha_score": float(alpha.loc[asset]),
+            "prediction_rank_score": float(alpha.loc[asset]),
             "holding_return": float(returns.loc[asset]),
         }
         for asset in alpha.index[valid]
@@ -1319,7 +1267,9 @@ def _calibration_fact(rows, intervals, *, as_of, shared_alpha_facts, alpha_fact_
     if shared_alpha_facts is not None and key in shared_alpha_facts:
         return shared_alpha_facts[key]
     calibration = calibrate_expected_alpha(
-        pd.DataFrame(rows, columns=["timestamp", "alpha_score", "holding_return"]),
+        pd.DataFrame(
+            rows, columns=["timestamp", "prediction_rank_score", "holding_return"]
+        ),
         as_of=as_of,
         scheduled_intervals=intervals,
     )
@@ -1485,7 +1435,6 @@ def _build_session(
 ) -> tuple[
     ExecutionAccounting,
     pd.Series,
-    pd.Series,
     OptimizationResult | None,
     pd.Series,
     pd.DataFrame,
@@ -1559,6 +1508,13 @@ def _build_session(
         },
         dtype="float64",
     )
+    missing_execution_quotes = frozenset(
+        execution_panel.loc[assets].index[
+            execution_panel.loc[assets, "adj_open"].isna()
+            | execution_panel.loc[assets, "adj_open"].eq(0)
+        ]
+    )
+    unquoted_assets = unquoted_assets | missing_execution_quotes
     masks = _mask_values(
         execution, assets, next_timestamp, closed_assets, unquoted_assets
     )
@@ -1587,6 +1543,20 @@ def _build_session(
                 )
         return totals
 
+    execution_cash = cash + recovery_cash
+    entry = execution_panel.reindex(assets)
+    required = held_units.reindex(assets, fill_value=0.0).ne(0)
+    if entry.loc[required, "adj_open"].isna().any():
+        raise PortfolioTargetBlocked("portfolio_held_return_missing")
+    execution_holdings = _unit_values(
+        held_units.reindex(assets, fill_value=Fraction()), entry.adj_open.fillna(0.0)
+    )
+    execution_nav = float(execution_holdings.sum() + execution_cash)
+    execution_weights = (
+        execution_holdings.div(execution_nav)
+        if execution_nav > 0
+        else execution_holdings.multiply(0.0)
+    )
     if (
         nav > 0
         and target_override is None
@@ -1667,20 +1637,6 @@ def _build_session(
         if orders_requested and nav > 0
         else pd.Series(0.0, index=assets)
     )
-    execution_cash = cash + recovery_cash
-    entry = execution_panel.reindex(assets)
-    required = held_units.reindex(assets, fill_value=0.0).ne(0)
-    if entry.loc[required, "adj_open"].isna().any():
-        raise PortfolioTargetBlocked("portfolio_held_return_missing")
-    execution_holdings = _unit_values(
-        held_units.reindex(assets, fill_value=Fraction()), entry.adj_open.fillna(0.0)
-    )
-    execution_nav = float(execution_holdings.sum() + execution_cash)
-    execution_weights = (
-        execution_holdings.div(execution_nav)
-        if execution_nav > 0
-        else execution_holdings.multiply(0.0)
-    )
     execution_target = target if orders_requested else execution_weights
     account = execute_continuous_target(
         execution_weights,
@@ -1697,6 +1653,56 @@ def _build_session(
         unquoted_assets=unquoted_assets,
     )
     asset_ledger = account.asset_ledger
+    if optimization is not None:
+        # Fees, capacity and blocked orders change realized weights. Validate the
+        # actual account without inventing trades in frozen holdings.
+        config = optimizer_config or OptimizerConfig()
+        risk = enhanced_decision.risk
+        realized = asset_ledger.set_index("asset_id").post_trade_notional
+        realized.loc[PORTFOLIO_CASH_ASSET_ID] = account.post_trade_cash
+        if account.nav_after <= 0:
+            raise PortfolioTargetBlocked("portfolio_post_trade_risk_unavailable")
+        weights = (
+            realized.reindex(assets_frame.asset_id, fill_value=0.0).to_numpy()
+            / account.nav_after
+        )
+        benchmark = assets_frame.benchmark_weight.to_numpy(dtype="float64")
+        active = weights - benchmark
+        columns = tuple(risk.factor_covariance.index)
+        exposure = assets_frame.loc[:, columns].to_numpy(dtype="float64")
+        specific = assets_frame.specific_variance.to_numpy(dtype="float64")
+        covariance = risk.factor_covariance.to_numpy(dtype="float64")
+        variance = sum(_risk_variances(active, exposure, covariance, specific))
+        industry = [i for i, name in enumerate(columns) if name.startswith("industry_")]
+        style = [
+            i for i, name in enumerate(columns) if not name.startswith("industry_")
+        ]
+        tolerance = 1e-8
+        if (
+            variance > config.tracking_error_limit**2 + tolerance
+            or np.any(
+                np.abs(exposure[:, industry].T @ active)
+                > config.industry_active_limit + tolerance
+            )
+            or np.any(
+                np.abs(exposure[:, style].T @ active)
+                > config.style_active_limit + tolerance
+            )
+            or np.any(
+                np.abs(active[~assets_frame.is_cash.to_numpy()])
+                > config.active_name_limit + tolerance
+            )
+        ):
+            raise PortfolioTargetBlocked("portfolio_post_trade_constraints_infeasible")
+        factor, specific_variance = _risk_variances(
+            active, exposure, covariance, specific
+        )
+        optimization = replace(
+            optimization,
+            predicted_tracking_error=float(np.sqrt(variance)),
+            factor_variance=factor,
+            specific_variance=specific_variance,
+        )
     missing_orders = asset_ledger.loc[
         asset_ledger.reason.eq("adv_unavailable"), "asset_id"
     ]
@@ -1710,8 +1716,7 @@ def _build_session(
             asset_ledger.loc[selected, "adv20_missing_observations"] = sum(
                 pd.isna(value) for value in history
             )
-    returns = _holding_returns(asset_ledger, next_panel, endpoint_panel)
-    return (account, returns, adv, optimization, decision_delta, asset_ledger)
+    return (account, adv, optimization, decision_delta, asset_ledger)
 
 
 def _prediction_alpha(
@@ -1819,35 +1824,6 @@ def _mask_values(
     return masks
 
 
-def _holding_returns(
-    asset_ledger: pd.DataFrame, next_panel: pd.DataFrame, endpoint_panel: pd.DataFrame
-) -> pd.Series:
-    assets = asset_ledger["asset_id"].astype(str)
-    returns = pd.Series(0.0, index=assets, dtype="float64")
-    selected = assets.loc[asset_ledger["post_trade_notional"].to_numpy() > 0.0]
-    if selected.empty:
-        return returns
-    start = next_panel.set_index("asset_id")
-    end = endpoint_panel.set_index("asset_id").copy()
-    if "research_previous_listing_date" in end:
-        conversion = (
-            end.research_previous_listing_date.notna()
-            & end.research_previous_listing_date.eq(start.listing_date)
-        )
-        end.loc[conversion, "adj_open"] = 0.0
-        end.loc[conversion, "listing_date"] = end.loc[
-            conversion, "research_previous_listing_date"
-        ]
-    returns.loc[selected] = _price_returns(
-        start,
-        end,
-        selected,
-        start_column="adj_open",
-        end_column="adj_open",
-    )
-    return returns
-
-
 def _ledger_batch(
     *,
     account: ExecutionAccounting,
@@ -1859,7 +1835,7 @@ def _ledger_batch(
     execution_units: pd.Series,
     previous_values: dict,
     rights_adjustments: tuple[PortfolioRightsAdjustment, ...],
-    alpha_score: pd.Series,
+    prediction_rank_score: pd.Series,
     adv20: pd.Series,
     enhanced_decision: _EnhancedDecision | None,
     benchmark_weights: pd.Series | None,
@@ -2056,7 +2032,7 @@ def _ledger_batch(
                 "adv20_missing_observations": getattr(
                     row, "adv20_missing_observations", None
                 ),
-                "alpha_score": alpha_score.get(asset),
+                "prediction_rank_score": prediction_rank_score.get(asset),
                 "decision_delta_weight": float(decision_delta.loc[asset]),
                 "expected_alpha": enhanced_decision.expected_alpha.get(asset)
                 if enhanced_decision is not None
@@ -2210,32 +2186,332 @@ def _validate_windows(
         raise ValueError("portfolio_windows_invalid")
 
 
-def _required_input_root(
-    layout: StorageLayout, upstream_identities: Mapping[str, str], target_id: str
-) -> Path:
-    return _required_target_root(
-        layout,
-        target_id,
-        expected_identity=_required_identity(upstream_identities, target_id),
+def backtest(config: Mapping) -> Path:
+    """Publish an A-share account from explicit market and prediction inputs."""
+    from quant_research_platform.artifacts.outputs.prediction import read_predictions
+    from quant_research_platform.artifacts.portfolio_ledger import (
+        write_portfolio_ledger_artifact,
+    )
+    from quant_research_platform.contracts.json_codec import parse_qrp_json_object
+    from quant_research_platform.contracts.portfolios import PortfolioCapital
+    from quant_research_platform.markets.implementations.a_share import (
+        portfolio_sessions,
+    )
+    from quant_research_platform.markets.implementations.a_share.calendar import (
+        unified_trading_sessions,
+    )
+    from quant_research_platform.markets.implementations.a_share.execution import (
+        fee_schedule_from_frame,
+        market_name_for_type,
+        prepare_trade_cost,
+        require_fee_coverage,
+    )
+    from quant_research_platform.research.models.persisted import load_model
+    from quant_research_platform.research.models.trial_selection import read_selection
+    from quant_research_platform.research.portfolios.accounting import (
+        frozen_alpha_calibration,
+    )
+
+    required = {
+        "candidate",
+        "inputs",
+        "predictions",
+        "output",
+        "output_window",
+        "input_window",
+        "formal_dataset_window",
+        "prediction_window",
+        "sample_role",
+        "assumptions",
+    }
+    optional = {"risk_config", "optimizer_config", "calibration"}
+    if (
+        not isinstance(config, Mapping)
+        or not required <= set(config)
+        or set(config) - required - optional
+    ):
+        raise ValueError("portfolio_config_fields_invalid")
+    if config["sample_role"] not in {"validation", "test"}:
+        raise ValueError("portfolio_sample_role_invalid")
+    candidate_values = dict(config["candidate"])
+    if "risk_style_columns" in candidate_values:
+        candidate_values["risk_style_columns"] = tuple(
+            candidate_values["risk_style_columns"]
+        )
+    candidate = PortfolioCandidateSpec(**candidate_values)
+    inputs = dict(config["inputs"])
+    base_inputs = {
+        "dataset",
+        "panel",
+        "execution",
+        "calendar",
+        "fees",
+        "market_bars",
+        "stock_master",
+    }
+    if not base_inputs <= set(inputs) or set(inputs) - base_inputs - {
+        "benchmark",
+        "risk_context",
+        "equity_events",
+    }:
+        raise ValueError("portfolio_input_fields_invalid")
+    if any(
+        type(value) is not str or not value
+        for key, value in inputs.items()
+        if key != "risk_context"
+    ):
+        raise ValueError("portfolio_input_path_invalid")
+    if "risk_context" in inputs and (
+        type(inputs["risk_context"]) is not list
+        or not inputs["risk_context"]
+        or any(type(value) is not str or not value for value in inputs["risk_context"])
+        or len(set(inputs["risk_context"])) != len(inputs["risk_context"])
+    ):
+        raise ValueError("portfolio_risk_context_invalid")
+    enhanced = candidate.construction == "benchmark_enhanced"
+    if enhanced != ("benchmark" in inputs) or enhanced != ("risk_context" in inputs):
+        raise ValueError("portfolio_enhanced_inputs_invalid")
+    if not enhanced and (
+        "risk_config" in config
+        or "optimizer_config" in config
+        or "calibration" in config
+    ):
+        raise ValueError("portfolio_unused_configuration")
+    assumptions_values = dict(config["assumptions"])
+    assumptions_values["adv_sensitivities"] = tuple(
+        assumptions_values["adv_sensitivities"]
+    )
+    assumptions = ExecutionAssumptions(**assumptions_values)
+    windows = {
+        name: TimeWindow(**config[name])
+        for name in (
+            "output_window",
+            "input_window",
+            "formal_dataset_window",
+            "prediction_window",
+        )
+    }
+    domains, frames = [], []
+    if not isinstance(config["predictions"], list) or not config["predictions"]:
+        raise ValueError("portfolio_prediction_inputs_required")
+    for item in config["predictions"]:
+        if (
+            not isinstance(item, dict)
+            or not {"path", "model", "window"} <= set(item)
+            or set(item) - {"path", "model", "window", "selection"}
+        ):
+            raise ValueError("portfolio_prediction_input_invalid")
+        frame, metadata = read_predictions(Path(item["path"]))
+        model, facts = load_model(Path(item["model"]))
+        if (
+            Path(metadata["model"]) != Path(item["model"])
+            or metadata["model_id"] != facts["model"]["model_id"]
+        ):
+            raise ValueError("portfolio_prediction_model_mismatch")
+        if metadata["model_metadata"] != model.metadata:
+            raise ValueError("portfolio_prediction_model_metadata_mismatch")
+        window = TimeWindow(**item["window"])
+        if any(
+            pd.Timestamp(window.start) <= pd.Timestamp(old.end)
+            and pd.Timestamp(old.start) <= pd.Timestamp(window.end)
+            for old, _, _ in domains
+        ):
+            raise ValueError("portfolio_prediction_domains_overlap")
+        if (
+            window.end is None
+            or pd.Timestamp(window.start)
+            < pd.Timestamp(metadata["prediction_window"]["start"])
+            or pd.Timestamp(window.end)
+            > pd.Timestamp(metadata["effective_prediction_end"])
+        ):
+            raise ValueError("portfolio_prediction_window_invalid")
+        if facts["market_id"] != "a_share":
+            raise ValueError("portfolio_model_market_mismatch")
+        if "selection" in item:
+            selected = read_selection(Path(item["selection"]))
+            if selected["selection_group"] != candidate.selection_group:
+                raise ValueError("portfolio_prediction_selection_mismatch")
+            if candidate.prediction_selector == "champion":
+                selected_model_id = selected["selected_model_id"]
+            else:
+                family = [
+                    entry
+                    for entry in selected["families"]
+                    if entry["family_id"] == candidate.prediction_selector
+                ]
+                if (
+                    len(family) != 1
+                    or metadata["family_id"] != candidate.prediction_selector
+                ):
+                    raise ValueError("portfolio_prediction_selector_mismatch")
+                selected_model_id = family[0]["selected_config_id"]
+            if selected_model_id != metadata["model_id"]:
+                raise ValueError("portfolio_prediction_selection_mismatch")
+            selected_candidate = next(
+                entry
+                for entry in selected["candidates"]
+                if entry["model_id"] == selected_model_id
+            )
+            if config["sample_role"] == "test":
+                if (
+                    not facts.get("selection")
+                    or read_selection(Path(facts["selection"])) != selected
+                ):
+                    raise ValueError("portfolio_test_selection_mismatch")
+            elif Path(item["model"]) not in {
+                Path(path) for path in selected_candidate["model_paths"]
+            }:
+                raise ValueError("portfolio_selected_training_model_mismatch")
+            if candidate.selection_group == "quarterly" and pd.Timestamp(
+                selected["cutoff"]
+            ) >= pd.Timestamp(window.start):
+                raise ValueError("portfolio_quarterly_selection_not_causal")
+        elif (
+            candidate.prediction_selector == "champion"
+            or config["sample_role"] == "test"
+        ):
+            raise ValueError("portfolio_frozen_selection_required")
+        elif candidate.prediction_selector != metadata["family_id"]:
+            raise ValueError("portfolio_prediction_selector_mismatch")
+        if config["sample_role"] == "test":
+            if (
+                metadata["sample_role"] != "test"
+                or facts.get("test_window") != selected["test_window"]
+            ):
+                raise ValueError("portfolio_test_prediction_not_frozen")
+        elif metadata["sample_role"] == "test":
+            raise ValueError("portfolio_test_prediction_in_validation")
+        chosen = frame.loc[
+            frame.timestamp.between(
+                pd.Timestamp(window.start), pd.Timestamp(window.end)
+            )
+        ].copy()
+        if chosen.empty:
+            raise ValueError("portfolio_prediction_domain_empty")
+        frames.append(chosen)
+        domains.append(
+            (
+                window,
+                tuple(model.metadata["input_columns"]),
+                model.metadata["model_algorithm"],
+            )
+        )
+    import pyarrow as pa
+
+    from quant_research_platform.artifacts.outputs.prediction import (
+        _PredictionLookup,
+    )
+    from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
+
+    frame = pd.concat(frames, ignore_index=True)
+    if frame.duplicated(["timestamp", "asset_id"]).any():
+        raise ValueError("portfolio_prediction_keys_invalid")
+    index = ExactPrimaryKeyIndex(primary_key=("timestamp", "asset_id"))
+    index.add_float_value_table(
+        pa.Table.from_pandas(frame, preserve_index=False),
+        namespace="prediction",
+        value_column="prediction_rank_score",
+        retain_values=True,
+    )
+    lookup = _PredictionLookup(
+        index=index,
+        primary_key=("timestamp", "asset_id"),
+        prediction_column="prediction_rank_score",
+    )
+    lookup.row_count = len(frame)
+    frozen = None
+    if enhanced and config["sample_role"] == "test":
+        if "calibration" not in config:
+            raise ValueError("portfolio_frozen_calibration_required")
+        payload = parse_qrp_json_object(Path(config["calibration"]).read_bytes())
+        if pd.Timestamp(payload["cutoff"]) >= pd.Timestamp(
+            windows["output_window"].start
+        ):
+            raise ValueError("portfolio_calibration_not_frozen")
+        frozen, _ = frozen_alpha_calibration(
+            payload, cutoff=payload["cutoff"], selection_group=candidate.selection_group
+        )
+    elif "calibration" in config:
+        raise ValueError("portfolio_unused_configuration")
+    final = []
+
+    def produce(emit):
+        with closing_iterator(
+            backtest_a_share(
+                candidate=candidate,
+                inputs=inputs,
+                **windows,
+                prediction_domains=tuple(domains),
+                prediction_lookup=lookup,
+                sample_role=config["sample_role"],
+                assumptions=assumptions,
+                risk_config=FactorRiskConfig(**config["risk_config"])
+                if "risk_config" in config
+                else None,
+                optimizer_config=OptimizerConfig(**config["optimizer_config"])
+                if "optimizer_config" in config
+                else None,
+                frozen_calibration=frozen,
+                on_final_calibration=final.append,
+                fee_schedule_from_frame=fee_schedule_from_frame,
+                require_fee_coverage=require_fee_coverage,
+                prepare_trade_cost=prepare_trade_cost,
+                market_name_for_type=market_name_for_type,
+                unified_trading_sessions=unified_trading_sessions,
+                iter_portfolio_sessions=portfolio_sessions.iter_portfolio_sessions,
+            )
+        ) as batches:
+            for batch in batches:
+                emit(batch)
+
+    metadata = {
+        **dict(config),
+        "window": dict(config["output_window"]),
+        "initial_holding_convention": "preheld_benchmark" if enhanced else "cash",
+    }
+    metadata.pop("output")
+    return write_portfolio_ledger_artifact(
+        Path(config["output"]),
+        capital=PortfolioCapital(
+            candidate.candidate_id, assumptions.initial_nav, "CNY", "adjusted_notional"
+        ),
+        metadata=metadata,
+        produce=produce,
+        final_calibration=(lambda: final[0])
+        if enhanced and config["sample_role"] == "validation"
+        else None,
     )
 
 
-def _required_target_root(
-    layout: StorageLayout, target_id: str, *, expected_identity: str
-) -> Path:
-    marker = Path("__missing_portfolio_target__")
-    root = layout.target_root(target_id, marker)
-    if root == marker or not filesystem_exists(root) or root.name != expected_identity:
-        raise ValueError(f"portfolio_input_missing: {target_id}")
-    return root
+def calibrate(config: Mapping) -> Path:
+    """Freeze mature A-share alpha observations against their declared schedule."""
+    from quant_research_platform.storage.atomic import atomic_write_json
 
-
-def _required_identity(upstream_identities: Mapping[str, str], target_id: str) -> str:
-    identity = upstream_identities.get(target_id)
-    if (
-        type(identity) is not str
-        or len(identity) != 64
-        or any(character not in "0123456789abcdef" for character in identity)
-    ):
-        raise ValueError(f"portfolio_input_identity_invalid: {target_id}")
-    return identity
+    required = {
+        "observations",
+        "scheduled_intervals",
+        "cutoff",
+        "selection_group",
+        "output",
+    }
+    if not isinstance(config, Mapping) or set(config) != required:
+        raise ValueError("alpha_calibration_config_invalid")
+    if config["selection_group"] not in {"global", "quarterly"}:
+        raise ValueError("portfolio_selection_group_invalid")
+    result = calibrate_expected_alpha(
+        pd.read_parquet(config["observations"]),
+        scheduled_intervals=pd.read_parquet(config["scheduled_intervals"]),
+        as_of=pd.Timestamp(config["cutoff"]),
+    )
+    return atomic_write_json(
+        Path(config["output"]),
+        {
+            "schema_id": "qrp-final-alpha-calibration",
+            "selection_group": config["selection_group"],
+            "cutoff": pd.Timestamp(config["cutoff"]).isoformat(),
+            "inputs": {
+                key: config[key] for key in ("observations", "scheduled_intervals")
+            },
+            "calibration": asdict(result),
+        },
+    )

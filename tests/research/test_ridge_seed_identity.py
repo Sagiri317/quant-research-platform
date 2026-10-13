@@ -1,112 +1,10 @@
-"""Derived Ridge seeds survive native fitting, publication and state loading."""
-
-from pathlib import Path
+"""Real backend states retain typed parameters and explicit seeds."""
 
 import numpy as np
 import pytest
 
 from quant_research_platform.contracts.models import ModelSpec
-from quant_research_platform.research.models import fitting, persisted
-from quant_research_platform.storage.identity import native_filesystem_path
-from tests.research.workflow_test_support import shared_model_case
-
-
-@pytest.mark.parametrize("solver", ("sag", "saga"))
-def test_ridge_native_seed_is_independent_of_global_rng_and_persisted(tmp_path, solver):
-    spec = ModelSpec(
-        model_id="ridge",
-        model_algorithm="ridge_regression",
-        input_factor_columns=("x",),
-        label_column="label",
-        hyperparameters={
-            "solver": solver,
-            "alpha": 1,
-            "max_iter": 10000,
-            "tol": 1e-10,
-        },
-    )
-    state = np.random.get_state()
-    try:
-        np.random.seed(1)
-        first = shared_model_case(
-            tmp_path / "first", specs=(spec,), development_end="2019-03-31"
-        )
-        np.random.seed(991)
-        second = shared_model_case(
-            tmp_path / "second", specs=(spec,), development_end="2019-03-31"
-        )
-    finally:
-        np.random.set_state(state)
-    assert first.artifact.selections == second.artifact.selections
-    for first_entry, second_entry in zip(
-        first.artifact.final_models, second.artifact.final_models, strict=True
-    ):
-        assert first_entry["model_metadata"] == second_entry["model_metadata"]
-        group = first_entry["selection_group"]
-        left = persisted.read_quarterly_predictor(first.artifact, group, "ridge")
-        right = persisted.read_quarterly_predictor(second.artifact, group, "ridge")
-        metadata = first_entry["model_metadata"]
-        assert type(left.estimator.random_state) is int
-        assert left.estimator.random_state == metadata["random_seed"]
-        assert right.estimator.random_state == metadata["random_seed"]
-        inputs = first.frame.loc[:, list(spec.input_columns)]
-        np.testing.assert_array_equal(left.predict(inputs), right.predict(inputs))
-        left.estimator.random_state = None
-        with pytest.raises(ValueError, match="^model_state_metadata_mismatch$"):
-            fitting.validate_model_state(left, metadata)
-
-
-@pytest.mark.parametrize("stage", ("candidate", "final"))
-@pytest.mark.parametrize("field", ("hyperparameters", "resolved_hyperparameters"))
-def test_model_reader_rejects_equal_numeric_values_with_different_parameter_types(
-    tmp_path, stage, field
-):
-    from tests.research.test_quarterly_model_artifacts import _republish
-
-    spec = ModelSpec(
-        model_id="ridge",
-        model_algorithm="ridge_regression",
-        input_factor_columns=("x",),
-        label_column="label",
-        hyperparameters={"alpha": 1},
-    )
-    good = shared_model_case(
-        tmp_path / "good", specs=(spec,), development_end="2019-03-31"
-    )
-    original = {
-        path.relative_to(good.root): path.read_bytes()
-        for path in good.root.rglob("*")
-        if path.is_file()
-    }
-    mutated = []
-
-    def change(relative, document):
-        key = "candidate_models" if stage == "candidate" else "final_models"
-        if key in document and not mutated:
-            metadata = document[key][0]["model_metadata"]
-            metadata[field]["alpha"] = 1.0
-            if field == "hyperparameters":
-                metadata["resolved_hyperparameters"]["alpha"] = 1.0
-            mutated.append(relative)
-
-    bad = _republish(good, tmp_path / "bad", mutate=change)
-    assert len(mutated) == 1
-    error = (
-        "invalid_model_metadata"
-        if field == "resolved_hyperparameters"
-        else "model_trial_parameters_misaligned"
-    )
-    with pytest.raises(ValueError, match=f"^{error}$"):
-        persisted.read_quarterly_model_artifact(
-            bad,
-            expected_identity=good.envelope.instance_identity,
-            trial_layout=good.layout,
-        )
-    assert {
-        path.relative_to(good.root): path.read_bytes()
-        for path in good.root.rglob("*")
-        if path.is_file()
-    } == original
+from quant_research_platform.research.models import fitting
 
 
 @pytest.mark.parametrize("solver", ("sag", "saga"))
@@ -138,7 +36,7 @@ def test_ridge_resolved_and_native_state_parameters_keep_typed_identity(
         model_id="ridge",
         model_algorithm="ridge_regression",
         input_factor_columns=("x",),
-        label_column="label",
+        target_column="label",
         random_seed=731,
         hyperparameters={"solver": solver, "alpha": 1, "max_iter": 10000, "tol": 1e-8},
     )
@@ -189,7 +87,7 @@ def test_ridge_native_seed_type_aliases_are_rejected(seed, alias):
         model_id="ridge",
         model_algorithm="ridge_regression",
         input_factor_columns=("x",),
-        label_column="label",
+        target_column="label",
         random_seed=seed,
     )
     fitted = fitting._fit_model_result(
@@ -246,15 +144,12 @@ def test_resolved_parameters_preserve_only_legal_thread_resolution_and_float_zer
         "lightgbm_regressor",
     ),
 )
-def test_native_estimator_defaults_and_nan_pass_typed_state_checks(algorithm):
+def test_native_estimator_defaults_and_nan_pass_typed_state_checks(algorithm, tmp_path):
     import pickle
 
     import pandas as pd
 
     from quant_research_platform.contracts.models import validate_model_metadata_core
-    from quant_research_platform.research.models.supervised import (
-        build_estimator_from_model_spec,
-    )
 
     rng = np.random.default_rng(27)
     x, z = rng.normal(size=(2, 120))
@@ -290,144 +185,19 @@ def test_native_estimator_defaults_and_nan_pass_typed_state_checks(algorithm):
         model_id="probe",
         model_algorithm=algorithm,
         input_factor_columns=("x", "z"),
-        label_column="label",
+        target_column="label",
         random_seed=731,
         hyperparameters=params,
     )
-    fitted = fitting._fit_model_result(
-        fitting._collect_training_frame(
-            (frame,), spec, fitting_cutoff=frame.timestamp.max() + pd.Timedelta(days=2)
-        ),
-        spec,
-        estimator=build_estimator_from_model_spec(spec),
+    from tests.research.direct_model_test_support import fit_frame
+
+    frame["asset_id"] = "asset"
+    case = fit_frame(
+        tmp_path, frame, spec, cutoff=frame.timestamp.max() + pd.Timedelta(days=2)
     )
+    fitted = case.result
     metadata = validate_model_metadata_core(fitted.metadata)
     predictor = pickle.loads(pickle.dumps(fitted.prediction_model))
     if algorithm == "ridge_regression":
         predictor.estimator.alpha = -0.0
     fitting.validate_model_state(predictor, metadata)
-
-
-@pytest.mark.parametrize("boundary", ("resolved", "state"))
-def test_model_publication_rejects_typed_parameter_drift_and_preserves_good(
-    tmp_path, boundary
-):
-    spec = ModelSpec(
-        model_id="ridge",
-        model_algorithm="ridge_regression",
-        input_factor_columns=("x",),
-        label_column="label",
-        hyperparameters={"alpha": 1},
-    )
-    good = shared_model_case(
-        tmp_path / "good", specs=(spec,), development_end="2019-03-31"
-    )
-    original = {
-        path.relative_to(good.root): path.read_bytes()
-        for path in good.root.rglob("*")
-        if path.is_file()
-    }
-
-    def wrap(builder):
-        def run(**callbacks):
-            on_candidate = callbacks["on_candidate"]
-
-            def mutate(fold, family, actual_spec, result):
-                if boundary == "resolved":
-                    result.metadata["resolved_hyperparameters"]["alpha"] = 1.0
-                else:
-                    result.prediction_model.estimator.alpha = 1.0
-                on_candidate(fold, family, actual_spec, result)
-
-            callbacks["on_candidate"] = mutate
-            yield from builder(**callbacks)
-
-        return run
-
-    error = (
-        "invalid_model_metadata"
-        if boundary == "resolved"
-        else "model_state_metadata_mismatch"
-    )
-    with pytest.raises(ValueError) as caught:
-        shared_model_case(
-            tmp_path / "bad",
-            specs=(spec,),
-            development_end="2019-03-31",
-            model_results_wrapper=wrap,
-        )
-    assert caught.value.args == (error,)
-    assert {
-        path.relative_to(good.root): path.read_bytes()
-        for path in good.root.rglob("*")
-        if path.is_file()
-    } == original
-    assert not list((tmp_path / "bad/models").rglob("model.json"))
-
-
-def test_model_reader_rejects_rehashed_typed_native_state_drift(tmp_path):
-    import pickle
-
-    from quant_research_platform.storage.identity import (
-        filesystem_mkdir,
-        filesystem_write_bytes,
-    )
-    from quant_research_platform.storage.semantic_artifacts import (
-        read_semantic_artifact_record,
-        write_semantic_artifact,
-    )
-
-    spec = ModelSpec(
-        model_id="ridge",
-        model_algorithm="ridge_regression",
-        input_factor_columns=("x",),
-        label_column="label",
-        hyperparameters={"alpha": 1},
-    )
-    good = shared_model_case(
-        tmp_path / "good", specs=(spec,), development_end="2019-03-31"
-    )
-    original = {
-        path.relative_to(good.root): path.read_bytes()
-        for path in good.root.rglob("*")
-        if path.is_file()
-    }
-    changed = []
-
-    def write(stage):
-        for member in good.artifact.member_records:
-            relative = member["path"]
-            payload = Path(native_filesystem_path(good.root / relative)).read_bytes()
-            if relative.endswith(".pkl") and not changed:
-                predictor = pickle.loads(payload)
-                predictor.estimator.alpha = 1.0
-                payload = pickle.dumps(predictor)
-                changed.append(relative)
-            destination = stage / relative
-            filesystem_mkdir(destination.parent, parents=True, exist_ok=True)
-            filesystem_write_bytes(destination, payload)
-
-    operational = {}
-    read_semantic_artifact_record(good.root, operational_metadata=operational)
-    bad = write_semantic_artifact(
-        tmp_path / "bad",
-        good.envelope,
-        write,
-        operational_metadata=operational,
-    )
-    assert len(changed) == 1
-    fresh = persisted.read_quarterly_model_artifact(
-        bad,
-        expected_identity=good.envelope.instance_identity,
-        trial_layout=good.layout,
-    )
-    with pytest.raises(ValueError, match="^model_state_metadata_mismatch$"):
-        entry = fresh.final_models[0]
-        persisted.read_quarterly_predictor(
-            fresh, entry["selection_group"], entry["family_id"]
-        )
-    assert {
-        path.relative_to(good.root): path.read_bytes()
-        for path in good.root.rglob("*")
-        if path.is_file()
-    } == original

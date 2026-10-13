@@ -7,7 +7,6 @@ from collections.abc import Mapping
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from quant_research_platform.contracts.outputs import validate_output_identifier
-from quant_research_platform.contracts.run_id import validate_run_id
 
 _WINDOWS_DRIVE_PATH_RE = re.compile(r"(?i)\b[a-z]:[\\/][^\r\n\t\"'<>|]+")
 
@@ -72,13 +71,6 @@ def evidence_json_value_unsafe_reason(
         reason = evidence_text_unsafe_reason(key)
         if reason is not None:
             return reason
-    if key == "run_id":
-        if not isinstance(value, str):
-            return "invalid_run_id"
-        try:
-            validate_run_id(value)
-        except ValueError:
-            return "invalid_run_id"
     if key in {"output_id", "output_definition_id"}:
         if not isinstance(value, str):
             return "invalid_output_id"
@@ -111,6 +103,19 @@ def sanitize_shared_text(text: object) -> str:
 
 
 def assert_internal_artifact_metadata_safe(value: object) -> None:
-    reason = evidence_json_value_unsafe_reason(value)
-    if reason is not None:
-        raise ValueError(f"unsafe_internal_artifact_metadata: {reason}")
+    """Private native artifacts may name real inputs, but never store credentials."""
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if _CREDENTIAL_KEY_RE.fullmatch(str(key)):
+                raise ValueError("unsafe_internal_artifact_metadata: credential")
+            assert_internal_artifact_metadata_safe(str(key))
+            assert_internal_artifact_metadata_safe(item)
+    elif isinstance(value, (list, tuple, set)):
+        for item in value:
+            assert_internal_artifact_metadata_safe(item)
+    elif isinstance(value, (str, Path)):
+        text = str(value)
+        if _CREDENTIAL_RE.search(text):
+            raise ValueError("unsafe_internal_artifact_metadata: credential")
+        if _TRACEBACK_RE.search(text):
+            raise ValueError("unsafe_internal_artifact_metadata: traceback")

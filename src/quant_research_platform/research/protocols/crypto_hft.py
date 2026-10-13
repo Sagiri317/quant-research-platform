@@ -3,20 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 from typing import ClassVar
 
 import pandas as pd
 
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
-from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
 from quant_research_platform.catalog.models import ModelCatalog
-from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import DataFrequency, DataGrain
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
-from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.experiments import ExperimentFold
 from quant_research_platform.contracts.json_codec import (
     qrp_json_object_snapshot,
@@ -24,11 +21,8 @@ from quant_research_platform.contracts.json_codec import (
 from quant_research_platform.contracts.labels import LabelDefinition
 from quant_research_platform.contracts.portfolios import (
     PortfolioCapital,
-    PortfolioTargetBlocked,
 )
-from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.signals import SignalSpec
-from quant_research_platform.contracts.targets import TargetSpec
 from quant_research_platform.contracts.time import (
     TimeWindow,
     is_datetime_window,
@@ -333,18 +327,6 @@ class CryptoMakerCandidate:
     def model_ids(self):
         return (self.price_model_id, self.proxy_model_id) if self.calibrated else ()
 
-    @property
-    def calibration_target_id(self):
-        return f"{self.candidate_id}_calibration"
-
-
-@dataclass(frozen=True)
-class CryptoExecutionTarget:
-    candidate: CryptoTakerCandidate | CryptoMakerCandidate
-    execution_mode: str
-    target_id: str
-    statistics_target_id: str
-
 
 def portfolio_candidates(selection):
     """Decode explicit execution candidates without a named strategy roster."""
@@ -464,10 +446,10 @@ def research_chronology(value):
         folds.append(fold)
     if len({fold.fold_id for fold in folds}) != len(folds):
         raise ValueError("crypto_research_plan_duplicate_fold")
-    holdout = window(snapshot["test"])
-    if any(fold.validation.end >= holdout.start for fold in folds):
-        raise ValueError("crypto_research_plan_holdout_overlap")
-    return tuple(folds), holdout
+    test_window = window(snapshot["test"])
+    if any(fold.validation.end >= test_window.start for fold in folds):
+        raise ValueError("crypto_research_plan_test_window_overlap")
+    return tuple(folds), test_window
 
 
 def _research_plan(value: Mapping[str, object]) -> _CryptoResearchPlan:
@@ -481,7 +463,7 @@ def _research_plan(value: Mapping[str, object]) -> _CryptoResearchPlan:
     }:
         raise ValueError("crypto_research_plan_fields_invalid")
 
-    folds, holdout = research_chronology(
+    folds, test_window = research_chronology(
         {key: snapshot[key] for key in ("folds", "test")}
     )
     capital = PortfolioCapital(
@@ -560,541 +542,12 @@ def _research_plan(value: Mapping[str, object]) -> _CryptoResearchPlan:
             raise ValueError("crypto_maker_parameters_invalid")
     return _CryptoResearchPlan(
         tuple(folds),
-        holdout,
+        test_window,
         float(capital.initial_capital),
         capital.valuation_currency,
         tuple(limits),
         execution,
     )
-
-
-@dataclass(frozen=True)
-class CryptoProtocol:
-    scenario_id: str = market_ids.HFT_RESEARCH_DATASET_ID
-    access_window: str = "development"
-    research_plan: _CryptoResearchPlan | None = None
-    configuration_json: str | None = None
-    frozen_development: dict[str, object] | None = None
-
-    def __post_init__(self) -> None:
-        if self.scenario_id != market_ids.HFT_RESEARCH_DATASET_ID:
-            raise ValueError("unknown_crypto_scenario")
-        if self.research_plan is not None and not isinstance(
-            self.research_plan, _CryptoResearchPlan
-        ):
-            raise TypeError("crypto_research_plan_invalid")
-        if self.access_window not in {"development", "holdout"}:
-            raise ValueError("unknown_crypto_access_window")
-        if (
-            self.research_plan is not None
-            and self.research_plan.execution is not None
-            and self.research_plan.execution.maker is not None
-        ):
-            maker = self.research_plan.execution.maker
-            for candidate in self.portfolio_candidates():
-                if (
-                    isinstance(candidate, CryptoMakerCandidate)
-                    and not candidate.calibrated
-                    and abs(maker.inventory_target)
-                    > next(
-                        position
-                        for asset, _order, position in (
-                            self.research_plan.exposure_limits
-                        )
-                        if asset == candidate.asset_id
-                    )
-                ):
-                    raise ValueError("crypto_maker_inventory_target_invalid")
-
-    def configuration(self):
-        import json
-
-        return (
-            None
-            if self.configuration_json is None
-            else json.loads(self.configuration_json)
-        )
-
-    @property
-    def protocol_id(self) -> str:
-        return PROTOCOL_ID
-
-    def manifest(self) -> dict[str, object]:
-        result = {
-            **(
-                {"research_configuration": self.configuration()}
-                if self.configuration_json is not None
-                else {}
-            ),
-            **(
-                {"frozen_development": self.frozen_development}
-                if self.frozen_development is not None
-                else {}
-            ),
-            "protocol_id": self.protocol_id,
-            "scenario_id": self.scenario_id,
-            "access_window": self.access_window,
-            "portfolio_candidates": [
-                asdict(candidate) for candidate in self.portfolio_candidates()
-            ],
-            "portfolio_statistics": {
-                "annualization_periods": 365,
-                "annualization_minimum_observations": 2,
-            },
-            "model_scopes": {
-                item["model_id"]: {
-                    "model_algorithm": item["model_algorithm"],
-                    "training_asset_ids": item["training_asset_ids"],
-                    "validation_asset_ids": item["training_asset_ids"],
-                    "evaluation_asset_ids": item["evaluation_asset_ids"],
-                    "label_column": item["label_column"],
-                    "label_horizon_ms": label_horizon_ms(item["label_column"]),
-                }
-                for item in (
-                    self.configuration()["models"]
-                    if self.configuration_json is not None
-                    else ()
-                )
-            },
-        }
-
-        if self.research_plan is not None:
-            payload = self.research_plan.payload()
-            result.update(
-                research_plan=payload,
-                development_window={
-                    "start": payload["folds"][0]["validation"]["start"],
-                    "end": payload["folds"][-1]["validation"]["end"],
-                },
-                holdout_window=payload["test"],
-            )
-        return result
-
-    def target_manifest(self, target_id, producer_kind):
-        """Own the semantic projection used by hashing, producers and readers."""
-        full = self.manifest()
-        if producer_kind == "REPORT":
-            return full
-        result = {
-            key: full[key] for key in ("protocol_id", "scenario_id", "access_window")
-        }
-        if self.research_plan is None:
-            return result
-        plan = self.research_plan.payload()
-        selected_plan = {key: plan[key] for key in ("folds", "test")}
-        result["research_plan"] = selected_plan
-        if producer_kind == "MODEL":
-            result["research_configuration"] = {
-                "models": self.configuration()["models"]
-            }
-            return result
-        if producer_kind == "EVALUATION":
-            evaluation = build_crypto_evaluation_catalog(
-                configuration=self.configuration()
-            ).get(target_id)
-            model_ids = {
-                signal.signal_id
-                for signal in evaluation.signals
-                if signal.source_kind == "prediction"
-            }
-            result["model_scopes"] = {
-                key: value
-                for key, value in full["model_scopes"].items()
-                if key in model_ids
-            }
-            return result
-        result["model_scopes"] = full["model_scopes"]
-        if producer_kind == "PREDICTION":
-            return result
-        calibration = next(
-            (
-                candidate
-                for candidate in self.portfolio_candidates()
-                if isinstance(candidate, CryptoMakerCandidate)
-                and candidate.calibrated
-                and candidate.calibration_target_id == target_id
-            ),
-            None,
-        )
-        descriptor = (
-            None
-            if calibration is not None
-            else self.execution_target_for_target(target_id)
-        )
-        candidate = calibration if calibration is not None else descriptor.candidate
-        result["portfolio_candidates"] = [asdict(candidate)]
-        model_ids = (
-            candidate.model_ids
-            if isinstance(candidate, CryptoMakerCandidate)
-            else (candidate.model_id,)
-        )
-        result["model_scopes"] = {
-            key: value
-            for key, value in full["model_scopes"].items()
-            if key in model_ids
-        }
-        execution = plan["execution"]
-        if calibration is not None:
-            limits = plan["exposure_limits"][candidate.asset_id]
-            maker = execution["maker"]
-            selected_plan["execution"] = {
-                "maker": {
-                    "order_quantity": min(
-                        limits["max_order_quantity"],
-                        2 * limits["max_position_quantity"],
-                    ),
-                    "latency_ms": maker["latency_ms"],
-                    "min_calibration_samples": maker["min_calibration_samples"],
-                }
-            }
-            return result
-        selected_plan["exposure_limits"] = {
-            candidate.asset_id: plan["exposure_limits"][candidate.asset_id]
-        }
-        selected_plan["execution"] = {
-            key: execution[key]
-            for key in (
-                ("maker", "markout_horizon_ms")
-                if isinstance(candidate, CryptoMakerCandidate)
-                else ("taker_fee_bps", "latency_ms", "markout_horizon_ms")
-            )
-        }
-        if isinstance(candidate, CryptoTakerCandidate):
-            selected_plan["execution"]["latency_ms"] = (
-                execution["latency_ms"]
-                if candidate.latency_ms is None
-                else candidate.latency_ms
-            )
-        elif candidate.calibrated:
-            selected_plan["execution"]["maker"] = {
-                key: value
-                for key, value in execution["maker"].items()
-                if key not in {"inventory_target", "inventory_skew"}
-            }
-        result["execution_mode"] = descriptor.execution_mode
-        result["execution_target_id"] = descriptor.target_id
-        selected_plan.update(
-            {key: plan[key] for key in ("initial_capital", "valuation_currency")}
-        )
-        if producer_kind == "STATISTIC":
-            result["portfolio_statistics"] = full["portfolio_statistics"]
-            selected_plan["execution"].update(
-                {
-                    key: execution[key]
-                    for key in (
-                        "fee_scenarios_bps",
-                        "additional_spread_scenarios_bps",
-                    )
-                }
-            )
-        return result
-
-    def model_ids_for_target(self, target_id):
-        if target_id != f"{self.scenario_id}_models":
-            raise ValueError("crypto_model_target_invalid")
-        if self.configuration_json is not None:
-            return tuple(model["model_id"] for model in self.configuration()["models"])
-        return tuple(
-            spec.model_id
-            for spec in build_hft_model_catalog(
-                configuration=self.configuration()
-            ).list()
-        )
-
-    def execution_targets(self):
-        candidates = self.portfolio_candidates()
-        if not candidates:
-            return ()
-        if self.research_plan is None or self.research_plan.execution is None:
-            raise PortfolioTargetBlocked("crypto_execution_plan_missing")
-        return tuple(
-            CryptoExecutionTarget(
-                candidate,
-                mode,
-                candidate.candidate_id
-                + ("_ledger" if mode == "continuous" else "_episodes"),
-                f"{candidate.candidate_id}_{mode}_statistics",
-            )
-            for candidate in candidates
-            for mode in self.research_plan.execution.backtest_modes
-        )
-
-    def execution_target_for_target(self, target_id):
-        return next(
-            target
-            for target in self.execution_targets()
-            if target_id in (target.target_id, target.statistics_target_id)
-        )
-
-    def portfolio_candidate_for_target(self, target_id):
-        return self.execution_target_for_target(target_id).candidate
-
-    def portfolio_candidates(self):
-        candidates = portfolio_candidates(
-            self.configuration()["portfolios"]
-            if self.configuration_json is not None
-            else []
-        )
-        if self.research_plan is None or self.research_plan.execution is None:
-            return candidates
-        execution = self.research_plan.execution
-        seen = {
-            (
-                candidate.asset_id,
-                candidate.model_id,
-                execution.latency_ms
-                if candidate.latency_ms is None
-                else candidate.latency_ms,
-            )
-            for candidate in candidates
-            if isinstance(candidate, CryptoTakerCandidate)
-        }
-        result = list(candidates)
-        candidate_ids = {candidate.candidate_id for candidate in candidates}
-        for candidate in candidates:
-            if (
-                not isinstance(candidate, CryptoTakerCandidate)
-                or candidate.latency_ms is not None
-            ):
-                continue
-            for latency in execution.latency_scenarios_ms:
-                key = (candidate.asset_id, candidate.model_id, latency)
-                if key in seen:
-                    continue
-                candidate_id = f"{candidate.candidate_id}_latency_{latency}ms"
-                if candidate_id in candidate_ids:
-                    raise ValueError("research_portfolio_candidate_duplicate")
-                result.append(
-                    replace(candidate, candidate_id=candidate_id, latency_ms=latency)
-                )
-                seen.add(key)
-                candidate_ids.add(candidate_id)
-        return tuple(result)
-
-    def statistics_table_group(self, target_id):
-        if any(
-            isinstance(candidate, CryptoMakerCandidate)
-            and candidate.calibrated
-            and target_id == candidate.calibration_target_id
-            for candidate in self.portfolio_candidates()
-        ):
-            if (
-                self.research_plan is None
-                or self.research_plan.execution is None
-                or self.research_plan.execution.maker is None
-            ):
-                raise PortfolioTargetBlocked("crypto_maker_plan_missing")
-            return "crypto_maker_calibration"
-        if any(
-            target.statistics_target_id == target_id
-            for target in self.execution_targets()
-        ):
-            return "crypto_portfolio"
-        raise ValueError("crypto_statistics_target_invalid")
-
-    def portfolio_contract(self, target_id):
-        if self.research_plan is None or self.research_plan.execution is None:
-            raise PortfolioTargetBlocked("crypto_execution_plan_missing")
-        candidate = self.portfolio_candidate_for_target(target_id)
-        if (
-            isinstance(candidate, CryptoMakerCandidate)
-            and self.research_plan.execution.maker is None
-        ):
-            raise PortfolioTargetBlocked("crypto_maker_plan_missing")
-        return {
-            "candidate": asdict(candidate),
-            "execution_mode": self.execution_target_for_target(
-                target_id
-            ).execution_mode,
-            "execution": self.target_manifest(target_id, "PORTFOLIO")["research_plan"][
-                "execution"
-            ],
-        }
-
-    def target_window(self, action, data_spec, window, target_id=None):
-        if (
-            action == "research run"
-            and data_spec is not None
-            and self.research_plan is not None
-        ):
-            return TimeWindow(
-                min(fold.train.start for fold in self.research_plan.folds), window.end
-            )
-        return window
-
-    def frozen_target_ids(self):
-        return (
-            f"{self.scenario_id}_models",
-            *(
-                candidate.calibration_target_id
-                for candidate in self.portfolio_candidates()
-                if isinstance(candidate, CryptoMakerCandidate) and candidate.calibrated
-            ),
-        )
-
-    def freeze_development(self, record, references, frozen, artifacts):
-        reference = references[f"{self.scenario_id}_models"]
-        persisted = artifacts[reference.target_id]
-        final_fold = self.research_plan.folds[-1]
-        entries = [
-            item
-            for item in persisted.final_models
-            if item["fold_id"] == final_fold.fold_id
-        ]
-        if {item["model_id"] for item in entries} != set(
-            self.model_ids_for_target(reference.target_id)
-        ):
-            raise ValueError("holdout_development_model_fold_invalid")
-        return replace(self, access_window="holdout", frozen_development=frozen), None
-
-    def target_specs(self, action: str) -> tuple[TargetSpec, ...]:
-        if action != "research run":
-            return ()
-        dataset = self.scenario_id
-        models = f"{dataset}_models"
-        predictions = f"{dataset}_predictions"
-        panel = build_hft_research_dataset_catalog().get(dataset).base_input_data_id
-        targets = (
-            *(
-                TargetSpec(
-                    evaluation.evaluation_id,
-                    dependencies=(
-                        dataset,
-                        predictions,
-                        *(
-                            tuple(
-                                signal.signal_id + "_oos_evaluation"
-                                for signal in evaluation.signals
-                            )
-                            if len(evaluation.signals) > 1
-                            else ()
-                        ),
-                    )
-                    if evaluation.signals[0].source_kind == "prediction"
-                    else (dataset,),
-                )
-                for evaluation in build_crypto_evaluation_catalog(
-                    configuration=self.configuration()
-                ).list()
-            ),
-            TargetSpec(
-                models,
-                dependencies=() if self.frozen_development is not None else (dataset,),
-            ),
-            TargetSpec(
-                predictions,
-                dependencies=(models, dataset),
-            ),
-            *(
-                TargetSpec(
-                    candidate.calibration_target_id,
-                    dependencies=()
-                    if self.frozen_development is not None
-                    else (models, dataset, panel),
-                )
-                for candidate in self.portfolio_candidates()
-                if isinstance(candidate, CryptoMakerCandidate) and candidate.calibrated
-            ),
-        )
-        execution_targets = self.execution_targets()
-        return (
-            *targets,
-            *(
-                TargetSpec(
-                    target.target_id,
-                    dependencies=(
-                        (
-                            target.candidate.calibration_target_id,
-                            predictions,
-                            dataset,
-                            panel,
-                        )
-                        if isinstance(target.candidate, CryptoMakerCandidate)
-                        and target.candidate.calibrated
-                        else (dataset, panel)
-                        if isinstance(target.candidate, CryptoMakerCandidate)
-                        else (predictions, dataset, panel)
-                    ),
-                )
-                for target in execution_targets
-            ),
-            *(
-                TargetSpec(
-                    target.statistics_target_id,
-                    dependencies=(target.target_id,),
-                )
-                for target in execution_targets
-            ),
-        )
-
-    def terminal_targets(self, action: str) -> tuple[str, ...]:
-        if action == "dataset build":
-            return (self.scenario_id,)
-        if action == "research run":
-            if self.configuration_json is not None:
-                stage = self.configuration()["stage"]
-                if stage == "dataset":
-                    return (self.scenario_id,)
-                if stage == "evaluation":
-                    return (f"{self.scenario_id}_evaluation",)
-                if stage == "models":
-                    return (
-                        f"{self.scenario_id}_models",
-                        f"{self.scenario_id}_evaluation",
-                    )
-            if self.access_window == "development":
-                return (
-                    f"{self.scenario_id}_models",
-                    f"{self.scenario_id}_evaluation",
-                    *(
-                        candidate.calibration_target_id
-                        for candidate in self.portfolio_candidates()
-                        if isinstance(candidate, CryptoMakerCandidate)
-                        and candidate.calibrated
-                    ),
-                )
-            if self.configuration_json is not None:
-                selected = self.configuration()
-                return (
-                    f"{self.scenario_id}_evaluation",
-                    *(
-                        model["model_id"] + "_oos_evaluation"
-                        for model in selected["models"]
-                    ),
-                    *(
-                        spec.evaluation_id
-                        for spec in build_crypto_evaluation_catalog(
-                            configuration=selected
-                        ).list()
-                        if len(spec.signals) > 1
-                        and spec.signals[0].source_kind == "prediction"
-                    ),
-                    *(
-                        name
-                        for target in self.execution_targets()
-                        for name in (target.target_id, target.statistics_target_id)
-                    ),
-                )
-            return (
-                *(
-                    spec.evaluation_id
-                    for spec in build_crypto_evaluation_catalog(
-                        configuration=self.configuration()
-                    ).list()
-                ),
-                *(
-                    name
-                    for target in self.execution_targets()
-                    for name in (target.target_id, target.statistics_target_id)
-                ),
-            )
-        if action == "data materialize":
-            return (
-                build_hft_research_dataset_catalog()
-                .get(self.scenario_id)
-                .input_data_ids
-            )
-        raise ValueError("unknown_crypto_action")
 
 
 def validation_windows(plan, output_window):
@@ -1119,18 +572,6 @@ def validation_windows(plan, output_window):
     )
 
 
-def protocol(
-    scenario_id: str = market_ids.HFT_RESEARCH_DATASET_ID,
-    access_window: str = "development",
-    research_plan: Mapping[str, object] | None = None,
-) -> CryptoProtocol:
-    return CryptoProtocol(
-        scenario_id,
-        access_window,
-        None if research_plan is None else _research_plan(research_plan),
-    )
-
-
 def build_signal_specs(*, columns: tuple[str, ...]) -> tuple[SignalSpec, ...]:
     return tuple(
         SignalSpec(
@@ -1148,124 +589,6 @@ def build_signal_specs(*, columns: tuple[str, ...]) -> tuple[SignalSpec, ...]:
 def build_hft_model_catalog(*, configuration=None) -> ModelCatalog:
     return ModelCatalog.from_configuration(
         [] if configuration is None else configuration["models"]
-    )
-
-
-def build_hft_prediction_catalog(
-    *, configuration, train_end: str, test_start: str, test_end: str
-) -> PredictionCatalog:
-    return PredictionCatalog(
-        PredictionSpec(
-            prediction_id=f"{item['model_id']}_prediction",
-            model_id=item["model_id"],
-            research_dataset_id=market_ids.HFT_RESEARCH_DATASET_ID,
-            train_end=train_end,
-            test_start=test_start,
-            test_end=test_end,
-            training_asset_ids=tuple(item["training_asset_ids"]),
-            evaluation_asset_ids=tuple(item["evaluation_asset_ids"]),
-            sample_filter_mode=item.get("sample_filter_mode", "eligible"),
-        )
-        for item in configuration["models"]
-    )
-
-
-def build_crypto_evaluation_catalog(*, configuration=None) -> EvaluationCatalog:
-    columns = (
-        HFT_FACTOR_COLUMNS
-        if configuration is None
-        else tuple(configuration["evaluation"]["factors"])
-    )
-    labels = (
-        tuple(item.output_column for item in label_catalog().list())
-        if configuration is None
-        else tuple(configuration["evaluation"]["labels"])
-    )
-    factor = EvaluationSpec(
-        evaluation_id=f"{market_ids.HFT_RESEARCH_DATASET_ID}_evaluation",
-        market_id=market_ids.MARKET_ID,
-        research_dataset_id=market_ids.HFT_RESEARCH_DATASET_ID,
-        signals=build_signal_specs(columns=columns),
-        label_columns=labels,
-        label_availability_columns={label: f"{label}_available_at" for label in labels},
-    )
-    models = build_hft_model_catalog(configuration=configuration).list()
-    comparisons = []
-    if configuration is not None and configuration["stage"] == "research":
-        reference = next(
-            model
-            for model in models
-            if model.model_id == configuration["comparison_model_id"]
-        )
-        scopes = {
-            item["model_id"]: set(item["evaluation_asset_ids"])
-            for item in configuration["models"]
-        }
-        for model in models:
-            if (
-                model.model_id == reference.model_id
-                or model.label_column != reference.label_column
-            ):
-                continue
-            assets = scopes[model.model_id] & scopes[reference.model_id]
-            comparisons.append(
-                EvaluationSpec(
-                    evaluation_id=f"{model.model_id}_vs_{reference.model_id}_common_oos",
-                    market_id=market_ids.MARKET_ID,
-                    research_dataset_id=market_ids.HFT_RESEARCH_DATASET_ID,
-                    signals=tuple(
-                        SignalSpec(
-                            signal_id=item.model_id,
-                            source_kind="prediction",
-                            source_column="prediction__" + item.model_id,
-                        )
-                        for item in (reference, model)
-                    ),
-                    label_columns=(model.label_column,),
-                    label_availability_columns={
-                        model.label_column: model.label_column + "_available_at",
-                    },
-                    evaluation_axis=(
-                        "single_asset_time_series"
-                        if len(assets) <= 1
-                        else "cross_sectional"
-                    ),
-                )
-            )
-    return EvaluationCatalog(
-        (
-            factor,
-            *(
-                EvaluationSpec(
-                    evaluation_id=f"{model.model_id}_oos_evaluation",
-                    market_id=market_ids.MARKET_ID,
-                    research_dataset_id=market_ids.HFT_RESEARCH_DATASET_ID,
-                    signals=(
-                        SignalSpec(
-                            signal_id=model.model_id,
-                            source_kind="prediction",
-                            source_column="prediction_score",
-                        ),
-                    ),
-                    label_columns=(model.label_column,),
-                    label_availability_columns={
-                        model.label_column: f"{model.label_column}_available_at"
-                    },
-                    evaluation_axis="single_asset_time_series"
-                    if len(
-                        next(
-                            item["evaluation_asset_ids"]
-                            for item in configuration["models"]
-                            if item["model_id"] == model.model_id
-                        )
-                    )
-                    == 1
-                    else "cross_sectional",
-                )
-                for model in models
-            ),
-            *comparisons,
-        )
     )
 
 

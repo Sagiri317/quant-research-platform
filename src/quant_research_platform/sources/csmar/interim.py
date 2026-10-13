@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import stat
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from itertools import chain, groupby
 from pathlib import Path
@@ -13,9 +13,6 @@ import pandas as pd
 import pyarrow as pa
 
 from quant_research_platform.catalog.processed import InterimDataCatalog
-from quant_research_platform.contracts.business_manifest import (
-    validate_business_manifest_envelope,
-)
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -41,11 +38,9 @@ from quant_research_platform.sources.csmar.raw_exports import (
     INDEX_INFO_SOURCE_CODE_COLUMNS,
     INDEX_INFO_SOURCE_CODE_ENUMS,
     _iter_dataset_file_identities,
-    _verify_csmar_member_set,
     dataset_files_with_identity_by_id,
     iter_private_export_chunks,
 )
-from quant_research_platform.storage.datasets.schema import COMMON_MANIFEST_METADATA_KEY
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
@@ -53,10 +48,8 @@ from quant_research_platform.storage.identity import (
     content_hash_for_files,
     filesystem_exists,
     filesystem_stat,
-    require_artifact_root,
     require_unaliased_path,
 )
-from quant_research_platform.storage.layout import StorageLayout
 
 MARKET_BARS_DATA_ID = market_bars_data_id(DataFrequency.DAILY)
 DEFAULT_INTERIM_DATA_IDS: tuple[str, ...] = (
@@ -367,14 +360,12 @@ def source_content_identity(raw_root: Path, data_id: str) -> str | None:
     with closing_iterator(records_iterator):
         for record in records_iterator:
             del record
-    _verify_csmar_member_set(root, index, requested_datasets=(data_id,))
     if not index.identity_payload_count(namespace="csmar-dataset-paths"):
         return None
     identity = content_hash_for_files(
         _iter_dataset_file_identities(root, index, data_id=data_id),
         error="csmar_raw_export_identity_changed",
     )
-    _verify_csmar_member_set(root, index, requested_datasets=(data_id,))
     return identity
 
 
@@ -979,7 +970,6 @@ def _iter_interim_frames(
     start_date: str | None,
     end_date: str | None,
     chunksize: int,
-    verify_members: Callable[[], None] | None = None,
     source_row_counts: dict[str, int] | None = None,
     producer_diagnostics: dict[str, object] | None = None,
 ) -> Iterator[object]:
@@ -1012,25 +1002,23 @@ def _iter_interim_frames(
                             yield _yield_value
                         except GeneratorExit:
                             return
-            if verify_members is not None:
-                verify_members()
 
     return activate()
 
 
 def materialize_interim_data(
     *,
-    layout: StorageLayout,
-    raw_root: Path | None = None,
+    raw_root: Path,
+    output_roots: Mapping[str, Path],
     data_ids: tuple[str, ...] = DEFAULT_INTERIM_DATA_IDS,
     start_date: str | None = "2014-01-01",
     end_date: str | None = "2025-12-31",
     chunksize: int = 500000,
-    instance_metadata: Mapping[str, object] | None = None,
+    metadata: Mapping[str, object] | None = None,
 ) -> InterimImportResult:
     if type(chunksize) is not int or chunksize <= 0:
         raise ValueError("invalid_csmar_chunksize")
-    source_raw_root = raw_root or layout.raw_source_root(SourceId(SOURCE_ID))
+    source_raw_root = Path(raw_root)
     written: dict[str, Path] = {}
     skipped: set[str] = set()
     pending = set(data_ids)
@@ -1045,39 +1033,11 @@ def materialize_interim_data(
         source_raw_root, identity_index=identity_index, requested_datasets=data_ids
     )
 
-    def verify_members() -> None:
-        _verify_csmar_member_set(
-            source_raw_root, identity_index, requested_datasets=data_ids
-        )
-
     with closing_iterator(indexed_files):
         for data_id, group in groupby(indexed_files, key=lambda item: item[0]):
             identity = content_hash_for_files(
                 group, error="csmar_raw_export_identity_changed"
             )
-            if (
-                instance_metadata is not None
-                and COMMON_MANIFEST_METADATA_KEY in instance_metadata
-            ):
-                envelope = validate_business_manifest_envelope(
-                    instance_metadata[COMMON_MANIFEST_METADATA_KEY]
-                )
-                if envelope["semantic_metadata"]["raw_content_identity"] != identity:
-                    raise ValueError("csmar_raw_export_identity_changed")
-
-            def verify_source(_receipt, dataset=data_id, expected=identity):
-                verify_members()
-                if (
-                    content_hash_for_files(
-                        _iter_dataset_file_identities(
-                            source_raw_root, identity_index, data_id=dataset
-                        ),
-                        error="csmar_raw_export_identity_changed",
-                    )
-                    != expected
-                ):
-                    raise ValueError("csmar_raw_export_identity_changed")
-                verify_members()
 
             input_records = _iter_dataset_file_identities(
                 source_raw_root, identity_index, data_id=data_id
@@ -1085,12 +1045,8 @@ def materialize_interim_data(
             input_files = ((item[1], item[2]) for item in input_records)
             pending.discard(data_id)
             spec = interim_catalog().get(data_id)
-            artifact_root = require_artifact_root(
-                layout.target_root(
-                    spec.data_id, layout.interim_data_root(spec.source_id, spec.data_id)
-                )
-            )
-            metadata = dict(instance_metadata or {})
+            artifact_root = Path(output_roots[spec.data_id])
+            metadata = dict(metadata or {})
             diagnostics = dict(metadata.get("producer_diagnostics", {}))
             diagnostics["exact_duplicate_count"] = 0
             metadata["producer_diagnostics"] = diagnostics
@@ -1104,7 +1060,6 @@ def materialize_interim_data(
                 start_date=start_date,
                 end_date=end_date,
                 chunksize=chunksize,
-                verify_members=verify_members,
                 source_row_counts=source_row_counts,
                 producer_diagnostics=diagnostics,
             )
@@ -1114,8 +1069,13 @@ def materialize_interim_data(
                         artifact_root,
                         frames,
                         spec=spec,
-                        instance_metadata=metadata,
-                        staged_validator=verify_source,
+                        metadata={
+                            **(metadata or {}),
+                            "source_evidence": {
+                                "source_id": str(SOURCE_ID),
+                                "content_hash": identity,
+                            },
+                        },
                     )
                 except ValueError as exc:
                     if str(exc) != "empty_dataset_schema_missing":
@@ -1200,7 +1160,7 @@ def _iter_normalized_interim_frames(
                 if counts is not None:
                     for key, count in counts.items():
                         source_row_counts[key] = source_row_counts.get(key, 0) + count
-                if skip_duplicate or pruned.empty and data_id != "analyst_forecast":
+                if skip_duplicate:
                     continue
                 try:
                     yield pruned
@@ -1209,6 +1169,7 @@ def _iter_normalized_interim_frames(
     if (
         data_id == "index_info"
         and source_row_counts
+        and source_row_counts["raw_rows"] > 0
         and source_row_counts["retained_before_date_filter_rows"] == 0
     ):
         count = source_row_counts["raw_rows"]

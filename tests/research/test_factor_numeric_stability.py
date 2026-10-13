@@ -9,17 +9,18 @@ import pytest
 
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.processed import producer
-from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.research.factors.price_volume.calculations import (
     calculate_price_volume_factors,
 )
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
 from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers.a_share_catalogs import scientific_catalogs
 
 
 def _produce_factors(root, data_id, inputs, columns, window):
-    profile = research_profile()
+    profile = scientific_catalogs()
     layout = StorageLayout(root)
+    input_paths = {}
     for input_id, frame in inputs.items():
         base = profile.processed.get(input_id)
         spec = replace(
@@ -30,6 +31,7 @@ def _produce_factors(root, data_id, inputs, columns, window):
         )
         path = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
         write_dataset(path, frame.loc[:, spec.required_columns], spec=spec)
+        input_paths[input_id] = path
     base = profile.processed.get(data_id)
     spec = replace(
         base,
@@ -42,14 +44,12 @@ def _produce_factors(root, data_id, inputs, columns, window):
     path = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
     with producer.produce_a_share_processed_data(
         spec,
-        layout=layout,
+        inputs=input_paths,
         time_window=window,
         processed_catalog=profile.processed,
         source_catalog=profile.interim,
-    ) as (frames, metadata, verify):
-        write_dataset(
-            path, frames, spec=spec, instance_metadata=metadata, staged_validator=verify
-        )
+    ) as (frames, metadata):
+        write_dataset(path, frames, spec=spec, metadata=metadata)
     return read_dataset(path)
 
 

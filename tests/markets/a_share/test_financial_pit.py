@@ -806,10 +806,10 @@ def test_last_session_revision_preserves_processed_pit_ttm_and_factor_prefix():
     from quant_research_platform.markets.implementations.a_share.processed import (
         producer,
     )
-    from quant_research_platform.profiles.research import research_profile
     from quant_research_platform.research.factors.fundamental.calculations import (
         calculate_fundamental_factors,
     )
+    from tests.helpers.a_share_catalogs import scientific_catalogs
 
     records = (
         dict(
@@ -837,7 +837,7 @@ def test_last_session_revision_preserves_processed_pit_ttm_and_factor_prefix():
             "timestamp": calendar,
         }
     )
-    spec = research_profile().processed.get("fundamental_pit")
+    spec = scientific_catalogs().processed.get("fundamental_pit")
 
     def produce(history, sessions):
         source = {
@@ -892,7 +892,7 @@ def test_financial_ttm_and_stock_mean_preserve_finite_results(scale) -> None:
     from quant_research_platform.markets.implementations.a_share.processed import (
         producer,
     )
-    from quant_research_platform.profiles.research import research_profile
+    from tests.helpers.a_share_catalogs import scientific_catalogs
 
     events = pd.DataFrame(
         dict(
@@ -922,7 +922,7 @@ def test_financial_ttm_and_stock_mean_preserve_finite_results(scale) -> None:
         ignore_index=True,
     )
     facts = producer._fundamental_pit_frame(
-        research_profile().processed.get("fundamental_pit"),
+        scientific_catalogs().processed.get("fundamental_pit"),
         panel=observations.assign(market_id="a_share"),
         pit=_prepare_pit_fundamentals(stocks)(_pit_observations(observations)),
     )
@@ -950,8 +950,8 @@ def test_empty_legal_financial_event_domain_persists_unknown_panel_rows(tmp_path
     from quant_research_platform.markets.implementations.a_share.processed import (
         producer,
     )
-    from quant_research_platform.profiles.research import research_profile
     from quant_research_platform.storage.datasets import read_dataset, write_dataset
+    from tests.helpers.a_share_catalogs import scientific_catalogs
 
     events = pd.DataFrame(
         columns=(
@@ -973,7 +973,7 @@ def test_empty_legal_financial_event_domain_persists_unknown_panel_rows(tmp_path
             ),
         }
     )
-    spec = research_profile().processed.get("fundamental_pit")
+    spec = scientific_catalogs().processed.get("fundamental_pit")
     actual = producer._fundamental_pit_frame(
         spec,
         panel=panel,
@@ -1058,19 +1058,14 @@ def test_balance_only_pit_calculates_book_to_market_and_rejects_missing_income()
     from quant_research_platform.markets.implementations.a_share.processed import (
         producer,
     )
-    from quant_research_platform.profiles.research import (
-        bind_research_configuration,
-        research_profile,
-    )
+    from quant_research_platform.markets.prepare import _configured_spec
     from quant_research_platform.research.factors.fundamental.calculations import (
         calculate_fundamental_factors,
     )
-    from tests.profiles.test_research_configurations import configuration
+    from tests.helpers.a_share_catalogs import scientific_catalogs
 
-    config = configuration("a_share_csmar_choice", "fusion_nf_core")
-    config["evaluation"]["factors"] = ["book_to_market"]
-    selected = bind_research_configuration(research_profile(), config)
-    spec = selected.processed.get("fundamental_pit")
+    base = scientific_catalogs().processed.get("fundamental_pit")
+    spec = _configured_spec(base, {"factor_columns": ["book_to_market"]})
     sessions = pd.to_datetime(["2020-01-31", "2020-02-03"])
     source = {
         "financial_balance": _financial_frame(
@@ -1113,10 +1108,7 @@ def test_balance_only_pit_calculates_book_to_market_and_rejects_missing_income()
     )
     assert actual.book_to_market.tolist() == [0.1, 0.1]
     for factor in ("earnings_yield", "roe", "accruals"):
-        config["evaluation"]["factors"] = [factor]
-        needed = bind_research_configuration(research_profile(), config).processed.get(
-            "fundamental_pit"
-        )
+        needed = _configured_spec(base, {"factor_columns": [factor]})
         with pytest.raises(
             ValueError, match="BLOCKED_EXTERNAL_DATA: .*financial_income"
         ):

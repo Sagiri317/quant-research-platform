@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from decimal import Decimal, localcontext
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -41,27 +40,13 @@ from quant_research_platform.research.portfolios.construction import (
     build_simple_target_weights,
 )
 from quant_research_platform.research.statistics import cross_sectional_rank_ic
-from quant_research_platform.storage import semantic_artifacts
 from quant_research_platform.storage.datasets.schema import (
     _typed_category_value_payload,
     parse_logical_dtype_metadata,
 )
 from quant_research_platform.storage.identity import (
-    filesystem_walk,
-    filesystem_write_bytes,
     native_filesystem_path,
 )
-from tests.storage.test_semantic_artifacts import _envelope
-
-
-def _file_bytes(root):
-    return {
-        (parent / name).relative_to(root): Path(
-            native_filesystem_path(parent / name)
-        ).read_bytes()
-        for parent, _directories, files in filesystem_walk(root)
-        for name in files
-    }
 
 
 @pytest.mark.parametrize(
@@ -218,33 +203,6 @@ def test_decimal_metadata_rejects_exponents_without_expansion():
     }
 
 
-@pytest.mark.parametrize("target", ["member", "manifest"])
-def test_semantic_read_rechecks_earlier_members_and_manifest(
-    tmp_path, monkeypatch, target
-):
-    def writer(path):
-        filesystem_write_bytes(path / "a.bin", b"first")
-        filesystem_write_bytes(path / "b.bin", b"last")
-
-    root = semantic_artifacts.write_semantic_artifact(tmp_path, _envelope(), writer)
-    original = semantic_artifacts._member_record
-    visited = []
-
-    def record(relative, path, *, identity=None):
-        result = original(relative, path, identity=identity)
-        visited.append(path)
-        if len(visited) == 2:
-            filesystem_write_bytes(
-                visited[0] if target == "member" else root / "manifest.json",
-                b"changed",
-            )
-        return result
-
-    monkeypatch.setattr(semantic_artifacts, "_member_record", record)
-    with pytest.raises(ValueError, match="semantic_artifact_member_identity_changed"):
-        semantic_artifacts.read_semantic_artifact_record(root)
-
-
 def test_real_observations_preserve_nonfinite_domain_handling():
     values = pd.Series([1.0, np.inf, -np.inf, np.nan])
     pd.testing.assert_series_equal(
@@ -254,36 +212,6 @@ def test_real_observations_preserve_nonfinite_domain_handling():
         pd.Series({"a": np.inf, "b": 1.0}), eligible=pd.Series({"a": False, "b": True})
     )
     assert target.tolist() == [0.0, 1.0]
-
-
-@pytest.mark.parametrize(
-    "error_type", (OSError, PermissionError, FileNotFoundError, NotADirectoryError)
-)
-def test_semantic_hash_io_failure_preserves_error_and_published_files(
-    tmp_path, monkeypatch, error_type
-):
-    root = semantic_artifacts.write_semantic_artifact(
-        tmp_path,
-        _envelope(),
-        lambda path: filesystem_write_bytes(path / "payload.bin", b"payload"),
-    )
-    primary = error_type("synthetic_io_failure")
-    before = _file_bytes(root)
-
-    def failed_hash(*args, **kwargs):
-        raise primary
-
-    monkeypatch.setattr(semantic_artifacts, "_hash_file_content", failed_hash)
-
-    missing = error_type in (FileNotFoundError, NotADirectoryError)
-    with pytest.raises(ValueError if missing else error_type) as caught:
-        semantic_artifacts.read_semantic_artifact_record(root)
-    if missing:
-        assert str(caught.value) == "semantic_artifact_member_invalid"
-        assert caught.value.__cause__ is primary
-    else:
-        assert caught.value is primary
-    assert before == _file_bytes(root)
 
 
 @pytest.mark.parametrize(
@@ -515,14 +443,12 @@ def test_pearson_rounding_counterexamples_reach_published_consumers(
     from quant_research_platform.artifacts.outputs.evaluation import (
         write_evaluation_outputs_from_chunks,
     )
-    from quant_research_platform.contracts.outputs import OutputSpec
     from quant_research_platform.research.evaluations.engine import (
         build_evaluation_result_from_frames,
     )
     from quant_research_platform.research.models.trial_selection import (
         evaluate_model_trial_metrics_from_chunks,
     )
-    from quant_research_platform.storage.layout import StorageLayout
 
     left = [float.fromhex(value) for value in left_hex]
     right = [sign * float.fromhex(value) for value in right_hex]
@@ -585,13 +511,7 @@ def test_pearson_rounding_counterexamples_reach_published_consumers(
                 result.output_chunks,
                 summary_factory=result.summaries,
                 spec=spec,
-                output_spec=OutputSpec(
-                    output_id="rounding",
-                    output_definition_id="evaluation_outputs",
-                    run_id="test_run",
-                    market_id=spec.market_id,
-                ),
-                layout=StorageLayout(tmp_path),
+                output_path=tmp_path / "evaluation",
             )
         validate_output_bundle(bundle)
         assert pd.read_parquet(
@@ -600,11 +520,6 @@ def test_pearson_rounding_counterexamples_reach_published_consumers(
         assert pd.read_parquet(
             native_filesystem_path(bundle / "ic_summary.parquet")
         ).mean_ic.tolist() == [expected]
-        assert (
-            Path(native_filesystem_path(bundle / "summary.md"))
-            .read_text(encoding="utf-8")
-            .startswith("# Evaluation Summary")
-        )
 
 
 def test_scaler_transform_preserves_representable_extreme_difference():

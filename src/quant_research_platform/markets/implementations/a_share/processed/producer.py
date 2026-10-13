@@ -6,6 +6,7 @@ import json
 from bisect import bisect_left, bisect_right
 from contextlib import contextmanager
 from dataclasses import replace
+from datetime import date, timedelta
 from itertools import chain
 from statistics import mean
 
@@ -19,6 +20,7 @@ from quant_research_platform.catalog.processed import (
 from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
 from quant_research_platform.contracts.time import (
     TimeWindow,
+    is_datetime_window,
     time_window_timestamp_interval,
 )
 from quant_research_platform.contracts.validation import (
@@ -69,7 +71,6 @@ from quant_research_platform.storage.datasets.reading import (
     open_dataset_session,
 )
 from quant_research_platform.storage.identity import filesystem_exists
-from quant_research_platform.storage.layout import StorageLayout
 
 # Amortize per-issuer preparation across panel and downstream session blocks.
 DEFAULT_BATCH_ROWS = 8 * resources.DEFAULT_BATCH_ROWS
@@ -90,7 +91,7 @@ _FULL_HISTORY_SOURCE_IDS = {
 def produce_a_share_processed_data(
     spec: ProcessedDataSpec,
     *,
-    layout: StorageLayout,
+    inputs,
     time_window: TimeWindow,
     processed_catalog: ProcessedDataCatalog | None = None,
     source_catalog: InterimDataCatalog,
@@ -101,29 +102,30 @@ def produce_a_share_processed_data(
     source = {}
     for data_id in spec.source_input_data_ids:
         source_spec = source_catalog.get(data_id)
-        default_root = layout.interim_data_root(source_spec.source_id, data_id)
-        root = layout.target_root(
-            data_id, default_root if filesystem_exists(default_root) else None
-        )
+        root = inputs.get(data_id)
         if root is None:
             if data_id in spec.optional_source_input_data_ids:
                 source[data_id] = pd.DataFrame(columns=source_spec.required_columns)
                 continue
             continue
-        source_sessions[data_id] = open_dataset_session(
-            root,
-            columns=None,
-            time_window=None
-            if data_id in _FULL_HISTORY_SOURCE_IDS
+        session = open_dataset_session(root, columns=None, time_window=None)
+        if (
+            data_id in _FULL_HISTORY_SOURCE_IDS
             or data_id in spec.optional_source_input_data_ids
-            else a_share.source_history_window(
-                source_spec,
-                time_window,
-                freshness_days=json.loads(spec.parameters_json).get(
-                    "freshness_days", FORECAST_FRESHNESS_DAYS
-                ),
-            ),
-        )
+        ):
+            source_sessions[data_id] = session
+            continue
+        input_window = time_window
+        if source_spec.source_id == "choice" or data_id == "market_bars_1d":
+            input_window = _preceding_input_window(session, time_window)
+        elif data_id == "analyst_forecast":
+            freshness = json.loads(spec.parameters_json).get(
+                "freshness_days", FORECAST_FRESHNESS_DAYS
+            )
+            input_window = TimeWindow(
+                time_window.start - timedelta(days=freshness), time_window.end
+            )
+        source_sessions[data_id] = session.filtered_view(input_window)
     if spec.data_id == "market_panel_1d":
         missing = {
             "market_bars_1d",
@@ -150,10 +152,7 @@ def produce_a_share_processed_data(
     )
     for data_id in spec.processed_input_data_ids:
         dependency = processed.get(data_id)
-        root = layout.target_root(
-            data_id,
-            layout.processed_data_root(dependency.market_id, dependency.kind, data_id),
-        )
+        root = inputs[data_id]
         if not filesystem_exists(root):
             raise ValueError(f"missing_processed_dependency: {data_id}")
         columns = None
@@ -184,18 +183,21 @@ def produce_a_share_processed_data(
             columns = tuple(
                 column for column in dependency.required_columns if column in requested
             )
-        dependencies[data_id] = open_dataset_session(
-            root,
-            columns=columns,
-            time_window=a_share.processed_input_window(spec, time_window),
-        )
+        session = open_dataset_session(root, columns=columns, time_window=None)
+        if spec.kind is ProcessedDataKind.LABEL or spec.data_id == "execution_mask":
+            # Actual supplied PANEL sessions own the future execution/label clock.
+            # Each block below reads only its required own-market lookahead.
+            dependencies[data_id] = session
+        else:
+            input_window = (
+                _preceding_input_window(session, time_window)
+                if factor_engine.factor_lookback_bars(factor_definitions)
+                else time_window
+            )
+            dependencies[data_id] = session.filtered_view(input_window)
     for data_id, session in source_sessions.items():
         if data_id not in {"market_bars_1d", "index_weights"}:
             source[data_id] = materialize_dataset_session(session)
-
-    def verify(_receipt):
-        for session in (*source_sessions.values(), *dependencies.values()):
-            session.verify()
 
     data = _processed_frames(
         spec,
@@ -207,9 +209,17 @@ def produce_a_share_processed_data(
     with closing_iterator(data):
         first = next((frame for frame in data if not frame.empty), None)
         if first is None:
-            yield (pd.DataFrame(), {}, verify)
-            return
-        yield (chain((first,), data), {}, verify)
+            raise ValueError("processed_output_empty")
+        yield (chain((first,), data), {})
+
+
+def _preceding_input_window(session, window):
+    """Keep supplied history through the exact cutoff, without a protocol epoch."""
+    minimum = session.manifest["date_min"]
+    start = date.fromisoformat(minimum) if minimum is not None else window.start
+    if is_datetime_window(window):
+        start = pd.Timestamp(start)
+    return TimeWindow(min(start, window.start), window.end)
 
 
 def _processed_frames(spec, *, time_window, source, source_sessions, dependencies):
@@ -245,7 +255,9 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
     lower, upper, closed = time_window_timestamp_interval(time_window)
     if panel_source:
         source["observed_market_sessions"] = observed_sessions
-        history_start = min(lower, sessions[0]) if sessions else lower
+        history_start = pd.Timestamp(
+            min(lower, sessions[0]) if sessions else lower
+        ).normalize()
         # Candidate dates cannot come from a potentially incomplete calendar.
         # The panel certifies requested O/C; older unknowns only break state carry.
         sessions = tuple(

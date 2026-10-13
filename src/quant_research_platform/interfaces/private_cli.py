@@ -11,7 +11,7 @@ from quant_research_platform.policy.share_safety import sanitize_shared_text
 from quant_research_platform.storage.identity import (
     filesystem_exists,
 )
-from quant_research_platform.workflows.diagnostics.schema_inventory import (
+from quant_research_platform.storage.schema_inventory import (
     write_schema_inventory,
 )
 

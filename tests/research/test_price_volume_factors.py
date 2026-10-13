@@ -971,8 +971,8 @@ def test_market_model_residual_volatility_matches_decimal_oracle(scale):
 def test_trend_efficiency_extreme_normal_price_path_persists_finite_ratio(tmp_path):
     from dataclasses import replace
 
-    from quant_research_platform.profiles.research import research_profile
     from quant_research_platform.storage.datasets import read_dataset, write_dataset
+    from tests.helpers.a_share_catalogs import scientific_catalogs
 
     exponents = [0]
     for _ in range(2):
@@ -995,7 +995,7 @@ def test_trend_efficiency_extreme_normal_price_path_persists_finite_ratio(tmp_pa
         frame, factor_columns=("trend_efficiency_60d",)
     )
     calculated.insert(0, "market_id", "a_share")
-    base = research_profile().processed.get("price_volume_facts")
+    base = scientific_catalogs().processed.get("price_volume_facts")
     spec = replace(
         base,
         column_roles={
@@ -1047,9 +1047,9 @@ def test_market_model_extreme_equal_assets_keep_unit_beta(values):
 def test_amplitude_extreme_representable_mean_persists(tmp_path, single_extreme):
     from dataclasses import replace
 
-    from quant_research_platform.profiles.research import research_profile
     from quant_research_platform.storage.datasets import read_dataset, write_dataset
     from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.a_share_catalogs import scientific_catalogs
 
     frame = pd.DataFrame(
         {
@@ -1075,7 +1075,7 @@ def test_amplitude_extreme_representable_mean_persists(tmp_path, single_extreme)
     )
     output = calculate_price_volume_factors(frame, factor_columns=("amplitude_20d",))
     output.insert(0, "market_id", "a_share")
-    base = research_profile().processed.get("price_volume_facts")
+    base = scientific_catalogs().processed.get("price_volume_facts")
     spec = replace(
         base,
         column_roles={
@@ -1094,10 +1094,10 @@ def test_amplitude_extreme_representable_mean_persists(tmp_path, single_extreme)
 
 
 def test_market_model_extreme_positive_prices_persist_usable_risk_styles(tmp_path):
-    from quant_research_platform.profiles.research import research_profile
     from quant_research_platform.research.portfolios.risk import FactorRiskState
     from quant_research_platform.storage.datasets import read_dataset, write_dataset
     from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.a_share_catalogs import scientific_catalogs
 
     dates = pd.bdate_range("2020-01-02", periods=312).as_unit("ns")
     prices = np.empty(312)
@@ -1137,7 +1137,7 @@ def test_market_model_extreme_positive_prices_persist_usable_risk_styles(tmp_pat
         _market_model_frames((panel,), trading_calendar=None, market_history=None),
         ignore_index=True,
     )
-    spec = research_profile().processed.get("market_model_factors")
+    spec = scientific_catalogs().processed.get("market_model_factors")
     root = StorageLayout(tmp_path).processed_data_root(
         spec.market_id, spec.kind, spec.data_id
     )
@@ -1228,8 +1228,8 @@ def test_coefficient_of_variation_keeps_exact_center_and_ratio(
     from decimal import Decimal, localcontext
     from fractions import Fraction
 
-    from quant_research_platform.profiles.research import research_profile
     from quant_research_platform.storage.datasets import read_dataset, write_dataset
+    from tests.helpers.a_share_catalogs import scientific_catalogs
 
     fractions = [Fraction(value) for value in values]
     center = sum(fractions) / len(fractions)
@@ -1250,7 +1250,7 @@ def test_coefficient_of_variation_keeps_exact_center_and_ratio(
     result = calculate_price_volume_factors(frame, factor_columns=(factor,))
     assert result[factor].iloc[-1] == expected
     result.insert(0, "market_id", "a_share")
-    base = research_profile().processed.get("price_volume_facts")
+    base = scientific_catalogs().processed.get("price_volume_facts")
     spec = replace(
         base,
         column_roles={

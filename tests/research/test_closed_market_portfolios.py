@@ -1,5 +1,3 @@
-from types import SimpleNamespace
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -8,12 +6,10 @@ from quant_research_platform.artifacts.portfolio_ledger import (
     read_portfolio_ledger_artifact,
     write_portfolio_ledger_artifact,
 )
-from quant_research_platform.contracts.business_manifest import (
-    build_business_manifest_envelope,
-)
 from quant_research_platform.contracts.portfolios import (
     ExecutionAssumptions,
     PortfolioCandidateSpec,
+    PortfolioCapital,
     PortfolioTargetBlocked,
 )
 from quant_research_platform.contracts.time import TimeWindow
@@ -38,14 +34,13 @@ from quant_research_platform.research.portfolios.risk import (
     holding_attribution,
 )
 from quant_research_platform.storage.datasets import write_dataset
-from quant_research_platform.storage.layout import StorageLayout
-from tests.helpers.portfolio_ledger import session_frame, write_market_evidence
-from tests.helpers.research_specs import make_demo_research_dataset_spec
-from tests.research.test_portfolio_production import _inputs
-from tests.workflows.test_portfolio_workflow_integration import (
+from tests.helpers.portfolio_inputs import (
     _interim_specs,
     _processed_specs,
 )
+from tests.helpers.portfolio_ledger import session_frame, write_market_evidence
+from tests.helpers.research_specs import make_demo_research_dataset_spec
+from tests.research.test_portfolio_production import _inputs
 
 
 def _native_inputs(tmp_path, *, fault=None, open_assets=6):
@@ -268,14 +263,7 @@ def _native_inputs(tmp_path, *, fault=None, open_assets=6):
     data = panel[["market_id", "asset_id", "timestamp", "float_market_cap"]].assign(
         eligible=True, signal=1.0, label=0.0
     )
-    layout = StorageLayout(tmp_path)
-    layout = layout.with_target_roots(
-        {
-            target: layout.interim_data_root("csmar", target) / "instances" / ("a" * 64)
-            for target in ("market_bars_1d", "stock_master")
-        }
-    )
-    roots = write_market_evidence(layout, panel, bars=bars, stocks=stocks)
+    roots = write_market_evidence(tmp_path, panel, bars=bars, stocks=stocks)
     specs = _processed_specs()
     dataset_spec = make_demo_research_dataset_spec(
         data_id="fixture",
@@ -298,16 +286,20 @@ def _native_inputs(tmp_path, *, fault=None, open_assets=6):
         ),
         ("fixture", data, dataset_spec),
     ):
-        if target == "fixture":
-            logical_root = layout.research_dataset_root("a_share", target)
-        elif target in {"trading_calendar", "a_share_fee_schedule"}:
-            logical_root = layout.interim_data_root(spec.source_id, target)
-        else:
-            logical_root = layout.processed_data_root("a_share", spec.kind, target)
-        root = logical_root / "instances" / ("a" * 64)
+        root = tmp_path / target
         write_dataset(root, frame, spec=spec)
         roots[target] = root
-    return layout.with_target_roots(roots), roots, calendar, panel
+    inputs = {
+        "dataset": roots["fixture"],
+        "panel": roots["market_panel_1d"],
+        "execution": roots["execution_mask"],
+        "calendar": roots["trading_calendar"],
+        "fees": roots["a_share_fee_schedule"],
+        "market_bars": roots["market_bars_1d"],
+        "stock_master": roots["stock_master"],
+        "risk_context": (),
+    }
+    return inputs, roots, calendar, panel
 
 
 def _ledger(layout, roots):
@@ -316,16 +308,9 @@ def _ledger(layout, roots):
         prediction_selector="champion",
         candidate_id="closed_market_portfolio",
         construction="top20_equal_weight",
-        prediction_target_id="prediction",
         rebalance_schedule="daily",
         top_quantile=0.5,
         benchmark_id=None,
-        benchmark_weights_target_id=None,
-        research_dataset_id="fixture",
-        market_panel_target_id="market_panel_1d",
-        execution_mask_target_id="execution_mask",
-        trading_calendar_target_id="trading_calendar",
-        fee_schedule_target_id="a_share_fee_schedule",
     )
 
     class Predictions:
@@ -337,34 +322,22 @@ def _ledger(layout, roots):
         def coverage_counts(self):
             return 0, 0
 
-    model = SimpleNamespace(
-        selection=lambda *args, **kwargs: {"selected_family_id": "family"},
-        prediction_models=lambda window, **kwargs: tuple(
-            {
-                "quarter_id": str(q),
-                "family_id": "family",
-                "model_metadata": {
-                    "input_columns": ("signal",),
-                    "model_algorithm": "equal_weight_rank_ensemble",
-                },
-            }
-            for q in pd.period_range(window.start, window.end, freq="Q")
-        ),
-    )
-    return production.build_portfolio_ledger(
+    return production.backtest_a_share(
         iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
         candidate=candidate,
-        layout=layout,
-        upstream_identities={
-            **{target: root.name for target, root in roots.items()},
-            "prediction": "b" * 64,
-        },
+        inputs=layout,
         output_window=TimeWindow("2022-12-30", "2023-01-06"),
         input_window=TimeWindow("2022-12-01", "2023-01-06"),
         formal_dataset_window=TimeWindow("2022-12-01", "2023-01-06"),
         prediction_lookup=Predictions(),
-        persisted_model=model,
-        access_window="development",
+        prediction_domains=(
+            (
+                TimeWindow("2022-12-30", "2023-01-06"),
+                ("signal",),
+                "equal_weight_rank_ensemble",
+            ),
+        ),
+        sample_role="validation",
         assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,)),
         fee_schedule_from_frame=fee_schedule_from_frame,
         require_fee_coverage=require_fee_coverage,
@@ -407,35 +380,22 @@ def test_closed_market_ledger_reopens_on_current_target_and_keeps_native_endpoin
         assert before.end_notional.sum() == pytest.approx(
             after.pre_trade_notional.sum()
         )
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="closed_market_portfolio",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": "2022-12-30",
-            "end": "2023-01-06",
-            "access": "development",
-        },
-        upstream_identities=dict.fromkeys(roots, "a" * 64),
-        semantic_metadata={
-            "portfolio_capital": {
-                "candidate_id": "closed_market_portfolio",
-                "initial_capital": 100.0,
-                "valuation_currency": "CNY",
-                "valuation_method": "adjusted_notional",
-            }
-        },
+    capital = PortfolioCapital(
+        "closed_market_portfolio", 100.0, "CNY", "adjusted_notional"
     )
+    metadata = {
+        "window": {"start": "2022-12-30", "end": "2023-01-06"},
+        "sample_role": "validation",
+    }
 
     def produce(emit):
         for batch in chunks:
             emit(batch)
 
     root = write_portfolio_ledger_artifact(
-        tmp_path / "native-ledger", envelope=envelope, produce=produce
+        tmp_path / "native-ledger", capital=capital, metadata=metadata, produce=produce
     )
-    saved = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    saved = read_portfolio_ledger_artifact(root)
     assert list(saved.iter_chunks()) == chunks
     from dataclasses import replace
     from hashlib import sha256
@@ -452,30 +412,18 @@ def test_closed_market_ledger_reopens_on_current_target_and_keeps_native_endpoin
             *chunks[0].trades[1:],
         ),
     )
-    rejected_envelope = build_business_manifest_envelope(
-        logical_artifact_id="closed_market_portfolio",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="d" * 64,
-        research_window={
-            "start": "2022-12-30",
-            "end": "2023-01-06",
-            "access": "development",
-        },
-        upstream_identities=dict.fromkeys(roots, "a" * 64),
-        semantic_metadata={
-            "portfolio_capital": {
-                "candidate_id": "closed_market_portfolio",
-                "initial_capital": 100.0,
-                "valuation_currency": "CNY",
-                "valuation_method": "adjusted_notional",
-            }
-        },
+    capital = PortfolioCapital(
+        "closed_market_portfolio", 100.0, "CNY", "adjusted_notional"
     )
+    metadata = {
+        "window": {"start": "2022-12-30", "end": "2023-01-06"},
+        "sample_role": "validation",
+    }
     with pytest.raises(ValueError, match="^portfolio_ledger_direction_invalid$"):
         write_portfolio_ledger_artifact(
-            tmp_path / "native-ledger",
-            envelope=rejected_envelope,
+            tmp_path / "rejected-ledger",
+            capital=capital,
+            metadata=metadata,
             produce=lambda emit: emit(rejected),
         )
     assert before == {
@@ -486,12 +434,11 @@ def test_closed_market_ledger_reopens_on_current_target_and_keeps_native_endpoin
     assert list(saved.iter_chunks()) == chunks
     inputs = iter_holding_factor_inputs(
         iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
-        layout=layout,
+        inputs=layout,
         calendar=calendar,
         time_window=TimeWindow("2022-12-30", "2023-01-06"),
         unified_trading_sessions=unified_trading_sessions,
         style_columns=(),
-        risk_context_target_ids=(),
         benchmark_required=False,
         risk_config=FactorRiskConfig(minimum_cross_section=10),
     )
@@ -534,16 +481,6 @@ def test_research_valuation_retains_unquoted_rights_without_claiming_execution(
     tmp_path, fault
 ):
     layout, roots, _calendar, _panel = _native_inputs(tmp_path, fault=fault)
-    if fault in {
-        "unknown_barrier",
-        "missing_calendar",
-        "unknown_membership",
-        "missing_open_price",
-        "missing_open_row",
-    }:
-        with pytest.raises(PortfolioTargetBlocked):
-            list(_ledger(layout, roots))
-        return
     batches = list(_ledger(layout, roots))
     assert batches
     facts = [item for batch in batches for item in batch.diagnostics]
@@ -554,7 +491,10 @@ def test_research_valuation_retains_unquoted_rights_without_claiming_execution(
             for item in facts
         )
     else:
-        assert any(item.name == "research_end_mark_at" for item in facts)
+        assert any(
+            item.name in {"research_entry_mark_at", "research_end_mark_at"}
+            for item in facts
+        )
     for batch in batches:
         frame = session_frame(batch).set_index("asset_id")
         assert np.isfinite(frame.end_notional).all()
@@ -580,7 +520,8 @@ def test_native_partial_quote_becomes_phase_ordered_research_anchor(tmp_path, ph
     )
     with closing_iterator(
         market_sessions.iter_portfolio_sessions(
-            layout=layout,
+            market_bars_root=layout["market_bars"],
+            stock_master_root=layout["stock_master"],
             panel_root=roots["market_panel_1d"],
             panel_columns=production._PANEL_COLUMNS,
             calendar=calendar,
@@ -602,18 +543,25 @@ def test_native_partial_quote_becomes_phase_ordered_research_anchor(tmp_path, ph
     }
     current = projected[pd.Timestamp("2023-01-05")].loc["a0"]
     assert current[f"adj_{phase}"] == 12.0
-    assert pd.isna(current[f"adj_{'close' if phase == 'open' else 'open'}"])
+    other = "close" if phase == "open" else "open"
+    # Missing open uses only yesterday's 11, never the later real close of 12.
+    # A real open of 12 may anchor the later missing close.
+    assert current[f"adj_{other}"] == (12.0 if phase == "open" else 11.0)
+    assert pd.notna(current[f"research_{other}_mark_at"])
     assert pd.isna(current[f"research_{phase}_mark_at"])
     next_day = projected[pd.Timestamp("2023-01-06")].loc["a0"]
-    assert pd.isna(next_day.adj_open) and pd.isna(next_day.adj_close)
+    assert next_day.adj_open == next_day.adj_close == 12.0
     assert partial.panel.set_index("asset_id").loc["a0"].equals(raw)
+    batches = list(_ledger(layout, roots))
+    assert all(np.isfinite(row.value) for batch in batches for row in batch.valuations)
     if phase == "close":
-        with pytest.raises(
-            PortfolioTargetBlocked, match="portfolio_held_return_missing"
-        ):
-            list(_ledger(layout, roots))
+        assert not any(
+            trade.asset_id == "a0"
+            and trade.timestamp_ns == pd.Timestamp("2023-01-05").value
+            for batch in batches
+            for trade in batch.trades
+        )
     else:
-        batches = list(_ledger(layout, roots))
         assert all(
             row.quantity == 0
             for row in batches[-1].valuations
@@ -632,8 +580,9 @@ def test_future_lifecycle_append_cannot_change_previous_ledger_prefix(tmp_path):
     for layout in (original, appended):
         with closing_iterator(
             market_sessions.iter_portfolio_sessions(
-                layout=layout,
-                panel_root=layout.target_root("market_panel_1d", None),
+                market_bars_root=layout["market_bars"],
+                stock_master_root=layout["stock_master"],
+                panel_root=layout["panel"],
                 panel_columns=production._PANEL_COLUMNS,
                 calendar=calendar,
                 time_window=TimeWindow("2022-12-30", "2023-01-06"),
@@ -647,8 +596,9 @@ def test_closed_calendar_rejects_real_activity_even_in_future_source(tmp_path):
         tmp_path, fault="actual_activity_on_closed"
     )
     source = market_sessions.iter_portfolio_sessions(
-        layout=layout,
-        panel_root=layout.target_root("market_panel_1d", None),
+        market_bars_root=layout["market_bars"],
+        stock_master_root=layout["stock_master"],
+        panel_root=layout["panel"],
         panel_columns=production._PANEL_COLUMNS,
         calendar=calendar,
         time_window=TimeWindow("2022-12-01", "2022-12-30"),
@@ -663,12 +613,11 @@ def test_identified_open_factor_domain_does_not_invent_closed_exposures(tmp_path
     layout, _roots, calendar, _panel = _native_inputs(tmp_path, open_assets=24)
     source = iter_holding_factor_inputs(
         iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
-        layout=layout,
+        inputs=layout,
         calendar=calendar,
         time_window=TimeWindow("2022-12-30", "2023-01-06"),
         unified_trading_sessions=unified_trading_sessions,
         style_columns=(),
-        risk_context_target_ids=(),
         benchmark_required=False,
         risk_config=FactorRiskConfig(minimum_cross_section=10),
     )
@@ -723,12 +672,11 @@ def test_union_session_keeps_closed_holdings_without_any_raw_asset_rows(tmp_path
     )
     stream = iter_holding_factor_inputs(
         iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
-        layout=layout,
+        inputs=layout,
         calendar=calendar,
         time_window=TimeWindow("2022-12-30", "2023-01-06"),
         unified_trading_sessions=unified_trading_sessions,
         style_columns=(),
-        risk_context_target_ids=(),
         benchmark_required=False,
         risk_config=FactorRiskConfig(minimum_cross_section=10),
     )
@@ -744,12 +692,11 @@ def test_closed_endpoints_do_not_hide_missing_decision_risk_facts(tmp_path):
     )
     source = iter_holding_factor_inputs(
         iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
-        layout=layout,
+        inputs=layout,
         calendar=calendar,
         time_window=TimeWindow("2022-12-30", "2023-01-06"),
         unified_trading_sessions=unified_trading_sessions,
         style_columns=(),
-        risk_context_target_ids=(),
         benchmark_required=False,
         risk_config=FactorRiskConfig(minimum_cross_section=10),
     )
@@ -794,12 +741,11 @@ def test_confirmed_suspension_rows_remain_in_real_factor_pair_domain(tmp_path):
         assert len(suspended) == 2 and suspended[value_column].eq(expected).all()
     source = iter_holding_factor_inputs(
         iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
-        layout=layout,
+        inputs=layout,
         calendar=calendar,
         time_window=TimeWindow("2022-12-30", "2023-01-06"),
         unified_trading_sessions=unified_trading_sessions,
         style_columns=(),
-        risk_context_target_ids=(),
         benchmark_required=False,
         risk_config=FactorRiskConfig(minimum_cross_section=10),
     )
@@ -813,7 +759,7 @@ def test_confirmed_suspension_rows_remain_in_real_factor_pair_domain(tmp_path):
 
 
 def test_asset_ordered_source_parts_preserve_portfolio_sessions(tmp_path):
-    from quant_research_platform.profiles.research import research_profile
+    from quant_research_platform.sources.csmar.interim import interim_catalog
     from quant_research_platform.storage.datasets.reading import (
         materialize_dataset_session,
         open_dataset_session,
@@ -824,7 +770,8 @@ def test_asset_ordered_source_parts_preserve_portfolio_sessions(tmp_path):
     def sessions(selected_layout):
         with closing_iterator(
             market_sessions.iter_portfolio_sessions(
-                layout=selected_layout,
+                market_bars_root=selected_layout["market_bars"],
+                stock_master_root=selected_layout["stock_master"],
                 panel_root=roots["market_panel_1d"],
                 panel_columns=production._PANEL_COLUMNS,
                 calendar=calendar,
@@ -847,9 +794,9 @@ def test_asset_ordered_source_parts_preserve_portfolio_sessions(tmp_path):
                 "source_asset_id", sort=False
             )
         ),
-        spec=research_profile().interim.get("market_bars_1d"),
+        spec=interim_catalog().get("market_bars_1d"),
     )
-    actual = sessions(layout.with_target_roots({"market_bars_1d": reordered}))
+    actual = sessions({**layout, "market_bars": reordered})
     assert len(actual) == len(expected)
     for left, right in zip(actual, expected, strict=True):
         assert left.timestamp == right.timestamp
@@ -864,26 +811,13 @@ def test_native_ledger_rejects_terminal_relisting_and_preserves_published_artifa
     from hashlib import sha256
 
     layout, roots, _, _ = _native_inputs(tmp_path / "control")
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="closed_market_portfolio",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": "2022-12-30",
-            "end": "2023-01-06",
-            "access": "development",
-        },
-        upstream_identities=dict.fromkeys(roots, "a" * 64),
-        semantic_metadata={
-            "portfolio_capital": {
-                "candidate_id": "closed_market_portfolio",
-                "initial_capital": 100.0,
-                "valuation_currency": "CNY",
-                "valuation_method": "adjusted_notional",
-            }
-        },
+    capital = PortfolioCapital(
+        "closed_market_portfolio", 100.0, "CNY", "adjusted_notional"
     )
+    metadata = {
+        "window": {"start": "2022-12-30", "end": "2023-01-06"},
+        "sample_role": "validation",
+    }
 
     def produce(emit):
         with closing_iterator(_ledger(layout, roots)) as chunks:
@@ -891,9 +825,9 @@ def test_native_ledger_rejects_terminal_relisting_and_preserves_published_artifa
                 emit(batch)
 
     root = write_portfolio_ledger_artifact(
-        tmp_path / "ledger", envelope=envelope, produce=produce
+        tmp_path / "ledger", capital=capital, metadata=metadata, produce=produce
     )
-    saved = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    saved = read_portfolio_ledger_artifact(root)
     good = list(saved.iter_chunks())
     assert good
     hashes = {
@@ -908,18 +842,14 @@ def test_native_ledger_rejects_terminal_relisting_and_preserves_published_artifa
         PortfolioTargetBlocked, match="portfolio_held_lifecycle_unproven"
     ):
         write_portfolio_ledger_artifact(
-            tmp_path / "rejected-ledger", envelope=envelope, produce=produce
+            tmp_path / "rejected-ledger",
+            capital=capital,
+            metadata=metadata,
+            produce=produce,
         )
     assert hashes == {
         p.relative_to(root): sha256(p.read_bytes()).hexdigest()
         for p in root.rglob("*")
         if p.is_file()
     }
-    assert (
-        list(
-            read_portfolio_ledger_artifact(
-                root, expected_identity=root.name
-            ).iter_chunks()
-        )
-        == good
-    )
+    assert list(read_portfolio_ledger_artifact(root).iter_chunks()) == good

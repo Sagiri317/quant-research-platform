@@ -46,31 +46,14 @@ from quant_research_platform.research.portfolios.risk import (
     FactorRiskConfig,
     FactorRiskState,
 )
-from quant_research_platform.research.protocols.a_share import (
-    EXECUTION_ASSUMPTIONS,
-    PROTOCOL_ID,
-    SCENARIO_IDS,
-    protocol,
-)
-from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.workflows import operations
+from quant_research_platform.research.protocols.a_share import EXECUTION_ASSUMPTIONS
 from tests.helpers.research_configuration import CORE6_FACTORS, PV25_FACTORS
 
 
-def test_research_protocol_identity_and_surfaces_are_explicit() -> None:
+def test_research_factor_rosters_are_explicit():
     assert len(PV25_FACTORS) == 25
     assert len(CORE6_FACTORS) == 6
-    assert SCENARIO_IDS == (
-        "pv_all",
-        "pv_expanded",
-        "pv_nf_expectations",
-        "fusion_nf_core",
-        "fusion_nf_expectations",
-    )
-    research_protocol = protocol("pv_all")
-    assert research_protocol.protocol_id == PROTOCOL_ID == "a_share_low_frequency"
-    assert research_protocol.manifest()["protocol_id"] == PROTOCOL_ID
-    assert "protocol_version" not in research_protocol.manifest()
+    assert set(CORE6_FACTORS) <= set(PV25_FACTORS)
     assert not hasattr(ModelSpec, "purge_gap_steps")
 
 
@@ -211,7 +194,7 @@ def test_supervised_fit_uses_only_mature_training_rows_and_scaler() -> None:
         model_id="ridge",
         model_algorithm="ridge_regression",
         input_feature_columns=("feature",),
-        label_column="model_target",
+        target_column="model_target",
         hyperparameters={"alpha": 1.0},
     )
     preflight_model_specs((spec,))
@@ -263,7 +246,7 @@ def test_fixed_model_parameters_agree_with_fitting_and_metadata(algorithm):
         model_id="fixed",
         model_algorithm=algorithm,
         input_factor_columns=("x",),
-        label_column="y",
+        target_column="y",
     )
     with pytest.raises(ValueError, match="^model_hyperparameters_not_supported$"):
         replace(spec, hyperparameters={"fit_intercept": False})
@@ -301,7 +284,7 @@ def test_rank_ensembles_learn_direction_and_keep_missing_neutral() -> None:
         model_id="rank",
         model_algorithm="equal_weight_rank_ensemble",
         input_factor_columns=("factor_a", "factor_b"),
-        label_column="model_target",
+        target_column="model_target",
     )
     preflight_model_specs((spec,))
     frame = pd.DataFrame(
@@ -381,7 +364,7 @@ def test_alpha_calibration_is_schedule_matched_and_non_flipping() -> None:
     frame = pd.DataFrame(
         {
             "timestamp": [date for date in dates for _asset in ("a", "b")],
-            "alpha_score": [-0.25, 0.25] * 6,
+            "prediction_rank_score": [-0.25, 0.25] * 6,
             "holding_return": [0.01, 0.03] * 6,
         }
     )
@@ -436,7 +419,7 @@ def test_calibration_weighted_cluster_reference_and_unit_scaling(
         [
             {
                 "timestamp": timestamp,
-                "alpha_score": x,
+                "prediction_rank_score": x,
                 "holding_return": 0.02
                 + (0.05 + 0.003 * g) * x
                 + 0.002 * g
@@ -451,13 +434,13 @@ def test_calibration_weighted_cluster_reference_and_unit_scaling(
     coefficient_scale = float(np.ldexp(1.0, return_exponent - alpha_exponent))
     result = calibrate_expected_alpha(
         frame.assign(
-            alpha_score=frame.alpha_score * alpha_scale,
+            prediction_rank_score=frame.prediction_rank_score * alpha_scale,
             holding_return=frame.holding_return * return_scale,
         ),
         as_of=sessions[-1],
         scheduled_intervals=intervals,
     )
-    x = sm.add_constant(frame.alpha_score)
+    x = sm.add_constant(frame.prediction_rank_score)
     weights = np.full(len(frame), 1 / 18)
     fit = sm.WLS(frame.holding_return, x, weights=weights).fit()
     # Same uncorrected date-cluster sandwich as production; no df policy change.
@@ -489,7 +472,7 @@ def test_alpha_calibration_missing_and_stale_date_coverage():
     frame = pd.DataFrame(
         {
             "timestamp": dates.repeat(2),
-            "alpha_score": [0.0, 1.0] * 6,
+            "prediction_rank_score": [0.0, 1.0] * 6,
             "holding_return": [0.0, 0.01] * 6,
         }
     )
@@ -523,7 +506,7 @@ def test_calibration_intervals_use_adjacent_execution_opens_across_holidays():
     frame = pd.DataFrame(
         {
             "timestamp": [first.timestamp] * 2,
-            "alpha_score": [-1.0, 1.0],
+            "prediction_rank_score": [-1.0, 1.0],
             "holding_return": [0.01, 0.03],
         }
     )
@@ -1121,8 +1104,8 @@ def test_enhanced_optimizer_is_deterministic_and_hard_constraint_only() -> None:
     [
         (1e10, True, None),
         (1e8, True, "optimizer_failed_closed"),
-        (np.nan, True, "optimizer_trade_adv_unavailable"),
-        (0.0, True, "optimizer_trade_adv_unavailable"),
+        (np.nan, True, "optimizer_held_risk_unavailable"),
+        (0.0, True, "optimizer_held_risk_unavailable"),
         (np.nan, False, None),
     ],
 )
@@ -1244,24 +1227,6 @@ def test_fundamental_value_factors_use_panel_total_cap() -> None:
     )
 
 
-def test_missing_raw_identity_blocks_dataset_build(tmp_path) -> None:
-    from quant_research_platform.profiles.research import research_profile
-
-    layout = StorageLayout(project_root=tmp_path)
-    result = operations.dataset_build(
-        profile=research_profile(),
-        layout=layout,
-        dataset_id="pv_all",
-        start_date="2020-01-01",
-        end_date="2020-12-31",
-    )
-    assert result["status"] == "BLOCKED"
-    assert any(
-        item["reason"] == "raw_content_identity_unavailable"
-        for item in result["blockers"]
-    )
-
-
 def test_factor_return_wls_uses_sqrt_cap_statistical_weight():
     import statsmodels.api as sm
 
@@ -1312,11 +1277,11 @@ def test_alpha_unidentified_statistics_are_not_defined_zero(constant, observed_d
     frame = pd.DataFrame(
         {
             "timestamp": np.repeat(intervals.timestamp.iloc[:observed_dates], 10),
-            "alpha_score": constant,
+            "prediction_rank_score": constant,
             "holding_return": np.arange(observed_dates * 10) / 10000,
         }
     )
-    design = np.column_stack([np.ones(len(frame)), frame.alpha_score])
+    design = np.column_stack([np.ones(len(frame)), frame.prediction_rank_score])
     assert np.linalg.matrix_rank(design) == 1
     result = calibrate_expected_alpha(
         frame, as_of=sessions[-1], scheduled_intervals=intervals
@@ -1371,7 +1336,7 @@ def test_alpha_cluster_variance_preserves_zero_and_binary64_signal(
     rows = [
         {
             "timestamp": day,
-            "alpha_score": x,
+            "prediction_rank_score": x,
             "holding_return": 0.125 + 0.25 * x + (group - 2) * 0.0078125 * (x * x + 1),
         }
         for group, (day, count) in enumerate(zip(dates, counts, strict=True))
@@ -1379,7 +1344,7 @@ def test_alpha_cluster_variance_preserves_zero_and_binary64_signal(
     ]
     frame = pd.DataFrame(rows)
     scale = float(np.ldexp(1.0, alpha_exponent))
-    frame["alpha_score"] *= scale
+    frame["prediction_rank_score"] *= scale
     intervals = pd.DataFrame(
         {
             "timestamp": dates,
@@ -1424,7 +1389,7 @@ def test_alpha_calibration_rejects_nonzero_unrepresentable_coefficients(quantity
         [
             {
                 "timestamp": day,
-                "alpha_score": sign * alpha,
+                "prediction_rank_score": sign * alpha,
                 "holding_return": sign * target,
             }
             for day, target in zip(dates, targets, strict=True)
@@ -1583,7 +1548,7 @@ def test_flag_only_model_rejects_structural_invalidity_but_keeps_ordinary_missin
             model_id="flags",
             model_algorithm="linear_regression",
             input_feature_columns=inputs,
-            label_column="label",
+            target_column="label",
             sample_filter_mode="unfiltered",
         ),
         fitting_cutoff=pd.Timestamp("2024-01-02"),

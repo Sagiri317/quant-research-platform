@@ -10,7 +10,6 @@ import pytest
 from quant_research_platform.catalog.processed import ProcessedDataCatalog
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
-from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.datasets.assembler import (
     assemble_research_dataset,
@@ -82,7 +81,16 @@ def test_research_dataset_assembler_uses_explicit_base_not_input_order(
     )
     write_dummy_processed_inputs(layout, processed_catalog)
     assemble_research_dataset(
-        layout=layout,
+        inputs={
+            item.data_id: layout.processed_data_root(
+                item.market_id, item.kind, item.data_id
+            )
+            for item in processed_catalog.list()
+            if item.data_id in dataset_catalog.get("dummy_dataset").input_data_ids
+        },
+        output_root=layout.research_dataset_root(
+            dataset_catalog.get("dummy_dataset").market_id, "dummy_dataset"
+        ),
         dataset_catalog=dataset_catalog,
         processed_catalog=processed_catalog,
         dataset_id="dummy_dataset",
@@ -115,7 +123,16 @@ def test_research_dataset_columns_extend_without_assembler_change(
     )
     write_dummy_processed_inputs(layout, processed_catalog, include_extensions=True)
     assemble_research_dataset(
-        layout=layout,
+        inputs={
+            item.data_id: layout.processed_data_root(
+                item.market_id, item.kind, item.data_id
+            )
+            for item in processed_catalog.list()
+            if item.data_id in dataset_catalog.get("dummy_dataset").input_data_ids
+        },
+        output_root=layout.research_dataset_root(
+            dataset_catalog.get("dummy_dataset").market_id, "dummy_dataset"
+        ),
         dataset_catalog=dataset_catalog,
         processed_catalog=processed_catalog,
         dataset_id="dummy_dataset",
@@ -144,7 +161,16 @@ def test_dummy_market_assembly_preserves_generic_market_identity(
     dataset_catalog = make_research_dataset_catalog(make_dummy_research_dataset_spec())
     write_dummy_processed_inputs(layout, processed_catalog)
     assemble_research_dataset(
-        layout=layout,
+        inputs={
+            item.data_id: layout.processed_data_root(
+                item.market_id, item.kind, item.data_id
+            )
+            for item in processed_catalog.list()
+            if item.data_id in dataset_catalog.get("dummy_dataset").input_data_ids
+        },
+        output_root=layout.research_dataset_root(
+            dataset_catalog.get("dummy_dataset").market_id, "dummy_dataset"
+        ),
         dataset_catalog=dataset_catalog,
         processed_catalog=processed_catalog,
         dataset_id="dummy_dataset",
@@ -163,7 +189,16 @@ def test_missing_join_key_fails_closed(tmp_path: Path) -> None:
         ValueError, match="missing_research_join_key: factors: asset_id"
     ):
         assemble_research_dataset(
-            layout=layout,
+            inputs={
+                item.data_id: layout.processed_data_root(
+                    item.market_id, item.kind, item.data_id
+                )
+                for item in processed_catalog.list()
+                if item.data_id in dataset_catalog.get("dummy_dataset").input_data_ids
+            },
+            output_root=layout.research_dataset_root(
+                dataset_catalog.get("dummy_dataset").market_id, "dummy_dataset"
+            ),
             dataset_catalog=dataset_catalog,
             processed_catalog=processed_catalog,
             dataset_id="dummy_dataset",
@@ -208,7 +243,16 @@ def test_output_row_order_is_stable_sort_by_primary_key(tmp_path: Path) -> None:
     dataset_catalog = make_research_dataset_catalog(make_dummy_research_dataset_spec())
     write_dummy_processed_inputs(layout, processed_catalog, reverse_base=True)
     assemble_research_dataset(
-        layout=layout,
+        inputs={
+            item.data_id: layout.processed_data_root(
+                item.market_id, item.kind, item.data_id
+            )
+            for item in processed_catalog.list()
+            if item.data_id in dataset_catalog.get("dummy_dataset").input_data_ids
+        },
+        output_root=layout.research_dataset_root(
+            dataset_catalog.get("dummy_dataset").market_id, "dummy_dataset"
+        ),
         dataset_catalog=dataset_catalog,
         processed_catalog=processed_catalog,
         dataset_id="dummy_dataset",
@@ -250,7 +294,16 @@ def test_persisted_research_sessions_are_complete_across_small_read_batches(
     datasets = make_research_dataset_catalog()
     write_demo_processed_inputs(layout, processed, frame=frame)
     assemble_research_dataset(
-        layout=layout,
+        inputs={
+            item.data_id: layout.processed_data_root(
+                item.market_id, item.kind, item.data_id
+            )
+            for item in processed.list()
+            if item.data_id in datasets.get("demo").input_data_ids
+        },
+        output_root=layout.research_dataset_root(
+            datasets.get("demo").market_id, "demo"
+        ),
         dataset_catalog=datasets,
         processed_catalog=processed,
         dataset_id="demo",
@@ -285,7 +338,16 @@ def test_research_dataset_fails_closed_on_empty_base_sessions(tmp_path: Path) ->
     write_dummy_processed_inputs(layout, processed_catalog)
     with pytest.raises(ValueError, match="no_research_dataset_sessions"):
         assemble_research_dataset(
-            layout=layout,
+            inputs={
+                item.data_id: layout.processed_data_root(
+                    item.market_id, item.kind, item.data_id
+                )
+                for item in processed_catalog.list()
+                if item.data_id in dataset_catalog.get("dummy_dataset").input_data_ids
+            },
+            output_root=layout.research_dataset_root(
+                dataset_catalog.get("dummy_dataset").market_id, "dummy_dataset"
+            ),
             dataset_catalog=dataset_catalog,
             processed_catalog=processed_catalog,
             dataset_id="dummy_dataset",
@@ -307,7 +369,16 @@ def test_strict_research_input_missing_base_key_fails_in_assembler(
     write_dummy_processed_inputs(layout, processed_catalog, truncate_factors=True)
     with pytest.raises(ValueError, match="missing_research_input_keys: factors: 1"):
         assemble_research_dataset(
-            layout=layout,
+            inputs={
+                item.data_id: layout.processed_data_root(
+                    item.market_id, item.kind, item.data_id
+                )
+                for item in processed_catalog.list()
+                if item.data_id in dataset_catalog.get("dummy_dataset").input_data_ids
+            },
+            output_root=layout.research_dataset_root(
+                dataset_catalog.get("dummy_dataset").market_id, "dummy_dataset"
+            ),
             dataset_catalog=dataset_catalog,
             processed_catalog=processed_catalog,
             dataset_id="dummy_dataset",
@@ -323,7 +394,16 @@ def test_sparse_research_input_missing_base_key_passes_with_nan(tmp_path: Path) 
     )
     write_dummy_processed_inputs(layout, processed_catalog, truncate_factors=True)
     assemble_research_dataset(
-        layout=layout,
+        inputs={
+            item.data_id: layout.processed_data_root(
+                item.market_id, item.kind, item.data_id
+            )
+            for item in processed_catalog.list()
+            if item.data_id in dataset_catalog.get("dummy_dataset").input_data_ids
+        },
+        output_root=layout.research_dataset_root(
+            dataset_catalog.get("dummy_dataset").market_id, "dummy_dataset"
+        ),
         dataset_catalog=dataset_catalog,
         processed_catalog=processed_catalog,
         dataset_id="dummy_dataset",
@@ -344,7 +424,16 @@ def test_research_dataset_semantic_snapshots_are_persisted_for_all_inputs(
     )
     write_dummy_processed_inputs(layout, processed_catalog, truncate_factors=True)
     assemble_research_dataset(
-        layout=layout,
+        inputs={
+            item.data_id: layout.processed_data_root(
+                item.market_id, item.kind, item.data_id
+            )
+            for item in processed_catalog.list()
+            if item.data_id in dataset_catalog.get("dummy_dataset").input_data_ids
+        },
+        output_root=layout.research_dataset_root(
+            dataset_catalog.get("dummy_dataset").market_id, "dummy_dataset"
+        ),
         dataset_catalog=dataset_catalog,
         processed_catalog=processed_catalog,
         dataset_id="dummy_dataset",
@@ -364,7 +453,6 @@ def test_research_dataset_semantic_snapshots_are_persisted_for_all_inputs(
     }
     assert spec_payload["key_coverage"] == expected
     assert "key_coverage" not in manifest_payload
-    assert manifest_payload["spec_identity"] == canonical_json_hash(spec_payload)
     expected_roles = {
         column: role.value
         for column, role in dataset_catalog.get("dummy_dataset").column_roles.items()
@@ -381,7 +469,16 @@ def test_strict_research_input_value_nan_does_not_count_as_missing_key(
     dataset_catalog = make_research_dataset_catalog(make_dummy_research_dataset_spec())
     write_dummy_processed_inputs(layout, processed_catalog, factor_values=[1.0, None])
     assemble_research_dataset(
-        layout=layout,
+        inputs={
+            item.data_id: layout.processed_data_root(
+                item.market_id, item.kind, item.data_id
+            )
+            for item in processed_catalog.list()
+            if item.data_id in dataset_catalog.get("dummy_dataset").input_data_ids
+        },
+        output_root=layout.research_dataset_root(
+            dataset_catalog.get("dummy_dataset").market_id, "dummy_dataset"
+        ),
         dataset_catalog=dataset_catalog,
         processed_catalog=processed_catalog,
         dataset_id="dummy_dataset",
@@ -403,7 +500,16 @@ def test_research_input_extra_key_outside_base_fails_closed(
     write_dummy_processed_inputs(layout, processed_catalog, extra_factor_key=True)
     with pytest.raises(ValueError, match="extra_research_input_keys: factors: 1"):
         assemble_research_dataset(
-            layout=layout,
+            inputs={
+                item.data_id: layout.processed_data_root(
+                    item.market_id, item.kind, item.data_id
+                )
+                for item in processed_catalog.list()
+                if item.data_id in dataset_catalog.get("dummy_dataset").input_data_ids
+            },
+            output_root=layout.research_dataset_root(
+                dataset_catalog.get("dummy_dataset").market_id, "dummy_dataset"
+            ),
             dataset_catalog=dataset_catalog,
             processed_catalog=processed_catalog,
             dataset_id="dummy_dataset",
@@ -466,7 +572,16 @@ def test_native_reader_missing_column_propagates_from_assembler(tmp_path):
     )
     with pytest.raises(ValueError, match="^dataset_column_not_found$"):
         assemble_research_dataset(
-            layout=layout,
+            inputs={
+                item.data_id: layout.processed_data_root(
+                    item.market_id, item.kind, item.data_id
+                )
+                for item in processed.list()
+                if item.data_id in datasets.get("dummy_dataset").input_data_ids
+            },
+            output_root=layout.research_dataset_root(
+                datasets.get("dummy_dataset").market_id, "dummy_dataset"
+            ),
             dataset_catalog=datasets,
             processed_catalog=processed,
             dataset_id="dummy_dataset",

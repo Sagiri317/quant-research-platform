@@ -19,22 +19,6 @@ from tests.storage.low_level_fixtures import (
 )
 
 
-def test_dataset_writer_rejects_invalid_processed_root_before_iterating_chunks(
-    tmp_path: Path,
-) -> None:
-    class ForbiddenChunks:
-        def __iter__(self):
-            raise AssertionError("input_iterated_before_processed_root_validation")
-
-    with pytest.raises(ValueError, match="invalid_processed_dataset_root"):
-        write_dataset(
-            tmp_path / "invalid-processed" / "x",
-            ForbiddenChunks(),
-            spec=make_processed_dataset_spec(),
-        )
-    assert not (tmp_path / "invalid-processed").exists()
-
-
 def test_public_dataset_writer_validates_concrete_sequence_elements(
     tmp_path: Path,
 ) -> None:
@@ -155,9 +139,9 @@ def test_exact_storage_layout_accepts_project_ancestor_names(tmp_path, ancestor)
     frame = make_default_dataset_frame()
     write_dataset(root, frame, spec=make_processed_dataset_spec("ancestor"))
     assert len(read_dataset(root)) == len(frame)
-    with pytest.raises(ValueError):
-        write_dataset(
-            tmp_path / "project" / "docs" / "shared",
-            frame,
-            spec=make_processed_dataset_spec("ancestor"),
-        )
+    write_dataset(
+        tmp_path / "project" / "docs" / "shared",
+        frame,
+        spec=make_processed_dataset_spec("ancestor"),
+    )
+    assert len(read_dataset(tmp_path / "project" / "docs" / "shared")) == len(frame)

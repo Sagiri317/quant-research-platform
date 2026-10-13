@@ -41,8 +41,6 @@ from quant_research_platform.storage.atomic import (
 )
 from quant_research_platform.storage.identity import (
     _DigestingReader,
-    dataset_file_identity,
-    dataset_file_identity_from_stat,
     filesystem_gzip_open,
     filesystem_stat,
     open_filesystem_file,
@@ -201,45 +199,23 @@ def _filename(date: str, offset: int, *, exchange=EXCHANGE) -> str:
 
 @contextmanager
 def _verified_file(path: Path, *, expected_sha256=None):
+    """Check source bytes during a complete read; never drain on early close."""
     require_unaliased_path(path, error="tardis_raw_identity_changed")
     try:
-        identity = dataset_file_identity(path)
         handle = open_filesystem_file(path, "rb")
-    except (FileNotFoundError, NotADirectoryError, ValueError) as error:
-        if isinstance(error, ValueError) and not isinstance(
-            error.__cause__, (FileNotFoundError, NotADirectoryError)
-        ):
-            raise
+    except IsADirectoryError:
+        raise ValueError("tardis_source_file_invalid") from None
+    except (FileNotFoundError, NotADirectoryError) as error:
         raise ValueError("tardis_raw_identity_changed") from error
     with closing_iterator(handle):
-        if dataset_file_identity_from_stat(os.fstat(handle.fileno())) != identity:
-            raise ValueError("tardis_raw_identity_changed")
         reader = _DigestingReader(handle) if expected_sha256 is not None else handle
-        primary = None
-        try:
-            yield reader
-        except BaseException as body_error:
-            primary = body_error
-            raise
-        finally:
-            try:
-                if expected_sha256 is not None:
-                    reader.drain()
-                    if reader.hexdigest() != expected_sha256:
-                        raise ValueError("tardis_raw_identity_changed")
-                if (
-                    dataset_file_identity_from_stat(os.fstat(handle.fileno()))
-                    != identity
-                    or dataset_file_identity(path) != identity
-                ):
-                    raise ValueError("tardis_raw_identity_changed")
-            except BaseException as error:
-                if primary is None:
-                    raise
-                primary.add_note(
-                    "Tardis raw identity verification also failed: "
-                    + type(error).__name__
-                )
+        yield reader
+        if (
+            expected_sha256 is not None
+            and handle.tell() == os.fstat(handle.fileno()).st_size
+        ):
+            if reader.hexdigest() != expected_sha256:
+                raise ValueError("tardis_raw_identity_changed")
 
 
 def iter_native_slice(

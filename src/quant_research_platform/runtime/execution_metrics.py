@@ -1,4 +1,4 @@
-"""Target-boundary observations for immutable local research-run records."""
+"""Boundary observations for a single research operation."""
 
 import os
 import platform
@@ -9,8 +9,6 @@ from math import isfinite
 from time import perf_counter
 
 import psutil
-
-from quant_research_platform.contracts.targets import unmeasured_operation_evidence
 
 
 @contextmanager
@@ -114,7 +112,6 @@ def record_run_observations(sink):
         }
 
     sink.clear()
-    sink.update(unmeasured_operation_evidence("observation_initialization_incomplete"))
     sample()
     sink.update(payload(complete=False))
     primary = None
@@ -126,7 +123,7 @@ def record_run_observations(sink):
     finally:
         try:
             sample()
-            finalized = payload(complete=True)
+            finalized = payload(complete=primary is None)
             sink.clear()
             sink.update(finalized)
         except BaseException as error:

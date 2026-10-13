@@ -5,14 +5,13 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass, fields
-from itertools import groupby, islice
+from itertools import groupby
 from pathlib import Path
 
 import pandas as pd
 import pyarrow as pa
 
 from quant_research_platform.compute.portfolio_economics import _LedgerEconomics
-from quant_research_platform.contracts.business_manifest import BusinessManifestEnvelope
 from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_CASH_ASSET_ID,
     ExecutedTrade,
@@ -30,22 +29,18 @@ from quant_research_platform.contracts.validation import (
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
+from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
-    DatasetFileIdentity,
     open_filesystem_file,
 )
 from quant_research_platform.storage.manifests import (
     read_qrp_json_file,
-    write_internal_artifact_manifest,
+    write_manifest,
 )
 from quant_research_platform.storage.parquet import (
     iter_dataset_part_batches,
     parquet_table_writer,
-)
-from quant_research_platform.storage.semantic_artifacts import (
-    semantic_artifact_read_session,
-    write_semantic_artifact,
 )
 
 _TABLE_TYPES = {
@@ -92,68 +87,29 @@ _SCHEMAS = {
 
 @dataclass(frozen=True, slots=True)
 class PortfolioLedgerArtifact:
-    envelope: dict
+    metadata: dict
     root: Path
-    identity: str
     capital: PortfolioCapital
-    member_identities: Mapping[str, DatasetFileIdentity]
-    operational_metadata: Mapping[str, object]
     final_alpha_calibration: Mapping[str, object] | None = None
 
     def iter_chunks(self) -> Iterator[PortfolioLedgerBatch]:
-        identities: dict[str, DatasetFileIdentity] = {}
-        with semantic_artifact_read_session(
-            self.root,
-            expected_identity=self.identity,
-            member_identities=identities,
-            expected_member_identities=self.member_identities,
-        ) as (envelope, _members):
-            if _capital(envelope) != self.capital:
-                raise ValueError("portfolio_ledger_capital_invalid")
-            with closing_iterator(
-                _iter_batches(
-                    self.root, self.capital, envelope["research_window"], identities
-                )
-            ) as delegated_chunks:
-                for yielded_value in delegated_chunks:
-                    try:
-                        yield yielded_value
-                    except GeneratorExit:
-                        return
-
-
-def _capital(envelope: Mapping[str, object]) -> PortfolioCapital:
-    metadata = envelope["semantic_metadata"]
-    if not isinstance(metadata, Mapping) or not isinstance(
-        metadata.get("portfolio_capital"), Mapping
-    ):
-        raise ValueError("portfolio_ledger_capital_missing")
-    return PortfolioCapital(**dict(metadata["portfolio_capital"]))
-
-
-def _final_calibration_required(envelope):
-    contract = envelope["semantic_metadata"].get("target_contract")
-    return (
-        isinstance(contract, Mapping)
-        and contract.get("protocol", {}).get("protocol_id") == "a_share_low_frequency"
-        and (contract["portfolio_candidate"]["construction"] == "benchmark_enhanced")
-        and (envelope["research_window"]["access"] == "development")
-    )
+        yield from _iter_batches(self.root, self.capital, self.metadata["window"])
 
 
 def write_portfolio_ledger_artifact(
     logical_root: Path,
     *,
-    envelope: BusinessManifestEnvelope,
+    capital: PortfolioCapital,
+    metadata: Mapping[str, object],
     produce: Callable[[Callable[[PortfolioLedgerBatch], None]], object],
     final_calibration: Callable[[], dict[str, object]] | None = None,
 ) -> Path:
     """Stream bounded tables, validate persisted economics, then atomic publish."""
-    capital = _capital(envelope.payload())
-    calibration_required = _final_calibration_required(envelope.payload())
-    operational = {}
-    if calibration_required != (final_calibration is not None):
-        raise ValueError("portfolio_final_calibration_contract_invalid")
+    if not isinstance(capital, PortfolioCapital):
+        raise ValueError("portfolio_ledger_capital_invalid")
+    metadata = dict(metadata)
+    if "window" not in metadata:
+        raise ValueError("portfolio_ledger_window_missing")
 
     def write(staging: Path) -> None:
         with closing_iterator(ExitStack()) as stack:
@@ -214,99 +170,65 @@ def write_portfolio_ledger_artifact(
             for name in writers:
                 flush(name)
         with closing_iterator(
-            _iter_batches(staging, capital, envelope.research_window)
+            _iter_batches(staging, capital, metadata["window"])
         ) as batches:
             for _ in batches:
                 pass
-        if calibration_required:
-            payload = dict(final_calibration())
-            operational["final_alpha_observations"] = payload.pop("observations")
-            write_internal_artifact_manifest(
-                staging / "final_alpha_calibration.json", payload
-            )
+        calibration = (
+            dict(final_calibration()) if final_calibration is not None else None
+        )
+        if calibration is not None:
+            write_manifest(staging / "final_alpha_calibration.json", calibration)
+        write_manifest(
+            staging / "manifest.json",
+            {
+                "schema_id": "qrp-portfolio-ledger",
+                "capital": asdict(capital),
+                "metadata": metadata,
+                "final_alpha_calibration": "final_alpha_calibration.json"
+                if calibration is not None
+                else None,
+                "members": [f"{name}.parquet" for name in _TABLE_TYPES],
+            },
+        )
 
-    return write_semantic_artifact(
-        Path(logical_root), envelope, write, operational_metadata=operational
-    )
+    atomic_write_directory(Path(logical_root), write)
+    return Path(logical_root)
 
 
 def read_portfolio_ledger_artifact(
     instance_root: Path,
     *,
-    expected_identity: str,
     consume_batches: Callable[
         [PortfolioLedgerArtifact, Iterator[PortfolioLedgerBatch]], object
     ]
     | None = None,
-    expected_member_identities: Mapping[str, DatasetFileIdentity] | None = None,
 ) -> PortfolioLedgerArtifact:
-    """Validate once, optionally consuming batches during that same full pass."""
-    identities: dict[str, DatasetFileIdentity] = {}
-    operational = {}
-    with semantic_artifact_read_session(
-        instance_root,
-        expected_identity=expected_identity,
-        member_identities=identities,
-        expected_member_identities=expected_member_identities,
-        operational_metadata=operational,
-    ) as (envelope, members):
-        calibration_required = _final_calibration_required(envelope)
-        required = {f"{name}.parquet" for name in _TABLE_TYPES}
-        if calibration_required:
-            required.add("final_alpha_calibration.json")
-        if {member["path"] for member in members} != required:
-            raise ValueError("portfolio_ledger_member_invalid")
-        calibration = (
-            read_qrp_json_file(
-                Path(instance_root) / "final_alpha_calibration.json",
-                expected_identity=identities["final_alpha_calibration.json"],
-            )[1]
-            if calibration_required
-            else None
-        )
-        if calibration_required and (
-            type(calibration) is not dict
-            or set(calibration)
-            != {
-                "schema_id",
-                "selection_group",
-                "cutoff",
-                "upstream_identities",
-                "calibration",
-            }
-            or calibration["schema_id"] != "qrp-final-alpha-calibration"
-            or (
-                calibration["selection_group"]
-                != envelope["semantic_metadata"]["target_contract"][
-                    "portfolio_candidate"
-                ]["selection_group"]
-            )
-            or (
-                pd.Timestamp(calibration["cutoff"])
-                != pd.Timestamp(envelope["research_window"]["end"])
-            )
-            or (calibration["upstream_identities"] != envelope["upstream_identities"])
-        ):
-            raise ValueError("portfolio_final_calibration_binding_invalid")
-        artifact = PortfolioLedgerArtifact(
-            envelope,
-            Path(instance_root),
-            expected_identity,
-            _capital(envelope),
-            identities,
-            operational,
-            calibration,
-        )
-        with closing_iterator(
-            _iter_batches(
-                artifact.root, artifact.capital, envelope["research_window"], identities
-            )
-        ) as batches:
-            if consume_batches is not None:
-                consume_batches(artifact, islice(batches, None))
-            for _ in batches:
-                pass
-        return artifact
+    """Read native metadata; consume requested economics once without pre-scans."""
+    root = Path(instance_root)
+    _, manifest = read_qrp_json_file(root / "manifest.json")
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema_id") != "qrp-portfolio-ledger"
+        or manifest.get("members") != [f"{name}.parquet" for name in _TABLE_TYPES]
+        or not isinstance(manifest.get("metadata"), dict)
+        or "window" not in manifest["metadata"]
+        or manifest.get("final_alpha_calibration")
+        not in {None, "final_alpha_calibration.json"}
+    ):
+        raise ValueError("portfolio_ledger_manifest_invalid")
+    artifact = PortfolioLedgerArtifact(
+        manifest["metadata"],
+        root,
+        PortfolioCapital(**manifest["capital"]),
+        read_qrp_json_file(root / "final_alpha_calibration.json")[1]
+        if manifest.get("final_alpha_calibration") is not None
+        else None,
+    )
+    if consume_batches is not None:
+        with closing_iterator(artifact.iter_chunks()) as batches:
+            consume_batches(artifact, batches)
+    return artifact
 
 
 def summarize_portfolio_ledger(
@@ -344,17 +266,13 @@ def summarize_portfolio_ledger(
     return result
 
 
-def _table_records(
-    root: Path, name: str, expected_identity: DatasetFileIdentity | None
-) -> Iterator[dict[str, object]]:
+def _table_records(root: Path, name: str) -> Iterator[dict[str, object]]:
     def validate_schema(metadata):
         if not metadata.schema.equals(_SCHEMAS[name]):
             raise ValueError("portfolio_ledger_schema_invalid")
 
     chunks = iter_dataset_part_batches(
-        root / f"{name}.parquet",
-        expected_identity=expected_identity,
-        metadata_observer=validate_schema,
+        root / f"{name}.parquet", metadata_observer=validate_schema
     )
     with closing_iterator(chunks):
         for chunk in chunks:
@@ -374,21 +292,12 @@ def _iter_batches(
     root: Path,
     capital: PortfolioCapital,
     research_window: Mapping[str, object],
-    identities: Mapping[str, DatasetFileIdentity] | None = None,
 ) -> Iterator[PortfolioLedgerBatch]:
     bounds = tuple(pd.Timestamp(research_window[key]).value for key in ("start", "end"))
     with closing_iterator(ExitStack()) as stack:
         key_index = ExactPrimaryKeyIndex(primary_key=("fill_id",))
         readers = {
-            name: stack.enter_context(
-                closing_iterator(
-                    _table_records(
-                        root,
-                        name,
-                        None if identities is None else identities[f"{name}.parquet"],
-                    )
-                )
-            )
+            name: stack.enter_context(closing_iterator(_table_records(root, name)))
             for name in _TABLE_TYPES
         }
         groups = {

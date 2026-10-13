@@ -18,6 +18,7 @@ from quant_research_platform.markets.implementations.a_share.processed.catalog i
 )
 from quant_research_platform.sources.csmar.interim import normalize_raw_frame
 from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers.a_share_sources import _published_inputs, _source_catalog
 
 
 def _benchmark_facts() -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -87,7 +88,6 @@ def test_benchmark_filters_repeated_codes_and_exact_snapshots():
 def test_processed_benchmark_target_streams_exact_dates_and_requires_global_coverage(
     tmp_path, monkeypatch
 ):
-    from quant_research_platform.profiles.research import research_profile
     from quant_research_platform.runtime.dataframes import iter_complete_session_frames
     from quant_research_platform.storage.datasets.reading import (
         DatasetReadMode,
@@ -108,7 +108,6 @@ def test_processed_benchmark_target_streams_exact_dates_and_requires_global_cove
         processed_producer, "materialize_dataset_session", observed_read
     )
     monkeypatch.setattr(processed_producer, "DEFAULT_BATCH_ROWS", 256)
-    profile = research_profile()
     layout = StorageLayout(tmp_path)
     index_info, _ = _benchmark_facts()
     dates = pd.bdate_range("2020-01-02", periods=130)
@@ -128,7 +127,7 @@ def test_processed_benchmark_target_streams_exact_dates_and_requires_global_cove
         ]
     )
     for data_id, frame in (("index_info", index_info), ("index_weights", weights)):
-        source_spec = profile.interim.get(data_id)
+        source_spec = _source_catalog().get(data_id)
         frame = frame.reindex(columns=source_spec.required_columns)
         write_dataset(
             layout.interim_data_root(source_spec.source_id, data_id),
@@ -139,14 +138,12 @@ def test_processed_benchmark_target_streams_exact_dates_and_requires_global_cove
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
     with processed_producer.produce_a_share_processed_data(
         spec,
-        layout=layout,
+        inputs=_published_inputs(layout, spec),
         time_window=TimeWindow(dates[0], dates[-1]),
-        processed_catalog=profile.processed,
-        source_catalog=profile.interim,
-    ) as (frames, metadata, verify):
-        write_dataset(
-            root, frames, spec=spec, instance_metadata=metadata, staged_validator=verify
-        )
+        processed_catalog=processed_catalog(),
+        source_catalog=_source_catalog(),
+    ) as (frames, metadata):
+        write_dataset(root, frames, spec=spec, metadata=metadata)
     actual = read_dataset(root)
     expected = pd.DataFrame(
         [

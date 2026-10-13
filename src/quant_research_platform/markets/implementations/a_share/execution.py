@@ -85,14 +85,7 @@ class FeeSchedule:
             raise ValueError("a_share_fee_schedule_invalid")
         if any(type(rule) is not FeeRule for rule in self.rules):
             raise ValueError("a_share_fee_schedule_invalid")
-        if (
-            type(self.content_identity) is not str
-            or len(self.content_identity) != 64
-            or any(
-                character not in "0123456789abcdef"
-                for character in self.content_identity
-            )
-        ):
+        if type(self.content_identity) is not str or not self.content_identity:
             raise ValueError("a_share_fee_schedule_identity_invalid")
         _validate_fee_intervals(self.rules)
 

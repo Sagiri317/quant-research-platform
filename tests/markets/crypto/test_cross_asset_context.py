@@ -249,7 +249,6 @@ def test_information_union_persists_complete_ordered_panel_for_research_windows(
         open_dataset_session,
         read_dataset,
     )
-    from quant_research_platform.storage.datasets.schema import dataset_identity_payload
     from quant_research_platform.storage.datasets.writing import write_dataset
     from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.binance_hft import _coverage, coverage_lookup
@@ -310,9 +309,7 @@ def test_information_union_persists_complete_ordered_panel_for_research_windows(
         )
         expected_parts.append(read_dataset(root))
         session = open_dataset_session(root, columns=None, time_window=None)
-        expected_identities[data_id] = dataset_identity_payload(
-            session.spec, session.manifest
-        )
+        expected_identities[data_id] = str(root)
     expected = pd.concat(expected_parts, ignore_index=True).sort_values(
         ["timestamp", "asset_id"], ignore_index=True
     )
@@ -321,22 +318,20 @@ def test_information_union_persists_complete_ordered_panel_for_research_windows(
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
     with producer.produce_information_panel(
         spec,
-        layout=layout,
+        inputs=expected_identities,
         time_window=window,
         processed_catalog=processed,
         source_catalog=None,
-    ) as (frames, metadata, verify):
-        write_dataset(
-            root, frames, spec=spec, instance_metadata=metadata, staged_validator=verify
-        )
-    frames = verify = None
+    ) as (frames, metadata):
+        write_dataset(root, frames, spec=spec, metadata=metadata)
+    frames = None
     restored = read_dataset(root)
     pd.testing.assert_frame_equal(restored, expected, check_exact=True)
     assert len(restored) == len(base) + len(sol)
     assert restored["timestamp"].is_monotonic_increasing
     assert not restored.duplicated(list(spec.primary_key)).any()
     session = open_dataset_session(root, columns=None, time_window=None)
-    assert session.manifest["input_dataset_identities"] == expected_identities
+    assert session.manifest["inputs"] == expected_identities
     previous = None
     rows = 0
     for frame in iter_dataset_chunks(session):

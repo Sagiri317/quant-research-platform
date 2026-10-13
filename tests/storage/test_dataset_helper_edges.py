@@ -34,7 +34,7 @@ from quant_research_platform.storage.datasets.paths import (
     timestamp_column_from_spec_payload,
 )
 from quant_research_platform.storage.datasets.reading import (
-    read_columns_for_time_window,
+    projection_columns_for_window,
 )
 from quant_research_platform.storage.datasets.schema import (
     data_spec_payload,
@@ -896,7 +896,7 @@ def test_dataset_timestamp_and_candidate_file_helpers(tmp_path: Path) -> None:
     spec = data_spec_payload(
         make_processed_dataset_spec("storage_demo", market_id="dummy")
     )
-    assert read_columns_for_time_window(
+    assert projection_columns_for_window(
         ("market_id",), spec=spec, time_window=TimeWindow("2024-01-01", "2024-01-31")
     ) == ("market_id", "timestamp")
     with pytest.raises(ValueError, match="invalid_column_roles"):
@@ -1126,20 +1126,6 @@ def test_directory_scan_processes_first_entry_before_enumerating_siblings(
     paths = _discovered_paths(root, spec={"partition_columns": []})
     assert [path.name for path in paths] == [f"part-{i:03d}.parquet" for i in range(64)]
     assert 1 <= processed[0] <= 2
-
-
-def test_inventory_discovery_rejects_hardlinked_part_alias(tmp_path: Path) -> None:
-    data_root = tmp_path / "data"
-    data_root.mkdir()
-    first = data_root / "part-000.parquet"
-    alias = data_root / "part-001.parquet"
-    pq.write_table(pa.table({"value": [1]}), first)
-    try:
-        os.link(first, alias)
-    except OSError:
-        pytest.skip("hardlink_not_available")
-    with pytest.raises(ValueError, match="invalid_dataset_part_files"):
-        _discovered_paths(data_root, spec={"partition_columns": []})
 
 
 def test_inventory_discovery_accepts_single_external_hardlink(tmp_path: Path) -> None:

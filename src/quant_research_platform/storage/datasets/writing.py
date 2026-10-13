@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass, field
@@ -37,7 +36,6 @@ from quant_research_platform.storage.datasets.paths import (
     relative_partition_label,
     timestamp_column_from_spec_payload,
     timestamp_primary_key_column_from_spec,
-    validate_dataset_artifact_root,
 )
 from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
@@ -52,7 +50,7 @@ from quant_research_platform.storage.datasets.schema import (
     encode_logical_category_value,
     logical_dtype_metadata_bytes,
     logical_dtype_payload_from_frame,
-    merge_dataset_instance_metadata,
+    merge_dataset_metadata,
     merge_logical_dtype_payloads,
     pandas_dtype_overrides_from_logical_payload,
     parse_logical_dtype_metadata,
@@ -65,7 +63,6 @@ from quant_research_platform.storage.datasets.types import DatasetInspection
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
-    dataset_file_identity,
     filesystem_mkdir,
     native_filesystem_path,
     require_artifact_root,
@@ -247,7 +244,6 @@ class _WriteStats:
 
         for _ in iter_declared_parquet_member_batches(
             path,
-            expected_identity=dataset_file_identity(path),
             batch_rows=batch_rows,
             metadata_observer=observe_metadata,
             dtype_overrides=dtype_overrides,
@@ -266,7 +262,7 @@ class _WriteStats:
         self.partition_row_counts[partition] = (
             self.partition_row_counts.get(partition, 0) + observed_rows
         )
-        self.inventory.add(path, observed_metadata)
+        self.inventory.add(path)
 
     def dtype_metadata(self, payload: dict[str, Any]) -> bytes:
         identity = canonical_identity_bytes(payload)
@@ -348,12 +344,11 @@ def write_dataset(
     data: pd.DataFrame | Iterable[pd.DataFrame],
     *,
     spec: DataSpec,
-    instance_metadata: Mapping[str, Any] | None = None,
+    metadata: Mapping[str, Any] | None = None,
     staged_validator: Callable[[DatasetWriteReceipt], None] | None = None,
 ) -> DatasetInspection:
     spec_payload = data_spec_payload(spec)
     final_root = Path(dataset_root)
-    validate_dataset_artifact_root(final_root, spec)
     final_root = require_artifact_root(final_root)
     input_chunks = iter((data,)) if isinstance(data, pd.DataFrame) else iter(data)
     with closing_iterator(ExitStack()) as input_owner:
@@ -378,10 +373,7 @@ def write_dataset(
             payload = accumulator.payload(spec_payload=spec_payload)
             payload["schema_id"] = "qrp-dataset-manifest"
             inventory.sort_parts()
-            payload["content_hash"] = inventory.content_hash()
-            manifest = merge_dataset_instance_metadata(
-                payload, instance_metadata, spec=spec_payload
-            )
+            manifest = merge_dataset_metadata(payload, metadata)
             write_internal_artifact_manifest(
                 temp_root / "_manifest" / "manifest.json", manifest
             )
@@ -390,7 +382,6 @@ def write_dataset(
             )
             if staged_validator is not None:
                 staged_validator(DatasetWriteReceipt(temp_root, session, key_tracker))
-            session.verify()
             result = inspection_from_persisted_session(
                 session, published_root=final_root
             )
@@ -574,5 +565,4 @@ def write_parquet_file(
         write_page_index=False,
         write_page_checksum=False,
     )
-    os.utime(native_filesystem_path(path), None)
     return path

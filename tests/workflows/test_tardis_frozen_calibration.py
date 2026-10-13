@@ -15,8 +15,6 @@ from quant_research_platform.artifacts.statistics import (
     read_statistics_artifact,
     write_statistics_artifact,
 )
-from quant_research_platform.contracts.targets import TargetPlan
-from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.crypto.execution import (
     MakerCalibration,
     _maker_new_order,
@@ -26,21 +24,10 @@ from quant_research_platform.markets.implementations.crypto.portfolio import (
     _calibration_samples,
     validate_maker_calibration,
 )
-from quant_research_platform.profiles.research import (
-    bind_research_configuration,
-    research_profile,
-)
-from quant_research_platform.research.protocols.crypto_hft import CryptoMakerCandidate
 from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
 from quant_research_platform.sources.tardis.raw import import_slices
-from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.storage.software_identity import (
-    production_software_identity,
-)
-from quant_research_platform.workflows import research
-from tests.artifacts.test_statistics_artifact import maker_calibration_tables
+from tests.artifacts.test_crypto_maker_calibration import maker_calibration_tables
 from tests.helpers.binance_hft import _quote, hft_research_plan
-from tests.helpers.research_configuration import research_configuration
 from tests.helpers.tardis import _slices
 from tests.markets.crypto.test_hft_execution import _maker_config, _state
 
@@ -107,10 +94,10 @@ def _publish(root, date, *, fine):
 @pytest.mark.parametrize(
     "asset,unit,current_unit", [("btc_usdt", "1", "0.1"), ("eth_usdt", "0.01", "0.001")]
 )
-def test_frozen_archive_identity_and_persisted_maker_units(
+def test_explicit_source_collection_and_persisted_maker_units(
     tmp_path, asset, unit, current_unit
 ):
-    tables, _ = maker_calibration_tables.__wrapped__()
+    tables, metadata = maker_calibration_tables.__wrapped__()
     tables["crypto_maker_calibration"]["price_unit"] = unit
     shift = pd.Timedelta(pd.Timestamp("2026-08-01").value, unit="ns")
     for column in ("decision_at", "prediction_end", "label_available_at"):
@@ -127,95 +114,39 @@ def test_frozen_archive_identity_and_persisted_maker_units(
         "end": "2026-08-01T00:00:03.500000",
     }
     plan["test"] = {"start": "2026-09-01T00:00:08.600000", "end": "2026-09-01T00:00:09"}
-    config = research_configuration(
-        "crypto",
-        "baseline",
-        plan=plan,
-        development=tuple(plan["folds"][0]["validation"].values()),
-    )
-    next(
-        item
-        for item in config["portfolios"]
-        if item["candidate_id"] == "crypto_hft_maker"
-    )["asset_id"] = asset
     raw = tmp_path / "raw"
     raw.mkdir()
-    layout = StorageLayout(tmp_path / "project")
     symbol = {"btc_usdt": "BTCUSDT", "eth_usdt": "ETHUSDT"}[asset]
-    config["source_archives"] = [
+    archives = [
         _publish(raw, day, fine=index == 2)
         for index, day in enumerate(("2026-07-01", "2026-08-01", "2026-09-01"))
     ]
-    profiles = {
-        access: bind_research_configuration(
-            research_profile(config["profile_id"]),
-            config,
-            tardis_root=raw,
-            access_window=access,
-        )
-        for access in ("development", "holdout")
-    }
-    protocols = {
-        access: profile.protocol(config["scenario_id"], access_window=access)
-        for access, profile in profiles.items()
-    }
-    candidate = next(
-        item
-        for item in protocols["development"].portfolio_candidates()
-        if isinstance(item, CryptoMakerCandidate)
-        and item.calibrated
-        and item.asset_id == asset
-    )
-    target_id = candidate.calibration_target_id
-    specs = {
-        access: next(
-            item
-            for item in protocol.target_specs("research run")
-            if item.target_id == target_id
-        )
-        for access, protocol in protocols.items()
-    }
-    identities = {}
-    for access, profile in profiles.items():
-        binding = profile.producer_bindings[target_id]
-        identities[access] = binding.source_identity(raw, target_id)
-        with binding.producer.keywords["open_run"](raw) as source:
-            assert len(source.archives) == 2
-            assert (
-                source.market_metadata(FUTURES_MARKET_TYPE, symbol)["price_unit"]
-                == unit
-            )
-    assert identities["development"] == identities["holdout"]
-    panel = profiles["holdout"].producer_bindings["binance_futures_l2_panel_100ms"]
-    with panel.producer.keywords["open_run"](raw) as source:
+    from quant_research_platform.sources.market import open_market_source
+
+    with open_market_source(raw, archive_paths=archives[:2]) as source:
+        assert len(source.archives) == 2
+        assert source.market_metadata(FUTURES_MARKET_TYPE, symbol)["price_unit"] == unit
+    with open_market_source(raw, archive_paths=archives) as source:
         assert len(source.archives) == 3
         assert (
             source.market_metadata(FUTURES_MARKET_TYPE, symbol)["price_unit"]
             == current_unit
         )
-    envelope = research._target_envelope_for_spec(
-        profile=profiles["development"],
-        protocol=protocols["development"],
-        target_spec=specs["development"],
-        data_spec=None,
-        research_window={
-            **config["windows"]["development"],
-            "access": "development",
-        },
-        upstream_identities={
-            key: "1" * 64 for key in specs["development"].dependencies
-        },
-        software_identity=production_software_identity(),
-        raw_content_identity=identities["development"],
-    )
+    metadata = {
+        **metadata,
+        "chronology": {"folds": plan["folds"], "test": plan["test"]},
+        "window": plan["folds"][0]["validation"],
+        "asset_id": asset,
+        "symbol": symbol,
+    }
 
     def produce(on_table):
         for name, frame in tables.items():
             on_table(name, frame)
 
     root = write_statistics_artifact(
-        research._target_logical_root(profiles["development"], layout, target_id),
-        envelope=envelope,
+        tmp_path / "calibration",
+        metadata=metadata,
         tables=produce,
         table_group="crypto_maker_calibration",
         validate_tables=validate_maker_calibration,
@@ -229,30 +160,8 @@ def test_frozen_archive_identity_and_persisted_maker_units(
         }
 
     before = fingerprints()
-    for access, profile in profiles.items():
-        result = research._reuse_target(
-            profile=profile,
-            protocol=protocols[access],
-            layout=layout,
-            spec=specs[access],
-            planned=TargetPlan(
-                target_id=specs[access].target_id,
-                upstream_target_ids=tuple(specs[access].dependencies),
-                decision="REUSE",
-                **{
-                    "requested_identity": envelope.instance_identity,
-                    "matching_instance_identity": envelope.instance_identity,
-                },
-            ),
-            raw_root=raw,
-            time_window=TimeWindow(
-                envelope.research_window["start"], envelope.research_window["end"]
-            ),
-        )
-        assert result.status.value == "REUSED"
     artifact = read_statistics_artifact(
         root,
-        expected_identity=envelope.instance_identity,
         validate_tables=validate_maker_calibration,
     )
     with artifact.table("crypto_maker_calibration.parquet") as summary:
@@ -378,16 +287,17 @@ def test_final_maker_gate_uses_only_required_fold_but_validates_full_artifact(
     tmp_path, monkeypatch, early_defined, last_defined
 ):
     import quant_research_platform.markets.implementations.crypto.portfolio as portfolio
-    from quant_research_platform.contracts.business_manifest import (
-        build_business_manifest_envelope,
-    )
     from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
 
-    original_tables, original_envelope = maker_calibration_tables.__wrapped__()
-    payload = original_envelope.payload()
-    metadata = payload["semantic_metadata"]
-    contract = metadata["target_contract"]["protocol"]
-    plan = contract["research_plan"]
+    original_tables, metadata = maker_calibration_tables.__wrapped__()
+    plan = hft_research_plan()
+    plan["folds"][0] = metadata["chronology"]["folds"][0]
+    metadata["chronology"] = {"folds": plan["folds"], "test": plan["test"]}
+    metadata["window"] = {
+        "start": plan["folds"][0]["validation"]["start"],
+        "end": plan["folds"][-1]["validation"]["end"],
+    }
+    metadata["model_ids"]["fold_2"] = metadata["model_ids"]["fold_1"]
     pieces = {name: [] for name in original_tables}
     for fold_id, defined, shift in (
         ("fold_1", early_defined, pd.Timedelta(0)),
@@ -412,55 +322,50 @@ def test_final_maker_gate_uses_only_required_fold_but_validates_full_artifact(
     tables = {
         name: pd.concat(frames, ignore_index=True) for name, frames in pieces.items()
     }
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id=payload["logical_artifact_id"],
-        schema_identity=payload["schema_identity"],
-        protocol_or_spec_identity=payload["protocol_or_spec_identity"],
-        software_identity=payload["software_identity"],
-        research_window={
-            "start": plan["folds"][0]["validation"]["start"],
-            "end": plan["folds"][-1]["validation"]["end"],
-            "access": "development",
+    config = {
+        "output": str(tmp_path / "backtest"),
+        "inputs": "inputs",
+        "panel": "panel",
+        "source": str(tmp_path),
+        "asset_id": "btc_usdt",
+        "symbol": "BTCUSDT",
+        "chronology": metadata["chronology"],
+        "prediction_window": plan["test"],
+        "execution_mode": "continuous",
+        "capital": {
+            "candidate_id": "maker",
+            "initial_capital": 1000.0,
+            "valuation_currency": "USDT",
+            "valuation_method": "linear_perpetual",
         },
-        upstream_identities={},
-        semantic_metadata=metadata,
-    )
-    candidate = portfolio.portfolio_candidates(contract["portfolio_candidates"])[0]
-    execution_plan = hft_research_plan()
-    execution_plan["folds"] = plan["folds"]
-    execution_plan["test"] = plan["test"]
-    configuration = research_configuration(
-        "crypto",
-        "baseline",
-        plan=execution_plan,
-        development=(
-            plan["folds"][0]["validation"]["start"],
-            plan["folds"][-1]["validation"]["end"],
-        ),
-    )
-    protocol = bind_research_configuration(
-        research_profile(configuration["profile_id"]), configuration
-    ).protocol(configuration["scenario_id"], access_window="holdout")
-    target = next(
-        target
-        for target in protocol.execution_targets()
-        if target.candidate.candidate_id == candidate.candidate_id
-        and target.execution_mode == "continuous"
-    )
-    protocol_manifest = protocol.target_manifest(target.target_id, "PORTFOLIO")
+        "execution": {
+            "order_quantity": 1.0,
+            "max_position": 2.0,
+            "maker_fee_bps": 0.0,
+            "inventory_target": 0.0,
+            "inventory_skew": 0.0,
+            "markout_horizon_ms": 100,
+            "latency_ms": 10,
+        },
+        "models": [
+            {"model": value, "predictions": value + "-predictions"}
+            for value in metadata["model_ids"]["fold_2"]
+        ],
+        "calibration": str(tmp_path / "calibration"),
+    }
 
     class RawReached(Exception):
         pass
 
     reached = []
 
-    def open_run(*args):
+    def open_run(*args, **kwargs):
         reached.append(True)
         raise RawReached()
 
     monkeypatch.setattr(
         portfolio,
-        "_panel",
+        "read_dataset_manifest_evidence",
         lambda *args: {
             "producer_diagnostics": {
                 "reconstruction": {"BTCUSDT": {"coverage_segments": {}}}
@@ -472,39 +377,78 @@ def test_final_maker_gate_uses_only_required_fold_but_validates_full_artifact(
         for name, frame in tables.items():
             on_table(name, frame)
 
-    root = write_statistics_artifact(
+    write_statistics_artifact(
         tmp_path / "calibration",
-        envelope=envelope,
+        metadata=metadata,
         tables=produce,
         table_group="crypto_maker_calibration",
         validate_tables=validate_maker_calibration,
     )
+    monkeypatch.setattr(portfolio, "open_market_source", open_run)
+
+    def model_evidence(model, *_args, **_kwargs):
+        index = metadata["model_ids"]["fold_2"].index(model)
+        return (
+            {},
+            {
+                "model": {
+                    "model_id": model,
+                    "target_column": (
+                        "future_mid_return_500ms",
+                        "maker_bid_sell_pressure_proxy_500ms",
+                    )[index],
+                }
+            },
+            None,
+        )
+
+    monkeypatch.setattr(portfolio, "_model_evidence", model_evidence)
     with pytest.raises(
         RawReached if last_defined else PortfolioTargetBlocked
     ) as caught:
-        portfolio.produce_maker_ledger(
-            layout=SimpleNamespace(target_root=lambda *args: root),
-            candidate=candidate,
-            protocol_manifest=protocol_manifest,
-            dataset_catalog=SimpleNamespace(get=lambda *args: SimpleNamespace()),
-            output_window=TimeWindow(**plan["test"]),
-            upstream_identities={
-                candidate.calibration_target_id: envelope.instance_identity
-            },
-            expected_funding_identity="a" * 64,
-            raw_root=tmp_path,
-            execution_mode="continuous",
-            symbol="BTCUSDT",
-            market_type="usdm_perpetual",
-            open_run=open_run,
-            reconstruct_depth=None,
-            read_trades=None,
-            read_funding=None,
-            read_prediction_bundle=None,
-            read_statistics_artifact=read_statistics_artifact,
-        )
+        portfolio.backtest_maker(config)
     if last_defined:
         assert reached == [True]
     else:
         assert str(caught.value) == "maker_calibration_insufficient_samples"
         assert not reached
+
+
+@pytest.mark.parametrize(
+    "current_unit,accepted", (("1", False), ("0.3", False), ("0.01", True))
+)
+def test_frozen_maker_coordinates_require_an_exact_integer_rescale(
+    current_unit, accepted
+):
+    from tests.markets.crypto.calibration_test_support import calibration_from_paths
+    from tests.markets.crypto.test_hft_execution import _trade
+
+    history = _state(0)
+    model = calibration_from_paths(
+        [([history], [_trade(100, price="99.5", quantity="3", maker_buyer=True)])],
+        [0.0],
+    )
+    factor = 10 if accepted else 1
+    current = replace(
+        history,
+        price_unit=current_unit,
+        bids=tuple((tick * factor, qty) for tick, qty in history.bids),
+        asks=tuple((tick * factor, qty) for tick, qty in history.asks),
+    )
+    order = _maker_new_order(1, "buy", 1.0, current, _quote(0, book_segment_id="s1"), 0)
+    query = dict(
+        state=current,
+        decision_ns=0,
+        new_order=order,
+        active_order=None,
+        commands=(),
+        lifetime_ns=500000000,
+        prediction=0.0,
+        fee_bps=0.0,
+        funding=[],
+    )
+    if accepted:
+        assert model.select(**query)[1] == 1.0
+    else:
+        with pytest.raises(ValueError, match="calibration_price_unit_incompatible"):
+            model.select(**query)

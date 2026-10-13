@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,9 +13,6 @@ from quant_research_platform.artifacts.portfolio_ledger import (
     read_portfolio_ledger_artifact,
     write_portfolio_ledger_artifact,
 )
-from quant_research_platform.contracts.business_manifest import (
-    build_business_manifest_envelope,
-)
 from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_DECISION_REASON_ENHANCED,
     PORTFOLIO_DECISION_REASON_MAINTENANCE,
@@ -23,6 +20,7 @@ from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_LEDGER_COST_COLUMNS,
     ExecutionAssumptions,
     PortfolioCandidateSpec,
+    PortfolioCapital,
     PortfolioTargetBlocked,
 )
 from quant_research_platform.contracts.time import TimeWindow
@@ -47,7 +45,6 @@ from quant_research_platform.research.protocols.a_share import RISK_STYLE_COLUMN
 from quant_research_platform.storage.datasets import DatasetReadMode
 from quant_research_platform.storage.datasets import reading as dataset_reading
 from quant_research_platform.storage.identity import filesystem_mkdir
-from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.portfolio_ledger import (
     CONTINUOUS_EXECUTION_COLUMNS,
     execute_continuous_target,
@@ -266,7 +263,7 @@ def _build_producer(
     model_inputs: tuple[str, ...] = (),
     model_algorithm: str = "equal_weight_rank_ensemble",
     final_calibrations=None,
-    access_window: str = "development",
+    sample_role: str = "validation",
     frozen_calibration: production.AlphaCalibration | None = None,
     typed_batches: bool = False,
     construction: str = "top20_equal_weight",
@@ -295,16 +292,9 @@ def _build_producer(
             prediction_selector="champion",
             candidate_id="synthetic_top20_equal_weight",
             construction=construction,
-            prediction_target_id="prediction",
             rebalance_schedule="daily",
             top_quantile=0.5,
             benchmark_id=None,
-            benchmark_weights_target_id=None,
-            research_dataset_id="dataset",
-            market_panel_target_id="panel",
-            execution_mask_target_id="execution",
-            trading_calendar_target_id="calendar",
-            fee_schedule_target_id="fee",
         )
     frames = dict(frames)
     frames["market_bars_1d"] = (
@@ -333,9 +323,8 @@ def _build_producer(
     roots = {}
     for target_id, identity in identities.items():
         root = tmp_path / target_id / identity
-        filesystem_mkdir(root, parents=True)
+        filesystem_mkdir(root, parents=True, exist_ok=True)
         roots[target_id] = root
-    layout = StorageLayout(project_root=tmp_path).with_target_roots(roots)
     calls: list[tuple[str, DatasetReadMode, TimeWindow | None]] = []
 
     def fake_read_dataset(
@@ -402,7 +391,14 @@ def _build_producer(
         ):
             yield (session.root / "synthetic.parquet", frame)
 
-    def source_evidence(layout, panel_root, calendar, *, include_asset_sessions):
+    def source_evidence(
+        market_bars_root,
+        stock_master_root,
+        panel_root,
+        calendar,
+        *,
+        include_asset_sessions,
+    ):
         from quant_research_platform.markets.implementations.a_share.processed import (
             panels,
         )
@@ -460,37 +456,36 @@ def _build_producer(
     )
 
     def output():
-        chunks = production.build_portfolio_ledger(
+        chunks = production.backtest_a_share(
             iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
             candidate=candidate,
-            layout=layout,
-            upstream_identities={**identities, "prediction": "b" * 64},
+            inputs={
+                "dataset": roots["dataset"],
+                "panel": roots["panel"],
+                "execution": roots["execution"],
+                "calendar": roots["calendar"],
+                "fees": roots["fee"],
+                "market_bars": roots["market_bars_1d"],
+                "stock_master": roots["stock_master"],
+                "benchmark": roots["benchmark"],
+                "risk_context": (roots["risk_context"],),
+            },
             output_window=output_window,
             input_window=input_window or TimeWindow("2022-12-01", "2023-01-10"),
             formal_dataset_window=formal_dataset_window
             or TimeWindow("2022-12-01", "2023-01-10"),
             prediction_window=prediction_window,
             prediction_lookup=prediction_lookup or _PredictionLookup(),
-            persisted_model=SimpleNamespace(
-                selection=lambda _group, _quarter, **_kwargs: {
-                    "selected_family_id": "family"
-                },
-                prediction_models=lambda window, **_kwargs: tuple(
-                    {
-                        "quarter_id": str(quarter),
-                        "source_quarter": str(quarter),
-                        "family_id": "family"
-                        if candidate.prediction_selector == "champion"
-                        else candidate.prediction_selector,
-                        "model_metadata": {
-                            "input_columns": model_inputs,
-                            "model_algorithm": model_algorithm,
-                        },
-                    }
-                    for quarter in pd.period_range(window.start, window.end, freq="Q")
+            prediction_domains=(
+                (
+                    prediction_window
+                    or formal_dataset_window
+                    or TimeWindow("2022-12-01", "2023-01-10"),
+                    model_inputs,
+                    model_algorithm,
                 ),
             ),
-            access_window=access_window,
+            sample_role=sample_role,
             frozen_calibration=frozen_calibration,
             assumptions=assumptions,
             fee_schedule_from_frame=fee_schedule_from_frame,
@@ -530,37 +525,35 @@ def test_simple_producer_publishes_one_bounded_ledger_and_reuses_it(
         tuple(frame.columns) == CONTINUOUS_EXECUTION_COLUMNS for frame in frames_out
     )
     assert all(frame["asset_id"].iloc[-1] == "__cash__" for frame in frames_out)
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="synthetic_portfolio",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": "2023-01-03",
-            "end": "2023-01-06",
-            "access": "development",
-        },
-        upstream_identities={"prediction": "b" * 64},
-        semantic_metadata={
-            "portfolio_capital": {
+    envelope = {
+        "capital": PortfolioCapital(
+            **{
                 "candidate_id": "synthetic_portfolio",
                 "initial_capital": 100.0,
                 "valuation_currency": "CNY",
                 "valuation_method": "adjusted_notional",
             }
+        ),
+        "metadata": {
+            "window": {
+                "start": "2023-01-03",
+                "end": "2023-01-06",
+                "access": "development",
+            }
         },
-    )
+    }
 
     def produce(emit):
         for batch in original_batches:
             emit(batch)
 
     artifact_root = write_portfolio_ledger_artifact(
-        tmp_path / "artifacts", envelope=envelope, produce=produce
+        tmp_path / "artifacts",
+        capital=envelope["capital"],
+        metadata=envelope["metadata"],
+        produce=produce,
     )
-    artifact = read_portfolio_ledger_artifact(
-        artifact_root, expected_identity=artifact_root.name
-    )
+    artifact = read_portfolio_ledger_artifact(artifact_root)
     persisted = list(artifact.iter_chunks())
     assert persisted == original_batches
     assert any(batch.trades for batch in persisted)
@@ -582,7 +575,8 @@ def test_simple_producer_publishes_one_bounded_ledger_and_reuses_it(
     with pytest.raises(ValueError, match="^portfolio_ledger_direction_invalid$"):
         write_portfolio_ledger_artifact(
             tmp_path / "damaged_artifacts",
-            envelope=envelope,
+            capital=envelope["capital"],
+            metadata=envelope["metadata"],
             produce=lambda emit: emit(damaged),
         )
 
@@ -674,7 +668,7 @@ def test_float_cap_roundoff_keeps_nonnegative_persisted_cash_target(tmp_path):
         account=account,
         decision_timestamp=pd.Timestamp("2023-01-03"),
         returns=zero,
-        alpha_score=caps,
+        prediction_rank_score=caps,
         adv20=adv,
         enhanced_decision=None,
         benchmark_weights=None,
@@ -682,30 +676,30 @@ def test_float_cap_roundoff_keeps_nonnegative_persisted_cash_target(tmp_path):
         decision_reason=PORTFOLIO_DECISION_REASON_SIMPLE,
         decision_delta=target,
     )
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="float_cap_ledger",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": "2023-01-03",
-            "end": "2023-01-04",
-            "access": "development",
-        },
-        upstream_identities={"prediction": "b" * 64},
-        semantic_metadata={
-            "portfolio_capital": {
+    envelope = {
+        "capital": PortfolioCapital(
+            **{
                 "candidate_id": "float_cap_ledger",
                 "initial_capital": nav,
                 "valuation_currency": "CNY",
                 "valuation_method": "adjusted_notional",
             }
+        ),
+        "metadata": {
+            "window": {
+                "start": "2023-01-03",
+                "end": "2023-01-04",
+                "access": "development",
+            }
         },
-    )
+    }
     root = write_test_sessions(
-        tmp_path / "ledger", envelope=envelope, ledger_chunks=iter((frame,))
+        tmp_path / "ledger",
+        capital=envelope["capital"],
+        metadata=envelope["metadata"],
+        ledger_chunks=iter((frame,)),
     )
-    saved = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    saved = read_portfolio_ledger_artifact(root)
     (batch,) = list(saved.iter_chunks())
     cash_target = next(
         row.number
@@ -751,18 +745,10 @@ def test_enhanced_producer_uses_benchmark_only_when_risk_is_insufficient(
         prediction_selector="champion",
         candidate_id="synthetic_csi500_enhanced",
         construction="benchmark_enhanced",
-        prediction_target_id="prediction",
         rebalance_schedule="weekly-last-trading-day",
         top_quantile=None,
         benchmark_id="csi500",
-        benchmark_weights_target_id="benchmark",
         risk_style_columns=RISK_STYLE_COLUMNS,
-        risk_context_target_ids=("risk_context",),
-        research_dataset_id="dataset",
-        market_panel_target_id="panel",
-        execution_mask_target_id="execution",
-        trading_calendar_target_id="calendar",
-        fee_schedule_target_id="fee",
     )
     chunks, _calls = _build_producer(
         tmp_path,
@@ -838,18 +824,10 @@ def test_enhanced_holdout_reads_research_sessions_from_prediction_start(
         prediction_selector="champion",
         candidate_id="synthetic_csi500_enhanced",
         construction="benchmark_enhanced",
-        prediction_target_id="prediction",
         rebalance_schedule="daily",
         top_quantile=None,
         benchmark_id="csi500",
-        benchmark_weights_target_id="benchmark",
         risk_style_columns=RISK_STYLE_COLUMNS,
-        risk_context_target_ids=("risk_context",),
-        research_dataset_id="dataset",
-        market_panel_target_id="panel",
-        execution_mask_target_id="execution",
-        trading_calendar_target_id="calendar",
-        fee_schedule_target_id="fee",
     )
     calibration = production.AlphaCalibration(
         slope=1.0,
@@ -889,7 +867,7 @@ def test_enhanced_holdout_reads_research_sessions_from_prediction_start(
         prediction_window=output_window,
         candidate=candidate,
         prediction_lookup=lookup,
-        access_window="holdout",
+        sample_role="holdout",
         frozen_calibration=calibration,
         final_calibrations=final_calibrations,
         shared_alpha_facts={},
@@ -966,18 +944,10 @@ def test_enhanced_membership_maintenance_keeps_explicit_benchmark_target(
         prediction_selector="champion",
         candidate_id="maintenance",
         construction="benchmark_enhanced",
-        prediction_target_id="prediction",
         rebalance_schedule="weekly-last-trading-day",
         top_quantile=None,
         benchmark_id="csi500",
-        benchmark_weights_target_id="benchmark",
         risk_style_columns=RISK_STYLE_COLUMNS,
-        risk_context_target_ids=("risk_context",),
-        research_dataset_id="dataset",
-        market_panel_target_id="panel",
-        execution_mask_target_id="execution",
-        trading_calendar_target_id="calendar",
-        fee_schedule_target_id="fee",
     )
     risk = FactorRiskEstimate(
         factor_returns=pd.DataFrame(),
@@ -1039,30 +1009,30 @@ def test_enhanced_membership_maintenance_keeps_explicit_benchmark_target(
         assert costs > 0.0
     else:
         assert indexed.loc["b", "executed_delta_notional"] == 0.0
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="maintenance",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": output_window.start.isoformat(),
-            "end": output_window.end.isoformat(),
-            "access": "development",
-        },
-        upstream_identities={"prediction": "b" * 64},
-        semantic_metadata={
-            "portfolio_capital": {
+    envelope = {
+        "capital": PortfolioCapital(
+            **{
                 "candidate_id": "maintenance",
                 "initial_capital": 100.0,
                 "valuation_currency": "CNY",
                 "valuation_method": "adjusted_notional",
             }
+        ),
+        "metadata": {
+            "window": {
+                "start": output_window.start.isoformat(),
+                "end": output_window.end.isoformat(),
+                "access": "development",
+            }
         },
-    )
+    }
     root = write_test_sessions(
-        tmp_path / "ledger", envelope=envelope, ledger_chunks=iter(sessions)
+        tmp_path / "ledger",
+        capital=envelope["capital"],
+        metadata=envelope["metadata"],
+        ledger_chunks=iter(sessions),
     )
-    saved = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    saved = read_portfolio_ledger_artifact(root)
     loaded = [session_frame(batch) for batch in saved.iter_chunks()]
     assert len(loaded) == len(sessions)
     for actual, expected in zip(loaded, sessions, strict=True):
@@ -1135,18 +1105,10 @@ def _enhanced_inputs(monkeypatch):
         prediction_selector="champion",
         candidate_id="synthetic_csi500_enhanced",
         construction="benchmark_enhanced",
-        prediction_target_id="prediction",
         rebalance_schedule="weekly-last-trading-day",
         top_quantile=None,
         benchmark_id="csi500",
-        benchmark_weights_target_id="benchmark",
         risk_style_columns=RISK_STYLE_COLUMNS,
-        risk_context_target_ids=("risk_context",),
-        research_dataset_id="dataset",
-        market_panel_target_id="panel",
-        execution_mask_target_id="execution",
-        trading_calendar_target_id="calendar",
-        fee_schedule_target_id="fee",
     )
     return frames, fee_frame, output_window, candidate
 
@@ -1218,9 +1180,7 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
     actual_build = production._build_session
 
     def observe_decision(**kwargs):
-        account, returns, adv, optimization, decision_delta, snapshot = actual_build(
-            **kwargs
-        )
+        account, adv, optimization, decision_delta, snapshot = actual_build(**kwargs)
         if kwargs["decision_timestamp"] == pd.Timestamp("2023-01-06"):
             assert optimization is not None
             observed.append(
@@ -1232,7 +1192,7 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
                     decision_delta.copy(),
                 )
             )
-        return (account, returns, adv, optimization, decision_delta, snapshot)
+        return (account, adv, optimization, decision_delta, snapshot)
 
     monkeypatch.setattr(production, "_build_session", observe_decision)
     chunks, _calls = _build_producer(
@@ -1514,19 +1474,11 @@ def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
         selection_group="global",
         candidate_id="cash_mapping",
         construction="benchmark_enhanced",
-        prediction_target_id="prediction",
         prediction_selector="champion",
         rebalance_schedule="weekly-last-trading-day",
         top_quantile=None,
         benchmark_id="csi500",
-        benchmark_weights_target_id="benchmark",
-        research_dataset_id="dataset",
-        market_panel_target_id="panel",
-        execution_mask_target_id="execution",
-        trading_calendar_target_id="calendar",
-        fee_schedule_target_id="fee",
         risk_style_columns=("style",),
-        risk_context_target_ids=("risk",),
     )
     assumptions = ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,))
 
@@ -1588,7 +1540,7 @@ def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
         with pytest.raises(error, match=f"^{reason}$"):
             build()
         return
-    account, returns, adv, optimized, delta, _snapshot = build()
+    account, adv, optimized, delta, _snapshot = build()
     assert optimized is not None and "__cash__" in optimized.weights
     assert "__cash__" not in set(account.asset_ledger.asset_id)
     if retain_cash:
@@ -1596,8 +1548,8 @@ def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
     ledger = ledger_frame(
         account=account,
         decision_timestamp=pd.Timestamp("2023-01-06"),
-        returns=returns,
-        alpha_score=alpha,
+        returns=pd.Series(0.0, index=account.asset_ledger.asset_id),
+        prediction_rank_score=alpha,
         adv20=adv,
         enhanced_decision=enhanced,
         benchmark_weights=enhanced.benchmark_weights,
@@ -1613,30 +1565,30 @@ def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
     assert ledger.post_trade_notional.sum() + ledger.loc[
         :, list(PORTFOLIO_LEDGER_COST_COLUMNS)
     ].sum().sum() == pytest.approx(100.0)
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="cash_mapping",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": "2023-01-06",
-            "end": "2023-01-10",
-            "access": "development",
-        },
-        upstream_identities={},
-        semantic_metadata={
-            "portfolio_capital": {
+    envelope = {
+        "capital": PortfolioCapital(
+            **{
                 "candidate_id": "cash_mapping",
                 "initial_capital": 100.0,
                 "valuation_currency": "CNY",
                 "valuation_method": "adjusted_notional",
             }
+        ),
+        "metadata": {
+            "window": {
+                "start": "2023-01-06",
+                "end": "2023-01-10",
+                "access": "development",
+            }
         },
-    )
+    }
     root = write_test_sessions(
-        tmp_path / "ledger", envelope=envelope, ledger_chunks=iter((ledger,))
+        tmp_path / "ledger",
+        capital=envelope["capital"],
+        metadata=envelope["metadata"],
+        ledger_chunks=iter((ledger,)),
     )
-    saved = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    saved = read_portfolio_ledger_artifact(root)
     (batch,) = tuple(saved.iter_chunks())
     assert set(session_frame(batch).asset_id) == {"a", "b", "__cash__"}
 
@@ -1683,7 +1635,7 @@ def test_simple_producer_prediction_coverage_fails_closed(
 
 
 @pytest.mark.parametrize("unknown_quote", (False, True))
-def test_simple_producer_unknown_held_quote_blocks_without_fabricated_return(
+def test_simple_producer_unknown_held_quote_carries_without_fabricated_trade(
     tmp_path: Path, monkeypatch, unknown_quote
 ) -> None:
     frames, fee_frame, output_window = _inputs()
@@ -1713,8 +1665,15 @@ def test_simple_producer_unknown_held_quote_blocks_without_fabricated_return(
         output_window=output_window,
         typed_batches=True,
     )
-    with pytest.raises(PortfolioTargetBlocked, match="portfolio_held_return_missing"):
-        list(output)
+    batches = list(output)
+    assert batches
+    marked = [
+        row
+        for batch in batches
+        for row in batch.diagnostics
+        if row.name.endswith("mark_kind")
+    ]
+    assert any(row.text == "ordinary_missing_quote" for row in marked)
 
 
 def _mark_view(
@@ -1780,21 +1739,13 @@ def test_missing_open_cannot_borrow_its_future_close():
     marks = production._ResearchValuationMarks()
     marks.project(_mark_view("2023-01-04", 10.0, 11.0))
     output = marks.project(_mark_view("2023-01-05", np.nan, 12.0))
-    assert pd.isna(output.adj_open.iloc[0])
+    assert output.adj_open.iloc[0] == 11.0
     assert output.adj_close.iloc[0] == 12.0
-    assert pd.isna(output.research_open_mark_kind.iloc[0])
+    assert output.research_open_mark_kind.iloc[0] == "ordinary_missing_quote"
     fresh = production._ResearchValuationMarks().project(
         _mark_view("2023-01-05", np.nan, 12.0)
     )
     assert fresh.adj_open.isna().all()
-    with pytest.raises(PortfolioTargetBlocked, match="portfolio_held_return_missing"):
-        production._price_returns(
-            fresh.set_index("asset_id"),
-            output.set_index("asset_id"),
-            ["a"],
-            start_column="adj_open",
-            end_column="adj_open",
-        )
 
 
 @pytest.mark.parametrize("invalid", (0.0, -1.0, np.inf, -np.inf))
@@ -1866,83 +1817,75 @@ def test_multiple_unquoted_sessions_native_roundtrip_and_absolute_nav_stresses(
     )
     assert observations[1]["maximum_mark_age_days"] == 2
     assert observations[2]["estimated_held_assets"] == 1
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="synthetic_research_valuation",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": window.start.isoformat(),
-            "end": window.end.isoformat(),
-            "access": "development",
-        },
-        upstream_identities={},
-        semantic_metadata={
-            "portfolio_capital": {
+    envelope = {
+        "capital": PortfolioCapital(
+            **{
                 "candidate_id": "synthetic_research_valuation",
                 "initial_capital": 100.0,
                 "valuation_currency": "CNY",
                 "valuation_method": "adjusted_notional",
             }
+        ),
+        "metadata": {
+            "window": {
+                "start": window.start.isoformat(),
+                "end": window.end.isoformat(),
+                "access": "development",
+            }
         },
-    )
+    }
 
     def produce(emit):
         for batch in batches:
             emit(batch)
 
     root = write_portfolio_ledger_artifact(
-        tmp_path / "estimated", envelope=envelope, produce=produce
+        tmp_path / "estimated",
+        capital=envelope["capital"],
+        metadata=envelope["metadata"],
+        produce=produce,
     )
-    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    artifact = read_portfolio_ledger_artifact(root)
     assert list(artifact.iter_chunks()) == batches
 
     from quant_research_platform.artifacts.statistics import (
         read_statistics_artifact,
         write_statistics_artifact,
     )
-    from quant_research_platform.profiles.research import (
-        bind_research_configuration,
-        research_profile,
-    )
     from quant_research_platform.research.portfolios.diagnostics import (
         _portfolio_statistics_tables,
     )
     from quant_research_platform.research.portfolios.risk import HoldingFactorInputs
     from tests.helpers.research_configuration import research_configuration
-    from tests.helpers.statistics_artifacts import statistics_envelope
+    from tests.helpers.statistics_artifacts import (
+        portfolio_statistics_config,
+        statistics_metadata,
+    )
 
     configuration = research_configuration()
     configuration["portfolios"] = configuration["portfolios"][:1]
     configuration["primary_portfolio_id"] = configuration["portfolios"][0][
         "candidate_id"
     ]
-    protocol = bind_research_configuration(research_profile(), configuration).protocol(
-        "pv_all"
-    )
-    candidates = protocol.portfolio_candidates()
+    candidates, config = portfolio_statistics_config(configuration=configuration)
     ledgers = {}
     for candidate in candidates:
-        owned = build_business_manifest_envelope(
-            logical_artifact_id=candidate.candidate_id,
-            schema_identity=envelope.schema_identity,
-            protocol_or_spec_identity=envelope.protocol_or_spec_identity,
-            software_identity=envelope.software_identity,
-            research_window=envelope.research_window,
-            upstream_identities={},
-            semantic_metadata={
-                "portfolio_capital": {
-                    **envelope.payload()["semantic_metadata"]["portfolio_capital"],
+        owned = {
+            "capital": PortfolioCapital(
+                **{
+                    **asdict(envelope["capital"]),
                     "candidate_id": candidate.candidate_id,
                 }
-            },
-        )
+            ),
+            "metadata": {"window": envelope["metadata"]["window"]},
+        }
         owned_root = write_portfolio_ledger_artifact(
-            tmp_path / candidate.candidate_id, envelope=owned, produce=produce
+            tmp_path / candidate.candidate_id,
+            capital=owned["capital"],
+            metadata=owned["metadata"],
+            produce=produce,
         )
-        ledgers[candidate.candidate_id] = read_portfolio_ledger_artifact(
-            owned_root, expected_identity=owned_root.name
-        )
+        ledgers[candidate.candidate_id] = read_portfolio_ledger_artifact(owned_root)
     intervals = production.holding_intervals(
         pd.bdate_range(window.start, window.end), window
     )
@@ -1962,7 +1905,7 @@ def test_multiple_unquoted_sessions_native_roundtrip_and_absolute_nav_stresses(
     tables = _portfolio_statistics_tables(
         ledgers=ledgers,
         candidates=candidates,
-        protocol_manifest=protocol.manifest(),
+        config=config,
         time_window=window,
         benchmark_opens=pd.DataFrame(columns=("benchmark_id", "timestamp", "open")),
         calendar=pd.DataFrame(
@@ -1974,16 +1917,20 @@ def test_multiple_unquoted_sessions_native_roundtrip_and_absolute_nav_stresses(
             for candidate in candidates
         },
     )
-    stat_envelope = statistics_envelope(
-        envelope, group="portfolio", protocol=protocol.manifest()
+    stat_metadata = statistics_metadata(
+        window,
+        candidate_ids=[c.candidate_id for c in candidates],
+        comparison_portfolio_ids=config["statistics"]["group_comparison"][
+            "portfolio_ids"
+        ],
     )
     stat_root = write_statistics_artifact(
         tmp_path / "statistics",
-        envelope=stat_envelope,
+        metadata=stat_metadata,
         tables=tables,
         table_group="portfolio",
     )
-    saved = read_statistics_artifact(stat_root, expected_identity=stat_root.name)
+    saved = read_statistics_artifact(stat_root)
     with saved.table("portfolio_performance.parquet") as performance:
         metrics = performance.loc[
             performance.candidate_id.eq(candidates[0].candidate_id)
@@ -2391,7 +2338,7 @@ def test_structurally_invalid_held_asset_exits_under_existing_execution_rules(
     held = output.loc[output.asset_id.eq("b")]
     assert held.iloc[0].end_notional > 0.0
     later = held.loc[held.decision_timestamp.ge(second)]
-    assert later.alpha_score.isna().all()
+    assert later.prediction_rank_score.isna().all()
     assert all((asset != "b" for date, asset in lookup.matched if date >= second))
     if can_exit:
         assert later.iloc[0].executed_delta_notional < 0.0
@@ -2486,18 +2433,10 @@ def test_enhanced_producer_blocks_only_required_unknown_industry(
         prediction_selector="champion",
         candidate_id="unknown_industry",
         construction="benchmark_enhanced",
-        prediction_target_id="prediction",
         rebalance_schedule="weekly-last-trading-day",
         top_quantile=None,
         benchmark_id="csi500",
-        benchmark_weights_target_id="benchmark",
         risk_style_columns=RISK_STYLE_COLUMNS,
-        risk_context_target_ids=("risk_context",),
-        research_dataset_id="dataset",
-        market_panel_target_id="panel",
-        execution_mask_target_id="execution",
-        trading_calendar_target_id="calendar",
-        fee_schedule_target_id="fee",
     )
     chunks, _calls = _build_producer(
         tmp_path,
@@ -2522,7 +2461,6 @@ def test_final_alpha_includes_last_mature_session_and_persists_without_fake_trad
     tmp_path, monkeypatch
 ):
     from quant_research_platform.research.portfolios.accounting import AlphaCalibration
-    from quant_research_platform.workflows.research import _window_payload
 
     frames, fee_frame, _ = _inputs()
     window = TimeWindow("2023-01-03", "2023-01-10")
@@ -2550,18 +2488,10 @@ def test_final_alpha_includes_last_mature_session_and_persists_without_fake_trad
         prediction_selector="champion",
         candidate_id="synthetic_csi500_enhanced",
         construction="benchmark_enhanced",
-        prediction_target_id="prediction",
         rebalance_schedule="daily",
         top_quantile=None,
         benchmark_id="csi500",
-        benchmark_weights_target_id="benchmark",
         risk_style_columns=RISK_STYLE_COLUMNS,
-        risk_context_target_ids=("risk_context",),
-        research_dataset_id="dataset",
-        market_panel_target_id="panel",
-        execution_mask_target_id="execution",
-        trading_calendar_target_id="calendar",
-        fee_schedule_target_id="fee",
     )
     observed = []
     original = production.calibrate_expected_alpha
@@ -2593,36 +2523,25 @@ def test_final_alpha_includes_last_mature_session_and_persists_without_fake_trad
     assert max(frame.decision_timestamp.max() for frame in batches) < pd.Timestamp(
         window.end
     )
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="final-alpha-ledger",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window=_window_payload(window, access="development"),
-        upstream_identities=final[0]["upstream_identities"],
-        semantic_metadata={
-            "portfolio_capital": {
+    envelope = {
+        "capital": PortfolioCapital(
+            **{
                 "candidate_id": candidate.candidate_id,
                 "initial_capital": 100.0,
                 "valuation_currency": "CNY",
                 "valuation_method": "adjusted_notional",
-            },
-            "target_contract": {
-                "protocol": {"protocol_id": "a_share_low_frequency"},
-                "portfolio_candidate": {
-                    "construction": candidate.construction,
-                    "selection_group": candidate.selection_group,
-                },
-            },
-        },
-    )
+            }
+        ),
+        "metadata": {"window": {"start": str(window.start), "end": str(window.end)}},
+    }
     root = write_test_sessions(
         tmp_path / "final-alpha",
-        envelope=envelope,
+        capital=envelope["capital"],
+        metadata=envelope["metadata"],
         ledger_chunks=batches,
         final_calibration=lambda: final[0],
     )
-    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    artifact = read_portfolio_ledger_artifact(root)
     restored, cutoff = accounting.frozen_alpha_calibration(
         artifact.final_alpha_calibration,
         cutoff=window.end,
@@ -2630,7 +2549,7 @@ def test_final_alpha_includes_last_mature_session_and_persists_without_fake_trad
     )
     assert restored == final_state
     assert cutoff == pd.Timestamp(window.end).date().isoformat()
-    with pytest.raises(ValueError, match="holdout_alpha_calibration_binding_invalid"):
+    with pytest.raises(ValueError, match="test_alpha_calibration_binding_invalid"):
         accounting.frozen_alpha_calibration(
             artifact.final_alpha_calibration,
             cutoff="2023-01-09",
@@ -2719,7 +2638,7 @@ def _assert_execution_endpoints_roundtrip(
         account=account,
         decision_timestamp=pd.Timestamp("2023-01-03"),
         returns=zero,
-        alpha_score=zero,
+        prediction_rank_score=zero,
         adv20=pd.Series({"a": adv}),
         enhanced_decision=None,
         benchmark_weights=None,
@@ -2733,30 +2652,30 @@ def _assert_execution_endpoints_roundtrip(
     assert row.executed_delta_notional == expected_delta
     assert (None if pd.isna(row.block_reason) else row.block_reason) == expected_reason
     batch = continuous_ledger_batch(frame, 0, end_timestamp=pd.Timestamp("2023-01-05"))
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="roundoff_ledger",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": "2023-01-03",
-            "end": "2023-01-05",
-            "access": "development",
-        },
-        upstream_identities={"prediction": "b" * 64},
-        semantic_metadata={
-            "portfolio_capital": {
+    envelope = {
+        "capital": PortfolioCapital(
+            **{
                 "candidate_id": "roundoff_ledger",
                 "initial_capital": nav,
                 "valuation_currency": "CNY",
                 "valuation_method": "adjusted_notional",
             }
+        ),
+        "metadata": {
+            "window": {
+                "start": "2023-01-03",
+                "end": "2023-01-05",
+                "access": "development",
+            }
         },
-    )
+    }
     root = write_portfolio_ledger_artifact(
-        tmp_path / "ledger", envelope=envelope, produce=lambda emit: emit(batch)
+        tmp_path / "ledger",
+        capital=envelope["capital"],
+        metadata=envelope["metadata"],
+        produce=lambda emit: emit(batch),
     )
-    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    artifact = read_portfolio_ledger_artifact(root)
     (saved,) = tuple(artifact.iter_chunks())
     assert saved == batch
     if expected_delta:
@@ -2950,42 +2869,35 @@ def test_half_step_rebalance_uses_existing_ledger_and_preserves_residual_cash(
     assert (
         0 < second.loc[second.index != "__cash__", "decision_delta_weight"].sum() < 0.5
     )
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="half_step",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": "2023-01-03",
-            "end": "2023-01-06",
-            "access": "development",
-        },
-        upstream_identities={"prediction": "b" * 64},
-        semantic_metadata={
-            "portfolio_capital": {
+    envelope = {
+        "capital": PortfolioCapital(
+            **{
                 "candidate_id": "half_step",
                 "initial_capital": 100.0,
                 "valuation_currency": "CNY",
                 "valuation_method": "adjusted_notional",
             }
+        ),
+        "metadata": {
+            "window": {
+                "start": "2023-01-03",
+                "end": "2023-01-06",
+                "access": "development",
+            }
         },
-    )
+    }
 
     def produce(emit):
         for batch in batches:
             emit(batch)
 
     root = write_portfolio_ledger_artifact(
-        tmp_path / "half-step", envelope=envelope, produce=produce
+        tmp_path / "half-step",
+        capital=envelope["capital"],
+        metadata=envelope["metadata"],
+        produce=produce,
     )
-    assert (
-        list(
-            read_portfolio_ledger_artifact(
-                root, expected_identity=root.name
-            ).iter_chunks()
-        )
-        == batches
-    )
+    assert list(read_portfolio_ledger_artifact(root).iter_chunks()) == batches
 
 
 @pytest.mark.parametrize(
@@ -3010,16 +2922,9 @@ def test_empty_selection_executes_zero_target_without_bypassing_market_facts(
         prediction_selector="champion",
         candidate_id="empty",
         construction=construction,
-        prediction_target_id="prediction",
         rebalance_schedule="daily",
         top_quantile=0.5,
         benchmark_id=None,
-        benchmark_weights_target_id=None,
-        research_dataset_id="dataset",
-        market_panel_target_id="panel",
-        execution_mask_target_id="execution",
-        trading_calendar_target_id="calendar",
-        fee_schedule_target_id="fee",
     )
 
     def panel(at):
@@ -3125,7 +3030,9 @@ def test_cash_exposure_is_post_execution_ledger_cash(
         STATISTICS_TABLE_COLUMNS,
         _validated_frame,
     )
-    from tests.helpers.statistics_artifacts import statistics_envelope
+    from tests.helpers.statistics_artifacts import (
+        statistics_metadata,
+    )
 
     frames, fee_frame, window = _inputs()
     if not fees:
@@ -3166,35 +3073,24 @@ def test_cash_exposure_is_post_execution_ledger_cash(
         relative_wealth=np.nan,
         benchmark_status="UNDEFINED",
         benchmark_reason="not_requested",
-        access_window="development",
+        sample_role="validation",
     )
     daily = pd.DataFrame(
         [row], columns=STATISTICS_TABLE_COLUMNS["portfolio_daily.parquet"]
     )
-    envelope = statistics_envelope(
-        build_business_manifest_envelope(
-            logical_artifact_id="cash_probe_statistics",
-            schema_identity="a" * 64,
-            protocol_or_spec_identity="b" * 64,
-            software_identity="c" * 64,
-            research_window={
-                "start": window.start.isoformat(),
-                "end": window.end.isoformat(),
-                "access": "development",
-            },
-            upstream_identities={},
-            semantic_metadata={},
-        ),
-        group="portfolio",
-        protocol={
-            "access_window": "development",
-            "portfolio_candidates": [row["candidate_id"]],
-        },
-    ).payload()
-    _validated_frame(daily, member="portfolio_daily.parquet", envelope=envelope)
+    metadata = statistics_metadata(window, candidate_ids=[row["candidate_id"]])
+    _validated_frame(
+        daily,
+        member="portfolio_daily.parquet",
+        metadata=metadata,
+    )
     daily.loc[0, "cash_weight_post"] += 0.01
     with pytest.raises(ValueError, match="statistics_cash_exposure_invalid"):
-        _validated_frame(daily, member="portfolio_daily.parquet", envelope=envelope)
+        _validated_frame(
+            daily,
+            member="portfolio_daily.parquet",
+            metadata=metadata,
+        )
 
 
 @pytest.mark.parametrize("styles", (RISK_STYLE_COLUMNS[:-1], RISK_STYLE_COLUMNS))
@@ -3336,18 +3232,10 @@ def test_enhanced_candidates_share_only_common_fits_and_preserve_ledgers(
         prediction_selector="champion",
         candidate_id="shared_500",
         construction="benchmark_enhanced",
-        prediction_target_id="prediction",
         rebalance_schedule="daily",
         top_quantile=None,
         benchmark_id="csi500",
-        benchmark_weights_target_id="benchmark",
         risk_style_columns=RISK_STYLE_COLUMNS,
-        risk_context_target_ids=("risk_context",),
-        research_dataset_id="dataset",
-        market_panel_target_id="panel",
-        execution_mask_target_id="execution",
-        trading_calendar_target_id="calendar",
-        fee_schedule_target_id="fee",
     )
     candidates = (
         base,
@@ -3384,16 +3272,17 @@ def test_enhanced_candidates_share_only_common_fits_and_preserve_ledgers(
     baseline_counts = counts.copy()
     counts.update(alpha=0, risk=0)
     alpha_facts, risk_fits = {}, {}
+    shared_lookup = Lookup()
     for candidate, baseline in zip(candidates, expected, strict=True):
         final = []
         chunks, _ = _build_producer(
-            tmp_path / (candidate.candidate_id + "_shared"),
+            tmp_path / "shared_inputs",
             monkeypatch,
             frames=frames,
             fee_frame=fee,
             output_window=window,
             candidate=candidate,
-            prediction_lookup=Lookup(),
+            prediction_lookup=shared_lookup,
             shared_alpha_facts=alpha_facts,
             shared_risk_fits=risk_fits,
             final_calibrations=final,
@@ -3407,7 +3296,7 @@ def test_enhanced_candidates_share_only_common_fits_and_preserve_ledgers(
     assert counts["risk"] * 2 == baseline_counts["risk"]
     assert alpha_facts and risk_fits
 
-    for label, candidate, identities, changed_alpha, changed_risk in (
+    for _label, candidate, identities, changed_alpha, changed_risk in (
         ("selector", replace(base, prediction_selector="family"), None, True, False),
         (
             "schedule",
@@ -3422,13 +3311,13 @@ def test_enhanced_candidates_share_only_common_fits_and_preserve_ledgers(
     ):
         before = counts.copy()
         chunks, _ = _build_producer(
-            tmp_path / label,
+            tmp_path / "shared_inputs",
             monkeypatch,
             frames=frames,
             fee_frame=fee,
             output_window=window,
             candidate=candidate,
-            prediction_lookup=Lookup(),
+            prediction_lookup=shared_lookup,
             shared_alpha_facts=alpha_facts,
             shared_risk_fits=risk_fits,
             identity_overrides=identities,
@@ -3483,45 +3372,47 @@ def test_unheld_scoring_asset_calibration_binds_signal_entry_and_completion(
         prediction_lookup=Lookup(),
         typed_batches=True,
     )
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id=candidate.candidate_id,
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": str(window.start),
-            "end": str(window.end),
-            "access": "development",
-        },
-        upstream_identities={},
-        semantic_metadata={
-            "portfolio_capital": {
+    envelope = {
+        "capital": PortfolioCapital(
+            **{
                 "candidate_id": candidate.candidate_id,
                 "initial_capital": 100.0,
                 "valuation_currency": "CNY",
                 "valuation_method": "adjusted_notional",
             }
+        ),
+        "metadata": {
+            "window": {
+                "start": str(window.start),
+                "end": str(window.end),
+                "access": "development",
+            }
         },
-    )
+    }
 
     def produce(emit):
         for batch in chunks:
             emit(batch)
 
     root = write_portfolio_ledger_artifact(
-        tmp_path / "ledger", envelope=envelope, produce=produce
+        tmp_path / "ledger",
+        capital=envelope["capital"],
+        metadata=envelope["metadata"],
+        produce=produce,
     )
-    saved = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    saved = read_portfolio_ledger_artifact(root)
     batches = list(saved.iter_chunks())
     assert batches
     assert not any(trade.asset_id == "c" for batch in batches for trade in batch.trades)
     rows = completed[pd.Timestamp("2022-12-16")]
-    assert {row["alpha_score"] for row in rows} == (
+    assert {row["prediction_rank_score"] for row in rows} == (
         {0.0, 1.0, 2.0} if change_at is None else {0.0, 1.0}
     )
     if change_at is None:
         assert (
-            next(row for row in rows if row["alpha_score"] == 2.0)["holding_return"]
+            next(row for row in rows if row["prediction_rank_score"] == 2.0)[
+                "holding_return"
+            ]
             == 0.0
         )
 
@@ -3539,28 +3430,6 @@ def test_adv_history_restarts_for_new_listing_but_survives_same_life_closure():
     )
     assert set(history) == {("asset", new)}
     assert list(history[("asset", new)]) == [100.0]
-
-
-def test_positive_held_price_returns_distinguish_adjacent_endpoints():
-    from fractions import Fraction
-
-    import numpy as np
-
-    from quant_research_platform.research.portfolios.production import _price_returns
-
-    end_prices = [3.0, np.nextafter(3.0, np.inf)]
-    end_prices.append(np.nextafter(end_prices[-1], np.inf))
-    assets = pd.Index(["a", "b", "c"])
-    start = pd.DataFrame(
-        {"adj_open": 3.0, "listing_date": pd.Timestamp("2020-01-01")},
-        index=assets,
-    )
-    end = start.assign(adj_open=end_prices)
-    actual = _price_returns(
-        start, end, assets, start_column="adj_open", end_column="adj_open"
-    )
-    assert actual.tolist() == [float((Fraction(value) - 3) / 3) for value in end_prices]
-    assert actual.iloc[0] < actual.iloc[1] < actual.iloc[2]
 
 
 def test_confirmed_delisting_zero_mark_preserves_reliable_same_life_quote():
@@ -3653,32 +3522,30 @@ def test_portfolio_delisting_zero_nav_retains_units_and_recovers_amounts(
         if row.asset_id == "__cash__"
     )
 
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id=capital.candidate_id,
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": "2023-01-03",
-            "end": "2023-01-09",
-            "access": "development",
-        },
-        upstream_identities={},
-        semantic_metadata={
-            "portfolio_capital": {
+    envelope = {
+        "capital": PortfolioCapital(
+            **{
                 "candidate_id": capital.candidate_id,
                 "initial_capital": 100.0,
                 "valuation_currency": "CNY",
                 "valuation_method": "adjusted_notional",
             }
+        ),
+        "metadata": {
+            "window": {
+                "start": "2023-01-03",
+                "end": "2023-01-09",
+                "access": "development",
+            }
         },
-    )
+    }
     root = write_portfolio_ledger_artifact(
         tmp_path / "zero-artifact",
-        envelope=envelope,
+        capital=envelope["capital"],
+        metadata=envelope["metadata"],
         produce=lambda emit: [emit(batch) for batch in batches],
     )
-    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    artifact = read_portfolio_ledger_artifact(root)
     assert list(artifact.iter_chunks()) == batches
     assert sum(
         row.value

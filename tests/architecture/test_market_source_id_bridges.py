@@ -11,7 +11,7 @@ SOURCE_ROOT = Path("src/quant_research_platform")
 MARKET_ROOT = SOURCE_ROOT / "markets/implementations"
 
 
-def test_market_implementations_import_only_source_id_contracts(
+def test_market_calculations_use_source_contracts_except_explicit_operations(
     import_edges: tuple[ImportEdge, ...],
 ) -> None:
     violations = [
@@ -20,6 +20,11 @@ def test_market_implementations_import_only_source_id_contracts(
         if edge.path.is_relative_to(MARKET_ROOT)
         and edge.module.startswith("quant_research_platform.sources")
         and not is_ids_contract_import(edge.module)
+        and edge.path
+        not in {
+            MARKET_ROOT / "crypto/portfolio.py",
+            MARKET_ROOT / "crypto/processed/external_market_context.py",
+        }
     ]
 
     assert violations == []

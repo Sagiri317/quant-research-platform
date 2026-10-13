@@ -635,7 +635,7 @@ def test_trade_resends_preserve_raw_bytes_and_count_each_identity_once(
 
 
 @pytest.mark.parametrize("cancel", [False, True, "early"])
-def test_archive_four_cursors_share_one_native_scan_and_close(
+def test_archive_independent_cursors_close_without_spools(
     tmp_path, monkeypatch, cancel
 ):
     import quant_research_platform.sources.tardis.raw as raw
@@ -737,7 +737,7 @@ def test_archive_four_cursors_share_one_native_scan_and_close(
                             )
                             assert len(result) == (1 if kinds == ("agg_trades",) else 3)
                     assert len(list(slow)) == 2
-                    assert calls == 1 and rows == 8
+                    assert calls == 5 and rows == 40
                     repeated = list(
                         source.iter_market_records(
                             symbol="BTCUSDT",
@@ -745,16 +745,18 @@ def test_archive_four_cursors_share_one_native_scan_and_close(
                             data_kinds=("agg_trades",),
                         )
                     )
-                    assert len(repeated) == 1 and calls == 1
+                    assert len(repeated) == 1 and calls == 6
     except KeyboardInterrupt as error:
         interrupted = True
         assert cancel and str(error) == "cancel_native_scan"
     assert interrupted is (cancel is True)
     assert handles and all(handle.closed for handle in handles)
-    assert buffers and all(handle.closed for handle in buffers)
+    assert not buffers
 
 
-def test_archive_tail_shares_native_scan_and_preserves_replay(tmp_path, monkeypatch):
+def test_archive_redecoding_preserves_order_and_independent_payloads(
+    tmp_path, monkeypatch
+):
     from collections import Counter
     from functools import partial
 
@@ -846,125 +848,37 @@ def test_archive_tail_shares_native_scan_and_preserves_replay(tmp_path, monkeypa
             )
             == 8
         )
-        assert calls["native_scans"] == 1 and calls["native_rows"] == 514
+        assert calls["native_scans"] == 4 and calls["native_rows"] >= 3 * 514
     assert handles and all(handle.closed for handle in handles)
 
 
-def test_cursor_spool_batches_native_appends(tmp_path, monkeypatch):
-    import io
-    from collections import Counter
-    from contextlib import ExitStack
-
-    import quant_research_platform.sources.tardis.replay as replay
-
-    calls = Counter()
-    streams = []
-
-    class CountedFile(io.FileIO):
-        def write(self, value):
-            calls["write"] += 1
-            return super().write(value)
-
-        def seek(self, offset, whence=0):
-            calls["seek"] += 1
-            return super().seek(offset, whence)
-
-    def temporary_file():
-        stream = io.BufferedRandom(CountedFile(tmp_path / "buffer", "w+"))
-        streams.append(stream)
-        return stream
-
-    def records(self):
-        for number in range(5000):
-            yield (
-                ("BTCUSDT", "agg_trades"),
-                {
-                    "sequence": number,
-                    "payload": "x" * 256,
-                },
-            )
-
-    monkeypatch.setattr(replay, "TemporaryFile", temporary_file)
-    monkeypatch.setattr(replay.TardisArchive, "_iter_canonical_records", records)
-    with ExitStack() as resources:
-        archive = replay.TardisArchive(tmp_path, {}, {}, None, resources, lambda: None)
-        for number, (_start, record) in enumerate(
-            archive._stream_records("BTCUSDT", "agg_trades", None)
-        ):
-            assert record == {"sequence": number, "payload": "x" * 256}
-        assert number == 4999
-    assert streams and all(stream.closed for stream in streams)
-    assert calls["write"] < 500 and calls["seek"] < 500
-
-
-def test_cursor_spool_releases_payloads_with_native_decoder_replaced(
-    tmp_path, monkeypatch
-):
+def test_unrequested_streams_and_consumed_history_have_no_spool(tmp_path, monkeypatch):
     import tracemalloc
-    from contextlib import ExitStack
 
     import quant_research_platform.sources.tardis.replay as replay
 
     def records(self):
         for number in range(5000):
+            yield ("ETHUSDT", "depth"), {"payload": "x" * 4096 + str(number)}
             yield ("BTCUSDT", "agg_trades"), {"payload": "x" * 4096 + str(number)}
 
+    def forbidden():
+        raise AssertionError("unnecessary replay spool")
+
+    monkeypatch.setattr(replay, "TemporaryFile", forbidden)
     monkeypatch.setattr(replay.TardisArchive, "_iter_canonical_records", records)
     tracemalloc.start()
     try:
-        with ExitStack() as resources:
-            archive = replay.TardisArchive(
-                tmp_path, {}, {}, None, resources, lambda: None
-            )
+        for _ in range(10):
+            archive = replay.TardisArchive(tmp_path, {}, {}, None)
             assert (
                 sum(1 for _ in archive._stream_records("BTCUSDT", "agg_trades", None))
                 == 5000
             )
-            retained, _peak = tracemalloc.get_traced_memory()
-            assert retained < 1024**2
-            buffers = tuple(archive._records_by_stream.values())
-        assert all(stream.closed for stream, _end in buffers)
+        retained, peak = tracemalloc.get_traced_memory()
+        assert retained < 1024**2 and peak < 2 * 1024**2
     finally:
         tracemalloc.stop()
-
-
-def test_archive_buffer_close_keeps_native_decode_failure(tmp_path, monkeypatch):
-    import io
-    from contextlib import ExitStack
-
-    import quant_research_platform.sources.tardis.replay as replay
-
-    primary = ValueError("controlled_native_decode_failure")
-    buffers = []
-
-    class BrokenClose(io.BytesIO):
-        def close(self):
-            if not self.closed:
-                super().close()
-                raise OSError("controlled_buffer_close_failure")
-
-    def temporary_file():
-        stream = BrokenClose()
-        buffers.append(stream)
-        return stream
-
-    def records(self):
-        yield ("BTCUSDT", "agg_trades"), {"payload": "synthetic"}
-        raise primary
-
-    monkeypatch.setattr(replay, "TemporaryFile", temporary_file)
-    monkeypatch.setattr(replay.TardisArchive, "_iter_canonical_records", records)
-    with pytest.raises(ValueError) as caught:
-        with ExitStack() as resources:
-            archive = replay.TardisArchive(
-                tmp_path, {}, {}, None, resources, lambda: None
-            )
-            list(archive._stream_records("BTCUSDT", "agg_trades", None))
-    assert caught.value is primary
-    assert all(stream.closed for stream in buffers)
-    assert any(
-        "iterator close also failed: OSError" in note for note in primary.__notes__
-    )
 
 
 @pytest.mark.parametrize("snapshot_depths", [(12, 12), (12, 13), (13, 12), (12, 9)])
@@ -973,7 +887,6 @@ def test_disjoint_archives_preserve_reset_ids_through_processed_publication(
 ):
     from functools import partial
 
-    from quant_research_platform.contracts.json_codec import canonical_json_hash
     from quant_research_platform.contracts.time import TimeWindow
     from quant_research_platform.markets.implementations.crypto.hft import (
         iter_label_frames,
@@ -1070,7 +983,6 @@ def test_disjoint_archives_preserve_reset_ids_through_processed_publication(
         assert source.market_metadata(FUTURES_MARKET_TYPE, "BTCUSDT")[
             "snapshot_limit"
         ] == max(snapshot_depths)
-        identity = canonical_json_hash(source.source_identity)
         rows = list(
             source.iter_market_records(
                 symbol="BTCUSDT",
@@ -1126,7 +1038,7 @@ def test_disjoint_archives_preserve_reset_ids_through_processed_publication(
         return
     with processed_producer.produce_hft_processed_data(
         spec,
-        layout=layout,
+        inputs={},
         time_window=window,
         processed_catalog=catalog,
         source_catalog=None,
@@ -1135,12 +1047,9 @@ def test_disjoint_archives_preserve_reset_ids_through_processed_publication(
         read_trades=iter_agg_trades,
         make_stats=ReconstructionStats,
         raw_root=tmp_path,
-        expected_source_identity=identity,
         symbols=("BTCUSDT",),
-    ) as (data, metadata, verify):
-        write_dataset(
-            root, data, spec=spec, instance_metadata=metadata, staged_validator=verify
-        )
+    ) as (data, metadata):
+        write_dataset(root, data, spec=spec, metadata=metadata)
     panel = read_dataset(root)
     assert set(panel.timestamp.dt.strftime("%Y-%m-%d")) == set(dates)
     assert panel.loc[panel.timestamp.dt.month == 7, "mid"].dropna().eq(100.5).all()
@@ -1179,7 +1088,6 @@ def test_disjoint_archives_preserve_reset_ids_through_processed_publication(
     manifest_path.write_text(json.dumps(manifest))
     seen = []
     with opener(tmp_path) as source:
-        bad_identity = canonical_json_hash(source.source_identity)
         with pytest.raises(ValueError, match="tardis_native_line_count_mismatch"):
             for row in source.iter_market_records(
                 symbol="BTCUSDT",
@@ -1194,7 +1102,7 @@ def test_disjoint_archives_preserve_reset_ids_through_processed_publication(
     with pytest.raises(ValueError, match="tardis_native_line_count_mismatch"):
         with processed_producer.produce_hft_processed_data(
             spec,
-            layout=layout,
+            inputs={},
             time_window=window,
             processed_catalog=catalog,
             source_catalog=None,
@@ -1203,15 +1111,13 @@ def test_disjoint_archives_preserve_reset_ids_through_processed_publication(
             read_trades=iter_agg_trades,
             make_stats=ReconstructionStats,
             raw_root=tmp_path,
-            expected_source_identity=bad_identity,
             symbols=("BTCUSDT",),
-        ) as (data, metadata, verify):
+        ) as (data, metadata):
             write_dataset(
                 candidate_root,
                 data,
                 spec=spec,
-                instance_metadata=metadata,
-                staged_validator=verify,
+                metadata=metadata,
             )
     assert not candidate_root.exists()
     assert {
@@ -1398,11 +1304,11 @@ def test_archive_actual_spans_sort_equivalent_cross_midnight_slices(tmp_path):
                 destination,
                 frame,
                 spec=spec,
-                instance_metadata={"source_artifact_identity": source.source_identity},
+                metadata={"source_evidence": source.source_identity},
             )
             pd.testing.assert_frame_equal(read_dataset(destination), frame)
             assert (
-                inspect_dataset(destination).manifest["source_artifact_identity"]
+                inspect_dataset(destination).manifest["source_evidence"]
                 == source.source_identity
             )
     assert all(summary == summaries[0] for summary in summaries)

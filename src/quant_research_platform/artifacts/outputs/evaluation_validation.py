@@ -30,6 +30,7 @@ from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_membership_series,
     strict_string_series,
+    strict_timestamp_series,
 )
 
 EVALUATION_ARTIFACTS = [
@@ -37,7 +38,6 @@ EVALUATION_ARTIFACTS = [
     "grouped_label_values.parquet",
     "ic_summary.parquet",
     "group_spread_summary.parquet",
-    "summary.md",
 ]
 _EVALUATION_OUTPUT_METADATA_KEYS = frozenset(
     {
@@ -74,11 +74,37 @@ _EVALUATION_DIAGNOSTIC_KEYS = frozenset(
 )
 
 
+def validate_evaluation_science(metadata):
+    """Validate the optional actual evaluation window, knowledge cutoff and role."""
+    from quant_research_platform.contracts.time import TimeWindow
+
+    if type(metadata) is not dict or set(metadata) != {
+        "window",
+        "cutoff",
+        "sample_role",
+    }:
+        raise ValueError("evaluation_science_metadata_invalid")
+    if metadata["sample_role"] not in {"train", "validation", "test"}:
+        raise ValueError("evaluation_sample_role_invalid")
+    window = TimeWindow(**metadata["window"])
+    if window.end is None or any(
+        pd.isna(pd.Timestamp(value))
+        for value in (window.start, window.end, metadata["cutoff"])
+    ):
+        raise ValueError("evaluation_science_time_invalid")
+
+
 def validate_evaluation_output_metadata_shape(
     metadata: object,
 ) -> dict[str, object]:
-    if type(metadata) is not dict or set(metadata) != _EVALUATION_OUTPUT_METADATA_KEYS:
+    science = {"window", "cutoff", "sample_role"}
+    if type(metadata) is not dict or set(metadata) not in (
+        _EVALUATION_OUTPUT_METADATA_KEYS,
+        _EVALUATION_OUTPUT_METADATA_KEYS | science,
+    ):
         raise ValueError("output_manifest_metadata_invalid")
+    if science <= set(metadata):
+        validate_evaluation_science({key: metadata[key] for key in science})
     for key in (
         "evaluation_id",
         "run_type",
@@ -141,6 +167,20 @@ def validate_evaluation_output_metadata_shape(
     )
     if (diagnostics["min_timestamp"] is None) != (diagnostics["max_timestamp"] is None):
         raise ValueError("output_manifest_metadata_invalid")
+    if science <= set(metadata) and min_timestamp is not None:
+        from quant_research_platform.contracts.time import (
+            TimeWindow,
+            time_window_timestamp_interval,
+        )
+
+        start, stop, closed = time_window_timestamp_interval(
+            TimeWindow(**metadata["window"])
+        )
+        maximum = pd.Timestamp(max_timestamp)
+        if pd.Timestamp(min_timestamp) < pd.Timestamp(start) or (
+            maximum > pd.Timestamp(stop) if closed else maximum >= pd.Timestamp(stop)
+        ):
+            raise ValueError("evaluation_diagnostics_outside_window")
     if not (
         diagnostics["rows_after_filter_mode"] <= diagnostics["rows_input"]
         and diagnostics["rows_after_signal_label_dropna"]
@@ -269,9 +309,34 @@ def validate_evaluation_artifact_structure(
     ic_summary: pd.DataFrame,
     group_spread_summary: pd.DataFrame,
     spec: EvaluationSpec,
+    science: dict | None = None,
+    validate_pairs: bool = False,
 ) -> None:
     for frame in (metrics, grouped_label_values, ic_summary, group_spread_summary):
         _validate_signal_label_membership(frame, spec=spec)
+    for frame in (metrics, grouped_label_values):
+        if frame.empty:
+            continue
+        if not pd.api.types.is_datetime64_any_dtype(frame.timestamp.dtype):
+            raise ValueError("invalid_evaluation_timestamp_values")
+        timestamps = strict_timestamp_series(
+            frame.timestamp, error="invalid_evaluation_timestamp_values"
+        )
+        if science is not None and "window" in science:
+            from quant_research_platform.contracts.time import (
+                TimeWindow,
+                time_window_timestamp_interval,
+            )
+
+            start, stop, closed = time_window_timestamp_interval(
+                TimeWindow(**science["window"])
+            )
+            if timestamps.lt(pd.Timestamp(start)).any() or (
+                timestamps.gt(pd.Timestamp(stop)).any()
+                if closed
+                else timestamps.ge(pd.Timestamp(stop)).any()
+            ):
+                raise ValueError("evaluation_member_outside_window")
     if spec.evaluation_axis == "single_asset_time_series":
         if (
             not grouped_label_values.empty
@@ -435,6 +500,21 @@ def validate_evaluation_artifact_structure(
                     raise ValueError("invalid_evaluation_statistic_reason")
             elif insufficient:
                 raise ValueError("invalid_evaluation_statistic_reason")
+
+    if validate_pairs and spec.evaluation_axis == "cross_sectional":
+        expected = {
+            (row.timestamp, row.signal, row.label): int(row.n_obs)
+            for row in metrics.itertuples(index=False)
+            if row.n_obs >= 2
+        }
+        observed = {}
+        for row in grouped_label_values.itertuples(index=False):
+            if row.n_obs <= 0 or pd.isna(row.mean_label_value):
+                raise ValueError("evaluation_group_observations_invalid")
+            key = (row.timestamp, row.signal, row.label)
+            observed[key] = observed.get(key, 0) + int(row.n_obs)
+        if observed != expected:
+            raise ValueError("evaluation_metric_group_observations_mismatch")
 
 
 def _reject_duplicate_keys(

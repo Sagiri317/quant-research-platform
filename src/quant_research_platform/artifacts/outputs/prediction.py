@@ -1,239 +1,260 @@
-"""Prediction output writer."""
+"""Publish already computed prediction rows; never fit or call a model."""
 
 from __future__ import annotations
 
-import heapq
-from collections.abc import Callable, Iterable, Mapping
-from contextlib import ExitStack
-from itertools import groupby
+from collections.abc import Sequence
 from pathlib import Path
-from uuid import uuid4
 
 import pandas as pd
+import pyarrow as pa
 
-from quant_research_platform.artifacts.outputs.common_validation import (
-    derive_output_bundle_root,
-)
-from quant_research_platform.artifacts.outputs.manifest import (
-    PREDICTION_ARTIFACTS,
-    output_manifest_payload,
-    prediction_output_metadata,
-)
-from quant_research_platform.artifacts.outputs.parquet import write_parquet_chunks
 from quant_research_platform.artifacts.outputs.prediction_validation import (
-    model_metadata_with_effective_prediction_end,
-    validate_crypto_prediction_frame,
-    validate_family_prediction_frame,
-    validate_model_metadata_consistency,
-    validate_model_metadata_shape,
-    validate_model_prediction_metadata_consistency,
-    validate_prediction_metadata_consistency_from_summary,
-    validate_prediction_metadata_shape,
+    validate_prediction_frame,
+    validate_prediction_output_metadata_shape,
 )
-from quant_research_platform.contracts.outputs import OutputSpec
-from quant_research_platform.contracts.predictions import (
-    PredictionSpec,
-    prediction_output_columns,
+from quant_research_platform.storage.atomic import (
+    atomic_write_directory,
+    atomic_write_json,
 )
-from quant_research_platform.contracts.time import is_datetime_value
-from quant_research_platform.contracts.validation import strict_timestamp_series
-from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.runtime.dataframes import iter_complete_session_frames
-from quant_research_platform.storage._scratch_ownership import (
-    owned_scratch_name,
-    remove_owned_scratch,
-)
-from quant_research_platform.storage.atomic import atomic_write_directory
-from quant_research_platform.storage.identity import (
-    dataset_file_identity,
-)
-from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.storage.manifests import write_manifest
-from quant_research_platform.storage.parquet import iter_dataset_part_batches
+from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 
 
 def write_prediction_outputs(
-    *,
-    spec: PredictionSpec,
-    output_spec: OutputSpec,
-    layout: StorageLayout,
-    output_chunks: Iterable[pd.DataFrame],
-    model_metadata: Mapping[str, object],
-    prediction_metadata_factory: Callable[[], Mapping[str, object]],
+    *, output_path: Path, output_chunks, metadata: dict
 ) -> Path:
-    output_bundle = derive_output_bundle_root(
-        output_spec=output_spec,
-        layout=layout,
-        expected_definition_id="prediction_outputs",
+    from quant_research_platform.artifacts.outputs.manifest import (
+        output_manifest_payload,
     )
-    required = prediction_output_columns(
-        spec.prediction_mode, spec.prediction_column, spec.primary_key
-    )
-    model_metadata_payload = validate_model_metadata_shape(dict(model_metadata))
-    validate_model_metadata_consistency(model_metadata_payload, spec=spec)
+    from quant_research_platform.artifacts.outputs.parquet import write_parquet_chunks
 
-    def validate_frame(frame: pd.DataFrame) -> None:
-        timestamps = strict_timestamp_series(
-            frame["timestamp"], error="prediction_metadata_inconsistent"
-        )
-        if timestamps.min() < pd.Timestamp(spec.test_start) or (
-            spec.test_end is not None and timestamps.max() > pd.Timestamp(spec.test_end)
+    destination = Path(output_path)
+
+    def write(staging):
+        from itertools import chain
+
+        first = next((frame for frame in chunks if not frame.empty), None)
+        final_metadata = dict(metadata)
+        if first is None:
+            empty = pd.DataFrame(
+                {
+                    "timestamp": pd.Series(dtype="datetime64[ns]"),
+                    "asset_id": pd.Series(dtype="str"),
+                    "prediction_score": pd.Series(dtype="float64"),
+                    "prediction_rank_score": pd.Series(dtype="float64"),
+                }
+            )
+            empty.to_parquet(staging / "prediction.parquet", index=False)
+            final_metadata.update(
+                prediction_rows=0, effective_prediction_end=None, status="empty"
+            )
+        else:
+            summary = write_parquet_chunks(
+                chain((first,), chunks),
+                staging / "prediction.parquet",
+                metadata=metadata,
+            )
+            final_metadata.update(
+                prediction_rows=summary.row_count,
+                effective_prediction_end=summary.effective_prediction_end,
+                status="complete",
+            )
+        validate_prediction_output_metadata_shape(final_metadata)
+        if (
+            metadata.get("prediction_rows") is not None
+            and metadata["prediction_rows"] != final_metadata["prediction_rows"]
         ):
             raise ValueError("prediction_metadata_inconsistent")
-        if spec.prediction_mode == "crypto_oos":
-            validate_crypto_prediction_frame(frame, model_metadata_payload)
-
-    def _write(temp_root: Path) -> None:
-        paths = []
-        primary = None
-        try:
-            active_frames = output_chunks
-            if spec.prediction_mode == "a_share_oos":
-                paths = _stage_family_predictions(
-                    output_chunks, temp_root, required, spec, model_metadata_payload
-                )
-                active_frames = _merge_family_predictions(paths, required)
-            write_summary = write_parquet_chunks(
-                active_frames,
-                temp_root / "prediction.parquet",
-                required=required,
-                key_columns=tuple(spec.primary_key),
-                compression="zstd",
-                date_only=not is_datetime_value(spec.test_start),
-                validate_frame=validate_frame,
-            )
-        except BaseException as body_error:
-            primary = body_error
-            raise
-        finally:
-            for _quarter, _family, path in paths:
-                try:
-                    remove_owned_scratch(path)
-                except BaseException as cleanup:
-                    if primary is None:
-                        raise
-                    primary.add_note(
-                        "family prediction cleanup also failed: "
-                        f"{type(cleanup).__name__}"
-                    )
-        prediction_metadata = validate_prediction_metadata_shape(
-            dict(prediction_metadata_factory())
-        )
-        validate_prediction_metadata_consistency_from_summary(
-            prediction_metadata,
-            spec=spec,
-            row_count=write_summary.row_count,
-            effective_test_end=write_summary.effective_test_end,
-        )
-        effective_model_metadata = model_metadata_with_effective_prediction_end(
-            model_metadata_payload, prediction_metadata
-        )
-        validate_model_metadata_consistency(effective_model_metadata, spec=spec)
-        validate_model_prediction_metadata_consistency(
-            effective_model_metadata, prediction_metadata
-        )
-        write_manifest(
-            temp_root / "manifest.json",
+        if metadata.get("effective_prediction_end") is not None and pd.Timestamp(
+            metadata["effective_prediction_end"]
+        ) != pd.Timestamp(final_metadata["effective_prediction_end"]):
+            raise ValueError("prediction_metadata_inconsistent")
+        atomic_write_json(
+            staging / "manifest.json",
             output_manifest_payload(
-                output_spec=output_spec,
-                metadata=prediction_output_metadata(
-                    spec=spec,
-                    model_metadata=effective_model_metadata,
-                    prediction_metadata=prediction_metadata,
-                ),
-                files=PREDICTION_ARTIFACTS,
+                definition_id="prediction_outputs",
+                metadata=final_metadata,
+                files=("prediction.parquet",),
             ),
         )
 
-    atomic_write_directory(output_bundle, _write)
-    return output_bundle
+    from quant_research_platform.policy.lifecycle import closing_iterator
+
+    with closing_iterator(iter(output_chunks)) as chunks:
+        if (
+            metadata.get("prediction_rows") is not None
+            and type(metadata["prediction_rows"]) is not int
+        ):
+            raise ValueError("invalid_prediction_row_count")
+        atomic_write_directory(destination, write)
+    return destination
 
 
-def _stage_family_predictions(frames, root, required, spec, metadata):
-    paths = []
-    expected = {
-        (item["quarter_id"], item["family_id"]): index
-        for index, item in enumerate(metadata["quarterly_models"])
-    }
-    seen = set()
+def read_predictions(path: Path, *, time_window=None):
+    """Read selected predictions without fitting or discovery."""
+    from quant_research_platform.artifacts.outputs.bundle_validation import (
+        validate_output_bundle,
+    )
 
-    def group_key(item):
-        frame = item
-        if frame.empty:
-            raise ValueError("empty_family_prediction_stream")
-        validate_family_prediction_frame(frame, metadata)
-        if len(frame[["quarter_id", "family_id"]].drop_duplicates()) != 1:
-            raise ValueError("prediction_family_chunk_mixed")
-        return (frame["quarter_id"].iloc[0], frame["family_id"].iloc[0])
+    manifest, _members = validate_output_bundle(
+        Path(path), expected_definition_id="prediction_outputs"
+    )
+    metadata = manifest["metadata"]
+    from quant_research_platform.policy.lifecycle import closing_iterator
 
-    with closing_iterator(iter(frames)) as source:
-        for coordinate, group in groupby(source, key=group_key):
-            if coordinate not in expected or coordinate in seen:
-                raise ValueError("prediction_family_stream_coordinate_invalid")
-            seen.add(coordinate)
-            path = root / owned_scratch_name(".s-", uuid4().hex[:12])
-            write_parquet_chunks(
-                group,
-                path,
-                required=required,
-                key_columns=spec.primary_key,
-                compression="zstd",
-                date_only=True,
+    with closing_iterator(iter_predictions(path, time_window=time_window)) as chunks:
+        frames = list(chunks)
+    frame = (
+        pd.concat(frames, ignore_index=True)
+        if frames
+        else pd.DataFrame(
+            {
+                "timestamp": pd.Series(dtype="datetime64[ns]"),
+                "asset_id": pd.Series(dtype="str"),
+                "prediction_score": pd.Series(dtype="float64"),
+                "prediction_rank_score": pd.Series(dtype="float64"),
+            }
+        )
+    )
+    return frame, metadata
+
+
+def iter_predictions(path: Path, *, columns=None, time_window=None):
+    """Project requested prediction columns/window from the chosen native member."""
+    from quant_research_platform.artifacts.outputs.bundle_validation import (
+        validate_output_bundle,
+    )
+    from quant_research_platform.policy.lifecycle import closing_iterator
+    from quant_research_platform.storage.datasets.reading import (
+        parquet_filters_for_time_window,
+    )
+    from quant_research_platform.storage.parquet import iter_dataset_part_batches
+
+    manifest, _members = validate_output_bundle(
+        Path(path), expected_definition_id="prediction_outputs"
+    )
+    metadata = manifest["metadata"]
+    requested = (
+        ("timestamp", "asset_id", "prediction_score", "prediction_rank_score")
+        if columns is None
+        else tuple(columns)
+    )
+    if (
+        not requested
+        or len(requested) != len(set(requested))
+        or set(requested)
+        - {"timestamp", "asset_id", "prediction_score", "prediction_rank_score"}
+    ):
+        raise ValueError("prediction_projection_columns_invalid")
+    physical = ("timestamp", "asset_id", "prediction_score", "prediction_rank_score")
+    filters = parquet_filters_for_time_window(
+        timestamp_column="timestamp", time_window=time_window
+    )
+    count = 0
+    maximum = None
+    keys = ExactPrimaryKeyIndex(primary_key=("timestamp", "asset_id"))
+    with closing_iterator(
+        iter_dataset_part_batches(
+            Path(path) / "prediction.parquet", columns=physical, parquet_filters=filters
+        )
+    ) as batches:
+        for batch in batches:
+            frame = batch.to_pandas()
+            if frame.empty:
+                continue
+            validate_prediction_frame(frame, metadata, columns=physical)
+            duplicates = keys.add_table(
+                pa.Table.from_pandas(
+                    frame.loc[:, ["timestamp", "asset_id"]], preserve_index=False
+                ),
+                namespace="prediction",
             )
-            paths.append((*coordinate, path))
-    return sorted(paths, key=lambda item: expected[item[:2]])
-
-
-def _merge_family_predictions(paths, columns):
-    for _quarter, group in groupby(paths, key=lambda item: item[0]):
-        members = list(group)
-
-        def frames(path):
-            batches = iter_dataset_part_batches(
-                path, expected_identity=dataset_file_identity(path), columns=columns
+            if duplicates:
+                raise ValueError("prediction_coverage_invalid")
+            count += len(frame)
+            maximum = (
+                frame.timestamp.max()
+                if maximum is None
+                else max(maximum, frame.timestamp.max())
             )
-            with closing_iterator(batches):
-                for batch in batches:
-                    frame = batch.to_pandas()
-                    try:
-                        yield frame
-                    except GeneratorExit:
-                        return
+            yield frame.loc[:, list(requested)]
+    if time_window is None and (
+        count != metadata["prediction_rows"]
+        or (count and maximum != pd.Timestamp(metadata["effective_prediction_end"]))
+    ):
+        raise ValueError("prediction_metadata_inconsistent")
 
-        with ExitStack() as readers:
-            heap = []
 
-            for _qid, family, path in members:
-                source = readers.enter_context(
-                    closing_iterator(
-                        iter_complete_session_frames(
-                            iter(frames(path)), timestamp_column="timestamp"
-                        )
-                    )
-                )
-                first = next(source, None)
-                if first is None:
-                    raise ValueError("empty_family_prediction_stream")
-                heapq.heappush(
-                    heap,
-                    (
-                        pd.Timestamp(first["timestamp"].iloc[0]),
-                        family,
-                        first,
-                        source,
-                    ),
-                )
+class _PredictionLookup:
+    def __init__(
+        self,
+        *,
+        index: ExactPrimaryKeyIndex,
+        primary_key: tuple[str, ...],
+        prediction_column: str,
+    ) -> None:
+        self._index = index
+        self.primary_key = primary_key
+        self.prediction_column = prediction_column
+        self.row_count = 0
 
-            while heap:
-                timestamp, family, frame, source = heapq.heappop(heap)
-                try:
-                    yield frame
-                except GeneratorExit:
-                    return
+    def close(self) -> None:
+        self._index = None
 
-                following = next(source, None)
-                if following is not None:
-                    next_timestamp = pd.Timestamp(following["timestamp"].iloc[0])
-                    if next_timestamp <= timestamp:
-                        raise ValueError("prediction_family_time_order_invalid")
-                    heapq.heappush(heap, (next_timestamp, family, following, source))
+    def values_for_frame(
+        self, frame: pd.DataFrame, *, mark_matched: bool
+    ) -> tuple[Sequence[float], bytearray]:
+        if any(column not in frame for column in self.primary_key):
+            raise ValueError("persisted_prediction_join_key_invalid")
+        lookup_frame = frame.loc[:, list(self.primary_key)]
+        table = pa.Table.from_pandas(
+            lookup_frame.loc[:, list(self.primary_key)], preserve_index=False
+        )
+        values, found = self._index.lookup_float_values(
+            table,
+            source_namespace="prediction",
+            matched_namespace="prediction-matched",
+            mark_matched=mark_matched,
+        )
+        return (values, found)
+
+    def coverage_counts(self) -> tuple[int, int]:
+        # Matching moves each key out of the outstanding partition.
+        return (self._index.float_value_count(namespace="prediction"), 0)
+
+
+def read_prediction_output_bundle(
+    root: Path, *, time_window=None, prediction_column="prediction_score"
+):
+    from quant_research_platform.artifacts.outputs.bundle_validation import (
+        validate_output_bundle,
+    )
+    from quant_research_platform.policy.lifecycle import closing_iterator
+
+    manifest, _members = validate_output_bundle(
+        Path(root), expected_definition_id="prediction_outputs"
+    )
+    if prediction_column not in {"prediction_score", "prediction_rank_score"}:
+        raise ValueError("prediction_column_invalid")
+    index = ExactPrimaryKeyIndex(primary_key=("timestamp", "asset_id"))
+    lookup = _PredictionLookup(
+        index=index,
+        primary_key=("timestamp", "asset_id"),
+        prediction_column=prediction_column,
+    )
+    with closing_iterator(
+        iter_predictions(
+            root,
+            columns=("timestamp", "asset_id", prediction_column),
+            time_window=time_window,
+        )
+    ) as frames:
+        for frame in frames:
+            index.add_float_value_table(
+                pa.Table.from_pandas(frame, preserve_index=False),
+                namespace="prediction",
+                value_column=prediction_column,
+                validation_column=prediction_column,
+                retain_values=True,
+            )
+            lookup.row_count += len(frame)
+    return manifest, lookup

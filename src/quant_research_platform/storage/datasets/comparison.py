@@ -18,10 +18,10 @@ from quant_research_platform.storage.datasets.paths import relative_partition_la
 from quant_research_platform.storage.datasets.reading import (
     iter_dataset_file_batches,
     open_dataset_session,
-    read_columns_for_time_window,
+    projection_columns_for_window,
 )
 from quant_research_platform.storage.datasets.schema import (
-    _DATASET_INSTANCE_METADATA_ALLOWED_KEYS,
+    _DATASET_METADATA_ALLOWED_KEYS,
 )
 from quant_research_platform.storage.datasets.types import DatasetComparison
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
@@ -95,7 +95,7 @@ def compare_datasets(
             with closing_iterator(
                 iter_dataset_file_batches(
                     context,
-                    columns=read_columns_for_time_window(
+                    columns=projection_columns_for_window(
                         columns, spec=context.spec, time_window=context.time_window
                     ),
                     batch_rows=DEFAULT_BATCH_ROWS,
@@ -157,7 +157,7 @@ def compare_datasets(
             side: canonical_json_hash(
                 {
                     key: manifest[key]
-                    for key in _DATASET_INSTANCE_METADATA_ALLOWED_KEYS
+                    for key in _DATASET_METADATA_ALLOWED_KEYS
                     if key in manifest
                 }
             )
@@ -169,8 +169,6 @@ def compare_datasets(
         summary["business_metadata"] = metadata_hashes
         if status == "MATCH" and metadata_hashes["left"] != metadata_hashes["right"]:
             status = "METADATA_MISMATCH"
-        left_context.verify()
-        right_context.verify()
         return _comparison(status, summary=summary, layout_delta=layout_delta)
     except (MemoryError, OSError, ValueError):
         return _comparison(

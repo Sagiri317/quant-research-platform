@@ -7,20 +7,21 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.contracts.targets import ProducerBinding, ProducerKind
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.execution import (
     market_name_for_type,
 )
 from quant_research_platform.markets.implementations.a_share.processed import producer
+from quant_research_platform.markets.implementations.a_share.processed.catalog import (
+    processed_catalog,
+)
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.research.filtering import a_share_eligibility
 from quant_research_platform.research.portfolios import (
     production as portfolio_production,
 )
+from quant_research_platform.research.protocols.a_share import factor_catalog
 from quant_research_platform.runtime.dataframes import iter_complete_session_frames
-from quant_research_platform.sources.csmar.interim import InterimImportResult
 from quant_research_platform.storage.datasets.reading import (
     DatasetReadMode,
     open_dataset_session,
@@ -29,8 +30,9 @@ from quant_research_platform.storage.datasets.reading import (
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.identity import native_filesystem_path
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.workflows import operations
-from tests.markets.a_share.test_target_dag_chain import (
+from tests.helpers.a_share_sources import (
+    _published_inputs,
+    _source_catalog,
     _synthetic_financial_frames,
     _synthetic_interim_frames,
 )
@@ -111,11 +113,14 @@ def test_local_panel_window_keeps_public_industry_history_and_unknown_barrier(tm
     )
     raw_root = tmp_path / "raw"
     write_industry_reference_fixture(raw_root, observations=observations)
-    profile = research_profile()
     layout = StorageLayout(tmp_path)
-    spec = profile.processed.get("market_panel_1d")
+    spec = processed_catalog().get("market_panel_1d")
     interim.materialize_interim_data(
-        layout=layout,
+        output_roots={
+            interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID: layout.interim_data_root(
+                "reference", interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
+            )
+        },
         raw_root=raw_root / "reference",
         data_ids=(interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID,),
         start_date="2020-01-06",
@@ -130,7 +135,7 @@ def test_local_panel_window_keeps_public_industry_history_and_unknown_barrier(tm
     for data_id in spec.source_input_data_ids:
         if data_id == interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID:
             continue
-        source_spec = profile.interim.get(data_id)
+        source_spec = _source_catalog().get(data_id)
         write_dataset(
             layout.interim_data_root(source_spec.source_id, data_id),
             source[data_id],
@@ -139,14 +144,12 @@ def test_local_panel_window_keeps_public_industry_history_and_unknown_barrier(tm
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
     with producer.produce_a_share_processed_data(
         spec,
-        layout=layout,
+        inputs=_published_inputs(layout, spec),
         time_window=TimeWindow(dates[0], dates[-1]),
-        processed_catalog=profile.processed,
-        source_catalog=profile.interim,
-    ) as (frames, metadata, verify):
-        write_dataset(
-            root, frames, spec=spec, instance_metadata=metadata, staged_validator=verify
-        )
+        processed_catalog=processed_catalog(),
+        source_catalog=_source_catalog(),
+    ) as (frames, metadata):
+        write_dataset(root, frames, spec=spec, metadata=metadata)
     result = read_dataset(root)
     asset = result.loc[result["asset_id"].eq("000001")]
     assert asset["timestamp"].tolist() == list(dates)
@@ -173,12 +176,11 @@ def test_panel_window_preserves_listing_age_history_and_eligibility(tmp_path):
     stock = source["stock_master"]
     stock["listing_date"] = [dates[0], dates[0], requested[0]]
     stock["timestamp"] = stock["listing_date"]
-    profile = research_profile()
-    spec = profile.processed.get("market_panel_1d")
+    spec = processed_catalog().get("market_panel_1d")
     layout = StorageLayout(tmp_path)
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
     for data_id in spec.source_input_data_ids:
-        source_spec = profile.interim.get(data_id)
+        source_spec = _source_catalog().get(data_id)
         write_dataset(
             layout.interim_data_root(source_spec.source_id, data_id),
             source[data_id],
@@ -186,14 +188,12 @@ def test_panel_window_preserves_listing_age_history_and_eligibility(tmp_path):
         )
     with producer.produce_a_share_processed_data(
         spec,
-        layout=layout,
+        inputs=_published_inputs(layout, spec),
         time_window=TimeWindow(requested[0], requested[-1]),
-        processed_catalog=profile.processed,
-        source_catalog=profile.interim,
-    ) as (frames, metadata, verify):
-        write_dataset(
-            root, frames, spec=spec, instance_metadata=metadata, staged_validator=verify
-        )
+        processed_catalog=processed_catalog(),
+        source_catalog=_source_catalog(),
+    ) as (frames, metadata):
+        write_dataset(root, frames, spec=spec, metadata=metadata)
     actual = read_dataset(root)
     assert actual["timestamp"].tolist() == [
         timestamp for timestamp in requested for _ in range(3)
@@ -223,13 +223,12 @@ def test_persisted_panel_market_codes_reach_real_fee_mapping(tmp_path):
         ignore_index=True,
     )
     assert "market_type" not in source["stock_master"]
-    profile = research_profile()
-    spec = profile.processed.get("market_panel_1d")
+    spec = processed_catalog().get("market_panel_1d")
     layout = StorageLayout(tmp_path)
     window = TimeWindow(dates[0], dates[-1])
     columns = ("market_id", "asset_id", "timestamp", "market_type")
     for data_id in spec.source_input_data_ids:
-        source_spec = profile.interim.get(data_id)
+        source_spec = _source_catalog().get(data_id)
         write_dataset(
             layout.interim_data_root(source_spec.source_id, data_id),
             source[data_id],
@@ -238,14 +237,12 @@ def test_persisted_panel_market_codes_reach_real_fee_mapping(tmp_path):
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
     with producer.produce_a_share_processed_data(
         spec,
-        layout=layout,
+        inputs=_published_inputs(layout, spec),
         time_window=window,
-        processed_catalog=profile.processed,
-        source_catalog=profile.interim,
-    ) as (frames, metadata, verify):
-        write_dataset(
-            root, frames, spec=spec, instance_metadata=metadata, staged_validator=verify
-        )
+        processed_catalog=processed_catalog(),
+        source_catalog=_source_catalog(),
+    ) as (frames, metadata):
+        write_dataset(root, frames, spec=spec, metadata=metadata)
     with closing_iterator(
         portfolio_production._iter_input_sessions(root, columns, window)
     ) as sessions:
@@ -294,7 +291,6 @@ def test_processed_blocks_preserve_full_history_math(
     stock = source["stock_master"]
     stock.loc[stock["source_asset_id"].eq("000003"), "listing_date"] = dates[70]
     stock.loc[stock["source_asset_id"].eq("000003"), "delisting_date"] = dates[330]
-    profile = research_profile()
     layout = StorageLayout(tmp_path)
     window = TimeWindow(pd.Timestamp("2019-01-01"), dates[-1])
     target_ids = (
@@ -306,30 +302,19 @@ def test_processed_blocks_preserve_full_history_math(
         "fundamental_factors",
     )
     for data_id, frame in source.items():
-        spec = profile.interim.get(data_id)
+        spec = _source_catalog().get(data_id)
         write_dataset(
             layout.interim_data_root(spec.source_id, data_id), frame, spec=spec
         )
-    full_history_ids = producer._FULL_HISTORY_SOURCE_IDS.union(
-        *(
-            profile.processed.get(target_id).optional_source_input_data_ids
-            for target_id in target_ids
-        )
-    )
     source = {
         data_id: read_dataset(
-            layout.interim_data_root(profile.interim.get(data_id).source_id, data_id),
-            time_window=None
-            if data_id in full_history_ids
-            else producer.a_share.source_history_window(
-                profile.interim.get(data_id), window
-            ),
+            layout.interim_data_root(_source_catalog().get(data_id).source_id, data_id)
         )
         for data_id in source
     }
     eager = {}
     for data_id in target_ids:
-        spec = profile.processed.get(data_id)
+        spec = processed_catalog().get(data_id)
         eager[data_id] = (
             producer._compute_processed_frame(
                 spec,
@@ -372,7 +357,7 @@ def test_processed_blocks_preserve_full_history_math(
     monkeypatch.setattr(producer, "_prepare_pit_fundamentals", observed_prepare)
     default_batch_rows = producer.DEFAULT_BATCH_ROWS
     for data_id in target_ids:
-        spec = profile.processed.get(data_id)
+        spec = processed_catalog().get(data_id)
         root = layout.processed_data_root(spec.market_id, spec.kind, data_id)
         monkeypatch.setattr(
             producer,
@@ -381,17 +366,16 @@ def test_processed_blocks_preserve_full_history_math(
         )
         with producer.produce_a_share_processed_data(
             spec,
-            layout=layout,
+            inputs=_published_inputs(layout, spec),
             time_window=window,
-            processed_catalog=profile.processed,
-            source_catalog=profile.interim,
-        ) as (frames, metadata, verify):
+            processed_catalog=processed_catalog(),
+            source_catalog=_source_catalog(),
+        ) as (frames, metadata):
             write_dataset(
                 root,
                 frames,
                 spec=spec,
-                instance_metadata=metadata,
-                staged_validator=verify,
+                metadata=metadata,
             )
         actual = read_dataset(root)
         pd.testing.assert_frame_equal(actual, eager[data_id], check_exact=True)
@@ -446,120 +430,29 @@ def test_processed_window_boundaries_preserve_publish_state(tmp_path, case):
     elif case == "holiday_fill":
         bars = frames["market_bars_1d"]
         bars.loc[bars["timestamp"].eq(dates[-1]), "filling_flag"] = 2
-    base = research_profile()
+    from tests.helpers.a_share_sources import _prepare, _write_inputs
 
-    def source_identity(_root, data_id):
-        return (data_id.encode().hex() + "0" * 64)[:64]
-
-    def interim_producer(**kwargs):
-        (data_id,) = kwargs["data_ids"]
-        spec = base.interim.get(data_id)
-        root = kwargs["layout"].target_root(
-            data_id, kwargs["layout"].interim_data_root(spec.source_id, data_id)
-        )
-        write_dataset(
-            root,
-            frames[data_id],
-            spec=spec,
-            instance_metadata=kwargs["instance_metadata"],
-        )
-        return InterimImportResult(
-            artifact_roots={data_id: root},
-            skipped=(),
-        )
-
-    profile = replace(
-        base,
-        producer_bindings={
-            **base.producer_bindings,
-            **{
-                data_id: ProducerBinding(
-                    ProducerKind.INTERIM,
-                    interim_producer,
-                    source_identity=source_identity,
-                )
-                for data_id in frames
-            },
-        },
-    )
-    layout = StorageLayout(tmp_path)
-
-    def build(*, plan=False):
-        return operations.dataset_build(
-            profile=profile,
-            layout=layout,
-            dataset_id="pv_all",
-            start_date="2030-01-01" if case == "empty_window" else str(dates[0].date()),
-            end_date="2030-01-04" if case == "empty_window" else str(dates[-1].date()),
-            raw_root=tmp_path / "synthetic-raw",
-            plan=plan,
-        )
-
+    inputs = _write_inputs(tmp_path / "source", frames)
+    start = pd.Timestamp("2030-01-01") if case == "empty_window" else dates[0]
+    end = pd.Timestamp("2030-01-04") if case == "empty_window" else dates[-1]
     errors = {
         "holiday_fill": "holiday_fill_conflicts_with_open_session",
-        "closed_calendar": "a_share_trading_calendar_empty",
+        "closed_calendar": "market_bar_session_missing_from_calendar",
         "invalid_market_type": "invalid_market_type",
     }
-    if case == "empty_window":
-        planned = build(plan=True)
-        core_identity = next(
-            row["requested_identity"]
-            for row in planned["targets"]
-            if row["target_id"] == "market_panel_1d"
-        )
-    result = build()
-    market = next(
-        row for row in result["target_results"] if row["target_id"] == "market_panel_1d"
-    )
-    if case in errors:
-        assert result["status"] == "FAILED"
-        assert market["status"] == "FAILED"
-        assert errors[case] in market["reason"]
-        descendant = next(
-            row for row in result["target_results"] if row["target_id"] == "pv_all"
-        )
-        assert descendant["status"] == "BLOCKED"
-    elif case == "late_lifecycle":
-        assert market["status"] == "BUILT"
-    else:
-        assert market["status"] == "BLOCKED"
-        assert market["reason"] == "processed_target_empty"
-    spec = profile.processed.get("market_panel_1d")
-    root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+    output = tmp_path / "prepared" / "market_panel_1d"
     if case == "late_lifecycle":
-        saved = read_dataset(layout.instance_root(root, market["instance_identity"]))
-        assert len(saved) == 3 * (130 - 70)
-        assert saved["timestamp"].min() == dates[70]
-    elif case == "empty_window":
-        assert result["status"] == "BLOCKED"
-        assert market["instance_identity"] is None
-        assert not layout.instance_root(root, core_identity).exists()
-        descendant = next(
-            row for row in result["target_results"] if row["target_id"] == "pv_all"
+        saved = read_dataset(
+            _prepare(tmp_path / "prepared", "market_panel_1d", inputs, start, end)
         )
-        assert descendant["status"] == "BLOCKED"
-        assert descendant["reason"].startswith("dependency_blocked: ")
-        assert descendant["instance_identity"] is None
-        dataset_root = layout.research_dataset_root(spec.market_id, "pv_all")
-        assert not tuple(dataset_root.rglob("manifest.json"))
-        (history_manifest,) = root.rglob("manifest.json")
-        history_root = history_manifest.parent.parent
-        assert history_root.name != core_identity
-        session = open_dataset_session(history_root, columns=None, time_window=None)
-        manifest = session.manifest
-        common = manifest["common_manifest"]
-        assert common["instance_identity"] == history_root.name
-        assert common["research_window"] == {
-            "start": "2011-01-01",
-            "end": "2030-01-04",
-            "access": "not_applicable",
-        }
-        assert manifest["row_count"] == 12
-        saved = read_dataset(history_root)
-        assert len(saved) == 12
-        assert tuple(saved["timestamp"].sort_values().unique()) == tuple(dates)
+        assert len(saved) == 3 * (130 - 70)
+        assert saved.timestamp.min() == dates[70]
     else:
-        assert not tuple(root.rglob("manifest.json"))
+        with pytest.raises(
+            ValueError, match=errors.get(case, "processed_output_empty")
+        ):
+            _prepare(tmp_path / "prepared", "market_panel_1d", inputs, start, end)
+        assert not output.exists()
 
 
 @pytest.mark.parametrize("missing", (0, 2, 4, "outside_request"))
@@ -588,12 +481,11 @@ def test_panel_calendar_rejects_missing_requested_trade_dates_including_endpoint
             .loc[source["trading_calendar"].calendar_date.ne(dates[missing])]
             .copy()
         )
-    profile = research_profile()
-    spec = profile.processed.get("market_panel_1d")
+    spec = processed_catalog().get("market_panel_1d")
     layout = StorageLayout(tmp_path)
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
     for data_id in spec.source_input_data_ids:
-        source_spec = profile.interim.get(data_id)
+        source_spec = _source_catalog().get(data_id)
         write_dataset(
             layout.interim_data_root(source_spec.source_id, data_id),
             source[data_id],
@@ -603,17 +495,16 @@ def test_panel_calendar_rejects_missing_requested_trade_dates_including_endpoint
     def publish():
         with producer.produce_a_share_processed_data(
             spec,
-            layout=layout,
+            inputs=_published_inputs(layout, spec),
             time_window=TimeWindow(requested[0], requested[-1]),
-            processed_catalog=profile.processed,
-            source_catalog=profile.interim,
-        ) as (frames, metadata, verify):
+            processed_catalog=processed_catalog(),
+            source_catalog=_source_catalog(),
+        ) as (frames, metadata):
             write_dataset(
                 root,
                 frames,
                 spec=spec,
-                instance_metadata=metadata,
-                staged_validator=verify,
+                metadata=metadata,
             )
 
     if missing == "outside_request":
@@ -645,12 +536,11 @@ def test_unknown_quote_breaks_suspension_baseline_across_persisted_slabs(
     bars.loc[asset & bars.timestamp.eq(dates[-1]), prices] = 120.0
     bars.loc[asset & bars.timestamp.eq(dates[-1]), "period_return"] = 0.1
     source["market_bars_1d"] = bars.loc[~(asset & bars.timestamp.eq(dates[62]))].copy()
-    profile = research_profile()
-    spec = profile.processed.get("market_panel_1d")
+    spec = processed_catalog().get("market_panel_1d")
     layout = StorageLayout(tmp_path)
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
     for data_id in spec.source_input_data_ids:
-        source_spec = profile.interim.get(data_id)
+        source_spec = _source_catalog().get(data_id)
         write_dataset(
             layout.interim_data_root(source_spec.source_id, data_id),
             source[data_id],
@@ -658,7 +548,7 @@ def test_unknown_quote_breaks_suspension_baseline_across_persisted_slabs(
         )
     decoded = {
         data_id: read_dataset(
-            layout.interim_data_root(profile.interim.get(data_id).source_id, data_id)
+            layout.interim_data_root(_source_catalog().get(data_id).source_id, data_id)
         )
         for data_id in spec.source_input_data_ids
     }
@@ -702,14 +592,12 @@ def test_unknown_quote_breaks_suspension_baseline_across_persisted_slabs(
     stocks_before = decoded["stock_master"].copy(deep=True)
     with producer.produce_a_share_processed_data(
         spec,
-        layout=layout,
+        inputs=_published_inputs(layout, spec),
         time_window=TimeWindow(dates[0], dates[-1]),
-        processed_catalog=profile.processed,
-        source_catalog=profile.interim,
-    ) as (frames, metadata, verify):
-        write_dataset(
-            root, frames, spec=spec, instance_metadata=metadata, staged_validator=verify
-        )
+        processed_catalog=processed_catalog(),
+        source_catalog=_source_catalog(),
+    ) as (frames, metadata):
+        write_dataset(root, frames, spec=spec, metadata=metadata)
     assert calls == {
         "_canonical_stock_master": 1,
         "_canonical_market_cap": 1,
@@ -766,9 +654,8 @@ def test_processed_narrow_output_uses_existing_panel_history(
     )
     bars = source["market_bars_1d"]
     bars["period_return"] = np.sin(np.arange(len(bars)) / 3) * 0.01
-    profile = research_profile()
-    panel_spec = profile.processed.get("market_panel_1d")
-    spec = profile.processed.get(target)
+    panel_spec = processed_catalog().get("market_panel_1d")
+    spec = processed_catalog().get(target)
     panel = producer._compute_processed_frame(
         panel_spec,
         source={
@@ -812,7 +699,7 @@ def test_processed_narrow_output_uses_existing_panel_history(
         spec=panel_spec,
     )
     for data_id in spec.source_input_data_ids:
-        source_spec = profile.interim.get(data_id)
+        source_spec = _source_catalog().get(data_id)
         write_dataset(
             layout.interim_data_root(source_spec.source_id, data_id),
             source[data_id],
@@ -847,28 +734,26 @@ def test_processed_narrow_output_uses_existing_panel_history(
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
     with producer.produce_a_share_processed_data(
         spec,
-        layout=layout,
+        inputs=_published_inputs(layout, spec),
         time_window=TimeWindow(core[0], core[-1]),
-        processed_catalog=profile.processed,
-        source_catalog=profile.interim,
-    ) as (frames, metadata, verify):
-        write_dataset(
-            root, frames, spec=spec, instance_metadata=metadata, staged_validator=verify
-        )
+        processed_catalog=processed_catalog(),
+        source_catalog=_source_catalog(),
+    ) as (frames, metadata):
+        write_dataset(root, frames, spec=spec, metadata=metadata)
     actual = read_dataset(root)
     pd.testing.assert_frame_equal(actual, expected, check_exact=True)
     assert actual.timestamp.min() == core[0]
     assert actual.timestamp.max() == core[-1]
     columns = [
         definition.output_column
-        for definition in profile.factors.list()
+        for definition in factor_catalog().list()
         if definition.output_column in spec.required_columns
     ]
     assert actual.loc[actual.timestamp.eq(core[0]), columns].notna().any().any()
     lookback = producer.factor_engine.factor_lookback_bars(
         tuple(
             definition
-            for definition in profile.factors.list()
+            for definition in factor_catalog().list()
             if definition.output_column in spec.required_columns
         )
     )
@@ -895,7 +780,6 @@ def test_financial_pit_calendar_file_order_preserves_formal_published_rows(tmp_p
     dates = pd.DatetimeIndex(["2019-01-30", "2019-01-31", "2019-02-01"])
     codes = ("000001.SZ", "000002.SZ", "000003.SZ")
     fields = tuple(field for columns in FINANCIAL_FIELDS.values() for field in columns)
-    profile = research_profile()
     cases = {
         "ordered": ((0, 1), (2,)),
         "single": ((2, 0, 1),),
@@ -920,7 +804,13 @@ def test_financial_pit_calendar_file_order_preserves_formal_published_rows(tmp_p
             )
             originals[path] = Path(native_filesystem_path(path)).read_bytes()
         imported = csmar_interim.materialize_interim_data(
-            layout=layout, data_ids=("trading_calendar",)
+            raw_root=layout.raw_source_root("csmar"),
+            output_roots={
+                "trading_calendar": layout.interim_data_root(
+                    "csmar", "trading_calendar"
+                )
+            },
+            data_ids=("trading_calendar",),
         )
         calendar = read_dataset(imported.artifact_roots["trading_calendar"])
         assert len(calendar) == 3
@@ -935,11 +825,11 @@ def test_financial_pit_calendar_file_order_preserves_formal_published_rows(tmp_p
         )
         source = _synthetic_interim_frames(dates)
         source["market_bars_1d"]["market_type"] = 4
-        panel_spec = profile.processed.get("market_panel_1d")
+        panel_spec = processed_catalog().get("market_panel_1d")
         for data_id in panel_spec.source_input_data_ids:
             if data_id == "trading_calendar":
                 continue
-            source_spec = profile.interim.get(data_id)
+            source_spec = _source_catalog().get(data_id)
             write_dataset(
                 layout.interim_data_root(source_spec.source_id, data_id),
                 source[data_id],
@@ -963,23 +853,29 @@ def test_financial_pit_calendar_file_order_preserves_formal_published_rows(tmp_p
                 },
                 branch="1",
             )
-        choice_interim.materialize_interim_data(layout=layout, end_date="2019-02-01")
+        choice_interim.materialize_interim_data(
+            raw_root=layout.raw_source_root("choice"),
+            output_roots={
+                spec.data_id: layout.interim_data_root("choice", spec.data_id)
+                for spec in choice_interim.interim_catalog().list()
+            },
+            end_date="2019-02-01",
+        )
         for data_id in ("market_panel_1d", "fundamental_pit"):
-            spec = profile.processed.get(data_id)
+            spec = processed_catalog().get(data_id)
             root = layout.processed_data_root(spec.market_id, spec.kind, data_id)
             with producer.produce_a_share_processed_data(
                 spec,
-                layout=layout,
+                inputs=_published_inputs(layout, spec),
                 time_window=TimeWindow(dates[0], dates[-1]),
-                processed_catalog=profile.processed,
-                source_catalog=profile.interim,
-            ) as (frames, metadata, verify):
+                processed_catalog=processed_catalog(),
+                source_catalog=_source_catalog(),
+            ) as (frames, metadata):
                 write_dataset(
                     root,
                     frames,
                     spec=spec,
-                    instance_metadata=metadata,
-                    staged_validator=verify,
+                    metadata=metadata,
                 )
             saved = read_dataset(root)
             assert tuple(saved.columns) == spec.required_columns
@@ -1041,11 +937,10 @@ def test_asynchronous_own_market_label_endpoints_and_mask_batches(
     second = calendar.assign(source_market_type=4)
     second.loc[second.calendar_date.eq(dates[2]), "is_trading_day"] = False
     source["trading_calendar"] = pd.concat((calendar, second), ignore_index=True)
-    profile = research_profile()
     layout = StorageLayout(tmp_path)
-    panel_spec = profile.processed.get("market_panel_1d")
+    panel_spec = processed_catalog().get("market_panel_1d")
     for data_id in panel_spec.source_input_data_ids:
-        spec = profile.interim.get(data_id)
+        spec = _source_catalog().get(data_id)
         write_dataset(
             layout.interim_data_root(spec.source_id, data_id),
             source[data_id],
@@ -1054,21 +949,20 @@ def test_asynchronous_own_market_label_endpoints_and_mask_batches(
     monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", batch_rows)
     saved = {}
     for data_id in ("market_panel_1d", "execution_mask", "forward_returns"):
-        spec = profile.processed.get(data_id)
+        spec = processed_catalog().get(data_id)
         root = layout.processed_data_root(spec.market_id, spec.kind, data_id)
         with producer.produce_a_share_processed_data(
             spec,
-            layout=layout,
+            inputs=_published_inputs(layout, spec),
             time_window=TimeWindow(dates[0], dates[-1]),
-            processed_catalog=profile.processed,
-            source_catalog=profile.interim,
-        ) as (frames, metadata, verify):
+            processed_catalog=processed_catalog(),
+            source_catalog=_source_catalog(),
+        ) as (frames, metadata):
             write_dataset(
                 root,
                 frames,
                 spec=spec,
-                instance_metadata=metadata,
-                staged_validator=verify,
+                metadata=metadata,
             )
         saved[data_id] = read_dataset(root)
     panel = (
@@ -1123,8 +1017,7 @@ def test_own_market_all_label_horizons_preserve_unknown_and_suspended_sessions(
         False
     )
     source["trading_calendar"] = pd.concat((calendar, second), ignore_index=True)
-    profile = research_profile()
-    spec = profile.processed.get("market_panel_1d")
+    spec = processed_catalog().get("market_panel_1d")
     panel = producer._compute_processed_frame(
         spec,
         source={
@@ -1143,7 +1036,7 @@ def test_own_market_all_label_horizons_preserve_unknown_and_suspended_sessions(
     }
     assert dates[2] not in axes["000001"] and dates[70] in axes["000001"]
     assert dates[1] in axes["000001"] and dates[3] in axes["000001"]
-    spec = profile.processed.get("forward_returns")
+    spec = processed_catalog().get("forward_returns")
     output = producer._compute_processed_frame(
         spec,
         source={},
@@ -1239,8 +1132,7 @@ def test_unobserved_initial_market_preserves_unknown_age_and_proven_252_sessions
             timestamp=old_date, market_type=old_market
         )
         source["market_bars_1d"] = pd.concat((old, bars), ignore_index=True)
-    profile = research_profile()
-    spec = profile.processed.get("market_panel_1d")
+    spec = processed_catalog().get("market_panel_1d")
     monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", batch_rows)
     windows = (
         ((0, dates[:6]), (1, dates[-6:])) if gap == "membership" else ((1, dates[-6:]),)
@@ -1248,7 +1140,7 @@ def test_unobserved_initial_market_preserves_unknown_age_and_proven_252_sessions
     for index, requested in windows:
         layout = StorageLayout(tmp_path / str(index))
         for data_id in spec.source_input_data_ids:
-            source_spec = profile.interim.get(data_id)
+            source_spec = _source_catalog().get(data_id)
             write_dataset(
                 layout.interim_data_root(source_spec.source_id, data_id),
                 source[data_id],
@@ -1257,17 +1149,16 @@ def test_unobserved_initial_market_preserves_unknown_age_and_proven_252_sessions
         root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
         with producer.produce_a_share_processed_data(
             spec,
-            layout=layout,
+            inputs=_published_inputs(layout, spec),
             time_window=TimeWindow(requested[0], requested[-1]),
-            processed_catalog=profile.processed,
-            source_catalog=profile.interim,
-        ) as (frames, metadata, verify):
+            processed_catalog=processed_catalog(),
+            source_catalog=_source_catalog(),
+        ) as (frames, metadata):
             write_dataset(
                 root,
                 frames,
                 spec=spec,
-                instance_metadata=metadata,
-                staged_validator=verify,
+                metadata=metadata,
             )
         actual = read_dataset(root)
         assert actual.listing_age_trading_days.isna().all()
@@ -1312,9 +1203,8 @@ def test_factor_warmup_uses_own_sessions_across_closure_and_migration(
     source["trading_calendar"] = pd.concat(
         (source["trading_calendar"], second), ignore_index=True
     )
-    profile = research_profile()
-    panel_spec = profile.processed.get("market_panel_1d")
-    spec = profile.processed.get("price_volume_facts")
+    panel_spec = processed_catalog().get("market_panel_1d")
+    spec = processed_catalog().get("price_volume_facts")
     panel = producer._compute_processed_frame(
         panel_spec,
         source={
@@ -1356,14 +1246,12 @@ def test_factor_warmup_uses_own_sessions_across_closure_and_migration(
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
     with producer.produce_a_share_processed_data(
         spec,
-        layout=layout,
+        inputs=_published_inputs(layout, spec),
         time_window=TimeWindow(core[0], core[-1]),
-        processed_catalog=profile.processed,
-        source_catalog=profile.interim,
-    ) as (frames, metadata, verify):
-        write_dataset(
-            root, frames, spec=spec, instance_metadata=metadata, staged_validator=verify
-        )
+        processed_catalog=processed_catalog(),
+        source_catalog=_source_catalog(),
+    ) as (frames, metadata):
+        write_dataset(root, frames, spec=spec, metadata=metadata)
     actual = read_dataset(root)
     pd.testing.assert_frame_equal(actual, expected, check_exact=True)
     assert actual.momentum_252_20.notna().all()
@@ -1389,11 +1277,10 @@ def test_historical_calendar_gap_keeps_exact_age_unknown_across_slabs(
         .loc[source["trading_calendar"].calendar_date.ne(dates[100])]
         .copy()
     )
-    profile = research_profile()
-    spec = profile.processed.get("market_panel_1d")
+    spec = processed_catalog().get("market_panel_1d")
     layout = StorageLayout(tmp_path)
     for data_id in spec.source_input_data_ids:
-        source_spec = profile.interim.get(data_id)
+        source_spec = _source_catalog().get(data_id)
         write_dataset(
             layout.interim_data_root(source_spec.source_id, data_id),
             source[data_id],
@@ -1403,17 +1290,16 @@ def test_historical_calendar_gap_keeps_exact_age_unknown_across_slabs(
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
     with producer.produce_a_share_processed_data(
         spec,
-        layout=layout,
+        inputs=_published_inputs(layout, spec),
         time_window=TimeWindow(dates[250], dates[-1]),
-        processed_catalog=profile.processed,
-        source_catalog=profile.interim,
-    ) as (frames, metadata, verify):
+        processed_catalog=processed_catalog(),
+        source_catalog=_source_catalog(),
+    ) as (frames, metadata):
         write_dataset(
             root,
             frames,
             spec=spec,
-            instance_metadata=metadata,
-            staged_validator=verify,
+            metadata=metadata,
         )
     actual = read_dataset(root)
     old = actual.loc[actual.asset_id.ne("000003")]
@@ -1434,31 +1320,27 @@ def test_historical_calendar_gap_keeps_exact_age_unknown_across_slabs(
 def test_missing_mandatory_panel_source_fails_before_materialization(
     tmp_path, monkeypatch, missing
 ):
-    profile = research_profile()
     layout = StorageLayout(tmp_path)
-    source_spec = profile.interim.get(missing)
-    missing_root = layout.interim_data_root(source_spec.source_id, missing)
-    monkeypatch.setattr(
-        producer, "filesystem_exists", lambda root: root != missing_root
-    )
-    monkeypatch.setattr(
-        producer, "open_dataset_session", lambda *args, **kwargs: object()
-    )
+    spec = processed_catalog().get("market_panel_1d")
+    inputs = _published_inputs(layout, spec)
+    del inputs[missing]
 
     def forbidden(*args, **kwargs):
         raise AssertionError("missing source reached materialization")
 
     monkeypatch.setattr(producer, "materialize_dataset_session", forbidden)
-    with pytest.raises(
-        ValueError, match=f"a_share_panel_source_data_missing: {missing}$"
-    ):
-        with producer.produce_a_share_processed_data(
-            profile.processed.get("market_panel_1d"),
-            layout=layout,
-            time_window=TimeWindow("2020-01-02", "2020-01-03"),
-            source_catalog=profile.interim,
-        ):
-            pass
+    from quant_research_platform.markets.prepare import prepare
+
+    with pytest.raises(ValueError, match="data_operation_input_paths_mismatch"):
+        prepare(
+            {
+                "market_id": "a_share",
+                "data_id": "market_panel_1d",
+                "inputs": {key: str(path) for key, path in inputs.items()},
+                "time_window": {"start": "2020-01-02", "end": "2020-01-03"},
+                "output_root": str(tmp_path / "output"),
+            }
+        )
 
 
 @pytest.mark.parametrize("prior", (None, 2.0, 1e308))
@@ -1496,7 +1378,7 @@ def test_fundamental_adapter_reuses_prior_year_for_beginning_balances(
 
     monkeypatch.setattr(pd.DataFrame, "pivot_table", pivot)
     result = producer._fundamental_pit_frame(
-        research_profile().processed.get("fundamental_pit"), panel=panel, pit=pit
+        processed_catalog().get("fundamental_pit"), panel=panel, pit=pit
     )
     assert sum(pivots) <= 2 * len(pit)
     for metric in ("total_assets", "parent_equity"):
@@ -1561,12 +1443,11 @@ def test_panel_preserves_proven_listing_lifecycles(
         bars = bars.loc[~bars.timestamp.isin(dates[3:5])].copy()
     bars.loc[bars.timestamp.eq(dates[5]), "filling_flag"] = 1
     source["market_bars_1d"] = bars
-    profile = research_profile()
-    spec = profile.processed.get("market_panel_1d")
+    spec = processed_catalog().get("market_panel_1d")
     layout = StorageLayout(tmp_path)
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
     for data_id in spec.source_input_data_ids:
-        source_spec = profile.interim.get(data_id)
+        source_spec = _source_catalog().get(data_id)
         write_dataset(
             layout.interim_data_root(source_spec.source_id, data_id),
             source[data_id],
@@ -1575,17 +1456,16 @@ def test_panel_preserves_proven_listing_lifecycles(
     monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", batch_rows)
     with producer.produce_a_share_processed_data(
         spec,
-        layout=layout,
+        inputs=_published_inputs(layout, spec),
         time_window=TimeWindow(dates[5] if second_only else dates[0], dates[-1]),
-        processed_catalog=profile.processed,
-        source_catalog=profile.interim,
-    ) as (frames, metadata, verify):
+        processed_catalog=processed_catalog(),
+        source_catalog=_source_catalog(),
+    ) as (frames, metadata):
         write_dataset(
             root,
             frames,
             spec=spec,
-            instance_metadata=metadata,
-            staged_validator=verify,
+            metadata=metadata,
         )
     actual = read_dataset(root)
     expected = (
@@ -1691,12 +1571,17 @@ def test_native_lifecycle_history_does_not_join_relisting(
         ],
     )
     imported = {"stock_master", "market_bars_1d", "trading_calendar"}
-    interim.materialize_interim_data(layout=layout, data_ids=tuple(sorted(imported)))
-    profile = research_profile()
-    panel_spec = profile.processed.get("market_panel_1d")
+    interim.materialize_interim_data(
+        raw_root=layout.raw_source_root("csmar"),
+        output_roots={
+            name: layout.interim_data_root("csmar", name) for name in imported
+        },
+        data_ids=tuple(sorted(imported)),
+    )
+    panel_spec = processed_catalog().get("market_panel_1d")
     for data_id in panel_spec.source_input_data_ids:
         if data_id not in imported:
-            spec = profile.interim.get(data_id)
+            spec = _source_catalog().get(data_id)
             write_dataset(
                 layout.interim_data_root(spec.source_id, data_id),
                 source[data_id],
@@ -1710,7 +1595,7 @@ def test_native_lifecycle_history_does_not_join_relisting(
         "forward_returns",
         "price_volume_facts",
     ):
-        spec = profile.processed.get(data_id)
+        spec = processed_catalog().get(data_id)
         if data_id == "price_volume_facts":
             spec = replace(
                 spec,
@@ -1723,17 +1608,16 @@ def test_native_lifecycle_history_does_not_join_relisting(
         root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
         with producer.produce_a_share_processed_data(
             spec,
-            layout=layout,
+            inputs=_published_inputs(layout, spec),
             time_window=TimeWindow(dates[0], dates[-1]),
-            processed_catalog=profile.processed,
-            source_catalog=profile.interim,
-        ) as (frames, metadata, verify):
+            processed_catalog=processed_catalog(),
+            source_catalog=_source_catalog(),
+        ) as (frames, metadata):
             write_dataset(
                 root,
                 frames,
                 spec=spec,
-                instance_metadata=metadata,
-                staged_validator=verify,
+                metadata=metadata,
             )
         results[data_id] = read_dataset(root).set_index("timestamp")
     panel = results["market_panel_1d"]
@@ -1771,7 +1655,7 @@ def test_native_lifecycle_history_does_not_join_relisting(
         pending, panel.loc[[dates[295]]].reset_index()
     )
     assert same_life == [
-        {"timestamp": dates[288], "alpha_score": 1.0, "holding_return": 0.0}
+        {"timestamp": dates[288], "prediction_rank_score": 1.0, "holding_return": 0.0}
     ]
 
 
@@ -1795,11 +1679,10 @@ def test_native_panel_persists_finite_turnover_at_share_count_boundaries(
     bars[["close", "open", "high", "low"]] = close
     bars[["float_market_cap", "total_market_cap"]] = cap
     bars["volume"] = volume
-    profile = research_profile()
-    spec = profile.processed.get("market_panel_1d")
+    spec = processed_catalog().get("market_panel_1d")
     layout = StorageLayout(tmp_path)
     for data_id in spec.source_input_data_ids:
-        source_spec = profile.interim.get(data_id)
+        source_spec = _source_catalog().get(data_id)
         write_dataset(
             layout.interim_data_root(source_spec.source_id, data_id),
             source[data_id],
@@ -1808,14 +1691,12 @@ def test_native_panel_persists_finite_turnover_at_share_count_boundaries(
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
     with producer.produce_a_share_processed_data(
         spec,
-        layout=layout,
+        inputs=_published_inputs(layout, spec),
         time_window=TimeWindow(dates[0], dates[-1]),
-        processed_catalog=profile.processed,
-        source_catalog=profile.interim,
-    ) as (frames, metadata, verify):
-        write_dataset(
-            root, frames, spec=spec, instance_metadata=metadata, staged_validator=verify
-        )
+        processed_catalog=processed_catalog(),
+        source_catalog=_source_catalog(),
+    ) as (frames, metadata):
+        write_dataset(root, frames, spec=spec, metadata=metadata)
     actual = read_dataset(root)
     expected = float(Fraction(volume) * Fraction(close) / Fraction(cap))
     assert np.isfinite(actual.turnover).all()
@@ -1838,7 +1719,7 @@ def test_processed_axis_keeps_raw_dates_and_assets_before_membership_filter(tmp_
         .assign(calendar_date=extra_date, timestamp=extra_date, is_trading_day=False)
     )
     calendar = pd.concat((source["trading_calendar"], closed), ignore_index=True)
-    spec = research_profile().interim.get("market_bars_1d")
+    spec = _source_catalog().get("market_bars_1d")
     root = StorageLayout(tmp_path).interim_data_root(spec.source_id, spec.data_id)
     write_dataset(root, bars, spec=spec)
     session = open_dataset_session(root, columns=None, time_window=None)
@@ -1873,11 +1754,10 @@ def test_native_panel_does_not_treat_unknown_calendar_as_closed(
     source["trading_calendar"] = pd.concat(
         (source["trading_calendar"], own), ignore_index=True
     )
-    profile = research_profile()
-    spec = profile.processed.get("market_panel_1d")
+    spec = processed_catalog().get("market_panel_1d")
     layout = StorageLayout(tmp_path)
     for data_id in spec.source_input_data_ids:
-        native = profile.interim.get(data_id)
+        native = _source_catalog().get(data_id)
         write_dataset(
             layout.interim_data_root(native.source_id, data_id),
             source[data_id],
@@ -1888,17 +1768,16 @@ def test_native_panel_does_not_treat_unknown_calendar_as_closed(
     def publish():
         with producer.produce_a_share_processed_data(
             spec,
-            layout=layout,
+            inputs=_published_inputs(layout, spec),
             time_window=TimeWindow(dates[0], dates[-1]),
-            processed_catalog=profile.processed,
-            source_catalog=profile.interim,
-        ) as (frames, metadata, verify):
+            processed_catalog=processed_catalog(),
+            source_catalog=_source_catalog(),
+        ) as (frames, metadata):
             write_dataset(
                 root,
                 frames,
                 spec=spec,
-                instance_metadata=metadata,
-                staged_validator=verify,
+                metadata=metadata,
             )
 
     if calendar_state == "unknown":
@@ -1922,11 +1801,10 @@ def test_native_panel_retains_listing_before_first_known_company_status(tmp_path
     source["stock_master"] = source["stock_master"].assign(
         timestamp=dates[3], status_change_date=dates[3], company_status="suspended"
     )
-    profile = research_profile()
-    spec = profile.processed.get("market_panel_1d")
+    spec = processed_catalog().get("market_panel_1d")
     layout = StorageLayout(tmp_path)
     for data_id in spec.source_input_data_ids:
-        native = profile.interim.get(data_id)
+        native = _source_catalog().get(data_id)
         write_dataset(
             layout.interim_data_root(native.source_id, data_id),
             source[data_id],
@@ -1935,14 +1813,12 @@ def test_native_panel_retains_listing_before_first_known_company_status(tmp_path
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
     with producer.produce_a_share_processed_data(
         spec,
-        layout=layout,
+        inputs=_published_inputs(layout, spec),
         time_window=TimeWindow(dates[0], dates[-1]),
-        processed_catalog=profile.processed,
-        source_catalog=profile.interim,
-    ) as (frames, metadata, verify):
-        write_dataset(
-            root, frames, spec=spec, instance_metadata=metadata, staged_validator=verify
-        )
+        processed_catalog=processed_catalog(),
+        source_catalog=_source_catalog(),
+    ) as (frames, metadata):
+        write_dataset(root, frames, spec=spec, metadata=metadata)
     actual = read_dataset(root)
     assert len(actual) == 15
     assert actual.listing_date.notna().all()
@@ -1961,25 +1837,23 @@ def test_native_panel_retains_listing_before_first_known_company_status(tmp_path
 def test_bound_optional_source_cannot_disappear_into_absence(tmp_path):
     dates = pd.bdate_range("2020-01-02", periods=5).as_unit("ns")
     source = _synthetic_interim_frames(dates)
-    profile = research_profile()
-    spec = profile.processed.get("market_panel_1d")
+    spec = processed_catalog().get("market_panel_1d")
     layout = StorageLayout(tmp_path)
     for data_id in spec.source_input_data_ids:
-        native = profile.interim.get(data_id)
+        native = _source_catalog().get(data_id)
         write_dataset(
             layout.interim_data_root(native.source_id, data_id),
             source[data_id],
             spec=native,
         )
-    layout = layout.with_target_roots(
-        {"industry_classification": tmp_path / "missing-bound-instance"}
-    )
+    inputs = _published_inputs(layout, spec)
+    inputs["industry_classification"] = tmp_path / "missing-bound-source"
     with pytest.raises((ValueError, FileNotFoundError)):
         with producer.produce_a_share_processed_data(
             spec,
-            layout=layout,
+            inputs=inputs,
             time_window=TimeWindow(dates[0], dates[-1]),
-            processed_catalog=profile.processed,
-            source_catalog=profile.interim,
-        ) as (frames, _metadata, _verify):
+            processed_catalog=processed_catalog(),
+            source_catalog=_source_catalog(),
+        ) as (frames, _metadata):
             list(frames)

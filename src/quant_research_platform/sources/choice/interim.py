@@ -14,9 +14,6 @@ from pathlib import Path
 import pandas as pd
 
 from quant_research_platform.catalog.processed import InterimDataCatalog
-from quant_research_platform.contracts.business_manifest import (
-    validate_business_manifest_envelope,
-)
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -44,7 +41,6 @@ from quant_research_platform.sources.choice.raw_exports import (
     ChoiceRequest,
     read_choice_response,
 )
-from quant_research_platform.storage.datasets.schema import COMMON_MANIFEST_METADATA_KEY
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
@@ -53,7 +49,6 @@ from quant_research_platform.storage.identity import (
     filesystem_scandir,
     require_unaliased_path,
 )
-from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import read_qrp_json_file
 
 _DISCLOSURE_INDICATORS = {"STMTACTDATE", "ACTUALISSUINGDATE", "ITEMVALUECHANGEDATE"}
@@ -141,13 +136,12 @@ def _raw_requests(raw_root: Path, *, data_id: str):
         return
     with closing_iterator(entries):
         for entry in entries:
-            directory = root / "css" / entry.name
-            if not re.fullmatch(r"[0-9a-f]{64}", directory.name):
+            if entry.name == "failed":
                 continue
+            directory = root / "css" / entry.name
             require_unaliased_path(directory, error="choice_raw_identity_changed")
             path = directory / "response.metadata.json"
-            expected = dataset_file_identity(path)
-            manifest = read_qrp_json_file(path, expected_identity=expected)[1]
+            manifest = read_qrp_json_file(path)[1]
             try:
                 payload = manifest["metadata"]["request"]
                 if type(payload["arguments"]) is not list:
@@ -158,10 +152,10 @@ def _raw_requests(raw_root: Path, *, data_id: str):
                     sdk_version=payload["sdk_version"],
                     cutoff=date.fromisoformat(payload["cutoff"]),
                 )
-                request_identity = request.identity()
+                request.payload()
             except (KeyError, TypeError) as error:
                 raise ValueError("choice_raw_request_metadata_invalid") from error
-            if request_identity != directory.name or request.endpoint != "css":
+            if request.endpoint != "css":
                 raise ValueError("choice_raw_identity_changed")
             options = dict(
                 (
@@ -625,12 +619,12 @@ def _frames(rows, spec):
 
 def materialize_interim_data(
     *,
-    layout: StorageLayout,
-    raw_root: Path | None = None,
+    raw_root: Path,
+    output_roots: Mapping[str, Path],
     data_ids: tuple[str, ...] = (*FINANCIAL_FIELDS, FIRST_DISCLOSURE_DATA_ID),
     start_date: str | None = None,
     end_date: str | None = None,
-    instance_metadata: Mapping[str, object] | None = None,
+    metadata: Mapping[str, object] | None = None,
 ) -> ChoiceInterimImportResult:
     if (
         type(data_ids) is not tuple
@@ -640,7 +634,7 @@ def materialize_interim_data(
         raise ValueError("choice_interim_data_ids_invalid")
     catalog = interim_catalog()
     specs = tuple(catalog.get(data_id) for data_id in data_ids)
-    root = Path(raw_root) if raw_root is not None else layout.raw_source_root(SOURCE_ID)
+    root = Path(raw_root)
     start = date.fromisoformat(start_date) if start_date is not None else None
     end = date.fromisoformat(end_date) if end_date is not None else None
     if start is not None and end is not None and start > end:
@@ -648,36 +642,24 @@ def materialize_interim_data(
     written, skipped = {}, []
     sources = [(spec, *_source_snapshot(root, spec.data_id)) for spec in specs]
     for spec, identity, members in sources:
-        if (
-            instance_metadata is not None
-            and COMMON_MANIFEST_METADATA_KEY in instance_metadata
-        ):
-            envelope = validate_business_manifest_envelope(
-                instance_metadata[COMMON_MANIFEST_METADATA_KEY]
-            )
-            if envelope["semantic_metadata"]["raw_content_identity"] != identity:
-                raise ValueError("choice_raw_identity_changed")
-
         index = _raw_index(root, spec.data_id, members=members)
-
-        def verify_source(_receipt, data_id=spec.data_id, expected=identity):
-            if source_content_identity(root, data_id) != expected:
-                raise ValueError("choice_raw_identity_changed")
 
         rows = _rows(index, spec.data_id, start, end)
         frames = _frames(rows, spec)
-        target = layout.target_root(
-            spec.data_id,
-            layout.interim_data_root(SOURCE_ID, spec.data_id),
-        )
+        target = Path(output_roots[spec.data_id])
         with closing_iterator(rows), closing_iterator(frames):
             try:
                 write_dataset(
                     target,
                     frames,
                     spec=spec,
-                    instance_metadata=instance_metadata,
-                    staged_validator=verify_source,
+                    metadata={
+                        **(metadata or {}),
+                        "source_evidence": {
+                            "source_id": str(SOURCE_ID),
+                            "content_hash": identity,
+                        },
+                    },
                 )
             except ValueError as error:
                 if str(error) != "empty_dataset_schema_missing":

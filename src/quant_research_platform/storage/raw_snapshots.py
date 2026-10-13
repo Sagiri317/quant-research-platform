@@ -15,8 +15,6 @@ from quant_research_platform.contracts.json_codec import canonical_identity_byte
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.identity import (
-    dataset_file_identity,
-    dataset_file_identity_from_stat,
     filesystem_iterdir,
     open_filesystem_file,
     require_unaliased_path,
@@ -131,7 +129,7 @@ def write_csv_snapshot(
 def iter_csv_snapshot(
     root: Path, *, expected_manifest: dict[str, object]
 ) -> Iterator[tuple[object, ...]]:
-    """Stream rows and verify complete consumed content on every exit."""
+    """Validate source bytes during one complete acceptance traversal."""
     root = require_unaliased_path(root, error="raw_csv_path_invalid")
     if set(path.name for path in filesystem_iterdir(root)) != {
         "response.csv",
@@ -139,7 +137,6 @@ def iter_csv_snapshot(
     }:
         raise ValueError("raw_csv_members_invalid")
     sidecar = root / "response.metadata.json"
-    sidecar_identity = dataset_file_identity(sidecar)
     manifest = read_manifest(sidecar)
     if (
         set(manifest)
@@ -165,15 +162,10 @@ def iter_csv_snapshot(
     ):
         raise ValueError("raw_csv_metadata_invalid")
     path = root / "response.csv"
-    identity = dataset_file_identity(path)
-    if identity.size != manifest["byte_count"]:
-        raise ValueError("raw_csv_byte_count_invalid")
     handle = open_filesystem_file(path)
     digest = hashlib.sha256()
     count = 0
     with closing_iterator(handle):
-        if dataset_file_identity_from_stat(os.fstat(handle.fileno())) != identity:
-            raise ValueError("raw_csv_identity_changed")
 
         def records() -> Iterator[list[str]]:
             csv.field_size_limit(sys.maxsize)
@@ -202,35 +194,15 @@ def iter_csv_snapshot(
                 count += 1
                 yield value
 
-        rows = decoded_rows()
-        primary = None
-        try:
-            # Keep rows resumable so the finally block can verify unread content.
+        with closing_iterator(decoded_rows()) as rows:
             for row in rows:
                 try:
                     yield row
                 except GeneratorExit:
                     return
-        except BaseException as body_error:
-            primary = body_error
-            raise
-        finally:
-            try:
-                for _row in rows:
-                    pass
-                if (
-                    count != manifest["row_count"]
-                    or digest.hexdigest() != manifest["sha256"]
-                    or dataset_file_identity_from_stat(os.fstat(handle.fileno()))
-                    != identity
-                    or (dataset_file_identity(path) != identity)
-                    or (dataset_file_identity(sidecar) != sidecar_identity)
-                ):
-                    raise ValueError("raw_csv_content_invalid")
-            except BaseException as error:
-                if primary is None:
-                    raise
-                primary.add_note(
-                    "Raw CSV consumed-content verification also failed: "
-                    + type(error).__name__
-                )
+        if (
+            count != manifest["row_count"]
+            or digest.hexdigest() != manifest["sha256"]
+            or handle.tell() != manifest["byte_count"]
+        ):
+            raise ValueError("raw_csv_content_invalid")

@@ -592,7 +592,6 @@ def test_persisted_tick_spread_preserves_constant_and_real_tick_changes(
 ):
     from quant_research_platform.storage.datasets import read_dataset
     from quant_research_platform.storage.datasets.writing import write_dataset
-    from quant_research_platform.storage.layout import StorageLayout
 
     states = [
         replace(
@@ -622,11 +621,7 @@ def test_persisted_tick_spread_preserves_constant_and_real_tick_changes(
         ignore_index=True,
     )
     spec = hft_processed_catalog().get("binance_futures_l2_panel_100ms")
-    layout = StorageLayout(project_root=tmp_path)
-    root = layout.target_root(
-        spec.data_id,
-        layout.processed_data_root(spec.market_id, spec.kind, spec.data_id),
-    )
+    root = tmp_path / spec.data_id
     write_dataset(root, panel, spec=spec)
     restored = read_dataset(root)
     factors = pd.concat(iter_factor_frames((restored,)), ignore_index=True)
@@ -643,7 +638,6 @@ def test_persisted_return_volatility_preserves_constant_windows_and_tick_changes
 ):
     from quant_research_platform.storage.datasets import read_dataset
     from quant_research_platform.storage.datasets.writing import write_dataset
-    from quant_research_platform.storage.layout import StorageLayout
 
     value = 10**10
     states = []
@@ -670,7 +664,6 @@ def test_persisted_return_volatility_preserves_constant_windows_and_tick_changes
         ),
         ignore_index=True,
     )
-    layout = StorageLayout(project_root=tmp_path)
     catalog = hft_processed_catalog()
     restored = panel
     for data_id in (
@@ -678,10 +671,7 @@ def test_persisted_return_volatility_preserves_constant_windows_and_tick_changes
         "binance_futures_microstructure_factors_100ms",
     ):
         spec = catalog.get(data_id)
-        root = layout.target_root(
-            spec.data_id,
-            layout.processed_data_root(spec.market_id, spec.kind, spec.data_id),
-        )
+        root = tmp_path / spec.data_id
         frame = (
             panel
             if data_id == "binance_futures_l2_panel_100ms"
@@ -797,7 +787,6 @@ def test_persisted_depth_ratios_keep_scale_invariance_and_one_ulp_change(
     from quant_research_platform.research.models.scaler import ModelMatrixScaler
     from quant_research_platform.storage.datasets import read_dataset
     from quant_research_platform.storage.datasets.writing import write_dataset
-    from quant_research_platform.storage.layout import StorageLayout
 
     quantities = [0.01, 0.015, 0.03, 0.035, 0.07, 0.1, 0.15, 0.3, 0.5, 0.15]
     states = []
@@ -829,17 +818,13 @@ def test_persisted_depth_ratios_keep_scale_invariance_and_one_ulp_change(
         ignore_index=True,
     )
     catalog = hft_processed_catalog()
-    layout = StorageLayout(project_root=tmp_path)
     restored = panel
     for data_id in (
         "binance_futures_l2_panel_100ms",
         "binance_futures_microstructure_factors_100ms",
     ):
         spec = catalog.get(data_id)
-        root = layout.target_root(
-            spec.data_id,
-            layout.processed_data_root(spec.market_id, spec.kind, spec.data_id),
-        )
+        root = tmp_path / spec.data_id
         frame = (
             panel
             if data_id == "binance_futures_l2_panel_100ms"

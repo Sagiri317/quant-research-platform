@@ -14,7 +14,6 @@ from quant_research_platform.compute.portfolio_economics import _LedgerEconomics
 from quant_research_platform.contracts.experiments import _model_inference_blocker
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.portfolios import PORTFOLIO_CASH_ASSET_ID
-from quant_research_platform.contracts.time import crypto_execution_windows
 from quant_research_platform.contracts.validation import (
     finite_exact_float,
     strict_finite_float,
@@ -321,28 +320,19 @@ def _crypto_observations(ledger, windows, limit, *, observation_window_ns=None):
 
 def build_crypto_portfolio_statistics_tables(
     *,
-    layout,
-    protocol_manifest,
-    time_window,
-    upstream_identities,
+    ledger_path,
+    config,
+    windows,
     read_ledger,
     read_episodes,
     summarize_ledger,
     table_columns,
 ):
-    from quant_research_platform.research.protocols.crypto_hft import (
-        CryptoMakerCandidate,
-        portfolio_candidates,
-    )
-
-    (candidate,) = portfolio_candidates(protocol_manifest["portfolio_candidates"])
-    mode = protocol_manifest["execution_mode"]
-    target_id = protocol_manifest["execution_target_id"]
-    plan = protocol_manifest["research_plan"]
-    statistics_policy = protocol_manifest["portfolio_statistics"]
-    windows = crypto_execution_windows(
-        plan, time_window, access_window=protocol_manifest["access_window"]
-    )
+    mode = config["execution_mode"]
+    execution_config = config["execution"]
+    statistics_policy = config["statistics"]
+    if not windows:
+        raise ValueError("crypto_statistics_windows_required")
     bounds = tuple(
         (
             (pd.Timestamp(window.start).value, pd.Timestamp(window.end).value)
@@ -365,7 +355,7 @@ def build_crypto_portfolio_statistics_tables(
     }
     cursor = bounds[0][0]
     envelope_stop = bounds[-1][1] + 1
-    candidate_key = {"candidate_id": candidate.candidate_id, "execution_mode": mode}
+    candidate_key = {"candidate_id": config["candidate_id"], "execution_mode": mode}
 
     def cover(start, stop, kind):
         coverage.append(
@@ -381,6 +371,8 @@ def build_crypto_portfolio_statistics_tables(
         )
 
     def metric(name, value, count, reason=""):
+        if isinstance(value, Fraction):
+            value = finite_exact_float(value)
         defined = value is not None and np.isfinite(value)
         metrics.append(
             {
@@ -414,7 +406,9 @@ def build_crypto_portfolio_statistics_tables(
         observe, finish = _crypto_observations(
             artifact,
             windows,
-            plan["exposure_limits"][candidate.asset_id]["max_position_quantity"],
+            execution_config["max_position"]
+            if config["execution_style"] == "maker"
+            else execution_config["position_size"],
             observation_window_ns=observed,
         )
         summary = summarize_ledger(
@@ -649,9 +643,9 @@ def build_crypto_portfolio_statistics_tables(
                 }
             )
         base_fee = (
-            plan["execution"]["maker"]["maker_fee_bps"]
-            if isinstance(candidate, CryptoMakerCandidate)
-            else plan["execution"]["taker_fee_bps"]
+            execution_config["maker_fee_bps"]
+            if config["execution_style"] == "maker"
+            else execution_config["taker_fee_bps"]
         )
         costs.extend(
             {**row_key, **row}
@@ -659,25 +653,23 @@ def build_crypto_portfolio_statistics_tables(
                 turnover=economic["turnover"],
                 net_pnl=economic["net_pnl"],
                 base_fee_bps=base_fee,
-                fee_scenarios_bps=plan["execution"]["fee_scenarios_bps"],
-                additional_spread_scenarios_bps=plan["execution"][
+                fee_scenarios_bps=statistics_policy["fee_scenarios_bps"],
+                additional_spread_scenarios_bps=statistics_policy[
                     "additional_spread_scenarios_bps"
                 ],
             )
         )
 
-    root = layout.target_root(target_id, None)
-    identity = upstream_identities[target_id]
+    root = ledger_path
     if mode == "continuous":
         read_ledger(
             root,
-            expected_identity=identity,
             consume_batches=lambda artifact, batches: consume_episode(
                 None, artifact, batches
             ),
         )
     else:
-        read_episodes(root, expected_identity=identity, consume_episode=consume_episode)
+        read_episodes(root, consume_episode=consume_episode)
     if cursor < envelope_stop:
         cover(cursor, envelope_stop, "missing")
     row_key = {**candidate_key, "episode_id": "all"}
@@ -736,12 +728,11 @@ def build_crypto_portfolio_statistics_tables(
 
 def iter_holding_factor_inputs(
     *,
-    layout,
+    inputs,
     calendar,
     time_window,
     unified_trading_sessions,
     style_columns,
-    risk_context_target_ids,
     benchmark_required,
     risk_config: FactorRiskConfig | None = None,
     iter_portfolio_sessions,
@@ -779,8 +770,10 @@ def iter_holding_factor_inputs(
         panels = channels.enter_context(
             closing_iterator(
                 iter_portfolio_sessions(
-                    layout=layout,
-                    panel_root=layout.target_root("market_panel_1d", None),
+                    market_bars_root=inputs["market_bars"],
+                    stock_master_root=inputs["stock_master"],
+                    equity_events_root=inputs.get("equity_events"),
+                    panel_root=inputs["panel"],
                     panel_columns=_ENHANCED_PANEL_COLUMNS,
                     calendar=calendar,
                     time_window=history,
@@ -788,9 +781,7 @@ def iter_holding_factor_inputs(
             )
         )
         risk_inputs = _risk_context_input_sessions(
-            roots=tuple(
-                layout.target_root(target, None) for target in risk_context_target_ids
-            ),
+            roots=tuple(inputs["risk_context"]),
             style_columns=style_columns,
             time_window=history,
             retained=channels,
@@ -799,7 +790,7 @@ def iter_holding_factor_inputs(
         context_frames = {root: next(source, None) for root, source in contexts.items()}
         benchmarks = (
             stream(
-                layout.target_root("benchmark_weights", None),
+                inputs["benchmark"],
                 ("benchmark_id", "asset_id", "timestamp", "weight"),
                 time_window,
             )
@@ -966,10 +957,10 @@ def build_portfolio_statistics_tables(
     *,
     ledgers,
     candidates,
-    protocol_manifest,
+    config,
     time_window,
     unified_trading_sessions,
-    layout,
+    inputs,
     iter_portfolio_sessions,
 ):
     from quant_research_platform.storage.datasets.reading import read_dataset
@@ -978,12 +969,12 @@ def build_portfolio_statistics_tables(
     pieces = []
 
     calendar = read_dataset(
-        layout.target_root("trading_calendar", None),
+        inputs["calendar"],
         columns=("calendar_date", "source_market_type", "is_trading_day"),
         time_window=None,
         mode=DatasetReadMode.MATERIALIZED,
     )
-    codes = protocol_manifest["benchmark_total_return_indices"]
+    codes = config["benchmark_total_return_indices"]
     price_codes = {
         name: code
         for code, (name, _label) in a_share_ids.FORMAL_BENCHMARKS.items()
@@ -1000,7 +991,7 @@ def build_portfolio_statistics_tables(
         )
         with closing_iterator(
             read_dataset(
-                layout.target_root("index_market", None),
+                inputs["index_market"],
                 columns=("source_asset_id", "timestamp", "open", "close"),
                 time_window=time_window,
                 mode=DatasetReadMode.CHUNKED,
@@ -1054,29 +1045,19 @@ def build_portfolio_statistics_tables(
     benchmark["benchmark_id"] = benchmark.source_asset_id.map(
         {code: name for name, code in codes.items()}
     )
-    inputs = {
+    holding_inputs = {
         styles: iter_holding_factor_inputs(
             iter_portfolio_sessions=iter_portfolio_sessions,
-            layout=layout,
+            inputs=inputs,
             calendar=calendar,
             time_window=time_window,
             unified_trading_sessions=unified_trading_sessions,
             style_columns=styles,
-            risk_config=FactorRiskConfig(**protocol_manifest["risk"]),
+            risk_config=FactorRiskConfig(**config["risk"]),
             benchmark_required=any(
                 candidate.benchmark_id is not None
                 for candidate in candidates
                 if candidate.risk_style_columns == styles
-            ),
-            risk_context_target_ids=tuple(
-                dict.fromkeys(
-                    target
-                    for candidate in candidates
-                    if candidate.risk_style_columns == styles
-                    for target in (
-                        candidate.risk_context_target_ids or ("price_volume_facts",)
-                    )
-                )
             ),
         )
         for styles in dict.fromkeys(
@@ -1086,12 +1067,12 @@ def build_portfolio_statistics_tables(
     return _portfolio_statistics_tables(
         ledgers=ledgers,
         candidates=candidates,
-        protocol_manifest=protocol_manifest,
+        config=config,
         time_window=time_window,
         benchmark_opens=benchmark,
         calendar=calendar,
         unified_trading_sessions=unified_trading_sessions,
-        holding_inputs=inputs,
+        holding_inputs=holding_inputs,
     )
 
 
@@ -1099,7 +1080,7 @@ def _portfolio_statistics_tables(
     *,
     ledgers,
     candidates,
-    protocol_manifest,
+    config,
     time_window,
     benchmark_opens,
     calendar,
@@ -1108,14 +1089,12 @@ def _portfolio_statistics_tables(
 ):
     """Project the protocol-selected ledgers into interval-aligned diagnostics."""
     ids = tuple(candidate.candidate_id for candidate in candidates)
-    if tuple(protocol_manifest["portfolio_candidates"]) != ids or set(ledgers) != set(
-        ids
-    ):
+    if len(ids) != len(set(ids)) or set(ledgers) != set(ids):
         raise ValueError("portfolio_statistics_candidate_set_invalid")
     expected_intervals = holding_intervals(
         pd.DatetimeIndex(unified_trading_sessions(calendar)), time_window
     )
-    access = protocol_manifest["access_window"]
+    access = config["sample_role"]
     (
         daily_rows,
         capacity_rows,
@@ -1241,7 +1220,7 @@ def _portfolio_statistics_tables(
                     relative_wealth=np.nan,
                     benchmark_status="NOT_APPLICABLE",
                     benchmark_reason="",
-                    access_window=access,
+                    sample_role=access,
                 )
                 if candidate.benchmark_id is not None:
                     benchmark = benchmarks[candidate.benchmark_id]
@@ -1403,7 +1382,7 @@ def _portfolio_statistics_tables(
                         for asset in deltas
                     }
                     adv_missing = any(value is None for value in available.values())
-                    for participation in protocol_manifest["execution_assumptions"][
+                    for participation in config["execution_assumptions"][
                         "adv_sensitivities"
                     ]:
                         capacities = (
@@ -1692,7 +1671,7 @@ def _portfolio_statistics_tables(
                     or name.endswith(("_capital_return", "_target_notional"))
                     else undefined_reason,
                     observation_count=count,
-                    access_window=access,
+                    sample_role=access,
                 )
             )
     daily = pd.DataFrame(daily_rows)
@@ -1707,7 +1686,7 @@ def _portfolio_statistics_tables(
         )
     ):
         raise ValueError("portfolio_statistics_window_incomplete")
-    paired_comparison = _group_portfolio_comparison(matrix, protocol_manifest)
+    paired_comparison = _group_portfolio_comparison(matrix, config)
     for index, pair in paired_comparison.iterrows():
         if pair.reason == "nonpositive_start_nav":
             pair_rows = daily.loc[
@@ -1730,10 +1709,10 @@ def _portfolio_statistics_tables(
         paired_comparison[f"{group}_terminal_wealth_reason"] = np.where(
             paired_comparison[f"{group}_terminal_wealth"].isna(), "nonfinite_result", ""
         )
-    if access == "development":
+    if access == "validation":
         blockers = {
             candidate.candidate_id: _model_inference_blocker(
-                access_window=access, selection_groups=(candidate.selection_group,)
+                sample_role=access, selection_groups=(candidate.selection_group,)
             )
             for candidate in candidates
         }
@@ -1798,11 +1777,11 @@ def _portfolio_statistics_tables(
                         reason=reason,
                         observation_count=len(matrix),
                         candidate_count=len(inference_ids),
-                        access_window=access,
+                        sample_role=access,
                     )
                 )
-        blocks = protocol_manifest["statistics"]["cscv_blocks"]
-        if (robustness_blocker := _inference_blocker(protocol_manifest)) is not None:
+        blocks = config["statistics"]["cscv_blocks"]
+        if (robustness_blocker := _inference_blocker(config)) is not None:
             value, status, reason = np.nan, "UNDEFINED", robustness_blocker
         elif not inference_ids:
             value, status, reason = (
@@ -1840,20 +1819,20 @@ def _portfolio_statistics_tables(
                 reason=reason,
                 observation_count=len(matrix),
                 candidate_count=len(inference_ids),
-                access_window=access,
+                sample_role=access,
             )
         )
     else:
         robustness_rows.append(
             dict(
                 candidate_id="joint",
-                test_id="development_only",
+                test_id="validation_only",
                 value=np.nan,
                 status="UNDEFINED",
-                reason="holdout_excluded",
+                reason="test_excluded",
                 observation_count=0,
                 candidate_count=len(ids),
-                access_window=access,
+                sample_role=access,
             )
         )
     capacity = pd.DataFrame(
@@ -1873,9 +1852,7 @@ def _portfolio_statistics_tables(
         ["candidate_id", "participation"], sort=False
     ).indices
     for candidate_id in ids:
-        for participation in protocol_manifest["execution_assumptions"][
-            "adv_sensitivities"
-        ]:
+        for participation in config["execution_assumptions"]["adv_sensitivities"]:
             sample = capacity.iloc[
                 capacity_groups.get((candidate_id, participation), [])
             ]
@@ -1957,10 +1934,47 @@ def _portfolio_statistics_tables(
     return tables
 
 
-def _group_portfolio_comparison(matrix, protocol_manifest):
+_PORTFOLIO_COMPARISON_COLUMNS = (
+    "portfolio_id",
+    "comparison_role",
+    "sample_role",
+    "status",
+    "reason",
+    "bootstrap_status",
+    "bootstrap_reason",
+    "fdr_method",
+    "global_terminal_wealth_reason",
+    "quarterly_terminal_wealth_reason",
+    "observation_count",
+    "hac_lag",
+    "bootstrap_block_size",
+    "bootstrap_repetitions",
+    "bootstrap_seed",
+    "fdr_family_size",
+    "global_mean",
+    "quarterly_mean",
+    "mean_difference",
+    "global_terminal_wealth",
+    "quarterly_terminal_wealth",
+    "standard_error",
+    "t_statistic",
+    "p_value",
+    "ci_lower",
+    "ci_upper",
+    "bootstrap_lower",
+    "bootstrap_upper",
+    "confidence",
+    "fdr_alpha",
+    "fdr_adjusted_p_value",
+)
+
+
+def _group_portfolio_comparison(matrix, config):
     """Compare both frozen groups on the complete, already validated daily grid."""
-    statistics = protocol_manifest["statistics"]
-    declaration = statistics["group_comparison"]
+    statistics = config["statistics"]
+    declaration = statistics.get("group_comparison")
+    if declaration is None:
+        return pd.DataFrame(columns=_PORTFOLIO_COMPARISON_COLUMNS)
     candidate_ids = declaration["portfolio_ids"]
     columns = [
         f"{group}_{candidate}"
@@ -1983,14 +1997,12 @@ def _group_portfolio_comparison(matrix, protocol_manifest):
             },
         }
     )
-    access = protocol_manifest["access_window"]
+    access = config["sample_role"]
     inference_blocker = _model_inference_blocker(
-        access_window=access, selection_groups=("global", "quarterly")
+        sample_role=access, selection_groups=("global", "quarterly")
     )
     fdr_method = (
-        None
-        if _inference_blocker(protocol_manifest) is not None
-        else declaration["fdr_method"]
+        None if _inference_blocker(config) is not None else declaration["fdr_method"]
     )
     undefined_pairs = {
         index for index in range(len(candidate_ids)) if differences[index].isna().any()
@@ -2020,7 +2032,7 @@ def _group_portfolio_comparison(matrix, protocol_manifest):
             "comparison_role": "primary"
             if candidate == declaration["primary_portfolio_id"]
             else "secondary",
-            "access_window": access,
+            "sample_role": access,
             "observation_count": len(values),
             "global_mean": float(mean(matrix[f"global_{candidate}"])),
             "quarterly_mean": float(mean(matrix[f"quarterly_{candidate}"])),
@@ -2109,37 +2121,211 @@ def _group_portfolio_comparison(matrix, protocol_manifest):
         rows.append(row)
     return pd.DataFrame.from_records(
         rows,
-        columns=(
-            "portfolio_id",
-            "comparison_role",
-            "access_window",
-            "status",
-            "reason",
-            "bootstrap_status",
-            "bootstrap_reason",
+        columns=_PORTFOLIO_COMPARISON_COLUMNS,
+    )
+
+
+def portfolio_statistics(config):
+    """Publish statistics for explicitly chosen A-share ledgers and market inputs."""
+    from pathlib import Path
+
+    from quant_research_platform.artifacts.portfolio_ledger import (
+        read_portfolio_ledger_artifact,
+    )
+    from quant_research_platform.artifacts.statistics import write_statistics_artifact
+    from quant_research_platform.contracts.json_codec import qrp_json_mapping_snapshot
+    from quant_research_platform.contracts.portfolios import PortfolioCandidateSpec
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.markets.implementations.a_share import (
+        portfolio_sessions,
+    )
+    from quant_research_platform.markets.implementations.a_share.calendar import (
+        unified_trading_sessions,
+    )
+    from quant_research_platform.storage.atomic import reject_if_exists
+
+    config = qrp_json_mapping_snapshot(config)
+    required = {
+        "ledgers",
+        "inputs",
+        "output",
+        "window",
+        "sample_role",
+        "benchmark_total_return_indices",
+        "risk",
+        "adv_sensitivities",
+        "statistics",
+    }
+    optional = {
+        "selection_is_exploratory",
+        "expectations",
+        "feature_recipe",
+        "training_weighting",
+    }
+    if required - set(config) or set(config) - required - optional:
+        raise ValueError("portfolio_statistics_config_invalid")
+    if config["sample_role"] not in {"validation", "test"}:
+        raise ValueError("statistics_sample_role_invalid")
+    if not isinstance(config["ledgers"], list) or not config["ledgers"]:
+        raise ValueError("portfolio_statistics_ledgers_required")
+    policy = config["statistics"]
+    paired = isinstance(policy, dict) and "group_comparison" in policy
+    expected = {"cscv_blocks"} | (
+        {"hac_lag", "bootstrap_block", "bootstrap_repetitions", "group_comparison"}
+        if paired
+        else set()
+    )
+    if not isinstance(policy, dict) or set(policy) != expected:
+        raise ValueError("portfolio_statistics_policy_invalid")
+    if paired and (
+        not isinstance(policy["group_comparison"], dict)
+        or set(policy["group_comparison"])
+        != {
+            "portfolio_ids",
+            "primary_portfolio_id",
             "fdr_method",
-            "global_terminal_wealth_reason",
-            "quarterly_terminal_wealth_reason",
-            "observation_count",
-            "hac_lag",
-            "bootstrap_block_size",
-            "bootstrap_repetitions",
-            "bootstrap_seed",
-            "fdr_family_size",
-            "global_mean",
-            "quarterly_mean",
-            "mean_difference",
-            "global_terminal_wealth",
-            "quarterly_terminal_wealth",
-            "standard_error",
-            "t_statistic",
-            "p_value",
-            "ci_lower",
-            "ci_upper",
-            "bootstrap_lower",
-            "bootstrap_upper",
+            "alpha",
+            "seed",
             "confidence",
-            "fdr_alpha",
-            "fdr_adjusted_p_value",
-        ),
+        }
+    ):
+        raise ValueError("portfolio_statistics_comparison_policy_invalid")
+    participation = config["adv_sensitivities"]
+    if (
+        not isinstance(participation, list)
+        or not participation
+        or any(
+            type(value) not in {int, float}
+            or not np.isfinite(value)
+            or not 0 < value <= 1
+            for value in participation
+        )
+        or len(set(participation)) != len(participation)
+    ):
+        raise ValueError("portfolio_statistics_adv_sensitivities_invalid")
+    output = Path(config["output"])
+    reject_if_exists(output)
+    window = TimeWindow(**config["window"])
+    ledgers, candidates = {}, []
+    for path in config["ledgers"]:
+        ledger = read_portfolio_ledger_artifact(Path(path))
+        values = dict(ledger.metadata["candidate"])
+        values["risk_style_columns"] = tuple(values.get("risk_style_columns", ()))
+        candidate = PortfolioCandidateSpec(**values)
+        if (
+            candidate.candidate_id in ledgers
+            or ledger.capital.candidate_id != candidate.candidate_id
+        ):
+            raise ValueError("portfolio_statistics_candidate_set_invalid")
+        if (
+            ledger.metadata["sample_role"] != config["sample_role"]
+            or TimeWindow(**ledger.metadata["window"]) != window
+        ):
+            raise ValueError("portfolio_statistics_ledger_window_mismatch")
+        ledgers[candidate.candidate_id] = ledger
+        candidates.append(candidate)
+    tables = build_portfolio_statistics_tables(
+        ledgers=ledgers,
+        candidates=tuple(candidates),
+        config={
+            **config,
+            "execution_assumptions": {"adv_sensitivities": participation},
+        },
+        time_window=window,
+        unified_trading_sessions=unified_trading_sessions,
+        inputs=config["inputs"],
+        iter_portfolio_sessions=portfolio_sessions.iter_portfolio_sessions,
+    )
+    metadata = {key: value for key, value in config.items() if key != "output"}
+    metadata["candidate_ids"] = list(ledgers)
+    metadata["comparison_portfolio_ids"] = (
+        config["statistics"].get("group_comparison", {}).get("portfolio_ids", [])
+    )
+    return write_statistics_artifact(
+        output, metadata=metadata, tables=tables, table_group="portfolio"
+    )
+
+
+def crypto_statistics(config):
+    """Calculate economic statistics from one explicit native Crypto account."""
+    from pathlib import Path
+
+    from quant_research_platform.artifacts.crypto_hft import (
+        read_crypto_episode_artifact,
+        summarize_crypto_ledger,
+    )
+    from quant_research_platform.artifacts.portfolio_ledger import (
+        read_portfolio_ledger_artifact,
+    )
+    from quant_research_platform.artifacts.statistics import (
+        STATISTICS_TABLE_COLUMNS,
+        write_statistics_artifact,
+    )
+    from quant_research_platform.contracts.json_codec import qrp_json_mapping_snapshot
+    from quant_research_platform.contracts.portfolios import PortfolioCapital
+    from quant_research_platform.contracts.time import (
+        TimeWindow,
+        crypto_execution_windows,
+    )
+    from quant_research_platform.storage.atomic import reject_if_exists
+    from quant_research_platform.storage.manifests import read_qrp_json_file
+
+    config = qrp_json_mapping_snapshot(config)
+    if set(config) != {"ledger", "output", "statistics"}:
+        raise ValueError("crypto_statistics_config_invalid")
+    policy = config["statistics"]
+    if not isinstance(policy, dict) or set(policy) != {
+        "annualization_minimum_observations",
+        "annualization_periods",
+        "fee_scenarios_bps",
+        "additional_spread_scenarios_bps",
+    }:
+        raise ValueError("crypto_statistics_policy_invalid")
+    if (
+        type(policy["annualization_minimum_observations"]) is not int
+        or policy["annualization_minimum_observations"] < 2
+        or type(policy["annualization_periods"]) not in {int, float}
+        or not np.isfinite(policy["annualization_periods"])
+        or policy["annualization_periods"] <= 0
+    ):
+        raise ValueError("crypto_statistics_annualization_invalid")
+    output = Path(config["output"])
+    reject_if_exists(output)
+    source = Path(config["ledger"])
+    _, manifest = read_qrp_json_file(source / "manifest.json")
+    metadata = manifest["metadata"]
+    capital = PortfolioCapital(**manifest["capital"])
+    mode = metadata["execution_mode"]
+    expected = "qrp-portfolio-ledger" if mode == "continuous" else "qrp-crypto-episodes"
+    if (
+        mode not in {"continuous", "independent_segments"}
+        or manifest.get("schema_id") != expected
+    ):
+        raise ValueError("crypto_statistics_execution_mode_invalid")
+    window = TimeWindow(**metadata["window"])
+    windows = crypto_execution_windows(
+        metadata["chronology"], window, sample_role=metadata["sample_role"]
+    )
+    science = {**metadata, "candidate_id": capital.candidate_id, "statistics": policy}
+    tables = build_crypto_portfolio_statistics_tables(
+        ledger_path=source,
+        config=science,
+        windows=windows,
+        read_ledger=read_portfolio_ledger_artifact,
+        read_episodes=read_crypto_episode_artifact,
+        summarize_ledger=summarize_crypto_ledger,
+        table_columns=STATISTICS_TABLE_COLUMNS,
+    )
+    return write_statistics_artifact(
+        output,
+        metadata={
+            "ledger": str(source),
+            "window": metadata["window"],
+            "sample_role": metadata["sample_role"],
+            "execution_mode": mode,
+            "candidate_ids": [capital.candidate_id],
+            "statistics": policy,
+        },
+        tables=tables,
+        table_group="crypto_portfolio",
     )

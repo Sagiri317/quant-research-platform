@@ -303,6 +303,7 @@ class FactorRiskState:
         self._residuals: dict[str, array] = {}
         self._residual_sessions: dict[str, array] = {}
         self._session_count = 0
+        self._specific_session_counts: dict[str, int] = {}
 
     def prepare_exposures(
         self, cross: pd.DataFrame, *, include_ineligible: bool = False
@@ -564,7 +565,12 @@ class FactorRiskState:
         ), tuple(current_industries)
 
     def observe_return_session(
-        self, cross: pd.DataFrame, *, shared_fits=None, fit_key=None
+        self,
+        cross: pd.DataFrame,
+        *,
+        closed_assets=frozenset(),
+        shared_fits=None,
+        fit_key=None,
     ) -> None:
         listings = strict_timestamp_series(
             cross["listing_date"], error="factor_risk_listing_invalid"
@@ -573,7 +579,13 @@ class FactorRiskState:
             if asset in self._listings and self._listings[asset] != listing:
                 self._residuals.pop(asset, None)
                 self._residual_sessions.pop(asset, None)
+                self._specific_session_counts.pop(asset, None)
             self._listings[asset] = listing
+        for asset in self._listings:
+            if asset not in closed_assets:
+                self._specific_session_counts[asset] = (
+                    self._specific_session_counts.get(asset, 0) + 1
+                )
         if shared_fits is None or fit_key not in shared_fits:
             fitted, industries = self._fit_return_session(cross)
             fact = (
@@ -598,7 +610,8 @@ class FactorRiskState:
             values = self._residuals[asset]
             while (
                 sessions
-                and sessions[0] <= self._session_count - self.config.specific_window
+                and sessions[0]
+                <= self._specific_session_counts[asset] - self.config.specific_window
             ):
                 sessions.pop(0)
                 values.pop(0)
@@ -631,7 +644,7 @@ class FactorRiskState:
         ):
             self._residuals.setdefault(asset, array("d")).append(float(residual))
             self._residual_sessions.setdefault(asset, array("Q")).append(
-                self._session_count
+                self._specific_session_counts[asset]
             )
 
     def current_exposures(self, cross: pd.DataFrame) -> pd.DataFrame:
@@ -696,7 +709,9 @@ class FactorRiskState:
             if len(values) >= self.config.minimum_specific_dates:
                 values = np.asarray(values)
                 absolute_values = np.abs(values)
-                ages = self._session_count - np.asarray(self._residual_sessions[asset])
+                ages = self._specific_session_counts[asset] - np.asarray(
+                    self._residual_sessions[asset]
+                )
                 weights = _ewma_weights(ages, self.config.specific_half_life)
                 if (
                     weights.dtype == object

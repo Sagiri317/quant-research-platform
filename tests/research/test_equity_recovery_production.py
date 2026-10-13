@@ -7,9 +7,6 @@ from quant_research_platform.artifacts.portfolio_ledger import (
     write_portfolio_ledger_artifact,
 )
 from quant_research_platform.compute.portfolio_economics import _LedgerEconomics
-from quant_research_platform.contracts.business_manifest import (
-    build_business_manifest_envelope,
-)
 from quant_research_platform.contracts.portfolios import (
     PortfolioCapital,
     validate_portfolio_transition,
@@ -18,10 +15,10 @@ from quant_research_platform.research.portfolios.accounting import (
     portfolio_interval_economics,
 )
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
+from tests.helpers.portfolio_inputs import _processed_specs
 from tests.helpers.research_specs import make_demo_research_dataset_spec
 from tests.research.test_closed_market_portfolios import _ledger
 from tests.sources.reference.test_equity_events import native_equity_inputs
-from tests.workflows.test_portfolio_workflow_integration import _processed_specs
 
 
 def recovered_batches(tmp_path, kind, *, events_override=None, panel_transform=None):
@@ -62,6 +59,7 @@ def recovered_batches(tmp_path, kind, *, events_override=None, panel_transform=N
                 successor_listing_date="2023-01-03",
                 successor_shares_per_old_share=0.5,
                 successor_shares_per_unit=4.0,
+                successor_unit_basis_date="2023-01-03",
             ),
             dict(
                 base,
@@ -90,7 +88,7 @@ def recovered_batches(tmp_path, kind, *, events_override=None, panel_transform=N
         frame = frame.loc[
             ~(frame.asset_id.eq("000001") & frame.timestamp.gt("2023-01-02"))
         ]
-        root = roots[target].parent / ("c" * 64)
+        root = roots[target].with_name(roots[target].name + "-updated")
         write_dataset(
             root,
             frame,
@@ -100,7 +98,11 @@ def recovered_batches(tmp_path, kind, *, events_override=None, panel_transform=N
         )
         changed[target] = root
     roots.update(changed)
-    layout = layout.with_target_roots(changed)
+    layout = {
+        **layout,
+        "dataset": changed["fixture"],
+        "execution": changed["execution_mask"],
+    }
     batches = list(_ledger(layout, roots))
     return batches
 
@@ -161,39 +163,17 @@ def test_actual_reference_evidence_reaches_retained_equity_ledger(tmp_path, kind
             for batch in batches[1:]
             for trade in batch.trades
         )
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id=capital.candidate_id,
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": "2022-12-30",
-            "end": "2023-01-06",
-            "access": "development",
-        },
-        upstream_identities={},
-        semantic_metadata={
-            "portfolio_capital": {
-                "candidate_id": capital.candidate_id,
-                "initial_capital": 100.0,
-                "valuation_currency": "CNY",
-                "valuation_method": "adjusted_notional",
-            }
-        },
-    )
+    metadata = {
+        "window": {"start": "2022-12-30", "end": "2023-01-06"},
+        "sample_role": "validation",
+    }
     root = write_portfolio_ledger_artifact(
         tmp_path / "ledger",
-        envelope=envelope,
+        capital=capital,
+        metadata=metadata,
         produce=lambda emit: [emit(batch) for batch in batches],
     )
-    assert (
-        list(
-            read_portfolio_ledger_artifact(
-                root, expected_identity=root.name
-            ).iter_chunks()
-        )
-        == batches
-    )
+    assert list(read_portfolio_ledger_artifact(root).iter_chunks()) == batches
 
 
 def test_unvalued_successor_blocks_without_synthetic_quote(tmp_path):
@@ -211,6 +191,7 @@ def test_unvalued_successor_blocks_without_synthetic_quote(tmp_path):
                 successor_listing_date="2023-01-03",
                 successor_shares_per_old_share=0.5,
                 successor_shares_per_unit=4.0,
+                successor_unit_basis_date="2023-01-03",
             )
         ]
 

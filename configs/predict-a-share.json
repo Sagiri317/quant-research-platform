@@ -1,0 +1,10 @@
+{
+  "model": "results/core6-linear-2018q1",
+  "inputs": "results/core6-dataset",
+  "output": "results/core6-linear-validation-2018q1",
+  "prediction_window": {
+    "start": "2018-01-01",
+    "end": "2018-03-31"
+  },
+  "sample_role": "validation"
+}

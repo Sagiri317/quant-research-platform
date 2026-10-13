@@ -15,11 +15,9 @@ from quant_research_platform.artifacts.statistics import (
     read_statistics_artifact,
     write_statistics_artifact,
 )
-from quant_research_platform.contracts.business_manifest import (
-    build_business_manifest_envelope,
-)
 from quant_research_platform.contracts.portfolios import (
     ExecutedTrade,
+    PortfolioCapital,
     PortfolioCashFlow,
     PortfolioDiagnostic,
     PortfolioLedgerBatch,
@@ -27,22 +25,20 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioValuation,
 )
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.profiles.research import (
-    bind_research_configuration,
-    research_profile,
-)
 from quant_research_platform.research.portfolios.diagnostics import (
     _portfolio_statistics_tables,
 )
 from quant_research_platform.research.portfolios.risk import HoldingFactorInputs
-from tests.helpers.research_configuration import research_configuration
-from tests.helpers.statistics_artifacts import statistics_envelope
+from tests.helpers.statistics_artifacts import (
+    portfolio_statistics_config,
+    statistics_metadata,
+)
 
 
 @pytest.mark.parametrize(
     "recovery", ["quote", "cash_retained", "cash_cancelled", "cash_tiny_start"]
 )
-@pytest.mark.parametrize("access", ["development", "holdout"])
+@pytest.mark.parametrize("access", ["validation", "test"])
 def test_zero_nav_rights_recovery_persists_amounts_and_undefined_returns(
     tmp_path, access, recovery
 ):
@@ -52,12 +48,7 @@ def test_zero_nav_rights_recovery_persists_amounts_and_undefined_returns(
         "end": str(dates[-1].date()),
         "access": access,
     }
-    protocol = bind_research_configuration(
-        research_profile(), research_configuration(name="pv25")
-    ).protocol("pv_all")
-    candidates = protocol.portfolio_candidates()
-    manifest = protocol.manifest()
-    manifest["access_window"] = access
+    candidates, manifest = portfolio_statistics_config(sample_role=access)
     is_cash = recovery.startswith("cash")
     tiny = recovery == "cash_tiny_start"
     initial = float.fromhex("0x0.0000000000001p-1022") if tiny else 1000.0
@@ -160,30 +151,25 @@ def test_zero_nav_rights_recovery_persists_amounts_and_undefined_returns(
 
     ledgers = {}
     for candidate in candidates:
-        envelope = build_business_manifest_envelope(
-            logical_artifact_id=candidate.candidate_id,
-            schema_identity="a" * 64,
-            protocol_or_spec_identity="b" * 64,
-            software_identity="c" * 64,
-            research_window=window,
-            upstream_identities={},
-            semantic_metadata={
-                "portfolio_capital": {
-                    "candidate_id": candidate.candidate_id,
-                    "initial_capital": initial,
-                    "valuation_currency": "CNY",
-                    "valuation_method": "adjusted_notional",
-                }
-            },
+        capital = PortfolioCapital(
+            **{
+                "candidate_id": candidate.candidate_id,
+                "initial_capital": initial,
+                "valuation_currency": "CNY",
+                "valuation_method": "adjusted_notional",
+            }
         )
+        metadata = {
+            "window": {key: value for key, value in window.items() if key != "access"},
+            "sample_role": access,
+        }
         root = write_portfolio_ledger_artifact(
             tmp_path / candidate.candidate_id,
-            envelope=envelope,
+            capital=capital,
+            metadata=metadata,
             produce=lambda emit: [emit(batch) for batch in batches],
         )
-        ledger = read_portfolio_ledger_artifact(
-            root, expected_identity=envelope.instance_identity
-        )
+        ledger = read_portfolio_ledger_artifact(root)
         ledgers[candidate.candidate_id] = ledger
         summary = summarize_portfolio_ledger(ledger.capital, ledger.iter_chunks())
         assert summary["nav"] == terminal
@@ -217,7 +203,8 @@ def test_zero_nav_rights_recovery_persists_amounts_and_undefined_returns(
         ):
             write_portfolio_ledger_artifact(
                 tmp_path / "replayed",
-                envelope=envelope,
+                capital=capital,
+                metadata=metadata,
                 produce=lambda emit: [emit(batch) for batch in repeated],
             )
     if is_cash:
@@ -266,7 +253,7 @@ def test_zero_nav_rights_recovery_persists_amounts_and_undefined_returns(
     tables = _portfolio_statistics_tables(
         ledgers=ledgers,
         candidates=candidates,
-        protocol_manifest=manifest,
+        config=manifest,
         time_window=TimeWindow(dates[0], dates[-1]),
         benchmark_opens=benchmark_opens,
         calendar=pd.DataFrame({"calendar_date": dates}),
@@ -329,25 +316,21 @@ def test_zero_nav_rights_recovery_persists_amounts_and_undefined_returns(
             .eq("nonfinite_result" if tiny else "")
             .all()
         )
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="pv_all_portfolio_statistics",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window=window,
-        upstream_identities={},
-        semantic_metadata={},
+    metadata = statistics_metadata(
+        TimeWindow(window["start"], window["end"]),
+        sample_role=access,
+        candidate_ids=[c.candidate_id for c in candidates],
+        comparison_portfolio_ids=manifest["statistics"]["group_comparison"][
+            "portfolio_ids"
+        ],
     )
-    envelope = statistics_envelope(envelope, group="portfolio", protocol=manifest)
     root = write_statistics_artifact(
         tmp_path / "statistics",
-        envelope=envelope,
+        metadata=metadata,
         tables=tables,
         table_group="portfolio",
     )
-    artifact = read_statistics_artifact(
-        root, expected_identity=envelope.instance_identity
-    )
+    artifact = read_statistics_artifact(root)
     with artifact.table("portfolio_daily.parquet") as persisted:
         assert len(persisted) == 4 * len(candidates)
         assert persisted.loc[persisted.nav_before.eq(0), "net_return"].isna().all()
@@ -358,7 +341,7 @@ def test_zero_nav_rights_recovery_persists_amounts_and_undefined_returns(
     with pytest.raises(ValueError, match="statistics_return_status_invalid"):
         write_statistics_artifact(
             tmp_path / "invalid",
-            envelope=envelope,
+            metadata=metadata,
             tables=damaged,
             table_group="portfolio",
         )
@@ -371,11 +354,7 @@ def test_undefined_return_pair_preserves_other_pairs_and_fdr_family():
         _group_portfolio_comparison,
     )
 
-    protocol = bind_research_configuration(
-        research_profile(), research_configuration(name="pv25")
-    ).protocol("pv_all")
-    manifest = protocol.manifest()
-    manifest["access_window"] = "holdout"
+    _, manifest = portfolio_statistics_config(sample_role="test")
     pairs = manifest["statistics"]["group_comparison"]["portfolio_ids"]
     dates = pd.bdate_range("2023-01-02", periods=76)
     matrix = pd.DataFrame(
@@ -538,32 +517,33 @@ def test_exact_quantity_encoding_exceeds_float_without_losing_amount_ledger(
             PortfolioDiagnostic("asset", None, "adv20", 1.0),
         ),
     )
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="exact",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": "1970-01-01",
-            "end": "1970-01-02",
-            "access": "development",
-        },
-        upstream_identities={},
-        semantic_metadata={
-            "portfolio_capital": {
-                "candidate_id": "exact",
-                "initial_capital": 1.0,
-                "valuation_currency": "CNY",
-                "valuation_method": "adjusted_notional",
-            }
-        },
+    capital = PortfolioCapital(
+        **{
+            "candidate_id": "exact",
+            "initial_capital": 1.0,
+            "valuation_currency": "CNY",
+            "valuation_method": "adjusted_notional",
+        }
     )
+    metadata = {
+        "window": {
+            key: value
+            for key, value in {
+                "start": "1970-01-01",
+                "end": "1970-01-02",
+                "access": "validation",
+            }.items()
+            if key != "access"
+        },
+        "sample_role": "validation",
+    }
     root = write_portfolio_ledger_artifact(
-        tmp_path / "exact", envelope=envelope, produce=lambda emit: emit(batch)
+        tmp_path / "exact",
+        capital=capital,
+        metadata=metadata,
+        produce=lambda emit: emit(batch),
     )
-    artifact = read_portfolio_ledger_artifact(
-        root, expected_identity=envelope.instance_identity
-    )
+    artifact = read_portfolio_ledger_artifact(root)
     summary = summarize_portfolio_ledger(artifact.capital, artifact.iter_chunks())
     assert summary["nav"] == 1.0
     assert summary["net_pnl"] == 0.0

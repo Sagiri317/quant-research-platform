@@ -70,9 +70,20 @@ def test_manifest_writers_render_the_snapshot_checked_for_safety(
         ({"nested": [{"C:\\": {"value": 1}}]}, "absolute_path"),
     ],
 )
-def test_internal_manifest_rejects_credentials_and_absolute_paths(
+def test_internal_manifest_rejects_credentials_and_keeps_private_paths(
     payload: dict[str, object], reason: str, tmp_path: Path
 ) -> None:
+    path = tmp_path / "private.json"
+    if reason == "absolute_path":
+        manifests.write_internal_artifact_manifest(
+            path, {"schema_id": "qrp-dataset-manifest", **payload}
+        )
+        assert manifests.read_manifest(path) == {
+            "schema_id": "qrp-dataset-manifest",
+            **payload,
+        }
+        return
+    assert not path.exists()
     with pytest.raises(
         ValueError, match=f"unsafe_internal_artifact_metadata: {reason}"
     ):
@@ -80,7 +91,6 @@ def test_internal_manifest_rejects_credentials_and_absolute_paths(
             tmp_path / "manifest.json", {"schema_id": "qrp-dataset-manifest", **payload}
         )
     path = tmp_path / "manifest.json"
-    assert not path.exists()
     safe = {
         "schema_id": "qrp-dataset-manifest",
         "source_id": "choice",
@@ -114,30 +124,6 @@ def test_internal_manifest_keeps_provider_schema_field_names(tmp_path: Path) -> 
     path = tmp_path / "schema.json"
     manifests.write_internal_artifact_manifest(path, payload)
     assert manifests.read_manifest(path) == payload
-
-
-@pytest.mark.parametrize("max_members", (1, 4))
-def test_json_directory_rechecks_members_with_constant_directory_identity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, max_members: int
-) -> None:
-    (tmp_path / "a.json").write_text('{"schema_id":"synthetic"}', encoding="utf-8")
-    stable = manifests._directory_identity(tmp_path.stat())
-    monkeypatch.setattr(manifests, "_directory_identity", lambda _stat: stable)
-    original = manifests.read_qrp_json_file
-    reads = []
-
-    def read(path, **kwargs):
-        reads.append(path.name)
-        (tmp_path / "b.json").write_text('{"schema_id":"synthetic"}', encoding="utf-8")
-        return original(path, **kwargs)
-
-    monkeypatch.setattr(manifests, "read_qrp_json_file", read)
-    with pytest.raises(
-        ValueError,
-        match="dataset_metadata_(directory_identity_changed|member_limit_exceeded)",
-    ):
-        manifests.read_bounded_qrp_json_directory(tmp_path, max_members=max_members)
-    assert reads == ["a.json"]
 
 
 def test_json_directory_limit_precedes_content_reads(tmp_path: Path, monkeypatch):

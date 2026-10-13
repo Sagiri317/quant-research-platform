@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import gc
-import os
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,10 +20,7 @@ from quant_research_platform.storage.datasets import (
     write_dataset,
 )
 from quant_research_platform.storage.identity import (
-    filesystem_glob,
     filesystem_mkdir,
-    filesystem_stat,
-    native_filesystem_path,
 )
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
@@ -45,42 +39,6 @@ def test_iter_frame_chunks_reuses_bounded_frame_storage() -> None:
         )
         for chunk in chunks
     )
-
-
-@pytest.mark.parametrize(
-    "primary_type", (RuntimeError, KeyboardInterrupt, GeneratorExit)
-)
-def test_fingerprint_consumer_failure_retains_primary_and_reader_identity_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, primary_type
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "fingerprint_consumer")
-    write_dataset(
-        root,
-        make_default_dataset_frame().iloc[:1],
-        spec=make_processed_dataset_spec("fingerprint_consumer"),
-    )
-    part = next(filesystem_glob(root / "data", "**/*.parquet"))
-    primary = primary_type("fingerprint_consumer_failed")
-    unraisable = []
-
-    def fail_hash(*_args, **_kwargs):
-        before = filesystem_stat(part)
-        os.utime(
-            native_filesystem_path(part),
-            ns=(before.st_atime_ns, before.st_mtime_ns + 100_000_000),
-        )
-        raise primary
-
-    monkeypatch.setattr(dataset_fingerprinting, "_iter_fingerprint_hashes", fail_hash)
-    monkeypatch.setattr(
-        sys, "unraisablehook", lambda event: unraisable.append(event.exc_value)
-    )
-    with pytest.raises(primary_type) as caught:
-        fingerprint_dataset(root)
-    assert caught.value is primary
-    assert primary.__notes__ == ["iterator close also failed: ValueError"]
-    gc.collect()
-    assert unraisable == []
 
 
 def test_compare_requires_exact_proof_after_forced_fingerprint_collision(
@@ -167,75 +125,6 @@ def test_compare_propagates_programmer_errors(
         dataset_comparison.compare_datasets(left, right)
 
 
-def test_compare_rejects_mutation_after_both_decoded_sources(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    left = make_dataset_artifact_root(tmp_path, "mutation_left")
-    right = make_dataset_artifact_root(tmp_path, "mutation_right")
-    frame = make_default_dataset_frame()
-    write_dataset(left, frame, spec=make_processed_dataset_spec("mutation_left"))
-    write_dataset(right, frame, spec=make_processed_dataset_spec("mutation_right"))
-    batches = dataset_comparison.iter_dataset_file_batches
-    calls = 0
-
-    def changing_identity(context, **kwargs):
-        nonlocal calls
-        yield from batches(context, **kwargs)
-        calls += 1
-        if calls == 2:
-            part = next(filesystem_glob(left / "data", "**/*.parquet"))
-            stat = filesystem_stat(part)
-            os.utime(
-                native_filesystem_path(part),
-                ns=(stat.st_atime_ns, stat.st_mtime_ns + 10000000),
-            )
-
-    monkeypatch.setattr(
-        dataset_comparison, "iter_dataset_file_batches", changing_identity
-    )
-    comparison = compare_datasets(left, right)
-    assert comparison.status == "INSPECTION_FAILED"
-    assert comparison.summary == {"error": "dataset_inspection_failed"}
-
-
-@pytest.mark.parametrize("mutated_side", ("left", "right"))
-def test_compare_best_effort_observed_stage_drift_rejects_post_index_mutation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutated_side: str
-) -> None:
-    roots = {
-        side: make_dataset_artifact_root(tmp_path, f"final_barrier_{side}")
-        for side in ("left", "right")
-    }
-    frame = make_default_dataset_frame()
-    for side, root in roots.items():
-        write_dataset(
-            root, frame, spec=make_processed_dataset_spec(f"final_barrier_{side}")
-        )
-    batches = dataset_comparison.iter_dataset_file_batches
-    injected = False
-
-    def index_then_mutate(context, **kwargs: object):
-        nonlocal injected
-        yield from batches(context, **kwargs)
-        if context.root != roots[mutated_side]:
-            return
-        injected = True
-        part = next(filesystem_glob(context.root / "data", "**/*.parquet"))
-        stat = filesystem_stat(part)
-        os.utime(
-            native_filesystem_path(part),
-            ns=(stat.st_atime_ns, stat.st_mtime_ns + 10000000),
-        )
-
-    monkeypatch.setattr(
-        dataset_comparison, "iter_dataset_file_batches", index_then_mutate
-    )
-    comparison = compare_datasets(roots["left"], roots["right"])
-    assert injected
-    assert comparison.status == "INSPECTION_FAILED"
-    assert comparison.summary == {"error": "dataset_inspection_failed"}
-
-
 @pytest.mark.parametrize(
     ("primary_type", "verify_type"),
     (
@@ -295,56 +184,6 @@ def test_reader_final_verify_does_not_replace_active_primary(
         iterator = dataset_reading.iter_dataset_chunks(context, batch_rows=2)
     with pytest.raises(primary_type, match="primary_failure"):
         next(iterator)
-
-
-@pytest.mark.parametrize("completion", ("exhausted", "early_close"))
-def test_reader_final_verify_failure_propagates_without_external_primary(
-    monkeypatch: pytest.MonkeyPatch, completion: str
-) -> None:
-    frame = pd.DataFrame({"value": [1]})
-
-    class Context:
-        read_paths = (Path("part.parquet"),)
-        physical_columns = ("value",)
-        logical_columns = ("value",)
-        logical_dtypes = {"value": {"kind": "numpy_int", "dtype": "int64"}}
-        parquet_filters = None
-
-        def __init__(self) -> None:
-            self.verify_calls = 0
-            self.verify_fail_after = 1
-
-        def verify(self) -> None:
-            self.verify_calls += 1
-            if self.verify_calls > self.verify_fail_after:
-                raise OSError("verify_failure")
-
-        def metadata_for(self, _path: Path) -> object:
-            return SimpleNamespace(identity=object())
-
-    monkeypatch.setattr(
-        dataset_reading,
-        "pandas_dtype_overrides_from_logical_payload",
-        lambda *_args, **_kwargs: {},
-    )
-
-    def declared(*_args: object, **_kwargs: object):
-        yield frame
-
-    monkeypatch.setattr(
-        dataset_reading, "iter_declared_parquet_member_batches", declared
-    )
-    context = Context()
-    iterator = dataset_reading.iter_dataset_file_batches(
-        context, columns=("value",), batch_rows=2
-    )
-    if completion == "exhausted":
-        with pytest.raises(OSError, match="verify_failure"):
-            list(iterator)
-    else:
-        next(iterator)
-        with pytest.raises(OSError, match="verify_failure"):
-            iterator.close()
 
 
 @pytest.mark.parametrize("iterator_name", ("file_batches", "chunks"))

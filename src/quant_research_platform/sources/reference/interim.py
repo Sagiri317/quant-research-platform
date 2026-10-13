@@ -17,9 +17,6 @@ from urllib.parse import urlsplit
 import pandas as pd
 
 from quant_research_platform.catalog.processed import InterimDataCatalog
-from quant_research_platform.contracts.business_manifest import (
-    validate_business_manifest_envelope,
-)
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -41,18 +38,15 @@ from quant_research_platform.sources.reference.a_share_fees import (
     FeeSourceRow,
     load_a_share_fee_source,
 )
-from quant_research_platform.storage.datasets.schema import COMMON_MANIFEST_METADATA_KEY
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.identity import (
     _hash_file_content,
-    content_hash_for_files,
     dataset_file_identity,
     filesystem_exists,
     filesystem_is_dir,
     filesystem_is_file,
     require_unaliased_path,
 )
-from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import read_qrp_json_file
 
 SOURCE_ID = SourceId("reference")
@@ -168,12 +162,12 @@ def source_content_identity(raw_root: Path, data_id: str) -> str | None:
 
 def materialize_interim_data(
     *,
-    layout: StorageLayout,
-    raw_root: Path | None = None,
+    raw_root: Path,
+    output_roots: Mapping[str, Path],
     data_ids: tuple[str, ...] = (A_SHARE_FEE_SCHEDULE_DATA_ID,),
     start_date: str | None = None,
     end_date: str | None = None,
-    instance_metadata: Mapping[str, object] | None = None,
+    metadata: Mapping[str, object] | None = None,
 ) -> ReferenceInterimImportResult:
     if type(data_ids) is not tuple or len(data_ids) != 1:
         raise ValueError("reference_interim_data_ids_invalid")
@@ -185,34 +179,23 @@ def materialize_interim_data(
     }:
         raise ValueError("reference_interim_data_ids_invalid")
     with ExitStack() as retained:
-        root = (
-            Path(raw_root)
-            if raw_root is not None
-            else layout.project_root / "data/raw" / str(SOURCE_ID)
-        )
+        root = Path(raw_root)
         if data_id == A_SHARE_EQUITY_EVENTS_DATA_ID:
             equity_frame, identity = retained.enter_context(_equity_source(root))
         elif data_id == A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID:
-            metadata, members, identity = retained.enter_context(_industry_source(root))
+            source_metadata, members, identity = retained.enter_context(
+                _industry_source(root)
+            )
         else:
             source = load_a_share_fee_source(reference_root=root)
             identity = source.source_identity
-        if (
-            instance_metadata is not None
-            and COMMON_MANIFEST_METADATA_KEY in instance_metadata
-        ):
-            envelope = validate_business_manifest_envelope(
-                instance_metadata[COMMON_MANIFEST_METADATA_KEY]
-            )
-            if envelope["semantic_metadata"]["raw_content_identity"] != identity:
-                raise ValueError("reference_raw_identity_changed")
         if data_id == A_SHARE_EQUITY_EVENTS_DATA_ID:
             frame = equity_frame
             if end_date is not None:
                 frame = frame.loc[frame["timestamp"].le(pd.Timestamp(end_date))].copy()
             spec = _equity_events_spec()
         elif data_id == A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID:
-            frame = _industry_frame(metadata, members)
+            frame = _industry_frame(source_metadata, members)
             if end_date is not None:
                 frame = frame.loc[frame["timestamp"].le(pd.Timestamp(end_date))].copy()
             spec = _industry_snapshots_spec()
@@ -220,31 +203,18 @@ def materialize_interim_data(
             frame = _frame_from_rows(source.rows)
             spec = fee_schedule_spec()
 
-        def verify_source(_receipt):
-            current = (
-                source_content_identity(root, data_id)
-                if data_id != A_SHARE_FEE_SCHEDULE_DATA_ID
-                else content_hash_for_files(
-                    tuple(
-                        (name, root / "a_share_fee_schedule" / name)
-                        for name in (A_SHARE_FEE_CSV_NAME, A_SHARE_FEE_SIDECAR_NAME)
-                    ),
-                    error="reference_raw_identity_changed",
-                )
-            )
-            if current != identity:
-                raise ValueError("reference_raw_identity_changed")
-
-        artifact_root = layout.target_root(
-            spec.data_id,
-            layout.interim_data_root(spec.source_id, spec.data_id),
-        )
+        artifact_root = Path(output_roots[spec.data_id])
         write_dataset(
             artifact_root,
             frame,
             spec=spec,
-            instance_metadata=instance_metadata,
-            staged_validator=verify_source,
+            metadata={
+                **(metadata or {}),
+                "source_evidence": {
+                    "source_id": str(SOURCE_ID),
+                    "content_hash": identity,
+                },
+            },
         )
         return ReferenceInterimImportResult(
             artifact_roots={spec.data_id: artifact_root},
@@ -312,8 +282,8 @@ def _snapshot_date(value):
 def _industry_source(reference_root):
     root = Path(reference_root) / A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
     path = root / _INDUSTRY_MANIFEST_NAME
-    expected = dataset_file_identity(path)
-    raw, metadata = read_qrp_json_file(path, expected_identity=expected)
+    dataset_file_identity(path)
+    raw, metadata = read_qrp_json_file(path)
     if (
         set(metadata) != {"schema_id", "files", "snapshots"}
         or metadata["schema_id"] != "a_share_industry_snapshots/0.1"
@@ -393,33 +363,14 @@ def _industry_source(reference_root):
             "files": metadata["files"],
         }
     )
-    primary = None
-    try:
-        yield metadata, members, source_identity
-    except BaseException as body_error:
-        primary = body_error
-        raise
-    finally:
-        try:
-            if dataset_file_identity(path) != expected or any(
-                dataset_file_identity(member) != identity
-                for member, identity in members.values()
-            ):
-                raise ValueError("reference_raw_identity_changed")
-        except BaseException as verification_error:
-            if primary is None:
-                raise
-            primary.add_note(
-                "reference source identity verification also failed: "
-                f"{type(verification_error).__name__}"
-            )
+    yield metadata, members, source_identity
 
 
 def _industry_frame(metadata, members):
     rows = []
     for snapshot in metadata["snapshots"]:
         path, expected = members[snapshot["candidate_file"]]
-        raw, candidate = read_qrp_json_file(path, expected_identity=expected)
+        raw, candidate = read_qrp_json_file(path)
         if (
             hashlib.sha256(raw).hexdigest()
             != metadata["files"][snapshot["candidate_file"]]
@@ -535,8 +486,8 @@ def _equity_source(reference_root):
     """Admit explicit official equity facts and their evidenced adjusted-unit basis."""
     root = Path(reference_root) / A_SHARE_EQUITY_EVENTS_DATA_ID
     path = root / "metadata.json"
-    expected = dataset_file_identity(path)
-    raw, metadata = read_qrp_json_file(path, expected_identity=expected)
+    dataset_file_identity(path)
+    raw, metadata = read_qrp_json_file(path)
     if (
         set(metadata) != {"schema_id", "files", "events"}
         or metadata["schema_id"] != "a_share_equity_events"
@@ -586,7 +537,8 @@ def _equity_source(reference_root):
         "successor_listing_date",
         "successor_shares_per_old_share",
         "successor_shares_per_unit",
-        "panel_content_hash",
+        "unit_basis_date",
+        "successor_unit_basis_date",
         "source_url",
         "document_file",
         "source_locator",
@@ -651,9 +603,6 @@ def _equity_source(reference_root):
         for key in ("document_file", "unit_document_file"):
             if type(event[key]) is not str or event[key] not in members:
                 raise ValueError("equity_event_member_invalid")
-        digest = event["panel_content_hash"]
-        if type(digest) is not str or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
-            raise ValueError("equity_event_unit_basis_invalid")
         try:
             listed = pd.Timestamp(_snapshot_date(event["listing_date"]))
             effective = pd.Timestamp(_snapshot_date(event["effective_date"]))
@@ -667,6 +616,13 @@ def _equity_source(reference_root):
                 observed.tz_convert("Asia/Shanghai").tz_localize(None).normalize()
             )
             observed = observed.tz_convert("UTC").tz_localize(None)
+            unit_date = pd.Timestamp(_snapshot_date(event["unit_basis_date"]))
+            if (
+                not listed
+                <= unit_date
+                <= max(effective, published + pd.Timedelta(days=1))
+            ):
+                raise ValueError("equity_event_unit_basis_invalid")
             if listed > effective or observed_market_date < published:
                 raise ValueError("invalid_date_order")
         except (TypeError, ValueError) as exc:
@@ -684,11 +640,13 @@ def _equity_source(reference_root):
         ):
             raise ValueError("equity_event_kind_fields_invalid")
         successor, successor_listing, ratio = None, pd.NaT, None
+        successor_unit_date, basis = pd.NaT, None
         successor_keys = (
             "successor_asset_id",
             "successor_listing_date",
             "successor_shares_per_old_share",
             "successor_shares_per_unit",
+            "successor_unit_basis_date",
         )
         if kind == "conversion":
             successor = event["successor_asset_id"]
@@ -706,6 +664,15 @@ def _equity_source(reference_root):
                 raise ValueError("equity_event_successor_invalid")
             shares = number(event["successor_shares_per_old_share"], positive=True)
             basis = number(event["successor_shares_per_unit"], positive=True)
+            successor_unit_date = pd.Timestamp(
+                _snapshot_date(event["successor_unit_basis_date"])
+            )
+            if (
+                not successor_listing
+                <= successor_unit_date
+                <= max(effective, published + pd.Timedelta(days=1))
+            ):
+                raise ValueError("equity_event_unit_basis_invalid")
             ratio = Fraction(shares) * Fraction(old_shares) / Fraction(basis)
         elif any(event[key] is not None for key in successor_keys):
             raise ValueError("equity_event_kind_fields_invalid")
@@ -736,7 +703,11 @@ def _equity_source(reference_root):
                 successor,
                 successor_listing,
                 None if ratio is None else encode_exact_numeric(ratio),
-                digest,
+                encode_exact_numeric(old_shares),
+                unit_date,
+                None if basis is None else encode_exact_numeric(basis),
+                successor_unit_date,
+                event["unit_source_locator"],
                 evidence,
                 event["source_locator"],
             )
@@ -749,6 +720,8 @@ def _equity_source(reference_root):
         "available_at",
         "observed_at",
         "successor_listing_date",
+        "unit_basis_date",
+        "successor_unit_basis_date",
     }
     for column in EQUITY_EVENT_COLUMNS:
         frame[column] = (
@@ -762,23 +735,4 @@ def _equity_source(reference_root):
     identity = canonical_json_hash(
         {"metadata_sha256": hashlib.sha256(raw).hexdigest(), "files": metadata["files"]}
     )
-    primary = None
-    try:
-        yield frame, identity
-    except BaseException as body_error:
-        primary = body_error
-        raise
-    finally:
-        try:
-            if dataset_file_identity(path) != expected or any(
-                dataset_file_identity(member) != identity
-                for member, identity in members.values()
-            ):
-                raise ValueError("reference_raw_identity_changed")
-        except BaseException as verification_error:
-            if primary is None:
-                raise
-            primary.add_note(
-                "reference source identity verification also failed: "
-                f"{type(verification_error).__name__}"
-            )
+    yield frame, identity

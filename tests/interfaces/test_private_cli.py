@@ -14,7 +14,7 @@ from quant_research_platform.storage.identity import (
     filesystem_exists,
     native_filesystem_path,
 )
-from quant_research_platform.workflows.diagnostics.schema_inventory import (
+from quant_research_platform.storage.schema_inventory import (
     iter_schema_inventory_items,
 )
 from tests.storage.low_level_fixtures import write_low_level_parquet_artifact

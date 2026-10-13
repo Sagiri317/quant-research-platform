@@ -24,7 +24,6 @@ from quant_research_platform.storage.identity import (
     filesystem_write_text,
     native_filesystem_path,
 )
-from tests.storage.dataset_test_support import _input_dataset_identity_payload
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
     make_default_dataset_frame,
@@ -94,125 +93,14 @@ def test_write_dataset_rejects_parallel_input_fingerprint_lineage(
 ) -> None:
     with pytest.raises(
         ValueError,
-        match="unsupported_dataset_instance_metadata_key: input_fingerprints",
+        match="unsupported_dataset_metadata_key",
     ):
         write_dataset(
             make_dataset_artifact_root(tmp_path),
             make_default_dataset_frame(),
             spec=make_processed_dataset_spec(),
-            instance_metadata={"input_fingerprints": {}},
+            metadata={"input_fingerprints": {}},
         )
-
-
-def test_write_dataset_merges_exact_input_dataset_identities(tmp_path: Path) -> None:
-    root = make_dataset_artifact_root(tmp_path, "identity_metadata")
-    identities = {"demo_input": _input_dataset_identity_payload()}
-    write_dataset(
-        root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("identity_metadata"),
-        instance_metadata={"input_dataset_identities": identities},
-    )
-    inspection = inspect_dataset(root)
-    assert inspection.manifest["input_dataset_identities"] == identities
-
-
-def test_write_dataset_merges_exact_source_artifact_identity(tmp_path: Path) -> None:
-    root = make_dataset_artifact_root(tmp_path, "source_artifact_identity")
-    source_identity = {
-        "schema_id": "qrp-binance-recorder",
-        "artifact_id": "run-1",
-        "manifest_hash": "a" * 64,
-    }
-    write_dataset(
-        root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("source_artifact_identity"),
-        instance_metadata={
-            "input_dataset_identities": {
-                "demo_input": _input_dataset_identity_payload()
-            },
-            "source_artifact_identity": source_identity,
-        },
-    )
-    inspection = inspect_dataset(root)
-    assert inspection.manifest["source_artifact_identity"] == source_identity
-
-
-@pytest.mark.parametrize(
-    "source_identity",
-    (
-        {},
-        {
-            "schema_id": "qrp-binance-recorder",
-            "artifact_id": "run-1",
-            "manifest_hash": "bad",
-        },
-        {
-            "schema_id": "qrp-binance-recorder",
-            "artifact_id": "run-1",
-            "manifest_hash": "a" * 64,
-            "extra": "x",
-        },
-    ),
-)
-def test_write_dataset_rejects_malformed_source_artifact_identity(
-    tmp_path: Path, source_identity: object
-) -> None:
-    with pytest.raises(ValueError, match="invalid_source_artifact_identity"):
-        write_dataset(
-            make_dataset_artifact_root(tmp_path, "bad_source_artifact_identity"),
-            make_default_dataset_frame(),
-            spec=make_processed_dataset_spec("bad_source_artifact_identity"),
-            instance_metadata={"source_artifact_identity": source_identity},
-        )
-
-
-@pytest.mark.parametrize(
-    "identities",
-    [
-        [],
-        {"demo_input": _input_dataset_identity_payload(extra={"unexpected": "x"})},
-        {"demo_input": _input_dataset_identity_payload(data_id="other_input")},
-        {"demo_input": _input_dataset_identity_payload(extra={"spec_hash": 1})},
-        {"demo_input": _input_dataset_identity_payload(extra={"manifest_hash": "x"})},
-        {1: _input_dataset_identity_payload()},
-    ],
-)
-def test_write_dataset_rejects_malformed_input_dataset_identities(
-    tmp_path: Path, identities: object
-) -> None:
-    with pytest.raises(ValueError, match="invalid_input_dataset_identities_metadata"):
-        write_dataset(
-            make_dataset_artifact_root(tmp_path, "bad_identity_metadata"),
-            make_default_dataset_frame(),
-            spec=make_processed_dataset_spec("bad_identity_metadata"),
-            instance_metadata={"input_dataset_identities": identities},
-        )
-
-
-def test_inspect_dataset_rejects_tampered_input_dataset_identity(
-    tmp_path: Path,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "tampered_identity_metadata")
-    write_dataset(
-        root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("tampered_identity_metadata"),
-        instance_metadata={
-            "input_dataset_identities": {
-                "demo_input": _input_dataset_identity_payload()
-            }
-        },
-    )
-    manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(
-        Path(native_filesystem_path(manifest_path)).read_text(encoding="utf-8")
-    )
-    manifest["input_dataset_identities"]["demo_input"]["unknown"] = "x"
-    filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
-    with pytest.raises(ValueError, match="invalid_input_dataset_identities_metadata"):
-        inspect_dataset(root)
 
 
 def test_inspect_dataset_rejects_parallel_input_fingerprint_lineage(
@@ -237,19 +125,19 @@ def test_inspect_dataset_rejects_parallel_input_fingerprint_lineage(
 def test_write_dataset_rejects_unsupported_reserved_and_unsafe_instance_metadata(
     tmp_path: Path,
 ) -> None:
-    with pytest.raises(ValueError, match="unsupported_dataset_instance_metadata_key"):
+    with pytest.raises(ValueError, match="unsupported_dataset_metadata_key"):
         write_dataset(
             make_dataset_artifact_root(tmp_path, "unsupported_metadata"),
             make_default_dataset_frame(),
             spec=make_processed_dataset_spec("unsupported_metadata"),
-            instance_metadata={"other_metadata": {}},
+            metadata={"other_metadata": {}},
         )
-    with pytest.raises(ValueError, match="reserved_dataset_instance_metadata_key"):
+    with pytest.raises(ValueError, match="unsupported_dataset_metadata_key"):
         write_dataset(
             make_dataset_artifact_root(tmp_path, "reserved_metadata"),
             make_default_dataset_frame(),
             spec=make_processed_dataset_spec("reserved_metadata"),
-            instance_metadata={"row_count": 999},
+            metadata={"row_count": 999},
         )
 
 
@@ -561,82 +449,6 @@ def test_float_primary_key_zero_identity_publication(tmp_path, dtype):
     assert comparison.status == "MATCH"
 
 
-@pytest.mark.parametrize(
-    "mutation",
-    (
-        "date_format",
-        "empty",
-        "missing_hash",
-        "schema",
-        "duplicate_identity",
-        "nested",
-        "hash",
-    ),
-)
-def test_archive_source_identity_is_validated_on_write_and_read(tmp_path, mutation):
-    from copy import deepcopy
-
-    from quant_research_platform.sources.tardis.raw import SCHEMA_ID
-
-    identity = {
-        "schema_id": SCHEMA_ID,
-        "archives": [
-            {
-                "date": day,
-                "schema_id": SCHEMA_ID,
-                "artifact_id": "native_archive_" + token * 24,
-                "manifest_hash": token * 64,
-            }
-            for day, token in (("2026-07-01", "a"), ("2026-08-01", "b"))
-        ],
-    }
-    spec = make_processed_dataset_spec("archive_identity")
-    root = make_dataset_artifact_root(tmp_path, spec.data_id)
-    write_dataset(
-        root,
-        make_default_dataset_frame(),
-        spec=spec,
-        instance_metadata={"source_artifact_identity": identity},
-    )
-    assert inspect_dataset(root).manifest["source_artifact_identity"] == identity
-    assert len(read_dataset(root)) == 3
-    invalid = deepcopy(identity)
-    archives = invalid["archives"]
-    if mutation == "date_format":
-        archives[0]["date"] = "20260701"
-    elif mutation == "empty":
-        archives.clear()
-    elif mutation == "missing_hash":
-        del archives[0]["manifest_hash"]
-    elif mutation == "schema":
-        archives[0]["schema_id"] = "other"
-    elif mutation == "duplicate_identity":
-        archives[1]["artifact_id"] = archives[0]["artifact_id"]
-        archives[1]["manifest_hash"] = archives[0]["manifest_hash"]
-    elif mutation == "nested":
-        archives[0] = identity
-    else:
-        archives[0]["manifest_hash"] = "bad"
-    candidate = make_dataset_artifact_root(tmp_path / "candidate", spec.data_id)
-    with pytest.raises(ValueError, match="invalid_source_artifact_identity"):
-        write_dataset(
-            candidate,
-            make_default_dataset_frame(),
-            spec=spec,
-            instance_metadata={"source_artifact_identity": invalid},
-        )
-    assert not candidate.exists()
-    assert inspect_dataset(root).manifest["source_artifact_identity"] == identity
-    manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(
-        Path(native_filesystem_path(manifest_path)).read_text(encoding="utf-8")
-    )
-    manifest["source_artifact_identity"] = invalid
-    filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
-    with pytest.raises(ValueError, match="invalid_source_artifact_identity"):
-        read_dataset(root)
-
-
 def test_public_writer_omits_caller_attrs_before_copy_and_arrow_serialization(
     tmp_path,
 ):
@@ -658,7 +470,7 @@ def test_public_writer_omits_caller_attrs_before_copy_and_arrow_serialization(
         root,
         frames,
         spec=make_processed_dataset_spec("caller_attrs"),
-        instance_metadata={"producer_diagnostics": {"label": "preserved"}},
+        metadata={"producer_diagnostics": {"label": "preserved"}},
     )
     primary_key = list(make_processed_dataset_spec("caller_attrs").primary_key)
     pd.testing.assert_frame_equal(
@@ -1087,7 +899,6 @@ def test_dataset_statistics_use_only_contract_time_key_and_read_old_files(
             .reset_index(drop=True)
         )
         pd.testing.assert_frame_equal(actual, expected)
-        session.verify()
         for member in session.all_paths:
             with pq.ParquetFile(member) as parquet:
                 for group in range(parquet.metadata.num_row_groups):
@@ -1122,9 +933,8 @@ def test_spec_semantics_checked_once_per_write_and_read_boundary(tmp_path, monke
     # The constructed spec is trusted; the staged wire remains a validation boundary.
     assert calls == [spec.data_id]
     calls.clear()
-    session = open_dataset_session(root, columns=None, time_window=None)
+    open_dataset_session(root, columns=None, time_window=None)
     assert calls == [spec.data_id]
-    session.verify()
     payload = json.loads((root / "spec.json").read_text())
     payload["column_roles"]["value"] = "context"
     (root / "spec.json").write_text(json.dumps(payload))

@@ -26,7 +26,6 @@ from quant_research_platform.storage.identity import (
     native_filesystem_path,
 )
 from tests.storage.low_level_fixtures import (
-    fixture_dataset_content_hash,
     make_dataset_artifact_root,
     make_default_dataset_frame,
     make_processed_dataset_spec,
@@ -78,7 +77,6 @@ def test_dataset_session_inventory_preserves_numeric_part_order(tmp_path: Path) 
     manifest = json.loads(
         Path(native_filesystem_path(manifest_path)).read_text(encoding="utf-8")
     )
-    manifest["content_hash"] = fixture_dataset_content_hash(root)
     filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
     session = dataset_reading.open_dataset_session(root, columns=None, time_window=None)
     expected = [f"part-{part_index}.parquet" for part_index in part_indices]

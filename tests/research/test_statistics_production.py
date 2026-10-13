@@ -1,10 +1,5 @@
-from __future__ import annotations
-
-import json
 from contextlib import contextmanager
-from copy import deepcopy
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -15,24 +10,11 @@ from quant_research_platform.artifacts.statistics import (
     read_statistics_artifact,
     write_statistics_artifact,
 )
-from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
-from quant_research_platform.catalog.evaluations import EvaluationCatalog
-from quant_research_platform.contracts.business_manifest import (
-    build_business_manifest_envelope,
-)
 from quant_research_platform.contracts.columns import ColumnRole
-from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.experiments import _model_inference_blocker
-from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.json_codec import canonical_json_hash
-from quant_research_platform.contracts.models import ModelSpec
-from quant_research_platform.contracts.signals import SignalSpec
-from quant_research_platform.contracts.targets import unmeasured_operation_evidence
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research import statistics_production
-from quant_research_platform.research.evaluations.runner import (
-    build_evaluation_result_from_research_dataset,
-)
 from quant_research_platform.research.protocols import a_share
 from quant_research_platform.research.randomness import derive_seed
 from quant_research_platform.research.statistics_production import (
@@ -45,124 +27,13 @@ from tests.helpers.research_configuration import (
     A_SHARE_MODEL_ALGORITHMS,
     CORE6_FACTORS,
     PV25_FACTORS,
-    research_configuration,
 )
 from tests.helpers.research_specs import make_demo_research_dataset_spec
 from tests.helpers.statistics_artifacts import (
-    statistics_envelope as bind_statistics_envelope,
+    model_statistics_inputs,
+    statistics_config,
+    statistics_metadata,
 )
-from tests.research.workflow_test_support import (
-    shared_model_protocol,
-)
-
-
-def _statistics_model_selection_fixture(spec, protocol, window):
-    factor = spec.factor_columns[0]
-    configuration = research_configuration(small_models=True)
-    models = tuple(
-        ModelSpec(
-            model_id=f"{spec.data_id}_{item['model_algorithm']}",
-            model_algorithm=item["model_algorithm"],
-            input_factor_columns=(factor,),
-            label_column=a_share.PRIMARY_LABEL_COLUMN,
-            hyperparameters=item.get("hyperparameters", {}),
-        )
-        for item in configuration["models"]
-    )
-    development_start = pd.Timestamp(window.start).replace(month=1, day=1)
-    development_end = pd.Timestamp(window.end).date().isoformat()
-    model_protocol = shared_model_protocol(models, development_end=development_end)
-    model_protocol.update(
-        scenario_id=spec.data_id,
-        root_seed=protocol["root_seed"],
-        development_window={
-            "start": development_start.date().isoformat(),
-            "end": development_end,
-        },
-        model_chronology={
-            "scoring_lookback_months": 12,
-            "warmup_window": {
-                "start": (development_start - pd.DateOffset(years=1))
-                .date()
-                .isoformat(),
-                "end": (development_start - pd.Timedelta(days=1)).date().isoformat(),
-            },
-        },
-    )
-    protocol.update(
-        scenario_id=spec.data_id,
-        selection_group="global",
-        development_window=model_protocol["development_window"],
-        research_configuration={
-            **configuration,
-            "evaluation": {
-                "factors": list(spec.factor_columns),
-                "labels": [a_share.PRIMARY_LABEL_COLUMN],
-                "primary_label": a_share.PRIMARY_LABEL_COLUMN,
-            },
-            "comparison_model_id": models[0].model_id,
-            "models": model_protocol["research_configuration"]["models"],
-        },
-    )
-    families = []
-    for model in models:
-        metrics = {
-            "model_id": model.model_id,
-            "validation_rows": 12,
-            "validation_ic": 0.1,
-            "validation_rankic": 0.1,
-            "validation_ic_reason": None,
-            "validation_rankic_reason": None,
-            "validation_mse": 1.0,
-            **{
-                f"validation_{key}": value
-                for prefix in ("ic", "rankic")
-                for key, value in (
-                    (f"std_{prefix}", 0.0),
-                    (f"{prefix}ir", None),
-                    (f"positive_{prefix}_rate", 1.0),
-                    (f"valid_{prefix}_count", 1),
-                    (f"{prefix}ir_reason", "insufficient_observations"),
-                )
-            },
-        }
-        families.append(
-            {
-                "family_id": model.model_id,
-                "selected_config_id": model.model_id,
-                "trial_metrics": [metrics],
-            }
-        )
-    selection = {"selected_family_id": models[0].model_id, "families": families}
-    quarters = tuple(
-        str(q) for q in pd.period_range(window.start, window.end, freq="Q")
-    )
-
-    def prediction_models(requested_window, **_kwargs):
-        return tuple(
-            {
-                "quarter_id": str(quarter),
-                "family_id": model.model_id,
-                "model_id": model.model_id,
-                "model_metadata": {
-                    "input_columns": [factor],
-                    "model_algorithm": model.model_algorithm,
-                },
-            }
-            for quarter in pd.period_range(
-                requested_window.start, requested_window.end, freq="Q"
-            )
-            for model in models
-        )
-
-    return SimpleNamespace(
-        selections={
-            "global": {"final": selection},
-            "quarterly": {q: selection for q in quarters},
-        },
-        prediction_models=prediction_models,
-        selection=lambda _group, _quarter, **_kwargs: selection,
-    )
 
 
 class _PredictionLookup:
@@ -177,363 +48,6 @@ class _PredictionLookup:
         return (values, np.ones(len(frame), dtype=bool))
 
 
-def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_path):
-    from functools import partial
-
-    from quant_research_platform.artifacts.outputs import (
-        read_prediction_output_bundle,
-        write_prediction_outputs,
-    )
-    from quant_research_platform.catalog.models import ModelCatalog
-    from quant_research_platform.contracts.models import model_spec_payload
-    from quant_research_platform.contracts.predictions import PredictionSpec
-    from quant_research_platform.profiles.research import (
-        A_SHARE_PROFILE_ID,
-        bind_research_configuration,
-        research_profile,
-    )
-    from quant_research_platform.research.models import persisted, production
-    from quant_research_platform.research.predictions.runner import (
-        build_prediction_result_from_persisted_model,
-    )
-    from quant_research_platform.storage.datasets.reading import open_dataset_session
-    from quant_research_platform.workflows.research import _output_spec_for_target
-
-    factor = CORE6_FACTORS[0]
-    dates = pd.bdate_range("2023-01-02", periods=48)
-    cutoff = dates[44]
-    window = TimeWindow(dates[0].date(), cutoff.date())
-    history = pd.to_datetime(
-        ["2014-01-02", "2016-01-04", "2021-12-29"]
-        + [f"2022-{month:02d}-{day:02d}" for month in (1, 4, 7, 10) for day in (4, 5)]
-        + ["2022-03-31", "2022-06-30", "2022-09-30", "2022-12-30"]
-    ).sort_values()
-    frame = pd.DataFrame(
-        [
-            {
-                "market_id": "a_share",
-                "asset_id": f"asset_{asset}",
-                "timestamp": timestamp,
-                "eligible": True,
-                factor: float(asset - 5.0 + index * 0.001),
-                "forward_return_5d": 0.1
-                + 0.4 * asset
-                + 0.03 * asset**2
-                + 0.02 * np.sin(index + asset),
-                "forward_return_20d": (
-                    80.0 - 5.0 * asset + 2.0 * np.cos(index + asset) - 100.0
-                )
-                / 100.0,
-                "forward_return_5d_available_at": timestamp + pd.offsets.BDay(6),
-                "forward_return_20d_available_at": timestamp + pd.offsets.BDay(21),
-            }
-            for index, timestamp in enumerate(history.append(dates))
-            for asset in range(12)
-        ]
-    )
-    for horizon in (5, 20):
-        label = f"forward_return_{horizon}d"
-        unavailable = frame[f"{label}_available_at"].gt(cutoff)
-        frame.loc[unavailable, label] = np.nan
-        frame.loc[unavailable, f"{label}_available_at"] = pd.NaT
-    spec = make_demo_research_dataset_spec(
-        data_id="pv_all",
-        factor_columns=(factor,),
-        label_columns=(
-            "forward_return_5d",
-            "forward_return_5d_available_at",
-            "forward_return_20d",
-            "forward_return_20d_available_at",
-        ),
-        filter_columns=("eligible",),
-        context_columns=("total_market_cap",),
-    )
-    dataset_catalog = ResearchDatasetCatalog((spec,))
-    identities = []
-    mature_dates = {}
-    for horizon in (5, 20):
-        primary = f"forward_return_{horizon}d"
-        configuration = research_configuration()
-        model = next(
-            item
-            for item in configuration["models"]
-            if item["model_algorithm"] == "linear_regression"
-        )
-        model.update(
-            model_id="horizon_linear",
-            input_factor_columns=[factor],
-            input_feature_columns=[],
-            label_column=primary,
-        )
-        model.pop("parameter_candidates", None)
-        configuration.update(
-            models=[model],
-            portfolios=[],
-            comparison_model_id=model["model_id"],
-            primary_portfolio_id=None,
-        )
-        configuration["evaluation"].update(
-            factors=[factor],
-            labels=["forward_return_5d", "forward_return_20d"],
-            primary_label=primary,
-        )
-        bound = bind_research_configuration(
-            research_profile(A_SHARE_PROFILE_ID), configuration
-        )
-        assert (
-            bound.protocol("pv_all").manifest()["research_configuration"]["evaluation"][
-                "primary_label"
-            ]
-            == primary
-        )
-        models = ModelCatalog.from_configuration(configuration["models"])
-        protocol = shared_model_protocol(
-            models.list(), development_end=cutoff.date().isoformat()
-        )
-        protocol.update(
-            scenario_id=spec.data_id,
-            root_seed=42,
-            selection_group="global",
-            development_window={
-                "start": dates[0].date().isoformat(),
-                "end": cutoff.date().isoformat(),
-            },
-            model_chronology={
-                "scoring_lookback_months": 12,
-                "warmup_window": {
-                    "start": (dates[0] - pd.DateOffset(months=12)).date().isoformat(),
-                    "end": (dates[0] - pd.Timedelta(days=1)).date().isoformat(),
-                },
-            },
-            research_configuration=configuration,
-        )
-        protocol["statistics"].update(
-            factor_fdr_families={"fixture": [factor]},
-            fama_macbeth_core_factors=[factor],
-        )
-        assert protocol["statistics"]["hac_lag"] == 19
-        layout = StorageLayout(tmp_path / str(horizon))
-        data_identity = canonical_json_hash(
-            {"fixture": "two_horizons", "dataset": spec.data_id}
-        )
-        root = layout.instance_root(
-            layout.research_dataset_root("a_share", spec.data_id), data_identity
-        )
-        frame["total_market_cap"] = 1.0 + frame.groupby("timestamp").cumcount()
-        write_dataset(root, frame, spec=spec)
-        layout = layout.with_target_roots({spec.data_id: root})
-        session = open_dataset_session(root, columns=None, time_window=None)
-        model_id = "horizon_models"
-        envelope = build_business_manifest_envelope(
-            logical_artifact_id=model_id,
-            schema_identity=canonical_json_hash({"models": model_id}),
-            protocol_or_spec_identity=canonical_json_hash(protocol),
-            software_identity="b" * 64,
-            research_window={
-                "start": "2022-01-01",
-                "end": cutoff.date().isoformat(),
-                "access": "development",
-            },
-            upstream_identities={spec.data_id: data_identity},
-            semantic_metadata={
-                "target_contract": {
-                    "protocol": protocol,
-                    "model_specs": [model_spec_payload(item) for item in models.list()],
-                }
-            },
-        )
-
-        results = partial(
-            production.build_model_selection_result,
-            layout=layout,
-            dataset_catalog=dataset_catalog,
-            model_catalog=models,
-            dataset_id=spec.data_id,
-            model_ids=tuple(item.model_id for item in models.list()),
-            time_window=TimeWindow("2022-01-01", cutoff.date()),
-            protocol_manifest=protocol,
-            run_id="run_horizon",
-            research_protocol_identity=canonical_json_hash(protocol),
-            model_target_id=model_id,
-            backend_versions={"internal": "fixture"},
-            dataset_session=session,
-        )
-
-        model_root = persisted.write_quarterly_model_artifact(
-            layout.project_root / "models",
-            model_id=model_id,
-            envelope=envelope,
-            model_results=results,
-            trial_layout=layout,
-            verify_source=session.verify,
-        )
-        saved = persisted.read_quarterly_model_artifact(
-            model_root,
-            expected_identity=envelope.instance_identity,
-            trial_layout=layout,
-        )
-        assert all(
-            entry["model_metadata"]["label_column"] == primary
-            for entry in saved.final_models
-        )
-        prediction = PredictionSpec(
-            prediction_id="horizon_predictions",
-            model_id=model_id,
-            research_dataset_id=spec.data_id,
-            train_end=None,
-            test_start=window.start.isoformat(),
-            test_end=window.end.isoformat(),
-            prediction_mode="a_share_oos",
-            prediction_column="raw_prediction",
-        )
-        with build_prediction_result_from_persisted_model(
-            layout=layout,
-            dataset_catalog=dataset_catalog,
-            prediction_spec=prediction,
-            persisted_model=saved,
-            selection_group="global",
-        ) as result:
-            prediction_root = write_prediction_outputs(
-                spec=prediction,
-                output_spec=_output_spec_for_target(
-                    prediction.prediction_id, "a_share", "prediction"
-                ),
-                layout=layout,
-                output_chunks=result.output_chunks,
-                model_metadata=result.model_metadata,
-                prediction_metadata_factory=result.prediction_metadata_factory,
-            )
-        metadata, lookup = read_prediction_output_bundle(
-            prediction_root, expected_output_id=prediction.prediction_id
-        )
-        assert (
-            metadata["metadata"]["model_metadata"]["model_artifact_identity"]
-            == envelope.instance_identity
-        )
-        keys = frame.loc[
-            frame.timestamp.between(dates[0], cutoff), ["timestamp", "asset_id"]
-        ].copy()
-        keys["family_id"] = model["model_id"]
-        scores, found = lookup.values_for_frame(keys, mark_matched=False)
-        assert all(found) and np.isfinite(scores).all()
-        assert len(keys) == 45 * 12 and not keys.duplicated().any()
-        tables = build_a_share_statistics_tables(
-            layout=layout,
-            dataset_catalog=dataset_catalog,
-            dataset_id=spec.data_id,
-            prediction_id=prediction.prediction_id,
-            persisted_model=saved,
-            protocol_manifest=protocol,
-            time_window=window,
-            prediction_lookup=lookup,
-            global_statistics=None,
-        )
-
-        tables.update(
-            build_a_share_factor_statistics_tables(
-                layout=layout,
-                dataset_catalog=dataset_catalog,
-                dataset_id=spec.data_id,
-                protocol_manifest=protocol,
-                time_window=window,
-            )
-        )
-        statistics_envelope = build_business_manifest_envelope(
-            logical_artifact_id="horizon_statistics",
-            schema_identity=canonical_json_hash({"statistics": "horizon"}),
-            protocol_or_spec_identity=canonical_json_hash(protocol),
-            software_identity="b" * 64,
-            research_window={
-                "start": window.start.isoformat(),
-                "end": window.end.isoformat(),
-                "access": "development",
-            },
-            upstream_identities={
-                spec.data_id: data_identity,
-                model_id: envelope.instance_identity,
-            },
-            semantic_metadata={"primary_label": primary, "hac_lag": 19},
-        )
-        statistics_envelope = bind_statistics_envelope(
-            statistics_envelope, group="research", protocol=protocol
-        )
-        factor_statistics_envelope = bind_statistics_envelope(
-            statistics_envelope, group="factor", protocol=protocol
-        )
-        factor_statistics_root = write_statistics_artifact(
-            (layout.project_root / "statistics").with_name(
-                (layout.project_root / "statistics").name + "_factor"
-            ),
-            envelope=factor_statistics_envelope,
-            tables={
-                key: value
-                for key, value in (tables).items()
-                if key + ".parquet" in STATISTICS_TABLE_GROUPS["factor"]
-            },
-            table_group="factor",
-        )
-        statistics_root = write_statistics_artifact(
-            layout.project_root / "statistics",
-            envelope=statistics_envelope,
-            tables={
-                key: value
-                for key, value in (tables).items()
-                if key + ".parquet" in STATISTICS_TABLE_GROUPS["research"]
-            },
-        )
-        read_statistics_artifact(
-            statistics_root, expected_identity=statistics_envelope.instance_identity
-        )
-        factor_statistics = read_statistics_artifact(
-            factor_statistics_root,
-            expected_identity=factor_statistics_envelope.instance_identity,
-        )
-        identities.append(statistics_envelope.instance_identity)
-        expected = frame.loc[
-            frame[f"{primary}_available_at"].le(cutoff) & frame.timestamp.le(cutoff)
-        ]
-        expected_dates = pd.DatetimeIndex(sorted(expected.timestamp.unique())).astype(
-            "datetime64[ns]"
-        )
-        with factor_statistics.table("fama_macbeth_periods.parquet") as periods:
-            coefficients = periods.loc[
-                periods.regression_id.eq("equal:single:" + factor)
-            ]
-            assert str(coefficients.timestamp.dtype) == "datetime64[ns]"
-            assert not coefficients.duplicated(
-                ["regression_id", "coefficient_id", "timestamp"]
-            ).any()
-            assert coefficients.status.eq("DEFINED").all()
-            for coefficient_id in ("intercept", factor):
-                actual = coefficients.loc[
-                    coefficients.coefficient_id.eq(coefficient_id)
-                ].sort_values("timestamp")
-                pd.testing.assert_index_equal(
-                    pd.DatetimeIndex(actual.timestamp),
-                    expected_dates,
-                    check_names=False,
-                )
-                oracle = [
-                    np.linalg.lstsq(
-                        np.column_stack((np.ones(len(group)), group[factor])),
-                        group[primary],
-                        rcond=None,
-                    )[0][0 if coefficient_id == "intercept" else 1]
-                    for _date, group in expected.groupby("timestamp", sort=True)
-                ]
-                np.testing.assert_allclose(actual.value, oracle, rtol=2e-14, atol=2e-14)
-                assert actual.observation_count.eq(12).all()
-        with factor_statistics.table("fama_macbeth.parquet") as summary:
-            assert summary.period_count.eq(len(expected_dates)).all()
-            assert summary.status.eq("DEFINED").all()
-        mature_dates[horizon] = expected_dates[expected_dates >= dates[0]]
-        assert lookup.coverage_counts() == (0, 0)
-        session.verify()
-    assert identities[0] != identities[1]
-    assert len(mature_dates[5]) == 39 and len(mature_dates[20]) == 24
-    assert len(mature_dates[5].difference(mature_dates[20])) == 15
-
-
 @pytest.mark.parametrize("full_factor_history", (False, True))
 def test_family_comparison_production_matches_arch_on_persisted_common_date_losses(
     tmp_path: Path, full_factor_history: bool
@@ -541,11 +55,11 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
     from arch.bootstrap import MCS, SPA, StepM
 
     layout = StorageLayout(tmp_path)
-    protocol = deepcopy(a_share.protocol("pv_all").manifest())
-    protocol["statistics"]["factor_fdr_families"] = {"fixture": ["x"]}
+    config = statistics_config()
+    config["statistics"]["factor_fdr_families"] = {"fixture": ["x"]}
     if full_factor_history:
-        protocol["statistics"]["bootstrap_repetitions"] = 32
-    protocol["statistics"]["fama_macbeth_core_factors"] = ["x"]
+        config["statistics"]["bootstrap_repetitions"] = 32
+    config["statistics"]["fama_macbeth_core_factors"] = ["x"]
     families = tuple(f"pv_all_{algorithm}" for algorithm in A_SHARE_MODEL_ALGORITHMS)
     dates = pd.bdate_range("2019-01-01", periods=64)
     label_calendar = pd.bdate_range(dates[0], periods=len(dates) + 21)
@@ -609,85 +123,67 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
         historical["timestamp"] = pd.Timestamp("2014-01-02")
         historical["forward_return_20d_available_at"] = pd.Timestamp("2014-02-03")
         frame = pd.concat((historical, frame), ignore_index=True)
-        protocol["development_window"] = {
-            "start": dates[0].date().isoformat(),
-            "end": cutoff.date().isoformat(),
-        }
     frame["total_market_cap"] = 1.0 + frame.groupby("timestamp").cumcount()
     write_dataset(layout.research_dataset_root("a_share", "pv_all"), frame, spec=spec)
-    model = _statistics_model_selection_fixture(
-        spec, protocol, TimeWindow(dates[0], cutoff)
-    )
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="pv_all_global_statistics",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": "2019-01-01",
-            "end": str(cutoff.date()),
-            "access": "development",
+    model = model_statistics_inputs(spec, config, TimeWindow(dates[0], cutoff))
+    metadata = {
+        "sample_role": "validation",
+        "window": {"start": "2019-01-01", "end": str(cutoff.date())},
+    }
+    factor_metadata = {
+        **metadata,
+        "window": {
+            **metadata["window"],
+            "start": "2014-01-02"
+            if full_factor_history
+            else metadata["window"]["start"],
         },
-        upstream_identities={},
-        semantic_metadata={},
-    )
-    envelope = bind_statistics_envelope(envelope, group="research", protocol=protocol)
-    factor_envelope = bind_statistics_envelope(
-        envelope, group="factor", protocol=protocol
-    )
+    }
     statistics_tables = build_a_share_statistics_tables(
-        layout=layout,
-        dataset_catalog=ResearchDatasetCatalog((spec,)),
-        dataset_id="pv_all",
-        prediction_id="prediction",
-        persisted_model=model,
-        protocol_manifest=protocol,
+        dataset_path=layout.research_dataset_root("a_share", spec.data_id),
+        dataset_spec=spec,
+        config=config,
         time_window=TimeWindow(dates[0], cutoff),
+        prediction_id="prediction",
         prediction_lookup=Lookup(),
         global_statistics=None,
+        **model,
     )
-
     statistics_tables.update(
         build_a_share_factor_statistics_tables(
-            layout=layout,
-            dataset_catalog=ResearchDatasetCatalog((spec,)),
-            dataset_id="pv_all",
-            protocol_manifest=protocol,
-            time_window=TimeWindow(dates[0], cutoff),
+            dataset_path=layout.research_dataset_root("a_share", spec.data_id),
+            dataset_spec=spec,
+            config=config,
+            time_window=TimeWindow(
+                pd.Timestamp("2014-01-02") if full_factor_history else dates[0], cutoff
+            ),
         )
     )
     global_tables = {name: table.copy() for name, table in statistics_tables.items()}
     assert global_tables["model_group_comparison"].empty
     factor_root = write_statistics_artifact(
-        (
-            layout.semantic_artifact_root("a_share", "pv_all_global_statistics")
-        ).with_name(
-            (layout.semantic_artifact_root("a_share", "pv_all_global_statistics")).name
-            + "_factor"
+        (layout.project_root / "pv_all_global_statistics").with_name(
+            (layout.project_root / "pv_all_global_statistics").name + "_factor"
         ),
-        envelope=factor_envelope,
+        metadata=factor_metadata,
         tables={
             key: value
-            for key, value in (statistics_tables).items()
+            for key, value in statistics_tables.items()
             if key + ".parquet" in STATISTICS_TABLE_GROUPS["factor"]
         },
         table_group="factor",
     )
     root = write_statistics_artifact(
-        layout.semantic_artifact_root("a_share", "pv_all_global_statistics"),
-        envelope=envelope,
+        layout.project_root / "pv_all_global_statistics",
+        metadata=metadata,
         tables={
             key: value
-            for key, value in (statistics_tables).items()
+            for key, value in statistics_tables.items()
             if key + ".parquet" in STATISTICS_TABLE_GROUPS["research"]
         },
     )
-    artifact = read_statistics_artifact(
-        root, expected_identity=envelope.instance_identity
-    )
-    factor_artifact = read_statistics_artifact(
-        factor_root, expected_identity=factor_envelope.instance_identity
-    )
+    artifact = read_statistics_artifact(root)
+    factor_artifact = read_statistics_artifact(factor_root)
     with factor_artifact.table("factor_diagnostics.parquet") as factors:
         assert factors.observation_count.eq(65 if full_factor_history else 64).all()
     with artifact.table("model_losses.parquet") as table:
@@ -713,7 +209,7 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
     )
     np.testing.assert_allclose(losses, expected, rtol=0, atol=1e-14)
     benchmark, challengers = (losses[families[0]], losses.loc[:, list(families[1:])])
-    blocked_reason = "global_development_selection_reuses_validation"
+    blocked_reason = "global_validation_selection_reuses_validation"
     for member in ("prediction_diagnostics.parquet", "model_comparison.parquet"):
         with (
             factor_artifact if member in STATISTICS_TABLE_GROUPS["factor"] else artifact
@@ -744,75 +240,51 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
         assert checks.reason.eq(blocked_reason).all()
         assert checks.value.isna().all()
         assert checks.observation_count.eq(64).all()
-    quarterly_protocol = {**protocol, "selection_group": "quarterly"}
-    paired_envelope = build_business_manifest_envelope(
-        **{
-            key: value
-            for key, value in envelope.payload().items()
-            if key not in {"instance_identity", "status", "logical_artifact_id"}
-        },
-        logical_artifact_id="pv_all_quarterly_statistics",
-    )
-    paired_envelope = bind_statistics_envelope(
-        paired_envelope, group="research", protocol=quarterly_protocol
-    )
-    factor_paired_envelope = bind_statistics_envelope(
-        paired_envelope, group="factor", protocol=quarterly_protocol
-    )
+    quarterly_config = {**config, "selection_group": "quarterly"}
+    paired_metadata = metadata
+    factor_paired_metadata = factor_metadata
     paired_tables = build_a_share_statistics_tables(
-        layout=layout,
-        dataset_catalog=ResearchDatasetCatalog((spec,)),
-        dataset_id="pv_all",
-        prediction_id="quarterly_prediction",
-        persisted_model=model,
-        protocol_manifest=quarterly_protocol,
+        dataset_path=layout.research_dataset_root("a_share", spec.data_id),
+        dataset_spec=spec,
+        config=quarterly_config,
         time_window=TimeWindow(dates[0], cutoff),
+        prediction_id="quarterly_prediction",
         prediction_lookup=Lookup(),
         global_statistics=artifact,
+        **model,
     )
-
     paired_tables.update(
         build_a_share_factor_statistics_tables(
-            layout=layout,
-            dataset_catalog=ResearchDatasetCatalog((spec,)),
-            dataset_id="pv_all",
-            protocol_manifest=quarterly_protocol,
+            dataset_path=layout.research_dataset_root("a_share", spec.data_id),
+            dataset_spec=spec,
+            config=quarterly_config,
             time_window=TimeWindow(dates[0], cutoff),
         )
     )
     quarterly_losses = paired_tables["model_losses"].copy()
     factor_paired_root = write_statistics_artifact(
-        (
-            layout.semantic_artifact_root("a_share", "pv_all_quarterly_statistics")
-        ).with_name(
-            (
-                layout.semantic_artifact_root("a_share", "pv_all_quarterly_statistics")
-            ).name
-            + "_factor"
+        (layout.project_root / "pv_all_quarterly_statistics").with_name(
+            (layout.project_root / "pv_all_quarterly_statistics").name + "_factor"
         ),
-        envelope=factor_paired_envelope,
+        metadata=factor_paired_metadata,
         tables={
             key: value
-            for key, value in (paired_tables).items()
+            for key, value in paired_tables.items()
             if key + ".parquet" in STATISTICS_TABLE_GROUPS["factor"]
         },
         table_group="factor",
     )
     paired_root = write_statistics_artifact(
-        layout.semantic_artifact_root("a_share", "pv_all_quarterly_statistics"),
-        envelope=paired_envelope,
+        layout.project_root / "pv_all_quarterly_statistics",
+        metadata=paired_metadata,
         tables={
             key: value
-            for key, value in (paired_tables).items()
+            for key, value in paired_tables.items()
             if key + ".parquet" in STATISTICS_TABLE_GROUPS["research"]
         },
     )
-    paired_artifact = read_statistics_artifact(
-        paired_root, expected_identity=paired_envelope.instance_identity
-    )
-    read_statistics_artifact(
-        factor_paired_root, expected_identity=factor_paired_envelope.instance_identity
-    )
+    paired_artifact = read_statistics_artifact(paired_root)
+    read_statistics_artifact(factor_paired_root)
     with paired_artifact.table("model_reality_checks.parquet") as checks:
         assert checks.status.eq("DEFINED").all()
         assert checks.observation_count.eq(64).all()
@@ -823,7 +295,7 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
                 ("model_confidence_set", MCS),
             ):
                 seed = derive_seed(
-                    42, "a_share_model_reality_check", "pv_all", "development", test_id
+                    42, "a_share_model_reality_check", "pv_all", "validation", test_id
                 )
                 options = dict(block_size=20, reps=10000, seed=seed)
                 native = (
@@ -876,31 +348,28 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
         assert paired.observation_count.eq(64).all()
         np.testing.assert_allclose(paired.mean_difference, 0.0, rtol=0, atol=1e-14)
         assert paired.status.eq("UNDEFINED").all()
-        assert paired.reason.eq("global_development_selection_reuses_validation").all()
+        assert paired.reason.eq("global_validation_selection_reuses_validation").all()
         assert paired.bootstrap_reason.eq(blocked_reason).all()
     if not full_factor_history:
-        robustness_protocol = {
-            **quarterly_protocol,
-            "training_weighting": {"half_life": 756, "role": "robustness"},
+        robustness_config = {
+            **quarterly_config,
+            "training_weighting": {"half_life_periods": 756, "role": "robustness"},
         }
         robustness_tables = build_a_share_statistics_tables(
-            layout=layout,
-            dataset_catalog=ResearchDatasetCatalog((spec,)),
-            dataset_id="pv_all",
-            prediction_id="quarterly_prediction",
-            persisted_model=model,
-            protocol_manifest=robustness_protocol,
+            dataset_path=layout.research_dataset_root("a_share", spec.data_id),
+            dataset_spec=spec,
+            config=robustness_config,
             time_window=TimeWindow(dates[0], cutoff),
+            prediction_id="quarterly_prediction",
             prediction_lookup=Lookup(),
             global_statistics=artifact,
+            **model,
         )
-
         robustness_tables.update(
             build_a_share_factor_statistics_tables(
-                layout=layout,
-                dataset_catalog=ResearchDatasetCatalog((spec,)),
-                dataset_id="pv_all",
-                protocol_manifest=robustness_protocol,
+                dataset_path=layout.research_dataset_root("a_share", spec.data_id),
+                dataset_spec=spec,
+                config=robustness_config,
                 time_window=TimeWindow(dates[0], cutoff),
             )
         )
@@ -932,38 +401,28 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
                 .all()
             )
         factor_robust_root = write_statistics_artifact(
-            (
-                layout.semantic_artifact_root("a_share", "pv_all_robust_statistics")
-            ).with_name(
-                (
-                    layout.semantic_artifact_root("a_share", "pv_all_robust_statistics")
-                ).name
-                + "_factor"
+            (layout.project_root / "pv_all_robust_statistics").with_name(
+                (layout.project_root / "pv_all_robust_statistics").name + "_factor"
             ),
-            envelope=factor_paired_envelope,
+            metadata=factor_paired_metadata,
             tables={
                 key: value
-                for key, value in (robustness_tables).items()
+                for key, value in robustness_tables.items()
                 if key + ".parquet" in STATISTICS_TABLE_GROUPS["factor"]
             },
             table_group="factor",
         )
         robust_root = write_statistics_artifact(
-            layout.semantic_artifact_root("a_share", "pv_all_robust_statistics"),
-            envelope=paired_envelope,
+            layout.project_root / "pv_all_robust_statistics",
+            metadata=paired_metadata,
             tables={
                 key: value
-                for key, value in (robustness_tables).items()
+                for key, value in robustness_tables.items()
                 if key + ".parquet" in STATISTICS_TABLE_GROUPS["research"]
             },
         )
-        robust_artifact = read_statistics_artifact(
-            robust_root, expected_identity=paired_envelope.instance_identity
-        )
-        factor_robust_artifact = read_statistics_artifact(
-            factor_robust_root,
-            expected_identity=factor_paired_envelope.instance_identity,
-        )
+        robust_artifact = read_statistics_artifact(robust_root)
+        factor_robust_artifact = read_statistics_artifact(factor_robust_root)
         with factor_robust_artifact.table("factor_diagnostics.parquet") as table:
             assert table.status.eq("DEFINED").all()
             assert table.fdr_method.eq("NOT_APPLICABLE").all()
@@ -987,48 +446,31 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
                 losses_table.loc[0, "asset_coverage_id"] = canonical_json_hash(
                     sorted([*assets[:-1], "different_asset"])
                 )
-            mutated_envelope = build_business_manifest_envelope(
-                **{
-                    key: value
-                    for key, value in envelope.payload().items()
-                    if key not in {"instance_identity", "status", "logical_artifact_id"}
-                },
-                logical_artifact_id=f"coverage_{mutation}",
-            )
-            mutated_envelope = bind_statistics_envelope(
-                mutated_envelope, group="research", protocol=protocol
-            )
-            factor_mutated_envelope = bind_statistics_envelope(
-                mutated_envelope, group="factor", protocol=protocol
-            )
+            mutated_metadata = metadata
+            factor_mutated_metadata = factor_metadata
             factor_mutated_root = write_statistics_artifact(
                 (tmp_path / f"coverage_{mutation}").with_name(
                     (tmp_path / f"coverage_{mutation}").name + "_factor"
                 ),
-                envelope=factor_mutated_envelope,
+                metadata=factor_mutated_metadata,
                 tables={
                     key: value
-                    for key, value in (malformed).items()
+                    for key, value in malformed.items()
                     if key + ".parquet" in STATISTICS_TABLE_GROUPS["factor"]
                 },
                 table_group="factor",
             )
             mutated_root = write_statistics_artifact(
                 tmp_path / f"coverage_{mutation}",
-                envelope=mutated_envelope,
+                metadata=mutated_metadata,
                 tables={
                     key: value
-                    for key, value in (malformed).items()
+                    for key, value in malformed.items()
                     if key + ".parquet" in STATISTICS_TABLE_GROUPS["research"]
                 },
             )
-            mutated_artifact = read_statistics_artifact(
-                mutated_root, expected_identity=mutated_envelope.instance_identity
-            )
-            read_statistics_artifact(
-                factor_mutated_root,
-                expected_identity=factor_mutated_envelope.instance_identity,
-            )
+            mutated_artifact = read_statistics_artifact(mutated_root)
+            read_statistics_artifact(factor_mutated_root)
             with pytest.raises(
                 ValueError,
                 match="model_group_comparison_family_incomplete"
@@ -1044,116 +486,8 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
                     global_statistics=mutated_artifact,
                     selection_group="quarterly",
                     family_ids=families,
-                    protocol_manifest=quarterly_protocol,
+                    config=quarterly_config,
                 )
-    from quant_research_platform.artifacts.research import (
-        load_a_share_run_evidence,
-        read_research_report_artifact,
-        write_research_report_artifact,
-    )
-    from quant_research_platform.contracts.targets import (
-        ProducerKind,
-        ResearchRunRecord,
-        ResearchRunTargetResult,
-        RunStatus,
-        TargetStatus,
-    )
-    from quant_research_platform.reports.a_share import (
-        REQUIRED_REPORT_SECTIONS,
-        build_a_share_report,
-    )
-
-    record = ResearchRunRecord(
-        operation_evidence=unmeasured_operation_evidence("fixture_record"),
-        run_id="run_statistics",
-        profile_id="fixture",
-        scenario_id="pv_all",
-        protocol=protocol,
-        protocol_identity=canonical_json_hash(protocol),
-        research_window=envelope.research_window,
-        software_identity="c" * 64,
-        terminal_targets=("pv_all_global_statistics",),
-        target_results=(
-            ResearchRunTargetResult(
-                target_id="pv_all_global_statistics",
-                producer_kind=ProducerKind.STATISTIC,
-                status=TargetStatus.BUILT,
-                instance_identity=envelope.instance_identity,
-                schema_identity=envelope.schema_identity,
-                artifact_root="data/artifacts/a_share/pv_all_global_statistics",
-            ),
-        ),
-        status=RunStatus.COMPLETE,
-    )
-    evidence = load_a_share_run_evidence(
-        layout=layout, record=record, selections=model.selections
-    )
-    report = build_a_share_report(record=record, evidence=evidence)
-    projected = deepcopy(evidence)
-    projected["issues"] = []
-    projected["portfolio_statistics"] = {
-        "status": "UNDEFINED",
-        "capacity": [{"status": "UNDEFINED", "reason": "no_rebalance_requests"}],
-        "performance": [],
-        "attribution": [],
-        "robustness": [],
-    }
-    unavailable = build_a_share_report(record=record, evidence=projected)
-    assert unavailable["sections"]["capacity"]["status"] == "UNDEFINED"
-    assert unavailable["report_status"] == "COMPLETE"
-    projected["portfolio_statistics"]["performance"] = [
-        {
-            "metric_id": "tracking_error",
-            "status": "BLOCKED",
-            "reason": "benchmark_total_return_open_missing",
-        }
-    ]
-    unavailable = build_a_share_report(record=record, evidence=projected)
-    assert unavailable["sections"]["risk"]["status"] == "BLOCKED"
-    assert unavailable["report_status"] == "BLOCKED"
-    assert unavailable["source_run_status"] == "COMPLETE"
-    actual = report["sections"]["OOS prediction"]["global"]["reality_checks"]
-    assert len(actual) == 3 * len(families) + 2 and all(
-        row["status"] == "UNDEFINED"
-        and row["reason"] == blocked_reason
-        and (row["observation_count"] == 64)
-        for row in actual
-    )
-    assert report["sections"]["OOS prediction"]["global"][
-        "inference_qualification"
-    ] == {"status": "UNDEFINED", "reason": blocked_reason}
-    assert report["sections"]["OOS prediction"]["quarterly"][
-        "inference_qualification"
-    ] == {"status": "ELIGIBLE", "reason": None}
-    source_identity = canonical_json_hash(record.payload())
-    contract = {
-        "schema_id": "qrp-a-share-research-report",
-        "required_sections": list(REQUIRED_REPORT_SECTIONS),
-        "source_run_identity": source_identity,
-    }
-    report_envelope = build_business_manifest_envelope(
-        logical_artifact_id="pv_all_report_artifact",
-        schema_identity=canonical_json_hash(contract),
-        protocol_or_spec_identity="a" * 64,
-        software_identity="c" * 64,
-        research_window=envelope.research_window,
-        upstream_identities={"source_run": source_identity},
-        semantic_metadata={
-            "target_contract": contract,
-            "source_run_id": record.run_id,
-            "source_run_status": "COMPLETE",
-            "report_status": report["report_status"],
-        },
-    )
-    report_root = write_research_report_artifact(
-        tmp_path / "report", envelope=report_envelope, payload=report
-    )
-    saved_report = read_research_report_artifact(
-        report_root, expected_identity=report_envelope.instance_identity
-    )
-    assert (
-        saved_report["sections"]["OOS prediction"]["global"]["reality_checks"] == actual
-    )
 
 
 def test_robustness_joint_exclusion_preserves_individual_hac(monkeypatch):
@@ -1175,7 +509,7 @@ def test_robustness_joint_exclusion_preserves_individual_hac(monkeypatch):
         values,
         family_ids=("baseline", "challenger"),
         benchmark_id="baseline",
-        access_window="development",
+        sample_role="validation",
         inference_blocker=None,
         joint_blocker="expectations_robustness_excluded",
         max_lags=2,
@@ -1212,9 +546,8 @@ def test_empty_fama_macbeth_periods_do_not_invent_dates_or_coefficients(
     assert list(summary["regression_id"]) == [
         weighting + ":" + regression
         for weighting in ("equal", "total_market_cap")
-        for regression in (
-            ["single:factor"] * 2 + (["core_multifactor"] * 2 if core_factors else [])
-        )
+        for regression in ["single:factor"] * 2
+        + (["core_multifactor"] * 2 if core_factors else [])
     ]
     assert set(summary["coefficient_id"]) == {"intercept", "factor"}
     assert summary["period_count"].eq(0).all()
@@ -1294,70 +627,61 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         frame = pd.DataFrame(rows)
         frame["total_market_cap"] = 1.0 + frame.groupby("timestamp").cumcount()
         write_dataset(
-            layout.research_dataset_root(spec.market_id, spec.data_id),
-            frame,
-            spec=spec,
+            layout.research_dataset_root(spec.market_id, spec.data_id), frame, spec=spec
         )
-        evaluation = build_evaluation_result_from_research_dataset(
-            layout=layout,
-            dataset_catalog=ResearchDatasetCatalog((spec,)),
-            evaluation_catalog=EvaluationCatalog(
-                (
-                    EvaluationSpec(
-                        evaluation_id="stats_demo_evaluation",
-                        market_id=MarketId("a_share"),
-                        research_dataset_id=spec.data_id,
-                        signals=(
-                            SignalSpec(
-                                signal_id=CORE6_FACTORS[0],
-                                source_kind="factor",
-                                source_column=CORE6_FACTORS[0],
-                            ),
-                        ),
-                        label_columns=(a_share.PRIMARY_LABEL_COLUMN,),
-                        label_availability_columns={
-                            a_share.PRIMARY_LABEL_COLUMN: (
-                                "forward_return_20d_available_at"
-                            )
-                        },
-                    ),
-                )
-            ),
-            evaluation_id="stats_demo_evaluation",
-            time_window=TimeWindow(dates[0], cutoff),
+        from quant_research_platform.artifacts.outputs.evaluation import (
+            read_evaluation_outputs,
         )
-        try:
-            for _output in evaluation.output_chunks:
-                pass
-            evaluation_summaries.append(evaluation.summaries()[1].copy())
-        finally:
-            evaluation.close()
-        protocol = deepcopy(a_share.protocol("pv_all").manifest())
-        protocol["statistics"]["factor_fdr_families"] = {
+        from quant_research_platform.research.evaluations.runner import evaluate
+
+        evaluation_path = evaluate(
+            {
+                "inputs": str(layout.research_dataset_root("a_share", spec.data_id)),
+                "output": str(root / "evaluation"),
+                "window": {"start": str(dates[0]), "end": str(cutoff)},
+                "cutoff": str(cutoff),
+                "sample_role": "validation",
+                "evaluation": {
+                    "evaluation_id": "stats_demo_evaluation",
+                    "market_id": "a_share",
+                    "research_dataset_id": spec.data_id,
+                    "signals": [
+                        {
+                            "signal_id": CORE6_FACTORS[0],
+                            "source_kind": "factor",
+                            "source_column": CORE6_FACTORS[0],
+                        }
+                    ],
+                    "label_columns": [a_share.PRIMARY_LABEL_COLUMN],
+                    "label_availability_columns": {
+                        a_share.PRIMARY_LABEL_COLUMN: "forward_return_20d_available_at"
+                    },
+                },
+            }
+        )
+        _, summaries = read_evaluation_outputs(evaluation_path)
+        evaluation_summaries.append(summaries["ic_summary"].copy())
+        config = statistics_config()
+        config["statistics"]["factor_fdr_families"] = {
             "price_volume": list(PV25_FACTORS)
         }
-        protocol["statistics"]["fama_macbeth_core_factors"] = list(CORE6_FACTORS)
-        model = _statistics_model_selection_fixture(
-            spec, protocol, TimeWindow(dates[0], cutoff)
-        )
+        config["statistics"]["fama_macbeth_core_factors"] = list(CORE6_FACTORS)
+        model = model_statistics_inputs(spec, config, TimeWindow(dates[0], cutoff))
         statistics_tables = build_a_share_statistics_tables(
-            layout=layout,
-            dataset_catalog=ResearchDatasetCatalog((spec,)),
-            dataset_id=spec.data_id,
-            prediction_id="prediction",
-            persisted_model=model,
-            protocol_manifest=protocol,
+            dataset_path=layout.research_dataset_root("a_share", spec.data_id),
+            dataset_spec=spec,
+            config=config,
             time_window=TimeWindow(dates[0], cutoff),
+            prediction_id="prediction",
             prediction_lookup=_PredictionLookup(),
             global_statistics=None,
+            **model,
         )
-
         statistics_tables.update(
             build_a_share_factor_statistics_tables(
-                layout=layout,
-                dataset_catalog=ResearchDatasetCatalog((spec,)),
-                dataset_id=spec.data_id,
-                protocol_manifest=protocol,
+                dataset_path=layout.research_dataset_root("a_share", spec.data_id),
+                dataset_spec=spec,
+                config=config,
                 time_window=TimeWindow(dates[0], cutoff),
             )
         )
@@ -1383,7 +707,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
     prediction = outputs[0]["prediction_diagnostics"].iloc[0]
     assert prediction["observation_count"] == 20
     assert prediction["status"] == "UNDEFINED"
-    assert prediction["reason"] == "global_development_selection_reuses_validation"
+    assert prediction["reason"] == "global_validation_selection_reuses_validation"
     assert prediction["mean"] == pytest.approx(0.2, abs=1e-15)
     assert prediction["bootstrap_seed"] == derive_seed(
         42, "a_share_statistics_bootstrap", "stats_demo", "prediction"
@@ -1411,50 +735,34 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
     }.issubset(set(trials.metric_id))
     assert set(trials.selection_status) == {"CHAMPION", "FAMILY_WINNER"}
     assert set(outputs[0]["robustness"]["reason"]) == {
-        "global_development_selection_reuses_validation"
+        "global_validation_selection_reuses_validation"
     }
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="stats_demo_statistics",
-        schema_identity=canonical_json_hash({"statistics": "test"}),
-        protocol_or_spec_identity="a" * 64,
-        software_identity="b" * 64,
-        research_window={
-            "start": "2023-01-02",
-            "end": str(cutoff.date()),
-            "access": "development",
-        },
-        upstream_identities={},
-        semantic_metadata={},
-    )
-    envelope = bind_statistics_envelope(envelope, group="research", protocol=protocol)
-    factor_envelope = bind_statistics_envelope(
-        envelope, group="factor", protocol=protocol
-    )
+    metadata = {
+        "sample_role": "validation",
+        "window": {"start": "2023-01-02", "end": str(cutoff.date())},
+    }
+    factor_metadata = metadata
     factor_artifact_root = write_statistics_artifact(
         (tmp_path / "statistics").with_name((tmp_path / "statistics").name + "_factor"),
-        envelope=factor_envelope,
+        metadata=factor_metadata,
         tables={
             key: value
-            for key, value in (outputs[0]).items()
+            for key, value in outputs[0].items()
             if key + ".parquet" in STATISTICS_TABLE_GROUPS["factor"]
         },
         table_group="factor",
     )
     artifact_root = write_statistics_artifact(
         tmp_path / "statistics",
-        envelope=envelope,
+        metadata=metadata,
         tables={
             key: value
-            for key, value in (outputs[0]).items()
+            for key, value in outputs[0].items()
             if key + ".parquet" in STATISTICS_TABLE_GROUPS["research"]
         },
     )
-    artifact = read_statistics_artifact(
-        artifact_root, expected_identity=envelope.instance_identity
-    )
-    factor_artifact = read_statistics_artifact(
-        factor_artifact_root, expected_identity=factor_envelope.instance_identity
-    )
+    artifact = read_statistics_artifact(artifact_root)
+    factor_artifact = read_statistics_artifact(factor_artifact_root)
     members = {
         "factor_diagnostics.parquet",
         "prediction_diagnostics.parquet",
@@ -1545,29 +853,25 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         (tmp_path / "statistics_zero_residual").with_name(
             (tmp_path / "statistics_zero_residual").name + "_factor"
         ),
-        envelope=factor_envelope,
+        metadata=factor_metadata,
         tables={
             key: value
-            for key, value in (outputs[2]).items()
+            for key, value in outputs[2].items()
             if key + ".parquet" in STATISTICS_TABLE_GROUPS["factor"]
         },
         table_group="factor",
     )
     zero_root = write_statistics_artifact(
         tmp_path / "statistics_zero_residual",
-        envelope=envelope,
+        metadata=metadata,
         tables={
             key: value
-            for key, value in (outputs[2]).items()
+            for key, value in outputs[2].items()
             if key + ".parquet" in STATISTICS_TABLE_GROUPS["research"]
         },
     )
-    zero_artifact = read_statistics_artifact(
-        zero_root, expected_identity=envelope.instance_identity
-    )
-    factor_zero_artifact = read_statistics_artifact(
-        factor_zero_root, expected_identity=factor_envelope.instance_identity
-    )
+    zero_artifact = read_statistics_artifact(zero_root)
+    factor_zero_artifact = read_statistics_artifact(factor_zero_root)
     for member in members:
         with (
             factor_zero_artifact
@@ -1599,36 +903,30 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         (tmp_path / "statistics_empty_periods").with_name(
             (tmp_path / "statistics_empty_periods").name + "_factor"
         ),
-        envelope=factor_envelope,
+        metadata=factor_metadata,
         tables={
             key: value
-            for key, value in (empty_period_tables).items()
+            for key, value in empty_period_tables.items()
             if key + ".parquet" in STATISTICS_TABLE_GROUPS["factor"]
         },
         table_group="factor",
     )
     empty_root = write_statistics_artifact(
         tmp_path / "statistics_empty_periods",
-        envelope=envelope,
+        metadata=metadata,
         tables={
             key: value
-            for key, value in (empty_period_tables).items()
+            for key, value in empty_period_tables.items()
             if key + ".parquet" in STATISTICS_TABLE_GROUPS["research"]
         },
     )
-    read_statistics_artifact(empty_root, expected_identity=envelope.instance_identity)
-    factor_empty_artifact = read_statistics_artifact(
-        factor_empty_root, expected_identity=factor_envelope.instance_identity
-    )
+    read_statistics_artifact(empty_root)
+    factor_empty_artifact = read_statistics_artifact(factor_empty_root)
     with factor_empty_artifact.table("fama_macbeth_periods.parquet") as table:
         assert table.empty
     primary = KeyboardInterrupt("table_consumer_interrupted")
-    artifact = read_statistics_artifact(
-        artifact_root, expected_identity=envelope.instance_identity
-    )
-    factor_artifact = read_statistics_artifact(
-        factor_artifact_root, expected_identity=factor_envelope.instance_identity
-    )
+    artifact = read_statistics_artifact(artifact_root)
+    factor_artifact = read_statistics_artifact(factor_artifact_root)
     with pytest.raises(KeyboardInterrupt) as caught:
         with artifact.table("model_losses.parquet") as table:
             assert not table.empty
@@ -1639,31 +937,13 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    from quant_research_platform.storage.identity import native_filesystem_path
-    from quant_research_platform.storage.semantic_artifacts import (
-        write_semantic_artifact,
-    )
-
-    def wrong_schema(staging):
-        for member in STATISTICS_TABLE_GROUPS["research"]:
-            if member == "model_losses.parquet":
-                pq.write_table(
-                    pa.table({"wrong": [1]}),
-                    native_filesystem_path(staging / member),
-                )
-            else:
-                shutil.copyfile(
-                    native_filesystem_path(artifact_root / member),
-                    native_filesystem_path(staging / member),
-                )
-
-    wrong_root = write_semantic_artifact(
-        tmp_path / "bad_schema", envelope, wrong_schema
-    )
+    wrong_root = tmp_path / "bad_schema"
+    shutil.copytree(artifact_root, wrong_root)
+    pq.write_table(pa.table({"wrong": [1]}), wrong_root / "model_losses.parquet")
+    unchecked = read_statistics_artifact(wrong_root)
     with pytest.raises(ValueError, match="statistics_table_schema_invalid"):
-        read_statistics_artifact(
-            wrong_root, expected_identity=envelope.instance_identity
-        )
+        with unchecked.table("model_losses.parquet"):
+            pass
 
 
 @pytest.mark.parametrize(
@@ -1698,10 +978,10 @@ def test_constant_risk_and_sharpe_have_distinct_definition_status(value):
 @pytest.mark.parametrize(
     "access,group",
     [
-        ("development", "global"),
-        ("development", "quarterly"),
-        ("holdout", "global"),
-        ("holdout", "quarterly"),
+        ("validation", "global"),
+        ("validation", "quarterly"),
+        ("test", "global"),
+        ("test", "quarterly"),
     ],
 )
 def test_model_inference_uses_selection_information_before_calling_backends(
@@ -1715,7 +995,7 @@ def test_model_inference_uses_selection_information_before_calling_backends(
             "challenger": rng.normal(0.02, 0.04, 64),
         }
     )
-    blocker = _model_inference_blocker(access_window=access, selection_groups=(group,))
+    blocker = _model_inference_blocker(sample_role=access, selection_groups=(group,))
     if blocker is not None:
 
         def forbidden(*args, **kwargs):
@@ -1742,7 +1022,7 @@ def test_model_inference_uses_selection_information_before_calling_backends(
         values.set_index("timestamp"),
         family_ids=("baseline", "challenger"),
         benchmark_id="baseline",
-        access_window=access,
+        sample_role=access,
         inference_blocker=blocker,
         max_lags=2,
         block_size=4,
@@ -1762,33 +1042,37 @@ def test_model_inference_uses_selection_information_before_calling_backends(
     else:
         assert summary.status.eq("DEFINED").all()
         assert comparison.status.eq("DEFINED").all()
-        if access == "development":
+        if access == "validation":
             assert checks.status.eq("DEFINED").all()
         else:
             assert checks.status.eq("UNDEFINED").all()
-            assert checks.reason.eq("holdout_excluded").all()
+            assert checks.reason.eq("test_excluded").all()
 
 
 @pytest.mark.parametrize("has_observations", (False, True))
-def test_paired_model_rankic_consumes_the_statistic_target_manifest(has_observations):
-    protocol = a_share.AShareProtocol(
-        "pv_all", configuration_json=json.dumps(research_configuration())
-    )
-    target_manifest = protocol.target_manifest(
-        protocol.statistics_target_ids[1], "STATISTIC"
-    )
-    families = protocol.model_ids_for_target(protocol.model_selection_target_id)
+def test_paired_model_rankic_consumes_explicit_comparison_config(has_observations):
+    comparison_config = statistics_config()
+    families = ("baseline", "challenger")
     columns = (
         "timestamp",
         "family_id",
         "asset_coverage_id",
         "observation_count",
-        "access_window",
+        "sample_role",
         "loss",
+        "status",
     )
     losses = pd.DataFrame.from_records(
         [
-            (pd.Timestamp("2023-01-03"), family, "a" * 64, 2, "development", -0.5)
+            (
+                pd.Timestamp("2023-01-03"),
+                family,
+                "a" * 64,
+                2,
+                "validation",
+                -0.5,
+                "DEFINED",
+            )
             for family in families
         ]
         if has_observations
@@ -1807,13 +1091,13 @@ def test_paired_model_rankic_consumes_the_statistic_target_manifest(has_observat
         global_statistics=GlobalStatistics(),
         selection_group="quarterly",
         family_ids=families,
-        protocol_manifest=target_manifest,
+        config=comparison_config,
     )
     assert set(paired.family_id) == set(families)
     assert paired.observation_count.eq(int(has_observations)).all()
     assert paired.status.eq("UNDEFINED").all()
     assert paired.reason.eq(
-        "global_development_selection_reuses_validation"
+        "global_validation_selection_reuses_validation"
         if has_observations
         else "no_common_observations"
     ).all()
@@ -1823,18 +1107,17 @@ def test_paired_model_rankic_consumes_the_statistic_target_manifest(has_observat
         assert paired.mean_difference.isna().all()
 
 
-@pytest.mark.parametrize("access", ("development", "holdout"))
+@pytest.mark.parametrize("access", ("validation", "test"))
 @pytest.mark.parametrize(
     "family_id", ("momentum_20d", "__prediction_alpha__", "timestamp")
 )
-def test_model_family_names_preserve_factor_statistics_and_persisted_identity(
+def test_model_family_names_preserve_factor_statistics_and_native_names(
     tmp_path: Path, family_id: str, access: str
 ) -> None:
     factor = "momentum_20d"
     dates = pd.bdate_range(
-        "2024-01-02" if access == "holdout" else "2019-01-02", periods=3
+        "2024-01-02" if access == "test" else "2019-01-02", periods=3
     )
-    quarter_id = str(dates[0].to_period("Q"))
     calendar = pd.bdate_range(dates[0], periods=len(dates) + 21)
     cutoff = calendar[-1]
     assets = [f"asset_{index}" for index in range(6)]
@@ -1865,23 +1148,11 @@ def test_model_family_names_preserve_factor_statistics_and_persisted_identity(
     results = []
     for position, selected_family in enumerate((family_id, "renamed_model")):
         families = ("baseline", selected_family)
-        protocol = deepcopy(a_share.protocol("pv_all").manifest())
-        protocol["research_configuration"] = research_configuration(small_models=True)
-        protocol.update(
-            selection_group="global",
-            access_window=access,
-            development_window={
-                "start": dates[0].date().isoformat(),
-                "end": cutoff.date().isoformat(),
-            },
-            formal_dataset_window={
-                "start": dates[0].date().isoformat(),
-                "end": cutoff.date().isoformat(),
-            },
-        )
-        protocol["research_configuration"]["evaluation"]["factors"] = [factor]
-        protocol["research_configuration"]["comparison_model_id"] = families[0]
-        protocol["statistics"].update(
+        config = statistics_config()
+        config.update(selection_group="global", sample_role=access)
+        config["evaluation"]["factors"] = [factor]
+        config["comparison_model_id"] = families[0]
+        config["statistics"].update(
             hac_lag=1,
             bootstrap_block=2,
             bootstrap_repetitions=16,
@@ -1921,28 +1192,6 @@ def test_model_family_names_preserve_factor_statistics_and_persisted_identity(
             ],
         }
 
-        class Models:
-            family_ids = families
-            payload = selection_payload
-            selections = {"global": {quarter_id: selection_payload}}
-
-            def prediction_models(self, _window, **_kwargs):
-                return [
-                    {
-                        "quarter_id": quarter_id,
-                        "family_id": family,
-                        "model_id": family + "_fit",
-                        "model_metadata": {
-                            "input_columns": [factor],
-                            "model_algorithm": A_SHARE_MODEL_ALGORITHMS[0],
-                        },
-                    }
-                    for family in self.family_ids
-                ]
-
-            def selection(self, _group, _quarter, **_kwargs):
-                return self.payload
-
         class Lookup:
             family = selected_family
 
@@ -1963,43 +1212,32 @@ def test_model_family_names_preserve_factor_statistics_and_persisted_identity(
             def coverage_counts(self):
                 return (len(dates) * len(assets) * 2 - len(self.matched), 0)
 
-        envelope = build_business_manifest_envelope(
-            logical_artifact_id=f"family_names_{position}",
-            schema_identity="a" * 64,
-            protocol_or_spec_identity="b" * 64,
-            software_identity="c" * 64,
-            research_window={
-                "start": str(dates[0].date()),
-                "end": str(cutoff.date()),
-                "access": access,
-            },
-            upstream_identities={},
-            semantic_metadata={},
-        )
-        envelope = bind_statistics_envelope(
-            envelope, group="research", protocol=protocol
-        )
-        factor_envelope = bind_statistics_envelope(
-            envelope, group="factor", protocol=protocol
-        )
+        metadata = {
+            "sample_role": access,
+            "window": {"start": str(dates[0].date()), "end": str(cutoff.date())},
+        }
+        factor_metadata = metadata
         statistics_tables = build_a_share_statistics_tables(
-            layout=layout,
-            dataset_catalog=ResearchDatasetCatalog((spec,)),
-            dataset_id=spec.data_id,
-            prediction_id="selected_prediction",
-            persisted_model=Models(),
-            protocol_manifest=protocol,
+            dataset_path=layout.research_dataset_root("a_share", spec.data_id),
+            dataset_spec=spec,
+            config=config,
             time_window=TimeWindow(dates[0], cutoff),
+            prediction_id="selected_prediction",
             prediction_lookup=Lookup(),
             global_statistics=None,
+            **model_statistics_inputs(
+                spec,
+                config,
+                TimeWindow(dates[0], cutoff),
+                families=families,
+                selection=selection_payload,
+            ),
         )
-
         statistics_tables.update(
             build_a_share_factor_statistics_tables(
-                layout=layout,
-                dataset_catalog=ResearchDatasetCatalog((spec,)),
-                dataset_id=spec.data_id,
-                protocol_manifest=protocol,
+                dataset_path=layout.research_dataset_root("a_share", spec.data_id),
+                dataset_spec=spec,
+                config=config,
                 time_window=TimeWindow(dates[0], cutoff),
             )
         )
@@ -2008,29 +1246,25 @@ def test_model_family_names_preserve_factor_statistics_and_persisted_identity(
             (tmp_path / f"statistics_{position}").with_name(
                 (tmp_path / f"statistics_{position}").name + "_factor"
             ),
-            envelope=factor_envelope,
+            metadata=factor_metadata,
             tables={
                 key: value
-                for key, value in (statistics_tables).items()
+                for key, value in statistics_tables.items()
                 if key + ".parquet" in STATISTICS_TABLE_GROUPS["factor"]
             },
             table_group="factor",
         )
         root = write_statistics_artifact(
             tmp_path / f"statistics_{position}",
-            envelope=envelope,
+            metadata=metadata,
             tables={
                 key: value
-                for key, value in (statistics_tables).items()
+                for key, value in statistics_tables.items()
                 if key + ".parquet" in STATISTICS_TABLE_GROUPS["research"]
             },
         )
-        artifact = read_statistics_artifact(
-            root, expected_identity=envelope.instance_identity
-        )
-        factor_artifact = read_statistics_artifact(
-            factor_root, expected_identity=factor_envelope.instance_identity
-        )
+        artifact = read_statistics_artifact(root)
+        factor_artifact = read_statistics_artifact(factor_root)
         tables = {}
         for member in members:
             with (
@@ -2070,20 +1304,20 @@ def test_model_family_names_preserve_factor_statistics_and_persisted_identity(
             global_statistics=artifact,
             selection_group="quarterly",
             family_ids=families,
-            protocol_manifest={**protocol, "selection_group": "quarterly"},
+            config={**config, "selection_group": "quarterly"},
         )
         assert paired.family_id.tolist() == list(families)
         assert paired.observation_count.eq(len(dates)).all()
         assert paired.calendar_count.eq(len(dates)).all()
         assert paired.fdr_family_size.eq(len(families)).all()
         assert paired.mean_difference.tolist() == pytest.approx([-0.2, 0.2])
-        assert paired.status.eq("DEFINED" if access == "holdout" else "UNDEFINED").all()
+        assert paired.status.eq("DEFINED" if access == "test" else "UNDEFINED").all()
         assert paired.bootstrap_status.eq(
-            "DEFINED" if access == "holdout" else "UNDEFINED"
+            "DEFINED" if access == "test" else "UNDEFINED"
         ).all()
-        if access == "development":
+        if access == "validation":
             assert paired.reason.eq(
-                "global_development_selection_reuses_validation"
+                "global_validation_selection_reuses_validation"
             ).all()
         else:
             assert paired.standard_error.notna().all()
@@ -2098,29 +1332,25 @@ def test_model_family_names_preserve_factor_statistics_and_persisted_identity(
             (tmp_path / f"paired_statistics_{position}").with_name(
                 (tmp_path / f"paired_statistics_{position}").name + "_factor"
             ),
-            envelope=factor_envelope,
+            metadata=factor_metadata,
             tables={
                 key: value
-                for key, value in (paired_tables).items()
+                for key, value in paired_tables.items()
                 if key + ".parquet" in STATISTICS_TABLE_GROUPS["factor"]
             },
             table_group="factor",
         )
         paired_root = write_statistics_artifact(
             tmp_path / f"paired_statistics_{position}",
-            envelope=envelope,
+            metadata=metadata,
             tables={
                 key: value
-                for key, value in (paired_tables).items()
+                for key, value in paired_tables.items()
                 if key + ".parquet" in STATISTICS_TABLE_GROUPS["research"]
             },
         )
-        paired_artifact = read_statistics_artifact(
-            paired_root, expected_identity=envelope.instance_identity
-        )
-        read_statistics_artifact(
-            factor_paired_root, expected_identity=factor_envelope.instance_identity
-        )
+        paired_artifact = read_statistics_artifact(paired_root)
+        read_statistics_artifact(factor_paired_root)
         with paired_artifact.table("model_group_comparison.parquet") as persisted:
             pd.testing.assert_frame_equal(
                 persisted,
@@ -2163,10 +1393,7 @@ def test_factor_fmb_weightings_match_independent_weighted_normal_equations():
     )
     records = pd.DataFrame(
         statistics_production._fama_macbeth_period_records(
-            frame,
-            return_column="y",
-            factors=("x",),
-            core_factors=(),
+            frame, return_column="y", factors=("x",), core_factors=()
         )
     )
     for weighting in ("equal", "total_market_cap"):
@@ -2178,7 +1405,10 @@ def test_factor_fmb_weightings_match_independent_weighted_normal_equations():
         )
         x = sample.x.to_numpy()
         y = sample.y.to_numpy()
-        x_mean, y_mean = np.average(x, weights=weights), np.average(y, weights=weights)
+        x_mean, y_mean = (
+            np.average(x, weights=weights),
+            np.average(y, weights=weights),
+        )
         slope = np.sum(weights * (x - x_mean) * (y - y_mean)) / np.sum(
             weights * (x - x_mean) ** 2
         )
@@ -2193,16 +1423,13 @@ def test_factor_fmb_weightings_match_independent_weighted_normal_equations():
     frame.loc[0, "total_market_cap"] = 0.0
     with pytest.raises(ValueError, match="fama_macbeth_weights_invalid"):
         statistics_production._fama_macbeth_period_records(
-            frame,
-            return_column="y",
-            factors=("x",),
-            core_factors=(),
+            frame, return_column="y", factors=("x",), core_factors=()
         )
 
 
 @pytest.mark.parametrize(
     ("factor_scale", "price_change"),
-    [(1e308, 2.0**-52), (1e300, 2.0**-52), (1e308, 0.0)],
+    [(1e308, 2.0 ** (-52)), (1e300, 2.0 ** (-52)), (1e308, 0.0)],
     ids=["nonzero_underflow", "representable_subnormal", "true_zero"],
 )
 def test_native_fmb_float_publication_survives_statistics_roundtrip(
@@ -2219,7 +1446,7 @@ def test_native_fmb_float_publication_survives_statistics_roundtrip(
     )
 
     axis = pd.bdate_range("2023-01-02", periods=41)
-    factor, label = "earnings_yield", "forward_return_20d"
+    factor, label = ("earnings_yield", "forward_return_20d")
     availability = label + "_available_at"
     prices = pd.DataFrame(
         [
@@ -2270,22 +1497,12 @@ def test_native_fmb_float_publication_survives_statistics_roundtrip(
         context_columns=("total_market_cap",),
     )
     layout = StorageLayout(tmp_path)
-    data_identity = canonical_json_hash(
-        {"factor_scale": factor_scale, "price_change": price_change}
-    )
-    dataset_root = layout.instance_root(
-        layout.research_dataset_root("a_share", spec.data_id), data_identity
-    )
+    dataset_root = layout.research_dataset_root("a_share", spec.data_id)
     write_dataset(dataset_root, frame.loc[:, list(spec.column_roles)], spec=spec)
-    layout = layout.with_target_roots({spec.data_id: dataset_root})
     window = TimeWindow(axis[0].date(), cutoff.date())
-    protocol = {
-        "access_window": "development",
-        "development_window": {"start": "2023-01-02", "end": str(cutoff.date())},
-        "formal_dataset_window": {"start": "2023-01-02", "end": str(cutoff.date())},
-        "research_configuration": {
-            "evaluation": {"primary_label": label, "factors": [factor]}
-        },
+    config = {
+        "sample_role": "validation",
+        "evaluation": {"primary_label": label, "factors": [factor]},
         "statistics": {
             "factor_fdr_families": {"fundamental": [factor]},
             "fama_macbeth_core_factors": [],
@@ -2295,29 +1512,16 @@ def test_native_fmb_float_publication_survives_statistics_roundtrip(
         },
     }
     tables = build_a_share_factor_statistics_tables(
-        layout=layout,
-        dataset_catalog=ResearchDatasetCatalog((spec,)),
-        dataset_id=spec.data_id,
-        protocol_manifest=protocol,
+        dataset_path=layout.research_dataset_root("a_share", spec.data_id),
+        dataset_spec=spec,
+        config=config,
         time_window=window,
     )
-    envelope = bind_statistics_envelope(
-        build_business_manifest_envelope(
-            logical_artifact_id="fmb_float_statistics",
-            schema_identity="a" * 64,
-            protocol_or_spec_identity=canonical_json_hash(protocol),
-            software_identity="b" * 64,
-            research_window={**protocol["development_window"], "access": "development"},
-            upstream_identities={spec.data_id: data_identity},
-            semantic_metadata={"primary_label": label, "hac_lag": 19},
-        ),
-        group="factor",
-        protocol=protocol,
-    )
+    metadata = statistics_metadata(window)
     root = write_statistics_artifact(
-        tmp_path / "statistics", envelope=envelope, tables=tables, table_group="factor"
+        tmp_path / "statistics", metadata=metadata, tables=tables, table_group="factor"
     )
-    saved = read_statistics_artifact(root, expected_identity=envelope.instance_identity)
+    saved = read_statistics_artifact(root)
     with saved.table("fama_macbeth_periods.parquet") as periods:
         assert len(periods) == 80
         assert periods.status.eq("DEFINED").all()
@@ -2350,3 +1554,277 @@ def test_native_fmb_float_publication_survives_statistics_roundtrip(
             .all()
             .all()
         )
+
+
+def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_path):
+    import pyarrow as pa
+
+    from quant_research_platform.artifacts.outputs.prediction import (
+        _PredictionLookup as NativeLookup,
+    )
+    from quant_research_platform.artifacts.outputs.prediction import read_predictions
+    from quant_research_platform.research.models.persisted import load_model
+    from quant_research_platform.research.models.production import fit
+    from quant_research_platform.research.models.trial_selection import (
+        read_selection,
+        score,
+        select,
+    )
+    from quant_research_platform.research.predictions.runner import predict
+    from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
+
+    factor = CORE6_FACTORS[0]
+    dates = pd.bdate_range("2023-01-02", periods=48)
+    cutoff = dates[44]
+    window = TimeWindow(dates[0], cutoff)
+    history = pd.to_datetime(
+        ["2014-01-02", "2016-01-04", "2021-12-29"]
+        + [f"2022-{month:02d}-{day:02d}" for month in (1, 4, 7, 10) for day in (4, 5)]
+        + ["2022-03-31", "2022-06-30", "2022-09-30", "2022-12-30"]
+    ).sort_values()
+    frame = pd.DataFrame(
+        [
+            {
+                "market_id": "a_share",
+                "asset_id": f"asset_{asset}",
+                "timestamp": timestamp,
+                "eligible": True,
+                factor: float(asset - 5 + index * 0.001),
+                "forward_return_5d": 0.1
+                + 0.4 * asset
+                + 0.03 * asset**2
+                + 0.02 * np.sin(index + asset),
+                "forward_return_20d": (80 - 5 * asset + 2 * np.cos(index + asset) - 100)
+                / 100,
+                "forward_return_5d_available_at": timestamp + pd.offsets.BDay(6),
+                "forward_return_20d_available_at": timestamp + pd.offsets.BDay(21),
+            }
+            for index, timestamp in enumerate(history.append(dates))
+            for asset in range(12)
+        ]
+    )
+    for horizon in (5, 20):
+        label = f"forward_return_{horizon}d"
+        unavailable = frame[label + "_available_at"].gt(cutoff)
+        frame.loc[unavailable, label] = np.nan
+        frame.loc[unavailable, label + "_available_at"] = pd.NaT
+    frame["total_market_cap"] = 1.0 + frame.groupby("timestamp").cumcount()
+    spec = make_demo_research_dataset_spec(
+        data_id="pv_all",
+        factor_columns=(factor,),
+        label_columns=(
+            "forward_return_5d",
+            "forward_return_5d_available_at",
+            "forward_return_20d",
+            "forward_return_20d_available_at",
+        ),
+        filter_columns=("eligible",),
+        context_columns=("total_market_cap",),
+    )
+    source = tmp_path / "source"
+    write_dataset(source, frame, spec=spec)
+    mature_dates = {}
+    targets = []
+    for horizon in (5, 20):
+        root = tmp_path / str(horizon)
+        primary = f"forward_return_{horizon}d"
+        model_id = "horizon_linear"
+        model = fit(
+            {
+                "market_id": "a_share",
+                "inputs": str(source),
+                "output": str(root / "model"),
+                "model": {
+                    "model_id": model_id,
+                    "model_algorithm": "linear_regression",
+                    "input_factor_columns": [factor],
+                    "target_column": primary,
+                    "random_seed": 42,
+                },
+                "fit_windows": [{"start": str(history[0].date()), "end": "2022-12-31"}],
+                "fit_cutoff": "2022-12-31",
+                "label_unit": "decimal_return",
+            }
+        )
+        fitted, facts = load_model(model)
+        assert fitted.metadata["target_column"] == primary
+        targets.append(fitted.metadata["target_column"])
+        prediction_window = {"start": str(dates[0]), "end": str(cutoff)}
+        predictions = predict(
+            {
+                "model": str(model),
+                "inputs": str(source),
+                "output": str(root / "prediction"),
+                "prediction_window": prediction_window,
+                "sample_role": "validation",
+            }
+        )
+        predicted, prediction_meta = read_predictions(predictions)
+        assert prediction_meta["model"] == str(model)
+        assert len(predicted) == 45 * 12 and (
+            not predicted.duplicated(["timestamp", "asset_id"]).any()
+        )
+        assert np.isfinite(predicted.prediction_score).all()
+        scored = score(
+            {
+                "predictions": [str(predictions)],
+                "labels": str(source),
+                "candidate_ids": [model_id],
+                "validation_windows": [prediction_window],
+                "scoring_window": prediction_window,
+                "cutoff": str(cutoff),
+                "test_window": {"start": "2024-01-01", "end": "2024-03-31"},
+                "selection_group": "global",
+                "validation_axis": "cross_sectional",
+                "output": str(root / "scores.json"),
+                "label_unit": "decimal_return",
+            }
+        )
+        selection_path = select(
+            {
+                "scores": str(scored),
+                "output": str(root / "selection.json"),
+                "selection_metric": "validation_rankic",
+                "selection_direction": "maximize",
+                "tie_break_order": [model_id],
+                "refit_windows": [
+                    {"start": str(history[0].date()), "end": "2022-12-31"},
+                    prediction_window,
+                ],
+                "refit_cutoff": str(cutoff),
+            }
+        )
+        selection = read_selection(selection_path)
+        family = prediction_meta["family_id"]
+        assert selection["selected_family_id"] == family
+        config = statistics_config(factors=(factor,))
+        config["evaluation"]["primary_label"] = primary
+        config["evaluation"]["labels"] = ["forward_return_5d", "forward_return_20d"]
+        config["comparison_model_id"] = family
+        factor_window = TimeWindow(history[0], cutoff)
+        factor_tables = build_a_share_factor_statistics_tables(
+            dataset_path=source,
+            dataset_spec=spec,
+            config=config,
+            time_window=factor_window,
+        )
+        index = ExactPrimaryKeyIndex(primary_key=("timestamp", "asset_id", "family_id"))
+        lookup = NativeLookup(
+            index=index,
+            primary_key=("timestamp", "asset_id", "family_id"),
+            prediction_column="prediction_score",
+        )
+        try:
+            projected = predicted.assign(family_id=family)
+            lookup.row_count += index.add_float_value_table(
+                pa.Table.from_pandas(projected, preserve_index=False),
+                namespace="prediction",
+                value_column="prediction_score",
+                validation_column="prediction_score",
+                retain_values=True,
+            )
+            tables = build_a_share_statistics_tables(
+                dataset_path=source,
+                dataset_spec=spec,
+                prediction_id="horizon_predictions",
+                model_entries={
+                    ("explicit_horizon", family): {
+                        "family_id": family,
+                        "model_id": model_id,
+                        "model_metadata": prediction_meta["model_metadata"],
+                    }
+                },
+                selections={"explicit_horizon": selection},
+                period_windows={"explicit_horizon": window},
+                trial_rows=statistics_production._selection_trial_rows(
+                    {"final": selection}, "global"
+                ),
+                config=config,
+                time_window=window,
+                prediction_lookup=lookup,
+                global_statistics=None,
+            )
+            assert lookup.coverage_counts() == (0, 0)
+        finally:
+            lookup.close()
+        write_statistics_artifact(
+            root / "statistics", metadata=statistics_metadata(window), tables=tables
+        )
+        public_output = statistics_production.model_statistics(
+            {
+                **config,
+                "evaluation": {"primary_label": primary},
+                "statistics": {
+                    key: config["statistics"][key]
+                    for key in ("hac_lag", "bootstrap_block", "bootstrap_repetitions")
+                },
+                "dataset": str(source),
+                "output": str(root / "public_statistics"),
+                "window": prediction_window,
+                "prediction_id": "horizon_predictions",
+                "periods": [
+                    {
+                        "period_id": "explicit_horizon",
+                        "window": prediction_window,
+                        "selection": str(selection_path),
+                        "predictions": [str(predictions)],
+                    }
+                ],
+            }
+        )
+        with read_statistics_artifact(public_output).table(
+            "model_losses.parquet"
+        ) as actual:
+            with read_statistics_artifact(root / "statistics").table(
+                "model_losses.parquet"
+            ) as expected_losses:
+                pd.testing.assert_frame_equal(actual, expected_losses, check_exact=True)
+            assert actual.period_id.eq("explicit_horizon").all()
+        published = write_statistics_artifact(
+            root / "factor_statistics",
+            metadata=statistics_metadata(factor_window),
+            tables=factor_tables,
+            table_group="factor",
+        )
+        factor_statistics = read_statistics_artifact(published)
+        expected = frame.loc[
+            frame[primary + "_available_at"].le(cutoff) & frame.timestamp.le(cutoff)
+        ]
+        expected_dates = pd.DatetimeIndex(sorted(expected.timestamp.unique())).astype(
+            "datetime64[ns]"
+        )
+        with factor_statistics.table("fama_macbeth_periods.parquet") as periods:
+            coefficients = periods.loc[
+                periods.regression_id.eq("equal:single:" + factor)
+            ]
+            assert str(coefficients.timestamp.dtype) == "datetime64[ns]"
+            assert not coefficients.duplicated(
+                ["regression_id", "coefficient_id", "timestamp"]
+            ).any()
+            assert coefficients.status.eq("DEFINED").all()
+            for coefficient_id in ("intercept", factor):
+                actual = coefficients.loc[
+                    coefficients.coefficient_id.eq(coefficient_id)
+                ].sort_values("timestamp")
+                pd.testing.assert_index_equal(
+                    pd.DatetimeIndex(actual.timestamp),
+                    expected_dates,
+                    check_names=False,
+                )
+                oracle = [
+                    np.linalg.lstsq(
+                        np.column_stack((np.ones(len(group)), group[factor])),
+                        group[primary],
+                        rcond=None,
+                    )[0][0 if coefficient_id == "intercept" else 1]
+                    for _, group in expected.groupby("timestamp", sort=True)
+                ]
+                np.testing.assert_allclose(actual.value, oracle, rtol=2e-14, atol=2e-14)
+                assert actual.observation_count.eq(12).all()
+        with factor_statistics.table("fama_macbeth.parquet") as summary:
+            assert summary.period_count.eq(len(expected_dates)).all()
+            assert summary.status.eq("DEFINED").all()
+        mature_dates[horizon] = expected_dates[expected_dates >= dates[0]]
+    assert targets == ["forward_return_5d", "forward_return_20d"]
+    assert len(mature_dates[5]) == 39 and len(mature_dates[20]) == 24
+    assert len(mature_dates[5].difference(mature_dates[20])) == 15

@@ -240,15 +240,19 @@ def test_share_safety_preserves_noncredential_counterexamples() -> None:
         ({"row_samples": [{"/srv/synthetic/report": 1}]}, "absolute_path"),
     ],
 )
-def test_internal_artifact_metadata_safety_is_owned_by_runtime(
+def test_private_metadata_paths_remain_unsafe_to_share_and_credentials_rejected(
     payload: dict[str, object],
     reason: str,
 ) -> None:
-    with pytest.raises(
-        ValueError,
-        match=f"unsafe_internal_artifact_metadata: {reason}",
-    ):
+    assert evidence_json_value_unsafe_reason(payload) == reason
+    if reason == "absolute_path":
         assert_internal_artifact_metadata_safe(payload)
+    else:
+        with pytest.raises(
+            ValueError,
+            match=f"unsafe_internal_artifact_metadata: {reason}",
+        ):
+            assert_internal_artifact_metadata_safe(payload)
 
 
 def test_internal_metadata_preserves_schema_fields_and_typed_identifiers() -> None:

@@ -301,8 +301,8 @@ def test_selected_validation_funding_never_reads_other_months(tmp_path, monkeypa
     assert inspected and set(inspected) == set(roots)
 
 
-@pytest.mark.parametrize("mode", ("complete", "early", "source_changed", "primary"))
-def test_native_funding_scope_decodes_once_and_rechecks_original_on_exit(
+@pytest.mark.parametrize("mode", ("complete", "early", "primary"))
+def test_native_funding_scope_decodes_once_and_preserves_primary(
     tmp_path, monkeypatch, mode
 ):
     import quant_research_platform.sources.binance.funding as funding
@@ -345,9 +345,7 @@ def test_native_funding_scope_decodes_once_and_rechecks_original_on_exit(
         with pytest.raises(MemoryError) as raised:
             consume()
         assert raised.value is primary
-        assert primary.__notes__ == [
-            "Funding source verification also failed: ValueError"
-        ]
+        assert not getattr(primary, "__notes__", [])
     else:
         consume()
     assert len(decoded) == 1
@@ -379,7 +377,7 @@ def test_separate_native_funding_archives_cannot_supply_continuous_months(tmp_pa
             with pytest.raises(
                 PortfolioTargetBlocked, match="binance_funding_coverage_incomplete"
             ):
-                _funding_check(observations, observations.identity, bounds)
+                _funding_check(observations, bounds)
             market_span = (bounds[0][0], bounds[0][1] + 1)
             episodes = list(
                 _qualified_episodes(

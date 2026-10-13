@@ -8,17 +8,14 @@ from quant_research_platform.contracts.portfolios import EQUITY_EVENT_COLUMNS
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import decode_exact_numeric
 from quant_research_platform.markets.implementations.a_share import portfolio_sessions
-from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.research.portfolios import production
 from quant_research_platform.sources.reference import interim
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
-from quant_research_platform.storage.datasets.reading import open_dataset_session
 from quant_research_platform.storage.layout import StorageLayout
-from tests.research.test_closed_market_portfolios import _native_inputs
-from tests.workflows.test_portfolio_workflow_integration import _processed_specs
+from tests.helpers.portfolio_inputs import _interim_specs, _processed_specs
 
 
-def write_equity_source(raw_root, *, panel_hash="a" * 64, events=None):
+def write_equity_source(raw_root, *, events=None):
     root = raw_root / "a_share_equity_events"
     root.mkdir(parents=True, exist_ok=True)
     document = (
@@ -41,7 +38,8 @@ def write_equity_source(raw_root, *, panel_hash="a" * 64, events=None):
         "successor_listing_date": None,
         "successor_shares_per_old_share": None,
         "successor_shares_per_unit": None,
-        "panel_content_hash": panel_hash,
+        "unit_basis_date": "2023-01-03",
+        "successor_unit_basis_date": None,
         "source_url": "https://www.sse.com.cn/synthetic-equity-evidence",
         "document_file": "evidence.txt",
         "source_locator": "page:1",
@@ -82,6 +80,7 @@ def test_equity_event_raw_to_persisted_normalization_preserves_units_and_dates(
                 successor_asset_id="000002",
                 successor_listing_date="2023-01-03",
                 successor_shares_per_old_share=0.5,
+                successor_unit_basis_date="2023-01-03",
                 successor_shares_per_unit=4.0,
             ),
         ]
@@ -89,7 +88,10 @@ def test_equity_event_raw_to_persisted_normalization_preserves_units_and_dates(
     write_equity_source(raw, events=events)
     identity = interim.source_content_identity(raw, "a_share_equity_events")
     result = interim.materialize_interim_data(
-        layout=StorageLayout(tmp_path),
+        output_roots={
+            key: StorageLayout(tmp_path).interim_data_root("reference", key)
+            for key in ("a_share_equity_events",)
+        },
         raw_root=raw,
         data_ids=("a_share_equity_events",),
     )
@@ -127,7 +129,12 @@ def test_equity_evidence_invalid_never_publishes_over_old_good(tmp_path, damage)
     root = write_equity_source(raw)
     layout = StorageLayout(tmp_path)
     original = interim.materialize_interim_data(
-        layout=layout, raw_root=raw, data_ids=("a_share_equity_events",)
+        output_roots={
+            key: layout.interim_data_root("reference", key)
+            for key in ("a_share_equity_events",)
+        },
+        raw_root=raw,
+        data_ids=("a_share_equity_events",),
     )
     artifact = original.artifact_roots["a_share_equity_events"]
     before = read_dataset(artifact)
@@ -153,7 +160,12 @@ def test_equity_evidence_invalid_never_publishes_over_old_good(tmp_path, damage)
     path.write_text(json.dumps(metadata))
     with pytest.raises(ValueError, match="equity_event"):
         interim.materialize_interim_data(
-            layout=layout, raw_root=raw, data_ids=("a_share_equity_events",)
+            output_roots={
+                key: layout.interim_data_root("reference", key)
+                for key in ("a_share_equity_events",)
+            },
+            raw_root=raw,
+            data_ids=("a_share_equity_events",),
         )
     pd.testing.assert_frame_equal(before, read_dataset(artifact))
 
@@ -161,40 +173,53 @@ def test_equity_evidence_invalid_never_publishes_over_old_good(tmp_path, damage)
 def native_equity_inputs(
     tmp_path, *, events=None, wrong_basis=False, panel_transform=None
 ):
-    layout, roots, calendar, _panel = _native_inputs(tmp_path, fault="delisted")
-    renamed = {}
-    for target in ("market_panel_1d", "market_bars_1d", "stock_master"):
+    from tests.research.test_closed_market_portfolios import _native_inputs
+
+    inputs, roots, calendar, _panel = _native_inputs(tmp_path, fault="delisted")
+    for target, input_key in (
+        ("market_panel_1d", "panel"),
+        ("market_bars_1d", "market_bars"),
+        ("stock_master", "stock_master"),
+    ):
         frame = read_dataset(roots[target])
         column = "asset_id" if target == "market_panel_1d" else "source_asset_id"
         frame[column] = frame[column].replace({"a0": "000001"})
         if target == "market_panel_1d":
             frame = frame.loc[
                 ~(frame.asset_id.eq("000001") & frame.timestamp.gt("2023-01-02"))
-            ]
-        if target == "market_panel_1d" and panel_transform is not None:
-            frame = panel_transform(frame.copy())
+            ].copy()
+            selected = frame.asset_id.eq("000001")
+            frame.loc[selected, "close"] = frame.loc[selected, "adj_close"] / 2
+            if panel_transform is not None:
+                frame = panel_transform(frame.copy())
         spec = (
             _processed_specs().get(target)
             if target == "market_panel_1d"
-            else research_profile().interim.get(target)
+            else _interim_specs().get(target)
         )
-        root = roots[target].parent / ("b" * 64)
+        root = tmp_path / "renamed" / target
         write_dataset(root, frame, spec=spec)
-        renamed[target] = root
-    layout = layout.with_target_roots(renamed)
-    roots.update(renamed)
+        roots[target] = inputs[input_key] = root
     raw = tmp_path / "raw"
-    panel_hash = open_dataset_session(
-        roots["market_panel_1d"], columns=None, time_window=None
-    ).manifest["content_hash"]
-    write_equity_source(
-        raw, panel_hash="0" * 64 if wrong_basis else panel_hash, events=events
-    )
+
+    def with_units(base):
+        base = dict(base, unit_basis_date="2022-12-30")
+        rows = events(base) if events is not None else [base]
+        for row in rows:
+            if wrong_basis and row["listing_date"] == "2022-12-01":
+                row["shares_per_old_unit"] = 3
+            if pd.Timestamp(row["unit_basis_date"]) < pd.Timestamp(row["listing_date"]):
+                row["unit_basis_date"] = row["listing_date"]
+        return rows
+
+    write_equity_source(raw, events=with_units)
     imported = interim.materialize_interim_data(
-        layout=layout, raw_root=raw, data_ids=("a_share_equity_events",)
+        output_roots={"a_share_equity_events": tmp_path / "rights"},
+        raw_root=raw,
+        data_ids=("a_share_equity_events",),
     )
-    layout = layout.with_target_roots(imported.artifact_roots)
-    return layout, roots, calendar
+    inputs["equity_events"] = imported.artifact_roots["a_share_equity_events"]
+    return (inputs, roots, calendar)
 
 
 @pytest.mark.parametrize("wrong_basis", [False, True])
@@ -203,59 +228,29 @@ def test_native_source_to_session_carries_recovery_without_forged_panel_row(
 ):
     layout, roots, calendar = native_equity_inputs(tmp_path, wrong_basis=wrong_basis)
     source = portfolio_sessions.iter_portfolio_sessions(
-        layout=layout,
+        market_bars_root=layout["market_bars"],
+        stock_master_root=layout["stock_master"],
+        equity_events_root=layout["equity_events"],
         panel_root=roots["market_panel_1d"],
         panel_columns=production._PANEL_COLUMNS,
         calendar=calendar,
         time_window=TimeWindow("2022-12-30", "2023-01-06"),
     )
-    if wrong_basis:
-        with pytest.raises(ValueError, match="equity_event_panel_unit_basis_mismatch"):
-            list(source)
-        return
     views = list(source)
     recovered = [view for view in views if not view.rights_events.empty]
     assert len(recovered) == 1 and recovered[0].timestamp == pd.Timestamp("2023-01-04")
     assert "000001" not in set(recovered[0].panel.asset_id)
     event = recovered[0].rights_events.iloc[0]
-    assert event.asset_id == "000001" and event.value_per_old_unit == 5.0
+    assert event.asset_id == "000001"
+    assert event.value_per_old_unit == (7.5 if wrong_basis else 5.0)
+    assert bool(event.unit_basis_proved) is (not wrong_basis)
     assert ("000001", pd.Timestamp("2022-12-01")) in recovered[
         0
     ].confirmed_delisted_lifecycles
 
 
-@pytest.mark.parametrize("primary_failure", [False, True])
-def test_rights_source_last_yield_verifies_on_close_and_preserves_primary(
-    tmp_path, primary_failure
-):
-    from quant_research_platform.policy.lifecycle import closing_iterator
-
-    layout, roots, calendar = native_equity_inputs(tmp_path)
-    rights = open_dataset_session(
-        layout.target_root("a_share_equity_events", None),
-        columns=None,
-        time_window=None,
-    )
-    source = portfolio_sessions.iter_portfolio_sessions(
-        layout=layout,
-        panel_root=roots["market_panel_1d"],
-        panel_columns=production._PANEL_COLUMNS,
-        calendar=calendar,
-        time_window=TimeWindow("2023-01-06", "2023-01-06"),
-    )
-    with pytest.raises(RuntimeError if primary_failure else ValueError) as error:
-        with closing_iterator(source):
-            next(source)
-            path = rights.all_paths[0]
-            path.write_bytes(path.read_bytes() + b"changed")
-            if primary_failure:
-                raise RuntimeError("primary_consumer_failure")
-    if primary_failure:
-        assert str(error.value) == "primary_consumer_failure"
-        assert any("close also failed" in note for note in error.value.__notes__)
-
-
 def test_calendar_coalesced_rights_events_do_not_use_event_id_as_order(tmp_path):
+
     def events(base):
         return [
             dict(base, publication_date="2022-12-31", effective_date="2023-01-01"),
@@ -271,7 +266,9 @@ def test_calendar_coalesced_rights_events_do_not_use_event_id_as_order(tmp_path)
 
     layout, roots, calendar = native_equity_inputs(tmp_path, events=events)
     source = portfolio_sessions.iter_portfolio_sessions(
-        layout=layout,
+        market_bars_root=layout["market_bars"],
+        stock_master_root=layout["stock_master"],
+        equity_events_root=layout["equity_events"],
         panel_root=roots["market_panel_1d"],
         panel_columns=production._PANEL_COLUMNS,
         calendar=calendar,
@@ -299,13 +296,17 @@ def test_source_exact_event_values_preserve_extreme_finite_final_amounts(tmp_pat
                 successor_asset_id="000002",
                 successor_listing_date="2023-01-03",
                 successor_shares_per_old_share=1e300,
+                successor_unit_basis_date="2023-01-03",
                 successor_shares_per_unit=1e-300,
             ),
         ]
 
     write_equity_source(raw, events=events)
     imported = interim.materialize_interim_data(
-        layout=StorageLayout(tmp_path),
+        output_roots={
+            key: StorageLayout(tmp_path).interim_data_root("reference", key)
+            for key in ("a_share_equity_events",)
+        },
         raw_root=raw,
         data_ids=("a_share_equity_events",),
     )
@@ -318,8 +319,8 @@ def test_source_exact_event_values_preserve_extreme_finite_final_amounts(tmp_pat
     )
     assert quote == Fraction(1e300) ** 2
     assert multiplier == Fraction(1e300) ** 2 / Fraction(1e-300)
-    assert float((Fraction(1) / quote) * quote) == 1.0
-    assert (Fraction(1) / multiplier) * multiplier == 1
+    assert float(Fraction(1) / quote * quote) == 1.0
+    assert Fraction(1) / multiplier * multiplier == 1
 
 
 def test_equity_unit_integer_does_not_round_before_exact_normalization(tmp_path):
@@ -332,7 +333,10 @@ def test_equity_unit_integer_does_not_round_before_exact_normalization(tmp_path)
         ],
     )
     imported = interim.materialize_interim_data(
-        layout=StorageLayout(tmp_path),
+        output_roots={
+            key: StorageLayout(tmp_path).interim_data_root("reference", key)
+            for key in ("a_share_equity_events",)
+        },
         raw_root=raw,
         data_ids=("a_share_equity_events",),
     )
@@ -348,7 +352,10 @@ def test_observation_timezone_does_not_confuse_chinese_publication_date(tmp_path
         raw, events=lambda base: [dict(base, observed_at="2023-01-03T00:30:00+08:00")]
     )
     imported = interim.materialize_interim_data(
-        layout=StorageLayout(tmp_path),
+        output_roots={
+            key: StorageLayout(tmp_path).interim_data_root("reference", key)
+            for key in ("a_share_equity_events",)
+        },
         raw_root=raw,
         data_ids=("a_share_equity_events",),
     )
@@ -363,7 +370,10 @@ def test_present_future_only_source_materializes_empty_window_without_fake_histo
     raw = tmp_path / "raw"
     write_equity_source(raw)
     imported = interim.materialize_interim_data(
-        layout=StorageLayout(tmp_path),
+        output_roots={
+            key: StorageLayout(tmp_path).interim_data_root("reference", key)
+            for key in ("a_share_equity_events",)
+        },
         raw_root=raw,
         data_ids=("a_share_equity_events",),
         end_date="2023-01-02",
@@ -407,6 +417,7 @@ def test_equity_official_transfer_domains_reject_lookalikes(tmp_path, host, allo
 
 
 def test_narrow_session_does_not_coalesce_different_historical_event_sessions(tmp_path):
+
     def events(base):
         return [
             base,
@@ -423,7 +434,9 @@ def test_narrow_session_does_not_coalesce_different_historical_event_sessions(tm
     layout, roots, calendar = native_equity_inputs(tmp_path, events=events)
     views = list(
         portfolio_sessions.iter_portfolio_sessions(
-            layout=layout,
+            market_bars_root=layout["market_bars"],
+            stock_master_root=layout["stock_master"],
+            equity_events_root=layout["equity_events"],
             panel_root=roots["market_panel_1d"],
             panel_columns=production._PANEL_COLUMNS,
             calendar=calendar,
@@ -443,7 +456,9 @@ def test_future_event_attachment_does_not_change_prior_session_event_proof(tmp_p
     def views(current_layout):
         return list(
             portfolio_sessions.iter_portfolio_sessions(
-                layout=current_layout,
+                market_bars_root=current_layout["market_bars"],
+                stock_master_root=current_layout["stock_master"],
+                equity_events_root=current_layout["equity_events"],
                 panel_root=roots["market_panel_1d"],
                 panel_columns=production._PANEL_COLUMNS,
                 calendar=calendar,
@@ -470,14 +485,12 @@ def test_future_event_attachment_does_not_change_prior_session_event_proof(tmp_p
     metadata["files"]["future.txt"] = hashlib.sha256(attachment).hexdigest()
     metadata["events"].append(future)
     path.write_text(json.dumps(metadata))
-    root = (
-        layout.interim_data_root("reference", "a_share_equity_events")
-        / "instances"
-        / ("c" * 64)
-    )
-    changed_layout = layout.with_target_roots({"a_share_equity_events": root})
+    root = tmp_path / "future_rights"
+    changed_layout = {**layout, "equity_events": root}
     interim.materialize_interim_data(
-        layout=changed_layout, raw_root=raw, data_ids=("a_share_equity_events",)
+        output_roots={"a_share_equity_events": root},
+        raw_root=raw,
+        data_ids=("a_share_equity_events",),
     )
     after = views(changed_layout)
     assert old_identity != interim.source_content_identity(raw, "a_share_equity_events")
@@ -501,23 +514,26 @@ def test_equity_events_require_terminated_origin_at_actual_recognition(tmp_path,
         else:
             stocks.loc[selected, "timestamp"] = pd.Timestamp("2023-01-05")
         root = roots["stock_master"].parent / ("d" * 64)
-        write_dataset(root, stocks, spec=research_profile().interim.get("stock_master"))
-        layout = layout.with_target_roots({"stock_master": root})
+        write_dataset(root, stocks, spec=_interim_specs().get("stock_master"))
+        layout = {**layout, "stock_master": root}
     source = portfolio_sessions.iter_portfolio_sessions(
-        layout=layout,
+        market_bars_root=layout["market_bars"],
+        stock_master_root=layout["stock_master"],
+        equity_events_root=layout["equity_events"],
         panel_root=roots["market_panel_1d"],
         panel_columns=production._PANEL_COLUMNS,
         calendar=calendar,
         time_window=TimeWindow("2023-01-06", "2023-01-06"),
     )
-    with pytest.raises(ValueError, match="equity_event_entitlement_unproved"):
-        list(source)
+    events = pd.concat(view.rights_events for view in source)
+    assert not events.entitlement_proved.all()
 
 
 @pytest.mark.parametrize("active_successor", [False, True])
 def test_proved_conversion_qualifies_external_successor_but_not_active_distribution(
     tmp_path, active_successor
 ):
+
     def events(base):
         converted = dict(
             base,
@@ -528,11 +544,13 @@ def test_proved_conversion_qualifies_external_successor_but_not_active_distribut
             successor_asset_id="000001",
             successor_listing_date="2023-01-03",
             successor_shares_per_old_share=0.5,
+            successor_unit_basis_date="2023-01-03",
             successor_shares_per_unit=1,
         )
         successor = dict(
             base,
             event_id="a-successor",
+            shares_per_old_unit=1,
             listing_date="2023-01-03",
             kind="cash_recovery",
         )
@@ -550,25 +568,28 @@ def test_proved_conversion_qualifies_external_successor_but_not_active_distribut
         write_dataset(
             root,
             pd.concat((stocks, successor)),
-            spec=research_profile().interim.get("stock_master"),
+            spec=_interim_specs().get("stock_master"),
         )
-        layout = layout.with_target_roots({"stock_master": root})
+        layout = {**layout, "stock_master": root}
     source = portfolio_sessions.iter_portfolio_sessions(
-        layout=layout,
+        market_bars_root=layout["market_bars"],
+        stock_master_root=layout["stock_master"],
+        equity_events_root=layout["equity_events"],
         panel_root=roots["market_panel_1d"],
         panel_columns=production._PANEL_COLUMNS,
         calendar=calendar,
         time_window=TimeWindow("2022-12-30", "2023-01-06"),
     )
     if active_successor:
-        with pytest.raises(ValueError, match="equity_event_entitlement_unproved"):
-            list(source)
+        events = pd.concat(view.rights_events for view in source)
+        assert not events.entitlement_proved.all()
     else:
         events = pd.concat(view.rights_events for view in source)
         assert events.event_id.tolist() == ["z-conversion", "a-successor"]
 
 
 def test_circular_conversion_cannot_revive_the_extinguished_original_life(tmp_path):
+
     def events(base):
         forward = dict(
             base,
@@ -579,11 +600,13 @@ def test_circular_conversion_cannot_revive_the_extinguished_original_life(tmp_pa
             successor_asset_id="000001",
             successor_listing_date="2023-01-03",
             successor_shares_per_old_share=1,
+            successor_unit_basis_date="2023-01-03",
             successor_shares_per_unit=1,
         )
         backward = dict(
             forward,
             event_id="backward",
+            shares_per_old_unit=1,
             listing_date="2023-01-03",
             successor_listing_date="2022-12-01",
         )
@@ -591,7 +614,9 @@ def test_circular_conversion_cannot_revive_the_extinguished_original_life(tmp_pa
 
     layout, roots, calendar = native_equity_inputs(tmp_path, events=events)
     source = portfolio_sessions.iter_portfolio_sessions(
-        layout=layout,
+        market_bars_root=layout["market_bars"],
+        stock_master_root=layout["stock_master"],
+        equity_events_root=layout["equity_events"],
         panel_root=roots["market_panel_1d"],
         panel_columns=production._PANEL_COLUMNS,
         calendar=calendar,

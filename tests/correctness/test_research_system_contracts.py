@@ -15,10 +15,6 @@ from quant_research_platform.contracts.models import (
     TrainingWeighting,
     model_spec_payload,
 )
-from quant_research_platform.profiles.research import (
-    bind_research_configuration,
-    research_profile,
-)
 from quant_research_platform.research.features.transforms import (
     _industry_size_residuals,
     a_share_feature_pipeline,
@@ -153,30 +149,28 @@ def _reference_residuals(target, industries, sizes):
     "name,count",
     [
         ("core6", 6),
-        ("pv25", 6),
-        ("pv_expanded", 6),
-        ("fusion_nf_core", 12),
-        ("fusion_nf_expectations", 16),
+        ("pv25", 25),
+        ("pv_expanded", 52),
+        ("fusion_nf_core", 44),
+        ("fusion_nf_expectations", 48),
     ],
 )
 def test_selected_core_intersection_does_not_shrink_research(name, count):
     path = (
         Path(__file__).resolve().parents[2]
-        / "configs/research/a_share"
+        / "docs/research-rosters/a_share"
         / (name + ".json")
     )
     configuration = json.loads(path.read_text(encoding="utf-8"))
-    bound = bind_research_configuration(research_profile(), configuration)
-    protocol = bound.protocol(configuration["scenario_id"])
-    assert len(protocol.manifest()["statistics"]["fama_macbeth_core_factors"]) == count
-    assert protocol.factor_columns == tuple(configuration["evaluation"]["factors"])
-    if name == "fusion_nf_core":
-        assert len(protocol.factor_columns) == 44
+    factors = configuration["evaluation"]["factors"]
+    assert len(factors) == len(set(factors)) == count
+    catalog = a_share.factor_catalog()
+    assert set(factors) <= {item.output_column for item in catalog.list()}
 
 
 def test_equal_timestamp_decay_is_one_frozen_model_contract():
     stamps = pd.to_datetime(["2020-01-01", "2020-01-01", "2020-01-02", "2020-01-03"])
-    weighting = TrainingWeighting(half_life=1)
+    weighting = TrainingWeighting(half_life_periods=1)
     weights = equal_timestamp_sample_weights(stamps, weighting)
     np.testing.assert_allclose(weights, np.array([2, 2, 8, 16]) / 7)
     assert weights.sum() == pytest.approx(4)
@@ -184,19 +178,19 @@ def test_equal_timestamp_decay_is_one_frozen_model_contract():
         model_id="x",
         model_algorithm="linear_regression",
         input_feature_columns=("x",),
-        label_column="y",
+        target_column="y",
     )
     decayed = ModelSpec(
         model_id="x",
         model_algorithm="linear_regression",
         input_feature_columns=("x",),
-        label_column="y",
-        training_weighting={"method": "equal_timestamp", "half_life": 756},
+        target_column="y",
+        training_weighting={"method": "equal_timestamp", "half_life_periods": 756},
     )
     assert canonical_json_hash(model_spec_payload(spec)) != canonical_json_hash(
         model_spec_payload(decayed)
     )
-    assert model_spec_payload(decayed)["training_weighting"]["half_life"] == 756
+    assert model_spec_payload(decayed)["training_weighting"]["half_life_periods"] == 756
     frame = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(
@@ -248,6 +242,8 @@ def test_crypto_labels_have_one_horizon_and_maturity_catalog():
 
     catalog = crypto_hft.label_catalog()
     assert len(catalog.list()) == 9
+    from quant_research_platform.profiles.research import research_profile
+
     profile = research_profile("crypto_binance_hft")
     assert profile.labels.list() == catalog.list()
     spec = processed_catalog.hft_processed_catalog().get(HFT_LABEL_DATA_ID)
@@ -276,12 +272,10 @@ def test_single_candidate_keeps_psr_and_explains_dsr_pbo():
 
 
 def test_prepared_training_rows_are_exact_and_cutoff_scoped():
-    from types import SimpleNamespace
-
     from quant_research_platform.contracts.experiments import (
         training_availability_columns,
     )
-    from quant_research_platform.research.models.production import _prepare_training
+    from quant_research_platform.research.models.fitting import _collect_training_frame
 
     frame = pd.DataFrame(
         {
@@ -299,26 +293,25 @@ def test_prepared_training_rows_are_exact_and_cutoff_scoped():
     def chunks(columns, **kwargs):
         yield frame.loc[:, list(columns)]
 
-    dataset = SimpleNamespace(primary_key=("timestamp", "asset_id"))
     for algorithm in ("linear_regression", "ridge_regression"):
         model = ModelSpec(
             model_id=algorithm,
             model_algorithm=algorithm,
             input_feature_columns=("x",),
-            label_column="y",
+            target_column="y",
         )
         assert (
             len(
-                _prepare_training(
-                    dataset, model, chunks=chunks, train_end="2020-01-02"
+                _collect_training_frame(
+                    [frame], model, fitting_cutoff="2020-01-02"
                 ).training
             )
             == 2
         )
     assert (
         len(
-            _prepare_training(
-                dataset, model, chunks=chunks, train_end="2020-01-01"
+            _collect_training_frame(
+                [frame], model, fitting_cutoff="2020-01-01"
             ).training
         )
         == 1
@@ -328,14 +321,13 @@ def test_prepared_training_rows_are_exact_and_cutoff_scoped():
 def test_training_preparation_failure_closes_borrowed_dataset_source(
     tmp_path, monkeypatch
 ):
-    from types import SimpleNamespace
-
     from quant_research_platform.contracts.experiments import (
         training_availability_columns,
     )
     from quant_research_platform.contracts.time import TimeWindow
     from quant_research_platform.research.models import fitting, production
-    from quant_research_platform.storage.datasets.reading import open_dataset_session
+    from quant_research_platform.storage.datasets.reading import read_dataset
+    from quant_research_platform.storage.datasets.types import DatasetReadMode
     from tests.storage.low_level_fixtures import write_low_level_parquet_artifact
 
     dates = pd.to_datetime(["2020-01-01", "2020-01-02"]).as_unit("ns")
@@ -355,45 +347,36 @@ def test_training_preparation_failure_closes_borrowed_dataset_source(
     write_low_level_parquet_artifact(
         root, frame, primary_key=primary_key, partition_columns=("year",)
     )
-    dataset = SimpleNamespace(primary_key=primary_key, market_id="a_share")
     model = ModelSpec(
         model_id="linear",
         model_algorithm="linear_regression",
         input_feature_columns=("x",),
-        label_column="y",
+        target_column="y",
     )
     primary = MemoryError("training_filter_failure")
-    sources = []
 
     def fail_filter(*args, **kwargs):
         raise primary
 
     monkeypatch.setattr(fitting, "legal_training_mask", fail_filter)
-    session = open_dataset_session(root, columns=None, time_window=None)
-
-    def chunks(columns, **kwargs):
-        source = production._model_input_chunks(
-            session,
-            dataset_spec=dataset,
-            columns=columns,
-            time_window=TimeWindow("2020-01-01", "2020-01-02"),
-        )
-        sources.append(source)
-        return source
-
+    source = read_dataset(
+        root,
+        columns=tuple(frame.columns),
+        time_window=TimeWindow("2020-01-01", "2020-01-02"),
+        mode=DatasetReadMode.CHUNKED,
+    )
     try:
         with pytest.raises(MemoryError) as raised:
-            production._prepare_training(
-                dataset,
+            production.fit_model(
+                source,
                 model,
-                chunks=chunks,
-                train_end="2020-01-02",
+                fit_windows=(TimeWindow("2020-01-01", "2020-01-02"),),
+                fit_cutoff="2020-01-02",
             )
         assert raised.value is primary
-        assert sources and all(source.gi_frame is None for source in sources)
+        assert source.gi_frame is None
     finally:
-        for source in sources:
-            source.close()
+        source.close()
 
 
 def test_risk_manifest_serializes_the_same_runtime_config():
@@ -407,8 +390,7 @@ def test_risk_manifest_serializes_the_same_runtime_config():
         diagonal_shrinkage=0.4,
         annualization=250,
     )
-    protocol = a_share.AShareProtocol("pv_all", risk_config=config)
-    assert protocol.manifest()["risk"] == asdict(config)
+    assert FactorRiskConfig(**asdict(config)) == config
     assert FactorRiskState(style_columns=("x",), config=config).config == config
 
 
@@ -448,7 +430,9 @@ def test_decay_normalizes_before_float64_underflow(count):
     from quant_research_platform.research.models.scaler import ModelMatrixScaler
 
     timestamps = pd.date_range("2020-01-01", periods=count)
-    actual = equal_timestamp_sample_weights(timestamps, TrainingWeighting(half_life=1))
+    actual = equal_timestamp_sample_weights(
+        timestamps, TrainingWeighting(half_life_periods=1)
+    )
     normalizer = 2 - Fraction(1, 2 ** (count - 1))
     expected = np.array(
         [
@@ -468,7 +452,7 @@ def test_decay_rejects_truly_unrepresentable_positive_weights():
     with pytest.raises(ValueError, match="sample_weights_unrepresentable"):
         equal_timestamp_sample_weights(
             pd.date_range("2020-01-01", periods=2000),
-            TrainingWeighting(half_life=1),
+            TrainingWeighting(half_life_periods=1),
         )
 
 

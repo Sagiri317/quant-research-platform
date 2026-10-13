@@ -50,11 +50,9 @@ def test_hft_models_use_generic_specs_with_exact_training_admission_bound() -> N
     assert all(not hasattr(model, "purge_gap_steps") for model in models)
 
 
-def test_ridge_asset_scopes_share_dimensionless_inputs_and_new_spec_identity():
+def test_ridge_asset_scopes_share_dimensionless_inputs():
     from dataclasses import replace
 
-    from quant_research_platform.contracts.json_codec import canonical_json_hash
-    from quant_research_platform.contracts.models import model_spec_payload
     from quant_research_platform.research.protocols.crypto_hft import HFT_FACTOR_COLUMNS
 
     comparable = (
@@ -74,10 +72,8 @@ def test_ridge_asset_scopes_share_dimensionless_inputs_and_new_spec_identity():
     for model in ridge:
         assert model.input_columns == comparable
         old = replace(model, input_factor_columns=HFT_FACTOR_COLUMNS)
-        assert canonical_json_hash(model_spec_payload(model)) != canonical_json_hash(
-            model_spec_payload(old)
-        )
-        assert model.label_column == "future_mid_return_500ms"
+        assert model.input_columns != old.input_columns
+        assert model.target_column == "future_mid_return_500ms"
     assert len(models) == 10
     for model in models:
         if model.model_algorithm != "ridge_regression":

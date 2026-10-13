@@ -39,7 +39,6 @@ def test_runtime_observations_sample_boundaries_and_mark_unavailable_io(monkeypa
 
 def test_runtime_observation_finalization_keeps_primary(monkeypatch):
     import quant_research_platform.runtime.execution_metrics as owner
-    from quant_research_platform.contracts.targets import _operation_evidence
 
     primary = KeyboardInterrupt("primary")
     times = iter((0.0, 0.1))
@@ -52,7 +51,7 @@ def test_runtime_observation_finalization_keeps_primary(monkeypatch):
     assert any(
         "observation finalization also failed" in note for note in primary.__notes__
     )
-    assert _operation_evidence(evidence)["reason"] == "operation_incomplete"
+    assert evidence["reason"] == "operation_incomplete"
 
 
 def test_runtime_finalization_surfaces_failure_inside_handled_outer(monkeypatch):
@@ -67,3 +66,12 @@ def test_runtime_finalization_surfaces_failure_inside_handled_outer(monkeypatch)
             with record_run_observations({}):
                 pass
         assert not getattr(outer, "__notes__", [])
+
+
+def test_failed_operation_is_not_reported_complete():
+    evidence = {}
+    with pytest.raises(ValueError, match="scientific_failure"):
+        with record_run_observations(evidence):
+            raise ValueError("scientific_failure")
+    assert evidence["reason"] == "operation_incomplete"
+    assert evidence["status"] == "UNDEFINED"

@@ -203,36 +203,6 @@ def test_dataset_session_tuple_in_filter_empty_result_preserves_projected_dtypes
     }
 
 
-@pytest.mark.parametrize("completion", ("close", "exhaust"))
-def test_filtered_empty_chunk_rechecks_identity_after_yield(
-    tmp_path: Path, completion: str
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, f"filtered_empty_{completion}")
-    write_dataset(
-        root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec(f"filtered_empty_{completion}"),
-    )
-    session = dataset_reading.open_dataset_session(
-        root,
-        columns=("timestamp", "value"),
-        time_window=None,
-        row_filters=(("asset_id", "in", ("missing",)),),
-    )
-    iterator = dataset_reading.iter_dataset_chunks(session, batch_rows=2048)
-    assert next(iterator).empty
-    part = session.all_paths[0]
-    replacement = tmp_path / f"replacement-{completion}.parquet"
-    filesystem_write_bytes(replacement, Path(native_filesystem_path(part)).read_bytes())
-    os.replace(native_filesystem_path(replacement), native_filesystem_path(part))
-    if completion == "close":
-        with pytest.raises(ValueError, match="dataset_file_identity_changed"):
-            iterator.close()
-    else:
-        with pytest.raises(ValueError, match="dataset_file_identity_changed"):
-            next(iterator)
-
-
 def test_filtered_empty_chunk_final_verify_preserves_caller_primary(
     tmp_path: Path,
 ) -> None:
@@ -356,7 +326,6 @@ def test_persisted_arrow_time_filters_support_equal_and_membership(
     equal = list(
         dataset_physical.iter_dataset_part_batches(
             path,
-            expected_identity=dataset_physical.dataset_file_identity(path),
             parquet_filters=[("value", "==", values[1])],
             batch_rows=2,
         )
@@ -364,7 +333,6 @@ def test_persisted_arrow_time_filters_support_equal_and_membership(
     membership = list(
         dataset_physical.iter_dataset_part_batches(
             path,
-            expected_identity=dataset_physical.dataset_file_identity(path),
             parquet_filters=[("value", "in", prepared)],
             batch_rows=2,
         )

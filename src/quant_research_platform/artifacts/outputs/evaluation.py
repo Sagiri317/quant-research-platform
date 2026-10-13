@@ -9,9 +9,7 @@ from pathlib import Path
 import pandas as pd
 import pyarrow as pa
 
-import quant_research_platform.reports.evaluation as evaluation_report
 from quant_research_platform.artifacts.outputs.common_validation import (
-    derive_output_bundle_root,
     validate_output_frame,
 )
 from quant_research_platform.artifacts.outputs.evaluation_validation import (
@@ -33,19 +31,14 @@ from quant_research_platform.contracts.evaluations import (
     EvaluationSpec,
     strict_non_negative_count_series,
 )
-from quant_research_platform.contracts.outputs import OutputSpec
 from quant_research_platform.contracts.time import time_value_isoformat
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.policy.share_safety import (
-    evidence_text_unsafe_reason,
-)
 from quant_research_platform.storage.atomic import atomic_write_directory
+from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
-    filesystem_write_text,
     open_filesystem_file,
 )
-from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import write_manifest
 from quant_research_platform.storage.parquet import parquet_table_writer
 
@@ -59,21 +52,28 @@ def write_evaluation_outputs_from_chunks(
         [], tuple[EvaluationDiagnostics, pd.DataFrame, pd.DataFrame, pd.DataFrame]
     ],
     spec: EvaluationSpec,
-    output_spec: OutputSpec,
-    layout: StorageLayout,
+    output_path: Path,
+    metadata: Mapping | None = None,
 ) -> Path:
     """Persist managed evaluation chunks without retaining aggregate frames."""
-    output_bundle = derive_output_bundle_root(
-        output_spec=output_spec,
-        layout=layout,
-        expected_definition_id="evaluation_outputs",
-    )
+    output_bundle = Path(output_path)
+    if metadata is not None:
+        from quant_research_platform.artifacts.outputs.evaluation_validation import (
+            validate_evaluation_science,
+        )
+        from quant_research_platform.contracts.json_codec import (
+            qrp_json_mapping_snapshot,
+        )
+
+        metadata = qrp_json_mapping_snapshot(metadata)
+        validate_evaluation_science(metadata)
 
     def _write(temp_root: Path) -> None:
         facts = _write_evaluation_artifact_chunks(
             chunks,
             temp_root=temp_root,
             spec=spec,
+            science=metadata,
         )
         evaluation_diagnostics, ic_summary, group_spread_summary, coverage_summary = (
             summary_factory()
@@ -112,25 +112,14 @@ def write_evaluation_outputs_from_chunks(
             group_spread_summary,
             temp_root / "group_spread_summary.parquet",
         )
-        rendered_summary = evaluation_report.render_evaluation_summary(
-            spec=spec,
-            evaluation_diagnostics=evaluation_diagnostics,
-            ic_summary=ic_summary,
-            group_spread_summary=group_spread_summary,
-            coverage_summary=coverage_summary,
-        )
-        unsafe_summary = evidence_text_unsafe_reason(rendered_summary)
-        if unsafe_summary is not None:
-            raise ValueError(f"evaluation_summary_share_unsafe: {unsafe_summary}")
-        filesystem_write_text(
-            temp_root / "summary.md", rendered_summary, encoding="utf-8"
-        )
         write_manifest(
             temp_root / "manifest.json",
             output_manifest_payload(
-                output_spec=output_spec,
+                definition_id="evaluation_outputs",
                 metadata=evaluation_output_metadata(
-                    spec=spec, evaluation_diagnostics=evaluation_diagnostics
+                    spec=spec,
+                    evaluation_diagnostics=evaluation_diagnostics,
+                    science=metadata,
                 ),
                 files=EVALUATION_ARTIFACTS,
             ),
@@ -145,6 +134,7 @@ def _write_evaluation_artifact_chunks(
     *,
     temp_root: Path,
     spec: EvaluationSpec,
+    science: dict | None = None,
 ) -> dict[str, object]:
     paths = {
         "metrics": temp_root / "metrics.parquet",
@@ -153,6 +143,12 @@ def _write_evaluation_artifact_chunks(
     required = {
         "metrics": EVALUATION_METRICS_COLUMNS,
         "grouped_label_values": EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
+    }
+    key_indexes = {
+        "metrics": ExactPrimaryKeyIndex(primary_key=("timestamp", "signal", "label")),
+        "grouped_label_values": ExactPrimaryKeyIndex(
+            primary_key=("timestamp", "signal", "label", "group")
+        ),
     }
     row_counts = dict.fromkeys(paths, 0)
     empty_frames = {}
@@ -192,9 +188,8 @@ def _write_evaluation_artifact_chunks(
             if frame.empty:
                 empty_frames[name] = frame.copy()
                 return
-            pending_tables[name].append(
-                pa.Table.from_pandas(frame, preserve_index=False)
-            )
+            table = pa.Table.from_pandas(frame, preserve_index=False)
+            pending_tables[name].append(table)
             pending_rows[name] += len(frame)
             if (
                 pending_rows[name] >= 8192
@@ -216,6 +211,14 @@ def _write_evaluation_artifact_chunks(
                     required=required["grouped_label_values"],
                     error_name="evaluation_grouped_label_values",
                 )
+                for name, frame in (
+                    ("metrics", metrics),
+                    ("grouped_label_values", grouped),
+                ):
+                    if key_indexes[name].add_table(
+                        pa.Table.from_pandas(frame, preserve_index=False)
+                    ):
+                        raise ValueError(f"duplicate_evaluation_{name}_keys")
                 validate_evaluation_artifact_structure(
                     metrics=metrics,
                     grouped_label_values=grouped,
@@ -224,6 +227,8 @@ def _write_evaluation_artifact_chunks(
                         columns=EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS
                     ),
                     spec=spec,
+                    science=science,
+                    validate_pairs=True,
                 )
                 timestamps = strict_timestamp_series(
                     metrics["timestamp"], error="evaluation_diagnostics_inconsistent"
@@ -321,3 +326,92 @@ def _write_evaluation_artifact_chunks(
         "filter_columns_used": filter_columns_used,
         "filter_definition_value": filter_definition_value,
     }
+
+
+def read_evaluation_outputs(
+    root: Path,
+    *,
+    tables: tuple[str, ...] = (
+        "metrics",
+        "grouped_label_values",
+        "ic_summary",
+        "group_spread_summary",
+    ),
+) -> tuple[dict[str, object], dict[str, pd.DataFrame]]:
+    """Read requested numeric members once and validate their scientific contracts."""
+    from quant_research_platform.artifacts.outputs.bundle_validation import (
+        validate_output_bundle,
+    )
+    from quant_research_platform.artifacts.outputs.common_validation import (
+        require_signal_metadata_list,
+    )
+    from quant_research_platform.storage.datasets.reading import (
+        iter_declared_parquet_member_batches,
+    )
+
+    required = {
+        "metrics": EVALUATION_METRICS_COLUMNS,
+        "grouped_label_values": EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
+        "ic_summary": EVALUATION_IC_SUMMARY_COLUMNS,
+        "group_spread_summary": EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS,
+    }
+    if (
+        not tables
+        or len(tables) != len(set(tables))
+        or any(name not in required for name in tables)
+    ):
+        raise ValueError("evaluation_tables_invalid")
+    manifest, _members = validate_output_bundle(
+        root, expected_definition_id="evaluation_outputs"
+    )
+    metadata = manifest["metadata"]
+    spec = EvaluationSpec(
+        evaluation_id=metadata["evaluation_id"],
+        market_id=metadata["market_id"],
+        research_dataset_id=metadata["research_dataset_id"],
+        signals=require_signal_metadata_list(
+            metadata, "signals", "output_manifest_metadata_invalid"
+        ),
+        label_columns=tuple(metadata["label_columns"]),
+        label_availability_columns=metadata["label_availability_columns"],
+        evaluation_axis=metadata["evaluation_axis"],
+        filter_mode=metadata["filter_mode"],
+        n_groups=metadata["evaluation_diagnostics"]["n_groups"],
+    )
+    result = {}
+    for name in tables:
+        with closing_iterator(
+            iter_declared_parquet_member_batches(
+                Path(root) / f"{name}.parquet", columns=required[name]
+            )
+        ) as chunks:
+            frames = list(chunks)
+        frame = (
+            pd.concat(frames, ignore_index=True)
+            if frames
+            else pd.DataFrame(columns=required[name])
+        )
+        validate_output_frame(
+            frame, required=required[name], error_name=f"evaluation_{name}"
+        )
+        expected_rows = metadata["evaluation_diagnostics"][
+            {
+                "metrics": "metric_rows",
+                "grouped_label_values": "grouped_label_value_rows",
+                "ic_summary": "ic_summary_rows",
+                "group_spread_summary": "group_spread_summary_rows",
+            }[name]
+        ]
+        if len(frame) != expected_rows:
+            raise ValueError("evaluation_member_row_count_mismatch")
+        result[name] = frame
+    validate_evaluation_artifact_structure(
+        **{
+            name: result.get(name, pd.DataFrame(columns=columns))
+            for name, columns in required.items()
+        },
+        spec=spec,
+        science=metadata,
+        validate_pairs={"metrics", "grouped_label_values"} <= set(result),
+    )
+    return manifest, result

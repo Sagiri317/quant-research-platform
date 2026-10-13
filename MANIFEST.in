@@ -1,1 +1,2 @@
-recursive-include configs/research *.json
+recursive-include configs *.json
+recursive-include docs *.md *.json

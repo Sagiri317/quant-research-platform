@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import hashlib
-import shutil
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
-from quant_research_platform.artifacts.research import read_research_run_record
 from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
 from quant_research_platform.markets.implementations.a_share.fundamentals import (
     _pit_observations,
@@ -15,7 +13,6 @@ from quant_research_platform.markets.implementations.a_share.fundamentals import
     construct_ttm_events,
     financial_events_from_interim,
 )
-from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.sources.choice import interim
 from quant_research_platform.sources.choice.fields import FINANCIAL_FIELDS
 from quant_research_platform.sources.choice.raw_exports import (
@@ -35,9 +32,7 @@ from quant_research_platform.storage.identity import (
     native_filesystem_path,
 )
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.workflows import operations
 from tests.helpers.choice_raw import SDK, response, write_css
-from tests.helpers.research_configuration import research_configuration
 
 FIELDS = tuple(field for fields in FINANCIAL_FIELDS.values() for field in fields)
 DATE_FIELDS = ("STMTACTDATE", "ACTUALISSUINGDATE", "ITEMVALUECHANGEDATE")
@@ -111,14 +106,24 @@ def test_financial_css_rejects_ctr_report_type_without_remapping(tmp_path, extra
             "synthetic-official-shape",
             date(2025, 12, 31),
         )
-        session.fetch(layout, request)
+        session.fetch(
+            layout.raw_source_root("choice") / request.endpoint / request.identity(),
+            request,
+        )
     before = _file_hashes(layout.raw_source_root("choice"))
     with pytest.raises(ValueError, match="choice_financial_css_reporttype_unsupported"):
         interim.source_content_identity(
             layout.raw_source_root("choice"), "financial_balance"
         )
     with pytest.raises(ValueError, match="choice_financial_css_reporttype_unsupported"):
-        interim.materialize_interim_data(layout=layout, data_ids=("financial_balance",))
+        interim.materialize_interim_data(
+            output_roots={
+                key: layout.interim_data_root("choice", key)
+                for key in ("financial_balance",)
+            },
+            raw_root=layout.raw_source_root("choice"),
+            data_ids=("financial_balance",),
+        )
     assert _file_hashes(layout.raw_source_root("choice")) == before
     assert not filesystem_exists(
         layout.interim_data_root("choice", "financial_balance")
@@ -144,17 +149,16 @@ def test_native_null_revisions_preserve_history_and_next_session_visibility(
             for branch in ("1", "3"):
                 _snapshot(session, layout, day, values, branch=branch)
     result = interim.materialize_interim_data(
-        layout=layout, start_date="2019-01-01", end_date="2020-02-02"
+        output_roots={
+            key: layout.interim_data_root("choice", key)
+            for key in tuple(spec.data_id for spec in interim.interim_catalog().list())
+        },
+        raw_root=layout.raw_source_root("choice"),
+        start_date="2019-01-01",
+        end_date="2020-02-02",
     )
     frames = _read(result)
     assert set(frames) == {*FINANCIAL_FIELDS, "financial_first_disclosure"}
-    for data_id in frames:
-        profile = research_profile()
-        assert str(profile.interim.get(data_id).source_id) == "choice"
-        assert (
-            profile.producer_bindings[data_id].producer
-            is interim.materialize_interim_data
-        )
     data_id = next(
         (name for name, fields in FINANCIAL_FIELDS.items() if field in fields)
     )
@@ -197,7 +201,11 @@ def test_same_coordinate_overlap_compares_values_and_keeps_request_scope(tmp_pat
         layout.raw_source_root("choice"), "financial_balance"
     )
     result = interim.materialize_interim_data(
-        layout=layout,
+        output_roots={
+            key: layout.interim_data_root("choice", key)
+            for key in ("financial_balance",)
+        },
+        raw_root=layout.raw_source_root("choice"),
         data_ids=("financial_balance",),
         start_date="2019-01-01",
         end_date="2020-02-02",
@@ -210,7 +218,14 @@ def test_same_coordinate_overlap_compares_values_and_keeps_request_scope(tmp_pat
     with pytest.raises(
         PortfolioTargetBlocked, match="choice_first_disclosure_snapshot_missing"
     ):
-        interim.materialize_interim_data(layout=layout, data_ids=("financial_income",))
+        interim.materialize_interim_data(
+            output_roots={
+                key: layout.interim_data_root("choice", key)
+                for key in ("financial_income",)
+            },
+            raw_root=layout.raw_source_root("choice"),
+            data_ids=("financial_income",),
+        )
 
 
 @pytest.mark.parametrize(
@@ -240,7 +255,17 @@ def test_request_date_formats_share_semantic_coordinates_and_preserve_raw(
     identity = interim.source_content_identity(
         layout.raw_source_root("choice"), "financial_balance"
     )
-    frames = _read(interim.materialize_interim_data(layout=layout))
+    frames = _read(
+        interim.materialize_interim_data(
+            output_roots={
+                key: layout.interim_data_root("choice", key)
+                for key in tuple(
+                    spec.data_id for spec in interim.interim_catalog().list()
+                )
+            },
+            raw_root=layout.raw_source_root("choice"),
+        )
+    )
     assert set(frames) == {*FINANCIAL_FIELDS, "financial_first_disclosure"}
     assert len(frames["financial_first_disclosure"]) == 1
     assert frames["financial_balance"].total_assets.tolist() == [100.0]
@@ -264,7 +289,17 @@ def test_disclosure_and_financial_superset_is_one_raw_response(tmp_path):
             indicators=(*DATE_FIELDS, *FIELDS),
             data={CODE: ["2020/1/30", None, None, *[100.0] * 14]},
         )
-    frames = _read(interim.materialize_interim_data(layout=layout))
+    frames = _read(
+        interim.materialize_interim_data(
+            output_roots={
+                key: layout.interim_data_root("choice", key)
+                for key in tuple(
+                    spec.data_id for spec in interim.interim_catalog().list()
+                )
+            },
+            raw_root=layout.raw_source_root("choice"),
+        )
+    )
     assert frames["financial_balance"].total_assets.tolist() == [100.0]
     assert frames["financial_first_disclosure"].first_disclosure_date.tolist() == [
         pd.Timestamp("2020-01-30")
@@ -291,7 +326,12 @@ def test_disclosure_date_list_order_and_duplicates_are_semantically_equal(tmp_pa
         )
     frames = _read(
         interim.materialize_interim_data(
-            layout=layout, data_ids=("financial_first_disclosure",)
+            output_roots={
+                key: layout.interim_data_root("choice", key)
+                for key in ("financial_first_disclosure",)
+            },
+            raw_root=layout.raw_source_root("choice"),
+            data_ids=("financial_first_disclosure",),
         )
     )
     assert frames["financial_first_disclosure"].first_disclosure_date.tolist() == [
@@ -314,7 +354,13 @@ def test_partial_disclosure_completeness_obeys_requested_report_period(tmp_path,
             data={CODE: ["2019/1/30" if field == "STMTACTDATE" else None]},
         )
     result = interim.materialize_interim_data(
-        layout=layout, start_date="2019-01-01", end_date="2020-02-02"
+        output_roots={
+            key: layout.interim_data_root("choice", key)
+            for key in tuple(spec.data_id for spec in interim.interim_catalog().list())
+        },
+        raw_root=layout.raw_source_root("choice"),
+        start_date="2019-01-01",
+        end_date="2020-02-02",
     )
     frames = _read(result)
     assert set(frames) == {*FINANCIAL_FIELDS, "financial_first_disclosure"}
@@ -324,7 +370,12 @@ def test_partial_disclosure_completeness_obeys_requested_report_period(tmp_path,
             PortfolioTargetBlocked, match="choice_disclosure_field_missing"
         ) as caught:
             interim.materialize_interim_data(
-                layout=StorageLayout(tmp_path / "unscoped"),
+                output_roots={
+                    key: StorageLayout(tmp_path / "unscoped").interim_data_root(
+                        "choice", key
+                    )
+                    for key in (data_id,)
+                },
                 raw_root=layout.raw_source_root("choice"),
                 data_ids=(data_id,),
             )
@@ -369,7 +420,13 @@ def test_unfetched_field_is_blocked_and_other_coordinates_cannot_fill_it(
         else "choice_disclosure_field_missing"
     )
     with pytest.raises(PortfolioTargetBlocked, match=reason) as caught:
-        interim.materialize_interim_data(layout=layout, data_ids=(data_id,))
+        interim.materialize_interim_data(
+            output_roots={
+                key: layout.interim_data_root("choice", key) for key in (data_id,)
+            },
+            raw_root=layout.raw_source_root("choice"),
+            data_ids=(data_id,),
+        )
     details = " ".join(caught.value.__notes__)
     assert any(field in details for field in fields)
     assert (
@@ -392,7 +449,13 @@ def test_unfetched_field_is_blocked_and_other_coordinates_cannot_fill_it(
             layout.raw_source_root("choice"), data_id
         )
         frames = _read(
-            interim.materialize_interim_data(layout=layout, data_ids=(data_id,))
+            interim.materialize_interim_data(
+                output_roots={
+                    key: layout.interim_data_root("choice", key) for key in (data_id,)
+                },
+                raw_root=layout.raw_source_root("choice"),
+                data_ids=(data_id,),
+            )
         )
         assert len(frames[data_id]) == 1
         if financial:
@@ -431,7 +494,14 @@ def test_overlapping_single_field_conflict_including_provider_null_is_rejected(
         if financial
         else "choice_disclosure_field_conflict",
     ) as caught:
-        interim.materialize_interim_data(layout=layout, data_ids=("financial_balance",))
+        interim.materialize_interim_data(
+            output_roots={
+                key: layout.interim_data_root("choice", key)
+                for key in ("financial_balance",)
+            },
+            raw_root=layout.raw_source_root("choice"),
+            data_ids=("financial_balance",),
+        )
     assert any("request_identities=" in note for note in caught.value.__notes__)
     assert not filesystem_exists(
         layout.interim_data_root("choice", "financial_balance")
@@ -450,7 +520,14 @@ def test_same_day_branch_conflict_is_not_hidden_by_the_current_canonical_value(
             _snapshot(session, layout, "2020-01-31", [old] * 14, branch=branch)
             _snapshot(session, layout, "2020-02-01", [new] * 14, branch=branch)
     with pytest.raises(ValueError, match="choice_financial_version_values_conflict"):
-        interim.materialize_interim_data(layout=layout, data_ids=("financial_balance",))
+        interim.materialize_interim_data(
+            output_roots={
+                key: layout.interim_data_root("choice", key)
+                for key in ("financial_balance",)
+            },
+            raw_root=layout.raw_source_root("choice"),
+            data_ids=("financial_balance",),
+        )
     assert not filesystem_exists(
         layout.interim_data_root("choice", "financial_balance")
     )
@@ -469,7 +546,14 @@ def test_explicit_predecessor_must_match_known_branch_history(tmp_path, after):
         PortfolioTargetBlocked,
         match="choice_revision_predecessor_conflicts_with_history",
     ):
-        interim.materialize_interim_data(layout=layout, data_ids=("financial_balance",))
+        interim.materialize_interim_data(
+            output_roots={
+                key: layout.interim_data_root("choice", key)
+                for key in ("financial_balance",)
+            },
+            raw_root=layout.raw_source_root("choice"),
+            data_ids=("financial_balance",),
+        )
     assert not filesystem_exists(
         layout.interim_data_root("choice", "financial_balance")
     )
@@ -485,11 +569,25 @@ def test_missing_predecessor_is_not_a_proven_all_null_snapshot(tmp_path):
     with pytest.raises(
         PortfolioTargetBlocked, match="choice_revision_predecessor_missing"
     ):
-        interim.materialize_interim_data(layout=layout, data_ids=("financial_balance",))
+        interim.materialize_interim_data(
+            output_roots={
+                key: layout.interim_data_root("choice", key)
+                for key in ("financial_balance",)
+            },
+            raw_root=layout.raw_source_root("choice"),
+            data_ids=("financial_balance",),
+        )
     with choice_session(SDK(response())) as session:
         _snapshot(session, layout, "2020-01-31", [None] * 14, branch="3")
     frame = _read(
-        interim.materialize_interim_data(layout=layout, data_ids=("financial_balance",))
+        interim.materialize_interim_data(
+            output_roots={
+                key: layout.interim_data_root("choice", key)
+                for key in ("financial_balance",)
+            },
+            raw_root=layout.raw_source_root("choice"),
+            data_ids=("financial_balance",),
+        )
     )["financial_balance"]
     assert frame.total_assets.tolist() == [100.0, 110.0]
 
@@ -518,26 +616,12 @@ def test_known_missing_coordinates_are_blocked_in_the_real_run_and_report(
         if mode == "predecessor":
             for branch in ("1", "3"):
                 _snapshot(session, layout, "2020-02-01", [110.0] * 14, branch=branch)
-    profile = research_profile()
-    result = operations.research_run(
-        profile=profile,
-        layout=layout,
-        research_plan=research_configuration(
-            name="fusion_nf_core", development=("2019-03-04", "2019-03-15")
-        ),
-    )
-    record = read_research_run_record(layout.research_run_path(result["run_id"]))
-    targets = {row.target_id: row for row in record.target_results}
-    assert targets["financial_balance"].status.value == "BLOCKED"
-    assert targets["financial_balance"].reason == reason
-    for group in ("global", "quarterly"):
-        ledger = targets[f"fusion_nf_core_{group}_champion_csi500_enhanced_ledger"]
-        assert ledger.status.value == "BLOCKED"
-    report = operations.report_build(
-        profile=profile, layout=layout, run_id=record.run_id
-    )
-    assert report["status"] != "COMPLETE"
-    assert reason in str(report["report"]["sections"]["readiness/blockers"])
+    with pytest.raises(PortfolioTargetBlocked, match=reason):
+        interim.materialize_interim_data(
+            raw_root=layout.raw_source_root("choice"),
+            output_roots={"financial_balance": tmp_path / "balance"},
+            data_ids=("financial_balance",),
+        )
 
 
 def _persisted_financials_feed_all_nineteen_factors_and_keep_nulls(tmp_path):
@@ -558,7 +642,26 @@ def _persisted_financials_feed_all_nineteen_factors_and_keep_nulls(tmp_path):
     from quant_research_platform.storage.datasets.writing import write_dataset
 
     layout = StorageLayout(tmp_path)
-    profile = research_profile()
+    from types import SimpleNamespace
+
+    from quant_research_platform.catalog.processed import InterimDataCatalog
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        catalog as processed_module,
+    )
+
+    processed_catalog = processed_module.processed_catalog
+    from quant_research_platform.sources.csmar.interim import (
+        interim_catalog as csmar_catalog,
+    )
+
+    source_specs = {
+        spec.data_id: spec
+        for catalog in (csmar_catalog(), interim.interim_catalog())
+        for spec in catalog.list()
+    }
+    profile = SimpleNamespace(
+        interim=InterimDataCatalog(source_specs.values()), processed=processed_catalog()
+    )
     current = {
         "total_assets": 100.0,
         "total_liabilities": 40.0,
@@ -610,7 +713,13 @@ def _persisted_financials_feed_all_nineteen_factors_and_keep_nulls(tmp_path):
         _snapshot(session, layout, "2020-02-01", correction)
         _snapshot(session, layout, "2020-02-01", [None] * 14, branch="3")
     imported = interim.materialize_interim_data(
-        layout=layout, start_date="2018-01-01", end_date="2020-02-02"
+        output_roots={
+            key: layout.interim_data_root("choice", key)
+            for key in tuple(spec.data_id for spec in interim.interim_catalog().list())
+        },
+        raw_root=layout.raw_source_root("choice"),
+        start_date="2018-01-01",
+        end_date="2020-02-02",
     )
     persisted = _read(imported)
     original = (
@@ -673,19 +782,31 @@ def _persisted_financials_feed_all_nineteen_factors_and_keep_nulls(tmp_path):
         spec = profile.processed.get(data_id)
         produced = producer.produce_a_share_processed_data(
             spec,
-            layout=layout,
+            inputs={
+                **{
+                    name: layout.interim_data_root(
+                        profile.interim.get(name).source_id, name
+                    )
+                    for name in spec.source_input_data_ids
+                },
+                **{
+                    name: layout.processed_data_root(
+                        "a_share", profile.processed.get(name).kind, name
+                    )
+                    for name in spec.processed_input_data_ids
+                },
+            },
             time_window=TimeWindow("2018-01-01", "2020-02-04"),
             processed_catalog=profile.processed,
             source_catalog=profile.interim,
         )
         root = layout.processed_data_root("a_share", spec.kind, data_id)
-        with produced as (frames, metadata, verify):
+        with produced as (frames, metadata):
             write_dataset(
                 root,
                 frames,
                 spec=spec,
-                instance_metadata=metadata,
-                staged_validator=verify,
+                metadata=metadata,
             )
         persisted[data_id] = read_dataset(root)
     saved = read_dataset(root)
@@ -776,56 +897,6 @@ def test_choice_persisted_financials_feed_all_nineteen_factors_and_keep_nulls(
         pd.testing.assert_frame_equal(full[data_id], split[data_id], check_exact=True)
 
 
-@pytest.mark.parametrize("mutation", ["add", "remove", "change"])
-def test_raw_mutation_before_publish_preserves_old_good(
-    tmp_path, monkeypatch, mutation
-):
-    layout = StorageLayout(tmp_path / "project")
-    extra = StorageLayout(tmp_path / "extra")
-    with choice_session(SDK(response())) as session:
-        _disclosure(session, layout)
-        snapshot, _ = _snapshot(session, layout, "2020-01-30", [100.0] * 14)
-        added, _ = _snapshot(session, extra, "2020-01-29", [100.0] * 14)
-    good = interim.materialize_interim_data(
-        layout=layout, data_ids=("financial_balance",)
-    )
-    good_root = good.artifact_roots["financial_balance"]
-    before = _file_hashes(good_root)
-    candidate_layout = StorageLayout(tmp_path / "candidate")
-    candidate = candidate_layout.interim_data_root("choice", "financial_balance")
-    actual_rows = interim._rows
-
-    def mutating_rows(*args):
-        yield from actual_rows(*args)
-        if mutation == "add":
-            shutil.copytree(
-                native_filesystem_path(added),
-                native_filesystem_path(
-                    layout.raw_source_root("choice") / "css" / added.name
-                ),
-            )
-        elif mutation == "remove":
-            filesystem_unlink(snapshot / "response.csv")
-        else:
-            path = snapshot / "response.csv"
-            filesystem_write_bytes(
-                path,
-                Path(native_filesystem_path(path))
-                .read_bytes()
-                .replace(b"100.0", b"101.0", 1),
-            )
-
-    monkeypatch.setattr(interim, "_rows", mutating_rows)
-    with pytest.raises(ValueError, match="choice_raw_identity_changed"):
-        interim.materialize_interim_data(
-            layout=candidate_layout,
-            raw_root=layout.raw_source_root("choice"),
-            data_ids=("financial_balance",),
-        )
-    assert not filesystem_exists(candidate)
-    assert before == _file_hashes(good_root)
-
-
 def test_bulk_import_uses_table_scopes_and_keeps_published_identity(
     tmp_path, monkeypatch
 ):
@@ -841,7 +912,13 @@ def test_bulk_import_uses_table_scopes_and_keeps_published_identity(
         return original_index(root, financial, members=members)
 
     monkeypatch.setattr(interim, "_raw_index", observed_index)
-    good = interim.materialize_interim_data(layout=layout)
+    good = interim.materialize_interim_data(
+        output_roots={
+            key: layout.interim_data_root("choice", key)
+            for key in tuple(spec.data_id for spec in interim.interim_catalog().list())
+        },
+        raw_root=layout.raw_source_root("choice"),
+    )
     assert sorted(opened) == sorted([*FINANCIAL_FIELDS, "financial_first_disclosure"])
     before = {
         root / relative: digest
@@ -875,7 +952,13 @@ def test_bulk_import_uses_table_scopes_and_keeps_published_identity(
     monkeypatch.setattr(interim, "write_dataset", mutate_after_first_publication)
     with pytest.raises(ValueError, match="raw_csv_content_invalid"):
         interim.materialize_interim_data(
-            layout=candidate, raw_root=layout.raw_source_root("choice")
+            output_roots={
+                key: candidate.interim_data_root("choice", key)
+                for key in tuple(
+                    spec.data_id for spec in interim.interim_catalog().list()
+                )
+            },
+            raw_root=layout.raw_source_root("choice"),
         )
     assert len(published) == 1
     assert len(opened) == len(set(opened)) == 2
@@ -956,24 +1039,22 @@ def test_invalid_choice_metadata_preserves_unrelated_target_and_report(tmp_path)
     )
     del payload["metadata"]["request"]
     filesystem_write_text(sidecar, json.dumps(payload), encoding="utf-8")
-    profile = research_profile()
-    result = operations.research_run(
-        profile=profile,
-        layout=layout,
-        research_plan=research_configuration(development=("2019-03-04", "2019-03-15")),
+    with pytest.raises(ValueError):
+        interim.materialize_interim_data(
+            raw_root=layout.raw_source_root("choice"),
+            output_roots={"financial_first_disclosure": tmp_path / "disclosures"},
+            data_ids=("financial_first_disclosure",),
+        )
+    from quant_research_platform.sources.reference.interim import (
+        materialize_interim_data,
     )
-    record = read_research_run_record(layout.research_run_path(result["run_id"]))
-    targets = {row.target_id: row for row in record.target_results}
-    assert targets["financial_first_disclosure"].status.value == "BLOCKED"
-    assert targets["financial_first_disclosure"].reason == "source_identity_invalid"
-    assert targets["a_share_fee_schedule"].status.value == "BUILT"
-    report = operations.report_build(
-        profile=profile, layout=layout, run_id=record.run_id
+
+    fees = tmp_path / "fees"
+    materialize_interim_data(
+        raw_root=layout.raw_source_root("reference"),
+        output_roots={"a_share_fee_schedule": fees},
     )
-    assert report["status"] != "COMPLETE"
-    assert "source_identity_invalid" in str(
-        report["report"]["sections"]["readiness/blockers"]
-    )
+    assert not read_dataset(fees).empty
 
 
 @pytest.mark.parametrize(
@@ -1000,13 +1081,12 @@ def test_choice_fatal_io_is_not_source_blocked(tmp_path, monkeypatch, error, bou
 
         monkeypatch.setattr(interim, "filesystem_scandir", scan)
     with pytest.raises(type(error)) as caught:
-        operations.data_materialize(
-            profile=research_profile(),
-            layout=layout,
-            raw_root=None,
+        interim.materialize_interim_data(
+            raw_root=layout.raw_source_root("choice"),
+            output_roots={"financial_first_disclosure": tmp_path / "disclosures"},
+            data_ids=("financial_first_disclosure",),
             start_date="2019-01-01",
             end_date="2019-12-31",
-            data_ids=("financial_first_disclosure",),
         )
     assert caught.value is error
 
@@ -1015,28 +1095,19 @@ def test_requested_knowledge_cutoff_excludes_future_disclosures_and_missing_revi
     tmp_path,
 ):
     layout = StorageLayout(tmp_path)
-    profile = research_profile()
     with choice_session(SDK(response())) as session:
         _disclosure(session, layout, events="2020-02-01")
         _disclosure(session, layout, period="2019-09-30", first="2020-02-03")
         _snapshot(session, layout, "2020-01-30", [100.0] * len(FIELDS))
         _snapshot(session, layout, "2020-01-30", [None] * len(FIELDS), branch="3")
-    arguments = dict(
-        profile=profile,
-        layout=layout,
-        raw_root=None,
-        start_date="2019-01-01",
-        data_ids=("financial_balance", "financial_first_disclosure"),
-    )
-    earlier = operations.data_materialize(**arguments, end_date="2020-01-31")
-    assert earlier["status"] == "COMPLETE"
+    arguments = dict(raw_root=layout.raw_source_root("choice"), start_date="2019-01-01")
     roots = {
-        item["target_id"]: layout.instance_root(
-            layout.interim_data_root("choice", item["target_id"]),
-            item["instance_identity"],
-        )
-        for item in earlier["target_results"]
+        name: tmp_path / ("earlier-" + name)
+        for name in ("financial_balance", "financial_first_disclosure")
     }
+    interim.materialize_interim_data(
+        **arguments, output_roots=roots, data_ids=tuple(roots), end_date="2020-01-31"
+    )
     saved = {name: read_dataset(root) for name, root in roots.items()}
     assert saved["financial_balance"].total_assets.tolist() == [100.0]
     assert saved["financial_balance"].report_period.tolist() == [
@@ -1046,26 +1117,33 @@ def test_requested_knowledge_cutoff_excludes_future_disclosures_and_missing_revi
         pd.Timestamp("2020-01-30")
     ]
     old_hashes = {name: _file_hashes(root) for name, root in roots.items()}
-    later = operations.data_materialize(**arguments, end_date="2020-02-02")
-    results = {item["target_id"]: item for item in later["target_results"]}
-    assert results["financial_balance"]["status"] == "BLOCKED"
-    assert results["financial_balance"]["reason"] == "choice_revision_snapshot_missing"
-    assert results["financial_first_disclosure"]["status"] == "BUILT"
+    with pytest.raises(
+        PortfolioTargetBlocked, match="choice_revision_snapshot_missing"
+    ):
+        interim.materialize_interim_data(
+            **arguments,
+            output_roots={"financial_balance": tmp_path / "missing-revision"},
+            data_ids=("financial_balance",),
+            end_date="2020-02-02",
+        )
+    interim.materialize_interim_data(
+        **arguments,
+        output_roots={"financial_first_disclosure": tmp_path / "later-disclosures"},
+        data_ids=("financial_first_disclosure",),
+        end_date="2020-02-02",
+    )
     assert all((_file_hashes(root) == old_hashes[name] for name, root in roots.items()))
     with choice_session(SDK(response())) as session:
         for branch in ("1", "3"):
             _snapshot(
                 session, layout, "2020-02-01", [200.0] * len(FIELDS), branch=branch
             )
-    complete = operations.data_materialize(**arguments, end_date="2020-02-02")
-    assert complete["status"] == "COMPLETE"
-    identity = next(
-        item["instance_identity"]
-        for item in complete["target_results"]
-        if item["target_id"] == "financial_balance"
-    )
-    root = layout.instance_root(
-        layout.interim_data_root("choice", "financial_balance"), identity
+    root = tmp_path / "complete-balance"
+    interim.materialize_interim_data(
+        **arguments,
+        output_roots={"financial_balance": root},
+        data_ids=("financial_balance",),
+        end_date="2020-02-02",
     )
     frame = read_dataset(root)
     assert frame.total_assets.tolist() == [100.0, 200.0]
@@ -1087,7 +1165,12 @@ def test_financial_tables_only_require_their_own_fields(tmp_path):
         )
     before = _file_hashes(layout.raw_source_root("choice"))
     result = interim.materialize_interim_data(
-        layout=layout, data_ids=("financial_balance",)
+        output_roots={
+            key: layout.interim_data_root("choice", key)
+            for key in ("financial_balance",)
+        },
+        raw_root=layout.raw_source_root("choice"),
+        data_ids=("financial_balance",),
     )
     frame = _read(result)["financial_balance"]
     assert len(frame) == 1 and frame.total_assets.iloc[0] == 100.0
@@ -1095,5 +1178,11 @@ def test_financial_tables_only_require_their_own_fields(tmp_path):
         with pytest.raises(
             PortfolioTargetBlocked, match="choice_first_disclosure_snapshot_missing"
         ):
-            interim.materialize_interim_data(layout=layout, data_ids=(data_id,))
+            interim.materialize_interim_data(
+                output_roots={
+                    key: layout.interim_data_root("choice", key) for key in (data_id,)
+                },
+                raw_root=layout.raw_source_root("choice"),
+                data_ids=(data_id,),
+            )
     assert _file_hashes(layout.raw_source_root("choice")) == before

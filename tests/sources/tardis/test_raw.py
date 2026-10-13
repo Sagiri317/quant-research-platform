@@ -66,7 +66,7 @@ def test_native_line_order_is_preserved_without_a_fabricated_clock(tmp_path):
 @pytest.mark.parametrize("outer_handled", [False, True])
 @pytest.mark.parametrize("changed", [False, True])
 @pytest.mark.parametrize("termination", ["exhaust", "close", "primary"])
-def test_native_consumed_digest_is_verified_on_every_exit(
+def test_native_complete_digest_and_primary_failure_are_preserved(
     tmp_path, changed, termination, outer_handled
 ):
     path = tmp_path / "native.gz"
@@ -88,7 +88,7 @@ def test_native_consumed_digest_is_verified_on_every_exit(
             with pytest.raises(KeyboardInterrupt) as caught:
                 rows.throw(primary)
             assert caught.value is primary
-            assert bool(getattr(primary, "__notes__", [])) == changed
+            assert not getattr(primary, "__notes__", [])
         elif changed:
             with pytest.raises(ValueError, match="tardis_raw_identity_changed"):
                 list(rows) if termination == "exhaust" else rows.close()
@@ -554,7 +554,7 @@ def test_declared_native_member_missing_is_invalid_not_unacquired(
                 path.unlink()
                 raise primary
         assert caught.value is primary
-        assert any("ValueError" in note for note in primary.__notes__)
+        assert not getattr(primary, "__notes__", [])
     else:
         path.unlink()
     with pytest.raises(ValueError, match="identity"):
@@ -598,7 +598,7 @@ def test_native_manifest_removed_after_selection_is_identity_failure(
 def test_verified_file_preserves_non_missing_contract_failure(tmp_path):
     from quant_research_platform.sources.tardis.raw import _verified_file
 
-    with pytest.raises(ValueError, match="^invalid_dataset_part_files$") as caught:
+    with pytest.raises(ValueError, match="^tardis_source_file_invalid$") as caught:
         with _verified_file(tmp_path):
             pass
     assert caught.value.__cause__ is None

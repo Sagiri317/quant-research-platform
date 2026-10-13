@@ -70,11 +70,11 @@ def lightgbm_regressor(spec: ModelSpec, params: dict[str, object]) -> object:
 
 
 def equal_weight_rank_ensemble(spec: ModelSpec, params: dict[str, object]) -> object:
-    return EqualWeightRankEnsembleFactory(spec.input_columns, spec.label_column)
+    return EqualWeightRankEnsembleFactory(spec.input_columns, spec.target_column)
 
 
 def ic_weighted_rank_ensemble(spec: ModelSpec, params: dict[str, object]) -> object:
-    return ICWeightedRankEnsembleFactory(spec.input_columns, spec.label_column)
+    return ICWeightedRankEnsembleFactory(spec.input_columns, spec.target_column)
 
 
 def _set_random_state(params: dict[str, object], spec: ModelSpec) -> None:

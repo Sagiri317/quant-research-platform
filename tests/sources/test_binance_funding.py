@@ -116,21 +116,10 @@ def test_funding_malformed_calendar_rejected_with_resources_released(tmp_path, r
         )
 
 
-def test_funding_changed_during_consumption_is_rejected_and_primary_preserved(tmp_path):
+def test_funding_consumer_primary_is_preserved(tmp_path):
     raw = tmp_path / "raw"
     row = ("forecast", 0, 100, None, None, [[50, 0.0]])
     _write(raw, rows=(row,))
-    changed = tmp_path / "changed" / "raw"
-    _write(changed, rows=(("forecast", 0, 100, None, None, [[50, 1.0]]),))
-    with pytest.raises(ValueError, match="binance_funding_identity_changed"):
-        with read_funding_observations(
-            (raw.parent / "funding" / "BTCUSDT",), symbol="BTCUSDT"
-        ) as source:
-            assert tuple(source.forecasts)
-            for name in ("response.csv", "response.metadata.json"):
-                (raw.parent / "funding" / "BTCUSDT" / name).write_bytes(
-                    (changed.parent / "funding" / "BTCUSDT" / name).read_bytes()
-                )
     primary = KeyboardInterrupt("primary")
     with pytest.raises(KeyboardInterrupt) as raised:
         with read_funding_observations(
@@ -144,7 +133,7 @@ def test_funding_changed_during_consumption_is_rejected_and_primary_preserved(tm
 def test_funding_identity_preserves_fatal_file_failure(tmp_path, monkeypatch, failure):
     import errno
 
-    import quant_research_platform.storage.identity as identity
+    import quant_research_platform.sources.binance.funding as funding
 
     raw = tmp_path / "raw"
     _write(raw)
@@ -155,14 +144,14 @@ def test_funding_identity_preserves_fatal_file_failure(tmp_path, monkeypatch, fa
         "memory": MemoryError("controlled_memory_failure"),
         "interrupt": KeyboardInterrupt("controlled_interrupt"),
     }[failure]
-    original = identity.filesystem_stat
+    original = funding.read_manifest
 
     def fail(path, *args, **kwargs):
         if path == root / "response.metadata.json":
             raise primary
         return original(path, *args, **kwargs)
 
-    monkeypatch.setattr(identity, "filesystem_stat", fail)
+    monkeypatch.setattr(funding, "read_manifest", fail)
     with pytest.raises(type(primary)) as caught:
         funding_source_identity((root,), "ledger", symbol="BTCUSDT")
     assert caught.value is primary
@@ -256,58 +245,6 @@ def test_funding_adjacent_sources_require_declared_order_and_all_roots(tmp_path)
                 pytest.fail("missing funding is not zero")
 
 
-@pytest.mark.parametrize("interrupt", (False, True))
-def test_funding_unconsumed_later_source_is_verified_at_exit(
-    tmp_path, monkeypatch, interrupt
-):
-    import os
-
-    import quant_research_platform.storage.raw_snapshots as snapshots
-
-    handles = []
-    original_open = snapshots.open_filesystem_file
-
-    def tracked_open(*args, **kwargs):
-        handle = original_open(*args, **kwargs)
-        handles.append(handle)
-        return handle
-
-    monkeypatch.setattr(snapshots, "open_filesystem_file", tracked_open)
-    roots = []
-    for number, start in enumerate((0, 200)):
-        raw = tmp_path / str(number) / "raw"
-        _write(
-            raw,
-            rows=(("forecast", start, start + 100, None, None, []),),
-            metadata_changes={
-                "coverage": {
-                    "start_ns": start,
-                    "end_ns": start + 100,
-                    "status": "COMPLETE",
-                }
-            },
-        )
-        roots.append(raw.parent / "funding" / "BTCUSDT")
-    primary = KeyboardInterrupt("controlled_primary")
-    with pytest.raises(KeyboardInterrupt if interrupt else ValueError) as caught:
-        with read_funding_observations(tuple(roots), symbol="BTCUSDT") as source:
-            assert next(source.forecasts).available_at_ns == 0
-            path = roots[1] / "response.csv"
-            before = path.stat()
-            path.write_bytes(path.read_bytes().replace(b"200", b"201"))
-            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
-            if interrupt:
-                raise primary
-    if interrupt:
-        assert caught.value is primary
-        assert primary.__notes__ == [
-            "Funding source verification also failed: ValueError"
-        ]
-    else:
-        assert str(caught.value) == "raw_csv_content_invalid"
-    assert handles and all(handle.closed for handle in handles)
-
-
 def test_funding_forecast_order_is_checked_across_sources(tmp_path):
     roots = []
     for number, start in enumerate((0, 200)):
@@ -327,28 +264,6 @@ def test_funding_forecast_order_is_checked_across_sources(tmp_path):
     with pytest.raises(ValueError, match="binance_funding_record_order_invalid"):
         with read_funding_observations(tuple(roots), symbol="BTCUSDT"):
             pytest.fail("cross-source forecasts must remain strictly ordered")
-
-
-def test_funding_tail_io_error_retains_original_exception(tmp_path, monkeypatch):
-    import errno
-
-    import quant_research_platform.storage.identity as identity
-
-    raw = tmp_path / "raw"
-    _write(raw, rows=(("forecast", 0, 100, None, None, []),))
-    root = raw.parent / "funding" / "BTCUSDT"
-    failure = OSError(errno.EIO, "controlled_tail_io_failure")
-    original_stat = identity.filesystem_stat
-
-    def failed_stat(path, *args, **kwargs):
-        if path == root / "response.metadata.json":
-            raise failure
-        return original_stat(path, *args, **kwargs)
-
-    with pytest.raises(OSError) as caught:
-        with read_funding_observations((root,), symbol="BTCUSDT"):
-            monkeypatch.setattr(identity, "filesystem_stat", failed_stat)
-    assert caught.value is failure
 
 
 def test_funding_numeric_strings_are_normalized_through_persisted_reader(tmp_path):
@@ -404,30 +319,3 @@ def test_funding_coverage_status_types_reject_in_reader_and_identity(tmp_path, b
     } == changed_before
     assert {path.name: path.read_bytes() for path in good.iterdir()} == before
     assert funding_source_identity((good,), "ledger", symbol="BTCUSDT") == identity
-
-
-@pytest.mark.parametrize("member", ["response.csv", "response.metadata.json", "extra"])
-def test_funding_exit_proves_bytes_and_members_without_forecast_consumption(
-    tmp_path, member
-):
-    import os
-
-    raw = tmp_path / "raw"
-    _write(raw, rows=(("forecast", 0, 100, None, None, []),))
-    root = raw.parent / "funding" / "BTCUSDT"
-    with pytest.raises(ValueError):
-        with read_funding_observations((root,), symbol="BTCUSDT"):
-            path = root / member
-            if member == "extra":
-                path.write_bytes(b"extra")
-            else:
-                before = path.stat()
-                original = path.read_bytes()
-                changed = (
-                    original.replace(b"100", b"101")
-                    if member.endswith("csv")
-                    else original.replace(b"synthetic", b"synthEtic")
-                )
-                assert changed != original and len(changed) == len(original)
-                path.write_bytes(changed)
-                os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))

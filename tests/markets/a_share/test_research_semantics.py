@@ -14,7 +14,6 @@ from quant_research_platform.research.datasets.assembler import (
     _add_a_share_semantic_columns,
     assemble_research_dataset,
 )
-from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
 from quant_research_platform.research.features.transforms import (
     _neutralize_cross_section,
     a_share_feature_pipeline,
@@ -24,7 +23,11 @@ from quant_research_platform.research.protocols.a_share import (
     research_dataset_catalog,
     research_dataset_specs,
 )
-from quant_research_platform.storage.datasets import write_dataset
+from quant_research_platform.storage.datasets import (
+    DatasetReadMode,
+    read_dataset,
+    write_dataset,
+)
 from quant_research_platform.storage.layout import StorageLayout
 
 
@@ -278,19 +281,24 @@ def test_a_share_assembler_persists_only_eligible_sample_truth(
         spec=label_spec,
     )
 
-    assemble_research_dataset(
-        layout=layout,
+    output = assemble_research_dataset(
+        inputs={
+            key: layout.processed_data_root(
+                processed.get(key).market_id, processed.get(key).kind, key
+            )
+            for key in dataset_spec.input_data_ids
+        },
+        output_root=tmp_path / "assembled",
         dataset_catalog=ResearchDatasetCatalog((dataset_spec,)),
         processed_catalog=processed,
         dataset_id=dataset_spec.data_id,
         time_window=TimeWindow("2023-01-03", "2023-01-03"),
     )
     result = pd.concat(
-        iter_research_dataset_chunks(
-            layout,
-            market_id=MarketId("a_share"),
-            dataset_id=dataset_spec.data_id,
+        read_dataset(
+            output,
             time_window=TimeWindow("2023-01-03", "2023-01-03"),
+            mode=DatasetReadMode.CHUNKED,
         ),
         ignore_index=True,
     )
@@ -610,7 +618,12 @@ def test_native_neutralization_zscore_publishes_representable_extreme_cross_sect
         spec=source,
     )
     root = assemble_research_dataset(
-        layout=layout,
+        inputs={
+            source.data_id: layout.processed_data_root(
+                source.market_id, source.kind, source.data_id
+            )
+        },
+        output_root=tmp_path / "assembled",
         dataset_catalog=ResearchDatasetCatalog((spec,)),
         processed_catalog=ProcessedDataCatalog((source,)),
         dataset_id=spec.data_id,

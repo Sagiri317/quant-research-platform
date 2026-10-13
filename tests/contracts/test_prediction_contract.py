@@ -1,82 +1,135 @@
-from __future__ import annotations
+"""Prediction windows describe extent; test eligibility comes from frozen records."""
 
+from datetime import date
+
+import pandas as pd
 import pytest
 
-from quant_research_platform.contracts.predictions import PredictionSpec
+from quant_research_platform.contracts.predictions import (
+    PredictionWindow,
+    prediction_window_mask,
+)
+from quant_research_platform.contracts.time import TimeWindow
 
 
-def test_prediction_mode_rejects_unimplemented_smoke_alias() -> None:
-    with pytest.raises(ValueError, match="unsupported_prediction_mode"):
-        PredictionSpec(
-            prediction_id="prediction_demo",
-            model_id="linear_model",
-            research_dataset_id="research_demo",
-            train_end="2024-01-31",
-            test_start="2024-03-01",
-            prediction_mode="oos_smoke",
+def test_prediction_window_has_no_oos_flags_or_test_aliases():
+    value = PredictionWindow("2020-01-02", "2020-01-03")
+    assert value.end.isoformat() == "2020-01-03"
+    with pytest.raises(ValueError):
+        TimeWindow("2020-01-02", None)
+    with pytest.raises(TypeError):
+        PredictionWindow("2020-01-02", "2020-01-03", is_oos=True)
+    with pytest.raises(TypeError):
+        PredictionWindow("2020-01-02", "2020-01-03", test_start="2020-01-02")
+
+
+def test_only_prediction_window_allows_an_open_end():
+    value = PredictionWindow("2020-01-02", None)
+    assert value.end is None
+    timestamps = pd.Series(pd.date_range("2020-01-01", periods=3))
+    assert prediction_window_mask(timestamps, value).tolist() == [
+        False,
+        True,
+        True,
+    ]
+
+
+@pytest.mark.parametrize(
+    "window",
+    [
+        {"start": None, "end": None},
+        {"start": "NaT", "end": None},
+        {"start": pd.NaT, "end": None},
+        {"start": True, "end": None},
+        {"start": "2020-01-02", "end": "2020-01-01"},
+        {"start": "2020-01-02", "end": "2020-01-03T00:00:00"},
+        {"start": "2020-01-02", "end": None, "extra": True},
+        {"start": "2020-01-02"},
+    ],
+)
+def test_prediction_window_rejects_invalid_or_unknown_bounds(window):
+    with pytest.raises((TypeError, ValueError)):
+        PredictionWindow(**window)
+
+
+def test_open_prediction_normalizes_date_and_timezone_timestamp_bounds():
+    class ObservationDate(date):
+        pass
+
+    assert PredictionWindow(ObservationDate(2020, 1, 2), None).start == date(2020, 1, 2)
+    value = PredictionWindow(pd.Timestamp("2020-01-02T08:00:00.000000001+08:00"), None)
+    assert value.start == pd.Timestamp("2020-01-02T00:00:00.000000001")
+    assert value.start.tzinfo is None and value.start.nanosecond == 1
+
+
+def test_intraday_window_preserves_midnight_and_nanoseconds():
+    value = PredictionWindow(
+        "2020-01-02T00:00:00.000000001", "2020-01-02T00:00:00.000000002"
+    )
+    assert str(value.start).endswith("000000001")
+    timestamps = pd.Series(
+        pd.to_datetime(
+            [
+                "2020-01-02T00:00:00",
+                "2020-01-02T00:00:00.000000001",
+                "2020-01-02T00:00:00.000000002",
+                "2020-01-02T00:00:00.000000003",
+            ],
+            format="mixed",
+        )
+    )
+    assert prediction_window_mask(timestamps, value).tolist() == [
+        False,
+        True,
+        True,
+        False,
+    ]
+    with pytest.raises(ValueError):
+        PredictionWindow("2020-01-02", "2020-01-02T01:00:00")
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "prediction_mode",
+        "prediction_column",
+        "primary_key",
+        "train_end",
+        "is_oos",
+        "test_start",
+        "training_asset_ids",
+        "evaluation_asset_ids",
+        "sample_filter_mode",
+    ],
+)
+def test_native_prediction_rejects_removed_overrides(key):
+    from quant_research_platform.research.predictions.runner import predict
+
+    with pytest.raises(ValueError, match="operation_config_fields_invalid"):
+        predict(
+            {
+                "model": "unused",
+                "inputs": "unused",
+                "output": "unused",
+                "prediction_window": {"start": "2020-01-02", "end": None},
+                "sample_role": "validation",
+                key: "unused",
+            }
         )
 
 
-def test_prediction_spec_accepts_a_share_persisted_row_contract() -> None:
-    spec = PredictionSpec(
-        prediction_id="a_share_prediction",
-        model_id="linear_model",
-        research_dataset_id="research_demo",
-        train_end=None,
-        test_start="2024-03-01",
-        prediction_mode="a_share_oos",
-        prediction_column="raw_prediction",
-    )
+@pytest.mark.parametrize("assets", [[], ["a", "a"], [""], [True], "a"])
+def test_native_prediction_asset_scope_requires_distinct_names(assets):
+    from quant_research_platform.research.predictions.runner import predict
 
-    assert spec.prediction_mode == "a_share_oos"
-    assert spec.prediction_column == "raw_prediction"
-
-
-def test_prediction_spec_accepts_intraday_windows_and_normalizes_utc() -> None:
-    spec = PredictionSpec(
-        prediction_id="intraday_prediction",
-        model_id="linear_model",
-        research_dataset_id="intraday_research",
-        train_end="2026-08-27T09:00:00+08:00",
-        test_start="2026-08-27T09:00:00.100+08:00",
-        test_end="2026-08-27T09:00:01+08:00",
-    )
-
-    assert spec.train_end == "2026-08-27T01:00:00"
-    assert spec.test_start == "2026-08-27T01:00:00.100000"
-    assert spec.test_end == "2026-08-27T01:00:01"
-
-
-def test_prediction_spec_rejects_mixed_date_and_intraday_windows() -> None:
-    with pytest.raises(ValueError, match="mixed_time_window_bounds"):
-        PredictionSpec(
-            prediction_id="mixed_window_prediction",
-            model_id="linear_model",
-            research_dataset_id="intraday_research",
-            train_end="2026-08-26",
-            test_start="2026-08-27T00:00:00",
-        )
-
-
-def test_prediction_spec_binds_paired_train_and_evaluation_asset_scopes() -> None:
-    spec = PredictionSpec(
-        prediction_id="btc_leave_out",
-        model_id="ridge_regression",
-        research_dataset_id="crypto_hft",
-        train_end="2024-01-31T00:00:00",
-        test_start="2024-02-01T00:00:00",
-        training_asset_ids=("eth_usdt",),
-        evaluation_asset_ids=("btc_usdt",),
-    )
-    assert spec.training_asset_ids == ("eth_usdt",)
-    assert spec.evaluation_asset_ids == ("btc_usdt",)
-
-    with pytest.raises(ValueError, match="prediction_asset_scopes_must_be_paired"):
-        PredictionSpec(
-            prediction_id="bad_scope",
-            model_id="ridge_regression",
-            research_dataset_id="crypto_hft",
-            train_end="2024-01-31T00:00:00",
-            test_start="2024-02-01T00:00:00",
-            training_asset_ids=("eth_usdt",),
+    with pytest.raises(ValueError, match="prediction_asset_ids_invalid"):
+        predict(
+            {
+                "model": "unused",
+                "inputs": "unused",
+                "output": "unused",
+                "prediction_window": {"start": "2020-01-02", "end": None},
+                "sample_role": "validation",
+                "asset_ids": assets,
+            }
         )

@@ -17,11 +17,9 @@ from uuid import uuid4
 from quant_research_platform.contracts.json_codec import render_qrp_json_object
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.policy.share_safety import evidence_text_unsafe_reason
-from quant_research_platform.sources.choice.ids import SOURCE_ID
 from quant_research_platform.storage.identity import (
     filesystem_exists,
 )
-from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import (
     read_manifest,
     read_qrp_json_file,
@@ -173,10 +171,10 @@ class ChoiceRawSession:
         self.active = True
         self._request_lock = threading.Lock()
 
-    def fetch(self, layout: StorageLayout, request: ChoiceRequest) -> Path:
+    def fetch(self, output_root: Path, request: ChoiceRequest) -> Path:
         payload = request.payload()
         identity = request.identity()
-        root = layout.raw_source_root(SOURCE_ID) / request.endpoint / identity
+        root = Path(output_root)
         if not self.active:
             raise RuntimeError("choice_session_closed")
         if not self._request_lock.acquire(blocking=False):
@@ -184,13 +182,7 @@ class ChoiceRawSession:
         try:
             # SDK has no streaming response: caller sizes each request beforehand.
             if filesystem_exists(root):
-                manifest = read_manifest(root / "response.metadata.json")
-                metadata = manifest["metadata"]
-                deque(
-                    _validated_rows(root, request, metadata, manifest=manifest),
-                    maxlen=0,
-                )
-                return root
+                raise FileExistsError("choice_output_already_exists")
             response = response_metadata = metadata = None
             response = getattr(self.sdk, request.endpoint)(*request.arguments)
             response_metadata = {
@@ -251,7 +243,6 @@ def read_choice_response(
     row = value = None
     manifest = read_qrp_json_file(
         root / "response.metadata.json",
-        expected_identity=expected_metadata_identity,
     )[1]
     metadata = manifest["metadata"]
     with closing_iterator(

@@ -5,7 +5,6 @@ from __future__ import annotations
 import gzip
 import hashlib
 import os
-import re
 import shutil
 import stat
 from collections.abc import Iterable, Iterator
@@ -15,8 +14,6 @@ from pathlib import Path
 from typing import BinaryIO
 
 from quant_research_platform.policy.lifecycle import closing_iterator
-
-_INSTANCE_IDENTITY_RE = re.compile("^[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,12 +40,6 @@ class _DigestingReader:
 
     def hexdigest(self) -> str:
         return self._digest.hexdigest()
-
-
-def validate_instance_identity(value: object) -> str:
-    if type(value) is not str or _INSTANCE_IDENTITY_RE.fullmatch(value) is None:
-        raise ValueError("invalid_instance_identity")
-    return value
 
 
 def dataset_file_identity_from_stat(value: os.stat_result) -> DatasetFileIdentity:

@@ -7,16 +7,13 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
-from types import MappingProxyType
 
 import pandas as pd
 import pyarrow as pa
 
-from quant_research_platform.contracts.business_manifest import BusinessManifestEnvelope
 from quant_research_platform.contracts.time import (
     TimeWindow,
-    a_share_analysis_windows,
-    crypto_execution_windows,
+    time_window_timestamp_interval,
 )
 from quant_research_platform.contracts.validation import (
     finite_exact_float,
@@ -24,23 +21,15 @@ from quant_research_platform.contracts.validation import (
     strict_integer_series,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
+from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.datasets.reading import (
     iter_declared_parquet_member_batches,
 )
-from quant_research_platform.storage.identity import (
-    DatasetFileIdentity,
-    dataset_file_identity,
-    open_filesystem_file,
-)
+from quant_research_platform.storage.identity import open_filesystem_file
+from quant_research_platform.storage.manifests import read_qrp_json_file, write_manifest
 from quant_research_platform.storage.parquet import (
     _opened_parquet,
     parquet_table_writer,
-)
-from quant_research_platform.storage.semantic_artifacts import (
-    semantic_artifact_read_session,
-    verify_semantic_artifact_member,
-    verify_semantic_artifact_snapshot,
-    write_semantic_artifact,
 )
 
 _ARROW_SCHEMAS = {
@@ -139,8 +128,8 @@ _ARROW_SCHEMAS = {
     "model_losses.parquet": pa.schema(
         [
             pa.field("timestamp", pa.timestamp("ns")),
-            pa.field("access_window", pa.string()),
-            pa.field("quarter_id", pa.string()),
+            pa.field("sample_role", pa.string()),
+            pa.field("period_id", pa.string()),
             pa.field("family_id", pa.string()),
             pa.field("config_id", pa.string()),
             pa.field("loss", pa.float64()),
@@ -154,7 +143,7 @@ _ARROW_SCHEMAS = {
     ),
     "model_comparison.parquet": pa.schema(
         [
-            pa.field("access_window", pa.string()),
+            pa.field("sample_role", pa.string()),
             pa.field("benchmark_id", pa.string()),
             pa.field("prediction_id", pa.string()),
             pa.field("observation_count", pa.int64()),
@@ -178,7 +167,7 @@ _ARROW_SCHEMAS = {
             pa.field(name, pa.string())
             for name in (
                 "family_id",
-                "access_window",
+                "sample_role",
                 "status",
                 "reason",
                 "fdr_method",
@@ -220,7 +209,7 @@ _ARROW_SCHEMAS = {
     "model_reality_checks.parquet": pa.schema(
         [
             pa.field("test_id", pa.string()),
-            pa.field("access_window", pa.string()),
+            pa.field("sample_role", pa.string()),
             pa.field("family_id", pa.string()),
             pa.field("statistic_id", pa.string()),
             pa.field("value", pa.float64()),
@@ -256,7 +245,7 @@ _ARROW_SCHEMAS = {
             pa.field("relative_wealth", pa.float64()),
             pa.field("benchmark_status", pa.string()),
             pa.field("benchmark_reason", pa.string()),
-            pa.field("access_window", pa.string()),
+            pa.field("sample_role", pa.string()),
         ]
     ),
     "portfolio_group_comparison.parquet": pa.schema(
@@ -266,7 +255,7 @@ _ARROW_SCHEMAS = {
                 for name in (
                     "portfolio_id",
                     "comparison_role",
-                    "access_window",
+                    "sample_role",
                     "status",
                     "reason",
                     "bootstrap_status",
@@ -317,7 +306,7 @@ _ARROW_SCHEMAS = {
             pa.field("status", pa.string()),
             pa.field("reason", pa.string()),
             pa.field("observation_count", pa.int64()),
-            pa.field("access_window", pa.string()),
+            pa.field("sample_role", pa.string()),
         ]
     ),
     "portfolio_capacity.parquet": pa.schema(
@@ -366,7 +355,7 @@ _ARROW_SCHEMAS = {
             pa.field("reason", pa.string()),
             pa.field("observation_count", pa.int64()),
             pa.field("candidate_count", pa.int64()),
-            pa.field("access_window", pa.string()),
+            pa.field("sample_role", pa.string()),
         ]
     ),
     "portfolio_exposures.parquet": pa.schema(
@@ -571,6 +560,7 @@ _EMPTY_TABLE_MEMBERS = frozenset(
         "model_losses.parquet",
         "model_group_comparison.parquet",
         "portfolio_capacity.parquet",
+        "portfolio_group_comparison.parquet",
         "portfolio_exposures.parquet",
     }
 )
@@ -606,121 +596,57 @@ STATISTICS_TABLE_COLUMNS = _TABLE_COLUMNS
 
 @dataclass(frozen=True, slots=True)
 class StatisticsArtifact:
-    envelope: dict
+    metadata: dict
     root: Path
-    identity: str
-    _members: Mapping[str, object]
-    _identities: Mapping[str, DatasetFileIdentity]
-    _row_counts: Mapping[str, int]
-    _snapshot: Mapping[str, DatasetFileIdentity] | None = None
-    _directories: Mapping[str, tuple[int, int, int, int]] | None = None
-
-    def _verify_snapshot(self):
-        if self._snapshot is not None:
-            verify_semantic_artifact_snapshot(
-                self.root, self._snapshot, self._directories
-            )
-
-    def _verify(self):
-        self._verify_snapshot()
-        for member, identity in self._identities.items():
-            path = self.root / member
-            if dataset_file_identity(path) != identity:
-                raise ValueError("statistics_table_identity_changed")
-            verify_semantic_artifact_member(
-                self.root, relative_path=member, expected=dict(self._members[member])
-            )
-            if dataset_file_identity(path) != identity:
-                raise ValueError("statistics_table_identity_changed")
+    table_group: str
+    _members: tuple[str, ...]
 
     def _batches(self, member, *, filters=None):
         if member not in self._members:
             raise ValueError("statistics_table_member_invalid")
         with closing_iterator(
             iter_declared_parquet_member_batches(
-                self.root / member,
-                expected_identity=self._identities[member],
-                parquet_filters=filters,
+                self.root / member, parquet_filters=filters
             )
         ) as frames:
             for frame in frames:
-                result = _validated_frame(frame, member=member, envelope=self.envelope)
-                try:
-                    yield result
-                except GeneratorExit:
-                    return
+                yield _validated_frame(frame, member=member, metadata=self.metadata)
 
     @contextmanager
     def table(self, member: str):
         if member not in self._members:
             raise ValueError("statistics_table_member_invalid")
-        path = self.root / member
-        identity = self._identities[member]
-        self._verify_snapshot()
-        verify_semantic_artifact_member(
-            self.root, relative_path=member, expected=dict(self._members[member])
-        )
-        with _opened_parquet(path, expected_identity=identity) as (
-            parquet,
-            _identity,
-            _handle,
-        ):
+        with _opened_parquet(self.root / member) as (parquet, _handle):
             if parquet.schema_arrow != _ARROW_SCHEMAS[member]:
                 raise ValueError("statistics_table_schema_invalid")
-            table = parquet.read()
-            frame = table.to_pandas()
-            result = _validated_frame(frame, member=member, envelope=self.envelope)
-            primary = None
-            try:
-                yield result
-            except BaseException as error:
-                primary = error
-                raise
-            finally:
-                try:
-                    self._verify_snapshot()
-                except BaseException as error:
-                    if primary is None:
-                        raise
-                    primary.add_note(
-                        "statistics snapshot verification also failed: "
-                        + type(error).__name__
-                    )
+            frame = parquet.read().to_pandas()
+        yield _validated_frame(frame, member=member, metadata=self.metadata)
 
 
 def write_statistics_artifact(
-    logical_root: Path,
+    output_path: Path,
     *,
-    envelope: BusinessManifestEnvelope,
+    metadata: dict,
     tables: Mapping[str, pd.DataFrame] | Callable[..., None],
     table_group: str = "research",
     validate_tables=None,
 ) -> Path:
     if table_group not in STATISTICS_TABLE_GROUPS:
         raise ValueError("statistics_tables_invalid")
-    envelope_payload = envelope.payload()
-    if set(_statistics_members(envelope_payload)) != set(
-        STATISTICS_TABLE_GROUPS[table_group]
-    ):
-        raise ValueError("statistics_artifact_contract_mismatch")
+    _validate_metadata(metadata)
+    members = tuple(STATISTICS_TABLE_GROUPS[table_group])
+    expected = {member.removesuffix(".parquet") for member in members}
     calibration = table_group == "crypto_maker_calibration"
-    if calibration and (not callable(validate_tables)):
+    if callable(tables) and not calibration:
+        raise ValueError("statistics_tables_invalid")
+    if calibration and not callable(validate_tables):
         raise ValueError("statistics_business_validator_required")
-    expected = {
-        member.removesuffix(".parquet")
-        for member in STATISTICS_TABLE_GROUPS[table_group]
-    }
-    if (
-        calibration
-        and (not callable(tables))
-        or (
-            not calibration
-            and (not isinstance(tables, Mapping) or set(tables) != expected)
-        )
+    if not callable(tables) and (
+        not isinstance(tables, Mapping) or set(tables) != expected
     ):
         raise ValueError("statistics_tables_invalid")
 
-    def write_batches(staging, produce):
+    def write(staging):
         with closing_iterator(ExitStack()) as output:
             writers = {}
 
@@ -749,208 +675,130 @@ def write_statistics_artifact(
                             ),
                         )
                     )
-
-                validated = _validated_frame(
-                    frame, member=member, envelope=envelope_payload
+                validated = _validated_frame(frame, member=member, metadata=metadata)
+                writers[member](
+                    pa.Table.from_pandas(
+                        validated, schema=_ARROW_SCHEMAS[member], preserve_index=False
+                    )
                 )
-                table = pa.Table.from_pandas(
-                    validated, schema=_ARROW_SCHEMAS[member], preserve_index=False
-                )
-                writers[member](table)
 
-            produce(on_table=append)
-            return {member.removesuffix(".parquet") for member in writers}
-
-    def write(staging):
-        if calibration:
-            written = write_batches(staging, tables)
-            if written != expected:
+            if callable(tables):
+                tables(on_table=append)
+            else:
+                for name, frame in tables.items():
+                    append(name, frame)
+            if set(writers) != set(members):
                 raise ValueError("statistics_tables_invalid")
-        else:
-            for table_name, frame in tables.items():
-                write_batches(
-                    staging,
-                    lambda on_table, name=table_name, value=frame: on_table(
-                        name, value
-                    ),
-                )
+        if callable(validate_tables):
+            validate_tables(
+                StatisticsArtifact(dict(metadata), staging, table_group, members),
+                metadata,
+            )
+        write_manifest(
+            staging / "manifest.json",
+            {
+                "schema_id": "qrp-statistics",
+                "table_group": table_group,
+                "metadata": dict(metadata),
+                "members": list(members),
+            },
+        )
 
-    def validate(staging, members):
-        artifact = _statistics_artifact(staging, envelope.payload(), members)
-        validate_tables(artifact, envelope.payload())
-
-    return write_semantic_artifact(
-        Path(logical_root),
-        envelope,
-        write,
-        staged_validator=validate if calibration else None,
-    )
+    atomic_write_directory(Path(output_path), write)
+    return Path(output_path)
 
 
-def _statistics_artifact(
-    root, envelope, members, member_identities=None, directory_identities=None
-):
-    by_path = {str(member.get("path")): member for member in members}
-    if set(by_path) != set(_statistics_members(envelope)) or len(by_path) != len(
-        members
+def read_statistics_artifact(path: Path, *, validate_tables=None) -> StatisticsArtifact:
+    root = Path(path)
+    _, manifest = read_qrp_json_file(root / "manifest.json")
+    group = manifest.get("table_group")
+    if (
+        manifest.get("schema_id") != "qrp-statistics"
+        or group not in STATISTICS_TABLE_GROUPS
     ):
+        raise ValueError("statistics_artifact_contract_invalid")
+    members = tuple(STATISTICS_TABLE_GROUPS[group])
+    if manifest.get("members") != list(members):
         raise ValueError("statistics_artifact_members_invalid")
-    identities, row_counts = ({}, {})
-    for member in by_path:
-        path = root / member
-        physical = (
-            verify_semantic_artifact_member(
-                root, relative_path=member, expected=dict(by_path[member])
-            )
-            if member_identities is None
-            else member_identities[member]
-        )
-        with _opened_parquet(path, expected_identity=physical) as (parquet, _, _handle):
-            if parquet.schema_arrow != _ARROW_SCHEMAS[member]:
-                raise ValueError("statistics_table_schema_invalid")
-            count = parquet.metadata.num_rows
-            if count == 0 and member not in _EMPTY_TABLE_MEMBERS:
-                raise ValueError("statistics_table_empty")
-            identities[member] = physical
-            row_counts[member] = count
-    return StatisticsArtifact(
-        envelope=envelope,
-        root=root,
-        identity=envelope["instance_identity"],
-        _members=MappingProxyType(by_path),
-        _identities=MappingProxyType(identities),
-        _row_counts=MappingProxyType(row_counts),
-        _snapshot=(
-            MappingProxyType(dict(member_identities))
-            if directory_identities is not None
-            else None
-        ),
-        _directories=(
-            MappingProxyType(dict(directory_identities))
-            if directory_identities is not None
-            else None
-        ),
-    )
+    metadata = manifest.get("metadata")
+    _validate_metadata(metadata)
+    artifact = StatisticsArtifact(metadata, root, group, members)
+    if group == "crypto_maker_calibration":
+        if not callable(validate_tables):
+            raise ValueError("statistics_business_validator_required")
+        validate_tables(artifact, metadata)
+    return artifact
 
 
-def read_statistics_artifact(
-    instance_root: Path,
-    *,
-    expected_identity: str,
-    validate_tables=None,
-    expected_member_identities=None,
-) -> StatisticsArtifact:
-    identities = {}
-    directories = {}
-    with semantic_artifact_read_session(
-        Path(instance_root),
-        expected_identity=expected_identity,
-        member_identities=identities,
-        expected_member_identities=expected_member_identities,
-        directory_identities=directories,
-    ) as (envelope, members):
-        artifact = _statistics_artifact(
-            Path(instance_root), envelope, members, identities, directories
-        )
-        if set(artifact._members) == set(
-            STATISTICS_TABLE_GROUPS["crypto_maker_calibration"]
-        ):
-            if not callable(validate_tables):
-                raise ValueError("statistics_business_validator_required")
-            validate_tables(artifact, envelope)
-        return artifact
-
-
-def _statistics_members(envelope):
-    contract = envelope["semantic_metadata"].get("target_contract")
-    if type(contract) is not dict or type(contract.get("protocol")) is not dict:
-        raise ValueError("statistics_artifact_contract_invalid")
-    declared = contract.get("statistics_tables")
-    protocol = contract["protocol"]
+def _validate_metadata(metadata):
+    if not isinstance(metadata, dict) or metadata.get("sample_role") not in {
+        "train",
+        "validation",
+        "test",
+    }:
+        raise ValueError("statistics_sample_role_invalid")
+    window = metadata.get("window")
+    if not isinstance(window, dict) or set(window) != {"start", "end"}:
+        raise ValueError("statistics_window_invalid")
+    TimeWindow(window["start"], window["end"])
+    candidates = metadata.get("candidate_ids", [])
     if (
-        type(declared) is not dict
-        or protocol.get("access_window") != envelope["research_window"]["access"]
+        not isinstance(candidates, list)
+        or any(not isinstance(x, str) or not x for x in candidates)
+        or len(set(candidates)) != len(candidates)
     ):
-        raise ValueError("statistics_artifact_contract_invalid")
-    for members in STATISTICS_TABLE_GROUPS.values():
-        if declared == {
-            member.removesuffix(".parquet"): list(_TABLE_COLUMNS[member])
-            for member in members
-        }:
-            return members
-    raise ValueError("statistics_artifact_contract_mismatch")
+        raise ValueError("statistics_candidate_ids_invalid")
 
 
-def _validate_table_binding(frame, *, member, envelope):
-    protocol = envelope["semantic_metadata"]["target_contract"]["protocol"]
-    window = envelope["research_window"]
-    access = window["access"]
-    if "access_window" in frame and not frame.access_window.eq(access).all():
-        raise ValueError("statistics_access_window_mismatch")
-    if member in STATISTICS_TABLE_GROUPS["crypto_maker_calibration"]:
-        # Calibration has its own fold, maturity and event-reference validator.
-        return
-    start, end = pd.Timestamp(window["start"]), pd.Timestamp(window["end"])
-    if member in STATISTICS_TABLE_GROUPS["crypto_portfolio"]:
-        crypto_execution_windows(
-            protocol["research_plan"], TimeWindow(start, end), access_window=access
-        )
-        candidates = {item["candidate_id"] for item in protocol["portfolio_candidates"]}
-        if not frame.execution_mode.eq(protocol["execution_mode"]).all():
-            raise ValueError("statistics_execution_mode_mismatch")
-    elif member in STATISTICS_TABLE_GROUPS["portfolio"]:
-        candidates = set(protocol["portfolio_candidates"])
-        if member == "portfolio_robustness.parquet":
-            joint = frame.candidate_id.eq("joint") & frame.test_id.isin(
-                ("cscv_pbo", "development_only")
-            )
-            if not (frame.candidate_id.isin(candidates) | joint).all():
-                raise ValueError("statistics_candidate_id_mismatch")
-        if (
-            "portfolio_id" in frame
-            and not frame.portfolio_id.isin(
-                protocol["statistics"]["group_comparison"]["portfolio_ids"]
-            ).all()
-        ):
-            raise ValueError("statistics_candidate_id_mismatch")
-        if (
-            "attribution_group" in frame
-            and not frame.attribution_group.isin(protocol["attribution_groups"]).all()
-        ):
-            raise ValueError("statistics_candidate_id_mismatch")
-    else:
-        candidates = set()
+def _validate_table_binding(frame, *, member, metadata):
     if (
-        "candidate_id" in frame
-        and member != "portfolio_robustness.parquet"
-        and not frame.candidate_id.isin(candidates).all()
+        "sample_role" in frame
+        and not frame.sample_role.eq(metadata["sample_role"]).all()
+    ):
+        raise ValueError("statistics_sample_role_mismatch")
+    if member in STATISTICS_TABLE_GROUPS["crypto_maker_calibration"]:
+        return  # Fold maturity and event references are checked by its producer.
+    if (
+        "execution_mode" in frame
+        and not frame.execution_mode.eq(metadata.get("execution_mode")).all()
+    ):
+        raise ValueError("statistics_execution_mode_mismatch")
+    if "candidate_id" in frame:
+        valid = frame.candidate_id.isin(metadata.get("candidate_ids", []))
+        if member == "portfolio_robustness.parquet":
+            valid |= frame.candidate_id.eq("joint") & frame.test_id.isin(
+                ("cscv_pbo", "validation_only")
+            )
+        if not valid.all():
+            raise ValueError("statistics_candidate_id_mismatch")
+    if (
+        "portfolio_id" in frame
+        and not frame.portfolio_id.isin(
+            metadata.get("comparison_portfolio_ids", [])
+        ).all()
     ):
         raise ValueError("statistics_candidate_id_mismatch")
-    if member in {"model_losses.parquet", "fama_macbeth_periods.parquet"}:
-        factor, model = a_share_analysis_windows(protocol, TimeWindow(start, end))
-        selected = factor if member == "fama_macbeth_periods.parquet" else model
-        start, end = pd.Timestamp(selected.start), pd.Timestamp(selected.end)
-        role = protocol[f"{access}_window"]
-        role_start = (
-            protocol["formal_dataset_window"]["start"]
-            if member == "fama_macbeth_periods.parquet" and access == "development"
-            else role["start"]
-        )
-        start, end = (
-            max(start, pd.Timestamp(role_start)),
-            min(end, pd.Timestamp(role["end"])),
-        )
+    start, stop, inclusive = time_window_timestamp_interval(
+        TimeWindow(**metadata["window"])
+    )
     for column in _TIMESTAMP_COLUMNS[member]:
+        valid = frame[column].ge(start)
+        endpoint = member == "crypto_portfolio_coverage.parquet" and column == "stop_at"
         upper = (
-            end + pd.Timedelta(1, "ns")
-            if member == "crypto_portfolio_coverage.parquet" and column == "stop_at"
-            else end
+            pd.Timestamp(stop) + pd.Timedelta(1, "ns")
+            if inclusive and endpoint
+            else stop
         )
-        if not frame[column].between(start, upper).all():
+        valid &= (
+            frame[column].le(upper)
+            if inclusive or endpoint
+            else frame[column].lt(upper)
+        )
+        if not valid.all():
             raise ValueError("statistics_table_window_mismatch")
 
 
-def _validated_frame(frame: pd.DataFrame, *, member: str, envelope) -> pd.DataFrame:
+def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFrame:
     if (
         type(frame) is not pd.DataFrame
         or tuple(frame.columns) != _TABLE_COLUMNS[member]
@@ -1109,10 +957,10 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, envelope) -> pd.DataFr
         "model_reality_checks.parquet",
     }:
         if (
-            not result["access_window"].isin(("development", "holdout")).all()
-            or result["access_window"].nunique() > 1
+            not result["sample_role"].isin(("validation", "test")).all()
+            or result["sample_role"].nunique() > 1
         ):
-            raise ValueError("statistics_access_window_invalid")
+            raise ValueError("statistics_sample_role_invalid")
         keys = {
             "model_losses.parquet": ("timestamp", "family_id"),
             "model_comparison.parquet": ("prediction_id",),
@@ -1144,9 +992,9 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, envelope) -> pd.DataFr
             result.duplicated([key]).any()
             or not result.status.isin(("DEFINED", "UNDEFINED")).all()
             or (not result.bootstrap_status.isin(("DEFINED", "UNDEFINED")).all())
-            or (not result.access_window.isin(("development", "holdout")).all())
-            or (result.access_window.nunique() > 1)
-            or (defined & result.access_window.ne("holdout")).any()
+            or (not result.sample_role.isin(("validation", "test")).all())
+            or (result.sample_role.nunique() > 1)
+            or (defined & result.sample_role.ne("test")).any()
             or (bootstrap_defined & ~defined).any()
             or result.loc[defined, list(measurements)].isna().any().any()
             or result.loc[defined, ["global_mean", "quarterly_mean", "mean_difference"]]
@@ -1182,20 +1030,24 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, envelope) -> pd.DataFr
             and result.observation_count.gt(result.calendar_count).any()
         ):
             raise ValueError("statistics_group_comparison_count_invalid")
-        if member == "portfolio_group_comparison.parquet" and (
-            not result.comparison_role.isin(("primary", "secondary")).all()
-            or result.comparison_role.eq("primary").sum() != 1
-            or result.loc[
-                ~result.reason.isin(("nonpositive_start_nav", "nonfinite_result")),
-                [
-                    "global_mean",
-                    "quarterly_mean",
-                    "mean_difference",
-                ],
-            ]
-            .isna()
-            .any()
-            .any()
+        if (
+            member == "portfolio_group_comparison.parquet"
+            and not result.empty
+            and (
+                not result.comparison_role.isin(("primary", "secondary")).all()
+                or result.comparison_role.eq("primary").sum() != 1
+                or result.loc[
+                    ~result.reason.isin(("nonpositive_start_nav", "nonfinite_result")),
+                    [
+                        "global_mean",
+                        "quarterly_mean",
+                        "mean_difference",
+                    ],
+                ]
+                .isna()
+                .any()
+                .any()
+            )
         ):
             raise ValueError("statistics_group_comparison_primary_invalid")
     if member == "portfolio_group_comparison.parquet":
@@ -1272,7 +1124,7 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, envelope) -> pd.DataFr
         else:
             aggregate = result.episode_id.eq("all")
             continuous = result.execution_mode.eq("continuous")
-            valid_episode = result.episode_id.str.fullmatch("[0-9a-f]{64}")
+            valid_episode = result.episode_id.str.fullmatch(r"[0-9]+_[0-9]+")
             if (
                 ~aggregate & continuous & ~result.episode_id.eq("continuous")
                 | ~aggregate & ~continuous & ~valid_episode
@@ -1444,6 +1296,26 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, envelope) -> pd.DataFr
             not result.component_type.isin(("additive", "detail")).all()
         ):
             raise ValueError("statistics_attribution_component_invalid")
-    _validate_table_binding(result, member=member, envelope=envelope)
+    keys = {
+        "model_trials.parquet": (
+            "selection_group",
+            "decision_id",
+            "family_id",
+            "config_id",
+            "metric_id",
+        ),
+        "prediction_diagnostics.parquet": ("prediction_id",),
+        "robustness.parquet": ("test_id",),
+        "factor_diagnostics.parquet": ("family_id", "factor_id", "fdr_method"),
+        "fama_macbeth.parquet": ("regression_id", "coefficient_id"),
+        "fama_macbeth_periods.parquet": (
+            "regression_id",
+            "coefficient_id",
+            "timestamp",
+        ),
+    }.get(member)
+    if keys is not None and result.duplicated(list(keys)).any():
+        raise ValueError("statistics_table_duplicate_keys")
+    _validate_table_binding(result, member=member, metadata=metadata)
     result.index = pd.RangeIndex(len(result))
     return result

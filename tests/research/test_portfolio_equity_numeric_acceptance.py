@@ -15,29 +15,26 @@ from quant_research_platform.artifacts.statistics import (
     write_statistics_artifact,
 )
 from quant_research_platform.compute.portfolio_economics import _LedgerEconomics
-from quant_research_platform.contracts.business_manifest import (
-    build_business_manifest_envelope,
-)
 from quant_research_platform.contracts.portfolios import (
     PortfolioCapital,
     PortfolioDiagnostic,
     PortfolioLedgerBatch,
+    PortfolioTargetBlocked,
     PortfolioValuation,
 )
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share import portfolio_sessions
-from quant_research_platform.profiles.research import (
-    bind_research_configuration,
-    research_profile,
-)
 from quant_research_platform.research.portfolios import production
 from quant_research_platform.research.portfolios.diagnostics import (
     _portfolio_statistics_tables,
 )
 from quant_research_platform.research.portfolios.risk import HoldingFactorInputs
+from quant_research_platform.sources.csmar.interim import interim_catalog
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
-from tests.helpers.research_configuration import research_configuration
-from tests.helpers.statistics_artifacts import statistics_envelope
+from tests.helpers.statistics_artifacts import (
+    portfolio_statistics_config,
+    statistics_metadata,
+)
 from tests.research.test_equity_recovery_production import recovered_batches
 from tests.research.test_portfolio_production import _build_producer, _inputs
 from tests.sources.reference.test_equity_events import native_equity_inputs
@@ -91,35 +88,35 @@ def test_finite_money_survives_exact_units_and_native_ledger_roundtrip(
                 assert row.value == capital
                 assert float(row.quantity * Fraction(row.mark_price)) == capital
 
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="independent_numeric_portfolio",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": "2023-01-03",
-            "end": "2023-01-06",
-            "access": "development",
-        },
-        upstream_identities={"prediction": "b" * 64},
-        semantic_metadata={
-            "portfolio_capital": {
-                "candidate_id": "independent_numeric_portfolio",
-                "initial_capital": float(capital),
-                "valuation_currency": "CNY",
-                "valuation_method": "adjusted_notional",
-            }
-        },
+    capital_spec = PortfolioCapital(
+        **{
+            "candidate_id": "independent_numeric_portfolio",
+            "initial_capital": float(capital),
+            "valuation_currency": "CNY",
+            "valuation_method": "adjusted_notional",
+        }
     )
+    metadata = {
+        "window": {
+            key: value
+            for key, value in {
+                "start": "2023-01-03",
+                "end": "2023-01-06",
+                "access": "validation",
+            }.items()
+            if key != "access"
+        },
+        "sample_role": "validation",
+    }
 
     def produce(emit):
         for batch in batches:
             emit(batch)
 
     root = write_portfolio_ledger_artifact(
-        tmp_path / "ledger", envelope=envelope, produce=produce
+        tmp_path / "ledger", capital=capital_spec, metadata=metadata, produce=produce
     )
-    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    artifact = read_portfolio_ledger_artifact(root)
     assert list(artifact.iter_chunks()) == batches
     economics = _LedgerEconomics(
         PortfolioCapital(
@@ -150,20 +147,29 @@ def test_active_share_cash_event_cannot_duplicate_adjusted_distribution(tmp_path
     layout, roots, calendar = native_equity_inputs(tmp_path, events=events)
     stocks = read_dataset(roots["stock_master"])
     stocks.loc[stocks.source_asset_id.eq("000001"), "delisting_date"] = pd.NaT
+    stocks.loc[stocks.source_asset_id.eq("000001"), "company_status"] = "active"
     active_root = roots["stock_master"].parent / ("d" * 64)
-    write_dataset(
-        active_root, stocks, spec=research_profile().interim.get("stock_master")
+    write_dataset(active_root, stocks, spec=interim_catalog().get("stock_master"))
+    layout = {**layout, "stock_master": active_root}
+    sessions = list(
+        portfolio_sessions.iter_portfolio_sessions(
+            market_bars_root=layout["market_bars"],
+            stock_master_root=layout["stock_master"],
+            equity_events_root=layout["equity_events"],
+            panel_root=roots["market_panel_1d"],
+            panel_columns=production._PANEL_COLUMNS,
+            calendar=calendar,
+            time_window=TimeWindow("2022-12-30", "2023-01-06"),
+        )
     )
-    layout = layout.with_target_roots({"stock_master": active_root})
-    with pytest.raises(ValueError, match="equity_event"):
-        list(
-            portfolio_sessions.iter_portfolio_sessions(
-                layout=layout,
-                panel_root=roots["market_panel_1d"],
-                panel_columns=production._PANEL_COLUMNS,
-                calendar=calendar,
-                time_window=TimeWindow("2022-12-30", "2023-01-06"),
-            )
+    events = pd.concat(view.rights_events for view in sessions)
+    assert not events.entitlement_proved.all()
+    with pytest.raises(PortfolioTargetBlocked, match="portfolio_held_rights_unproved"):
+        production._apply_rights_events(
+            events,
+            pd.Series({"000001": Fraction(1)}),
+            pd.Series({"000001": pd.Timestamp("2022-12-01")}),
+            pd.Timestamp("2023-01-04"),
         )
 
 
@@ -218,6 +224,9 @@ def test_admitted_recovery_reaches_native_statistics_without_losing_money(
     def huge_price(panel):
         panel = panel.copy()
         panel.loc[panel.asset_id.eq("000001"), ["adj_open", "adj_close"]] = 1e308
+        anchor = panel.asset_id.eq("000001") & panel.timestamp.eq("2022-12-30")
+        panel.loc[anchor, "adj_close"] = 10.0
+        panel.loc[anchor, "close"] = 1.0
         return panel
 
     def huge_event(base):
@@ -262,42 +271,34 @@ def test_admitted_recovery_reaches_native_statistics_without_losing_money(
             Fraction(),
         )
     )
-    protocol = bind_research_configuration(
-        research_profile(), research_configuration(name="pv25")
-    ).protocol("pv_all")
-    candidates = protocol.portfolio_candidates()
-    manifest = protocol.manifest()
-    manifest["access_window"] = "development"
-    window = {"start": "2022-12-30", "end": "2023-01-06", "access": "development"}
+    candidates, manifest = portfolio_statistics_config(sample_role="validation")
+    window = {"start": "2022-12-30", "end": "2023-01-06", "access": "validation"}
     ledgers = {}
     for candidate in candidates:
-        envelope = build_business_manifest_envelope(
-            logical_artifact_id=candidate.candidate_id,
-            schema_identity="a" * 64,
-            protocol_or_spec_identity="b" * 64,
-            software_identity="c" * 64,
-            research_window=window,
-            upstream_identities={},
-            semantic_metadata={
-                "portfolio_capital": {
-                    "candidate_id": candidate.candidate_id,
-                    "initial_capital": 100.0,
-                    "valuation_currency": "CNY",
-                    "valuation_method": "adjusted_notional",
-                }
-            },
+        capital_spec = PortfolioCapital(
+            **{
+                "candidate_id": candidate.candidate_id,
+                "initial_capital": 100.0,
+                "valuation_currency": "CNY",
+                "valuation_method": "adjusted_notional",
+            }
         )
+        metadata = {
+            "window": {key: value for key, value in window.items() if key != "access"},
+            "sample_role": "validation",
+        }
 
         def produce(emit):
             for batch in batches:
                 emit(batch)
 
         root = write_portfolio_ledger_artifact(
-            tmp_path / candidate.candidate_id, envelope=envelope, produce=produce
+            tmp_path / candidate.candidate_id,
+            capital=capital_spec,
+            metadata=metadata,
+            produce=produce,
         )
-        ledgers[candidate.candidate_id] = read_portfolio_ledger_artifact(
-            root, expected_identity=root.name
-        )
+        ledgers[candidate.candidate_id] = read_portfolio_ledger_artifact(root)
     dates = pd.bdate_range("2022-12-30", "2023-01-06")
     inputs = [
         HoldingFactorInputs(
@@ -315,7 +316,7 @@ def test_admitted_recovery_reaches_native_statistics_without_losing_money(
     tables = _portfolio_statistics_tables(
         ledgers=ledgers,
         candidates=candidates,
-        protocol_manifest=manifest,
+        config=manifest,
         time_window=TimeWindow(dates[0], dates[-1]),
         benchmark_opens=pd.DataFrame(columns=("benchmark_id", "timestamp", "open")),
         calendar=pd.DataFrame({"calendar_date": dates}),
@@ -335,23 +336,21 @@ def test_admitted_recovery_reaches_native_statistics_without_losing_money(
         assert performance.loc[
             (candidate.candidate_id, "cost"), "value"
         ] == pytest.approx(fees, abs=1e-13)
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="pv_all_portfolio_statistics",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window=window,
-        upstream_identities={},
-        semantic_metadata={},
+    metadata = statistics_metadata(
+        TimeWindow(window["start"], window["end"]),
+        sample_role="validation",
+        candidate_ids=[c.candidate_id for c in candidates],
+        comparison_portfolio_ids=manifest["statistics"]["group_comparison"][
+            "portfolio_ids"
+        ],
     )
-    envelope = statistics_envelope(envelope, group="portfolio", protocol=manifest)
     root = write_statistics_artifact(
         tmp_path / "statistics",
-        envelope=envelope,
+        metadata=metadata,
         tables=tables,
         table_group="portfolio",
     )
-    artifact = read_statistics_artifact(root, expected_identity=root.name)
+    artifact = read_statistics_artifact(root)
     with artifact.table("portfolio_daily.parquet") as daily:
         assert daily.groupby("candidate_id").nav_end.last().eq(final_nav).all()
 
@@ -388,27 +387,30 @@ def test_native_writer_rejects_negative_zero_valued_long_only_rights(tmp_path):
             ),
         ),
     )
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="invalid_negative_rights",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": "2023-01-03",
-            "end": "2023-01-06",
-            "access": "development",
-        },
-        upstream_identities={},
-        semantic_metadata={
-            "portfolio_capital": {
-                "candidate_id": "invalid_negative_rights",
-                "initial_capital": 100.0,
-                "valuation_currency": "CNY",
-                "valuation_method": "adjusted_notional",
-            }
-        },
+    capital_spec = PortfolioCapital(
+        **{
+            "candidate_id": "invalid_negative_rights",
+            "initial_capital": 100.0,
+            "valuation_currency": "CNY",
+            "valuation_method": "adjusted_notional",
+        }
     )
+    metadata = {
+        "window": {
+            key: value
+            for key, value in {
+                "start": "2023-01-03",
+                "end": "2023-01-06",
+                "access": "validation",
+            }.items()
+            if key != "access"
+        },
+        "sample_role": "validation",
+    }
     with pytest.raises(ValueError, match="portfolio_ledger_notional_invalid"):
         write_portfolio_ledger_artifact(
-            tmp_path / "ledger", envelope=envelope, produce=lambda emit: emit(batch)
+            tmp_path / "ledger",
+            capital=capital_spec,
+            metadata=metadata,
+            produce=lambda emit: emit(batch),
         )

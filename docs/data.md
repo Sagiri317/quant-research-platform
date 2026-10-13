@@ -4,7 +4,7 @@
 
 ## 原始来源
 
-所有来源共用 data/raw，各 owner 只在 data/raw/<source_id> 内递归发现和验证输入。
+来源默认保存在 data/raw，但接纳函数只消费调用者明确指定的源根或原件集合。
 来源家族由供应商/表标识及结构证明，不从目录名猜测，不探测备用根。
 
 ### CSMAR
@@ -165,7 +165,7 @@ Bybit 与 OKX normalized 来源在 `data/raw/tardis/<exchange>/` 下按配置选
 owner，提交前重核完整源身份；缺少已声明文件、身份变化或结构不合法不能以空列表替代，
 失败保留已验证旧产物。公开源与 CSMAR 原件分别保留，不伪造供应商字段或修改原始附件。
 
-`a_share_industry_snapshots` 是正式 PANEL 的显式 DAG 输入，source_id 为 reference。
+`a_share_industry_snapshots` 是正式 PANEL 的显式输入，source_id 为 reference。
 Interim 的 observation_date 保留观察期，publication_date 保留页面公开日，timestamp
 为日期型公开日之后的次日下界；按角色窗口末端裁剪，保留窗口起点前的历史状态。
 PANEL 在真实交易日轴上实施可用日规则。分类词典、历史资产身份、未知屏障与混合标准
@@ -176,7 +176,7 @@ PANEL 在真实交易日轴上实施可用日规则。分类词典、历史资�
 
 `reference/a_share_equity_events/metadata.json` 是现有 reference owner 的可选来源，
 仅供组合权益和估值消费，不进入 PANEL、因子、标签、训练或交易许可。
-原生 PORT 身份分别绑定来源实例或明确 ABSENT；不存在来源不证明没有回收，也不制造空源产物。
+原生 PORT 记录实际引用的来源路径或未提供；不存在来源不证明没有回收，也不制造空源产物。
 元数据使用 `a_share_equity_events` schema，保存 `files` 原件 SHA256 和 `events`。
 每个事件必须绑定原证券与上市日期、官方 SSE/SZSE/CNINFO/NEEQ 发布 URL、原件和定位、
 独立的单位/权益衔接原件与定位、公开日、经济生效日及真实观察时刻。
@@ -187,7 +187,7 @@ PANEL 在真实交易日轴上实施可用日规则。分类词典、历史资�
 支持 `quote`、`cash_recovery`、`cancel`、`conversion` 四种明确事实。
 人民币每原股金额须乘有证据的 `shares_per_old_unit`，从实际股份换成已有复权价格账本单位；
 转换还须提供每原股换得的后继股份及每后继账本单位的实际股数。
-`panel_content_hash` 必须精确匹配被消费 PANEL 的内容，不能将一种复权基准的单位证据
+实际证券生命周期、原单位和复权价格坐标必须匹配被消费 PANEL，不能将一种复权基准的单位证据
 用于另一份价格语义。归一金额与数量比例共用规范精确有理数编码，避免中间溢出丢失最终
 可表示的金额；原始 PANEL 行情类型保持不变。每个事件有独立身份；同一旧权益在同一
 确认会话的多个事件若缺少可证明顺序则拒绝，不以事件 ID 排序冒充经济先后。
@@ -202,33 +202,22 @@ NEEQ 官方发布域包括 `neeq.com.cn` 与 `neeq.cc`，依据[官方信息披�
 但已进入正常 A 股复权行情域的后继权益不能再次消费这一路现金分配，避免与含息收益重复。
 同会话不同权益的转换按已证明的因果关系推进；缺根源或循环衔接拒绝，不以代码顺序猜测。
 只有报价不会产生交易许可；现金回收不冒充卖出，注销不产生现金，同码重新上市不构成权益衔接。
-参考事件经原生 reader 进入 `portfolio_sessions`，全生命周期含末次 yield/提前关闭仍验证
-来源身份，主异常不被清理校验异常替换。
+参考事件经原生 reader 进入 `portfolio_sessions`，仍检查实际消费生命周期和单位关系；
+可靠关闭，主异常不被清理异常替换。
 
-## 持久化与就绪
+## 持久化与可消费范围
 
-数据层分为 raw、interim、processed、research、artifacts、runs，由 storage 布局派生路径。
+输入和新输出路径由调用者显式指定，raw/interim/processed/research只是数据责任层，
+不要求instances/hash或运行目录。ProcessedDataSpec的来源声明是实际消费字段关系，
+允许缺省的来源只在未提供时省略；明确指定坏路径、缺必需列或文件损坏不能fallback为空。
 
-ProcessedDataSpec以`source_input_data_ids`声明消费来源，以其子集`optional_source_input_data_ids`
-声明允许不存在的来源，生产者与DAG共用这一份合同。可选来源真正缺省时，其ABSENT事实进入父产物身份，
-不创建伪成功源节点，也不回落到另一个默认目录；来源后来出现会改变父身份。已存在但损坏的来源仍失败，
-直接请求缺省的源目标仍BLOCKED。缺省不等于行业等业务事实已获资格，实际必需事实仍由对应消费者判断。
-该可选来源字段属于processed spec的规范序列化；空集合也进入schema身份。合同变化后的旧spec与受影响下游须按原生DAG重建，不能直接修改旧manifest使其通过。
+native spec记录列、角色、主键、分区和配方；native manifest记录实际成员、范围、参数及必要资格。
+普通读取只打开指定成员、列和窗口，无全树SHA/快照或读中替换保证；详见[架构](architecture.md)。
+正式产物不可变，计算期间不可并发覆盖；发布原子且拒绝覆盖旧结果。
+PIT、标签成熟、单位、样本资格和新join覆盖由真实消费者检查，文件存在不证明科学可用。
 
-每个 QRP 数据集有 spec.json 和 _manifest/manifest.json，
-`spec.json` 是列、角色、主键、分区、特征配方等静态合同的唯一持久化来源；
-manifest 只保存运行事实和 `spec_identity`，读取投影从规格派生静态字段。
-schema_id 分别为 qrp-dataset-spec 与 qrp-dataset-manifest；研究运行记录使用 `data/runs/research/<run_id>.json`，Binance 录制清单使用录制根目录下的 `run.json`。
-数据集 manifest 的 `content_hash` 按规范物理顺序绑定全部成员路径与原始字节摘要；
-新会话在暴露数据前有界核对全部成员，不能把同大小、同统计的替换文件当作旧实例。
-未保存该内容证明的历史实例不静默补证或改写；需要从已验证上游重建新的实例。
-物理 IO、发布和精确比较见 [架构合同](architecture.md)。
-
-raw 存在、供应商接口成功、字段齐全、范围内 PIT 适用、质量合格及正式研究验收是不同事实。
-正式就绪要求 owner、真实消费者、持久化输出与适用语义检查；
-记录每个缺口只影响的目标，不能把缺失解释成零或完整覆盖。
-Choice 的实际披露、修订及历史版本约定见 [A 股](a-share.md)。
-标签访问与开发末端规则见 [A 股研究数据集语义边界](a-share.md#512-研究数据集语义边界)。
+必须来源未取得只阻塞依赖操作；已有数据问题按影响域处理，无法合法计算的结果如实失败。
+NULL、未采集、损坏、缺行、UNKNOWN、真实0不合并，不从NaN猜原因。
 
 ## 本地操作与交付
 

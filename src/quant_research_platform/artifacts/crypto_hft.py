@@ -1,8 +1,8 @@
-"""Crypto HFT execution evidence owner."""
+"""Native Crypto HFT episode ledgers and economic summaries."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from fractions import Fraction
 from pathlib import Path
 
@@ -10,18 +10,13 @@ import pandas as pd
 import pyarrow as pa
 
 from quant_research_platform.artifacts.portfolio_ledger import (
-    PORTFOLIO_LEDGER_TABLE_COLUMNS,
-    _capital,
     read_portfolio_ledger_artifact,
     summarize_portfolio_ledger,
     write_portfolio_ledger_artifact,
 )
-from quant_research_platform.contracts.business_manifest import (
-    build_business_manifest_envelope,
-)
 from quant_research_platform.contracts.json_codec import (
-    canonical_json_hash,
     parse_qrp_json_object,
+    qrp_json_object_snapshot,
 )
 from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_ECONOMIC_SUMMARY_FIELDS,
@@ -29,22 +24,13 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioTargetBlocked,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
+from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.datasets.reading import (
     iter_declared_parquet_member_batches,
 )
-from quant_research_platform.storage.identity import (
-    dataset_file_identity,
-    native_filesystem_path,
-)
-from quant_research_platform.storage.parquet import (
-    parquet_table_writer,
-)
-from quant_research_platform.storage.semantic_artifacts import (
-    _member_inventory,
-    _visit_member_paths,
-    semantic_artifact_read_session,
-    write_semantic_artifact,
-)
+from quant_research_platform.storage.identity import native_filesystem_path
+from quant_research_platform.storage.manifests import read_qrp_json_file, write_manifest
+from quant_research_platform.storage.parquet import parquet_table_writer
 
 CRYPTO_EPISODE_SCHEMA = pa.schema(
     [
@@ -55,7 +41,6 @@ CRYPTO_EPISODE_SCHEMA = pa.schema(
         pa.field("termination", pa.string(), nullable=False),
         pa.field("stop_reasons", pa.list_(pa.string()), nullable=False),
         pa.field("ledger_root", pa.string(), nullable=False),
-        pa.field("ledger_identity", pa.string(), nullable=False),
     ]
 )
 _EPISODE_STOP_REASONS = frozenset(
@@ -76,256 +61,142 @@ def crypto_episode_schema_payload():
     ]
 
 
-def _episode_identity(parent_identity, start_ns, stop_ns):
-    return canonical_json_hash(
-        {
-            "execution_instance_identity": parent_identity,
-            "start_ns": start_ns,
-            "stop_ns": stop_ns,
-        }
-    )
+def _episode_id(start_ns, stop_ns):
+    return f"{start_ns}_{stop_ns}"
 
 
-def _episode_envelope(parent, start, stop):
-    episode_id = _episode_identity(parent["instance_identity"], start, stop)
-    return build_business_manifest_envelope(
-        logical_artifact_id="episode_" + episode_id,
-        schema_identity=canonical_json_hash(PORTFOLIO_LEDGER_TABLE_COLUMNS),
-        protocol_or_spec_identity=parent["protocol_or_spec_identity"],
-        software_identity=parent["software_identity"],
-        research_window={
-            **parent["research_window"],
-            "start": pd.Timestamp(start).isoformat(),
-            "end": pd.Timestamp(stop - 1).isoformat(),
-        },
-        upstream_identities={"episode_parent": parent["instance_identity"]},
-        semantic_metadata={
-            "portfolio_capital": parent["semantic_metadata"]["portfolio_capital"]
-        },
-    )
-
-
-def _episode_rows(
-    root, envelope, members, identities, manifest_identity=None, consume_episode=None
-):
-    """Keep the parent's captured physical member barrier through child consumption."""
-    previous_stop = None
-    expected_paths = {"episodes.parquet"}
-    window = envelope["research_window"]
-    first, last = (
-        pd.Timestamp(window["start"]).value,
-        pd.Timestamp(window["end"]).value,
-    )
-    primary = None
+def _episode_window(metadata):
+    window = metadata.get("window")
+    if not isinstance(window, dict) or set(window) != {"start", "end"}:
+        raise ValueError("crypto_episode_window_invalid")
     try:
+        start, end = (pd.Timestamp(window[key]) for key in ("start", "end"))
+        if pd.isna(start) or pd.isna(end) or start > end:
+            raise ValueError("crypto_episode_window_invalid")
+        return start.value, end.value
+    except (TypeError, OverflowError) as error:
+        raise ValueError("crypto_episode_window_invalid") from error
 
-        def validate_schema(metadata):
-            if not metadata.schema.equals(CRYPTO_EPISODE_SCHEMA, check_metadata=False):
-                raise ValueError("crypto_episode_schema_invalid")
 
-        chunks = iter_declared_parquet_member_batches(
-            root / "episodes.parquet",
-            expected_identity=identities["episodes.parquet"],
-            metadata_observer=validate_schema,
-        )
-        count = 0
-        with closing_iterator(chunks):
-            for frame in chunks:
-                for row in frame.to_dict("records"):
-                    start, stop, terminal = (
-                        int(row["start_ns"]),
-                        int(row["stop_ns"]),
-                        int(row["terminal_valuation_ns"]),
-                    )
-                    reasons = list(row["stop_reasons"])
-                    episode_id = _episode_identity(
-                        envelope["instance_identity"], start, stop
-                    )
-                    child_root = (
-                        f"episodes/{episode_id}/instances/{row['ledger_identity']}"
-                    )
-                    if (
-                        row["episode_id"] != episode_id
-                        or row["ledger_root"] != child_root
-                        or (not first <= start <= terminal < stop <= last + 1)
-                        or (previous_stop is not None and start < previous_stop)
-                        or (not reasons)
-                        or (reasons != sorted(set(reasons)))
-                        or (not set(reasons) <= _EPISODE_STOP_REASONS)
-                        or (
-                            row["termination"]
-                            != ("PLANNED_END" if stop == last + 1 else "TRUNCATED")
-                        )
-                        or (("planned_oos_end" in reasons) != (stop == last + 1))
-                    ):
-                        raise ValueError("crypto_episode_index_invalid")
-                    previous_stop = stop
-                    row["stop_reasons"] = reasons
-                    child_paths = {
-                        child_root + "/" + member
-                        for member in (
-                            "manifest.json",
-                            *(
-                                name + ".parquet"
-                                for name in PORTFOLIO_LEDGER_TABLE_COLUMNS
-                            ),
-                        )
-                    }
-                    if not child_paths <= identities.keys():
-                        raise ValueError("crypto_episode_child_members_invalid")
-                    expected_paths.update(child_paths)
-                    terminal_observed = None
+def _episode_rows(artifact, consume_episode=None):
+    """Check chronological episode references while consuming each ledger once."""
+    first, last = _episode_window(artifact.metadata)
+    previous_stop = None
 
-                    def consume(artifact, batches, row=row):
+    def validate_schema(metadata):
+        if not metadata.schema.equals(CRYPTO_EPISODE_SCHEMA, check_metadata=False):
+            raise ValueError("crypto_episode_schema_invalid")
 
-                        def observe():
-                            nonlocal terminal_observed
-                            for batch in batches:
-                                for value in batch.valuations:
-                                    if value.phase == "end":
-                                        terminal_observed = (
-                                            value.timestamp_ns
-                                            if terminal_observed is None
-                                            else max(
-                                                terminal_observed, value.timestamp_ns
-                                            )
-                                        )
-                                yield batch
-
-                        with closing_iterator(observe()) as observed:
-                            if consume_episode is not None:
-                                consume_episode(row, artifact, observed)
-                            for _ in observed:
-                                pass
-
-                    expected_child = _episode_envelope(envelope, start, stop)
-                    if row["ledger_identity"] != expected_child.instance_identity:
-                        raise ValueError("crypto_episode_child_contract_invalid")
-                    child_identities = {
-                        path.removeprefix(child_root + "/"): identities[path]
-                        for path in child_paths
-                    }
-                    child = read_portfolio_ledger_artifact(
-                        root / child_root,
-                        expected_identity=expected_child.instance_identity,
-                        expected_member_identities=child_identities,
-                        consume_batches=consume,
-                    )
-                    if terminal_observed != terminal:
-                        raise ValueError("crypto_episode_child_contract_invalid")
-                    count += 1
-                    yielded_value = (row, child)
-                    try:
-                        yield yielded_value
-                    except GeneratorExit:
-                        return
-        if not count or expected_paths != {member["path"] for member in members}:
-            raise ValueError("crypto_episode_child_members_invalid")
-    except BaseException as body_error:
-        primary = body_error
-        raise
-    finally:
-        try:
-            observed_paths = set()
-            _visit_member_paths(
-                root, lambda relative, path: observed_paths.add(relative)
-            )
-            if observed_paths != set(identities) or any(
-                (
-                    dataset_file_identity(root / path) != identity
-                    for path, identity in identities.items()
+    chunks = iter_declared_parquet_member_batches(
+        artifact.root / "episodes.parquet", metadata_observer=validate_schema
+    )
+    count = 0
+    with closing_iterator(chunks):
+        for frame in chunks:
+            for row in frame.to_dict("records"):
+                start, stop, terminal = (
+                    int(row["start_ns"]),
+                    int(row["stop_ns"]),
+                    int(row["terminal_valuation_ns"]),
                 )
-            ):
-                raise ValueError("crypto_episode_member_identity_changed")
-            if (
-                manifest_identity is not None
-                and dataset_file_identity(root / "manifest.json") != manifest_identity
-            ):
-                raise ValueError("crypto_episode_manifest_identity_changed")
-        except BaseException as error:
-            if primary is None:
-                raise
-            primary.add_note(
-                "episode member verification also failed: " + type(error).__name__
-            )
+                reasons = list(row["stop_reasons"])
+                episode_id = _episode_id(start, stop)
+                child_root = f"episodes/{episode_id}"
+                if (
+                    row["episode_id"] != episode_id
+                    or row["ledger_root"] != child_root
+                    or not first <= start <= terminal < stop <= last + 1
+                    or previous_stop is not None
+                    and start < previous_stop
+                    or not reasons
+                    or reasons != sorted(set(reasons))
+                    or not set(reasons) <= _EPISODE_STOP_REASONS
+                    or row["termination"]
+                    != ("PLANNED_END" if stop == last + 1 else "TRUNCATED")
+                    or ("planned_oos_end" in reasons) != (stop == last + 1)
+                ):
+                    raise ValueError("crypto_episode_index_invalid")
+                previous_stop = stop
+                row["stop_reasons"] = reasons
+                terminal_observed = None
+
+                def consume(child, batches, row=row, start=start, stop=stop):
+                    if child.capital != artifact.capital or child.metadata[
+                        "window"
+                    ] != {
+                        "start": pd.Timestamp(start).isoformat(),
+                        "end": pd.Timestamp(stop - 1).isoformat(),
+                    }:
+                        raise ValueError("crypto_episode_child_contract_invalid")
+
+                    def observe():
+                        nonlocal terminal_observed
+                        for batch in batches:
+                            for value in batch.valuations:
+                                if value.phase == "end":
+                                    terminal_observed = (
+                                        value.timestamp_ns
+                                        if terminal_observed is None
+                                        else max(terminal_observed, value.timestamp_ns)
+                                    )
+                            yield batch
+
+                    with closing_iterator(observe()) as observed:
+                        if consume_episode is not None:
+                            consume_episode(row, child, observed)
+                        for _ in observed:
+                            pass
+
+                child = read_portfolio_ledger_artifact(
+                    artifact.root / child_root, consume_batches=consume
+                )
+                if terminal_observed != terminal:
+                    raise ValueError("crypto_episode_child_contract_invalid")
+                count += 1
+                yield row, child
+    if not count:
+        raise ValueError("crypto_episode_child_members_invalid")
 
 
 @dataclass(frozen=True, slots=True)
 class CryptoEpisodeArtifact:
     root: Path
-    identity: str
     capital: PortfolioCapital
-    _envelope: dict
-    _members: tuple
-    _identities: dict
-    _manifest_identity: object
+    metadata: dict
 
     def iter_episodes(self, *, consume_episode=None):
-        identities = {}
-        with semantic_artifact_read_session(
-            self.root,
-            expected_identity=self.identity,
-            member_identities=identities,
-            expected_member_identities={
-                **self._identities,
-                "manifest.json": self._manifest_identity,
-            },
-        ) as (envelope, members):
-            with closing_iterator(
-                _episode_rows(
-                    self.root,
-                    envelope,
-                    members,
-                    self._identities,
-                    self._manifest_identity,
-                    consume_episode,
-                )
-            ) as episodes:
-                for row in episodes:
-                    try:
-                        yield row
-                    except GeneratorExit:
-                        return
+        with closing_iterator(_episode_rows(self, consume_episode)) as episodes:
+            yield from episodes
 
 
-def read_crypto_episode_artifact(
-    root, *, expected_identity, expected_member_identities=None, consume_episode=None
-):
+def read_crypto_episode_artifact(root, *, consume_episode=None):
     root = Path(root)
-    identities = {}
-    with semantic_artifact_read_session(
-        root,
-        expected_identity=expected_identity,
-        member_identities=identities,
-        expected_member_identities=expected_member_identities,
-    ) as (envelope, members):
-        manifest_identity = identities["manifest.json"]
-        artifact = CryptoEpisodeArtifact(
-            root,
-            expected_identity,
-            _capital(envelope),
-            envelope,
-            members,
-            {key: value for key, value in identities.items() if key != "manifest.json"},
-            manifest_identity,
-        )
+    _, manifest = read_qrp_json_file(root / "manifest.json")
+    if (
+        manifest.get("schema_id") != "qrp-crypto-episodes"
+        or manifest.get("members") != ["episodes.parquet"]
+        or not isinstance(manifest.get("metadata"), dict)
+    ):
+        raise ValueError("crypto_episode_manifest_invalid")
+    artifact = CryptoEpisodeArtifact(
+        root, PortfolioCapital(**manifest["capital"]), manifest["metadata"]
+    )
+    _episode_window(artifact.metadata)
+    if consume_episode is not None:
         with closing_iterator(
-            _episode_rows(
-                root,
-                envelope,
-                members,
-                artifact._identities,
-                manifest_identity,
-                consume_episode,
-            )
-        ) as episodes:
-            for _row, _ledger in episodes:
+            artifact.iter_episodes(consume_episode=consume_episode)
+        ) as rows:
+            for _ in rows:
                 pass
-        return artifact
+    return artifact
 
 
-def write_crypto_episode_artifact(logical_root, *, envelope, produce):
-    """Publish the complete episode collection only after every child validates."""
+def write_crypto_episode_artifact(output_path, *, capital, metadata, produce):
+    """Publish new explicit output only after every indexed child validates."""
+    if not isinstance(capital, PortfolioCapital):
+        raise ValueError("crypto_episode_capital_invalid")
+    metadata = qrp_json_object_snapshot(metadata)
+    _episode_window(metadata)
 
     def write(staging):
         count = 0
@@ -337,14 +208,12 @@ def write_crypto_episode_artifact(logical_root, *, envelope, produce):
 
             def emit_episode(*, start_ns, stop_ns, termination, stop_reasons, produce):
                 nonlocal count
-                episode_id = _episode_identity(
-                    envelope.instance_identity, start_ns, stop_ns
-                )
-                child = _episode_envelope(envelope.payload(), start_ns, stop_ns)
+                if type(start_ns) is not int or type(stop_ns) is not int:
+                    raise ValueError("crypto_episode_index_invalid")
+                episode_id = _episode_id(start_ns, stop_ns)
                 terminal = None
 
                 def produce_child(emit):
-
                     def capture(batch):
                         nonlocal terminal
                         for value in batch.valuations:
@@ -358,9 +227,16 @@ def write_crypto_episode_artifact(logical_root, *, envelope, produce):
 
                     return produce(capture)
 
-                root = write_portfolio_ledger_artifact(
+                child = write_portfolio_ledger_artifact(
                     staging / "episodes" / episode_id,
-                    envelope=child,
+                    capital=capital,
+                    metadata={
+                        **metadata,
+                        "window": {
+                            "start": pd.Timestamp(start_ns).isoformat(),
+                            "end": pd.Timestamp(stop_ns - 1).isoformat(),
+                        },
+                    },
                     produce=produce_child,
                 )
                 row = {
@@ -370,8 +246,7 @@ def write_crypto_episode_artifact(logical_root, *, envelope, produce):
                     "terminal_valuation_ns": terminal,
                     "termination": termination,
                     "stop_reasons": list(stop_reasons),
-                    "ledger_root": root.relative_to(staging).as_posix(),
-                    "ledger_identity": child.instance_identity,
+                    "ledger_root": child.relative_to(staging).as_posix(),
                 }
                 write_index(pa.Table.from_pylist([row], schema=CRYPTO_EPISODE_SCHEMA))
                 count += 1
@@ -381,27 +256,22 @@ def write_crypto_episode_artifact(logical_root, *, envelope, produce):
                 raise PortfolioTargetBlocked(
                     "crypto_execution_qualified_episode_missing"
                 )
-
-    def validate(staging, members):
-        identities = {}
-        if (
-            _member_inventory(
-                staging,
-                expected_paths={member["path"] for member in members},
-                verified_identities=identities,
-            )
-            != members
-        ):
-            raise ValueError("crypto_episode_member_integrity_invalid")
-        with closing_iterator(
-            _episode_rows(staging, envelope.payload(), members, identities)
-        ) as rows:
-            for _row, _ledger in rows:
+        write_manifest(
+            staging / "manifest.json",
+            {
+                "schema_id": "qrp-crypto-episodes",
+                "capital": asdict(capital),
+                "metadata": metadata,
+                "members": ["episodes.parquet"],
+            },
+        )
+        artifact = read_crypto_episode_artifact(staging)
+        with closing_iterator(artifact.iter_episodes()) as rows:
+            for _ in rows:
                 pass
 
-    return write_semantic_artifact(
-        Path(logical_root), envelope, write, staged_validator=validate
-    )
+    atomic_write_directory(Path(output_path), write)
+    return Path(output_path)
 
 
 def summarize_crypto_ledger(artifact, batches, *, windows_ns=None, consume_batch=None):

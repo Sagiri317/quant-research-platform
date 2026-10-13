@@ -759,3 +759,14 @@ def test_unbounded_nav_roundoff_is_undefined_not_zero_risk(capital):
             trial_sharpes=[0.1, 0.2],
             return_roundoff=errors,
         )
+
+
+@pytest.mark.parametrize("sign", [1, -1])
+def test_common_sample_does_not_hide_infinity_behind_another_missing_candidate(sign):
+    frame = pd.DataFrame({"a": [1.0, sign * np.inf, 2.0], "b": [3.0, np.nan, 4.0]})
+    with pytest.raises(ValueError, match="candidate_matrix_nonfinite"):
+        aligned_candidate_matrix(frame)
+    frame.loc[1, "a"] = np.nan
+    result = aligned_candidate_matrix(frame)
+    assert result.observation_count == 2
+    assert result.dropped_observation_count == 1

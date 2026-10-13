@@ -39,59 +39,50 @@ from quant_research_platform.storage.datasets.reading import (
     materialize_dataset_session,
     open_dataset_session,
 )
-from quant_research_platform.storage.datasets.schema import (
-    COMMON_MANIFEST_METADATA_KEY,
-    dataset_identity_payload,
-)
 from quant_research_platform.storage.datasets.writing import (
-    DatasetWriteReceipt,
     write_dataset,
 )
 from quant_research_platform.storage.identity import require_artifact_root
-from quant_research_platform.storage.layout import StorageLayout
 
 
 def assemble_research_dataset(
     *,
-    layout: StorageLayout,
+    inputs: Mapping[str, Path],
+    output_root: Path,
     dataset_catalog: ResearchDatasetCatalog,
     processed_catalog: ProcessedDataCatalog,
     dataset_id: str,
     time_window: TimeWindow,
-    instance_metadata: Mapping[str, object] | None = None,
+    metadata: Mapping[str, object] | None = None,
 ) -> Path:
     """Assemble one registered research dataset from processed inputs."""
     spec = dataset_catalog.get(dataset_id)
     _validate_research_input_specs(spec, processed_catalog)
     input_sessions = _open_input_dataset_sessions(
-        layout=layout,
+        inputs=inputs,
         dataset_spec=spec,
         processed_catalog=processed_catalog,
         time_window=time_window,
     )
     return _assemble_research_dataset_from_sessions(
-        layout=layout,
+        output_root=output_root,
         spec=spec,
         time_window=time_window,
         input_sessions=input_sessions,
-        instance_metadata=instance_metadata,
+        metadata=metadata,
     )
 
 
 def _assemble_research_dataset_from_sessions(
     *,
-    layout: StorageLayout,
+    output_root: Path,
     spec: ResearchDatasetSpec,
     time_window: TimeWindow,
     input_sessions: Mapping[str, DatasetSession],
-    instance_metadata: Mapping[str, object] | None,
+    metadata: Mapping[str, object] | None,
 ) -> Path:
-    artifact_root = require_artifact_root(
-        layout.target_root(
-            spec.data_id, layout.research_dataset_root(spec.market_id, spec.data_id)
-        )
-    )
-    metadata = dict(instance_metadata or {})
+    artifact_root = require_artifact_root(output_root)
+    metadata = dict(metadata or {})
     diagnostics = None
     if spec.feature_transforms:
         metadata["producer_diagnostics"] = dict(
@@ -106,25 +97,14 @@ def _assemble_research_dataset_from_sessions(
         diagnostics=diagnostics,
     )
 
-    def verify_input_sessions(_receipt: DatasetWriteReceipt) -> None:
-        for session in input_sessions.values():
-            session.verify()
-
-    if COMMON_MANIFEST_METADATA_KEY not in metadata:
-        metadata["input_dataset_identities"] = _input_dataset_identities(
-            dataset_spec=spec, sessions=input_sessions
-        )
-        base_manifest = input_sessions[spec.base_input_data_id].manifest
-        if "source_artifact_identity" in base_manifest:
-            metadata["source_artifact_identity"] = base_manifest[
-                "source_artifact_identity"
-            ]
+    metadata["inputs"] = {
+        data_id: str(session.root) for data_id, session in input_sessions.items()
+    }
     write_dataset(
         artifact_root,
         chunks,
         spec=spec,
-        instance_metadata=metadata,
-        staged_validator=verify_input_sessions,
+        metadata=metadata,
     )
     return artifact_root
 
@@ -515,25 +495,15 @@ def _a_share_model_target(frame: pd.DataFrame) -> pd.Series:
     return target
 
 
-def _input_dataset_identities(
-    *, dataset_spec: ResearchDatasetSpec, sessions: Mapping[str, DatasetSession]
-) -> dict[str, dict[str, str]]:
-    identities: dict[str, dict[str, str]] = {}
-    for data_id in dataset_spec.input_data_ids:
-        session = sessions[data_id]
-        if session.spec.get("data_id") != data_id:
-            raise ValueError("invalid_research_input_dataset_identity")
-        identities[data_id] = dataset_identity_payload(session.spec, session.manifest)
-    return dict(sorted(identities.items()))
-
-
 def _open_input_dataset_sessions(
     *,
-    layout: StorageLayout,
+    inputs: Mapping[str, Path],
     dataset_spec: ResearchDatasetSpec,
     processed_catalog: ProcessedDataCatalog,
     time_window: TimeWindow,
 ) -> dict[str, DatasetSession]:
+    if set(inputs) != set(dataset_spec.input_data_ids):
+        raise ValueError("research_input_paths_mismatch")
     sessions: dict[str, DatasetSession] = {}
     existing_columns: tuple[str, ...] = ()
     for data_id in _ordered_input_data_ids(dataset_spec):
@@ -541,13 +511,209 @@ def _open_input_dataset_sessions(
         columns = _processed_input_columns(
             dataset_spec, processed_spec, existing_columns=existing_columns
         )
-        root = layout.target_root(
-            data_id,
-            layout.processed_data_root(
-                processed_spec.market_id, processed_spec.kind, processed_spec.data_id
-            ),
-        )
+        root = inputs[data_id]
         session = open_dataset_session(root, columns=columns, time_window=time_window)
+        if (
+            session.spec.get("data_id") != data_id
+            or tuple(session.spec.get("primary_key", ())) != processed_spec.primary_key
+            or session.spec.get("market_id") != str(processed_spec.market_id)
+        ):
+            raise ValueError("research_input_semantics_mismatch")
+        for column in columns:
+            if (
+                session.spec["column_roles"].get(column)
+                != processed_spec.column_roles[column].value
+            ):
+                raise ValueError("research_input_column_role_mismatch")
         sessions[data_id] = session
         existing_columns = tuple(dict.fromkeys((*existing_columns, *columns)))
     return sessions
+
+
+def assemble(config: Mapping) -> Path:
+    """Assemble explicit tables, ordered factors, labels, and causal recipes."""
+    from quant_research_platform.contracts.features import FEATURE_RECIPES
+    from quant_research_platform.research.features.transforms import feature_transforms
+
+    required = {"market_id", "dataset_id", "inputs", "time_window", "output_root"}
+    optional = {
+        "factor_columns",
+        "label_columns",
+        "feature_recipe",
+        "base_input_data_id",
+        "sparse_input_data_ids",
+    }
+    if (
+        not isinstance(config, Mapping)
+        or not required <= set(config)
+        or set(config) - required - optional
+    ):
+        raise ValueError("assemble_fields_invalid")
+    if any(
+        type(config[key]) is not str or not config[key]
+        for key in ("market_id", "dataset_id", "output_root")
+    ):
+        raise ValueError("assemble_value_invalid")
+    inputs = config["inputs"]
+    if (
+        not isinstance(inputs, Mapping)
+        or not inputs
+        or any(
+            type(k) is not str or not k or type(v) is not str or not v
+            for k, v in inputs.items()
+        )
+    ):
+        raise ValueError("assemble_input_paths_invalid")
+    bounds = config["time_window"]
+    if not isinstance(bounds, Mapping) or set(bounds) != {"start", "end"}:
+        raise ValueError("assemble_window_invalid")
+    window = TimeWindow(**bounds)
+    if config["market_id"] == "a_share":
+        from quant_research_platform.markets.implementations.a_share.processed import (
+            catalog as market_catalog,
+        )
+        from quant_research_platform.research.protocols.a_share import (
+            research_dataset_catalog,
+        )
+
+        processed = market_catalog.processed_catalog()
+    elif config["market_id"] == "crypto":
+        from quant_research_platform.markets.implementations.crypto.processed import (
+            catalog as market_catalog,
+        )
+        from quant_research_platform.research.protocols.crypto_hft import (
+            build_hft_research_dataset_catalog as research_dataset_catalog,
+        )
+
+        processed = market_catalog.hft_processed_catalog()
+    else:
+        raise ValueError("assemble_market_invalid")
+    base = research_dataset_catalog().get(config["dataset_id"])
+    factors = config.get("factor_columns", list(base.factor_columns))
+    labels = config.get("label_columns", list(base.label_columns))
+    for name, values in (("factor_columns", factors), ("label_columns", labels)):
+        if (
+            type(values) is not list
+            or not values
+            or any(type(v) is not str or not v for v in values)
+            or len(set(values)) != len(values)
+        ):
+            raise ValueError("assemble_" + name + "_invalid")
+    if set(labels) - set(base.label_columns):
+        raise ValueError("assemble_label_not_available")
+    available_factors = {
+        column
+        for spec in processed.list()
+        for column, role in spec.column_roles.items()
+        if role is ColumnRole.FACTOR
+    }
+    if set(factors) - available_factors or (
+        base.market_id == MARKET_ID and set(factors) - set(base.factor_columns)
+    ):
+        raise ValueError("assemble_factor_not_available")
+    recipe = config.get(
+        "feature_recipe", "a_share_canonical" if base.market_id == MARKET_ID else None
+    )
+    if base.market_id != MARKET_ID and "feature_recipe" in config:
+        raise ValueError("assemble_feature_recipe_not_supported")
+    if recipe is not None and (
+        type(recipe) is not str or recipe not in FEATURE_RECIPES
+    ):
+        raise ValueError("unsupported_feature_recipe")
+    transforms = feature_transforms(tuple(factors), recipe_id=recipe) if recipe else ()
+    features = tuple(
+        column for transform in transforms for column in transform.output_columns
+    )
+    context = [
+        column
+        for column in base.context_columns
+        if column != "model_target_available_at" or "model_target" in labels
+    ]
+    # Maturity support is retained with the economic labels, never placed in X.
+    labels = list(labels)
+    if "model_target" in labels:
+        labels.extend(("forward_return_20d", "forward_return_20d_available_at"))
+    for label in tuple(labels):
+        maturity = label + "_available_at"
+        if maturity in base.label_columns:
+            labels.append(maturity)
+        elif maturity in base.context_columns and maturity not in context:
+            context.append(maturity)
+    labels = tuple(dict.fromkeys(labels))
+    for data_id in inputs:
+        input_spec = processed.get(data_id)
+        context.extend(
+            column
+            for column, role in input_spec.column_roles.items()
+            if role is ColumnRole.CONTEXT and column not in labels
+        )
+    context = tuple(dict.fromkeys(context))
+    base_input = config.get("base_input_data_id", base.base_input_data_id)
+    if type(base_input) is not str or base_input not in inputs:
+        raise ValueError("assemble_base_input_invalid")
+    if base_input != base.base_input_data_id:
+        from quant_research_platform.markets.implementations.crypto.ids import (
+            HFT_INFORMATION_PANEL_DATA_ID,
+        )
+
+        if base.market_id == MARKET_ID or base_input != HFT_INFORMATION_PANEL_DATA_ID:
+            raise ValueError("assemble_base_input_invalid")
+    sparse_inputs = config.get("sparse_input_data_ids", [])
+    if (
+        type(sparse_inputs) is not list
+        or any(type(value) is not str for value in sparse_inputs)
+        or len(set(sparse_inputs)) != len(sparse_inputs)
+    ):
+        raise ValueError("assemble_sparse_inputs_invalid")
+    if sparse_inputs:
+        from quant_research_platform.markets.implementations.crypto import (
+            ids as crypto_ids,
+        )
+
+        permitted_sparse = {
+            crypto_ids.HFT_DERIVATIVE_DATA_ID,
+            crypto_ids.HFT_SPOT_CONTEXT_DATA_ID,
+            *crypto_ids.HFT_EXTERNAL_DATA_IDS.values(),
+        }
+        if base.market_id == MARKET_ID or not set(
+            sparse_inputs
+        ) <= permitted_sparse.intersection(inputs):
+            raise ValueError("assemble_sparse_inputs_invalid")
+    coverage = {key: "sparse" if key in sparse_inputs else "strict" for key in inputs}
+    roles = {
+        **{key: base.column_roles[key] for key in base.primary_key},
+        **{key: ColumnRole.FACTOR for key in factors},
+        **{key: ColumnRole.FEATURE for key in features},
+        **{key: ColumnRole.LABEL for key in labels},
+        **{key: base.column_roles[key] for key in base.filter_columns},
+        **{key: ColumnRole.CONTEXT for key in context},
+    }
+    spec = replace(
+        base,
+        input_data_ids=tuple(inputs),
+        base_input_data_id=base_input,
+        factor_columns=tuple(factors),
+        feature_columns=features,
+        feature_transforms=transforms,
+        label_columns=labels,
+        context_columns=context,
+        column_roles=roles,
+        key_coverage=coverage,
+    )
+    return assemble_research_dataset(
+        inputs={key: Path(value) for key, value in inputs.items()},
+        output_root=Path(config["output_root"]),
+        dataset_catalog=ResearchDatasetCatalog((spec,)),
+        processed_catalog=processed,
+        dataset_id=spec.data_id,
+        time_window=window,
+        metadata={
+            "parameters": {
+                "factor_columns": list(factors),
+                "label_columns": list(labels),
+                "feature_recipe": recipe,
+                "sparse_input_data_ids": sparse_inputs,
+                "time_window": dict(bounds),
+            }
+        },
+    )

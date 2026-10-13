@@ -214,7 +214,7 @@ def read_export_header(
     primary = None
     try:
         record = next(rows, None)
-        columns = tuple(materialize_header_record(record)) if record is not None else ()
+        columns = tuple(validate_export_header(record)) if record is not None else ()
         if not columns:
             raise ValueError("malformed_csmar_csv_row")
     except BaseException as body_error:
@@ -232,7 +232,7 @@ def read_export_header(
     return columns
 
 
-def materialize_header_record(record: list[str]) -> list[str]:
+def validate_export_header(record: list[str]) -> list[str]:
     """Materialize a legal header while preserving duplicate-header errors."""
 
     columns = record

@@ -147,7 +147,7 @@ def test_scaler_and_linear_fit_match_original_arithmetic(kind, weighting, monkey
         filter_metadata={},
         preprocessing=(weights, actual_scaler, matrix),
     )
-    spec = SimpleNamespace(label_column="label", input_columns=tuple(frame.columns))
+    spec = SimpleNamespace(target_column="label", input_columns=tuple(frame.columns))
     monkeypatch.setattr(fitting, "model_metadata", lambda *args, **kwargs: {})
     design = np.column_stack((np.ones(len(frame)), matrix.to_numpy(dtype="float64")))
     _, exponent = np.frexp(float(np.max(np.abs(target))))
@@ -212,7 +212,7 @@ def test_linear_lstsq_receives_the_fresh_design_without_an_extra_copy(monkeypatc
         filter_metadata={},
         preprocessing=(weights, scaler, matrix),
     )
-    spec = SimpleNamespace(label_column="label", input_columns=tuple(frame.columns))
+    spec = SimpleNamespace(target_column="label", input_columns=tuple(frame.columns))
     monkeypatch.setattr(fitting, "model_metadata", lambda *args, **kwargs: {})
     captured = []
     original_stack, original_lstsq = np.column_stack, np.linalg.lstsq

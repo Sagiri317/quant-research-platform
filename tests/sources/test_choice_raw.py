@@ -75,10 +75,19 @@ def test_official_shapes_roundtrip_and_exact_reuse(
     sdk = SDK(response)
     layout = StorageLayout(tmp_path)
     with choice_session(sdk) as session:
-        root = session.fetch(layout, request)
+        root = session.fetch(
+            layout.raw_source_root("choice") / request.endpoint / request.identity(),
+            request,
+        )
         assert root.is_relative_to(tmp_path / "data/raw/choice")
         original = Path(native_filesystem_path(root / "response.csv")).read_bytes()
-        assert session.fetch(layout, request) == root
+        with pytest.raises(FileExistsError, match="choice_output_already_exists"):
+            session.fetch(
+                layout.raw_source_root("choice")
+                / request.endpoint
+                / request.identity(),
+                request,
+            )
         assert sdk.calls == 1
         restored = read_choice_response(root, request)
         assert restored == vars(response)
@@ -113,9 +122,20 @@ def test_documented_ctr_report_type_is_forwarded_and_persisted_exactly(tmp_path:
         )
     )
     with choice_session(sdk) as session:
-        root = session.fetch(StorageLayout(tmp_path), request)
+        root = session.fetch(
+            StorageLayout(tmp_path).raw_source_root("choice")
+            / request.endpoint
+            / request.identity(),
+            request,
+        )
         before = _immediate_file_bytes(root)
-        assert session.fetch(StorageLayout(tmp_path), request) == root
+        with pytest.raises(FileExistsError, match="choice_output_already_exists"):
+            session.fetch(
+                StorageLayout(tmp_path).raw_source_root("choice")
+                / request.endpoint
+                / request.identity(),
+                request,
+            )
         assert sdk.calls == 1 and sdk.last_arguments == request.arguments
         restored = read_choice_response(root, request)
         assert restored == vars(sdk.response)
@@ -133,7 +153,12 @@ def test_sdk_null_empty_nonfinite_and_bytes_are_distinct(tmp_path: Path) -> None
     )
     request = _request()
     with choice_session(sdk) as session:
-        root = session.fetch(StorageLayout(tmp_path), request)
+        root = session.fetch(
+            StorageLayout(tmp_path).raw_source_root("choice")
+            / request.endpoint
+            / request.identity(),
+            request,
+        )
         response = read_choice_response(root, request)
         restored = response["Data"]["0"]
         assert restored[:5] == values[:5]
@@ -151,7 +176,12 @@ def test_corrupt_completed_response_refuses_reuse_without_overwriting(
     sdk = SDK(_response(Indicators=["QKMZ"], Data={"0": [12]}))
     request = _request()
     with choice_session(sdk) as session:
-        root = session.fetch(StorageLayout(tmp_path), request)
+        root = session.fetch(
+            StorageLayout(tmp_path).raw_source_root("choice")
+            / request.endpoint
+            / request.identity(),
+            request,
+        )
         sidecar = root / "response.metadata.json"
         metadata = json.loads(
             Path(native_filesystem_path(sidecar)).read_text(encoding="utf-8")
@@ -173,8 +203,13 @@ def test_corrupt_completed_response_refuses_reuse_without_overwriting(
         if corruption != "value":
             filesystem_write_text(sidecar, json.dumps(metadata), encoding="utf-8")
         before = _immediate_file_bytes(root)
-        with pytest.raises(ValueError):
-            session.fetch(StorageLayout(tmp_path), request)
+        with pytest.raises(FileExistsError):
+            session.fetch(
+                StorageLayout(tmp_path).raw_source_root("choice")
+                / request.endpoint
+                / request.identity(),
+                request,
+            )
         with pytest.raises(ValueError):
             read_choice_response(root, request)
             pytest.fail("corrupt raw became visible")
@@ -187,7 +222,12 @@ def test_empty_success_and_failed_attempt_then_explicit_success(tmp_path: Path) 
     sdk = SDK(_response(ErrorCode=10001001, ErrorMsg="transport failed"))
     with choice_session(sdk) as session:
         with pytest.raises(RuntimeError, match="choice_query_failed:10001001"):
-            session.fetch(StorageLayout(tmp_path), request)
+            session.fetch(
+                StorageLayout(tmp_path).raw_source_root("choice")
+                / request.endpoint
+                / request.identity(),
+                request,
+            )
         failures = list(
             filesystem_glob(
                 tmp_path / "data/raw/choice/ctr/failed", "**/response.metadata.json"
@@ -196,7 +236,12 @@ def test_empty_success_and_failed_attempt_then_explicit_success(tmp_path: Path) 
         assert len(failures) == 1
         assert read_manifest(failures[0])["metadata"]["status"] == "FAILED"
         sdk.response = _response()
-        root = session.fetch(StorageLayout(tmp_path), request)
+        root = session.fetch(
+            StorageLayout(tmp_path).raw_source_root("choice")
+            / request.endpoint
+            / request.identity(),
+            request,
+        )
         assert "failed" not in root.parts
         assert read_manifest(root / "response.metadata.json")["row_count"] == 0
         assert (
@@ -207,7 +252,13 @@ def test_empty_success_and_failed_attempt_then_explicit_success(tmp_path: Path) 
         )
         response = read_choice_response(root, request)
         assert response["Data"] == {}
-        session.fetch(StorageLayout(tmp_path), request)
+        with pytest.raises(FileExistsError):
+            session.fetch(
+                StorageLayout(tmp_path).raw_source_root("choice")
+                / request.endpoint
+                / request.identity(),
+                request,
+            )
         assert sdk.calls == 2
 
 
@@ -217,19 +268,34 @@ def test_invalid_shape_preserves_old_good_and_long_cell_is_accepted(
     request = _request()
     sdk = SDK(_response(Indicators=["QKMZ"], Data={"0": [1]}))
     with choice_session(sdk) as session:
-        root = session.fetch(StorageLayout(tmp_path), request)
+        root = session.fetch(
+            StorageLayout(tmp_path).raw_source_root("choice")
+            / request.endpoint
+            / request.identity(),
+            request,
+        )
         original = Path(native_filesystem_path(root / "response.csv")).read_bytes()
         different = replace(request, sdk_version="other-sdk")
         sdk.response = _response(Indicators=["QKMZ"], Data={"0": [1, 2]})
         with pytest.raises(ValueError):
-            session.fetch(StorageLayout(tmp_path), different)
+            session.fetch(
+                StorageLayout(tmp_path).raw_source_root("choice")
+                / different.endpoint
+                / different.identity(),
+                different,
+            )
         assert (
             Path(native_filesystem_path(root / "response.csv")).read_bytes() == original
         )
         assert len(list(filesystem_iterdir(root.parent))) == 1
         values = ["x" * (1024 * 1024 + 1)]
         sdk.response = _response(Indicators=["QKMZ"], Data={"0": values})
-        published = session.fetch(StorageLayout(tmp_path), different)
+        published = session.fetch(
+            StorageLayout(tmp_path).raw_source_root("choice")
+            / different.endpoint
+            / different.identity(),
+            different,
+        )
         assert read_choice_response(published, different)["Data"]["0"] == values
         assert (
             Path(native_filesystem_path(root / "response.csv")).read_bytes() == original
@@ -254,7 +320,12 @@ def test_atomic_failure_preserves_primary_and_session_exclusivity(
             with pytest.raises(RuntimeError, match="choice_session_busy"):
                 with choice_session(sdk):
                     pass
-            session.fetch(StorageLayout(tmp_path), _request())
+            session.fetch(
+                StorageLayout(tmp_path).raw_source_root("choice")
+                / _request().endpoint
+                / _request().identity(),
+                _request(),
+            )
     assert caught.value is primary
     assert any("choice logout" in note for note in primary.__notes__)
     assert sdk.stops == 1
@@ -300,7 +371,10 @@ def test_scalar_saved_metadata_preserves_primary_error_at_read_and_reuse(
     request = _request()
     layout = StorageLayout(tmp_path)
     with choice_session(sdk) as session:
-        root = session.fetch(layout, request)
+        root = session.fetch(
+            layout.raw_source_root("choice") / request.endpoint / request.identity(),
+            request,
+        )
         path = root / "response.metadata.json"
         original = Path(native_filesystem_path(path)).read_bytes()
         manifest = json.loads(original)
@@ -311,8 +385,13 @@ def test_scalar_saved_metadata_preserves_primary_error_at_read_and_reuse(
         with pytest.raises(ValueError, match="^choice_saved_metadata_invalid$"):
             read_choice_response(root, request)
             pytest.fail("invalid metadata admitted")
-        with pytest.raises(ValueError, match="^choice_saved_metadata_invalid$"):
-            session.fetch(layout, request)
+        with pytest.raises(FileExistsError, match="choice_output_already_exists"):
+            session.fetch(
+                layout.raw_source_root("choice")
+                / request.endpoint
+                / request.identity(),
+                request,
+            )
         assert sdk.calls == 1
         assert Path(native_filesystem_path(path)).read_bytes() == corrupt
 
@@ -333,7 +412,12 @@ def test_documented_index_weight_request_preserves_index_and_date(tmp_path):
         Data={"0": ["000905.SH", "600000.SH", "2023-12-29", 0.5]},
     )
     with choice_session(SDK(response)) as session:
-        root = session.fetch(StorageLayout(tmp_path), request)
+        root = session.fetch(
+            StorageLayout(tmp_path).raw_source_root("choice")
+            / request.endpoint
+            / request.identity(),
+            request,
+        )
         assert read_choice_response(root, request) == vars(response)
     with pytest.raises(ValueError, match="choice_request_after_cutoff"):
         replace(

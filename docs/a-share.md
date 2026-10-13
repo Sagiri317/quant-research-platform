@@ -2,7 +2,8 @@
 
 本文件说明研究目标、支持能力、研究推进顺序和量化合同。
 能力说明以生产者和持久化消费者为依据；合成验证、真实数据覆盖和经济有效性分别提供证据。
-正式协议是 a_share_low_frequency，入口 profile 为 a_share_csmar_choice。
+正式协议是 a_share_low_frequency，只读目录 profile 为 a_share_csmar_choice；
+计算操作各自接收显式配置，不通过 profile 绑定或展开整项研究。
 本文件不是投资建议，不授权实盘、模拟账户或预建未来功能。
 
 ## 1. 研究目标与边界
@@ -26,7 +27,7 @@ CSMAR 市场/指数/行业/分析师事实及 Choice 财务事件版本 → 因�
 | 特征与标签 | 横截面资格、MAD/中性化/zscore、缺失指示、成熟标签、20日模型目标与辅助期限 | 缺少必要事实的真实样本仍不可用 |
 | 模型与预测 | 等权/IC 排名集成及 OLS/Huber/Ridge/Lasso/决策树/RF/GBRT/XGBoost/LightGBM；研究 JSON 显式选择模型，共享季度候选预测、G/Q 选择与最终冻结预测 | 算法可配置不表示已纳入某项研究或完成真实留出验证 |
 | 组合与推断 | 配置简单分位数组合或 CSI500/CSI1000 增强，选择日/周/月再平衡；复用自融资账本、成本/风险/容量/归因及预注册统计 | 配置合法不表示所有市场环境均可成交或优化可行 |
-| 报告与展示 | 唯一目标 DAG、按 run_id 的报告、CLI/API 和只读研究图片 | 入口存在与合成运行不证明真实经济有效性 |
+| 报告与展示 | 独立操作、显式数值产物、CLI/API 和只读研究图片 | 入口存在与合成运行不证明真实经济有效性 |
 
 真实数据就绪、开发完成和留出资格由对应输入验收及持久化运行证据判定，不由能力清单推断。
 
@@ -67,16 +68,20 @@ QRP A股主线是：
 
 `protocol_id = a_share_low_frequency`
 
-协议发生语义变化时使用不可变协议内容/哈希区分；不得用阶段号或版本后缀制造第二命名真值。
+研究选择及实际参数随本次产物记录；语义变化后由研究者明确重算范围并使用新输出路径，
+不使用协议哈希、软件哈希或阶段版本自动查找、失效或复用旧产物。
 
 正式经济研究期：
 
 `2014-01-01 至 2025-12-31`
 
 预热数据按因子、标签、风险和会计的真实依赖向前读取，不以研究期起点硬截历史状态。
-公共 `data materialize` / `dataset build` 的 Choice Interim 来源窗由同一协议 owner 规划，
-从 `min(2011-01-01, 请求起点)` 至请求终点；processed/PIT 与研究数据集仍只发布请求窗口。
-来源窗口进入其持久化身份，缺失会计依赖保持缺失值，不填零。
+来源准备、加工与组装分别调用 `prepare-source`、`prepare`、`assemble`。agent 显式提供
+Choice 来源的 `start_date`、`end_date` 及输出映射；`prepare-source` 不自动扩大来源窗口。
+因果历史加工从显式输入已发布的 `date_min` 读取至实际输出截止，不以固定 2011 年或
+请求起点裁掉已给出的历史状态。标签与执行掩码从同一给定输入读取所需未来本市场会话，
+不能补造未提供的端点；processed/PIT 与研究数据集只发布精确请求窗口。
+缺失会计依赖保持缺失值，不填零；缺少必需输入时不自动补跑来源准备。
 Choice 的请求终点同时约束已公开信息：首次披露和修订事件晚于终点时不进入 Interim，
 也不要求其未来快照；扩大窗口后，窗口内修订仍须具有完整可验证的快照。
 
@@ -526,32 +531,29 @@ fusion_nf_expectations
 `pv_nf_expectations` 要求完整历史行业及非金融身份，但不要求财务 PIT；融合场景继续要求合法财务 PIT。
 所选财务因子及组合风险暴露共同决定必要报表依赖；未选因子的缺失表不阻塞独立消费者。
 
-#### 配置、场景与执行阶段
+#### 科研选择与独立操作
 
 场景限定可选因子和经济资格，研究 JSON 决定评估因子、模型输入与参数、比较基线、
 组合集合及访问窗口。配置中未选择的能力不自动补齐；配置不能绕过数据、成熟度或留出准入门。
 
-随仓配置提供以下研究选择，因子数仅统计 `evaluation.factors`：
+随仓科研选择参考保留以下研究选择，因子数仅统计 `evaluation.factors`；这些文件不直接交给单操作 CLI：
 
 | 配置 | 场景 | 评估因子 | 模型 | 组合定义 |
 |---|---|---:|---:|---:|
-| [core6.json](../configs/research/a_share/core6.json) | pv_all | 6 | 11 | 5 |
-| [pv25.json](../configs/research/a_share/pv25.json) | pv_all | 25 | 11 | 5 |
-| [fusion_nf_core.json](../configs/research/a_share/fusion_nf_core.json) | fusion_nf_core | 44 | 11 | 5 |
-| [fusion_nf_expectations.json](../configs/research/a_share/fusion_nf_expectations.json) | fusion_nf_expectations | 48 | 11 | 5 |
-| [pv_expanded.json](../configs/research/a_share/pv_expanded.json) | pv_expanded | 52（50价量+2暴露） | 11 | 3 |
-| [pv_nf_expectations.json](../configs/research/a_share/pv_nf_expectations.json) | pv_nf_expectations | 29（PV25+预期4） | 11 | 3 |
+| [core6.json](research-rosters/a_share/core6.json) | pv_all | 6 | 11 | 5 |
+| [pv25.json](research-rosters/a_share/pv25.json) | pv_all | 25 | 11 | 5 |
+| [fusion_nf_core.json](research-rosters/a_share/fusion_nf_core.json) | fusion_nf_core | 44 | 11 | 5 |
+| [fusion_nf_expectations.json](research-rosters/a_share/fusion_nf_expectations.json) | fusion_nf_expectations | 48 | 11 | 5 |
+| [pv_expanded.json](research-rosters/a_share/pv_expanded.json) | pv_expanded | 52（50价量+2暴露） | 11 | 3 |
+| [pv_nf_expectations.json](research-rosters/a_share/pv_nf_expectations.json) | pv_nf_expectations | 29（PV25+预期4） | 11 | 3 |
 
 模型列统计两种排名集成及九种监督模型；六份配置均保留完整模型集合。
-组合列统计 JSON 中的定义数量，每条定义分别生成 G/Q 两组候选；它不是账本产物总数。
-未绑定研究配置的 profile 不隐式生成组合或账本目标。
+组合列统计参考 JSON 中的定义数量，研究者分别为 G/Q 构造显式候选；它不是账本产物总数。
+只读 profile 不生成组合或账本；各次计算由 agent 显式调用。
 
-| 阶段或访问域 | 配置与产物责任 |
-|---|---|
-| `stage=dataset` | 可保留完整模型、组合及选择器声明以确定同一数据规格；只请求所选数据集，不拟合、不执行组合，不解锁留出 |
-| `stage=evaluation` | 显式选择因子与标签，`models` 和 `portfolios` 必须为空；只展开因子评估终端 |
-| `stage=research` | 显式选择模型及组合；按所选目标生成候选预测、选择、统计和执行账本 |
-| `access_window=holdout` | 须绑定完整开发窗口的同协议 COMPLETE 记录、对应终端集合和已验证冻结产物；评估子图完成不替代开发冻结资格 |
+各单操作只接受自己消费的配置；科研选择表是供agent使用的设计参考，不由程序展开研究。
+训练、预测、评分、选择、组合和统计必须独立指定输入与新输出路径。
+测试集核真实冻结选择、最终模型和必要校准，不要求无关图表或全研究完成。
 
 `fusion_nf_core.json` 选择 PV25 + Fundamental19，共44个因子；名字不表示只选 `FactorSet.CORE`。
 配置中这44个因子继续分别做单因子FMB、RankIC/HAC/FDR及模型OOS研究。
@@ -898,8 +900,10 @@ FY2 = FY1 forecast_end_date + 1 calendar year  # 紧邻的下一财年，缺年�
 forward EP = median forecast EPS / unadjusted signal-day close  # 前瞻盈利收益率定义
 ```
 
-公开配置 `evaluation.forecast_freshness_days` 只接受 90 或 180，省略时为 90。
-该值经 `ProcessedDataSpec.parameters_json.freshness_days` 统一绑定来源回看、公式、DAG 与研究身份。
+`prepare` 在 `data_id=expectations_factors` 时接受 `parameters.freshness_days`，
+仅允许 90 或 180，未显式指定时沿用该数据规格的 90 日默认值。
+解析值保存在 `ProcessedDataSpec.parameters_json.freshness_days`，约束实际来源回看和公式；
+统计所声明的 `evaluation.forecast_freshness_days` 必须描述实际使用的研究选择。
 180 日方案单独创建不可变研究实例，标为 `expectations.role=robustness`；保留其模型、预测与组合链，
 但不将其候选或结果混入 90 日正式选型及 FDR、SPA、StepM、PBO 推断域。
 180 日运行内部保留训练、验证和原排序作为稳健性诊断；基础描述、HAC、基准及归因仍按原定义计算。
@@ -1047,7 +1051,9 @@ observed = 1
 
 统计和组合从已验证预测谱系绑定的持久化模型派生同一有效域，域内缺失的必需预测仍失败。
 `prediction_eligible` 只决定alpha及简单组合入选，域外alpha为NULL；持仓和benchmark会计全集不随之裁剪。
-既有持仓按原交易限制退出，许可 unknown 的对应方向订单不成交并记录原因；增强组合的incomplete资产仍固定benchmark，内部优化零系数不发布为预测。
+既有持仓按原交易限制退出，许可 unknown 的对应方向订单不成交并记录原因；
+增强组合对可到达基准的 incomplete 资产约束主动权重为零。不能交易的真实持仓仍占预算及风险，
+不得用内部零系数掩盖其风险或发布为预测，详见 §5.22.3。
 
 单因子统计始终使用原始已观测经济值，绝不使用模型填充零。
 
@@ -1087,7 +1093,7 @@ A 股经济时间线：
 
 signal time 为 t 收盘；entry/exit event time 分别为 t+1/t+1+h 开盘。
 对有限正价格端点，收益按`(exit-entry)/entry`局部稳定计算，避免先求比值再减1合并接近零的可分辨收益；
-普通、常量及非法端点的资格规则保持，最终不可表示值仍缺失。该保证随标签生产者身份绑定，不改标签期限或成熟时点。
+普通、常量及非法端点的资格规则保持，最终不可表示值仍缺失。该计算由标签生产者唯一实现，不改标签期限或成熟时点。
 日线一字板判定使用入场日 OHLC，information availability 为入场日收盘；
 标签 maturity 为所需执行事实与两端价格均已可得的离场交易日开盘。
 日频持久化日期使用 session 标签，`available_at = exit session open`；
@@ -1144,7 +1150,7 @@ can_enter / can_exit 未来执行列
 
 数据集标识依赖数据、特征和标签语义，不依赖 Ridge lambda、TE 限制或其他下游模型/组合设置。
 
-开发与留出使用同一数据集定义和唯一生产者，按实际请求窗口绑定各自的精确输入与产物身份。
+开发与留出使用同一数据集定义和唯一生产者，按实际请求窗口明确给出各自输入与新输出。
 开发标签生产者只访问开发可见末端；开发输入截止于 2023 年末。
 截至最终开发 cutoff 仍未成熟、需要 2024–2025 独立 test 事实的尾部标签保持不可用，
 不得为保存或重新评分而提前读取这些事实，也不得将其写入开发产物。
@@ -1153,7 +1159,7 @@ can_enter / can_exit 未来执行列
 
 ### 5.13 三角色、两组选择与最终留出
 
-数据角色只有 train、validation、test。development 是开发访问阶段，
+数据角色只有 train、validation、test，不另设研究访问阶段。
 selection 和 refit 是执行阶段，不构成额外数据角色。
 
 - 2014–2017 提供初始训练历史。
@@ -1180,7 +1186,7 @@ refit 不伪造重叠 train/validation，也不建立假的第四角色。
 相同配置使用相同最终拟合规则和种子。全部获批家族与配置继续保留。
 
 部分开发请求可以产生共享候选和已有季度选择。G 经济预测需要完整开发终局选择；
-此前在工作流中明确 BLOCKED: global_selection_requires_complete_development，不能虚构部分 G。
+全局选择缺完整验证历史时明确拒绝；独立合法季度拟合与Q可以继续，不能虚构部分G。
 
 最终 test 绑定明确的开发模型及各组 Alpha 校准来源。
 算法、配置、特征、系数、排名方向/权重和缩放器固定两年；
@@ -1201,10 +1207,13 @@ refit 不伪造重叠 train/validation，也不建立假的第四角色。
 | 线性与稳健回归 | OLS、Huber、Ridge、Lasso |
 | 树模型 | 普通决策树、随机森林、sklearn GradientBoostingRegressor（GBRT）、XGBoost、LightGBM |
 
-研究 JSON 的 `models`、输入列、`hyperparameters` 和 `parameter_candidates` 冻结实际候选，
-不由算法能力表隐式补齐。声明`parameter_candidates`时，季度预检、拟合、refit与reader均消费该候选序列；
-被覆盖的基础`hyperparameters`只保留在完整运行provenance，不影响MODEL科学合同或开发冻结复用。
-实际候选、输入、标签、种子与权重等其他冻结事实仍须完全匹配。
+科研选择参考中的 `models`、输入列及有序 `parameter_candidates` 声明实际候选，
+不由算法能力表隐式补齐，也不自动展开拟合。完整 `parameter_candidates` 与基础
+`hyperparameters` 不得同时声明；不能保留一份被静默忽略的参数真值。
+agent 为每个候选构造独立 `fit` 配置：`model.model_id` 标识候选，`family_id` 标识家族，
+`candidate_parameters` 声明需按真实训练样本数解析的参数；使用该字段时
+`model.hyperparameters` 必须为空。单次拟合不接收候选列表或自动参数搜索。
+实际候选参数、输入列、`target_column`、种子、权重及拟合窗口均随模型与 trial 保存。
 随仓配置的模型数量见 §5.7，六份配置均选择11种模型。普通决策树使用既有 sklearn 拟合路径，
 默认预定深度3、叶子最少样本比例0.001、种子42，不根据研究收益追加搜索。
 这一区分不代表任何模型已经通过真实研究验收。
@@ -1240,13 +1249,14 @@ fit、持久化、reload、transform 和 predict 共用 ModelMatrixScaler。
 
 主方案不使用时间衰减。
 
-预注册稳健性通过 ModelSpec/config 的 `training_weighting={"method":"equal_timestamp","half_life":756}` 执行；
-按有序训练时点的年龄乘 `0.5 ** (age / half_life)` 后重新归一化为 `sum=N_train`。
-该合同进入模型与trial身份、metadata及冻结复用，supervised缩放/拟合与rank ensemble方向/IC权重共用。
+预注册稳健性通过 ModelSpec/config 的 `training_weighting={"method":"equal_timestamp","half_life_periods":756}` 执行；
+按有序训练时点的年龄乘 `0.5 ** (age / half_life_periods)` 后重新归一化为 `sum=N_train`。
+这里的年龄是合法训练唯一 timestamp 的观察期数，不是日历天。实际配置写入模型与 trial，
+supervised 缩放/拟合与 rank ensemble 方向/IC 权重共用。
 756-period配置单独运行，派生`training_weighting.role=robustness`；不得与其他half-life模型混入同一选型实例。
 其内部训练、验证排序与单项HAC/bootstrap仍保留，正式FDR、SPA、StepM、MCS与PBO排除该实例，
 原因使用`training_weighting_robustness_excluded`；冻结test的G/Q单项比较保留，联合FDR为`NOT_APPLICABLE`。
-正式 A 股协议仅接受 `half_life=null` 主方案或独立的全 `half_life=756` 稳健性方案。
+正式 A 股协议仅接受 `half_life_periods=null` 主方案或独立的全 `half_life_periods=756` 稳健性方案。
 由 `AShareProtocol` 统一校验；主方案与稳健性混合拒绝，其他半衰期（含 378 或 null+378）
 在正式入口明确拒绝，不标为 primary，也不进入正式联合检验。通用模型与 Crypto 的半衰期
 合同保留；756-period 稳健性仍保留单项诊断，不用留出结果选择模型或参数。
@@ -1264,7 +1274,8 @@ Crypto 不接入该横截面流程。
 EWMA先扣除当前有效观测的共同最小年龄再归一化；缺失最新session不抹掉有效历史。极小半衰期下，尾部质量保留到乘上收益或残差平方之后，只对最终风险值做float64舍入；真实不可表示风险明确失败。
 FactorRiskConfig唯一拥有风险窗口、半衰期、最小观测、diagonal shrinkage、annualization与weighting；
 OptimizerConfig唯一拥有active-name/TE/turnover/industry/style/SLSQP容差和迭代上限。
-protocol序列化同一配置，运行消费同一实例；ADV participation由ExecutionAssumptions唯一拥有。
+独立 `backtest` 的 `risk_config`、`optimizer_config` 与 `assumptions` 分别解析为上述对象；
+ADV participation 由 ExecutionAssumptions 唯一拥有，不另设 CLI 覆盖值。
 协方差保持既有 PSD 准入容差；这不允许成功优化结果含负方差或非有限跟踪误差。
 优化约束、解后检查与诊断共用风险计算。浮点二次型为负时，以输入二进制值的精确算术
 区分计算舍入与真实负值；前者恢复非负结果，后者明确阻断，不投影协方差或静默截断。
@@ -1372,9 +1383,10 @@ GBRT 与 LightGBM 复用上述训练样本权重、仅训练期拟合的缩放�
 1. 按 §5.13 的 G 全正式验证窗或 Q 因果过去 12 个月窗，家族内以每日验证 RankIC 均值选择配置。
 2. 在研究 JSON 选定的家族优胜配置中，以同一组、同一截止和同一共同域选择优胜家族。
 
-A 股研究 JSON 的 `models[].model_id` 是具名模型家族身份；精确小写 `champion` 保留给组合预测选择器，不能作为 A 股模型家族名。
-此规则由同一 A 股模型合同约束配置绑定、生产、选择元数据及模型/预测产物读回，冲突原因为 `a_share_model_id_reserved`；预测 bundle reader 保留外层 `output_manifest_metadata_invalid` 及该原因链。
-正式 A 股 `models[].sample_filter_mode` 仅支持 `eligible`；省略字段沿用既有默认。`unfiltered` 在 A 股协议准入时以 `a_share_model_sample_filter_mode_not_supported` 拒绝，开发验证与最终留出使用同一资格合同。该限制不调整既有完整合法截面排名、eligible 输出和共同域投影顺序；通用及 Crypto 模型的合法 `unfiltered` 能力保留。
+科研选择参考的 `models[].model_id` 表示家族；直接 `fit` 使用 `family_id` 和
+`model.model_id` 分开记录家族与具体候选。精确小写 `champion` 保留给组合预测选择器，
+不得作为 A 股模型或家族名；拟合及评分消费同一 A 股模型合同。
+正式 A 股 `model.sample_filter_mode` 仅支持 `eligible`；省略字段沿用既有默认。`unfiltered` 在 A 股协议准入时以 `a_share_model_sample_filter_mode_not_supported` 拒绝，开发验证与最终留出使用同一资格合同。该限制不调整既有完整合法截面排名、eligible 输出和共同域投影顺序；通用及 Crypto 模型的合法 `unfiltered` 能力保留。
 `winner` 和其他拼写不被解释为优胜选择器，继续遵循各自原有身份合同；不扩展原有大小写/标识符语法，也不限制 Crypto 或通用 `ModelSpec` 的同名准入。
 
 精确并列时，按研究 JSON 中模型的声明顺序选择；候选清单只在配置中维护。
@@ -1386,36 +1398,35 @@ Lasso -> 较大的 alpha
 RF / XGB -> 更浅 / 更保守的配置
 ```
 
-必需试验失败意味着正式季度选择失败；不得静默删除候选。
+完整有序候选集合必须保留。失败或放弃的候选可用真实终态 trial 显式登记，
+记录失败原因、零验证行和未定义指标，不冒充已完成预测，也不静默删除。
+选择只从已完成候选中进行；某家族没有已完成候选则无优胜配置，全部家族均无已完成候选时失败。
 同一季度所有参加比较的家族/配置在唯一共同有效(timestamp,asset_id)域上重算验证成绩。
 先在各自完整合法截面预测，再投影共同域评分，不能先裁剪而改变rank；排名缺失中性规则不变。
 只有raw因子的rank缺失保持中性；rank模型若消费canonical值或缺失/合法性标志，仍须满足来源特征的结构有效性。
-合法部分季度 MODEL 只读取截至请求结束日的会话并据此生成有效验证折；
-coverage、评分标签成熟截止、trial 和发布窗口共用该折，训练仍使用独立的 fold.train.end。
-发布成员不保留晚于请求结束日才成熟的标签，reader 同时约束折窗口及标签截止。
-未完成整个开发期仍不生成 global 选择及最终 refit。
-每个候选的原始预测成员同时保存真实键、label、label_available_at 和 score_eligible。
-score_eligible 只表示共同评分资格；成员保留该候选自身合法的经济预测行，不能将其裁成共同域。
-选择元数据绑定精确预测成员、标签数据集身份、cutoff、共同域 semantic_identity 和 row_count。
-生产评分和发布验收逐日期核对 PK、成熟域、得分与选择结论；行数相同不代表覆盖相同。
-普通 reader 核对全部成员内容身份、冻结引用、候选顺序、预测成员、截止和 trial 父引用，
-不重算已由可信发布者验证的选择成绩，也不预加载每个模型；实际预测加载仍验证模型状态。
-此合同不声称识别恶意发布者同时改写结果并重新计算全部哈希的伪造。
-季度候选元数据、各组各次选择和最终模型元数据分别持久化，顶层仅保存唯一索引。
-季度中断接续以整季全部家族/配置通过上述验收后的不可变分片为边界，不能从未验收
-candidate scores 或 completed trial 推断完成。分片保存候选预测、季度选择、原 trial 引用
-及其实际拟合观测；相同完整 MODEL 身份的新请求经原生 reader 验证后跳过这些季度的
-训练与选择计算，保留原请求谱系。剩余季度仍按原时序运行，全局选择只有在全部季度
-候选齐备后执行，最终 refit 不提前。未发布的最终 refit 仍须重新执行，但不重跑已验收季度。
-配置、软件、窗口或上游身份变化不跨身份接续。旧版完整 MODEL 保留其原源码和真实身份，
-旧版不完整事务不转成已验收分片；此机制不要求为了使用新代码而重建已完成的旧请求。
+agent 显式按合法训练窗调用 `fit`，再按 `prediction_window` 调用 `predict`；
+部分季度不扩大到请求末端之外。每次 `score` 提供有序 `candidate_ids`、逐候选的
+完整 `validation_windows` 预测路径、`labels`、`scoring_window`、`cutoff`、
+`selection_group`、`validation_axis`、`test_window`、`label_unit` 与新 `output`。
+G 评分窗必须覆盖所声明的完整正式验证历史，Q 选择截止必须早于实际消费季度。
+模型使用各自合法输入域；PRED 只保存预测及真实键，不重复保存 label、成熟列或 score_eligible。
+评分时读取显式标签输入，在 cutoff 下重建成熟共同域；先核每个候选自身应有预测完整，
+再按精确主键比较。未成熟标签不参与得分，预测本身不等待未来标签。
+评分 JSON 保存候选/模型/PRED 路径、实际拟合窗、逐候选指标及 `common_rows` 等科学事实，
+不维护共同域持久哈希或跨操作身份。`select` 另外声明指标、方向、完整并列次序、
+`refit_windows` 与 `refit_cutoff`，保存家族优胜与 `selected_model_id`；不会自动重新拟合。
+reader 核本次所消费的模型状态、完成 trial、选择与原评分记录关系，
+不扫描无关成员或认证整个旧研究的源码、环境与文件快照。
+中断后由 agent 选用已正式发布且科学范围合适的模型、PRED 和选择，
+只补缺失操作并给出新输出位置；不得把 staging、失败 trial 或未发布最终拟合当作成功。
+旧 trial 不改写，不再提供自动季度续跑、同 hash 命中或软件身份驱动的接续。
 每个候选同时输出每日 RankIC 的总体标准差（ddof=0）、ICIR、正值率、有效日期数及共同样本数；
 ICIR 为每日均值除以该标准差，不年化；零方差和不可表示结果保留未定义。
 标准差与 ICIR 各自按最终结果的可表示性判断；标准差下溢为缺失不使可表示的 ICIR 同时缺失，
 已定义 ICIR 仍要求至少两个有效日期，已表示的标准差不得为零或负数。
-同 family/fold 只准备一次真实训练域，各候选拟合使用隔离副本。G/Q 选择同一配置、
-训练窗、权重、种子与后端事实时，只实际 refit 一次，两个选择引用共享模型成员及 trial；
-不同选择分别拟合，不伪造第二次 attempted 或训练成本。
+每次拟合只记录真实训练和实际成本。G/Q 的候选评分可明确选用同一份已保存验证 PRED；
+最终模型还须满足本次冻结选择与真实拟合记录，不能仅凭参数相同替代选择关系。代码不自动搜索或合并 refit。
+独立调用确实重新拟合时各记自己的 trial，不伪造第二次 attempted 或共享训练成本。
 共同域只约束比较，不裁剪完整预测或经济账本；无法解释的预测漏行不得用于缩小比较域。
 
 RankIC 为负的优胜模型仍是有效协议结果；不得因结果差而重新调参。
@@ -1434,30 +1445,33 @@ IC 排名因子权重：
 
 排名缺失贡献中性 0；不得对每只股票仅按已观测因子重新归一化。
 
-A 股排名模型只学习排序所需方向或权重，不拟合或持久化未被消费的标签单位
-`label_calibration`。组合的 Alpha 校准仍按 §5.18 独立执行；Crypto 标签单位转换
-继续在真实 TRAIN/refit 域内拟合并冻结，见 [Crypto 标定](crypto.md#数值缩放与排名模型标定)。
+排名模型的方向/权重与 `label_calibration` 都只在合法 TRAIN/refit 域拟合并保存。
+PRED 的 `prediction_score` 仍是原始排名分数；评分的标签单位 MSE 使用已冻结的转换，
+不得拿当前验证标签重估。A 股组合使用 `prediction_rank_score`，其 Alpha 校准仍按 §5.18
+独立执行；Crypto 经济转换见 [Crypto 标定](crypto.md#数值缩放与排名模型标定)。
 
 方向和权重在每个候选 fold 的 train 内学习，并在对应 validation 季度内冻结；
 2024–2025 最终留出按§5.13固定两年，不继续更新。
 
 ### 5.16 预测产物语义
 
-组合只能消费持久化 OOS 预测产物，不得以活动模型对象或原始因子作为捷径；唯一例外是单独定义、由等权排名基线自身正式生产的基线信号产物。
+组合消费显式指定的已持久化预测，并核必要模型及选择记录；等权排名基线也经同一 fit/predict 路径，
+不得以活动模型对象或原始因子作为捷径。
 
 预测行至少包含：
 
 ```text
 timestamp
 asset_id
-model_id
-raw_prediction
-alpha_score
+prediction_score
+prediction_rank_score
 ```
 
-横截面 alpha 分数：
+`model_id`、`family_id`、模型路径、输入路径、`sample_role`、`prediction_window`、
+`effective_prediction_end` 与必要模型 metadata 保存在原生预测 metadata 中，不逐行重复。
+`prediction_score` 是模型原输出，中心化排名分数为：
 
-`alpha_score = (average_rank - (n+1)/2) / n`
+`prediction_rank_score = (average_rank - (n+1)/2) / n`
 
 有效预测证券范围内，每日横截面均值为 0。
 
@@ -1479,23 +1493,25 @@ N_train
 
 ### 5.17 组合候选配置
 
-组合由研究 JSON 的 `portfolios` 显式声明：
+科研选择参考中的 `portfolios` 保留研究候选；直接 `backtest` 的 `candidate` 明确指定一项：
 
 | 字段 | 责任 |
 |---|---|
-| `candidate_id` | 配置内候选身份；协议分别派生 G/Q 两组身份 |
+| `candidate_id` | 本次候选标识，由调用者为实际 G/Q 结果明确命名 |
+| `selection_group` | `global` 或 `quarterly`，与所消费的选择记录一致 |
 | `construction` | `top20_equal_weight`、`top20_equal_weight_half_step`、`top20_float_cap` 或 `benchmark_enhanced` |
-| `prediction_selector` | 已持久化预测中的具名 `model_id`，或保留选择器 `champion`，不借组合名称推断算法 |
+| `prediction_selector` | 已持久化模型的 `family_id`，或保留选择器 `champion`，不借组合名称推断算法 |
 | `top_quantile` | 简单组合的最高分位比例，须满足 `0 < top_quantile <= 1`；增强组合为 `null` |
 | `rebalance_schedule` | `daily`、`weekly-last-trading-day` 或 `monthly-last-trading-day` |
 | `benchmark_id` | 增强组合的 CSI500/CSI1000 基准；简单组合为 `null` |
 
-`prediction_selector` 精确区分大小写；`champion` 读取同组、同季度选择记录中的 `selected_family_id`，留出读取开发期冻结的最终优胜家族。
+`prediction_selector` 精确区分大小写；`champion` 按指定选择记录的 `selected_model_id`
+选取其优胜家族配置，留出消费开发期冻结选择对应的最终模型。
 具名 selector 只读取所声明模型家族，不隐式映射 `winner` 或其他拼写。模型家族与候选身份分别由配置声明，不从 `candidate_id` 推断选择器。
 
 `top20_equal_weight` / `top20_float_cap` 是构建标识，名称中的 top20 不覆盖 `top_quantile`。
 增强组合所需 benchmark、风险及数据依赖由同一组合合同派生；配置不能省略必要事实。
-未绑定研究配置的 profile 不隐式创建组合或账本目标。
+只读 profile 不创建组合或账本，参考文件不作为自动展开入口。
 
 `core6.json`、`pv25.json` 及两个融合配置各声明下列五条周频候选；
 `pv_expanded.json` 声明前三条简单组合。它们是随仓配置选择，不是候选数的硬约束：
@@ -1531,8 +1547,8 @@ N_train
 ```text
 过去 12 个月
 与日程匹配的下一执行开盘收益
-alpha_score -> 带截距、等日期权重 OLS
-expected_alpha = slope * alpha_score
+prediction_rank_score -> 带截距、等日期权重 OLS
+expected_alpha = slope * prediction_rank_score
 忽略截距
 ```
 
@@ -1543,7 +1559,7 @@ expected_alpha = slope * alpha_score
 and >= 6 valid dates  # 同时满足有效再平衡日期门槛
 ```
 
-不使用更长窗口作为备用方案。设计矩阵（截距与 alpha_score）必须满列秩；
+不使用更长窗口作为备用方案。设计矩阵（截距与 prediction_rank_score）必须满列秩；
 覆盖不足或秩亏时校准为 UNDEFINED，记录原因，不发布伪零斜率及 SE/t/p/CI/R2。
 开发期仍执行仅基准逻辑，但它不表示斜率已确定为零。校准状态随账本发布，
 报告和 API 读取账本末期实际状态，不重新拟合。
@@ -1576,8 +1592,11 @@ SE/t/p/CI 使用按再平衡日期聚类的稳健推断，置信水平为 95%；
 
 2024–2025 的 Alpha OLS 校准同样属于监督学习，整个留出期不得用成熟留出收益重新拟合或更新斜率。
 每组在开发最终截止重新计算其实际验证路径的 Alpha 校准，纳入末日新成熟样本；不能仅冻结最后一个交易批次的旧状态。
-校准参数、组别、cutoff 及精确上游来源保存于增强账本的 final_alpha_calibration.json 语义成员，
-冻结引用验证这些身份；同组、同日程 CSI500/CSI1000 的共享校准必须一致。只有耗时/资源观测进入 operational metadata。
+开发增强账本保存 `final_alpha_calibration.json`；独立 `calibrate` 也可从明确的
+`observations`、`scheduled_intervals`、`cutoff`、`selection_group` 写入新校准 JSON。
+测试 `backtest` 的 `calibration` 显式指定该文件，核合法截止、组别及校准状态；
+同组、同日程 CSI500/CSI1000 的共享校准必须一致。输入路径与参数真实记录，
+不以原件哈希或全研究完成状态替代实际校准关系。
 缺少可用状态、覆盖不足或校准 UNDEFINED 时 BLOCKED，不能永久仅基准来冒充已冻结能力；
 已合法校准的非正斜率仍可产生仅基准结果。持仓、执行、费用及预先确定的风险估计规则可合法演化，
 历史市场预热不等于监督再学习。
@@ -1678,7 +1697,8 @@ EWMA half-life = 63  # 特异方差指数加权半衰期
 
 协方差必须有限、对称且为 PSD。
 
-缺少特异风险 -> 股票目标主动权重 = 0。
+缺少特异风险时，可合法回到基准的股票目标主动权重为 0；不能交易且有主动暴露的旧持仓
+仍需要真实风险依据，缺失时明确失败，不能伪造零风险。
 
 因子历史不足 -> 仅基准。
 
@@ -1766,7 +1786,7 @@ TE 约束
 固定预测的持仓对照可选择 `top20_equal_weight_half_step`：换仓日先由原简单组合 owner
 生成完整等权目标，再与仍合格且有有效预测的当前持仓权重各取一半。首次从现金开始只建半仓；
 剩余现金不重归一化。失去资格或预测的旧仓目标归零，实际卖出仍遵守原交易限制。
-该构造进入组合语义身份，不改变模型或预测身份；报告同时比较毛/净收益、风险、现金和换手，
+该构造在本次组合参数中记录，可显式选用原模型和预测；报告同时比较毛/净收益、风险、现金和换手，
 不能把敞口差异导致的收益变化只归因为交易成本。该固定规则不根据回测收益调节。
 
 ### 5.22 组合时序与核算
@@ -1799,7 +1819,7 @@ cash_weight
 
 正式连续权重研究回测不模拟整数股或 100 股交易单位。
 
-权重与名义金额用于执行；持仓数量使用同一复权价格基准下的连续研究权益单位，不声称实际股数。数量及经证据换算的权益报价采用精确有理数，金额最终舍入为有限浮点值；不得因有限金额除以极小/极大价格而溢出或抹掉权益。权益单位与实际股数的衔接必须有原始证据且绑定具体 PANEL 内容身份。复权区间收益已包含的股息/公司行动不得再次入账。整数股和 100 股交易单位仍不模拟。
+权重与名义金额用于执行；持仓数量使用同一复权价格基准下的连续研究权益单位，不声称实际股数。数量及经证据换算的权益报价采用精确有理数，金额最终舍入为有限浮点值；不得因有限金额除以极小/极大价格而溢出或抹掉权益。权益单位与实际股数的衔接必须有原始证据，并核实际消费的证券生命周期、基准日原价/复权价及精确换算比例。复权区间收益已包含的股息/公司行动不得再次入账。整数股和 100 股交易单位仍不模拟。
 
 组合会话采用沪深本市场日历的开市日期并集。个股的真实 PANEL、因子、标签和 ADV 仍只使用该股本市场的原有会话；组合估值视图单独处理并集会话，不向原始数据或 PANEL 写入闭市假行情。
 
@@ -1809,12 +1829,13 @@ cash_weight
 
 组合账本与持仓诊断共享估值端点，但闭市 mark 不生成因子收益样本。归因回归只使用入口和出口均有真实 PANEL 行的配对域，保留真实确认停牌行的原有语义；不能识别的持仓归因保留未定义及事实不完整原因，不填零归因。已证明的历史 as-of 风险暴露可以保留到闭市当前轴。指数基准独立要求自己的合法区间端点；个股闭市不能证明跨市场指数闭市，缺指数开盘仍为 `benchmark_total_return_open_missing`。增强组合的初始持仓只能在实际执行日合法开市时建立。
 
-当前组合 producer 的固定研究合同为 `RESEARCH_DELISTING_ZERO_V1`，替代首版一般缺价前填，不保留并行估值引擎。原始 PANEL、执行 mask、因子、标签及 MODEL/PRED 均不回填：
+组合使用唯一研究估值路径，将正常停牌、已证闭市、普通漏报价与确认退市分开。
+暂估仅用于既有持仓会计，不回填原始 PANEL、执行 mask、因子、标签或 MODEL/PRED：
 
 - 实际执行日买卖许可未知时有订单则不成交，记 `execution_fact_unknown`；已知禁止仍记 `market_blocked`。不递延订单，未成交卖出不释放现金。估值补充事实不授予任何成交许可。
-- 正常停牌和权威日历已证明的闭市与退市分开。仅已证明停牌/闭市可沿用同一生命周期、当时已观察到的有效价格；正常交易的漏报价、仅行消失或状态不明不自动前填，缺少必要持有端点时明确阻塞。当日收盘不能填更早的缺失开盘。
+- 已证明停牌/闭市可沿用同一生命周期、当时已观察到的有效价格。普通漏报价的既有持仓，在生命周期及研究单位可证明且已有可信历史锚点时可暂估，并披露依据、账龄与恢复影响；不据此成交、增加现金或改写未知许可。无可信锚点或生命周期/单位不能证明时仍失败。当日收盘不能填更早的缺失开盘。
 - 已确认退市且无可靠可用报价/回收事实时，账面暂按零估值，诊断为 `confirmed_delisting_zero`；这是保守研究假设，不表示股份被注销。保留精确持仓单位和原上市生命周期，不假造卖出、成交量或现金。已有可靠且时点合格的报价不能被清零覆盖。
-- `a_share_equity_events` 只通过现有 reference 原件接纳和市场会话 owner 进入组合。事件标识、原权益 `(asset_id, listing_date)`、生效日、证据公开日、实际取得时间、原件哈希与定位、CNY 金额和研究单位换算证据均须明确。按实际已可用且已生效的会话确认，不倒改较早历史。日期级公开证据保守从次日可用。原始每股金额不能直接当成每研究单位金额；换算同时绑定精确 PANEL 内容哈希。
+- `a_share_equity_events` 只通过现有 reference 原件接纳和市场会话 owner 进入组合。事件标识、原权益 `(asset_id, listing_date)`、生效日、证据公开日、实际取得时间、原件哈希与定位、CNY 金额和研究单位换算证据均须明确。按实际已可用且已生效的会话确认，不倒改较早历史。日期级公开证据保守从次日可用。原始每股金额不能直接当成每研究单位金额；换算核本次消费 PANEL 的真实原价/复权价、生命周期、基准时点及已有权益接续证据，不要求 PANEL 内容哈希。
 - 可靠转让报价只用于估值，仍禁止据它成交。实际现金回收使用独立 `recovery` 现金流与唯一权益调整记录；部分保留、注销、缩股或换股按证据数量转换，不用 principal 或假成交掩盖。事件在持久化流中只能使用一次；同原权益在同一会话聚合出多个无已证顺序的事件明确拒绝。
 - 原权益已注销后，旧生命周期的同代码报价不能恢复旧权益，也不能再按该旧生命周期买入。不同代码或上市生命周期的转换只有有证据的承接标识和精确换算比例才能产生目标权益；同一代码同时持有两个生命周期而既有键不能唯一表达时明确阻塞，不自动拼接。目标权益缺可靠估值事实时也明确阻塞，不制造报价。没有衔接证据的重新上市绝不恢复旧持仓。
 - 从零估值恢复按权益金额入账，数量和现金守恒由同一个原生账本及 reader 校验。整个 NAV 为零的区间仍保留金额和后续回收；零分母收益率、换手权重明确 `UNDEFINED/nonpositive_start_nav`，不填有限值、不删区间。精确成交数量汇总若不能表示为有限浮点数，仅该诊断为 `UNDEFINED/nonfinite_result`，有限现金和 NAV 不丢失。
@@ -1822,7 +1843,7 @@ cash_weight
 
 没有真实、合格的回收/换股材料时，事件输入为空只表示尚无已接纳事实。不得把合成事件测试称为补到了真实供应商资料，也不得把代码通过或 PORT 发布当作真实研究已完成。
 
-使用旧 MODEL/PRED 的独立组合阶段必须经原生 reader 验证精确身份，并以当前真实软件身份发布新 PORT/STAT。共享合同变更会改变上游软件身份，因此此路径不声称新全 DAG 复用，不覆盖旧 manifest、严格失败记录或预测统计。其结果始终带有研究估值版本，不等同于严格市场事实完整的净值。
+显式复用已有模型与预测时，原生 reader 核本次实际覆盖、窗口、列序和科学关系，组合及统计写新位置。代码变化的重算范围由研究者判断；研究估值结果不能冒充严格市场事实完整的净值。
 
 #### 5.22.1 唯一经济执行账本
 
@@ -1890,9 +1911,11 @@ ADV 约束有两项职责，但只有一份参数真值：
 必要来源整体不存在、身份或结构非法仍由原生准入拒绝，不能将缺源伪造成局部空行情。
 已有原件中的缺项不能仅凭空值就断言为供应商缺源。
 
-增强优化器的算法及固定基准、风险、换手、容量硬约束不变；当未知 ADV 导致无法形成
-合法目标时，明确 `portfolio_optimizer_adv_unavailable` 阻塞，不冻结或重分配权重绕过。
-仅在原有优化器已能合法形成目标时适用上述逐订单政策。
+增强优化器对 ADV 未知或为零的资产固定当前真实持仓，未持有资产不新增；
+不能将受阻卖出当作可用现金，也不为维持旧权重伪造成交。冻结后仍须同时满足现金、费用、
+预算、单股、换手、行业/风格及跟踪误差硬约束。冻结持仓的真实暴露与特异风险继续计入；
+持有风险缺失或约束不可行时明确失败，不将风险补零或动态放宽上限。
+执行时费用导致 NAV 变化可以使未交易持仓权重自然改变，数量与金额会计不能倒过来服从旧比例。
 
 目标换手与实现换手分开报告。
 
@@ -1906,9 +1929,9 @@ ADV 约束有两项职责，但只有一份参数真值：
 
 `RMB 1,000,000,000`
 
-探索性的低层 Python 调用可通过 `build_portfolio_ledger` 的 `assumptions` 参数，
-传入显式设置 `initial_nav` 的 `ExecutionAssumptions`。正式 `research_run` 配置固定使用上述 NAV，
-不提供初始 NAV 覆盖参数。低层接口接受任意有限正初始NAV；现金勾稽容差随实际数值分辨率缩放，
+上述为科研选择参考的正式本金。直接 `backtest` 的 `assumptions.initial_nav` 明确给出
+本次初始 NAV，Python 与 CLI 消费同一 ExecutionAssumptions，不存在另一层覆盖参数。
+接口接受任意有限正初始 NAV；偏离预声明本金须披露为不同研究假设。现金勾稽容差随实际数值分辨率缩放，
 不设固定货币单位的正数底座，也不用勾稽容差作为破产门槛。实际 NAV 为负或非有限时拒绝；NAV 为零时保留现金与权益金额账，零分母比例未定义，后续已证回收仍可继续。
 持仓比例以无量纲容差独立验证；金额容差为`min(512*ulp(nav), abs(nav)*512*ulp(1))`，
 不能因最小次正规金额的一格很大而放过超额持仓或负现金。合法正本金不保证每种分配都可表示；
@@ -2060,12 +2083,13 @@ G/Q 主比较预先声明唯一 primary_portfolio_id，方向为同一日历上�
 不以家族比较代替冠军诊断，也不在报告阶段重新计算。
 G 在完整开发验证窗上终局选择参数，其开发曲线仅保留均值、样本数、收益和风险等描述结果。
 该曲线及其家族差值的 HAC/块 bootstrap、SPA/StepM/MCS、PSR/DSR 均为
-UNDEFINED/global_development_selection_reuses_validation，不作为独立 OOS 推断。
+UNDEFINED/global_validation_selection_reuses_validation，不作为独立 OOS 推断。
 同一协议资格判定适用于单组、跨组和报告；不能仅禁止 G/Q 配对检验。
 G 回顾性开发曲线与 Q 因果开发曲线的差异只作描述；正式优越性检验来自冻结 test。
 Q 的因果开发预测保留既有合格推断；冻结 test 的 G/Q 保留既有 HAC/块 bootstrap 合同。
 共享 candidate×fold 成本只计一次；选择和最终 refit 按组分别报告实际成本，
-逐阶段 planning/时间和资源观测完整保留，边界采样峰值不冒充全进程峰值。
+各实际操作的时间与资源观测按已记录范围报告，边界采样峰值不冒充全进程峰值；
+不要求阶段 planning 或完整研究运行记录。
 
 RankIC、FMB系数及模型RankIC比较的统计时钟统一为`ordered_defined_observations`：
 HAC滞后和bootstrap区块按有定义观测的位置计数，不能解释成相同数量的市场交易日。
@@ -2105,8 +2129,8 @@ Fundamental19 一个家族
 `Benjamini-Yekutieli q=5%`
 
 FDR 家族不按结果删减成员；其他显式因子选择同样使用其完整预注册家族。
-BH/BY发现性FDR仅development；holdout只保留raw OOS/HAC，FDR记NOT_APPLICABLE。
-SPA/StepM/MCS仅用于Q的因果development曲线；G开发曲线按上述资格阻塞，holdout记UNDEFINED/holdout_excluded。
+BH/BY发现性FDR仅validation；test只保留raw OOS/HAC，FDR记NOT_APPLICABLE。
+SPA/StepM/MCS仅用于Q的因果validation曲线；G开发曲线按上述资格阻塞，test记UNDEFINED/test_excluded。
 单候选PSR仍可定义，DSR/PBO统一为UNDEFINED/insufficient_candidate_count；候选数取真实ID数量。
 FDR 永不动态改变 CORE/FULL 因子成员。
 
@@ -2221,13 +2245,14 @@ ADV 范围/参与率
 
 `42`
 
-所有随机组件从语义组件 IDs、折或季度派生确定性子种子。
+研究者按模型、折或季度明确选择确定性子种子，并通过 `model.random_seed` 传给每次拟合；
+拟合要求显式种子，不能假定单操作入口会从全研究配置自动派生。
 
 不得使用 Python 进程随机化的 `hash()`。
 
 无法保证跨环境精确浮点行为时，可复现合同是在批准数值容差内的持久化语义相等；不声称普遍的跨平台逐比特一致。
 
-随机种子能够改变研究数值输出时，它属于语义协议标识的一部分。
+随机种子能够改变研究数值输出，必须随模型与 trial 记录；它不是自动复用或失效键。
 
 ### 5.30 报告语义
 
@@ -2257,13 +2282,13 @@ ADV 范围/参与率
 阻塞项 / 无效目标
 ```
 
-报告只从已发布产物派生；必需产物缺失属于阻塞/失败，绝不以 `None` 占位或虚构状态文本。
+研究者/agent从显式已发布数值产物撰写解释；图片直接消费数值，不要求完整run。缺失输入、失败和合法未定义分开说明，不虚构完成。
 
 ### 5.31 正式、探索与就绪程度
 
 正式运行要求协议锁定语义，以及每个目标完整的必需输入。
 
-数据问题只阻塞依赖子图；无关的有效研究可以继续通过目标 DAG 执行。
+必需来源缺失只阻塞依赖操作；已有数据问题局部处理，其他独立有效研究继续。无法合法计算的结果如实失败或未定义。
 
 字段或覆盖缺失不构成永久备用语义、虚假值、当前状态历史回填、缩短窗口或隐藏模型变化的理由。
 

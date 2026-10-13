@@ -1,661 +1,496 @@
-from __future__ import annotations
+"""Real candidate-domain scoring and frozen selection, independent of run state."""
 
-import warnings
-from datetime import timedelta, timezone
+import json
 from pathlib import Path
-from types import SimpleNamespace
-from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 import pytest
 
-import quant_research_platform.research.models.fitting as model_fitting
-import quant_research_platform.research.models.trial_selection as model_selection_owner
-from quant_research_platform.contracts.experiments import (
-    ExperimentFold,
-    ExperimentPlan,
-    legal_training_rows,
-)
-from quant_research_platform.contracts.ids import MarketId
-from quant_research_platform.contracts.models import ModelSpec, model_spec_payload
-from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.contracts.validation import strict_timestamp_series
-from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
-from quant_research_platform.research.experiments import TrialRecorder
-from quant_research_platform.research.models.production import _prepare_training
-from quant_research_platform.research.models.supervised import (
-    build_estimator_from_model_spec,
-)
+from quant_research_platform.artifacts.outputs.prediction import read_predictions
+from quant_research_platform.contracts.models import ModelSpec
+from quant_research_platform.research.models.production import fit
 from quant_research_platform.research.models.trial_selection import (
-    evaluate_model_trial_metrics_from_chunks,
+    read_selection,
+    score,
+    select,
+    select_best_validation_trial,
 )
-from quant_research_platform.storage.datasets import read_dataset, write_dataset
-from quant_research_platform.storage.experiments import read_trial_ledger
-from quant_research_platform.storage.layout import StorageLayout
-from tests.helpers.research_prediction_inputs import make_prediction_frame
-from tests.helpers.research_specs import make_demo_research_dataset_spec
+from quant_research_platform.research.predictions.runner import predict
+from tests.research.direct_model_test_support import fit_frame
 
 
-def test_prediction_runner_selects_model_using_validation_metric(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    layout = StorageLayout(project_root=tmp_path)
-    dataset = _selection_dataset()
-    specs = (
-        _model("base_model", ("factor_a",)),
-        _model("candidate_model", ("factor_b",)),
-    )
-    frame = _development_frame()
-    write_dataset(
-        layout.research_dataset_root(MarketId("a_share"), dataset.data_id),
-        frame,
-        spec=dataset,
-    )
-    original_to_dict = pd.DataFrame.to_dict
-
-    def reject_validation_row_graph(frame, *args, **kwargs):
-        orient = args[0] if args else kwargs.get("orient", "dict")
-        if orient == "records" and {
-            "timestamp",
-            "asset_id",
-            "label",
-            "prediction_score",
-        }.issubset(frame.columns):
-            raise AssertionError(
-                "validation predictions converted to a Python row graph"
-            )
-        return original_to_dict(frame, *args, **kwargs)
-
-    monkeypatch.setattr(pd.DataFrame, "to_dict", reject_validation_row_graph)
-    result = _fit_validation_trials(layout, dataset, specs, frame, read_persisted=True)
-    selected = model_selection_owner.select_best_validation_trial(
-        result.metrics,
-        trial_id_column="model_id",
-        selection_metric=result.plan.selection_metric,
-        maximize=result.plan.selection_direction == "maximize",
-        validation_metric_columns=("validation_mse",),
-        test_metric_columns=(),
-        tie_break_order=result.plan.tie_break_order,
-    )
-    assert selected == "candidate_model"
-    assert result.plan.selection_metric == "validation_mse"
-    assert result.plan.selection_direction == "minimize"
-    assert result.plan.candidate_ids == ("base_model", "candidate_model")
-    assert result.parameters[selected]["input_factor_columns"] == ["factor_b"]
-    assert result.metrics.set_index("model_id").loc[
-        selected, "validation_mse"
-    ] == pytest.approx(0.0)
-
-
-def test_model_selection_compares_common_validation_primary_keys(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    frame = _development_frame()
-    frame.loc[frame["timestamp"].eq("2023-01-04"), "factor_a"] = np.nan
-    frame.loc[frame["timestamp"].eq("2023-01-05"), "factor_b"] = np.nan
-    specs = (
-        _model("base_model", ("factor_a",)),
-        _model("candidate_model", ("factor_b",)),
-    )
-    validation_keys: list[tuple[tuple[pd.Timestamp, str], ...]] = []
-    original_metrics = model_selection_owner.evaluate_model_trial_metrics_from_chunks
-
-    def record_validation_keys(chunks, **kwargs):
-        keys: list[tuple[pd.Timestamp, str]] = []
-
-        def observed_chunks():
-            for item in chunks:
-                frame_value = item
-                keys.extend(
-                    frame_value[["timestamp", "asset_id"]].itertuples(
-                        index=False, name=None
-                    )
-                )
-                yield item
-
-        result = original_metrics(observed_chunks(), **kwargs)
-        validation_keys.append(tuple(keys))
-        return result
-
-    monkeypatch.setattr(
-        model_selection_owner,
-        "evaluate_model_trial_metrics_from_chunks",
-        record_validation_keys,
-    )
-    result = _fit_validation_trials(
-        StorageLayout(tmp_path), _selection_dataset(), specs, frame
-    )
-    assert result.metrics.validation_rows.tolist() == [1, 1]
-    expected = ((pd.Timestamp("2023-01-06"), "asset_a"),)
-    assert validation_keys == [expected, expected]
-
-
-@pytest.mark.parametrize("invalid_prediction", [np.nan, np.inf, -np.inf])
-def test_model_selection_rejects_candidate_specific_non_finite_predictions(
-    invalid_prediction: float,
-) -> None:
-    validation = pd.DataFrame(
-        {"label": [1.0, 2.0, 3.0], "prediction": [1.0, invalid_prediction, 3.0]}
-    )
-    with pytest.raises(ValueError, match="invalid_trial_metric_values"):
-        evaluate_model_trial_metrics_from_chunks(
-            (
-                validation.assign(
-                    timestamp=pd.date_range(
-                        "2023-01-01", periods=len(validation), freq="D"
-                    ),
-                    asset_id="asset",
-                ),
-            ),
-            model_id="candidate_model",
-            label_column="label",
-            prediction_column="prediction",
-        )
-
-
-def test_prediction_runner_applies_sample_filter_to_validation_metrics(
-    tmp_path: Path,
-) -> None:
-    layout = StorageLayout(project_root=tmp_path)
-    dataset = _selection_dataset()
-    specs = (
-        _model("base_model", ("factor_a",)),
-        _model("candidate_model", ("factor_b",)),
-    )
-    frame = _development_frame(filter_flip=True)
-    write_dataset(
-        layout.research_dataset_root(MarketId("a_share"), dataset.data_id),
-        frame,
-        spec=dataset,
-    )
-    result = _fit_validation_trials(layout, dataset, specs, frame, read_persisted=True)
-    selected = model_selection_owner.select_best_validation_trial(
-        result.metrics,
-        trial_id_column="model_id",
-        selection_metric="validation_mse",
-        maximize=False,
-        validation_metric_columns=("validation_mse",),
-        test_metric_columns=(),
-    )
-    assert selected == "candidate_model"
-    assert result.parameters[selected]["input_factor_columns"] == ["factor_b"]
-    assert result.metrics.validation_rows.tolist() == [1, 1]
-
-
-def test_prediction_runner_fails_closed_on_candidate_label_mismatch(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    specs = (
-        _model("base_model", ("factor_a",), label_column="label"),
-        _model("candidate_model", ("factor_b",), label_column="other_label"),
-    )
-
-    def unexpected_fit(*_args, **_kwargs):
-        pytest.fail("label mismatch reached fitting")
-
-    monkeypatch.setattr(model_fitting, "_fit_model_result", unexpected_fit)
-    with pytest.raises(ValueError, match="^model_selection_label_column_mismatch$"):
-        model_selection_owner.fit_validation_candidates(
-            fold=_selection_fold(),
-            candidate_specs=specs,
-            training_by_candidate={},
-            dataset_spec=_selection_dataset(),
-            chunks=lambda *args, **kwargs: (),
-            trial_recorder=None,
-            validation_coverage=model_selection_owner.ModelSampleCoverage({}),
-            on_validation=lambda *args: None,
-            on_candidate=lambda *args: None,
-        )
-
-
-def test_prediction_runner_accepts_equivalent_timezone_representations() -> None:
-    chunk = pd.DataFrame(
-        {
-            "timestamp": [
-                pd.Timestamp("2023-01-15T12:00:00", tz=timezone(timedelta(hours=-5))),
-                pd.Timestamp("2023-01-15T12:01:00", tz=ZoneInfo("America/New_York")),
-            ]
-        }
-    )
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        timestamps = strict_timestamp_series(
-            chunk["timestamp"], error="invalid_prediction_timestamp_values"
-        )
-    assert timestamps.tolist() == [
-        pd.Timestamp("2023-01-15T17:00:00"),
-        pd.Timestamp("2023-01-15T17:01:00"),
-    ]
-
-
-def _selection_dataset():
-    return make_demo_research_dataset_spec(
-        data_id="research_demo",
-        input_data_ids=("processed_demo",),
-        base_input_data_id="processed_demo",
-        factor_columns=("factor_a", "factor_b"),
-        label_columns=("label",),
-        filter_columns=("eligible",),
-        context_columns=("label_available_at",),
-    )
-
-
-def _selection_fold():
-    return ExperimentFold(
-        fold_id="validation",
-        train=TimeWindow("2023-01-01", "2023-01-03"),
-        validation=TimeWindow("2023-01-04", "2023-01-06"),
-    )
-
-
-def _fit_validation_trials(
-    layout,
-    dataset,
-    specs,
-    frame,
-    *,
-    fold=None,
-    chunk_size=None,
-    read_persisted=False,
-    tie_break_order=(),
+def candidates(
+    tmp_path, *, algorithms=("linear_regression", "ic_weighted_rank_ensemble")
 ):
-    """Exercise the real fit and immutable trial owners without a selection wrapper."""
-    fold = _selection_fold() if fold is None else fold
-    plan = ExperimentPlan(
-        stage="selection",
-        experiment_id="validation_candidates",
-        market_id=MarketId("a_share"),
-        research_dataset_id=dataset.data_id,
-        target_id="validation_models",
-        candidate_family_id="validation_candidates",
-        data_snapshot_id="fixture",
-        input_lineage=("fixture",),
-        folds=(fold,),
-        test=TimeWindow(
-            (pd.Timestamp(fold.validation.end) + pd.Timedelta(days=1)).date(),
-            (pd.Timestamp(fold.validation.end) + pd.Timedelta(days=2)).date(),
-        ),
-        selection_metric="validation_mse",
-        selection_direction="minimize",
-        candidate_ids=tuple(spec.model_id for spec in specs),
-        trial_budget=len(specs),
-        random_seed=0,
-        tie_break_order=tie_break_order or tuple(spec.model_id for spec in specs),
-        candidate_parameters={
-            spec.model_id: model_spec_payload(spec) for spec in specs
-        },
-    )
-    common_inputs = model_selection_owner.model_validation_inputs(specs)
-    coverage = model_selection_owner.ModelSampleCoverage(
-        model_selection_owner.model_validation_coverage_scope("fixture", fold, specs)
-    )
-    validation = frame.loc[
-        frame.timestamp.between(
-            pd.Timestamp(fold.validation.start), pd.Timestamp(fold.validation.end)
-        )
-    ]
-    coverage.add(
-        legal_training_rows(
-            validation,
-            fitting_cutoff=fold.validation.end,
-            feature_columns=common_inputs,
-            target_column=specs[0].label_column,
-        )
-    )
-
-    def chunks(columns, *, input_columns, start, end):
-        del input_columns
-        step = len(frame) if chunk_size is None else chunk_size
-        source = (
-            iter_research_dataset_chunks(
-                layout,
-                market_id=MarketId("a_share"),
-                dataset_id=dataset.data_id,
-                columns=columns,
-            )
-            if read_persisted
-            else (
-                frame.iloc[offset : offset + step].loc[:, list(columns)]
-                for offset in range(0, len(frame), step)
-            )
-        )
-        with closing_iterator(iter(source)) as values:
-            for value in values:
-                keep = value.timestamp.le(pd.Timestamp(end))
-                if start is not None:
-                    keep &= value.timestamp.ge(pd.Timestamp(start))
-                yield value.loc[keep]
-
-    recorder = TrialRecorder(layout, "validation_run", plan)
-    model_selection_owner.fit_validation_candidates(
-        fold=fold,
-        candidate_specs=specs,
-        training_by_candidate={
-            spec.model_id: _prepare_training(
-                dataset, spec, chunks=chunks, train_end=fold.train.end
-            )
-            for spec in specs
-        },
-        dataset_spec=dataset,
-        chunks=chunks,
-        trial_recorder=recorder,
-        validation_coverage=coverage,
-        on_validation=lambda *_args: None,
-        on_candidate=lambda *_args: None,
-    )
-    saved_plan, records = read_trial_ledger(recorder.root, plan)
-    assert saved_plan == plan
-    assert [record.status for record in records] == ["completed"] * len(specs)
-    completed = tuple(record for record in records if record.status == "completed")
-    metrics = pd.DataFrame(
-        [{"model_id": record.candidate_id, **record.metrics} for record in completed]
-    )
-    parameters = {
-        record.candidate_id: record.payload()["normalized_parameters"]
-        for record in completed
-    }
-    assert all(
-        record.common_coverage_id == coverage.semantic_identity for record in completed
-    )
-    return SimpleNamespace(plan=plan, metrics=metrics, parameters=parameters)
-
-
-@pytest.mark.parametrize(
-    ("future_label", "missing_input"), [(False, False), (True, False), (True, True)]
-)
-def test_real_rank_validation_predictions_and_winner_preserve_split_sessions(
-    tmp_path: Path, future_label: bool, missing_input: bool
-) -> None:
-    dates = pd.date_range("2023-01-01", periods=5)
+    stamps = pd.date_range("2020-01-01", periods=6).repeat(3)
     frame = pd.DataFrame(
         {
-            "market_id": "a_share",
-            "timestamp": dates.repeat(4),
-            "asset_id": ["a", "b", "c", "d"] * 5,
-            "factor_a": [1.0, 2.0, 3.0, 4.0] * 5,
-            "label": [1.0, 2.0, 3.0, 4.0] * 5,
-            "label_available_at": dates.repeat(4),
+            "timestamp": stamps,
+            "asset_id": ["a", "b", "c"] * 6,
+            "x": [1.0, 2.0, 3.0] * 6,
+            "label": [0.1, 0.2, 0.3] * 6,
             "eligible": True,
+            "label_available_at": stamps,
         }
     )
-    validation_rows = frame.timestamp.between(dates[2], dates[3])
-    if future_label:
-        future_rows = validation_rows & frame.asset_id.eq("d")
-        frame.loc[future_rows, "label_available_at"] = dates[4]
-        frame.loc[future_rows, "label"] = 1000000000.0
-    if missing_input:
-        frame.loc[validation_rows & frame.asset_id.eq("b"), "factor_a"] = np.nan
-    layout = StorageLayout(tmp_path)
-    dataset = make_demo_research_dataset_spec(
-        data_id="research",
-        input_data_ids=("source",),
-        base_input_data_id="source",
-        factor_columns=("factor_a",),
-        label_columns=("label",),
-        filter_columns=("eligible",),
-        context_columns=("label_available_at",),
-    )
-    root = layout.research_dataset_root(MarketId("a_share"), dataset.data_id)
-    write_dataset(root, frame, spec=dataset)
-    frame = read_dataset(root)
-    specs = tuple(
-        ModelSpec(
+    frame.loc[
+        (frame.timestamp >= pd.Timestamp("2020-01-04")) & frame.asset_id.eq("a"), "x"
+    ] = np.nan
+    cases, paths = [], []
+    window = {"start": "2020-01-04", "end": "2020-01-06"}
+    for algorithm in algorithms:
+        spec = ModelSpec(
             model_id=algorithm,
             model_algorithm=algorithm,
-            random_seed=0,
-            input_factor_columns=("factor_a",),
-            label_column="label",
-        )
-        for algorithm in ("equal_weight_rank_ensemble", "ic_weighted_rank_ensemble")
-    )
-    fold = ExperimentFold(
-        fold_id="rank",
-        train=TimeWindow("2023-01-01", "2023-01-02"),
-        validation=TimeWindow("2023-01-03", "2023-01-04"),
-    )
-    for spec in specs:
-        fitted = model_fitting._fit_model_result(
-            model_fitting._collect_training_frame(
-                (frame,), spec, fitting_cutoff=fold.train.end
-            ),
-            spec,
-            estimator=build_estimator_from_model_spec(spec),
-        )
-        outputs = []
-        for step in (len(frame), 2):
-            pieces = []
-            for item in model_selection_owner.iter_validation_prediction_chunks(
-                lambda step=step: (
-                    frame.iloc[i : i + step] for i in range(0, len(frame), step)
-                ),
-                candidate_spec=spec,
-                model_result=fitted,
-                validation_start=pd.Timestamp("2023-01-03"),
-                validation_end=pd.Timestamp("2023-01-04"),
-            ):
-                pieces.append(item.copy())
-            outputs.append(pd.concat(pieces, ignore_index=True))
-        pd.testing.assert_frame_equal(outputs[0], outputs[1], check_exact=True)
-        expected_by_asset = (
-            {"a": -1 / 3, "b": 0.0, "c": 0.0, "d": 1 / 3}
-            if missing_input
-            else {"a": -0.375, "b": -0.125, "c": 0.125, "d": 0.375}
-        )
-        assert outputs[0].asset_id.tolist() == ["a", "b", "c", "d"] * 2
-        assert outputs[0]["prediction_score"].tolist() == pytest.approx(
-            list(expected_by_asset.values()) * 2
-        )
-        mature = outputs[0].loc[
-            outputs[0].label_available_at.le(pd.Timestamp(fold.validation.end))
-        ]
-        expected_mature_assets = (
-            ["a", "b", "c"] if future_label else ["a", "b", "c", "d"]
-        )
-        assert mature.asset_id.tolist() == expected_mature_assets * 2
-        assert mature.prediction_score.tolist() == pytest.approx(
-            [expected_by_asset[asset] for asset in expected_mature_assets] * 2
-        )
-    selections = []
-    for step in (len(frame), 2):
-        result = _fit_validation_trials(
-            StorageLayout(tmp_path / f"trials-{step}"),
-            dataset,
-            specs,
-            frame,
-            fold=fold,
-            chunk_size=step,
-        )
-        selected = model_selection_owner.select_best_validation_trial(
-            result.metrics,
-            trial_id_column="model_id",
-            selection_metric="validation_mse",
-            maximize=False,
-            validation_metric_columns=("validation_mse",),
-            test_metric_columns=(),
-            tie_break_order=result.plan.tie_break_order,
-        )
-        selections.append((selected, result.metrics))
-        assert result.metrics.validation_rows.tolist() == [
-            len(expected_mature_assets) * 2,
-            len(expected_mature_assets) * 2,
-        ]
-    assert selections[0][0] == selections[1][0] == specs[0].model_id
-    pd.testing.assert_frame_equal(selections[0][1], selections[1][1], check_exact=True)
-
-
-@pytest.mark.parametrize("label_column", ["forward_return_20d", "custom_target"])
-def test_dataset_training_preserves_label_maturity(
-    tmp_path: Path, label_column: str
-) -> None:
-    availability = (
-        "forward_return_20d_available_at"
-        if label_column == "forward_return_20d"
-        else "label_available_at"
-    )
-    dataset = make_demo_research_dataset_spec(
-        data_id="research",
-        input_data_ids=("source",),
-        base_input_data_id="source",
-        factor_columns=("factor_a",),
-        label_columns=(label_column,),
-        filter_columns=("eligible",),
-        context_columns=(availability,),
-    )
-    model = _model("model", ("factor_a",), label_column=label_column)
-    prediction = PredictionSpec(
-        prediction_id="prediction",
-        model_id=model.model_id,
-        research_dataset_id=dataset.data_id,
-        train_end="2023-01-03",
-        test_start="2023-01-04",
-        test_end="2023-01-04",
-    )
-    outputs = []
-    for future_label in (0.3, 30.0):
-        layout = StorageLayout(tmp_path / str(future_label))
-        frame = pd.DataFrame(
-            {
-                "market_id": "a_share",
-                "asset_id": "asset",
-                "timestamp": pd.to_datetime(
-                    ["2022-12-01", "2022-12-02", "2023-01-02", "2023-01-04"]
-                ),
-                "factor_a": [1.0, 2.0, 3.0, 4.0],
-                label_column: [0.1, 0.2, future_label, 0.4],
-                "eligible": True,
-                availability: pd.to_datetime(
-                    ["2023-01-01", "2023-01-02", "2023-02-02", "2023-02-04"]
-                ),
-            }
-        )
-        write_dataset(
-            layout.research_dataset_root(MarketId("a_share"), dataset.data_id),
-            frame,
-            spec=dataset,
-        )
-        owned = model_fitting._fit_model_result(
-            model_fitting._collect_training_frame(
-                iter_research_dataset_chunks(
-                    layout, market_id=MarketId("a_share"), dataset_id=dataset.data_id
-                ),
-                model,
-                fitting_cutoff=prediction.train_end,
-            ),
-            model,
-            estimator=build_estimator_from_model_spec(model),
-        )
-        assert owned.metadata["rows_after_input_label_dropna"] == 2
-        predict = model_fitting.prediction_callable(
-            model.input_columns, owned.prediction_model
-        )
-        outputs.append(
-            pd.DataFrame({prediction.prediction_column: predict(frame.tail(1))})
-        )
-    pd.testing.assert_frame_equal(outputs[0], outputs[1], check_exact=True)
-    assert outputs[0][prediction.prediction_column].tolist() == pytest.approx([0.4])
-
-
-@pytest.mark.parametrize(
-    "label_column",
-    ["label", "forward_return_20d", "model_target", "future_mid_return_1s"],
-)
-def test_training_requires_its_explicit_availability(label_column: str) -> None:
-    frame = _development_frame().rename(columns={"label": label_column})
-    if label_column == "label":
-        frame = frame.drop(columns="label_available_at")
-    model = _model("model", ("factor_a",), label_column=label_column)
-    with pytest.raises(ValueError, match="label_availability_column_required"):
-        model_fitting._fit_model_result(
-            model_fitting._collect_training_frame(
-                (frame,), model, fitting_cutoff="2023-01-03"
-            ),
-            model,
-            estimator=build_estimator_from_model_spec(model),
-        )
-
-
-def _model(
-    model_id: str, input_columns: tuple[str, ...], *, label_column: str = "label"
-) -> ModelSpec:
-    return ModelSpec(
-        model_id=model_id,
-        model_algorithm="linear_regression",
-        random_seed=0,
-        input_factor_columns=input_columns,
-        label_column=label_column,
-    )
-
-
-def _development_frame(*, filter_flip: bool = False) -> pd.DataFrame:
-    frame = make_prediction_frame(filter_flip=filter_flip)
-    for column in ("timestamp", "label_available_at"):
-        frame[column] = frame[column] - pd.DateOffset(years=1)
-    return frame
-
-
-@pytest.mark.parametrize(
-    "order,expected",
-    (((), "base"), (("other", "base"), "other"), (("base", "other"), "base")),
-)
-def test_explicit_tie_order_uses_the_full_fitted_candidate_universe(
-    tmp_path, order, expected
-):
-    from quant_research_platform.research.models.supervised import preflight_model_specs
-
-    specs = tuple(
-        ModelSpec(
-            model_id=name,
-            model_algorithm="ridge_regression",
-            random_seed=0,
             input_factor_columns=("x",),
-            label_column="label",
-            hyperparameters={"alpha": 1.0},
+            target_column="label",
+            random_seed=19,
         )
-        for name in ("base", "other")
+        case = fit_frame(
+            tmp_path / algorithm,
+            frame.loc[frame.timestamp <= pd.Timestamp("2020-01-03")],
+            spec,
+        )
+        future = tmp_path / algorithm / "future.parquet"
+        frame.to_parquet(future, index=False)
+        config = {
+            "model": str(case.root),
+            "inputs": str(future),
+            "input_spec": case.config["input_spec"],
+            "output": str(tmp_path / algorithm / "predictions"),
+            "prediction_window": window,
+            "sample_role": "validation",
+        }
+        paths.append(str(predict(config)))
+        cases.append(case)
+    labels = tmp_path / "labels.parquet"
+    frame.to_parquet(labels, index=False)
+    config = {
+        "predictions": paths,
+        "candidate_ids": list(algorithms),
+        "labels": str(labels),
+        "label_spec": cases[0].config["input_spec"],
+        "validation_windows": [window],
+        "scoring_window": window,
+        "cutoff": "2020-01-06",
+        "test_window": {"start": "2020-01-07", "end": "2020-01-09"},
+        "selection_group": "quarterly",
+        "validation_axis": "cross_sectional",
+        "label_unit": "decimal_return",
+        "output": str(tmp_path / "scores.json"),
+    }
+    return cases, config
+
+
+def test_candidate_domains_survive_new_common_comparison(tmp_path):
+    cases, config = candidates(tmp_path)
+    frames = [read_predictions(path)[0] for path in config["predictions"]]
+    assert [len(frame) for frame in frames] == [6, 9]
+    before = [
+        (Path(path) / "prediction.parquet").read_bytes()
+        for path in config["predictions"]
+    ]
+    scored = json.loads(score(config).read_text())
+    assert scored["common_rows"] == 6
+    assert all(row["validation_rows"] == 6 for row in scored["metrics"])
+    single = {
+        **config,
+        "predictions": config["predictions"][:1],
+        "candidate_ids": config["candidate_ids"][:1],
+        "output": str(tmp_path / "single.json"),
+    }
+    score(single)
+    assert before == [
+        (Path(path) / "prediction.parquet").read_bytes()
+        for path in config["predictions"]
+    ]
+    assert "score_eligible" not in frames[0]
+
+
+@pytest.mark.parametrize(
+    "mutation", ["missing", "duplicate", "wrong_key", "inf", "nat_metadata"]
+)
+def test_scoring_rejects_broken_candidate_before_intersection(tmp_path, mutation):
+    _cases, config = candidates(tmp_path)
+    root = Path(config["predictions"][0])
+    frame = pd.read_parquet(root / "prediction.parquet")
+    if mutation == "missing":
+        frame = frame.iloc[:-1]
+    elif mutation == "duplicate":
+        frame = pd.concat([frame, frame.iloc[:1]], ignore_index=True)
+    elif mutation == "wrong_key":
+        frame.loc[0, "asset_id"] = "unknown"
+    elif mutation == "inf":
+        frame.loc[0, "prediction_score"] = np.inf
+    else:
+        path = root / "manifest.json"
+        payload = json.loads(path.read_text())
+        payload["metadata"]["effective_prediction_end"] = "NaT"
+        path.write_text(json.dumps(payload))
+    frame.to_parquet(root / "prediction.parquet", index=False)
+    with pytest.raises(ValueError):
+        score(config)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing_candidate",
+        "duplicate_candidate",
+        "missing_fold",
+        "global_partial",
+        "test_role",
+        "test_metric",
+    ],
+)
+def test_selection_requires_full_declared_validation_science(tmp_path, mutation):
+    _cases, config = candidates(tmp_path)
+    if mutation == "missing_candidate":
+        config["predictions"] = config["predictions"][:1]
+    elif mutation == "duplicate_candidate":
+        config["candidate_ids"] = [config["candidate_ids"][0]] * 2
+    elif mutation == "missing_fold":
+        config["predictions"][0] = []
+    elif mutation == "global_partial":
+        config.update(
+            selection_group="global",
+            scoring_window={"start": "2020-01-05", "end": "2020-01-06"},
+        )
+    elif mutation == "test_role":
+        path = Path(config["predictions"][0]) / "manifest.json"
+        value = json.loads(path.read_text())
+        value["metadata"]["sample_role"] = "test"
+        path.write_text(json.dumps(value))
+    else:
+        path = score(config)
+        with pytest.raises(ValueError):
+            select(
+                {
+                    "scores": str(path),
+                    "output": str(tmp_path / "selection.json"),
+                    "selection_metric": "test_rankic",
+                    "selection_direction": "maximize",
+                    "tie_break_order": config["candidate_ids"],
+                }
+            )
+        return
+    with pytest.raises(ValueError):
+        score(config)
+
+
+def test_future_labels_do_not_change_prior_causal_selection(tmp_path):
+    _cases, config = candidates(tmp_path)
+    config.update(
+        cutoff="2020-01-05",
+        validation_windows=[{"start": "2020-01-04", "end": "2020-01-06"}],
     )
-    preflight_model_specs(specs)
-    frame = pd.DataFrame(
-        [
+    # A validation interval after the decision is never admissible.
+    with pytest.raises(ValueError, match="fit_window_after_cutoff"):
+        score(config)
+
+
+@pytest.mark.parametrize(
+    "values,expected", [([-0.4, None], "a"), ([None, None], "b"), ([1.0, 1.0], "b")]
+)
+def test_defined_negative_and_all_undefined_keep_declared_ties(values, expected):
+    rows = pd.DataFrame({"candidate": ["a", "b"], "validation_rankic": values})
+    assert (
+        select_best_validation_trial(
+            rows,
+            trial_id_column="candidate",
+            selection_metric="validation_rankic",
+            maximize=True,
+            validation_metric_columns=["validation_rankic"],
+            test_metric_columns=[],
+            tie_break_order=("b", "a"),
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize("failed_family", ["linear_regression", "failed_family"])
+def test_failed_attempt_stays_in_complete_candidate_score(tmp_path, failed_family):
+    cases, config = candidates(tmp_path, algorithms=("linear_regression",))
+    failed = {
+        **cases[0].config,
+        "output": str(tmp_path / "failed"),
+        "family_id": failed_family,
+        "model": {**cases[0].config["model"], "model_id": "failed"},
+        "fit_windows": [{"start": "2019-01-01", "end": "2019-01-02"}],
+        "fit_cutoff": "2019-01-02",
+    }
+    with pytest.raises(ValueError):
+        fit(failed)
+    config["selection_group"] = "global"
+    config["candidate_ids"].append("failed")
+    config["predictions"].append({"trial": str(tmp_path / "failed.trial")})
+    result = json.loads(score(config).read_text())
+    assert result["candidate_ids"] == ["linear_regression", "failed"]
+    assert result["candidates"][1]["status"] == "failed"
+    assert result["metrics"][1]["validation_rows"] == 0
+    assert result["metrics"][1]["validation_rankic"] is None
+    assert result["metrics"][0]["validation_rows"] == 6
+    selection = select(
+        {
+            "scores": config["output"],
+            "output": str(tmp_path / "selection.json"),
+            "selection_metric": "validation_rankic",
+            "selection_direction": "maximize",
+            "tie_break_order": ["failed", "linear_regression"],
+            "refit_windows": [{"start": "2020-01-01", "end": "2020-01-06"}],
+            "refit_cutoff": "2020-01-06",
+        }
+    )
+    frozen = read_selection(selection)
+    assert frozen["selected_model_id"] == "linear_regression"
+    family = next(
+        item for item in frozen["families"] if item["family_id"] == failed_family
+    )
+    assert family["failure_reasons"] == {"failed": "ValueError"}
+    if failed_family == "failed_family":
+        assert family["selected_config_id"] is None
+        assert failed_family not in frozen["refit_windows"]
+        from quant_research_platform.artifacts.statistics import (
+            read_statistics_artifact,
+        )
+        from quant_research_platform.research.statistics_production import (
+            model_statistics,
+        )
+
+        statistics = model_statistics(
             {
-                "timestamp": pd.Timestamp(day),
-                "label_available_at": pd.Timestamp(day),
-                "asset_id": asset,
-                "market_id": "a_share",
-                "eligible": True,
-                "x": float(i),
-                "label": float(2 * i),
+                "dataset": config["labels"],
+                "input_spec": config["label_spec"],
+                "output": str(tmp_path / "statistics"),
+                "window": config["scoring_window"],
+                "sample_role": "validation",
+                "evaluation": {"primary_label": "label"},
+                "statistics": {
+                    "hac_lag": 0,
+                    "bootstrap_block": 1,
+                    "bootstrap_repetitions": 10,
+                },
+                "root_seed": 37,
+                "selection_group": "global",
+                "comparison_model_id": "linear_regression",
+                "prediction_id": "actual-family-predictions",
+                "periods": [
+                    {
+                        "period_id": "validation",
+                        "window": config["scoring_window"],
+                        "selection": str(selection),
+                        "predictions": config["predictions"][:1],
+                    }
+                ],
             }
-            for day in ("2020-01-01", "2020-01-02", "2020-01-03")
-            for i, asset in enumerate("abc")
-        ]
+        )
+        saved = read_statistics_artifact(statistics)
+        with saved.table("model_losses.parquet") as losses:
+            failed_losses = losses.loc[losses.family_id.eq("failed_family")]
+            assert not failed_losses.empty
+            assert failed_losses.status.eq("UNDEFINED").all()
+            assert failed_losses.reason.eq("family_training_failed").all()
+            assert (
+                losses.loc[losses.family_id.eq("linear_regression"), "status"]
+                .eq("DEFINED")
+                .all()
+            )
+        with saved.table("model_trials.parquet") as trials:
+            assert set(trials.family_id) == {"linear_regression", "failed_family"}
+            assert set(trials.config_id) == {"linear_regression", "failed"}
+
+
+def test_refit_freeze_rejects_undeclared_crypto_gap(tmp_path):
+    from quant_research_platform.research.models.trial_selection import (
+        _validate_refit_scope,
     )
-    dataset = make_demo_research_dataset_spec(
-        data_id="fixture",
-        factor_columns=("x",),
-        label_columns=("label",),
-        filter_columns=("eligible",),
-        context_columns=("label_available_at",),
+
+    value = {
+        "refit_cutoff": "2020-01-06",
+        "cutoff": "2020-01-06",
+        "test_window": {"start": "2020-01-07", "end": "2020-01-09"},
+        "families": [{"family_id": "f", "selected_config_id": "m"}],
+        "candidates": [
+            {
+                "model_id": "m",
+                "fit_windows": [{"start": "2020-01-01", "end": "2020-01-02"}],
+            }
+        ],
+        "validation_windows": [{"start": "2020-01-04", "end": "2020-01-06"}],
+        "refit_windows": [{"start": "2020-01-01", "end": "2020-01-06"}],
+    }
+    with pytest.raises(ValueError, match="outside_observed"):
+        _validate_refit_scope(value)
+    value["refit_windows"] = [
+        {"start": "2020-01-01", "end": "2020-01-02"},
+        {"start": "2020-01-04", "end": "2020-01-06"},
+    ]
+    assert len(_validate_refit_scope(value)[0]["f"]) == 2
+
+
+def test_each_frozen_family_winner_can_refit_but_family_change_cannot(tmp_path):
+    cases, config = candidates(tmp_path)
+    scores = score(config)
+    selected = select(
+        {
+            "scores": str(scores),
+            "output": str(tmp_path / "selected.json"),
+            "selection_metric": "validation_rankic",
+            "selection_direction": "maximize",
+            "tie_break_order": config["candidate_ids"],
+            "refit_windows": [{"start": "2020-01-01", "end": "2020-01-06"}],
+            "refit_cutoff": "2020-01-06",
+        }
     )
-    fold = ExperimentFold(
-        fold_id="tie",
-        train=TimeWindow("2020-01-01", "2020-01-01"),
-        validation=TimeWindow("2020-01-02", "2020-01-02"),
+    frozen = read_selection(selected)
+    assert len(frozen["families"]) == 2
+    for index, case in enumerate(cases):
+        refit = {
+            **case.config,
+            "inputs": str(
+                tmp_path / case.facts["model"]["model_id"] / "future.parquet"
+            ),
+            "output": str(tmp_path / f"final-{index}"),
+            "fit_windows": [{"start": "2020-01-01", "end": "2020-01-06"}],
+            "fit_cutoff": "2020-01-06",
+            "selection": str(selected),
+            "test_window": config["test_window"],
+        }
+        assert fit(refit).exists()
+        with pytest.raises(ValueError, match="family_market_or_units"):
+            fit(
+                {
+                    **refit,
+                    "output": str(tmp_path / f"wrong-{index}"),
+                    "family_id": "wrong",
+                }
+            )
+
+
+def test_explicit_prediction_asset_scope_is_preserved_at_score(tmp_path):
+    cases, config = candidates(tmp_path, algorithms=("linear_regression",))
+    case = cases[0]
+    path = predict(
+        {
+            "model": str(case.root),
+            "inputs": str(tmp_path / "linear_regression" / "future.parquet"),
+            "input_spec": case.config["input_spec"],
+            "output": str(tmp_path / "scoped-pred"),
+            "prediction_window": config["validation_windows"][0],
+            "sample_role": "validation",
+            "asset_ids": ["b"],
+        }
     )
-    result = _fit_validation_trials(
-        StorageLayout(tmp_path), dataset, specs, frame, fold=fold, tie_break_order=order
+    frame, metadata = read_predictions(path)
+    assert set(frame.asset_id) == {"b"} and metadata["asset_ids"] == ["b"]
+    config.update(predictions=[str(path)])
+    assert json.loads(score(config).read_text())["common_rows"] == 3
+
+
+@pytest.mark.parametrize(
+    "algorithm",
+    ["linear_regression", "equal_weight_rank_ensemble", "ic_weighted_rank_ensemble"],
+)
+def test_output_asset_projection_preserves_full_current_cross_section(
+    tmp_path, algorithm
+):
+    cases, config = candidates(tmp_path, algorithms=(algorithm,))
+    case = cases[0]
+    full, _ = read_predictions(config["predictions"][0])
+    path = predict(
+        {
+            "model": str(case.root),
+            "inputs": str(tmp_path / algorithm / "future.parquet"),
+            "input_spec": case.config["input_spec"],
+            "output": str(tmp_path / "scoped"),
+            "prediction_window": config["validation_windows"][0],
+            "sample_role": "validation",
+            "asset_ids": ["c"],
+        }
     )
-    selected = model_selection_owner.select_best_validation_trial(
-        result.metrics,
-        trial_id_column="model_id",
-        selection_metric="validation_mse",
-        maximize=False,
-        validation_metric_columns=("validation_mse",),
-        test_metric_columns=(),
-        tie_break_order=result.plan.tie_break_order,
+    actual, _ = read_predictions(path)
+    expected = full.loc[full.asset_id.eq("c")].reset_index(drop=True)
+    pd.testing.assert_frame_equal(actual, expected)
+
+
+@pytest.mark.parametrize("explicit_scope", [True, False, "multi"])
+def test_crypto_validation_axis_comes_from_training_universe(tmp_path, explicit_scope):
+    stamps = pd.date_range("2020-01-01", periods=6)
+    frame = pd.DataFrame(
+        {
+            "timestamp": stamps,
+            "asset_id": "btc",
+            "eligible": True,
+            "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "label": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+            "label_available_at": stamps,
+        }
     )
-    assert selected == expected
-    assert result.plan.candidate_ids == ("base", "other")
-    assert result.plan.tie_break_order == (order or ("base", "other"))
+    spec = ModelSpec(
+        model_id="single",
+        model_algorithm="linear_regression",
+        input_factor_columns=("x",),
+        target_column="label",
+        random_seed=19,
+    )
+    case = fit_frame(tmp_path / "single", frame.iloc[:3], spec)
+    if explicit_scope:
+        case_config = {
+            **case.config,
+            "output": str(tmp_path / "explicit"),
+            "asset_ids": ["btc", "eth"] if explicit_scope == "multi" else ["btc"],
+        }
+        model = fit(case_config)
+    else:
+        model = case.root
+    inputs = tmp_path / "inputs.parquet"
+    frame.to_parquet(inputs, index=False)
+    window = {"start": "2020-01-04", "end": "2020-01-06"}
+    predictions = predict(
+        {
+            "model": str(model),
+            "inputs": str(inputs),
+            "input_spec": case.config["input_spec"],
+            "output": str(tmp_path / "pred"),
+            "prediction_window": window,
+            "sample_role": "validation",
+        }
+    )
+    config = {
+        "predictions": [str(predictions)],
+        "candidate_ids": ["single"],
+        "labels": str(inputs),
+        "label_spec": case.config["input_spec"],
+        "validation_windows": [window],
+        "scoring_window": window,
+        "cutoff": "2020-01-06",
+        "test_window": {"start": "2020-01-07", "end": "2020-01-09"},
+        "selection_group": "global",
+        "validation_axis": "cross_sectional",
+        "label_unit": "decimal_return",
+        "output": str(tmp_path / "scores.json"),
+    }
+    if explicit_scope == "multi":
+        assert (
+            json.loads(score(config).read_text())["metrics"][0]["validation_ic"] is None
+        )
+        config.update(
+            validation_axis="single_asset_time_series",
+            output=str(tmp_path / "invalid-axis.json"),
+        )
+        with pytest.raises(ValueError, match="training_scope_validation_axis"):
+            score(config)
+        return
+    with pytest.raises(ValueError, match="training_scope_validation_axis"):
+        score(config)
+    config["validation_axis"] = "single_asset_time_series"
+    assert json.loads(score(config).read_text())["metrics"][0]["validation_ic"] == 1.0
+
+
+def test_scoring_uses_saved_training_domain_without_reopening_training_data(tmp_path):
+    cases, config = candidates(tmp_path, algorithms=("linear_regression",))
+    case = cases[0]
+    assert case.result.metadata["training_asset_ids"] == ["a", "b", "c"]
+    Path(case.config["inputs"]).unlink()
+    assert json.loads(score(config).read_text())["common_rows"] == 6

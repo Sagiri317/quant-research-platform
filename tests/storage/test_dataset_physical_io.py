@@ -3,7 +3,6 @@ from __future__ import annotations
 import errno
 import importlib
 import json
-import os
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -177,7 +176,13 @@ def test_sparse_assembler_preserves_object_text_after_null_prefix(tmp_path, chun
             spec=spec,
         )
     output = assemble_research_dataset(
-        layout=layout,
+        inputs={
+            spec.data_id: layout.processed_data_root(
+                spec.market_id, spec.kind, spec.data_id
+            )
+            for spec in catalog.list()
+        },
+        output_root=tmp_path / "assembled",
         processed_catalog=catalog,
         dataset_catalog=make_research_dataset_catalog(
             make_dummy_research_dataset_spec(key_coverage={"context": "sparse"})
@@ -211,46 +216,6 @@ def test_unresolved_or_drifting_object_schema_never_publishes(tmp_path, values, 
             ),
         )
     assert not filesystem_exists(root)
-
-
-def test_session_detects_part_manifest_and_same_size_identity_changes(
-    tmp_path: Path,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "identity_changes")
-    write_dataset(
-        root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("identity_changes"),
-    )
-    session = dataset_reading.open_dataset_session(root, columns=None, time_window=None)
-    manifest_path = root / "_manifest" / "manifest.json"
-    filesystem_write_bytes(manifest_path, session.manifest_bytes + b" ")
-    with pytest.raises(ValueError, match="dataset_manifest_identity_changed"):
-        session.verify()
-    filesystem_write_bytes(manifest_path, session.manifest_bytes)
-    session = dataset_reading.open_dataset_session(root, columns=None, time_window=None)
-    part = session.all_paths[0]
-    raw = bytearray(Path(native_filesystem_path(part)).read_bytes())
-    raw[len(raw) // 2] ^= 1
-    filesystem_write_bytes(part, raw)
-    with pytest.raises(ValueError, match="dataset_file_identity_changed"):
-        session.verify()
-
-
-def test_session_detects_part_replacement_after_issue(tmp_path: Path) -> None:
-    root = make_dataset_artifact_root(tmp_path, "part_replacement")
-    write_dataset(
-        root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("part_replacement"),
-    )
-    session = dataset_reading.open_dataset_session(root, columns=None, time_window=None)
-    part = session.all_paths[0]
-    replacement = tmp_path / "replacement.parquet"
-    filesystem_write_bytes(replacement, Path(native_filesystem_path(part)).read_bytes())
-    os.replace(native_filesystem_path(replacement), native_filesystem_path(part))
-    with pytest.raises(ValueError, match="dataset_file_identity_changed"):
-        session.verify()
 
 
 def test_exact_key_decimal_zero_and_numpy_scalar_identity() -> None:

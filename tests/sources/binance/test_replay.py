@@ -47,7 +47,6 @@ from quant_research_platform.storage.identity import (
     native_filesystem_path,
     open_filesystem_file,
 )
-from quant_research_platform.workflows import operations
 
 
 def _raw(
@@ -1098,31 +1097,6 @@ def test_recorder_run_rejects_aliased_input_paths(tmp_path, alias_kind):
             pytest.fail("aliased recorder input admitted")
 
 
-@pytest.mark.parametrize("consumer_primary", (False, True))
-def test_recorder_run_rejects_replaced_root_and_preserves_primary(
-    tmp_path, consumer_primary
-):
-    root = tmp_path / "run"
-    _write_run(
-        root, [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])]
-    )
-    original = Path(native_filesystem_path(root / "run.json")).read_bytes()
-    moved = tmp_path / "moved"
-    primary = KeyboardInterrupt("consumer_primary")
-    with pytest.raises(KeyboardInterrupt if consumer_primary else ValueError) as raised:
-        with open_recorder_run(root):
-            filesystem_rename(root, moved)
-            filesystem_mkdir(root)
-            if consumer_primary:
-                raise primary
-    if consumer_primary:
-        assert raised.value is primary
-        assert any("ValueError" in note for note in primary.__notes__)
-    else:
-        assert str(raised.value) == "binance_raw_export_identity_changed"
-    assert Path(native_filesystem_path(moved / "run.json")).read_bytes() == original
-
-
 def test_recorder_run_rejects_member_replacement_between_capture_and_open(
     tmp_path, monkeypatch
 ):
@@ -1887,78 +1861,6 @@ def test_partial_connection_overlap_has_one_panel_and_execution_domain(
     ]
 
 
-@pytest.mark.parametrize("change", ("grow", "truncate", "replace"))
-def test_manifest_race_is_bounded_and_rejected_before_decode(
-    tmp_path, monkeypatch, change
-):
-    from quant_research_platform.sources.market import open_market_source
-
-    root = tmp_path / "run"
-    _write_run(
-        root, [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])]
-    )
-    path = root / "run.json"
-    original = Path(native_filesystem_path(path)).read_bytes()
-    original_open = storage_manifests.open_filesystem_file
-    reads, handles, decodes = ([], [], [])
-
-    class ObservedReader:
-        def __init__(self, handle):
-            self.handle = handle
-
-        def fileno(self):
-            return self.handle.fileno()
-
-        def read(self, size=-1):
-            assert size == len(original) + 1
-            filesystem_write_bytes(
-                path,
-                original + b" " * (2 * 1024**2)
-                if change == "grow"
-                else original[: len(original) // 2],
-            )
-            result = self.handle.read(size)
-            reads.append((size, len(result)))
-            return result
-
-        def close(self):
-            self.handle.close()
-
-    def open_changed(candidate, *args, **kwargs):
-        assert candidate == path
-        if change == "replace":
-            replacement = root / "replacement.json"
-            filesystem_write_bytes(replacement, original.replace(b"run-1", b"run-2"))
-            os.replace(
-                native_filesystem_path(replacement), native_filesystem_path(path)
-            )
-        reader = ObservedReader(original_open(candidate, *args, **kwargs))
-        handles.append(reader.handle)
-        return reader
-
-    def forbidden_decode(raw):
-        decodes.append(len(raw))
-        pytest.fail("changed manifest reached JSON decoding")
-
-    monkeypatch.setattr(storage_manifests, "open_filesystem_file", open_changed)
-    monkeypatch.setattr(storage_manifests, "parse_qrp_json_object", forbidden_decode)
-    with pytest.raises(ValueError, match="^binance_replay_run_identity_changed$"):
-        with open_market_source(root):
-            pytest.fail("changed manifest reached the source consumer")
-    assert not decodes
-    assert handles and all(handle.closed for handle in handles)
-    assert reads == (
-        []
-        if change == "replace"
-        else [
-            (
-                len(original) + 1,
-                len(original) + 1 if change == "grow" else len(original) // 2,
-            )
-        ]
-    )
-
-
 def test_manifest_read_failure_preserves_primary_and_closes_handle(
     tmp_path, monkeypatch
 ):
@@ -1982,7 +1884,7 @@ def test_manifest_read_failure_preserves_primary_and_closes_handle(
             return self.handle.fileno()
 
         def read(self, size=-1):
-            assert size == len(original) + 1
+            assert size == -1
             filesystem_write_bytes(path, original + b" ")
             raise primary
 
@@ -2002,72 +1904,8 @@ def test_manifest_read_failure_preserves_primary_and_closes_handle(
     assert caught.value is primary
     assert handles and all(handle.closed for handle in handles)
     assert primary.__notes__ == [
-        "file identity verification also failed: ValueError",
         "iterator close also failed: OSError",
     ]
-
-
-def test_manifest_growth_blocks_materialization_and_preserves_old_good(
-    tmp_path, monkeypatch
-):
-    from quant_research_platform.markets.implementations.crypto.ids import (
-        HFT_PANEL_DATA_ID,
-    )
-    from quant_research_platform.profiles.research import (
-        CRYPTO_PROFILE_ID,
-        research_profile,
-    )
-    from quant_research_platform.storage.identity import filesystem_walk
-    from quant_research_platform.storage.layout import StorageLayout
-    from tests.helpers.binance_hft import write_binance_hft_run
-
-    raw_root = tmp_path / "raw"
-    write_binance_hft_run(raw_root)
-    layout = StorageLayout(tmp_path / "project")
-    profile = research_profile(CRYPTO_PROFILE_ID)
-    kwargs = dict(
-        profile=profile,
-        layout=layout,
-        raw_root=raw_root,
-        data_ids=(HFT_PANEL_DATA_ID,),
-        start_date="1970-01-01T00:00:00",
-        end_date="1970-01-01T00:00:06",
-    )
-    result = operations.data_materialize(**kwargs)
-    assert result["status"] == "COMPLETE"
-    spec = profile.processed.get(HFT_PANEL_DATA_ID)
-    instances = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
-
-    def published_bytes():
-        return {
-            (parent / name).relative_to(instances): Path(
-                native_filesystem_path(parent / name)
-            ).read_bytes()
-            for parent, _directories, files in filesystem_walk(instances)
-            for name in files
-        }
-
-    old_good = published_bytes()
-    assert old_good
-    manifest_path = raw_root / "run.json"
-    original = Path(native_filesystem_path(manifest_path)).read_bytes()
-    read_manifest = replay.read_qrp_json_file
-    attempts = []
-
-    def grow_after_admission(path, **options):
-        if path == manifest_path:
-            attempts.append(options["expected_identity"].size)
-            filesystem_write_bytes(
-                path, Path(native_filesystem_path(path)).read_bytes() + b" "
-            )
-        return read_manifest(path, **options)
-
-    monkeypatch.setattr(replay, "read_qrp_json_file", grow_after_admission)
-    rejected = operations.data_materialize(**kwargs, rebuild=True)
-    assert rejected["status"] == "BLOCKED"
-    assert rejected["target_results"][0]["reason"] == "source_identity_invalid"
-    assert attempts and attempts[0] == len(original)
-    assert published_bytes() == old_good
 
 
 def test_same_utc_book_invalidation_drops_empty_coverage():
@@ -2348,3 +2186,41 @@ def test_depth_index_direct_advance_checks_every_invalid_state(bids, reason):
     engine.bootstrap(snapshot)
     assert engine.advance(row | {"payload": row["payload"] | {"b": []}}) is True
     assert engine.valid and engine.stats.emitted_states == 0
+
+
+@pytest.mark.parametrize("member", ["coverage", "stream"])
+@pytest.mark.parametrize("prefix", ["/outside/", "C:outside/"])
+def test_recorder_rejects_windows_anchored_members_before_read(
+    tmp_path, monkeypatch, member, prefix
+):
+    from pathlib import PureWindowsPath
+
+    root = tmp_path / "run"
+    manifest = _write_run(
+        root,
+        [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])],
+    )
+    descriptor = (
+        manifest["capture"]["connection_intervals"]
+        if member == "coverage"
+        else manifest["files"][0]
+    )
+    anchored = prefix + Path(descriptor["path"]).name
+    descriptor["path"] = anchored
+    filesystem_write_text(root / "run.json", json.dumps(manifest), encoding="utf-8")
+
+    # Exercise Windows manifest-path parsing while retaining native fixture I/O.
+    monkeypatch.setattr(
+        replay,
+        "Path",
+        lambda value: PureWindowsPath(value) if value == anchored else Path(value),
+    )
+
+    def unexpected_read(*args, **kwargs):
+        pytest.fail("anchored manifest member reached the coverage reader")
+
+    monkeypatch.setattr(replay, "ObservationCoverageIndex", unexpected_read)
+    reason = "connection_intervals" if member == "coverage" else "file_manifest"
+    with pytest.raises(ValueError, match=f"^binance_replay_{reason}_invalid$"):
+        with open_recorder_run(root):
+            pass

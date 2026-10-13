@@ -15,7 +15,6 @@ import pytest
 import quant_research_platform.storage.datasets.reading as dataset_reading
 import quant_research_platform.storage.parquet as dataset_physical
 from quant_research_platform.contracts.json_codec import canonical_json_hash
-from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
@@ -37,10 +36,8 @@ from quant_research_platform.storage.identity import (
     filesystem_write_bytes,
     filesystem_write_text,
     native_filesystem_path,
-    open_filesystem_file,
 )
 from tests.storage.low_level_fixtures import (
-    fixture_dataset_content_hash,
     make_dataset_artifact_root,
     make_default_dataset_frame,
     make_processed_dataset_spec,
@@ -74,7 +71,6 @@ def test_plain_reader_streams_normal_files(tmp_path, filtered):
     with closing_iterator(
         dataset_physical.iter_dataset_part_batches(
             path,
-            expected_identity=None,
             parquet_filters=[("value", ">=", 1024)] if filtered else None,
             batch_rows=batch_rows,
         )
@@ -115,9 +111,7 @@ def test_declared_member_preserves_output_across_parent_batches(
         "iter_dataset_part_batches",
         lambda *_args, **_kwargs: iter(batches),
     )
-    converted = dataset_reading.iter_declared_parquet_member_batches(
-        path, expected_identity=SimpleNamespace()
-    )
+    converted = dataset_reading.iter_declared_parquet_member_batches(path)
     output = tuple(converted)
     for observed, expected_frame in zip(output, expected, strict=True):
         pd.testing.assert_frame_equal(observed, expected_frame)
@@ -172,7 +166,6 @@ def test_declared_variable_width_member_decodes_multirow_batches(
     frames = tuple(
         dataset_reading.iter_declared_parquet_member_batches(
             path,
-            expected_identity=dataset_physical.dataset_file_identity(path),
             batch_rows=128,
         )
     )
@@ -242,12 +235,9 @@ def test_dictionary_decode_preserves_supported_logical_types_and_keys(tmp_path, 
         table, native_filesystem_path(path), use_dictionary=True, row_group_size=128
     )
     native = pq.read_table(native_filesystem_path(path))
-    before = dataset_physical.dataset_file_identity(path)
     delivered = 0
     with closing_iterator(
-        dataset_physical.iter_dataset_part_batches(
-            path, expected_identity=before, batch_rows=128
-        )
+        dataset_physical.iter_dataset_part_batches(path, batch_rows=128)
     ) as batches:
         for batch in batches:
             pd.testing.assert_frame_equal(
@@ -256,7 +246,6 @@ def test_dictionary_decode_preserves_supported_logical_types_and_keys(tmp_path, 
             assert batch.schema.remove_metadata() == native.schema.remove_metadata()
             delivered += batch.num_rows
     assert delivered == 256
-    assert dataset_physical.dataset_file_identity(path) == before
 
 
 @pytest.mark.parametrize(
@@ -306,7 +295,6 @@ def test_mixed_row_group_encoding_only_changes_selected_native_layout(
     with closing_iterator(
         dataset_physical.iter_dataset_part_batches(
             path,
-            expected_identity=dataset_physical.dataset_file_identity(path),
             row_groups=groups,
             parquet_filters=filters,
             batch_rows=257,
@@ -366,9 +354,7 @@ def test_dictionary_reader_closes_same_handle_and_native_iterator(
 
     monkeypatch.setattr(dataset_physical, "open_filesystem_file", observed_open)
     monkeypatch.setattr(pq, "ParquetFile", ObservedParquet)
-    batches = dataset_physical.iter_dataset_part_batches(
-        path, expected_identity=None, batch_rows=128
-    )
+    batches = dataset_physical.iter_dataset_part_batches(path, batch_rows=128)
     first = next(batches)
     assert first.num_rows > 0
     first = None
@@ -431,68 +417,6 @@ def test_arrow_batch_converter_observes_each_row_once(
     assert logical_rows == list(row_ids)
     assert tuple(row for frame in output for row in frame["row_id"]) == row_ids
     assert all(str(frame["value"].dtype) == "string" for frame in output)
-
-
-def test_chunk_iterator_verifies_session_on_close_empty_and_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import sys
-
-    error_verifications = 0
-    root = make_dataset_artifact_root(tmp_path, "iterator_final_verify")
-    write_dataset(
-        root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("iterator_final_verify"),
-    )
-    session = dataset_reading.open_dataset_session(root, columns=None, time_window=None)
-    calls = 0
-    original_verify = dataset_reading.DatasetSession.verify
-
-    def record_verify(current: dataset_reading.DatasetSession) -> None:
-        nonlocal calls, error_verifications
-        if current.root == root:
-            calls += 1
-        original_verify(current)
-        if (
-            isinstance(sys.exception(), RuntimeError)
-            and str(sys.exception()) == "injected_read_failure"
-        ):
-            error_verifications += 1
-            raise ValueError("injected_final_identity_failure")
-
-    monkeypatch.setattr(dataset_reading.DatasetSession, "verify", record_verify)
-    iterator = dataset_reading.iter_dataset_chunks(session, batch_rows=2048)
-    next(iterator)
-    before_close = calls
-    iterator.close()
-    assert calls > before_close
-    empty_session = dataset_reading.open_dataset_session(
-        root, columns=None, time_window=TimeWindow("2099-01-01", "2099-01-02")
-    )
-    before_empty = calls
-    assert (
-        len(list(dataset_reading.iter_dataset_chunks(empty_session, batch_rows=2048)))
-        == 1
-    )
-    assert calls > before_empty
-
-    def fail_batches(*_args, **_kwargs):
-        raise RuntimeError("injected_read_failure")
-        yield
-
-    monkeypatch.setattr(
-        dataset_reading, "iter_declared_parquet_member_batches", fail_batches
-    )
-    error_session = dataset_reading.open_dataset_session(
-        root, columns=None, time_window=None
-    )
-    before_error = calls
-    with pytest.raises(RuntimeError, match="injected_read_failure") as caught:
-        list(dataset_reading.iter_dataset_chunks(error_session, batch_rows=2048))
-    assert calls > before_error
-    assert error_verifications >= 1
-    assert "dataset verification also failed: ValueError" in caught.value.__notes__
 
 
 @pytest.mark.parametrize(
@@ -681,7 +605,6 @@ def test_reads_reject_nonnull_category_outside_declared_domain(
         filesystem_stat(path).st_size
         for path in filesystem_glob(root / "data", "**/part-*.parquet")
     )
-    manifest["content_hash"] = fixture_dataset_content_hash(root)
     filesystem_write_text(manifest_path, json.dumps(manifest) + "\n", encoding="utf-8")
     with pytest.raises(ValueError, match="dataset_categorical_domain_mismatch"):
         result = read_dataset(root, mode=mode)
@@ -802,7 +725,6 @@ def test_physical_values_cannot_be_reinterpreted_by_forged_logical_dtype(
         manifest["logical_dtypes"] = logical
         manifest["logical_dtype_hash"] = canonical_json_hash(logical)
         manifest["file_size_bytes"] = filesystem_stat(part).st_size
-        manifest["content_hash"] = fixture_dataset_content_hash(root)
         filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
         with pytest.raises(ValueError, match="dataset_logical_dtype_mismatch"):
             result = dataset_reading.read_dataset(root, mode=DatasetReadMode(mode))
@@ -892,7 +814,6 @@ def test_nonnullable_boolean_rejects_physical_null_values(
         Path(native_filesystem_path(manifest_path)).read_text(encoding="utf-8")
     )
     manifest["file_size_bytes"] = filesystem_stat(part).st_size
-    manifest["content_hash"] = fixture_dataset_content_hash(root)
     filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ValueError, match="dataset_nonnullable_value_missing"):
         result = read_dataset(root, mode=mode)
@@ -929,95 +850,27 @@ def test_fingerprint_content_hash_preserves_registered_formula(tmp_path: Path) -
     assert fingerprint.content_hash == expected
 
 
-@pytest.mark.parametrize(
-    ("use_dictionary", "failure"),
-    (
-        (False, "native_close"),
-        (True, "native_close"),
-        (False, "identity"),
-        (True, "identity"),
-    ),
-)
-@pytest.mark.parametrize("reader_kind", ("physical", "declared", "prediction"))
+@pytest.mark.parametrize("use_dictionary", (False, True))
+@pytest.mark.parametrize("reader_kind", ("physical", "declared"))
 @pytest.mark.parametrize("consumer_primary", (False, True))
-def test_parquet_early_close_propagates_cleanup_and_identity_failures(
-    tmp_path, monkeypatch, use_dictionary, failure, consumer_primary, reader_kind
+def test_parquet_early_close_preserves_cleanup_and_consumer_failure(
+    tmp_path, monkeypatch, use_dictionary, consumer_primary, reader_kind
 ):
     original = tmp_path / "original.parquet"
     path = tmp_path / "read.parquet"
-    if reader_kind == "prediction":
-        from quant_research_platform.artifacts.outputs.prediction import (
-            _merge_family_predictions,
-        )
-        from quant_research_platform.artifacts.outputs.prediction_validation import (
-            validate_family_prediction_frame,
-        )
-        from quant_research_platform.contracts.predictions import (
-            A_SHARE_PREDICTION_PRIMARY_KEY,
-            RAW_PREDICTION_COLUMN,
-            prediction_output_columns,
-        )
-
-        columns = prediction_output_columns(
-            "a_share_oos", RAW_PREDICTION_COLUMN, A_SHARE_PREDICTION_PRIMARY_KEY
-        )
-        metadata = {
-            "quarterly_models": [
-                {
-                    "quarter_id": "2020Q1",
-                    "family_id": family,
-                    "model_id": f"{family}_2020Q1",
-                    "prediction_window": {"start": "2020-01-02", "end": "2020-03-31"},
-                }
-                for family in ("linear_regression", "ridge")
-            ]
-        }
-        prediction_paths = []
-        prediction_originals = {}
-        for model in metadata["quarterly_models"]:
-            frame = pd.DataFrame(
-                {
-                    "timestamp": pd.to_datetime(
-                        ["2020-01-02", "2020-01-03", "2020-01-06"]
-                    ),
-                    "asset_id": ["000001.SZ"] * 3,
-                    "family_id": model["family_id"],
-                    "quarter_id": model["quarter_id"],
-                    "model_id": model["model_id"],
-                    "raw_prediction": [0.1, 0.2, 0.3],
-                    "alpha_score": [0.01, 0.02, 0.03],
-                },
-                columns=columns,
-            )
-            validate_family_prediction_frame(frame, metadata)
-            assert not frame.duplicated(list(A_SHARE_PREDICTION_PRIMARY_KEY)).any()
-            member = path if not prediction_paths else tmp_path / "other.parquet"
-            pq.write_table(
-                pa.Table.from_pandas(frame, preserve_index=False),
-                native_filesystem_path(member),
-                use_dictionary=use_dictionary,
-            )
-            prediction_paths.append((model["quarter_id"], model["family_id"], member))
-            prediction_originals[member] = Path(
-                native_filesystem_path(member)
-            ).read_bytes()
-        filesystem_write_bytes(original, prediction_originals[path])
-    else:
-        pq.write_table(
-            pa.table(
-                {
-                    "value": ["x" * (32 * 1024)] * 256,
-                    "timestamp": pd.date_range("2020-01-01", periods=256),
-                    "asset_id": ["asset"] * 256,
-                }
-            ),
-            native_filesystem_path(original),
-            use_dictionary=use_dictionary,
-            row_group_size=1,
-        )
-        filesystem_write_bytes(
-            path, Path(native_filesystem_path(original)).read_bytes()
-        )
+    pq.write_table(
+        pa.table(
+            {
+                "value": ["x" * (32 * 1024)] * 256,
+                "timestamp": pd.date_range("2020-01-01", periods=256),
+                "asset_id": ["asset"] * 256,
+            }
+        ),
+        native_filesystem_path(original),
+        use_dictionary=use_dictionary,
+        row_group_size=1,
+    )
+    filesystem_write_bytes(path, Path(native_filesystem_path(original)).read_bytes())
     original_bytes = Path(native_filesystem_path(original)).read_bytes()
     open_file = dataset_physical.open_filesystem_file
     constructor = pq.ParquetFile
@@ -1046,41 +899,24 @@ def test_parquet_early_close_propagates_cleanup_and_identity_failures(
         def close(self):
             self.inner.close()
             reader_closed.append(True)
-            if failure == "native_close":
-                raise OSError("parquet_native_close")
+            raise OSError("parquet_native_close")
 
     monkeypatch.setattr(dataset_physical, "open_filesystem_file", observed_open)
     monkeypatch.setattr(pq, "ParquetFile", ObservedParquet)
     primary = KeyboardInterrupt("parquet_consumer_primary")
-    if reader_kind == "prediction":
-        batches = _merge_family_predictions(prediction_paths, columns)
-    else:
-        reader = (
-            dataset_physical.iter_dataset_part_batches
-            if reader_kind == "physical"
-            else dataset_reading.iter_declared_parquet_member_batches
-        )
-        batches = reader(
-            path,
-            expected_identity=dataset_physical.dataset_file_identity(path),
-            batch_rows=128,
-        )
-    assert len(next(batches)) > 0
-    readers = 2 if reader_kind == "prediction" else 1
-    assert len(handles) == readers and all(not handle.closed for handle in handles)
-    assert not reader_closed and (not iterator_closed)
-    if failure == "identity":
-        before = filesystem_stat(path)
-        with open_filesystem_file(path, "ab") as handle:
-            handle.write(b"x")
-        assert filesystem_stat(path).st_size == before.st_size + 1
-    error = (
-        KeyboardInterrupt
-        if consumer_primary
-        else ValueError
-        if failure == "identity"
-        else OSError
+    reader = (
+        dataset_physical.iter_dataset_part_batches
+        if reader_kind == "physical"
+        else dataset_reading.iter_declared_parquet_member_batches
     )
+    batches = reader(
+        path,
+        batch_rows=128,
+    )
+    assert len(next(batches)) > 0
+    assert len(handles) == 1 and all(not handle.closed for handle in handles)
+    assert not reader_closed and (not iterator_closed)
+    error = KeyboardInterrupt if consumer_primary else OSError
     with pytest.raises(error) as caught:
         if consumer_primary:
             with closing_iterator(batches):
@@ -1089,20 +925,12 @@ def test_parquet_early_close_propagates_cleanup_and_identity_failures(
             batches.close()
     if consumer_primary:
         assert caught.value is primary
-        secondary = "ValueError" if failure == "identity" else "OSError"
-        assert any(secondary in note for note in getattr(primary, "__notes__", ()))
-    elif failure == "identity":
-        assert str(caught.value) == "dataset_file_identity_changed"
-    assert len(handles) == readers and all(handle.closed for handle in handles)
-    assert reader_closed == [True] * readers
-    assert iterator_closed == [True] * readers
+        assert any("OSError" in note for note in getattr(primary, "__notes__", ()))
+    assert len(handles) == 1 and all(handle.closed for handle in handles)
+    assert reader_closed == [True]
+    assert iterator_closed == [True]
     assert Path(native_filesystem_path(original)).read_bytes() == original_bytes
-    if failure != "identity":
-        assert Path(native_filesystem_path(path)).read_bytes() == original_bytes
-    if reader_kind == "prediction":
-        for member, payload in prediction_originals.items():
-            if member != path or failure != "identity":
-                assert Path(native_filesystem_path(member)).read_bytes() == payload
+    assert Path(native_filesystem_path(path)).read_bytes() == original_bytes
 
 
 @pytest.mark.parametrize("observer_kind", ("persisted", "batch"))
@@ -1135,7 +963,6 @@ def test_declared_reader_preserves_observer_generator_exit(
     monkeypatch.setattr(pq, "ParquetFile", ObservedParquet)
     frames = dataset_reading.iter_declared_parquet_member_batches(
         path,
-        expected_identity=dataset_physical.dataset_file_identity(path),
         persisted_frame_observer=observer if observer_kind == "persisted" else None,
         batch_observer=observer if observer_kind == "batch" else None,
         batch_rows=128,
@@ -1368,76 +1195,3 @@ def test_comparison_rechecks_dtype_structure_after_schema_hash_collision(
     assert compare_datasets(*roots).status == "SCHEMA_MISMATCH"
     monkeypatch.setattr(comparison, "canonical_json_hash", lambda _value: "a" * 64)
     assert compare_datasets(*roots).status == "SCHEMA_MISMATCH"
-
-
-def test_explicit_generator_exit_keeps_primary_during_final_verification(
-    tmp_path, monkeypatch
-):
-    root = make_dataset_artifact_root(tmp_path, "generator_exit")
-    write_dataset(
-        root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("generator_exit"),
-    )
-    session = dataset_reading.open_dataset_session(root, columns=None, time_window=None)
-    original_verify = dataset_reading.DatasetSession.verify
-    primary = GeneratorExit("explicit_primary")
-
-    def verify(current):
-        import sys
-
-        if sys.exception() is primary:
-            raise ValueError("secondary_identity_failure")
-        original_verify(current)
-
-    monkeypatch.setattr(dataset_reading.DatasetSession, "verify", verify)
-    with pytest.raises(GeneratorExit) as caught:
-
-        def observe(_batch, _frame):
-            raise primary
-
-        list(
-            dataset_reading.iter_dataset_chunks(
-                session, batch_observer=observe, batch_rows=2048
-            )
-        )
-    assert caught.value is primary
-    assert "dataset verification also failed: ValueError" in primary.__notes__
-
-
-@pytest.mark.parametrize("selection", ["populated", "empty", "filtered"])
-@pytest.mark.parametrize("termination", ["exhaust", "close"])
-def test_dataset_final_verification_ignores_handled_outer(
-    tmp_path, monkeypatch, selection, termination
-):
-    root = make_dataset_artifact_root(tmp_path, "handled_outer")
-    frame = make_default_dataset_frame()
-    write_dataset(
-        root,
-        frame.iloc[:0] if selection == "empty" else frame,
-        spec=make_processed_dataset_spec("handled_outer"),
-    )
-    session = dataset_reading.open_dataset_session(
-        root,
-        columns=None,
-        time_window=TimeWindow("2099-01-01", "2099-01-02")
-        if selection == "filtered"
-        else None,
-    )
-    iterator = dataset_reading.iter_dataset_chunks(session)
-    next(iterator)
-    verifications = 0
-
-    def fail_final_verify(_session):
-        nonlocal verifications
-        verifications += 1
-        raise ValueError("final_identity_failure")
-
-    monkeypatch.setattr(dataset_reading.DatasetSession, "verify", fail_final_verify)
-    try:
-        raise RuntimeError("handled_outer")
-    except RuntimeError as outer:
-        with pytest.raises(ValueError, match="final_identity_failure"):
-            list(iterator) if termination == "exhaust" else iterator.close()
-        assert not getattr(outer, "__notes__", [])
-    assert verifications >= 1

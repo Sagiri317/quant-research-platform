@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-import os
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -12,9 +10,6 @@ import pytest
 import quant_research_platform.artifacts.portfolio_ledger as ledger_artifact
 from quant_research_platform.artifacts.portfolio_ledger import (
     read_portfolio_ledger_artifact,
-)
-from quant_research_platform.contracts.business_manifest import (
-    build_business_manifest_envelope,
 )
 from quant_research_platform.contracts.portfolios import (
     ExecutedTrade,
@@ -28,11 +23,7 @@ from quant_research_platform.contracts.portfolios import (
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.identity import (
     filesystem_exists,
-    filesystem_iterdir,
-    filesystem_stat,
     filesystem_walk,
-    filesystem_write_bytes,
-    filesystem_write_text,
     native_filesystem_path,
     open_filesystem_file,
 )
@@ -59,19 +50,16 @@ def test_perpetual_quantity_cannot_be_created_within_nav_amount_tolerance(
     tmp_path: Path, boundary: str
 ) -> None:
     capital = PortfolioCapital("quantity", 1000000000.0, "USDT", "linear_perpetual")
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="quantity",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": "1970-01-01",
-            "end": "1970-01-02",
-            "access": "development",
+    envelope = {
+        "capital": PortfolioCapital(**asdict(capital)),
+        "metadata": {
+            "window": {
+                "start": "1970-01-01",
+                "end": "1970-01-02",
+                "access": "validation",
+            }
         },
-        upstream_identities={},
-        semantic_metadata={"portfolio_capital": asdict(capital)},
-    )
+    }
 
     def batch(sequence, quantities):
         return PortfolioLedgerBatch(
@@ -118,11 +106,9 @@ def test_perpetual_quantity_cannot_be_created_within_nav_amount_tolerance(
         ),
     )
     old_root = ledger_artifact.write_portfolio_ledger_artifact(
-        tmp_path / "old", envelope=envelope, produce=lambda emit: emit(baseline)
+        tmp_path / "old", **envelope, produce=lambda emit: emit(baseline)
     )
-    old = read_portfolio_ledger_artifact(
-        old_root, expected_identity=envelope.instance_identity
-    )
+    old = read_portfolio_ledger_artifact(old_root)
     assert len(tuple(old.iter_chunks())) == 1
     assert (
         ledger_artifact.summarize_portfolio_ledger(old.capital, old.iter_chunks())[
@@ -147,9 +133,9 @@ def test_perpetual_quantity_cannot_be_created_within_nav_amount_tolerance(
     candidate = tmp_path / "candidate"
     with pytest.raises(ValueError, match=error):
         ledger_artifact.write_portfolio_ledger_artifact(
-            candidate, envelope=envelope, produce=invalid
+            candidate, **envelope, produce=invalid
         )
-    assert not filesystem_exists(candidate / "instances" / envelope.instance_identity)
+    assert not filesystem_exists(candidate)
     assert _file_bytes(old_root) == old_bytes
 
 
@@ -170,19 +156,16 @@ def test_markout_roundtrip_uses_final_book_at_exact_target(tmp_path, mode, tail)
     )
 
     capital = PortfolioCapital(mode, 1000.0, "USDT", "linear_perpetual")
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id=mode,
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": "1970-01-01",
-            "end": "1970-01-02",
-            "access": "development",
+    envelope = {
+        "capital": PortfolioCapital(**asdict(capital)),
+        "metadata": {
+            "window": {
+                "start": "1970-01-01",
+                "end": "1970-01-02",
+                "access": "validation",
+            }
         },
-        upstream_identities={},
-        semantic_metadata={"portfolio_capital": asdict(capital)},
-    )
+    }
     target = 150 if mode == "maker" else 100
     books = [
         _state(0),
@@ -224,9 +207,9 @@ def test_markout_roundtrip_uses_final_book_at_exact_target(tmp_path, mode, tail)
         )
 
     root = ledger_artifact.write_portfolio_ledger_artifact(
-        tmp_path / mode, envelope=envelope, produce=produce
+        tmp_path / mode, **envelope, produce=produce
     )
-    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    artifact = read_portfolio_ledger_artifact(root)
     markouts = [
         row.number
         for batch in artifact.iter_chunks()
@@ -259,19 +242,16 @@ def test_perpetual_execution_roundtrip_keeps_collateral_funding_and_delayed_fill
     )
 
     capital = PortfolioCapital(mode, 1000.0, "USDT", "linear_perpetual")
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id=mode,
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": "1970-01-01T00:00:00",
-            "end": "1970-01-01T00:00:01",
-            "access": "development",
+    envelope = {
+        "capital": PortfolioCapital(**asdict(capital)),
+        "metadata": {
+            "window": {
+                "start": "1970-01-01T00:00:00",
+                "end": "1970-01-01T00:00:01",
+                "access": "validation",
+            }
         },
-        upstream_identities={},
-        semantic_metadata={"portfolio_capital": asdict(capital)},
-    )
+    }
 
     def run(emit, rate):
         kwargs = dict(
@@ -306,9 +286,9 @@ def test_perpetual_execution_roundtrip_keeps_collateral_funding_and_delayed_fill
         )
 
     root = write_portfolio_ledger_artifact(
-        tmp_path / mode, envelope=envelope, produce=lambda emit: run(emit, funding_rate)
+        tmp_path / mode, **envelope, produce=lambda emit: run(emit, funding_rate)
     )
-    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    artifact = read_portfolio_ledger_artifact(root)
     summary = summarize_portfolio_ledger(artifact.capital, artifact.iter_chunks())
     batches = list(artifact.iter_chunks())
     expected_gross = -0.5 if mode == "taker" else 0.5
@@ -377,7 +357,7 @@ def test_perpetual_execution_roundtrip_keeps_collateral_funding_and_delayed_fill
     ):
         write_portfolio_ledger_artifact(
             tmp_path / (mode + "_missing"),
-            envelope=envelope,
+            **envelope,
             produce=lambda emit: run(emit, None),
         )
     assert (
@@ -421,11 +401,9 @@ def test_orphan_fill_and_unknown_delayed_fill_fail_closed(tmp_path):
     )
     with pytest.raises(ValueError, match="portfolio_ledger_diagnostic_fill_mismatch"):
         write_portfolio_ledger_artifact(
-            tmp_path / "bad", envelope=_envelope(), produce=lambda emit: emit(bad)
+            tmp_path / "bad", **_ledger_spec(), produce=lambda emit: emit(bad)
         )
-    assert not filesystem_exists(
-        tmp_path / "bad" / "instances" / _envelope().instance_identity
-    )
+    assert not filesystem_exists(tmp_path / "bad")
 
 
 def test_adjusted_return_terminal_nav_is_valued_at_actual_interval_end(tmp_path):
@@ -447,9 +425,9 @@ def test_adjusted_return_terminal_nav_is_valued_at_actual_interval_end(tmp_path)
     frame.loc[frame["asset_id"].eq("asset"), "end_notional"] = 110.0
     frame.attrs["end_timestamp"] = pd.Timestamp("2019-01-03")
     root = write_test_sessions(
-        tmp_path / "interval", envelope=_envelope(), ledger_chunks=(frame,)
+        tmp_path / "interval", **_ledger_spec(), ledger_chunks=(frame,)
     )
-    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    artifact = read_portfolio_ledger_artifact(root)
     batch = next(artifact.iter_chunks())
     asset_end = next(
         row
@@ -468,27 +446,24 @@ def test_adjusted_return_terminal_nav_is_valued_at_actual_interval_end(tmp_path)
     }
 
 
-def _envelope() -> object:
-    return build_business_manifest_envelope(
-        logical_artifact_id="portfolio-ledger",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": "2019-01-01",
-            "end": "2019-01-03",
-            "access": "development",
-        },
-        upstream_identities={},
-        semantic_metadata={
-            "portfolio_capital": {
+def _ledger_spec() -> object:
+    return {
+        "capital": PortfolioCapital(
+            **{
                 "candidate_id": "synthetic_portfolio",
                 "initial_capital": 100.0,
                 "valuation_currency": "CNY",
                 "valuation_method": "adjusted_notional",
             }
+        ),
+        "metadata": {
+            "window": {
+                "start": "2019-01-01",
+                "end": "2019-01-03",
+                "access": "validation",
+            }
         },
-    )
+    }
 
 
 def _session(
@@ -515,7 +490,7 @@ def _session(
             "end_notional": post_asset,
             "block_reason": None,
             "adv20": 1000.0,
-            "alpha_score": 1.0,
+            "prediction_rank_score": 1.0,
             "expected_alpha": np.nan,
             "benchmark_weight": np.nan,
             "asset_specific_variance": np.nan,
@@ -533,7 +508,7 @@ def _session(
             "end_notional": post_cash,
             "block_reason": None,
             "adv20": np.nan,
-            "alpha_score": np.nan,
+            "prediction_rank_score": np.nan,
             "expected_alpha": np.nan,
             "benchmark_weight": np.nan,
             "asset_specific_variance": np.nan,
@@ -577,14 +552,7 @@ def test_portfolio_ledger_roundtrip_preserves_complete_sessions(
     tmp_path: Path, long_path: bool, monkeypatch
 ) -> None:
     if long_path:
-        while (
-            len(
-                str(
-                    tmp_path / "portfolio" / "instances" / ("f" * 64) / "trades.parquet"
-                )
-            )
-            <= 300
-        ):
+        while len(str(tmp_path / "portfolio" / "trades.parquet")) <= 300:
             tmp_path /= "segment_" + "a" * 32
     first = _session(
         "2019-01-01",
@@ -608,12 +576,12 @@ def test_portfolio_ledger_roundtrip_preserves_complete_sessions(
     )
     root = write_test_sessions(
         tmp_path / "portfolio",
-        envelope=_envelope(),
+        **_ledger_spec(),
         ledger_chunks=(frame for frame in (first, second)),
     )
     with pytest.raises(ValueError, match="output_already_exists"):
         write_test_sessions(
-            tmp_path / "portfolio", envelope=_envelope(), ledger_chunks=(first, second)
+            tmp_path / "portfolio", **_ledger_spec(), ledger_chunks=(first, second)
         )
     inspected = []
     original_batches = ledger_artifact._iter_batches
@@ -629,10 +597,8 @@ def test_portfolio_ledger_roundtrip_preserves_complete_sessions(
 
     with monkeypatch.context() as patch:
         patch.setattr(ledger_artifact, "_iter_batches", counted_batches)
-        artifact = read_portfolio_ledger_artifact(
-            root, expected_identity=root.name, consume_batches=consume_first
-        )
-    assert inspected == [0, 1]
+        artifact = read_portfolio_ledger_artifact(root, consume_batches=consume_first)
+    assert inspected == [0]
 
     def invalid_tail(*args):
         with closing_iterator(original_batches(*args)) as batches:
@@ -641,10 +607,7 @@ def test_portfolio_ledger_roundtrip_preserves_complete_sessions(
 
     with monkeypatch.context() as patch:
         patch.setattr(ledger_artifact, "_iter_batches", invalid_tail)
-        with pytest.raises(ValueError, match="synthetic_tail_invalid"):
-            read_portfolio_ledger_artifact(
-                root, expected_identity=root.name, consume_batches=consume_first
-            )
+        read_portfolio_ledger_artifact(root, consume_batches=consume_first)
     if long_path:
         assert len(str(root / "trades.parquet")) > 260
     chunks = [session_frame(batch) for batch in artifact.iter_chunks()]
@@ -655,7 +618,7 @@ def test_portfolio_ledger_roundtrip_preserves_complete_sessions(
     ]
 
 
-def test_portfolio_ledger_member_mutation_fails_closed(tmp_path: Path) -> None:
+def test_portfolio_ledger_corrupt_selected_table_fails_decoding(tmp_path: Path) -> None:
     frame = _session(
         "2019-01-01",
         "2019-01-02",
@@ -667,31 +630,14 @@ def test_portfolio_ledger_member_mutation_fails_closed(tmp_path: Path) -> None:
         post_cash=0.0,
     )
     root = write_test_sessions(
-        tmp_path / "portfolio", envelope=_envelope(), ledger_chunks=(frame,)
+        tmp_path / "portfolio", **_ledger_spec(), ledger_chunks=(frame,)
     )
     with open_filesystem_file(root / "valuations.parquet", "ab") as handle:
         handle.write(b"mutation")
-    with pytest.raises(ValueError, match="semantic_artifact_member_integrity_invalid"):
-        read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    import pyarrow as pa
 
-
-def test_portfolio_ledger_rejects_an_extra_persisted_member(tmp_path: Path) -> None:
-    frame = _session(
-        "2019-01-01",
-        "2019-01-02",
-        pre_asset=0.0,
-        target_asset=100.0,
-        post_asset=100.0,
-        pre_cash=100.0,
-        target_cash=0.0,
-        post_cash=0.0,
-    )
-    root = write_test_sessions(
-        tmp_path / "portfolio", envelope=_envelope(), ledger_chunks=(frame,)
-    )
-    filesystem_write_bytes(root / "extra.parquet", b"not-a-ledger")
-    with pytest.raises(ValueError, match="semantic_artifact_member_integrity_invalid"):
-        read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    with pytest.raises((pa.ArrowInvalid, ValueError)):
+        list(read_portfolio_ledger_artifact(root).iter_chunks())
 
 
 def test_portfolio_ledger_reconciles_cash_rotation_costs_and_zero_asset_carry(
@@ -735,9 +681,9 @@ def test_portfolio_ledger_reconciles_cash_rotation_costs_and_zero_asset_carry(
     second["end_notional"] = second["post_trade_notional"]
     second["block_reason"] = None
     root = write_test_sessions(
-        tmp_path / "rotation", envelope=_envelope(), ledger_chunks=(first, second)
+        tmp_path / "rotation", **_ledger_spec(), ledger_chunks=(first, second)
     )
-    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    artifact = read_portfolio_ledger_artifact(root)
     chunks = [session_frame(batch) for batch in artifact.iter_chunks()]
     assert float(chunks[0]["post_trade_notional"].sum()) == 99.0
     assert chunks[0]["target_notional"].sum() == 100.0
@@ -764,9 +710,9 @@ def test_portfolio_ledger_diagnostic_counts_are_integral(tmp_path: Path) -> None
     frame.loc[frame["asset_id"].eq("__cash__"), "alpha_valid_dates"] = 3
     frame.loc[frame["asset_id"].eq("__cash__"), "alpha_scheduled_dates"] = 4
     root = write_test_sessions(
-        tmp_path / "valid", envelope=_envelope(), ledger_chunks=(frame,)
+        tmp_path / "valid", **_ledger_spec(), ledger_chunks=(frame,)
     )
-    read = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    read = read_portfolio_ledger_artifact(root)
     result = session_frame(next(read.iter_chunks()))
     assert (
         result.loc[result["asset_id"].eq("__cash__"), "alpha_valid_dates"].iloc[0] == 3
@@ -774,7 +720,7 @@ def test_portfolio_ledger_diagnostic_counts_are_integral(tmp_path: Path) -> None
     frame.loc[frame["asset_id"].eq("__cash__"), "alpha_valid_dates"] = 1.5
     with pytest.raises(ValueError, match="portfolio_ledger_count_invalid"):
         write_test_sessions(
-            tmp_path / "invalid", envelope=_envelope(), ledger_chunks=(frame,)
+            tmp_path / "invalid", **_ledger_spec(), ledger_chunks=(frame,)
         )
 
 
@@ -800,9 +746,9 @@ def test_portfolio_ledger_small_row_groups_preserve_complete_transitions(
 
     monkeypatch.setattr(pq.ParquetWriter, "write_table", one_row_physical_batches)
     root = write_test_sessions(
-        tmp_path / "portfolio", envelope=_envelope(), ledger_chunks=(frame,)
+        tmp_path / "portfolio", **_ledger_spec(), ledger_chunks=(frame,)
     )
-    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    artifact = read_portfolio_ledger_artifact(root)
     assert len(list(artifact.iter_chunks())) == 1
 
 
@@ -811,14 +757,7 @@ def test_portfolio_ledger_primary_error_survives_writer_close_failure(
     tmp_path: Path, monkeypatch, long_path: bool
 ) -> None:
     if long_path:
-        while (
-            len(
-                str(
-                    tmp_path / "portfolio" / "instances" / ("f" * 64) / "trades.parquet"
-                )
-            )
-            <= 300
-        ):
+        while len(str(tmp_path / "portfolio" / "trades.parquet")) <= 300:
             tmp_path /= "segment_" + "a" * 32
     first = _session(
         "2019-01-01",
@@ -853,10 +792,10 @@ def test_portfolio_ledger_primary_error_survives_writer_close_failure(
     monkeypatch.setattr(ledger_artifact, "DEFAULT_BATCH_ROWS", 1)
     with pytest.raises(ValueError, match="portfolio_ledger_schema_invalid") as raised:
         write_test_sessions(
-            tmp_path / "portfolio", envelope=_envelope(), ledger_chunks=(first, second)
+            tmp_path / "portfolio", **_ledger_spec(), ledger_chunks=(first, second)
         )
     assert any("close also failed" in note for note in raised.value.__notes__)
-    assert not list(filesystem_iterdir(tmp_path / "portfolio" / "instances"))
+    assert not filesystem_exists(tmp_path / "portfolio")
 
 
 @pytest.mark.parametrize(
@@ -896,47 +835,8 @@ def test_portfolio_ledger_trust_boundary_mutations_fail_closed(
         frame.loc[asset, "decision_reason"] = "unknown_reason"
     with pytest.raises(ValueError, match=error):
         write_test_sessions(
-            tmp_path / mutation, envelope=_envelope(), ledger_chunks=(frame,)
+            tmp_path / mutation, **_ledger_spec(), ledger_chunks=(frame,)
         )
-
-
-@pytest.mark.parametrize(
-    ("mutation", "error"),
-    (
-        ("manifest", "dataset_metadata_file_identity_changed"),
-        ("member", "semantic_artifact_member_integrity_invalid"),
-    ),
-)
-def test_portfolio_ledger_rechecks_outer_manifest_and_member_set_each_iteration(
-    tmp_path: Path, mutation: str, error: str
-) -> None:
-    frame = _session(
-        "2019-01-01",
-        "2019-01-02",
-        pre_asset=0.0,
-        target_asset=100.0,
-        post_asset=100.0,
-        pre_cash=100.0,
-        target_cash=0.0,
-        post_cash=0.0,
-    )
-    root = write_test_sessions(
-        tmp_path / "portfolio", envelope=_envelope(), ledger_chunks=(frame,)
-    )
-    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
-    if mutation == "manifest":
-        manifest_path = root / "manifest.json"
-        manifest = json.loads(
-            Path(native_filesystem_path(manifest_path)).read_text(encoding="utf-8")
-        )
-        manifest["members"].append(
-            {"path": "extra.parquet", "size": 0, "sha256": "0" * 64}
-        )
-        filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
-    else:
-        filesystem_write_bytes(root / "extra.parquet", b"extra")
-    with pytest.raises(ValueError, match=f"^{error}$"):
-        next(artifact.iter_chunks())
 
 
 @pytest.mark.parametrize(
@@ -967,19 +867,16 @@ def test_perpetual_terminal_marks_use_real_quote_or_cash_only(tmp_path, mode, ca
     )
 
     capital = PortfolioCapital(mode, 1000.0, "USDT", "linear_perpetual")
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id=mode,
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": "1970-01-01T00:00:00",
-            "end": "1970-01-01T00:00:01",
-            "access": "development",
+    envelope = {
+        "capital": PortfolioCapital(**asdict(capital)),
+        "metadata": {
+            "window": {
+                "start": "1970-01-01T00:00:00",
+                "end": "1970-01-01T00:00:01",
+                "access": "validation",
+            }
         },
-        upstream_identities={},
-        semantic_metadata={"portfolio_capital": asdict(capital)},
-    )
+    }
     books = (
         [_state(5)]
         if case == "late_quote"
@@ -1027,12 +924,8 @@ def test_perpetual_terminal_marks_use_real_quote_or_cash_only(tmp_path, mode, ca
                 )
             )
 
-    root = write_portfolio_ledger_artifact(
-        tmp_path / mode, envelope=envelope, produce=produce
-    )
-    artifact = read_portfolio_ledger_artifact(
-        root, expected_identity=envelope.instance_identity
-    )
+    root = write_portfolio_ledger_artifact(tmp_path / mode, **envelope, produce=produce)
+    artifact = read_portfolio_ledger_artifact(root)
     chunks = list(artifact.iter_chunks())
     terminal = chunks[-1]
     if case == "late_quote":
@@ -1063,83 +956,6 @@ def test_perpetual_terminal_marks_use_real_quote_or_cash_only(tmp_path, mode, ca
     chunks = terminal = None
 
 
-@pytest.mark.parametrize("consumer", ("close", "keyboard"))
-@pytest.mark.parametrize("mutation", ("member", "manifest", "extra"))
-def test_portfolio_reader_early_close_reports_identity_failures(
-    tmp_path, consumer, mutation
-):
-    import shutil
-
-    from quant_research_platform.policy.lifecycle import closing_iterator
-
-    sessions = tuple(
-        _session(
-            f"2019-01-0{index + 1}",
-            f"2019-01-0{index + 2}",
-            pre_asset=100.0 if index else 0.0,
-            target_asset=100.0,
-            post_asset=100.0,
-            pre_cash=0.0 if index else 100.0,
-            target_cash=0.0,
-            post_cash=0.0,
-        )
-        for index in range(2)
-    )
-    root = write_test_sessions(
-        tmp_path / "portfolio", envelope=_envelope(), ledger_chunks=sessions
-    )
-    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
-    original = {
-        path.name: Path(native_filesystem_path(path)).read_bytes()
-        for path in filesystem_iterdir(root)
-    }
-    copied = tmp_path / "copy" / root.name
-    shutil.copytree(native_filesystem_path(root), native_filesystem_path(copied))
-    artifact = read_portfolio_ledger_artifact(copied, expected_identity=copied.name)
-
-    def mutate_member():
-        if mutation == "extra":
-            filesystem_write_bytes(artifact.root / "extra.bin", b"extra")
-            return
-        path = artifact.root / (
-            "valuations.parquet" if mutation == "member" else "manifest.json"
-        )
-        before = filesystem_stat(path)
-        with open_filesystem_file(path, "ab") as handle:
-            handle.write(b"x")
-        assert filesystem_stat(path).st_size == before.st_size + 1
-
-    primary = KeyboardInterrupt("ledger_consumer_primary")
-    chunks = artifact.iter_chunks()
-    with pytest.raises(
-        KeyboardInterrupt if consumer == "keyboard" else ValueError
-    ) as caught:
-        if consumer == "keyboard":
-            with closing_iterator(chunks):
-                assert next(chunks).valuations
-                mutate_member()
-                raise primary
-        else:
-            assert next(chunks).valuations
-            mutate_member()
-            chunks.close()
-    if consumer == "keyboard":
-        assert caught.value is primary
-        assert any("ValueError" in note for note in getattr(primary, "__notes__", ()))
-    else:
-        assert str(caught.value) == (
-            "dataset_file_identity_changed"
-            if mutation == "member"
-            else "semantic_artifact_member_identity_changed"
-            if mutation == "manifest"
-            else "semantic_artifact_member_set_changed"
-        )
-    assert {
-        path.name: Path(native_filesystem_path(path)).read_bytes()
-        for path in filesystem_iterdir(root)
-    } == original
-
-
 @pytest.mark.parametrize("observed_dates", [1, 8])
 def test_unidentified_alpha_survives_publication_and_blocks_freezing(
     tmp_path, observed_dates
@@ -1156,7 +972,7 @@ def test_unidentified_alpha_survives_publication_and_blocks_freezing(
         pd.DataFrame(
             {
                 "timestamp": np.repeat(intervals.timestamp.iloc[:observed_dates], 10),
-                "alpha_score": 0.0,
+                "prediction_rank_score": 0.0,
                 "holding_return": np.arange(observed_dates * 10) / 10000,
             }
         ),
@@ -1181,14 +997,14 @@ def test_unidentified_alpha_survives_publication_and_blocks_freezing(
     frame.loc[cash, "alpha_coverage"] = calibration.coverage
     frame.loc[cash, "alpha_valid_dates"] = calibration.valid_rebalance_dates
     frame.loc[cash, "alpha_scheduled_dates"] = calibration.scheduled_rebalance_dates
-    envelope = _alpha_envelope("2023-12-31")
+    envelope = _alpha_metadata("2023-12-31")
     root = write_test_sessions(
         tmp_path / "undefined",
-        envelope=envelope,
+        **envelope,
         ledger_chunks=(frame,),
         final_calibration=lambda: _alpha_payload(calibration, envelope),
     )
-    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    artifact = read_portfolio_ledger_artifact(root)
     summary = ledger_artifact.summarize_portfolio_ledger(
         artifact.capital, artifact.iter_chunks()
     )
@@ -1199,7 +1015,7 @@ def test_unidentified_alpha_survives_publication_and_blocks_freezing(
     assert "slope" not in summary["alpha_calibration"]
     assert summary["nav"] == 100.0
     with pytest.raises(
-        PortfolioTargetBlocked, match="holdout_alpha_calibration_undefined"
+        PortfolioTargetBlocked, match="test_alpha_calibration_undefined"
     ):
         frozen_alpha_calibration(
             artifact.final_alpha_calibration,
@@ -1223,11 +1039,11 @@ def test_degenerate_alpha_diagnostics_survive_ledger_and_freeze(
 
     dates = pd.date_range("2019-01-01", periods=6, freq="MS")
     inputs = pd.DataFrame(
-        {"timestamp": dates.repeat(2), "alpha_score": [-0.5, 0.5] * 6}
+        {"timestamp": dates.repeat(2), "prediction_rank_score": [-0.5, 0.5] * 6}
     )
-    inputs["holding_return"] = intercept + slope * inputs.alpha_score
+    inputs["holding_return"] = intercept + slope * inputs.prediction_rank_score
     alpha_scale = float(np.ldexp(1.0, alpha_exponent))
-    inputs["alpha_score"] *= alpha_scale
+    inputs["prediction_rank_score"] *= alpha_scale
     intervals = pd.DataFrame(
         {
             "timestamp": dates,
@@ -1265,14 +1081,14 @@ def test_degenerate_alpha_diagnostics_survive_ledger_and_freeze(
     for column, field in _ALPHA_DIAGNOSTICS.items():
         frame[column] = pd.Series([None] * len(frame), dtype=object)
         frame.loc[frame.asset_id.eq("__cash__"), column] = getattr(calibration, field)
-    envelope = _alpha_envelope("2019-12-31")
+    envelope = _alpha_metadata("2019-12-31")
     root = write_test_sessions(
         tmp_path / "portfolio",
-        envelope=envelope,
+        **envelope,
         ledger_chunks=(frame,),
         final_calibration=lambda: _alpha_payload(calibration, envelope),
     )
-    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    artifact = read_portfolio_ledger_artifact(root)
     frozen, _ = frozen_alpha_calibration(
         artifact.final_alpha_calibration,
         cutoff=pd.Timestamp("2019-12-31"),
@@ -1288,27 +1104,6 @@ def test_degenerate_alpha_diagnostics_survive_ledger_and_freeze(
         == "alpha_calibration_zero_standard_error"
     )
     assert "slope_t" not in summary["alpha_calibration"]
-    from quant_research_platform.artifacts.research import (
-        read_research_report_artifact,
-        write_research_report_artifact,
-    )
-    from tests.artifacts.test_research_artifact import _report
-
-    envelope, payload = _report()
-    payload["sections"]["portfolio"] = {"status": "DEFINED", "results": [summary]}
-    report_root = write_research_report_artifact(
-        tmp_path / "report", envelope=envelope, payload=payload
-    )
-    saved = read_research_report_artifact(
-        report_root, expected_identity=envelope.instance_identity
-    )
-    assert (
-        saved["sections"]["portfolio"]["results"][0]["alpha_calibration"]
-        == summary["alpha_calibration"]
-    )
-    assert "alpha_calibration_zero_standard_error" in Path(
-        native_filesystem_path(report_root / "report.md")
-    ).read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("engine", ("taker", "maker"))
@@ -1329,19 +1124,16 @@ def test_flat_eof_preserves_historical_fill_diagnostics_and_cash_ledger(
     )
 
     capital = PortfolioCapital("flat_eof", 1000.0, "USDT", "linear_perpetual")
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="flat_eof",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": "1970-01-01T00:00:00",
-            "end": "1970-01-01T00:00:01",
-            "access": "development",
+    envelope = {
+        "capital": PortfolioCapital(**asdict(capital)),
+        "metadata": {
+            "window": {
+                "start": "1970-01-01T00:00:00",
+                "end": "1970-01-01T00:00:01",
+                "access": "validation",
+            }
         },
-        upstream_identities={},
-        semantic_metadata={"portfolio_capital": asdict(capital)},
-    )
+    }
     batches = []
 
     def produce(emit):
@@ -1384,11 +1176,9 @@ def test_flat_eof_preserves_historical_fill_diagnostics_and_cash_ledger(
         )
 
     published = ledger_artifact.write_portfolio_ledger_artifact(
-        tmp_path / "flat_eof", envelope=envelope, produce=produce
+        tmp_path / "flat_eof", **envelope, produce=produce
     )
-    artifact = read_portfolio_ledger_artifact(
-        published, expected_identity=envelope.instance_identity
-    )
+    artifact = read_portfolio_ledger_artifact(published)
     persisted = list(artifact.iter_chunks())
     trades = [trade for batch in persisted for trade in batch.trades]
     assert len(trades) == 2 and sum(trade.quantity for trade in trades) == 0
@@ -1419,19 +1209,16 @@ def test_perpetual_close_sign_is_independent_of_quantity_units(
     )
 
     capital = PortfolioCapital("units", 1000.0, "USDT", "linear_perpetual")
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="units",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": "1970-01-01",
-            "end": "1970-01-02",
-            "access": "development",
+    envelope = {
+        "capital": PortfolioCapital(**asdict(capital)),
+        "metadata": {
+            "window": {
+                "start": "1970-01-01",
+                "end": "1970-01-02",
+                "access": "validation",
+            }
         },
-        upstream_identities={},
-        semantic_metadata={"portfolio_capital": asdict(capital)},
-    )
+    }
     expected_realized = direction * min(1.0, closing_units)
     expected_basis = (
         direction * (1.0 - closing_units) * (1.0 if closing_units < 1.0 else 2.0)
@@ -1460,9 +1247,9 @@ def test_perpetual_close_sign_is_independent_of_quantity_units(
         assert economics.cost_basis == expected_basis
 
     root = ledger_artifact.write_portfolio_ledger_artifact(
-        tmp_path / "units", envelope=envelope, produce=produce
+        tmp_path / "units", **envelope, produce=produce
     )
-    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    artifact = read_portfolio_ledger_artifact(root)
     batches = tuple(artifact.iter_chunks())
     assert (
         sum(
@@ -1522,403 +1309,29 @@ def test_tiny_adjusted_notional_trade_cannot_reverse_target_direction(tmp_path):
         target_cash=1.0,
         post_cash=1.0,
     )
-    payload = _envelope().payload()
-    del payload["instance_identity"], payload["status"]
-    payload["semantic_metadata"]["portfolio_capital"]["initial_capital"] = 1.0
-    envelope = build_business_manifest_envelope(**payload)
+    envelope = _ledger_spec()
+    envelope["capital"] = replace(envelope["capital"], initial_capital=1.0)
     with pytest.raises(ValueError, match="portfolio_ledger_direction_invalid"):
         write_test_sessions(
-            tmp_path / "wrong_direction", envelope=envelope, ledger_chunks=(frame,)
+            tmp_path / "wrong_direction", **envelope, ledger_chunks=(frame,)
         )
-    assert not filesystem_exists(
-        tmp_path / "wrong_direction" / "instances" / envelope.instance_identity
-    )
+    assert not filesystem_exists(tmp_path / "wrong_direction")
 
 
-@pytest.mark.parametrize("entry", ("read", "iterate"))
-def test_verified_member_identity_reaches_ledger_decoder(tmp_path, monkeypatch, entry):
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    from quant_research_platform.storage import semantic_artifacts
-
-    frame = _session(
-        "2019-01-01",
-        "2019-01-02",
-        pre_asset=0.0,
-        target_asset=100.0,
-        post_asset=100.0,
-        pre_cash=100.0,
-        target_cash=0.0,
-        post_cash=0.0,
-    )
-    root = write_test_sessions(
-        tmp_path / "portfolio", envelope=_envelope(), ledger_chunks=(frame,)
-    )
-    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
-    native = semantic_artifacts.read_semantic_artifact_record
-
-    def replace_after_verification(*args, **kwargs):
-        result = native(*args, **kwargs)
-        member = root / "valuations.parquet"
-        table = pq.read_table(native_filesystem_path(member))
-        rows = table.to_pylist()
-        for row in rows:
-            if row["phase"] == "end" and row["asset_id"] == "asset":
-                row["value"] = 120.0
-                row["mark_price"] = "f:" + (1.2).hex()
-        replacement = tmp_path / "replacement.parquet"
-        pq.write_table(
-            pa.Table.from_pylist(rows, schema=table.schema),
-            native_filesystem_path(replacement),
-        )
-        os.replace(native_filesystem_path(replacement), native_filesystem_path(member))
-        return result
-
-    monkeypatch.setattr(
-        semantic_artifacts, "read_semantic_artifact_record", replace_after_verification
-    )
-    with pytest.raises(ValueError, match="identity_changed"):
-        if entry == "read":
-            read_portfolio_ledger_artifact(root, expected_identity=root.name)
-        else:
-            tuple(artifact.iter_chunks())
-
-
-def _alpha_envelope(cutoff):
-    base = _envelope().payload()
-    return build_business_manifest_envelope(
-        logical_artifact_id=base["logical_artifact_id"],
-        schema_identity=base["schema_identity"],
-        protocol_or_spec_identity=base["protocol_or_spec_identity"],
-        software_identity=base["software_identity"],
-        research_window={**base["research_window"], "end": cutoff},
-        upstream_identities={"prediction": "d" * 64},
-        semantic_metadata={
-            **base["semantic_metadata"],
-            "target_contract": {
-                "protocol": {"protocol_id": "a_share_low_frequency"},
-                "portfolio_candidate": {
-                    "construction": "benchmark_enhanced",
-                    "selection_group": "global",
-                },
-            },
-        },
-    )
+def _alpha_metadata(cutoff):
+    base = _ledger_spec()
+    base["metadata"]["window"]["end"] = cutoff
+    return base
 
 
 def _alpha_payload(calibration, envelope):
-    from dataclasses import asdict
-
-    from quant_research_platform.contracts.targets import unmeasured_operation_evidence
-
     return {
         "schema_id": "qrp-final-alpha-calibration",
         "selection_group": "global",
-        "cutoff": envelope.research_window["end"],
-        "upstream_identities": dict(envelope.upstream_identities),
+        "cutoff": envelope["metadata"]["window"]["end"],
+        "inputs": {},
         "calibration": asdict(calibration),
-        "observations": unmeasured_operation_evidence("test_calibration"),
     }
-
-
-@pytest.mark.parametrize("calibrated", (False, True))
-@pytest.mark.parametrize("mutation", (None, "manifest", "extra", "same_size"))
-def test_report_reuses_native_ledger_validation_and_checks_consumption_exit(
-    tmp_path, monkeypatch, calibrated, mutation
-):
-    from collections import Counter
-    from types import SimpleNamespace
-
-    from quant_research_platform.artifacts import research
-    from quant_research_platform.contracts.targets import ProducerKind, TargetStatus
-    from quant_research_platform.research.portfolios.accounting import (
-        alpha_calibration_intervals,
-        calibrate_expected_alpha,
-    )
-    from quant_research_platform.storage import semantic_artifacts
-    from quant_research_platform.storage.layout import StorageLayout
-
-    base = (_alpha_envelope("2019-01-03") if calibrated else _envelope()).payload()
-    envelope = build_business_manifest_envelope(
-        **{
-            **{
-                key: value
-                for key, value in base.items()
-                if key not in {"instance_identity", "status"}
-            },
-            "logical_artifact_id": "probe_synthetic_portfolio_ledger",
-        }
-    )
-    sessions = tuple(
-        _session(
-            f"2019-01-0{index + 1}",
-            f"2019-01-0{index + 2}",
-            pre_asset=100.0 if index else 0.0,
-            target_asset=100.0,
-            post_asset=100.0,
-            pre_cash=0.0 if index else 100.0,
-            target_cash=0.0,
-            post_cash=0.0,
-        )
-        for index in range(2)
-    )
-    intervals = alpha_calibration_intervals(
-        pd.bdate_range("2018-12-10", periods=10), "daily"
-    )
-    calibration = calibrate_expected_alpha(
-        pd.DataFrame(
-            {
-                "timestamp": np.repeat(intervals.timestamp.iloc[:1], 10),
-                "alpha_score": 0.0,
-                "holding_return": np.arange(10) / 10000,
-            }
-        ),
-        as_of=pd.Timestamp("2019-01-03"),
-        scheduled_intervals=intervals,
-    )
-    payload = _alpha_payload(calibration, envelope)
-    root = write_test_sessions(
-        tmp_path / "ledger",
-        envelope=envelope,
-        ledger_chunks=sessions,
-        **({"final_calibration": lambda: payload} if calibrated else {}),
-    )
-    expected = read_portfolio_ledger_artifact(root, expected_identity=root.name)
-    economics = ledger_artifact.summarize_portfolio_ledger(
-        expected.capital, expected.iter_chunks()
-    )
-    counts = Counter()
-    hash_file = semantic_artifacts._hash_file_content
-
-    def counted(path, *args, **kwargs):
-        counts[path.name] += 1
-        return hash_file(path, *args, **kwargs)
-
-    monkeypatch.setattr(semantic_artifacts, "_hash_file_content", counted)
-    summarize = research.summarize_portfolio_ledger
-
-    def consume_then_change(*args):
-        result = summarize(*args)
-        if mutation == "manifest":
-            path = root / "manifest.json"
-            filesystem_write_bytes(
-                path, Path(native_filesystem_path(path)).read_bytes() + b"\n"
-            )
-        elif mutation == "extra":
-            filesystem_write_bytes(root / "extra.bin", b"extra")
-        elif mutation == "same_size":
-            path = root / "valuations.parquet"
-            other = tmp_path / "replacement"
-            filesystem_write_bytes(
-                other, Path(native_filesystem_path(path)).read_bytes()
-            )
-            os.replace(native_filesystem_path(other), native_filesystem_path(path))
-        return result
-
-    monkeypatch.setattr(research, "summarize_portfolio_ledger", consume_then_change)
-    protocol = {
-        "research_configuration": {"stage": "research"},
-        "portfolio_candidates": ("synthetic_portfolio",),
-    }
-    record = SimpleNamespace(
-        scenario_id="probe",
-        protocol=protocol,
-        payload=lambda: {"protocol": protocol},
-        trial_ledgers=(),
-        target_results=(
-            SimpleNamespace(
-                target_id=envelope.logical_artifact_id,
-                producer_kind=ProducerKind.PORTFOLIO,
-                status=TargetStatus.BUILT,
-                instance_identity=root.name,
-                schema_identity=envelope.schema_identity,
-                artifact_root="ledger",
-            ),
-        ),
-    )
-    evidence = research.load_a_share_run_evidence(
-        layout=StorageLayout(tmp_path), record=record, selections={}
-    )
-    assert counts == {
-        name: 1 for name in expected.member_identities if name != "manifest.json"
-    }
-    if mutation:
-        assert evidence["portfolios"] == []
-        assert any(
-            issue["reason"] == "portfolio_ledger_reference_invalid"
-            for issue in evidence["issues"]
-        )
-    else:
-        (row,) = evidence["portfolios"]
-        assert row["economics"] == economics
-        assert row["final_calibration"] == expected.final_alpha_calibration
-        assert row["calibration_observations"] == (
-            payload["observations"] if calibrated else None
-        )
-
-
-@pytest.mark.parametrize(
-    "mutation", (None, "source", "manifest", "member", "directory", "primary")
-)
-def test_source_backed_reuse_binds_one_content_check_to_native_consumption(
-    tmp_path, monkeypatch, mutation
-):
-    from collections import Counter
-    from types import SimpleNamespace
-
-    from quant_research_platform.contracts.targets import (
-        ProducerBinding,
-        ProducerKind,
-        TargetPlan,
-        TargetSpec,
-    )
-    from quant_research_platform.contracts.time import TimeWindow
-    from quant_research_platform.profiles.research import research_profile
-    from quant_research_platform.storage import semantic_artifacts
-    from quant_research_platform.storage.layout import StorageLayout
-    from quant_research_platform.workflows import research
-
-    payload = _envelope().payload()
-    envelope = build_business_manifest_envelope(
-        **{
-            **{
-                key: value
-                for key, value in payload.items()
-                if key not in {"instance_identity", "status"}
-            },
-            "semantic_metadata": {
-                **payload["semantic_metadata"],
-                "raw_content_identity": "d" * 64,
-            },
-        }
-    )
-    layout = StorageLayout(tmp_path)
-    target_id = envelope.logical_artifact_id
-    root = write_test_sessions(
-        layout.semantic_artifact_root("a_share", target_id),
-        envelope=envelope,
-        ledger_chunks=(
-            _session(
-                "2019-01-01",
-                "2019-01-02",
-                pre_asset=0.0,
-                target_asset=100.0,
-                post_asset=100.0,
-                pre_cash=100.0,
-                target_cash=0.0,
-                post_cash=0.0,
-            ),
-        ),
-    )
-    source = ["d" * 64]
-    profile = replace(
-        research_profile(),
-        producer_bindings={
-            target_id: ProducerBinding(
-                ProducerKind.PORTFOLIO,
-                lambda **kwargs: None,
-                source_identity=lambda *_: source[0],
-            ),
-        },
-    )
-    counts = Counter()
-    native_hash = semantic_artifacts._hash_file_content
-
-    def counted(path, *args, **kwargs):
-        counts[path.name] += 1
-        return native_hash(path, *args, **kwargs)
-
-    monkeypatch.setattr(semantic_artifacts, "_hash_file_content", counted)
-    reuse_sessions = {}
-    assert research._matching_instance(
-        profile=profile,
-        layout=layout,
-        spec=TargetSpec(target_id),
-        protocol=SimpleNamespace(protocol_id="a_share"),
-        requested_identity=root.name,
-        reuse_sessions=reuse_sessions,
-    ) == (root.name, None)
-    planned_counts = counts.copy()
-    assert planned_counts and set(planned_counts.values()) == {1}
-    planned = TargetPlan(
-        target_id=target_id,
-        decision="REUSE",
-        requested_identity=root.name,
-        matching_instance_identity=root.name,
-        upstream_target_ids=(),
-        upstream_identities={},
-    )
-
-    def reuse():
-        return research._reuse_target(
-            profile=profile,
-            protocol=SimpleNamespace(protocol_id="a_share"),
-            layout=layout,
-            spec=TargetSpec(target_id),
-            planned=planned,
-            raw_root=tmp_path,
-            time_window=TimeWindow("2019-01-01", "2019-01-02"),
-            session=reuse_sessions[root],
-        )
-
-    primary = KeyboardInterrupt("primary_native_read")
-    if mutation == "source":
-        source[0] = "e" * 64
-        result = reuse()
-        assert (
-            result.status.value == "BLOCKED"
-            and result.reason == "source_identity_changed"
-        )
-    elif mutation in {"manifest", "member"}:
-        path = root / (
-            "manifest.json" if mutation == "manifest" else "valuations.parquet"
-        )
-        filesystem_write_bytes(
-            path, Path(native_filesystem_path(path)).read_bytes() + b"broken"
-        )
-        with pytest.raises(ValueError):
-            reuse()
-        assert research._matching_instance(
-            profile=profile,
-            layout=layout,
-            spec=TargetSpec(target_id),
-            protocol=SimpleNamespace(protocol_id="a_share"),
-            requested_identity=root.name,
-        ) == (None, "persisted_instance_invalid")
-    elif mutation == "directory":
-        (root / "extra-directory").mkdir()
-        with pytest.raises(ValueError, match="semantic_artifact_member_set_changed"):
-            reuse()
-    elif mutation == "primary":
-        native_batches = ledger_artifact._iter_batches
-
-        def changed_batches(*args, **kwargs):
-            yield from native_batches(*args, **kwargs)
-            (root / "extra-directory").mkdir()
-            if mutation == "primary":
-                raise primary
-
-        monkeypatch.setattr(ledger_artifact, "_iter_batches", changed_batches)
-        with pytest.raises(
-            KeyboardInterrupt if mutation == "primary" else ValueError
-        ) as caught:
-            research._matching_instance(
-                profile=profile,
-                layout=layout,
-                spec=TargetSpec(target_id),
-                protocol=SimpleNamespace(protocol_id="a_share"),
-                requested_identity=root.name,
-                reuse_sessions={},
-            )
-        if mutation == "primary":
-            assert caught.value is primary
-            assert primary.__notes__
-    else:
-        assert reuse().status.value == "REUSED"
-        assert counts == planned_counts
-        assert reuse().status.value == "REUSED"
-        assert counts == planned_counts
 
 
 @pytest.mark.parametrize(
@@ -1939,19 +1352,16 @@ def test_perpetual_rounded_cost_preserves_exact_pnl(
     quantity *= direction
     expected = float(Fraction(quantity) * (Fraction(mark) - Fraction(entry)))
     capital = PortfolioCapital("rounded_cost", 1000.0, "USDT", "linear_perpetual")
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id=capital.candidate_id,
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": "1970-01-01",
-            "end": "1970-01-02",
-            "access": "development",
+    envelope = {
+        "capital": PortfolioCapital(**asdict(capital)),
+        "metadata": {
+            "window": {
+                "start": "1970-01-01",
+                "end": "1970-01-02",
+                "access": "validation",
+            }
         },
-        upstream_identities={},
-        semantic_metadata={"portfolio_capital": asdict(capital)},
-    )
+    }
 
     def produce(emit):
         account = PortfolioEconomics(capital, "asset", emit)
@@ -1966,9 +1376,9 @@ def test_perpetual_rounded_cost_preserves_exact_pnl(
         assert account.mark(2, mark)["net_pnl"] == expected
 
     root = ledger_artifact.write_portfolio_ledger_artifact(
-        tmp_path / "ledger", envelope=envelope, produce=produce
+        tmp_path / "ledger", **envelope, produce=produce
     )
-    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    artifact = read_portfolio_ledger_artifact(root)
     batches = tuple(artifact.iter_chunks())
     assert (
         ledger_artifact.summarize_portfolio_ledger(artifact.capital, iter(batches))[

@@ -69,7 +69,7 @@ class PortfolioEconomics:
         self.capital = capital
         self.asset_id = asset_id
         self.emit = emit
-        self.quantity = 0.0
+        self.quantity = Fraction()
         self._cost_basis = Fraction()
         self._cash = Fraction(capital.initial_capital)
         self._economics = _LedgerEconomics(capital)
@@ -108,7 +108,7 @@ class PortfolioEconomics:
                 self.asset_id,
                 phase,
                 self.quantity,
-                float(Fraction(self.quantity) * Fraction(mark) - self._cost_basis),
+                float(self.quantity * Fraction(mark) - self._cost_basis),
                 mark,
                 self.cost_basis,
             ),
@@ -120,13 +120,15 @@ class PortfolioEconomics:
         *,
         timestamp_ns: int,
         order_id: str,
-        quantity: float,
-        price: float,
+        quantity: float | Fraction,
+        price: float | Fraction,
         mark_price: float,
         fee: float,
     ) -> str:
         if (
-            not np.isfinite([quantity, price, mark_price, fee]).all()
+            not np.isfinite([mark_price, fee]).all()
+            or (not isinstance(price, Fraction) and not np.isfinite(price))
+            or (not isinstance(quantity, Fraction) and not np.isfinite(quantity))
             or not quantity
             or min(price, mark_price) <= 0
         ):
@@ -134,26 +136,26 @@ class PortfolioEconomics:
         before = self._values(timestamp_ns, "before", mark_price)
         self.fill_count += 1
         fill_id = f"fill:{self.fill_count}"
+        quantity = Fraction(quantity)
+        notional = float(quantity * Fraction(price))
         trade = ExecutedTrade(
-            fill_id, order_id, timestamp_ns, self.asset_id, quantity, quantity * price
+            fill_id, order_id, timestamp_ns, self.asset_id, quantity, notional
         )
         realized = Fraction()
         if self.quantity and (self.quantity > 0) != (quantity > 0):
             closed = min(abs(self.quantity), abs(quantity))
-            entry = self._cost_basis / Fraction(self.quantity)
+            entry = self._cost_basis / self.quantity
             realized = (
-                Fraction(closed)
-                * (1 if self.quantity > 0 else -1)
-                * (Fraction(price) - entry)
+                closed * (1 if self.quantity > 0 else -1) * (Fraction(price) - entry)
             )
             remaining = self.quantity + quantity
-            self._cost_basis = Fraction(remaining) * (
+            self._cost_basis = remaining * (
                 entry
                 if remaining != 0 and (remaining > 0) == (self.quantity > 0)
                 else Fraction(price)
             )
         else:
-            self._cost_basis += Fraction(quantity) * Fraction(price)
+            self._cost_basis += quantity * Fraction(price)
         self.quantity += quantity
         realized = float(realized)
         self._cash += Fraction(realized) - Fraction(fee)
@@ -185,7 +187,7 @@ class PortfolioEconomics:
             raise PortfolioTargetBlocked("portfolio_required_funding_missing")
         before = self._values(event.timestamp_ns, "before", event.mark_price)
         amount = float(
-            -Fraction(self.quantity) * Fraction(event.mark_price) * Fraction(event.rate)
+            -self.quantity * Fraction(event.mark_price) * Fraction(event.rate)
         )
         self._cash += Fraction(amount)
         self._emit(
@@ -379,14 +381,7 @@ class ExecutionAccounting:
             raise ValueError("execution_ledger_notional_invalid")
         if not np.isclose(nav_after, nav_before - total_cost, rtol=0.0, atol=tolerance):
             raise ValueError("execution_self_financing_invalid")
-        if (
-            type(self.cost_source_identity) is not str
-            or len(self.cost_source_identity) != 64
-            or any(
-                character not in "0123456789abcdef"
-                for character in self.cost_source_identity
-            )
-        ):
+        if type(self.cost_source_identity) is not str or not self.cost_source_identity:
             raise ValueError("execution_fee_identity_invalid")
         object.__setattr__(self, "_asset_ledger", ledger)
         object.__setattr__(self, "_nav_before", nav_before)
@@ -487,7 +482,7 @@ def alpha_calibration_intervals(
 def calibrate_expected_alpha(
     frame: pd.DataFrame,
     *,
-    alpha_column: str = "alpha_score",
+    alpha_column: str = "prediction_rank_score",
     return_column: str = "holding_return",
     as_of: pd.Timestamp,
     scheduled_intervals: pd.DataFrame,
@@ -1152,7 +1147,7 @@ def portfolio_interval_economics(batch: PortfolioLedgerBatch) -> dict[str, objec
 
 
 def frozen_alpha_calibration(payload, *, cutoff, selection_group):
-    """Validate the final development calibration bound to its actual group inputs."""
+    """Validate the final validation calibration bound to its actual group inputs."""
     if (
         type(payload) is not dict
         or set(payload)
@@ -1160,7 +1155,7 @@ def frozen_alpha_calibration(payload, *, cutoff, selection_group):
             "schema_id",
             "selection_group",
             "cutoff",
-            "upstream_identities",
+            "inputs",
             "calibration",
         }
         or (
@@ -1174,19 +1169,19 @@ def frozen_alpha_calibration(payload, *, cutoff, selection_group):
             )
         )
     ):
-        raise ValueError("holdout_alpha_calibration_binding_invalid")
+        raise ValueError("test_alpha_calibration_binding_invalid")
     values = payload["calibration"]
     calibration = AlphaCalibration(**values)
     if calibration.status != "DEFINED":
-        raise PortfolioTargetBlocked("holdout_alpha_calibration_undefined")
+        raise PortfolioTargetBlocked("test_alpha_calibration_undefined")
     if calibration.valid_rebalance_dates < 6 or calibration.coverage < 0.8:
-        raise PortfolioTargetBlocked("holdout_alpha_calibration_insufficient")
+        raise PortfolioTargetBlocked("test_alpha_calibration_insufficient")
     required = ("slope", "intercept", "slope_standard_error", "coverage")
     if any(
         type(values[name]) not in {int, float} or not np.isfinite(values[name])
         for name in required
     ):
-        raise ValueError("holdout_alpha_calibration_statistics_invalid")
+        raise ValueError("test_alpha_calibration_statistics_invalid")
     if (
         calibration.slope_standard_error < 0
         or not 0 <= calibration.coverage <= 1
@@ -1194,7 +1189,7 @@ def frozen_alpha_calibration(payload, *, cutoff, selection_group):
         or (type(calibration.scheduled_rebalance_dates) is not int)
         or (calibration.scheduled_rebalance_dates < calibration.valid_rebalance_dates)
     ):
-        raise ValueError("holdout_alpha_calibration_statistics_invalid")
+        raise ValueError("test_alpha_calibration_statistics_invalid")
     optional = (
         "slope_t_statistic",
         "slope_pvalue",
@@ -1207,7 +1202,7 @@ def frozen_alpha_calibration(payload, *, cutoff, selection_group):
         and (type(values[name]) not in {int, float} or not np.isfinite(values[name]))
         for name in optional
     ):
-        raise ValueError("holdout_alpha_calibration_statistics_invalid")
+        raise ValueError("test_alpha_calibration_statistics_invalid")
     if (
         (calibration.slope_standard_error == 0)
         != (calibration.slope_t_statistic is None)
@@ -1221,5 +1216,5 @@ def frozen_alpha_calibration(payload, *, cutoff, selection_group):
             and calibration.slope_ci_low > calibration.slope_ci_high
         )
     ):
-        raise ValueError("holdout_alpha_calibration_statistics_invalid")
+        raise ValueError("test_alpha_calibration_statistics_invalid")
     return (calibration, payload["cutoff"])
