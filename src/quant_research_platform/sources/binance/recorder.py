@@ -879,6 +879,7 @@ class _StreamReader(threading.Thread):
             raise
         finally:
             with self._network_lock:
+                owned_connection = self._active_websocket
                 self._active_websocket = None
                 self._request_socket = None
             first_failure: BaseException | None = None
@@ -899,22 +900,39 @@ class _StreamReader(threading.Thread):
                 )
             if websocket is not None:
                 cleanups.append(("websocket", websocket.close))
+            if owned_connection is not None:
+                cleanups.append(("websocket socket", owned_connection.close_socket))
+            cleanup_failures = []
             for name, close in cleanups:
                 try:
                     close()
                 except BaseException as cleanup_error:
-                    if primary is not None:
-                        primary.add_note(
-                            f"Binance {name} close also failed: "
-                            f"{type(cleanup_error).__name__}"
-                        )
-                    elif first_failure is None:
-                        first_failure = cleanup_error
-                    else:
-                        first_failure.add_note(
-                            f"Binance {name} close also failed: "
-                            f"{type(cleanup_error).__name__}"
-                        )
+                    cleanup_failures.append((name, cleanup_error))
+            if owned_connection is not None:
+                for thread in (
+                    owned_connection.recv_events_thread,
+                    owned_connection.keepalive_thread,
+                ):
+                    if thread is None:
+                        continue
+                    while thread.is_alive():
+                        try:
+                            thread.join()
+                        except BaseException as cleanup_error:
+                            cleanup_failures.append(("websocket thread", cleanup_error))
+            for name, cleanup_error in cleanup_failures:
+                if primary is not None:
+                    primary.add_note(
+                        f"Binance {name} close also failed: "
+                        f"{type(cleanup_error).__name__}"
+                    )
+                elif first_failure is None:
+                    first_failure = cleanup_error
+                else:
+                    first_failure.add_note(
+                        f"Binance {name} close also failed: "
+                        f"{type(cleanup_error).__name__}"
+                    )
             if first_failure is not None:
                 raise first_failure
 

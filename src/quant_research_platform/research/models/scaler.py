@@ -48,17 +48,32 @@ class ModelMatrixScaler:
         weights = weights / weights.max()
         total = float(weights.sum())
         with np.errstate(over="ignore"):
-            differences = values - anchor
-        shifted = np.isfinite(differences).all(axis=0)
+            normalized = values - anchor
+        shifted = np.isfinite(normalized).all(axis=0)
         origin = np.where(shifted, anchor, 0.0)
-        differences[:, ~shifted] = values[:, ~shifted]
-        magnitude = np.max(np.abs(differences), axis=0)
+        for column in np.flatnonzero(~shifted):
+            normalized[:, column] = values[:, column]
+        magnitude = np.max(np.abs(normalized), axis=0)
         constant = magnitude == 0.0
         magnitude[constant] = 1.0
-        normalized = differences / magnitude
+        normalized /= magnitude
         weighted = weights[:, None] * normalized
         center = weighted.sum(axis=0) / total
         offset = center * magnitude
+        # Preserve original-unit centers across underflow and anchor cancellation.
+        exact_columns = ~constant & (
+            np.array(
+                [
+                    (
+                        (normalized[:, column] != 0)
+                        & (np.abs(weighted[:, column]) < np.finfo(float).tiny)
+                    ).any()
+                    for column in range(len(columns))
+                ]
+            )
+            | (np.abs(origin + offset) <= np.finfo(float).eps * np.abs(origin))
+        )
+        del weighted
         normalized_scale = np.array(
             [
                 norm(
@@ -68,13 +83,9 @@ class ModelMatrixScaler:
                 for column in range(len(columns))
             ]
         ) / np.sqrt(total)
+        del normalized
         # Values are in [-1, 1], so the population deviation cannot exceed one.
         scale = np.minimum(normalized_scale, 1.0) * magnitude
-        # Preserve original-unit centers across underflow and anchor cancellation.
-        exact_columns = ~constant & (
-            ((normalized != 0) & (np.abs(weighted) < np.finfo(float).tiny)).any(axis=0)
-            | (np.abs(origin + offset) <= np.finfo(float).eps * np.abs(origin))
-        )
         exact_offsets = [Fraction(float(value)) for value in offset]
         if exact_columns.any():
             exact_weights = tuple(

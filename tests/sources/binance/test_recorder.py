@@ -588,16 +588,18 @@ def test_capture_stats_streams_finalized_intervals_to_sidecar(tmp_path: Path) ->
 
 
 @pytest.mark.parametrize(
-    "phase,interrupt_join",
+    "phase,interrupt_join,cleanup_failure",
     (
-        ("reconnect_handshake", False),
-        ("snapshot_headers", False),
-        ("snapshot_body", False),
-        ("snapshot_headers", True),
+        ("reconnect_handshake", False, None),
+        ("snapshot_headers", False, None),
+        ("snapshot_body", False, None),
+        ("snapshot_headers", True, None),
+        ("snapshot_body", False, "websocket_close"),
+        ("snapshot_body", False, "keepalive_join"),
     ),
 )
 def test_real_recorder_stops_owned_network_and_joins_before_return(
-    tmp_path, monkeypatch, phase, interrupt_join
+    tmp_path, monkeypatch, phase, interrupt_join, cleanup_failure
 ):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -614,6 +616,37 @@ def test_real_recorder_stops_owned_network_and_joins_before_return(
     original_reader = recorder._StreamReader
     original_join = original_reader.join
     join_interruptions = []
+    keepalive_paused = threading.Event()
+    release_keepalive = threading.Event()
+    keepalive_joins = []
+    cleanup_failures = []
+    original_keepalive = ClientConnection.keepalive
+    original_thread_join = threading.Thread.join
+
+    def keepalive(client):
+        original_keepalive(client)
+        keepalive_paused.set()
+        assert release_keepalive.wait(80)
+
+    def join_thread(thread, timeout=None):
+        if any(thread is client.keepalive_thread for client in clients):
+            keepalive_joins.append(True)
+            if cleanup_failure == "keepalive_join" and not cleanup_failures:
+                cleanup_failures.append(True)
+                raise KeyboardInterrupt("keepalive join interrupted")
+            assert keepalive_paused.wait(3)
+            release_keepalive.set()
+        return original_thread_join(thread, timeout)
+
+    def fail_websocket_close(client):
+        del client
+        cleanup_failures.append(True)
+        raise OSError("websocket close failed")
+
+    monkeypatch.setattr(ClientConnection, "keepalive", keepalive)
+    monkeypatch.setattr(threading.Thread, "join", join_thread)
+    if cleanup_failure == "websocket_close":
+        monkeypatch.setattr(ClientConnection, "close", fail_websocket_close)
 
     def join_reader(reader, timeout=None):
         if interrupt_join and timeout is None and not join_interruptions:
@@ -737,6 +770,12 @@ def test_real_recorder_stops_owned_network_and_joins_before_return(
             assert all(reader._active_websocket is None for reader in readers)
             assert len(clients) >= (2 if phase == "reconnect_handshake" else 1)
             assert all(not client.recv_events_thread.is_alive() for client in clients)
+            assert keepalive_paused.is_set()
+            assert keepalive_joins
+            if cleanup_failure is not None:
+                assert cleanup_failures == [True]
+            if cleanup_failure == "keepalive_join":
+                assert len(keepalive_joins) == 2
             assert all(
                 client.keepalive_thread is None
                 or not client.keepalive_thread.is_alive()
@@ -744,6 +783,10 @@ def test_real_recorder_stops_owned_network_and_joins_before_return(
             )
         finally:
             release.set()
+            release_keepalive.set()
+            for client in clients:
+                if client.keepalive_thread is not None:
+                    original_thread_join(client.keepalive_thread, 3)
             for connection in connections:
                 connection.close()
             websocket_server.shutdown()
@@ -759,6 +802,60 @@ def test_real_recorder_stops_owned_network_and_joins_before_return(
             assert not websocket_thread.is_alive() and not http_thread.is_alive()
             assert all(not thread.is_alive() for thread in server_threads)
             assert all(not reader.is_alive() for reader in readers)
+
+
+def test_connection_start_failure_closes_owner_and_skips_unstarted_keepalive(
+    tmp_path, monkeypatch
+):
+    import socket
+
+    from websockets.client import ClientProtocol
+    from websockets.uri import parse_uri
+
+    primary = RuntimeError("keepalive start failed")
+    clients = []
+    original_start = threading.Thread.start
+
+    def start_thread(thread):
+        if clients and thread is clients[0].keepalive_thread:
+            raise primary
+        return original_start(thread)
+
+    client_socket, peer_socket = socket.socketpair()
+
+    def connect(uri, **kwargs):
+        client = kwargs["create_connection"](
+            client_socket, ClientProtocol(parse_uri(uri))
+        )
+        clients.append(client)
+        client.start_keepalive()
+        raise AssertionError("keepalive start must fail")
+
+    monkeypatch.setattr(threading.Thread, "start", start_thread)
+    monkeypatch.setattr(recorder, "_connect_websocket", connect)
+    reader = recorder._StreamReader(
+        stream=FUTURES_STREAMS[1],
+        writer=recorder._RunWriter(tmp_path),
+        stats=recorder._CaptureStats(),
+        stop=threading.Event(),
+        config=RecorderConfig(tmp_path / "run", 1),
+        tick_size="0.1",
+    )
+    try:
+        with pytest.raises(RuntimeError, match="^keepalive start failed$") as raised:
+            reader._read_connection(reconnect=False)
+        assert raised.value is primary
+        assert reader._active_websocket is None
+        assert client_socket.fileno() == -1
+        assert not clients[0].recv_events_thread.is_alive()
+        assert clients[0].keepalive_thread.ident is None
+        assert not clients[0].keepalive_thread.is_alive()
+    finally:
+        for client in clients:
+            client.close_socket()
+            client.recv_events_thread.join(3)
+        client_socket.close()
+        peer_socket.close()
 
 
 def test_recorder_start_failure_joins_only_started_native_threads(

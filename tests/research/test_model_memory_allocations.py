@@ -10,6 +10,7 @@ import pytest
 from scipy.linalg import norm
 from threadpoolctl import threadpool_limits
 
+from quant_research_platform.contracts.models import TrainingWeighting
 from quant_research_platform.research.models import fitting
 from quant_research_platform.research.models.scaler import (
     LinearScaledPredictor,
@@ -101,23 +102,43 @@ def _case(kind):
     elif kind == "subnormal":
         tiny = np.nextafter(0.0, 1.0)
         frame = pd.DataFrame({"x": [0.0, tiny * 8, tiny * 16], "y": [0.0, 0.0, 1.0]})
+    elif kind == "cancellation":
+        frame = pd.DataFrame({"x": [1.0, -1.0, 0.0], "y": [1e300, -1e300, 1.0]})
+    elif kind == "mixed_extremes":
+        maximum, tiny = np.finfo(float).max, np.nextafter(0.0, 1.0)
+        frame = pd.DataFrame(
+            {
+                "x": [-maximum, maximum, 0.0],
+                "y": [maximum, -maximum, 1.0],
+                "constant": [3.0, 3.0, 3.0],
+                "subnormal": [0.0, tiny * 8, tiny * 16],
+            }
+        )
     else:
         frame = pd.DataFrame({"x": [1.0, 0.0, 0.0], "y": [3.0, 3.0, 3.0]})
     frame.columns = [str(column) for column in frame.columns]
     return frame
 
 
-@pytest.mark.parametrize("kind", ("ordinary", "overflow", "subnormal", "fraction"))
-@pytest.mark.parametrize("weighting", ("uniform", "equal_timestamp", "extreme"))
+@pytest.mark.parametrize(
+    "kind",
+    ("ordinary", "overflow", "subnormal", "fraction", "cancellation", "mixed_extremes"),
+)
+@pytest.mark.parametrize(
+    "weighting", ("uniform", "equal_timestamp", "decayed", "extreme")
+)
 def test_scaler_and_linear_fit_match_original_arithmetic(kind, weighting, monkeypatch):
     frame = _case(kind)
     if weighting == "uniform":
         weights = np.ones(len(frame))
-    elif weighting == "equal_timestamp":
+    elif weighting in {"equal_timestamp", "decayed"}:
         timestamps = pd.Timestamp("2024-01-01") + pd.to_timedelta(
             np.arange(len(frame)) // 2, unit="D"
         )
-        weights = equal_timestamp_sample_weights(timestamps)
+        weights = equal_timestamp_sample_weights(
+            timestamps,
+            TrainingWeighting(half_life_periods=2) if weighting == "decayed" else None,
+        )
     else:
         weights = np.geomspace(np.nextafter(0.0, 1.0), 1.0, len(frame))
     original_frame, original_weights = frame.copy(deep=True), weights.copy()
@@ -168,6 +189,61 @@ def test_scaler_and_linear_fit_match_original_arithmetic(kind, weighting, monkey
     np.testing.assert_array_equal(weights, original_weights)
 
 
+@pytest.mark.parametrize(
+    "shape", ((1, 1), (1, 5), (2, 1), (7, 17), (257, 17), (1025, 3))
+)
+@pytest.mark.parametrize("layout", ("C", "F", "mixed"))
+def test_scaler_shapes_and_layouts_match_original_arithmetic(shape, layout):
+    values = np.random.default_rng(59).normal(size=shape)
+    if layout == "mixed":
+        frame = pd.DataFrame(
+            {
+                str(column): values[:, column].astype("float32" if column % 2 else int)
+                for column in range(shape[1])
+            }
+        )
+    else:
+        frame = pd.DataFrame(np.array(values, order=layout))
+        frame.columns = frame.columns.astype(str)
+    frame.index = pd.Index(np.arange(len(frame))[::-1], name="row")
+    original = frame.copy(deep=True)
+    weights = np.linspace(0.5, 3.0, len(frame))
+    weights.flags.writeable = False
+    for sample_weight in (None, weights):
+        expected = _reference_fit(ModelMatrixScaler, frame, sample_weight=sample_weight)
+        actual = ModelMatrixScaler.fit(frame, sample_weight=sample_weight)
+        assert actual.to_payload() == expected.to_payload()
+        pd.testing.assert_frame_equal(
+            actual.transform(frame), expected.transform(frame), check_exact=True
+        )
+        coefficients = tuple(np.linspace(-3.0, 5.0, shape[1] + 1))
+        np.testing.assert_array_equal(
+            LinearScaledPredictor(coefficients, actual).predict(frame),
+            LinearScaledPredictor(coefficients, expected).predict(frame),
+        )
+    pd.testing.assert_frame_equal(frame, original, check_exact=True)
+    np.testing.assert_array_equal(weights, np.linspace(0.5, 3.0, len(frame)))
+
+
+def test_scaler_keeps_root_weights_before_extreme_weight_normalization():
+    frame = pd.DataFrame({"x": [0.0, 1.0], "y": [1.0, 0.0]})
+    weights = np.array([1e308, 1e-300])
+    original, original_weights = frame.copy(deep=True), weights.copy()
+    expected = _reference_fit(ModelMatrixScaler, frame, sample_weight=weights)
+    actual = ModelMatrixScaler.fit(frame, sample_weight=weights)
+    assert actual.to_payload() == expected.to_payload()
+    assert 0.0 < actual.scale_[0] < np.finfo(float).tiny ** 0.5
+    pd.testing.assert_frame_equal(
+        actual.transform(frame), expected.transform(frame), check_exact=True
+    )
+    np.testing.assert_array_equal(
+        LinearScaledPredictor((1.0, 2.0, -3.0), actual).predict(frame),
+        LinearScaledPredictor((1.0, 2.0, -3.0), expected).predict(frame),
+    )
+    pd.testing.assert_frame_equal(frame, original, check_exact=True)
+    np.testing.assert_array_equal(weights, original_weights)
+
+
 def test_scaler_peak_scratch_reduction_is_bounded_by_column():
     frame = pd.DataFrame(np.random.default_rng(29).normal(size=(1024, 32)))
     frame.columns = frame.columns.astype(str)
@@ -189,6 +265,9 @@ def test_scaler_peak_scratch_reduction_is_bounded_by_column():
     optimized = peak(ModelMatrixScaler.fit)
     # A small 256-KiB matrix suffices; require only half a matrix of savings.
     assert original - optimized > frame.size * 4
+    # Column-local norms alone still needed over five matrices. Reuse and release
+    # fit buffers so only three dense matrices plus column-local scratch coexist.
+    assert optimized < frame.size * 8 * 3.5
 
 
 def test_unrepresentable_population_scale_remains_an_explicit_failure():
