@@ -104,6 +104,7 @@ def calculate_price_volume_factors(
             if output[factor]
             else np.empty(0, dtype="float64")
         )
+        ordered[factor] = ordered[factor].where(np.isfinite(ordered[factor]))
     return ordered
 
 
@@ -252,26 +253,27 @@ def _calculate_values(
         output[first - start :][valid] = result
         return output
     if factor in {"amount_cv_126d", "turnover_cv_126d"}:
-        if source_name not in sums:
-            sums[source_name] = _binary_prefix(source)
-        totals, _unit = sums[source_name]
-        square_totals = list(
-            accumulate(
-                (
-                    (right - left) ** 2
-                    for left, right in zip(totals[:-1], totals[1:], strict=True)
-                ),
-                initial=0,
-            )
+        current = window(source)[valid]
+        _, exponent = np.frexp(np.max(np.abs(current), axis=1, keepdims=True))
+        scaled = np.ldexp(current, -exponent)
+        center = scaled.mean(axis=1)
+        deviation = _sample_standard_deviation(scaled)
+        result = np.divide(
+            deviation, center, out=np.full(len(current), np.nan), where=center > 0
         )
-        result = np.full(np.count_nonzero(valid), np.nan)
-        for index, position in enumerate(np.flatnonzero(valid) + first + 1):
-            total = totals[position] - totals[position - size]
-            if total <= 0:
+        # Preserve meaningful extreme cancellation without Decimal on ordinary
+        # positive amount/turnover windows.
+        exceptional = ((current > 0).any(axis=1) & (current < 0).any(axis=1)) | (
+            (current != 0) & (scaled == 0)
+        ).any(axis=1)
+        for index in np.flatnonzero(exceptional):
+            terms = tuple(map(Fraction, current[index]))
+            mean = sum(terms, Fraction()) / size
+            if mean <= 0:
+                result[index] = np.nan
                 continue
-            squares = square_totals[position] - square_totals[position - size]
-            squared = Fraction(
-                size * (size * squares - total * total), (size - 1) * total * total
+            squared = sum((value - mean) ** 2 for value in terms) / (
+                (size - 1) * mean * mean
             )
             with localcontext() as context:
                 context.prec = 80

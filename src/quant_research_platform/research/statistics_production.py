@@ -12,6 +12,7 @@ from quant_research_platform.contracts.experiments import (
     legal_training_rows,
     training_availability_columns,
 )
+from quant_research_platform.contracts.ids import validate_input_market
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.time import (
     TimeWindow,
@@ -1952,6 +1953,7 @@ def model_statistics(config):
             raise ValueError("model_statistics_selection_fields_required")
         family_ids = None
     periods, entries, selections = {}, {}, {}
+    market = None
     previous_end = None
     index = ExactPrimaryKeyIndex(primary_key=("timestamp", "asset_id", "family_id"))
     lookup = _PredictionLookup(
@@ -1986,6 +1988,8 @@ def model_statistics(config):
                 wanted = dict.fromkeys(family_ids)
             else:
                 selection = read_selection(Path(item["selection"]))
+                market = selection["market_id"] if market is None else market
+                validate_input_market(selection, market)
                 if selection["selection_group"] != config["selection_group"]:
                     raise ValueError("statistics_selection_group_mismatch")
                 if config["selection_group"] == "quarterly" and pd.Timestamp(
@@ -2020,6 +2024,8 @@ def model_statistics(config):
                 ):
                     raise ValueError("statistics_prediction_family_mismatch")
                 facts = metadata["model_facts"]
+                market = facts["market_id"] if market is None else market
+                validate_input_market(facts, market)
                 if facts["family_id"] != family:
                     raise ValueError("statistics_prediction_family_mismatch")
                 supplied.add(family)
@@ -2060,6 +2066,7 @@ def model_statistics(config):
             }:
                 raise ValueError("statistics_prediction_family_coverage_missing")
         session, spec = _statistics_input_session(config, window)
+        validate_input_market(session.spec, market)
         tables = build_a_share_statistics_tables(
             dataset_path=session.root,
             dataset_session=session,

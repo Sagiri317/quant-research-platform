@@ -1,4 +1,4 @@
-"""Common forward-return labels on an explicit ordered time axis."""
+"""A-share return labels on an explicit session axis and real exchange clocks."""
 
 from __future__ import annotations
 
@@ -25,7 +25,11 @@ def add_forward_return_labels(
     sessions: Sequence[object],
     can_enter_column: str = "can_enter",
 ) -> pd.DataFrame:
-    """Add entry-open to exit-open returns on the supplied trading-session axis."""
+    """Add next-open to exit-open returns, available at the A-share exit open.
+
+    Session labels identify trading dates; availability is the actual 09:30
+    Asia/Shanghai exchange event represented as a UTC-naive instant.
+    """
 
     horizons = _validate_horizons(horizons)
     validated = _validate_label_input_frame(
@@ -88,8 +92,8 @@ def add_forward_return_labels(
             values = (exit_prices[positive] - entries[positive]) / entries[positive]
         finite = np.isfinite(values)
         labels[valid_positions[finite]] = values[finite]
-        available[valid_positions[finite]] = exit_dates[finite].to_numpy(
-            dtype="datetime64[ns]"
+        available[valid_positions[finite]] = _a_share_session_event(
+            exit_dates[finite], hour=9, minute=30
         )
         label_column = forward_return_label_column(horizon)
         result[label_column] = labels
@@ -104,6 +108,17 @@ def forward_return_label_column(horizon: int) -> str:
 
 def forward_return_available_at_column(horizon: int) -> str:
     return f"{forward_return_label_column(horizon)}_available_at"
+
+
+def _a_share_session_event(sessions, *, hour, minute=0):
+    """Convert exchange-local session events to canonical UTC-naive instants."""
+    return (
+        (sessions + pd.Timedelta(hours=hour, minutes=minute))
+        .tz_localize("Asia/Shanghai")
+        .tz_convert("UTC")
+        .tz_localize(None)
+        .to_numpy(dtype="datetime64[ns]")
+    )
 
 
 def _session_axis(sessions: Sequence[object]) -> pd.DatetimeIndex:
@@ -290,13 +305,7 @@ def _on_id_asset_decomposition(group, axis, horizons):
         maturity = np.full(n, np.datetime64("NaT"), dtype="datetime64[ns]")
         count = max(0, n - offset)
         if count:
-            event = (
-                (axis[offset:] + pd.Timedelta(hours=hour, minutes=minute))
-                .tz_localize("Asia/Shanghai")
-                .tz_convert("UTC")
-                .tz_localize(None)
-                .to_numpy(dtype="datetime64[ns]")
-            )
+            event = _a_share_session_event(axis[offset:], hour=hour, minute=minute)
             maturity[:count] = np.where(legal[:count], event, np.datetime64("NaT"))
         block[name] = values
         block[f"{name}_available_at"] = maturity

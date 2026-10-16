@@ -828,9 +828,9 @@ class PortfolioCandidateSpec:
     candidate_id: str
     selection_group: Literal["global", "quarterly"]
     construction: Literal[
-        "top20_equal_weight",
-        "top20_equal_weight_half_step",
-        "top20_float_cap",
+        "quantile_equal_weight",
+        "quantile_equal_weight_half_step",
+        "quantile_float_cap",
         "benchmark_enhanced",
     ]
     prediction_selector: str
@@ -853,9 +853,9 @@ class PortfolioCandidateSpec:
             if type(value) is not str or not value:
                 raise ValueError("portfolio_candidate_dependency_invalid")
         if type(self.construction) is not str or self.construction not in {
-            "top20_equal_weight",
-            "top20_equal_weight_half_step",
-            "top20_float_cap",
+            "quantile_equal_weight",
+            "quantile_equal_weight_half_step",
+            "quantile_float_cap",
             "benchmark_enhanced",
         }:
             raise ValueError("portfolio_candidate_construction_invalid")

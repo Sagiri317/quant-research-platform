@@ -309,9 +309,6 @@ def _bounds(
         if cash_column is not None and bool(row[cash_column]):
             bounds.append((0.0, 1.0))
             continue
-        if frozen[position]:
-            bounds.append((float(row.current_weight), float(row.current_weight)))
-            continue
         fixed = (
             financial_column is not None
             and bool(row[financial_column])
@@ -331,6 +328,8 @@ def _bounds(
     for position, row in data.iterrows():
         lower, upper = bounds[position]
         current = float(row.current_weight)
+        if frozen[position]:
+            lower, upper = max(lower, current), min(upper, current)
         if "can_enter" in data and (pd.isna(row.can_enter) or not bool(row.can_enter)):
             upper = min(upper, current)
         if "can_exit" in data and (pd.isna(row.can_exit) or not bool(row.can_exit)):

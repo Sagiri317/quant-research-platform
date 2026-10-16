@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
@@ -404,6 +405,8 @@ def iter_private_export_chunks(
     chunksize: int,
     expected_identity: DatasetFileIdentity | None = None,
     content_hashes: list[str] | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> Iterator[pd.DataFrame]:
     if type(dataset) is not str or dataset not in RAW_TABLE_CONTRACTS:
         raise ValueError("unknown_csmar_dataset")
@@ -441,7 +444,7 @@ def iter_private_export_chunks(
                 if not emitted:
                     if header is None:
                         raise ValueError("malformed_csmar_csv_row")
-                    yield _raw_frame([], header)
+                    yield _raw_frame([], header, dataset=dataset)
                 return
             if dataset == "index_info":
                 from .field_mappings import COLUMN_MAPPINGS, validate_raw_column_names
@@ -455,7 +458,13 @@ def iter_private_export_chunks(
                 header = [header[i] for i in positions]
                 pending = [[row[i] for i in positions] for row in pending]
             emitted = True
-            frame = _raw_frame(pending, header)
+            frame = _raw_frame(
+                pending,
+                header,
+                dataset=dataset,
+                start_date=start_date,
+                end_date=end_date,
+            )
             try:
                 yield frame
             except GeneratorExit:
@@ -501,6 +510,7 @@ def _iter_csv_records(
             validate_raw_column_names(tuple(physical_header), dataset)
         if require_exact_width and dataset is not None:
             selected_columns = set(COLUMN_MAPPINGS[dataset])
+            selected_columns.update(RAW_TABLE_CONTRACTS[dataset].required_columns)
             selected_columns.update(
                 alias
                 for aliases in COLUMN_ALIASES.get(dataset, {}).values()
@@ -542,11 +552,61 @@ def _iter_csv_records(
                 del record
 
 
-def _raw_frame(rows: list[list[str]], header: list[str]) -> pd.DataFrame:
+def _raw_frame(
+    rows: list[list[str]],
+    header: list[str],
+    *,
+    dataset: str,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> pd.DataFrame:
+    from .field_mappings import COLUMN_ALIASES, COLUMN_MAPPINGS
+
     frame = pd.DataFrame(rows, columns=header)
     frame.replace("", pd.NA, inplace=True)
+    date_column = {
+        "market_bars_1d": "Trddt",
+        "adjustment": "TradingDate",
+        "market_cap": "Shrchgdt",
+    }.get(dataset)
+    if date_column is not None and (start_date is not None or end_date is not None):
+        date_column = next(
+            (
+                column
+                for column in (
+                    date_column,
+                    *COLUMN_ALIASES.get(dataset, {}).get(date_column, ()),
+                )
+                if column in frame
+            ),
+            date_column,
+        )
+        if date_column not in frame:
+            missing = missing_raw_column_names(tuple(header), dataset)
+            raise ValueError(
+                f"{dataset} raw export is missing CSMAR columns: {missing}"
+            )
+        timestamps = strict_timestamp_series(
+            frame[date_column], error=f"invalid_{dataset}_source_timestamp"
+        )
+        mask = pd.Series(True, index=frame.index)
+        if start_date is not None and dataset != "market_cap":
+            mask &= timestamps >= pd.Timestamp(start_date)
+        if end_date is not None:
+            mask &= timestamps <= pd.Timestamp(end_date)
+        frame = frame.loc[mask].copy()
+    consumed = set(COLUMN_MAPPINGS[dataset])
+    consumed.update(
+        alias
+        for aliases in COLUMN_ALIASES.get(dataset, {}).values()
+        for alias in aliases
+    )
     for column in frame.columns:
-        if column in STRING_CODE_DTYPES or column in INDEX_INFO_SOURCE_CODE_COLUMNS:
+        if (
+            column not in consumed
+            or column in STRING_CODE_DTYPES
+            or column in INDEX_INFO_SOURCE_CODE_COLUMNS
+        ):
             frame[column] = frame[column].astype("string")
             continue
         try:

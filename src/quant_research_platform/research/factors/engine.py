@@ -123,12 +123,19 @@ def _market_model_frames(
                 if open_markets is None
                 else open_markets[timestamp.normalize()],
                 asset_market_types=membership,
+                market_input_complete=(
+                    bool(cross["_panel_observed"].all())
+                    if "_panel_observed" in cross
+                    else True
+                ),
             )
             piece = cross.loc[:, ["market_id", "asset_id", "timestamp"]].copy()
             piece["beta_252d"] = piece.asset_id.map(styles.beta)
             piece["residual_volatility_60d"] = piece.asset_id.map(
                 styles.residual_volatility
             )
+            if "_panel_observed" in cross:
+                piece = piece.loc[cross["_panel_observed"].to_numpy()]
             pieces.append(piece)
         if pieces:
             yield pd.concat(pieces, ignore_index=True)
@@ -163,7 +170,6 @@ def factor_lookback_bars(definitions: Sequence[FactorDefinition]) -> int:
             for definition in definitions
             for value in (
                 definition.lookback_window,
-                definition.window,
                 *definition.required_windows,
             )
             if value is not None

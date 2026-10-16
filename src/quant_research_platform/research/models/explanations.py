@@ -109,6 +109,7 @@ def _session(source, input_spec, result, facts, *, labels=False):
     validate_model_input_roles(
         session.spec,
         _model_spec(facts["model"]),
+        market_id=facts["market_id"],
         include_target=labels,
         selected_columns=selected_columns,
         input_units=facts["input_units"],

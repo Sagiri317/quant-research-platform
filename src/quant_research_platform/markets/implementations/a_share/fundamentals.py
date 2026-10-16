@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.validation import (
+    finite_exact_float,
     strict_bool_series,
     strict_finite_numeric_series,
     strict_string_series,
@@ -338,10 +339,9 @@ def _ttm_value(known, report_period: pd.Timestamp) -> float | None:
     prior_ytd = known.get(_prior_year_report_period(report_period))
     if prior_fy is None or prior_ytd is None:
         return None
-    try:
-        return float(Fraction(current) + Fraction(prior_fy) - Fraction(prior_ytd))
-    except OverflowError as exc:
-        raise ValueError("invalid_ttm_value") from exc
+    return finite_exact_float(
+        Fraction(current) + Fraction(prior_fy) - Fraction(prior_ytd)
+    )
 
 
 _PIT_EVENT_COLUMNS = {

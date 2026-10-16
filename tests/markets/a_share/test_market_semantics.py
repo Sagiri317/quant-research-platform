@@ -1398,9 +1398,13 @@ def test_public_suspension_placeholders_keep_fixed_horizon_returns(tmp_path):
     saved = read_dataset(root)
     row = saved.loc[saved.asset_id.eq("000001") & saved.timestamp.eq(dates[0])].iloc[0]
     assert row.forward_return_1d == 0.0
-    assert row.forward_return_1d_available_at == dates[2]
+    assert row.forward_return_1d_available_at == dates[2] + pd.Timedelta(
+        hours=1, minutes=30
+    )
     assert row.forward_return_5d == pytest.approx(0.2)
-    assert row.forward_return_5d_available_at == dates[6]
+    assert row.forward_return_5d_available_at == dates[6] + pd.Timedelta(
+        hours=1, minutes=30
+    )
 
 
 def test_listing_age_keeps_unavailable_master_date_unknown():

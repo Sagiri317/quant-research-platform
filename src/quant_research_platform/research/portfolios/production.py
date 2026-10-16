@@ -537,7 +537,7 @@ def backtest_a_share(
 
     dataset_business_columns = (
         ("float_market_cap",)
-        if candidate.construction == "top20_float_cap"
+        if candidate.construction == "quantile_float_cap"
         or (candidate.neutrality != "none" and "float_market_cap" in declared_columns)
         else ()
     )
@@ -726,7 +726,7 @@ def backtest_a_share(
                 )
                 risk_frames.clear()
 
-                if previous_risk_cross is not None and not panel.empty:
+                if previous_risk_cross is not None:
                     risk_cross = _factor_return_cross(
                         exposures=previous_risk_cross, panel=panel
                     )
@@ -1247,6 +1247,8 @@ def _enhanced_risk_cross(
 def _factor_return_cross(
     *, exposures: pd.DataFrame, panel: pd.DataFrame
 ) -> pd.DataFrame:
+    if panel.empty:
+        return exposures.iloc[:0].copy()
     previous = exposures.set_index("asset_id")
     current = panel.set_index("asset_id")
     assets = previous.index.intersection(current.index)
@@ -1584,15 +1586,15 @@ def _build_session(
                 alpha,
                 eligible=prediction_eligible,
                 method="float_cap_weight"
-                if candidate.construction == "top20_float_cap"
+                if candidate.construction == "quantile_float_cap"
                 else "equal_weight",
                 top_quantile=float(candidate.top_quantile),
                 bottom_quantile=float(candidate.top_quantile),
                 float_market_cap=dataset["float_market_cap"]
-                if candidate.construction == "top20_float_cap"
+                if candidate.construction == "quantile_float_cap"
                 else None,
             )
-            if candidate.construction == "top20_equal_weight_half_step":
+            if candidate.construction == "quantile_equal_weight_half_step":
                 retained = holdings.div(nav).reindex(target.index, fill_value=0.0)
                 retained = retained.where(prediction_eligible, 0.0)
                 target = (target + retained) / 2.0
@@ -2877,12 +2879,19 @@ def calibrate(config: Mapping) -> Path:
         unified_trading_sessions(calendar), config["rebalance_schedule"]
     )
     supplied = frames["scheduled_intervals"].apply(pd.to_datetime, errors="raise")
+    if supplied.timestamp.duplicated().any():
+        raise ValueError("alpha_calibration_schedule_invalid")
     matched = supplied.merge(expected, on=list(expected), how="left", indicator=True)
     if not matched["_merge"].eq("both").all():
         raise ValueError("alpha_calibration_interval_semantics_mismatch")
+    # The selected market calendar owns planned dates. A missing declared interval
+    # makes its observations unavailable; it cannot shrink the coverage denominator.
+    observations = frames["observations"]
+    declared = pd.to_datetime(observations.timestamp, errors="raise").dt.normalize()
+    observations = observations.loc[declared.isin(supplied.timestamp)]
     result = calibrate_expected_alpha(
-        frames["observations"],
-        scheduled_intervals=frames["scheduled_intervals"],
+        observations,
+        scheduled_intervals=expected,
         as_of=pd.Timestamp(config["cutoff"]),
     )
     return atomic_write_json(

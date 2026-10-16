@@ -71,6 +71,7 @@ def predict(config: Mapping) -> Path:
     validate_model_input_roles(
         session.spec,
         _model_spec(facts["model"]),
+        market_id=facts["market_id"],
         selected_columns=selected_columns,
         input_units=facts["input_units"],
     )

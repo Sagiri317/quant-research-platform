@@ -12,10 +12,10 @@ from typing import Literal
 
 import numpy as np
 import pandas as pd
-import statsmodels.api as sm
-from arch.bootstrap import MCS, SPA, StationaryBootstrap, StepM
 from scipy.stats import chi2, kurtosis, norm, skew
+from statsmodels.regression.linear_model import OLS, WLS
 from statsmodels.stats.multitest import multipletests
+from statsmodels.tools.tools import add_constant
 
 from quant_research_platform.compute.dataframe.cross_section import (
     _average_ranks,
@@ -183,7 +183,7 @@ def hac_mean(
         np.max(np.abs(normalized))
     ):
         raise ValueError("hac_inference_undefined")
-    fit = sm.OLS(normalized, np.ones((len(data), 1))).fit(
+    fit = OLS(normalized, np.ones((len(data), 1))).fit(
         cov_type="HAC", cov_kwds={"maxlags": max_lags}
     )
     mean = float(_mean(data))
@@ -244,6 +244,8 @@ def stationary_bootstrap_mean_ci(
     _validate_bootstrap_configuration(block_size, repetitions, seed)
     if type(confidence) is not float or not 0.0 < confidence < 1.0:
         raise ValueError("confidence_invalid")
+    from arch.bootstrap import StationaryBootstrap
+
     bootstrap = StationaryBootstrap(block_size, data, seed=seed)
     interval = bootstrap.conf_int(
         lambda sample: np.array([float(_mean(sample))]),
@@ -282,6 +284,8 @@ def spa_reality_check(
     models = pd.DataFrame(
         aligned.values[:, 1:], index=aligned.index, columns=aligned.candidate_ids[1:]
     )
+    from arch.bootstrap import SPA
+
     test = SPA(benchmark, models, block_size=block_size, reps=repetitions, seed=seed)
     test.compute()
     values = test.pvalues
@@ -325,6 +329,8 @@ def stepm_superior_models(
     models = pd.DataFrame(
         aligned.values[:, 1:], index=aligned.index, columns=aligned.candidate_ids[1:]
     )
+    from arch.bootstrap import StepM
+
     test = StepM(
         benchmark,
         models,
@@ -370,6 +376,8 @@ def model_confidence_set(
     frame = pd.DataFrame(
         aligned.values, index=aligned.index, columns=aligned.candidate_ids
     )
+    from arch.bootstrap import MCS
+
     test = MCS(frame, size=alpha, reps=repetitions, block_size=block_size, seed=seed)
     try:
         test.compute()
@@ -634,7 +642,7 @@ def fama_macbeth_period(
     offsets = np.mean(differences, axis=0)
     centered = differences - offsets
     scales = np.max(np.abs(centered), axis=0)
-    x = sm.add_constant(
+    x = add_constant(
         pd.DataFrame(
             centered / np.where(scales > 0, scales, 1.0),
             index=numeric.index,
@@ -696,9 +704,9 @@ def fama_macbeth_period(
             target_scale = float(np.max(np.abs(target_centered))) or 1.0
             target = target_centered / target_scale
             fit = (
-                sm.OLS(target, x).fit()
+                OLS(target, x).fit()
                 if weights is None
-                else sm.WLS(target, x, weights=weights).fit()
+                else WLS(target, x, weights=weights).fit()
             )
             params = fit.params
             residual_scale = float(np.max(np.abs(fit.resid)))
@@ -797,7 +805,7 @@ def fama_macbeth_period(
             # White LM needs the auxiliary R-squared, not its unused F statistic.
             left, right = np.triu_indices(x.shape[1])
             regressors = x.to_numpy(dtype="float64", copy=False)
-            auxiliary = sm.OLS(
+            auxiliary = OLS(
                 white_response,
                 regressors[:, left] * regressors[:, right],
             ).fit()

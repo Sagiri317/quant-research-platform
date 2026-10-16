@@ -99,6 +99,13 @@ def test_evaluation_publishes_numeric_members_and_reads_only_requested_summaries
     assert len(tables["metrics"]) == 1
     assert len(tables["ic_summary"]) == 1
     assert manifest["metadata"]["evaluation_diagnostics"]["metric_rows"] == 1
+    for scope in ("LOCAL_ONLY", "shared"):
+        manifest["metadata"]["scope"] = scope
+        (output / "manifest.json").write_text(json.dumps(manifest))
+        with pytest.raises(ValueError, match="output_manifest_metadata_invalid"):
+            read_evaluation_outputs(output, tables=("ic_summary",))
+    del manifest["metadata"]["scope"]
+    (output / "manifest.json").write_text(json.dumps(manifest))
     (output / "metrics.parquet").write_bytes(b"unselected damaged member")
     _, summary = read_evaluation_outputs(
         output, tables=("ic_summary", "group_spread_summary")

@@ -100,9 +100,9 @@ def test_native_narrow_outputs_equal_full_with_actual_history_and_lookahead(
     assert labels.forward_return_5d_available_at.gt(end).all()
     for row in labels.itertuples():
         axis = dates[::3] if row.asset_id == "000001" else dates
-        assert (
-            row.forward_return_5d_available_at == axis[axis.get_loc(row.timestamp) + 6]
-        )
+        assert row.forward_return_5d_available_at == axis[
+            axis.get_loc(row.timestamp) + 6
+        ] + pd.Timedelta(hours=1, minutes=30)
 
     # Future prices exist for labels; they must not influence causal factors.
     panel = read_dataset(inputs["market_panel_1d"])

@@ -104,7 +104,6 @@ def inspect(path: Path) -> dict[str, object]:
             "spec.json",
             "metadata.json",
             "model.json",
-            "prediction.json",
         }:
             raise ValueError("inspection_requires_native_json_metadata")
         return read_qrp_json_file(root)[1]
@@ -114,7 +113,6 @@ def inspect(path: Path) -> dict[str, object]:
         "manifest.json",
         "_manifest/manifest.json",
         "model.json",
-        "prediction.json",
         "spec.json",
         "metadata.json",
     ):

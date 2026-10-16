@@ -361,7 +361,7 @@ def _portfolio_pair(tmp_path, *, change=None, base_changes=None):
     base = PortfolioCandidateSpec(
         candidate_id="global_cash",
         selection_group="global",
-        construction="top20_equal_weight",
+        construction="quantile_equal_weight",
         prediction_selector="same_predictions",
         rebalance_schedule="daily",
         top_quantile=0.2,
@@ -433,7 +433,7 @@ def test_native_paired_portfolio_benchmarks_must_match(tmp_path):
     "change",
     [
         {"selection_group": "global"},
-        {"construction": "top20_equal_weight_half_step"},
+        {"construction": "quantile_equal_weight_half_step"},
         {"rebalance_schedule": "weekly-last-trading-day"},
         {"top_quantile": 0.4},
         {"neutrality": "industry"},

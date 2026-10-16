@@ -53,7 +53,9 @@ def test_shared_entries_preserve_sparse_quotes_and_horizon_availability(monkeypa
                     and exit_ > 0
                 ):
                     expected = (exit_ - entry) / entry
-                    available = sessions[position + 1 + horizon]
+                    available = sessions[position + 1 + horizon] + pd.Timedelta(
+                        hours=1, minutes=30
+                    )
             value = getattr(row, f"forward_return_{horizon}d")
             time = getattr(row, f"forward_return_{horizon}d_available_at")
             assert np.isnan(value) if np.isnan(expected) else value == expected

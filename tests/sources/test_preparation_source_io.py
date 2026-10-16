@@ -122,8 +122,20 @@ def test_csmar_known_members_parse_and_hash_once_before_publication(
     )
 
 
+@pytest.mark.parametrize(
+    "data_ids",
+    [
+        ("financial_balance",),
+        (
+            "financial_balance",
+            "financial_income",
+            "financial_cashflow",
+            "financial_first_disclosure",
+        ),
+    ],
+)
 def test_choice_selected_response_bytes_and_sidecars_are_read_once(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, data_ids
 ):
     layout = StorageLayout(tmp_path)
     with choice_session(SDK(response())) as session:
@@ -141,15 +153,16 @@ def test_choice_selected_response_bytes_and_sidecars_are_read_once(
         ]
     )
     opened, counts, handles = count_source_reads(monkeypatch, raw)
-    output = tmp_path / "balance"
+    outputs = {data_id: tmp_path / data_id for data_id in data_ids}
     choice.materialize_interim_data(
         raw_root=raw,
-        output_roots={"financial_balance": output},
-        data_ids=("financial_balance",),
+        output_roots=outputs,
+        data_ids=data_ids,
     )
     assert opened == Counter({path: 1 for path in selected})
     assert counts == Counter({path: path.stat().st_size for path in selected})
     assert handles and all(handle.closed for handle in handles)
+    output = outputs["financial_balance"]
     assert read_dataset(output).total_assets.tolist() == [100.0]
     assert (
         read_dataset_manifest_evidence(output)["source_evidence"]["content_hash"]

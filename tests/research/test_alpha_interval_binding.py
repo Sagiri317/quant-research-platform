@@ -108,6 +108,34 @@ def test_direct_weekly_claim_rejects_daily_or_shifted_interval_samples(tmp_path)
         calibrate(config)
 
 
+@pytest.mark.parametrize("retain_undeclared_observations", [False, True])
+def test_missing_declared_intervals_do_not_shrink_calendar_coverage(
+    tmp_path, retain_undeclared_observations
+):
+    config, intervals, observations = _calibration_inputs(tmp_path)
+    mature = intervals.loc[intervals.available_at.le(config["cutoff"])]
+    supplied = mature.iloc[:6]
+    supplied.to_parquet(config["scheduled_intervals"], index=False)
+    if not retain_undeclared_observations:
+        observations = observations.loc[observations.timestamp.isin(supplied.timestamp)]
+        observations.to_parquet(config["observations"], index=False)
+    result = json.loads(calibrate(config).read_text())["calibration"]
+    assert len(mature) == 10
+    assert result["scheduled_rebalance_dates"] == len(mature)
+    assert result["valid_rebalance_dates"] == 6
+    assert result["coverage"] == pytest.approx(0.6)
+    assert result["undefined_reason"] == "alpha_calibration_insufficient_coverage"
+
+
+def test_duplicate_declared_intervals_remain_invalid(tmp_path):
+    config, intervals, _ = _calibration_inputs(tmp_path)
+    pd.concat((intervals, intervals.iloc[:1]), ignore_index=True).to_parquet(
+        config["scheduled_intervals"], index=False
+    )
+    with pytest.raises(ValueError, match="alpha_calibration_schedule_invalid"):
+        calibrate(config)
+
+
 def test_native_independent_consumers_share_schedule_but_reject_other_horizon(tmp_path):
     from quant_research_platform.artifacts.portfolio_ledger import (
         read_portfolio_ledger_artifact,

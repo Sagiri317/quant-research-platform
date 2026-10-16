@@ -17,8 +17,6 @@ class FactorCatalogItem(_PublicModel):
     description: str
     family: str
     input_columns: list[str]
-    base_input_columns: list[str]
-    derived_input_columns: list[str]
     output_column: str
     required_windows: list[int]
     lookback_window: int | None
@@ -27,7 +25,6 @@ class FactorCatalogItem(_PublicModel):
     null_policy: str
     source_layer: str
     required_input_data_id: str
-    window: int | None = None
 
 
 class LabelCatalogItem(_PublicModel):

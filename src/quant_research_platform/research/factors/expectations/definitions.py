@@ -18,8 +18,14 @@ EXPECTATIONS_MECHANISM_FACTORS = (
     "newly_updated_institution_fraction_fy1",
 )
 ALL_EXPECTATIONS_FACTORS = (*EXPECTATIONS_FACTORS, *EXPECTATIONS_MECHANISM_FACTORS)
+PRICE_SCALED_EXPECTATIONS = frozenset(
+    {
+        "forward_earnings_yield_fy1",
+        "forward_earnings_yield_fy2",
+        "forecast_dispersion_price_scaled_fy1",
+    }
+)
 EXPECTATIONS_INPUT_COLUMNS = (
-    "close",
     "forecast_eps",
     "forecast_end_date",
     "institution_id",
@@ -35,8 +41,8 @@ def expectations_factor_definitions(
             factor_id=f"expectations_{name}",
             market_id=market_id,
             factor_set=FactorSet.CORE,
-            input_columns=EXPECTATIONS_INPUT_COLUMNS,
-            base_input_columns=EXPECTATIONS_INPUT_COLUMNS,
+            input_columns=(("close",) if name in PRICE_SCALED_EXPECTATIONS else ())
+            + EXPECTATIONS_INPUT_COLUMNS,
             output_column=name,
             display_name=name,
             description="PIT analyst forecast factor.",

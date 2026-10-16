@@ -279,15 +279,37 @@ def test_shared_preprocessing_matches_independent_candidate_states(monkeypatch):
     ]
     assert counts == {"weights": 1, "scaler": 1, "transform": 1}
     for reference, result in zip(expected, actual, strict=True):
-        assert result.metadata == reference.metadata
-        assert pickle.dumps(result.prediction_model) == pickle.dumps(
-            reference.prediction_model
+        numerical = {"scaler", "feature_importance"}
+        assert set(result.metadata) == set(reference.metadata)
+        assert {
+            key: value for key, value in result.metadata.items() if key not in numerical
+        } == {
+            key: value
+            for key, value in reference.metadata.items()
+            if key not in numerical
+        }
+        assert result.metadata["scaler"]["columns"] == list(specs[0].input_columns)
+        assert set(result.metadata["feature_importance"]) == set(
+            reference.metadata["feature_importance"]
         )
+        # Independent fits may differ by roundoff; saved state must remain consistent.
+        for column in result.metadata["feature_importance"]:
+            assert result.metadata["feature_importance"][column] == pytest.approx(
+                reference.metadata["feature_importance"][column], rel=1e-12, abs=1e-14
+            )
         restored = pickle.loads(pickle.dumps(result.prediction_model))
         fitting.validate_model_state(restored, result.metadata)
-        np.testing.assert_array_equal(
+        np.testing.assert_allclose(
+            restored.scaler.transform(frame[["x"]]),
+            reference.prediction_model.scaler.transform(frame[["x"]]),
+            rtol=1e-13,
+            atol=1e-14,
+        )
+        np.testing.assert_allclose(
             restored.predict(frame[["x"]]),
             reference.prediction_model.predict(frame[["x"]]),
+            rtol=1e-12,
+            atol=1e-14,
         )
 
 

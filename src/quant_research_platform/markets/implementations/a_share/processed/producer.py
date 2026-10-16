@@ -180,10 +180,6 @@ def produce_a_share_processed_data(
             ):
                 requested.add("listing_date")
             if any(
-                definition.family == "expectations" for definition in factor_definitions
-            ):
-                requested.add("close")
-            if any(
                 definition.family == "market_model" for definition in factor_definitions
             ):
                 requested.add("market_type")
@@ -242,12 +238,28 @@ def produce_a_share_processed_data(
             )
         session = open_dataset_session(**options)
         if spec.data_id == "on_id_decomposition" and data_id == "market_panel_1d":
-            # Bare member selections have no independent full-session inventory.
-            if not session.native and options.get("files") is not None:
-                raise ValueError("on_id_panel_session_domain_unproven")
             session = replace(
                 session, _allow_infinite_columns=("adj_open", "adj_close")
             )
+        uses_panel_clock = (
+            spec.kind is ProcessedDataKind.LABEL
+            or spec.data_id == "execution_mask"
+            or any(
+                definition.family in {"price_volume", "market_model"}
+                for definition in factor_definitions
+            )
+        )
+        selected_observations = any(
+            options.get(name) is not None for name in ("files", "years", "time_window")
+        ) or bool(options.get("row_filters"))
+        if (
+            uses_panel_clock
+            and (selected_observations or spec.data_id == "on_id_decomposition")
+            and data_id == "market_panel_1d"
+        ):
+            # Bare member selections have no independent full-session inventory.
+            if not session.native and options.get("files") is not None:
+                raise ValueError("a_share_panel_session_domain_unproven")
             # Selectors restrict observations, never the declared PANEL clock.
             # Native inventories or one declared bare PANEL file own the domain.
             # Read only keys/lifecycles outside the selected prices.
@@ -437,17 +449,25 @@ def _processed_frames(
         )
 
         def panel_frames():
-            for start in range(
-                0,
+            stop = (
                 bisect_right(sessions, upper)
                 if closed
-                else bisect_left(sessions, upper),
-                block_sessions,
-            ):
-                core = sessions[start : start + block_sessions]
-                yield materialize_dataset_session(
-                    reference.filtered_view(TimeWindow(core[0], core[-1]))
+                else bisect_left(sessions, upper)
+            )
+            for start in range(0, stop, block_sessions):
+                core = sessions[start : min(stop, start + block_sessions)]
+                window = TimeWindow(core[0], core[-1])
+                panel = materialize_dataset_session(
+                    dependencies["market_panel_1d"].filtered_view(window)
                 )
+                if panel_axis is not None:
+                    declared = materialize_dataset_session(
+                        panel_axis.filtered_view(window)
+                    )
+                    panel, _ = _align_panel_observations(
+                        declared, {"market_panel_1d": panel}
+                    )
+                yield panel
 
         with closing_iterator(panel_frames()) as frames:
             with closing_iterator(
@@ -509,30 +529,20 @@ def _processed_frames(
         for data_id, session in dependencies.items():
             view = session.filtered_view(read_window)
             frames[data_id] = materialize_dataset_session(view)
+        output_keys = None
         if panel_axis is not None:
             keys = ["market_id", "asset_id", "timestamp"]
             declared = materialize_dataset_session(
                 panel_axis.filtered_view(read_window)
             )
-            for selected in frames.values():
-                if (
-                    selected.merge(
-                        declared[keys],
-                        on=keys,
-                        how="left",
-                        indicator=True,
-                        validate="one_to_one",
-                    )["_merge"]
-                    .eq("left_only")
-                    .any()
-                ):
-                    raise ValueError("on_id_input_key_outside_panel")
-            frames["market_panel_1d"] = declared.merge(
-                frames["market_panel_1d"][[*keys, "adj_open", "adj_close"]],
-                on=keys,
-                how="left",
-                validate="one_to_one",
+            frames["market_panel_1d"], output_keys = _align_panel_observations(
+                declared, frames
             )
+            output_keys = output_keys.loc[
+                output_keys.timestamp.between(core[0], core[-1])
+            ]
+            if output_keys.empty:
+                continue
         current_source = dict(source)
         if panel_source:
             view = reference.filtered_view(read_window)
@@ -573,6 +583,10 @@ def _processed_frames(
             expectations=expectations,
             market_history=market_history,
         )
+        if output_keys is not None:
+            output = output.merge(
+                output_keys, on=keys, how="inner", validate="one_to_one"
+            )
         output = (
             output.loc[output["timestamp"].between(core[0], core[-1])]
             .sort_values(["timestamp", "market_id", "asset_id"], kind="mergesort")
@@ -615,6 +629,35 @@ def _processed_frames(
         if not output.empty:
             yield output
         del output, frames, current_source
+
+
+def _align_panel_observations(declared, dependencies):
+    """Retain the full clock while selected rows alone define published signals."""
+    keys = ["market_id", "asset_id", "timestamp"]
+    for selected in dependencies.values():
+        if (
+            selected.merge(
+                declared[keys],
+                on=keys,
+                how="left",
+                indicator=True,
+                validate="one_to_one",
+            )["_merge"]
+            .eq("left_only")
+            .any()
+        ):
+            raise ValueError("a_share_input_key_outside_panel")
+    selected = dependencies["market_panel_1d"]
+    observed = [column for column in selected if column not in declared]
+    panel = declared.merge(
+        selected[[*keys, *observed]],
+        on=keys,
+        how="left",
+        validate="one_to_one",
+        indicator="_panel_observed",
+    )
+    panel["_panel_observed"] = panel["_panel_observed"].eq("both")
+    return panel, selected[keys]
 
 
 def _benchmark_frames(source, session):
@@ -909,7 +952,7 @@ def _compute_processed_frame(
         )
         if "expectations" in {definition.family for definition in definitions}:
             panel = dependencies["market_panel_1d"]
-            features = expectations(panel.loc[:, ["asset_id", "timestamp", "close"]])
+            features = expectations(panel)
             return (
                 panel.loc[:, ["market_id", "asset_id", "timestamp"]]
                 .merge(

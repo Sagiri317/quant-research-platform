@@ -1,6 +1,6 @@
 {
   "kind": "metrics",
-  "inputs": "results/statistics/portfolio_performance.parquet",
+  "inputs": "results/statistics/portfolio_benchmark_metrics.parquet",
   "output": "figures/tracking-error.png",
   "metric_id": "tracking_error",
   "units": "年化比例"

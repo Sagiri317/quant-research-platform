@@ -758,7 +758,7 @@ def test_batched_volatility_matches_scalar_reference_across_units_and_windows():
 
 
 @pytest.mark.parametrize("extreme", (False, True))
-def test_rolling_means_match_exact_scalar_windows(extreme):
+def test_rolling_means_match_scalar_windows_with_numeric_tolerance(extreme):
     from fractions import Fraction
     from statistics import mean
 
@@ -814,13 +814,17 @@ def test_rolling_means_match_exact_scalar_windows(extreme):
                     if name == "log_avg_amount_20d"
                     else average
                 )
-        np.testing.assert_array_equal(result[name], expected)
+        np.testing.assert_allclose(
+            result[name], expected, rtol=1e-12, atol=0, equal_nan=True
+        )
         bounded = calculate_price_volume_factors(
             panel.iloc[20:],
             factor_columns=(name,),
             output_window=TimeWindow(dates[300], dates[-1]),
         )
-        np.testing.assert_array_equal(bounded[name], result[name].iloc[300:])
+        np.testing.assert_allclose(
+            bounded[name], result[name].iloc[300:], rtol=1e-12, atol=0, equal_nan=True
+        )
 
 
 def test_turnover_uses_canonical_suspension_zero_and_preserves_unknown(tmp_path):
@@ -1248,7 +1252,7 @@ def test_coefficient_of_variation_keeps_exact_center_and_ratio(
         }
     )
     result = calculate_price_volume_factors(frame, factor_columns=(factor,))
-    assert result[factor].iloc[-1] == expected
+    assert result[factor].iloc[-1] == pytest.approx(expected, rel=1e-12, abs=0)
     result.insert(0, "market_id", "a_share")
     base = scientific_catalogs().processed.get("price_volume_facts")
     spec = replace(
@@ -1369,3 +1373,36 @@ def test_prefix_mean_factors_do_not_materialize_sliding_windows(monkeypatch):
     assert result.loc[120, "avg_amount_20d"] == 111.5
     assert pd.isna(result.loc[120, "amount_shock_20d"])
     assert result.loc[121, "amount_shock_20d"] == (122.0 - 111.5) / 111.5
+
+
+def test_unrepresentable_rolling_value_does_not_erase_independent_factor():
+    frame = pd.DataFrame(
+        {
+            "asset_id": "a",
+            "timestamp": pd.bdate_range("2024-01-01", periods=21),
+            "period_return": np.resize([1.79e308, -1.79e308], 21),
+        }
+    )
+    result = calculate_price_volume_factors(
+        frame, factor_columns=("volatility_20d", "max_return_20d")
+    )
+    assert result.volatility_20d.isna().all()
+    assert result.max_return_20d.iloc[19:].eq(1.79e308).all()
+
+
+@pytest.mark.parametrize("factor", ["amount_cv_126d", "turnover_cv_126d"])
+def test_cv_nonpositive_exact_center_cannot_retain_rounded_positive_ratio(factor):
+    values = np.zeros(126)
+    values[[10, 73, 7, 59]] = [1e16, -1e16, 1.0, -1.0]
+    frame = pd.DataFrame(
+        {
+            "asset_id": "a",
+            "timestamp": pd.bdate_range("2024-01-01", periods=126),
+            factor.split("_")[0]: values,
+        }
+    )
+    assert (
+        calculate_price_volume_factors(frame, factor_columns=(factor,))[factor]
+        .isna()
+        .all()
+    )

@@ -307,7 +307,7 @@ def _ledger(layout, roots):
         selection_group="global",
         prediction_selector="champion",
         candidate_id="closed_market_portfolio",
-        construction="top20_equal_weight",
+        construction="quantile_equal_weight",
         rebalance_schedule="daily",
         top_quantile=0.5,
         benchmark_id=None,

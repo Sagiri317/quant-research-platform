@@ -912,28 +912,6 @@ def _parse_correction_flag(series: pd.Series) -> pd.Series:
     return numeric.astype(bool)
 
 
-def filter_by_source_date_range(
-    frame: pd.DataFrame,
-    *,
-    data_id: str,
-    start_date: str | None,
-    end_date: str | None,
-) -> pd.DataFrame:
-    if start_date is None and end_date is None:
-        return frame
-    timestamps = strict_timestamp_series(
-        frame["timestamp"],
-        error=f"invalid_{data_id}_source_timestamp",
-        allow_null=True,
-    )
-    mask = pd.Series(True, index=frame.index)
-    if start_date is not None:
-        mask &= timestamps >= pd.Timestamp(start_date)
-    if end_date is not None:
-        mask &= timestamps <= pd.Timestamp(end_date)
-    return frame[mask].copy()
-
-
 def materialize_interim_data(
     *,
     raw_root: Path,
@@ -965,10 +943,10 @@ def materialize_interim_data(
             pending.discard(data_id)
             spec = interim_catalog().get(data_id)
             artifact_root = Path(output_roots[spec.data_id])
-            metadata = dict(metadata or {})
-            diagnostics = dict(metadata.get("producer_diagnostics", {}))
+            target_metadata = dict(metadata or {})
+            diagnostics = dict(target_metadata.get("producer_diagnostics", {}))
             diagnostics["exact_duplicate_count"] = 0
-            metadata["producer_diagnostics"] = diagnostics
+            target_metadata["producer_diagnostics"] = diagnostics
             source_row_counts = None
             if data_id in {"analyst_forecast", "index_info"}:
                 source_row_counts = {}
@@ -990,7 +968,7 @@ def materialize_interim_data(
                         frames,
                         spec=spec,
                         metadata={
-                            **(metadata or {}),
+                            **target_metadata,
                             "source_evidence": source_evidence,
                         },
                     )
@@ -1042,14 +1020,14 @@ def _iter_normalized_interim_frames(
             chunksize=chunksize,
             expected_identity=expected_identity,
             content_hashes=content_hashes,
+            start_date=start_date,
+            end_date=end_date,
         )
         with closing_iterator(chunks):
             for chunk in chunks:
                 pruned, counts = _transform_interim_chunk(
                     chunk,
                     data_id=data_id,
-                    start_date=start_date,
-                    end_date=end_date,
                 )
                 skip_duplicate = False
                 if not pruned.empty:
@@ -1120,24 +1098,15 @@ def _transform_interim_chunk(
     chunk: pd.DataFrame,
     *,
     data_id: str,
-    start_date: str | None,
-    end_date: str | None,
 ) -> tuple[pd.DataFrame, dict[str, int] | None]:
     normalized = normalize_raw_frame(chunk, data_id)
     source_row_counts = normalized.attrs.pop("source_row_counts", None)
-    filtered = _filter_normalized_frame(
-        normalized,
-        data_id=data_id,
-        start_date=start_date,
-        end_date=end_date,
-    )
-    del normalized
     if source_row_counts is not None:
-        source_row_counts["retained_after_date_filter_rows"] = len(filtered)
+        source_row_counts["retained_after_date_filter_rows"] = len(normalized)
         source_row_counts["excluded_date_range_rows"] = source_row_counts[
             "retained_before_date_filter_rows"
-        ] - len(filtered)
-    return filtered.loc[
+        ] - len(normalized)
+    return normalized.loc[
         :, list(INTERIM_COLUMNS_BY_DATA_ID[data_id])
     ].copy(), source_row_counts
 
@@ -1229,27 +1198,3 @@ def _normalize_trading_calendar_frame(frame: pd.DataFrame) -> pd.DataFrame:
         .sort_values(["calendar_date", "source_market_type"])
         .reset_index(drop=True)
     )
-
-
-def _filter_normalized_frame(
-    frame: pd.DataFrame,
-    *,
-    data_id: str,
-    start_date: str | None,
-    end_date: str | None,
-) -> pd.DataFrame:
-    if data_id in {MARKET_BARS_DATA_ID, "adjustment"}:
-        return filter_by_source_date_range(
-            frame,
-            data_id=data_id,
-            start_date=start_date,
-            end_date=end_date,
-        )
-    if data_id == "market_cap":
-        return filter_by_source_date_range(
-            frame,
-            data_id=data_id,
-            start_date=None,
-            end_date=end_date,
-        )
-    return frame

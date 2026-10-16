@@ -27,7 +27,6 @@ from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_unlink,
     filesystem_walk,
-    filesystem_write_bytes,
     filesystem_write_text,
     native_filesystem_path,
 )
@@ -883,83 +882,50 @@ def test_choice_persisted_financials_feed_all_nineteen_factors_and_keep_nulls(
         pd.testing.assert_frame_equal(full[data_id], split[data_id], check_exact=True)
 
 
-def test_bulk_import_uses_table_scopes_and_keeps_published_identity(
+def test_bulk_import_shares_selected_reads_and_preserves_table_evidence(
     tmp_path, monkeypatch
 ):
+    from collections import Counter
+
+    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+
     layout = StorageLayout(tmp_path)
     with choice_session(SDK(response())) as session:
         _disclosure(session, layout)
-        snapshot, _ = _snapshot(session, layout, "2020-01-30", [100.0] * 14)
-    original_index = interim._raw_index
-    opened = []
-
-    def observed_index(root, financial):
-        opened.append(financial)
-        return original_index(root, financial)
-
-    monkeypatch.setattr(interim, "_raw_index", observed_index)
-    good = interim.materialize_interim_data(
-        output_roots={
-            key: layout.interim_data_root("choice", key)
-            for key in tuple(spec.data_id for spec in interim.interim_catalog().list())
-        },
-        raw_root=layout.raw_source_root("choice"),
-    )
-    assert sorted(opened) == sorted([*FINANCIAL_FIELDS, "financial_first_disclosure"])
-    before = {
-        root / relative: digest
-        for root in good.artifact_roots.values()
-        for relative, digest in _file_hashes(root).items()
-    }
-    opened.clear()
-    original_write = interim.write_dataset
-    published = []
-    candidate = StorageLayout(tmp_path / "candidate")
-
-    def mutate_after_first_publication(*args, **kwargs):
-        result = original_write(*args, **kwargs)
-        published.append(kwargs["spec"].data_id)
-        if len(published) == 1:
-            before.update(
-                {
-                    args[0] / relative: digest
-                    for relative, digest in _file_hashes(args[0]).items()
-                }
-            )
-            raw = snapshot / "response.csv"
-            filesystem_write_bytes(
-                raw,
-                Path(native_filesystem_path(raw))
-                .read_bytes()
-                .replace(b"100.0", b"101.0", 1),
-            )
-        return result
-
-    monkeypatch.setattr(interim, "write_dataset", mutate_after_first_publication)
-    with pytest.raises(ValueError, match="raw_csv_content_invalid"):
+        _snapshot(session, layout, "2020-01-30", [100.0] * len(FIELDS))
+    data_ids = (*FINANCIAL_FIELDS, "financial_first_disclosure")
+    expected = {}
+    for data_id in data_ids:
+        target = tmp_path / "single" / data_id
         interim.materialize_interim_data(
-            output_roots={
-                key: candidate.interim_data_root("choice", key)
-                for key in tuple(
-                    spec.data_id for spec in interim.interim_catalog().list()
-                )
-            },
             raw_root=layout.raw_source_root("choice"),
+            output_roots={data_id: target},
+            data_ids=(data_id,),
         )
-    assert len(published) == 1
-    assert len(opened) == len(set(opened)) == 2
-    assert published[0] in opened
-    for data_id in (*FINANCIAL_FIELDS, "financial_first_disclosure"):
-        assert filesystem_exists(candidate.interim_data_root("choice", data_id)) == (
-            data_id == published[0]
+        expected[data_id] = (
+            read_dataset(target),
+            read_dataset_manifest_evidence(target)["source_evidence"],
+            _file_hashes(target),
         )
-    assert all(
-        (
-            hashlib.sha256(Path(native_filesystem_path(path)).read_bytes()).hexdigest()
-            == digest
-            for path, digest in before.items()
-        )
+    reads = Counter()
+    original = interim.read_choice_response
+
+    def counted(root, *args, **kwargs):
+        reads[root] += 1
+        return original(root, *args, **kwargs)
+
+    monkeypatch.setattr(interim, "read_choice_response", counted)
+    roots = {data_id: tmp_path / "bulk" / data_id for data_id in data_ids}
+    result = interim.materialize_interim_data(
+        raw_root=layout.raw_source_root("choice"), output_roots=roots, data_ids=data_ids
     )
+    assert len(reads) == 2 and set(reads.values()) == {1}
+    assert set(result.artifact_roots) == set(data_ids)
+    for data_id, root in roots.items():
+        frame, evidence, hashes = expected[data_id]
+        pd.testing.assert_frame_equal(read_dataset(root), frame, check_exact=True)
+        assert read_dataset_manifest_evidence(root)["source_evidence"] == evidence
+        assert _file_hashes(tmp_path / "single" / data_id) == hashes
 
 
 @pytest.mark.parametrize(
@@ -1174,3 +1140,76 @@ def test_financial_tables_only_require_their_own_fields(tmp_path):
                 data_ids=(data_id,),
             )
     assert _file_hashes(layout.raw_source_root("choice")) == before
+
+
+@pytest.mark.parametrize(
+    "period,day", [("2021-12-31", "2022-01-30"), ("2019-12-31", "2020-02-01")]
+)
+def test_unselected_financial_values_do_not_block_historical_window(
+    tmp_path, period, day
+):
+    layout = StorageLayout(tmp_path)
+    with choice_session(SDK(response())) as session:
+        _disclosure(session, layout, events="2020-02-01")
+        _snapshot(session, layout, "2020-01-30", [100.0] * len(FIELDS))
+    arguments = dict(
+        raw_root=layout.raw_source_root("choice"),
+        data_ids=("financial_balance",),
+        start_date="2019-01-01",
+        end_date="2020-01-31",
+    )
+    baseline = tmp_path / "baseline"
+    interim.materialize_interim_data(
+        **arguments, output_roots={"financial_balance": baseline}
+    )
+    with choice_session(SDK(response())) as session:
+        if period != "2019-12-31":
+            _disclosure(session, layout, period=period, first=day)
+        _snapshot(
+            session,
+            layout,
+            day,
+            ["invalid-unused-numeric"] * len(FIELDS),
+            period=period,
+        )
+    raw_hashes = _file_hashes(layout.raw_source_root("choice"))
+    historical = tmp_path / "historical"
+    interim.materialize_interim_data(
+        **arguments, output_roots={"financial_balance": historical}
+    )
+    pd.testing.assert_frame_equal(
+        read_dataset(historical), read_dataset(baseline), check_exact=True
+    )
+    assert _file_hashes(layout.raw_source_root("choice")) == raw_hashes
+    with pytest.raises(ValueError, match="choice_financial_value_invalid"):
+        interim.materialize_interim_data(
+            **{**arguments, "end_date": day},
+            output_roots={"financial_balance": tmp_path / "selected-invalid"},
+        )
+
+
+def test_bulk_financial_reports_remain_table_specific(tmp_path):
+    layout = StorageLayout(tmp_path)
+    with choice_session(SDK(response())) as session:
+        _disclosure(session, layout)
+        _snapshot(session, layout, "2020-01-30", [100.0] * len(FIELDS))
+        _snapshot(
+            session,
+            layout,
+            "2020-02-01",
+            [200.0],
+            period="2019-09-30",
+            fields=("TCASHFLOWSTATEMENT_39",),
+        )
+    # An orphan cash-flow report must not enter the balance-sheet report index.
+    roots = {
+        name: tmp_path / name for name in ("financial_balance", "financial_cashflow")
+    }
+    with pytest.raises(PortfolioTargetBlocked, match="choice_first_disclosure_missing"):
+        interim.materialize_interim_data(
+            raw_root=layout.raw_source_root("choice"),
+            output_roots=roots,
+            data_ids=tuple(roots),
+        )
+    assert read_dataset(roots["financial_balance"]).total_assets.tolist() == [100.0]
+    assert not filesystem_exists(roots["financial_cashflow"])

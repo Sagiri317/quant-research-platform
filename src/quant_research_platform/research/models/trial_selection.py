@@ -22,6 +22,7 @@ from quant_research_platform.contracts.experiments import (
     legal_training_mask,
     training_availability_columns,
 )
+from quant_research_platform.contracts.ids import validate_input_market
 from quant_research_platform.contracts.json_codec import (
     _strict_config,
 )
@@ -639,6 +640,7 @@ def score(config):
                 validate_model_input_roles(
                     session.spec,
                     _model_spec(facts["model"]),
+                    market_id=facts["market_id"],
                     selected_columns=selected_columns,
                 )
                 read_columns = tuple(
@@ -745,6 +747,7 @@ def score(config):
                 "fit_windows": training_windows,
             }
         )
+    validate_input_market(declared, market)
     if market == "a_share":
         from quant_research_platform.research.protocols.a_share import (
             validate_model_selection,

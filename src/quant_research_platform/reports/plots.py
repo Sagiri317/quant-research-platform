@@ -1,8 +1,8 @@
-"""Pure plots of validated query/report rows; no reads or statistical inference.
+"""Plot existing numerical evidence without statistical inference.
 
-Callers supply actual source references and the sample role from the consumed
-artifact. Figures are caller-owned: save with ``figure.savefig`` and close them.
-Naive timestamps retain their source wall-clock meaning; ``timezone`` labels it.
+Pure helpers return caller-owned figures; ``plot`` reads explicit inputs and
+writes a new image. Naive timestamps retain their source wall-clock meaning;
+``timezone`` labels it.
 """
 
 from __future__ import annotations
@@ -13,6 +13,8 @@ from functools import wraps
 from textwrap import fill
 
 import pandas as pd
+
+from quant_research_platform.artifacts.statistics import _COMPARISON_IDENTITY
 
 
 def _styled(function):
@@ -125,7 +127,7 @@ def _reason(value):
 
 def _value(row, key, *, status="status"):
     state = row[status]
-    if state not in {"DEFINED", "UNDEFINED", "BLOCKED", "FAILED"}:
+    if state not in {"DEFINED", "UNDEFINED", "NOT_APPLICABLE", "BLOCKED", "FAILED"}:
         raise ValueError("plot_status_invalid")
     return _number(row[key]) if state == "DEFINED" else math.nan
 
@@ -363,6 +365,15 @@ def plot_metric_comparison(rows, *, metric_id, units, source_reference, sample_r
         "fees": "手续费",
         "funding": "资金费",
         "turnover": "换手",
+        "tracking_error": "跟踪误差",
+        "information_ratio": "信息比率",
+        "portfolio_total_return": "组合总收益",
+        "benchmark_total_return": "参考序列总收益",
+        "mean_return_difference": "平均收益差",
+        "annualized_return_difference": "年化收益差",
+        "relative_wealth": "相对财富",
+        "relative_wealth_return": "相对财富收益",
+        "maximum_relative_drawdown": "最大相对回撤",
         "continuous_max_drawdown": "连续组合最大回撤",
         "episode_max_drawdown": "独立区段最大回撤",
     }.get(metric_id, metric_id)
@@ -372,11 +383,7 @@ def plot_metric_comparison(rows, *, metric_id, units, source_reference, sample_r
     figure.set_figheight(max(3.5, 0.5 * len(selected) + 2))
     axis = axes[0]
     labels = [
-        " | ".join(
-            str(row[key])
-            for key in ("candidate_id", "execution_mode", "episode_id", "sample_role")
-            if key in row
-        )
+        " | ".join(str(row[key]) for key in _COMPARISON_IDENTITY if key in row)
         for row in selected
     ]
     if len(labels) != len(set(labels)):
@@ -1135,7 +1142,13 @@ def plot(config):
                     "sample_role",
                 )
                 fields = {
-                    "metrics": ("metric_id", "value", "status", "reason"),
+                    "metrics": (
+                        *_COMPARISON_IDENTITY,
+                        "metric_id",
+                        "value",
+                        "status",
+                        "reason",
+                    ),
                     "returns": (
                         "end_at",
                         "net_return",

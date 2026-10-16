@@ -133,7 +133,22 @@ def test_missing_or_nonpositive_close_preserves_rows_and_later_forecasts():
         observations.loc[:, ["asset_id", "timestamp"]],
         check_exact=True,
     )
-    assert actual.iloc[1:-1, 2:].isna().all().all()
+    assert (
+        actual.loc[
+            1:5,
+            [
+                "forward_earnings_yield_fy1",
+                "forward_earnings_yield_fy2",
+                "forecast_dispersion_price_scaled_fy1",
+            ],
+        ]
+        .isna()
+        .all()
+        .all()
+    )
+    assert actual.forecast_dispersion_fy1.eq(1.0).all()
+    assert actual.log_analyst_coverage.to_numpy() == pytest.approx(np.log(3))
+    assert actual.median_forecast_age_days_fy1.notna().all()
     for position in (0, len(actual) - 1):
         assert actual.loc[position, "forward_earnings_yield_fy1"] == 0.2
         assert actual.loc[position, "forward_earnings_yield_fy2"] == 0.4
@@ -198,7 +213,23 @@ def test_expectations_processed_producer_persists_latest_declaration(
         assert saved.loc[position, "forecast_dispersion_fy1"] == 1.0
         assert saved.loc[position, "log_analyst_coverage"] == pytest.approx(np.log(3.0))
     assert saved.iloc[0, 3:].isna().all()
-    assert saved.iloc[2:4, 3:].isna().all().all()
+    assert (
+        saved.loc[
+            2:3,
+            [
+                "forward_earnings_yield_fy1",
+                "forward_earnings_yield_fy2",
+                "forecast_dispersion_price_scaled_fy1",
+            ],
+        ]
+        .isna()
+        .all()
+        .all()
+    )
+    assert saved.loc[2:3, "forecast_dispersion_fy1"].eq(1.0).all()
+    assert saved.loc[2:3, "log_analyst_coverage"].to_numpy() == pytest.approx(
+        np.log(3.0)
+    )
 
 
 def test_asset_candidate_scan_preserves_interleaved_observation_positions(monkeypatch):
@@ -719,7 +750,7 @@ def test_indexed_event_range_is_chunk_and_query_order_independent(
     [(column,) for column in ALL_EXPECTATIONS_FACTORS]
     + [("log_analyst_coverage", "forward_earnings_yield_fy2")],
 )
-def test_selected_expectations_equal_full_output_and_keep_price_gate(selected):
+def test_selected_expectations_equal_full_output_and_keep_factor_dependencies(selected):
     records = pd.DataFrame(
         [
             {
@@ -747,7 +778,16 @@ def test_selected_expectations_equal_full_output_and_keep_price_gate(selected):
     pd.testing.assert_frame_equal(
         actual, full.loc[:, ["asset_id", "timestamp", *selected]], check_exact=True
     )
-    assert actual.iloc[2:, 2:].isna().all().all()
+    from quant_research_platform.research.factors.expectations.definitions import (
+        PRICE_SCALED_EXPECTATIONS,
+    )
+
+    for column in selected:
+        assert (
+            actual.loc[2:, column].isna().all()
+            if column in PRICE_SCALED_EXPECTATIONS
+            else actual.loc[2:, column].notna().all()
+        )
 
 
 def test_coverage_query_does_not_compute_medians(monkeypatch):
@@ -775,3 +815,91 @@ def test_coverage_query_does_not_compute_medians(monkeypatch):
         pd.DataFrame({"asset_id": "asset", "timestamp": sessions, "close": 10.0})
     )
     assert actual.log_analyst_coverage.iloc[-1] == np.log(3)
+
+
+@pytest.mark.parametrize("close", [None, "unconsumed_bad_value"])
+def test_price_independent_expectations_need_no_close_column(close):
+    records = pd.DataFrame(
+        {
+            "asset_id": ["a"] * 3,
+            "declare_date": pd.Timestamp("2024-01-01"),
+            "forecast_end_date": pd.Timestamp("2024-12-31"),
+            "institution_id": ["i", "j", "k"],
+            "forecast_eps": [1.0, 2.0, 3.0],
+        }
+    )
+    selected = (
+        "forecast_dispersion_fy1",
+        "log_analyst_coverage",
+        "median_forecast_age_days_fy1",
+        "newly_updated_institution_fraction_fy1",
+    )
+    observation = pd.DataFrame(
+        {"asset_id": ["a"], "timestamp": [pd.Timestamp("2024-01-02")]}
+    )
+    if close is not None:
+        observation["close"] = close
+    actual = _prepare_expectations(
+        records,
+        trading_sessions=pd.date_range("2024-01-01", periods=3),
+        selected_columns=selected,
+    )(observation)
+    np.testing.assert_allclose(
+        actual.loc[0, list(selected)].to_numpy(dtype=float), [1.0, np.log(3), 1.0, 1.0]
+    )
+    from quant_research_platform.research.factors.expectations.definitions import (
+        expectations_factor_definitions,
+    )
+
+    definitions = expectations_factor_definitions(
+        market_id="a_share", required_input_data_id="analyst_forecast"
+    )
+    assert all(
+        "close" not in d.input_columns
+        for d in definitions
+        if d.output_column in selected
+    )
+
+
+def test_unrepresentable_expectation_yield_preserves_other_values_and_rows(tmp_path):
+    from quant_research_platform.markets.prepare import _configured_spec
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+    from tests.helpers.a_share_catalogs import scientific_catalogs
+
+    selected = (
+        "forward_earnings_yield_fy1",
+        "forecast_dispersion_fy1",
+        "log_analyst_coverage",
+    )
+    records = pd.DataFrame(
+        {
+            "asset_id": ["a"] * 3,
+            "declare_date": pd.Timestamp("2024-01-01"),
+            "forecast_end_date": pd.Timestamp("2024-12-31"),
+            "institution_id": ["i", "j", "k"],
+            "forecast_eps": [1e308] * 3,
+        }
+    )
+    observation = pd.DataFrame(
+        {
+            "asset_id": ["a", "a"],
+            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+            "close": [1e-308, 10.0],
+        }
+    )
+    actual = _prepare_expectations(
+        records,
+        trading_sessions=pd.date_range("2024-01-01", periods=4),
+        selected_columns=selected,
+    )(observation)
+    assert np.isnan(actual.forward_earnings_yield_fy1.iloc[0])
+    assert actual.forward_earnings_yield_fy1.iloc[1] == pytest.approx(1e307)
+    assert actual.forecast_dispersion_fy1.eq(0.0).all()
+    assert actual.log_analyst_coverage.to_numpy() == pytest.approx(np.log(3))
+    actual.insert(0, "market_id", "a_share")
+    spec = _configured_spec(
+        scientific_catalogs().processed.get("expectations_factors"),
+        {"factor_columns": list(selected)},
+    )
+    write_dataset(tmp_path / "factors", actual, spec=spec)
+    pd.testing.assert_frame_equal(read_dataset(tmp_path / "factors"), actual)

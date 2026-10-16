@@ -364,7 +364,7 @@ def test_equal_replacement_native_statistics_has_no_artificial_drawdown_or_volat
                 PortfolioCandidateSpec(
                     "closed_market_portfolio",
                     "global",
-                    "top20_equal_weight",
+                    "quantile_equal_weight",
                     "explicit",
                     "daily",
                     0.5,
@@ -471,7 +471,7 @@ def test_event_wealth_and_cash_count_are_chunk_and_reporting_window_invariant(
     candidate = PortfolioCandidateSpec(
         "closed_market_portfolio",
         "global",
-        "top20_equal_weight",
+        "quantile_equal_weight",
         "explicit",
         "daily",
         0.5,

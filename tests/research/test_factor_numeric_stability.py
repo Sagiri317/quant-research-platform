@@ -177,7 +177,7 @@ def test_fundamental_growth_stable_differences_persist_across_chunks(
     assert saved.has_legal_fundamental_pit.all()
 
 
-def test_abnormal_turnover_keeps_unrepresentable_signed_result():
+def test_abnormal_turnover_localizes_unrepresentable_result():
     values = [1e308] + [0.0] * 228 + [5e-324, -1e308] + [0.0] * 19
     panel = pd.DataFrame(
         dict(
@@ -187,9 +187,10 @@ def test_abnormal_turnover_keeps_unrepresentable_signed_result():
         )
     )
     output = calculate_price_volume_factors(
-        panel, factor_columns=("abnormal_turnover_20_250",)
+        panel, factor_columns=("abnormal_turnover_20_250", "turnover_20d")
     )
-    assert output.abnormal_turnover_20_250.iloc[-1] == -np.inf
+    assert pd.isna(output.abnormal_turnover_20_250.iloc[-1])
+    assert output.turnover_20d.iloc[-1] == pytest.approx(-5e306)
 
 
 @pytest.mark.parametrize("scale", (1e16, 1e308))

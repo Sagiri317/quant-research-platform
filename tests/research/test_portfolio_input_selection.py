@@ -144,7 +144,7 @@ def test_calibration_selection_preserves_duplicate_observations(
         ),
         spec=_interim_specs().get("trading_calendar"),
     )
-    days = pd.date_range("2023-01-01", periods=8, freq="4D")
+    days = pd.date_range("2023-01-01", periods=8)
     observations = pd.DataFrame(
         [
             {
@@ -189,7 +189,7 @@ def test_calibration_selection_preserves_duplicate_observations(
         schedule = {
             "path": str(root),
             "columns": ["entry_at"],
-            "time_window": {"start": "2023-01-01", "end": "2023-01-21"},
+            "time_window": {"start": "2023-01-01", "end": "2023-01-06"},
         }
     else:
         schedule = str(tmp_path / "intervals.parquet")
@@ -206,7 +206,10 @@ def test_calibration_selection_preserves_duplicate_observations(
             "observations": options,
             "scheduled_intervals": schedule,
             "rebalance_schedule": "daily",
-            "calendar": str(calendar_root),
+            "calendar": {
+                "path": str(calendar_root),
+                "time_window": {"start": "2023-01-01", "end": "2023-01-08"},
+            },
             "cutoff": "2023-02-01",
             "selection_group": "global",
             "output": str(tmp_path / "calibration.json"),

@@ -15,7 +15,7 @@ from quant_research_platform.contracts.validation import (
     strict_timestamp_series,
 )
 
-from .definitions import ALL_EXPECTATIONS_FACTORS
+from .definitions import ALL_EXPECTATIONS_FACTORS, PRICE_SCALED_EXPECTATIONS
 
 FORECAST_FRESHNESS_DAYS = 90
 
@@ -118,17 +118,23 @@ def _expectations_for_observations(
     minimum_institutions,
     selected_columns,
 ):
-    if not {"asset_id", "timestamp", "close"}.issubset(observations.columns):
+    needs_price = bool(set(selected_columns) & PRICE_SCALED_EXPECTATIONS)
+    columns = ["asset_id", "timestamp", *(("close",) if needs_price else ())]
+    if not set(columns).issubset(observations.columns):
         raise ValueError("expectations_input_columns_invalid")
-    output = observations.loc[:, ["asset_id", "timestamp", "close"]].copy()
+    output = observations.loc[:, columns].copy()
     output["asset_id"] = strict_string_series(
         output["asset_id"], error="expectations_asset_id_invalid"
     )
     output["timestamp"] = strict_timestamp_series(
         output["timestamp"], error="expectations_timestamp_invalid"
     ).dt.normalize()
-    output["close"] = strict_finite_numeric_series(
-        output["close"], error="expectations_close_invalid", allow_null=True
+    output["close"] = (
+        strict_finite_numeric_series(
+            output["close"], error="expectations_close_invalid", allow_null=True
+        )
+        if needs_price
+        else np.nan
     )
     if output.duplicated(["asset_id", "timestamp"]).any():
         raise ValueError("expectations_observation_key_duplicate")
@@ -191,8 +197,7 @@ def _features_for_observation(
         "timestamp": timestamp,
         **{factor: float("nan") for factor in selected_columns},
     }
-    if pd.isna(close) or close <= 0.0:
-        return base
+    valid_price = pd.notna(close) and close > 0.0
     by_period = {}
     for event in forecast:
         by_period.setdefault(event.forecast_end_date, []).append(event)
@@ -213,8 +218,8 @@ def _features_for_observation(
             )
         ):
             center = median(eps_values)
-            if "forward_earnings_yield_fy1" in selected_columns:
-                base["forward_earnings_yield_fy1"] = float(
+            if "forward_earnings_yield_fy1" in selected_columns and valid_price:
+                base["forward_earnings_yield_fy1"] = _finite_float(
                     center / Fraction(float(close))
                 )
             if any(
@@ -226,9 +231,12 @@ def _features_for_observation(
             ):
                 mad = median(abs(value - center) for value in eps_values)
                 if "forecast_dispersion_fy1" in selected_columns:
-                    base["forecast_dispersion_fy1"] = float(mad)
-                if "forecast_dispersion_price_scaled_fy1" in selected_columns:
-                    base["forecast_dispersion_price_scaled_fy1"] = float(
+                    base["forecast_dispersion_fy1"] = _finite_float(mad)
+                if (
+                    "forecast_dispersion_price_scaled_fy1" in selected_columns
+                    and valid_price
+                ):
+                    base["forecast_dispersion_price_scaled_fy1"] = _finite_float(
                         mad / Fraction(float(close))
                     )
         if "log_analyst_coverage" in selected_columns:
@@ -241,13 +249,25 @@ def _features_for_observation(
             base["newly_updated_institution_fraction_fy1"] = sum(
                 event.available_at == timestamp for event in selected[0]
             ) / len(selected[0])
-    if "forward_earnings_yield_fy2" in selected_columns and len(selected) > 1:
+    if (
+        "forward_earnings_yield_fy2" in selected_columns
+        and len(selected) > 1
+        and valid_price
+    ):
         fy2 = [event.forecast_eps for event in selected[1]]
         if len(fy2) >= minimum_institutions:
-            base["forward_earnings_yield_fy2"] = float(
+            base["forward_earnings_yield_fy2"] = _finite_float(
                 _finite_median(fy2) / Fraction(float(close))
             )
     return base
+
+
+def _finite_float(value):
+    """Keep an unrepresentable derived value local to its own factor."""
+    try:
+        return float(value)
+    except OverflowError:
+        return np.nan
 
 
 def _finite_median(values) -> Fraction:

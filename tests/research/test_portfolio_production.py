@@ -265,7 +265,7 @@ def _build_producer(
     final_calibrations=None,
     frozen_calibration: production.AlphaCalibration | None = None,
     typed_batches: bool = False,
-    construction: str = "top20_equal_weight",
+    construction: str = "quantile_equal_weight",
     shared_alpha_facts=None,
     shared_risk_fits=None,
     identity_overrides=None,
@@ -289,7 +289,7 @@ def _build_producer(
         candidate = PortfolioCandidateSpec(
             selection_group="global",
             prediction_selector="champion",
-            candidate_id="synthetic_top20_equal_weight",
+            candidate_id="synthetic_quantile_equal_weight",
             construction=construction,
             rebalance_schedule="daily",
             top_quantile=0.5,
@@ -2873,7 +2873,7 @@ def test_half_step_rebalance_uses_existing_ledger_and_preserves_residual_cash(
         frames=frames,
         fee_frame=fee_frame,
         output_window=output_window,
-        construction="top20_equal_weight_half_step",
+        construction="quantile_equal_weight_half_step",
         typed_batches=True,
     )
     batches = list(output)
@@ -2919,7 +2919,7 @@ def test_half_step_rebalance_uses_existing_ledger_and_preserves_residual_cash(
 
 @pytest.mark.parametrize(
     "construction",
-    ("top20_equal_weight", "top20_float_cap", "top20_equal_weight_half_step"),
+    ("quantile_equal_weight", "quantile_float_cap", "quantile_equal_weight_half_step"),
 )
 @pytest.mark.parametrize("empty_reason", ("ineligible", "structural"))
 @pytest.mark.parametrize("state", ("cash", "sellable", "blocked", "closed", "unknown"))
@@ -3036,7 +3036,7 @@ def test_nonempty_selection_still_requires_valid_predictions(problem):
 
 
 @pytest.mark.parametrize(
-    "construction", ("top20_equal_weight", "top20_equal_weight_half_step")
+    "construction", ("quantile_equal_weight", "quantile_equal_weight_half_step")
 )
 @pytest.mark.parametrize("fees", (False, True))
 @pytest.mark.parametrize("blocked", (False, True))
@@ -3507,7 +3507,7 @@ def test_portfolio_delisting_zero_nav_retains_units_and_recovers_amounts(
     )
     batches = list(chunks)
     capital = PortfolioCapital(
-        "synthetic_top20_equal_weight", 100.0, "CNY", "adjusted_notional"
+        "synthetic_quantile_equal_weight", 100.0, "CNY", "adjusted_notional"
     )
     previous = None
     economy = _LedgerEconomics(capital)
@@ -3633,7 +3633,7 @@ def test_persisted_adv_unavailable_rejects_fabricated_evidence(
     batches = list(producer)
     batch = batches[0]
     capital = PortfolioCapital(
-        "synthetic_top20_equal_weight", 100.0, "CNY", "adjusted_notional"
+        "synthetic_quantile_equal_weight", 100.0, "CNY", "adjusted_notional"
     )
     validate_portfolio_transition(batch, capital, None)
     timestamp = next(

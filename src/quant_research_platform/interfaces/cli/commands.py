@@ -26,6 +26,7 @@ Config = Annotated[Path, typer.Option("--config", help="Strict operation JSON fi
 
 @catalog_app.command("factors")
 def catalog_factors(profile: str = A_SHARE_PROFILE_ID) -> None:
+    """List the selected market's factor catalog."""
     typer.echo("factor_id,market_id,factor_set")
     for item in queries.list_factors(research_profile(profile)).items:
         typer.echo(f"{item.factor_id},{item.market_id},{item.factor_set}")
@@ -33,6 +34,7 @@ def catalog_factors(profile: str = A_SHARE_PROFILE_ID) -> None:
 
 @catalog_app.command("labels")
 def catalog_labels(profile: str = A_SHARE_PROFILE_ID) -> None:
+    """List the selected market's label catalog."""
     typer.echo("label_id,market_id,horizon,horizon_unit")
     for item in queries.list_labels(research_profile(profile)).items:
         typer.echo(
@@ -42,6 +44,7 @@ def catalog_labels(profile: str = A_SHARE_PROFILE_ID) -> None:
 
 @catalog_app.command("dataset")
 def catalog_dataset(dataset_id: str, profile: str = A_SHARE_PROFILE_ID) -> None:
+    """Describe one research dataset's required inputs and columns."""
     _echo_result(
         queries.describe_research_dataset_requirements(
             dataset_id, research_profile(profile)
@@ -51,6 +54,7 @@ def catalog_dataset(dataset_id: str, profile: str = A_SHARE_PROFILE_ID) -> None:
 
 @app.command("prepare-source")
 def prepare_source(config: Config) -> None:
+    """Normalize selected source data into explicitly named new outputs."""
     from quant_research_platform.sources.prepare import prepare_source
 
     result = prepare_source(read_qrp_json_file(config)[1])
@@ -64,6 +68,7 @@ def prepare_source(config: Config) -> None:
 
 @app.command("prepare")
 def prepare(config: Config) -> None:
+    """Prepare one market table from explicit inputs."""
     from quant_research_platform.markets.prepare import prepare
 
     _echo_result(prepare(read_qrp_json_file(config)[1]))
@@ -71,6 +76,7 @@ def prepare(config: Config) -> None:
 
 @app.command("assemble")
 def assemble(config: Config) -> None:
+    """Assemble selected factors, labels and features into a new dataset."""
     from quant_research_platform.research.datasets.assembler import assemble
 
     _echo_result(assemble(read_qrp_json_file(config)[1]))
@@ -78,6 +84,7 @@ def assemble(config: Config) -> None:
 
 @app.command("fit")
 def fit(config: Config) -> None:
+    """Fit and save one model on the declared historical windows."""
     from quant_research_platform.research.models.production import fit
 
     _echo_result(fit(read_qrp_json_file(config)[1]))
@@ -85,6 +92,7 @@ def fit(config: Config) -> None:
 
 @app.command("predict")
 def predict(config: Config) -> None:
+    """Predict with a saved model without fitting."""
     from quant_research_platform.research.predictions.runner import predict
 
     _echo_result(predict(read_qrp_json_file(config)[1]))
@@ -92,6 +100,7 @@ def predict(config: Config) -> None:
 
 @app.command("explain")
 def explain(config: Config) -> None:
+    """Explain one frozen model and save the selected numerical tables."""
     from quant_research_platform.research.models.explanations import explain
 
     _echo_result(explain(read_qrp_json_file(config)[1]))
@@ -99,6 +108,7 @@ def explain(config: Config) -> None:
 
 @app.command("score")
 def score(config: Config) -> None:
+    """Score the declared candidate set on mature validation samples."""
     from quant_research_platform.research.models.trial_selection import score
 
     _echo_result(score(read_qrp_json_file(config)[1]))
@@ -106,6 +116,7 @@ def score(config: Config) -> None:
 
 @app.command("select")
 def select(config: Config) -> None:
+    """Select a candidate from saved validation scores without refitting."""
     from quant_research_platform.research.models.trial_selection import select
 
     _echo_result(select(read_qrp_json_file(config)[1]))
@@ -113,6 +124,7 @@ def select(config: Config) -> None:
 
 @app.command("backtest")
 def backtest(config: Config) -> None:
+    """Backtest one A-share portfolio from saved predictions."""
     from quant_research_platform.research.portfolios.production import backtest
 
     _echo_result(backtest(read_qrp_json_file(config)[1]))
@@ -120,6 +132,7 @@ def backtest(config: Config) -> None:
 
 @app.command("calibrate")
 def calibrate(config: Config) -> None:
+    """Calibrate A-share alpha from mature prediction and return pairs."""
     from quant_research_platform.research.portfolios.production import calibrate
 
     _echo_result(calibrate(read_qrp_json_file(config)[1]))
@@ -127,6 +140,7 @@ def calibrate(config: Config) -> None:
 
 @app.command("plot")
 def plot(config: Config) -> None:
+    """Plot existing numerical evidence into a new PNG, SVG or PDF."""
     from quant_research_platform.reports.plots import plot
 
     _echo_result(plot(read_qrp_json_file(config)[1]))
@@ -134,6 +148,7 @@ def plot(config: Config) -> None:
 
 @app.command("backtest-crypto-taker")
 def backtest_crypto_taker(config: Config) -> None:
+    """Backtest one Crypto taker portfolio from explicit event inputs."""
     from quant_research_platform.markets.implementations.crypto.portfolio import (
         backtest_taker,
     )
@@ -143,6 +158,7 @@ def backtest_crypto_taker(config: Config) -> None:
 
 @app.command("backtest-crypto-maker")
 def backtest_crypto_maker(config: Config) -> None:
+    """Backtest one Crypto maker portfolio with its declared calibration."""
     from quant_research_platform.markets.implementations.crypto.portfolio import (
         backtest_maker,
     )
@@ -152,6 +168,7 @@ def backtest_crypto_maker(config: Config) -> None:
 
 @app.command("calibrate-crypto-maker")
 def calibrate_crypto_maker(config: Config) -> None:
+    """Calibrate Crypto maker responses on the declared historical samples."""
     from quant_research_platform.markets.implementations.crypto.portfolio import (
         calibrate_maker,
     )
@@ -161,6 +178,7 @@ def calibrate_crypto_maker(config: Config) -> None:
 
 @app.command("statistics-factors")
 def statistics_factors(config: Config) -> None:
+    """Compute selected factor statistics from data or saved daily evaluations."""
     from quant_research_platform.research.statistics_production import factor_statistics
 
     _echo_result(factor_statistics(read_qrp_json_file(config)[1]))
@@ -168,6 +186,7 @@ def statistics_factors(config: Config) -> None:
 
 @app.command("statistics-portfolio")
 def statistics_portfolio(config: Config) -> None:
+    """Compute selected A-share portfolio statistics from existing ledgers."""
     from quant_research_platform.research.portfolios.diagnostics import (
         portfolio_statistics,
     )
@@ -177,6 +196,7 @@ def statistics_portfolio(config: Config) -> None:
 
 @app.command("statistics-crypto")
 def statistics_crypto(config: Config) -> None:
+    """Compute selected Crypto portfolio statistics from existing ledgers."""
     from quant_research_platform.research.portfolios.diagnostics import (
         crypto_statistics,
     )
@@ -186,6 +206,7 @@ def statistics_crypto(config: Config) -> None:
 
 @app.command("statistics-model")
 def statistics_model(config: Config) -> None:
+    """Compute selected statistics for explicit models and predictions."""
     from quant_research_platform.research.statistics_production import model_statistics
 
     _echo_result(model_statistics(read_qrp_json_file(config)[1]))
@@ -193,6 +214,7 @@ def statistics_model(config: Config) -> None:
 
 @app.command("evaluate")
 def evaluate(config: Config) -> None:
+    """Evaluate explicit signals against mature labels on the declared window."""
     from quant_research_platform.research.evaluations.runner import evaluate
 
     _echo_result(evaluate(read_qrp_json_file(config)[1]))
@@ -200,6 +222,7 @@ def evaluate(config: Config) -> None:
 
 @app.command("inspect")
 def inspect(path: Path) -> None:
+    """Read one explicitly selected artifact's native metadata."""
     _echo_result(queries.inspect(path))
 
 

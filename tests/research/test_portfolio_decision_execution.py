@@ -281,7 +281,7 @@ def test_zero_nav_neutrality_has_no_defined_weights_or_exposures():
         candidate=PortfolioCandidateSpec(
             "zero",
             "global",
-            "top20_equal_weight",
+            "quantile_equal_weight",
             "champion",
             "daily",
             1.0,

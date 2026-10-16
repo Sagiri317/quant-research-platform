@@ -121,7 +121,6 @@ def factor_catalog() -> FactorCatalog:
                     required_input_data_id="market_model_factors",
                     lookback_window=312,
                     required_windows=(252, 60),
-                    window=312,
                     description=(
                         "Prior-cap weighted eligible market; causal 252-session OLS "
                         "and 60-session population residual volatility."

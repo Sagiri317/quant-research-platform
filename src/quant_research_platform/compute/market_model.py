@@ -12,6 +12,7 @@ import pandas as pd
 
 from quant_research_platform.compute.dataframe.cross_section import _CorrelationMoments
 from quant_research_platform.contracts.validation import (
+    finite_exact_float,
     strict_finite_numeric_series,
     strict_integer_series,
     strict_timestamp_series,
@@ -38,6 +39,7 @@ class MarketModelRiskState:
         self._previous_weights: dict[str, float] = {}
         self._asset_markets: dict[str, int] = {}
         self._pending_market_gross: dict[str, Fraction | None] = {}
+        self._previous_market_complete = True
 
     def observe(
         self,
@@ -45,7 +47,10 @@ class MarketModelRiskState:
         *,
         open_market_types: frozenset[int] | None = None,
         asset_market_types: Mapping[str, int] | None = None,
+        market_input_complete: bool = True,
     ) -> MarketModelRiskStyles:
+        if type(market_input_complete) is not bool:
+            raise ValueError("market_model_input_completeness_invalid")
         required = {
             "asset_id",
             "listing_date",
@@ -153,7 +158,15 @@ class MarketModelRiskState:
                 exact_weight = Fraction(weight)
                 market_weight += exact_weight
                 market_total += exact_weight * Fraction(value)
-        market_return = float(market_total / market_weight) if market_weight else np.nan
+        # A selector gap also leaves the next session's lagged weights unknown.
+        market_return = (
+            float(market_total / market_weight)
+            if market_weight
+            and market_input_complete
+            and self._previous_market_complete
+            else np.nan
+        )
+        self._previous_market_complete = market_input_complete
         for asset in closed_assets:
             gross = self._pending_market_gross.get(asset, Fraction(1))
             self._pending_market_gross[asset] = (
@@ -180,11 +193,14 @@ class MarketModelRiskState:
             interval_market_return = market_return
             if asset in self._pending_market_gross:
                 gross = self._pending_market_gross.pop(asset)
-                interval_market_return = (
-                    float(gross * (1 + Fraction.from_float(float(market_return))) - 1)
+                converted = (
+                    finite_exact_float(
+                        gross * (1 + Fraction.from_float(float(market_return))) - 1
+                    )
                     if gross is not None and np.isfinite(market_return)
-                    else np.nan
+                    else None
                 )
+                interval_market_return = np.nan if converted is None else converted
             if np.isfinite(interval_market_return) and np.isfinite(return_value):
                 moments.update(float(interval_market_return), return_value)
                 returns.append(return_value)
@@ -202,13 +218,17 @@ class MarketModelRiskState:
                 variance = market_square - market_mean * market_mean
                 if variance > 0:
                     slope = (product - market_mean * return_mean) / variance
-                    beta = float(slope)
-                    residual = float(
-                        Fraction(return_value)
-                        - return_mean
-                        - slope
-                        * (Fraction(float(interval_market_return)) - market_mean)
-                    )
+                    converted = finite_exact_float(slope)
+                    if converted is not None:
+                        beta = converted
+                        converted = finite_exact_float(
+                            Fraction(return_value)
+                            - return_mean
+                            - slope
+                            * (Fraction(float(interval_market_return)) - market_mean)
+                        )
+                        if converted is not None:
+                            residual = converted
             residuals.append(residual)
             if len(residuals) > self.residual_window:
                 residuals.pop(0)

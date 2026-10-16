@@ -77,6 +77,7 @@ def test_catalog_cli_is_read_only_and_outputs_native_catalog():
         ("assemble", "research.datasets.assembler", "assemble"),
         ("fit", "research.models.production", "fit"),
         ("predict", "research.predictions.runner", "predict"),
+        ("explain", "research.models.explanations", "explain"),
         ("score", "research.models.trial_selection", "score"),
         ("select", "research.models.trial_selection", "select"),
         ("backtest", "research.portfolios.production", "backtest"),
@@ -166,6 +167,19 @@ def test_inspect_reads_only_the_selected_native_dataset_metadata(tmp_path):
         inspect(root / "unrelated.json")
 
 
+def test_inspect_prediction_uses_native_manifest_without_reading_scores(tmp_path):
+    from quant_research_platform.interfaces.queries import inspect
+    from tests.artifacts.test_outputs_core import native_bundle
+
+    root, _, metadata = native_bundle(tmp_path)
+    (root / "prediction.parquet").write_bytes(b"unselected damaged member")
+    (root / "prediction.json").write_text("not a native metadata member")
+    assert inspect(root)["metadata"] == metadata
+    assert inspect(root / "manifest.json")["metadata"] == metadata
+    with pytest.raises(ValueError, match="inspection_requires_native_json_metadata"):
+        inspect(root / "prediction.json")
+
+
 @pytest.mark.parametrize("kind", ["date", "path", "nonfinite"])
 def test_source_stage_json_boundary_precedes_materialization(
     tmp_path, monkeypatch, kind
@@ -194,3 +208,14 @@ def test_source_stage_json_boundary_precedes_materialization(
     with pytest.raises(ValueError):
         prepare_source(config)
     assert not list(tmp_path.iterdir())
+
+
+def test_cli_help_describes_each_registered_operation():
+    from typer.main import get_command
+
+    command = get_command(commands.app)
+    assert all(item.help for item in command.commands.values())
+    assert all(item.help for item in command.commands["catalog"].commands.values())
+    result = CliRunner().invoke(commands.app, ["explain", "--help"])
+    assert result.exit_code == 0
+    assert "frozen model" in result.output

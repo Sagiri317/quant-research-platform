@@ -282,7 +282,10 @@ def _prediction_rows(
     session = session.projected_view(columns)
     model_spec = _model_spec(facts["model"])
     validate_model_input_roles(
-        session.spec, model_spec, include_target=sample_role == "validation"
+        session.spec,
+        model_spec,
+        market_id="crypto",
+        include_target=sample_role == "validation",
     )
     if sample_role == "validation":
         declared_unit = session.spec.get("column_units", {}).get(target)
@@ -1038,17 +1041,15 @@ def _produce_maker_calibration(*, on_table, config, model_evidence):
 
             def observe_event(*, event_id, event, fold_id=fold_id):
                 if isinstance(event, TradeEvent):
-                    if event.visible_quantity is None:
-                        raise PortfolioTargetBlocked(
-                            "hft_trade_visible_quantity_unknown"
-                        )
                     kind, context = "trade", event.observation_id
                     rows = (
                         (
                             "buy" if event.buyer_is_maker else "sell",
                             0,
                             event.price_index,
-                            event.visible_quantity,
+                            np.nan
+                            if event.visible_quantity is None
+                            else event.visible_quantity,
                         ),
                     )
                     count = 1
@@ -1526,7 +1527,9 @@ def _calibration_events(artifact, fold_id):
                     segment_id=first.context_id,
                     observation_id=first.context_id,
                     price_index=int(first.price_index),
-                    visible_quantity=float(first.quantity),
+                    visible_quantity=None
+                    if pd.isna(first.quantity)
+                    else float(first.quantity),
                     buyer_is_maker=first.side == "buy",
                 )
                 try:
@@ -1564,6 +1567,7 @@ def _calibration_headers(artifact, fold_id, cutoff):
                     (row.event_at, row.event_kind, row.context_id)
                     != (first.event_at, first.event_kind, first.context_id)
                     or not isfinite(row.quantity)
+                    and not (row.event_kind == "trade" and pd.isna(row.quantity))
                     or row.quantity < 0
                 ):
                     raise ValueError("crypto_calibration_event_invalid")

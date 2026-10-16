@@ -366,7 +366,7 @@ def test_native_adv_gap_preserves_portfolio_statistics(tmp_path):
             "candidate": {
                 "candidate_id": "global_fixed",
                 "selection_group": "global",
-                "construction": "top20_equal_weight",
+                "construction": "quantile_equal_weight",
                 "prediction_selector": "linear",
                 "top_quantile": 0.5,
                 "rebalance_schedule": "daily",

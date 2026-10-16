@@ -73,8 +73,6 @@ def validate_output_manifest(
         "run_type"
     ] != output_definition_id.removesuffix("_outputs"):
         raise ValueError("output_manifest_metadata_invalid")
-    if "scope" in metadata and metadata["scope"] != "LOCAL_ONLY":
-        raise ValueError("output_manifest_metadata_invalid")
     evidence_payload: dict[str, object] = {}
     if output_definition_id == "prediction_outputs":
         facts = metadata["model_facts"]

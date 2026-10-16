@@ -1391,6 +1391,72 @@ def _persist_execution(tmp_path, capital, produce):
     return read_portfolio_ledger_artifact(root)
 
 
+@pytest.mark.parametrize("quote_active", (False, True))
+@pytest.mark.parametrize("visible", (None, 0.0, 3.0))
+@pytest.mark.parametrize(
+    "price,maker_buyer,relevant",
+    (
+        ("100.5", False, False),
+        ("100.0", True, False),
+        ("99.5", True, True),
+        ("99.4", True, True),
+    ),
+)
+def test_maker_unknown_visible_quantity_only_blocks_dependent_orders(
+    tmp_path, quote_active, visible, price, maker_buyer, relevant
+):
+    from quant_research_platform.artifacts.crypto_hft import summarize_crypto_ledger
+
+    capital = PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual")
+    results = []
+
+    def produce(emit):
+        results.append(
+            simulate_maker(
+                [_state(0), _state(200)],
+                [
+                    replace(
+                        _trade(100, price=price, quantity="3", maker_buyer=maker_buyer),
+                        visible_quantity=visible,
+                    )
+                ],
+                [_quote(0, book_segment_id="s1")] if quote_active else [],
+                # Only the buy side is quoted at initial inventory zero.
+                config=replace(
+                    _maker_config(), inventory_target=2.0, inventory_skew=1.0
+                ),
+                observed_coverage={"s1": _coverage(0, 201)},
+                trade_coverage={"trade-connection-1": _coverage(0, 201)},
+                capital=capital,
+                asset_id="btc_usdt",
+                funding_events=(),
+                decision_windows_ns=((0, 200_000_000),),
+                on_ledger=emit,
+            )
+        )
+
+    artifact = _persist_execution(tmp_path, capital, produce)
+    summary = summarize_crypto_ledger(
+        artifact, artifact.iter_chunks(), windows_ns=((0, 200_000_000),)
+    )
+    expected_partial = quote_active and relevant and visible is None
+    status = "PARTIAL" if expected_partial else "COMPLETE"
+    assert results[0]["created_orders"] == int(quote_active)
+    assert results[0]["account_path_status"] == status
+    assert summary["execution"]["account_path_status"] == status
+    if expected_partial:
+        assert results[0]["account_stop_ns"] == 100_000_000
+        assert results[0]["net_pnl"] is None
+        assert summary["execution"]["account_stop_reason"] == (
+            "hft_trade_visible_quantity_unknown"
+        )
+    else:
+        expected_pnl = 0.50995 if quote_active and relevant and visible else 0.0
+        assert results[0]["net_pnl"] == pytest.approx(expected_pnl)
+        assert summary["economics"]["net_pnl"] == pytest.approx(expected_pnl)
+        assert summary["execution"]["account_stop_reason"] is None
+
+
 @pytest.mark.parametrize("quantity,unit", [(1.0, "0.001"), (1e308, "1e-311")])
 def test_taker_weighted_diagnostics_survive_unit_scaling(tmp_path, quantity, unit):
     import json

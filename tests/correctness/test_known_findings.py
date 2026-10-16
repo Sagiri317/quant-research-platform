@@ -115,7 +115,9 @@ def test_only_required_future_facts_determine_realized_target():
 
     original, labels = targets(panel)
     assert labels.loc[0, "forward_return_20d"] == pytest.approx(31 / 11 - 1)
-    assert labels.loc[0, "forward_return_20d_available_at"] == panel.timestamp.iloc[21]
+    assert labels.loc[0, "forward_return_20d_available_at"] == panel.timestamp.iloc[
+        21
+    ] + pd.Timedelta(hours=1, minutes=30)
     later = panel.copy()
     later.loc[23, "limit_status"] = np.nan
     changed, _ = targets(later)
@@ -198,7 +200,7 @@ def test_hac_adapter_rejects_backend_non_inference(monkeypatch, se, pvalue):
 
     monkeypatch.setattr(statistics.norm, "sf", tail)
     monkeypatch.setattr(
-        statistics.sm, "OLS", lambda *args: SimpleNamespace(fit=lambda **kwargs: fit)
+        statistics, "OLS", lambda *args: SimpleNamespace(fit=lambda **kwargs: fit)
     )
     with pytest.raises(ValueError, match="hac_inference_undefined"):
         hac_mean([1.0, 2.0, 3.0], max_lags=1)

@@ -1,7 +1,11 @@
 """Universal optional comparison through native accounts and persisted STAT tables."""
 
+import os
+import subprocess
+import sys
 from copy import deepcopy
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -75,9 +79,9 @@ def _compare(axis, references, **options):
 @pytest.mark.parametrize(
     "construction",
     [
-        "top20_equal_weight",
-        "top20_equal_weight_half_step",
-        "top20_float_cap",
+        "quantile_equal_weight",
+        "quantile_equal_weight_half_step",
+        "quantile_float_cap",
         "benchmark_enhanced",
     ],
 )
@@ -87,7 +91,7 @@ def test_each_construction_defaults_to_performance_and_accepts_two_references(
     base = PortfolioCandidateSpec(
         candidate_id="cash",
         selection_group="global",
-        construction="top20_equal_weight",
+        construction="quantile_equal_weight",
         prediction_selector="explicit",
         rebalance_schedule="daily",
         top_quantile=0.2,
@@ -340,10 +344,12 @@ def test_market_exposure_hac_and_regimes_use_intact_axis_and_descriptive_timing(
     assert regime.loc[
         ("above_threshold", "mean_return_difference"), "value"
     ] == pytest.approx((portfolio - market)[market > 0].mean())
-    import statsmodels.api as sm
+    import statsmodels.regression.linear_model as regression
 
     monkeypatch.setattr(
-        sm, "OLS", lambda *_args, **_kwargs: pytest.fail("compressed HAC attempted")
+        regression,
+        "OLS",
+        lambda *_args, **_kwargs: pytest.fail("compressed HAC attempted"),
     )
     broken = portfolio.copy()
     broken[2] = np.nan
@@ -352,6 +358,45 @@ def test_market_exposure_hac_and_regimes_use_intact_axis_and_descriptive_timing(
     assert (
         missing["portfolio_market_exposure"].reason.eq("incomplete_paired_path").all()
     )
+
+
+def test_numeric_market_exposure_does_not_import_plotting_dependencies():
+    script = """
+import sys
+import numpy as np
+import pandas as pd
+from quant_research_platform.research.portfolios.comparison import _exposure
+
+assert not any(
+    name == 'matplotlib' or name.startswith('matplotlib.') for name in sys.modules
+)
+market = np.array([0.01, -0.02, 0.03, 0.005, -0.01, 0.04])
+noise = np.array([0.001, -0.001, -0.001, 0.001, 0.002, -0.002])
+portfolio = 0.002 + 1.5 * market + noise
+dates = pd.bdate_range('2024-01-02', periods=7)
+axis = pd.DataFrame({'start_at': dates[:-1], 'end_at': dates[1:]})
+rows = _exposure({}, axis, portfolio, market, None, True,
+                 {'minimum_observations': 3, 'hac_lag': 1, 'confidence': 0.95})
+assert len(rows) == 4 and all(row['status'] == 'DEFINED' for row in rows)
+assert not any(
+    name == 'matplotlib' or name.startswith('matplotlib.') for name in sys.modules
+)
+assert 'arch' not in sys.modules
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src"),
+            "OPENBLAS_NUM_THREADS": "1",
+            "OMP_NUM_THREADS": "1",
+            "MKL_NUM_THREADS": "1",
+        },
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def _crypto_account(

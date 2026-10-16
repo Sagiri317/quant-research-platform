@@ -59,3 +59,56 @@ def test_specific_risk_distinguishes_market_closure_from_missing_open_observatio
     expected = 0.0004 / 3 + 0.0016 * 2 / 3 if closed else 0.0016
     assert state.estimate().specific_variance["A0"] == pytest.approx(expected)
     assert len(state._residuals["A0"]) == (2 if closed else 1)
+
+
+@pytest.mark.parametrize("missing_panel", [False, True])
+def test_producer_advances_risk_clock_through_whole_open_market_data_gap(
+    tmp_path, monkeypatch, missing_panel
+):
+    from quant_research_platform.research.portfolios import production
+    from tests.research.test_portfolio_production import (
+        _build_producer,
+        _enhanced_inputs,
+    )
+
+    estimate = production.FactorRiskState.estimate
+    frames, fees, window, candidate = _enhanced_inputs(monkeypatch)
+    monkeypatch.setattr(production.FactorRiskState, "estimate", estimate)
+    gap = pd.Timestamp("2022-12-20")
+    if missing_panel:
+        for name in ("panel", "dataset", "execution"):
+            frames[name] = frames[name].loc[~frames[name].timestamp.eq(gap)].copy()
+    else:
+        frames["panel"].loc[frames["panel"].timestamp.eq(gap), "period_return"] = float(
+            "nan"
+        )
+    clocks = []
+    original = production.FactorRiskState.observe_return_session
+
+    def observe(state, cross, **kwargs):
+        previous = state._session_count
+        if not cross.empty and cross.timestamp.eq(gap).all():
+            assert cross.asset_return.isna().all()
+        original(state, cross, **kwargs)
+        assert state._session_count == previous + 1
+        if cross.empty:
+            assert not state._factor_rows
+        clocks.append((state._session_count, dict(state._specific_session_counts)))
+
+    monkeypatch.setattr(production.FactorRiskState, "observe_return_session", observe)
+    stream, _ = _build_producer(
+        tmp_path,
+        monkeypatch,
+        frames=frames,
+        fee_frame=fees,
+        output_window=window,
+        candidate=candidate,
+        typed_batches=True,
+    )
+    batches = list(stream)
+    assert len(batches) == 4
+    sessions = frames["calendar"].loc[
+        frames["calendar"].calendar_date.between("2022-12-01", "2023-01-10")
+    ]
+    expected = len(sessions) - 1
+    assert clocks[-1] == (expected, {"a": expected, "b": expected})

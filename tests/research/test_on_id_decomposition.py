@@ -47,6 +47,10 @@ def test_hand_calculation_and_endpoint_owner():
         np.testing.assert_array_equal(
             result[endpoint], original[f"forward_return_{horizon}d"]
         )
+        np.testing.assert_array_equal(
+            result[f"{endpoint}_available_at"],
+            original[f"forward_return_{horizon}d_available_at"],
+        )
         assert result[f"{intraday}_available_at"].iloc[0] == frame.timestamp.iloc[
             horizon
         ] + pd.Timedelta(hours=7)

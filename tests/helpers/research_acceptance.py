@@ -263,7 +263,7 @@ def run_a_share_acceptance(project_root: Path):
             "candidate": {
                 "candidate_id": group + "_champion_top20",
                 "selection_group": group,
-                "construction": "top20_equal_weight",
+                "construction": "quantile_equal_weight",
                 "prediction_selector": "champion",
                 "top_quantile": 0.2,
                 "rebalance_schedule": "weekly-last-trading-day",
@@ -333,7 +333,13 @@ def run_a_share_acceptance(project_root: Path):
                 "observations": str(calibration_root / "observations.parquet"),
                 "scheduled_intervals": str(calibration_root / "intervals.parquet"),
                 "rebalance_schedule": "weekly-last-trading-day",
-                "calendar": str(case.paths["trading_calendar"]),
+                "calendar": {
+                    "path": str(case.paths["trading_calendar"]),
+                    "time_window": {
+                        "start": validation["start"],
+                        "end": case.formal["end"],
+                    },
+                },
                 "cutoff": validation["end"],
                 "selection_group": group,
                 "output": str(calibration_root / "calibration.json"),

@@ -91,7 +91,7 @@ def test_neutral_target_and_blocked_realized_exposure_are_distinct(
     candidate = PortfolioCandidateSpec(
         "neutral",
         "global",
-        "top20_equal_weight",
+        "quantile_equal_weight",
         "ridge",
         "daily",
         0.5,
@@ -153,7 +153,7 @@ def test_nonrebalance_holding_outside_benchmark_marks_both_exposures_unknown(
     candidate = PortfolioCandidateSpec(
         "neutral",
         "global",
-        "top20_equal_weight",
+        "quantile_equal_weight",
         "ridge",
         "weekly-last-trading-day",
         0.5,
@@ -224,7 +224,7 @@ def test_missing_neutral_context_carries_nonrebalance_account_and_blocks_target(
     inputs = _decision_inputs()
     inputs["candidate"] = replace(
         inputs["candidate"],
-        construction="top20_equal_weight",
+        construction="quantile_equal_weight",
         top_quantile=0.5,
         benchmark_id=None,
         risk_style_columns=(),
@@ -338,7 +338,7 @@ def test_unheld_missing_cap_does_not_make_known_exposures_undefined(schedule):
     inputs = _decision_inputs(benchmark=(0.5, 0.5, 0.0))
     inputs["candidate"] = replace(
         inputs["candidate"],
-        construction="top20_equal_weight",
+        construction="quantile_equal_weight",
         top_quantile=0.5,
         benchmark_id=None,
         risk_style_columns=(),
@@ -366,7 +366,7 @@ def test_absent_cap_column_is_local_to_actual_scheduled_neutral_target(
     candidate = PortfolioCandidateSpec(
         "missing-cap",
         "global",
-        "top20_equal_weight",
+        "quantile_equal_weight",
         "ridge",
         "weekly-last-trading-day",
         0.5,

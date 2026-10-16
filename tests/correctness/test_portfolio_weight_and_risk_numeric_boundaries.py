@@ -403,7 +403,7 @@ def test_native_simple_production_and_ledger_keep_representable_positive_target(
     candidate = PortfolioCandidateSpec(
         candidate_id="extreme_capitalization",
         selection_group="global",
-        construction="top20_float_cap",
+        construction="quantile_float_cap",
         prediction_selector="champion",
         rebalance_schedule="daily",
         top_quantile=1.0,

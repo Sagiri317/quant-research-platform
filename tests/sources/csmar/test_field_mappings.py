@@ -120,7 +120,16 @@ def test_mapping_facts_reject_invalid_alias_ownership_before_frame_checks(
 
 def test_all_registered_mapping_facts_are_self_consistent() -> None:
     for dataset, mappings in field_mappings.COLUMN_MAPPINGS.items():
-        frame = pd.DataFrame(columns=tuple(mappings))
+        frame = pd.DataFrame(
+            columns=tuple(
+                dict.fromkeys(
+                    (
+                        *mappings,
+                        *field_mappings.RAW_TABLE_CONTRACTS[dataset].required_columns,
+                    )
+                )
+            )
+        )
         result = field_mappings.map_columns(frame, dataset)
         assert result.columns.is_unique
 

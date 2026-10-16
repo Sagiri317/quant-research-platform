@@ -1337,10 +1337,6 @@ def _maker_join(order, state, observed_coverage, trade_coverage):
 
 
 def _maker_trade_fill(order, trade):
-    if trade.visible_quantity is None:
-        raise PortfolioTargetBlocked("hft_trade_visible_quantity_unknown")
-    if trade.visible_quantity <= 0:
-        return 0.0, "zero_visible_trade_quantity"
     if trade.observation_id != order.trade_observation_id:
         return 0.0, "trade_connection_mismatch"
     same_direction = (order.side == "buy") == trade.buyer_is_maker
@@ -1349,11 +1345,15 @@ def _maker_trade_fill(order, trade):
     through = (order.side == "buy" and trade.price_index < order.price_index) or (
         order.side == "sell" and trade.price_index > order.price_index
     )
+    if not through and trade.price_index != order.price_index:
+        return 0.0, "different_trade_price"
+    if trade.visible_quantity is None:
+        raise PortfolioTargetBlocked("hft_trade_visible_quantity_unknown")
+    if trade.visible_quantity <= 0:
+        return 0.0, "zero_visible_trade_quantity"
     if through:
         order.queue_ahead = Fraction()
         return order.remaining, "trade_through"
-    if trade.price_index != order.price_index:
-        return 0.0, "different_trade_price"
     visible = Fraction(trade.visible_quantity)
     consumed = min(order.queue_ahead, visible)
     order.queue_ahead -= consumed
@@ -1868,10 +1868,13 @@ def replay_maker_calibration(
             counts[order.side] += 1
             samples.remove(sample)
 
-        def exclude_references():
+        def exclude_references(decisions=None):
             nonlocal excluded
-            excluded += sum(sample["order"].side == "buy" for sample in samples)
-            samples.clear()
+            for sample in tuple(samples):
+                order = sample["order"]
+                if decisions is None or order.created_time_ns in decisions:
+                    excluded += order.side == "buy"
+                    samples.remove(sample)
 
         def process_until(target):
             nonlocal latest_state, latest_book_id, next_event
@@ -1897,9 +1900,7 @@ def replay_maker_calibration(
                         finish(sample)
                 if event_time == due:
                     event = next_event[1]
-                    if isinstance(event, TradeBoundary) or (
-                        isinstance(event, TradeEvent) and event.visible_quantity is None
-                    ):
+                    if isinstance(event, TradeBoundary):
                         exclude_references()
                         latest_book_id = None
                     elif isinstance(event, BookBoundary):
@@ -1908,6 +1909,7 @@ def replay_maker_calibration(
                     elif isinstance(event, TradeEvent):
                         if samples:
                             record(event)
+                        unknown_decisions = set()
                         for sample in samples:
                             order = sample["order"]
                             if (
@@ -1917,10 +1919,16 @@ def replay_maker_calibration(
                                 or latest_state.segment_id != order.segment_id
                             ):
                                 continue
-                            quantity, _reason = _maker_trade_fill(order, event)
+                            try:
+                                quantity, _reason = _maker_trade_fill(order, event)
+                            except PortfolioTargetBlocked:
+                                unknown_decisions.add(order.created_time_ns)
+                                continue
                             order.remaining -= quantity
                             if order.remaining <= 0:
                                 sample["terminal_reason"] = "filled"
+                        if unknown_decisions:
+                            exclude_references(unknown_decisions)
                     else:
                         state = event
                         if (
@@ -2319,11 +2327,10 @@ def simulate_maker(
                 order = active.get(side)
                 if order is None or order.segment_id != latest_state.segment_id:
                     continue
-                if trade.visible_quantity is None:
-                    raise _AccountPathStop(
-                        "hft_trade_visible_quantity_unknown", trade.observed_time_ns
-                    )
-                quantity, reason = _maker_trade_fill(order, trade)
+                try:
+                    quantity, reason = _maker_trade_fill(order, trade)
+                except PortfolioTargetBlocked as error:
+                    raise _AccountPathStop(str(error), trade.observed_time_ns) from None
                 if quantity <= 0:
                     continue
                 price = index_to_price(order.price_index, order.price_unit)

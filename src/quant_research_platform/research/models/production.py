@@ -156,7 +156,11 @@ def fit(config: Mapping) -> Path:
     session = open_dataset_session(**options)
     declared = session.spec
     validate_model_input_roles(
-        declared, spec, include_target=True, selected_columns=selected_columns
+        declared,
+        spec,
+        market_id=config["market_id"],
+        include_target=True,
+        selected_columns=selected_columns,
     )
     availability = declared.get("label_availability_columns", {}).get(
         spec.target_column

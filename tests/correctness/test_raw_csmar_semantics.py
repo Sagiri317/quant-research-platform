@@ -58,6 +58,7 @@ def _analyst_rows():
 
 
 @pytest.mark.parametrize("chunksize", (1, 100))
+@pytest.mark.parametrize("unused_value", [0.125, "invalid-unused-numeric"])
 @pytest.mark.parametrize(
     "data_id,source_column,kept_column",
     (
@@ -67,7 +68,7 @@ def _analyst_rows():
     ),
 )
 def test_csmar_fixed_projection_preserves_dtypes_duplicates_and_raw(
-    tmp_path, chunksize, data_id, source_column, kept_column
+    tmp_path, chunksize, data_id, source_column, kept_column, unused_value
 ):
 
     from quant_research_platform.storage.datasets import read_dataset
@@ -100,11 +101,7 @@ def test_csmar_fixed_projection_preserves_dtypes_duplicates_and_raw(
         )
     else:
         row.update(Shrchgdt="2020-01-02")
-    row[source_column] = (
-        4
-        if data_id == "stock_master"
-        else (-0.125 if data_id == "market_bars_1d" else 0.125)
-    )
+    row[source_column] = unused_value
     extra = (
         ()
         if source_column in row
@@ -1983,7 +1980,9 @@ def test_adjusted_open_preserves_units_through_storage_and_labels(
     )
     labeled = add_forward_return_labels(panel, horizons=(1,), sessions=sessions)
     assert labeled.forward_return_1d.iloc[0] == pytest.approx(0.0 if split else 0.5)
-    assert labeled.forward_return_1d_available_at.iloc[0] == sessions[2]
+    assert labeled.forward_return_1d_available_at.iloc[0] == sessions[2] + pd.Timedelta(
+        hours=1, minutes=30
+    )
     assert labeled.forward_return_1d.iloc[1:].isna().all()
 
 
@@ -2685,3 +2684,90 @@ def test_complete_chain_index_info_fixture_has_native_price_and_return_identitie
     for code, (benchmark, name) in FORMAL_BENCHMARKS.items():
         assert saved.loc[code, "index_name"] == name
         assert saved.loc[total_returns[benchmark], "index_name"] == f"{name}全收益"
+
+
+@pytest.mark.parametrize("chunksize", [1, 100])
+@pytest.mark.parametrize(
+    "data_id,date_column,value_column",
+    [
+        ("market_bars_1d", "Trddt", "Clsprc"),
+        ("adjustment", "TradingDate", "FwardFactor"),
+        ("market_cap", "Shrchgdt", "Nshrttl"),
+    ],
+)
+def test_source_window_precedes_value_validation(
+    tmp_path, chunksize, data_id, date_column, value_column
+):
+    from quant_research_platform.storage.datasets.reading import read_dataset
+    from tests.helpers.a_share_raw import _write_csmar
+
+    raw = tmp_path / "raw"
+    filesystem_mkdir(raw)
+    row = dict.fromkeys(raw_exports.RAW_TABLE_CONTRACTS[data_id].required_columns, 1.0)
+    row["Symbol" if data_id == "adjustment" else "Stkcd"] = "000001"
+    row[date_column] = "2020-01-02"
+    if data_id == "market_bars_1d":
+        row.update(
+            Markettype=1, Trdsta=0, Filling=0, Ahshrtrd_D=0, Ahvaltrd_D=0, LimitStatus=0
+        )
+    _write_csmar(raw, data_id, [row])
+    arguments = dict(
+        raw_root=raw,
+        data_ids=(data_id,),
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        chunksize=chunksize,
+    )
+    baseline = tmp_path / "baseline"
+    interim.materialize_interim_data(**arguments, output_roots={data_id: baseline})
+    future = {**row, date_column: "2026-01-02", value_column: "invalid-later-value"}
+    if data_id == "market_bars_1d":
+        future.update(Ahshrtrd_D="", Ahvaltrd_D="")
+    _write_csmar(raw, data_id, [row, future])
+    original = _file_bytes(raw)
+    selected = tmp_path / "selected"
+    interim.materialize_interim_data(**arguments, output_roots={data_id: selected})
+    pd.testing.assert_frame_equal(
+        read_dataset(selected), read_dataset(baseline), check_exact=True
+    )
+    assert _file_bytes(raw) == original
+    with pytest.raises(ValueError, match="invalid_csmar_numeric_value"):
+        interim.materialize_interim_data(
+            **{**arguments, "end_date": "2026-12-31"},
+            output_roots={data_id: tmp_path / "invalid"},
+        )
+    _write_csmar(raw, data_id, [row, {**future, date_column: "unknown-date"}])
+    with pytest.raises(ValueError, match=f"invalid_{data_id}_source_timestamp"):
+        interim.materialize_interim_data(
+            **arguments, output_roots={data_id: tmp_path / "unknown"}
+        )
+    assert not (tmp_path / "invalid").exists()
+    assert not (tmp_path / "unknown").exists()
+
+
+def test_multi_target_diagnostics_do_not_inherit_previous_table_counts(tmp_path):
+    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from tests.helpers.a_share_raw import _write_csmar
+
+    raw = tmp_path / "raw"
+    filesystem_mkdir(raw)
+    _write_csmar(raw, "analyst_forecast", _analyst_rows())
+    _write_csmar(
+        raw,
+        "trading_calendar",
+        [dict(Markettype=4, Clddt="2020-01-02", Daywk=4, State="O")],
+    )
+    roots = {name: tmp_path / name for name in ("analyst_forecast", "trading_calendar")}
+    metadata = {"producer_diagnostics": {"caller_fact": "preserved"}}
+    interim.materialize_interim_data(
+        raw_root=raw, output_roots=roots, data_ids=tuple(roots), metadata=metadata
+    )
+    analyst = read_dataset_manifest_evidence(roots["analyst_forecast"])[
+        "producer_diagnostics"
+    ]
+    calendar = read_dataset_manifest_evidence(roots["trading_calendar"])[
+        "producer_diagnostics"
+    ]
+    assert analyst["source_row_counts"]["raw_rows"] == len(_analyst_rows())
+    assert calendar == {"exact_duplicate_count": 0, "caller_fact": "preserved"}
+    assert metadata == {"producer_diagnostics": {"caller_fact": "preserved"}}

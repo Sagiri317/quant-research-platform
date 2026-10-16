@@ -113,8 +113,6 @@ def price_volume_factor_definitions(
                 }
                 else FactorSet.STANDARD,
                 input_columns=inputs,
-                base_input_columns=inputs,
-                derived_input_columns=(),
                 output_column=column,
                 display_name=column,
                 description=(
@@ -137,7 +135,6 @@ def price_volume_factor_definitions(
                 null_policy="preserve_nulls_after_min_periods",
                 source_layer="processed",
                 required_input_data_id=required_input_data_id,
-                window=lookback,
             )
         )
     return tuple(definitions)

@@ -16,6 +16,15 @@ async def test_catalog_queries_and_missing_root_are_read_only(anyio_backend):
             response = await client.get(f"/api/catalog/{endpoint}")
             assert response.status_code == 200
             assert response.json()["items"]
+            if endpoint == "factors":
+                assert all(
+                    not {
+                        "window",
+                        "base_input_columns",
+                        "derived_input_columns",
+                    }.intersection(item)
+                    for item in response.json()["items"]
+                )
         response = await client.get("/api/research-datasets/pv_all/requirements")
         assert response.status_code == 200
         assert response.json()["mode"] == "requirements_query_only"

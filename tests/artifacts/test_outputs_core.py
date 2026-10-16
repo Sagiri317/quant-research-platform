@@ -50,6 +50,8 @@ def test_manifest_actual_model_and_paths(tmp_path):
         ("effective_prediction_end", "NaT"),
         ("sample_role", ""),
         ("prediction_rows", True),
+        ("scope", "LOCAL_ONLY"),
+        ("scope", "shared"),
     ],
 )
 def test_metadata_rejected_before_publish_and_after_read(tmp_path, field, value):

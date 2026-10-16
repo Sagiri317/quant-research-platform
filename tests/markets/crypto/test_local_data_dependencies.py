@@ -125,6 +125,84 @@ def test_every_selected_factor_prepares_from_its_minimal_persisted_inputs(
     assert actual[factor].notna().any()
 
 
+@pytest.mark.parametrize("with_history", (False, True))
+def test_pointwise_factor_projection_keeps_native_values_and_local_nulls(
+    tmp_path, monkeypatch, with_history
+):
+    from fractions import Fraction
+
+    from quant_research_platform.markets.implementations.crypto.processed import (
+        producer,
+    )
+
+    panel = pd.concat(_panel(count=20), ignore_index=True)
+    panel.loc[2, "book_spread"] = np.nan
+    panel.loc[3, "mid"] = 0.0
+    panel.loc[4, "observed_taker_buy_volume_100ms"] = -1.0
+    panel.loc[5, ["book_spread", "mid"]] = [1e300, 1e-300]
+    panel.loc[6, ["book_spread", "mid"]] = [5e-324, 2.0]
+    panel.loc[7, "book_ofi_100ms"] = -2.0
+    panel.loc[8, "observed_signed_trade_volume_100ms"] = -3.0
+    panel.loc[10:, "segment_id"] = "new-segment"
+    copied = {
+        "spread": "book_spread",
+        "ofi_100ms": "book_ofi_100ms",
+        "signed_trade_flow_100ms": "observed_signed_trade_volume_100ms",
+        "taker_buy_volume_100ms": "observed_taker_buy_volume_100ms",
+        "taker_sell_volume_100ms": "observed_taker_sell_volume_100ms",
+    }
+    columns = (
+        *copied,
+        "relative_spread",
+        *(("imbalance_1", "return_100ms", "ofi_500ms") if with_history else ()),
+    )
+    root = _persist(tmp_path / "input", panel)
+    read_chunks = producer.iter_dataset_chunks
+    monkeypatch.setattr(
+        producer,
+        "iter_dataset_chunks",
+        lambda session, **kwargs: read_chunks(session, batch_rows=3),
+    )
+    output = prepare(
+        {
+            "market_id": "crypto",
+            "data_id": HFT_FACTOR_DATA_ID,
+            "factor_columns": list(columns),
+            "parameters": {"asset_ids": ["btc_usdt"]},
+            "inputs": {HFT_PANEL_DATA_ID: str(root)},
+            "time_window": _window(0, 2000),
+            "output_root": str(tmp_path / "factor"),
+        }
+    )
+    actual = read_dataset(output)
+    for factor, source in copied.items():
+        expected = panel[source].copy()
+        if factor in {"spread", "taker_buy_volume_100ms", "taker_sell_volume_100ms"}:
+            expected = expected.where(
+                expected > 0 if factor == "spread" else expected >= 0
+            )
+        pd.testing.assert_series_equal(
+            actual[factor], expected.rename(factor), check_exact=True
+        )
+    expected_ratio = []
+    for spread, mid in zip(panel.book_spread, panel.mid, strict=True):
+        if not np.isfinite(spread) or not np.isfinite(mid) or min(spread, mid) <= 0:
+            expected_ratio.append(np.nan)
+            continue
+        try:
+            expected_ratio.append(float(Fraction(spread) / Fraction(mid)))
+        except OverflowError:
+            expected_ratio.append(np.nan)
+    np.testing.assert_allclose(
+        actual.relative_spread, expected_ratio, rtol=2e-15, atol=0, equal_nan=True
+    )
+    assert actual.relative_spread.iloc[6] == 0.0
+    if with_history:
+        assert pd.isna(actual.return_100ms.iloc[10])
+        assert actual.ofi_500ms.iloc[10:14].isna().all()
+        assert actual.ofi_500ms.iloc[14:].notna().all()
+
+
 @pytest.mark.parametrize("mode", ["gap", "empty", "recover", "initially_empty"])
 def test_real_source_peer_gap_preserves_own_panel_factors_labels_and_model(
     tmp_path, mode

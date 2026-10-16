@@ -124,8 +124,10 @@ def normalize_first_disclosure_frame(frame: pd.DataFrame) -> pd.DataFrame:
     ).reset_index(drop=True)
 
 
-def _raw_requests(raw_root: Path, *, data_id: str):
-    indicators = FINANCIAL_FIELDS.get(data_id, {})
+def _raw_requests(raw_root: Path, *, data_ids):
+    indicators = {
+        field for data_id in data_ids for field in FINANCIAL_FIELDS.get(data_id, {})
+    }
     root = require_unaliased_path(Path(raw_root), error="choice_raw_identity_changed")
     try:
         entries = filesystem_scandir(root / "css")
@@ -167,8 +169,6 @@ def _raw_requests(raw_root: Path, *, data_id: str):
             fields = set(request.arguments[1].upper().split(","))
             disclosure = bool(_DISCLOSURE_INDICATORS.intersection(fields))
             financial_fields = bool(set(indicators).intersection(fields))
-            if financial_fields and "reporttype" in options:
-                raise ValueError("choice_financial_css_reporttype_unsupported")
             snapshot = financial_fields and (options.get("type", "1") in {"1", "3"})
             if "reportdate" not in options or not (disclosure or snapshot):
                 continue
@@ -177,6 +177,7 @@ def _raw_requests(raw_root: Path, *, data_id: str):
                 request,
                 options,
                 disclosure,
+                snapshot,
                 raw_metadata,
                 manifest,
             )
@@ -248,46 +249,72 @@ def _values(cells):
     return result
 
 
-def _raw_index(raw_root, data_id):
-    indicators = FINANCIAL_FIELDS.get(data_id, {})
-    index = ExactPrimaryKeyIndex(
-        primary_key=("source_coordinate",),
-    )
-
-    hashes = []
+def _raw_index(raw_root, data_ids, start, end):
+    indicators = {
+        field for data_id in data_ids for field in FINANCIAL_FIELDS.get(data_id, {})
+    }
+    index = ExactPrimaryKeyIndex(primary_key=("source_coordinate",))
+    hashes = {data_id: [] for data_id in data_ids}
 
     def rows():
-        with closing_iterator(_raw_requests(raw_root, data_id=data_id)) as requests:
-            for root, request, options, disclosure, raw_metadata, manifest in requests:
-                period = date.fromisoformat(options["reportdate"]).isoformat()
+        with closing_iterator(_raw_requests(raw_root, data_ids=data_ids)) as requests:
+            for (
+                root,
+                request,
+                options,
+                disclosure,
+                snapshot,
+                raw_metadata,
+                manifest,
+            ) in requests:
+                period = date.fromisoformat(options["reportdate"])
+                if (start is not None and period < start) or (
+                    end is not None and period > end
+                ):
+                    continue
+                period = period.isoformat()
+                snapshot_date = date.fromisoformat(options["enddate"])
+                snapshot = snapshot and (end is None or snapshot_date <= end)
+                if not disclosure and not snapshot:
+                    continue
+                if snapshot and "reporttype" in options:
+                    raise ValueError("choice_financial_css_reporttype_unsupported")
                 response = read_choice_response(root, request, manifest=manifest)
-                hashes.extend(
-                    (
+                fields = set(response["Indicators"])
+                targets = {
+                    data_id
+                    for data_id in data_ids
+                    if disclosure
+                    or snapshot
+                    and fields.intersection(FINANCIAL_FIELDS.get(data_id, {}))
+                }
+                for data_id in targets:
+                    hashes[data_id].extend(
                         (
-                            f"css/{root.name}/response.metadata.json",
-                            hashlib.sha256(raw_metadata).hexdigest(),
-                        ),
-                        (f"css/{root.name}/response.csv", manifest["sha256"]),
+                            (
+                                f"css/{root.name}/response.metadata.json",
+                                hashlib.sha256(raw_metadata).hexdigest(),
+                            ),
+                            (f"css/{root.name}/response.csv", manifest["sha256"]),
+                        )
                     )
-                )
                 if not response["Data"]:
                     continue
                 if len(response["Dates"]) != 1:
                     raise ValueError("choice_financial_snapshot_dates_invalid")
-                fields = response["Indicators"]
                 for code, cells in response["Data"].items():
-                    if not re.fullmatch("\\d{6}\\.(SH|SZ|BJ)", code):
+                    if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", code):
                         raise ValueError("invalid_choice_asset_id")
-                    values = dict(zip(fields, cells, strict=True))
+                    values = dict(zip(response["Indicators"], cells, strict=True))
                     pair = [code, period]
                     coordinate = [
                         *pair,
-                        date.fromisoformat(options["enddate"]).isoformat(),
+                        snapshot_date.isoformat(),
                         options.get("type", "1"),
                     ]
                     if disclosure:
                         for field in _DISCLOSURE_INDICATORS.intersection(values):
-                            _yield_value = _identity_payload_row(
+                            yield _identity_payload_row(
                                 index,
                                 "disclosure_field",
                                 [*coordinate, field],
@@ -298,27 +325,12 @@ def _raw_index(raw_root, data_id):
                                     "request_identity": root.name,
                                 },
                             )
-                            try:
-                                yield _yield_value
-                            except GeneratorExit:
-                                return
-                        _yield_value = _identity_payload_row(
+                        yield _identity_payload_row(
                             index,
                             f"disclosure_coordinates:{code}:{period}",
                             coordinate,
                             coordinate,
                         )
-                        try:
-                            yield _yield_value
-                        except GeneratorExit:
-                            return
-                        _yield_value = _identity_payload_row(
-                            index, "report", pair, pair
-                        )
-                        try:
-                            yield _yield_value
-                        except GeneratorExit:
-                            return
                         if "STMTACTDATE" in values:
                             first = [
                                 day
@@ -326,34 +338,24 @@ def _raw_index(raw_root, data_id):
                                 if day <= request.cutoff
                             ]
                             if first:
-                                _yield_value = _identity_payload_row(
+                                yield _identity_payload_row(
                                     index,
                                     "disclosure",
                                     pair,
                                     [*pair, first[0].isoformat()],
                                 )
-                                try:
-                                    yield _yield_value
-                                except GeneratorExit:
-                                    return
                         if "ITEMVALUECHANGEDATE" in values:
                             for event in _dates(values["ITEMVALUECHANGEDATE"]):
                                 if event <= request.cutoff:
-                                    _yield_value = _identity_payload_row(
+                                    yield _identity_payload_row(
                                         index,
                                         f"events:{code}:{period}",
                                         event.isoformat(),
                                         event.isoformat(),
                                     )
-                                    try:
-                                        yield _yield_value
-                                    except GeneratorExit:
-                                        return
-                    if set(indicators).intersection(values) and (
-                        options.get("type", "1") in {"1", "3"}
-                    ):
-                        for field in set(indicators).intersection(values):
-                            _yield_value = _identity_payload_row(
+                    if snapshot:
+                        for field in indicators.intersection(values):
+                            yield _identity_payload_row(
                                 index,
                                 "snapshot",
                                 [*coordinate, field],
@@ -362,28 +364,24 @@ def _raw_index(raw_root, data_id):
                                     "request_identity": root.name,
                                 },
                             )
-                            try:
-                                yield _yield_value
-                            except GeneratorExit:
-                                return
-                        _yield_value = _identity_payload_row(
-                            index, "report", pair, pair
+                    for data_id in targets:
+                        yield _identity_payload_row(
+                            index, f"report:{data_id}", pair, pair
                         )
-                        try:
-                            yield _yield_value
-                        except GeneratorExit:
-                            return
 
     with closing_iterator(rows()) as input_rows:
         for row in input_rows:
             index.add_identity_payload_rows(rows=(row,))
-    digest = hashlib.sha256()
-    for name, member_hash in sorted(hashes):
-        for value in (name, member_hash):
-            encoded = value.encode("utf-8")
-            digest.update(len(encoded).to_bytes(8, "big"))
-            digest.update(encoded)
-    return index, digest.hexdigest() if hashes else None
+    identities = {}
+    for data_id, members in hashes.items():
+        digest = hashlib.sha256()
+        for name, member_hash in sorted(members):
+            for value in (name, member_hash):
+                encoded = value.encode("utf-8")
+                digest.update(len(encoded).to_bytes(8, "big"))
+                digest.update(encoded)
+        identities[data_id] = digest.hexdigest() if members else None
+    return index, identities
 
 
 def _snapshot(index, pair, day, branch, indicators):
@@ -492,17 +490,12 @@ def _report_versions(index, pair, first, end, indicators):
                     return
 
 
-def _rows(index, data_id, start, end) -> Iterator[tuple[object, ...]]:
-    reports = index.identity_payload_values(namespace="report")
+def _rows(index, data_id, end) -> Iterator[tuple[object, ...]]:
+    reports = index.identity_payload_values(namespace=f"report:{data_id}")
     with closing_iterator(reports):
         for payload in reports:
             row = json.loads(payload)
             pair = row[:2]
-            period = date.fromisoformat(pair[1])
-            if (start is not None and period < start) or (
-                end is not None and period > end
-            ):
-                continue
             disclosure = _get(index, "disclosure", pair)
             first = (
                 date.fromisoformat(disclosure[2]) if disclosure is not None else None
@@ -626,10 +619,9 @@ def materialize_interim_data(
     if start is not None and end is not None and start > end:
         raise ValueError("choice_interim_window_invalid")
     written, skipped = {}, []
+    index, identities = _raw_index(root, data_ids, start, end)
     for spec in specs:
-        index, identity = _raw_index(root, spec.data_id)
-
-        rows = _rows(index, spec.data_id, start, end)
+        rows = _rows(index, spec.data_id, end)
         frames = _frames(rows, spec)
         target = Path(output_roots[spec.data_id])
         with closing_iterator(rows), closing_iterator(frames):
@@ -642,7 +634,7 @@ def materialize_interim_data(
                         **(metadata or {}),
                         "source_evidence": {
                             "source_id": str(SOURCE_ID),
-                            "content_hash": identity,
+                            "content_hash": identities[spec.data_id],
                         },
                     },
                 )

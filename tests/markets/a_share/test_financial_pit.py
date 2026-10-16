@@ -930,7 +930,7 @@ def test_financial_ttm_and_stock_mean_preserve_finite_results(scale) -> None:
     assert facts["average_parent_equity"].iloc[0] == scale
 
 
-def test_financial_ttm_rejects_unrepresentable_final_value() -> None:
+def test_financial_ttm_localizes_unrepresentable_final_value() -> None:
     events = pd.DataFrame(
         dict(
             asset_id="asset",
@@ -942,8 +942,13 @@ def test_financial_ttm_rejects_unrepresentable_final_value() -> None:
             value=[-1e308, 1e308, 1e308],
         )
     )
-    with pytest.raises(ValueError, match="invalid_ttm_value"):
-        construct_ttm_events(events)
+    other = events.assign(asset_id="other", value=[1.0, 2.0, 3.0])
+    actual = construct_ttm_events(pd.concat([events, other], ignore_index=True))
+    bad = actual.loc[actual.asset_id.eq("asset")].sort_values("report_period")
+    assert pd.isna(bad.ttm_value.iloc[-1])
+    assert bad.ttm_value.iloc[1] == 1e308
+    good = actual.loc[actual.asset_id.eq("other")].sort_values("report_period")
+    assert good.ttm_value.iloc[-1] == 4.0
 
 
 def test_empty_legal_financial_event_domain_persists_unknown_panel_rows(tmp_path):
@@ -1115,3 +1120,90 @@ def test_balance_only_pit_calculates_book_to_market_and_rejects_missing_income()
             producer._financial_pit_events(
                 source, required_sources=needed.source_input_data_ids
             )
+
+
+def test_multi_term_factor_vectorization_preserves_domain_and_extreme_ratios():
+    from fractions import Fraction
+
+    from quant_research_platform.research.factors.fundamental.calculations import (
+        calculate_fundamental_factors,
+    )
+
+    values = [
+        (120.0, 80.0, 1000.0),
+        (1e308, -1e308, 1e308),
+        (1e308, 1e308, 1e308),
+        (np.nan, 1.0, 10.0),
+        (1.0, 2.0, 0.0),
+    ]
+    frame = pd.DataFrame(
+        values,
+        columns=[
+            "consolidated_net_income_ttm",
+            "operating_cash_flow_ttm",
+            "average_total_assets",
+        ],
+    )
+    frame["asset_id"] = "a"
+    frame["timestamp"] = pd.date_range("2024-01-01", periods=len(frame))
+    actual = calculate_fundamental_factors(frame, factor_columns=["accruals"])
+    expected = [
+        float((Fraction(a) - Fraction(b)) / Fraction(c))
+        if np.isfinite(a) and c > 0
+        else np.nan
+        for a, b, c in values
+    ]
+    np.testing.assert_allclose(
+        actual.accruals, expected, rtol=1e-12, atol=0, equal_nan=True
+    )
+    empty_selection = calculate_fundamental_factors(
+        frame[["asset_id", "timestamp"]], factor_columns=[]
+    )
+    pd.testing.assert_frame_equal(empty_selection, frame[["asset_id", "timestamp"]])
+
+
+def test_multi_term_ratio_preserves_small_residual_without_exact_normal_path():
+    from quant_research_platform.research.factors.fundamental.calculations import _ratio
+
+    terms = tuple(pd.Series([value]) for value in (1e16, 1.0, -1e16, 1000.0))
+    assert _ratio(terms, pd.Series([1.0])).iloc[0] == pytest.approx(1001.0)
+
+
+def test_multi_term_ratio_retains_smallest_representable_positive_result():
+    from quant_research_platform.research.factors.fundamental.calculations import _ratio
+
+    smallest = np.nextafter(0.0, 1.0)
+    terms = tuple(pd.Series([value]) for value in (2.0**-52, smallest, 0.0, 0.0))
+    assert _ratio(terms, pd.Series([2.0**1023])).iloc[0] == smallest
+
+
+def test_multi_term_ratio_retains_largest_representable_positive_result():
+    from quant_research_platform.research.factors.fundamental.calculations import _ratio
+
+    terms = tuple(
+        pd.Series([value])
+        for value in (
+            0.6771906299368142,
+            0.6013894209439775,
+            0.5840202195218063,
+            0.13739972959740182,
+        )
+    )
+    value = _ratio(terms, pd.Series([2.0**-1023])).iloc[0]
+    assert np.isfinite(value)
+    assert value == pytest.approx(np.finfo(float).max, rel=1e-15)
+
+
+def test_multi_term_ratio_does_not_round_overflow_into_finite_max():
+    from quant_research_platform.research.factors.fundamental.calculations import _ratio
+
+    terms = tuple(
+        pd.Series([value])
+        for value in (
+            0.7472123171029671,
+            0.9077249170810495,
+            0.017084774740192744,
+            0.09888084068921948,
+        )
+    )
+    assert pd.isna(_ratio(terms, pd.Series([9.850974091576876e-309])).iloc[0])

@@ -329,7 +329,13 @@ def test_frozen_alpha_schedules_use_real_mature_prediction_returns(
                 "observations": str(root / "observations.parquet"),
                 "scheduled_intervals": str(root / "intervals.parquet"),
                 "rebalance_schedule": schedule,
-                "calendar": str(case.paths["trading_calendar"]),
+                "calendar": {
+                    "path": str(case.paths["trading_calendar"]),
+                    "time_window": {
+                        "start": case.validation["start"],
+                        "end": case.formal["end"],
+                    },
+                },
                 "cutoff": case.validation["end"],
                 "selection_group": group,
                 "output": str(root / "calibration.json"),

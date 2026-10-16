@@ -103,7 +103,9 @@ def test_session_label_uses_next_open_and_persists_availability() -> None:
     )
     assert pd.isna(result.loc[0, "forward_return_1d"])
     assert result.loc[1, "forward_return_1d"] == pytest.approx(13.0 / 12.0 - 1.0)
-    assert result.loc[1, "forward_return_1d_available_at"] == sessions[3]
+    assert result.loc[1, "forward_return_1d_available_at"] == sessions[
+        3
+    ] + pd.Timedelta(hours=1, minutes=30)
 
 
 def test_model_scaler_uses_equal_timestamp_weights_and_zero_variance_zero() -> None:

@@ -989,7 +989,11 @@ def test_asynchronous_own_market_label_endpoints_and_mask_batches(
             == (panel.loc[exit_date, "adj_open"] - panel.iloc[1].adj_open)
             / panel.iloc[1].adj_open
         )
-        assert label.loc[dates[0], column + "_available_at"] == exit_date
+        assert label.loc[dates[0], column + "_available_at"] == (
+            pd.Timestamp(f"{exit_date.date()} 09:30", tz="Asia/Shanghai")
+            .tz_convert("UTC")
+            .tz_localize(None)
+        )
     assert mask.iloc[-1][["can_enter", "can_exit"]].isna().all()
 
 
@@ -1064,7 +1068,11 @@ def test_own_market_all_label_horizons_preserve_unknown_and_suspended_sessions(
                 )
                 / own_panel.loc[dates[1], "adj_open"]
             )
-            assert saved.loc[dates[0], column + "_available_at"] == exit_date
+            assert saved.loc[dates[0], column + "_available_at"] == (
+                pd.Timestamp(f"{exit_date.date()} 09:30", tz="Asia/Shanghai")
+                .tz_convert("UTC")
+                .tz_localize(None)
+            )
 
 
 @pytest.mark.parametrize(
@@ -1125,7 +1133,7 @@ def test_unobserved_initial_market_preserves_unknown_age_and_proven_252_sessions
             ]
         )
         source["stock_master"], _ = _transform_interim_chunk(
-            masters, data_id="stock_master", start_date=None, end_date=None
+            masters, data_id="stock_master"
         )
         bars = source["market_bars_1d"]
         old = bars.drop_duplicates("source_asset_id").assign(
@@ -1426,8 +1434,6 @@ def test_panel_preserves_proven_listing_lifecycles(
     normalized, _ = _transform_interim_chunk(
         raw_master,
         data_id="stock_master",
-        start_date=None,
-        end_date=None,
     )
     stock = normalized.iloc[:1]
     revision = stock.assign(timestamp=dates[1], stock_name="revised")

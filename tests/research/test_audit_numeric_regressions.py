@@ -275,7 +275,7 @@ def test_public_builder_small_nav_cash_and_fee_publish(
         typed_batches=True,
     )
     capital = PortfolioCapital(
-        "synthetic_top20_equal_weight", initial_nav, "CNY", "adjusted_notional"
+        "synthetic_quantile_equal_weight", initial_nav, "CNY", "adjusted_notional"
     )
     metadata = {
         "sample_role": "validation",
@@ -566,7 +566,7 @@ def test_white_constant_squared_residual_is_undefined_without_backend_fit(monkey
             "Constant squared residuals have no defined White auxiliary R-squared."
         )
 
-    monkeypatch.setattr(statistics.sm, "OLS", forbidden)
+    monkeypatch.setattr(statistics, "OLS", forbidden)
     actual = statistics.fama_macbeth_period(
         frame,
         return_column="label",

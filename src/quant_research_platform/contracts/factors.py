@@ -28,8 +28,6 @@ class FactorDefinition:
     factor_set: FactorSet
     input_columns: tuple[str, ...]
     output_column: str
-    base_input_columns: tuple[str, ...] = ()
-    derived_input_columns: tuple[str, ...] = ()
     display_name: str = ""
     description: str = ""
     family: str = "unknown"
@@ -40,7 +38,6 @@ class FactorDefinition:
     null_policy: str = "preserve_nulls"
     source_layer: str = "processed"
     required_input_data_id: str = ""
-    window: int | None = None
 
     def __post_init__(self) -> None:
         _validate_non_empty_string(self.factor_id, "factor_id_required")
@@ -55,23 +52,6 @@ class FactorDefinition:
             raise ValueError("unsupported_factor_set") from exc
         object.__setattr__(self, "factor_set", factor_set)
         _validate_column_tuple(self.input_columns, "factor_input_columns")
-        _validate_column_tuple(
-            self.base_input_columns,
-            "factor_base_input_columns",
-            required=False,
-        )
-        base_inputs = self.base_input_columns or self.input_columns
-        derived_inputs = self.derived_input_columns
-        _validate_column_tuple(
-            derived_inputs,
-            "factor_derived_input_columns",
-            required=False,
-        )
-        expected_inputs = tuple(dict.fromkeys((*base_inputs, *derived_inputs)))
-        if expected_inputs != self.input_columns:
-            raise ValueError("factor_input_columns_must_match_base_and_derived")
-        object.__setattr__(self, "base_input_columns", base_inputs)
-        object.__setattr__(self, "derived_input_columns", derived_inputs)
         _validate_non_empty_string(self.output_column, "factor_output_column_required")
         _validate_non_empty_string(
             self.required_input_data_id,
@@ -90,21 +70,16 @@ class FactorDefinition:
         object.__setattr__(self, "grain", normalize_data_grain(self.grain))
         if (
             type(self.required_windows) is not tuple
-            or any(
-                type(window) is not int or isinstance(window, bool)
-                for window in self.required_windows
-            )
+            or any(type(window) is not int for window in self.required_windows)
             or len(set(self.required_windows)) != len(self.required_windows)
         ):
             raise ValueError("factor_required_windows_invalid")
         if any(window <= 0 for window in self.required_windows):
             raise ValueError("factor_required_windows_must_be_positive")
-        for field_name in ("lookback_window", "window"):
-            value = getattr(self, field_name)
-            if value is not None and (
-                type(value) is not int or isinstance(value, bool) or value <= 0
-            ):
-                raise ValueError(f"factor_{field_name}_must_be_positive")
+        if self.lookback_window is not None and (
+            type(self.lookback_window) is not int or self.lookback_window <= 0
+        ):
+            raise ValueError("factor_lookback_window_must_be_positive")
 
     def to_manifest(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -115,8 +90,6 @@ class FactorDefinition:
             "description": self.description,
             "family": self.family,
             "input_columns": list(self.input_columns),
-            "base_input_columns": list(self.base_input_columns),
-            "derived_input_columns": list(self.derived_input_columns),
             "output_column": self.output_column,
             "required_windows": list(self.required_windows),
             "lookback_window": self.lookback_window,
@@ -126,6 +99,4 @@ class FactorDefinition:
             "source_layer": self.source_layer,
             "required_input_data_id": self.required_input_data_id,
         }
-        if self.window is not None:
-            payload["window"] = self.window
         return payload

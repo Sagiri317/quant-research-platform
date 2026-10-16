@@ -24,6 +24,7 @@ from quant_research_platform.contracts.experiments import (
     training_availability_columns,
 )
 from quant_research_platform.contracts.filtering import required_filter_columns
+from quant_research_platform.contracts.ids import validate_input_market
 from quant_research_platform.contracts.json_codec import _strict_config
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.time import (
@@ -51,6 +52,7 @@ from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 
 
 def _input_roles(declared, spec, selected_columns):
+    validate_input_market(declared, spec.market_id)
     consumed = {
         *spec.label_columns,
         *(
@@ -212,6 +214,7 @@ def evaluate(config):
             columns=("timestamp", "asset_id", "prediction_score"),
             time_window=window,
         )
+        validate_input_market(metadata["model_facts"], spec.market_id)
         prediction_window = PredictionWindow(**metadata["prediction_window"])
         if pd.Timestamp(prediction_window.start) > pd.Timestamp(start):
             raise ValueError("evaluation_prediction_window_incomplete")
@@ -552,8 +555,6 @@ def _scoped_evaluate(config, *, spec, session, source, columns, cutoff, window, 
         )
     ):
         raise ValueError("evaluation_scoped_requires_a_share_factors")
-    if session.spec.get("market_id", "a_share") != "a_share":
-        raise ValueError("evaluation_market_mismatch")
     focal = {
         "session": session,
         "declared": session.spec,
@@ -597,17 +598,14 @@ def _scoped_evaluate(config, *, spec, session, source, columns, cutoff, window, 
         options.setdefault("columns", ("timestamp", "asset_id"))
         peer_session = open_dataset_session(**options)
         declared = peer_session.spec
+        validate_input_market(declared, spec.market_id)
         _validate_asset_time_key(declared["primary_key"], declared["column_roles"])
-        if (
-            declared.get("market_id", "a_share") != "a_share"
-            or any(
-                declared["column_roles"].get(column) not in {"factor", "feature"}
-                for column in signals
-            )
-            or any(
-                declared["column_roles"].get(label) != "label"
-                for label in spec.label_columns
-            )
+        if any(
+            declared["column_roles"].get(column) not in {"factor", "feature"}
+            for column in signals
+        ) or any(
+            declared["column_roles"].get(label) != "label"
+            for label in spec.label_columns
         ):
             raise ValueError("evaluation_comparison_domain_invalid")
         if selected is not None and set((*signals, *spec.label_columns)) - set(

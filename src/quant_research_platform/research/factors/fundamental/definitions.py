@@ -110,8 +110,6 @@ def fundamental_factor_definitions(
             if factor in CORE_FUNDAMENTAL_FACTORS
             else factor_set,
             input_columns=fundamental_inputs(factor),
-            base_input_columns=fundamental_inputs(factor),
-            derived_input_columns=(),
             output_column=factor,
             display_name=factor,
             description="Protocol-defined PIT fundamental factor.",

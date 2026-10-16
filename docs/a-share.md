@@ -237,7 +237,8 @@ annual report TTM = annual value  # 年报 TTM 取年度值
 
 若后续更正改变了被后续 TTM/YoY/平均值依赖的组成项，派生会计事件必须从更正合法生效时点反映新的合法视图；不得只修旧报告期而不传播到依赖它的派生事实。
 
-有限组成项的 TTM、存量平均值和复合因子按完整公式计算，不能因中间和/差溢出而拒绝可表示结果或制造缺失。TTM 最终值确实不可表示时明确失败；因子仍按既有规则将缺失组成项、非正分母及不可表示的最终结果记为 NaN，不截断或补零。
+有限组成项的 TTM、存量平均值和复合因子按完整公式计算，不能因中间和/差溢出而拒绝可表示结果或制造缺失。TTM 最终值确实不可表示时，只将该资产、指标、报告期的派生值记为未知，其他有效事实继续计算；
+因子将缺失组成项、非正分母及不可表示的最终结果记为 NaN，不截断或补零。
 
 禁止用通用 `previous_value` 同时表达：
 
@@ -911,6 +912,8 @@ forward EP = median forecast EPS / unadjusted signal-day close  # 前瞻盈利�
 统计合同按实际评估因子和模型输入派生此角色；只由模型消费分析师因子时仍执行相同排除。
 冻结test的G/Q保留单项HAC与bootstrap，联合FDR标为`NOT_APPLICABLE`。
 机构日中位数与跨机构中位数的临时精确值保留到最终 EPS/close 比值，落盘仍为现有 Float64。
+价格缺失或非正只使 EP 与价格缩放离散度未知；原始 EPS 离散度、机构覆盖、年龄和更新比例仍按有效预测计算，
+单独选择这些因子不读取 close。不可表示的派生比值只标记该值 NULL，不中断其他因子或后续日期。
 
 预期修订、超预期、PEAD 和业绩预告属于扩展研究方向，不属于本协议的预期4模块。
 
@@ -1108,7 +1111,10 @@ signal time 为 t 收盘；entry/exit event time 分别为 t+1/t+1+h 开盘。
 普通、常量及非法端点的资格规则保持，最终不可表示值仍缺失。该计算由标签生产者唯一实现，不改标签期限或成熟时点。
 日线一字板判定使用入场日 OHLC，information availability 为入场日收盘；
 标签 maturity 为所需执行事实与两端价格均已可得的离场交易日开盘。
-日频持久化日期使用 session 标签，`available_at = exit session open`；
+行的日频日期使用 session 标签；`available_at` 则持久化离场日真实开盘时刻：
+Asia/Shanghai 09:30 规范到 UTC（现代 A 股为 01:30），不使用该日零点。
+普通 forward-return 与 ON/ID 共用一个交易事件时钟。日期形式的 cutoff 仍严格表示 UTC 零点，
+不会自动扩到日末；离场日 00:30 的拟合和评价不能使用该标签，01:30 才成熟。
 不把执行事实的发生时间当成信号日已知信息。
 
 #### 模型目标
@@ -1510,7 +1516,7 @@ N_train
 |---|---|
 | `candidate_id` | 本次候选标识，由调用者为实际 G/Q 结果明确命名 |
 | `selection_group` | `global` 或 `quarterly`，与所消费的选择记录一致 |
-| `construction` | `top20_equal_weight`、`top20_equal_weight_half_step`、`top20_float_cap` 或 `benchmark_enhanced` |
+| `construction` | `quantile_equal_weight`、`quantile_equal_weight_half_step`、`quantile_float_cap` 或 `benchmark_enhanced` |
 | `prediction_selector` | 已持久化模型的 `family_id`，或保留选择器 `champion`，不借组合名称推断算法 |
 | `top_quantile` | 简单组合的最高分位比例，须满足 `0 < top_quantile <= 1`；增强组合为 `null` |
 | `rebalance_schedule` | `daily`、`weekly-last-trading-day` 或 `monthly-last-trading-day` |
@@ -1520,7 +1526,7 @@ N_train
 选取其优胜家族配置，留出消费开发期冻结选择对应的最终模型。
 具名 selector 只读取所声明模型家族，不隐式映射 `winner` 或其他拼写。模型家族与候选身份分别由配置声明，不从 `candidate_id` 推断选择器。
 
-`top20_equal_weight` / `top20_float_cap` 是构建标识，名称中的 top20 不覆盖 `top_quantile`。
+`quantile_equal_weight` / `quantile_float_cap` 按显式 `top_quantile` 选择最高分位；构建标识只说明加权方法。
 增强组合所需 benchmark、风险及数据依赖由同一组合合同派生；配置不能省略必要事实。
 只读 profile 不创建组合或账本，参考文件不作为自动展开入口。
 
@@ -1606,7 +1612,9 @@ SE/t/p/CI 使用按再平衡日期聚类的稳健推断，置信水平为 95%；
 开发增强账本保存 `final_alpha_calibration.json`；独立 `calibrate` 也可从明确的
 `observations`、`scheduled_intervals`、`cutoff`、`selection_group`、`calendar` 和
 `rebalance_schedule` 写入新校准 JSON。每条声明区间必须对应真实交易日历上相邻调仓的执行开盘，
-不能用固定七个日历日冒充周频。直接与开发最终校准均保存 `interval_semantics`，
+不能用固定七个日历日冒充周频。calendar 的输入选择器明确拟合日历起点及所需端点范围，
+覆盖率分母来自该日历中截至 cutoff 已成熟的全部计划区间，不能按实际有收益的行反推或缩小。
+直接与开发最终校准均保存 `interval_semantics`，
 包含调仓日程、next execution open 到 following rebalance execution open 的收益约定及 A 股统一交易日历约定。
 测试 `backtest` 的 `calibration` 显式指定该文件，核合法截止、组别、校准状态及这些实际区间语义；
 同组、同日程 CSI500/CSI1000 的共享校准必须一致。输入路径与参数真实记录，
@@ -1802,7 +1810,7 @@ cash = 0
 组合偏离目标；未知暴露、域外持仓及非正 NAV 明确记录未定义原因与可知的排除权重，不能把
 部分已知暴露当作完整结果。执行、现金、ADV 与成本共用实际经济账本。
 
-固定预测的持仓对照可选择 `top20_equal_weight_half_step`：换仓日先由原简单组合 owner
+固定预测的持仓对照可选择 `quantile_equal_weight_half_step`：换仓日先由原简单组合 owner
 生成完整等权目标，再与仍合格且有有效预测的当前持仓权重各取一半。首次从现金开始只建半仓；
 剩余现金不重归一化；这是 `neutrality=none` 时的最终目标。启用中性化时，该半仓权重
 是原始目标，随后投影为总权重 1 的约束目标。失去资格或预测的旧仓目标归零，实际卖出仍遵守原交易限制。
@@ -2343,11 +2351,12 @@ pre-entry、ID、ON 不因 can_enter=False 自动抹掉；完整分解 qualified
 每个值有自己的 `_available_at` 和 `_reason`，另存分解 qualified 与原因。
 数值使用 LABEL role，DataSpec 明确成熟映射；对数分量单位为 `log_return`，端点为 `decimal_return`。
 新成熟时点按 Asia/Shanghai 开盘09:30、收盘15:00规范到UTC：pre-entry为t+1开盘，ID为t+h收盘，
-ON/endpoint为t+h+1开盘。原 forward-return 的会话日期成熟口径不在此修改。
+ON/endpoint为t+h+1开盘；原 forward-return 与 endpoint 共用相同的真实开盘成熟时点。
 这些是收益事件时钟，不冒称供应商历史发布时点已经独立验证。
 
 生产使用真实本资产会话轴和上市生命周期，停牌/未知报价不能压缩期限，已知休市不计会话；不跨重上市连接。
 原生输入的文件、年份、日期和行筛选仍以完整声明 PANEL 键域建轴，将未选价格保留为未知。
+输出仅保留选中 PANEL 信号键与请求输出窗口的交集，不把用于确定时钟的未选行重新发布。
 裸目录的成员列表不能独立证明完整会话域，明确拒绝；裸单文件按调用者声明的完整 PANEL 域使用，
 其行/时间筛选从未筛文件保留键轴。这不是对供应商全市场日历完整性的独立证明。
 

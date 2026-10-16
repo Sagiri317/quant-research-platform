@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from fractions import Fraction
+from math import fsum
 
 import numpy as np
 import pandas as pd
@@ -20,7 +21,9 @@ def calculate_fundamental_factors(
 ) -> pd.DataFrame:
     """Calculate the 19 registered factors from PIT/derived accounting facts."""
 
-    requested = tuple(dict.fromkeys(factor_columns or FUNDAMENTAL_FACTORS))
+    requested = tuple(
+        dict.fromkeys(FUNDAMENTAL_FACTORS if factor_columns is None else factor_columns)
+    )
     unknown = sorted(set(requested).difference(FUNDAMENTAL_FACTORS))
     if unknown:
         raise ValueError("unknown_fundamental_factor: " + ", ".join(unknown))
@@ -70,16 +73,43 @@ def _ratio(
 ) -> pd.Series:
     if isinstance(numerator, pd.Series):
         return numerator.div(denominator.where(denominator.gt(0.0)))
-    result = np.full(len(denominator), np.nan)
-    for index, (divisor, *terms) in enumerate(
-        zip(denominator, *numerator, strict=True)
-    ):
-        if not divisor > 0.0 or any(pd.isna(term) for term in terms):
-            continue
-        # Round the complete ratio once, without an overflowing intermediate sum.
-        ratio = sum(map(Fraction, terms), Fraction()) / Fraction(divisor)
+    terms = np.column_stack(numerator)
+    divisors = denominator.to_numpy(dtype=float)
+    valid = (divisors > 0) & np.isfinite(terms).all(axis=1)
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        totals = terms.sum(axis=1)
+        result = np.divide(
+            totals, divisors, out=np.full(len(divisors), np.nan), where=valid
+        )
+    mixed = (terms > 0).any(axis=1) & (terms < 0).any(axis=1)
+    exceptional = valid & (
+        ~np.isfinite(totals)
+        | ~np.isfinite(result)
+        | (mixed & (terms.shape[1] > 2))
+        | (
+            (
+                (np.abs(totals) < np.finfo(float).tiny)
+                | (np.abs(result) < np.finfo(float).tiny)
+                | (np.abs(result) >= np.finfo(float).max / 2)
+            )
+            & (terms != 0).any(axis=1)
+        )
+    )
+    for index in np.flatnonzero(exceptional):
+        try:
+            total = fsum(terms[index])
+            if abs(total) >= np.finfo(float).tiny:
+                value = total / float(divisors[index])
+                if np.finfo(float).tiny <= abs(value) < np.finfo(float).max / 2:
+                    result[index] = value
+                    continue
+        except OverflowError:
+            pass
+        # Only the representability boundaries need an exact ratio; normal multi-term
+        # cancellation uses the standard library's compensated sum.
+        ratio = sum(map(Fraction, terms[index]), Fraction()) / Fraction(divisors[index])
         try:
             result[index] = float(ratio)
         except OverflowError:
-            result[index] = np.nan  # An unrepresentable final factor is undefined.
+            result[index] = np.nan
     return pd.Series(result, index=denominator.index)

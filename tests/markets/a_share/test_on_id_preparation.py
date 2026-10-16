@@ -118,12 +118,17 @@ def test_price_filter_keeps_full_declared_axis_and_unknown_prices(tmp_path):
             _request(tmp_path / "filtered", inputs, frame, parameters={"horizons": [1]})
         )
     )
-    assert len(result) == len(frame)
+    assert len(result) == int(frame.is_trading.sum())
+    assert result.timestamp.isin(frame.loc[frame.is_trading, "timestamp"]).all()
     b = result.loc[result.asset_id.eq("b")].reset_index(drop=True)
     assert pd.isna(b.on_id_endpoint_return_1d.iloc[0])
     assert b.on_id_endpoint_return_1d_reason.iloc[0] == "missing_price"
     assert pd.isna(b.on_id_endpoint_return_1d.iloc[1])
     assert np.isfinite(b.on_id_holding_intraday_log_return_1d.iloc[0])
+    assert b.on_id_holding_intraday_log_return_1d_available_at.iloc[0] == (
+        frame.loc[frame.asset_id.eq("b"), "timestamp"].iloc[1] + pd.Timedelta(hours=7)
+    )
+    assert pd.isna(b.on_id_endpoint_return_1d_available_at.iloc[0])
 
 
 def test_noncontiguous_year_selection_keeps_sessions_unknown(tmp_path):
@@ -134,10 +139,14 @@ def test_noncontiguous_year_selection_keeps_sessions_unknown(tmp_path):
             _request(tmp_path / "selected", inputs, frame, parameters={"horizons": [1]})
         )
     )
-    assert len(result) == len(frame)
+    assert len(result) == int(frame.timestamp.dt.year.eq(2024).sum())
+    assert result.timestamp.dt.year.eq(2024).all()
     first = result.loc[result.asset_id.eq("b")].iloc[0]
-    assert pd.isna(first.on_id_endpoint_return_1d)
-    assert first.on_id_endpoint_return_1d_reason == "missing_price"
+    assert np.isfinite(first.on_id_endpoint_return_1d)
+    assert first.on_id_endpoint_return_1d_available_at == (
+        result.loc[result.asset_id.eq("b"), "timestamp"].iloc[2]
+        + pd.Timedelta(hours=1, minutes=30)
+    )
 
 
 @pytest.mark.parametrize("horizons", ([], [2], [True], [1, 1], "20"))
@@ -324,9 +333,10 @@ def test_native_file_selection_uses_inventory_without_compacting_clock(tmp_path)
             )
         )
     )
-    assert len(result) == len(frame)
+    assert len(result) == int(frame.timestamp.dt.year.eq(2024).sum())
+    assert result.timestamp.dt.year.eq(2024).all()
     row = result.loc[result.asset_id.eq("b")].iloc[0]
-    assert row.on_id_endpoint_return_1d_reason == "missing_price"
+    assert np.isfinite(row.on_id_endpoint_return_1d)
 
 
 def test_execution_key_outside_panel_is_rejected(tmp_path):
@@ -338,7 +348,7 @@ def test_execution_key_outside_panel_is_rejected(tmp_path):
     inputs["execution_mask"] = _input(
         tmp_path / "invalid", "execution_mask", keys, native=True
     )
-    with pytest.raises(ValueError, match="on_id_input_key_outside_panel"):
+    with pytest.raises(ValueError, match="a_share_input_key_outside_panel"):
         prepare(
             _request(tmp_path / "output", inputs, frame, parameters={"horizons": [1]})
         )
@@ -406,7 +416,7 @@ def test_bare_directory_member_selection_cannot_define_a_sparse_clock(tmp_path):
             "path": str(directory),
             "files": ["part-0.parquet", "part-2.parquet", "part-4.parquet"],
         }
-    with pytest.raises(ValueError, match="on_id_panel_session_domain_unproven"):
+    with pytest.raises(ValueError, match="a_share_panel_session_domain_unproven"):
         prepare(
             _request(tmp_path / "output", inputs, frame, parameters={"horizons": [1]})
         )

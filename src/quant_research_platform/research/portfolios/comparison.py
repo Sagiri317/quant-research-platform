@@ -757,7 +757,8 @@ def comparison_tables(axis, *, config, analyses, currencies, clock, metadata):
 
 def _exposure(identity, axis, rp, rb, rf, daily, policy):
     """HAC is fitted on the intact paired axis, never on NaN-compressed dates."""
-    import statsmodels.api as sm
+    from statsmodels.regression.linear_model import OLS
+    from statsmodels.tools.tools import add_constant
 
     x, y = (rb, rp) if rf is None else (rb - rf, rp - rf)
     finite = np.isfinite(x) & np.isfinite(y)
@@ -784,12 +785,12 @@ def _exposure(identity, axis, rp, rb, rf, daily, policy):
         x_scale = np.max(np.abs(x))
         y_scale = np.max(np.abs(y)) or 1.0
         scaled_x, scaled_y = x / x_scale, y / y_scale
-        design = sm.add_constant(scaled_x, has_constant="add")
+        design = add_constant(scaled_x, has_constant="add")
         try:
             if np.linalg.matrix_rank(design) < 2:
                 reason = "regression_not_identified"
             else:
-                fit = sm.OLS(scaled_y, design).fit(
+                fit = OLS(scaled_y, design).fit(
                     cov_type="HAC",
                     cov_kwds={"maxlags": policy["hac_lag"], "use_correction": True},
                 )

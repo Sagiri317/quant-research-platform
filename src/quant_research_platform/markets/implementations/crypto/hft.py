@@ -458,6 +458,23 @@ def iter_factor_frames(
     required = tuple(
         dict.fromkeys(name for names in definitions.values() for name in names)
     )
+    copied = selected & {
+        "spread",
+        "ofi_100ms",
+        "signed_trade_flow_100ms",
+        "taker_buy_volume_100ms",
+        "taker_sell_volume_100ms",
+    }
+    scalar_definitions = {
+        name: dependencies
+        for name, dependencies in definitions.items()
+        if name not in copied and name != "relative_spread"
+    }
+    scalar_columns = {
+        column
+        for dependencies in scalar_definitions.values()
+        for column in dependencies
+    }
     rolling = {
         name: {"100ms": 1, "500ms": 5, "1s": 10, "5s": 50}[name.rsplit("_", 1)[1]]
         for name in selected
@@ -513,7 +530,14 @@ def iter_factor_frames(
         inputs = {name: _nullable_numeric_column(frame, name) for name in required}
         output = _identity_frame(frame)
         calculated = {name: np.full(len(frame), np.nan) for name in selected}
-        for index in range(len(frame)):
+        for name in copied:
+            calculated[name] = inputs[definitions[name][0]]
+        if "relative_spread" in selected:
+            with np.errstate(over="ignore", invalid="ignore"):
+                ratio = inputs["book_spread"] / inputs["mid"]
+            ratio[~np.isfinite(ratio)] = np.nan
+            calculated["relative_spread"] = ratio
+        for index in range(len(frame)) if scalar_definitions else ():
             if boundaries[index]:
                 for history in histories.values():
                     history.clear()
@@ -522,7 +546,7 @@ def iter_factor_frames(
                 mids.clear()
                 returns.clear()
                 previous_mid = np.nan
-            current = {name: float(values[index]) for name, values in inputs.items()}
+            current = {name: float(inputs[name][index]) for name in scalar_columns}
             exact = {
                 name: Fraction(value) if math.isfinite(value) else None
                 for name, value in current.items()
@@ -551,7 +575,7 @@ def iter_factor_frames(
                 returns.append(step_return)
             else:
                 returns.clear()
-            for name, dependencies in definitions.items():
+            for name, dependencies in scalar_definitions.items():
                 result = np.nan
                 values = [exact[column] for column in dependencies]
                 if any(value is None for value in values):
@@ -582,10 +606,6 @@ def iter_factor_frames(
                         volume, depth = dependencies
                         if exact[depth] > 0:
                             result = sums[volume] / exact[depth]
-                elif name == "spread":
-                    result = values[0]
-                elif name == "relative_spread":
-                    result = values[0] / values[1]
                 elif name.startswith("imbalance_") or name in {
                     "microprice",
                     "microprice_deviation",
@@ -617,8 +637,6 @@ def iter_factor_frames(
                 elif name == "realized_volatility_1s":
                     if len(returns) == 10:
                         result = stdev(returns)
-                else:
-                    result = values[0]
                 try:
                     value = float(result)
                 except OverflowError:

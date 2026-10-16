@@ -22,6 +22,7 @@ from quant_research_platform.contracts.filtering import (
     required_filter_columns,
     validate_sample_filter_mode,
 )
+from quant_research_platform.contracts.ids import validate_input_market
 from quant_research_platform.contracts.json_codec import (
     canonical_identity_bytes,
     parse_qrp_json_object,
@@ -898,9 +899,16 @@ def _validate_model_prediction_window(facts, window):
 
 
 def validate_model_input_roles(
-    declared, spec, *, include_target=False, selected_columns=None, input_units=None
+    declared,
+    spec,
+    *,
+    market_id,
+    include_target=False,
+    selected_columns=None,
+    input_units=None,
 ):
-    """Check model-consumed roles and explicit unit conflicts in the opened input."""
+    """Check consumed roles and explicit market/unit conflicts in the opened input."""
+    validate_input_market(declared, market_id)
     consumed = {*spec.input_columns, *((spec.target_column,) if include_target else ())}
     if selected_columns is not None and consumed - set(selected_columns):
         raise ValueError("model_input_projection_missing")

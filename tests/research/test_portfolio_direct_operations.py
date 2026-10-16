@@ -232,6 +232,34 @@ def test_frozen_quantity_is_not_rebalanced_to_old_weight_after_fees():
     assert result.nav_after == 999.0
 
 
+@pytest.mark.parametrize("current", [(0.6, 0.4), (0.4, 0.6), (0.505, 0.495)])
+def test_frozen_adv_intersects_the_existing_single_name_bounds(current):
+    frame = pd.DataFrame(
+        {
+            "asset_id": ["a", "b"],
+            "expected_alpha": [0.0, 0.0],
+            "current_weight": current,
+            "benchmark_weight": [0.5, 0.5],
+            "specific_variance": [0.0, 0.0],
+            "adv": [np.nan, np.nan],
+            "style": [1.0, 1.0],
+        }
+    )
+    kwargs = dict(
+        factor_covariance=pd.DataFrame([[0.0]], index=["style"], columns=["style"]),
+        style_columns=("style",),
+        expected_transaction_cost=lambda weights: 0.0,
+        nav=100.0,
+        assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,)),
+    )
+    if current == (0.505, 0.495):
+        result = optimize_portfolio(frame, **kwargs)
+        assert tuple(result.weights) == current
+    else:
+        with pytest.raises(ValueError, match="optimizer_frozen_constraints_infeasible"):
+            optimize_portfolio(frame, **kwargs)
+
+
 @pytest.mark.parametrize("held", [False, True])
 def test_unproved_rights_only_block_the_account_that_holds_them(held):
     from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
@@ -380,7 +408,7 @@ def test_explicit_native_fit_prediction_and_backtest_roundtrip(
         "candidate": {
             "candidate_id": "native",
             "selection_group": "global",
-            "construction": "top20_equal_weight",
+            "construction": "quantile_equal_weight",
             "prediction_selector": "ridge",
             "rebalance_schedule": "daily",
             "top_quantile": 0.5,

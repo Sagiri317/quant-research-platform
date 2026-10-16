@@ -94,7 +94,9 @@ def _reference_forward_labels(frame, *, horizons, sessions):
             if not np.isfinite(value):
                 continue
             labels[position] = value
-            available[position] = exit_date.to_datetime64()
+            available[position] = (
+                exit_date + pd.Timedelta(hours=1, minutes=30)
+            ).to_datetime64()
         label_column = f"forward_return_{horizon}d"
         result[label_column] = labels
         result[f"{label_column}_available_at"] = available

@@ -1,7 +1,8 @@
 """Explicit saved models, predictions, calibration and backtests retain science."""
 
 from contextlib import nullcontext
-from dataclasses import asdict
+from dataclasses import asdict, replace
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -580,6 +581,111 @@ def _independent_maker_case(tmp_path, monkeypatch, *, unfiltered=False):
 @pytest.fixture
 def independent_maker(tmp_path, monkeypatch):
     return _independent_maker_case(tmp_path, monkeypatch)
+
+
+@pytest.mark.parametrize("maker_buyer", (False, True))
+@pytest.mark.parametrize("relevant", (False, True))
+def test_native_calibration_preserves_unknown_trades_and_reference_relevance(
+    monkeypatch, independent_maker, maker_buyer, relevant
+):
+    from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
+    from quant_research_platform.markets.implementations.crypto.execution import (
+        MakerCalibration,
+        _maker_new_order,
+    )
+    from tests.helpers.binance_hft import _quote
+
+    config, _backtest = independent_maker
+    price = ("99.5" if maker_buyer else "100.5") if relevant else "100.0"
+    trade = replace(
+        _trade(2300, price=price, quantity="2", maker_buyer=maker_buyer),
+        visible_quantity=None,
+    )
+
+    def books(*_args, stats=None, **_kwargs):
+        if stats is not None:
+            stats.coverage_segments["s1"] = (0, 10_000_000_000)
+        yield _state(2100)
+        # The second reference pair cannot be touched by the first pair's price.
+        yield from (
+            _state(stamp, bid_index=990, ask_index=1010) for stamp in (2150, 2650, 2700)
+        )
+
+    monkeypatch.setattr(portfolio, "iter_reconstructed_depth", books)
+    monkeypatch.setattr(
+        portfolio, "iter_agg_trades", lambda *_args, **_kwargs: iter((trade,))
+    )
+    output = portfolio.calibrate_maker(config)
+    artifact = read_statistics_artifact(
+        output, validate_tables=portfolio.validate_maker_calibration
+    )
+    count = 1 if relevant else 2
+    with artifact.table("crypto_maker_calibration.parquet") as frame:
+        assert frame.sample_count.tolist() == [count, count]
+        assert frame.excluded_decisions.tolist() == [int(relevant)] * 2
+    with artifact.table("crypto_maker_events.parquet") as frame:
+        trades = frame.loc[frame.event_kind.eq("trade")]
+        assert len(trades) == 1 and trades.quantity.isna().all()
+        event_frame = frame.copy()
+    events = list(portfolio._calibration_events(artifact, "observed"))
+    assert (
+        next(event for event in events if event.kind == "trade").visible_quantity
+        is None
+    )
+    with artifact.table("crypto_maker_samples.parquet") as frame:
+        assert frame.filled_quantity.eq(0).all()
+        assert frame.decision_at.min() == pd.Timestamp(
+            2200 if relevant else 2100, unit="ms"
+        )
+    for kind, quantity in (("book", np.nan), ("trade", np.inf), ("trade", -1.0)):
+        damaged = event_frame.copy()
+        damaged.loc[damaged.event_kind.eq(kind), "quantity"] = quantity
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                portfolio,
+                "_calibration_rows",
+                lambda *_args, _frame=damaged, **_kwargs: iter(
+                    _frame.itertuples(index=False)
+                ),
+            )
+            with pytest.raises(ValueError, match="crypto_calibration_event_invalid"):
+                list(
+                    portfolio._calibration_headers(artifact, "observed", 2_700_000_000)
+                )
+    if relevant:
+        return
+
+    model = MakerCalibration(
+        partial(portfolio._calibration_samples, artifact, "observed"),
+        partial(portfolio._calibration_events, artifact, "observed"),
+        price_unit="0.1",
+    )
+    side = "buy" if maker_buyer else "sell"
+    sample = next(model.samples(side))
+    state = _state(8600)
+    order = _maker_new_order(1, side, 1.0, state, _quote(8600, book_segment_id="s1"), 0)
+
+    def response(active_order, replace_quantity):
+        return list(
+            model._response(
+                sample,
+                state=state,
+                decision_ns=8_600_000_000,
+                new_order=order,
+                active_order=active_order,
+                commands=(),
+                lifetime_ns=500_000_000,
+                replace_quantity=replace_quantity,
+                history_scale=1,
+                events=model.events(sample["event_start"], sample["event_end"]),
+            )
+        )
+
+    assert response(None, 1.0) == []
+    assert response(order, None) == []
+    dependent_keep = replace(order, price_index=1000)
+    with pytest.raises(PortfolioTargetBlocked, match="visible_quantity_unknown"):
+        response(dependent_keep, None)
 
 
 @pytest.mark.parametrize("cutoff,count", ((2600, 1), (2700, 2)))

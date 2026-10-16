@@ -180,7 +180,9 @@ def test_selected_a_share_label_bounds_real_lookahead_and_persisted_schema(
     result = read_dataset(result_root)
     assert max(observed) == dates[2]
     assert result.forward_return_1d.tolist() == pytest.approx([1 / 11])
-    assert result.forward_return_1d_available_at.tolist() == [dates[2]]
+    assert result.forward_return_1d_available_at.tolist() == [
+        dates[2] + pd.Timedelta(hours=1, minutes=30)
+    ]
     assert set(result) == {
         "market_id",
         "asset_id",

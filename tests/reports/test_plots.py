@@ -520,3 +520,141 @@ def test_series_long_table_group_filter_and_physical_projection(tmp_path, monkey
         timezone="UTC",
     )
     assert len(axes) == 2 and all(len(axis.lines[0].get_ydata()) == 3 for axis in axes)
+
+
+def test_plot_risk_example_consumes_native_comparisons_and_unavailable_reason(tmp_path):
+    import json
+
+    from quant_research_platform.artifacts.statistics import read_statistics_artifact
+    from quant_research_platform.research.portfolios.diagnostics import (
+        portfolio_statistics,
+    )
+    from tests.helpers.benchmark_references import reference_input
+    from tests.research.test_optional_statistics import _cash_ledger
+
+    ledger = tmp_path / "ledger"
+    window = _cash_ledger(ledger)
+    references = [
+        reference_input(
+            tmp_path / f"{name}.parquet",
+            values,
+            reference_id=name,
+            currency=currency,
+        )
+        for name, values, currency in (
+            ("first", [100.0, 110.0, 99.0], "CNY"),
+            ("second", [100.0, 90.0, 110.0], "CNY"),
+            ("mismatched", [100.0, 110.0, 99.0], "USD"),
+        )
+    ]
+    source = portfolio_statistics(
+        {
+            "ledgers": [str(ledger)],
+            "window": window,
+            "analyses": ["performance", "benchmark_comparison"],
+            "comparison_benchmarks": references,
+            "output": str(tmp_path / "statistics"),
+        }
+    )
+    artifact = read_statistics_artifact(source)
+    with artifact.table("portfolio_benchmark_metrics.parquet") as values:
+        rows = values.loc[values.metric_id.eq("tracking_error")]
+    _, axes = plots.plot_metric_comparison(
+        rows.to_dict("records"),
+        metric_id="tracking_error",
+        units="年化比例",
+        source_reference=str(source),
+        sample_role=None,
+    )
+    np.testing.assert_array_equal(
+        [patch.get_width() for patch in axes[0].patches], rows.value
+    )
+    assert rows.status.tolist() == ["DEFINED", "DEFINED", "NOT_APPLICABLE"]
+    assert math.isnan(axes[0].patches[-1].get_width())
+    assert "跟踪误差" in axes[0].get_xlabel()
+    assert any(
+        "valuation_currency_mismatch" in text.get_text() for text in axes[0].texts
+    )
+
+    example = Path(__file__).resolve().parents[2] / "configs" / "plot-risk.json"
+    config = json.loads(example.read_text())
+    member = source / Path(config["inputs"]).name
+    before = member.read_bytes()
+    config.update(inputs=str(member), output=str(tmp_path / "risk.svg"))
+    rendered = plots.plot(config).read_text()
+    assert "没有所选指标" not in rendered
+    assert "跟踪误差" in rendered
+    assert all(item["reference_id"] in rendered for item in references)
+    assert "NOT_APPLICABLE: valuation_currency_mismatch" in rendered
+    assert member.read_bytes() == before
+
+
+@pytest.mark.parametrize("identity", ["reference_id", "reference_kind", "fold_id"])
+def test_native_metric_plot_preserves_each_comparison_identity(
+    tmp_path, monkeypatch, identity
+):
+    from quant_research_platform.artifacts.statistics import (
+        STATISTICS_TABLE_COLUMNS,
+        write_statistics_artifact,
+    )
+
+    row = {
+        "candidate_id": "candidate",
+        "execution_mode": "continuous",
+        "episode_id": "continuous",
+        "fold_id": "fold-one",
+        "reference_id": "reference-one",
+        "reference_kind": "benchmark",
+        "sample_role": "test",
+        "metric_id": "tracking_error",
+        "value": 0.1,
+        "observation_count": 2,
+        "planned_observation_count": 2,
+        "status": "DEFINED",
+        "reason": "",
+    }
+    other = {
+        "reference_id": "reference-two",
+        "reference_kind": "control",
+        "fold_id": "fold-two",
+    }[identity]
+    member = "portfolio_benchmark_metrics.parquet"
+    source = write_statistics_artifact(
+        tmp_path / "statistics",
+        metadata={
+            "sample_role": "test",
+            "window": {"start": "2024-01-01", "end": "2024-01-03"},
+            "candidate_ids": ["candidate"],
+            "execution_mode": "continuous",
+        },
+        table_group="portfolio",
+        tables={
+            member.removesuffix(".parquet"): pd.DataFrame(
+                [row, {**row, identity: other, "value": 0.2}],
+                columns=STATISTICS_TABLE_COLUMNS[member],
+            )
+        },
+    )
+    labels = []
+    original = plots.plot_metric_comparison
+
+    def render(rows, **kwargs):
+        figure, axes = original(rows, **kwargs)
+        labels.extend(
+            label.get_text().replace("\n", "") for label in axes[0].get_yticklabels()
+        )
+        return figure, axes
+
+    monkeypatch.setattr(plots, "plot_metric_comparison", render)
+    output = plots.plot(
+        {
+            "kind": "metrics",
+            "inputs": str(source / member),
+            "output": str(tmp_path / "comparison.svg"),
+            "metric_id": "tracking_error",
+            "units": "年化比例",
+        }
+    )
+    assert output.is_file()
+    assert len(set(labels)) == 2
+    assert row[identity] in labels[0] and other in labels[1]
