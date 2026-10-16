@@ -114,7 +114,7 @@ def test_writer_rejects_missing_persisted_logical_dtype_metadata(
         return path
 
     monkeypatch.setattr(dataset_writing, "write_parquet_file", write_without_metadata)
-    with pytest.raises(ValueError, match="dataset_logical_dtypes_invalid"):
+    with pytest.raises(ValueError, match="dataset_logical_dtypes_missing"):
         write_dataset(
             root,
             make_default_dataset_frame(),
@@ -344,15 +344,6 @@ def test_dataset_schema_validators_reject_mutated_runtime_contracts() -> None:
         dataset_schema.merge_dataset_metadata({}, {1: "value"})
     with pytest.raises(ValueError, match="dataset_spec_type_invalid"):
         dataset_schema.validate_dataset_spec(object())
-    for manifest in (
-        {},
-        {"primary_key": ["asset_id"], "null_count_summary": {}},
-        {"primary_key": ["asset_id"], "null_count_summary": {"asset_id": True}},
-    ):
-        with pytest.raises(ValueError, match="dataset_manifest_not_consumable"):
-            dataset_schema.validate_dataset_primary_key_null_summary(
-                manifest, primary_key=manifest.get("primary_key")
-            )
 
 
 @pytest.mark.parametrize(
@@ -739,7 +730,6 @@ def test_unordered_decimal_category_shards_match_whole_and_preserve_physical_typ
             metadata.append(
                 (
                     inspection.manifest["logical_dtypes"],
-                    inspection.manifest["logical_dtype_hash"],
                     inspection.manifest["physical_schema"],
                 )
             )
@@ -1022,36 +1012,27 @@ def test_writer_incremental_logical_dtype_plan_keeps_schema_width(
     assert set(retained_column_counts) == {len(base.columns)}
 
 
-def test_unordered_category_domain_uses_live_exact_index_namespace(
-    tmp_path: Path,
-) -> None:
+def test_unordered_category_domain_survives_persistence(tmp_path: Path) -> None:
     root = make_dataset_artifact_root(tmp_path, "category_domain")
     frame = make_default_dataset_frame().iloc[:1].copy()
     categories = [f"asset-{index:05d}" for index in range(2000)]
     frame["asset_id"] = pd.Categorical(
         [categories[-1]], categories=categories, ordered=False
     )
-    observed_counts: list[int] = []
-
-    def validate(receipt: dataset_writing.DatasetWriteReceipt) -> None:
-        observed_counts.append(
-            len(
-                list(
-                    receipt.exact_primary_key_index.identity_payload_values(
-                        namespace="logical-category:asset_id"
-                    )
-                )
-            )
-        )
-
-    dataset_writing.write_dataset(
+    result = dataset_writing.write_dataset(
         root,
         (frame,),
         spec=make_processed_dataset_spec("category_domain"),
-        staged_validator=validate,
     )
-    assert observed_counts == [len(categories)]
-    assert len(read_dataset(root)["asset_id"].cat.categories) == len(categories)
+    descriptor = next(
+        item
+        for item in result.manifest["logical_dtypes"]["columns"]
+        if item["name"] == "asset_id"
+    )
+    assert len(descriptor["categories"]) == len(categories)
+    actual = read_dataset(root)["asset_id"]
+    assert set(actual.cat.categories) == set(categories)
+    assert actual.tolist() == [categories[-1]]
 
 
 @pytest.mark.parametrize(
@@ -1129,12 +1110,12 @@ def test_writer_dtype_work_depends_on_distinct_metadata_not_parts(
     encode = dataset_writing.encode_logical_category_value
     physical = dataset_writing.validate_persisted_logical_schema
 
-    def checked(payload):
+    def checked(payload, **kwargs):
         work["validate"] += 1
         work["categories"] += sum(
             len(item.get("categories", ())) for item in payload["columns"]
         )
-        return validate(payload)
+        return validate(payload, **kwargs)
 
     def encoded(value):
         work["encode"] += 1

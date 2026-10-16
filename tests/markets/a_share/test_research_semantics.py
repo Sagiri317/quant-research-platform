@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
+from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.processed.catalog import (
@@ -12,7 +13,6 @@ from quant_research_platform.markets.implementations.a_share.processed.catalog i
 )
 from quant_research_platform.research.datasets.assembler import (
     _add_a_share_semantic_columns,
-    assemble_research_dataset,
 )
 from quant_research_platform.research.features.transforms import (
     _neutralize_cross_section,
@@ -28,7 +28,8 @@ from quant_research_platform.storage.datasets import (
     read_dataset,
     write_dataset,
 )
-from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers.paths import StorageLayout
+from tests.helpers.research_specs import assemble_research_dataset
 
 
 @pytest.mark.parametrize("scale", [1.0, 1e-200, 1e200])
@@ -529,7 +530,6 @@ def test_native_neutralization_zscore_publishes_representable_extreme_cross_sect
     from quant_research_platform.catalog.processed import ProcessedDataCatalog
     from quant_research_platform.contracts.columns import ColumnRole
     from quant_research_platform.contracts.data import ProcessedDataKind
-    from quant_research_platform.research.features.transforms import feature_transforms
     from quant_research_platform.storage.datasets import read_dataset
     from tests.helpers.research_processed_inputs import _processed_spec
     from tests.helpers.research_specs import make_demo_research_dataset_spec
@@ -588,7 +588,7 @@ def test_native_neutralization_zscore_publishes_representable_extreme_cross_sect
             actual_raw.earnings_yield, [float(v) for v in residual]
         )
 
-    recipe = feature_transforms(("earnings_yield",))
+    recipe = (FeatureTransformSpec("a_share_canonical", ("earnings_yield",)),)
     spec = make_demo_research_dataset_spec(
         data_id="extreme_features",
         input_data_ids=("feature_inputs",),

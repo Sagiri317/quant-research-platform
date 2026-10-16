@@ -77,7 +77,10 @@ def _styled(function):
 def _figure(count, *, title, source_reference, sample_role, ratios=None):
     import matplotlib.pyplot as plt
 
-    if not source_reference or sample_role not in {"train", "validation", "test"}:
+    if not source_reference or (
+        sample_role is not None
+        and (not isinstance(sample_role, str) or not sample_role.strip())
+    ):
         raise ValueError("plot_provenance_invalid")
     figure, axes = plt.subplots(
         max(1, count),
@@ -88,9 +91,11 @@ def _figure(count, *, title, source_reference, sample_role, ratios=None):
         gridspec_kw={"height_ratios": ratios} if ratios else None,
     )
     figure.suptitle(title, fontsize=14)
+    role_label = dict(train="训练集", validation="验证集", test="测试集").get(
+        sample_role, sample_role or "样本"
+    )
     figure.supxlabel(
-        f"{dict(train='训练集', validation='验证集', test='测试集')[sample_role]} | "
-        f"来源：{fill(str(source_reference), 110)}",
+        f"{role_label} | 来源：{fill(str(source_reference), 110)}",
         fontsize=8,
     )
     return figure, axes[:, 0]
@@ -190,7 +195,11 @@ def plot_portfolio_curve(curve, *, sample_role, timezone):
     Independent episodes stay in separate panels. Sampled curves cannot supply
     a drawdown path. This plot never estimates the official max-drawdown metric.
     """
-    if "sample_role" in curve and curve["sample_role"] != sample_role:
+    if (
+        sample_role is not None
+        and "sample_role" in curve
+        and curve["sample_role"] != sample_role
+    ):
         raise ValueError("plot_sample_role_mismatch")
     epoch_timezone = (
         "UTC" if curve.get("valuation_method") == "linear_perpetual" else None
@@ -406,14 +415,28 @@ def plot_metric_comparison(rows, *, metric_id, units, source_reference, sample_r
     return figure, axes
 
 
-def _groups(rows, sample_role):
+def _groups(rows, sample_role, group_columns=()):
+    if (
+        not isinstance(group_columns, (list, tuple))
+        or any(not isinstance(name, str) or not name for name in group_columns)
+        or len(set(group_columns)) != len(group_columns)
+    ):
+        raise ValueError("plot_group_columns_invalid")
     groups = defaultdict(list)
     for row in rows:
-        if "sample_role" in row and row["sample_role"] != sample_role:
+        if set(group_columns) - set(row):
+            raise ValueError("plot_group_columns_missing")
+        if (
+            sample_role is not None
+            and "sample_role" in row
+            and row["sample_role"] != sample_role
+        ):
             raise ValueError("plot_sample_role_mismatch")
         key = tuple(
             str(row[name])
-            for name in ("candidate_id", "execution_mode", "episode_id")
+            for name in dict.fromkeys(
+                ("candidate_id", "execution_mode", "episode_id", *group_columns)
+            )
             if name in row
         )
         groups[key].append(row)
@@ -483,7 +506,11 @@ def plot_factor_ic(rows, *, source_reference, sample_role, timezone, summary=Fal
     """
     groups = defaultdict(list)
     for row in rows:
-        if "sample_role" in row and row["sample_role"] != sample_role:
+        if (
+            sample_role is not None
+            and "sample_role" in row
+            and row["sample_role"] != sample_role
+        ):
             raise ValueError("plot_sample_role_mismatch")
         groups[(row["signal"], row["label"])].append(row)
     figure, axes = _figure(
@@ -644,6 +671,7 @@ def plot_series(
     sample_role,
     timezone,
     categorical=False,
+    group_columns=(),
 ):
     """Display declared numerical columns without rolling or aggregating them.
 
@@ -659,7 +687,7 @@ def plot_series(
         or type(categorical) is not bool
     ):
         raise ValueError("plot_columns_invalid")
-    groups = _groups(list(rows), sample_role)
+    groups = _groups(list(rows), sample_role, group_columns)
     if not groups:
         raise ValueError("plot_columns_missing")
     figure, axes = _figure(
@@ -715,15 +743,26 @@ def plot(config):
     from quant_research_platform.storage.manifests import read_qrp_json_file
 
     config = qrp_json_mapping_snapshot(config)
-    required = {"kind", "inputs", "output", "sample_role"}
+    required = {"kind", "inputs", "output"}
     optional = {
         "curve": {"execution_mode"},
         "metrics": {"metric_id", "units"},
         "returns": set(),
         "factor_ic": {"summary"},
         "activity": set(),
-        "series": {"x_column", "value_columns", "title", "units", "categorical"},
+        "series": {
+            "x_column",
+            "value_columns",
+            "title",
+            "units",
+            "categorical",
+            "group_columns",
+        },
     }
+    for name, fields in optional.items():
+        fields.add("sample_role")
+        if name != "curve":
+            fields.add("row_filters")
     kind = config.get("kind")
     if kind in {"curve", "returns", "factor_ic", "activity"} or (
         kind == "series" and config.get("categorical", False) is not True
@@ -743,12 +782,13 @@ def plot(config):
     for key in (
         "inputs",
         "output",
-        "sample_role",
+        *(["sample_role"] if "sample_role" in config else []),
         *(["timezone"] if "timezone" in required else []),
         *(key for key in ("metric_id", "units", "title", "x_column") if key in config),
     ):
         if type(config[key]) is not str or not config[key]:
             raise ValueError("plot_config_value_invalid")
+    config.setdefault("sample_role", None)
     output = Path(config["output"])
     if output.suffix not in {".png", ".svg", ".pdf"}:
         raise ValueError("plot_output_format_invalid")
@@ -765,12 +805,106 @@ def plot(config):
         )
     else:
         if source.suffix == ".parquet":
-            rows = pd.read_parquet(source).to_dict("records")
+            from quant_research_platform.policy.lifecycle import closing_iterator
+            from quant_research_platform.storage.datasets.reading import (
+                _dataset_input_options,
+                _selection_filters,
+            )
+            from quant_research_platform.storage.parquet import (
+                _filter_arrow_batch,
+                _matching_row_groups,
+                _opened_parquet,
+            )
+
+            options = _dataset_input_options(
+                {"path": source, "row_filters": config.get("row_filters", [])}
+            )
+            with _opened_parquet(source) as (parquet, _handle):
+                schema = parquet.schema_arrow
+                filters = _selection_filters(
+                    schema,
+                    timestamp=None,
+                    time_window=None,
+                    years=None,
+                    row_filters=options["row_filters"],
+                )
+                common_columns = (
+                    "candidate_id",
+                    "execution_mode",
+                    "episode_id",
+                    "sample_role",
+                )
+                fields = {
+                    "metrics": ("metric_id", "value", "status", "reason"),
+                    "returns": (
+                        "end_at",
+                        "net_return",
+                        "return_status",
+                        "return_reason",
+                        "status",
+                        "reason",
+                    ),
+                    "factor_ic": (
+                        "signal",
+                        "label",
+                        "timestamp",
+                        "ic",
+                        "rankic",
+                        "mean_ic",
+                        "mean_rankic",
+                        "ic_reason",
+                        "rankic_reason",
+                    ),
+                    "activity": ("entry_at", "cost_drag", "realized_turnover"),
+                    "series": (
+                        config.get("x_column"),
+                        *config.get("value_columns", []),
+                        *config.get("group_columns", []),
+                    ),
+                }[kind]
+                wanted = set(
+                    (*common_columns, *fields, *(column for column, _, _ in filters))
+                )
+                columns = [name for name in schema.names if name in wanted]
+                rows = []
+                with closing_iterator(
+                    parquet.iter_batches(
+                        columns=columns,
+                        row_groups=_matching_row_groups(parquet, filters),
+                    )
+                ) as batches:
+                    for batch in batches:
+                        rows.extend(_filter_arrow_batch(batch, filters).to_pylist())
         elif source.suffix == ".json":
             payload = read_qrp_json_file(source)[1]
             if set(payload) != {"rows"} or type(payload["rows"]) is not list:
                 raise ValueError("plot_numeric_rows_required")
             rows = payload["rows"]
+            if "row_filters" in config:
+                import pyarrow as pa
+
+                from quant_research_platform.storage.datasets.reading import (
+                    _dataset_input_options,
+                    _selection_filters,
+                )
+                from quant_research_platform.storage.parquet import _filter_arrow_batch
+
+                table = pa.Table.from_pylist(rows)
+                options = _dataset_input_options(
+                    {"path": source, "row_filters": config["row_filters"]}
+                )
+                filters = _selection_filters(
+                    table.schema,
+                    timestamp=None,
+                    time_window=None,
+                    years=None,
+                    row_filters=options["row_filters"],
+                )
+                rows = [
+                    row
+                    for batch in table.to_batches()
+                    for row in _filter_arrow_batch(batch, filters).to_pylist()
+                ]
         else:
             raise ValueError("plot_numeric_file_required")
         common = {"source_reference": str(source), "sample_role": config["sample_role"]}
@@ -803,6 +937,7 @@ def plot(config):
                     for key in ("x_column", "value_columns", "title", "units")
                 },
                 categorical=config.get("categorical", False),
+                group_columns=config.get("group_columns", []),
             )
     import matplotlib.pyplot as plt
 

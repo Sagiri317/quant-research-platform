@@ -1059,7 +1059,11 @@ def test_hourly_owner_files_merge_transitive_ranges_with_bounded_handles(
                 assert [row["capture_seq"] for row in run.iter_records()] == list(
                     range(1, 9)
                 )
-        assert handles and all(handle.closed for handle in handles)
+        if mode == "same_owner_overlap":
+            assert not handles  # Conflicting ranges fail before opening raw data.
+        else:
+            assert handles
+        assert all(handle.closed for handle in handles)
     assert high_water <= 2
 
 
@@ -1121,8 +1125,8 @@ def test_recorder_run_rejects_member_replacement_between_capture_and_open(
 
     monkeypatch.setattr(replay, "open_filesystem_file", mutate_before_open)
     with pytest.raises(ValueError, match="^binance_raw_export_identity_changed$"):
-        with open_recorder_run(root):
-            pytest.fail("replaced recorder member admitted")
+        with open_recorder_run(root) as run:
+            list(run.iter_records())
     assert mutated == [True]
     assert Path(native_filesystem_path(member)).read_bytes() == original
 
@@ -1557,8 +1561,8 @@ def test_recorder_file_boundaries_preserve_serious_io(tmp_path, monkeypatch, bou
         with monkeypatch.context() as patch:
             patch.setattr(owner, operation, fail)
             with pytest.raises(OSError) as caught:
-                with open_recorder_run(root):
-                    pytest.fail("fatal file error was accepted")
+                with open_recorder_run(root) as run:
+                    list(run.iter_records())
     assert caught.value is primary
 
 
@@ -2224,3 +2228,46 @@ def test_recorder_rejects_windows_anchored_members_before_read(
     with pytest.raises(ValueError, match=f"^binance_replay_{reason}_invalid$"):
         with open_recorder_run(root):
             pass
+
+
+def test_replay_hashes_selected_members_once_during_decode(tmp_path, monkeypatch):
+    root = tmp_path / "run"
+    manifest = _write_run(
+        root, [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])]
+    )
+    members = {
+        root / item["path"]: item["compressed_bytes"] for item in manifest["files"]
+    }
+    coverage = manifest["capture"]["connection_intervals"]
+    members[root / coverage["path"]] = coverage["compressed_bytes"]
+    counts = {path: [0, 0] for path in members}
+    real_open = replay.open_filesystem_file
+
+    class Counted:
+        def __init__(self, handle, path):
+            self.handle, self.path = handle, path
+
+        def __getattr__(self, name):
+            return getattr(self.handle, name)
+
+        def read(self, size=-1):
+            result = self.handle.read(size)
+            counts[self.path][1] += len(result)
+            return result
+
+        def readinto(self, buffer):
+            count = self.handle.readinto(buffer)
+            counts[self.path][1] += count
+            return count
+
+    def counted(path, *args, **kwargs):
+        handle = real_open(path, *args, **kwargs)
+        if path in members:
+            counts[path][0] += 1
+            return Counted(handle, path)
+        return handle
+
+    monkeypatch.setattr(replay, "open_filesystem_file", counted)
+    with open_recorder_run(root) as run:
+        assert len(list(run.iter_records(data_kinds=("agg_trades",)))) == 1
+    assert counts == {path: [1, size] for path, size in members.items()}

@@ -126,20 +126,6 @@ def test_internal_manifest_keeps_provider_schema_field_names(tmp_path: Path) -> 
     assert manifests.read_manifest(path) == payload
 
 
-def test_json_directory_limit_precedes_content_reads(tmp_path: Path, monkeypatch):
-    for name in ("a", "b"):
-        (tmp_path / f"{name}.json").write_text(
-            '{"schema_id":"synthetic"}', encoding="utf-8"
-        )
-
-    def forbidden(*_args, **_kwargs):
-        raise AssertionError("content_read_before_member_limit")
-
-    monkeypatch.setattr(manifests, "read_qrp_json_file", forbidden)
-    with pytest.raises(ValueError, match="dataset_metadata_member_limit_exceeded"):
-        manifests.read_bounded_qrp_json_directory(tmp_path, max_members=1)
-
-
 @pytest.mark.parametrize(
     "writer_name", ("write_manifest", "write_internal_artifact_manifest")
 )

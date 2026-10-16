@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import os
+from collections.abc import Iterable, Sequence
+from contextlib import ExitStack
+from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
@@ -10,13 +13,38 @@ import pyarrow as pa
 
 from quant_research_platform.artifacts.outputs.prediction_validation import (
     validate_prediction_frame,
-    validate_prediction_output_metadata_shape,
 )
+from quant_research_platform.contracts.time import time_value_isoformat
+from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.atomic import (
     atomic_write_directory,
     atomic_write_json,
 )
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
+from quant_research_platform.storage.identity import (
+    open_filesystem_file,
+    require_unaliased_path,
+)
+from quant_research_platform.storage.parquet import parquet_table_writer
+
+
+def prediction_model_metadata(metadata):
+    """Project the single saved recipe into downstream eligibility/calibration facts.
+
+    This is an in-memory view, not a model load or a persisted identity copy.
+    """
+    recipe = metadata["model_facts"]["model"]
+    return {
+        **metadata["model_metadata"],
+        "model_algorithm": recipe["model_algorithm"],
+        "input_columns": [
+            *recipe["input_factor_columns"],
+            *recipe["input_feature_columns"],
+        ],
+        "target_column": recipe["target_column"],
+        "sample_filter_mode": recipe["sample_filter_mode"],
+    }
 
 
 def write_prediction_outputs(
@@ -25,7 +53,6 @@ def write_prediction_outputs(
     from quant_research_platform.artifacts.outputs.manifest import (
         output_manifest_payload,
     )
-    from quant_research_platform.artifacts.outputs.parquet import write_parquet_chunks
 
     destination = Path(output_path)
 
@@ -58,7 +85,7 @@ def write_prediction_outputs(
                 effective_prediction_end=summary.effective_prediction_end,
                 status="complete",
             )
-        validate_prediction_output_metadata_shape(final_metadata)
+        resources.close()
         if (
             metadata.get("prediction_rows") is not None
             and metadata["prediction_rows"] != final_metadata["prediction_rows"]
@@ -79,7 +106,8 @@ def write_prediction_outputs(
 
     from quant_research_platform.policy.lifecycle import closing_iterator
 
-    with closing_iterator(iter(output_chunks)) as chunks:
+    with closing_iterator(ExitStack()) as resources:
+        chunks = resources.enter_context(closing_iterator(iter(output_chunks)))
         if (
             metadata.get("prediction_rows") is not None
             and type(metadata["prediction_rows"]) is not int
@@ -89,9 +117,9 @@ def write_prediction_outputs(
     return destination
 
 
-def read_predictions(path: Path, *, time_window=None):
+def read_predictions(path: Path, *, columns=None, time_window=None):
     """Read selected predictions without fitting or discovery."""
-    from quant_research_platform.artifacts.outputs.bundle_validation import (
+    from quant_research_platform.artifacts.outputs.manifest import (
         validate_output_bundle,
     )
 
@@ -101,7 +129,11 @@ def read_predictions(path: Path, *, time_window=None):
     metadata = manifest["metadata"]
     from quant_research_platform.policy.lifecycle import closing_iterator
 
-    with closing_iterator(iter_predictions(path, time_window=time_window)) as chunks:
+    with closing_iterator(
+        _iter_prediction_member(
+            path, metadata, columns=columns, time_window=time_window
+        )
+    ) as chunks:
         frames = list(chunks)
     frame = (
         pd.concat(frames, ignore_index=True)
@@ -115,24 +147,31 @@ def read_predictions(path: Path, *, time_window=None):
             }
         )
     )
+    if columns is not None:
+        frame = frame.loc[:, list(columns)]
     return frame, metadata
 
 
 def iter_predictions(path: Path, *, columns=None, time_window=None):
     """Project requested prediction columns/window from the chosen native member."""
-    from quant_research_platform.artifacts.outputs.bundle_validation import (
+    from quant_research_platform.artifacts.outputs.manifest import (
         validate_output_bundle,
     )
-    from quant_research_platform.policy.lifecycle import closing_iterator
+
+    manifest, _members = validate_output_bundle(
+        Path(path), expected_definition_id="prediction_outputs"
+    )
+    return _iter_prediction_member(
+        path, manifest["metadata"], columns=columns, time_window=time_window
+    )
+
+
+def _iter_prediction_member(path, metadata, *, columns=None, time_window=None):
     from quant_research_platform.storage.datasets.reading import (
         parquet_filters_for_time_window,
     )
     from quant_research_platform.storage.parquet import iter_dataset_part_batches
 
-    manifest, _members = validate_output_bundle(
-        Path(path), expected_definition_id="prediction_outputs"
-    )
-    metadata = manifest["metadata"]
     requested = (
         ("timestamp", "asset_id", "prediction_score", "prediction_rank_score")
         if columns is None
@@ -145,7 +184,7 @@ def iter_predictions(path: Path, *, columns=None, time_window=None):
         - {"timestamp", "asset_id", "prediction_score", "prediction_rank_score"}
     ):
         raise ValueError("prediction_projection_columns_invalid")
-    physical = ("timestamp", "asset_id", "prediction_score", "prediction_rank_score")
+    physical = tuple(dict.fromkeys(("timestamp", "asset_id", *requested)))
     filters = parquet_filters_for_time_window(
         timestamp_column="timestamp", time_window=time_window
     )
@@ -184,6 +223,62 @@ def iter_predictions(path: Path, *, columns=None, time_window=None):
         raise ValueError("prediction_metadata_inconsistent")
 
 
+@dataclass(frozen=True)
+class _PredictionOutputWriteSummary:
+    row_count: int
+    effective_prediction_end: str
+
+
+def write_parquet_chunks(
+    frames: Iterable[pd.DataFrame],
+    path: Path,
+    *,
+    metadata: dict,
+) -> _PredictionOutputWriteSummary:
+    path = Path(path)
+    require_unaliased_path(path, error="invalid_output_write_path")
+    row_count = 0
+    effective_prediction_end = None
+    with closing_iterator(iter(frames)) as active_frames:
+        handle = open_filesystem_file(path, "xb")
+        with closing_iterator(handle):
+            require_unaliased_path(path.parent, error="invalid_output_write_path")
+            with parquet_table_writer(handle, compression="zstd") as write_table:
+                key_index = ExactPrimaryKeyIndex(primary_key=("timestamp", "asset_id"))
+                for frame in active_frames:
+                    if not isinstance(frame, pd.DataFrame):
+                        raise TypeError("invalid_artifact_output_frame")
+                    validate_prediction_frame(frame, metadata)
+                    if frame.empty:
+                        continue
+                    timestamps = strict_timestamp_series(
+                        frame["timestamp"],
+                        error="prediction_metadata_inconsistent",
+                    )
+                    selected = frame.assign(timestamp=timestamps)
+                    current_end = time_value_isoformat(pd.Timestamp(timestamps.max()))
+                    if effective_prediction_end is None or pd.Timestamp(
+                        current_end
+                    ) > pd.Timestamp(effective_prediction_end):
+                        effective_prediction_end = current_end
+                    table = pa.Table.from_pandas(selected, preserve_index=False)
+                    try:
+                        duplicates = key_index.add_table(table)
+                    except ValueError as exc:
+                        raise ValueError("invalid_prediction_keys") from exc
+                    if duplicates:
+                        raise ValueError("duplicate_prediction_keys")
+                    write_table(table)
+                    row_count += len(selected)
+            handle.flush()
+            os.fsync(handle.fileno())
+    if row_count == 0 or effective_prediction_end is None:
+        raise ValueError("empty_prediction_window")
+    return _PredictionOutputWriteSummary(
+        row_count=row_count, effective_prediction_end=effective_prediction_end
+    )
+
+
 class _PredictionLookup:
     def __init__(
         self,
@@ -220,41 +315,3 @@ class _PredictionLookup:
     def coverage_counts(self) -> tuple[int, int]:
         # Matching moves each key out of the outstanding partition.
         return (self._index.float_value_count(namespace="prediction"), 0)
-
-
-def read_prediction_output_bundle(
-    root: Path, *, time_window=None, prediction_column="prediction_score"
-):
-    from quant_research_platform.artifacts.outputs.bundle_validation import (
-        validate_output_bundle,
-    )
-    from quant_research_platform.policy.lifecycle import closing_iterator
-
-    manifest, _members = validate_output_bundle(
-        Path(root), expected_definition_id="prediction_outputs"
-    )
-    if prediction_column not in {"prediction_score", "prediction_rank_score"}:
-        raise ValueError("prediction_column_invalid")
-    index = ExactPrimaryKeyIndex(primary_key=("timestamp", "asset_id"))
-    lookup = _PredictionLookup(
-        index=index,
-        primary_key=("timestamp", "asset_id"),
-        prediction_column=prediction_column,
-    )
-    with closing_iterator(
-        iter_predictions(
-            root,
-            columns=("timestamp", "asset_id", prediction_column),
-            time_window=time_window,
-        )
-    ) as frames:
-        for frame in frames:
-            index.add_float_value_table(
-                pa.Table.from_pandas(frame, preserve_index=False),
-                namespace="prediction",
-                value_column=prediction_column,
-                validation_column=prediction_column,
-                retain_values=True,
-            )
-            lookup.row_count += len(frame)
-    return manifest, lookup

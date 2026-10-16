@@ -100,6 +100,7 @@ def test_hft_prediction_alignment_requires_usable_rows_and_rejects_extras(tmp_pa
         "sample_filter_mode": "eligible",
     }
     metadata = {
+        "training_asset_ids": ["btc_usdt"],
         "model_algorithm": "linear_regression",
         "input_columns": ["x"],
         "sample_filter_mode": "eligible",
@@ -336,6 +337,7 @@ def test_crypto_consumption_respects_explicit_prediction_asset_domain(tmp_path):
     root = tmp_path / "two-assets"
     frame = _inputs(root, [100, 100], assets=["btc_usdt", "eth_usdt"])
     metadata = {
+        "training_asset_ids": ["btc_usdt", "eth_usdt"],
         "model_algorithm": "linear_regression",
         "input_columns": ["x"],
         "sample_filter_mode": "eligible",
@@ -367,3 +369,9 @@ def test_crypto_consumption_respects_explicit_prediction_asset_domain(tmp_path):
     assert [row["asset_id"] for row in rows("btc_usdt")] == ["btc_usdt"]
     with pytest.raises(ValueError, match="asset_outside_scope"):
         rows("eth_usdt")
+
+    # A real explicit forecast domain may include assets outside the training set.
+    facts["prediction_asset_ids"] = ["btc_usdt", "eth_usdt"]
+    metadata["training_asset_ids"] = ["btc_usdt"]
+    predictions = frame.loc[:, ["timestamp", "asset_id"]].assign(prediction_score=0.5)
+    assert [row["asset_id"] for row in rows("eth_usdt")] == ["eth_usdt"]

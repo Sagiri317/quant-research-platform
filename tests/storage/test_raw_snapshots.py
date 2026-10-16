@@ -100,11 +100,9 @@ def test_raw_cell_codec_preserves_types_and_canonical_bytes():
         encode_raw_cell(cyclic)
 
 
-@pytest.mark.parametrize("field", ["byte_count", "metadata"])
-def test_raw_manifest_expected_identity_preserves_json_numeric_types(tmp_path, field):
+@pytest.mark.parametrize("field", ["byte_count", "row_count", "sha256"])
+def test_raw_manifest_validates_consumed_size_rows_and_digest(tmp_path, field):
     from copy import deepcopy
-
-    from quant_research_platform.contracts.json_codec import canonical_identity_bytes
 
     root = tmp_path / "typed_snapshot"
     write_csv_snapshot(
@@ -124,11 +122,11 @@ def test_raw_manifest_expected_identity_preserves_json_numeric_types(tmp_path, f
     changed = deepcopy(manifest)
     if field == "byte_count":
         changed["byte_count"] = float(changed["byte_count"])
+    elif field == "row_count":
+        changed[field] += 1
     else:
-        changed["metadata"]["revision"] = True
-    assert changed == manifest
-    assert canonical_identity_bytes(changed) != canonical_identity_bytes(manifest)
-    with pytest.raises(ValueError, match="raw_csv_metadata_invalid"):
+        changed[field] = "0" * 64
+    with pytest.raises(ValueError, match="raw_csv_(metadata|content)_invalid"):
         list(iter_csv_snapshot(root, expected_manifest=changed))
 
 

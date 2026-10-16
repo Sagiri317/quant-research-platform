@@ -48,45 +48,33 @@ def test_dataset_session_returns_fresh_contract_views_and_keeps_frozen_truth(
     assert session.logical_dtypes == expected_logical
 
 
-def test_writer_observes_each_closed_part_once_and_passes_live_receipt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "writer_receipt")
+def test_writer_validates_each_canonical_part_without_full_readback(
+    tmp_path, monkeypatch
+):
+    root = make_dataset_artifact_root(tmp_path, "canonical_stream")
     frame = make_default_dataset_frame()
-    observed_paths: list[Path] = []
-    decoder = dataset_writing.iter_declared_parquet_member_batches
-    receipt_checks: list[bool] = []
+    observed = []
+    original = dataset_writing.inspect_dataset_part
 
-    def record_decode(path, **kwargs):
-        observed_paths.append(Path(path))
-        yield from decoder(path, **kwargs)
+    def record_footer(path, **kwargs):
+        observed.append(Path(path))
+        return original(path, **kwargs)
 
-    def validate_receipt(receipt: dataset_writing.DatasetWriteReceipt) -> None:
-        receipt_checks.append(
-            receipt.exact_primary_key_index.identity_payload_count(namespace="dataset")
-            == len(frame)
-        )
-        assert receipt.exact_primary_key_index.add_table(
-            pa.Table.from_pandas(frame, preserve_index=False)
-        ) == len(frame)
+    def reject_full_read(*_args, **_kwargs):
+        raise AssertionError("writer_redecoded_canonical_rows")
 
+    monkeypatch.setattr(dataset_writing, "inspect_dataset_part", record_footer)
     monkeypatch.setattr(
-        dataset_writing, "iter_declared_parquet_member_batches", record_decode
+        dataset_reading, "iter_declared_parquet_member_batches", reject_full_read
     )
-    dataset_writing.write_dataset(
+    result = dataset_writing.write_dataset(
         root,
         (frame.iloc[:1].copy(), frame.iloc[1:].copy()),
-        spec=make_processed_dataset_spec("writer_receipt"),
-        staged_validator=validate_receipt,
+        spec=make_processed_dataset_spec("canonical_stream"),
     )
-    assert receipt_checks == [True]
-    assert len(observed_paths) == len(set(observed_paths))
-    manifest = json.loads(
-        Path(native_filesystem_path(root / "_manifest" / "manifest.json")).read_text(
-            encoding="utf-8"
-        )
-    )
-    assert len(observed_paths) == manifest["file_count"]
+    assert len(observed) == len(set(observed)) == result.file_count
+    assert result.row_count == len(frame)
+    assert result.manifest["duplicate_primary_key_count"] == 0
 
 
 def test_open_dataset_session_preserves_missing_manifest_preflight(
@@ -113,30 +101,15 @@ def test_open_dataset_session_preserves_missing_manifest_preflight(
     assert metadata_reads == 0
 
 
-def test_writer_manifest_uses_persisted_bytes_not_prewrite_summary(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "persisted_truth")
-    original = dataset_writing.write_parquet_file
-
-    def write_infinite(table, path, **kwargs):
-        position = table.schema.get_field_index("value")
-        persisted = table.set_column(
-            position,
-            table.schema.field(position),
-            pa.array(
-                [float("inf")] * table.num_rows, type=table.schema.field(position).type
-            ),
-        )
-        return original(persisted, path, **kwargs)
-
-    monkeypatch.setattr(dataset_writing, "write_parquet_file", write_infinite)
+def test_canonical_nonfinite_rows_rejected_before_publication(tmp_path: Path) -> None:
+    root = make_dataset_artifact_root(tmp_path, "canonical_invalid")
+    frame = make_default_dataset_frame().assign(value=float("inf"))
     with pytest.raises(ValueError, match="dataset_infinite_value"):
         write_dataset(
-            root,
-            make_default_dataset_frame(),
-            spec=make_processed_dataset_spec("persisted_truth"),
+            root, frame, spec=make_processed_dataset_spec("canonical_invalid")
         )
+    assert not root.exists()
+    assert not list(root.parent.glob(".a-*"))
 
 
 def test_exact_primary_key_index_supports_nested_arrow_key_identity() -> None:
@@ -182,7 +155,6 @@ def test_dataset_global_nullable_integer_plan_is_chunk_order_independent(
             )
         )
     assert manifests[0]["logical_dtypes"] == manifests[1]["logical_dtypes"]
-    assert manifests[0]["logical_dtype_hash"] == manifests[1]["logical_dtype_hash"]
 
 
 def test_chunked_reader_preserves_declared_object_dtype_like_materialized(
@@ -260,26 +232,27 @@ def test_writer_rejects_malformed_persisted_logical_dtype_metadata(
         )
 
 
-def test_writer_rejects_persisted_category_outside_declared_domain(
+def test_writer_rejects_canonical_category_outside_declared_domain(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "forged_category_domain")
     frame = make_default_dataset_frame()
     frame["asset_id"] = pd.Categorical(frame["asset_id"])
-    original = dataset_writing.write_parquet_file
+    original = dataset_writing._WriteStats.table_for_frame
 
-    def write_extra_domain(current, path, **kwargs):
+    def write_extra_domain(owner, source, **kwargs):
+        current = original(owner, source, **kwargs)
         persisted = current.to_pandas(use_threads=False)
         persisted["asset_id"] = persisted["asset_id"].cat.add_categories(
             ["FORGED_UNUSED_CATEGORY"]
         )
         persisted.loc[persisted.index[0], "asset_id"] = "FORGED_UNUSED_CATEGORY"
         forged = pa.Table.from_pandas(persisted, preserve_index=False)
-        return original(
-            forged.replace_schema_metadata(current.schema.metadata), path, **kwargs
-        )
+        return forged.cast(current.schema)
 
-    monkeypatch.setattr(dataset_writing, "write_parquet_file", write_extra_domain)
+    monkeypatch.setattr(
+        dataset_writing._WriteStats, "table_for_frame", write_extra_domain
+    )
     with pytest.raises(ValueError, match="dataset_categorical_domain_mismatch"):
         write_dataset(
             root, frame, spec=make_processed_dataset_spec("forged_category_domain")

@@ -10,7 +10,10 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 
-from quant_research_platform.contracts.portfolios import ExecutionAssumptions
+from quant_research_platform.contracts.portfolios import (
+    ExecutionAssumptions,
+    PortfolioTargetBlocked,
+)
 from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_real_numeric_series,
@@ -258,6 +261,8 @@ def optimize_portfolio(
 
 
 def _risk_variances(active, exposure, covariance, specific) -> tuple[float, float]:
+    nonzero = active != 0.0
+    active, exposure, specific = active[nonzero], exposure[nonzero], specific[nonzero]
     factor_active = active @ exposure
     factor = float(factor_active @ covariance @ factor_active)
     residual = float(np.sum(specific * active**2))
@@ -408,3 +413,43 @@ def _validate_config(config: OptimizerConfig) -> None:
         raise ValueError("optimizer_config_invalid")
     if type(config.solver_maxiter) is not int or config.solver_maxiter <= 0:
         raise ValueError("optimizer_config_invalid")
+
+
+def _project_neutral_target(target, context):
+    """Minimize 0.5 ||w-q||², w>=0, sum(w)=1 and A w=A b over full U."""
+    q = target.reindex(context.index, fill_value=0.0).to_numpy(dtype="float64")
+    if not np.isfinite(q).all() or np.any(q < 0):
+        raise ValueError("target_weights_invalid")
+    b = context.benchmark_weight.to_numpy(dtype="float64")
+    exposures = context.drop(columns="benchmark_weight").to_numpy(dtype="float64").T
+    matrix = np.vstack((np.ones(len(b)), exposures))
+    # Remove only algebraically redundant equalities; retain their residual checks.
+    _, singular, vectors = np.linalg.svd(matrix, full_matrices=False)
+    rank = np.count_nonzero(
+        singular > singular[0] * max(matrix.shape) * np.finfo(float).eps
+    )
+    constraints = vectors[:rank]
+    values = constraints @ b
+    solved = minimize(
+        lambda w: float(0.5 * np.dot(w - q, w - q)),
+        b,
+        jac=lambda w: w - q,
+        method="SLSQP",
+        bounds=[(0.0, None)] * len(b),
+        constraints={
+            "type": "eq",
+            "fun": lambda w: constraints @ w - values,
+            "jac": lambda w: constraints,
+        },
+        options={"ftol": 1e-12, "maxiter": 1000},
+    )
+    if not solved.success:
+        raise PortfolioTargetBlocked("target_neutrality_solver_failed")
+    weights = np.maximum(solved.x, 0.0)
+    if not np.isfinite(weights).all() or not np.allclose(
+        matrix @ weights, matrix @ b, rtol=0.0, atol=1e-8
+    ):
+        raise PortfolioTargetBlocked("target_neutrality_infeasible")
+    return pd.Series(
+        weights, index=context.index, dtype="float64", name="target_weight"
+    )

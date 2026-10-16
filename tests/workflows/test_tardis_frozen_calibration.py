@@ -348,7 +348,7 @@ def test_final_maker_gate_uses_only_required_fold_but_validates_full_artifact(
             "latency_ms": 10,
         },
         "models": [
-            {"model": value, "predictions": value + "-predictions"}
+            {"predictions": value + "-predictions"}
             for value in metadata["model_ids"]["fold_2"]
         ],
         "calibration": str(tmp_path / "calibration"),
@@ -386,7 +386,8 @@ def test_final_maker_gate_uses_only_required_fold_but_validates_full_artifact(
     )
     monkeypatch.setattr(portfolio, "open_market_source", open_run)
 
-    def model_evidence(model, *_args, **_kwargs):
+    def prediction_evidence(predictions, *_args, **_kwargs):
+        model = predictions.removesuffix("-predictions")
         index = metadata["model_ids"]["fold_2"].index(model)
         return (
             {},
@@ -402,7 +403,7 @@ def test_final_maker_gate_uses_only_required_fold_but_validates_full_artifact(
             None,
         )
 
-    monkeypatch.setattr(portfolio, "_model_evidence", model_evidence)
+    monkeypatch.setattr(portfolio, "_prediction_evidence", prediction_evidence)
     with pytest.raises(
         RawReached if last_defined else PortfolioTargetBlocked
     ) as caught:

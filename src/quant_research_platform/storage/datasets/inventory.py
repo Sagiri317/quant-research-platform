@@ -51,9 +51,12 @@ class DatasetSessionInventory:
         self._coordinates: set[tuple[int, int, int]] = set()
         self._years: dict[int, str] = {}
 
-    def discover(self, spec: Mapping[str, Any]) -> None:
+    def discover(self, spec: Mapping[str, Any], *, years=None) -> None:
         self._scan_filesystem(
-            spec, on_year=self._register_year, on_path=self._register_candidate
+            spec,
+            on_year=self._register_year,
+            on_path=self._register_candidate,
+            years=years,
         )
         self.sort_parts()
 
@@ -84,7 +87,7 @@ class DatasetSessionInventory:
         if coordinates[0]:
             self._register_year(coordinates[1], path.parent.name)
 
-    def _scan_filesystem(self, spec, *, on_year, on_path) -> None:
+    def _scan_filesystem(self, spec, *, on_year, on_path, years=None) -> None:
         partition_columns = tuple(
             str(column) for column in spec.get("partition_columns", ())
         )
@@ -101,9 +104,12 @@ class DatasetSessionInventory:
                 for path, is_directory, _ in entries:
                     if not path.name.casefold().startswith("year="):
                         continue
+                    year = parse_year_partition_label(path.name)
+                    if years is not None and year not in years:
+                        continue
                     require_unaliased_path(path, error="invalid_dataset_part_files")
                     if is_directory:
-                        on_year(parse_year_partition_label(path.name), path.name)
+                        on_year(year, path.name)
         pending = [_directory_entries(self.data_root)]
         try:
             while pending:
@@ -112,6 +118,14 @@ class DatasetSessionInventory:
                     path, is_directory, is_alias = next(entries)
                 except StopIteration:
                     pending.pop().close()
+                    continue
+                if (
+                    partitioned
+                    and years is not None
+                    and path.parent == self.data_root
+                    and path.name.casefold().startswith("year=")
+                    and parse_year_partition_label(path.name) not in years
+                ):
                     continue
                 if is_directory:
                     if not is_alias:

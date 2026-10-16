@@ -449,3 +449,74 @@ def test_curve_clock_distinguishes_crypto_epoch_from_daily_civil_dates(
         data, sample_role="test", timezone="Asia/Shanghai"
     )
     assert pd.Timestamp(axes[0].lines[0].get_xdata()[0]).hour == expected_hour
+
+
+def test_series_long_table_group_filter_and_physical_projection(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    from quant_research_platform.storage import parquet as storage
+
+    source = tmp_path / "strata.parquet"
+    frame = pd.DataFrame(
+        [
+            {
+                "timestamp": date,
+                "stratum": stratum,
+                "signal": "value",
+                "sample": sample,
+                "mean": float(i),
+                "unused_payload": b"unused" * 1000,
+            }
+            for i, date in enumerate(pd.bdate_range("2024-01-02", periods=3))
+            for stratum in ("large", "small")
+            for sample in ("own", "common")
+        ]
+    )
+    frame.to_parquet(source, index=False)
+    projections = []
+    original = storage._opened_parquet
+
+    @contextmanager
+    def observed(path):
+        with original(path) as (parquet, handle):
+
+            class Observed:
+                def __getattr__(self, name):
+                    return getattr(parquet, name)
+
+                def iter_batches(self, **kwargs):
+                    projections.append(kwargs["columns"])
+                    return parquet.iter_batches(**kwargs)
+
+            yield Observed(), handle
+
+    monkeypatch.setattr(storage, "_opened_parquet", observed)
+    result = plots.plot(
+        {
+            "kind": "series",
+            "inputs": str(source),
+            "output": str(tmp_path / "strata.png"),
+            "timezone": "UTC",
+            "x_column": "timestamp",
+            "value_columns": ["mean"],
+            "group_columns": ["stratum", "signal"],
+            "row_filters": [["sample", "in", ["common"]]],
+            "title": "分层指标",
+            "units": "相关系数",
+        }
+    )
+    assert result.is_file()
+    assert len(projections) == 1
+    assert set(projections[0]) == {"timestamp", "stratum", "signal", "sample", "mean"}
+    _, axes = plots.plot_series(
+        frame.loc[frame["sample"].eq("common")].to_dict("records"),
+        x_column="timestamp",
+        value_columns=["mean"],
+        group_columns=["stratum", "signal"],
+        title="分层指标",
+        units="相关系数",
+        source_reference="explicit",
+        sample_role="任意研究区间",
+        timezone="UTC",
+    )
+    assert len(axes) == 2 and all(len(axis.lines[0].get_ydata()) == 3 for axis in axes)

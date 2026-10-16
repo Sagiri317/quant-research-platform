@@ -22,9 +22,6 @@ from quant_research_platform.markets.implementations.crypto.hft import (
     HFT_GRID_MS,
     iter_label_frames,
 )
-from quant_research_platform.research.protocols.crypto_hft import (
-    build_hft_model_catalog,
-)
 from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
 from tests.helpers.binance_hft import (
     KNOWN_NO_FUNDING,
@@ -34,7 +31,7 @@ from tests.helpers.binance_hft import (
     _row_timestamp_ms,
 )
 from tests.helpers.portfolio_ledger import capture_fill_rows
-from tests.helpers.research_configuration import research_configuration
+from tests.helpers.research_configuration import model_specs, research_configuration
 
 
 def _state(
@@ -604,7 +601,7 @@ def test_hft_grid_is_the_only_model_and_label_step_owner() -> None:
     config = research_configuration("crypto", "baseline")
     for item in config["models"]:
         item["max_train_rows"] = 1
-    models = build_hft_model_catalog(configuration=config).list()
+    models = model_specs(config["models"])
     assert all(not hasattr(model, "purge_gap_steps") for model in models)
     rows = [
         {"timestamp_ms": index * HFT_GRID_MS, "segment_id": "book-1", "mid": 100.0}

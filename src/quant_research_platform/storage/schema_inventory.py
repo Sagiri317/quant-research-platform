@@ -151,9 +151,7 @@ def _inventory_item(
     *,
     important_null_count_columns: frozenset[str],
 ) -> dict[str, Any]:
-    session = open_dataset_session(
-        artifact_root, columns=None, time_window=None, require_consumable=False
-    )
+    session = open_dataset_session(artifact_root, columns=None, time_window=None)
     return _inventory_item_from_session(
         project_root,
         artifact_root,

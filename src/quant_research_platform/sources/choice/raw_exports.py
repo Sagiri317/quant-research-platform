@@ -234,16 +234,15 @@ class ChoiceRawSession:
 
 
 def read_choice_response(
-    root: Path, request: ChoiceRequest, *, expected_metadata_identity=None
+    root: Path, request: ChoiceRequest, *, manifest=None
 ) -> dict[str, object]:
     """Restore a fully verified SDK response."""
     request.payload()
     metadata = response = header = {}
     data = [] if request.endpoint == "sector" else {}
     row = value = None
-    manifest = read_qrp_json_file(
-        root / "response.metadata.json",
-    )[1]
+    if manifest is None:
+        manifest = read_qrp_json_file(root / "response.metadata.json")[1]
     metadata = manifest["metadata"]
     with closing_iterator(
         _validated_rows(root, request, metadata, manifest=manifest)

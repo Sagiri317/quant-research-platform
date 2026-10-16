@@ -437,11 +437,11 @@ def test_scaler_retains_small_variation_on_large_origin():
 def test_pearson_rounding_counterexamples_reach_published_consumers(
     tmp_path, kind, left_hex, right_hex, sign
 ):
-    from quant_research_platform.artifacts.outputs.bundle_validation import (
-        validate_output_bundle,
-    )
     from quant_research_platform.artifacts.outputs.evaluation import (
         write_evaluation_outputs_from_chunks,
+    )
+    from quant_research_platform.artifacts.outputs.manifest import (
+        validate_output_bundle,
     )
     from quant_research_platform.research.evaluations.engine import (
         build_evaluation_result_from_frames,

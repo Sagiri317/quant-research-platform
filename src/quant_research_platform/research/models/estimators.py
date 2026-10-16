@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from importlib import import_module
 
-from quant_research_platform.contracts.models import ModelSpec
+from quant_research_platform.contracts.models import (
+    _PARALLEL_MODEL_ALGORITHMS,
+    DEFAULT_MODEL_THREAD_COUNT,
+    ModelSpec,
+    _model_algorithm_facts,
+    _resolved_model_thread_count,
+    _thaw_model_hyperparameters,
+)
 from quant_research_platform.research.models.rank_ensemble import (
     EqualWeightRankEnsembleFactory,
     ICWeightedRankEnsembleFactory,
 )
+from quant_research_platform.runtime.resources import model_cpu_capacity
 
 
 def ridge_regression_estimator(spec: ModelSpec, params: dict[str, object]) -> object:
@@ -96,3 +105,55 @@ _MODEL_ESTIMATOR_FACTORIES: dict[
     "equal_weight_rank_ensemble": equal_weight_rank_ensemble,
     "ic_weighted_rank_ensemble": ic_weighted_rank_ensemble,
 }
+
+
+def model_dependency_status(algorithm: str) -> dict[str, str]:
+    facts = _model_algorithm_facts(algorithm)
+    package = facts.dependency_package
+    if package is None:
+        return {"status": "available", "package": "internal"}
+    try:
+        module = import_module(package)
+    except ImportError:
+        return {"status": "missing", "package": package, "version": "unavailable"}
+    version = getattr(module, "__version__", None)
+    if not isinstance(version, str) or not version:
+        raise RuntimeError("model_dependency_version_unavailable")
+    return {"status": "available", "package": package, "version": version}
+
+
+def require_model_dependency(algorithm: str) -> dict[str, str]:
+    status = model_dependency_status(algorithm)
+    if status["status"] == "missing":
+        raise ImportError(f"model_dependency_unavailable: {status['package']}")
+    return status
+
+
+def build_estimator_from_model_spec(spec: ModelSpec) -> object | None:
+    params = resolved_model_hyperparameters(spec)
+    require_model_dependency(spec.model_algorithm)
+    if spec.model_algorithm == "linear_regression":
+        return None
+    factory = _MODEL_ESTIMATOR_FACTORIES.get(spec.model_algorithm)
+    if factory is None:
+        raise ValueError("unsupported_model_algorithm")
+    return factory(spec, params)
+
+
+def resolved_model_hyperparameters(spec: ModelSpec) -> dict[str, object]:
+    params = _thaw_model_hyperparameters(spec.hyperparameters)
+    if spec.model_algorithm in _PARALLEL_MODEL_ALGORITHMS and "n_jobs" in params:
+        physical, available = model_cpu_capacity()
+        params["n_jobs"] = _resolved_model_thread_count(
+            params["n_jobs"], physical_cores=physical, available_cores=available
+        )
+    return params
+
+
+def model_thread_count(spec: ModelSpec) -> int:
+    if spec.model_algorithm not in _PARALLEL_MODEL_ALGORITHMS:
+        return DEFAULT_MODEL_THREAD_COUNT
+    params = resolved_model_hyperparameters(spec)
+    if "n_jobs" not in params:
+        return DEFAULT_MODEL_THREAD_COUNT
+    return int(params["n_jobs"])

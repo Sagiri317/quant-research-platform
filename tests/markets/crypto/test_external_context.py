@@ -122,8 +122,8 @@ def test_external_archive_units_clocks_and_invalid_rows_reach_publication(
         open_dataset_session,
     )
     from quant_research_platform.storage.datasets.writing import write_dataset
-    from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.binance_hft import _coverage, coverage_lookup
+    from tests.helpers.paths import StorageLayout
     from tests.markets.crypto.test_hft import _state
 
     class Response(io.BytesIO):
@@ -173,7 +173,6 @@ def test_external_archive_units_clocks_and_invalid_rows_reach_publication(
         producer=partial(
             producer.produce_normalized_context,
             read_records=normalized.iter_records,
-            source_identity=identity_reader,
             source_schema_id=normalized.SCHEMA_ID,
             archives=archives,
         ),
@@ -313,13 +312,55 @@ def test_external_archive_units_clocks_and_invalid_rows_reach_publication(
         source_catalog=None,
         raw_root=binding.raw_root,
     )
-    with binding.producer(spec, **request) as (chunks, metadata):
-        write_dataset(
-            output_root,
-            chunks,
-            spec=spec,
-            metadata=metadata,
+    from collections import Counter
+    from pathlib import Path
+
+    from quant_research_platform.markets.prepare import prepare
+    from quant_research_platform.sources.tardis import raw as raw_owner
+    from tests.sources.test_preparation_source_io import CountedFile
+
+    opened, consumed, manifest_reads, handles = Counter(), Counter(), Counter(), []
+    open_file, read_manifest = raw_owner.open_filesystem_file, normalized.read_manifest
+
+    def tracked_file(path, *args, **kwargs):
+        handle = open_file(path, *args, **kwargs)
+        path = Path(path)
+        opened[path] += 1
+        handles.append(handle)
+        return CountedFile(handle, path, consumed)
+
+    def tracked_manifest(path):
+        manifest_reads[path] += 1
+        return read_manifest(path)
+
+    with monkeypatch.context() as audit:
+        audit.setattr(raw_owner, "open_filesystem_file", tracked_file)
+        audit.setattr(normalized, "read_manifest", tracked_manifest)
+        prepare(
+            {
+                "market_id": "crypto",
+                "data_id": data_id,
+                "inputs": {key: str(value) for key, value in request["inputs"].items()},
+                "time_window": {
+                    "start": start.isoformat(),
+                    "end": window.end.isoformat(),
+                },
+                "output_root": str(output_root),
+                "source": {"root": str(binding.raw_root), "archives": archives},
+                "parameters": {"max_age_ms": 200, "input_delay_ms": 0},
+            }
         )
+    selected_paths = [
+        binding.raw_root / relative / "data.csv.gz"
+        for kinds in archives.values()
+        for paths in kinds.values()
+        for relative in paths
+        if relative[:10] <= source_end
+    ]
+    assert opened == Counter({path: 1 for path in selected_paths})
+    assert consumed == Counter({path: path.stat().st_size for path in selected_paths})
+    assert manifest_reads and set(manifest_reads.values()) == {1}
+    assert handles and all(handle.closed for handle in handles)
     session = open_dataset_session(output_root, columns=None, time_window=None)
     assert session.manifest["source_evidence"] == {
         "schema_id": normalized.SCHEMA_ID,
@@ -409,6 +450,37 @@ def test_external_archive_units_clocks_and_invalid_rows_reach_publication(
     } == good
     assert binding.source_identity(binding.raw_root, data_id) == expected_hash
 
+    wrong_scope = {symbol: dict(kinds) for symbol, kinds in archives.items()}
+    wrong_scope[symbols[0]]["quotes"] = archives[symbols[1]]["quotes"]
+    with pytest.raises(ValueError, match="tardis_normalized_scope_invalid"):
+        with binding.producer(spec, **request, archives=wrong_scope) as (
+            chunks,
+            metadata,
+        ):
+            write_dataset(rejected_root, chunks, spec=spec, metadata=metadata)
+    assert not rejected_root.exists()
+
+    # Even an empty target selection must admit every required source before publish.
+    empty_request = request | {
+        "inputs": {
+            ids.HFT_PANEL_DATA_ID: {
+                "path": str(request["inputs"][ids.HFT_PANEL_DATA_ID]),
+                "row_filters": [["asset_id", "==", "absent"]],
+            }
+        }
+    }
+    source_file = guard_manifest.parent / "data.csv.gz"
+    original_data = source_file.read_bytes()
+    source_file.unlink()
+    try:
+        with pytest.raises(ValueError, match="tardis_raw_identity_changed"):
+            with binding.producer(spec, **empty_request) as (chunks, metadata):
+                assert "manifest_hash" not in metadata["source_evidence"]
+                write_dataset(rejected_root, chunks, spec=spec, metadata=metadata)
+    finally:
+        source_file.write_bytes(original_data)
+    assert not rejected_root.exists()
+
 
 @pytest.mark.parametrize(
     "asset,old,new,transition",
@@ -434,7 +506,7 @@ def test_okx_dated_face_value_native_csv_to_persisted_flow(
     hft_processed_catalog = processed_module.hft_processed_catalog
     from quant_research_platform.sources.tardis.normalized import _rows
     from quant_research_platform.storage.datasets import read_dataset, write_dataset
-    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.paths import StorageLayout
 
     definition = crypto_producer.EXTERNAL_INSTRUMENTS["okx"]
     start = (

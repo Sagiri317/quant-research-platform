@@ -39,6 +39,7 @@ def compute_ic_and_grouped_label_values(
     for timestamp, timestamp_frame in panel.groupby(spec.timestamp_column, sort=True):
         for label in spec.label_columns:
             label_values = timestamp_frame[label].to_numpy(dtype="float64", copy=False)
+            label_ranks_by_mask = {}
             for signal in spec.signal_columns:
                 signal_values = timestamp_frame[signal].to_numpy(
                     dtype="float64",
@@ -58,9 +59,12 @@ def compute_ic_and_grouped_label_values(
                         label_valid,
                     )
                     signal_ranks = _average_ranks(signal_valid)
+                    mask_key = valid_mask.tobytes()
+                    if mask_key not in label_ranks_by_mask:
+                        label_ranks_by_mask[mask_key] = _average_ranks(label_valid)
                     rankic, rankic_reason = _pearson_correlation_result(
                         signal_ranks,
-                        _average_ranks(label_valid),
+                        label_ranks_by_mask[mask_key],
                     )
                     groups = _assign_groups_from_ranks(signal_ranks, n_groups)
                     for group in np.unique(groups):

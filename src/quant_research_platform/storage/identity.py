@@ -7,7 +7,7 @@ import hashlib
 import os
 import shutil
 import stat
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +34,25 @@ class _DigestingReader:
         self._digest.update(chunk)
         return chunk
 
+    def __getattr__(self, name):
+        return getattr(self._handle, name)
+
+    def read1(self, size: int = -1) -> bytes:
+        read = getattr(self._handle, "read1", self._handle.read)
+        chunk = read(size)
+        self._digest.update(chunk)
+        return chunk
+
+    def readinto(self, buffer) -> int:
+        chunk = self.read(len(buffer))
+        buffer[: len(chunk)] = chunk
+        return len(chunk)
+
+    def readinto1(self, buffer) -> int:
+        chunk = self.read1(len(buffer))
+        buffer[: len(chunk)] = chunk
+        return len(chunk)
+
     def drain(self) -> None:
         while self.read(64 * 1024):
             pass
@@ -51,18 +70,6 @@ def dataset_file_identity_from_stat(value: os.stat_result) -> DatasetFileIdentit
     )
 
 
-def _file_identity_bytes(identity: DatasetFileIdentity) -> bytes:
-    return b"\x00".join(
-        str(value).encode("ascii")
-        for value in (
-            identity.device,
-            identity.inode,
-            identity.size,
-            identity.modified_ns,
-        )
-    )
-
-
 def dataset_file_identity(path: Path) -> DatasetFileIdentity:
     candidate = require_unaliased_path(Path(path), error="invalid_dataset_part_files")
     try:
@@ -72,52 +79,6 @@ def dataset_file_identity(path: Path) -> DatasetFileIdentity:
     if not stat.S_ISREG(before.st_mode) or int(before.st_ino) <= 0:
         raise ValueError("invalid_dataset_part_files")
     return dataset_file_identity_from_stat(before)
-
-
-def content_hash_for_files(
-    files: Iterable[tuple[str, Path] | tuple[str, Path, DatasetFileIdentity]],
-    *,
-    error: str,
-) -> str:
-    """Hash logical member ids and bytes with exact before/after identities."""
-    entries = []
-    hashes = []
-    with closing_iterator(iter(files)) as members:
-        try:
-            for item in members:
-                if not isinstance(item, tuple) or len(item) not in (2, 3):
-                    raise ValueError(error)
-                logical_id, path = item[:2]
-                expected = item[2] if len(item) == 3 else None
-                if (
-                    type(logical_id) is not str
-                    or not logical_id
-                    or (not isinstance(path, Path))
-                    or (
-                        expected is not None
-                        and (not isinstance(expected, DatasetFileIdentity))
-                    )
-                ):
-                    raise ValueError(error)
-                identity = dataset_file_identity(path)
-                if expected is not None and identity != expected:
-                    raise ValueError(error)
-                entries.append((path, identity))
-                hashes.append((logical_id, _hash_file_content(path, identity, error)))
-            if not entries:
-                raise ValueError(error)
-            digest = hashlib.sha256()
-            for logical_id, member_hash in sorted(hashes):
-                for value in (logical_id, member_hash):
-                    encoded = value.encode("utf-8")
-                    digest.update(len(encoded).to_bytes(8, "big"))
-                    digest.update(encoded)
-            for path, identity in entries:
-                if dataset_file_identity(path) != identity:
-                    raise ValueError(error)
-            return digest.hexdigest()
-        except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
-            raise ValueError(error) from exc
 
 
 @contextmanager

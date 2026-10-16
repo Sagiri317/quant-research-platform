@@ -67,11 +67,11 @@ def test_single_asset_insufficient_pairs_publish_with_rankic_not_applicable(
 def test_nanosecond_evaluation_diagnostics_survive_actual_writer_roundtrip(
     tmp_path: Path,
 ) -> None:
-    from quant_research_platform.artifacts.outputs.bundle_validation import (
-        validate_output_bundle,
-    )
     from quant_research_platform.artifacts.outputs.evaluation import (
         write_evaluation_outputs_from_chunks,
+    )
+    from quant_research_platform.artifacts.outputs.manifest import (
+        validate_output_bundle,
     )
 
     times = pd.Timestamp("2020-01-01") + pd.to_timedelta([1, 2], unit="ns")
@@ -478,7 +478,7 @@ def test_evaluation_failure_closes_source_with_traceback_retained(
             if cleanup_fails:
                 raise RuntimeError("secondary_close")
 
-    monkeypatch.setattr(runner, "_read_model_input", lambda *a, **k: Source())
+    monkeypatch.setattr(runner, "iter_dataset_chunks", lambda *a, **k: Source())
     with pytest.raises(PermissionError) as caught:
         runner.evaluate(
             evaluation_config(
@@ -711,9 +711,11 @@ def test_explicit_crypto_direction_reaches_native_metadata_metrics_and_groups(tm
 def test_evaluation_writer_preserves_counts_without_text_workarounds(
     tmp_path, monkeypatch, count
 ):
-    from quant_research_platform.artifacts.outputs import validate_output_bundle
     from quant_research_platform.artifacts.outputs.evaluation import (
         write_evaluation_outputs_from_chunks,
+    )
+    from quant_research_platform.artifacts.outputs.manifest import (
+        validate_output_bundle,
     )
     from quant_research_platform.contracts.evaluations import (
         EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
@@ -834,7 +836,7 @@ def test_evaluation_early_failure_closes_native_source_without_gc(
         label_availability_columns={"label": "available_at"},
         n_groups=2,
     )
-    read = runner._read_model_input
+    read = runner.iter_dataset_chunks
     closed = []
 
     def chunks(*args, **kwargs):
@@ -852,7 +854,7 @@ def test_evaluation_early_failure_closes_native_source_without_gc(
         next(iter(chunks))
         raise primary
 
-    monkeypatch.setattr(runner, "_read_model_input", chunks)
+    monkeypatch.setattr(runner, "iter_dataset_chunks", chunks)
     monkeypatch.setattr(runner, "write_evaluation_outputs_from_chunks", interrupt)
     with pytest.raises(KeyboardInterrupt) as caught:
         runner.evaluate(
@@ -1132,7 +1134,7 @@ def test_evaluation_collision_never_opens_input_or_overwrites(tmp_path, monkeypa
     marker.write_bytes(b"old-good")
     monkeypatch.setattr(
         runner,
-        "_read_model_input",
+        "iter_dataset_chunks",
         lambda *a, **k: pytest.fail("collision consumed input"),
     )
     with pytest.raises(ValueError, match="already_exists"):
@@ -1150,7 +1152,9 @@ def test_evaluation_collision_never_opens_input_or_overwrites(tmp_path, monkeypa
     assert tuple(output.iterdir()) == (marker,)
 
 
-@pytest.mark.parametrize("damage", ("role", "cutoff", "window", "missing_field"))
+@pytest.mark.parametrize(
+    "damage", ("role", "empty_role", "cutoff", "window", "missing_field")
+)
 def test_evaluation_native_science_metadata_is_validated_on_read(
     tmp_path,
     explicit_evaluation,
@@ -1167,6 +1171,8 @@ def test_evaluation_native_science_metadata_is_validated_on_read(
     value = json.loads(path.read_text())
     if damage == "role":
         value["metadata"]["sample_role"] = "holdout"
+    elif damage == "empty_role":
+        value["metadata"]["sample_role"] = ""
     elif damage == "cutoff":
         value["metadata"]["cutoff"] = "NaT"
     elif damage == "window":
@@ -1174,8 +1180,12 @@ def test_evaluation_native_science_metadata_is_validated_on_read(
     else:
         value["metadata"].pop("cutoff")
     path.write_text(json.dumps(value))
-    with pytest.raises(ValueError):
-        read_evaluation_outputs(root)
+    if damage == "role":
+        manifest, _tables = read_evaluation_outputs(root)
+        assert manifest["metadata"]["sample_role"] == "holdout"
+    else:
+        with pytest.raises(ValueError):
+            read_evaluation_outputs(root)
 
 
 def test_direct_evaluation_partial_publication_keeps_primary_close_note_and_old_good(

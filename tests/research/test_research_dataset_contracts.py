@@ -11,16 +11,13 @@ from quant_research_platform.catalog.processed import ProcessedDataCatalog
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.research.datasets.assembler import (
-    assemble_research_dataset,
-)
 from quant_research_platform.runtime.dataframes import iter_complete_session_frames
 from quant_research_platform.storage.datasets import read_dataset
 from quant_research_platform.storage.datasets.reading import (
     iter_dataset_chunks,
     open_dataset_session,
 )
-from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers.paths import StorageLayout
 from tests.helpers.research_processed_inputs import (
     make_demo_processed_catalog,
     make_dummy_processed_catalog,
@@ -28,6 +25,7 @@ from tests.helpers.research_processed_inputs import (
     write_dummy_processed_inputs,
 )
 from tests.helpers.research_specs import (
+    assemble_research_dataset,
     make_dummy_research_dataset_spec,
     make_research_dataset_catalog,
 )
@@ -47,7 +45,7 @@ def test_research_dataset_key_coverage_is_defensively_copied() -> None:
     assert spec.key_coverage["factors"] == "sparse"
 
 
-def test_research_dataset_validation_rejects_noncanonical_primary_key() -> None:
+def test_research_dataset_validation_preserves_declared_primary_key_order() -> None:
     from quant_research_platform.research.datasets.validation import (
         validate_research_dataset,
     )
@@ -64,8 +62,17 @@ def test_research_dataset_validation_rejects_noncanonical_primary_key() -> None:
             "factor_1": [1.0, 2.0],
         }
     )
+    validate_research_dataset(frame, spec, require_all_columns=False)
+    with pytest.raises(ValueError, match="research_dataset_market_mismatch"):
+        validate_research_dataset(
+            frame.assign(market_id="other"), spec, require_all_columns=False
+        )
     with pytest.raises(ValueError, match="invalid_research_dataset_primary_key"):
-        validate_research_dataset(frame, spec)
+        validate_research_dataset(
+            frame,
+            replace(spec, primary_key=("market_id", "timestamp")),
+            require_all_columns=False,
+        )
 
 
 def test_research_dataset_assembler_uses_explicit_base_not_input_order(
@@ -521,7 +528,11 @@ def test_research_dataset_reports_incompatible_and_missing_required_specs() -> N
     processed_catalog = make_dummy_processed_catalog()
     bad_factors = replace(
         processed_catalog.get("factors"),
-        primary_key=("asset_id", "market_id", "timestamp"),
+        primary_key=("asset_id", "market_id", "timestamp", "lifecycle"),
+        column_roles={
+            **processed_catalog.get("factors").column_roles,
+            "lifecycle": ColumnRole.KEY,
+        },
     )
     incompatible = ProcessedDataCatalog(
         tuple(
@@ -546,7 +557,9 @@ def _validate_inputs(
         _validate_research_input_specs,
     )
 
-    _validate_research_input_specs(spec, processed_catalog)
+    _validate_research_input_specs(
+        spec, {item.data_id: item for item in processed_catalog.list()}
+    )
 
 
 @pytest.mark.parametrize(
@@ -563,14 +576,14 @@ def test_dummy_spec_preserves_explicit_overrides(overrides, expected):
     assert (spec.data_id, spec.market_id) == expected
 
 
-def test_native_reader_missing_column_propagates_from_assembler(tmp_path):
+def test_assembler_rejects_requested_column_missing_from_actual_spec(tmp_path):
     layout = StorageLayout(tmp_path)
     write_dummy_processed_inputs(layout, make_dummy_processed_catalog())
     processed = make_dummy_processed_catalog(include_extensions=True)
     datasets = make_research_dataset_catalog(
         make_dummy_research_dataset_spec(factor_columns=("factor_2",)),
     )
-    with pytest.raises(ValueError, match="^dataset_column_not_found$"):
+    with pytest.raises(ValueError, match="^assemble_factor_not_available$"):
         assemble_research_dataset(
             inputs={
                 item.data_id: layout.processed_data_root(

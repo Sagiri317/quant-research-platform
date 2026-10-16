@@ -148,20 +148,20 @@ def test_explicit_model_roundtrip_freeze_and_repeated_prediction(tmp_path, monke
     assert len(read_predictions(test)[0]) == 9
 
 
-def test_prediction_test_requires_refit_freeze(tmp_path):
+def test_prediction_role_is_usage_and_does_not_require_selection(tmp_path):
     inputs = data(tmp_path)
     model = fit(fit_config(tmp_path, inputs))
-    with pytest.raises(ValueError, match="frozen_final_refit"):
-        predict(
-            {
-                "model": str(model),
-                "inputs": str(inputs),
-                "output": str(tmp_path / "pred"),
-                "prediction_window": {"start": "2020-01-04", "end": "2020-01-06"},
-                "sample_role": "test",
-                "input_spec": input_spec(),
-            }
-        )
+    prediction = predict(
+        {
+            "model": str(model),
+            "inputs": str(inputs),
+            "output": str(tmp_path / "pred"),
+            "prediction_window": {"start": "2020-01-04", "end": "2020-01-06"},
+            "sample_role": "test",
+            "input_spec": input_spec(),
+        }
+    )
+    assert len(read_predictions(prediction)[0]) == 9
 
 
 def test_failed_fit_records_failure_without_model(tmp_path):

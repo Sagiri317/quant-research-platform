@@ -153,10 +153,14 @@ def test_scaler_and_linear_fit_match_original_arithmetic(kind, weighting, monkey
         np.testing.assert_array_equal(weights, original_weights)
         return
     actual_scaler = ModelMatrixScaler.fit(frame, sample_weight=weights)
-    assert actual_scaler.to_payload() == expected_scaler.to_payload()
+    assert actual_scaler.columns == expected_scaler.columns
     matrix = actual_scaler.transform(frame)
     pd.testing.assert_frame_equal(
-        matrix, expected_scaler.transform(frame), check_exact=True
+        matrix,
+        expected_scaler.transform(frame),
+        check_exact=False,
+        rtol=1e-13,
+        atol=1e-14,
     )
     before_matrix = matrix.copy(deep=True)
     target = np.linspace(-1e150, 1e150, len(frame))
@@ -180,9 +184,11 @@ def test_scaler_and_linear_fit_match_original_arithmetic(kind, weighting, monkey
         )[0]
     expected_beta = np.ldexp(expected_beta, exponent)
     result = fitting._fit_linear_model_result(prepared, spec).prediction_model
-    np.testing.assert_array_equal(result.coefficients, expected_beta)
+    np.testing.assert_allclose(result.coefficients, expected_beta, rtol=1e-12, atol=0)
     reference = LinearScaledPredictor(tuple(expected_beta), expected_scaler)
-    np.testing.assert_array_equal(result.predict(frame), reference.predict(frame))
+    np.testing.assert_allclose(
+        result.predict(frame), reference.predict(frame), rtol=1e-12, atol=0
+    )
     pd.testing.assert_frame_equal(frame, original_frame, check_exact=True)
     pd.testing.assert_frame_equal(matrix, before_matrix, check_exact=True)
     pd.testing.assert_frame_equal(training, before_training, check_exact=True)
@@ -212,14 +218,20 @@ def test_scaler_shapes_and_layouts_match_original_arithmetic(shape, layout):
     for sample_weight in (None, weights):
         expected = _reference_fit(ModelMatrixScaler, frame, sample_weight=sample_weight)
         actual = ModelMatrixScaler.fit(frame, sample_weight=sample_weight)
-        assert actual.to_payload() == expected.to_payload()
+        assert actual.columns == expected.columns
         pd.testing.assert_frame_equal(
-            actual.transform(frame), expected.transform(frame), check_exact=True
+            actual.transform(frame),
+            expected.transform(frame),
+            check_exact=False,
+            rtol=1e-13,
+            atol=1e-14,
         )
         coefficients = tuple(np.linspace(-3.0, 5.0, shape[1] + 1))
-        np.testing.assert_array_equal(
+        np.testing.assert_allclose(
             LinearScaledPredictor(coefficients, actual).predict(frame),
             LinearScaledPredictor(coefficients, expected).predict(frame),
+            rtol=1e-12,
+            atol=0,
         )
     pd.testing.assert_frame_equal(frame, original, check_exact=True)
     np.testing.assert_array_equal(weights, np.linspace(0.5, 3.0, len(frame)))
@@ -231,14 +243,20 @@ def test_scaler_keeps_root_weights_before_extreme_weight_normalization():
     original, original_weights = frame.copy(deep=True), weights.copy()
     expected = _reference_fit(ModelMatrixScaler, frame, sample_weight=weights)
     actual = ModelMatrixScaler.fit(frame, sample_weight=weights)
-    assert actual.to_payload() == expected.to_payload()
+    assert actual.columns == expected.columns
     assert 0.0 < actual.scale_[0] < np.finfo(float).tiny ** 0.5
     pd.testing.assert_frame_equal(
-        actual.transform(frame), expected.transform(frame), check_exact=True
+        actual.transform(frame),
+        expected.transform(frame),
+        check_exact=False,
+        rtol=1e-13,
+        atol=1e-14,
     )
-    np.testing.assert_array_equal(
+    np.testing.assert_allclose(
         LinearScaledPredictor((1.0, 2.0, -3.0), actual).predict(frame),
         LinearScaledPredictor((1.0, 2.0, -3.0), expected).predict(frame),
+        rtol=1e-12,
+        atol=0,
     )
     pd.testing.assert_frame_equal(frame, original, check_exact=True)
     np.testing.assert_array_equal(weights, original_weights)

@@ -5,13 +5,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from quant_research_platform.artifacts.outputs.prediction import (
+    prediction_model_metadata,
+)
 from quant_research_platform.artifacts.statistics import (
     STATISTICS_TABLE_GROUPS,
     read_statistics_artifact,
     write_statistics_artifact,
 )
 from quant_research_platform.contracts.columns import ColumnRole
-from quant_research_platform.contracts.experiments import _model_inference_blocker
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research import statistics_production
@@ -22,7 +24,7 @@ from quant_research_platform.research.statistics_production import (
     build_a_share_statistics_tables,
 )
 from quant_research_platform.storage.datasets import write_dataset
-from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers.paths import StorageLayout
 from tests.helpers.research_configuration import (
     A_SHARE_MODEL_ALGORITHMS,
     CORE6_FACTORS,
@@ -126,7 +128,10 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
     frame["total_market_cap"] = 1.0 + frame.groupby("timestamp").cumcount()
     write_dataset(layout.research_dataset_root("a_share", "pv_all"), frame, spec=spec)
     model = model_statistics_inputs(spec, config, TimeWindow(dates[0], cutoff))
+    for selection in model["selections"].values():
+        selection["cutoff"] = str(cutoff)
     metadata = {
+        "selection_cutoffs": [str(cutoff)],
         "sample_role": "validation",
         "window": {"start": "2019-01-01", "end": str(cutoff.date())},
     }
@@ -209,7 +214,7 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
     )
     np.testing.assert_allclose(losses, expected, rtol=0, atol=1e-14)
     benchmark, challengers = (losses[families[0]], losses.loc[:, list(families[1:])])
-    blocked_reason = "global_validation_selection_reuses_validation"
+    blocked_reason = "selection_reuses_evaluation_window"
     for member in ("prediction_diagnostics.parquet", "model_comparison.parquet"):
         with (
             factor_artifact if member in STATISTICS_TABLE_GROUPS["factor"] else artifact
@@ -241,6 +246,8 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
         assert checks.value.isna().all()
         assert checks.observation_count.eq(64).all()
     quarterly_config = {**config, "selection_group": "quarterly"}
+    for selection in model["selections"].values():
+        selection["cutoff"] = str(dates[0] - pd.Timedelta(days=1))
     paired_metadata = metadata
     factor_paired_metadata = factor_metadata
     paired_tables = build_a_share_statistics_tables(
@@ -348,7 +355,7 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
         assert paired.observation_count.eq(64).all()
         np.testing.assert_allclose(paired.mean_difference, 0.0, rtol=0, atol=1e-14)
         assert paired.status.eq("UNDEFINED").all()
-        assert paired.reason.eq("global_validation_selection_reuses_validation").all()
+        assert paired.reason.eq("selection_reuses_evaluation_window").all()
         assert paired.bootstrap_reason.eq(blocked_reason).all()
     if not full_factor_history:
         robustness_config = {
@@ -667,6 +674,8 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         }
         config["statistics"]["fama_macbeth_core_factors"] = list(CORE6_FACTORS)
         model = model_statistics_inputs(spec, config, TimeWindow(dates[0], cutoff))
+        for selection in model["selections"].values():
+            selection["cutoff"] = str(cutoff)
         statistics_tables = build_a_share_statistics_tables(
             dataset_path=layout.research_dataset_root("a_share", spec.data_id),
             dataset_spec=spec,
@@ -707,7 +716,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
     prediction = outputs[0]["prediction_diagnostics"].iloc[0]
     assert prediction["observation_count"] == 20
     assert prediction["status"] == "UNDEFINED"
-    assert prediction["reason"] == "global_validation_selection_reuses_validation"
+    assert prediction["reason"] == "selection_reuses_evaluation_window"
     assert prediction["mean"] == pytest.approx(0.2, abs=1e-15)
     assert prediction["bootstrap_seed"] == derive_seed(
         42, "a_share_statistics_bootstrap", "stats_demo", "prediction"
@@ -735,7 +744,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
     }.issubset(set(trials.metric_id))
     assert set(trials.selection_status) == {"CHAMPION", "FAMILY_WINNER"}
     assert set(outputs[0]["robustness"]["reason"]) == {
-        "global_validation_selection_reuses_validation"
+        "selection_reuses_evaluation_window"
     }
     metadata = {
         "sample_role": "validation",
@@ -976,16 +985,11 @@ def test_constant_risk_and_sharpe_have_distinct_definition_status(value):
 
 
 @pytest.mark.parametrize(
-    "access,group",
-    [
-        ("validation", "global"),
-        ("validation", "quarterly"),
-        ("test", "global"),
-        ("test", "quarterly"),
-    ],
+    "access,reused_selection",
+    [("validation", True), ("validation", False), ("test", True), ("test", False)],
 )
 def test_model_inference_uses_selection_information_before_calling_backends(
-    monkeypatch, access, group
+    monkeypatch, access, reused_selection
 ):
     rng = np.random.default_rng(22019)
     values = pd.DataFrame(
@@ -995,7 +999,7 @@ def test_model_inference_uses_selection_information_before_calling_backends(
             "challenger": rng.normal(0.02, 0.04, 64),
         }
     )
-    blocker = _model_inference_blocker(sample_role=access, selection_groups=(group,))
+    blocker = "selection_reuses_evaluation_window" if reused_selection else None
     if blocker is not None:
 
         def forbidden(*args, **kwargs):
@@ -1042,11 +1046,7 @@ def test_model_inference_uses_selection_information_before_calling_backends(
     else:
         assert summary.status.eq("DEFINED").all()
         assert comparison.status.eq("DEFINED").all()
-        if access == "validation":
-            assert checks.status.eq("DEFINED").all()
-        else:
-            assert checks.status.eq("UNDEFINED").all()
-            assert checks.reason.eq("test_excluded").all()
+        assert checks.status.eq("DEFINED").all()
 
 
 @pytest.mark.parametrize("has_observations", (False, True))
@@ -1097,9 +1097,7 @@ def test_paired_model_rankic_consumes_explicit_comparison_config(has_observation
     assert paired.observation_count.eq(int(has_observations)).all()
     assert paired.status.eq("UNDEFINED").all()
     assert paired.reason.eq(
-        "global_validation_selection_reuses_validation"
-        if has_observations
-        else "no_common_observations"
+        "hac_lag_exceeds_observations" if has_observations else "no_common_observations"
     ).all()
     if has_observations:
         assert paired.mean_difference.eq(0.0).all()
@@ -1311,18 +1309,11 @@ def test_model_family_names_preserve_factor_statistics_and_native_names(
         assert paired.calendar_count.eq(len(dates)).all()
         assert paired.fdr_family_size.eq(len(families)).all()
         assert paired.mean_difference.tolist() == pytest.approx([-0.2, 0.2])
-        assert paired.status.eq("DEFINED" if access == "test" else "UNDEFINED").all()
-        assert paired.bootstrap_status.eq(
-            "DEFINED" if access == "test" else "UNDEFINED"
-        ).all()
-        if access == "validation":
-            assert paired.reason.eq(
-                "global_validation_selection_reuses_validation"
-            ).all()
-        else:
-            assert paired.standard_error.notna().all()
-            assert paired.fdr_adjusted_p_value.notna().all()
-            assert paired.bootstrap_lower.notna().all()
+        assert paired.status.eq("DEFINED").all()
+        assert paired.bootstrap_status.eq("DEFINED").all()
+        assert paired.standard_error.notna().all()
+        assert paired.fdr_adjusted_p_value.notna().all()
+        assert paired.bootstrap_lower.notna().all()
         paired_tables = {
             **tables,
             "model_losses": quarterly_losses,
@@ -1731,7 +1722,7 @@ def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_pat
                     ("explicit_horizon", family): {
                         "family_id": family,
                         "model_id": model_id,
-                        "model_metadata": prediction_meta["model_metadata"],
+                        "model_metadata": prediction_model_metadata(prediction_meta),
                     }
                 },
                 selections={"explicit_horizon": selection},

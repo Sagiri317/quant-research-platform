@@ -17,8 +17,8 @@ from quant_research_platform.markets.implementations.a_share.processed.catalog i
     processed_catalog,
 )
 from quant_research_platform.sources.csmar.interim import normalize_raw_frame
-from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.a_share_sources import _published_inputs, _source_catalog
+from tests.helpers.paths import StorageLayout
 
 
 def _benchmark_facts() -> tuple[pd.DataFrame, pd.DataFrame]:

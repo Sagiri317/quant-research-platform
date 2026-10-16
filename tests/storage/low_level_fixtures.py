@@ -179,6 +179,8 @@ def write_low_level_parquet_artifact(
         "partition_columns": list(partition_columns),
         "required_columns": [str(column) for column in frame.columns],
         "column_roles": _column_roles(frame.columns, effective_primary_key),
+        "column_units": {},
+        "label_availability_columns": {},
     }
     root = Path(artifact_root)
     filesystem_mkdir(root, parents=True, exist_ok=True)
@@ -237,13 +239,11 @@ def _write_runtime_manifest(
         frame.loc[:, list(spec["required_columns"])]
     )
     manifest = {
-        "spec_identity": canonical_json_hash(spec),
         "schema_id": "qrp-dataset-manifest",
         "columns": list(physical_schema_columns(first_schema)),
         "physical_schema": first_schema,
         "schema_hash": canonical_json_hash(first_schema),
         "logical_dtypes": logical_dtypes,
-        "logical_dtype_hash": canonical_json_hash(logical_dtypes),
         "partition_row_counts": dict(sorted(partition_row_counts.items())),
         "partition_count": len(partition_row_counts),
         "partitions": sorted(partition_row_counts),
@@ -263,7 +263,6 @@ def _write_runtime_manifest(
         "duplicate_primary_key_count": int(frame.duplicated(primary_key).sum()),
         "factor_nan_profile": {},
         "label_nan_profile": {},
-        "validation_status": "PASS",
     }
     manifest_path = root / "_manifest" / "manifest.json"
     filesystem_mkdir(manifest_path.parent, parents=True, exist_ok=True)

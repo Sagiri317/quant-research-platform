@@ -16,7 +16,7 @@ from pathlib import Path
 
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.identity import (
-    content_hash_for_files,
+    _DigestingReader,
     dataset_file_identity,
     dataset_file_identity_from_stat,
     open_filesystem_file,
@@ -91,21 +91,27 @@ def load_a_share_fee_source(
     root = Path(reference_root) / "a_share_fee_schedule"
     csv_path = root / A_SHARE_FEE_CSV_NAME
     sidecar_path = root / A_SHARE_FEE_SIDECAR_NAME
-    csv_sha256, csv_identity = _sha256_file(csv_path)
+    csv_identity = _file_identity(csv_path)
     sidecar_identity = _file_identity(sidecar_path)
-    metadata = _read_sidecar(sidecar_path, sidecar_identity)
-    csv_bytes = csv_identity.size
-    _validate_sidecar(metadata, csv_sha256, csv_bytes=csv_bytes)
-    rows, data_row_count = _read_rows(csv_path, csv_identity)
+    metadata, sidecar_sha256 = _read_sidecar(sidecar_path, sidecar_identity)
+    rows, data_row_count, csv_sha256 = _read_rows(csv_path, csv_identity)
+    _validate_sidecar(metadata, csv_sha256, csv_bytes=csv_identity.size)
     if metadata.get("row_count") != data_row_count:
         raise ValueError("a_share_fee_source_row_count_mismatch")
-    source_identity = content_hash_for_files(
+    if _file_identity(sidecar_path) != sidecar_identity:
+        raise ValueError("a_share_fee_source_identity_changed")
+    digest = hashlib.sha256()
+    for name, member_hash in sorted(
         (
-            (A_SHARE_FEE_CSV_NAME, csv_path, csv_identity),
-            (A_SHARE_FEE_SIDECAR_NAME, sidecar_path, sidecar_identity),
-        ),
-        error="a_share_fee_source_identity_invalid",
-    )
+            (A_SHARE_FEE_CSV_NAME, csv_sha256),
+            (A_SHARE_FEE_SIDECAR_NAME, sidecar_sha256),
+        )
+    ):
+        for value in (name, member_hash):
+            encoded = value.encode("utf-8")
+            digest.update(len(encoded).to_bytes(8, "big"))
+            digest.update(encoded)
+    source_identity = digest.hexdigest()
     return AShareFeeSource(
         rows=rows,
         csv_sha256=csv_sha256,
@@ -120,24 +126,7 @@ def _file_identity(path: Path):
         raise ValueError("a_share_fee_source_unavailable") from exc
 
 
-def _sha256_file(path: Path):
-    digest = hashlib.sha256()
-    expected = _file_identity(path)
-    try:
-        with closing_iterator(open_filesystem_file(path)) as handle:
-            if dataset_file_identity_from_stat(os.fstat(handle.fileno())) != expected:
-                raise ValueError("a_share_fee_source_identity_changed")
-            while chunk := handle.read(1024 * 1024):
-                digest.update(chunk)
-            final = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
-    except (FileNotFoundError, NotADirectoryError) as exc:
-        raise ValueError("a_share_fee_source_unavailable") from exc
-    if final != expected or _file_identity(path) != expected:
-        raise ValueError("a_share_fee_source_identity_changed")
-    return digest.hexdigest(), expected
-
-
-def _read_sidecar(path: Path, expected) -> dict[str, object]:
+def _read_sidecar(path: Path, expected) -> tuple[dict[str, object], str]:
     try:
         with closing_iterator(open_filesystem_file(path)) as handle:
             if dataset_file_identity_from_stat(os.fstat(handle.fileno())) != expected:
@@ -154,7 +143,7 @@ def _read_sidecar(path: Path, expected) -> dict[str, object]:
         raise ValueError("a_share_fee_sidecar_invalid") from exc
     if type(value) is not dict:
         raise ValueError("a_share_fee_sidecar_invalid")
-    return value
+    return value, hashlib.sha256(raw).hexdigest()
 
 
 def _validate_sidecar(
@@ -174,84 +163,86 @@ def _validate_sidecar(
         raise ValueError("a_share_fee_source_metadata_invalid")
 
 
-def _read_rows(path: Path, expected) -> tuple[tuple[FeeSourceRow, ...], int]:
+def _read_rows(path: Path, expected) -> tuple[tuple[FeeSourceRow, ...], int, str]:
     rows: list[FeeSourceRow] = []
     seen: set[tuple[object, ...]] = set()
     data_row_count = 0
     try:
-        with (
-            closing_iterator(open_filesystem_file(path)) as binary,
-            closing_iterator(
-                io.TextIOWrapper(binary, encoding="utf-8-sig", newline="")
-            ) as text,
-        ):
-            if dataset_file_identity_from_stat(os.fstat(binary.fileno())) != expected:
-                raise ValueError("a_share_fee_source_identity_changed")
-            csv.field_size_limit(sys.maxsize)
-            reader = csv.DictReader(text, strict=True)
-            if tuple(reader.fieldnames or ()) != FEE_CSV_COLUMNS:
-                raise ValueError("a_share_fee_source_schema_invalid")
-            for row in reader:
-                data_row_count += 1
-                if set(row) != set(FEE_CSV_COLUMNS) or None in row:
+        with closing_iterator(open_filesystem_file(path)) as binary:
+            hashed = _DigestingReader(binary)
+            with closing_iterator(
+                io.TextIOWrapper(hashed, encoding="utf-8-sig", newline="")
+            ) as text:
+                if (
+                    dataset_file_identity_from_stat(os.fstat(binary.fileno()))
+                    != expected
+                ):
+                    raise ValueError("a_share_fee_source_identity_changed")
+                csv.field_size_limit(sys.maxsize)
+                reader = csv.DictReader(text, strict=True)
+                if tuple(reader.fieldnames or ()) != FEE_CSV_COLUMNS:
                     raise ValueError("a_share_fee_source_schema_invalid")
-                values = {}
-                for key in FEE_CSV_COLUMNS:
-                    value = row[key]
-                    if not isinstance(value, str):
+                for row in reader:
+                    data_row_count += 1
+                    if set(row) != set(FEE_CSV_COLUMNS) or None in row:
                         raise ValueError("a_share_fee_source_schema_invalid")
-                    values[key] = value
-                fee_code = values["费用代码"]
-                if fee_code not in _FEE_CODES:
-                    raise ValueError("a_share_fee_source_fee_code_invalid")
-                market = _canonical_market(values["市场"])
-                basis = _canonical_basis(values["计费基数"])
-                sides = _canonical_sides(values["方向"])
-                start = _parse_date(values["生效日"])
-                end = _parse_date(values["截止日"])
-                rate = _parse_rate(values["十进制费率"])
-                per_mille = _parse_rate(values["费率(‰)"])
-                basis_points = _parse_rate(values["费率(bps)"])
-                if not math.isclose(
-                    per_mille, rate * 1_000.0, abs_tol=1e-12, rel_tol=0.0
-                ):
-                    raise ValueError("a_share_fee_source_rate_unit_invalid")
-                if not math.isclose(
-                    basis_points,
-                    rate * 10_000.0,
-                    abs_tol=1e-12,
-                    rel_tol=0.0,
-                ):
-                    raise ValueError("a_share_fee_source_rate_unit_invalid")
-                included_text = values["进入正式账本"]
-                if included_text not in {"是", "否"}:
-                    raise ValueError("a_share_fee_source_inclusion_invalid")
-                included = included_text == "是"
-                included_in = values["包含于"] or None
-                if included and included_in is not None:
-                    raise ValueError("a_share_fee_source_inclusion_invalid")
-                if not included and included_in not in _INCLUDED_CODES:
-                    raise ValueError("a_share_fee_source_inclusion_invalid")
-                for side in sides:
-                    key = (fee_code, start, end, market, side, basis)
-                    if key in seen:
-                        raise ValueError("a_share_fee_source_duplicate")
-                    seen.add(key)
-                    rows.append(
-                        FeeSourceRow(
-                            fee_code=fee_code,
-                            effective_date=start,
-                            end_date=end,
-                            market=market,
-                            side=side,
-                            basis=basis,
-                            rate=rate,
-                            included_in_ledger=included,
-                            included_in=included_in,
+                    values = {}
+                    for key in FEE_CSV_COLUMNS:
+                        value = row[key]
+                        if not isinstance(value, str):
+                            raise ValueError("a_share_fee_source_schema_invalid")
+                        values[key] = value
+                    fee_code = values["费用代码"]
+                    if fee_code not in _FEE_CODES:
+                        raise ValueError("a_share_fee_source_fee_code_invalid")
+                    market = _canonical_market(values["市场"])
+                    basis = _canonical_basis(values["计费基数"])
+                    sides = _canonical_sides(values["方向"])
+                    start = _parse_date(values["生效日"])
+                    end = _parse_date(values["截止日"])
+                    rate = _parse_rate(values["十进制费率"])
+                    per_mille = _parse_rate(values["费率(‰)"])
+                    basis_points = _parse_rate(values["费率(bps)"])
+                    if not math.isclose(
+                        per_mille, rate * 1_000.0, abs_tol=1e-12, rel_tol=0.0
+                    ):
+                        raise ValueError("a_share_fee_source_rate_unit_invalid")
+                    if not math.isclose(
+                        basis_points,
+                        rate * 10_000.0,
+                        abs_tol=1e-12,
+                        rel_tol=0.0,
+                    ):
+                        raise ValueError("a_share_fee_source_rate_unit_invalid")
+                    included_text = values["进入正式账本"]
+                    if included_text not in {"是", "否"}:
+                        raise ValueError("a_share_fee_source_inclusion_invalid")
+                    included = included_text == "是"
+                    included_in = values["包含于"] or None
+                    if included and included_in is not None:
+                        raise ValueError("a_share_fee_source_inclusion_invalid")
+                    if not included and included_in not in _INCLUDED_CODES:
+                        raise ValueError("a_share_fee_source_inclusion_invalid")
+                    for side in sides:
+                        key = (fee_code, start, end, market, side, basis)
+                        if key in seen:
+                            raise ValueError("a_share_fee_source_duplicate")
+                        seen.add(key)
+                        rows.append(
+                            FeeSourceRow(
+                                fee_code=fee_code,
+                                effective_date=start,
+                                end_date=end,
+                                market=market,
+                                side=side,
+                                basis=basis,
+                                rate=rate,
+                                included_in_ledger=included,
+                                included_in=included_in,
+                            )
                         )
-                    )
-                row = values = value = None
-            final = dataset_file_identity_from_stat(os.fstat(binary.fileno()))
+                    row = values = value = None
+                final = dataset_file_identity_from_stat(os.fstat(binary.fileno()))
     except csv.Error as exc:
         raise ValueError("a_share_fee_source_schema_invalid") from exc
     except (FileNotFoundError, NotADirectoryError) as exc:
@@ -260,7 +251,7 @@ def _read_rows(path: Path, expected) -> tuple[tuple[FeeSourceRow, ...], int]:
         raise ValueError("a_share_fee_source_identity_changed")
     if not rows:
         raise ValueError("a_share_fee_source_empty")
-    return tuple(rows), data_row_count
+    return tuple(rows), data_row_count, hashed.hexdigest()
 
 
 def _parse_date(value: str) -> date:

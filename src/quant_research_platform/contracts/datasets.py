@@ -28,11 +28,19 @@ class ResearchDatasetSpec(DataSpec):
     label_columns: tuple[str, ...]
     filter_columns: tuple[str, ...] = ()
     context_columns: tuple[str, ...] = ()
+    eligibility_recipe: str | None = None
     key_coverage: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         super().__post_init__()
         object.__setattr__(self, "market_id", validate_market_id(self.market_id))
+        if self.eligibility_recipe is not None and (
+            self.market_id != "a_share"
+            or type(self.eligibility_recipe) is not str
+            or self.eligibility_recipe
+            not in {"a_share_all", "a_share_nonfinancial", "a_share_fundamental"}
+        ):
+            raise ValueError("invalid_research_eligibility_recipe")
         if type(self.input_data_ids) is tuple and not self.input_data_ids:
             raise ValueError(
                 f"base_input_data_id_not_in_inputs: {self.base_input_data_id}"
@@ -82,7 +90,7 @@ class ResearchDatasetSpec(DataSpec):
             raise ValueError("base_input_key_coverage_must_be_strict")
         _validate_column_tuple(self.factor_columns, "factor_columns", required=False)
         _validate_column_tuple(self.feature_columns, "feature_columns", required=False)
-        _validate_column_tuple(self.label_columns, "label_columns")
+        _validate_column_tuple(self.label_columns, "label_columns", required=False)
         _validate_column_tuple(self.filter_columns, "filter_columns", required=False)
         _validate_column_tuple(self.context_columns, "context_columns", required=False)
         if not self.factor_columns and not self.feature_columns:

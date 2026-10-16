@@ -25,7 +25,7 @@ def test_model_threads_bind_affinity_and_cgroup_bandwidth(
     import psutil
 
     from quant_research_platform.contracts.models import ModelSpec
-    from quant_research_platform.research.models.supervised import (
+    from quant_research_platform.research.models.estimators import (
         resolved_model_hyperparameters,
     )
 

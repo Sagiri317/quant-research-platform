@@ -339,7 +339,10 @@ def test_consumed_ledger_rejects_unsupported_research_valuation_policy(
             )
 
 
-def test_explicit_native_fit_prediction_and_backtest_roundtrip(tmp_path):
+@pytest.mark.parametrize("selected_inputs", [False, True])
+def test_explicit_native_fit_prediction_and_backtest_roundtrip(
+    tmp_path, monkeypatch, selected_inputs
+):
     from quant_research_platform.contracts.models import ModelSpec
     from quant_research_platform.research.portfolios.production import backtest
     from quant_research_platform.research.predictions.runner import predict
@@ -388,15 +391,13 @@ def test_explicit_native_fit_prediction_and_backtest_roundtrip(tmp_path):
         "inputs": {
             key: str(value) for key, value in inputs.items() if key != "risk_context"
         },
-        "predictions": [
-            {"path": str(predicted), "model": str(fitted.root), "window": window}
-        ],
+        "predictions": [{"path": str(predicted), "window": window}],
         "output": str(tmp_path / "ledger"),
         "output_window": window,
         "input_window": {"start": "2022-12-01", "end": "2023-01-06"},
         "formal_dataset_window": {"start": "2022-12-01", "end": "2023-01-06"},
         "prediction_window": window,
-        "sample_role": "validation",
+        "sample_role": "custom-backtest-label",
         "assumptions": {
             "initial_nav": 100.0,
             "slippage_bps": 0.0,
@@ -405,6 +406,51 @@ def test_explicit_native_fit_prediction_and_backtest_roundtrip(tmp_path):
             "adv_sensitivities": [1.0],
         },
     }
+    if not selected_inputs:
+        config.pop("sample_role")
+    if selected_inputs:
+        from quant_research_platform.storage.datasets.reading import (
+            open_dataset_session,
+        )
+
+        selected = {}
+        for name, value in config["inputs"].items():
+            session = open_dataset_session(value)
+            item = {
+                "path": value,
+                "files": [
+                    str(path.relative_to(session.root)) for path in session.read_paths
+                ],
+                "columns": {
+                    "dataset": ["signal"],
+                    "panel": ["adj_open", "adj_close", "amount"],
+                    "calendar": ["calendar_date"],
+                    "execution": ["can_enter", "can_exit"],
+                    "fees": ["rate"],
+                    "market_bars": ["filling_flag"],
+                    "stock_master": ["company_status"],
+                }[name],
+            }
+            if name not in {"fees", "stock_master"}:
+                item["years"] = [2022, 2023]
+                item["time_window"] = config["input_window"]
+            if name == "market_bars":
+                item["row_filters"] = [["filling_flag", "in", [0, 1, 2]]]
+            selected[name] = item
+        config["inputs"] = selected
+        from quant_research_platform.storage.datasets import reading
+
+        scans = []
+        original = reading.iter_dataset_part_batches
+        source_files = set(open_dataset_session(inputs["dataset"]).read_paths)
+
+        def scan(path, **kwargs):
+            if path in source_files:
+                scans.append(kwargs["columns"])
+            yield from original(path, **kwargs)
+
+        monkeypatch.setattr(reading, "iter_dataset_part_batches", scan)
+    fitted.root.rename(fitted.root.with_name("model_not_needed_by_backtest"))
     root = backtest(config)
     ledger = artifacts.read_portfolio_ledger_artifact(root)
     batches = list(ledger.iter_chunks())
@@ -413,6 +459,32 @@ def test_explicit_native_fit_prediction_and_backtest_roundtrip(tmp_path):
     assert np.isfinite(summary["nav"])
     assert summary["fees"] > 0
     assert ledger.metadata["initial_holding_convention"] == "cash"
+    assert ledger.metadata.get("sample_role") == (
+        "custom-backtest-label" if selected_inputs else None
+    )
+    if selected_inputs:
+        assert scans
+        assert all("float_market_cap" not in columns for columns in scans)
+        assert all(
+            {"timestamp", "asset_id", "eligible", "signal"} <= set(columns)
+            for columns in scans
+        )
+        excluded = {
+            **config,
+            "output": str(tmp_path / "excluded-price-ledger"),
+            "inputs": {
+                **config["inputs"],
+                "panel": {
+                    **config["inputs"]["panel"],
+                    "columns": ["adj_close", "amount"],
+                },
+            },
+        }
+        with pytest.raises(
+            ValueError, match="portfolio_input_business_columns_excluded"
+        ):
+            backtest(excluded)
+        assert not (tmp_path / "excluded-price-ledger").exists()
 
 
 def test_adv_warmup_counts_twenty_own_market_observations_across_union_holiday(
@@ -464,3 +536,25 @@ def test_adv_warmup_counts_twenty_own_market_observations_across_union_holiday(
         ]
         > 0
     )
+
+
+@pytest.mark.parametrize("role", ["", "   ", None, 1, [], {}])
+def test_backtest_role_requires_nonempty_descriptive_string(role):
+    from quant_research_platform.research.portfolios.production import backtest
+
+    config = dict.fromkeys(
+        (
+            "candidate",
+            "inputs",
+            "predictions",
+            "output",
+            "output_window",
+            "input_window",
+            "formal_dataset_window",
+            "prediction_window",
+            "assumptions",
+        )
+    )
+    config["sample_role"] = role
+    with pytest.raises(ValueError, match="portfolio_sample_role_invalid"):
+        backtest(config)

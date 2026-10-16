@@ -3,9 +3,12 @@
 from collections.abc import Mapping
 from pathlib import Path
 
+from quant_research_platform.contracts.json_codec import qrp_json_mapping_snapshot
+
 
 def prepare_source(config: Mapping):
     """Normalize selected vendor exports without resolving a project layout."""
+    config = qrp_json_mapping_snapshot(config)
     required = {"source_id", "raw_root", "outputs"}
     if (
         not isinstance(config, Mapping)

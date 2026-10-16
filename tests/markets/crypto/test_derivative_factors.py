@@ -119,7 +119,7 @@ def test_native_epoch_invalidates_all_assets_only_after_known_clock(tmp_path, mo
     from quant_research_platform.sources.tardis.raw import STATE_CHANNELS, import_slices
     from quant_research_platform.storage.datasets.reading import read_dataset
     from quant_research_platform.storage.datasets.writing import write_dataset
-    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.paths import StorageLayout
     from tests.helpers.tardis import _slices
 
     origin = pd.Timestamp("2026-09-01").value
@@ -265,7 +265,7 @@ def test_native_force_windows_preserve_exact_mass_resets_and_early_close(tmp_pat
     from quant_research_platform.sources.tardis.raw import STATE_CHANNELS, import_slices
     from quant_research_platform.storage.datasets.reading import read_dataset
     from quant_research_platform.storage.datasets.writing import write_dataset
-    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.paths import StorageLayout
     from tests.helpers.tardis import _slices
 
     origin = pd.Timestamp("2026-09-01", tz="UTC").value

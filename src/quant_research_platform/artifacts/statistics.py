@@ -1,4 +1,4 @@
-"""Multi-table semantic artifact for formal research statistics."""
+"""Multi-table semantic artifact for scientific research statistics."""
 
 from __future__ import annotations
 
@@ -634,17 +634,26 @@ def write_statistics_artifact(
     if table_group not in STATISTICS_TABLE_GROUPS:
         raise ValueError("statistics_tables_invalid")
     _validate_metadata(metadata)
-    members = tuple(STATISTICS_TABLE_GROUPS[table_group])
-    expected = {member.removesuffix(".parquet") for member in members}
+    known_members = tuple(STATISTICS_TABLE_GROUPS[table_group])
+    expected = {member.removesuffix(".parquet") for member in known_members}
     calibration = table_group == "crypto_maker_calibration"
     if callable(tables) and not calibration:
         raise ValueError("statistics_tables_invalid")
     if calibration and not callable(validate_tables):
         raise ValueError("statistics_business_validator_required")
     if not callable(tables) and (
-        not isinstance(tables, Mapping) or set(tables) != expected
+        not isinstance(tables, Mapping)
+        or not tables
+        or set(tables) - expected
+        or (calibration and set(tables) != expected)
     ):
         raise ValueError("statistics_tables_invalid")
+    members = tuple(
+        member
+        for member in known_members
+        if callable(tables) or member.removesuffix(".parquet") in tables
+    )
+    expected = {member.removesuffix(".parquet") for member in members}
 
     def write(staging):
         with closing_iterator(ExitStack()) as output:
@@ -717,9 +726,20 @@ def read_statistics_artifact(path: Path, *, validate_tables=None) -> StatisticsA
         or group not in STATISTICS_TABLE_GROUPS
     ):
         raise ValueError("statistics_artifact_contract_invalid")
-    members = tuple(STATISTICS_TABLE_GROUPS[group])
-    if manifest.get("members") != list(members):
+    known = STATISTICS_TABLE_GROUPS[group]
+    declared = manifest.get("members")
+    if (
+        not isinstance(declared, list)
+        or not declared
+        or any(
+            not isinstance(member, str) or member not in known for member in declared
+        )
+        or len(set(declared)) != len(declared)
+        or declared != [member for member in known if member in declared]
+        or (group == "crypto_maker_calibration" and declared != list(known))
+    ):
         raise ValueError("statistics_artifact_members_invalid")
+    members = tuple(declared)
     metadata = manifest.get("metadata")
     _validate_metadata(metadata)
     artifact = StatisticsArtifact(metadata, root, group, members)
@@ -731,11 +751,11 @@ def read_statistics_artifact(path: Path, *, validate_tables=None) -> StatisticsA
 
 
 def _validate_metadata(metadata):
-    if not isinstance(metadata, dict) or metadata.get("sample_role") not in {
-        "train",
-        "validation",
-        "test",
-    }:
+    if (
+        not isinstance(metadata, dict)
+        or type(metadata.get("sample_role")) is not str
+        or not metadata["sample_role"].strip()
+    ):
         raise ValueError("statistics_sample_role_invalid")
     window = metadata.get("window")
     if not isinstance(window, dict) or set(window) != {"start", "end"}:
@@ -957,7 +977,8 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
         "model_reality_checks.parquet",
     }:
         if (
-            not result["sample_role"].isin(("validation", "test")).all()
+            result["sample_role"].isna().any()
+            or result["sample_role"].str.strip().eq("").any()
             or result["sample_role"].nunique() > 1
         ):
             raise ValueError("statistics_sample_role_invalid")
@@ -992,9 +1013,9 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
             result.duplicated([key]).any()
             or not result.status.isin(("DEFINED", "UNDEFINED")).all()
             or (not result.bootstrap_status.isin(("DEFINED", "UNDEFINED")).all())
-            or (not result.sample_role.isin(("validation", "test")).all())
+            or result.sample_role.isna().any()
+            or result.sample_role.str.strip().eq("").any()
             or (result.sample_role.nunique() > 1)
-            or (defined & result.sample_role.ne("test")).any()
             or (bootstrap_defined & ~defined).any()
             or result.loc[defined, list(measurements)].isna().any().any()
             or result.loc[defined, ["global_mean", "quarterly_mean", "mean_difference"]]

@@ -97,6 +97,7 @@ def _prepare_midnight(tmp_path, gap_kind):
             "dataset_id": ids.HFT_RESEARCH_DATASET_ID,
             "inputs": roots,
             "factor_columns": ["return_100ms", "relative_spread"],
+            "context_columns": list(portfolio.HFT_EXECUTION_CONTEXT_COLUMNS),
             "time_window": window,
             "output_root": str(tmp_path / "research"),
         }
@@ -158,7 +159,7 @@ def _freeze_models(root, inputs, chronology):
                 }
             )
             predictions.append(str(pred))
-            item[role + "_model"], item[role + "_predictions"] = str(model), str(pred)
+            item[role + "_predictions"] = str(pred)
         scores = trial_selection.score(
             {
                 "predictions": [predictions],
@@ -294,7 +295,7 @@ def test_native_midnight_models_reach_frozen_backtests(tmp_path, monkeypatch, ga
             assert set(asset_rows.timestamp) == expected_times
         # The 8.6-9 s holdout still predicts when its 500 ms target matures after
         # test end, or never matures because a real source gap interrupts it.
-        target = metadata["model_metadata"]["target_column"]
+        target = metadata["model_facts"]["model"]["target_column"]
         available = target + "_available_at"
         matched = rows.merge(
             frame[["timestamp", "asset_id", available]], validate="one_to_one"
@@ -331,7 +332,7 @@ def test_native_midnight_models_reach_frozen_backtests(tmp_path, monkeypatch, ga
                                 _taker_config(latency_ms=10), markout_horizon_ms=500
                             )
                         ),
-                        **models[0],
+                        predictions=models[0]["predictions"],
                     )
                     backtest = portfolio.backtest_taker
                 else:
@@ -344,7 +345,9 @@ def test_native_midnight_models_reach_frozen_backtests(tmp_path, monkeypatch, ga
                                 markout_horizon_ms=500,
                             )
                         ),
-                        models=models if calibrated else [],
+                        models=[{"predictions": item["predictions"]} for item in models]
+                        if calibrated
+                        else [],
                         calibration=calibrations[asset] if calibrated else None,
                     )
                     backtest = portfolio.backtest_maker

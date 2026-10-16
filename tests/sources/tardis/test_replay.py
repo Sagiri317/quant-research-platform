@@ -361,13 +361,12 @@ def test_native_schema_invalid_fields_fail_atomic_full_import(tmp_path, date, ch
 
 
 @pytest.mark.parametrize("boundary", ("manifest_stat", "member_open", "coverage_open"))
-def test_tardis_identity_preserves_shared_owner_io_failure(
+def test_tardis_source_preserves_shared_owner_io_failure(
     tmp_path, monkeypatch, boundary
 ):
     import errno
 
     import quant_research_platform.sources.binance.replay as binance_replay
-    from quant_research_platform.sources.market import market_source_identity
     from tests.helpers.tardis import _snapshot
 
     root = tmp_path / "published"
@@ -376,7 +375,8 @@ def test_tardis_identity_preserves_shared_owner_io_failure(
         date="2026-09-01",
         slices=_slices(tmp_path / "native", _snapshot()),
     )
-    assert market_source_identity(root, "panel")
+    with open_market_source(root) as source:
+        assert source.source_identity
     target = root / (
         "manifest.json"
         if boundary == "manifest_stat"
@@ -384,7 +384,9 @@ def test_tardis_identity_preserves_shared_owner_io_failure(
         if boundary == "coverage_open"
         else manifest["files"][0]["path"]
     )
-    owner = binance_replay
+    from quant_research_platform.sources.tardis import raw
+
+    owner = raw if boundary == "member_open" else binance_replay
     operation = (
         "filesystem_stat" if boundary == "manifest_stat" else "open_filesystem_file"
     )
@@ -399,7 +401,9 @@ def test_tardis_identity_preserves_shared_owner_io_failure(
     with monkeypatch.context() as patch:
         patch.setattr(owner, operation, fail)
         with pytest.raises(OSError) as caught:
-            market_source_identity(root, "panel")
+            with open_market_source(root) as source:
+                if boundary == "member_open":
+                    list(source.archives[0]._iter_canonical_records())
     assert caught.value is primary
 
 
@@ -900,7 +904,7 @@ def test_disjoint_archives_preserve_reset_ids_through_processed_publication(
     from quant_research_platform.sources.binance.replay import iter_agg_trades
     from quant_research_platform.storage.datasets.reading import read_dataset
     from quant_research_platform.storage.datasets.writing import write_dataset
-    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.paths import StorageLayout
 
     dates = ("2026-07-01", "2026-08-01")
     window = TimeWindow("2026-07-01T00:00:00", "2026-08-01T00:00:04")
@@ -1502,7 +1506,7 @@ def test_native_panel_exact_ofi_publication(tmp_path, case, batch_rows):
     from quant_research_platform.sources.binance.replay import iter_agg_trades
     from quant_research_platform.storage.datasets.reading import read_dataset
     from quant_research_platform.storage.datasets.writing import write_dataset
-    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.paths import StorageLayout
 
     midnight = pd.Timestamp("2026-09-01T00:00:00Z").value
     quantity = "1" if case == "ordinary" else "1e308"

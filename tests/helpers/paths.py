@@ -1,4 +1,4 @@
-"""Portable disk layout for QRP."""
+"""Synthetic fixture layout; production operations use explicit paths."""
 
 from __future__ import annotations
 

@@ -9,16 +9,21 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
-from quant_research_platform.catalog.processed import ProcessedDataCatalog
 from quant_research_platform.compute.dataframe.cross_section import _stable_zscore
-from quant_research_platform.contracts.columns import ColumnRole
+from quant_research_platform.contracts.columns import (
+    ColumnRole,
+    _validate_asset_time_key,
+)
 from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
-from quant_research_platform.contracts.time import TimeWindow, is_datetime_window
+from quant_research_platform.contracts.time import (
+    TimeWindow,
+    time_window_timestamp_interval,
+)
 from quant_research_platform.contracts.validation import (
     strict_bool_series,
     strict_finite_numeric_series,
+    strict_timestamp_series,
 )
 from quant_research_platform.markets.implementations.a_share.ids import MARKET_ID
 from quant_research_platform.policy.lifecycle import closing_iterator
@@ -32,7 +37,7 @@ from quant_research_platform.research.filtering import (
     A_SHARE_ELIGIBILITY_FACTS,
     a_share_eligibility,
 )
-from quant_research_platform.research.protocols.a_share import SCENARIO_IDS
+from quant_research_platform.runtime.dataframes import iter_complete_time_frames
 from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
     iter_dataset_chunks,
@@ -43,34 +48,6 @@ from quant_research_platform.storage.datasets.writing import (
     write_dataset,
 )
 from quant_research_platform.storage.identity import require_artifact_root
-
-
-def assemble_research_dataset(
-    *,
-    inputs: Mapping[str, Path],
-    output_root: Path,
-    dataset_catalog: ResearchDatasetCatalog,
-    processed_catalog: ProcessedDataCatalog,
-    dataset_id: str,
-    time_window: TimeWindow,
-    metadata: Mapping[str, object] | None = None,
-) -> Path:
-    """Assemble one registered research dataset from processed inputs."""
-    spec = dataset_catalog.get(dataset_id)
-    _validate_research_input_specs(spec, processed_catalog)
-    input_sessions = _open_input_dataset_sessions(
-        inputs=inputs,
-        dataset_spec=spec,
-        processed_catalog=processed_catalog,
-        time_window=time_window,
-    )
-    return _assemble_research_dataset_from_sessions(
-        output_root=output_root,
-        spec=spec,
-        time_window=time_window,
-        input_sessions=input_sessions,
-        metadata=metadata,
-    )
 
 
 def _assemble_research_dataset_from_sessions(
@@ -116,35 +93,62 @@ def _iter_joined_processed_chunks(
     time_window: TimeWindow,
     diagnostics: dict | None = None,
 ) -> Iterator[pd.DataFrame]:
-    base_data_id = dataset_spec.base_input_data_id
-    chunk_windows = _iter_research_chunk_windows_from_base_input(
-        replace(
-            sessions[base_data_id],
-            logical_columns=("timestamp",),
-            physical_columns=("timestamp",),
-        ),
-        time_window=time_window,
-    )
+    base_session = sessions[dataset_spec.base_input_data_id].filtered_view(time_window)
     physical_order = (
         "timestamp",
         *(key for key in dataset_spec.primary_key if key != "timestamp"),
     )
-    with closing_iterator(iter(chunk_windows)) as active_chunk_windows:
-        for chunk_window in active_chunk_windows:
-            chunk = _join_processed_inputs(
-                dataset_spec=dataset_spec,
-                sessions=sessions,
-                time_window=chunk_window,
-                diagnostics=diagnostics,
-            )
-            validate_research_dataset(chunk, dataset_spec)
-            yielded_value = chunk.sort_values(
-                list(physical_order), kind="mergesort", ignore_index=True
-            )
-            try:
-                yield yielded_value
-            except GeneratorExit:
-                return
+    start, stop, closed = time_window_timestamp_interval(time_window)
+    start, stop = pd.Timestamp(start), pd.Timestamp(stop)
+    if not closed:
+        stop -= pd.Timedelta(1, "ns")
+    pending = None
+    with closing_iterator(
+        iter_complete_time_frames(
+            iter_dataset_chunks(base_session), timestamp_column="timestamp"
+        )
+    ) as chunks:
+        for frame in chunks:
+            if frame.empty:
+                continue
+            if pending is not None:
+                end = pd.Timestamp(pending.timestamp.iloc[-1])
+                chunk = _join_processed_inputs(
+                    dataset_spec=dataset_spec,
+                    sessions=sessions,
+                    time_window=TimeWindow(start, end),
+                    base_frame=pending,
+                    diagnostics=diagnostics,
+                )
+                validate_research_dataset(chunk, dataset_spec)
+                yield chunk.sort_values(
+                    list(physical_order), kind="mergesort", ignore_index=True
+                )
+                start = end + pd.Timedelta(1, "ns")
+            pending = frame
+        if pending is None:
+            # An empty base still has no authority to hide auxiliary extra keys.
+            for data_id, session in sessions.items():
+                if data_id != dataset_spec.base_input_data_id:
+                    auxiliary = materialize_dataset_session(
+                        session.filtered_view(time_window)
+                    )
+                    if len(auxiliary):
+                        raise ValueError(
+                            f"extra_research_input_keys: {data_id}: {len(auxiliary)}"
+                        )
+            raise ValueError("no_research_dataset_sessions")
+        chunk = _join_processed_inputs(
+            dataset_spec=dataset_spec,
+            sessions=sessions,
+            time_window=TimeWindow(start, stop),
+            base_frame=pending,
+            diagnostics=diagnostics,
+        )
+        validate_research_dataset(chunk, dataset_spec)
+        yield chunk.sort_values(
+            list(physical_order), kind="mergesort", ignore_index=True
+        )
 
 
 def _join_processed_inputs(
@@ -152,10 +156,12 @@ def _join_processed_inputs(
     dataset_spec: ResearchDatasetSpec,
     sessions: Mapping[str, DatasetSession],
     time_window: TimeWindow,
+    base_frame: pd.DataFrame,
     diagnostics: dict | None = None,
 ) -> pd.DataFrame:
     base = dataset_spec.base_input_data_id
-    assembled = materialize_dataset_session(sessions[base].filtered_view(time_window))
+    assembled = base_frame
+    validate_research_dataset(assembled, dataset_spec, require_all_columns=False)
     base_keys = assembled.loc[:, list(dataset_spec.primary_key)].copy()
     for input_data_id in dataset_spec.input_data_ids:
         if input_data_id == base:
@@ -163,6 +169,7 @@ def _join_processed_inputs(
         input_frame = materialize_dataset_session(
             sessions[input_data_id].filtered_view(time_window)
         )
+        validate_research_dataset(input_frame, dataset_spec, require_all_columns=False)
         _validate_input_key_coverage(
             base_keys,
             input_frame,
@@ -181,53 +188,6 @@ def _join_processed_inputs(
             assembled, dataset_spec.feature_transforms, diagnostics=diagnostics
         )
     return assembled.loc[:, list(_ordered_output_columns(dataset_spec))]
-
-
-def _iter_research_chunk_windows_from_base_input(
-    base_session: DatasetSession, *, time_window: TimeWindow
-) -> Iterator[TimeWindow]:
-    """Partition the complete request domain using ordered base-chunk boundaries."""
-    intraday = is_datetime_window(time_window)
-    last_timestamp: pd.Timestamp | None = None
-    pending: TimeWindow | None = None
-    session = base_session.filtered_view(time_window)
-    with closing_iterator(iter_dataset_chunks(session)) as chunks:
-        for chunk in chunks:
-            timestamps = chunk["timestamp"]
-            values = timestamps.dropna().unique()
-            chunk_timestamps = pd.DatetimeIndex(values).sort_values()
-            if not intraday:
-                chunk_timestamps = chunk_timestamps.normalize()
-            chunk_timestamps = chunk_timestamps.drop_duplicates()
-            if chunk_timestamps.empty:
-                continue
-            if last_timestamp is not None:
-                current = pd.Timestamp(chunk_timestamps[0])
-                if current < last_timestamp:
-                    raise ValueError("non_monotonic_research_time_keys")
-                chunk_timestamps = chunk_timestamps[chunk_timestamps > last_timestamp]
-            if chunk_timestamps.empty:
-                continue
-            start = (
-                pd.Timestamp(time_window.start)
-                if last_timestamp is None
-                else last_timestamp + pd.Timedelta(1, unit="ns" if intraday else "D")
-            )
-            end = pd.Timestamp(chunk_timestamps[-1])
-            last_timestamp = end
-            if intraday:
-                window = TimeWindow(start, end)
-            else:
-                window = TimeWindow(start.date(), end.date())
-            if pending is not None:
-                try:
-                    yield pending
-                except GeneratorExit:
-                    return
-            pending = window
-    if pending is None:
-        raise ValueError("no_research_dataset_sessions")
-    yield TimeWindow(pending.start, time_window.end)
 
 
 def _ordered_input_data_ids(
@@ -270,6 +230,37 @@ def _validate_input_key_coverage(
         )
 
 
+def _required_input_columns(spec: ResearchDatasetSpec) -> tuple[str, ...]:
+    columns = list(_ordered_output_columns(spec))
+    for transform in spec.feature_transforms:
+        columns.extend(transform.support_columns)
+    generated = _generated_semantic_columns(spec)
+    if "eligible" in generated:
+        columns.extend(A_SHARE_ELIGIBILITY_FACTS)
+        if spec.eligibility_recipe in {"a_share_nonfinancial", "a_share_fundamental"}:
+            columns.extend(
+                (
+                    "is_nonfinancial_industry",
+                    "industry_standard_id",
+                    "industry_level1_code",
+                    "industry_level1_name",
+                )
+            )
+        if spec.eligibility_recipe == "a_share_fundamental":
+            columns.append("has_legal_fundamental_pit")
+    if "model_target" in generated:
+        columns.extend(
+            (
+                "eligible",
+                "forward_return_20d",
+                spec.label_availability_columns.get(
+                    "forward_return_20d", "forward_return_20d_available_at"
+                ),
+            )
+        )
+    return tuple(dict.fromkeys(columns))
+
+
 def _processed_input_columns(
     dataset_spec: ResearchDatasetSpec,
     processed_spec: ProcessedDataSpec,
@@ -277,7 +268,9 @@ def _processed_input_columns(
     existing_columns: tuple[str, ...],
 ) -> tuple[str, ...]:
     existing = set(existing_columns)
-    output_columns = set(dataset_spec.required_columns)
+    output_columns = set(_required_input_columns(dataset_spec)).difference(
+        _generated_semantic_columns(dataset_spec)
+    )
     columns: list[str] = []
     for column in dataset_spec.primary_key:
         columns.append(column)
@@ -293,12 +286,8 @@ def _processed_input_columns(
 
 
 def _validate_research_input_specs(
-    dataset_spec: ResearchDatasetSpec, processed_catalog: ProcessedDataCatalog
+    dataset_spec: ResearchDatasetSpec, processed_specs: Mapping[str, ProcessedDataSpec]
 ) -> None:
-    processed_specs = {
-        data_id: processed_catalog.get(data_id)
-        for data_id in dataset_spec.input_data_ids
-    }
     for data_id, processed_spec in processed_specs.items():
         missing_key_columns = [
             column
@@ -310,8 +299,11 @@ def _validate_research_input_specs(
                 f"missing_research_join_key: {data_id}: "
                 + ", ".join(missing_key_columns)
             )
-        if processed_spec.primary_key != dataset_spec.primary_key:
+        if set(processed_spec.primary_key) != set(dataset_spec.primary_key):
             raise ValueError(f"incompatible_research_input_keys: {data_id}")
+        _validate_asset_time_key(
+            processed_spec.primary_key, processed_spec.column_roles
+        )
     _require_no_duplicate_output_columns(dataset_spec, processed_specs)
     _require_research_required_columns_available(dataset_spec, processed_specs)
     role_by_column: dict[str, set[ColumnRole]] = {}
@@ -360,7 +352,7 @@ def _validate_research_input_specs(
         ),
         role_by_column=role_by_column,
         kind_by_column=kind_by_column,
-        allowed_roles={ColumnRole.CONTEXT},
+        allowed_roles={ColumnRole.CONTEXT, ColumnRole.TIMESTAMP},
         allowed_kinds=set(),
         error_name="invalid_research_context_columns",
     )
@@ -389,9 +381,10 @@ def _require_no_duplicate_output_columns(
     dataset_spec: ResearchDatasetSpec, processed_specs: dict[str, ProcessedDataSpec]
 ) -> None:
     requested = (
-        set(_ordered_output_columns(dataset_spec))
+        set(_required_input_columns(dataset_spec))
         .difference(dataset_spec.primary_key)
         .difference(dataset_spec.feature_columns)
+        .difference(_generated_semantic_columns(dataset_spec))
     )
     producers: dict[str, list[str]] = {}
     for data_id, processed_spec in processed_specs.items():
@@ -415,7 +408,7 @@ def _require_research_required_columns_available(
         for column in processed_spec.required_columns
     }
     missing = sorted(
-        set(_ordered_output_columns(dataset_spec))
+        set(_required_input_columns(dataset_spec))
         .difference(available)
         .difference(
             dataset_spec.feature_columns + _generated_semantic_columns(dataset_spec)
@@ -441,35 +434,55 @@ def _ordered_output_columns(dataset_spec: ResearchDatasetSpec) -> tuple[str, ...
 
 
 def _generated_semantic_columns(dataset_spec: ResearchDatasetSpec) -> tuple[str, ...]:
-    if dataset_spec.market_id != MARKET_ID or dataset_spec.data_id not in SCENARIO_IDS:
+    if dataset_spec.market_id != MARKET_ID:
         return ()
-    return tuple(
-        column
-        for column in ("eligible", "model_target", "model_target_available_at")
-        if column in _ordered_output_columns(dataset_spec)
-    )
+    needed = set(_ordered_output_columns(dataset_spec))
+    if dataset_spec.feature_transforms or "model_target" in dataset_spec.label_columns:
+        needed.add("eligible")
+    generated = []
+    if dataset_spec.eligibility_recipe is not None and "eligible" in needed:
+        generated.append("eligible")
+    if "model_target" in dataset_spec.label_columns:
+        generated.extend(("model_target", "model_target_available_at"))
+    return tuple(generated)
 
 
 def _add_a_share_semantic_columns(
     frame: pd.DataFrame, dataset_spec: ResearchDatasetSpec
 ) -> pd.DataFrame:
-    if dataset_spec.market_id != MARKET_ID or dataset_spec.data_id not in SCENARIO_IDS:
+    generated = _generated_semantic_columns(dataset_spec)
+    if not generated:
         return frame
-    missing = sorted(set(A_SHARE_ELIGIBILITY_FACTS).difference(frame.columns))
-    if missing:
-        raise ValueError("a_share_eligibility_facts_missing: " + ", ".join(missing))
     result = frame.copy()
-    result["eligible"] = a_share_eligibility(result, dataset_spec.data_id)
-    if "model_target" in dataset_spec.label_columns:
+    if "eligible" in generated:
+        missing = sorted(set(A_SHARE_ELIGIBILITY_FACTS).difference(frame.columns))
+        if missing:
+            raise ValueError("a_share_eligibility_facts_missing: " + ", ".join(missing))
+        result["eligible"] = a_share_eligibility(
+            result, dataset_spec.eligibility_recipe
+        )
+    if "model_target" in generated:
         if "forward_return_20d" not in result.columns:
             raise ValueError("a_share_model_target_label_missing")
+        maturity = dataset_spec.label_availability_columns.get("forward_return_20d")
+        if maturity is None:
+            raise ValueError("model_target_label_availability_required")
         result["model_target"] = _a_share_model_target(result)
-        result["model_target_available_at"] = (
-            result["forward_return_20d_available_at"]
-            .where(result.model_target.notna())
+        participating = result.model_target.notna()
+        clocks = strict_timestamp_series(
+            result[maturity].where(participating),
+            error="invalid_model_target_label_availability",
+            allow_null=True,
+        )
+        unknown = (
+            (participating & clocks.isna())
             .groupby(result.timestamp, sort=False)
+            .transform("any")
+        )
+        result["model_target_available_at"] = (
+            clocks.groupby(result.timestamp, sort=False)
             .transform("max")
-            .where(result.model_target.notna())
+            .where(participating & ~unknown)
         )
     return result
 
@@ -495,53 +508,24 @@ def _a_share_model_target(frame: pd.DataFrame) -> pd.Series:
     return target
 
 
-def _open_input_dataset_sessions(
-    *,
-    inputs: Mapping[str, Path],
-    dataset_spec: ResearchDatasetSpec,
-    processed_catalog: ProcessedDataCatalog,
-    time_window: TimeWindow,
-) -> dict[str, DatasetSession]:
-    if set(inputs) != set(dataset_spec.input_data_ids):
-        raise ValueError("research_input_paths_mismatch")
-    sessions: dict[str, DatasetSession] = {}
-    existing_columns: tuple[str, ...] = ()
-    for data_id in _ordered_input_data_ids(dataset_spec):
-        processed_spec = processed_catalog.get(data_id)
-        columns = _processed_input_columns(
-            dataset_spec, processed_spec, existing_columns=existing_columns
-        )
-        root = inputs[data_id]
-        session = open_dataset_session(root, columns=columns, time_window=time_window)
-        if (
-            session.spec.get("data_id") != data_id
-            or tuple(session.spec.get("primary_key", ())) != processed_spec.primary_key
-            or session.spec.get("market_id") != str(processed_spec.market_id)
-        ):
-            raise ValueError("research_input_semantics_mismatch")
-        for column in columns:
-            if (
-                session.spec["column_roles"].get(column)
-                != processed_spec.column_roles[column].value
-            ):
-                raise ValueError("research_input_column_role_mismatch")
-        sessions[data_id] = session
-        existing_columns = tuple(dict.fromkeys((*existing_columns, *columns)))
-    return sessions
-
-
 def assemble(config: Mapping) -> Path:
-    """Assemble explicit tables, ordered factors, labels, and causal recipes."""
-    from quant_research_platform.contracts.features import FEATURE_RECIPES
-    from quant_research_platform.research.features.transforms import feature_transforms
+    """Assemble selected columns from actual input declarations and optional recipes."""
+    from quant_research_platform.contracts.features import FeatureTransformSpec
+    from quant_research_platform.contracts.json_codec import qrp_json_mapping_snapshot
+    from quant_research_platform.storage.datasets.reading import _dataset_input_options
 
+    config = qrp_json_mapping_snapshot(config)
     required = {"market_id", "dataset_id", "inputs", "time_window", "output_root"}
     optional = {
         "factor_columns",
         "label_columns",
         "feature_recipe",
+        "feature_transform",
         "base_input_data_id",
         "sparse_input_data_ids",
+        "context_columns",
+        "filter_columns",
+        "eligibility_recipe",
     }
     if (
         not isinstance(config, Mapping)
@@ -558,10 +542,7 @@ def assemble(config: Mapping) -> Path:
     if (
         not isinstance(inputs, Mapping)
         or not inputs
-        or any(
-            type(k) is not str or not k or type(v) is not str or not v
-            for k, v in inputs.items()
-        )
+        or any(type(key) is not str or not key for key in inputs)
     ):
         raise ValueError("assemble_input_paths_invalid")
     bounds = config["time_window"]
@@ -569,149 +550,320 @@ def assemble(config: Mapping) -> Path:
         raise ValueError("assemble_window_invalid")
     window = TimeWindow(**bounds)
     if config["market_id"] == "a_share":
-        from quant_research_platform.markets.implementations.a_share.processed import (
-            catalog as market_catalog,
-        )
         from quant_research_platform.research.protocols.a_share import (
             research_dataset_catalog,
         )
-
-        processed = market_catalog.processed_catalog()
     elif config["market_id"] == "crypto":
-        from quant_research_platform.markets.implementations.crypto.processed import (
-            catalog as market_catalog,
-        )
         from quant_research_platform.research.protocols.crypto_hft import (
             build_hft_research_dataset_catalog as research_dataset_catalog,
         )
-
-        processed = market_catalog.hft_processed_catalog()
     else:
-        raise ValueError("assemble_market_invalid")
-    base = research_dataset_catalog().get(config["dataset_id"])
-    factors = config.get("factor_columns", list(base.factor_columns))
-    labels = config.get("label_columns", list(base.label_columns))
-    for name, values in (("factor_columns", factors), ("label_columns", labels)):
+        research_dataset_catalog = None
+    defaults = (
+        next(
+            (
+                item
+                for item in research_dataset_catalog().list()
+                if item.data_id == config["dataset_id"]
+            ),
+            None,
+        )
+        if research_dataset_catalog is not None
+        else None
+    )
+    base_input = config.get(
+        "base_input_data_id",
+        defaults.base_input_data_id if defaults else next(iter(inputs)),
+    )
+    if type(base_input) is not str or base_input not in inputs:
+        raise ValueError("assemble_base_input_invalid")
+    sessions = {
+        data_id: open_dataset_session(**_dataset_input_options(value)).filtered_view(
+            window
+        )
+        for data_id, value in inputs.items()
+    }
+    actual_specs = {}
+    for data_id, session in sessions.items():
+        declared = session.spec
+        if (
+            declared["data_id"] != data_id
+            or declared.get("market_id", config["market_id"]) != config["market_id"]
+        ):
+            raise ValueError("research_input_semantics_mismatch")
+        actual_specs[data_id] = ProcessedDataSpec(
+            data_id=data_id,
+            market_id=config["market_id"],
+            kind=declared.get("kind", "panel"),
+            frequency=declared["frequency"],
+            grain=declared["grain"],
+            primary_key=tuple(declared["primary_key"]),
+            partition_columns=tuple(declared["partition_columns"]),
+            column_roles={
+                column: declared["column_roles"][column]
+                for column in declared["required_columns"]
+            },
+            column_units=declared.get("column_units", {}),
+            label_availability_columns=declared.get("label_availability_columns", {}),
+        )
+    roles = {
+        column: role
+        for item in actual_specs.values()
+        for column, role in item.column_roles.items()
+    }
+    selected_roles = {
+        column: role
+        for data_id, item in actual_specs.items()
+        for column, role in item.column_roles.items()
+        if column in sessions[data_id].logical_columns
+    }
+    selected_factors = {
+        column
+        for data_id, item in actual_specs.items()
+        for column, role in item.column_roles.items()
+        if role is ColumnRole.FACTOR and column in sessions[data_id].logical_columns
+    }
+    selected_labels = {
+        column
+        for data_id, item in actual_specs.items()
+        for column, role in item.column_roles.items()
+        if role is ColumnRole.LABEL and column in sessions[data_id].logical_columns
+    }
+    factors = config.get(
+        "factor_columns",
+        [
+            column
+            for column in (defaults.factor_columns if defaults else selected_roles)
+            if column in selected_factors
+        ],
+    )
+    labels = config.get(
+        "label_columns",
+        [
+            column
+            for column in (defaults.label_columns if defaults else selected_roles)
+            if column in selected_labels
+            or (column == "model_target" and "forward_return_20d" in selected_labels)
+        ],
+    )
+    filters = config.get(
+        "filter_columns", list(defaults.filter_columns) if defaults else []
+    )
+    context = config.get("context_columns", [])
+    sparse_inputs = config.get("sparse_input_data_ids", [])
+    for name, values in (
+        ("factor_columns", factors),
+        ("label_columns", labels),
+        ("filter_columns", filters),
+        ("context_columns", context),
+        ("sparse_inputs", sparse_inputs),
+    ):
         if (
             type(values) is not list
-            or not values
-            or any(type(v) is not str or not v for v in values)
+            or (name == "factor_columns" and not values)
+            or any(type(value) is not str or not value for value in values)
             or len(set(values)) != len(values)
         ):
             raise ValueError("assemble_" + name + "_invalid")
-    if set(labels) - set(base.label_columns):
-        raise ValueError("assemble_label_not_available")
-    available_factors = {
+    if set(factors) - {
         column
-        for spec in processed.list()
-        for column, role in spec.column_roles.items()
+        for item in actual_specs.values()
+        for column, role in item.column_roles.items()
         if role is ColumnRole.FACTOR
-    }
-    if set(factors) - available_factors or (
-        base.market_id == MARKET_ID and set(factors) - set(base.factor_columns)
-    ):
+    }:
         raise ValueError("assemble_factor_not_available")
-    recipe = config.get(
-        "feature_recipe", "a_share_canonical" if base.market_id == MARKET_ID else None
-    )
-    if base.market_id != MARKET_ID and "feature_recipe" in config:
-        raise ValueError("assemble_feature_recipe_not_supported")
-    if recipe is not None and (
-        type(recipe) is not str or recipe not in FEATURE_RECIPES
+    if set(factors) - selected_factors:
+        raise ValueError("assemble_factor_not_selected")
+    generated_labels = {"model_target"} if config["market_id"] == "a_share" else set()
+    if (
+        set(labels)
+        - {
+            column
+            for item in actual_specs.values()
+            for column, role in item.column_roles.items()
+            if role is ColumnRole.LABEL
+        }
+        - generated_labels
     ):
-        raise ValueError("unsupported_feature_recipe")
-    transforms = feature_transforms(tuple(factors), recipe_id=recipe) if recipe else ()
+        raise ValueError("assemble_label_not_available")
+    if set(labels) - selected_labels - generated_labels or (
+        "model_target" in labels and "forward_return_20d" not in selected_labels
+    ):
+        raise ValueError("assemble_label_not_selected")
+    generated_context = (
+        {"model_target_available_at"} if "model_target" in labels else set()
+    )
+    if set(context) - set(selected_roles) - generated_context:
+        raise ValueError("assemble_context_not_selected")
+    business_columns = set((*factors, *labels, *filters, *context))
+    recipe = config.get(
+        "feature_recipe",
+        "a_share_canonical" if config["market_id"] == "a_share" else None,
+    )
+    options = config.get("feature_transform", {})
+    if not isinstance(options, Mapping) or set(options) - {
+        "clip",
+        "industry_neutralize",
+        "size_neutralize",
+        "center",
+        "scale",
+        "impute_missing",
+    }:
+        raise ValueError("assemble_feature_transform_invalid")
+    if config["market_id"] != "a_share" and (recipe is not None or options):
+        raise ValueError("assemble_feature_recipe_not_supported")
+    if recipe is None and options:
+        raise ValueError("assemble_feature_transform_requires_recipe")
+    transforms = (
+        (FeatureTransformSpec(recipe, tuple(factors), **options),)
+        if recipe is not None
+        else ()
+    )
     features = tuple(
         column for transform in transforms for column in transform.output_columns
     )
-    context = [
-        column
-        for column in base.context_columns
-        if column != "model_target_available_at" or "model_target" in labels
-    ]
-    # Maturity support is retained with the economic labels, never placed in X.
-    labels = list(labels)
-    if "model_target" in labels:
-        labels.extend(("forward_return_20d", "forward_return_20d_available_at"))
-    for label in tuple(labels):
-        maturity = label + "_available_at"
-        if maturity in base.label_columns:
-            labels.append(maturity)
-        elif maturity in base.context_columns and maturity not in context:
-            context.append(maturity)
-    labels = tuple(dict.fromkeys(labels))
-    for data_id in inputs:
-        input_spec = processed.get(data_id)
-        context.extend(
-            column
-            for column, role in input_spec.column_roles.items()
-            if role is ColumnRole.CONTEXT and column not in labels
-        )
-    context = tuple(dict.fromkeys(context))
-    base_input = config.get("base_input_data_id", base.base_input_data_id)
-    if type(base_input) is not str or base_input not in inputs:
-        raise ValueError("assemble_base_input_invalid")
-    if base_input != base.base_input_data_id:
-        from quant_research_platform.markets.implementations.crypto.ids import (
-            HFT_INFORMATION_PANEL_DATA_ID,
-        )
-
-        if base.market_id == MARKET_ID or base_input != HFT_INFORMATION_PANEL_DATA_ID:
-            raise ValueError("assemble_base_input_invalid")
-    sparse_inputs = config.get("sparse_input_data_ids", [])
-    if (
-        type(sparse_inputs) is not list
-        or any(type(value) is not str for value in sparse_inputs)
-        or len(set(sparse_inputs)) != len(sparse_inputs)
-    ):
-        raise ValueError("assemble_sparse_inputs_invalid")
-    if sparse_inputs:
-        from quant_research_platform.markets.implementations.crypto import (
-            ids as crypto_ids,
-        )
-
-        permitted_sparse = {
-            crypto_ids.HFT_DERIVATIVE_DATA_ID,
-            crypto_ids.HFT_SPOT_CONTEXT_DATA_ID,
-            *crypto_ids.HFT_EXTERNAL_DATA_IDS.values(),
-        }
-        if base.market_id == MARKET_ID or not set(
-            sparse_inputs
-        ) <= permitted_sparse.intersection(inputs):
-            raise ValueError("assemble_sparse_inputs_invalid")
-    coverage = {key: "sparse" if key in sparse_inputs else "strict" for key in inputs}
-    roles = {
-        **{key: base.column_roles[key] for key in base.primary_key},
-        **{key: ColumnRole.FACTOR for key in factors},
-        **{key: ColumnRole.FEATURE for key in features},
-        **{key: ColumnRole.LABEL for key in labels},
-        **{key: base.column_roles[key] for key in base.filter_columns},
-        **{key: ColumnRole.CONTEXT for key in context},
+    labels, context = list(labels), list(context)
+    availability = {
+        label: maturity
+        for item in actual_specs.values()
+        for label, maturity in item.label_availability_columns.items()
     }
-    spec = replace(
-        base,
+    if "model_target" in labels:
+        if "forward_return_20d" not in availability:
+            raise ValueError("model_target_label_availability_required")
+        labels.append("forward_return_20d")
+        context.append("model_target_available_at")
+        availability["model_target"] = "model_target_available_at"
+    for label in tuple(labels):
+        maturity = availability.get(label)
+        if maturity and maturity not in labels and maturity not in context:
+            (labels if roles.get(maturity) is ColumnRole.LABEL else context).append(
+                maturity
+            )
+    labels = tuple(dict.fromkeys(labels))
+    context = tuple(dict.fromkeys(context))
+    if set(sparse_inputs) - set(inputs) or base_input in sparse_inputs:
+        raise ValueError("assemble_sparse_inputs_invalid")
+    source = actual_specs[base_input]
+    output_roles = {
+        **{column: source.column_roles[column] for column in source.primary_key},
+        **dict.fromkeys(factors, ColumnRole.FACTOR),
+        **dict.fromkeys(features, ColumnRole.FEATURE),
+        **dict.fromkeys(labels, ColumnRole.LABEL),
+        **{column: roles.get(column, ColumnRole.UNIVERSE) for column in filters},
+        **dict.fromkeys(context, ColumnRole.CONTEXT),
+    }
+    units = {
+        column: unit
+        for item in actual_specs.values()
+        for column, unit in item.column_units.items()
+        if column in output_roles
+    }
+    for transform in transforms:
+        for factor in transform.source_columns:
+            for prefix in ("feature_missing_", "feature_observed_"):
+                units[prefix + factor] = "dimensionless"
+            if transform.scale:
+                units["feature_" + factor] = "dimensionless"
+            elif factor in units:
+                units["feature_" + factor] = units[factor]
+    if "model_target" in labels:
+        units["model_target"] = "dimensionless"
+    spec = ResearchDatasetSpec(
+        data_id=config["dataset_id"],
+        market_id=config["market_id"],
+        frequency=source.frequency,
+        grain="research_row",
+        primary_key=source.primary_key,
+        partition_columns=("year",),
         input_data_ids=tuple(inputs),
         base_input_data_id=base_input,
         factor_columns=tuple(factors),
         feature_columns=features,
         feature_transforms=transforms,
         label_columns=labels,
+        filter_columns=tuple(filters),
         context_columns=context,
-        column_roles=roles,
-        key_coverage=coverage,
+        eligibility_recipe=config.get(
+            "eligibility_recipe", defaults.eligibility_recipe if defaults else None
+        ),
+        column_roles=output_roles,
+        column_units=units,
+        label_availability_columns={
+            label: maturity
+            for label, maturity in availability.items()
+            if label in labels and maturity in output_roles
+        },
+        key_coverage={
+            key: "sparse" if key in sparse_inputs else "strict" for key in inputs
+        },
     )
-    return assemble_research_dataset(
-        inputs={key: Path(value) for key, value in inputs.items()},
+    # Explicit input columns bound business candidates; dependency-only columns
+    # can still support the declared calculation without leaking into output X.
+    required_inputs = set(_required_input_columns(spec))
+    consumed_specs = {}
+    for data_id, item in actual_specs.items():
+        consumed = {
+            column: role
+            for column, role in item.column_roles.items()
+            if column in item.primary_key
+            or (
+                column in required_inputs
+                and (
+                    column in sessions[data_id].logical_columns
+                    or column not in business_columns
+                )
+            )
+        }
+        consumed_specs[data_id] = replace(
+            item,
+            column_roles=consumed,
+            column_units={
+                column: unit
+                for column, unit in item.column_units.items()
+                if column in consumed
+            },
+            label_availability_columns={
+                label: maturity
+                for label, maturity in item.label_availability_columns.items()
+                if label in consumed and maturity in consumed
+            },
+        )
+    _validate_research_input_specs(spec, consumed_specs)
+    existing = ()
+    projected = {}
+    for data_id in _ordered_input_data_ids(spec):
+        columns = _processed_input_columns(
+            spec, consumed_specs[data_id], existing_columns=existing
+        )
+        projected[data_id] = sessions[data_id].projected_view(columns)
+        existing = tuple(dict.fromkeys((*existing, *columns)))
+    return _assemble_research_dataset_from_sessions(
         output_root=Path(config["output_root"]),
-        dataset_catalog=ResearchDatasetCatalog((spec,)),
-        processed_catalog=processed,
-        dataset_id=spec.data_id,
+        spec=spec,
         time_window=window,
+        input_sessions=projected,
         metadata={
             "parameters": {
                 "factor_columns": list(factors),
                 "label_columns": list(labels),
                 "feature_recipe": recipe,
+                "eligibility_recipe": spec.eligibility_recipe,
+                "feature_transform": (
+                    {
+                        name: getattr(transforms[0], name)
+                        for name in (
+                            "clip",
+                            "industry_neutralize",
+                            "size_neutralize",
+                            "center",
+                            "scale",
+                            "impute_missing",
+                        )
+                    }
+                    if transforms
+                    else None
+                ),
                 "sparse_input_data_ids": sparse_inputs,
                 "time_window": dict(bounds),
             }

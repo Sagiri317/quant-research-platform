@@ -57,8 +57,6 @@ def _producer_config(metadata):
             {
                 "fold_id": fold["fold_id"],
                 "inputs": "inputs",
-                "price_model": MAKER_MODEL_IDS[0],
-                "proxy_model": MAKER_MODEL_IDS[1],
                 "price_predictions": "price",
                 "proxy_predictions": "proxy",
             }

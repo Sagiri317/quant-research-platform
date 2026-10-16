@@ -16,15 +16,21 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.artifacts.outputs.prediction import read_predictions
+from quant_research_platform.artifacts.outputs.prediction import (
+    prediction_model_metadata,
+    read_predictions,
+)
 from quant_research_platform.artifacts.statistics import STATISTICS_TABLE_COLUMNS
 from quant_research_platform.contracts.experiments import (
-    label_maturity_mask,
+    legal_training_mask,
     training_availability_columns,
 )
 from quant_research_platform.contracts.filtering import required_filter_columns
-from quant_research_platform.contracts.json_codec import qrp_json_mapping_snapshot
-from quant_research_platform.contracts.models import _model_spec
+from quant_research_platform.contracts.json_codec import _strict_config
+from quant_research_platform.contracts.models import (
+    _model_spec,
+    validate_model_input_roles,
+)
 from quant_research_platform.contracts.order_book import (
     BookBoundary,
     TradeEvent,
@@ -36,8 +42,9 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioDiagnostic,
     PortfolioTargetBlocked,
 )
-from quant_research_platform.contracts.time import TimeWindow, crypto_execution_windows
+from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.crypto.execution import (
+    MAKER_QUOTE_HORIZON_MS,
     MakerCalibration,
     MakerConfig,
     TakerConfig,
@@ -55,13 +62,11 @@ from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.features.transforms import (
     model_input_validity_columns,
 )
-from quant_research_platform.research.models.fitting import _read_model_input
-from quant_research_platform.research.models.persisted import load_model
 from quant_research_platform.research.predictions.outputs import prediction_rows
 from quant_research_platform.research.protocols.crypto_hft import (
     HFT_EXECUTION_ASSET_IDS,
     HFT_EXECUTION_CONTEXT_COLUMNS,
-    CryptoMakerPlan,
+    crypto_execution_windows,
     label_horizon_ms,
     research_chronology,
 )
@@ -74,6 +79,11 @@ from quant_research_platform.sources.binance.replay import (
 )
 from quant_research_platform.sources.market import open_market_source
 from quant_research_platform.storage.atomic import reject_if_exists
+from quant_research_platform.storage.datasets.reading import (
+    _dataset_input_options,
+    iter_dataset_chunks,
+    open_dataset_session,
+)
 from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
 
 
@@ -106,13 +116,6 @@ def _score_in_label_units(score, calibration):
     return value if calibration is None else calibration[0] + calibration[1] * value
 
 
-def _strict_config(value, keys, optional=()):
-    value = qrp_json_mapping_snapshot(value)
-    if set(keys) - set(value) or set(value) - set(keys) - set(optional):
-        raise ValueError("crypto_operation_config_fields_invalid")
-    return value
-
-
 def _window(value):
     value = _strict_config(value, {"start", "end"})
     window = TimeWindow(**value)
@@ -121,37 +124,48 @@ def _window(value):
     return window
 
 
-def _model_evidence(
-    model_path, predictions_path, *, window, sample_role, chronology, fold_id
+def _prediction_evidence(
+    predictions_path,
+    *,
+    window,
+    sample_role="prediction",
+    chronology=None,
+    fold_id="direct",
 ):
-    model, facts = load_model(Path(model_path))
-    predictions, metadata = read_predictions(Path(predictions_path))
-    if (
-        Path(metadata["model"]).resolve() != Path(model_path).resolve()
-        or metadata["model_id"] != facts["model"]["model_id"]
-        or metadata["sample_role"] != sample_role
-        or metadata["label_unit"] != facts["label_unit"]
-        or facts["market_id"] != "crypto"
-        or metadata["model_metadata"] != model.metadata
-    ):
-        raise ValueError("crypto_prediction_model_relationship_invalid")
-    folds, test = research_chronology(chronology)
+    predictions, metadata = read_predictions(
+        Path(predictions_path),
+        columns=("timestamp", "asset_id", "prediction_score"),
+        time_window=window,
+    )
+    facts = metadata["model_facts"]
+    if facts["market_id"] != "crypto":
+        raise ValueError("crypto_prediction_market_invalid")
+    target = facts["model"]["target_column"]
+    unit = (
+        "decimal_return"
+        if target.startswith("future_mid_return_")
+        else "quantity_ratio"
+        if target == "maker_bid_sell_pressure_proxy_500ms"
+        else None
+    )
+    if unit is not None and facts["label_unit"] != unit:
+        raise ValueError("crypto_prediction_label_unit_invalid")
     cutoff = pd.Timestamp(facts["fit_cutoff"])
-    if sample_role == "test":
-        from quant_research_platform.research.models.trial_selection import (
-            read_selection,
-        )
-
-        if not facts.get("selection") or facts.get("test_window") is None:
-            raise ValueError("crypto_execution_requires_frozen_model")
-        selection = read_selection(Path(facts["selection"]))
-        frozen = _window(facts["test_window"])
+    if cutoff >= pd.Timestamp(window.start):
+        raise ValueError("crypto_prediction_model_after_decision")
+    if chronology is not None:
+        folds, test = research_chronology(chronology)
+    if chronology is not None and sample_role == "test":
+        frozen = facts.get("test_window")
+        selection_cutoff = facts.get("selection_cutoff")
         if (
-            frozen != test
+            (frozen is not None and _window(frozen) != test)
             or cutoff > pd.Timestamp(folds[-1].validation.end)
             or cutoff >= pd.Timestamp(test.start)
-            or selection["selected_model_id"] != facts["model"]["model_id"]
-            or _window(selection["test_window"]) != test
+            or (
+                selection_cutoff is not None
+                and pd.Timestamp(selection_cutoff) >= pd.Timestamp(test.start)
+            )
         ):
             raise ValueError("crypto_execution_model_freeze_invalid")
         allowed = sorted(
@@ -174,7 +188,7 @@ def _model_evidence(
                 cursor = end + pd.Timedelta(1, "ns")
             if not covered:
                 raise ValueError("crypto_execution_refit_window_outside_chronology")
-    else:
+    elif chronology is not None:
         fold = next(fold for fold in folds if fold.fold_id == fold_id)
         if cutoff > pd.Timestamp(fold.train.end) or cutoff >= pd.Timestamp(
             window.start
@@ -186,23 +200,29 @@ def _model_evidence(
             for item in facts["fit_windows"]
         ):
             raise ValueError("crypto_calibration_model_training_window_invalid")
-    declared = _window(metadata["prediction_window"])
+    declared = TimeWindow(
+        metadata["prediction_window"]["start"],
+        metadata["prediction_window"]["end"] or metadata["effective_prediction_end"],
+    )
     if window.start < declared.start or window.end > declared.end:
         raise ValueError("crypto_prediction_window_coverage_invalid")
-    predictions = predictions.loc[
-        predictions.timestamp.between(
-            pd.Timestamp(window.start), pd.Timestamp(window.end)
-        )
-    ]
     return (
-        model.metadata,
+        prediction_model_metadata(metadata),
         {**facts, "prediction_asset_ids": metadata.get("asset_ids")},
         predictions,
     )
 
 
 def _prediction_rows(
-    *, inputs, evidence, window, fold_id, asset_id, sample_role="test", input_spec=None
+    *,
+    inputs,
+    evidence,
+    window,
+    fold_id,
+    asset_id,
+    sample_role="test",
+    input_spec=None,
+    label_cutoff=None,
 ):
     metadata, facts, predictions = evidence
     assets = facts.get("prediction_asset_ids")
@@ -216,7 +236,17 @@ def _prediction_rows(
     if is_rank != (calibration is not None):
         raise ValueError("crypto_prediction_score_units_invalid")
     target = facts["model"]["target_column"]
-    availability = training_availability_columns(target)[0]
+    options = _dataset_input_options(inputs)
+    if input_spec is not None:
+        options.update(
+            _dataset_input_options(
+                {"path": options["dataset_root"], "spec": input_spec}
+            )
+        )
+    session = open_dataset_session(**options).filtered_view(window)
+    availability = session.spec.get("label_availability_columns", {}).get(
+        target, training_availability_columns(target)[0]
+    )
     columns = tuple(
         dict.fromkeys(
             (
@@ -228,21 +258,35 @@ def _prediction_rows(
                 ),
                 *required_filter_columns(metadata["sample_filter_mode"]),
                 *HFT_EXECUTION_CONTEXT_COLUMNS,
-                *((target, availability) if sample_role == "validation" else ()),
+                *(
+                    (target, availability, "eligible")
+                    if sample_role == "validation"
+                    else ()
+                ),
             )
         )
     )
     keys = pd.MultiIndex.from_frame(predictions[["timestamp", "asset_id"]])
     matched = np.zeros(len(predictions), dtype=bool)
     scores = predictions.prediction_score.to_numpy()
-    chunks = _read_model_input(
-        inputs,
-        columns=columns,
-        time_window=window,
-        input_spec=input_spec,
-        model_spec=_model_spec(facts["model"]),
-        chunked=True,
+    business_columns = {
+        *metadata["input_columns"],
+        *((target,) if sample_role == "validation" else ()),
+    }
+    if options.get("columns") is not None and business_columns - set(
+        options["columns"]
+    ):
+        raise ValueError("crypto_prediction_required_columns_excluded")
+    session = session.projected_view(columns)
+    model_spec = _model_spec(facts["model"])
+    validate_model_input_roles(
+        session.spec, model_spec, include_target=sample_role == "validation"
     )
+    if sample_role == "validation":
+        declared_unit = session.spec.get("column_units", {}).get(target)
+        if declared_unit is not None and declared_unit != facts["label_unit"]:
+            raise ValueError("crypto_prediction_label_unit_invalid")
+    chunks = iter_dataset_chunks(session)
     with closing_iterator(chunks):
         for frame in chunks:
             required = prediction_rows(frame, metadata, window)
@@ -261,9 +305,9 @@ def _prediction_rows(
                 prediction_score=scores[positions], fold_id=fold_id
             )
             if sample_role == "validation":
-                mature = label_maturity_mask(
+                mature = legal_training_mask(
                     required,
-                    fitting_cutoff=window.end,
+                    fitting_cutoff=window.end if label_cutoff is None else label_cutoff,
                     availability_column=availability,
                     target_column=target,
                 )
@@ -595,7 +639,6 @@ _BACKTEST_KEYS = {
     "source",
     "asset_id",
     "symbol",
-    "chronology",
     "prediction_window",
     "execution_mode",
     "capital",
@@ -614,10 +657,13 @@ def _execution_asset(config):
 def _backtest_inputs(config):
     _execution_asset(config)
     reject_if_exists(Path(config["output"]))
-    chronology = config["chronology"]
-    research_chronology(chronology)
+    chronology = config.get("chronology")
     window = _window(config["prediction_window"])
-    windows = crypto_execution_windows(chronology, window, sample_role="test")
+    if chronology is not None:
+        research_chronology(chronology)
+        windows = crypto_execution_windows(chronology, window, sample_role="test")
+    else:
+        windows = (("direct", window),)
     capital = PortfolioCapital(
         **_strict_config(
             config["capital"],
@@ -677,8 +723,8 @@ def _write_backtest(config, capital, produce):
     }
     metadata.update(
         window=config["prediction_window"],
-        sample_role="test",
-        execution_style="taker" if "model" in config else "maker",
+        sample_role="test" if config.get("chronology") is not None else "prediction",
+        execution_style="taker" if "predictions" in config else "maker",
     )
     if config["execution_mode"] == "independent_segments":
         return write_crypto_episode_artifact(
@@ -699,19 +745,18 @@ def backtest_taker(config):
     """Backtest explicit frozen predictions and native market inputs to a new ledger."""
     config = _strict_config(
         config,
-        _BACKTEST_KEYS | {"model", "predictions"},
-        {"archive_paths", "input_spec"},
+        _BACKTEST_KEYS | {"predictions"},
+        {"archive_paths", "input_spec", "chronology"},
     )
     window, windows, capital, coverage, panel = _backtest_inputs(config)
     execution = TakerConfig(
         **_strict_config(config["execution"], TakerConfig.__dataclass_fields__)
     )
-    evidence = _model_evidence(
-        config["model"],
+    evidence = _prediction_evidence(
         config["predictions"],
         window=window,
         sample_role="test",
-        chronology=config["chronology"],
+        chronology=config.get("chronology"),
         fold_id=windows[0][0],
     )
     _metadata, facts, _predictions = evidence
@@ -823,10 +868,58 @@ def _paired_validation(streams, *, asset_id):
                 pass
 
 
+def _calibration_windows(config):
+    """Resolve actual sample windows and maturity cutoffs, with optional plan bounds."""
+    chronology = config.get("chronology")
+    folds = (
+        {}
+        if chronology is None
+        else {fold.fold_id: fold for fold in research_chronology(chronology)[0]}
+    )
+    entries = config.get("models")
+    if "models" not in config:
+        entries = [{"fold_id": fold_id} for fold_id in folds]
+    if (
+        type(entries) is not list
+        or not entries
+        or any(type(item) is not dict for item in entries)
+        or any(
+            type(item.get("fold_id")) is not str or not item["fold_id"]
+            for item in entries
+        )
+        or len({item["fold_id"] for item in entries}) != len(entries)
+        or folds
+        and [item["fold_id"] for item in entries] != list(folds)
+    ):
+        raise ValueError("crypto_calibration_fold_models_invalid")
+    windows = {}
+    for item in entries:
+        fold_id = item["fold_id"]
+        validation = folds[fold_id].validation if folds else None
+        if validation is None and not {"window", "cutoff"} <= item.keys():
+            raise ValueError("crypto_calibration_window_cutoff_required")
+        window = _window(item["window"]) if "window" in item else validation
+        cutoff = item.get("cutoff", validation.end if validation else None)
+        cutoff = pd.Timestamp(TimeWindow(cutoff, cutoff).end)
+        if (
+            pd.isna(cutoff)
+            or cutoff < pd.Timestamp(window.end)
+            or validation is not None
+            and (
+                window.start < validation.start
+                or window.end > validation.end
+                or cutoff > pd.Timestamp(validation.end)
+            )
+        ):
+            raise ValueError("crypto_calibration_window_invalid")
+        windows[fold_id] = (window, cutoff)
+    return windows
+
+
 def _produce_maker_calibration(*, on_table, config, model_evidence):
     reference = config["reference"]
     panel = read_dataset_manifest_evidence(Path(config["panel"]))
-    folds, _test = research_chronology(config["chronology"])
+    windows = _calibration_windows(config)
     symbol, asset_id = config["symbol"], config["asset_id"]
     market_type = binance_ids.FUTURES_MARKET_TYPE
     reconstruct_depth = partial(iter_reconstructed_depth, market_type=market_type)
@@ -924,9 +1017,9 @@ def _produce_maker_calibration(*, on_table, config, model_evidence):
         trade_coverage = run.observation_coverage(
             market_type=market_type, data_kind="agg_trades", symbol=symbol
         )
-        for fold in config["chronology"]["folds"]:
+        for fold_id, (window, cutoff_at) in windows.items():
             model_inputs = next(
-                item for item in config["models"] if item["fold_id"] == fold["fold_id"]
+                item for item in config["models"] if item["fold_id"] == fold_id
             )
             counts = {side: [0, 0, 0] for side in ("buy", "sell")}
 
@@ -949,7 +1042,7 @@ def _produce_maker_calibration(*, on_table, config, model_evidence):
                 initial_ask_index,
                 event_start,
                 event_end,
-                fold_id=fold["fold_id"],
+                fold_id=fold_id,
                 counts=counts,
             ):
                 values = (
@@ -978,7 +1071,7 @@ def _produce_maker_calibration(*, on_table, config, model_evidence):
                 counts[side][1] += int(filled == 0)
                 counts[side][2] += int(terminal_reason == "post_only_crossing_rejected")
 
-            def observe_event(*, event_id, event, fold_id=fold["fold_id"]):
+            def observe_event(*, event_id, event, fold_id=fold_id):
                 if isinstance(event, TradeEvent):
                     if event.visible_quantity is None:
                         raise PortfolioTargetBlocked(
@@ -1028,7 +1121,7 @@ def _produce_maker_calibration(*, on_table, config, model_evidence):
                     count,
                 )
 
-            cutoff = pd.Timestamp(fold["validation"]["end"]).value
+            cutoff = cutoff_at.value
             result = replay_maker_calibration(
                 _books_until(
                     run,
@@ -1042,9 +1135,10 @@ def _produce_maker_calibration(*, on_table, config, model_evidence):
                         _prediction_rows(
                             inputs=model_inputs["inputs"],
                             input_spec=model_inputs.get("input_spec"),
-                            evidence=model_evidence[fold["fold_id"]][role],
-                            window=_window(fold["validation"]),
-                            fold_id=fold["fold_id"],
+                            evidence=model_evidence[fold_id][role],
+                            window=window,
+                            label_cutoff=cutoff_at,
+                            fold_id=fold_id,
                             asset_id=asset_id,
                             sample_role="validation",
                         )
@@ -1065,7 +1159,7 @@ def _produce_maker_calibration(*, on_table, config, model_evidence):
             for side, (count, zero, rejected) in counts.items():
                 summaries.append(
                     {
-                        "fold_id": fold["fold_id"],
+                        "fold_id": fold_id,
                         "side": side,
                         "price_unit": price_unit,
                         "sample_count": count,
@@ -1101,15 +1195,14 @@ def calibrate_maker(config):
             "source",
             "asset_id",
             "symbol",
-            "chronology",
             "reference",
             "models",
         },
-        {"archive_paths"},
+        {"archive_paths", "chronology"},
     )
     _execution_asset(config)
     reject_if_exists(Path(config["output"]))
-    folds, _test = research_chronology(config["chronology"])
+    windows = _calibration_windows(config)
     reference = _strict_config(
         config["reference"], {"order_quantity", "latency_ms", "min_calibration_samples"}
     )
@@ -1120,54 +1213,50 @@ def calibrate_maker(config):
         or reference["min_calibration_samples"] < 1
     ):
         raise ValueError("crypto_calibration_minimum_invalid")
-    if (
-        type(config["models"]) is not list
-        or any(type(item) is not dict for item in config["models"])
-        or [item.get("fold_id") for item in config["models"]]
-        != [fold.fold_id for fold in folds]
-    ):
-        raise ValueError("crypto_calibration_fold_models_invalid")
     model_ids = {}
     model_evidence = {}
-    for fold, item in zip(folds, config["models"], strict=True):
+    for item in config["models"]:
+        fold_id = item["fold_id"]
+        window, _cutoff = windows[fold_id]
         _strict_config(
             item,
             {
                 "fold_id",
                 "inputs",
-                "price_model",
                 "price_predictions",
-                "proxy_model",
                 "proxy_predictions",
             },
-            {"input_spec"},
+            {"input_spec", "window", "cutoff"},
         )
-        model_ids[fold.fold_id] = []
-        model_evidence[fold.fold_id] = {}
+        model_ids[fold_id] = []
+        model_evidence[fold_id] = {}
         for role, target in (
             ("price", "future_mid_return_500ms"),
             ("proxy", "maker_bid_sell_pressure_proxy_500ms"),
         ):
-            evidence = _model_evidence(
-                item[f"{role}_model"],
+            evidence = _prediction_evidence(
                 item[f"{role}_predictions"],
-                window=fold.validation,
+                window=window,
                 sample_role="validation",
-                chronology=config["chronology"],
-                fold_id=fold.fold_id,
+                chronology=config.get("chronology"),
+                fold_id=fold_id,
             )
-            model_evidence[fold.fold_id][role] = evidence
+            model_evidence[fold_id][role] = evidence
             _metadata, facts, _predictions = evidence
             if facts["model"]["target_column"] != target:
                 raise ValueError("crypto_maker_prediction_target_invalid")
-            model_ids[fold.fold_id].append(facts["model"]["model_id"])
+            model_ids[fold_id].append(facts["model"]["model_id"])
     metadata = {key: value for key, value in config.items() if key != "output"}
     metadata.update(
         window={
-            "start": pd.Timestamp(folds[0].validation.start).isoformat(),
-            "end": pd.Timestamp(folds[-1].validation.end).isoformat(),
+            "start": min(
+                pd.Timestamp(window.start) for window, _ in windows.values()
+            ).isoformat(),
+            "end": max(
+                pd.Timestamp(window.end) for window, _ in windows.values()
+            ).isoformat(),
         },
-        sample_role="validation",
+        sample_role="calibration",
         model_ids=model_ids,
     )
     return write_statistics_artifact(
@@ -1188,7 +1277,7 @@ def backtest_maker(config):
     config = _strict_config(
         config,
         _BACKTEST_KEYS | {"models", "calibration"},
-        {"archive_paths", "input_spec"},
+        {"archive_paths", "input_spec", "chronology"},
     )
     window, windows, capital, coverage, panel = _backtest_inputs(config)
     execution = MakerConfig(
@@ -1207,26 +1296,41 @@ def backtest_maker(config):
         artifact = read_statistics_artifact(
             Path(config["calibration"]), validate_tables=validate_maker_calibration
         )
+        calibration_windows = _calibration_windows(artifact.metadata)
         if (
-            research_chronology(artifact.metadata["chronology"])
-            != research_chronology(config["chronology"])
+            (
+                config.get("chronology") is not None
+                and (
+                    artifact.metadata.get("chronology") is None
+                    or research_chronology(artifact.metadata["chronology"])
+                    != research_chronology(config["chronology"])
+                )
+            )
             or artifact.metadata["asset_id"] != config["asset_id"]
             or artifact.metadata["symbol"] != config["symbol"]
+            or any(
+                cutoff >= pd.Timestamp(window.start)
+                for _window_value, cutoff in calibration_windows.values()
+            )
         ):
             raise ValueError("crypto_calibration_consumer_relationship_invalid")
+        if config.get("chronology") is None:
+            fold_id = max(
+                calibration_windows, key=lambda key: calibration_windows[key][1]
+            )
+            windows = ((fold_id, window),)
         ids = []
         for item, target in zip(
             config["models"],
             ("future_mid_return_500ms", "maker_bid_sell_pressure_proxy_500ms"),
             strict=True,
         ):
-            _strict_config(item, {"model", "predictions"})
-            evidence = _model_evidence(
-                item["model"],
+            _strict_config(item, {"predictions"})
+            evidence = _prediction_evidence(
                 item["predictions"],
                 window=window,
                 sample_role="test",
-                chronology=config["chronology"],
+                chronology=config.get("chronology"),
                 fold_id=fold_id,
             )
             model_evidence.append(evidence)
@@ -1290,13 +1394,19 @@ def backtest_maker(config):
                         "proxy_prediction": proxy["prediction_score"],
                     }
         else:
-            chunks = _read_model_input(
-                config["inputs"],
-                input_spec=config.get("input_spec"),
-                time_window=window,
-                columns=("timestamp", "asset_id", *HFT_EXECUTION_CONTEXT_COLUMNS),
-                chunked=True,
-            )
+            options = _dataset_input_options(config["inputs"])
+            if config.get("input_spec") is not None:
+                options.update(
+                    _dataset_input_options(
+                        {"path": options["dataset_root"], "spec": config["input_spec"]}
+                    )
+                )
+            session = open_dataset_session(**options).filtered_view(window)
+            columns = ("timestamp", "asset_id", *HFT_EXECUTION_CONTEXT_COLUMNS)
+            if set(columns) - set(session.logical_columns):
+                raise ValueError("crypto_prediction_required_columns_excluded")
+            session = session.projected_view(columns)
+            chunks = iter_dataset_chunks(session)
             with closing_iterator(chunks):
                 for frame in chunks:
                     for row in frame.itertuples(index=False):
@@ -1532,9 +1642,7 @@ def _calibration_headers(artifact, fold_id, cutoff):
 
 def validate_maker_calibration(artifact, metadata):
     _execution_asset(metadata)
-    if metadata.get("sample_role") != "validation":
-        raise ValueError("crypto_calibration_role_invalid")
-    parsed_folds, _test = research_chronology(metadata["chronology"])
+    folds = _calibration_windows(metadata)
     reference = _strict_config(
         metadata["reference"],
         {"order_quantity", "latency_ms", "min_calibration_samples"},
@@ -1544,10 +1652,10 @@ def validate_maker_calibration(artifact, metadata):
         raise ValueError("crypto_calibration_minimum_invalid")
     output = _window(metadata["window"])
     if output != TimeWindow(
-        parsed_folds[0].validation.start, parsed_folds[-1].validation.end
+        min(window.start for window, _ in folds.values()),
+        max(window.end for window, _ in folds.values()),
     ):
         raise ValueError("crypto_calibration_window_invalid")
-    folds = {fold["fold_id"]: fold for fold in metadata["chronology"]["folds"]}
     if (
         type(metadata.get("model_ids")) is not dict
         or set(metadata["model_ids"]) != set(folds)
@@ -1574,7 +1682,7 @@ def validate_maker_calibration(artifact, metadata):
         for column in STATISTICS_TABLE_COLUMNS["crypto_maker_samples.parquet"]
         if column not in ("side", "filled_quantity", "terminal_reason")
     )
-    for fold_id, fold in folds.items():
+    for fold_id, (sample_window, cutoff_at) in folds.items():
         summaries = {}
         with closing_iterator(
             _calibration_rows(
@@ -1590,8 +1698,9 @@ def validate_maker_calibration(artifact, metadata):
         if set(summaries) != {"buy", "sell"}:
             raise ValueError("crypto_calibration_keys_invalid")
         totals["calibration"] += 2
-        cutoff = pd.Timestamp(fold["validation"]["end"]).value
-        beginning = pd.Timestamp(fold["validation"]["start"]).value
+        cutoff = cutoff_at.value
+        beginning = pd.Timestamp(sample_window.start).value
+        last_decision = pd.Timestamp(sample_window.end).value
         counts = {side: [0, 0, 0] for side in ("buy", "sell")}
         with closing_iterator(ExitStack()) as reads:
             starts = reads.enter_context(
@@ -1663,8 +1772,8 @@ def validate_maker_calibration(artifact, metadata):
                 decision = buy.decision_at.value
                 expiry = buy.prediction_end.value
                 if not (
-                    beginning <= decision <= cutoff
-                    and expiry == decision + CryptoMakerPlan.quote_horizon_ms * 1000000
+                    beginning <= decision <= last_decision
+                    and expiry == decision + MAKER_QUOTE_HORIZON_MS * 1000000
                     and expiry <= buy.label_available_at.value <= cutoff
                 ):
                     raise ValueError("crypto_calibration_outcome_not_mature")
@@ -1752,7 +1861,7 @@ def validate_maker_calibration(artifact, metadata):
                             new_order=order,
                             active_order=None,
                             commands=(),
-                            lifetime_ns=CryptoMakerPlan.quote_horizon_ms * 1000000,
+                            lifetime_ns=MAKER_QUOTE_HORIZON_MS * 1000000,
                             replace_quantity=row.quote_quantity,
                             history_scale=1,
                             events=iter(window),

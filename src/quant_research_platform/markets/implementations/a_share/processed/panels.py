@@ -118,14 +118,22 @@ def compute_market_panel(
     if dense.empty:
         return dense
     dense = _asof_market_cap(dense, market_cap)
-    dense = _asof_industry(
-        dense,
+    # Earlier rows initialize price/suspension state only. Industry has no
+    # recursive state, so validate its frontier only where it is consumed.
+    industry_rows = (
+        dense["timestamp"].ge(required_calendar_start)
+        if required_calendar_start is not None
+        else pd.Series(True, index=dense.index)
+    )
+    classified = _asof_industry(
+        dense.loc[industry_rows],
         industry_history,
         industry_sets=industry_sets,
         industry_versions=industry_versions,
         industry_snapshots=industry_snapshots,
         stock_master=stock_master,
     )
+    dense = pd.concat((dense.loc[~industry_rows], classified), ignore_index=True)
     dense = _apply_no_limit_exceptions(dense, no_limit_history)
     dense = _apply_special_treatment(dense, special_treatment_history)
     if suspension_history is not None and not suspension_history.empty:
@@ -698,23 +706,30 @@ def _asof_industry(
     event_key = ["asset_id", "_industry_event_timestamp", "industry_standard_id"]
     if known.groupby(event_key)["_industry_classification_code"].nunique().gt(1).any():
         raise ValueError("industry_history_conflict")
-    simultaneous = known.drop_duplicates(
-        ["asset_id", "timestamp", "_industry_event_timestamp", "industry_standard_id"]
-    )
-    if simultaneous.duplicated(
-        ["asset_id", "timestamp", "_industry_event_timestamp"], keep=False
-    ).any():
-        raise ValueError("industry_history_standard_conflict")
     # Unknown publication blocks unproved coverage from its effective date.
     # A late older event cannot replace a newer state or cross that barrier.
     history = history.sort_values(
         ["timestamp", "_industry_event_timestamp", "asset_id", "_industry_known"],
         kind="mergesort",
     )
-    latest_effective = history.groupby("asset_id", sort=False)[
-        "_industry_event_timestamp"
-    ].cummax()
+    # All events becoming available together share one effective frontier. This
+    # excludes superseded rows even when their older conflicts arrive that day.
+    latest_effective = (
+        history.groupby(["asset_id", "timestamp"], sort=False)[
+            "_industry_event_timestamp"
+        ]
+        .transform("max")
+        .groupby(history["asset_id"], sort=False)
+        .cummax()
+    )
     history = history.loc[history["_industry_event_timestamp"].eq(latest_effective)]
+    history["_industry_standard_conflict"] = (
+        history["industry_standard_id"]
+        .where(history["_industry_known"])
+        .groupby([history["asset_id"], history["timestamp"]], sort=False)
+        .transform("nunique")
+        .gt(1)
+    )
     history = history.drop_duplicates(["asset_id", "timestamp"], keep="last")
     right = history.loc[
         :,
@@ -727,6 +742,7 @@ def _asof_industry(
             "is_nonfinancial_industry",
             "_industry_event_timestamp",
             "_industry_known",
+            "_industry_standard_conflict",
         ],
     ]
     current = pd.merge_asof(
@@ -738,6 +754,10 @@ def _asof_industry(
         allow_exact_matches=True,
         suffixes=("", "_industry"),
     )
+    # Only a frontier consumed by this panel can block its output. Historical
+    # computation rows are included in the panel and cannot use a future repair.
+    if current["_industry_standard_conflict"].fillna(False).any():
+        raise ValueError("industry_history_standard_conflict")
     valid_standard = current["_industry_known"].fillna(False)
     valid_standard &= _industry_version_active_mask(
         current["industry_standard_id_industry"],
@@ -754,7 +774,14 @@ def _asof_industry(
         current[column] = current[f"{column}_industry"].combine_first(current[column])
         current.loc[~valid_standard, column] = pd.NA
         current.drop(columns=f"{column}_industry", inplace=True)
-    current.drop(columns=["_industry_event_timestamp", "_industry_known"], inplace=True)
+    current.drop(
+        columns=[
+            "_industry_event_timestamp",
+            "_industry_known",
+            "_industry_standard_conflict",
+        ],
+        inplace=True,
+    )
     order = current["asset_id"].map(
         {asset: i for i, asset in enumerate(panel["asset_id"].unique())}
     )

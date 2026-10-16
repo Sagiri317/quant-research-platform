@@ -83,7 +83,11 @@ def test_native_fit_preserves_nonbinary_center(tmp_path):
         Fraction(*case.result.metadata["scaler"]["weighted_mean_offset"][0])
         == scaler.offset_[0]
     )
-    assert scaler.transform(pd.DataFrame({"x": [0.0]})).x.iloc[0] == float(
-        -Fraction(1, 3) / Fraction(scaler.scale_[0])
+    # Independent floating-point evaluation may differ by a few rounding steps.
+    # Zero absolute tolerance still rejects losing this tiny nonzero center.
+    assert scaler.transform(pd.DataFrame({"x": [0.0]})).x.iloc[0] == pytest.approx(
+        float(-Fraction(1, 3) / Fraction(scaler.scale_[0])),
+        rel=8 * np.finfo(float).eps,
+        abs=0.0,
     )
     assert np.isfinite(predictor.predict(case.frame[["x"]])).all()

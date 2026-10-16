@@ -337,7 +337,6 @@ def _ledger(layout, roots):
                 "equal_weight_rank_ensemble",
             ),
         ),
-        sample_role="validation",
         assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,)),
         fee_schedule_from_frame=fee_schedule_from_frame,
         require_fee_coverage=require_fee_coverage,

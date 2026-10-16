@@ -32,7 +32,7 @@ def test_a_share_filter_admission(algorithm, mode):
         ):
             validate_model_selection([spec])
     else:
-        assert validate_model_selection([spec]) == "primary"
+        validate_model_selection([spec])
 
 
 @pytest.mark.parametrize("algorithm", ALGORITHMS[1:])
@@ -102,8 +102,8 @@ def test_native_rank_filter_domains_explain_formal_unfiltered_rejection(
     eligible_first, _, metadata = predict_frame(
         tmp_path / "filtered", frame, eligible, window=window
     )
-    assert full_metadata["model_metadata"]["sample_filter_mode"] == "unfiltered"
-    assert metadata["model_metadata"]["sample_filter_mode"] == "eligible"
+    assert full_metadata["model_facts"]["model"]["sample_filter_mode"] == "unfiltered"
+    assert metadata["model_facts"]["model"]["sample_filter_mode"] == "eligible"
     assert full.asset_id.tolist() == ["a", "b", "c"]
     assert full.prediction_rank_score.tolist() == pytest.approx([0.0, 1 / 3, -1 / 3])
     # Filtering after scoring retains different ranks for a/b; filtering before

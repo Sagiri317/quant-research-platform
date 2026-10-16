@@ -9,11 +9,10 @@ import pytest
 
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.research.models import fitting
-from quant_research_platform.research.models.fitting import training_scope_chunks
-from quant_research_platform.research.models.rank_ensemble import RankEnsemblePredictor
-from quant_research_platform.research.models.supervised import (
+from quant_research_platform.research.models.estimators import (
     build_estimator_from_model_spec,
 )
+from quant_research_platform.research.models.rank_ensemble import RankEnsemblePredictor
 from quant_research_platform.research.models.trial_selection import (
     select_best_validation_trial,
 )
@@ -49,16 +48,6 @@ def test_fitting_counts_raw_filter_and_label_rows_once() -> None:
     assert model_result.metadata["rows_input"] == 4
     assert model_result.metadata["rows_after_filter_mode"] == 3
     assert model_result.metadata["rows_after_input_label_dropna"] == 2
-
-
-def test_training_asset_scope_preserves_consumer_primary_on_early_close() -> None:
-    frame = pd.DataFrame({"asset_id": ["a", "b"], "value": [1.0, 2.0]})
-    primary = RuntimeError("consumer_primary")
-    scoped = training_scope_chunks((frame,), asset_ids=("b",))
-    next(scoped)
-    with pytest.raises(RuntimeError) as raised:
-        scoped.throw(primary)
-    assert raised.value is primary
 
 
 def test_rank_missing_contributes_neutral_without_renormalization() -> None:
@@ -226,35 +215,6 @@ def test_equal_rank_single_undefined_direction_names_required_input():
     fitted = estimator.fit(frame, frame.label.to_numpy())
     assert fitted.columns == ("valid", "constant")
     assert fitted.directions == (1.0, -1.0)
-
-
-def test_common_pk_identity_distinguishes_equal_count_and_ignores_chunking():
-    from quant_research_platform.research.models.trial_selection import (
-        ModelSampleCoverage,
-    )
-
-    asset_major = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(["2019-01-01", "2019-01-02"] * 2),
-            "asset_id": ["a", "a", "b", "b"],
-        }
-    )
-    time_major = asset_major.iloc[[0, 2, 1, 3]]
-    whole, pieces, changed, duplicate, invalid = (
-        ModelSampleCoverage({"scope": "oracle"}) for _ in range(5)
-    )
-    whole.add(asset_major)
-    pieces.add(time_major.iloc[:2])
-    pieces.add(time_major.iloc[2:])
-    changed.add(asset_major.assign(asset_id=["a", "a", "c", "c"]))
-    assert whole.row_count == pieces.row_count == changed.row_count == 4
-    assert whole.semantic_identity == pieces.semantic_identity
-    assert whole.semantic_identity != changed.semantic_identity
-    duplicate.add(asset_major)
-    with pytest.raises(ValueError, match="model_coverage_key_order_invalid"):
-        duplicate.add(asset_major.iloc[-1:])
-    with pytest.raises(ValueError, match="model_coverage_key_invalid"):
-        invalid.add(asset_major.assign(asset_id=["a", "a", None, "b"]))
 
 
 def test_shared_preprocessing_matches_independent_candidate_states(monkeypatch):

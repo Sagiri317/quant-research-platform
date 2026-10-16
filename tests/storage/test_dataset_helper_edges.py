@@ -608,10 +608,9 @@ def test_exact_index_preserves_decimal_values_beyond_context_precision() -> None
 def test_write_stats_rejects_invalid_non_null_timestamp() -> None:
     spec = make_processed_dataset_spec("storage_demo", market_id="dummy")
     tracker = ExactPrimaryKeyIndex(primary_key=spec.primary_key)
-    inventory = DatasetSessionInventory(data_root=Path("data"))
     with pytest.raises(ValueError, match="invalid_dataset_timestamp_value"):
         _WriteStats(
-            spec=spec, data_root=Path("data"), key_tracker=tracker, inventory=inventory
+            spec=spec, data_root=Path("data"), key_tracker=tracker
         ).prepare_frame(
             make_helper_edges_dataset_frame(market_id="dummy").assign(
                 timestamp=["2024-01-02", "bad-date"]
@@ -671,6 +670,8 @@ def test_dataset_spec_payload_accepts_exact_base_variant_and_rejects_extras() ->
         "partition_columns": [],
         "required_columns": ["asset_id", "name"],
         "column_roles": {"asset_id": "key", "name": "context"},
+        "column_units": {},
+        "label_availability_columns": {},
     }
     validate_dataset_spec_payload(base_spec)
     with pytest.raises(ValueError, match="dataset_spec_fields_invalid"):
@@ -1195,7 +1196,7 @@ def test_feature_recipe_rejects_invalid_persisted_recipe(invalid):
         validate_dataset_spec_payload(payload)
 
 
-def test_feature_recipe_is_the_only_persisted_transform_configuration():
+def test_resolved_feature_options_are_the_persisted_transform_configuration():
     factor = make_demo_research_dataset_spec().factor_columns[0]
     identities = []
     for recipe in ("a_share_canonical", "a_share_quantile_1_99"):
@@ -1208,7 +1209,16 @@ def test_feature_recipe_is_the_only_persisted_transform_configuration():
         )
         validate_dataset_spec_payload(payload)
         assert payload["feature_transforms"] == [
-            {"recipe_id": recipe, "source_columns": [factor]}
+            {
+                "recipe_id": recipe,
+                "source_columns": [factor],
+                "clip": transform.clip,
+                "industry_neutralize": True,
+                "size_neutralize": True,
+                "center": True,
+                "scale": True,
+                "impute_missing": True,
+            }
         ]
         identities.append(canonical_json_hash(payload))
         payload["feature_transforms"][0]["fillna_policy"] = "zero"

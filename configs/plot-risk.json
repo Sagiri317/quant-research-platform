@@ -1,13 +1,7 @@
 {
-  "kind": "series",
-  "inputs": "results/statistics/rolling_risk.parquet",
-  "output": "figures/rolling-risk.png",
-  "sample_role": "test",
-  "timezone": "Asia/Shanghai",
-  "x_column": "timestamp",
-  "value_columns": [
-    "tracking_error"
-  ],
-  "title": "滚动跟踪误差",
+  "kind": "metrics",
+  "inputs": "results/statistics/portfolio_performance.parquet",
+  "output": "figures/tracking-error.png",
+  "metric_id": "tracking_error",
   "units": "年化比例"
 }

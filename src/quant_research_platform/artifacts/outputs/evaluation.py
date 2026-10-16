@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import ExitStack
 from pathlib import Path
@@ -9,19 +10,16 @@ from pathlib import Path
 import pandas as pd
 import pyarrow as pa
 
-from quant_research_platform.artifacts.outputs.common_validation import (
-    validate_output_frame,
-)
 from quant_research_platform.artifacts.outputs.evaluation_validation import (
     EVALUATION_ARTIFACTS,
     validate_evaluation_artifact_structure,
     validate_evaluation_diagnostics_consistency,
+    validate_output_frame,
 )
 from quant_research_platform.artifacts.outputs.manifest import (
     evaluation_output_metadata,
     output_manifest_payload,
 )
-from quant_research_platform.artifacts.outputs.parquet import write_parquet
 from quant_research_platform.contracts.evaluations import (
     EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS,
     EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
@@ -38,6 +36,7 @@ from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
     open_filesystem_file,
+    require_unaliased_path,
 )
 from quant_research_platform.storage.manifests import write_manifest
 from quant_research_platform.storage.parquet import parquet_table_writer
@@ -339,11 +338,11 @@ def read_evaluation_outputs(
     ),
 ) -> tuple[dict[str, object], dict[str, pd.DataFrame]]:
     """Read requested numeric members once and validate their scientific contracts."""
-    from quant_research_platform.artifacts.outputs.bundle_validation import (
-        validate_output_bundle,
-    )
-    from quant_research_platform.artifacts.outputs.common_validation import (
+    from quant_research_platform.artifacts.outputs.evaluation_validation import (
         require_signal_metadata_list,
+    )
+    from quant_research_platform.artifacts.outputs.manifest import (
+        validate_output_bundle,
     )
     from quant_research_platform.storage.datasets.reading import (
         iter_declared_parquet_member_batches,
@@ -415,3 +414,16 @@ def read_evaluation_outputs(
         validate_pairs={"metrics", "grouped_label_values"} <= set(result),
     )
     return manifest, result
+
+
+def write_parquet(frame: pd.DataFrame, path: Path) -> Path:
+    """Write one member inside its caller-owned atomic bundle staging directory."""
+    path = Path(path)
+    require_unaliased_path(path, error="invalid_output_write_path")
+    with closing_iterator(open_filesystem_file(path, "xb")) as handle:
+        table = pa.Table.from_pandas(frame, preserve_index=False)
+        with parquet_table_writer(handle, compression="zstd") as write_table:
+            write_table(table)
+        handle.flush()
+        os.fsync(handle.fileno())
+    return path

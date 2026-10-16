@@ -11,8 +11,9 @@ from quant_research_platform.markets.implementations.a_share import portfolio_se
 from quant_research_platform.research.portfolios import production
 from quant_research_platform.sources.reference import interim
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
-from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers.paths import StorageLayout
 from tests.helpers.portfolio_inputs import _interim_specs, _processed_specs
+from tests.helpers.source_preparation import prepared_source_evidence
 
 
 def write_equity_source(raw_root, *, events=None):
@@ -86,7 +87,7 @@ def test_equity_event_raw_to_persisted_normalization_preserves_units_and_dates(
         ]
 
     write_equity_source(raw, events=events)
-    identity = interim.source_content_identity(raw, "a_share_equity_events")
+    identity = prepared_source_evidence(interim, raw, "a_share_equity_events")
     result = interim.materialize_interim_data(
         output_roots={
             key: StorageLayout(tmp_path).interim_data_root("reference", key)
@@ -108,7 +109,7 @@ def test_equity_event_raw_to_persisted_normalization_preserves_units_and_dates(
     assert frame.effective_at.eq(pd.Timestamp("2023-01-03")).all()
     assert frame.observed_at.eq(pd.Timestamp("2026-10-13")).all()
     assert frame.evidence_identity.str.len().eq(64).all()
-    assert interim.source_content_identity(raw, "a_share_equity_events") == identity
+    assert prepared_source_evidence(interim, raw, "a_share_equity_events") == identity
 
 
 @pytest.mark.parametrize(
@@ -378,16 +379,16 @@ def test_present_future_only_source_materializes_empty_window_without_fake_histo
         data_ids=("a_share_equity_events",),
         end_date="2023-01-02",
     )
-    assert interim.source_content_identity(raw, "a_share_equity_events") is not None
+    assert prepared_source_evidence(interim, raw, "a_share_equity_events") is not None
     frame = read_dataset(imported.artifact_roots["a_share_equity_events"])
     assert frame.empty and tuple(frame.columns) == EQUITY_EVENT_COLUMNS
 
 
 def test_absent_source_is_distinct_from_partial_present_source(tmp_path):
-    assert interim.source_content_identity(tmp_path, "a_share_equity_events") is None
+    assert prepared_source_evidence(interim, tmp_path, "a_share_equity_events") is None
     (tmp_path / "a_share_equity_events").mkdir()
     with pytest.raises(ValueError, match="equity_event_metadata_missing"):
-        interim.source_content_identity(tmp_path, "a_share_equity_events")
+        prepared_source_evidence(interim, tmp_path, "a_share_equity_events")
 
 
 @pytest.mark.parametrize(
@@ -408,12 +409,12 @@ def test_equity_official_transfer_domains_reject_lookalikes(tmp_path, host, allo
     )
     if allowed:
         assert (
-            interim.source_content_identity(tmp_path, "a_share_equity_events")
+            prepared_source_evidence(interim, tmp_path, "a_share_equity_events")
             is not None
         )
     else:
         with pytest.raises(ValueError, match="equity_event_source_invalid"):
-            interim.source_content_identity(tmp_path, "a_share_equity_events")
+            prepared_source_evidence(interim, tmp_path, "a_share_equity_events")
 
 
 def test_narrow_session_does_not_coalesce_different_historical_event_sessions(tmp_path):
@@ -468,7 +469,7 @@ def test_future_event_attachment_does_not_change_prior_session_event_proof(tmp_p
 
     before = views(layout)
     raw = tmp_path / "raw"
-    old_identity = interim.source_content_identity(raw, "a_share_equity_events")
+    old_identity = prepared_source_evidence(interim, raw, "a_share_equity_events")
     source = raw / "a_share_equity_events"
     path = source / "metadata.json"
     metadata = json.loads(path.read_text())
@@ -493,7 +494,9 @@ def test_future_event_attachment_does_not_change_prior_session_event_proof(tmp_p
         data_ids=("a_share_equity_events",),
     )
     after = views(changed_layout)
-    assert old_identity != interim.source_content_identity(raw, "a_share_equity_events")
+    assert old_identity != prepared_source_evidence(
+        interim, raw, "a_share_equity_events"
+    )
     for old, new in zip(before, after, strict=True):
         pd.testing.assert_frame_equal(old.rights_events, new.rights_events)
 

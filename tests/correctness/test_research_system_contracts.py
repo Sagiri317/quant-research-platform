@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.models import (
     ModelSpec,
@@ -19,7 +20,6 @@ from quant_research_platform.research.features.transforms import (
     _industry_size_residuals,
     a_share_feature_pipeline,
     apply_feature_transforms,
-    feature_transforms,
 )
 from quant_research_platform.research.labels.forward_returns import (
     add_forward_return_labels,
@@ -224,7 +224,7 @@ def test_canonical_pipeline_is_executable_without_a_scenario_bypass():
     )
     frame.loc[10:15, "x"] = np.nan
     columns = ("x", "log_float_market_cap")
-    transforms = feature_transforms(columns)
+    transforms = (FeatureTransformSpec("a_share_canonical", columns),)
     assert len(transforms) == 1 and transforms[0].recipe_id == "a_share_canonical"
     pd.testing.assert_frame_equal(
         apply_feature_transforms(frame, transforms),

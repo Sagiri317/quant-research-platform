@@ -116,7 +116,7 @@ def _market_model_frames(
             while event is not None and event.timestamp <= timestamp:
                 membership[event.asset_id] = event.market_type
                 event = next(events, None)
-            cross = cross.assign(eligible=a_share_eligibility(cross, "pv_expanded"))
+            cross = cross.assign(eligible=a_share_eligibility(cross, "a_share_all"))
             styles = state.observe(
                 cross,
                 open_market_types=None

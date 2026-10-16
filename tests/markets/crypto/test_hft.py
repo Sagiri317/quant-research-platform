@@ -898,7 +898,7 @@ def test_panel_and_execution_midpoint_round_only_final_exact_price(
     )
     assert panel.mid.tolist() == [expected]
     spec = hft_processed_catalog().get("binance_futures_l2_panel_100ms")
-    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.paths import StorageLayout
 
     root = StorageLayout(tmp_path).processed_data_root(
         spec.market_id, spec.kind, spec.data_id

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -23,9 +22,6 @@ from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.research.datasets.assembler import (
-    assemble_research_dataset,
-)
 from quant_research_platform.research.datasets.validation import (
     validate_evaluation_input,
     validate_research_input,
@@ -36,13 +32,16 @@ from quant_research_platform.storage.datasets import (
     read_dataset,
     write_dataset,
 )
-from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers.paths import StorageLayout
 from tests.helpers.research_processed_inputs import (
     _demo_research_rows,
     make_demo_processed_catalog,
     write_demo_processed_inputs,
 )
-from tests.helpers.research_specs import make_research_dataset_catalog
+from tests.helpers.research_specs import (
+    assemble_research_dataset,
+    make_research_dataset_catalog,
+)
 
 
 def test_research_dataset_assembles_from_processed_inputs(tmp_path: Path) -> None:
@@ -146,7 +145,9 @@ def test_non_a_share_named_scenario_keeps_input_semantics_and_requires_real_colu
     assert frame.eligible.tolist() == [True, False]
     assert assembler_module._generated_semantic_columns(spec) == ()
     assert assembler_module._add_a_share_semantic_columns(frame, spec) is frame
-    a_share = replace(spec, market_id=MarketId("a_share"))
+    a_share = replace(
+        spec, market_id=MarketId("a_share"), eligibility_recipe="a_share_all"
+    )
     assert assembler_module._generated_semantic_columns(a_share) == ("eligible",)
     with pytest.raises(ValueError, match="^a_share_eligibility_facts_missing:"):
         assembler_module._add_a_share_semantic_columns(
@@ -170,158 +171,9 @@ def test_non_a_share_named_scenario_keeps_input_semantics_and_requires_real_colu
     with pytest.raises(
         ValueError, match="^missing_research_required_columns: eligible$"
     ):
-        assembler_module._validate_research_input_specs(spec, missing)
-
-
-def test_research_time_window_driver_uses_one_window_per_physical_chunk(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    timestamps = pd.date_range("2026-01-01", periods=20, freq="min")
-    session = _passthrough_session()
-
-    def fake_iter_dataset_chunks(_context):
-        yield pd.DataFrame({"timestamp": timestamps})
-
-    monkeypatch.setattr(
-        assembler_module, "iter_dataset_chunks", fake_iter_dataset_chunks, raising=False
-    )
-    result = list(
-        assembler_module._iter_research_chunk_windows_from_base_input(
-            session,
-            time_window=TimeWindow("2026-01-01T00:00:00", "2026-01-01T00:19:00"),
+        assembler_module._validate_research_input_specs(
+            spec, {item.data_id: item for item in missing.list()}
         )
-    )
-    assert result == [TimeWindow("2026-01-01T00:00:00", "2026-01-01T00:19:00")]
-
-
-def test_research_time_window_driver_preserves_single_timestamp(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    session = _passthrough_session()
-    monkeypatch.setattr(
-        assembler_module,
-        "iter_dataset_chunks",
-        lambda *_args, **_kwargs: (
-            frame
-            for frame in (pd.DataFrame({"timestamp": [pd.Timestamp("2026-01-01")]}),)
-        ),
-    )
-    assert list(
-        assembler_module._iter_research_chunk_windows_from_base_input(
-            session,
-            time_window=TimeWindow("2026-01-01T00:00:00", "2026-01-01T00:00:00"),
-        )
-    ) == [TimeWindow("2026-01-01T00:00:00", "2026-01-01T00:00:00")]
-
-
-def test_research_time_window_driver_normalizes_and_deduplicates_dates(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    session = _passthrough_session()
-    monkeypatch.setattr(
-        assembler_module,
-        "iter_dataset_chunks",
-        lambda *_args, **_kwargs: iter(
-            (
-                pd.DataFrame(
-                    {
-                        "timestamp": [
-                            pd.Timestamp("2026-01-02 15:00"),
-                            pd.Timestamp("2026-01-01 09:00"),
-                        ]
-                    }
-                ),
-                pd.DataFrame(
-                    {
-                        "timestamp": [
-                            pd.Timestamp("2026-01-02 09:00"),
-                            pd.Timestamp("2026-01-03 09:00"),
-                        ]
-                    }
-                ),
-            )
-        ),
-    )
-    result = list(
-        assembler_module._iter_research_chunk_windows_from_base_input(
-            session, time_window=TimeWindow("2026-01-01", "2026-01-03")
-        )
-    )
-    assert result == [
-        TimeWindow("2026-01-01", "2026-01-02"),
-        TimeWindow("2026-01-03", "2026-01-03"),
-    ]
-
-
-def test_research_time_window_driver_rejects_empty_input(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    session = _passthrough_session()
-    monkeypatch.setattr(
-        assembler_module,
-        "iter_dataset_chunks",
-        lambda *_args, **_kwargs: iter(
-            (pd.DataFrame({"timestamp": pd.Series(dtype="datetime64[ns]")}),)
-        ),
-    )
-    with pytest.raises(ValueError, match="no_research_dataset_sessions"):
-        list(
-            assembler_module._iter_research_chunk_windows_from_base_input(
-                session, time_window=TimeWindow("2026-01-01", "2026-01-01")
-            )
-        )
-
-
-def test_research_time_window_driver_rejects_non_monotonic_chunks(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    session = _passthrough_session()
-    monkeypatch.setattr(
-        assembler_module,
-        "iter_dataset_chunks",
-        lambda *_args, **_kwargs: iter(
-            (
-                pd.DataFrame({"timestamp": [pd.Timestamp("2026-01-02")]}),
-                pd.DataFrame({"timestamp": [pd.Timestamp("2026-01-01")]}),
-            )
-        ),
-    )
-    with pytest.raises(ValueError, match="non_monotonic_research_time_keys"):
-        list(
-            assembler_module._iter_research_chunk_windows_from_base_input(
-                session, time_window=TimeWindow("2026-01-01", "2026-01-02")
-            )
-        )
-
-
-def test_research_time_window_driver_closes_iterator_on_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    events: list[str] = []
-    view = SimpleNamespace()
-
-    def filtered_view(_time_window):
-        return view
-
-    base_session = SimpleNamespace(filtered_view=filtered_view)
-
-    def chunks():
-        try:
-            yield pd.DataFrame({"not_timestamp": [1]})
-        finally:
-            events.append("iterator_close")
-
-    iterator = chunks()
-    monkeypatch.setattr(
-        assembler_module, "iter_dataset_chunks", lambda *_args, **_kwargs: iterator
-    )
-    with pytest.raises(KeyError, match="timestamp"):
-        list(
-            assembler_module._iter_research_chunk_windows_from_base_input(
-                base_session, time_window=TimeWindow("2026-01-01", "2026-01-01")
-            )
-        )
-    assert events == ["iterator_close"]
 
 
 def test_research_dataset_assembles_intraday_timestamp_window(tmp_path: Path) -> None:
@@ -690,7 +542,7 @@ def test_research_dataset_role_validation_rejects_wrong_factor_source(
         )
     )
     write_demo_processed_inputs(layout, processed_catalog)
-    with pytest.raises(ValueError, match="invalid_research_factor_columns"):
+    with pytest.raises(ValueError, match="assemble_factor_not_available"):
         assemble_research_dataset(
             inputs={
                 item.data_id: layout.processed_data_root(
@@ -818,7 +670,6 @@ def test_model_target_uses_last_participating_label_maturity_and_keeps_raw_clock
 
     from quant_research_platform.contracts.experiments import (
         legal_training_rows,
-        resolve_training_availability_column,
     )
     from quant_research_platform.research.protocols import a_share
     from quant_research_platform.storage.datasets import read_dataset
@@ -878,11 +729,16 @@ def test_model_target_uses_last_participating_label_maturity_and_keeps_raw_clock
             "model_target",
         ),
         column_roles={key: base.column_roles[key] for key in columns},
+        label_availability_columns={
+            label: maturity
+            for label, maturity in base.label_availability_columns.items()
+            if label in columns and maturity in columns
+        },
     )
     root = StorageLayout(tmp_path).research_dataset_root(spec.market_id, spec.data_id)
     write_dataset(root, output.loc[:, columns], spec=spec)
     saved = read_dataset(root)
-    maturity = resolve_training_availability_column(saved, label_column="model_target")
+    maturity = spec.label_availability_columns["model_target"]
     assert maturity == "model_target_available_at"
     assert legal_training_rows(
         saved,
@@ -1003,18 +859,17 @@ def test_named_feature_recipe_assembles_complete_sessions_and_persists_identity(
         )
     assert saved.feature_factor.notna().all()
     assert data_spec_payload(datasets.get("recipe_case"))["feature_transforms"] == [
-        {"recipe_id": recipe, "source_columns": ["factor"]},
+        {
+            "recipe_id": recipe,
+            "source_columns": ["factor"],
+            "clip": transform.clip,
+            "industry_neutralize": True,
+            "size_neutralize": True,
+            "center": True,
+            "scale": True,
+            "impute_missing": True,
+        },
     ]
-
-
-def _passthrough_session(**attributes):
-    session = SimpleNamespace(**attributes)
-
-    def filtered_view(_time_window):
-        return session
-
-    session.filtered_view = filtered_view
-    return session
 
 
 def _research_rows_for_dates(dates: list[str]) -> pd.DataFrame:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -44,8 +45,6 @@ from quant_research_platform.sources.choice.raw_exports import (
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
-    content_hash_for_files,
-    dataset_file_identity,
     filesystem_scandir,
     require_unaliased_path,
 )
@@ -141,7 +140,7 @@ def _raw_requests(raw_root: Path, *, data_id: str):
             directory = root / "css" / entry.name
             require_unaliased_path(directory, error="choice_raw_identity_changed")
             path = directory / "response.metadata.json"
-            manifest = read_qrp_json_file(path)[1]
+            raw_metadata, manifest = read_qrp_json_file(path)
             try:
                 payload = manifest["metadata"]["request"]
                 if type(payload["arguments"]) is not list:
@@ -173,42 +172,18 @@ def _raw_requests(raw_root: Path, *, data_id: str):
             snapshot = financial_fields and (options.get("type", "1") in {"1", "3"})
             if "reportdate" not in options or not (disclosure or snapshot):
                 continue
-            _yield_value = (directory, request, options, disclosure)
+            _yield_value = (
+                directory,
+                request,
+                options,
+                disclosure,
+                raw_metadata,
+                manifest,
+            )
             try:
                 yield _yield_value
             except GeneratorExit:
                 return
-
-
-def _source_snapshot(raw_root: Path, data_id: str):
-    interim_catalog().get(data_id)
-    members = {}
-    with closing_iterator(_raw_requests(raw_root, data_id=data_id)) as requests:
-        for root, _request, _options, _disclosure in requests:
-            for name in ("response.csv", "response.metadata.json"):
-                path = root / name
-                try:
-                    member_identity = dataset_file_identity(path)
-                except ValueError as error:
-                    raise ValueError("choice_raw_identity_changed") from error
-                members[path] = member_identity
-        identity = (
-            content_hash_for_files(
-                (
-                    (f"css/{path.parent.name}/{path.name}", path, expected)
-                    for path, expected in members.items()
-                ),
-                error="choice_raw_identity_changed",
-            )
-            if members
-            else None
-        )
-        return identity, members
-
-
-def source_content_identity(raw_root: Path, data_id: str) -> str | None:
-    (identity, _members) = _source_snapshot(raw_root, data_id)
-    return identity
 
 
 def _encode(value: object) -> bytes:
@@ -273,22 +248,27 @@ def _values(cells):
     return result
 
 
-def _raw_index(raw_root, data_id, *, members):
+def _raw_index(raw_root, data_id):
     indicators = FINANCIAL_FIELDS.get(data_id, {})
     index = ExactPrimaryKeyIndex(
         primary_key=("source_coordinate",),
     )
 
+    hashes = []
+
     def rows():
         with closing_iterator(_raw_requests(raw_root, data_id=data_id)) as requests:
-            for root, request, options, disclosure in requests:
+            for root, request, options, disclosure, raw_metadata, manifest in requests:
                 period = date.fromisoformat(options["reportdate"]).isoformat()
-                try:
-                    expected_metadata = members[root / "response.metadata.json"]
-                except KeyError:
-                    raise ValueError("choice_raw_identity_changed") from None
-                response = read_choice_response(
-                    root, request, expected_metadata_identity=expected_metadata
+                response = read_choice_response(root, request, manifest=manifest)
+                hashes.extend(
+                    (
+                        (
+                            f"css/{root.name}/response.metadata.json",
+                            hashlib.sha256(raw_metadata).hexdigest(),
+                        ),
+                        (f"css/{root.name}/response.csv", manifest["sha256"]),
+                    )
                 )
                 if not response["Data"]:
                     continue
@@ -397,7 +377,13 @@ def _raw_index(raw_root, data_id, *, members):
     with closing_iterator(rows()) as input_rows:
         for row in input_rows:
             index.add_identity_payload_rows(rows=(row,))
-    return index
+    digest = hashlib.sha256()
+    for name, member_hash in sorted(hashes):
+        for value in (name, member_hash):
+            encoded = value.encode("utf-8")
+            digest.update(len(encoded).to_bytes(8, "big"))
+            digest.update(encoded)
+    return index, digest.hexdigest() if hashes else None
 
 
 def _snapshot(index, pair, day, branch, indicators):
@@ -640,9 +626,8 @@ def materialize_interim_data(
     if start is not None and end is not None and start > end:
         raise ValueError("choice_interim_window_invalid")
     written, skipped = {}, []
-    sources = [(spec, *_source_snapshot(root, spec.data_id)) for spec in specs]
-    for spec, identity, members in sources:
-        index = _raw_index(root, spec.data_id, members=members)
+    for spec in specs:
+        index, identity = _raw_index(root, spec.data_id)
 
         rows = _rows(index, spec.data_id, start, end)
         frames = _frames(rows, spec)

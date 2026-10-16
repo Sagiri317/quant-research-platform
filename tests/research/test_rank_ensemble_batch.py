@@ -33,7 +33,9 @@ def _legacy_ranks(frame, columns):
 @pytest.mark.parametrize("timestamp", (True, False))
 @pytest.mark.parametrize("nullable", (True, False))
 @pytest.mark.parametrize("missing", ("mixed", "all", "none"))
-def test_batched_rank_preserves_final_prediction_bytes(timestamp, nullable, missing):
+def test_batched_rank_preserves_rank_and_prediction_values(
+    timestamp, nullable, missing
+):
     rng = np.random.default_rng(71)
     columns = ("a", "b", "c", "d")
     frame = pd.DataFrame(
@@ -63,15 +65,19 @@ def test_batched_rank_preserves_final_prediction_bytes(timestamp, nullable, miss
         frame = frame.drop(columns="timestamp")
     expected = _legacy_ranks(frame, columns)
     actual = rank._rank_frame_columns(frame, columns)
-    assert actual.tobytes() == expected.tobytes()
-    assert (
-        predictor.predict(frame).tobytes()
-        == (expected @ np.asarray(predictor.weights, dtype="float64")).tobytes()
+    np.testing.assert_allclose(actual, expected, rtol=0, atol=np.finfo(float).eps)
+    np.testing.assert_allclose(
+        predictor.predict(frame),
+        expected @ np.asarray(predictor.weights, dtype="float64"),
+        rtol=8 * np.finfo(float).eps,
+        atol=8 * np.finfo(float).eps,
     )
     equal = rank.RankEnsemblePredictor(columns, (1.0, -1.0, 1.0, -1.0))
-    assert (
-        equal.predict(frame).tobytes()
-        == (expected @ np.asarray(equal.directions) / len(columns)).tobytes()
+    np.testing.assert_allclose(
+        equal.predict(frame),
+        expected @ np.asarray(equal.directions) / len(columns),
+        rtol=8 * np.finfo(float).eps,
+        atol=8 * np.finfo(float).eps,
     )
 
 

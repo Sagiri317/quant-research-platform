@@ -8,6 +8,7 @@ from pathlib import Path
 
 from quant_research_platform.contracts.json_codec import qrp_json_mapping_snapshot
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.storage.datasets.reading import _dataset_input_options
 from quant_research_platform.storage.datasets.writing import write_dataset
 
 
@@ -19,7 +20,7 @@ def _request(config, *, name_key):
         or set(config)
         - required
         - (
-            {"source", "parameters", "factor_columns", "base_panel"}
+            {"source", "parameters", "factor_columns", "label_columns", "base_panel"}
             if name_key == "data_id"
             else {"source", "parameters"}
         )
@@ -32,14 +33,19 @@ def _request(config, *, name_key):
         raise ValueError("data_operation_value_invalid")
     inputs = config["inputs"]
     if not isinstance(inputs, Mapping) or any(
-        type(k) is not str or not k or type(v) is not str or not v
-        for k, v in inputs.items()
+        type(k) is not str or not k for k in inputs
     ):
         raise ValueError("data_operation_inputs_invalid")
+    for value in inputs.values():
+        if (isinstance(value, str) and not value) or (
+            isinstance(value, Mapping) and value.get("path") == ""
+        ):
+            raise ValueError("data_operation_inputs_invalid")
+        _dataset_input_options(value)
     window = config["time_window"]
     if not isinstance(window, Mapping) or set(window) != {"start", "end"}:
         raise ValueError("data_operation_window_invalid")
-    return {key: Path(value) for key, value in inputs.items()}, TimeWindow(**window)
+    return dict(inputs), TimeWindow(**window)
 
 
 def prepare(config: Mapping) -> Path:
@@ -160,7 +166,6 @@ def prepare(config: Mapping) -> Path:
                 from quant_research_platform.sources.tardis.normalized import (
                     SCHEMA_ID,
                     iter_records,
-                    source_identity,
                 )
 
                 if (
@@ -170,22 +175,10 @@ def prepare(config: Mapping) -> Path:
                     or not source["root"]
                 ):
                     raise ValueError("normalized_source_request_invalid")
-                venue = next(
-                    key
-                    for key, value in HFT_EXTERNAL_DATA_IDS.items()
-                    if value == spec.data_id
-                )
-                instrument = crypto.EXTERNAL_INSTRUMENTS[venue]
                 producer = crypto.produce_normalized_context
                 kwargs.update(
                     raw_root=Path(source["root"]),
                     read_records=iter_records,
-                    source_identity=partial(
-                        source_identity,
-                        exchange=instrument["exchange"],
-                        archives=source["archives"],
-                        time_window=window,
-                    ),
                     source_schema_id=SCHEMA_ID,
                     archives=source["archives"],
                 )
@@ -217,7 +210,7 @@ def prepare(config: Mapping) -> Path:
     with producer(
         spec, inputs=inputs, time_window=window, processed_catalog=catalog, **kwargs
     ) as (data, metadata):
-        metadata["inputs"] = {key: str(value) for key, value in inputs.items()}
+        metadata["inputs"] = dict(config["inputs"])
         metadata["parameters"] = {
             "time_window": dict(config["time_window"]),
             **json.loads(spec.parameters_json),
@@ -273,7 +266,7 @@ def _configured_spec(spec, config):
         raise ValueError("data_operation_parameter_not_consumed")
     if "freshness_days" in parameters and (
         type(parameters["freshness_days"]) is not int
-        or parameters["freshness_days"] not in {90, 180}
+        or parameters["freshness_days"] <= 0
     ):
         raise ValueError("data_operation_freshness_days_invalid")
     if "input_delay_ms" in parameters and (
@@ -400,4 +393,58 @@ def _configured_spec(spec, config):
             # Scientific input order is explicit; supporting keys never become factors.
             roles.update((name, ColumnRole.FACTOR) for name in factors)
             spec = replace(spec, column_roles=roles)
+            if spec.data_id == "fundamental_factors":
+                from quant_research_platform.research.factors.fundamental.definitions import (  # noqa: E501
+                    fundamental_inputs,
+                )
+
+                if not any(
+                    "total_market_cap" in fundamental_inputs(name) for name in factors
+                ):
+                    spec = replace(spec, processed_input_data_ids=("fundamental_pit",))
+    if "label_columns" in config:
+        labels = config["label_columns"]
+        if (
+            type(labels) is not list
+            or not labels
+            or any(type(label) is not str or not label for label in labels)
+            or len(set(labels)) != len(labels)
+            or not set(labels) <= set(spec.label_availability_columns)
+        ):
+            raise ValueError("data_operation_label_columns_invalid")
+        from quant_research_platform.research.protocols import a_share, crypto_hft
+
+        definitions = {
+            item.output_column: item
+            for item in (
+                a_share.label_catalog()
+                if spec.market_id == "a_share"
+                else crypto_hft.label_catalog()
+            ).list()
+        }
+        selected = [definitions[name] for name in labels]
+        label_fields = {
+            *spec.label_availability_columns,
+            *spec.label_availability_columns.values(),
+        }
+        roles = {
+            name: role
+            for name, role in spec.column_roles.items()
+            if name not in label_fields
+        }
+        for definition in selected:
+            for name in (definition.output_column, definition.available_at_column):
+                roles[name] = spec.column_roles[name]
+        spec = replace(
+            spec,
+            column_roles=roles,
+            column_units={
+                name: unit for name, unit in spec.column_units.items() if name in roles
+            },
+            label_availability_columns={
+                item.output_column: item.available_at_column for item in selected
+            },
+        )
+        if "labels" in actual:
+            actual["labels"] = [item.to_manifest() for item in selected]
     return replace(spec, parameters_json=json.dumps(actual))

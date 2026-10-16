@@ -4,14 +4,6 @@ from __future__ import annotations
 
 import pandas as pd
 
-from quant_research_platform.artifacts.outputs.common_validation import (
-    require_metadata_string,
-    require_metadata_string_list,
-    require_non_negative_metadata_int,
-    require_optional_metadata_string,
-    require_signal_metadata_list,
-    validate_filter_metadata,
-)
 from quant_research_platform.contracts.evaluations import (
     CORRELATION_RAW_REASON_CODES,
     CORRELATION_SUMMARY_REASON_CODES,
@@ -26,6 +18,7 @@ from quant_research_platform.contracts.filtering import (
     required_filter_columns,
 )
 from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_membership_series,
@@ -84,7 +77,7 @@ def validate_evaluation_science(metadata):
         "sample_role",
     }:
         raise ValueError("evaluation_science_metadata_invalid")
-    if metadata["sample_role"] not in {"train", "validation", "test"}:
+    if type(metadata["sample_role"]) is not str or not metadata["sample_role"].strip():
         raise ValueError("evaluation_sample_role_invalid")
     window = TimeWindow(**metadata["window"])
     if window.end is None or any(
@@ -556,3 +549,125 @@ def _validate_reason_pair(
                 raise ValueError("invalid_evaluation_statistic_reason")
         elif not reason_is_null:
             raise ValueError("invalid_evaluation_statistic_reason")
+
+
+_SIGNAL_METADATA_KEYS = frozenset(
+    {"signal_id", "source_kind", "source_column", "direction", "transform"}
+)
+
+
+def validate_filter_metadata(
+    *,
+    mode: str,
+    columns: object,
+    definition: str,
+    error_name: str,
+) -> None:
+    if type(columns) is not list or columns != list(required_filter_columns(mode)):
+        raise ValueError(error_name)
+    if definition != filter_definition(mode):
+        raise ValueError(error_name)
+
+
+def require_metadata_string(
+    metadata: dict[str, object],
+    key: str,
+    error_name: str,
+) -> str:
+    value = metadata[key]
+    if type(value) is not str or not value:
+        raise ValueError(error_name)
+    return value
+
+
+def require_optional_metadata_string(
+    metadata: dict[str, object],
+    key: str,
+    error_name: str,
+) -> str | None:
+    value = metadata[key]
+    if value is None:
+        return None
+    if type(value) is not str or not value:
+        raise ValueError(error_name)
+    return value
+
+
+def require_metadata_string_list(
+    metadata: dict[str, object],
+    key: str,
+    error_name: str,
+    *,
+    allow_empty: bool = False,
+) -> list[str]:
+    value = metadata[key]
+    if type(value) is not list:
+        raise ValueError(error_name)
+    if (not allow_empty and not value) or any(
+        type(item) is not str or not item for item in value
+    ):
+        raise ValueError(error_name)
+    if len(value) != len(set(value)):
+        raise ValueError(error_name)
+    return value
+
+
+def require_non_negative_metadata_int(
+    metadata: dict[str, object],
+    key: str,
+    error_name: str,
+) -> int:
+    value = metadata[key]
+    if type(value) is not int or value < 0:
+        raise ValueError(error_name)
+    return value
+
+
+def require_signal_metadata_list(
+    metadata: dict[str, object],
+    key: str,
+    error_name: str,
+) -> tuple[SignalSpec, ...]:
+    value = metadata[key]
+    if type(value) is not list or not value:
+        raise ValueError(error_name)
+    signals: list[SignalSpec] = []
+    for signal in value:
+        if type(signal) is not dict or set(signal) != _SIGNAL_METADATA_KEYS:
+            raise ValueError(error_name)
+        for field in _SIGNAL_METADATA_KEYS:
+            require_metadata_string(signal, field, error_name)
+        try:
+            signals.append(
+                SignalSpec(
+                    signal_id=signal["signal_id"],
+                    source_kind=signal["source_kind"],
+                    source_column=signal["source_column"],
+                    direction=signal["direction"],
+                    transform=signal["transform"],
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(error_name) from exc
+    return tuple(signals)
+
+
+def validate_output_frame(
+    frame: pd.DataFrame,
+    *,
+    required: tuple[str, ...],
+    error_name: str,
+) -> None:
+    observed = tuple(frame.columns)
+    if any(type(column) is not str or not column for column in observed):
+        raise ValueError(f"invalid_{error_name}_columns")
+    if len(observed) != len(set(observed)):
+        raise ValueError(f"duplicate_{error_name}_columns")
+    missing = sorted(set(required).difference(frame.columns))
+    if missing:
+        raise ValueError(f"missing_{error_name}_columns: {', '.join(missing)}")
+    extra = sorted(set(frame.columns).difference(required))
+    if extra:
+        raise ValueError(f"unregistered_{error_name}_columns: {', '.join(extra)}")
+    if observed != required:
+        raise ValueError(f"misordered_{error_name}_columns")

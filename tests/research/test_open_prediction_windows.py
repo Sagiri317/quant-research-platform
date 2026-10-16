@@ -198,8 +198,8 @@ def test_open_prediction_cannot_bypass_frozen_test_scope(tmp_path):
         }
     )
     for role, error in (
-        ("test", "test_prediction_window_outside_freeze"),
-        ("validation", "test_window_requires_test_sample_role"),
+        ("test", "prediction_window_outside_freeze"),
+        ("validation", "prediction_window_outside_freeze"),
     ):
         with pytest.raises(ValueError, match=error):
             predict(

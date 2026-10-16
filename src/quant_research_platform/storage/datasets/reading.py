@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Callable, Iterator, Mapping
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
@@ -14,12 +16,8 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
-import pyarrow.dataset as ds
 
 from quant_research_platform.contracts.data import DataSpec
-from quant_research_platform.contracts.json_codec import (
-    parse_qrp_json_object,
-)
 from quant_research_platform.contracts.time import (
     TimeWindow,
     time_window_date_bounds,
@@ -39,14 +37,13 @@ from quant_research_platform.storage.datasets.paths import (
 from quant_research_platform.storage.datasets.schema import (
     arrow_schema_from_payload,
     data_spec_payload,
-    logical_dtype_metadata_bytes,
     merge_logical_dtype_payloads,
     pandas_dtype_overrides_from_logical_payload,
     parse_logical_dtype_metadata,
     physical_schema_columns,
     physical_schema_from_schema,
-    validate_dataset_manifest_consumable,
     validate_dataset_manifest_payload,
+    validate_logical_dtype_payload,
     validate_persisted_logical_schema,
 )
 from quant_research_platform.storage.datasets.types import DatasetReadMode
@@ -61,6 +58,7 @@ from quant_research_platform.storage.parquet import (
     DatasetPartMetadata,
     PreparedMembershipValues,
     _physical_filter_scalar,
+    inspect_dataset_part,
     iter_dataset_part_batches,
 )
 
@@ -69,34 +67,56 @@ from quant_research_platform.storage.parquet import (
 class DatasetSession:
     root: Path
     data_root: Path
-    spec_bytes: bytes
-    manifest_bytes: bytes
+    _spec: dict[str, Any]
+    _manifest: dict[str, Any]
     logical_columns: tuple[str, ...]
     physical_columns: tuple[str, ...]
     timestamp_column: str | None
     time_window: TimeWindow | None
     schema_hash: str
     arrow_schema: pa.Schema
-    logical_dtype_bytes: bytes
+    _logical_dtypes: dict[str, Any]
+    native: bool
     parquet_filters: tuple[tuple[str, str, Any], ...] | None
     all_paths: tuple[Path, ...]
     read_paths: tuple[Path, ...]
 
     @property
     def spec(self) -> dict[str, Any]:
-        return parse_qrp_json_object(self.spec_bytes)
+        return deepcopy(self._spec)
 
     @property
     def manifest(self) -> dict[str, Any]:
-        return parse_qrp_json_object(self.manifest_bytes)
+        return deepcopy(self._manifest)
 
     @property
     def schema(self) -> list[dict[str, Any]]:
-        return list(self.manifest["physical_schema"])
+        if self.native:
+            return list(self.manifest["physical_schema"])
+        return physical_schema_from_schema(
+            pa.schema(
+                [self.arrow_schema.field(column) for column in self.physical_columns]
+            )
+        )
 
     @property
     def logical_dtypes(self) -> dict[str, Any]:
-        return parse_logical_dtype_metadata(self.logical_dtype_bytes)
+        return deepcopy(self._logical_dtypes)
+
+    def projected_view(self, columns) -> DatasetSession:
+        """Select output columns, retaining only filter support in the scanner."""
+        requested = resolve_columns_from_schema(
+            tuple(self.arrow_schema.names), spec=self._spec, columns=columns
+        )
+        physical = tuple(
+            dict.fromkeys(
+                (
+                    *requested,
+                    *(column for column, _, _ in self.parquet_filters or ()),
+                )
+            )
+        )
+        return replace(self, logical_columns=requested, physical_columns=physical)
 
     def filtered_view(self, time_window: TimeWindow) -> DatasetSession:
         spec = self.spec
@@ -104,7 +124,9 @@ class DatasetSession:
             self,
             read_paths=prune_paths_for_time_window(
                 self.data_root, self.read_paths, spec=spec, time_window=time_window
-            ),
+            )
+            if self.native
+            else self.read_paths,
             time_window=time_window,
             parquet_filters=(
                 *(self.parquet_filters or ()),
@@ -131,99 +153,220 @@ class DatasetSession:
 def read_dataset(
     dataset_root: Path,
     *,
+    files=None,
     columns=None,
+    years=None,
     time_window=None,
+    row_filters=(),
     mode=DatasetReadMode.MATERIALIZED,
     spec: DataSpec | None = None,
 ):
-    if Path(dataset_root).is_file():
-        if spec is None:
-            raise ValueError("parquet_semantic_spec_required")
-        chunks = _iter_parquet_projection(
-            Path(dataset_root), spec=spec, columns=columns, time_window=time_window
+    """Read one logical table in member order, without sorting rows."""
+    try:
+        mode = DatasetReadMode(mode)
+    except (TypeError, ValueError):
+        raise ValueError("unsupported_dataset_read_mode") from None
+
+    def activate():
+        context = open_dataset_session(
+            dataset_root,
+            files=files,
+            columns=columns,
+            years=years,
+            time_window=time_window,
+            row_filters=row_filters,
+            spec=spec,
         )
-        if mode is DatasetReadMode.CHUNKED:
-            return chunks
-        if mode is not DatasetReadMode.MATERIALIZED:
-            raise ValueError("unsupported_dataset_read_mode")
-        with closing_iterator(chunks) as owned:
-            return pd.concat(list(owned), ignore_index=True)
-    if spec is not None:
-        raise ValueError("dataset_spec_already_declared")
+        yield from iter_dataset_chunks(context, batch_rows=DEFAULT_BATCH_ROWS)
+
+    chunks = activate()
     if mode is DatasetReadMode.CHUNKED:
-
-        def activate():
-            context = open_dataset_session(
-                dataset_root, columns=columns, time_window=time_window
-            )
-            yield from iter_dataset_chunks(context, batch_rows=DEFAULT_BATCH_ROWS)
-
-        return activate()
-    if mode is not DatasetReadMode.MATERIALIZED:
-        raise ValueError("unsupported_dataset_read_mode")
-    context = open_dataset_session(
-        dataset_root, columns=columns, time_window=time_window
+        return chunks
+    with closing_iterator(chunks) as owned:
+        frames = list(owned)
+    return (
+        pd.concat(frames, ignore_index=True)
+        if len(frames) > 1
+        else frames[0].reset_index(drop=True)
     )
-    return materialize_dataset_session(context, batch_rows=DEFAULT_BATCH_ROWS)
 
 
-def _iter_parquet_projection(path: Path, *, spec: DataSpec, columns, time_window):
-    """Read a supplied bare file with explicit semantic roles using Arrow projection."""
-    require_unaliased_path(path, error="invalid_dataset_part_files")
+def _selected_paths(root: Path, files) -> tuple[Path, ...]:
+    if type(files) not in (list, tuple) or any(
+        type(member) is not str or not member for member in files
+    ):
+        raise ValueError("dataset_files_invalid")
+    paths = []
+    for member in files:
+        relative = Path(member)
+        if (
+            relative.is_absolute()
+            or ".." in relative.parts
+            or relative.suffix.casefold() != ".parquet"
+        ):
+            raise ValueError("dataset_files_invalid")
+        path = root / relative
+        require_unaliased_path(path, error="invalid_dataset_part_files")
+        if not filesystem_is_file(path) or path in paths:
+            raise ValueError("invalid_dataset_part_files")
+        paths.append(path)
+    return tuple(paths)
+
+
+def _validated_years(years) -> tuple[int, ...] | None:
+    if years is None:
+        return None
+    if type(years) not in (list, tuple) or any(
+        type(year) is not int or not 1 <= year <= 9999 for year in years
+    ):
+        raise ValueError("dataset_years_invalid")
+    return tuple(sorted(set(years)))
+
+
+def _selection_filters(schema, *, timestamp, time_window, years, row_filters):
+    filters = (
+        parquet_filters_for_time_window(
+            timestamp_column=timestamp, time_window=time_window
+        )
+        or []
+    )
+    if years is not None:
+        if timestamp is None:
+            raise ValueError("time_window_not_supported")
+        filters.append((timestamp, "year_in", years))
+    for column, operator, value in row_filters:
+        if column not in schema.names:
+            raise ValueError("dataset_filter_column_not_found")
+        if operator not in {"==", "in"}:
+            raise ValueError("unsupported_dataset_physical_filter")
+        field = schema.field(column)
+        if pa.types.is_dictionary(field.type):
+            field = pa.field(column, field.type.value_type)
+        if operator == "in":
+            if type(value) is not tuple or not value:
+                raise ValueError("invalid_dataset_physical_filter_value")
+            value = _prepare_in_filter(field, value)
+        else:
+            value = _validated_physical_filter_value(field, value)
+        filters.append((column, operator, value))
+    return filters
+
+
+def _dataset_input_options(value):
+    """Parse the existing input fields without opening a file or inferring semantics."""
+    if isinstance(value, (str, Path)):
+        return {"dataset_root": Path(value)}
+    if (
+        not isinstance(value, Mapping)
+        or set(value)
+        - {"path", "spec", "files", "columns", "years", "time_window", "row_filters"}
+        or "path" not in value
+    ):
+        raise ValueError("dataset_input_invalid")
+    options = dict(value)
+    path = options.pop("path")
+    if not isinstance(path, (str, Path)):
+        raise ValueError("dataset_input_invalid")
+    options["dataset_root"] = Path(path)
+    if options.get("columns") is not None:
+        options["columns"] = _validated_columns(options["columns"])
+    declared = options.get("spec")
+    if declared is not None and not isinstance(declared, DataSpec):
+        if not isinstance(declared, Mapping):
+            raise ValueError("parquet_semantic_spec_required")
+        values = dict(declared)
+        for name in ("primary_key", "partition_columns"):
+            if name in values:
+                values[name] = tuple(values[name])
+        options["spec"] = DataSpec(**values)
+    window = options.get("time_window")
+    if window is not None and not isinstance(window, TimeWindow):
+        if not isinstance(window, Mapping):
+            raise ValueError("dataset_time_window_invalid")
+        options["time_window"] = TimeWindow(**window)
+    if "row_filters" in options:
+        filters = options["row_filters"]
+        if type(filters) not in (tuple, list) or any(
+            type(item) not in (tuple, list) or len(item) != 3 for item in filters
+        ):
+            raise ValueError("dataset_row_filters_invalid")
+        options["row_filters"] = tuple(
+            (
+                column,
+                operator,
+                tuple(items) if operator == "in" and type(items) is list else items,
+            )
+            for column, operator, items in filters
+        )
+    return options
+
+
+def _bare_dataset_session(
+    path, *, columns, time_window, files, years, row_filters, spec
+):
+    if spec is None:
+        raise ValueError("parquet_semantic_spec_required")
+    if path.is_file():
+        if files is not None:
+            raise ValueError("dataset_files_require_directory")
+        require_unaliased_path(path, error="invalid_dataset_part_files")
+        paths = (path,)
+    else:
+        if files is None:
+            raise ValueError("parquet_files_required")
+        paths = _selected_paths(path, files)
+        if not paths:
+            raise ValueError("parquet_files_required")
     payload = data_spec_payload(spec)
-    dataset = ds.dataset(path, format="parquet")
+    metadata = inspect_dataset_part(paths[0], require_logical_dtypes=False)
+    schema = metadata.schema.with_metadata(
+        {b"pandas": metadata.pandas_metadata} if metadata.pandas_metadata else None
+    )
+    logical = (
+        parse_logical_dtype_metadata(
+            metadata.logical_dtype_payload, selected_columns=()
+        )
+        if metadata.logical_dtype_payload
+        else {}
+    )
     requested = resolve_columns_from_schema(
-        tuple(dataset.schema.names), spec=payload, columns=columns
+        tuple(schema.names), spec=payload, columns=columns
     )
     timestamp = timestamp_column_from_spec_payload(payload)
-    filters = parquet_filters_for_time_window(
-        timestamp_column=timestamp, time_window=time_window
+    filters = _selection_filters(
+        schema,
+        timestamp=timestamp,
+        time_window=time_window,
+        years=years,
+        row_filters=row_filters,
     )
-    predicate = None
-    for column, operator, value in filters or ():
-        field = ds.field(column)
-        value = _physical_filter_scalar(dataset.schema.field(column), value)
-        condition = (
-            field >= value
-            if operator == ">="
-            else field <= value
-            if operator == "<="
-            else field < value
-        )
-        predicate = condition if predicate is None else predicate & condition
-    scanner = dataset.scanner(
-        columns=list(requested), filter=predicate, batch_size=DEFAULT_BATCH_ROWS
+    return DatasetSession(
+        root=path,
+        data_root=path.parent if path.is_file() else path,
+        _spec=payload,
+        _manifest={},
+        logical_columns=requested,
+        physical_columns=tuple(
+            dict.fromkeys((*requested, *(column for column, _, _ in filters)))
+        ),
+        timestamp_column=timestamp,
+        time_window=time_window,
+        schema_hash="",
+        arrow_schema=schema,
+        _logical_dtypes=logical,
+        native=False,
+        parquet_filters=tuple(filters) or None,
+        all_paths=paths,
+        read_paths=paths,
     )
-    raw = (dataset.schema.metadata or {}).get(b"qrp.logical-dtypes")
-    overrides = (
-        pandas_dtype_overrides_from_logical_payload(
-            parse_logical_dtype_metadata(raw), columns=requested
-        )
-        if raw
-        else None
-    )
-    yielded = False
-    empty_batch = None
-    with closing_iterator(scanner.to_batches()) as batches:
-        for batch in batches:
-            if batch.num_rows == 0 and empty_batch is None:
-                empty_batch = batch
-            for frame in _arrow_batch_to_bounded_pandas(
-                batch, dtype_overrides=overrides
-            ):
-                yielded = True
-                yield frame
-    if not yielded:
-        schema = scanner.projected_schema
-        batch = (
-            empty_batch
-            if empty_batch is not None
-            else pa.RecordBatch.from_arrays(
-                [pa.array([], type=field.type) for field in schema], schema=schema
-            )
-        )
-        empty = _arrow_slice_to_pandas(batch, dtype_overrides=overrides)
-        yield empty.astype(overrides) if overrides else empty
+
+
+def _project_logical_dtypes(payload, columns):
+    by_name = {item["name"]: item for item in payload["columns"]}
+    return {
+        "schema_id": payload["schema_id"],
+        "columns": [by_name[column] for column in columns],
+    }
 
 
 def materialize_dataset_session(
@@ -244,11 +387,29 @@ def materialize_dataset_session(
 def open_dataset_session(
     dataset_root: Path,
     *,
-    columns: tuple[str, ...] | list[str] | None,
-    time_window: TimeWindow | None,
+    columns: tuple[str, ...] | list[str] | None = None,
+    time_window: TimeWindow | None = None,
     row_filters: tuple[tuple[str, str, Any], ...] = (),
-    require_consumable: bool = True,
+    files: tuple[str, ...] | list[str] | None = None,
+    years: tuple[int, ...] | list[int] | None = None,
+    spec: DataSpec | None = None,
 ) -> DatasetSession:
+    years = _validated_years(years)
+    path = Path(dataset_root)
+    if not path.exists():
+        raise FileNotFoundError(path)
+    if path.is_file() or (spec is not None and not (path / "spec.json").is_file()):
+        return _bare_dataset_session(
+            path,
+            columns=columns,
+            time_window=time_window,
+            files=files,
+            years=years,
+            row_filters=row_filters,
+            spec=spec,
+        )
+    if spec is not None:
+        raise ValueError("dataset_spec_already_declared")
     root = require_artifact_root(Path(dataset_root))
     spec_path, data_root, manifest_path = (
         root / "spec.json",
@@ -264,97 +425,68 @@ def open_dataset_session(
         raise ValueError("dataset_data_dir_missing")
     if not filesystem_is_file(manifest_path):
         raise ValueError("dataset_manifest_missing")
-    spec_bytes, spec_payload = read_qrp_json_file(spec_path)
+    _, spec_payload = read_qrp_json_file(spec_path)
     if spec_payload.get("schema_id") != "qrp-dataset-spec":
         raise ValueError("dataset_spec_schema_id_invalid")
-    manifest_bytes, manifest = read_qrp_json_file(manifest_path)
+    _, manifest = read_qrp_json_file(manifest_path)
     if manifest.get("schema_id") != "qrp-dataset-manifest":
         raise ValueError("dataset_manifest_schema_id_invalid")
-    validate_dataset_manifest_payload(manifest, spec=spec_payload)
-    if require_consumable:
-        validate_dataset_manifest_consumable(
-            manifest, primary_key=spec_payload["primary_key"]
-        )
+    validate_dataset_manifest_payload(manifest, spec=spec_payload, logical_columns=())
     inventory = DatasetSessionInventory(data_root=data_root)
-    inventory.discover(spec_payload)
+    if files is None:
+        partition_years = None if years is None else set(years)
+        if time_window is not None and tuple(spec_payload["partition_columns"]) == (
+            "year",
+        ):
+            start, end = time_window_date_bounds(time_window)
+            window_years = set(range(int(start.year), int(end.year) + 1))
+            partition_years = (
+                window_years
+                if partition_years is None
+                else partition_years & window_years
+            )
+        inventory.discover(spec_payload, years=partition_years)
+    else:
+        for path in _selected_paths(root, files):
+            try:
+                inventory.add(path)
+            except ValueError as exc:
+                raise ValueError("invalid_dataset_part_files") from exc
     paths = inventory.paths
-    if not paths:
+    if not paths and files is None and years is None and time_window is None:
         raise ValueError("dataset_data_dir_missing")
     session = _build_dataset_session(
         root=root,
         data_root=data_root,
-        spec_bytes=spec_bytes,
         spec_payload=spec_payload,
-        manifest_bytes=manifest_bytes,
         manifest=manifest,
         inventory=inventory,
         columns=columns,
         time_window=time_window,
         row_filters=row_filters,
+        years=_validated_years(years),
     )
     return session
-
-
-def dataset_session_from_inventory(
-    dataset_root: Path,
-    *,
-    inventory: DatasetSessionInventory,
-    columns: tuple[str, ...] | list[str] | None,
-    time_window: TimeWindow | None,
-) -> DatasetSession:
-    """Freeze a writer receipt without reopening already observed Parquet parts."""
-    root = require_artifact_root(Path(dataset_root))
-    data_root, spec_path, manifest_path = (
-        root / "data",
-        root / "spec.json",
-        root / "_manifest" / "manifest.json",
-    )
-    require_unaliased_path(data_root, error="invalid_dataset_part_files")
-    require_unaliased_path(spec_path, error="dataset_metadata_file_invalid")
-    require_unaliased_path(manifest_path, error="dataset_metadata_file_invalid")
-    spec_bytes, spec_payload = read_qrp_json_file(spec_path)
-    manifest_bytes, manifest = read_qrp_json_file(manifest_path)
-    validate_dataset_manifest_payload(manifest, spec=spec_payload)
-    validate_dataset_manifest_consumable(
-        manifest, primary_key=spec_payload["primary_key"]
-    )
-    return _build_dataset_session(
-        root=root,
-        data_root=data_root,
-        spec_bytes=spec_bytes,
-        spec_payload=spec_payload,
-        manifest_bytes=manifest_bytes,
-        manifest=manifest,
-        inventory=inventory,
-        columns=columns,
-        time_window=time_window,
-        row_filters=(),
-    )
 
 
 def _build_dataset_session(
     *,
     root: Path,
     data_root: Path,
-    spec_bytes: bytes,
     spec_payload: dict[str, Any],
-    manifest_bytes: bytes,
     manifest: dict[str, Any],
     inventory: DatasetSessionInventory,
     columns: tuple[str, ...] | list[str] | None,
     time_window: TimeWindow | None,
     row_filters: tuple[tuple[str, str, Any], ...],
+    years: tuple[int, ...] | None,
 ) -> DatasetSession:
     all_paths = inventory.paths
-    if not all_paths:
-        raise ValueError("dataset_data_dir_missing")
     schema = manifest["physical_schema"]
     arrow_schema = arrow_schema_from_payload(schema)
     schema_columns = physical_schema_columns(schema)
     schema_hash = manifest["schema_hash"]
     logical_dtypes = manifest["logical_dtypes"]
-    validate_persisted_logical_schema(arrow_schema, logical_dtypes)
-    logical_dtype_bytes = logical_dtype_metadata_bytes(logical_dtypes)
     logical_columns = resolve_columns_from_schema(
         schema_columns, spec=spec_payload, columns=columns
     )
@@ -363,43 +495,46 @@ def _build_dataset_session(
         logical_columns, spec=spec_payload, time_window=time_window
     )
     physical_columns = tuple(
-        dict.fromkeys((*physical_columns, *(column for column, _, _ in row_filters)))
-    )
-    physical_filters = (
-        parquet_filters_for_time_window(
-            timestamp_column=timestamp_column, time_window=time_window
+        dict.fromkeys(
+            (
+                *physical_columns,
+                *((timestamp_column,) if years is not None else ()),
+                *(column for column, _, _ in row_filters),
+            )
         )
-        or []
     )
-    for column, operator, value in row_filters:
-        if column not in schema_columns:
-            raise ValueError("dataset_filter_column_not_found")
-        if operator not in {"==", "in"}:
-            raise ValueError("unsupported_dataset_physical_filter")
-        field = arrow_schema.field(column)
-        if operator == "in":
-            if type(value) is not tuple or not value:
-                raise ValueError("invalid_dataset_physical_filter_value")
-            validated_value = _prepare_in_filter(field, value)
-        else:
-            validated_value = _validated_physical_filter_value(field, value)
-        physical_filters.append((column, operator, validated_value))
+    physical_filters = _selection_filters(
+        arrow_schema,
+        timestamp=timestamp_column,
+        time_window=time_window,
+        years=years,
+        row_filters=row_filters,
+    )
+    selected_paths = prune_paths_for_time_window(
+        data_root, all_paths, spec=spec_payload, time_window=time_window
+    )
+    if years is not None and tuple(spec_payload["partition_columns"]) == ("year",):
+        selected_paths = tuple(
+            path
+            for path in selected_paths
+            if path.parent == data_root
+            or parse_year_partition_label(path.parent.name) in years
+        )
     session = DatasetSession(
         all_paths=all_paths,
-        read_paths=prune_paths_for_time_window(
-            data_root, all_paths, spec=spec_payload, time_window=time_window
-        ),
+        read_paths=selected_paths,
         root=root,
         data_root=data_root,
-        spec_bytes=spec_bytes,
-        manifest_bytes=manifest_bytes,
         logical_columns=logical_columns,
         physical_columns=physical_columns,
         timestamp_column=timestamp_column,
         time_window=time_window,
         schema_hash=schema_hash,
         arrow_schema=arrow_schema,
-        logical_dtype_bytes=logical_dtype_bytes,
+        _spec=deepcopy(spec_payload),
+        _manifest=deepcopy(manifest),
+        _logical_dtypes=deepcopy(logical_dtypes),
+        native=True,
         parquet_filters=tuple(
             (
                 (column, operator, _freeze_filter_value(value))
@@ -421,13 +556,61 @@ def iter_dataset_chunks(
     if not context.read_paths:
         yield _empty_frame(context, context.logical_columns)
         return
+    key_index = None
+    keys = None
+
+    def observe_consumed(batch, frame):
+        nonlocal key_index, keys
+        if keys is None:
+            keys = tuple(context.spec["primary_key"])
+        for column in keys:
+            if column not in batch.schema.names:
+                continue
+            values = batch.column(column)
+            if pa.types.is_dictionary(values.type):
+                values = pc.dictionary_decode(values)
+            if values.null_count or (
+                pa.types.is_floating(values.type) and pc.any(pc.is_nan(values)).as_py()
+            ):
+                raise ValueError("dataset_primary_key_null")
+        if not all(column in batch.schema.names for column in keys):
+            from quant_research_platform.storage.exact_keys import (
+                _append_arrow_scalar_payload,
+            )
+
+            for column in keys:
+                if column not in batch.schema.names:
+                    continue
+                values = batch.column(column)
+                value_type = values.type
+                if pa.types.is_dictionary(value_type):
+                    values = pc.dictionary_decode(values)
+                    value_type = values.type
+                if pa.types.is_nested(value_type):
+                    for value in values:
+                        _append_arrow_scalar_payload(bytearray(), value, value_type)
+        if all(column in batch.schema.names for column in keys):
+            if key_index is None:
+                from quant_research_platform.storage.exact_keys import (
+                    ExactPrimaryKeyIndex,
+                )
+
+                key_index = ExactPrimaryKeyIndex(primary_key=keys)
+            if key_index.add_table(pa.Table.from_batches([batch])):
+                raise ValueError("duplicate_dataset_primary_key")
+        for column in batch.columns:
+            if pa.types.is_floating(column.type) and pc.any(pc.is_inf(column)).as_py():
+                raise ValueError("dataset_infinite_value")
+        if batch_observer is not None:
+            batch_observer(batch, frame)
+
     yielded = False
     with closing_iterator(
         iter_dataset_file_batches(
             context,
             columns=context.physical_columns,
             batch_rows=rows_per_batch,
-            batch_observer=batch_observer,
+            batch_observer=observe_consumed,
         )
     ) as file_batches:
         for _, frame in file_batches:
@@ -489,17 +672,39 @@ def iter_dataset_file_batches(
 ) -> Iterator[tuple[Path, pd.DataFrame]]:
     """Yield deterministic file batches after Arrow-level bounded conversion."""
     rows_per_batch = _validated_batch_rows(batch_rows)
-    dtype_overrides = pandas_dtype_overrides_from_logical_payload(
-        context.logical_dtypes, columns=columns
+    logical = context.logical_dtypes
+    declared_logical = _project_logical_dtypes(logical, columns) if logical else {}
+    if declared_logical:
+        validate_logical_dtype_payload(declared_logical)
+    dtype_overrides = (
+        pandas_dtype_overrides_from_logical_payload(declared_logical, columns=columns)
+        if declared_logical
+        else {}
     )
+    expected = pa.schema([context.arrow_schema.field(column) for column in columns])
 
     def validate_metadata(metadata):
-        if physical_schema_from_schema(metadata.schema) != context.schema:
+        try:
+            selected = pa.schema([metadata.schema.field(column) for column in columns])
+        except KeyError as exc:
+            raise ValueError("dataset_column_not_found") from exc
+        if selected != expected:
             raise ValueError("dataset_schema_mismatch")
-        current = parse_logical_dtype_metadata(metadata.logical_dtype_payload)
-        validate_persisted_logical_schema(metadata.schema, current)
-        merged = merge_logical_dtype_payloads([context.logical_dtypes, current])
-        if merged != context.logical_dtypes:
+        if not metadata.logical_dtype_payload and not context.native:
+            if declared_logical:
+                raise ValueError("dataset_logical_dtypes_missing")
+            return
+        current = _project_logical_dtypes(
+            parse_logical_dtype_metadata(
+                metadata.logical_dtype_payload, selected_columns=columns
+            ),
+            columns,
+        )
+        validate_persisted_logical_schema(selected, current)
+        if not declared_logical:
+            raise ValueError("dataset_logical_dtypes_mismatch")
+        merged = merge_logical_dtype_payloads([declared_logical, current])
+        if merged != declared_logical:
             raise ValueError("manifest_logical_dtypes_mismatch")
 
     for path in context.read_paths:
@@ -640,9 +845,20 @@ def _validated_physical_filter_value(field: pa.Field, value: Any) -> Any:
 
 
 def _empty_frame(context: DatasetSession, columns: tuple[str, ...]) -> pd.DataFrame:
-    selected = pa.schema([context.arrow_schema.field(column) for column in columns])
-    overrides = pandas_dtype_overrides_from_logical_payload(
-        context.logical_dtypes, columns=columns
+    logical = context.logical_dtypes
+    selected_logical = _project_logical_dtypes(logical, columns) if logical else {}
+    if selected_logical:
+        validate_logical_dtype_payload(selected_logical)
+    selected = pa.schema(
+        [context.arrow_schema.field(column) for column in columns],
+        metadata=context.arrow_schema.metadata,
+    )
+    if selected_logical:
+        validate_persisted_logical_schema(selected, selected_logical)
+    overrides = (
+        pandas_dtype_overrides_from_logical_payload(selected_logical, columns=columns)
+        if selected_logical
+        else {}
     )
     frame = _arrow_slice_to_pandas(
         pa.RecordBatch.from_arrays(
@@ -650,8 +866,7 @@ def _empty_frame(context: DatasetSession, columns: tuple[str, ...]) -> pd.DataFr
         ),
         dtype_overrides=overrides,
     )
-    output = frame.astype(overrides) if overrides else frame
-    return output
+    return frame.astype(overrides) if overrides else frame
 
 
 def _arrow_batch_to_bounded_pandas(
@@ -694,6 +909,15 @@ def _arrow_batch_to_bounded_pandas(
 def _arrow_slice_to_pandas(
     arrow_slice: pa.RecordBatch, *, dtype_overrides: Mapping[str, object] | None = None
 ) -> pd.DataFrame:
+    metadata = arrow_slice.schema.metadata
+    if metadata and b"pandas" in metadata:
+        pandas_metadata = json.loads(metadata[b"pandas"])
+        if pandas_metadata.get("index_columns"):
+            # Dataset keys remain columns; retain pandas extension dtype metadata.
+            pandas_metadata["index_columns"] = []
+            arrow_slice = arrow_slice.replace_schema_metadata(
+                {**metadata, b"pandas": json.dumps(pandas_metadata).encode("utf-8")}
+            )
     native_types = set()
     nullable_float_columns = []
     for name, dtype in (dtype_overrides or {}).items():
@@ -799,24 +1023,29 @@ def parquet_filters_for_time_window(
     ]
 
 
+def _validated_columns(columns) -> tuple[str, ...]:
+    if type(columns) not in (tuple, list):
+        raise ValueError("dataset_columns_invalid")
+    if not columns:
+        raise ValueError("dataset_columns_empty")
+    if any(type(column) is not str or not column for column in columns) or len(
+        columns
+    ) != len(set(columns)):
+        raise ValueError("dataset_columns_invalid")
+    return tuple(columns)
+
+
 def resolve_columns_from_schema(
     schema_columns: tuple[str, ...],
     *,
     spec: Mapping[str, Any],
     columns: tuple[str, ...] | list[str] | None,
 ) -> tuple[str, ...]:
-    if columns is None:
-        requested = tuple(spec["required_columns"])
-    else:
-        if type(columns) not in (tuple, list):
-            raise ValueError("dataset_columns_invalid")
-        if not columns:
-            raise ValueError("dataset_columns_empty")
-        if any(type(column) is not str or not column for column in columns) or len(
-            columns
-        ) != len(set(columns)):
-            raise ValueError("dataset_columns_invalid")
-        requested = tuple(columns)
+    requested = (
+        tuple(spec["required_columns"])
+        if columns is None
+        else _validated_columns(columns)
+    )
     missing = [column for column in requested if column not in schema_columns]
     if missing:
         raise ValueError("dataset_column_not_found")
@@ -838,9 +1067,9 @@ def _iter_dataset_session_frames(session, columns):
     from quant_research_platform.runtime.dataframes import iter_complete_session_frames
 
     with closing_iterator(
-        iter_dataset_file_batches(session, columns=columns)
+        iter_dataset_chunks(session.projected_view(columns))
     ) as batches:
-        source = (frame for _, frame in batches)
+        source = batches
         with closing_iterator(
             iter_complete_session_frames(source, timestamp_column="timestamp")
         ) as frames:

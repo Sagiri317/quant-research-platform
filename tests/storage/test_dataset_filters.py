@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from datetime import time
 from pathlib import Path
 
@@ -16,7 +15,6 @@ from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.datasets.reading import _prepare_in_filter
 from quant_research_platform.storage.identity import (
-    filesystem_write_bytes,
     native_filesystem_path,
 )
 from tests.storage.low_level_fixtures import (
@@ -203,7 +201,7 @@ def test_dataset_session_tuple_in_filter_empty_result_preserves_projected_dtypes
     }
 
 
-def test_filtered_empty_chunk_final_verify_preserves_caller_primary(
+def test_filtered_empty_chunk_preserves_caller_primary(
     tmp_path: Path,
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "filtered_empty_primary")
@@ -222,14 +220,6 @@ def test_filtered_empty_chunk_final_verify_preserves_caller_primary(
     with pytest.raises(RuntimeError, match="primary_failure"):
         with closing_iterator(iterator):
             assert next(iterator).empty
-            part = session.all_paths[0]
-            replacement = tmp_path / "replacement-primary.parquet"
-            filesystem_write_bytes(
-                replacement, Path(native_filesystem_path(part)).read_bytes()
-            )
-            os.replace(
-                native_filesystem_path(replacement), native_filesystem_path(part)
-            )
             raise RuntimeError("primary_failure")
 
 

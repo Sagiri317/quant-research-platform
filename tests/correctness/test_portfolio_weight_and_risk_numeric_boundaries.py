@@ -39,7 +39,7 @@ from quant_research_platform.research.portfolios.risk import (
     holding_attribution,
 )
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
-from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers.paths import StorageLayout
 from tests.helpers.portfolio_inputs import _processed_specs
 from tests.helpers.portfolio_ledger import (
     ledger_frame,

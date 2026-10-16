@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pytest
 
 import quant_research_platform.storage.datasets.comparison as dataset_comparison
@@ -126,19 +127,12 @@ def test_compare_propagates_programmer_errors(
 
 
 @pytest.mark.parametrize(
-    ("primary_type", "verify_type"),
-    (
-        (RuntimeError, OSError),
-        (MemoryError, ValueError),
-        (KeyboardInterrupt, OSError),
-        (SystemExit, ValueError),
-    ),
+    "primary_type", (RuntimeError, MemoryError, KeyboardInterrupt, SystemExit)
 )
 @pytest.mark.parametrize("iterator_name", ("file_batches", "chunks"))
-def test_reader_final_verify_does_not_replace_active_primary(
+def test_reader_propagates_decode_failure(
     monkeypatch: pytest.MonkeyPatch,
     primary_type: type[BaseException],
-    verify_type: type[BaseException],
     iterator_name: str,
 ) -> None:
 
@@ -146,20 +140,9 @@ def test_reader_final_verify_does_not_replace_active_primary(
         read_paths = (Path("part.parquet"),)
         physical_columns = ("value",)
         logical_columns = ("value",)
-        logical_dtypes = {"value": {"kind": "numpy_int", "dtype": "int64"}}
+        logical_dtypes = {}
+        arrow_schema = pa.schema([("value", pa.int64())])
         parquet_filters = None
-
-        def __init__(self) -> None:
-            self.verify_calls = 0
-            self.verify_fail_after = 1 if iterator_name == "file_batches" else 0
-
-        def verify(self) -> None:
-            self.verify_calls += 1
-            if self.verify_calls > self.verify_fail_after:
-                raise verify_type("verify_failure")
-
-        def metadata_for(self, _path: Path) -> object:
-            return SimpleNamespace(identity=object())
 
     context = Context()
 
@@ -201,20 +184,9 @@ def test_dataset_iterator_context_preserves_caller_primary(
         read_paths = (Path("part.parquet"),)
         physical_columns = ("value",)
         logical_columns = ("value",)
-        logical_dtypes = {"value": {"kind": "numpy_int", "dtype": "int64"}}
+        logical_dtypes = {}
+        arrow_schema = pa.schema([("value", pa.int64())])
         parquet_filters = None
-
-        def __init__(self) -> None:
-            self.verify_calls = 0
-            self.verify_fail_after = 1 if iterator_name == "file_batches" else 0
-
-        def verify(self) -> None:
-            self.verify_calls += 1
-            if self.verify_calls > self.verify_fail_after:
-                raise OSError("verify_failure")
-
-        def metadata_for(self, _path: Path) -> object:
-            return SimpleNamespace(identity=object())
 
     context = Context()
     if iterator_name == "file_batches":

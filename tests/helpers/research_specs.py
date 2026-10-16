@@ -136,3 +136,54 @@ def _research_column_roles(
     roles.update({column: ColumnRole.CONTEXT for column in context_columns})
     roles.update(filter_column_roles or {})
     return roles
+
+
+def assemble_research_dataset(
+    *,
+    inputs,
+    output_root,
+    dataset_catalog,
+    processed_catalog,
+    dataset_id,
+    time_window,
+):
+    """Run the public assembly operation for existing explicit scenario fixtures."""
+    from quant_research_platform.contracts.time import time_value_isoformat
+    from quant_research_platform.research.datasets.assembler import assemble
+
+    spec = dataset_catalog.get(dataset_id)
+    config = {
+        "market_id": str(spec.market_id),
+        "dataset_id": spec.data_id,
+        "inputs": {key: str(value) for key, value in inputs.items()},
+        "output_root": str(output_root),
+        "time_window": {
+            "start": time_value_isoformat(time_window.start),
+            "end": time_value_isoformat(time_window.end),
+        },
+        "factor_columns": list(spec.factor_columns),
+        "label_columns": list(spec.label_columns),
+        "filter_columns": list(spec.filter_columns),
+        "context_columns": list(spec.context_columns),
+        "base_input_data_id": spec.base_input_data_id,
+        "sparse_input_data_ids": [
+            key for key, value in spec.key_coverage.items() if value == "sparse"
+        ],
+        "feature_recipe": None,
+        "eligibility_recipe": spec.eligibility_recipe,
+    }
+    if spec.feature_transforms:
+        transform = spec.feature_transforms[0]
+        config["feature_recipe"] = transform.recipe_id
+        config["feature_transform"] = {
+            name: getattr(transform, name)
+            for name in (
+                "clip",
+                "industry_neutralize",
+                "size_neutralize",
+                "center",
+                "scale",
+                "impute_missing",
+            )
+        }
+    return assemble(config)

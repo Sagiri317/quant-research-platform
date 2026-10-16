@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
 from quant_research_platform.contracts.columns import ColumnRole
@@ -11,13 +10,12 @@ from quant_research_platform.contracts.data import (
     DataGrain,
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
-from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
+from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.labels import LabelDefinition
 from quant_research_platform.contracts.portfolios import (
     ExecutionAssumptions,
 )
-from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.markets.implementations.a_share import ids as market_ids
 from quant_research_platform.research.factors.expectations.definitions import (
     ALL_EXPECTATIONS_FACTORS,
@@ -32,9 +30,6 @@ from quant_research_platform.research.factors.price_volume.definitions import (
     PRICE_VOLUME_PATH_FACTORS,
     price_volume_factor_definitions,
 )
-from quant_research_platform.research.features.transforms import (
-    feature_transforms,
-)
 from quant_research_platform.research.filtering import A_SHARE_ELIGIBILITY_FACTS
 from quant_research_platform.research.labels.forward_returns import (
     forward_return_available_at_column,
@@ -43,7 +38,6 @@ from quant_research_platform.research.labels.forward_returns import (
 
 PROTOCOL_ID = "a_share_low_frequency"
 MARKET_MODEL_FACTORS = ("beta_252d", "residual_volatility_60d")
-BENCHMARK_TOTAL_RETURN_INDICES = {"csi500": "H00905", "csi1000": "H00852"}
 RESEARCH_DATASET_IDS = {
     "pv_all": "pv_all",
     "pv_expanded": "pv_expanded",
@@ -64,9 +58,6 @@ EXECUTION_ASSUMPTIONS = ExecutionAssumptions(
     adv_participation=0.05,
     adv_sensitivities=(0.01, 0.02, 0.05, 0.10),
 )
-STATISTICS_BLOCK = 20
-STATISTICS_REPETITIONS = 10_000
-HAC_LAG = 19
 RISK_STYLE_COLUMNS = (
     "log_float_market_cap",
     "beta_252d",
@@ -174,30 +165,6 @@ def label_catalog() -> LabelCatalog:
     return LabelCatalog(label_definitions())
 
 
-def evaluation_catalog() -> EvaluationCatalog:
-    return EvaluationCatalog(
-        EvaluationSpec(
-            evaluation_id=f"{selected}_evaluation",
-            market_id=market_ids.MARKET_ID,
-            research_dataset_id=RESEARCH_DATASET_IDS[selected],
-            signals=tuple(
-                SignalSpec(
-                    signal_id=column,
-                    source_kind="factor",
-                    source_column=column,
-                )
-                for column in dataset_factor_columns(selected)
-            ),
-            label_columns=(PRIMARY_LABEL_COLUMN,),
-            label_availability_columns={
-                PRIMARY_LABEL_COLUMN: forward_return_available_at_column(20)
-            },
-            n_groups=5,
-        )
-        for selected in SCENARIO_IDS
-    )
-
-
 def research_dataset_specs() -> tuple[ResearchDatasetSpec, ...]:
     specs: list[ResearchDatasetSpec] = []
     for scenario_id in SCENARIO_IDS:
@@ -263,7 +230,7 @@ def research_dataset_specs() -> tuple[ResearchDatasetSpec, ...]:
             )
             for column in all_columns
         }
-        transforms = feature_transforms(factor_columns)
+        transforms = (FeatureTransformSpec("a_share_canonical", tuple(factor_columns)),)
         input_data_ids = [
             market_ids.MARKET_PANEL_ID,
             market_ids.PRICE_VOLUME_DATA_ID,
@@ -285,7 +252,23 @@ def research_dataset_specs() -> tuple[ResearchDatasetSpec, ...]:
                 feature_columns=feature_columns,
                 feature_transforms=transforms,
                 label_columns=labels,
+                label_availability_columns={
+                    **{
+                        forward_return_label_column(
+                            h
+                        ): forward_return_available_at_column(h)
+                        for h in LABEL_HORIZONS
+                    },
+                    "model_target": "model_target_available_at",
+                },
                 filter_columns=("eligible",),
+                eligibility_recipe=(
+                    "a_share_fundamental"
+                    if scenario_id in {"fusion_nf_core", "fusion_nf_expectations"}
+                    else "a_share_nonfinancial"
+                    if scenario_id == "pv_nf_expectations"
+                    else "a_share_all"
+                ),
                 context_columns=context,
                 frequency=DataFrequency.DAILY,
                 grain="research_row",
@@ -337,7 +320,7 @@ def forward_label_available_columns() -> tuple[str, ...]:
 
 
 def validate_model_selection(models):
-    """Keep the formal A-share filtering and weighting research qualifications."""
+    """Validate A-share model family identities and sample eligibility."""
     from quant_research_platform.contracts.models import (
         ModelSpec,
         _validate_a_share_model_family_ids,
@@ -349,9 +332,3 @@ def validate_model_selection(models):
     _validate_a_share_model_family_ids(model.model_id for model in models)
     if any(model.sample_filter_mode != "eligible" for model in models):
         raise ValueError("a_share_model_sample_filter_mode_not_supported")
-    half_lives = {model.training_weighting.half_life_periods for model in models}
-    if 756 in half_lives and len(half_lives) > 1:
-        raise ValueError("a_share_training_weighting_research_roles_mixed")
-    if half_lives.difference({None, 756}):
-        raise ValueError("a_share_training_weighting_half_life_not_supported")
-    return "robustness" if half_lives == {756} else "primary"

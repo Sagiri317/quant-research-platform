@@ -512,15 +512,14 @@ def _open_tardis_archive(root, *, expected_manifest_hash):
         for item in members
     )
 
-    def verify_files():
-        for member, expected in zip(members, identities, strict=True):
-            if (
-                expected.size != member["compressed_bytes"]
-                or _sha256_file(root / member["path"], expected) != member["sha256"]
-            ):
-                raise ValueError("tardis_raw_identity_changed")
-
-    verify_files()
+    for member, expected in zip(members, identities, strict=True):
+        if expected.size != member["compressed_bytes"]:
+            raise ValueError("tardis_raw_identity_changed")
+    # Native members verify while consumed, including a drain on early close.
+    # Coverage verifies while decoded below; gaps have no separate decoder.
+    gaps = manifest["gaps"]
+    if _sha256_file(root / gaps["path"], identities[-2]) != gaps["sha256"]:
+        raise ValueError("tardis_raw_identity_changed")
     index = ObservationCoverageIndex(
         root,
         manifest["observation_intervals"],
@@ -739,30 +738,3 @@ def open_tardis_archive(root, *, archive_paths=None, time_window=None):
             },
             readers,
         )
-
-
-def native_source_identity(
-    root,
-    _target_id,
-    *,
-    exchange,
-    symbols,
-    channels,
-    archive_paths=None,
-    time_window=None,
-):
-    """Bind every exact approved native information-source archive."""
-    try:
-        with open_tardis_archive(
-            root, archive_paths=archive_paths, time_window=time_window
-        ) as source:
-            for archive in source.archives:
-                if (
-                    archive.manifest["exchange"] != exchange
-                    or set(archive.manifest["symbols"]) != set(symbols)
-                    or not set(channels) <= set(archive.manifest["requested_channels"])
-                ):
-                    raise ValueError("tardis_auxiliary_scope_invalid")
-            return canonical_json_hash(source.source_identity)
-    except FileNotFoundError:
-        return None

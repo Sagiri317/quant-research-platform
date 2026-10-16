@@ -20,7 +20,7 @@ def _frame():
             "timestamp": np.repeat(pd.date_range("2020-01-01", periods=2), 5),
             "asset_id": ["e", "b", "a", "d", "c"] * 2,
             "feature": [1.0, 1.0, 3.0, np.nan, 5.0, -1e308, 0.0, 1e308, 1e308, np.nan],
-            "feature_alt": [
+            "alternate": [
                 np.nan,
                 3.0,
                 1.0,
@@ -48,7 +48,7 @@ def _run(frames, labels):
         signals=(
             make_artifact_signal_spec(),
             SignalSpec(
-                signal_id="alt", source_column="feature_alt", source_kind="feature"
+                signal_id="alt", source_column="alternate", source_kind="feature"
             ),
         ),
         label_columns=labels,
@@ -58,7 +58,7 @@ def _run(frames, labels):
         frames,
         spec=spec,
         asset_column="asset_id",
-        source_columns_by_kind={"feature": ("feature", "feature_alt")},
+        source_columns_by_kind={"feature": ("feature", "alternate")},
     ) as result:
         chunks = list(result.output_chunks)
         summaries = result.summaries()
@@ -108,5 +108,10 @@ def test_multilabel_preserves_validation_boundaries(damage):
         frame = pd.concat([frame, frame.iloc[:1]], ignore_index=True)
     else:
         frame.loc[0, "feature" if damage == "signal" else "third"] = np.inf
-    with pytest.raises((ValueError, TypeError)):
+    error = {
+        "duplicate": "unique timestamp-asset keys",
+        "signal": "invalid_signal_values: feature",
+        "last_label": "column 'third' must contain finite numeric values",
+    }[damage]
+    with pytest.raises(ValueError, match=error):
         _run([frame], ("first", "second", "third"))

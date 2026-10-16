@@ -7,7 +7,7 @@ import pytest
 
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
-from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers.paths import StorageLayout
 from tests.storage.low_level_fixtures import make_processed_dataset_spec
 
 

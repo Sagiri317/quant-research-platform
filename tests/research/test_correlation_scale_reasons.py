@@ -2,14 +2,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.artifacts.outputs.bundle_validation import (
-    validate_output_bundle,
-)
 from quant_research_platform.artifacts.outputs.evaluation import (
     write_evaluation_outputs_from_chunks,
 )
 from quant_research_platform.artifacts.outputs.evaluation_validation import (
     validate_evaluation_artifact_structure,
+)
+from quant_research_platform.artifacts.outputs.manifest import (
+    validate_output_bundle,
 )
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.signals import SignalSpec

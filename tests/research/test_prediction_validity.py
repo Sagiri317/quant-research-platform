@@ -4,12 +4,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.artifacts.outputs import read_prediction_output_bundle
 from quant_research_platform.artifacts.outputs.prediction import read_predictions
+from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.research.features.transforms import (
     apply_feature_transforms,
-    feature_transforms,
 )
 from quant_research_platform.research.predictions.runner import predict
 from tests.research.direct_model_test_support import fit_frame
@@ -46,7 +45,13 @@ def test_transform_prediction_publication_keeps_real_domain(
     )
     raw.loc[count - 2, "x"] = np.nan
     raw.loc[count - 1, "log_float_market_cap"] = np.nan
-    frame = apply_feature_transforms(raw, feature_transforms(("x",))).iloc[-4:].copy()
+    frame = (
+        apply_feature_transforms(
+            raw, (FeatureTransformSpec("a_share_canonical", ("x",)),)
+        )
+        .iloc[-4:]
+        .copy()
+    )
     expected = (
         frame.asset_id.tolist()
         if algorithm == "equal_weight_rank_ensemble" and input_column == "x"
@@ -123,28 +128,6 @@ def test_causal_current_rank_permutation_and_exact_native_lookup(tmp_path):
         )
     pd.testing.assert_frame_equal(*tables)
     assert tables[0].prediction_rank_score.tolist() == pytest.approx([-1 / 3, 0, 1 / 3])
-    for mutation in (None, "asset", "timestamp"):
-        requested = future.iloc[[2, 0, 1]].copy()
-        if mutation == "asset":
-            requested.iloc[0, requested.columns.get_loc("asset_id")] = "missing"
-        if mutation == "timestamp":
-            requested.iloc[0, requested.columns.get_loc("timestamp")] += pd.Timedelta(
-                days=1
-            )
-        _, lookup = read_prediction_output_bundle(
-            out, prediction_column="prediction_rank_score"
-        )
-        values, found = lookup.values_for_frame(requested, mark_matched=True)
-        if mutation is None:
-            assert list(found) == [1, 1, 1]
-            assert list(values) == pytest.approx([1 / 3, -1 / 3, 0])
-            assert lookup.coverage_counts() == (0, 0)
-        else:
-            assert list(found) == [0, 1, 1]
-            assert np.isnan(values[0])
-            assert list(values[1:]) == pytest.approx([-1 / 3, 0])
-            assert lookup.coverage_counts() == (1, 0)
-        lookup.close()
 
 
 @pytest.mark.parametrize("coordinate", ["asset_id", "timestamp"])

@@ -29,8 +29,8 @@ from quant_research_platform.research.predictions.runner import predict
 from quant_research_platform.research.protocols import a_share
 from quant_research_platform.sources.prepare import prepare_source
 from quant_research_platform.storage.datasets import read_dataset
-from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.a_share_raw import write_a_share_raw_fixture
+from tests.helpers.paths import StorageLayout
 from tests.helpers.research_configuration import research_configuration
 
 
@@ -166,7 +166,6 @@ def run_a_share_acceptance(project_root: Path):
             "output": str(case.root / "models" / model["model_id"]),
             "fit_windows": [train],
             "fit_cutoff": train["end"],
-            "label_unit": "cross_sectional_zscore",
         }
         if candidates is not None:
             config["candidate_parameters"] = candidates[0]
@@ -203,7 +202,6 @@ def run_a_share_acceptance(project_root: Path):
                 "test_window": test,
                 "selection_group": group,
                 "validation_axis": "cross_sectional",
-                "label_unit": "cross_sectional_zscore",
                 "output": str(case.root / group / "scores.json"),
             }
         )
@@ -229,7 +227,6 @@ def run_a_share_acceptance(project_root: Path):
                     "output": str(case.root / group / "final" / identifier),
                     "fit_windows": [refit_window],
                     "fit_cutoff": validation["end"],
-                    "selection": str(selected),
                     "test_window": test,
                 }
             )
@@ -276,8 +273,6 @@ def run_a_share_acceptance(project_root: Path):
             "predictions": [
                 {
                     "path": str(case.test_predictions[group, champion]),
-                    "model": str(case.final_models[group, champion]),
-                    "selection": str(selected),
                     "window": test,
                 }
             ],

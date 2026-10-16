@@ -221,7 +221,17 @@ def _spec(
         )
         for column in columns
     }
+    labels = [item for item in label_catalog().list() if item.output_column in columns]
+    units = {
+        "future_mid_return": "decimal_return",
+        "future_mid_direction": "dimensionless",
+        "maker_sell_pressure_proxy": "quantity_ratio",
+    }
     return ProcessedDataSpec(
+        column_units={item.output_column: units[item.family] for item in labels},
+        label_availability_columns={
+            item.output_column: item.available_at_column for item in labels
+        },
         data_id=data_id,
         market_id="crypto",
         kind=kind,

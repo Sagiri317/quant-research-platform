@@ -243,19 +243,6 @@ class ObservationCoverageIndex:
         row = self._rows.get(observation_id)
         return None if row is None else row[4]
 
-    def verify_file(self, root: Path) -> None:
-        path = root / self._descriptor["path"]
-        identity = _capture_raw_file_identity(
-            path,
-            expected_identity=self.identity,
-            missing_is_file_not_found=False,
-        )
-        if (
-            identity.size != self._descriptor["compressed_bytes"]
-            or _sha256_file(path, identity) != self._descriptor["sha256"]
-        ):
-            raise ValueError("binance_replay_file_identity_mismatch")
-
 
 class ObservationCoverage:
     """Exact lookups and a single forward sweep over sorted connection intervals."""
@@ -538,7 +525,7 @@ def open_recorder_run(root: Path) -> Iterator[RecorderRun]:
         markets=set(manifest["market_types"]),
         decode_interval=_decode_recorder_interval,
     )
-    files = _capture_run_files(run_root, manifest, coverage_index=coverage_index)
+    files = _capture_run_files(run_root, manifest)
     run = RecorderRun(
         root=run_root,
         manifest=manifest,
@@ -843,21 +830,16 @@ def _validate_record_coverage(
         raise ValueError("binance_replay_connection_coverage_invalid")
 
 
-def _capture_run_files(
-    root: Path, manifest: dict[str, Any], *, coverage_index: ObservationCoverageIndex
-) -> tuple[_RunFile, ...]:
+def _capture_run_files(root: Path, manifest: dict[str, Any]) -> tuple[_RunFile, ...]:
     declared_paths = {item["path"] for item in manifest["files"]} | {
         manifest["capture"]["connection_intervals"]["path"]
     }
     _verify_exact_run_tree(root, declared_paths)
-    coverage_index.verify_file(root)
     result = []
     for metadata in manifest["files"]:
         path = root / metadata["path"]
         identity = _capture_raw_file_identity(path, missing_is_file_not_found=False)
         if identity.size != metadata["compressed_bytes"]:
-            raise ValueError("binance_replay_file_identity_mismatch")
-        if _sha256_file(path, identity) != metadata["sha256"]:
             raise ValueError("binance_replay_file_identity_mismatch")
         result.append(_RunFile(dict(metadata), identity))
     return tuple(result)

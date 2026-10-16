@@ -54,13 +54,6 @@ _EPISODE_STOP_REASONS = frozenset(
 )
 
 
-def crypto_episode_schema_payload():
-    return [
-        {"name": field.name, "type": str(field.type), "nullable": field.nullable}
-        for field in CRYPTO_EPISODE_SCHEMA
-    ]
-
-
 def _episode_id(start_ns, stop_ns):
     return f"{start_ns}_{stop_ns}"
 
@@ -76,6 +69,34 @@ def _episode_window(metadata):
         return start.value, end.value
     except (TypeError, OverflowError) as error:
         raise ValueError("crypto_episode_window_invalid") from error
+
+
+def _validate_episode_row(row, first, last, previous_stop):
+    start, stop, terminal = (
+        row["start_ns"],
+        row["stop_ns"],
+        row["terminal_valuation_ns"],
+    )
+    if any(type(value) is not int for value in (start, stop, terminal)):
+        raise ValueError("crypto_episode_index_invalid")
+    reasons = list(row["stop_reasons"])
+    episode_id = _episode_id(start, stop)
+    child_root = f"episodes/{episode_id}"
+    if (
+        row["episode_id"] != episode_id
+        or row["ledger_root"] != child_root
+        or not first <= start <= terminal < stop <= last + 1
+        or previous_stop is not None
+        and start < previous_stop
+        or not reasons
+        or reasons != sorted(set(reasons))
+        or not set(reasons) <= _EPISODE_STOP_REASONS
+        or row["termination"] != ("PLANNED_END" if stop == last + 1 else "TRUNCATED")
+        or ("planned_oos_end" in reasons) != (stop == last + 1)
+    ):
+        raise ValueError("crypto_episode_index_invalid")
+    row["stop_reasons"] = reasons
+    return stop
 
 
 def _episode_rows(artifact, consume_episode=None):
@@ -99,25 +120,8 @@ def _episode_rows(artifact, consume_episode=None):
                     int(row["stop_ns"]),
                     int(row["terminal_valuation_ns"]),
                 )
-                reasons = list(row["stop_reasons"])
-                episode_id = _episode_id(start, stop)
-                child_root = f"episodes/{episode_id}"
-                if (
-                    row["episode_id"] != episode_id
-                    or row["ledger_root"] != child_root
-                    or not first <= start <= terminal < stop <= last + 1
-                    or previous_stop is not None
-                    and start < previous_stop
-                    or not reasons
-                    or reasons != sorted(set(reasons))
-                    or not set(reasons) <= _EPISODE_STOP_REASONS
-                    or row["termination"]
-                    != ("PLANNED_END" if stop == last + 1 else "TRUNCATED")
-                    or ("planned_oos_end" in reasons) != (stop == last + 1)
-                ):
-                    raise ValueError("crypto_episode_index_invalid")
-                previous_stop = stop
-                row["stop_reasons"] = reasons
+                previous_stop = _validate_episode_row(row, first, last, previous_stop)
+                child_root = row["ledger_root"]
                 terminal_observed = None
 
                 def consume(child, batches, row=row, start=start, stop=stop):
@@ -196,10 +200,11 @@ def write_crypto_episode_artifact(output_path, *, capital, metadata, produce):
     if not isinstance(capital, PortfolioCapital):
         raise ValueError("crypto_episode_capital_invalid")
     metadata = qrp_json_object_snapshot(metadata)
-    _episode_window(metadata)
+    first, last = _episode_window(metadata)
 
     def write(staging):
         count = 0
+        previous_stop = None
         with parquet_table_writer(
             native_filesystem_path(staging / "episodes.parquet"),
             compression="zstd",
@@ -207,7 +212,7 @@ def write_crypto_episode_artifact(output_path, *, capital, metadata, produce):
         ) as write_index:
 
             def emit_episode(*, start_ns, stop_ns, termination, stop_reasons, produce):
-                nonlocal count
+                nonlocal count, previous_stop
                 if type(start_ns) is not int or type(stop_ns) is not int:
                     raise ValueError("crypto_episode_index_invalid")
                 episode_id = _episode_id(start_ns, stop_ns)
@@ -248,6 +253,7 @@ def write_crypto_episode_artifact(output_path, *, capital, metadata, produce):
                     "stop_reasons": list(stop_reasons),
                     "ledger_root": child.relative_to(staging).as_posix(),
                 }
+                previous_stop = _validate_episode_row(row, first, last, previous_stop)
                 write_index(pa.Table.from_pylist([row], schema=CRYPTO_EPISODE_SCHEMA))
                 count += 1
 
@@ -265,10 +271,6 @@ def write_crypto_episode_artifact(output_path, *, capital, metadata, produce):
                 "members": ["episodes.parquet"],
             },
         )
-        artifact = read_crypto_episode_artifact(staging)
-        with closing_iterator(artifact.iter_episodes()) as rows:
-            for _ in rows:
-                pass
 
     atomic_write_directory(Path(output_path), write)
     return Path(output_path)

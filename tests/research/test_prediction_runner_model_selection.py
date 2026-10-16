@@ -140,7 +140,6 @@ def test_scoring_rejects_broken_candidate_before_intersection(tmp_path, mutation
         "duplicate_candidate",
         "missing_fold",
         "global_partial",
-        "test_role",
         "test_metric",
     ],
 )
@@ -157,11 +156,6 @@ def test_selection_requires_full_declared_validation_science(tmp_path, mutation)
             selection_group="global",
             scoring_window={"start": "2020-01-05", "end": "2020-01-06"},
         )
-    elif mutation == "test_role":
-        path = Path(config["predictions"][0]) / "manifest.json"
-        value = json.loads(path.read_text())
-        value["metadata"]["sample_role"] = "test"
-        path.write_text(json.dumps(value))
     else:
         path = score(config)
         with pytest.raises(ValueError):
@@ -301,7 +295,7 @@ def test_failed_attempt_stays_in_complete_candidate_score(tmp_path, failed_famil
             assert set(trials.config_id) == {"linear_regression", "failed"}
 
 
-def test_refit_freeze_rejects_undeclared_crypto_gap(tmp_path):
+def test_refit_uses_explicit_current_domain_without_filling_disjoint_gaps():
     from quant_research_platform.research.models.trial_selection import (
         _validate_refit_scope,
     )
@@ -320,13 +314,15 @@ def test_refit_freeze_rejects_undeclared_crypto_gap(tmp_path):
         "validation_windows": [{"start": "2020-01-04", "end": "2020-01-06"}],
         "refit_windows": [{"start": "2020-01-01", "end": "2020-01-06"}],
     }
-    with pytest.raises(ValueError, match="outside_observed"):
-        _validate_refit_scope(value)
+    assert _validate_refit_scope(value)[0]["f"] == value["refit_windows"]
     value["refit_windows"] = [
         {"start": "2020-01-01", "end": "2020-01-02"},
         {"start": "2020-01-04", "end": "2020-01-06"},
     ]
-    assert len(_validate_refit_scope(value)[0]["f"]) == 2
+    assert _validate_refit_scope(value)[0]["f"] == value["refit_windows"]
+    value["refit_windows"] = [{"start": "2020-01-01", "end": "2020-01-07"}]
+    with pytest.raises(ValueError, match="fit_window_after_cutoff"):
+        _validate_refit_scope(value)
 
 
 def test_each_frozen_family_winner_can_refit_but_family_change_cannot(tmp_path):

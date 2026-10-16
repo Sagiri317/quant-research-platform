@@ -522,27 +522,16 @@ def test_download_response_close_preserves_primary_and_published_archive(
 def test_declared_native_member_missing_is_invalid_not_unacquired(
     tmp_path, member_kind, during_read
 ):
-    from quant_research_platform.sources.market import (
-        market_source_identity,
-        open_market_source,
-    )
-    from quant_research_platform.sources.tardis.replay import native_source_identity
+    from quant_research_platform.sources.market import open_market_source
 
     root = tmp_path / "published"
-    scope = dict(
-        exchange="binance-futures",
-        symbols=("btcusdt", "ethusdt"),
-        channels=("depth", "depthSnapshot", "aggTrade", "markPrice"),
-    )
-    assert market_source_identity(root, "synthetic") is None
-    assert native_source_identity(root, "synthetic", **scope) is None
     manifest = import_slices(
         root,
         date="2026-08-01",
         slices=_slices(tmp_path / "native", count=1),
     )
-    assert market_source_identity(root, "synthetic") is not None
-    assert native_source_identity(root, "synthetic", **scope) is not None
+    with open_market_source(root) as source:
+        assert source.source_identity
     member = (
         manifest[member_kind][0] if member_kind == "files" else manifest[member_kind]
     )
@@ -558,10 +547,6 @@ def test_declared_native_member_missing_is_invalid_not_unacquired(
     else:
         path.unlink()
     with pytest.raises(ValueError, match="identity"):
-        market_source_identity(root, "synthetic")
-    with pytest.raises(ValueError, match="identity"):
-        native_source_identity(root, "synthetic", **scope)
-    with pytest.raises(ValueError, match="identity"):
         with open_market_source(root):
             pass
 
@@ -570,7 +555,7 @@ def test_native_manifest_removed_after_selection_is_identity_failure(
     tmp_path, monkeypatch
 ):
     import quant_research_platform.sources.tardis.replay as replay
-    from quant_research_platform.sources.market import market_source_identity
+    from quant_research_platform.sources.market import open_market_source
 
     root = tmp_path / "published"
     import_slices(
@@ -591,7 +576,8 @@ def test_native_manifest_removed_after_selection_is_identity_failure(
 
     monkeypatch.setattr(replay, "_capture_raw_file_identity", capture)
     with pytest.raises(ValueError, match="identity"):
-        market_source_identity(root, "synthetic")
+        with open_market_source(root):
+            pass
     assert calls == 2
 
 
@@ -611,7 +597,6 @@ def test_native_sidecar_digest_preserves_failure_and_existing_archive(
     tmp_path, monkeypatch, kind, member, failure
 ):
     from quant_research_platform.sources.tardis import raw
-    from quant_research_platform.sources.tardis.replay import native_source_identity
 
     slices = _slices(tmp_path / "source", _snapshot() + b"\n", count=1)
     source_before = slices[0].read_bytes()
@@ -627,14 +612,6 @@ def test_native_sidecar_digest_preserves_failure_and_existing_archive(
     good = tmp_path / "good"
     manifest = publish(good)
     good_before = {path.name: path.read_bytes() for path in good.iterdir()}
-    identity = native_source_identity(
-        good,
-        "fixture",
-        exchange=raw.EXCHANGE,
-        symbols=raw.SYMBOLS,
-        channels=raw.CHANNELS,
-    )
-    assert identity is not None
     for key in ("gaps", "observation_intervals"):
         descriptor = manifest[key]
         assert (
@@ -705,10 +682,135 @@ def test_native_sidecar_digest_preserves_failure_and_existing_archive(
     assert opened[0].native.closed
     assert source_before == slices[0].read_bytes()
     assert good_before == {path.name: path.read_bytes() for path in good.iterdir()}
-    assert identity == native_source_identity(
-        good,
-        "fixture",
-        exchange=raw.EXCHANGE,
-        symbols=raw.SYMBOLS,
-        channels=raw.CHANNELS,
-    )
+
+
+@pytest.mark.parametrize("early", [False, True])
+def test_verified_source_reads_once_and_checks_unread_tail(
+    tmp_path, monkeypatch, early
+):
+    from quant_research_platform.sources.tardis import raw
+
+    path = tmp_path / "source"
+    payload = bytes(range(256)) * 1024
+    path.write_bytes(payload)
+    open_file = raw.open_filesystem_file
+    counts = {"opens": 0, "bytes": 0}
+
+    class Counted:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __getattr__(self, name):
+            return getattr(self.handle, name)
+
+        def read(self, size=-1):
+            result = self.handle.read(size)
+            counts["bytes"] += len(result)
+            return result
+
+    def open_counted(*args, **kwargs):
+        counts["opens"] += 1
+        return Counted(open_file(*args, **kwargs))
+
+    monkeypatch.setattr(raw, "open_filesystem_file", open_counted)
+    with raw._verified_file(
+        path, expected_sha256=hashlib.sha256(payload).hexdigest()
+    ) as stream:
+        stream.read(1 if early else -1)
+    assert counts == {"opens": 1, "bytes": len(payload)}
+    path.write_bytes(payload[:-1] + b"x")
+    with pytest.raises(ValueError, match="tardis_raw_identity_changed"):
+        with raw._verified_file(
+            path, expected_sha256=hashlib.sha256(payload).hexdigest()
+        ) as stream:
+            stream.read(1)
+
+
+def test_archive_hashes_native_member_during_decode_only(tmp_path, monkeypatch):
+    from quant_research_platform.sources.binance import replay as binance_replay
+    from quant_research_platform.sources.tardis import raw
+    from quant_research_platform.sources.tardis.replay import open_tardis_archive
+
+    source = _slices(tmp_path / "source", _snapshot() + b"\n")
+    root = tmp_path / "archive"
+    manifest = import_slices(root, date="2026-09-01", slices=source)
+    native_name = manifest["files"][0]["path"]
+    open_file = raw.open_filesystem_file
+    counts = {"opens": 0, "bytes": 0}
+
+    class Counted:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __getattr__(self, name):
+            return getattr(self.handle, name)
+
+        def read(self, size=-1):
+            result = self.handle.read(size)
+            counts["bytes"] += len(result)
+            return result
+
+        def readinto(self, buffer):
+            count = self.handle.readinto(buffer)
+            counts["bytes"] += count
+            return count
+
+    def open_counted(path, *args, **kwargs):
+        handle = open_file(path, *args, **kwargs)
+        if Path(path).name == native_name:
+            counts["opens"] += 1
+            return Counted(handle)
+        return handle
+
+    monkeypatch.setattr(raw, "open_filesystem_file", open_counted)
+    monkeypatch.setattr(binance_replay, "open_filesystem_file", open_counted)
+    with open_tardis_archive(root) as archive:
+        list(archive.archives[0]._iter_canonical_records())
+    assert counts == {"opens": 1, "bytes": manifest["files"][0]["compressed_bytes"]}
+
+
+def test_early_source_drain_error_is_not_successful_eof_or_publication(
+    tmp_path, monkeypatch
+):
+    from quant_research_platform.sources.tardis import raw
+    from quant_research_platform.storage.atomic import atomic_write_directory
+
+    source = tmp_path / "source"
+    source.write_bytes(b"source-tail")
+    real_open = raw.open_filesystem_file
+    primary = OSError("synthetic_tail_read_failure")
+    handles = []
+
+    class FailingTail:
+        def __init__(self, handle):
+            self.handle, self.reads = handle, 0
+
+        def __getattr__(self, name):
+            return getattr(self.handle, name)
+
+        def read(self, size=-1):
+            self.reads += 1
+            if self.reads > 1:
+                raise primary
+            return self.handle.read(1)
+
+    def opened(*args, **kwargs):
+        handle = FailingTail(real_open(*args, **kwargs))
+        handles.append(handle)
+        return handle
+
+    monkeypatch.setattr(raw, "open_filesystem_file", opened)
+    destination = tmp_path / "published"
+
+    def write(staging):
+        with raw._verified_file(
+            source, expected_sha256=hashlib.sha256(b"source-tail").hexdigest()
+        ) as stream:
+            stream.read(1)
+            (staging / "result").write_text("partial")
+
+    with pytest.raises(OSError) as caught:
+        atomic_write_directory(destination, write)
+    assert caught.value is primary
+    assert not destination.exists()
+    assert all(handle.closed for handle in handles)

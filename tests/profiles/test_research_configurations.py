@@ -4,7 +4,6 @@ import json
 
 import pytest
 
-from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.markets.implementations.a_share.processed.catalog import (
     processed_catalog,
 )
@@ -15,7 +14,6 @@ from quant_research_platform.markets.implementations.crypto.processed.catalog im
 from quant_research_platform.markets.prepare import _configured_spec
 from quant_research_platform.research.protocols.crypto_hft import (
     HFT_DERIVATIVE_CHANNELS,
-    portfolio_candidates,
 )
 
 
@@ -157,33 +155,13 @@ def test_external_unit_rules_cannot_be_overridden_by_configuration():
         )
 
 
-def test_complete_parameter_candidates_reject_shadow_base_parameters():
-    model = {
-        "model_id": "candidate",
-        "model_algorithm": "ridge_regression",
-        "input_factor_columns": ["factor"],
-        "input_feature_columns": [],
-        "target_column": "label",
-        "random_seed": 42,
-        "hyperparameters": {},
-        "parameter_candidates": [{"alpha": 1.0}],
-    }
-    with pytest.raises(ValueError, match="multiple_sources"):
-        ModelCatalog.from_configuration([model])
-    del model["hyperparameters"]
-    assert ModelCatalog.from_configuration([model]).list()[0].model_id == "candidate"
+def test_research_rosters_declare_one_parameter_source():
+    from tests.helpers.research_configuration import CONFIG_ROOT, model_specs
 
-
-@pytest.mark.parametrize("roles", [(None, "price"), ("proxy", None), (True, "price")])
-def test_calibrated_maker_requires_both_explicit_model_roles(roles):
-    with pytest.raises(ValueError, match="research_portfolio_model_invalid"):
-        portfolio_candidates(
-            [
-                {
-                    "candidate_id": "maker",
-                    "asset_id": "btc_usdt",
-                    "price_model_id": roles[0],
-                    "proxy_model_id": roles[1],
-                }
-            ]
+    for path in CONFIG_ROOT.rglob("*.json"):
+        models = json.loads(path.read_text(encoding="utf-8"))["models"]
+        assert all(
+            not ("parameter_candidates" in model and "hyperparameters" in model)
+            for model in models
         )
+        assert len(model_specs(models)) == len(models)

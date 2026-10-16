@@ -23,6 +23,9 @@ from quant_research_platform.research.factors.price_volume.calculations import (
 from quant_research_platform.research.labels.forward_returns import (
     add_forward_return_labels,
 )
+from quant_research_platform.research.models.estimators import (
+    build_estimator_from_model_spec,
+)
 from quant_research_platform.research.models.fitting import (
     _collect_training_frame,
     _fit_model_result,
@@ -30,10 +33,6 @@ from quant_research_platform.research.models.fitting import (
 from quant_research_platform.research.models.scaler import (
     ModelMatrixScaler,
     equal_timestamp_sample_weights,
-)
-from quant_research_platform.research.models.supervised import (
-    build_estimator_from_model_spec,
-    preflight_model_specs,
 )
 from quant_research_platform.research.portfolios.accounting import (
     calibrate_expected_alpha,
@@ -197,7 +196,6 @@ def test_supervised_fit_uses_only_mature_training_rows_and_scaler() -> None:
         target_column="model_target",
         hyperparameters={"alpha": 1.0},
     )
-    preflight_model_specs((spec,))
     frame = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(
@@ -250,7 +248,6 @@ def test_fixed_model_parameters_agree_with_fitting_and_metadata(algorithm):
     )
     with pytest.raises(ValueError, match="^model_hyperparameters_not_supported$"):
         replace(spec, hyperparameters={"fit_intercept": False})
-    preflight_model_specs((spec,))
     timestamp = pd.Timestamp("2020-01-02")
     frame = pd.DataFrame(
         {
@@ -286,7 +283,6 @@ def test_rank_ensembles_learn_direction_and_keep_missing_neutral() -> None:
         input_factor_columns=("factor_a", "factor_b"),
         target_column="model_target",
     )
-    preflight_model_specs((spec,))
     frame = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(["2024-01-01"] * 3 + ["2024-01-02"] * 3),

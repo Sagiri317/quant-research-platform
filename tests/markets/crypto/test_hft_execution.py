@@ -236,7 +236,6 @@ def _native_taker_projection_case(tmp_path, monkeypatch, *, count=300):
             "source": str(root),
             "asset_id": "btc_usdt",
             "symbol": "BTCUSDT",
-            "model": "explicit-model",
             "predictions": "explicit-predictions",
             "chronology": {
                 "folds": [
@@ -278,7 +277,7 @@ def _native_taker_projection_case(tmp_path, monkeypatch, *, count=300):
         monkeypatch.setattr(portfolio, "read_funding_observations", funding)
         monkeypatch.setattr(
             portfolio,
-            "_model_evidence",
+            "_prediction_evidence",
             lambda *args, **kwargs: (
                 {},
                 {"model": {"target_column": f"future_mid_return_{horizon}ms"}},

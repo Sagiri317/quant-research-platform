@@ -74,7 +74,9 @@ _A_SHARE_FUSION_ELIGIBILITY_FACTS = (
 )
 
 
-def a_share_eligibility(frame: pd.DataFrame, dataset_id: str) -> pd.Series:
+def a_share_eligibility(frame: pd.DataFrame, recipe: str) -> pd.Series:
+    if recipe not in {"a_share_all", "a_share_nonfinancial", "a_share_fundamental"}:
+        raise ValueError("invalid_a_share_eligibility_recipe")
     bool_facts = {
         column: strict_bool_series(
             frame[column],
@@ -115,10 +117,10 @@ def a_share_eligibility(frame: pd.DataFrame, dataset_id: str) -> pd.Series:
         & numeric_facts["amount"].gt(0.0)
         & numeric_facts["turnover"].gt(0.0)
     ).fillna(False)
-    if dataset_id in {"pv_nf_expectations", "fusion_nf_core", "fusion_nf_expectations"}:
+    if recipe in {"a_share_nonfinancial", "a_share_fundamental"}:
         required = (
             ("is_nonfinancial_industry",)
-            if dataset_id == "pv_nf_expectations"
+            if recipe == "a_share_nonfinancial"
             else _A_SHARE_FUSION_ELIGIBILITY_FACTS
         )
         for column in required:

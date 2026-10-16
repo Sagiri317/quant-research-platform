@@ -202,7 +202,7 @@ def test_native_statistics_short_and_zero_maturity_windows(
             else:
                 assert diagnostics.observation_count.between(1, 19).all()
             assert diagnostics.reason.eq(
-                "global_validation_selection_reuses_validation"
+                "selection_reuses_evaluation_window"
                 if group == "global"
                 else "hac_lag_exceeds_observations"
             ).all()
@@ -210,7 +210,7 @@ def test_native_statistics_short_and_zero_maturity_windows(
             assert robustness.status.eq("UNDEFINED").all()
             assert robustness.observation_count.lt(20).all()
             assert robustness.reason.eq(
-                "global_validation_selection_reuses_validation"
+                "selection_reuses_evaluation_window"
                 if group == "global"
                 else "bootstrap_block_exceeds_common_observations"
             ).all()
@@ -373,9 +373,7 @@ def test_native_adv_gap_preserves_portfolio_statistics(tmp_path):
                 "benchmark_id": None,
             },
             "inputs": inputs,
-            "predictions": [
-                {"path": str(prediction), "model": str(model), "window": window}
-            ],
+            "predictions": [{"path": str(prediction), "window": window}],
             "output": str(tmp_path / "ledger"),
             "output_window": window,
             "input_window": {"start": "2018-12-01", "end": "2019-02-15"},
@@ -422,6 +420,14 @@ def test_native_adv_gap_preserves_portfolio_statistics(tmp_path):
             "risk": asdict(FactorRiskConfig()),
             "adv_sensitivities": assumptions["adv_sensitivities"],
             "statistics": policy,
+            "analyses": [
+                "performance",
+                "benchmark",
+                "attribution",
+                "capacity",
+                "sharpe_inference",
+                "cscv",
+            ],
         }
     )
     stats = read_statistics_artifact(output)

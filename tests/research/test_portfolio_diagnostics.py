@@ -185,7 +185,7 @@ def test_simple_only_configuration_reads_its_persisted_risk_context(tmp_path):
         iter_holding_factor_inputs,
     )
     from quant_research_platform.storage.datasets import write_dataset
-    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.paths import StorageLayout
     from tests.helpers.portfolio_inputs import _frames, _processed_specs
     from tests.helpers.research_configuration import research_configuration
 
@@ -662,17 +662,16 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
         ]
         global_rows = rows.loc[rows.candidate_id.isin(blocked_ids)]
         assert len(global_rows) == 10 and global_rows.status.eq("UNDEFINED").all()
-        assert global_rows.reason.eq(
+        assert not global_rows.reason.eq(
             "global_validation_selection_reuses_validation"
-        ).all()
+        ).any()
         assert global_rows.value.isna().all()
-        assert rows.candidate_count.eq(5).all()
+        assert rows.candidate_count.eq(len(candidates)).all()
     with artifact.table("portfolio_group_comparison.parquet") as rows:
         assert len(rows) == 5
-        assert rows.reason.eq("global_validation_selection_reuses_validation").all()
-        assert rows.bootstrap_reason.eq(
-            "global_validation_selection_reuses_validation"
-        ).all()
+        assert rows.status.eq("UNDEFINED").all()
+        assert not rows.reason.eq("global_validation_selection_reuses_validation").any()
+        assert rows.observation_count.eq(3).all()
 
 
 @pytest.mark.parametrize("st_holding", (False, True))
@@ -688,7 +687,7 @@ def test_holding_input_reader_freezes_decision_universe_over_holding_interval(
         iter_holding_factor_inputs,
     )
     from quant_research_platform.storage.datasets import write_dataset
-    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.paths import StorageLayout
     from tests.helpers.portfolio_inputs import _processed_specs
 
     dates = pd.bdate_range("2017-01-02", periods=4)
@@ -923,7 +922,7 @@ def test_holding_input_reader_freezes_decision_universe_over_holding_interval(
         (False, False, "timestamp"),
     ),
 )
-def test_mixed_group_ledgers_publish_qualified_universe_robustness(
+def test_declared_ledger_family_preserves_descriptive_inference(
     tmp_path, constant, swap_group_metadata, candidate_id
 ):
     from dataclasses import replace
@@ -959,6 +958,7 @@ def test_mixed_group_ledgers_publish_qualified_universe_robustness(
         configuration["portfolios"][0]["candidate_id"] = candidate_id
         configuration["primary_portfolio_id"] = candidate_id
     candidates, config = portfolio_statistics_config(configuration=configuration)
+    config["statistics"]["bootstrap_repetitions"] = 99
     if candidate_id is not None:
         assert (
             candidate_id
@@ -979,7 +979,6 @@ def test_mixed_group_ledgers_publish_qualified_universe_robustness(
     assert len(qualified) == len(blocked) == 5
     qualified_ids = [item.candidate_id for item in qualified]
     blocked_ids = [item.candidate_id for item in blocked]
-    reason = "global_validation_selection_reuses_validation"
     returns = np.random.default_rng(802).normal(0.0002, 0.008, (73, 5))
     if constant:
         returns[:, 0] = 0.1
@@ -1126,27 +1125,23 @@ def test_mixed_group_ledgers_publish_qualified_universe_robustness(
     corrupt = None
     artifact = read_statistics_artifact(root)
     with artifact.table("portfolio_robustness.parquet") as rows:
-        assert len(rows) == 21 and rows.candidate_count.eq(5).all()
-        global_rows = rows.loc[rows.candidate_id.isin(blocked_ids)]
-        assert len(global_rows) == 10
-        assert global_rows.status.eq("UNDEFINED").all()
-        assert global_rows.reason.eq(reason).all()
-        assert global_rows.value.isna().all()
-        baseline_qualified = (
-            rows.loc[rows.candidate_id.isin([*qualified_ids, "joint"])]
-            .reset_index(drop=True)
-            .copy()
-        )
+        assert len(rows) == 2 * len(candidates) + 1
+        assert rows.candidate_count.eq(len(candidates)).all()
+        assert set(rows.candidate_id) == {"joint", *ledgers}
+        assert not rows.reason.isin(
+            ("test_excluded", "global_validation_selection_reuses_validation")
+        ).any()
+        baseline = rows.copy()
     with artifact.table("portfolio_group_comparison.parquet") as rows:
         assert len(rows) == 5
-        assert rows.status.eq("UNDEFINED").all()
-        assert rows.reason.eq(reason).all()
-        assert rows.bootstrap_status.eq("UNDEFINED").all()
-        assert rows.bootstrap_reason.eq(reason).all()
-        assert (
-            rows[["p_value", "bootstrap_lower", "bootstrap_upper"]].isna().all().all()
-        )
         assert rows.global_mean.notna().all() and rows.quarterly_mean.notna().all()
+        assert rows.observation_count.eq(73).all()
+    with artifact.table("portfolio_capacity.parquet") as rows:
+        assert rows.empty
+    with artifact.table("portfolio_capacity_summary.parquet") as rows:
+        assert rows.status.eq("UNDEFINED").all()
+        assert rows.reason.eq("no_rebalance_requests").all()
+
     if constant:
         with artifact.table("portfolio_performance.parquet") as rows:
             selected = rows.loc[
@@ -1154,223 +1149,138 @@ def test_mixed_group_ledgers_publish_qualified_universe_robustness(
             ].set_index("metric_id")
             assert selected.loc["sharpe", "status"] == "UNDEFINED"
             assert selected.loc["annualized_volatility", "value"] == 0.0
-        with artifact.table("portfolio_robustness.parquet") as rows:
-            rows = rows.loc[rows.candidate_id.isin([*qualified_ids, "joint"])]
-            assert len(rows) == 11
-            assert rows.candidate_count.eq(5).all()
-            assert rows.loc[rows.test_id.eq("dsr"), "status"].eq("UNDEFINED").all()
-            assert rows.loc[rows.test_id.eq("cscv_pbo"), "status"].eq("UNDEFINED").all()
-            psr = rows.loc[rows.test_id.eq("psr")].set_index("candidate_id")
-            assert psr.loc[qualified[0].candidate_id, "status"] == "UNDEFINED"
-            assert psr.loc[qualified_ids[1:], "status"].eq("DEFINED").all()
-        return
-    with artifact.table("portfolio_robustness.parquet") as rows:
-        rows = rows.loc[rows.candidate_id.isin([*qualified_ids, "joint"])]
-        assert len(rows) == 11 and rows.status.eq("DEFINED").all()
-        sharpes = returns.mean(axis=0) / returns.std(axis=0, ddof=1)
-        reference = sharpes.std(ddof=1) * (
-            (1 - np.euler_gamma) * norm.ppf(0.8)
-            + np.euler_gamma * norm.ppf(1 - 1 / (5 * np.e))
-        )
-        for column, candidate in enumerate(qualified):
-            series = returns[:, column]
-            score = sharpes[column]
-            se = np.sqrt(
-                (
-                    1
-                    - skew(series, bias=False) * score
-                    + (kurtosis(series, fisher=False, bias=False) - 1) * score**2 / 4
-                )
-                / 72
-            )
-            actual = (
-                rows.loc[rows.candidate_id.eq(candidate.candidate_id)]
-                .set_index("test_id")
-                .value
-            )
-            assert actual.psr == pytest.approx(norm.cdf(score / se))
-            assert actual.dsr == pytest.approx(norm.cdf((score - reference) / se))
-        blocks = np.array_split(np.arange(73), 10)
-        outcomes = []
-        for chosen in combinations(range(10), 5):
-            train = returns[np.concatenate([blocks[i] for i in chosen])]
-            test = returns[
-                np.concatenate([blocks[i] for i in range(10) if i not in chosen])
-            ]
-            winner = np.argmax(train.mean(axis=0) / train.std(axis=0, ddof=1))
-            rank = rankdata(test.mean(axis=0) / test.std(axis=0, ddof=1))[winner]
-            outcomes.append(rank / 6 <= 0.5)
-        assert len(outcomes) == 252
-        assert rows.loc[rows.test_id.eq("cscv_pbo"), "value"].iloc[0] == pytest.approx(
-            np.mean(outcomes)
-        )
-    with artifact.table("portfolio_capacity.parquet") as rows:
-        assert rows.empty
-    with artifact.table("portfolio_capacity_summary.parquet") as rows:
         assert (
-            rows.status.eq("UNDEFINED").all()
-            and rows.reason.eq("no_rebalance_requests").all()
+            baseline.loc[baseline.test_id.isin(("dsr", "cscv_pbo")), "status"]
+            .eq("UNDEFINED")
+            .all()
         )
-    if not swap_group_metadata:
-        holdout_tables = produce(ledgers, sample_role="test")
-        comparison = holdout_tables["portfolio_group_comparison"]
-        assert comparison.portfolio_id.tolist() == [
-            item["candidate_id"] for item in configuration["portfolios"]
-        ]
+        psr = baseline.loc[baseline.test_id.eq("psr")].set_index("candidate_id")
+        assert (
+            psr.loc[[qualified[0].candidate_id, blocked[0].candidate_id], "status"]
+            .eq("UNDEFINED")
+            .all()
+        )
+        assert (
+            psr.loc[[*qualified_ids[1:], *blocked_ids[1:]], "status"]
+            .eq("DEFINED")
+            .all()
+        )
+        return
+
+    # All explicitly supplied candidates contribute to DSR and CSCV, including
+    # descriptive historical groups. A name alone cannot remove a trial.
+    daily = owned["portfolio_daily"]
+    matrix = daily.pivot(
+        index=["entry_at", "end_at"], columns="candidate_id", values="net_return"
+    ).reindex(columns=[candidate.candidate_id for candidate in candidates])
+    values = matrix.to_numpy()
+    sharpes = values.mean(axis=0) / values.std(axis=0, ddof=1)
+    count = len(candidates)
+    reference = sharpes.std(ddof=1) * (
+        (1 - np.euler_gamma) * norm.ppf(1 - 1 / count)
+        + np.euler_gamma * norm.ppf(1 - 1 / (count * np.e))
+    )
+    for column, candidate in enumerate(candidates):
+        series, score = values[:, column], sharpes[column]
+        se = np.sqrt(
+            (
+                1
+                - skew(series, bias=False) * score
+                + (kurtosis(series, fisher=False, bias=False) - 1) * score**2 / 4
+            )
+            / 72
+        )
+        actual = (
+            baseline.loc[baseline.candidate_id.eq(candidate.candidate_id)]
+            .set_index("test_id")
+            .value
+        )
+        assert actual.psr == pytest.approx(norm.cdf(score / se))
+        assert actual.dsr == pytest.approx(norm.cdf((score - reference) / se))
+    blocks = np.array_split(np.arange(73), 10)
+    outcomes = []
+    for chosen in combinations(range(10), 5):
+        train = values[np.concatenate([blocks[i] for i in chosen])]
+        test = values[np.concatenate([blocks[i] for i in range(10) if i not in chosen])]
+        winner = np.argmax(train.mean(axis=0) / train.std(axis=0, ddof=1))
+        rank = rankdata(test.mean(axis=0) / test.std(axis=0, ddof=1))[winner]
+        outcomes.append(rank / (count + 1) <= 0.5)
+    assert len(outcomes) == 252
+    assert baseline.loc[baseline.test_id.eq("cscv_pbo"), "value"].iloc[
+        0
+    ] == pytest.approx(np.mean(outcomes))
+
+    for role, robustness in (
+        ("test", False),
+        ("validation", True),
+        ("test", "training_weighting"),
+    ):
+        varied = produce(ledgers, sample_role=role, robustness=robustness)
+        comparison = varied["portfolio_group_comparison"]
         assert comparison.status.eq("DEFINED").all()
         assert comparison.bootstrap_status.eq("DEFINED").all()
-        assert comparison.fdr_method.eq("BY").all()
-        assert comparison.fdr_adjusted_p_value.notna().all()
-        np.testing.assert_allclose(
-            comparison.mean_difference,
-            -0.015 - returns.mean(axis=0),
-            rtol=0,
-            atol=1e-14,
+        assert comparison.fdr_method.eq("NOT_APPLICABLE" if robustness else "BY").all()
+        assert comparison.fdr_adjusted_p_value.isna().eq(bool(robustness)).all()
+        paired = comparison.set_index("portfolio_id")
+        for portfolio_id in paired.index:
+            expected = (
+                matrix[f"quarterly_{portfolio_id}"].mean()
+                - matrix[f"global_{portfolio_id}"].mean()
+            )
+            assert paired.loc[portfolio_id, "mean_difference"] == pytest.approx(
+                expected, abs=1e-14
+            )
+        pd.testing.assert_frame_equal(
+            varied["portfolio_robustness"].drop(columns="sample_role"),
+            owned["portfolio_robustness"].drop(columns="sample_role"),
+            check_exact=False,
+            rtol=1e-14,
+            atol=1e-15,
         )
-        holdout_metadata = {
-            "sample_role": {**window, "access": "test"}["access"],
-            "window": {
-                key: {**window, "access": "test"}[key] for key in ("start", "end")
-            },
-        }
-        holdout_metadata = {
-            **holdout_metadata,
-            "candidate_ids": [c.candidate_id for c in candidates],
-            "comparison_portfolio_ids": config["statistics"]["group_comparison"][
-                "portfolio_ids"
-            ],
-        }
-        holdout_root = write_statistics_artifact(
-            tmp_path / "holdout_statistics",
-            metadata=holdout_metadata,
-            tables=holdout_tables,
+        metadata_variant = {**metadata, "sample_role": role}
+        published = write_statistics_artifact(
+            tmp_path / f"role-{role}-{robustness}",
+            metadata=metadata_variant,
+            tables=varied,
             table_group="portfolio",
         )
-        with read_statistics_artifact(holdout_root).table(
+        with read_statistics_artifact(published).table(
             "portfolio_group_comparison.parquet"
-        ) as persisted:
-            assert persisted.portfolio_id.tolist() == comparison.portfolio_id.tolist()
-            pd.testing.assert_frame_equal(
-                persisted,
-                comparison.assign(
-                    reason=comparison.reason.fillna("").astype(str),
-                    bootstrap_reason=comparison.bootstrap_reason.fillna("").astype(str),
-                ),
-                check_exact=True,
-            )
-        robust = produce(ledgers, robustness=True)
-        pd.testing.assert_frame_equal(
-            robust["portfolio_performance"],
-            owned["portfolio_performance"],
-            check_exact=True,
-        )
-        pd.testing.assert_frame_equal(
-            robust["portfolio_daily"], owned["portfolio_daily"], check_exact=True
-        )
-        pbo = robust["portfolio_robustness"].query("test_id == 'cscv_pbo'")
-        assert pbo.status.eq("UNDEFINED").all()
-        assert pbo.reason.eq("expectations_robustness_excluded").all()
-        comparison = robust["portfolio_group_comparison"]
-        assert comparison.reason.eq(reason).all()
-        assert comparison.fdr_method.eq("NOT_APPLICABLE").all()
-        assert comparison.fdr_adjusted_p_value.isna().all()
-        assert comparison.global_mean.notna().all()
-        robust_root = write_statistics_artifact(
-            tmp_path / "robustness_statistics",
-            metadata=metadata,
-            tables=robust,
-            table_group="portfolio",
-        )
-        with read_statistics_artifact(robust_root).table(
-            "portfolio_robustness.parquet"
-        ) as rows:
-            assert (
-                rows.loc[rows.test_id.eq("cscv_pbo"), "reason"]
-                .eq("expectations_robustness_excluded")
-                .all()
-            )
-        for variant in ("expectations", "training_weighting"):
-            holdout_tables = produce(ledgers, robustness=variant, sample_role="test")
-            comparison = holdout_tables["portfolio_group_comparison"]
-            assert comparison.portfolio_id.is_unique
-            assert comparison.status.eq("DEFINED").all()
-            assert comparison.bootstrap_status.eq("DEFINED").all()
-            assert comparison.p_value.notna().all()
-            assert comparison.fdr_method.eq("NOT_APPLICABLE").all()
-            assert comparison.fdr_adjusted_p_value.isna().all()
-            excluded = holdout_tables["portfolio_robustness"]
-            assert len(excluded) == 1
-            assert excluded.test_id.tolist() == ["validation_only"]
-            assert excluded.status.tolist() == ["UNDEFINED"]
-            assert excluded.reason.tolist() == ["test_excluded"]
-            holdout_root = write_statistics_artifact(
-                tmp_path / variant,
-                metadata=holdout_metadata,
-                tables=holdout_tables,
-                table_group="portfolio",
-            )
-            with read_statistics_artifact(holdout_root).table(
-                "portfolio_group_comparison.parquet"
-            ) as saved:
-                assert saved.status.eq("DEFINED").all()
-                assert saved.bootstrap_status.eq("DEFINED").all()
-                assert saved.fdr_method.eq("NOT_APPLICABLE").all()
-                assert saved.fdr_adjusted_p_value.isna().all()
-                pd.testing.assert_frame_equal(
-                    saved.loc[:, ["portfolio_id", "mean_difference", "p_value"]],
-                    comparison.loc[:, ["portfolio_id", "mean_difference", "p_value"]],
-                    check_exact=True,
-                )
-        altered_ledgers = dict(ledgers)
-        for column, candidate in enumerate(blocked):
-            extreme = np.where(np.arange(73) % 2, -0.2, 0.5 + column / 10)
-            altered_ledgers[candidate.candidate_id] = persisted_ledger(
-                candidate, extreme, tmp_path / "changed_global" / candidate.candidate_id
-            )
-        changed = produce(altered_ledgers)
-        changed_metadata = {
-            "sample_role": window["access"],
-            "window": {key: window[key] for key in ("start", "end")},
-        }
-        changed_metadata = {
-            **changed_metadata,
-            "candidate_ids": [c.candidate_id for c in candidates],
-            "comparison_portfolio_ids": config["statistics"]["group_comparison"][
-                "portfolio_ids"
-            ],
-        }
-        changed_root = write_statistics_artifact(
-            tmp_path / "changed_statistics",
-            metadata=changed_metadata,
-            tables=changed,
-            table_group="portfolio",
-        )
-        saved = read_statistics_artifact(changed_root)
-        with saved.table("portfolio_robustness.parquet") as changed_rows:
-            pd.testing.assert_frame_equal(
-                changed_rows.loc[
-                    changed_rows.candidate_id.isin([*qualified_ids, "joint"])
-                ].reset_index(drop=True),
-                baseline_qualified,
-                check_exact=True,
-            )
-        changed_rows = changed["portfolio_robustness"]
-        global_rows = changed_rows.loc[changed_rows.candidate_id.isin(blocked_ids)]
-        assert global_rows.status.eq("UNDEFINED").all()
-        assert global_rows.reason.eq(reason).all()
-        assert global_rows.value.isna().all()
-        actual = changed["portfolio_daily"]
-        for column, candidate in enumerate(blocked):
-            selected = actual.loc[actual.candidate_id.eq(candidate.candidate_id)]
+        ) as saved:
             np.testing.assert_allclose(
-                selected.net_return,
-                np.where(np.arange(73) % 2, -0.2, 0.5 + column / 10),
+                saved.p_value, comparison.p_value, rtol=1e-14, atol=1e-15
             )
+
+    altered = dict(ledgers)
+    for column, candidate in enumerate(blocked):
+        altered[candidate.candidate_id] = persisted_ledger(
+            candidate,
+            np.where(np.arange(73) % 2, -0.2, 0.5 + column / 10),
+            tmp_path / "changed" / candidate.candidate_id,
+        )
+    changed = produce(altered)["portfolio_robustness"]
+    baseline_own = baseline.loc[baseline.candidate_id.isin(qualified_ids)].set_index(
+        ["candidate_id", "test_id"]
+    )
+    changed_own = changed.loc[changed.candidate_id.isin(qualified_ids)].set_index(
+        ["candidate_id", "test_id"]
+    )
+    np.testing.assert_allclose(
+        changed_own.xs("psr", level="test_id").value,
+        baseline_own.xs("psr", level="test_id").value,
+        rtol=1e-14,
+        atol=1e-15,
+    )
+    assert not np.array_equal(
+        changed_own.xs("dsr", level="test_id").value,
+        baseline_own.xs("dsr", level="test_id").value,
+    )
 
 
 def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sources(
     tmp_path,
 ):
+    import hashlib
     from fractions import Fraction
 
     import numpy as np
@@ -1391,12 +1301,7 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
         build_portfolio_statistics_tables,
     )
     from quant_research_platform.storage.datasets import write_dataset
-    from quant_research_platform.storage.identity import (
-        content_hash_for_files,
-        filesystem_glob,
-        filesystem_is_file,
-    )
-    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.paths import StorageLayout
     from tests.helpers.portfolio_inputs import _frames, _interim_specs, _processed_specs
     from tests.helpers.portfolio_ledger import (
         CONTINUOUS_EXECUTION_COLUMNS,
@@ -1424,14 +1329,13 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
         }
 
     def tree_hash(root):
-        return content_hash_for_files(
-            (
-                (path.relative_to(root).as_posix(), path)
-                for path in filesystem_glob(root, "**/*")
-                if filesystem_is_file(path)
-            ),
-            error="fixture_input_changed",
-        )
+        return {
+            path.relative_to(root).as_posix(): hashlib.sha256(
+                path.read_bytes()
+            ).hexdigest()
+            for path in root.rglob("*")
+            if path.is_file()
+        }
 
     layout = StorageLayout(tmp_path)
     roots = {}
@@ -1582,8 +1486,28 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
             unified_trading_sessions=lambda calendar: pd.DatetimeIndex(
                 calendar.calendar_date
             ),
-            inputs=_holding_paths({**roots, "index_market": index_root}),
+            inputs=_holding_paths(
+                {
+                    **roots,
+                    "index_market": {"path": index_root, "columns": ["open", "close"]},
+                }
+            ),
         )
+        if case == "derived_and_native":
+            excluded = {
+                **kwargs,
+                "inputs": {
+                    **kwargs["inputs"],
+                    "index_market": {"path": index_root, "columns": ["close"]},
+                },
+            }
+            with pytest.raises(
+                ValueError, match="portfolio_input_business_columns_excluded"
+            ):
+                build_portfolio_statistics_tables(
+                    iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
+                    **excluded,
+                )
         if expected_status == "ERROR":
             with pytest.raises(ValueError, match="^benchmark_return_open_invalid$"):
                 build_portfolio_statistics_tables(

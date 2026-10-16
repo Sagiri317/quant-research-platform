@@ -31,8 +31,9 @@ from quant_research_platform.storage.identity import (
     native_filesystem_path,
     open_filesystem_file,
 )
-from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+from tests.helpers.paths import StorageLayout
+from tests.helpers.source_preparation import prepared_source_evidence
 
 
 def _file_bytes(root: Path) -> dict[Path, bytes]:
@@ -155,7 +156,7 @@ def test_fee_reader_cleanup_preserves_primary(tmp_path, monkeypatch):
     primary = MemoryError("primary")
 
     class Handle(io.BufferedReader):
-        def read(self, *args):
+        def read1(self, *args):
             raise primary
 
         def close(self):
@@ -163,7 +164,12 @@ def test_fee_reader_cleanup_preserves_primary(tmp_path, monkeypatch):
             raise OSError("secondary")
 
     handle = Handle(io.FileIO(native_filesystem_path(path)))
-    monkeypatch.setattr(a_share_fees, "open_filesystem_file", lambda _: handle)
+    original_open = a_share_fees.open_filesystem_file
+    monkeypatch.setattr(
+        a_share_fees,
+        "open_filesystem_file",
+        lambda candidate: handle if candidate == path else original_open(candidate),
+    )
     with pytest.raises(MemoryError) as caught:
         load_a_share_fee_source(reference_root=root)
     assert caught.value is primary
@@ -247,9 +253,9 @@ def test_public_industry_source_reaches_interim_and_real_panel(tmp_path):
     assert snapshots["observation_date"].tolist() == [pd.Timestamp("2019-12-31")]
     assert snapshots["timestamp"].tolist() == [pd.Timestamp("2020-01-04")]
     manifest = read_dataset_manifest_evidence(root)
-    assert manifest["source_evidence"][
-        "content_hash"
-    ] == interim.source_content_identity(raw_root / "reference", data_id)
+    assert manifest["source_evidence"]["content_hash"] == prepared_source_evidence(
+        interim, raw_root / "reference", data_id
+    )
     dates = pd.bdate_range("2020-01-02", periods=5)
     inputs = _synthetic_interim_frames(dates)
     stocks = inputs["stock_master"].copy()

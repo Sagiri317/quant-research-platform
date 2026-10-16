@@ -17,7 +17,7 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.storage.datasets import write_dataset
-from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers.paths import StorageLayout
 from tests.helpers.research_specs import DEMO_FACTOR_COLUMN, DEMO_LABEL_COLUMN
 
 

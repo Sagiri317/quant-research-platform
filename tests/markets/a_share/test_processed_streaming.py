@@ -29,13 +29,13 @@ from quant_research_platform.storage.datasets.reading import (
 )
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.identity import native_filesystem_path
-from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.a_share_sources import (
     _published_inputs,
     _source_catalog,
     _synthetic_financial_frames,
     _synthetic_interim_frames,
 )
+from tests.helpers.paths import StorageLayout
 
 
 def test_local_panel_window_keeps_public_industry_history_and_unknown_barrier(tmp_path):
@@ -201,7 +201,7 @@ def test_panel_window_preserves_listing_age_history_and_eligibility(tmp_path):
     assert actual["listing_age_trading_days"].tolist() == [
         age for offset in range(5) for age in (251 + offset, 251 + offset, 1 + offset)
     ]
-    assert a_share_eligibility(actual, "pv_expanded").tolist() == [
+    assert a_share_eligibility(actual, "a_share_all").tolist() == [
         False,
         False,
         False,
@@ -1168,15 +1168,15 @@ def test_unobserved_initial_market_preserves_unknown_age_and_proven_252_sessions
             unknown = actual.timestamp.lt(dates[4])
             assert actual.loc[unknown, "market_type"].isna().all()
             assert actual.has_252_trading_sessions.isna().all()
-            assert not a_share_eligibility(actual, "pv_expanded").any()
+            assert not a_share_eligibility(actual, "a_share_all").any()
         elif gap == "calendar":
             assert actual.has_252_trading_sessions.all()
-            assert a_share_eligibility(actual, "pv_expanded").all()
+            assert a_share_eligibility(actual, "a_share_all").all()
         else:
             assert actual.has_252_trading_sessions.iloc[:3].isna().all()
             assert actual.has_252_trading_sessions.iloc[3:].all()
             assert (
-                a_share_eligibility(actual, "pv_expanded").tolist()
+                a_share_eligibility(actual, "a_share_all").tolist()
                 == [False] * 3 + [True] * 15
             )
 
@@ -1622,7 +1622,7 @@ def test_native_lifecycle_history_does_not_join_relisting(
         results[data_id] = read_dataset(root).set_index("timestamp")
     panel = results["market_panel_1d"]
     assert panel.loc[dates[289], "listing_age_trading_days"] == 290
-    assert a_share_eligibility(panel.reset_index(), "a_share_core6").iloc[289]
+    assert a_share_eligibility(panel.reset_index(), "a_share_all").iloc[289]
     mask = results["execution_mask"]
     assert pd.isna(mask.loc[dates[299], "can_enter"])
     assert mask.loc[dates[300 + gap], "can_enter"]

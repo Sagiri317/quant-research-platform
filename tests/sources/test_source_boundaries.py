@@ -2,9 +2,10 @@
 
 import pytest
 
-from quant_research_platform.sources.market import market_source_identity
+from quant_research_platform.sources.market import open_market_source
 from quant_research_platform.sources.reference import interim
-from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers.paths import StorageLayout
+from tests.helpers.source_preparation import prepared_source_evidence
 from tests.sources.reference.test_interim import (
     _file_bytes,
     _write_reference_root,
@@ -20,19 +21,21 @@ def test_present_crypto_source_is_invalid(tmp_path, damage):
         root.mkdir()
         (root / ("run.json" if damage == "run_directory" else "manifest.json")).mkdir()
     with pytest.raises(ValueError):
-        market_source_identity(root, "market_bars")
+        with open_market_source(root):
+            pass
 
 
-def test_absent_crypto_source_does_not_consume_unrelated_data(tmp_path):
-    assert market_source_identity(tmp_path / "absent", "market_bars") is None
-    assert (
-        market_source_identity(
-            tmp_path / "absent", "market_bars", archive_paths=("declared",)
-        )
-        is None
-    )
+@pytest.mark.parametrize(
+    "location,archive_paths",
+    [("absent", None), ("absent", ("declared",)), (".", None)],
+)
+def test_absent_crypto_source_does_not_consume_unrelated_data(
+    tmp_path, location, archive_paths
+):
     (tmp_path / "unrelated.json").write_text("{}")
-    assert market_source_identity(tmp_path, "market_bars") is None
+    with pytest.raises(FileNotFoundError):
+        with open_market_source(tmp_path / location, archive_paths=archive_paths):
+            pass
 
 
 @pytest.mark.parametrize(
@@ -66,7 +69,7 @@ def test_reference_present_invalid_is_not_absent(tmp_path, data_id, damage):
         elif damage == "partial":
             member.write_text("{}")
     with pytest.raises(ValueError):
-        interim.source_content_identity(raw, data_id)
+        prepared_source_evidence(interim, raw, data_id)
 
 
 @pytest.mark.parametrize(
@@ -79,7 +82,7 @@ def test_reference_present_invalid_is_not_absent(tmp_path, data_id, damage):
 )
 def test_reference_absent_requested_dataset_with_other_data(tmp_path, data_id):
     (tmp_path / "unrelated").mkdir()
-    assert interim.source_content_identity(tmp_path, data_id) is None
+    assert prepared_source_evidence(interim, tmp_path, data_id) is None
 
 
 def test_partial_source_workflow_blocks_and_preserves_old_good(tmp_path):
@@ -105,27 +108,6 @@ def test_partial_source_workflow_blocks_and_preserves_old_good(tmp_path):
     assert _file_bytes(old_root) == before
 
 
-def test_present_crypto_source_disappearing_during_open_is_not_absence(
-    tmp_path, monkeypatch
-):
-    from contextlib import contextmanager
-
-    from quant_research_platform.sources import market
-
-    manifest = tmp_path / "manifest.json"
-    manifest.write_text("{}")
-
-    @contextmanager
-    def vanished(*args, **kwargs):
-        manifest.unlink()
-        raise FileNotFoundError("source disappeared during admission")
-        yield
-
-    monkeypatch.setattr(market, "open_market_source", vanished)
-    with pytest.raises(ValueError, match="crypto_source_member_missing"):
-        market.market_source_identity(tmp_path, "market_bars")
-
-
 @pytest.mark.parametrize("location", ["root", "dataset"])
 @pytest.mark.parametrize(
     "data_id",
@@ -147,4 +129,4 @@ def test_dangling_reference_source_alias_is_not_absent(tmp_path, location, data_
     except (OSError, NotImplementedError):
         pytest.skip("directory symlinks unavailable")
     with pytest.raises(ValueError, match="reference_source_root_invalid"):
-        interim.source_content_identity(root, data_id)
+        prepared_source_evidence(interim, root, data_id)

@@ -18,7 +18,7 @@ def test_ridge_resolved_and_native_state_parameters_keep_typed_identity(
     import pandas as pd
 
     from quant_research_platform.contracts.models import validate_model_metadata_core
-    from quant_research_platform.research.models.supervised import (
+    from quant_research_platform.research.models.estimators import (
         build_estimator_from_model_spec,
     )
 
@@ -70,7 +70,7 @@ def test_ridge_resolved_and_native_state_parameters_keep_typed_identity(
 def test_ridge_native_seed_type_aliases_are_rejected(seed, alias):
     import pandas as pd
 
-    from quant_research_platform.research.models.supervised import (
+    from quant_research_platform.research.models.estimators import (
         build_estimator_from_model_spec,
     )
 

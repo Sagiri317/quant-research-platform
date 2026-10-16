@@ -263,7 +263,6 @@ def _build_producer(
     model_inputs: tuple[str, ...] = (),
     model_algorithm: str = "equal_weight_rank_ensemble",
     final_calibrations=None,
-    sample_role: str = "validation",
     frozen_calibration: production.AlphaCalibration | None = None,
     typed_batches: bool = False,
     construction: str = "top20_equal_weight",
@@ -328,8 +327,13 @@ def _build_producer(
     calls: list[tuple[str, DatasetReadMode, TimeWindow | None]] = []
 
     def fake_read_dataset(
-        root: Path, *, columns=None, time_window=None, mode=DatasetReadMode.MATERIALIZED
+        dataset_root: Path,
+        *,
+        columns=None,
+        time_window=None,
+        mode=DatasetReadMode.MATERIALIZED,
     ):
+        root = dataset_root
         target_id = next(
             (
                 target_id
@@ -358,7 +362,7 @@ def _build_producer(
                 )
             return iter((selected.copy(),))
         if target_id == "fee":
-            assert columns is None
+            assert columns == production._FEE_COLUMNS
             assert time_window is None
             return fee_frame.copy()
         if target_id == "calendar":
@@ -367,7 +371,8 @@ def _build_producer(
             return frames["calendar"].copy()
         raise AssertionError(f"Unexpected materialized target: {target_id}")
 
-    def input_session(root, *, columns=None, time_window=None):
+    def input_session(dataset_root, *, columns=None, time_window=None):
+        root = dataset_root
         target = next((key for key, value in roots.items() if value == root))
         if time_window is None:
             time_window = TimeWindow(
@@ -377,12 +382,22 @@ def _build_producer(
             root=root,
             time_window=time_window,
             arrow_schema=SimpleNamespace(names=tuple(frames[target].columns)),
+            read_paths=(root / "synthetic.parquet",),
+            logical_columns=tuple(columns)
+            if columns is not None
+            else tuple(frames[target].columns),
+            physical_columns=tuple(columns)
+            if columns is not None
+            else tuple(frames[target].columns),
+            projected_view=lambda selected: input_session(
+                root, columns=selected, time_window=time_window
+            ),
             filtered_view=lambda window: input_session(
                 root, columns=columns, time_window=window
             ),
         )
 
-    def file_batches(session, *, columns):
+    def file_batches(session, *, columns, **_kwargs):
         for frame in fake_read_dataset(
             session.root,
             columns=columns,
@@ -397,6 +412,7 @@ def _build_producer(
         panel_root,
         calendar,
         *,
+        panel_columns,
         include_asset_sessions,
     ):
         from quant_research_platform.markets.implementations.a_share.processed import (
@@ -485,7 +501,6 @@ def _build_producer(
                     model_algorithm,
                 ),
             ),
-            sample_role=sample_role,
             frozen_calibration=frozen_calibration,
             assumptions=assumptions,
             fee_schedule_from_frame=fee_schedule_from_frame,
@@ -612,7 +627,7 @@ def test_benchmark_stream_keeps_future_snapshot_across_missing_sessions(monkeypa
     sessions = pd.date_range("2020-01-01", periods=5)
     observed = []
 
-    def snapshots(*args):
+    def snapshots(*args, **kwargs):
         observed.append("open")
         try:
             for timestamp in sessions[[1, 3]]:
@@ -867,7 +882,6 @@ def test_enhanced_holdout_reads_research_sessions_from_prediction_start(
         prediction_window=output_window,
         candidate=candidate,
         prediction_lookup=lookup,
-        sample_role="holdout",
         frozen_calibration=calibration,
         final_calibrations=final_calibrations,
         shared_alpha_facts={},
@@ -3066,6 +3080,7 @@ def test_cash_exposure_is_post_execution_ledger_cash(
         )
     row.update(
         candidate_id="cash_probe",
+        sample_role="validation",
         return_status="DEFINED",
         return_reason="",
         benchmark_return=np.nan,
@@ -3073,7 +3088,6 @@ def test_cash_exposure_is_post_execution_ledger_cash(
         relative_wealth=np.nan,
         benchmark_status="UNDEFINED",
         benchmark_reason="not_requested",
-        sample_role="validation",
     )
     daily = pd.DataFrame(
         [row], columns=STATISTICS_TABLE_COLUMNS["portfolio_daily.parquet"]

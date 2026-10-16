@@ -15,6 +15,7 @@ from quant_research_platform.markets.implementations.crypto.processed import (
     producer,
 )
 from quant_research_platform.markets.prepare import prepare
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.protocols.crypto_hft import (
     HFT_DERIVATIVE_CHANNELS,
 )
@@ -224,13 +225,18 @@ def test_derivative_five_minute_warmup_is_bounded(tmp_path, monkeypatch, native_
     params["max_age_ms"] = dict.fromkeys(HFT_DERIVATIVE_CHANNELS, 400000)
     spec = replace(spec, parameters_json=json.dumps(params))
     windows = []
-    original = producer.open_dataset_session
+    original = producer.iter_dataset_chunks
 
-    def open_session(*args, **kwargs):
-        windows.append(kwargs["time_window"])
-        return original(*args, **kwargs)
+    def chunks(session, **kwargs):
+        windows.append(session.time_window)
+        with closing_iterator(original(session, **kwargs)) as frames:
+            for part in frames:
+                assert part.timestamp.between(
+                    session.time_window.start, session.time_window.end
+                ).all()
+                yield part
 
-    monkeypatch.setattr(producer, "open_dataset_session", open_session)
+    monkeypatch.setattr(producer, "iter_dataset_chunks", chunks)
 
     def compute(start):
         with producer.produce_derivative_processed_data(
@@ -276,17 +282,14 @@ def test_external_prior_day_prefix_and_delayed_warmup(tmp_path, native_panel, mi
         }
         for stamp in frame.timestamp.drop_duplicates()
     ]
-    reads, identities = [], []
+    reads = []
 
-    def records(_root, *, archive_paths, time_window):
+    def records(_root, *, archive_paths, time_window, expected_scope, on_verified):
         reads.append(time_window)
-        return iter(
+        yield from (
             [] if missing else [quote] if archive_paths == ["quotes"] else trades
         )
-
-    def identity(_root, _data_id, *, time_window):
-        identities.append(time_window)
-        return "a" * 64
+        on_verified("a" * 64)
 
     spec = catalog.hft_processed_catalog().get(ids.HFT_EXTERNAL_DATA_IDS["bybit"])
     params = json.loads(spec.parameters_json)
@@ -308,7 +311,6 @@ def test_external_prior_day_prefix_and_delayed_warmup(tmp_path, native_panel, mi
             source_catalog=None,
             raw_root=tmp_path,
             read_records=records,
-            source_identity=identity,
             source_schema_id="test",
             archives={
                 symbol: {"quotes": ["quotes"], "trades": ["trades"]}
@@ -321,9 +323,7 @@ def test_external_prior_day_prefix_and_delayed_warmup(tmp_path, native_panel, mi
     narrow_start = pd.Timestamp("2026-01-01T00:00:00")
     narrow = compute(narrow_start)
     assert_projection(broad, narrow, narrow_start, end)
-    assert all(
-        window.start < quote_time and window.end == end for window in reads + identities
-    )
+    assert all(window.start < quote_time and window.end == end for window in reads)
     if missing:
         assert narrow.bybit_mid_usdt.isna().all()
         assert narrow.bybit_quote_observed_at.isna().all()
@@ -359,13 +359,18 @@ def test_core_reads_only_finite_dependency_interval(
     first, last = native_panel.timestamp.min(), native_panel.timestamp.max()
     broad = run_prepare(tmp_path / "broad", inputs, data_id, first, last)
     windows = []
-    original = producer.open_dataset_session
+    original = producer.iter_dataset_chunks
 
-    def open_session(*args, **kwargs):
-        windows.append(kwargs["time_window"])
-        return original(*args, **kwargs)
+    def chunks(session, **kwargs):
+        windows.append(session.time_window)
+        with closing_iterator(original(session, **kwargs)) as frames:
+            for part in frames:
+                assert part.timestamp.between(
+                    session.time_window.start, session.time_window.end
+                ).all()
+                yield part
 
-    monkeypatch.setattr(producer, "open_dataset_session", open_session)
+    monkeypatch.setattr(producer, "iter_dataset_chunks", chunks)
     start, end = first + pd.Timedelta(seconds=5.2), first + pd.Timedelta(seconds=5.3)
     narrow = run_prepare(tmp_path / "narrow", inputs, data_id, start, end)
     assert_projection(broad, narrow, start, end)

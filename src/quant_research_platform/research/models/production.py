@@ -8,38 +8,49 @@ from pathlib import Path
 
 import pandas as pd
 
+from quant_research_platform.contracts.json_codec import _strict_config
 from quant_research_platform.contracts.models import (
     ModelSpec,
     _fit_windows,
     _model_spec,
     _resolve_candidate_parameters,
-    _strict_config,
-    _window_payload,
     model_spec_payload,
+    validate_model_input_roles,
 )
 from quant_research_platform.contracts.time import (
     TimeWindow,
+    _window_payload,
     time_value_isoformat,
 )
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.experiments import TrialRecorder
 from quant_research_platform.research.models import fitting
-from quant_research_platform.research.models.fitting import _read_model_input
+from quant_research_platform.research.models.estimators import (
+    build_estimator_from_model_spec,
+)
 from quant_research_platform.research.models.rank_ensemble import (
     ICWeightedRankEnsemble,
     RankEnsemblePredictor,
     _label_calibration,
     rank_model_parameters,
 )
-from quant_research_platform.research.models.supervised import (
-    build_estimator_from_model_spec,
-)
 from quant_research_platform.storage.atomic import reject_if_exists
+from quant_research_platform.storage.datasets.reading import (
+    _dataset_input_options,
+    iter_dataset_chunks,
+    open_dataset_session,
+)
 
 
 def fit_model(
-    frames, spec: ModelSpec, *, fit_windows, fit_cutoff, candidate_parameters=None
+    frames,
+    spec: ModelSpec,
+    *,
+    fit_windows,
+    fit_cutoff,
+    candidate_parameters=None,
+    label_availability_column=None,
 ):
     """Fit one candidate on its legal observed domain."""
     cutoff = strict_timestamp_series(
@@ -67,7 +78,12 @@ def fit_model(
                     )
                 yield frame.loc[mask]
 
-    prepared = fitting._collect_training_frame(scoped(), spec, fitting_cutoff=cutoff)
+    prepared = fitting._collect_training_frame(
+        scoped(),
+        spec,
+        fitting_cutoff=cutoff,
+        availability_column=label_availability_column,
+    )
     if prepared.training.empty:
         raise ValueError("model_training_sample_empty")
     if candidate_parameters is not None:
@@ -112,10 +128,10 @@ def fit(config: Mapping) -> Path:
             "model",
             "fit_windows",
             "fit_cutoff",
-            "label_unit",
             "market_id",
         },
         {
+            "label_unit",
             "candidate_parameters",
             "selection",
             "test_window",
@@ -124,9 +140,32 @@ def fit(config: Mapping) -> Path:
             "family_id",
         },
     )
+    output = Path(config["output"])
+    reject_if_exists(output)
+    spec = _model_spec(config["model"])
+    source = config["inputs"]
+    if config.get("input_spec") is not None:
+        if isinstance(source, Mapping):
+            raise ValueError("duplicate_input_spec")
+        source = {"path": source, "spec": config["input_spec"]}
+    options = _dataset_input_options(source)
+    selected_columns = options.get("columns")
+    options.setdefault("columns", ("timestamp", "asset_id"))
+    session = open_dataset_session(**options)
+    declared = session.spec
+    validate_model_input_roles(
+        declared, spec, include_target=True, selected_columns=selected_columns
+    )
+    availability = declared.get("label_availability_columns", {}).get(
+        spec.target_column
+    )
+    unit = declared.get("column_units", {}).get(spec.target_column)
+    config.setdefault("label_unit", unit)
     if type(config["label_unit"]) is not str or not config["label_unit"]:
         raise ValueError("label_unit_required")
-    spec = _model_spec(config["model"])
+    if unit is not None and unit != config["label_unit"]:
+        raise ValueError("model_label_unit_mismatch")
+
     from quant_research_platform.contracts.ids import validate_market_id
 
     market = validate_market_id(config["market_id"])
@@ -158,7 +197,9 @@ def fit(config: Mapping) -> Path:
             or pd.Timestamp(selection["cutoff"]) > cutoff
         ):
             raise ValueError("refit_selection_mismatch")
-        if test is None or selection["test_window"] != _window_payload(test):
+        if selection.get("test_window") != (
+            None if test is None else _window_payload(test)
+        ):
             raise ValueError("refit_test_window_mismatch")
         selected = next(
             item
@@ -198,19 +239,15 @@ def fit(config: Mapping) -> Path:
             != selected["candidate_parameters"]
         ):
             raise ValueError("refit_selected_parameters_mismatch")
-    elif test is not None:
-        raise ValueError("final_refit_requires_frozen_selection")
     family_id = config.get("family_id", spec.model_id)
     if type(family_id) is not str or not family_id or family_id == "champion":
         raise ValueError("model_family_id_invalid")
-    output = Path(config["output"])
-    reject_if_exists(output)
     facts = {
         "family_id": family_id,
         "asset_ids": config.get("asset_ids"),
         "market_id": str(market),
         "model": model_spec_payload(spec),
-        "inputs": str(Path(config["inputs"])),
+        "inputs": config["inputs"],
         "fit_windows": [_window_payload(w) for w in windows],
         "fit_cutoff": time_value_isoformat(cutoff, preserve_datetime=True),
         "candidate_parameters": config.get(
@@ -218,6 +255,7 @@ def fit(config: Mapping) -> Path:
         ),
         "label_unit": config["label_unit"],
         "selection": config.get("selection"),
+        "selection_cutoff": None if selection is None else selection["cutoff"],
         "test_window": None if test is None else _window_payload(test),
         "input_spec": config.get("input_spec"),
     }
@@ -229,14 +267,12 @@ def fit(config: Mapping) -> Path:
             spec.input_columns,
             label_column=spec.target_column,
             sample_filter_mode=spec.sample_filter_mode,
+            availability_column=availability,
         )
-        frames = _read_model_input(
-            config["inputs"],
-            columns=columns,
-            input_spec=config.get("input_spec"),
-            time_window=TimeWindow(windows[0].start, windows[-1].end),
-            model_spec=spec,
-            chunked=True,
+        frames = iter_dataset_chunks(
+            session.filtered_view(
+                TimeWindow(windows[0].start, windows[-1].end)
+            ).projected_view(columns)
         )
         assets = config.get("asset_ids")
         if assets is not None and (
@@ -274,6 +310,7 @@ def fit(config: Mapping) -> Path:
             fit_windows=windows,
             fit_cutoff=cutoff,
             candidate_parameters=config.get("candidate_parameters"),
+            label_availability_column=availability,
         )
         from quant_research_platform.research.models.persisted import save_model
 

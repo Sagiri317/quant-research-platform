@@ -15,15 +15,6 @@ from quant_research_platform.contracts.validation import (
 )
 
 
-def _model_inference_blocker(
-    *, sample_role: str, selection_groups: tuple[str, ...]
-) -> str | None:
-    """Historical global selection is descriptive, not causal validation."""
-    if sample_role == "validation" and "global" in selection_groups:
-        return "global_validation_selection_reuses_validation"
-    return None
-
-
 @dataclass(frozen=True, kw_only=True)
 class ExperimentFold:
     fold_id: str
@@ -156,17 +147,6 @@ def training_availability_columns(label_column: str) -> tuple[str, ...]:
     ):
         return (f"{label_column}_available_at",)
     return ("label_available_at",)
-
-
-def resolve_training_availability_column(
-    frame: pd.DataFrame,
-    *,
-    label_column: str,
-) -> str:
-    column = training_availability_columns(label_column)[0]
-    if column not in frame.columns:
-        raise ValueError("label_availability_column_required")
-    return column
 
 
 def _strictly_before(left: date | datetime, right: date | datetime) -> bool:

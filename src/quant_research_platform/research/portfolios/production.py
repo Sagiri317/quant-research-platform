@@ -7,12 +7,15 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass, replace
 from fractions import Fraction
+from functools import partial
 from pathlib import Path
 from statistics import mean
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 
+from quant_research_platform.contracts.json_codec import qrp_json_mapping_snapshot
 from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_CASH_ASSET_ID,
     PORTFOLIO_DECISION_REASON_BENCHMARK,
@@ -33,7 +36,10 @@ from quant_research_platform.contracts.portfolios import (
     _portfolio_session_frame,
     portfolio_notional_tolerance,
 )
-from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.contracts.time import (
+    TimeWindow,
+    time_window_timestamp_interval,
+)
 from quant_research_platform.contracts.validation import (
     finite_exact_float,
     strict_finite_float,
@@ -55,11 +61,13 @@ from quant_research_platform.research.portfolios.accounting import (
     execute_continuous_target,
 )
 from quant_research_platform.research.portfolios.construction import (
+    _neutrality_context,
     build_simple_target_weights,
 )
 from quant_research_platform.research.portfolios.optimizer import (
     OptimizationResult,
     OptimizerConfig,
+    _project_neutral_target,
     _risk_variances,
     optimize_portfolio,
 )
@@ -76,13 +84,26 @@ from quant_research_platform.research.portfolios.schedules import (
 from quant_research_platform.runtime.execution_metrics import record_run_observations
 from quant_research_platform.storage.datasets import DatasetReadMode
 from quant_research_platform.storage.datasets.reading import (
+    _dataset_input_options,
     _iter_dataset_session_frames,
     open_dataset_session,
     read_dataset,
 )
+from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 
 _CALENDAR_COLUMNS = ("calendar_date", "source_market_type", "is_trading_day")
-_DATASET_COLUMNS = ("asset_id", "timestamp", "eligible", "float_market_cap")
+_FEE_COLUMNS = (
+    "fee_code",
+    "effective_date",
+    "end_date",
+    "market",
+    "side",
+    "basis",
+    "rate",
+    "included_in_ledger",
+    "included_in",
+)
+_DATASET_COLUMNS = ("asset_id", "timestamp", "eligible")
 _PANEL_COLUMNS = (
     "asset_id",
     "listing_date",
@@ -443,7 +464,6 @@ def backtest_a_share(
     shared_risk_fits: dict | None = None,
     prediction_lookup: object,
     prediction_domains: tuple[tuple[TimeWindow, tuple[str, ...], str], ...],
-    sample_role: str,
     assumptions: ExecutionAssumptions,
     fee_schedule_from_frame: Callable[..., object],
     require_fee_coverage: Callable[..., None],
@@ -460,8 +480,8 @@ def backtest_a_share(
     _validate_windows(output_window, input_window, formal_dataset_window)
     enhanced = candidate.construction == "benchmark_enhanced"
     risk_style_columns = candidate.risk_style_columns
-    calendar_root = Path(inputs["calendar"])
-    calendar = _read_materialized(calendar_root, _CALENDAR_COLUMNS, time_window=None)
+    calendar_root = inputs["calendar"]
+    calendar = _read_materialized(calendar_root, _CALENDAR_COLUMNS)
     try:
         sessions = pd.DatetimeIndex(unified_trading_sessions(calendar))
     except (TypeError, ValueError) as exc:
@@ -508,10 +528,16 @@ def backtest_a_share(
             raise ValueError("portfolio_prediction_domain_coverage_invalid")
         return matches[0]
 
+    dataset_business_columns = (
+        ("float_market_cap",)
+        if candidate.construction == "top20_float_cap" or candidate.neutrality != "none"
+        else ()
+    )
     dataset_columns = tuple(
         dict.fromkeys(
             (
                 *_DATASET_COLUMNS,
+                *dataset_business_columns,
                 *(column for _, columns in domains for column in columns),
             )
         )
@@ -520,9 +546,9 @@ def backtest_a_share(
     calibration_intervals = calibration_intervals.loc[
         calibration_intervals.timestamp.ge(alpha_start)
     ].copy()
-    fee_root = Path(inputs["fees"])
-    fee_identity = str(fee_root)
-    fee_frame = _read_materialized(fee_root, None, time_window=None)
+    fee_root = inputs["fees"]
+    fee_identity = str(_dataset_input_options(fee_root)["dataset_root"])
+    fee_frame = _read_materialized(fee_root, _FEE_COLUMNS, business_columns=("rate",))
     fee_schedule = fee_schedule_from_frame(fee_frame, content_identity=fee_identity)
 
     try:
@@ -534,10 +560,10 @@ def backtest_a_share(
         )
     except ValueError as exc:
         raise PortfolioTargetBlocked("portfolio_fee_coverage_missing") from exc
-    dataset_root = Path(inputs["dataset"])
-    panel_root = Path(inputs["panel"])
-    execution_root = Path(inputs["execution"])
-    benchmark_root = Path(inputs["benchmark"]) if enhanced else None
+    dataset_root = inputs["dataset"]
+    panel_root = inputs["panel"]
+    execution_root = inputs["execution"]
+    benchmark_root = inputs["benchmark"] if enhanced else None
     holdings = pd.Series(dtype="float64")
     held_units = pd.Series(dtype="object")
     held_lives = pd.Series(dtype="datetime64[ns]")
@@ -561,7 +587,6 @@ def backtest_a_share(
         candidate.prediction_selector,
         candidate.selection_group,
         candidate.rebalance_schedule,
-        sample_role,
         alpha_start,
         domains,
     )
@@ -583,11 +608,17 @@ def backtest_a_share(
     with ExitStack() as input_channels:
         history = TimeWindow(sessions[0], sessions[-1])
         panel_columns = _ENHANCED_PANEL_COLUMNS if enhanced else _PANEL_COLUMNS
+        if candidate.neutrality in {"industry", "industry_size"}:
+            panel_columns = tuple(
+                dict.fromkeys(
+                    (*panel_columns, "industry_standard_id", "industry_level1_code")
+                )
+            )
         panel_frames = input_channels.enter_context(
             closing_iterator(
                 iter_portfolio_sessions(
-                    market_bars_root=Path(inputs["market_bars"]),
-                    stock_master_root=Path(inputs["stock_master"]),
+                    market_bars_root=inputs["market_bars"],
+                    stock_master_root=inputs["stock_master"],
                     equity_events_root=inputs.get("equity_events"),
                     panel_root=panel_root,
                     panel_columns=panel_columns,
@@ -599,12 +630,17 @@ def backtest_a_share(
         )
         dataset_frames = input_channels.enter_context(
             closing_iterator(
-                _iter_input_sessions(dataset_root, dataset_columns, history)
+                _iter_input_sessions(
+                    dataset_root,
+                    dataset_columns,
+                    history,
+                    business_columns=dataset_business_columns,
+                )
             )
         )
         risk_inputs = (
             _risk_context_input_sessions(
-                roots=tuple(Path(root) for root in inputs.get("risk_context", ())),
+                roots=tuple(inputs.get("risk_context", ())),
                 style_columns=risk_style_columns,
                 time_window=history,
                 retained=input_channels,
@@ -1014,7 +1050,7 @@ def backtest_a_share(
             raise ValueError("misaligned_persisted_prediction_keys")
         if not emitted:
             raise PortfolioTargetBlocked("portfolio_execution_window_empty")
-        if enhanced and sample_role == "validation":
+        if enhanced and frozen_calibration is None:
             if on_final_calibration is None:
                 raise ValueError("portfolio_final_calibration_sink_required")
             observation = {}
@@ -1032,8 +1068,13 @@ def backtest_a_share(
                     "selection_group": candidate.selection_group,
                     "cutoff": pd.Timestamp(output_window.end).date().isoformat(),
                     "inputs": {
-                        key: list(map(str, value))
+                        key: [
+                            dict(source) if isinstance(source, Mapping) else str(source)
+                            for source in value
+                        ]
                         if key == "risk_context"
+                        else dict(value)
+                        if isinstance(value, Mapping)
                         else str(value)
                         for key, value in inputs.items()
                     },
@@ -1043,23 +1084,30 @@ def backtest_a_share(
 
 
 def _read_materialized(
-    root: Path, columns: tuple[str, ...] | None, *, time_window: TimeWindow | None
+    source, columns: tuple[str, ...], *, business_columns=()
 ) -> pd.DataFrame:
-    frame = read_dataset(
-        root,
-        columns=columns,
-        time_window=time_window,
-        mode=DatasetReadMode.MATERIALIZED,
-    )
+    options = _dataset_input_options(source)
+    if options.get("columns") is not None and not set(business_columns) <= set(
+        options["columns"]
+    ):
+        raise ValueError("portfolio_input_business_columns_excluded")
+    options["columns"] = columns
+    frame = read_dataset(**options, mode=DatasetReadMode.MATERIALIZED)
     if not isinstance(frame, pd.DataFrame):
         raise ValueError("portfolio_input_reader_not_materialized")
     return frame
 
 
 def _iter_input_sessions(
-    root: Path, columns: tuple[str, ...], time_window: TimeWindow
+    source, columns: tuple[str, ...], time_window: TimeWindow, *, business_columns=()
 ) -> Iterator[pd.DataFrame]:
-    session = open_dataset_session(root, columns=columns, time_window=time_window)
+    options = _dataset_input_options(source)
+    if options.get("columns") is not None and not set(business_columns) <= set(
+        options["columns"]
+    ):
+        raise ValueError("portfolio_input_business_columns_excluded")
+    options["columns"] = columns
+    session = open_dataset_session(**options).filtered_view(time_window)
     with closing_iterator(
         _iter_dataset_session_frames(session, columns)
     ) as delegated_chunks:
@@ -1086,7 +1134,7 @@ def _read_next_session(
 
 def _risk_context_input_sessions(
     *,
-    roots: tuple[Path, ...],
+    roots: tuple[object, ...],
     style_columns: tuple[str, ...],
     time_window: TimeWindow,
     retained: ExitStack,
@@ -1094,16 +1142,18 @@ def _risk_context_input_sessions(
     required = set(style_columns)
     available: set[str] = set()
     inputs = {}
-    for root in roots:
-        session = open_dataset_session(root, columns=None, time_window=time_window)
+    for position, root in enumerate(roots):
+        session = open_dataset_session(**_dataset_input_options(root)).filtered_view(
+            time_window
+        )
         columns = tuple(
-            column for column in style_columns if column in session.arrow_schema.names
+            column for column in style_columns if column in session.logical_columns
         )
         if available.intersection(columns):
             raise ValueError("portfolio_risk_context_owner_duplicate")
         available.update(columns)
         projection = (*_SESSION_KEY, *columns)
-        inputs[root] = (
+        inputs[position] = (
             projection,
             retained.enter_context(
                 closing_iterator(_iter_dataset_session_frames(session, projection))
@@ -1141,7 +1191,7 @@ def _enhanced_risk_cross(
     result["industry_level1_code"] = (
         panel_by_asset["industry_level1_code"].astype("string").reindex(assets)
     )
-    result["eligible"] = a_share_eligibility(panel_by_asset, "pv_expanded").reindex(
+    result["eligible"] = a_share_eligibility(panel_by_asset, "a_share_all").reindex(
         assets
     )
     for frame in risk_frames:
@@ -1207,7 +1257,10 @@ def _iter_benchmark_weights(root, benchmark_id, sessions):
     """Align sparse snapshots without consuming a future session prematurely."""
     with closing_iterator(
         _iter_input_sessions(
-            root, _BENCHMARK_COLUMNS, TimeWindow(sessions[0], sessions[-1])
+            root,
+            _BENCHMARK_COLUMNS,
+            TimeWindow(sessions[0], sessions[-1]),
+            business_columns=("weight",),
         )
     ) as frames:
         pending = next(frames, None)
@@ -1450,6 +1503,17 @@ def _build_session(
     eligible = _bool_series(dataset["eligible"], "portfolio_eligibility_invalid")
     alpha = alpha.reindex(dataset.index)
     prediction_eligible = eligible & alpha.notna()
+    neutrality = None
+    if candidate.neutrality != "none" and nav > 0:
+        industry = (
+            _industry_group_codes(panel.set_index("asset_id"), "industry_level1_code")
+            if candidate.neutrality in {"industry", "industry_size"}
+            else None
+        )
+        neutrality = _neutrality_context(
+            eligible, dataset["float_market_cap"], industry, candidate.neutrality
+        )
+        prediction_eligible &= prediction_eligible.index.isin(neutrality.index)
     optimization: OptimizationResult | None = None
     if nav == 0:
         target = pd.Series(0.0, index=holdings.index, dtype="float64")
@@ -1461,6 +1525,8 @@ def _build_session(
         decision_timestamp, next_timestamp, candidate.rebalance_schedule
     ):
         if not prediction_eligible.any():
+            if neutrality is not None:
+                raise PortfolioTargetBlocked("target_selection_unavailable")
             target = pd.Series(0.0, index=dataset.index, dtype="float64")
         else:
             target = build_simple_target_weights(
@@ -1481,10 +1547,20 @@ def _build_session(
                 target = (target + retained) / 2.0
     else:
         target = holdings.div(nav).copy(deep=True)
+    raw_target = target.copy(deep=True)
+    if neutrality is not None and is_rebalance_session(
+        decision_timestamp, next_timestamp, candidate.rebalance_schedule
+    ):
+        target = _project_neutral_target(target, neutrality)
     target = target.loc[target.ne(0.0)]
     current = holdings.copy(deep=True)
     assets = pd.Index(
-        sorted(set(current.index) | set(target.index) | set(held_units.index)),
+        sorted(
+            set(current.index)
+            | set(target.index)
+            | set(held_units.index)
+            | set(raw_target.index[raw_target.ne(0)])
+        ),
         dtype="string",
     )
     unquoted_assets = unquoted_assets.intersection(assets)
@@ -1494,19 +1570,26 @@ def _build_session(
     missing_panel = [asset for asset in assets if asset not in execution_panel.index]
     if missing_panel:
         raise PortfolioTargetBlocked("portfolio_held_asset_missing_from_panel")
-    market_by_asset = {
-        str(asset): market_name_for_type(execution_panel.loc[asset, "market_type"])
-        for asset in assets
-        if pd.notna(execution_panel.loc[asset, "market_type"])
-    }
-    adv = pd.Series(
+    decision_panel = panel.set_index("asset_id")
+    decision_markets, market_by_asset = (
         {
-            asset: float(mean(history))
-            if len(history := amount_history.get((asset, listing), ())) == 20
-            else np.nan
-            for asset, listing in execution_panel.loc[assets, "listing_date"].items()
-        },
-        dtype="float64",
+            str(asset): market_name_for_type(market_type)
+            for asset, market_type in frame.reindex(assets).market_type.items()
+            if pd.notna(market_type)
+        }
+        for frame in (decision_panel, execution_panel)
+    )
+    decision_adv, adv = (
+        pd.Series(
+            {
+                asset: float(mean(history))
+                if len(history := amount_history.get((asset, listing), ())) == 20
+                else np.nan
+                for asset, listing in frame.reindex(assets).listing_date.items()
+            },
+            dtype="float64",
+        )
+        for frame in (decision_panel, execution_panel)
     )
     missing_execution_quotes = frozenset(
         execution_panel.loc[assets].index[
@@ -1522,21 +1605,30 @@ def _build_session(
         (market, side): prepare_trade_cost(
             next_timestamp.date(), market, side, fee_schedule, assumptions
         )
-        for market in set(market_by_asset.values())
+        for market in set(market_by_asset.values()) | set(decision_markets.values())
         for side in ("buy", "sell")
     }
 
     def cost_for_trade(
-        execution_date, asset, side, notional, adv20, called_assumptions
+        execution_date,
+        asset,
+        side,
+        notional,
+        adv20,
+        called_assumptions,
+        *,
+        markets=market_by_asset,
     ):
-        return prepared[market_by_asset[asset], side].trade(notional, adv20)
+        return prepared[markets[asset], side].trade(notional, adv20)
 
-    def cost_totals_for_buys(buy_assets, notionals, adv_values):
+    def cost_totals_for_buys(
+        buy_assets, notionals, adv_values, *, markets=market_by_asset
+    ):
         totals = np.zeros(len(buy_assets), dtype="float64")
-        for market in set(market_by_asset.values()):
-            mask = np.asarray(
-                [market_by_asset[asset] == market for asset in buy_assets]
-            ) & (notionals > 0.0)
+        for market in set(markets.values()):
+            mask = np.asarray([markets[asset] == market for asset in buy_assets]) & (
+                notionals > 0.0
+            )
             if mask.any():
                 totals[mask] = prepared[market, "buy"].totals(
                     notionals[mask], adv_values[mask]
@@ -1573,15 +1665,15 @@ def _build_session(
             expected_alpha=enhanced_decision.expected_alpha,
             exposures=enhanced_decision.exposures,
             specific_variance=risk.specific_variance,
-            adv=adv,
+            adv=decision_adv,
             eligible=eligible,
             panel=panel,
         )
         current_values = assets_frame["current_weight"].to_numpy(dtype="float64")
         adv_values = assets_frame["adv"].to_numpy(dtype="float64")
         market_masks = {
-            market: assets_frame["asset_id"].map(market_by_asset).eq(market).to_numpy()
-            for market in set(market_by_asset.values())
+            market: assets_frame["asset_id"].map(decision_markets).eq(market).to_numpy()
+            for market in set(decision_markets.values())
         }
 
         def expected_cost(weights: np.ndarray) -> float:
@@ -1589,6 +1681,8 @@ def _build_session(
             notionals = np.abs(delta) * nav
             totals = np.zeros(len(delta), dtype="float64")
             for (market, side), evaluator in prepared.items():
+                if market not in market_masks:
+                    continue
                 active = market_masks[market] & (
                     delta > 0 if side == "buy" else delta < 0
                 )
@@ -1654,55 +1748,129 @@ def _build_session(
     )
     asset_ledger = account.asset_ledger
     if optimization is not None:
-        # Fees, capacity and blocked orders change realized weights. Validate the
-        # actual account without inventing trades in frozen holdings.
+        # Known fees and ADV must admit the target at decision time. Future marks,
+        # rights cash and trading permissions belong only to realized accounting.
+        permitted = pd.Series(True, index=assets)
+        projected_account = execute_continuous_target(
+            current.div(nav),
+            target,
+            nav=nav,
+            average_daily_volume=decision_adv,
+            can_enter=permitted,
+            can_exit=permitted,
+            execution_date=next_timestamp.date(),
+            cost_for_trade=partial(cost_for_trade, markets=decision_markets),
+            cost_totals_for_buys=partial(
+                cost_totals_for_buys, markets=decision_markets
+            ),
+            assumptions=assumptions,
+            cost_source_identity=fee_identity,
+        )
         config = optimizer_config or OptimizerConfig()
         risk = enhanced_decision.risk
-        realized = asset_ledger.set_index("asset_id").post_trade_notional
-        realized.loc[PORTFOLIO_CASH_ASSET_ID] = account.post_trade_cash
-        if account.nav_after <= 0:
-            raise PortfolioTargetBlocked("portfolio_post_trade_risk_unavailable")
-        weights = (
-            realized.reindex(assets_frame.asset_id, fill_value=0.0).to_numpy()
-            / account.nav_after
-        )
         benchmark = assets_frame.benchmark_weight.to_numpy(dtype="float64")
-        active = weights - benchmark
         columns = tuple(risk.factor_covariance.index)
         exposure = assets_frame.loc[:, columns].to_numpy(dtype="float64")
         specific = assets_frame.specific_variance.to_numpy(dtype="float64")
         covariance = risk.factor_covariance.to_numpy(dtype="float64")
-        variance = sum(_risk_variances(active, exposure, covariance, specific))
         industry = [i for i, name in enumerate(columns) if name.startswith("industry_")]
         style = [
             i for i, name in enumerate(columns) if not name.startswith("industry_")
         ]
         tolerance = 1e-8
-        if (
-            variance > config.tracking_error_limit**2 + tolerance
-            or np.any(
-                np.abs(exposure[:, industry].T @ active)
-                > config.industry_active_limit + tolerance
-            )
-            or np.any(
-                np.abs(exposure[:, style].T @ active)
-                > config.style_active_limit + tolerance
-            )
-            or np.any(
-                np.abs(active[~assets_frame.is_cash.to_numpy()])
-                > config.active_name_limit + tolerance
-            )
+        for phase, risk_account in (
+            ("decision", projected_account),
+            ("realized", account),
         ):
-            raise PortfolioTargetBlocked("portfolio_post_trade_constraints_infeasible")
-        factor, specific_variance = _risk_variances(
-            active, exposure, covariance, specific
-        )
-        optimization = replace(
-            optimization,
-            predicted_tracking_error=float(np.sqrt(variance)),
-            factor_variance=factor,
-            specific_variance=specific_variance,
-        )
+            diagnostics = {}
+            if risk_account.nav_after <= 0:
+                if phase == "decision":
+                    raise PortfolioTargetBlocked(
+                        "portfolio_post_trade_risk_unavailable"
+                    )
+                diagnostics.update(
+                    realized_constraints_status="UNDEFINED",
+                    realized_constraints_reason="nonpositive_nav",
+                )
+            else:
+                notionals = risk_account.asset_ledger.set_index(
+                    "asset_id"
+                ).post_trade_notional
+                notionals.loc[PORTFOLIO_CASH_ASSET_ID] = risk_account.post_trade_cash
+                weights = (
+                    notionals.reindex(assets_frame.asset_id, fill_value=0.0).to_numpy()
+                    / risk_account.nav_after
+                )
+                active = weights - benchmark
+                nonzero = active != 0.0
+                complete = (
+                    np.isfinite(exposure[nonzero]).all()
+                    and np.isfinite(specific[nonzero]).all()
+                    and (specific[nonzero] >= 0.0).all()
+                )
+                if not complete:
+                    if phase == "decision":
+                        raise PortfolioTargetBlocked(
+                            "portfolio_post_trade_risk_unavailable"
+                        )
+                    diagnostics.update(
+                        realized_constraints_status="UNDEFINED",
+                        realized_constraints_reason="active_risk_unavailable",
+                    )
+                else:
+                    factor, residual = _risk_variances(
+                        active, exposure, covariance, specific
+                    )
+                    factor_active = exposure[nonzero].T @ active[nonzero]
+                    limits = {
+                        "tracking_error": (
+                            np.sqrt(factor + residual),
+                            config.tracking_error_limit,
+                        ),
+                        "name_active_weight": (
+                            np.abs(active[~assets_frame.is_cash.to_numpy()]).max(
+                                initial=0.0
+                            ),
+                            config.active_name_limit,
+                        ),
+                        "industry_active_exposure": (
+                            np.abs(factor_active[industry]).max(initial=0.0),
+                            config.industry_active_limit,
+                        ),
+                        "style_active_exposure": (
+                            np.abs(factor_active[style]).max(initial=0.0),
+                            config.style_active_limit,
+                        ),
+                    }
+                    breached = [
+                        name
+                        for name, (value, limit) in limits.items()
+                        if (
+                            value**2 > limit**2 + tolerance
+                            if name == "tracking_error"
+                            else value > limit + tolerance
+                        )
+                    ]
+                    if phase == "decision" and breached:
+                        raise PortfolioTargetBlocked(
+                            "portfolio_post_trade_constraints_infeasible"
+                        )
+                    diagnostics.update(
+                        realized_constraints_status="BREACHED"
+                        if breached
+                        else "SATISFIED",
+                        realized_constraints_reason=",".join(breached)
+                        if breached
+                        else None,
+                        realized_factor_variance=factor,
+                        realized_specific_variance=residual,
+                        **{
+                            f"realized_{name}": float(value)
+                            for name, (value, _) in limits.items()
+                        },
+                    )
+            if phase == "realized":
+                asset_ledger.attrs["realized_constraints"] = diagnostics
     missing_orders = asset_ledger.loc[
         asset_ledger.reason.eq("adv_unavailable"), "asset_id"
     ]
@@ -1716,6 +1884,68 @@ def _build_session(
             asset_ledger.loc[selected, "adv20_missing_observations"] = sum(
                 pd.isna(value) for value in history
             )
+    if neutrality is not None:
+        realized = asset_ledger.set_index("asset_id").post_trade_notional
+        exposure_diagnostics = {}
+        exposure_weights = {"target": target, "benchmark": neutrality.benchmark_weight}
+        if account.nav_after > 0:
+            exposure_weights["realized"] = realized / account.nav_after
+        for kind in ("target", "realized"):
+            weights = exposure_weights.get(kind)
+            outside = (
+                weights.loc[~weights.index.isin(neutrality.index)].abs().sum()
+                if weights is not None
+                else None
+            )
+            complete = weights is not None and outside == 0.0
+            exposure_diagnostics[f"{kind}_exposure_status"] = (
+                "DEFINED" if complete else "UNDEFINED"
+            )
+            exposure_diagnostics[f"{kind}_exposure_reason"] = (
+                None
+                if complete
+                else "nonpositive_nav"
+                if weights is None
+                else "outside_benchmark_domain"
+            )
+            exposure_diagnostics[f"{kind}_exposure_excluded_weight"] = outside
+            if not complete:
+                exposure_weights.pop(kind, None)
+        for factor in neutrality.columns.drop("benchmark_weight"):
+            exposure = neutrality[factor]
+            for kind, weights in exposure_weights.items():
+                exposure_diagnostics[f"{kind}_exposure:{factor}"] = float(
+                    exposure @ weights.reindex(exposure.index, fill_value=0.0)
+                )
+        asset_ledger.attrs["neutrality_exposures"] = exposure_diagnostics
+        for name, weights in (
+            ("raw_target_weight", raw_target),
+            ("target_weight", target),
+            ("benchmark_weight", neutrality.benchmark_weight),
+            (
+                "realized_weight",
+                realized / account.nav_after
+                if account.nav_after > 0
+                else realized * np.nan,
+            ),
+        ):
+            asset_ledger[name] = (
+                asset_ledger.asset_id.map(weights).fillna(0.0)
+                if name != "realized_weight"
+                else asset_ledger.asset_id.map(weights)
+            )
+    elif candidate.neutrality != "none":
+        asset_ledger.attrs["neutrality_exposures"] = {
+            f"{kind}_exposure_{field}": value
+            for kind in ("target", "realized")
+            for field, value in (
+                ("status", "UNDEFINED"),
+                ("reason", "nonpositive_nav"),
+                ("excluded_weight", None),
+            )
+        }
+        for name in ("raw_target_weight", "target_weight", "realized_weight"):
+            asset_ledger[name] = np.nan
     return (account, adv, optimization, decision_delta, asset_ledger)
 
 
@@ -2024,6 +2254,15 @@ def _ledger_batch(
             fill_id,
             {
                 "target_notional": float(row.target_notional),
+                **{
+                    name: getattr(row, name)
+                    for name in (
+                        "raw_target_weight",
+                        "target_weight",
+                        "realized_weight",
+                    )
+                    if hasattr(row, name)
+                },
                 "block_reason": row.reason,
                 "adv20": adv20.get(asset),
                 "adv20_observation_count": getattr(
@@ -2039,7 +2278,7 @@ def _ledger_batch(
                 else None,
                 "benchmark_weight": benchmark_weights.get(asset)
                 if benchmark_weights is not None
-                else None,
+                else getattr(row, "benchmark_weight", None),
                 "asset_specific_variance": enhanced_decision.risk.specific_variance.get(
                     asset
                 )
@@ -2109,6 +2348,8 @@ def _ledger_batch(
             and decision_reason == PORTFOLIO_DECISION_REASON_BENCHMARK
             else decision_reason,
             "research_valuation_version": RESEARCH_VALUATION_VERSION,
+            **asset_ledger.attrs.get("neutrality_exposures", {}),
+            **asset_ledger.attrs.get("realized_constraints", {}),
             **(
                 {
                     name: getattr(enhanced_decision.calibration, field)
@@ -2176,23 +2417,28 @@ def _validate_windows(
         for value in (output_window, input_window, formal_dataset_window)
     ):
         raise ValueError("portfolio_windows_invalid")
-    if (
-        input_window.start > input_window.end
-        or formal_dataset_window.start > formal_dataset_window.end
-        or output_window.start > output_window.end
-        or (output_window.start < formal_dataset_window.start)
-        or (output_window.end > input_window.end)
-    ):
+    bounds = []
+    for window in (output_window, input_window, formal_dataset_window):
+        start, end, closed = time_window_timestamp_interval(window)
+        bounds.append(
+            (pd.Timestamp(start).value, pd.Timestamp(end).value - (0 if closed else 1))
+        )
+    output, inputs, formal = bounds
+    if output[0] < formal[0] or output[1] > inputs[1]:
         raise ValueError("portfolio_windows_invalid")
 
 
 def backtest(config: Mapping) -> Path:
-    """Publish an A-share account from explicit market and prediction inputs."""
-    from quant_research_platform.artifacts.outputs.prediction import read_predictions
+    """Publish an A-share account from explicit JSON market and prediction inputs."""
+    config = qrp_json_mapping_snapshot(config)
+    from quant_research_platform.artifacts.outputs.prediction import (
+        _PredictionLookup,
+        prediction_model_metadata,
+        read_predictions,
+    )
     from quant_research_platform.artifacts.portfolio_ledger import (
         write_portfolio_ledger_artifact,
     )
-    from quant_research_platform.contracts.json_codec import parse_qrp_json_object
     from quant_research_platform.contracts.portfolios import PortfolioCapital
     from quant_research_platform.markets.implementations.a_share import (
         portfolio_sessions,
@@ -2206,11 +2452,10 @@ def backtest(config: Mapping) -> Path:
         prepare_trade_cost,
         require_fee_coverage,
     )
-    from quant_research_platform.research.models.persisted import load_model
-    from quant_research_platform.research.models.trial_selection import read_selection
     from quant_research_platform.research.portfolios.accounting import (
         frozen_alpha_calibration,
     )
+    from quant_research_platform.storage.manifests import read_qrp_json_file
 
     required = {
         "candidate",
@@ -2221,17 +2466,18 @@ def backtest(config: Mapping) -> Path:
         "input_window",
         "formal_dataset_window",
         "prediction_window",
-        "sample_role",
         "assumptions",
     }
-    optional = {"risk_config", "optimizer_config", "calibration"}
+    optional = {"risk_config", "optimizer_config", "calibration", "sample_role"}
     if (
         not isinstance(config, Mapping)
         or not required <= set(config)
         or set(config) - required - optional
     ):
         raise ValueError("portfolio_config_fields_invalid")
-    if config["sample_role"] not in {"validation", "test"}:
+    if "sample_role" in config and (
+        not isinstance(config["sample_role"], str) or not config["sample_role"].strip()
+    ):
         raise ValueError("portfolio_sample_role_invalid")
     candidate_values = dict(config["candidate"])
     if "risk_style_columns" in candidate_values:
@@ -2255,19 +2501,13 @@ def backtest(config: Mapping) -> Path:
         "equity_events",
     }:
         raise ValueError("portfolio_input_fields_invalid")
-    if any(
-        type(value) is not str or not value
-        for key, value in inputs.items()
-        if key != "risk_context"
-    ):
-        raise ValueError("portfolio_input_path_invalid")
     if "risk_context" in inputs and (
-        type(inputs["risk_context"]) is not list
-        or not inputs["risk_context"]
-        or any(type(value) is not str or not value for value in inputs["risk_context"])
-        or len(set(inputs["risk_context"])) != len(inputs["risk_context"])
+        type(inputs["risk_context"]) is not list or not inputs["risk_context"]
     ):
         raise ValueError("portfolio_risk_context_invalid")
+    for key, value in inputs.items():
+        for source in value if key == "risk_context" else (value,):
+            _dataset_input_options(source)
     enhanced = candidate.construction == "benchmark_enhanced"
     if enhanced != ("benchmark" in inputs) or enhanced != ("risk_context" in inputs):
         raise ValueError("portfolio_enhanced_inputs_invalid")
@@ -2295,21 +2535,11 @@ def backtest(config: Mapping) -> Path:
     if not isinstance(config["predictions"], list) or not config["predictions"]:
         raise ValueError("portfolio_prediction_inputs_required")
     for item in config["predictions"]:
-        if (
-            not isinstance(item, dict)
-            or not {"path", "model", "window"} <= set(item)
-            or set(item) - {"path", "model", "window", "selection"}
-        ):
+        if not isinstance(item, dict) or set(item) != {"path", "window"}:
             raise ValueError("portfolio_prediction_input_invalid")
         frame, metadata = read_predictions(Path(item["path"]))
-        model, facts = load_model(Path(item["model"]))
-        if (
-            Path(metadata["model"]) != Path(item["model"])
-            or metadata["model_id"] != facts["model"]["model_id"]
-        ):
-            raise ValueError("portfolio_prediction_model_mismatch")
-        if metadata["model_metadata"] != model.metadata:
-            raise ValueError("portfolio_prediction_model_metadata_mismatch")
+        facts = metadata["model_facts"]
+        model_metadata = prediction_model_metadata(metadata)
         window = TimeWindow(**item["window"])
         if any(
             pd.Timestamp(window.start) <= pd.Timestamp(old.end)
@@ -2327,60 +2557,13 @@ def backtest(config: Mapping) -> Path:
             raise ValueError("portfolio_prediction_window_invalid")
         if facts["market_id"] != "a_share":
             raise ValueError("portfolio_model_market_mismatch")
-        if "selection" in item:
-            selected = read_selection(Path(item["selection"]))
-            if selected["selection_group"] != candidate.selection_group:
-                raise ValueError("portfolio_prediction_selection_mismatch")
-            if candidate.prediction_selector == "champion":
-                selected_model_id = selected["selected_model_id"]
-            else:
-                family = [
-                    entry
-                    for entry in selected["families"]
-                    if entry["family_id"] == candidate.prediction_selector
-                ]
-                if (
-                    len(family) != 1
-                    or metadata["family_id"] != candidate.prediction_selector
-                ):
-                    raise ValueError("portfolio_prediction_selector_mismatch")
-                selected_model_id = family[0]["selected_config_id"]
-            if selected_model_id != metadata["model_id"]:
-                raise ValueError("portfolio_prediction_selection_mismatch")
-            selected_candidate = next(
-                entry
-                for entry in selected["candidates"]
-                if entry["model_id"] == selected_model_id
-            )
-            if config["sample_role"] == "test":
-                if (
-                    not facts.get("selection")
-                    or read_selection(Path(facts["selection"])) != selected
-                ):
-                    raise ValueError("portfolio_test_selection_mismatch")
-            elif Path(item["model"]) not in {
-                Path(path) for path in selected_candidate["model_paths"]
-            }:
-                raise ValueError("portfolio_selected_training_model_mismatch")
-            if candidate.selection_group == "quarterly" and pd.Timestamp(
-                selected["cutoff"]
-            ) >= pd.Timestamp(window.start):
-                raise ValueError("portfolio_quarterly_selection_not_causal")
-        elif (
-            candidate.prediction_selector == "champion"
-            or config["sample_role"] == "test"
-        ):
-            raise ValueError("portfolio_frozen_selection_required")
-        elif candidate.prediction_selector != metadata["family_id"]:
+        if candidate.prediction_selector not in {"champion", metadata["family_id"]}:
             raise ValueError("portfolio_prediction_selector_mismatch")
-        if config["sample_role"] == "test":
-            if (
-                metadata["sample_role"] != "test"
-                or facts.get("test_window") != selected["test_window"]
+        for cutoff in (facts["fit_cutoff"], facts.get("selection_cutoff")):
+            if cutoff is not None and pd.Timestamp(cutoff) >= pd.Timestamp(
+                window.start
             ):
-                raise ValueError("portfolio_test_prediction_not_frozen")
-        elif metadata["sample_role"] == "test":
-            raise ValueError("portfolio_test_prediction_in_validation")
+                raise ValueError("portfolio_prediction_not_causal")
         chosen = frame.loc[
             frame.timestamp.between(
                 pd.Timestamp(window.start), pd.Timestamp(window.end)
@@ -2392,17 +2575,10 @@ def backtest(config: Mapping) -> Path:
         domains.append(
             (
                 window,
-                tuple(model.metadata["input_columns"]),
-                model.metadata["model_algorithm"],
+                tuple(model_metadata["input_columns"]),
+                model_metadata["model_algorithm"],
             )
         )
-    import pyarrow as pa
-
-    from quant_research_platform.artifacts.outputs.prediction import (
-        _PredictionLookup,
-    )
-    from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
-
     frame = pd.concat(frames, ignore_index=True)
     if frame.duplicated(["timestamp", "asset_id"]).any():
         raise ValueError("portfolio_prediction_keys_invalid")
@@ -2420,10 +2596,8 @@ def backtest(config: Mapping) -> Path:
     )
     lookup.row_count = len(frame)
     frozen = None
-    if enhanced and config["sample_role"] == "test":
-        if "calibration" not in config:
-            raise ValueError("portfolio_frozen_calibration_required")
-        payload = parse_qrp_json_object(Path(config["calibration"]).read_bytes())
+    if "calibration" in config:
+        payload = read_qrp_json_file(Path(config["calibration"]))[1]
         if pd.Timestamp(payload["cutoff"]) >= pd.Timestamp(
             windows["output_window"].start
         ):
@@ -2431,8 +2605,6 @@ def backtest(config: Mapping) -> Path:
         frozen, _ = frozen_alpha_calibration(
             payload, cutoff=payload["cutoff"], selection_group=candidate.selection_group
         )
-    elif "calibration" in config:
-        raise ValueError("portfolio_unused_configuration")
     final = []
 
     def produce(emit):
@@ -2443,7 +2615,6 @@ def backtest(config: Mapping) -> Path:
                 **windows,
                 prediction_domains=tuple(domains),
                 prediction_lookup=lookup,
-                sample_role=config["sample_role"],
                 assumptions=assumptions,
                 risk_config=FactorRiskConfig(**config["risk_config"])
                 if "risk_config" in config
@@ -2477,14 +2648,13 @@ def backtest(config: Mapping) -> Path:
         ),
         metadata=metadata,
         produce=produce,
-        final_calibration=(lambda: final[0])
-        if enhanced and config["sample_role"] == "validation"
-        else None,
+        final_calibration=(lambda: final[0]) if enhanced and frozen is None else None,
     )
 
 
 def calibrate(config: Mapping) -> Path:
-    """Freeze mature A-share alpha observations against their declared schedule."""
+    """Freeze mature A-share alpha observations from an explicit JSON configuration."""
+    config = qrp_json_mapping_snapshot(config)
     from quant_research_platform.storage.atomic import atomic_write_json
 
     required = {
@@ -2498,9 +2668,57 @@ def calibrate(config: Mapping) -> Path:
         raise ValueError("alpha_calibration_config_invalid")
     if config["selection_group"] not in {"global", "quarterly"}:
         raise ValueError("portfolio_selection_group_invalid")
+    from quant_research_platform.storage.datasets.reading import (
+        _selection_filters,
+        _validated_years,
+    )
+    from quant_research_platform.storage.parquet import (
+        inspect_dataset_part,
+        iter_dataset_part_batches,
+    )
+
+    frames = {}
+    for name, columns in (
+        ("observations", ("timestamp", "prediction_rank_score", "holding_return")),
+        ("scheduled_intervals", ("timestamp", "entry_at", "available_at")),
+    ):
+        options = _dataset_input_options(config[name])
+        business_columns = columns[1:] if name == "observations" else ()
+        if options.get("columns") is not None and not set(business_columns) <= set(
+            options["columns"]
+        ):
+            raise ValueError("portfolio_input_business_columns_excluded")
+        path = options["dataset_root"]
+        if path.is_file() and options.get("spec") is None:
+            if options.get("files") is not None:
+                raise ValueError("dataset_files_require_directory")
+            schema = inspect_dataset_part(path, require_logical_dtypes=False).schema
+            filters = _selection_filters(
+                schema,
+                timestamp="timestamp",
+                time_window=options.get("time_window"),
+                years=_validated_years(options.get("years")),
+                row_filters=options.get("row_filters", ()),
+            )
+            projection = tuple(
+                dict.fromkeys((*columns, *(column for column, _, _ in filters)))
+            )
+            with closing_iterator(
+                iter_dataset_part_batches(
+                    path, columns=projection, parquet_filters=filters
+                )
+            ) as batches:
+                selected = [batch.select(columns).to_pandas() for batch in batches]
+            frames[name] = (
+                pd.concat(selected, ignore_index=True)
+                if selected
+                else pd.DataFrame(columns=columns)
+            )
+        else:
+            frames[name] = _read_materialized(config[name], columns)
     result = calibrate_expected_alpha(
-        pd.read_parquet(config["observations"]),
-        scheduled_intervals=pd.read_parquet(config["scheduled_intervals"]),
+        frames["observations"],
+        scheduled_intervals=frames["scheduled_intervals"],
         as_of=pd.Timestamp(config["cutoff"]),
     )
     return atomic_write_json(

@@ -7,13 +7,13 @@ from quant_research_platform.sources.choice.fields import FINANCIAL_FIELDS
 from quant_research_platform.sources.choice.raw_exports import choice_session
 from quant_research_platform.sources.prepare import prepare_source
 from quant_research_platform.storage.datasets import read_dataset
-from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.a_share_sources import (
     _prepare,
     _synthetic_interim_frames,
     _write_inputs,
 )
 from tests.helpers.choice_raw import SDK, response, write_css
+from tests.helpers.paths import StorageLayout
 
 
 @pytest.mark.parametrize("year", (2010, 2020))

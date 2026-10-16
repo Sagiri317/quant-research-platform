@@ -615,6 +615,7 @@ def test_real_recorder_stops_owned_network_and_joins_before_return(
     handshakes = []
     original_reader = recorder._StreamReader
     original_join = original_reader.join
+    original_start = original_reader.start
     join_interruptions = []
     keepalive_paused = threading.Event()
     release_keepalive = threading.Event()
@@ -656,7 +657,17 @@ def test_real_recorder_stops_owned_network_and_joins_before_return(
 
     monkeypatch.setattr(original_reader, "join", join_reader)
 
+    def start_reader(reader):
+        original_start(reader)
+        # Start recorder deadlines only after the target I/O phase is active.
+        assert entered.wait(3)
+
+    monkeypatch.setattr(original_reader, "start", start_reader)
+
     def make_reader(**kwargs):
+        if phase != "reconnect_handshake":
+            # Separate fixture handshake setup from the recorder readiness deadline.
+            kwargs["config"] = replace(kwargs["config"], connect_timeout_seconds=3)
         reader = original_reader(**kwargs)
         readers.append(reader)
         return reader
@@ -687,10 +698,10 @@ def test_real_recorder_stops_owned_network_and_joins_before_return(
 
         def do_GET(self):
             server_threads.append(threading.current_thread())
-            entered.set()
             try:
                 if phase == "snapshot_headers":
                     # No response bytes: cancellation must reach the active socket.
+                    entered.set()
                     release.wait(80)
                 else:
                     self.send_response(200)
@@ -700,6 +711,7 @@ def test_real_recorder_stops_owned_network_and_joins_before_return(
                     while not release.wait(0.02):
                         self.wfile.write(b" ")
                         self.wfile.flush()
+                        entered.set()
             except (BrokenPipeError, ConnectionResetError):
                 pass
 

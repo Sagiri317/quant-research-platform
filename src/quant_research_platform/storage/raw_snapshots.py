@@ -11,7 +11,6 @@ import sys
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
-from quant_research_platform.contracts.json_codec import canonical_identity_bytes
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.identity import (
@@ -19,7 +18,7 @@ from quant_research_platform.storage.identity import (
     open_filesystem_file,
     require_unaliased_path,
 )
-from quant_research_platform.storage.manifests import read_manifest, write_manifest
+from quant_research_platform.storage.manifests import write_manifest
 
 SCHEMA_ID = "qrp-raw-csv-snapshot"
 _CELL_ENCODER = json.JSONEncoder(ensure_ascii=False, separators=(",", ":"))
@@ -136,8 +135,7 @@ def iter_csv_snapshot(
         "response.metadata.json",
     }:
         raise ValueError("raw_csv_members_invalid")
-    sidecar = root / "response.metadata.json"
-    manifest = read_manifest(sidecar)
+    manifest = expected_manifest
     if (
         set(manifest)
         != {
@@ -151,10 +149,6 @@ def iter_csv_snapshot(
         }
         or manifest["schema_id"] != SCHEMA_ID
         or manifest["encoding"] != "utf-8-json-cells"
-        or (
-            canonical_identity_bytes(manifest)
-            != canonical_identity_bytes(expected_manifest)
-        )
         or (type(manifest["byte_count"]) is not int)
         or (manifest["byte_count"] < 0)
         or (type(manifest["row_count"]) is not int)
@@ -162,7 +156,10 @@ def iter_csv_snapshot(
     ):
         raise ValueError("raw_csv_metadata_invalid")
     path = root / "response.csv"
-    handle = open_filesystem_file(path)
+    try:
+        handle = open_filesystem_file(path)
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        raise ValueError("raw_csv_content_invalid") from exc
     digest = hashlib.sha256()
     count = 0
     with closing_iterator(handle):

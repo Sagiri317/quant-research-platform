@@ -21,10 +21,10 @@ from quant_research_platform.storage.identity import (
     filesystem_write_text,
     native_filesystem_path,
 )
-from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import read_manifest
 from tests.helpers.choice_raw import SDK
 from tests.helpers.choice_raw import response as _response
+from tests.helpers.paths import StorageLayout
 
 
 def _immediate_file_bytes(root: Path) -> dict[str, bytes]:

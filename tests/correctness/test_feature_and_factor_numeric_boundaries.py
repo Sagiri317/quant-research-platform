@@ -19,10 +19,8 @@ from quant_research_platform.contracts.data import (
     ProcessedDataKind,
     ProcessedDataSpec,
 )
+from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.research.datasets.assembler import (
-    assemble_research_dataset,
-)
 from quant_research_platform.research.factors.engine import calculate_factors_for_panel
 from quant_research_platform.research.factors.price_volume.definitions import (
     price_volume_factor_definitions,
@@ -30,7 +28,6 @@ from quant_research_platform.research.factors.price_volume.definitions import (
 from quant_research_platform.research.features.transforms import (
     _mad_winsorize,
     a_share_feature_pipeline,
-    feature_transforms,
 )
 from quant_research_platform.research.models.scaler import ModelMatrixScaler
 from quant_research_platform.research.portfolios.risk import preprocess_risk_styles
@@ -40,8 +37,11 @@ from quant_research_platform.storage.datasets import (
     read_dataset,
     write_dataset,
 )
-from quant_research_platform.storage.layout import StorageLayout
-from tests.helpers.research_specs import make_demo_research_dataset_spec
+from tests.helpers.paths import StorageLayout
+from tests.helpers.research_specs import (
+    assemble_research_dataset,
+    make_demo_research_dataset_spec,
+)
 
 
 @pytest.mark.parametrize("weights", ([1.0, 1.0], [1.0, 3.0]))
@@ -315,7 +315,7 @@ def test_canonical_degeneracy_diagnostics_accumulate_in_native_manifest(
     import quant_research_platform.storage.datasets.writing as writing
 
     monkeypatch.setattr(writing, "DEFAULT_BATCH_ROWS", 37)
-    transforms = feature_transforms(("factor",))
+    transforms = (FeatureTransformSpec("a_share_canonical", ("factor",)),)
     roles = {
         "market_id": ColumnRole.KEY,
         "asset_id": ColumnRole.KEY,
@@ -390,11 +390,9 @@ def test_canonical_degeneracy_diagnostics_accumulate_in_native_manifest(
         processed_catalog=ProcessedDataCatalog((source_spec,)),
         dataset_id=dataset_spec.data_id,
         time_window=TimeWindow("2020-01-01", "2020-01-03"),
-        metadata={"producer_diagnostics": {"existing": "preserved"}},
     )
     result = read_dataset(root)
     diagnostic = inspect_dataset(root).manifest["producer_diagnostics"]
-    assert diagnostic["existing"] == "preserved"
     assert diagnostic["canonical_features"]["mad_zero_by_input"] == {
         "factor": 2,
         "log_float_market_cap": 0,

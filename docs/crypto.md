@@ -359,8 +359,10 @@ derivatives_state.json 加入衍生品状态因子；不做块或参数的笛卡
 | [cross_asset.json](research-rosters/crypto/cross_asset.json) | BTC/ETH/SOL 跨资产上下文及显式迁移选择 | SOL native 归档 |
 | [external_context.json](research-rosters/crypto/external_context.json) | Bybit/OKX 外部价格发现 | 各场所 quotes、trades 归档 |
 
-研究计划必须显式给定各 fold 的 train/validation、唯一锁定 test、初始资金、估值币种和暴露上限；
-不为适应短录制而缩窗，不随机打乱事件行，不用排序掩盖同时间戳顺序歧义。
+各操作只要求自己消费的输入：拟合声明历史窗口与截止时刻，预测声明实际预测窗，
+校准声明样本窗与成熟截止，回测声明资金、执行假设与执行窗。
+需要固定最终评价时，可显式提供 `chronology`；普通独立操作不要求一份完整研究计划。
+不为适应短录制而偷偷缩窗，不随机打乱事件行，不用排序掩盖同时间戳顺序歧义。
 训练资格由成熟标签和拟合截止时间决定。额外隔离间隔若必要，属于显式实验语义，
 不是第二套通用机械purge规则。特征只消费决策时已知事实，未来盘口/成交和未来派生分类不得回填。
 
@@ -368,7 +370,8 @@ derivatives_state.json 加入衍生品状态因子；不做块或参数的笛卡
 直接 `fit` 的 `asset_ids` 明确训练资产，模型 metadata 的 `training_asset_ids` 记录实际训练资产；
 评分按该训练范围核 `validation_axis`：单资产训练范围在成熟验证
 时间序列上计算 Pearson IC，RankIC 明确为 `not_applicable`；多资产训练范围保持横截面轴，
-不会因偶发缺失只剩一资产而改轴。评价/预测时选取的资产范围不决定训练验证轴。
+不会因偶发缺失只剩一资产而改轴。评价/预测时选取的资产范围不决定训练验证轴。模型可以对训练集以外的资产产生显式预测；
+执行范围由 PRED 的实际键与所声明预测资产限制，不把训练资产列表作为下游准入。
 仅有 BTC/ETH 两个有效且无并列的观测时，截面 Pearson IC 和 RankIC 都只能为 ±1，
 其均值等于 `2 × 排序命中率 − 1`；二者不是相互独立的效果证据，也不能区分信号幅度。
 并列或缺失仍按既有有效样本数及零方差规则报告，不用时序指标替换该截面定义。
@@ -379,13 +382,14 @@ derivatives_state.json 加入衍生品状态因子；不做块或参数的笛卡
 模型统计、OOS预测、费用/价差/延迟敏感性与经济账本分别报告。
 概率模型若未来采用，必须检查校准，不能只看准确率。
 
-数据角色只有 train、validation、test，不另设访问阶段。
-每个开发 fold 在 train 内拟合模型并产生 validation 预测，maker calibration 只消费
-该 validation 窗内截至其截止时点已成熟的结果。Crypto 不执行 parameter_candidates 自动搜索。
-开发最后一个 fold 结束后，在其真实 train 与 validation 两个窗口上进行最终 refit；
-两个窗口保持独立，不能用包络补齐中间空白，也不构造重叠或虚假的 fold。
-最终test显式加载保存的真实最终模型、冻结选择和必要maker校准，再独立调用预测、评估、账本和统计。
-禁止用test训练、选模型、调参或重新校准。缺新数据不否定已保存模型本身，但依赖数据的操作仍无法计算。
+`sample_role` 是可选的窗口用途说明，不赋予训练、推断或回测资格。独立预测、评估分别默认 `prediction`、`evaluation`；模型、因子及 A 股组合统计默认
+`exploratory`，均可使用明确的自定义名称。Crypto 经济统计沿用输入账本的用途说明，不另设重复参数。
+walk-forward 每折分别声明拟合窗口、拟合截止、预测窗口和标签成熟截止；同一日期早先用于
+样本外评价，在以后标签成熟后可以进入后续拟合。各折的拟合窗可滚动或扩展，不强套永久三集身份。
+显式冻结最终评价时，仍核实际选择截止、拟合事实和必要校准。重新拟合可以使用新声明且截至
+拟合时刻合法的历史；离散窗口不以包络填平。已查看的测试结果不能再宣称为未参与选型的证据。
+预测使用模型；后续评估、回测和统计直接消费自包含 PRED，不重新打开模型或 trial 文件。
+缺新数据只阻塞真实依赖该数据的操作。
 
 ### 数值缩放与排名模型标定
 
@@ -441,12 +445,13 @@ direction 或压力 proxy 不得被当作收益率使用。
 ### 候选、数量与成本
 
 每次 `backtest_taker` / `backtest_maker` 明确提供
-`inputs`、`panel`、`source`、`asset_id`、`symbol`、`chronology`、`prediction_window`、
+`inputs`、`panel`、`source`、`asset_id`、`symbol`、`prediction_window`、
 `execution_mode`、`capital`、`execution` 与新 `output`；可额外给出 `archive_paths`，
 裸 Parquet 输入还需 `input_spec`。`capital` 保存 `candidate_id`、`initial_capital`、
 `valuation_currency`、`valuation_method`；执行资产限定 Binance BTC/ETH，币种为 USDT，
-估值方法为 `linear_perpetual`。taker 另给 `model` 与 `predictions` 路径；
-校准 maker 另给按价格/proxy 顺序排列的两个 `{model, predictions}` 及 `calibration` 路径，
+估值方法为 `linear_perpetual`。`chronology` 可省略；若显式提供，核其真实冻结边界。
+taker 另给 `predictions` 路径；校准 maker 给按价格/proxy 顺序排列的两个
+`{predictions}` 及 `calibration` 路径，
 固定 maker 使用 `models=[]`、`calibration=null`。
 独立回测与统计不反推 scenario 路径，不自动生成目标名字；报告逐组合列出校准证据，
 不能拿 BTC 的校准产物用于 ETH。
@@ -542,9 +547,9 @@ verification区分显式归档尚未独立核对、官方响应已验证、供�
 
 ### 连续与独立分段执行
 
-正式直接 backtest 仅接受 chronology 锁定 test 内的 `prediction_window`，
-并核最终重新拟合与冻结选择。开发操作产出模型、validation 评估及 maker 校准，
-不自动发布开发组合账本。下文的执行 OOS 指本次合法测试执行窗口。
+直接 backtest 按实际 `prediction_window` 消费持久化预测，要求模型拟合截止早于预测窗。
+显式提供 `chronology` 时，另核锁定评价窗与真实冻结事实；省略时不构造虚假 train/test。
+校准 maker 仍要求全部所选校准截止早于执行开始。下文执行 OOS 指本次声明的样本外执行窗。
 研究窗口由连续 UTC 时点定义，午夜或文件块不是账户重置边界。
 每次 backtest 的 `execution_mode` 选择 `continuous` 或 `independent_segments`；
 比较两种模式时分别调用并指定新输出。evaluate 不接收组合执行配置。
@@ -590,6 +595,10 @@ maker 的 `execution` 提供 `order_quantity`、`max_position`、`maker_fee_bps`
 后两个字段仅供 fixed maker 使用；calibrated maker 按历史净收益选量，填 `null`，
 不保留一份被忽略的固定报价设置。独立 `calibrate_maker` 的 `reference` 明确提供
 `order_quantity`、`latency_ms` 与 `min_calibration_samples`，不从 backtest 配置反推。
+`models` 的每项声明 `fold_id`、`inputs`、`price_predictions`、`proxy_predictions`，裸表可带
+`input_spec`。不提供 `chronology` 时，每项还须给出真实 `window` 与 `cutoff`；
+若提供计划，可从对应 validation 窗得到缺省值，显式值仍须位于计划边界内。
+`cutoff` 决定哪些标签及回放响应已经成熟，不用缺失时钟推断成熟，也不读取模型路径。
 校准使用 TRAIN 拟合后产生、在 VALIDATION 截止前成熟的价格模型和 proxy 预测；
 按买卖方向保留每个样本的成交路径与价格预测残差，包括未成交样本。
 预期收益计算保留成交与残差的联合关系，不把均值相乘代替配对结果。

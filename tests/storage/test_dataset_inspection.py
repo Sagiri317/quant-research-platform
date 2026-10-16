@@ -25,7 +25,6 @@ from tests.storage.low_level_fixtures import (
 @pytest.mark.parametrize(
     ("field", "value"),
     (
-        ("validation_status", "FAIL"),
         ("duplicate_primary_key_count", 1),
         ("null_count_summary", {"market_id": 1}),
         ("non_finite_count_summary", {"value": 1}),
@@ -42,15 +41,10 @@ def test_inspection_recomputes_persisted_summary_instead_of_trusting_manifest(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest[field] = value
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    with pytest.raises(ValueError, match="dataset_manifest_not_consumable"):
-        read_dataset(root)
-    with pytest.raises(ValueError, match="dataset_manifest_not_consumable"):
-        fingerprint_dataset(root)
-    if field == "validation_status":
-        assert inspect_dataset(root).manifest[field] == value
-    else:
-        with pytest.raises(ValueError, match="dataset_manifest_summary_mismatch"):
-            inspect_dataset(root)
+    assert len(read_dataset(root)) == 3
+    assert fingerprint_dataset(root).row_count == 3
+    with pytest.raises(ValueError, match="dataset_manifest_summary_mismatch"):
+        inspect_dataset(root)
 
 
 @pytest.mark.parametrize(
@@ -69,10 +63,8 @@ def test_inspection_rejects_missing_primary_key_null_facts(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["null_count_summary"] = null_count_summary
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    with pytest.raises(ValueError, match="dataset_manifest_not_consumable"):
-        read_dataset(root)
-    with pytest.raises(ValueError, match="dataset_manifest_not_consumable"):
-        fingerprint_dataset(root)
+    assert len(read_dataset(root)) == 3
+    assert fingerprint_dataset(root).row_count == 3
     with pytest.raises(ValueError, match="dataset_manifest_summary_mismatch"):
         inspect_dataset(root)
 
@@ -84,9 +76,7 @@ def test_session_consuming_inspection_does_not_reopen_dataset(
     write_dataset(
         root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
     )
-    session = dataset_reading.open_dataset_session(
-        root, columns=None, time_window=None, require_consumable=False
-    )
+    session = dataset_reading.open_dataset_session(root, columns=None, time_window=None)
     monkeypatch.setattr(
         dataset_inspection,
         "open_dataset_session",

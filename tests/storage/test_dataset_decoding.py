@@ -135,8 +135,7 @@ def test_dataset_file_batches_preserve_output_across_files(
         logical_dtypes=logical_dtype_payload_from_frame(expected[0]),
         parquet_filters=None,
         read_paths=paths,
-        metadata_for=lambda _path: SimpleNamespace(identity=SimpleNamespace()),
-        verify=lambda: None,
+        arrow_schema=batches[paths[0]].schema,
     )
     converted = dataset_reading.iter_dataset_file_batches(context, columns=("value",))
     output = tuple(converted)
@@ -723,7 +722,6 @@ def test_physical_values_cannot_be_reinterpreted_by_forged_logical_dtype(
             Path(native_filesystem_path(manifest_path)).read_text(encoding="utf-8")
         )
         manifest["logical_dtypes"] = logical
-        manifest["logical_dtype_hash"] = canonical_json_hash(logical)
         manifest["file_size_bytes"] = filesystem_stat(part).st_size
         filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
         with pytest.raises(ValueError, match="dataset_logical_dtype_mismatch"):

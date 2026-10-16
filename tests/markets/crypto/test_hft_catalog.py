@@ -12,10 +12,9 @@ from quant_research_platform.markets.implementations.crypto.processed.catalog im
     hft_processed_catalog,
 )
 from quant_research_platform.research.protocols.crypto_hft import (
-    build_hft_model_catalog,
     build_hft_research_dataset_catalog,
 )
-from tests.helpers.research_configuration import research_configuration
+from tests.helpers.research_configuration import model_specs, research_configuration
 
 
 def test_hft_catalog_has_one_panel_factor_label_and_research_path() -> None:
@@ -42,7 +41,7 @@ def test_hft_models_use_generic_specs_with_exact_training_admission_bound() -> N
     config = research_configuration("crypto", "baseline")
     for item in config["models"]:
         item["max_train_rows"] = 100
-    models = build_hft_model_catalog(configuration=config).list()
+    models = model_specs(config["models"])
     assert {model.model_algorithm for model in models} == {
         item["model_algorithm"] for item in config["models"]
     }
@@ -66,7 +65,7 @@ def test_ridge_asset_scopes_share_dimensionless_inputs():
     config = research_configuration("crypto", "baseline")
     for item in config["models"]:
         item["max_train_rows"] = None
-    models = build_hft_model_catalog(configuration=config).list()
+    models = model_specs(config["models"])
     ridge = [model for model in models if model.model_algorithm == "ridge_regression"]
     assert len(ridge) == 5
     for model in ridge:
@@ -86,3 +85,23 @@ def test_ridge_asset_scopes_share_dimensionless_inputs():
     assert dataset.factor_columns == HFT_FACTOR_COLUMNS
     assert len(config["evaluation"]["factors"]) == 14
     assert len(dataset.factor_columns) == 30
+
+
+def test_native_labels_declare_distinct_units_and_maturity_columns():
+    from quant_research_platform.research.protocols.crypto_hft import label_catalog
+
+    spec = hft_processed_catalog().get(HFT_LABEL_DATA_ID)
+    for definition in label_catalog().list():
+        assert (
+            spec.label_availability_columns[definition.output_column]
+            == definition.available_at_column
+        )
+        assert (
+            spec.column_units[definition.output_column]
+            == {
+                "future_mid_return": "decimal_return",
+                "future_mid_direction": "dimensionless",
+                "maker_sell_pressure_proxy": "quantity_ratio",
+            }[definition.family]
+        )
+    assert not set(spec.label_availability_columns.values()) & set(spec.column_units)

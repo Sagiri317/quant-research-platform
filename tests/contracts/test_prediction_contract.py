@@ -5,11 +5,11 @@ from datetime import date
 import pandas as pd
 import pytest
 
-from quant_research_platform.contracts.predictions import (
+from quant_research_platform.contracts.time import (
     PredictionWindow,
+    TimeWindow,
     prediction_window_mask,
 )
-from quant_research_platform.contracts.time import TimeWindow
 
 
 def test_prediction_window_has_no_oos_flags_or_test_aliases():

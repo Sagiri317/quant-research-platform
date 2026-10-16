@@ -1,5 +1,6 @@
 """Evaluate explicit signals against labels observable at the declared cutoff."""
 
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
@@ -9,17 +10,21 @@ import pyarrow as pa
 from quant_research_platform.artifacts.outputs.evaluation import (
     write_evaluation_outputs_from_chunks,
 )
-from quant_research_platform.artifacts.outputs.prediction import read_predictions
+from quant_research_platform.artifacts.outputs.prediction import (
+    prediction_model_metadata,
+    read_predictions,
+)
+from quant_research_platform.contracts.columns import _validate_asset_time_key
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.experiments import (
     label_maturity_mask,
     training_availability_columns,
 )
 from quant_research_platform.contracts.filtering import required_filter_columns
-from quant_research_platform.contracts.json_codec import parse_qrp_json_object
-from quant_research_platform.contracts.models import _strict_config
+from quant_research_platform.contracts.json_codec import _strict_config
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.time import (
+    PredictionWindow,
     TimeWindow,
     time_window_timestamp_interval,
 )
@@ -29,26 +34,32 @@ from quant_research_platform.research.evaluations.engine import (
     build_evaluation_result_from_frames,
 )
 from quant_research_platform.research.features.transforms import (
+    feature_observation_columns,
     model_input_validity_columns,
 )
-from quant_research_platform.research.models.fitting import _read_model_input
-from quant_research_platform.research.models.persisted import load_model
-from quant_research_platform.research.models.trial_selection import read_selection
 from quant_research_platform.research.predictions.outputs import prediction_rows
 from quant_research_platform.storage.atomic import reject_if_exists
+from quant_research_platform.storage.datasets.reading import (
+    _dataset_input_options,
+    iter_dataset_chunks,
+    open_dataset_session,
+)
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 
 
-def _input_roles(config, spec):
-    root = Path(config["inputs"])
-    declared = (
-        config.get("input_spec")
-        if root.is_file()
-        else parse_qrp_json_object((root / "spec.json").read_bytes())
-    )
-    if not isinstance(declared, dict):
-        raise ValueError("parquet_semantic_spec_required")
+def _input_roles(declared, spec, selected_columns):
+    consumed = {
+        *spec.label_columns,
+        *(
+            signal.source_column
+            for signal in spec.signals
+            if signal.source_kind != "prediction"
+        ),
+    }
+    if selected_columns is not None and consumed - set(selected_columns):
+        raise ValueError("evaluation_input_projection_missing")
     roles = declared["column_roles"]
+    _validate_asset_time_key(declared["primary_key"], roles)
     for signal in spec.signals:
         if signal.source_kind != "prediction" and (
             roles.get(signal.source_column) != signal.source_kind
@@ -62,11 +73,12 @@ def evaluate(config):
     """Publish one new numeric evaluation; no training or implicit input resolution."""
     config = _strict_config(
         config,
-        {"inputs", "output", "evaluation", "window", "cutoff", "sample_role"},
-        {"input_spec", "predictions"},
+        {"inputs", "output", "evaluation", "window", "cutoff"},
+        {"input_spec", "predictions", "sample_role"},
     )
     reject_if_exists(Path(config["output"]))
-    if config["sample_role"] not in {"train", "validation", "test"}:
+    config.setdefault("sample_role", "evaluation")
+    if type(config["sample_role"]) is not str or not config["sample_role"].strip():
         raise ValueError("evaluation_sample_role_invalid")
     window = TimeWindow(**config["window"])
     if window.end is None or any(
@@ -77,18 +89,37 @@ def evaluate(config):
     cutoff = strict_timestamp_series(
         pd.Series([config["cutoff"]]), error="evaluation_cutoff_invalid"
     ).iloc[0]
+    source = config["inputs"]
+    if config.get("input_spec") is not None:
+        if isinstance(source, Mapping):
+            raise ValueError("duplicate_input_spec")
+        source = {"path": source, "spec": config["input_spec"]}
+    options = _dataset_input_options(source)
+    selected_columns = options.get("columns")
+    options.setdefault("columns", ("timestamp", "asset_id"))
+    session = open_dataset_session(**options)
+    declared = session.spec
     values = dict(config["evaluation"])
     values["signals"] = tuple(SignalSpec(**item) for item in values["signals"])
     values["label_columns"] = tuple(values["label_columns"])
     supplied_availability = values.get("label_availability_columns", {})
     values["label_availability_columns"] = {
-        label: supplied_availability.get(label, training_availability_columns(label)[0])
+        label: supplied_availability.get(
+            label,
+            declared.get("label_availability_columns", {}).get(
+                label, training_availability_columns(label)[0]
+            ),
+        )
         for label in values["label_columns"]
     }
     if set(supplied_availability) - set(values["label_columns"]):
         raise ValueError("label_availability_columns_invalid")
     spec = EvaluationSpec(**values)
-    _input_roles(config, spec)
+    for label, column in supplied_availability.items():
+        native_column = declared.get("label_availability_columns", {}).get(label)
+        if native_column is not None and native_column != column:
+            raise ValueError("evaluation_label_availability_mismatch")
+    _input_roles(declared, spec, selected_columns)
     prediction_sources = {
         signal.source_column
         for signal in spec.signals
@@ -111,6 +142,13 @@ def evaluate(config):
                 "timestamp",
                 "asset_id",
                 *ordinary,
+                *feature_observation_columns(
+                    tuple(
+                        signal.source_column
+                        for signal in spec.signals
+                        if signal.source_kind == "feature"
+                    )
+                ),
                 *spec.label_columns,
                 *spec.label_availability_columns.values(),
                 *required_filter_columns(spec.filter_mode),
@@ -119,47 +157,23 @@ def evaluate(config):
     )
     predictions = {}
     for column, path in supplied_predictions.items():
-        frame, metadata = read_predictions(Path(path))
-        if metadata["sample_role"] != config["sample_role"]:
-            raise ValueError("evaluation_prediction_sample_role_mismatch")
-        declared = TimeWindow(**metadata["prediction_window"])
-        if declared.end is None:
-            raise ValueError("evaluation_prediction_window_incomplete")
-        declared_start, declared_stop, declared_closed = time_window_timestamp_interval(
-            declared
+        frame, metadata = read_predictions(
+            Path(path),
+            columns=("timestamp", "asset_id", "prediction_score"),
+            time_window=window,
         )
-        if (
-            declared_start > start
-            or declared_stop < stop
-            or (declared_stop == stop and closed and not declared_closed)
-        ):
+        prediction_window = PredictionWindow(**metadata["prediction_window"])
+        if pd.Timestamp(prediction_window.start) > pd.Timestamp(start):
             raise ValueError("evaluation_prediction_window_incomplete")
-        if config["sample_role"] == "test":
-            model, facts = load_model(Path(metadata["model"]))
-            test = facts.get("test_window")
-            if not facts.get("selection") or not test:
-                raise ValueError("test_evaluation_requires_frozen_refit")
-            frozen = read_selection(Path(facts["selection"]))
-            test_start, test_stop, test_closed = time_window_timestamp_interval(
-                TimeWindow(**test)
+        if prediction_window.end is not None:
+            _, declared_stop, declared_closed = time_window_timestamp_interval(
+                prediction_window
             )
-            if (
-                metadata["model_id"] != facts["model"]["model_id"]
-                or model.metadata != metadata["model_metadata"]
-                or metadata["model_id"]
-                not in {item["selected_config_id"] for item in frozen["families"]}
-                or frozen["test_window"] != test
-                or start < test_start
-                or stop > test_stop
-                or (stop == test_stop and closed and not test_closed)
-                or (
-                    cutoff > pd.Timestamp(test_stop)
-                    if test_closed
-                    else cutoff >= pd.Timestamp(test_stop)
-                )
+            if declared_stop < stop or (
+                declared_stop == stop and closed and not declared_closed
             ):
-                raise ValueError("test_evaluation_model_not_selected")
-        model_metadata = metadata["model_metadata"]
+                raise ValueError("evaluation_prediction_window_incomplete")
+        model_metadata = prediction_model_metadata(metadata)
         columns = tuple(
             dict.fromkeys(
                 (
@@ -173,17 +187,7 @@ def evaluate(config):
                 )
             )
         )
-        frame = frame.loc[
-            frame.timestamp.ge(pd.Timestamp(start))
-            & (
-                frame.timestamp.le(pd.Timestamp(stop))
-                if closed
-                else frame.timestamp.lt(pd.Timestamp(stop))
-            )
-        ].copy()
         keys = pd.MultiIndex.from_frame(frame[["timestamp", "asset_id"]])
-        if not keys.is_unique:
-            raise ValueError("evaluation_prediction_duplicate_keys")
         predictions[column] = (
             frame,
             keys,
@@ -196,13 +200,7 @@ def evaluate(config):
         # Acquire the input in its consuming generator. A rejected destination or
         # failed initialization cannot leave an unstarted input session open.
         with closing_iterator(
-            _read_model_input(
-                config["inputs"],
-                columns=columns,
-                input_spec=config.get("input_spec"),
-                time_window=window,
-                chunked=True,
-            )
+            iter_dataset_chunks(session.filtered_view(window).projected_view(columns))
         ) as source:
             for frame in source:
                 if seen.add_table(
@@ -219,7 +217,7 @@ def evaluate(config):
                     metadata,
                 ) in predictions.items():
                     expected = prediction_rows(
-                        frame, metadata["model_metadata"], window
+                        frame, prediction_model_metadata(metadata), window
                     )
                     if metadata.get("asset_ids") is not None:
                         expected = expected.loc[

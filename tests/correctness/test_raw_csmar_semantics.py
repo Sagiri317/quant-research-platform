@@ -19,6 +19,7 @@ from quant_research_platform.storage.identity import (
     native_filesystem_path,
     open_filesystem_file,
 )
+from tests.helpers.source_preparation import prepared_source_evidence
 
 
 def _file_bytes(root: Path) -> dict[Path, bytes]:
@@ -70,9 +71,9 @@ def test_csmar_fixed_projection_preserves_dtypes_duplicates_and_raw(
 ):
 
     from quant_research_platform.storage.datasets import read_dataset
-    from quant_research_platform.storage.layout import StorageLayout
     from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
     from tests.helpers.a_share_raw import _write_csmar
+    from tests.helpers.paths import StorageLayout
 
     raw = tmp_path / "raw"
     filesystem_mkdir(raw)
@@ -161,8 +162,8 @@ def test_analyst_raw_reports_persist_and_feed_institution_consensus(
     )
     from quant_research_platform.storage.datasets.reading import read_dataset
     from quant_research_platform.storage.datasets.writing import write_dataset
-    from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.a_share_raw import _write_csmar
+    from tests.helpers.paths import StorageLayout
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
@@ -261,8 +262,8 @@ def test_analyst_all_excluded_persists_zero_rows_and_counts(tmp_path):
         producer,
     )
     from quant_research_platform.storage.datasets.reading import read_dataset
-    from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.a_share_raw import _write_csmar
+    from tests.helpers.paths import StorageLayout
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
@@ -367,8 +368,8 @@ def test_calendar_direct_boolean_is_not_an_integer(column):
     ),
 )
 def test_invalid_analyst_raw_does_not_publish_candidate(tmp_path, column, value):
-    from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.a_share_raw import _write_csmar
+    from tests.helpers.paths import StorageLayout
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
@@ -407,8 +408,8 @@ def test_invalid_analyst_raw_does_not_publish_candidate(tmp_path, column, value)
     ),
 )
 def test_calendar_raw_rejects_nonintegers_without_publication(tmp_path, column, value):
-    from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.a_share_raw import _write_csmar
+    from tests.helpers.paths import StorageLayout
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
@@ -437,8 +438,8 @@ def test_calendar_raw_rejects_nonintegers_without_publication(tmp_path, column, 
 
 def test_calendar_raw_preserves_integer_codes(tmp_path):
     from quant_research_platform.storage.datasets.reading import read_dataset
-    from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.a_share_raw import _write_csmar
+    from tests.helpers.paths import StorageLayout
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
@@ -523,8 +524,8 @@ def test_after_hours_nulls_follow_known_historical_applicability(
 
 def test_after_hours_materialization_preserves_totals_and_old_good(tmp_path) -> None:
     from quant_research_platform.storage.datasets.reading import read_dataset
-    from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.a_share_raw import _write_csmar
+    from tests.helpers.paths import StorageLayout
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
@@ -681,16 +682,16 @@ def test_raw_export_discovery_contract_keeps_csv_only(
         raw_schemas.inspect_raw_export_file(txt_description)
 
 
-def test_csmar_source_identity_is_selected_content_only(tmp_path: Path) -> None:
+def test_csmar_preparation_evidence_is_selected_content_only(tmp_path: Path) -> None:
     bars = tmp_path / (
-        "csmar__market_bars_1d__all_market_types__full__export-20260605.csv"
+        "csmar__trading_calendar__all_market_types__full__export-20260605.csv"
     )
     unrelated = tmp_path / (
         "csmar__stock_master__all_market_types__full__export-20260605.csv"
     )
     filesystem_write_text(
         bars,
-        ",".join(raw_exports.RAW_TABLE_CONTRACTS["market_bars_1d"].required_columns)
+        ",".join(raw_exports.RAW_TABLE_CONTRACTS["trading_calendar"].required_columns)
         + "\n",
         encoding="utf-8",
     )
@@ -701,14 +702,14 @@ def test_csmar_source_identity_is_selected_content_only(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    first = interim.source_content_identity(tmp_path, "market_bars_1d")
+    first = prepared_source_evidence(interim, tmp_path, "trading_calendar")
     assert first is not None
 
     sidecar = bars.with_suffix(".metadata.json")
     filesystem_write_text(sidecar, "{}", encoding="utf-8")
-    assert interim.source_content_identity(tmp_path, "market_bars_1d") == first
+    assert prepared_source_evidence(interim, tmp_path, "trading_calendar") == first
     filesystem_write_text(sidecar, '{"row_count": 1}', encoding="utf-8")
-    assert interim.source_content_identity(tmp_path, "market_bars_1d") == first
+    assert prepared_source_evidence(interim, tmp_path, "trading_calendar") == first
 
     filesystem_write_text(
         unrelated,
@@ -716,37 +717,37 @@ def test_csmar_source_identity_is_selected_content_only(tmp_path: Path) -> None:
         + "\n# unrelated\n",
         encoding="utf-8",
     )
-    assert interim.source_content_identity(tmp_path, "market_bars_1d") == first
+    assert prepared_source_evidence(interim, tmp_path, "trading_calendar") == first
 
     filesystem_write_text(
         bars,
-        ",".join(raw_exports.RAW_TABLE_CONTRACTS["market_bars_1d"].required_columns)
-        + "\n# changed\n",
+        ",".join(raw_exports.RAW_TABLE_CONTRACTS["trading_calendar"].required_columns)
+        + ",unused\n",
         encoding="utf-8",
     )
-    second = interim.source_content_identity(tmp_path, "market_bars_1d")
+    second = prepared_source_evidence(interim, tmp_path, "trading_calendar")
     assert second is not None
     assert second != first
 
-    renamed = tmp_path / "renamed-market-file.csv"
+    renamed = tmp_path / "renamed-calendar-file.csv"
     filesystem_rename(bars, renamed)
-    assert interim.source_content_identity(tmp_path, "market_bars_1d") == second
+    assert prepared_source_evidence(interim, tmp_path, "trading_calendar") == second
     bars = renamed
 
     shard = tmp_path / (
-        "csmar__market_bars_1d__all_market_types__full__part-01__export-20260605.csv"
+        "csmar__trading_calendar__all_market_types__full__part-01__export-20260605.csv"
     )
     filesystem_write_text(
         shard,
-        ",".join(raw_exports.RAW_TABLE_CONTRACTS["market_bars_1d"].required_columns)
+        ",".join(raw_exports.RAW_TABLE_CONTRACTS["trading_calendar"].required_columns)
         + "\n",
         encoding="utf-8",
     )
-    third = interim.source_content_identity(tmp_path, "market_bars_1d")
+    third = prepared_source_evidence(interim, tmp_path, "trading_calendar")
     assert third is not None
     assert third != second
     filesystem_unlink(shard)
-    assert interim.source_content_identity(tmp_path, "market_bars_1d") == second
+    assert prepared_source_evidence(interim, tmp_path, "trading_calendar") == second
 
 
 def test_csmar_source_identity_uses_only_one_recursive_root(
@@ -769,7 +770,7 @@ def test_csmar_source_identity_uses_only_one_recursive_root(
         encoding="utf-8",
     )
 
-    identity = interim.source_content_identity(primary, "trading_calendar")
+    identity = prepared_source_evidence(interim, primary, "trading_calendar")
     assert identity is not None
     raw_only = primary / "raw_only"
     filesystem_mkdir(raw_only)
@@ -779,17 +780,17 @@ def test_csmar_source_identity_uses_only_one_recursive_root(
         ",".join(columns) + "\n4,2020-01-03,5,C\n",
         encoding="utf-8",
     )
-    assert interim.source_content_identity(primary, "trading_calendar") == identity
+    assert prepared_source_evidence(interim, primary, "trading_calendar") == identity
     filesystem_write_text(
         raw_only_file,
         ",".join(columns) + "\n4,2020-01-04,6,O\n",
         encoding="utf-8",
     )
-    assert interim.source_content_identity(primary, "trading_calendar") == identity
+    assert prepared_source_evidence(interim, primary, "trading_calendar") == identity
     filesystem_unlink(raw_only_file)
-    assert interim.source_content_identity(primary, "trading_calendar") == identity
-    assert interim.source_content_identity(sibling, "trading_calendar") is not None
-    assert interim.source_content_identity(primary, "stock_master") is None
+    assert prepared_source_evidence(interim, primary, "trading_calendar") == identity
+    assert prepared_source_evidence(interim, sibling, "trading_calendar") is not None
+    assert prepared_source_evidence(interim, primary, "stock_master") is None
 
 
 def test_csmar_identity_ignores_unrequested_bad_schema(
@@ -808,7 +809,7 @@ def test_csmar_identity_ignores_unrequested_bad_schema(
     )
     filesystem_write_text(unrelated, "bad,header\n", encoding="utf-8")
 
-    identity = interim.source_content_identity(tmp_path, "trading_calendar")
+    identity = prepared_source_evidence(interim, tmp_path, "trading_calendar")
     assert identity is not None
 
 
@@ -824,7 +825,7 @@ def test_csmar_source_identity_hashes_every_inventory_member(tmp_path):
                 raw / f"csmar__trading_calendar__p{index}__full__export-20260101.csv",
                 payload,
             )
-        actual = interim.source_content_identity(raw, "trading_calendar")
+        actual = prepared_source_evidence(interim, raw, "trading_calendar")
         expected = hashlib.sha256()
         for _ in range(count):
             for value in ("trading_calendar", hashlib.sha256(payload).hexdigest()):
@@ -838,8 +839,8 @@ def test_csmar_materialization_replays_each_dataset_from_one_inventory(
     tmp_path, monkeypatch
 ):
     from quant_research_platform.storage.datasets.reading import read_dataset
-    from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.a_share_raw import _write_csmar
+    from tests.helpers.paths import StorageLayout
 
     raw = tmp_path / "raw"
     for index in range(2):
@@ -990,8 +991,8 @@ def test_csmar_identity_rejects_requested_bad_schema(
     )
     filesystem_write_text(requested, "bad,header\n", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="csmar_raw_export_"):
-        interim.source_content_identity(tmp_path, "trading_calendar")
+    with pytest.raises(ValueError, match="missing CSMAR columns"):
+        prepared_source_evidence(interim, tmp_path, "trading_calendar")
 
 
 @pytest.mark.parametrize("order", ("first_empty", "last_empty", "all_empty"))
@@ -1001,8 +1002,8 @@ def test_analyst_fixed_projection_is_independent_of_empty_chunk_order(
 ):
 
     from quant_research_platform.storage.datasets import read_dataset
-    from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.a_share_raw import _write_csmar
+    from tests.helpers.paths import StorageLayout
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
@@ -1126,8 +1127,8 @@ def test_index_info_retains_supported_rows_and_discloses_exclusions(
     import json
 
     from quant_research_platform.storage.datasets.reading import read_dataset
-    from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.a_share_raw import _write_csmar
+    from tests.helpers.paths import StorageLayout
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
@@ -1233,8 +1234,8 @@ def test_index_info_qualification_keeps_atomic_failure_and_old_good(
     tmp_path, malformed
 ):
     from quant_research_platform.storage.datasets.reading import read_dataset
-    from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.a_share_raw import _write_csmar
+    from tests.helpers.paths import StorageLayout
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
@@ -1300,8 +1301,8 @@ def test_index_info_excluded_required_benchmark_remains_blocked(
         FORMAL_BENCHMARKS,
     )
     from quant_research_platform.storage.datasets.reading import read_dataset
-    from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.a_share_raw import _write_csmar
+    from tests.helpers.paths import StorageLayout
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
@@ -1521,9 +1522,9 @@ def test_csmar_exact_duplicates_and_unordered_chunks_persist_identical_content(
 
     from quant_research_platform.storage.datasets.comparison import compare_datasets
     from quant_research_platform.storage.datasets.reading import read_dataset
-    from quant_research_platform.storage.layout import StorageLayout
     from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
     from tests.helpers.a_share_raw import _write_csmar
+    from tests.helpers.paths import StorageLayout
 
     if data_id == "analyst_forecast":
         source = _analyst_rows()
@@ -1599,8 +1600,8 @@ def test_csmar_exact_duplicates_and_unordered_chunks_persist_identical_content(
 
 @pytest.mark.parametrize("chunksize", (1, 2))
 def test_csmar_conflicting_duplicate_keeps_prior_published_dataset(tmp_path, chunksize):
-    from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.a_share_raw import _write_csmar
+    from tests.helpers.paths import StorageLayout
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
@@ -1629,7 +1630,7 @@ def test_csmar_conflicting_duplicate_keeps_prior_published_dataset(tmp_path, chu
 
 
 @pytest.mark.parametrize("primary_type", (MemoryError, OSError, KeyboardInterrupt))
-def test_csmar_inspection_keeps_fatal_source_failure(
+def test_csmar_preparation_keeps_fatal_source_failure(
     tmp_path, monkeypatch, primary_type
 ):
     path = tmp_path / "native-calendar.csv"
@@ -1641,9 +1642,9 @@ def test_csmar_inspection_keeps_fatal_source_failure(
     def fail(*args, **kwargs):
         raise primary
 
-    monkeypatch.setattr(raw_exports, "inspect_raw_export_file", fail)
+    monkeypatch.setattr(raw_schemas, "open_filesystem_file", fail)
     with pytest.raises(primary_type) as caught:
-        interim.source_content_identity(tmp_path, "trading_calendar")
+        prepared_source_evidence(interim, tmp_path, "trading_calendar")
     assert caught.value is primary
 
 
@@ -1701,8 +1702,8 @@ def test_index_membership_raw_text_survives_public_materialization(
     tmp_path, chunksize, bad_numeric
 ):
     from quant_research_platform.storage.datasets.reading import read_dataset
-    from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.a_share_raw import _write_csmar
+    from tests.helpers.paths import StorageLayout
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
@@ -1769,8 +1770,8 @@ def test_index_membership_preserves_native_codes_and_venue_type_identity(
     tmp_path, chunksize
 ):
     from quant_research_platform.storage.datasets.reading import read_dataset
-    from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.a_share_raw import _write_csmar
+    from tests.helpers.paths import StorageLayout
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
@@ -1853,7 +1854,7 @@ def test_index_membership_identity_uses_normalized_provider_types(kind):
 def test_csmar_parent_failure_keeps_workflow_semantics(
     tmp_path, monkeypatch, failure_type
 ):
-    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.paths import StorageLayout
 
     raw = tmp_path / "raw/csmar"
     filesystem_mkdir(raw, parents=True)
@@ -1933,8 +1934,8 @@ def test_adjusted_open_preserves_units_through_storage_and_labels(
         add_forward_return_labels,
     )
     from quant_research_platform.storage.datasets.reading import read_dataset
-    from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.a_share_raw import _write_csmar
+    from tests.helpers.paths import StorageLayout
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
@@ -2140,8 +2141,8 @@ def test_controlled_csmar_numeric_reasons_survive_workflow_sanitizer():
 def test_csmar_date_reason_survives_research_run_record_and_report(tmp_path):
 
     from quant_research_platform.sources.csmar.field_mappings import COLUMN_MAPPINGS
-    from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.a_share_raw import _write_csmar
+    from tests.helpers.paths import StorageLayout
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
@@ -2213,8 +2214,8 @@ def test_index_source_null_numeric_values_persist_without_claiming_complete_weig
         iter_benchmark_weight_snapshots,
     )
     from quant_research_platform.storage.datasets.reading import read_dataset
-    from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.a_share_raw import _write_csmar
+    from tests.helpers.paths import StorageLayout
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
@@ -2332,8 +2333,8 @@ def test_csv_strict_grammar_matches_standard_parser(tmp_path, payload, expected)
 
 def test_malformed_quoted_numeric_cannot_publish_over_old_good(tmp_path):
     from quant_research_platform.storage.datasets.reading import read_dataset
-    from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.a_share_raw import _write_csmar
+    from tests.helpers.paths import StorageLayout
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
@@ -2418,7 +2419,7 @@ def test_cr_only_physical_fragments_preserve_interim_rows(
     tmp_path, real_csv_handles, case, count, endings, terminated
 ):
     from quant_research_platform.storage.datasets.reading import read_dataset
-    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.paths import StorageLayout
 
     header, rows = _short_analyst_csv_records(count)
     records = [header, *(",".join(row).encode() for row in rows)]
@@ -2461,7 +2462,7 @@ def test_cr_only_physical_fragments_preserve_interim_rows(
     keys = ["source_asset_id", "timestamp", "report_id", "forecast_end_date"]
     expected = expected.sort_values(keys).reset_index(drop=True)
     assert raw_schemas.read_export_header(path) == tuple(header.decode().split(","))
-    identity = interim.source_content_identity(raw_root, "analyst_forecast")
+    identity = prepared_source_evidence(interim, raw_root, "analyst_forecast")
     assert identity is not None
     result = interim.materialize_interim_data(
         output_roots={
@@ -2475,14 +2476,14 @@ def test_cr_only_physical_fragments_preserve_interim_rows(
     pd.testing.assert_frame_equal(
         saved.sort_values(keys).reset_index(drop=True), expected, check_exact=True
     )
-    assert interim.source_content_identity(raw_root, "analyst_forecast") == identity
+    assert prepared_source_evidence(interim, raw_root, "analyst_forecast") == identity
     assert Path(native_filesystem_path(path)).read_bytes() == payload
 
 
 @pytest.mark.parametrize("ending", (b"\n", b"\r"))
 def test_long_record_after_short_header_can_publish(tmp_path, real_csv_handles, ending):
     from quant_research_platform.storage.datasets import read_dataset
-    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.paths import StorageLayout
 
     header, rows = _short_analyst_csv_records(1)
     row = rows[0]
@@ -2498,7 +2499,7 @@ def test_long_record_after_short_header_can_publish(tmp_path, real_csv_handles, 
     target = layout.interim_data_root("csmar", "analyst_forecast")
     assert not filesystem_exists(target)
     assert raw_schemas.read_export_header(path) == tuple(header.decode().split(","))
-    assert interim.source_content_identity(raw_root, "analyst_forecast") is not None
+    assert prepared_source_evidence(interim, raw_root, "analyst_forecast") is not None
     interim.materialize_interim_data(
         output_roots={
             key: layout.interim_data_root("csmar", key) for key in ("analyst_forecast",)
@@ -2576,7 +2577,7 @@ def test_index_info_projects_extra_text_and_persists_optional_columns(
 ):
     from quant_research_platform.sources.csmar.field_mappings import COLUMN_MAPPINGS
     from quant_research_platform.storage.datasets import read_dataset
-    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.paths import StorageLayout
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
@@ -2650,8 +2651,8 @@ def test_complete_chain_index_info_fixture_has_native_price_and_return_identitie
         FORMAL_BENCHMARKS,
     )
     from quant_research_platform.storage.datasets.reading import read_dataset
-    from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers import a_share_raw
+    from tests.helpers.paths import StorageLayout
 
     layout = StorageLayout(tmp_path)
     writer = a_share_raw._write_csmar

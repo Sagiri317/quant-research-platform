@@ -34,6 +34,10 @@ from quant_research_platform.contracts.filtering import (
 from quant_research_platform.contracts.time import time_value_isoformat
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
+from quant_research_platform.research.features.transforms import (
+    feature_observation_columns,
+    mask_unobserved_features,
+)
 from quant_research_platform.research.signals.normalization import (
     normalize_signal_frame,
 )
@@ -476,9 +480,9 @@ def _iter_single_asset_time_series_output_chunks(
                 str(column) for column in filter_metadata["filter_columns_used"]
             )
             filter_definition_value = str(filter_metadata["filter_definition"])
-            if filtered.empty:
+            if filter_metadata["timestamps"].empty:
                 continue
-            assets = filtered[asset_column]
+            assets = filter_metadata["asset_ids"]
             unique_assets = assets.drop_duplicates()
             if len(unique_assets) != 1 or bool(assets.isna().any()):
                 raise ValueError(
@@ -492,7 +496,8 @@ def _iter_single_asset_time_series_output_chunks(
                     "single_asset_time_series_evaluation_requires_one_asset"
                 )
             timestamps = strict_timestamp_series(
-                filtered["timestamp"], error="invalid_evaluation_timestamp_values"
+                filter_metadata["timestamps"],
+                error="invalid_evaluation_timestamp_values",
             )
             if bool(timestamps.duplicated().any()):
                 raise ValueError(
@@ -625,7 +630,7 @@ def _evaluate_filtered_frame(
     label_columns = spec.label_columns
     n_groups = spec.n_groups
     timestamps = strict_timestamp_series(
-        filtered["timestamp"], error="invalid_evaluation_timestamp_values"
+        filter_metadata["timestamps"], error="invalid_evaluation_timestamp_values"
     )
     timestamp_count = int(timestamps.nunique())
     skipped_timestamps: set[pd.Timestamp] = set()
@@ -638,6 +643,33 @@ def _evaluate_filtered_frame(
     metrics, grouped = compute_ic_and_grouped_label_values(
         filtered.loc[:, list(columns)], compute_spec, n_groups=n_groups
     )
+    absent = timestamps.drop_duplicates().loc[
+        ~timestamps.drop_duplicates().isin(metrics.timestamp)
+    ]
+    if not absent.empty:
+        missing = pd.DataFrame.from_records(
+            [
+                {
+                    "timestamp": timestamp,
+                    "signal": signal,
+                    "label": label,
+                    "ic": np.nan,
+                    "rankic": np.nan,
+                    "n_obs": 0,
+                    "ic_reason": "insufficient_observations",
+                    "rankic_reason": "insufficient_observations",
+                }
+                for timestamp in absent
+                for signal in signal_columns
+                for label in label_columns
+            ],
+            columns=EVALUATION_METRICS_COLUMNS,
+        ).astype(metrics.dtypes.to_dict())
+        metrics = (
+            pd.concat([metrics, missing], ignore_index=True)
+            .sort_values(["timestamp", "signal", "label"], kind="stable")
+            .reset_index(drop=True)
+        )
     n_obs = strict_non_negative_count_series(metrics["n_obs"])
     skipped_timestamps.update(
         pd.Timestamp(value)
@@ -676,6 +708,11 @@ def _iter_evaluation_work_frames(
     from quant_research_platform.research.filtering import apply_filter_mode
 
     label_columns = spec.label_columns
+    feature_columns = tuple(
+        signal.source_column
+        for signal in spec.signals
+        if signal.source_kind == "feature"
+    )
     required = {
         "timestamp",
         asset_column,
@@ -689,6 +726,7 @@ def _iter_evaluation_work_frames(
                 asset_column,
                 *(signal.source_column for signal in spec.signals),
                 *label_columns,
+                *feature_observation_columns(feature_columns),
                 *required_filter_columns(spec.filter_mode),
             )
         )
@@ -706,8 +744,10 @@ def _iter_evaluation_work_frames(
             filtered, filter_metadata = apply_filter_mode(
                 projected, mode=spec.filter_mode, metadata_key="filter_mode"
             )
+            filter_metadata["timestamps"] = projected.timestamp
+            filter_metadata["asset_ids"] = projected[asset_column]
             normalized = normalize_signal_frame(
-                filtered,
+                mask_unobserved_features(filtered, feature_columns),
                 signals=spec.signals,
                 timestamp_column="timestamp",
                 source_columns_by_kind=source_columns_by_kind,

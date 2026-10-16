@@ -9,9 +9,14 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
 from quant_research_platform.contracts.validation import (
     strict_finite_float,
     strict_real_numeric_series,
+)
+from quant_research_platform.research.features.transforms import _mad_winsorize
+from quant_research_platform.research.portfolios.optimizer import (
+    _project_neutral_target,
 )
 
 TargetMethod = Literal["equal_weight", "float_cap_weight"]
@@ -27,6 +32,8 @@ def build_simple_target_weights(
     top_quantile: float = 0.2,
     bottom_quantile: float = 0.2,
     float_market_cap: pd.Series | None = None,
+    neutrality: Literal["none", "industry", "size", "industry_size"] = "none",
+    industry: pd.Series | None = None,
 ) -> pd.Series:
     """Build one target from current eligible signal and capitalization facts."""
 
@@ -47,8 +54,16 @@ def build_simple_target_weights(
     )
     if portfolio_mode == "long_short" and top_quantile + bottom_quantile > 1.0:
         raise ValueError("target_quantiles_invalid")
+    context = None
+    if neutrality != "none":
+        if portfolio_mode != "long_only":
+            raise ValueError("target_neutrality_requires_long_only")
+        context = _neutrality_context(
+            eligibility, float_market_cap, industry, neutrality
+        )
+        eligibility = eligibility & eligibility.index.isin(context.index)
     valid = eligibility & values.notna() & np.isfinite(values)
-    if bool((eligibility & ~valid).any()):
+    if context is None and bool((eligibility & ~valid).any()):
         raise ValueError("target_signal_invalid")
     if int(valid.sum()) == 0:
         raise ValueError("target_selection_unavailable")
@@ -92,7 +107,7 @@ def build_simple_target_weights(
         or not np.isclose(result.abs().sum(), 1.0)
     ):
         raise ValueError("target_weights_invalid")
-    return result
+    return _project_neutral_target(result, context) if context is not None else result
 
 
 def _canonical_assets(signal: pd.Series, eligible: pd.Series) -> pd.Index:
@@ -198,3 +213,47 @@ def _validate_quantile(value: float, error: str) -> float:
     if not 0.0 < numeric <= 1.0:
         raise ValueError(error)
     return numeric
+
+
+def _neutrality_context(eligible, float_market_cap, industry, neutrality):
+    """Use the full lawful benchmark domain, including assets without scores."""
+    if type(neutrality) is not str or neutrality not in {
+        "industry",
+        "size",
+        "industry_size",
+    }:
+        raise ValueError("target_neutrality_invalid")
+    assets = eligible.index
+    if (
+        not isinstance(float_market_cap, pd.Series)
+        or not float_market_cap.index.is_unique
+    ):
+        raise ValueError("target_float_market_cap_required")
+    capitals = _numeric_series(
+        float_market_cap, assets, "target_float_market_cap_invalid"
+    )
+    domain = eligible & capitals.gt(0) & np.isfinite(capitals)
+    if neutrality in {"industry", "industry_size"}:
+        if not isinstance(industry, pd.Series) or not industry.index.is_unique:
+            raise ValueError("target_industry_required")
+        industry = industry.reindex(assets)
+        if any(type(value) is not str or not value for value in industry.dropna()):
+            raise ValueError("target_industry_invalid")
+        domain &= industry.notna()
+    capitals = capitals.loc[domain]
+    if capitals.empty:
+        raise PortfolioTargetBlocked("target_neutrality_benchmark_empty")
+    exact = [Fraction(float(value)) for value in capitals]
+    total = sum(exact)
+    context = pd.DataFrame(
+        {"benchmark_weight": [float(value / total) for value in exact]},
+        index=capitals.index,
+    )
+    if neutrality in {"industry", "industry_size"}:
+        codes = industry.reindex(context.index)
+        for code in sorted(codes.unique()):
+            context[f"industry:{code}"] = codes.eq(code).astype(float)
+    if neutrality in {"size", "industry_size"}:
+        size = np.log(capitals)
+        context["size"] = _mad_winsorize(size, {0: np.arange(len(size))})
+    return context

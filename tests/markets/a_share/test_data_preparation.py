@@ -183,7 +183,7 @@ def test_market_model_keeps_only_known_closed_history_and_aligned_returns(
     pending = Fraction(1)
     expected_beta = expected_volatility = np.nan
     for timestamp, cross in panel.groupby("timestamp", sort=False):
-        eligible = cross.loc[a_share_eligibility(cross, "pv_expanded")]
+        eligible = cross.loc[a_share_eligibility(cross, "a_share_all")]
         denominator = sum(previous_caps.get(asset, 0.0) for asset in eligible.asset_id)
         market = (
             sum(
@@ -275,7 +275,7 @@ def test_listing_age_keeps_prior_market_sessions_in_native_narrow_panel(
     assert moved_asset.market_type.tolist() == [1, 1, 4, 4]
     assert moved_asset.listing_age_trading_days.tolist() == [253, 254, 255, 256]
     assert str(moved_asset.listing_age_trading_days.dtype) == "Int64"
-    assert a_share_eligibility(moved_asset, "pv_all").all()
+    assert a_share_eligibility(moved_asset, "a_share_all").all()
     assert not saved.duplicated(["market_id", "asset_id", "timestamp"]).any()
 
 

@@ -13,6 +13,7 @@ from itertools import chain, islice
 
 import pandas as pd
 
+from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.time import TimeWindow, is_datetime_window
 from quant_research_platform.markets.implementations.crypto.hft import (
     HFT_GRID_MS,
@@ -43,6 +44,7 @@ from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
 from quant_research_platform.sources.binance import ids as binance_ids
 from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
+    _dataset_input_options,
     iter_dataset_chunks,
     open_dataset_session,
 )
@@ -188,13 +190,17 @@ def produce_hft_processed_data(
             root = inputs[input_id]
             parameters = json.loads(spec.parameters_json)
             if spec.data_id == HFT_LABEL_DATA_ID:
-                horizons = tuple(
-                    sorted({item["horizon"] for item in parameters["labels"]})
-                )
                 definitions = tuple(
-                    item for item in label_catalog().list() if item.horizon in horizons
+                    item
+                    for item in label_catalog().list()
+                    if item.output_column in spec.required_columns
                 )
-                transform = partial(iter_label_frames, horizons_ms=horizons)
+                horizons = tuple(sorted({item.horizon for item in definitions}))
+                transform = partial(
+                    iter_label_frames,
+                    horizons_ms=horizons,
+                    columns=tuple(item.output_column for item in definitions),
+                )
                 computation_window = _computation_window(
                     time_window, future_ms=max(horizons)
                 )
@@ -246,9 +252,14 @@ def produce_hft_processed_data(
                     )
                 )
             )
+            options = _dataset_input_options(root)
+            if options.get("columns") is not None and not set(inputs).difference(
+                {"market_id", "asset_id", "timestamp", "segment_id"}
+            ) <= set(options["columns"]):
+                raise ValueError("data_operation_input_columns_missing")
             session = open_dataset_session(
-                root, columns=inputs, time_window=computation_window
-            )
+                **{**options, "columns": inputs}
+            ).filtered_view(computation_window)
             metadata["inputs"] = {input_id: str(session.root)}
             data = _panel_frame_producer(
                 session,
@@ -451,10 +462,21 @@ def produce_derivative_processed_data(
     root = inputs[HFT_PANEL_DATA_ID]
     with ExitStack() as readers:
         archive = readers.enter_context(open_archive(raw_root))
-        session = open_dataset_session(
-            root,
-            columns=None,
-            time_window=_computation_window(
+        options = _dataset_input_options(root)
+        if options.get("columns") is not None:
+            options["columns"] = tuple(
+                dict.fromkeys(
+                    (
+                        "market_id",
+                        "asset_id",
+                        "timestamp",
+                        "segment_id",
+                        *options["columns"],
+                    )
+                )
+            )
+        session = open_dataset_session(**options).filtered_view(
+            _computation_window(
                 time_window,
                 history_ms=max(
                     300_000,
@@ -515,14 +537,23 @@ def produce_spot_perp_context(
     sessions = {}
     for data_id in (HFT_PANEL_DATA_ID, HFT_SPOT_PANEL_DATA_ID):
         root = inputs[data_id]
-        sessions[data_id] = open_dataset_session(
-            root,
-            columns=None,
-            time_window=(
-                _computation_window(time_window, history_ms=500)
-                if data_id == HFT_PANEL_DATA_ID
-                else TimeWindow(_EPOCH, time_window.end)
-            ),
+        options = _dataset_input_options(root)
+        if options.get("columns") is not None:
+            options["columns"] = tuple(
+                dict.fromkeys(
+                    (
+                        "market_id",
+                        "asset_id",
+                        "timestamp",
+                        "segment_id",
+                        *options["columns"],
+                    )
+                )
+            )
+        sessions[data_id] = open_dataset_session(**options).filtered_view(
+            _computation_window(time_window, history_ms=500)
+            if data_id == HFT_PANEL_DATA_ID
+            else TimeWindow(_EPOCH, time_window.end)
         )
     metadata = {
         "inputs": {key: str(session.root) for key, session in sessions.items()},
@@ -645,9 +676,16 @@ def produce_information_panel(
     identities = {}
     for data_id in spec.processed_input_data_ids:
         root = inputs[data_id]
+        options = _dataset_input_options(root)
+        if options.get("columns") is not None and not set(
+            spec.required_columns
+        ).difference({"market_id", "asset_id", "timestamp", "segment_id"}) <= set(
+            options["columns"]
+        ):
+            raise ValueError("data_operation_input_columns_missing")
         session = open_dataset_session(
-            root, columns=spec.required_columns, time_window=time_window
-        )
+            **{**options, "columns": spec.required_columns}
+        ).filtered_view(time_window)
         sessions.append(session)
         identities[data_id] = str(session.root)
     batch_rows = DEFAULT_BATCH_ROWS
@@ -672,14 +710,15 @@ def produce_cross_asset_context(
     sessions = {}
     for data_id in spec.processed_input_data_ids:
         root = inputs[data_id]
-        sessions[data_id] = open_dataset_session(
-            root,
-            columns=None,
-            time_window=(
-                time_window
-                if data_id == target_id
-                else TimeWindow(_EPOCH, time_window.end)
-            ),
+        options = _dataset_input_options(root)
+        if options.get("columns") is not None:
+            options["columns"] = tuple(
+                dict.fromkeys(
+                    ("market_id", "asset_id", "timestamp", *options["columns"])
+                )
+            )
+        sessions[data_id] = open_dataset_session(**options).filtered_view(
+            time_window if data_id == target_id else TimeWindow(_EPOCH, time_window.end)
         )
     metadata = {
         "inputs": {key: str(session.root) for key, session in sessions.items()},
@@ -743,7 +782,6 @@ def produce_normalized_context(
     source_catalog,
     raw_root,
     read_records,
-    source_identity,
     source_schema_id,
     archives,
 ):
@@ -758,14 +796,24 @@ def produce_normalized_context(
     # Stale observed clocks remain meaningful after factor freshness expires.
     # Keep the source prefix, including prior-day observations and native units.
     source_window = TimeWindow(_EPOCH, time_window.end)
-    session = open_dataset_session(root, columns=None, time_window=computation_window)
+    options = _dataset_input_options(root)
+    if options.get("columns") is not None:
+        options["columns"] = tuple(
+            dict.fromkeys(
+                (
+                    "market_id",
+                    "asset_id",
+                    "timestamp",
+                    "segment_id",
+                    *options["columns"],
+                )
+            )
+        )
+    session = open_dataset_session(**options).filtered_view(computation_window)
     metadata = {
         "source_evidence": {
             "schema_id": source_schema_id,
             "artifact_id": spec.data_id,
-            "manifest_hash": source_identity(
-                raw_root, spec.data_id, time_window=source_window
-            ),
         },
         "inputs": {HFT_PANEL_DATA_ID: str(session.root)},
         "producer_diagnostics": {
@@ -786,28 +834,59 @@ def produce_normalized_context(
             return
         asset = first["asset_id"].iloc[0]
         symbol = parameters["symbols"][asset]
-        paths = archives[symbol]
         yield from iter_external_context_frames(
             chain((first,), frames),
-            quotes=read_records(
-                raw_root, archive_paths=paths["quotes"], time_window=source_window
-            ),
-            trades=read_records(
-                raw_root, archive_paths=paths["trades"], time_window=source_window
-            ),
+            quotes=sources[symbol]["quotes"],
+            trades=sources[symbol]["trades"],
             venue=parameters["venue"],
             base_units_per_amount=parameters["base_units_per_amount"][asset],
             max_age_ms=parameters["max_age_ms"],
             input_delay_ms=parameters.get("input_delay_ms", 0),
         )
 
-    data = _panel_frame_producer(
-        session,
-        transform=transform,
-        columns=spec.required_columns,
-        asset_ids=("btc_usdt", "eth_usdt"),
-    )
+    identities = {
+        symbol: {kind: [] for kind in kinds} for symbol, kinds in archives.items()
+    }
+    with closing_iterator(ExitStack()) as readers:
+        sources = {
+            symbol: {
+                kind: readers.enter_context(
+                    closing_iterator(
+                        read_records(
+                            raw_root,
+                            archive_paths=paths,
+                            time_window=source_window,
+                            expected_scope=(
+                                EXTERNAL_INSTRUMENTS[parameters["venue"]]["exchange"],
+                                symbol,
+                                kind,
+                            ),
+                            on_verified=identities[symbol][kind].append,
+                        )
+                    )
+                )
+                for kind, paths in kinds.items()
+            }
+            for symbol, kinds in archives.items()
+        }
 
-    data = _output_frames(data, time_window)
-    with closing_iterator(data):
-        yield (data, metadata)
+        def frames():
+            data = _panel_frame_producer(
+                session,
+                transform=transform,
+                columns=spec.required_columns,
+                asset_ids=("btc_usdt", "eth_usdt"),
+            )
+            with closing_iterator(_output_frames(data, time_window)) as output:
+                yield from output
+            # A declared source is required even when its target PANEL is empty.
+            for kinds in sources.values():
+                for records in kinds.values():
+                    for _ in records:
+                        pass
+            metadata["source_evidence"]["manifest_hash"] = canonical_json_hash(
+                identities
+            )
+
+        with closing_iterator(frames()) as data:
+            yield (data, metadata)

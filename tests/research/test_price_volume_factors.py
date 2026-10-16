@@ -1004,7 +1004,7 @@ def test_trend_efficiency_extreme_normal_price_path_persists_finite_ratio(tmp_pa
             if key in calculated.columns
         },
     )
-    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.paths import StorageLayout
 
     root = StorageLayout(tmp_path).processed_data_root(
         spec.market_id, spec.kind, spec.data_id
@@ -1048,8 +1048,8 @@ def test_amplitude_extreme_representable_mean_persists(tmp_path, single_extreme)
     from dataclasses import replace
 
     from quant_research_platform.storage.datasets import read_dataset, write_dataset
-    from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.a_share_catalogs import scientific_catalogs
+    from tests.helpers.paths import StorageLayout
 
     frame = pd.DataFrame(
         {
@@ -1096,8 +1096,8 @@ def test_amplitude_extreme_representable_mean_persists(tmp_path, single_extreme)
 def test_market_model_extreme_positive_prices_persist_usable_risk_styles(tmp_path):
     from quant_research_platform.research.portfolios.risk import FactorRiskState
     from quant_research_platform.storage.datasets import read_dataset, write_dataset
-    from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.a_share_catalogs import scientific_catalogs
+    from tests.helpers.paths import StorageLayout
 
     dates = pd.bdate_range("2020-01-02", periods=312).as_unit("ns")
     prices = np.empty(312)
@@ -1257,7 +1257,7 @@ def test_coefficient_of_variation_keeps_exact_center_and_ratio(
             name: role for name, role in base.column_roles.items() if name in result
         },
     )
-    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.paths import StorageLayout
 
     root = StorageLayout(tmp_path).processed_data_root(
         spec.market_id, spec.kind, spec.data_id
@@ -1335,3 +1335,37 @@ def test_shock_and_log_preserve_exact_positive_window_mean(scale, positive_count
         context.prec = 100
         log_mean = float((Decimal(center.numerator) / Decimal(center.denominator)).ln())
     assert actual.log_avg_amount_20d.iloc[19] == pytest.approx(log_mean, abs=1e-12)
+
+
+def test_prefix_mean_factors_do_not_materialize_sliding_windows(monkeypatch):
+    from quant_research_platform.research.factors.price_volume import calculations
+
+    values = np.arange(1.0, 351.0)
+    values[100] = np.nan
+    frame = pd.DataFrame(
+        {
+            "asset_id": "a",
+            "timestamp": pd.bdate_range("2020-01-01", periods=len(values)),
+            "amount": values,
+            "turnover": values,
+        }
+    )
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("mean factors must not scan dense sliding windows")
+
+    monkeypatch.setattr(calculations, "sliding_window_view", unexpected)
+    result = calculations.calculate_price_volume_factors(
+        frame,
+        factor_columns=(
+            "avg_amount_20d",
+            "avg_amount_126d",
+            "amount_shock_20d",
+            "turnover_250d",
+            "abnormal_turnover_20_250",
+        ),
+    )
+    assert pd.isna(result.loc[119, "avg_amount_20d"])
+    assert result.loc[120, "avg_amount_20d"] == 111.5
+    assert pd.isna(result.loc[120, "amount_shock_20d"])
+    assert result.loc[121, "amount_shock_20d"] == (122.0 - 111.5) / 111.5

@@ -11,7 +11,6 @@ from quant_research_platform.artifacts.outputs.manifest import (
     validate_output_manifest,
 )
 from quant_research_platform.artifacts.outputs.prediction import (
-    read_prediction_output_bundle,
     read_predictions,
     write_prediction_outputs,
 )
@@ -49,7 +48,7 @@ def test_manifest_actual_model_and_paths(tmp_path):
             {"start": "2014-01-03", "end": "2014-01-03", "extra": True},
         ),
         ("effective_prediction_end", "NaT"),
-        ("sample_role", "development"),
+        ("sample_role", ""),
         ("prediction_rows", True),
     ],
 )
@@ -71,8 +70,8 @@ def test_metadata_rejected_before_publish_and_after_read(tmp_path, field, value)
 @pytest.mark.parametrize("key", ["Authorization", "auth", "private_key"])
 def test_manifest_rejects_credentials(tmp_path, key):
     _, frame, metadata = native_bundle(tmp_path)
-    metadata["model_metadata"]["hyperparameters"][key] = "secret-value"
-    metadata["model_metadata"]["resolved_hyperparameters"][key] = "secret-value"
+    metadata["model_facts"]["model"]["hyperparameters"][key] = "secret-value"
+    metadata["model_facts"]["candidate_parameters"][key] = "secret-value"
     with pytest.raises(ValueError):
         output_manifest_payload(
             definition_id="prediction_outputs",
@@ -136,8 +135,7 @@ def test_timestamp_normalization_and_readback(tmp_path, kind):
     root = write_prediction_outputs(
         output_path=tmp_path / "pred", output_chunks=[frame], metadata=metadata
     )
-    _, lookup = read_prediction_output_bundle(root)
-    assert lookup.row_count == 1
+    assert len(read_predictions(root)[0]) == 1
     pd.testing.assert_frame_equal(frame, before)
 
 

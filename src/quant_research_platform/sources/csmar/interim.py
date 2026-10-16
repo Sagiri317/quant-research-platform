@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import stat
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
-from itertools import chain, groupby
+from itertools import groupby
 from pathlib import Path
 
 import numpy as np
@@ -37,7 +38,6 @@ from quant_research_platform.sources.csmar.ids import SOURCE_ID, market_bars_dat
 from quant_research_platform.sources.csmar.raw_exports import (
     INDEX_INFO_SOURCE_CODE_COLUMNS,
     INDEX_INFO_SOURCE_CODE_ENUMS,
-    _iter_dataset_file_identities,
     dataset_files_with_identity_by_id,
     iter_private_export_chunks,
 )
@@ -45,8 +45,6 @@ from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
-    content_hash_for_files,
-    filesystem_exists,
     filesystem_stat,
     require_unaliased_path,
 )
@@ -340,33 +338,6 @@ def interim_specs() -> tuple[InterimDataSpec, ...]:
 
 def interim_catalog() -> InterimDataCatalog:
     return InterimDataCatalog(interim_specs())
-
-
-def source_content_identity(raw_root: Path, data_id: str) -> str | None:
-    """Return the provider-validated raw content identity for one target."""
-
-    root = require_unaliased_path(
-        Path(raw_root),
-        error="csmar_raw_export_identity_changed",
-    )
-    if not filesystem_exists(root):
-        return None
-    index = ExactPrimaryKeyIndex(
-        primary_key=("dataset_path",),
-    )
-    records_iterator = dataset_files_with_identity_by_id(
-        root, identity_index=index, requested_datasets=(data_id,)
-    )
-    with closing_iterator(records_iterator):
-        for record in records_iterator:
-            del record
-    if not index.identity_payload_count(namespace="csmar-dataset-paths"):
-        return None
-    identity = content_hash_for_files(
-        _iter_dataset_file_identities(root, index, data_id=data_id),
-        error="csmar_raw_export_identity_changed",
-    )
-    return identity
 
 
 def normalize_raw_frame(
@@ -963,49 +934,6 @@ def filter_by_source_date_range(
     return frame[mask].copy()
 
 
-def _iter_interim_frames(
-    *,
-    data_id: str,
-    input_files: Iterable[Path | tuple[Path, DatasetFileIdentity]],
-    start_date: str | None,
-    end_date: str | None,
-    chunksize: int,
-    source_row_counts: dict[str, int] | None = None,
-    producer_diagnostics: dict[str, object] | None = None,
-) -> Iterator[object]:
-    def activate() -> Iterator[object]:
-        inputs = iter(input_files)
-        with closing_iterator(inputs):
-            try:
-                first_input = next(inputs)
-            except StopIteration:
-                first_input = None
-            if first_input is not None:
-                prepared_inputs = _iter_source_inputs(first_input, inputs)
-                spec = interim_catalog().get(data_id)
-                index = ExactPrimaryKeyIndex(
-                    primary_key=spec.primary_key,
-                )
-                frames = _iter_normalized_interim_frames(
-                    data_id=data_id,
-                    input_files=prepared_inputs,
-                    start_date=start_date,
-                    end_date=end_date,
-                    chunksize=chunksize,
-                    source_row_counts=source_row_counts,
-                    duplicate_index=index,
-                    producer_diagnostics=producer_diagnostics,
-                )
-                with closing_iterator(frames):
-                    for _yield_value in frames:
-                        try:
-                            yield _yield_value
-                        except GeneratorExit:
-                            return
-
-    return activate()
-
-
 def materialize_interim_data(
     *,
     raw_root: Path,
@@ -1026,23 +954,14 @@ def materialize_interim_data(
         source_raw_root,
         error="csmar_raw_export_identity_changed",
     )
-    identity_index = ExactPrimaryKeyIndex(
-        primary_key=("dataset_path",),
-    )
     indexed_files = dataset_files_with_identity_by_id(
-        source_raw_root, identity_index=identity_index, requested_datasets=data_ids
+        source_raw_root, requested_datasets=data_ids
     )
 
     with closing_iterator(indexed_files):
         for data_id, group in groupby(indexed_files, key=lambda item: item[0]):
-            identity = content_hash_for_files(
-                group, error="csmar_raw_export_identity_changed"
-            )
-
-            input_records = _iter_dataset_file_identities(
-                source_raw_root, identity_index, data_id=data_id
-            )
-            input_files = ((item[1], item[2]) for item in input_records)
+            input_files = ((item[1], item[2]) for item in group)
+            source_evidence = {"source_id": str(SOURCE_ID)}
             pending.discard(data_id)
             spec = interim_catalog().get(data_id)
             artifact_root = Path(output_roots[spec.data_id])
@@ -1054,7 +973,7 @@ def materialize_interim_data(
             if data_id in {"analyst_forecast", "index_info"}:
                 source_row_counts = {}
                 diagnostics["source_row_counts"] = source_row_counts
-            frames = _iter_interim_frames(
+            frames = _iter_normalized_interim_frames(
                 data_id=data_id,
                 input_files=input_files,
                 start_date=start_date,
@@ -1062,8 +981,9 @@ def materialize_interim_data(
                 chunksize=chunksize,
                 source_row_counts=source_row_counts,
                 producer_diagnostics=diagnostics,
+                source_evidence=source_evidence,
             )
-            with closing_iterator(input_records), closing_iterator(frames):
+            with closing_iterator(frames):
                 try:
                     write_dataset(
                         artifact_root,
@@ -1071,10 +991,7 @@ def materialize_interim_data(
                         spec=spec,
                         metadata={
                             **(metadata or {}),
-                            "source_evidence": {
-                                "source_id": str(SOURCE_ID),
-                                "content_hash": identity,
-                            },
+                            "source_evidence": source_evidence,
                         },
                     )
                 except ValueError as exc:
@@ -1094,27 +1011,37 @@ def materialize_interim_data(
 def _iter_normalized_interim_frames(
     *,
     data_id: str,
-    input_files: Iterable[Path | tuple[Path, DatasetFileIdentity]],
+    input_files: Iterable[tuple[Path, DatasetFileIdentity]],
     start_date: str | None,
     end_date: str | None,
     chunksize: int,
-    duplicate_index: ExactPrimaryKeyIndex,
     producer_diagnostics: dict[str, object] | None,
     source_row_counts: dict[str, int] | None = None,
+    source_evidence: dict[str, object] | None = None,
 ) -> Iterator[object]:
     primary_key = interim_catalog().get(data_id).primary_key
+    duplicate_index = ExactPrimaryKeyIndex(primary_key=primary_key)
     if source_row_counts is None:
         source_row_counts = {}
     exact_duplicate_count = 0
-    for input in input_files:
-        input_file, expected_identity = (
-            input if isinstance(input, tuple) else (input, None)
+    content_hashes = []
+    for input_file, expected_identity in input_files:
+        parent = require_unaliased_path(
+            input_file.parent, error="csmar_interim_source_parent_invalid"
         )
+        try:
+            parent_stat = filesystem_stat(parent, follow_symlinks=False)
+        except (FileNotFoundError, NotADirectoryError) as exc:
+            raise ValueError("csmar_interim_source_parent_invalid") from exc
+        if not stat.S_ISDIR(parent_stat.st_mode):
+            raise ValueError("csmar_interim_source_parent_invalid")
+        completed_before = len(content_hashes)
         chunks = iter_private_export_chunks(
             input_file,
             dataset=data_id,
             chunksize=chunksize,
             expected_identity=expected_identity,
+            content_hashes=content_hashes,
         )
         with closing_iterator(chunks):
             for chunk in chunks:
@@ -1166,6 +1093,8 @@ def _iter_normalized_interim_frames(
                     yield pruned
                 except GeneratorExit:
                     return
+        if len(content_hashes) != completed_before + 1:
+            raise ValueError("csmar_raw_export_incomplete_read")
     if (
         data_id == "index_info"
         and source_row_counts
@@ -1177,6 +1106,14 @@ def _iter_normalized_interim_frames(
             f"no_supported_csmar_index_info_rows:raw_{count}:"
             f"excluded_{count}:retained_0"
         )
+    if source_evidence is not None:
+        digest = hashlib.sha256()
+        for member_hash in sorted(content_hashes):
+            for value in (data_id, member_hash):
+                encoded = value.encode("utf-8")
+                digest.update(len(encoded).to_bytes(8, "big"))
+                digest.update(encoded)
+        source_evidence["content_hash"] = digest.hexdigest()
 
 
 def _transform_interim_chunk(
@@ -1203,24 +1140,6 @@ def _transform_interim_chunk(
     return filtered.loc[
         :, list(INTERIM_COLUMNS_BY_DATA_ID[data_id])
     ].copy(), source_row_counts
-
-
-def _iter_source_inputs(
-    first: Path | tuple[Path, DatasetFileIdentity],
-    remaining: Iterator[Path | tuple[Path, DatasetFileIdentity]],
-) -> Iterator[Path | tuple[Path, DatasetFileIdentity]]:
-    for value in chain((first,), remaining):
-        parent = require_unaliased_path(
-            Path(value[0] if isinstance(value, tuple) else value).parent,
-            error="csmar_interim_source_parent_invalid",
-        )
-        try:
-            metadata = filesystem_stat(parent, follow_symlinks=False)
-        except (FileNotFoundError, NotADirectoryError) as exc:
-            raise ValueError("csmar_interim_source_parent_invalid") from exc
-        if not stat.S_ISDIR(metadata.st_mode):
-            raise ValueError("csmar_interim_source_parent_invalid")
-        yield value
 
 
 def _interim_spec(data_id: str, columns: tuple[str, ...]) -> InterimDataSpec:

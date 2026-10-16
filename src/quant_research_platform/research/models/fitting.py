@@ -8,26 +8,20 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from fractions import Fraction
 from functools import cached_property
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from joblib import parallel_config
 from threadpoolctl import threadpool_limits
 
-import quant_research_platform.research.models.dependencies as dependencies
 import quant_research_platform.research.models.estimators as estimators
 import quant_research_platform.research.models.feature_importance as feature_importance
-import quant_research_platform.research.models.supervised as supervised
 from quant_research_platform.contracts.experiments import (
     legal_training_mask,
-    resolve_training_availability_column,
     training_availability_columns,
 )
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.json_codec import (
     canonical_identity_bytes,
-    parse_qrp_json_object,
 )
 from quant_research_platform.contracts.models import (
     ModelSpec,
@@ -93,8 +87,7 @@ def prediction_callable(input_columns: tuple[str, ...], prediction_model: object
             prediction_model, (RankEnsemblePredictor, ICWeightedRankEnsemble)
         ):
             columns = tuple(dict.fromkeys(("timestamp", *input_columns)))
-        with parallel_config(backend="sequential"):
-            predicted = prediction_model.predict(frame.loc[:, list(columns)])
+        predicted = prediction_model.predict(frame.loc[:, list(columns)])
         return np.asarray(predicted, dtype="float64")
 
     return predict_from_model
@@ -209,33 +202,25 @@ def _fit_model_result(
     spec: ModelSpec,
     *,
     estimator: object,
-    on_fit_start=None,
 ) -> ModelFitResult:
     if spec.model_algorithm == "linear_regression":
-        return _fit_linear_model_result(
-            prepared_training, spec, on_fit_start=on_fit_start
-        )
+        return _fit_linear_model_result(prepared_training, spec)
     return _fit_estimator_model_result(
         prepared_training,
         spec,
         estimator=estimator,
-        on_fit_start=on_fit_start,
     )
 
 
 def _fit_linear_model_result(
     prepared_training,
     spec: ModelSpec,
-    *,
-    on_fit_start=None,
 ) -> ModelFitResult:
     training = prepared_training.training
     row_counts = prepared_training.row_counts
     filter_metadata = prepared_training.filter_metadata
     if training.empty:
         raise ValueError("model_training_sample_empty")
-    if on_fit_start is not None:
-        on_fit_start(spec, training)
     weights, scaler, matrix = prepared_training.preprocessing
     transformed = matrix.to_numpy(dtype="float64")
     design = np.column_stack((np.ones(len(transformed)), transformed))
@@ -289,20 +274,20 @@ def model_metadata(
         "training_asset_ids": row_counts.get("training_asset_ids", []),
         "train_start": row_counts["train_start"],
         "train_end": row_counts["train_end"],
+        "label_availability_column": row_counts["label_availability_column"],
+        "label_available_max": row_counts["label_available_max"],
         "input_factor_columns": list(spec.input_factor_columns),
         "input_feature_columns": list(spec.input_feature_columns),
         "input_columns": list(spec.input_columns),
         "input_count": len(spec.input_columns),
         "target_column": spec.target_column,
         "hyperparameters": _thaw_model_hyperparameters(spec.hyperparameters),
-        "resolved_hyperparameters": supervised.resolved_model_hyperparameters(spec)
+        "resolved_hyperparameters": estimators.resolved_model_hyperparameters(spec)
         if resolved_hyperparameters is None
         else _thaw_model_hyperparameters(resolved_hyperparameters),
         "random_seed": spec.random_seed,
         "max_train_rows": spec.max_train_rows,
-        "dependency_status": dependencies.require_model_dependency(
-            spec.model_algorithm
-        ),
+        "dependency_status": estimators.require_model_dependency(spec.model_algorithm),
         "training_weighting": spec.training_weighting.payload(),
         "scaler": None if scaler is None else scaler.to_payload(),
     }
@@ -320,22 +305,19 @@ def _fit_estimator_model_result(
     spec: ModelSpec,
     *,
     estimator: object,
-    on_fit_start=None,
 ) -> ModelFitResult:
     training = prepared_training.training
     row_counts = prepared_training.row_counts
     filter_metadata = prepared_training.filter_metadata
     if training.empty:
         raise ValueError("model_training_sample_empty")
-    threads = supervised.model_thread_count(spec)
-    if on_fit_start is not None:
-        on_fit_start(spec, training)
+    threads = estimators.model_thread_count(spec)
     predictor = _fit_predictor(
         spec, prepared_training=prepared_training, estimator=estimator, threads=threads
     )
 
-    resolved_hyperparameters = supervised.resolved_model_hyperparameters(spec)
-    if spec.model_algorithm in supervised._PARALLEL_MODEL_ALGORITHMS:
+    resolved_hyperparameters = estimators.resolved_model_hyperparameters(spec)
+    if spec.model_algorithm in estimators._PARALLEL_MODEL_ALGORITHMS:
         fitted_threads = getattr(predictor, "n_jobs", None)
         if type(fitted_threads) is not int or fitted_threads <= 0:
             raise RuntimeError("invalid_fitted_model_thread_count")
@@ -357,7 +339,11 @@ def _fit_estimator_model_result(
 
 
 def _collect_training_frame(
-    frames: Iterable[pd.DataFrame], spec: ModelSpec, *, fitting_cutoff: object
+    frames: Iterable[pd.DataFrame],
+    spec: ModelSpec,
+    *,
+    fitting_cutoff: object,
+    availability_column: str | None = None,
 ) -> PreparedTraining:
     validity_columns = model_input_validity_columns(
         spec.input_columns, spec.model_algorithm
@@ -366,7 +352,11 @@ def _collect_training_frame(
     required.add(spec.target_column)
     required.add("timestamp")
     required.add("eligible")
-    availability_columns = training_availability_columns(spec.target_column)
+    availability_columns = (
+        (availability_column,)
+        if availability_column is not None
+        else training_availability_columns(spec.target_column)
+    )
     work_columns = tuple(
         dict.fromkeys(
             (
@@ -397,9 +387,7 @@ def _collect_training_frame(
             keep = legal_training_mask(
                 chunk,
                 fitting_cutoff=fitting_cutoff,
-                availability_column=resolve_training_availability_column(
-                    chunk, label_column=spec.target_column
-                ),
+                availability_column=availability_columns[0],
                 feature_columns=validity_columns,
                 target_column=spec.target_column,
             )
@@ -417,6 +405,7 @@ def _collect_training_frame(
                 *(("asset_id",) if "asset_id" in filtered.columns else ()),
                 *spec.input_columns,
                 spec.target_column,
+                availability_columns[0],
             ]
             usable = filtered.loc[keep.loc[filtered.index], selected_columns].copy()
             if usable.empty:
@@ -456,7 +445,21 @@ def _collect_training_frame(
         else [],
         "train_start": train_start,
         "train_end": train_end,
+        "label_availability_column": availability_columns[0],
+        "label_available_max": None
+        if training.empty
+        else time_value_isoformat(
+            pd.Timestamp(
+                strict_timestamp_series(
+                    training[availability_columns[0]],
+                    error="invalid_model_label_maturity",
+                ).max()
+            ),
+            preserve_datetime=True,
+        ),
     }
+    if not training.empty:
+        training = training.drop(columns=availability_columns[0])
     filter_metadata = {
         "sample_filter_mode": spec.sample_filter_mode,
         "filter_columns_used": filter_columns_used,
@@ -496,7 +499,7 @@ def _fit_predictor(
         )
     from sklearn.exceptions import ConvergenceWarning
 
-    if spec.model_algorithm in supervised._PARALLEL_MODEL_ALGORITHMS:
+    if spec.model_algorithm in estimators._PARALLEL_MODEL_ALGORITHMS:
         set_params = getattr(estimator, "set_params", None)
         if not callable(set_params):
             raise RuntimeError("model_thread_configuration_unavailable")
@@ -543,6 +546,7 @@ def model_training_read_columns(
     *,
     label_column: str,
     sample_filter_mode,
+    availability_column=None,
 ) -> tuple[str, ...]:
     return tuple(
         dict.fromkeys(
@@ -552,33 +556,15 @@ def model_training_read_columns(
                 *canonical_feature_validity_columns(input_columns),
                 label_column,
                 "eligible",
-                *training_availability_columns(label_column),
+                *(
+                    training_availability_columns(label_column)
+                    if availability_column is None
+                    else (availability_column,)
+                ),
                 *required_filter_columns(sample_filter_mode),
             )
         )
     )
-
-
-def training_scope_chunks(
-    chunks: Iterable[pd.DataFrame], *, asset_ids: tuple[str, ...] = ()
-) -> Iterable[pd.DataFrame]:
-    """Apply only the caller's asset scope; fitting owns semantic filtering."""
-    with closing_iterator(iter(chunks)) as active_chunks:
-        for chunk in active_chunks:
-            if not asset_ids:
-                try:
-                    yield chunk
-                except GeneratorExit:
-                    return
-                continue
-            if "asset_id" not in chunk:
-                raise ValueError("model_training_asset_id_missing")
-            scoped = chunk.loc[chunk["asset_id"].isin(asset_ids)]
-            if not scoped.empty:
-                try:
-                    yield scoped
-                except GeneratorExit:
-                    return
 
 
 def _strict_non_negative_count_value(value: object) -> int:
@@ -598,48 +584,3 @@ def _apply_training_controls(frame: pd.DataFrame, spec: ModelSpec) -> pd.DataFra
     if spec.max_train_rows is not None:
         result = result.tail(spec.max_train_rows)
     return result.reset_index(drop=True)
-
-
-def _read_model_input(
-    path, *, columns, input_spec=None, time_window=None, model_spec=None, chunked=False
-):
-    """Project declared columns and necessary scientific context."""
-    from quant_research_platform.contracts.data import DataSpec
-    from quant_research_platform.storage.datasets.reading import read_dataset
-
-    path = Path(path)
-    if path.is_file():
-        if type(input_spec) is not dict:
-            raise ValueError("parquet_semantic_spec_required")
-        values = dict(input_spec)
-        for name in ("primary_key", "partition_columns"):
-            values[name] = tuple(values[name])
-        declared = DataSpec(**values)
-        roles = {key: str(value) for key, value in declared.column_roles.items()}
-    else:
-        if input_spec is not None:
-            raise ValueError("dataset_spec_already_declared")
-        payload = parse_qrp_json_object((path / "spec.json").read_bytes())
-        roles = payload["column_roles"]
-        declared = None
-    if model_spec is not None:
-        for column in model_spec.input_factor_columns:
-            if roles.get(column) != "factor":
-                raise ValueError("model_factor_role_mismatch")
-        for column in model_spec.input_feature_columns:
-            if roles.get(column) != "feature":
-                raise ValueError("model_feature_role_mismatch")
-        if (
-            model_spec.target_column in columns
-            and roles.get(model_spec.target_column) != "label"
-        ):
-            raise ValueError("model_target_role_mismatch")
-    from quant_research_platform.storage.datasets.types import DatasetReadMode
-
-    return read_dataset(
-        path,
-        columns=columns,
-        time_window=time_window,
-        spec=declared,
-        mode=DatasetReadMode.CHUNKED if chunked else DatasetReadMode.MATERIALIZED,
-    )

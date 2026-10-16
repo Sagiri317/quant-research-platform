@@ -27,9 +27,7 @@ from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 def inspect_dataset(
     dataset_root: Path, *, time_window: TimeWindow | None = None
 ) -> DatasetInspection:
-    context = open_dataset_session(
-        dataset_root, columns=None, time_window=time_window, require_consumable=False
-    )
+    context = open_dataset_session(dataset_root, columns=None, time_window=time_window)
     return inspect_dataset_session(context)
 
 
@@ -49,31 +47,6 @@ def inspect_dataset_session(context: DatasetSession) -> DatasetInspection:
         date_min=runtime["date_min"],
         date_max=runtime["date_max"],
         manifest=context.manifest,
-    )
-
-
-def inspection_from_persisted_session(
-    context: DatasetSession, *, published_root: Path
-) -> DatasetInspection:
-    """Build the writer receipt from the already validated persisted session."""
-    root = Path(published_root)
-    manifest = context.manifest
-    return DatasetInspection(
-        root=root,
-        data_root=root / "data",
-        spec=context.spec,
-        columns=physical_schema_columns(context.schema),
-        schema_hash=context.schema_hash,
-        file_count=int(manifest["file_count"]),
-        row_count=int(manifest["row_count"]),
-        partitions=tuple(str(item) for item in manifest["partitions"]),
-        partition_row_counts={
-            str(key): int(value)
-            for key, value in manifest["partition_row_counts"].items()
-        },
-        date_min=manifest["date_min"],
-        date_max=manifest["date_max"],
-        manifest=manifest,
     )
 
 

@@ -1,4 +1,4 @@
-"""Formal A-share weighting qualification survives independent operation calls."""
+"""A-share weighting accepts explicit decay independently of research roles."""
 
 import pytest
 
@@ -10,19 +10,20 @@ from quant_research_platform.research.protocols.a_share import (
 
 
 @pytest.mark.parametrize(
-    "half_lives,reason",
+    "half_lives",
     [
-        ((None,), None),
-        ((None, None), None),
-        ((756,), None),
-        ((756, 756), None),
-        ((378,), "a_share_training_weighting_half_life_not_supported"),
-        ((None, 378), "a_share_training_weighting_half_life_not_supported"),
-        ((None, 756), "a_share_training_weighting_research_roles_mixed"),
-        ((756, 378), "a_share_training_weighting_research_roles_mixed"),
+        (None,),
+        (None, None),
+        (756,),
+        (756, 756),
+        (378,),
+        (0.5,),
+        (None, 378),
+        (None, 756),
+        (756, 378),
     ],
 )
-def test_a_share_formal_decay_admission(half_lives, reason):
+def test_a_share_accepts_explicit_positive_decay_candidates(half_lives):
     models = [
         ModelSpec(
             model_id=f"candidate_{i}",
@@ -33,17 +34,24 @@ def test_a_share_formal_decay_admission(half_lives, reason):
         )
         for i, value in enumerate(half_lives)
     ]
-    if reason:
-        with pytest.raises(ValueError, match=reason):
-            validate_model_selection(models)
-    else:
-        role = validate_model_selection(models)
-        assert role == ("primary" if half_lives[0] is None else "robustness")
-        assert _inference_blocker({"training_weighting": {"role": role}}) == (
-            None if role == "primary" else "training_weighting_robustness_excluded"
-        )
+    validate_model_selection(models)
 
 
 @pytest.mark.parametrize("periods", [1, 378, 756])
 def test_generic_weighting_keeps_other_positive_decay_contracts(periods):
     assert TrainingWeighting(half_life_periods=periods).half_life_periods == periods
+
+
+@pytest.mark.parametrize("periods", [0, -1, True, float("inf"), float("nan"), "378"])
+def test_decay_rejects_nonpositive_nonfinite_or_nonnumeric_values(periods):
+    with pytest.raises(
+        ValueError, match="training_weighting_half_life_periods_invalid"
+    ):
+        TrainingWeighting(half_life_periods=periods)
+
+
+@pytest.mark.parametrize("role", ["primary", "robustness"])
+def test_explicit_robustness_role_still_blocks_formal_joint_inference(role):
+    assert _inference_blocker({"training_weighting": {"role": role}}) == (
+        None if role == "primary" else "training_weighting_robustness_excluded"
+    )

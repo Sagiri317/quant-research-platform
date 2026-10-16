@@ -6,33 +6,43 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 
+from quant_research_platform.contracts.json_codec import _strict_config
 from quant_research_platform.contracts.models import (
     _model_spec,
-    _strict_config,
+    _validate_model_prediction_window,
+    validate_model_input_roles,
+)
+from quant_research_platform.contracts.time import (
+    PredictionWindow,
+    TimeWindow,
     _window_payload,
 )
-from quant_research_platform.contracts.predictions import PredictionWindow
-from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.features.transforms import (
     model_input_validity_columns,
 )
 from quant_research_platform.research.models.fitting import (
-    _read_model_input,
     prediction_callable,
 )
 from quant_research_platform.research.models.persisted import load_model
 from quant_research_platform.research.predictions.outputs import prediction_rows
+from quant_research_platform.storage.atomic import reject_if_exists
+from quant_research_platform.storage.datasets.reading import (
+    _dataset_input_options,
+    iter_dataset_chunks,
+    open_dataset_session,
+)
 
 
 def predict(config: Mapping) -> Path:
     config = _strict_config(
         config,
-        {"model", "inputs", "output", "prediction_window", "sample_role"},
-        {"input_spec", "asset_ids"},
+        {"model", "inputs", "output", "prediction_window"},
+        {"input_spec", "asset_ids", "sample_role"},
     )
-    if config["sample_role"] not in {"validation", "test"}:
+    reject_if_exists(Path(config["output"]))
+    role = config.get("sample_role", "prediction")
+    if type(role) is not str or not role.strip():
         raise ValueError("prediction_purpose_invalid")
     window = PredictionWindow(**config["prediction_window"])
     assets = config.get("asset_ids")
@@ -44,34 +54,7 @@ def predict(config: Mapping) -> Path:
     ):
         raise ValueError("prediction_asset_ids_invalid")
     result, facts = load_model(Path(config["model"]))
-    if pd.Timestamp(window.start) <= pd.Timestamp(facts["fit_cutoff"]):
-        raise ValueError("prediction_must_follow_fit_cutoff")
-    if config["sample_role"] == "test":
-        from quant_research_platform.research.models.trial_selection import (
-            read_selection,
-        )
-
-        test = facts.get("test_window")
-        if not test or not facts.get("selection"):
-            raise ValueError("test_prediction_requires_frozen_final_refit")
-        selection = read_selection(Path(facts["selection"]))
-        if (
-            facts["model"]["model_id"]
-            not in {item["selected_config_id"] for item in selection["families"]}
-            or selection["test_window"] != test
-        ):
-            raise ValueError("test_selection_reference_mismatch")
-        if (
-            pd.Timestamp(window.start) < pd.Timestamp(test["start"])
-            or window.end is None
-            or pd.Timestamp(window.end) > pd.Timestamp(test["end"])
-        ):
-            raise ValueError("test_prediction_window_outside_freeze")
-    elif facts.get("test_window") is not None and (
-        window.end is None
-        or pd.Timestamp(window.end) >= pd.Timestamp(facts["test_window"]["start"])
-    ):
-        raise ValueError("test_window_requires_test_sample_role")
+    _validate_model_prediction_window(facts, window)
     from quant_research_platform.contracts.filtering import required_filter_columns
 
     columns = tuple(
@@ -90,16 +73,21 @@ def predict(config: Mapping) -> Path:
     )
     # ponytail: open prediction streams prior rows too; add lower-only read filters
     # if that scan becomes costly, rather than inventing a finite endpoint.
-    frames = _read_model_input(
-        config["inputs"],
-        columns=columns,
-        input_spec=config.get("input_spec"),
-        time_window=None
-        if window.end is None
-        else TimeWindow(window.start, window.end),
-        model_spec=_model_spec(facts["model"]),
-        chunked=True,
+    source = config["inputs"]
+    if config.get("input_spec") is not None:
+        if isinstance(source, Mapping):
+            raise ValueError("duplicate_input_spec")
+        source = {"path": source, "spec": config["input_spec"]}
+    options = _dataset_input_options(source)
+    selected_columns = options.get("columns")
+    options.setdefault("columns", ("timestamp", "asset_id"))
+    session = open_dataset_session(**options)
+    validate_model_input_roles(
+        session.spec, _model_spec(facts["model"]), selected_columns=selected_columns
     )
+    if window.end is not None:
+        session = session.filtered_view(TimeWindow(window.start, window.end))
+    frames = iter_dataset_chunks(session.projected_view(columns))
     from quant_research_platform.policy.lifecycle import closing_iterator
     from quant_research_platform.runtime.dataframes import iter_complete_time_frames
 
@@ -131,19 +119,47 @@ def predict(config: Mapping) -> Path:
 
     metadata = {
         "model": str(Path(config["model"])),
-        "inputs": str(Path(config["inputs"])),
+        "inputs": config["inputs"],
         "model_id": facts["model"]["model_id"],
         "family_id": facts["family_id"],
         "prediction_window": _window_payload(window),
         "effective_prediction_end": None,
-        "sample_role": config["sample_role"],
+        "sample_role": role,
         "prediction_rows": None,
         "label_unit": facts["label_unit"],
-        "model_metadata": result.metadata,
+        "model_metadata": {
+            key: result.metadata[key]
+            for key in (
+                "training_asset_ids",
+                "train_start",
+                "train_end",
+                "label_availability_column",
+                "label_available_max",
+            )
+        },
+        "model_facts": {
+            key: facts.get(key)
+            for key in (
+                "family_id",
+                "asset_ids",
+                "market_id",
+                "model",
+                "fit_windows",
+                "fit_cutoff",
+                "candidate_parameters",
+                "label_unit",
+                "test_window",
+                "selection_cutoff",
+            )
+        },
         "input_spec": config.get("input_spec"),
         "asset_ids": assets,
-        "selection": facts.get("selection"),
     }
+    calibration = result.metadata.get("rank_parameters", {}).get("label_calibration")
+    if calibration is not None:
+        metadata["model_metadata"]["rank_parameters"] = {
+            "label_calibration": calibration
+        }
     from quant_research_platform.artifacts.outputs.prediction import (
         write_prediction_outputs,
     )

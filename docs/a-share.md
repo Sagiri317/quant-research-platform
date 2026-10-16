@@ -533,8 +533,8 @@ fusion_nf_expectations
 
 #### 科研选择与独立操作
 
-场景限定可选因子和经济资格，研究 JSON 决定评估因子、模型输入与参数、比较基线、
-组合集合及访问窗口。配置中未选择的能力不自动补齐；配置不能绕过数据、成熟度或留出准入门。
+场景提供因子和经济资格的默认组合，显式配置决定实际选择，研究 JSON 决定评估因子、模型输入与参数、比较基线、
+组合集合及访问窗口。配置中未选择的能力不自动补齐；配置仍须符合实际字段、单位、标签成熟和明确冻结的科学边界。
 
 随仓科研选择参考保留以下研究选择，因子数仅统计 `evaluation.factors`；这些文件不直接交给单操作 CLI：
 
@@ -901,9 +901,9 @@ forward EP = median forecast EPS / unadjusted signal-day close  # 前瞻盈利�
 ```
 
 `prepare` 在 `data_id=expectations_factors` 时接受 `parameters.freshness_days`，
-仅允许 90 或 180，未显式指定时沿用该数据规格的 90 日默认值。
+接受任意正整数，未显式指定时沿用该数据规格的 90 日默认值；90/180 是随仓研究选择。
 解析值保存在 `ProcessedDataSpec.parameters_json.freshness_days`，约束实际来源回看和公式；
-统计所声明的 `evaluation.forecast_freshness_days` 必须描述实际使用的研究选择。
+统计中的 `expectations` 研究说明应与 prepare 的实际参数一致；不另设重复的 freshness 配置字段。
 180 日方案单独创建不可变研究实例，标为 `expectations.role=robustness`；保留其模型、预测与组合链，
 但不将其候选或结果混入 90 日正式选型及 FDR、SPA、StepM、PBO 推断域。
 180 日运行内部保留训练、验证和原排序作为稳健性诊断；基础描述、HAC、基准及归因仍按原定义计算。
@@ -946,7 +946,15 @@ FULL_Exp = FULL Fusion features + 4 expectations  # 完整融合特征加预期�
 
 已处理事实存储经济原始因子、经济标签与市场事实；只有确定 `eligible` 后，才创建场景专属规范特征。
 
-规范特征流水线：
+`assemble.feature_recipe=null` 保留原始因子；`label_columns=[]` 可生成仅供预测的无标签数据集。
+选用配方后，`feature_transform` 可分别设置 `clip`、`industry_neutralize`、`size_neutralize`、
+`center`、`scale`、`impute_missing`。`clip` 支持 `none`、`mad`、`quantile_1_99`；
+其余字段为布尔值。关闭某步骤就不要求该步骤专用上下文，不自动补算未选因子。
+固定顺序为裁剪、中性化、中心化、总体标准差缩放；尺寸因子不回归掉自己。
+中心化不改变单位，标准化输出无量纲。仅缩放而不中心化时，零方差结果未定义；
+中心化并缩放的常数截面按配方输出零。
+
+默认规范特征流水线：
 
 ```text
 符合 eligible 的横截面
@@ -1043,13 +1051,16 @@ observed = 1
 ```
 
 结构/上下文前提失败时，该特征/行必须明确不可用；中性化失败不得通过 `.fillna(0)` 进入模型。
-现有三列 (feature, feature_missing, feature_observed) 的唯一编码：eligible且结构无效为
-(NULL,1,0)，设计有效但普通raw缺失为(0,1,0)，已观察有效为(z,0,1)，ineligible为(NULL,0,0)。
+三列 (feature, feature_missing, feature_observed) 的编码：eligible 且结构无效为
+(NULL,1,0)，已观察有效为(z,0,1)，ineligible为(NULL,0,0)。设计有效但普通 raw 缺失时，
+`impute_missing=true` 输出(0,1,0)，关闭后保留(NULL,1,0)。这里的零是技术填充值，
+不承诺在关闭中心化或中性化后等于截面均值；结构无效和标签缺失始终不插补。
 训练、验证、OOS及预测消费者的必需PK域，共用该模型实际输入的唯一有效性规则；即使只选missing/observed
 标记，也必须检查来源feature，不能因为标记为有限数而绕过。raw排名模型不消费的canonical
 结构状态不改变其既有缺失中性规则；非rank模型还要求直接输入完整。不新增行级原因表，原始输入和转换规格保留可复核原因。
 
-统计和组合从已验证预测谱系绑定的持久化模型派生同一有效域，域内缺失的必需预测仍失败。
+统计和组合从 PRED 保存的真实 recipe 与训练/选择事实派生相应有效域，不重新打开模型目录；
+域内缺失的必需预测仍失败。
 `prediction_eligible` 只决定alpha及简单组合入选，域外alpha为NULL；持仓和benchmark会计全集不随之裁剪。
 既有持仓按原交易限制退出，许可 unknown 的对应方向订单不成交并记录原因；
 增强组合对可到达基准的 incomplete 资产约束主动权重为零。不能交易的真实持仓仍占预算及风险，
@@ -1256,10 +1267,9 @@ supervised 缩放/拟合与 rank ensemble 方向/IC 权重共用。
 756-period配置单独运行，派生`training_weighting.role=robustness`；不得与其他half-life模型混入同一选型实例。
 其内部训练、验证排序与单项HAC/bootstrap仍保留，正式FDR、SPA、StepM、MCS与PBO排除该实例，
 原因使用`training_weighting_robustness_excluded`；冻结test的G/Q单项比较保留，联合FDR为`NOT_APPLICABLE`。
-正式 A 股协议仅接受 `half_life_periods=null` 主方案或独立的全 `half_life_periods=756` 稳健性方案。
-由 `AShareProtocol` 统一校验；主方案与稳健性混合拒绝，其他半衰期（含 378 或 null+378）
-在正式入口明确拒绝，不标为 primary，也不进入正式联合检验。通用模型与 Crypto 的半衰期
-合同保留；756-period 稳健性仍保留单项诊断，不用留出结果选择模型或参数。
+A 股与通用模型都接受 `half_life_periods=null` 或任意有限正数；756 是随仓研究选择，
+不构成库能力上限，也不按参数值自动授予 primary/robustness 身份。
+统计中的稳健性用途须显式声明；上述 756-period 研究设计的推断范围由该声明决定。
 
 缩放器的加权均值/标准差使用精确的最终训练样本权重。
 
@@ -1407,7 +1417,8 @@ RF / XGB -> 更浅 / 更保守的配置
 agent 显式按合法训练窗调用 `fit`，再按 `prediction_window` 调用 `predict`；
 部分季度不扩大到请求末端之外。每次 `score` 提供有序 `candidate_ids`、逐候选的
 完整 `validation_windows` 预测路径、`labels`、`scoring_window`、`cutoff`、
-`selection_group`、`validation_axis`、`test_window`、`label_unit` 与新 `output`。
+`selection_group`、`validation_axis` 与新 `output`。`test_window` 只在需要明确冻结最终评价时提供；
+`label_unit` 可从输入真实单位声明取得，未声明时须显式给出，二者不能矛盾。
 G 评分窗必须覆盖所声明的完整正式验证历史，Q 选择截止必须早于实际消费季度。
 模型使用各自合法输入域；PRED 只保存预测及真实键，不重复保存 label、成熟列或 score_eligible。
 评分时读取显式标签输入，在 cutoff 下重建成熟共同域；先核每个候选自身应有预测完整，
@@ -1415,8 +1426,8 @@ G 评分窗必须覆盖所声明的完整正式验证历史，Q 选择截止必�
 评分 JSON 保存候选/模型/PRED 路径、实际拟合窗、逐候选指标及 `common_rows` 等科学事实，
 不维护共同域持久哈希或跨操作身份。`select` 另外声明指标、方向、完整并列次序、
 `refit_windows` 与 `refit_cutoff`，保存家族优胜与 `selected_model_id`；不会自动重新拟合。
-reader 核本次所消费的模型状态、完成 trial、选择与原评分记录关系，
-不扫描无关成员或认证整个旧研究的源码、环境与文件快照。
+模型加载核实际拟合状态；已完成 PRED 的评分直接消费其保存的真实事实，不要求外部模型或完成 trial。
+失败候选仍须有真实终态证据，选择核原评分及真实截止；不认证整个旧研究的源码、环境与文件快照。
 中断后由 agent 选用已正式发布且科学范围合适的模型、PRED 和选择，
 只补缺失操作并给出新输出位置；不得把 staging、失败 trial 或未发布最终拟合当作成功。
 旧 trial 不改写，不再提供自动季度续跑、同 hash 命中或软件身份驱动的接续。
@@ -1725,7 +1736,9 @@ maxiter = 1000
 确定性起点
 ```
 
-每次成功求解都必须经过独立解后验证。
+每次成功求解都必须经过独立解后验证。决策时已知费用后的可行性复用同一执行会计核，
+以当时持仓、NAV、ADV 和已知费率核算，保留冻结资产的真实持仓；不得把未来开盘价格、
+权益现金或成交许可用于决定目标是否合法。
 
 硬约束：
 
@@ -1772,20 +1785,21 @@ cash = 0
 
 ### 5.21 简单组合构建
 
-简单分位数等权/流通市值加权组合按配置的 `top_quantile` 构建，不使用：
+简单分位数等权/流通市值加权组合按 `top_quantile` 构建。
+`neutrality` 可选 `none`（默认）、`industry`、`size`、`industry_size`。
+选择中性化时，在完整合法流通市值基准域内，求与原始目标最接近的非负、总权重为 1 的目标，
+使所选行业权重及稳健 log 市值暴露与基准一致。没有预测的合法基准成员仍可进入约束解，
+不能先裁掉它们再声称全域中性。约束不可行时明确失败，不静默降级或伪造协方差。
+这些简单组合不额外启用增强组合的目标换手、跟踪误差和主动权重边界。
 
-```text
-20% 目标换手上限
-TE 约束
-风格约束
-行业约束
-```
-
-它们直接执行规则定义的目标；执行、现金、ADV 与成本仍使用和增强组合相同的经济执行账本。
+账本分开记录原始目标、约束目标、基准和实际成交权重及暴露。未来执行限制或价格变化会使实际
+组合偏离目标；未知暴露、域外持仓及非正 NAV 明确记录未定义原因与可知的排除权重，不能把
+部分已知暴露当作完整结果。执行、现金、ADV 与成本共用实际经济账本。
 
 固定预测的持仓对照可选择 `top20_equal_weight_half_step`：换仓日先由原简单组合 owner
 生成完整等权目标，再与仍合格且有有效预测的当前持仓权重各取一半。首次从现金开始只建半仓；
-剩余现金不重归一化。失去资格或预测的旧仓目标归零，实际卖出仍遵守原交易限制。
+剩余现金不重归一化；这是 `neutrality=none` 时的最终目标。启用中性化时，该半仓权重
+是原始目标，随后投影为总权重 1 的约束目标。失去资格或预测的旧仓目标归零，实际卖出仍遵守原交易限制。
 该构造在本次组合参数中记录，可显式选用原模型和预测；报告同时比较毛/净收益、风险、现金和换手，
 不能把敞口差异导致的收益变化只归因为交易成本。该固定规则不根据回测收益调节。
 
@@ -2018,6 +2032,11 @@ ADV20 定义：
 目标换手硬约束适用于收盘决策的目标组合，不适用于未来实际执行结果。
 
 未来市场变化/执行导致的实际约束越界属于诊断，不追溯改变目标决策。
+`predicted_tracking_error`、`portfolio_factor_variance`、`portfolio_specific_variance`
+保留优化目标的风险含义。实际账户另记 `realized_tracking_error`、
+`realized_factor_variance`、`realized_specific_variance` 及实际最大单股、行业、风格主动暴露；
+`realized_constraints_status` 区分 `SATISFIED`、`BREACHED`、`UNDEFINED`，并记录原因。
+实际 NAV 非正或非零主动持仓缺少必需风险时，不编造数值，也不追溯否定原本可行的目标。
 
 ### 5.26 绩效与归因
 

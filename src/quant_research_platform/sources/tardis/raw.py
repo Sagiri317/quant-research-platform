@@ -199,7 +199,7 @@ def _filename(date: str, offset: int, *, exchange=EXCHANGE) -> str:
 
 @contextmanager
 def _verified_file(path: Path, *, expected_sha256=None):
-    """Check source bytes during a complete read; never drain on early close."""
+    """Verify consumed source bytes before successful completion or early close."""
     require_unaliased_path(path, error="tardis_raw_identity_changed")
     try:
         handle = open_filesystem_file(path, "rb")
@@ -210,10 +210,8 @@ def _verified_file(path: Path, *, expected_sha256=None):
     with closing_iterator(handle):
         reader = _DigestingReader(handle) if expected_sha256 is not None else handle
         yield reader
-        if (
-            expected_sha256 is not None
-            and handle.tell() == os.fstat(handle.fileno()).st_size
-        ):
+        if expected_sha256 is not None:
+            reader.drain()
             if reader.hexdigest() != expected_sha256:
                 raise ValueError("tardis_raw_identity_changed")
 

@@ -14,6 +14,7 @@ from pathlib import Path
 from quant_research_platform.sources.csmar import field_mappings as _field_mappings
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
+    _DigestingReader,
     dataset_file_identity,
     dataset_file_identity_from_stat,
     open_filesystem_file,
@@ -102,7 +103,7 @@ def _infer_dataset_from_header(columns: tuple[str, ...]) -> str:
 class _CsvRecords:
     """Parse strict provider CSV records with source identity checks."""
 
-    def __init__(self, path, *, expected_identity=None):
+    def __init__(self, path, *, expected_identity=None, content_hashes=None):
         try:
             identity = dataset_file_identity(path)
         except ValueError as exc:
@@ -117,9 +118,11 @@ class _CsvRecords:
             ):
                 raise ValueError("csmar_raw_export_identity_changed")
             self._identity = identity
-            self._text = io.TextIOWrapper(
-                self._handle, encoding="utf-8-sig", newline=""
-            )
+            self._path = path
+            self._content_hashes = content_hashes
+            self._exhausted = False
+            self._bytes = _DigestingReader(self._handle)
+            self._text = io.TextIOWrapper(self._bytes, encoding="utf-8-sig", newline="")
             # The provider format permits fields above Python's default limit.
             csv.field_size_limit(sys.maxsize)
             self._reader = csv.reader(self._text, strict=True)
@@ -138,6 +141,9 @@ class _CsvRecords:
     def __next__(self):
         try:
             fields = next(self._reader)
+        except StopIteration:
+            self._exhausted = True
+            raise
         except (UnicodeError, csv.Error) as exc:
             raise ValueError("malformed_csmar_csv_row") from exc
         return fields
@@ -148,6 +154,7 @@ class _CsvRecords:
             if (
                 dataset_file_identity_from_stat(os.fstat(self._handle.fileno()))
                 != self._identity
+                or dataset_file_identity(self._path) != self._identity
             ):
                 raise ValueError("csmar_raw_export_identity_changed")
         except BaseException as error:
@@ -163,10 +170,15 @@ class _CsvRecords:
                 failure = error
         if failure is not None:
             raise failure
+        if self._exhausted and self._content_hashes is not None:
+            self._content_hashes.append(self._bytes.hexdigest())
 
 
 def iter_export_csv_records(
-    path: str | Path, *, expected_identity: DatasetFileIdentity | None = None
+    path: str | Path,
+    *,
+    expected_identity: DatasetFileIdentity | None = None,
+    content_hashes: list[str] | None = None,
 ) -> Iterator[list[str]]:
 
     def activate() -> Iterator[list[str]]:
@@ -176,6 +188,7 @@ def iter_export_csv_records(
             records = _CsvRecords(
                 Path(path),
                 expected_identity=expected_identity,
+                content_hashes=content_hashes,
             )
             for record in records:
                 try:

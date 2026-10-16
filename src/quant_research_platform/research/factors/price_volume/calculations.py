@@ -169,8 +169,30 @@ def _calculate_values(
             first - size + 1 - shift : stop - size + 1 - shift
         ]
 
-    matrix = window(source)
-    valid = np.isfinite(matrix).all(axis=1)
+    def complete_window(name: str, condition: str = "finite") -> np.ndarray:
+        key = ("invalid_count", name, condition)
+        if key not in sums:
+            column = values[name]
+            if len(column) >= np.iinfo(np.int64).max:
+                raise ValueError("price_volume_history_too_long")
+            bad = (
+                ~np.isfinite(column)
+                if condition == "finite"
+                else column <= 0
+                if condition == "positive"
+                else column == 0
+            )
+            prefix = np.empty(len(column) + 1, dtype=np.int64)
+            prefix[0] = 0
+            np.cumsum(bad, dtype=np.int64, out=prefix[1:])
+            sums[key] = prefix
+        prefix = sums[key]
+        return (
+            prefix[first + 1 - shift : stop + 1 - shift]
+            == prefix[first + 1 - shift - size : stop + 1 - shift - size]
+        )
+
+    valid = complete_window(source_name)
     extra_names = (
         ("low", "close")
         if factor == "amplitude_20d"
@@ -179,17 +201,14 @@ def _calculate_values(
         or factor in {"signed_amount_flow_20d", "return_amount_imbalance_20d"}
         else ()
     )
-    extra = {name: window(values[name]) for name in extra_names}
-    for matrix_extra in extra.values():
-        valid &= np.isfinite(matrix_extra).all(axis=1)
+    for name in extra_names:
+        valid &= complete_window(name)
     if factor == "drawdown_60d":
-        valid &= (matrix > 0).all(axis=1)
+        valid &= complete_window(source_name, "positive")
     if factor == "amplitude_20d":
-        valid &= (extra["close"] != 0).all(axis=1)
+        valid &= complete_window("close", "nonzero")
     if factor.startswith("amihud_"):
-        valid &= (extra["amount"] > 0).all(axis=1)
-    if factor in {"skewness_20d", "skewness_60d", "kurtosis_60d"}:
-        valid &= np.min(matrix, axis=1) != np.max(matrix, axis=1)
+        valid &= complete_window("amount", "positive")
     if shift:
         valid &= np.isfinite(source[first:stop])
     if shift or factor in {
@@ -278,8 +297,11 @@ def _calculate_values(
                     result[index] = np.inf if numerator > 0 else -np.inf
         output[first - start :][valid] = result
         return output
+    matrix = window(source)
+    if factor in {"skewness_20d", "skewness_60d", "kurtosis_60d"}:
+        valid &= np.min(matrix, axis=1) != np.max(matrix, axis=1)
     current = matrix[valid]
-    extra = {name: data[valid] for name, data in extra.items()}
+    extra = {name: window(values[name])[valid] for name in extra_names}
     if factor.startswith("volatility_") or factor in {
         "amount_volatility_20d",
         "turnover_volatility_20d",

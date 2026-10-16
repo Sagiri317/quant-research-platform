@@ -27,7 +27,7 @@ from quant_research_platform.storage.identity import (
     filesystem_write_text,
     native_filesystem_path,
 )
-from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers.paths import StorageLayout
 
 
 def _collect_inventory(
@@ -111,7 +111,8 @@ def test_inventory_reuses_verified_null_profiles_and_reads_remaining_facts(
     assert set(projections[0]) == set(frame.columns)
 
 
-def test_inventory_ignores_only_unpublished_atomic_directory(tmp_path):
+def test_inventory_ignores_only_unpublished_atomic_directory(tmp_path, monkeypatch):
+    from quant_research_platform.storage.datasets import writing as dataset_writing
     from quant_research_platform.storage.identity import filesystem_exists
     from tests.storage.low_level_fixtures import (
         make_default_dataset_frame,
@@ -123,24 +124,29 @@ def test_inventory_ignores_only_unpublished_atomic_directory(tmp_path):
     filesystem_mkdir(ordinary_file.parent, parents=True)
     filesystem_write_text(ordinary_file, "ordinary file", encoding="utf-8")
     observed = []
+    original_atomic = dataset_writing.atomic_write_directory
     for index, name in enumerate(("published", "new_build")):
         spec = make_processed_dataset_spec(name)
         root = layout.processed_data_root("a_share", "factor", name)
 
-        def inspect_staged(receipt, root=root, index=index):
-            assert receipt.root.name.startswith(".a-")
+        def inspect_staged(staging, root=root, index=index):
+            assert staging.name.startswith(".a-")
             assert not filesystem_exists(root)
             items = _collect_inventory(tmp_path)["datasets"]
             observed.append(items)
             assert len(items) == index
             assert all(".a-" not in item["logical_relative_root"] for item in items)
 
-        write_dataset(
-            root,
-            make_default_dataset_frame(),
-            spec=spec,
-            staged_validator=inspect_staged,
-        )
+        def observed_atomic(final_root, writer):
+            def observe(staging):
+                result = writer(staging)
+                inspect_staged(staging)
+                return result
+
+            return original_atomic(final_root, observe)
+
+        monkeypatch.setattr(dataset_writing, "atomic_write_directory", observed_atomic)
+        write_dataset(root, make_default_dataset_frame(), spec=spec)
     assert len(observed) == 2
     assert len(_collect_inventory(tmp_path)["datasets"]) == 2
     assert (

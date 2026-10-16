@@ -257,7 +257,16 @@ def _spec(
     for column in selected_primary_key:
         if column != "timestamp":
             roles[column] = ColumnRole.KEY
+    availability = {
+        forward_return_label_column(horizon): forward_return_available_at_column(
+            horizon
+        )
+        for horizon in LABEL_HORIZONS
+        if forward_return_label_column(horizon) in label_columns
+    }
     return ProcessedDataSpec(
+        column_units={column: "decimal_return" for column in availability},
+        label_availability_columns=availability,
         data_id=data_id,
         market_id=MARKET_ID,
         kind=kind,

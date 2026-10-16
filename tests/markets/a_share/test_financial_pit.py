@@ -981,7 +981,7 @@ def test_empty_legal_financial_event_domain_persists_unknown_panel_rows(tmp_path
             _pit_observations(panel)
         ),
     )
-    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.paths import StorageLayout
 
     root = StorageLayout(tmp_path).processed_data_root(
         spec.market_id, spec.kind, spec.data_id

@@ -564,7 +564,9 @@ def test_defined_group_comparison_requires_descriptive_facts(
             tables,
             metadata,
             "model_group_comparison.parquet",
-            error="^statistics_group_comparison_invalid$",
+            error="^statistics_sample_role_mismatch$"
+            if corruption == "sample_role"
+            else "^statistics_group_comparison_invalid$",
         )
     else:
         root = statistics.write_statistics_artifact(
@@ -804,6 +806,8 @@ def test_paired_rankic_and_champion_diagnostics_reach_native_artifacts(
     global_artifact = None
     for group in ("global", "quarterly"):
         bound = {**metadata, "sample_role": access}
+        if group == "global" and access == "validation":
+            bound["selection_cutoffs"] = [metadata["window"]["end"]]
         selected = {name: table.copy(deep=True) for name, table in tables.items()}
         for table in selected.values():
             if "sample_role" in table:
@@ -812,7 +816,7 @@ def test_paired_rankic_and_champion_diagnostics_reach_native_artifacts(
         selected["prediction_diagnostics"] = production._prediction_summary(
             ranks[group].to_frame(production._PREDICTION_COLUMN),
             prediction_id=f"factors_only_{group}_persisted_predictions",
-            inference_blocker="global_validation_selection_reuses_validation"
+            inference_blocker="selection_reuses_evaluation_window"
             if group == "global" and access == "validation"
             else None,
             max_lags=1,

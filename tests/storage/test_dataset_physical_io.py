@@ -78,19 +78,20 @@ def test_nonstring_categorical_native_roundtrip(
         actual.sort_values("asset_id").reset_index(drop=True),
         frame.sort_values("asset_id").reset_index(drop=True),
     )
-    native_write = dataset_writing.write_parquet_file
+    canonical_table = dataset_writing._WriteStats.table_for_frame
     invalid = (
         99 if isinstance(categories, list) else categories[-1] + pd.Timedelta(days=1)
     )
 
-    def corrupt_domain(table, path, **kwargs):
+    def corrupt_domain(owner, source, **kwargs):
+        table = canonical_table(owner, source, **kwargs)
         position = table.schema.get_field_index("value")
         values = pa.array(
             [invalid] * table.num_rows, type=table.schema.field("value").type
         )
-        return native_write(table.set_column(position, "value", values), path, **kwargs)
+        return table.set_column(position, "value", values)
 
-    monkeypatch.setattr(dataset_writing, "write_parquet_file", corrupt_domain)
+    monkeypatch.setattr(dataset_writing._WriteStats, "table_for_frame", corrupt_domain)
     invalid_root = make_dataset_artifact_root(tmp_path, "invalid_domain")
     with pytest.raises(ValueError, match="dataset_categorical_domain_mismatch"):
         write_dataset(
@@ -135,12 +136,10 @@ def test_object_null_prefix_has_chunk_independent_schema(tmp_path):
 
 @pytest.mark.parametrize("chunked", (False, True))
 def test_sparse_assembler_preserves_object_text_after_null_prefix(tmp_path, chunked):
-    from quant_research_platform.research.datasets.assembler import (
-        assemble_research_dataset,
-    )
-    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.paths import StorageLayout
     from tests.helpers.research_processed_inputs import make_dummy_processed_catalog
     from tests.helpers.research_specs import (
+        assemble_research_dataset,
         make_dummy_research_dataset_spec,
         make_research_dataset_catalog,
     )
@@ -259,30 +258,16 @@ def test_exact_key_decimal_zero_and_numpy_scalar_identity() -> None:
     )
 
 
-def test_staged_validator_wrong_keys_rejects_and_cleans_atomic_state(
+def test_duplicate_keys_across_chunks_reject_and_clean_atomic_state(
     tmp_path: Path,
 ) -> None:
-    root = make_dataset_artifact_root(tmp_path, "wrong_staged_keys")
+    root = make_dataset_artifact_root(tmp_path, "duplicate_stream_keys")
     frame = make_default_dataset_frame()
-
-    def reject_wrong_keys(receipt: dataset_writing.DatasetWriteReceipt) -> None:
-        wrong = frame.copy()
-        wrong["asset_id"] = ["WRONG-A", "WRONG-B", "WRONG-C"]
-        receipt.exact_primary_key_index.add_table(
-            pa.Table.from_pandas(wrong, preserve_index=False), namespace="expected"
-        )
-        missing, extra = receipt.exact_primary_key_index.difference_counts(
-            expected_namespace="expected", actual_namespace="dataset"
-        )
-        assert (missing, extra) == (len(frame), len(frame))
-        raise ValueError("staged_dataset_primary_key_mismatch")
-
-    with pytest.raises(ValueError, match="staged_dataset_primary_key_mismatch"):
+    with pytest.raises(ValueError, match="duplicate_dataset_primary_key"):
         dataset_writing.write_dataset(
             root,
-            (frame,),
-            spec=make_processed_dataset_spec("wrong_staged_keys"),
-            staged_validator=reject_wrong_keys,
+            (frame, frame.iloc[:1].copy()),
+            spec=make_processed_dataset_spec("duplicate_stream_keys"),
         )
     assert not filesystem_exists(root)
     assert not list(filesystem_glob(root.parent, ".a-*"))

@@ -228,6 +228,7 @@ def test_information_union_closes_all_inputs_and_preserves_primary(exit_mode):
 def test_information_union_persists_complete_ordered_panel_for_research_windows(
     tmp_path,
 ):
+    from quant_research_platform.contracts.data import DataSpec
     from quant_research_platform.contracts.time import TimeWindow
     from quant_research_platform.markets.implementations.crypto.hft import (
         iter_panel_frames,
@@ -241,17 +242,15 @@ def test_information_union_persists_complete_ordered_panel_for_research_windows(
         catalog,
         producer,
     )
-    from quant_research_platform.research.datasets.assembler import (
-        _iter_research_chunk_windows_from_base_input,
-    )
+    from quant_research_platform.research.datasets.assembler import assemble
     from quant_research_platform.storage.datasets.reading import (
         iter_dataset_chunks,
         open_dataset_session,
         read_dataset,
     )
     from quant_research_platform.storage.datasets.writing import write_dataset
-    from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.binance_hft import _coverage, coverage_lookup
+    from tests.helpers.paths import StorageLayout
     from tests.markets.crypto.test_hft import _state
 
     start = pd.Timestamp("2026-08-01T00:00:01")
@@ -342,11 +341,54 @@ def test_information_union_persists_complete_ordered_panel_for_research_windows(
         rows += len(frame)
         frame = None
     assert rows == len(expected)
-    windows = list(
-        _iter_research_chunk_windows_from_base_input(session, time_window=window)
+    factors = expected.loc[:, list(spec.primary_key)].copy()
+    factors["signal"] = np.arange(len(factors), dtype=float)
+    factor_root = tmp_path / "factors"
+    write_dataset(
+        factor_root,
+        factors,
+        spec=DataSpec(
+            data_id="union_signal",
+            frequency="tick",
+            grain="asset_timestamp",
+            primary_key=spec.primary_key,
+            partition_columns=(),
+            column_roles={
+                **{key: spec.column_roles[key] for key in spec.primary_key},
+                "signal": "factor",
+            },
+        ),
     )
-    assert windows[0].start == window.start
-    assert windows[-1].end == window.end
+    context = ["transaction_time_ms", "book_receive_monotonic_ns"]
+    research = assemble(
+        {
+            "market_id": "crypto",
+            "dataset_id": "union_research",
+            "inputs": {spec.data_id: str(root), "union_signal": str(factor_root)},
+            "base_input_data_id": spec.data_id,
+            "factor_columns": ["signal"],
+            "label_columns": [],
+            "filter_columns": [],
+            "feature_recipe": None,
+            "context_columns": context,
+            "time_window": {
+                "start": window.start.isoformat(),
+                "end": window.end.isoformat(),
+            },
+            "output_root": str(tmp_path / "research"),
+        }
+    )
+    actual = read_dataset(research).sort_values(
+        ["timestamp", "asset_id"], ignore_index=True
+    )
+    selected = [*spec.primary_key, *context]
+    pd.testing.assert_frame_equal(
+        actual.loc[:, selected], expected.loc[:, selected], check_exact=True
+    )
+    assert actual.timestamp.between(window.start, window.end).all()
+    assert actual.timestamp.min() == expected.timestamp.min()
+    assert actual.timestamp.max() == expected.timestamp.max()
+    np.testing.assert_array_equal(actual.signal, factors.signal)
     restored = expected = None
 
 

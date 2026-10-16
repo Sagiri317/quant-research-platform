@@ -28,6 +28,7 @@ from quant_research_platform.markets.implementations.a_share.processed.producer 
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.datasets.reading import (
+    _dataset_input_options,
     _iter_dataset_session_frames,
     materialize_dataset_session,
     open_dataset_session,
@@ -57,14 +58,29 @@ class _PortfolioSession:
 
 
 def _portfolio_session_evidence(
-    market_bars_root, stock_master_root, panel_root, calendar, *, include_asset_sessions
+    market_bars_root,
+    stock_master_root,
+    panel_root,
+    calendar,
+    *,
+    panel_columns,
+    include_asset_sessions,
 ):
     bars = open_dataset_session(
-        market_bars_root,
-        columns=_MARKET_FACT_COLUMNS,
-        time_window=None,
-    )
-    panel = open_dataset_session(panel_root, columns=None, time_window=None)
+        **_dataset_input_options(market_bars_root)
+    ).projected_view(_MARKET_FACT_COLUMNS)
+    panel = open_dataset_session(**_dataset_input_options(panel_root))
+    business_columns = set(panel_columns) & {
+        "adj_open",
+        "adj_close",
+        "amount",
+        "period_return",
+        "float_market_cap",
+        "industry_standard_id",
+        "industry_level1_code",
+    }
+    if not business_columns <= set(panel.logical_columns):
+        raise ValueError("portfolio_input_business_columns_excluded")
     asset_sessions = {}
     if include_asset_sessions:
         _, _, _, asset_sessions, _, _raw_axis = _processed_axis(
@@ -73,10 +89,8 @@ def _portfolio_session_evidence(
     stocks = panels._canonical_stock_master(
         materialize_dataset_session(
             open_dataset_session(
-                stock_master_root,
-                columns=_STOCK_FACT_COLUMNS,
-                time_window=None,
-            )
+                **_dataset_input_options(stock_master_root)
+            ).projected_view(_STOCK_FACT_COLUMNS)
         )
     )
     _, _, membership, _, _, raw_axis = _processed_axis(
@@ -103,19 +117,24 @@ def iter_portfolio_sessions(
             stock_master_root,
             panel_root,
             calendar,
+            panel_columns=panel_columns,
             include_asset_sessions=execution_root is not None,
         )
     )
     rights_root = equity_events_root
     rights_session = (
-        open_dataset_session(
-            rights_root, columns=EQUITY_EVENT_COLUMNS, time_window=None
-        )
+        open_dataset_session(**_dataset_input_options(rights_root))
         if rights_root is not None
         else None
     )
+    if rights_session is not None and not {
+        "value_per_old_unit",
+        "remaining_old_units_per_old_unit",
+        "successor_units_per_old_unit",
+    } <= set(rights_session.logical_columns):
+        raise ValueError("portfolio_input_business_columns_excluded")
     rights = (
-        materialize_dataset_session(rights_session)
+        materialize_dataset_session(rights_session.projected_view(EQUITY_EVENT_COLUMNS))
         if rights_session is not None
         else pd.DataFrame(columns=EQUITY_EVENT_COLUMNS)
     )
@@ -133,7 +152,7 @@ def iter_portfolio_sessions(
         raise ValueError("equity_event_timestamp_invalid")
     rights = rights.loc[rights.timestamp.le(pd.Timestamp(time_window.end))].copy()
     rights = (
-        _prove_equity_units(rights, panel_root, panel.arrow_schema.names)
+        _prove_equity_units(rights, panel)
         if not rights.empty
         else rights.assign(unit_basis_proved=True)
     )
@@ -182,9 +201,7 @@ def iter_portfolio_sessions(
             channels.enter_context(
                 closing_iterator(
                     _iter_dataset_session_frames(
-                        open_dataset_session(
-                            execution_root, columns=_EXECUTION_COLUMNS, time_window=None
-                        ),
+                        open_dataset_session(**_dataset_input_options(execution_root)),
                         _EXECUTION_COLUMNS,
                     )
                 )
@@ -428,7 +445,7 @@ def iter_portfolio_sessions(
                 return
 
 
-def _prove_equity_units(rights, panel_root, panel_columns):
+def _prove_equity_units(rights, panel):
     """Bind old units to actual quotes or previously proved off-market rights."""
     rights = rights.copy()
     rights["unit_basis_proved"] = False
@@ -438,21 +455,19 @@ def _prove_equity_units(rights, panel_root, panel_columns):
         raw_column, adjusted_column = (
             ("open", "adj_open") if at == recognized else ("close", "adj_close")
         )
-        if raw_column not in panel_columns:
+        if raw_column not in panel.arrow_schema.names:
             return None
         key = (asset, listing, at, raw_column)
         if key not in anchors:
             frame = materialize_dataset_session(
-                open_dataset_session(
-                    panel_root,
-                    columns=(
+                panel.filtered_view(TimeWindow(at, at)).projected_view(
+                    (
                         "asset_id",
                         "timestamp",
                         "listing_date",
                         raw_column,
                         adjusted_column,
-                    ),
-                    time_window=TimeWindow(at, at),
+                    )
                 )
             )
             frame = frame.loc[frame.asset_id.eq(asset) & frame.listing_date.eq(listing)]

@@ -11,6 +11,7 @@ from types import MappingProxyType
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.contracts.columns import _validate_asset_time_key
 from quant_research_platform.contracts.evaluations import (
     CORRELATION_SUMMARY_REASON_CODES,
 )
@@ -24,17 +25,15 @@ from quant_research_platform.contracts.filtering import (
 from quant_research_platform.contracts.json_codec import (
     canonical_identity_bytes,
     parse_qrp_json_object,
-    qrp_json_mapping_snapshot,
     render_qrp_json_object,
 )
 from quant_research_platform.contracts.time import (
     TimeWindow,
-    is_datetime_value,
-    time_value_isoformat,
 )
 from quant_research_platform.contracts.validation import (
     _validate_column_tuple,
     _validate_non_empty_string,
+    strict_timestamp_series,
 )
 
 
@@ -311,11 +310,21 @@ def validate_model_metadata_core(
         "train_start",
         "training_asset_ids",
         "train_end",
+        "label_availability_column",
+        "label_available_max",
         "filter_columns_used",
         "filter_definition",
         "training_weighting",
         "scaler",
     }
+    _validate_non_empty_string(
+        metadata.get("label_availability_column"),
+        "model_label_availability_column_required",
+    )
+    strict_timestamp_series(
+        pd.Series([metadata.get("label_available_max")]),
+        error="invalid_model_label_maturity",
+    )
     assets = metadata.get("training_asset_ids")
     if (
         type(assets) is not list
@@ -712,29 +721,6 @@ def model_spec_payload(spec: object) -> dict[str, object]:
     }
 
 
-def validate_completed_model_trial_metrics(
-    model_id: str, metrics: Mapping[str, object]
-) -> None:
-    """Validate model metrics at model/report persisted-trial boundaries."""
-    if set(metrics) != (_MODEL_SELECTION_TRIAL_METRIC_KEYS - {"model_id"}) | {
-        "n_train"
-    }:
-        raise ValueError("invalid_model_trial_metrics")
-    trial = dict(metrics)
-    n_train = trial.pop("n_train")
-    if type(n_train) is not int or n_train <= 0:
-        raise ValueError("invalid_model_trial_metrics")
-    trial["model_id"] = model_id
-    _validate_model_selection_trial_record(trial)
-
-
-def _strict_config(config, required, optional=()):
-    value = qrp_json_mapping_snapshot(config)
-    if set(value) - set(required) - set(optional) or set(required) - set(value):
-        raise ValueError("operation_config_fields_invalid")
-    return value
-
-
 def _model_spec(value):
     if not isinstance(value, Mapping):
         raise ValueError("model_spec_required")
@@ -745,19 +731,6 @@ def _model_spec(value):
                 raise ValueError("model_input_columns_invalid")
             value[name] = tuple(value[name])
     return ModelSpec(**value)
-
-
-def _window_payload(window):
-    return {
-        "start": time_value_isoformat(
-            window.start, preserve_datetime=is_datetime_value(window.start)
-        ),
-        "end": None
-        if window.end is None
-        else time_value_isoformat(
-            window.end, preserve_datetime=is_datetime_value(window.start)
-        ),
-    }
 
 
 def _fit_windows(values, cutoff):
@@ -800,3 +773,136 @@ def _resolve_candidate_parameters(algorithm, parameters, n_train):
         if not np.isfinite(values[target]):
             raise ValueError("model_sample_scaled_parameters_unrepresentable")
     return values
+
+
+def validate_model_facts(facts, metadata):
+    required = {
+        "model",
+        "market_id",
+        "family_id",
+        "candidate_parameters",
+        "fit_windows",
+        "fit_cutoff",
+        "label_unit",
+    }
+    if not isinstance(facts, Mapping) or not required <= set(facts):
+        raise ValueError("model_facts_invalid")
+    from quant_research_platform.contracts.ids import validate_market_id
+
+    validate_market_id(facts["market_id"])
+    _validate_non_empty_string(facts["family_id"], "model_family_id_invalid")
+    spec = _model_spec(facts["model"])
+    expected_parameters = _resolve_candidate_parameters(
+        spec.model_algorithm,
+        facts["candidate_parameters"],
+        metadata["rows_after_input_label_dropna"],
+    )
+    if canonical_identity_bytes(expected_parameters) != canonical_identity_bytes(
+        metadata["hyperparameters"]
+    ):
+        raise ValueError("model_sample_scaled_parameters_mismatch")
+    if not metadata["training_asset_ids"]:
+        raise ValueError("native_model_training_asset_ids_required")
+    if facts.get("asset_ids") is not None and not set(
+        metadata["training_asset_ids"]
+    ) <= set(facts["asset_ids"]):
+        raise ValueError("model_training_asset_scope_mismatch")
+    for key in (
+        "model_algorithm",
+        "target_column",
+        "sample_filter_mode",
+        "random_seed",
+        "max_train_rows",
+    ):
+        if getattr(spec, key) != metadata[key]:
+            raise ValueError("model_facts_metadata_mismatch")
+    if spec.training_weighting.payload() != metadata["training_weighting"]:
+        raise ValueError("model_facts_metadata_mismatch")
+    if list(spec.input_columns) != metadata["input_columns"]:
+        raise ValueError("model_facts_metadata_mismatch")
+
+    validate_model_fit_facts(facts, metadata)
+
+
+def validate_model_fit_facts(facts, metadata):
+    """Validate chronology using only realized training and decision facts."""
+    cutoff = strict_timestamp_series(
+        pd.Series([facts["fit_cutoff"]]), error="invalid_fit_cutoff"
+    ).iloc[0]
+    maturity = strict_timestamp_series(
+        pd.Series([metadata["label_available_max"]]),
+        error="invalid_model_label_maturity",
+    ).iloc[0]
+    if maturity > cutoff:
+        raise ValueError("model_training_label_after_fit_cutoff")
+    windows = _fit_windows(facts["fit_windows"], cutoff)
+    bounds = strict_timestamp_series(
+        pd.Series([metadata["train_start"], metadata["train_end"]]),
+        error="invalid_model_training_window",
+    )
+    if bounds.iloc[0] > bounds.iloc[1] or bounds.iloc[1] > cutoff:
+        raise ValueError("model_training_window_invalid")
+    from quant_research_platform.contracts.time import time_window_timestamp_interval
+
+    def contains(window, timestamp):
+        start, end, closed = time_window_timestamp_interval(window)
+        return pd.Timestamp(start) <= timestamp and (
+            timestamp <= pd.Timestamp(end) if closed else timestamp < pd.Timestamp(end)
+        )
+
+    if not all(any(contains(window, bound) for window in windows) for bound in bounds):
+        raise ValueError("model_training_window_outside_declared_fit")
+    if facts.get("test_window") is not None:
+        if cutoff >= pd.Timestamp(TimeWindow(**facts["test_window"]).start):
+            raise ValueError("model_test_freeze_missing")
+    decision = facts.get("selection_cutoff")
+    if (
+        decision is not None
+        and strict_timestamp_series(
+            pd.Series([decision]), error="invalid_selection_cutoff"
+        ).iloc[0]
+        > cutoff
+    ):
+        raise ValueError("model_selection_after_fit_cutoff")
+    if facts.get("label_unit") in (None, ""):
+        raise ValueError("model_label_unit_required")
+
+
+def _validate_model_prediction_window(facts, window):
+    """Bind output to the actual decision cutoff and any explicit held-out freeze."""
+    if pd.Timestamp(window.start) <= pd.Timestamp(facts["fit_cutoff"]):
+        raise ValueError("prediction_must_follow_fit_cutoff")
+    frozen = facts.get("test_window")
+    if frozen is None:
+        return
+    if window.end is None:
+        raise ValueError("prediction_window_outside_freeze")
+    from quant_research_platform.contracts.time import time_window_timestamp_interval
+
+    start, stop, closed = time_window_timestamp_interval(TimeWindow(**frozen))
+    lower, upper, output_closed = time_window_timestamp_interval(window)
+    if (
+        lower < start
+        or upper > stop
+        or (upper == stop and output_closed and not closed)
+    ):
+        raise ValueError("prediction_window_outside_freeze")
+
+
+def validate_model_input_roles(
+    declared, spec, *, include_target=False, selected_columns=None
+):
+    """Check only model-consumed scientific roles in an already-opened input."""
+    consumed = {*spec.input_columns, *((spec.target_column,) if include_target else ())}
+    if selected_columns is not None and consumed - set(selected_columns):
+        raise ValueError("model_input_projection_missing")
+    roles = declared["column_roles"]
+    _validate_asset_time_key(declared["primary_key"], roles)
+    for column in spec.input_factor_columns:
+        if roles.get(column) != "factor":
+            raise ValueError("model_factor_role_mismatch")
+    for column in spec.input_feature_columns:
+        if roles.get(column) != "feature":
+            raise ValueError("model_feature_role_mismatch")
+    if include_target and roles.get(spec.target_column) != "label":
+        raise ValueError("model_target_role_mismatch")

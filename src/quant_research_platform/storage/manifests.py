@@ -15,7 +15,6 @@ from quant_research_platform.policy.share_safety import (
 )
 from quant_research_platform.storage.atomic import atomic_write_text
 from quant_research_platform.storage.identity import (
-    filesystem_scandir,
     open_filesystem_file,
     require_artifact_root,
     require_unaliased_path,
@@ -32,29 +31,6 @@ def read_qrp_json_file(path: Path) -> tuple[bytes, dict[str, Any]]:
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("dataset_metadata_file_invalid") from exc
     return raw, parse_qrp_json_object(raw)
-
-
-def read_bounded_qrp_json_directory(
-    root: Path, *, max_members: int
-) -> tuple[tuple[str, dict[str, Any]], ...]:
-    """Read declared JSON members once, retaining ordering and bounded membership."""
-    if type(max_members) is not int or max_members < 0:
-        raise ValueError("dataset_metadata_member_limit_invalid")
-    root = require_unaliased_path(
-        Path(root), error="dataset_metadata_directory_invalid"
-    )
-    names = []
-    with filesystem_scandir(root) as entries:
-        for entry in entries:
-            if len(names) >= max_members:
-                raise ValueError("dataset_metadata_member_limit_exceeded")
-            if (
-                not entry.is_file(follow_symlinks=False)
-                or Path(entry.name).suffix != ".json"
-            ):
-                raise ValueError("dataset_metadata_directory_member_invalid")
-            names.append(entry.name)
-    return tuple((name, read_qrp_json_file(root / name)[1]) for name in sorted(names))
 
 
 def read_manifest(path: Path) -> dict[str, Any]:

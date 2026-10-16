@@ -16,8 +16,8 @@ from quant_research_platform.markets.implementations.crypto.processed import (
 from quant_research_platform.storage.datasets.reading import (
     read_dataset,
 )
-from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.binance_hft import write_binance_hft_run
+from tests.helpers.paths import StorageLayout
 
 
 def test_common_panel_alignment_ignores_asymmetric_frame_boundaries() -> None:

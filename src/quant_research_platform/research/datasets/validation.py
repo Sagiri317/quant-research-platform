@@ -6,7 +6,7 @@ from collections.abc import Iterable
 
 import pandas as pd
 
-from quant_research_platform.contracts.columns import PLATFORM_ASSET_TIME_KEY
+from quant_research_platform.contracts.columns import _validate_asset_time_key
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.policy.lifecycle import closing_iterator
@@ -18,8 +18,7 @@ def validate_research_dataset(
     *,
     require_all_columns: bool = True,
 ) -> None:
-    if spec.primary_key != PLATFORM_ASSET_TIME_KEY:
-        raise ValueError("invalid_research_dataset_primary_key")
+    _validate_asset_time_key(spec.primary_key, spec.column_roles)
     duplicate_columns = tuple(
         dict.fromkeys(
             str(column)
@@ -34,6 +33,12 @@ def validate_research_dataset(
     missing = sorted(required.difference(frame.columns))
     if missing:
         raise ValueError(f"missing_research_required_fields: {', '.join(missing)}")
+
+    if (
+        "market_id" in frame
+        and not frame["market_id"].eq(str(spec.market_id)).fillna(False).all()
+    ):
+        raise ValueError("research_dataset_market_mismatch")
 
     null_key_columns = [
         column for column in spec.primary_key if bool(frame[column].isna().any())

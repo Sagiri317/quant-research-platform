@@ -292,13 +292,9 @@ def _archive_manifest(root):
     return manifest
 
 
-def _iter_records(root, *, expected_manifest_hash):
-    """Verify manifest and compressed identity throughout bounded row consumption."""
+def _iter_records(root, *, manifest):
+    """Verify the selected manifest against the bytes actually decoded."""
     root = Path(root)
-    manifest = _archive_manifest(root)
-    identity = canonical_json_hash(manifest)
-    if identity != expected_manifest_hash:
-        raise ValueError("tardis_normalized_selection_identity_changed")
     path = root / "data.csv.gz"
     with closing_iterator(
         _rows(
@@ -346,24 +342,30 @@ def _selected_archives(root, archive_paths, time_window):
     return selected
 
 
-def iter_records(root, *, archive_paths, time_window):
-    """Consume the declared dated observations without manufacturing gap coverage."""
+def iter_records(
+    root, *, archive_paths, time_window, expected_scope=None, on_verified=None
+):
+    """Decode and verify each selected archive once, including on early close."""
     selected = _selected_archives(root, archive_paths, time_window)
     first = selected[0][1]
+    scope = ("exchange", "symbol", "dataset_type")
+    expected_scope = expected_scope or tuple(first[key] for key in scope)
+    if any(
+        tuple(manifest[key] for key in scope) != expected_scope
+        for _, manifest in selected
+    ):
+        raise ValueError("tardis_normalized_scope_invalid")
+    emit = True
     for path, manifest in selected:
-        if any(
-            manifest[key] != first[key]
-            for key in ("exchange", "symbol", "dataset_type")
-        ):
-            raise ValueError("tardis_normalized_scope_invalid")
-        with closing_iterator(
-            _iter_records(path, expected_manifest_hash=canonical_json_hash(manifest))
-        ) as records:
-            for _yield_value in records:
-                try:
-                    yield _yield_value
-                except GeneratorExit:
-                    return
+        with closing_iterator(_iter_records(path, manifest=manifest)) as records:
+            for row in records:
+                if emit:
+                    try:
+                        yield row
+                    except GeneratorExit:
+                        emit = False
+        if on_verified is not None:
+            on_verified(canonical_json_hash(manifest))
 
 
 def source_identity(root, _target_id, *, exchange, archives, time_window=None):

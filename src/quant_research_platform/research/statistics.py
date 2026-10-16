@@ -504,6 +504,19 @@ def probabilistic_and_deflated_sharpe(
     )
 
 
+def _selected_analyses(config, allowed):
+    """Validate explicit analysis selection while retaining the declared default."""
+    values = config.get("analyses", list(allowed))
+    if (
+        not isinstance(values, list)
+        or not values
+        or any(not isinstance(value, str) or value not in allowed for value in values)
+        or len(set(values)) != len(values)
+    ):
+        raise ValueError("statistics_analyses_invalid")
+    return tuple(value for value in allowed if value in values)
+
+
 def cscv_pbo(
     returns: object,
     *,
@@ -541,7 +554,10 @@ def cscv_pbo(
         raise ValueError("cscv_slice_partition_invalid")
     overfit_count = 0
     all_slice_ids = set(range(slice_count))
-    for in_sample_ids in combinations(range(slice_count), slice_count // 2):
+    # The first half of lexicographic combinations contains slice zero. Each
+    # complementary pair has exactly the same two rankings in reverse order.
+    for tail in combinations(range(1, slice_count), slice_count // 2 - 1):
+        in_sample_ids = (0, *tail)
         out_sample_ids = tuple(sorted(all_slice_ids.difference(in_sample_ids)))
         in_indices = np.concatenate([slices[index] for index in in_sample_ids])
         out_indices = np.concatenate([slices[index] for index in out_sample_ids])
@@ -557,11 +573,12 @@ def cscv_pbo(
             return _undefined_pbo(
                 matrix, slice_count, combination_count, "candidate_ranking_tie"
             )
-        selected = int(np.argmax(in_scores))
-        rank = 1 + int(np.sum(out_scores < out_scores[selected]))
-        fraction = rank / (matrix.shape[1] + 1.0)
-        logit = float(np.log(fraction / (1.0 - fraction)))
-        overfit_count += int(logit <= 0.0)
+        for training, testing in ((in_scores, out_scores), (out_scores, in_scores)):
+            selected = int(np.argmax(training))
+            rank = 1 + int(np.sum(testing < testing[selected]))
+            fraction = rank / (matrix.shape[1] + 1.0)
+            logit = float(np.log(fraction / (1.0 - fraction)))
+            overfit_count += int(logit <= 0.0)
     return PboResult(
         pbo=overfit_count / combination_count,
         slice_count=slice_count,
@@ -876,15 +893,21 @@ def cross_sectional_rank_ic(
     records: list[dict[str, object]] = []
     for timestamp, group in selected.groupby("timestamp", sort=True):
         record: dict[str, object] = {"timestamp": timestamp}
+        labels_all = group[label_column].to_numpy(dtype="float64")
+        label_present = ~np.isnan(labels_all)
+        label_ranks = {}
         for column in value_columns:
-            valid = group[[column, label_column]].dropna()
-            values = valid[column].to_numpy(dtype="float64")
-            labels = valid[label_column].to_numpy(dtype="float64")
+            values_all = group[column].to_numpy(dtype="float64")
+            mask = label_present & ~np.isnan(values_all)
+            values, labels = values_all[mask], labels_all[mask]
             if not np.isfinite(values).all() or not np.isfinite(labels).all():
                 record[column] = np.nan
                 continue
+            key = mask.tobytes()
+            if key not in label_ranks:
+                label_ranks[key] = _average_ranks(labels)
             correlation, _reason = _pearson_correlation_result(
-                _average_ranks(values), _average_ranks(labels)
+                _average_ranks(values), label_ranks[key]
             )
             record[column] = np.nan if correlation is None else correlation
         records.append(record)

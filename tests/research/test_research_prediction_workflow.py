@@ -8,11 +8,10 @@ import pytest
 
 import quant_research_platform.research.models.fitting as model_fitting
 from quant_research_platform.contracts.models import ModelSpec
-from quant_research_platform.research.models.fitting import prediction_callable
-from quant_research_platform.research.models.supervised import (
+from quant_research_platform.research.models.estimators import (
     build_estimator_from_model_spec,
-    preflight_model_specs,
 )
+from quant_research_platform.research.models.fitting import prediction_callable
 from tests.helpers.research_configuration import configured_models
 from tests.helpers.research_processed_inputs import _demo_research_rows
 from tests.research.direct_model_test_support import fit_frame, predict_frame
@@ -55,9 +54,13 @@ def test_native_prediction_preserves_raw_units_rank_and_family(tmp_path: Path) -
     assert output == tmp_path / "future" / "prediction"
 
 
-def test_forest_prediction_keeps_tree_order_without_mutating_fitted_state(monkeypatch):
+@pytest.mark.parametrize("tree_values", [(1.0, 2.0, 3.0), (1e16, -1e16, 1.0)])
+def test_forest_parallel_prediction_respects_error_bound_and_fitted_state(
+    monkeypatch, tree_values
+):
     import pickle
     import threading
+    from fractions import Fraction
 
     from joblib import parallel_config
     from joblib.parallel import get_active_backend
@@ -72,7 +75,7 @@ def test_forest_prediction_keeps_tree_order_without_mutating_fitted_state(monkey
     forest = RandomForestRegressor(
         n_estimators=3, n_jobs=3, bootstrap=False, random_state=0
     ).fit(frame, [0.0, 0.0])
-    for tree, value in zip(forest.estimators_, (1e16, -1e16, 1.0), strict=True):
+    for tree, value in zip(forest.estimators_, tree_values, strict=True):
         tree.tree_.value.fill(value)
     fitted = ScaledPredictor(forest, ModelMatrixScaler.fit(frame))
     frozen_state = pickle.dumps(fitted)
@@ -96,10 +99,16 @@ def test_forest_prediction_keeps_tree_order_without_mutating_fitted_state(monkey
     with parallel_config(backend="threading", n_jobs=3):
         outer_backend, outer_jobs = get_active_backend()
         first = predict(frame)
-        np.testing.assert_array_equal(first, np.full(len(frame), 1.0 / 3.0))
+        expected = float(sum(map(Fraction, tree_values)) / len(tree_values))
+        # Forward error for two additions and one final division; the budget scales
+        # with actual tree magnitudes, so ordinary data keep a near-epsilon bound.
+        eps = np.finfo(float).eps
+        gamma = 3 * eps / (1 - 3 * eps)
+        budget = gamma * sum(abs(value) for value in tree_values) / len(tree_values)
+        np.testing.assert_allclose(first, expected, rtol=0, atol=budget)
         for event in completed:
             event.clear()
-        np.testing.assert_array_equal(predict(frame), first)
+        np.testing.assert_allclose(predict(frame), expected, rtol=0, atol=budget)
         assert get_active_backend() == (outer_backend, outer_jobs)
     assert forest.n_jobs == 3
     assert pickle.dumps(fitted) == frozen_state
@@ -130,7 +139,6 @@ def test_a_share_model_ladder_fits_and_predicts_each_retained_algorithm() -> Non
                 for date_index in range(len(dates))
                 for asset_index in range(3)
             ]
-    preflight_model_specs(specs)
     for spec in specs:
         result = model_fitting._fit_model_result(
             model_fitting._collect_training_frame(
@@ -183,10 +191,21 @@ def test_native_prediction_binds_backend_package_to_actual_model_owner(
         window={"start": "2014-01-03", "end": "2014-01-03"},
     )
     assert (
-        metadata["model_metadata"]["dependency_status"]["package"] == expected_package
+        not {
+            "dependency_status",
+            "scaler",
+            "feature_importance",
+            "hyperparameters",
+            "resolved_hyperparameters",
+            "model_algorithm",
+            "input_columns",
+            "target_column",
+        }
+        & metadata["model_metadata"].keys()
     )
     manifest = case.root / "model.json"
     payload = json.loads(manifest.read_text())
+    assert payload["model_metadata"]["dependency_status"]["package"] == expected_package
     payload["model_metadata"]["dependency_status"]["package"] = wrong_package
     manifest.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="invalid_model_metadata"):

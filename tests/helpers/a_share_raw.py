@@ -29,8 +29,8 @@ from quant_research_platform.storage.identity import (
     native_filesystem_path,
     open_filesystem_file,
 )
-from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.choice_raw import SDK, response, write_css
+from tests.helpers.paths import StorageLayout
 
 
 def _write_csmar(root, data_id, rows, *, extra_columns=()):

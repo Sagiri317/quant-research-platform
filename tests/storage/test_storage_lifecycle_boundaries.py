@@ -17,6 +17,7 @@ import quant_research_platform.storage.identity as identity
 import quant_research_platform.storage.parquet as physical
 from quant_research_platform.storage import _scratch_ownership as scratch_owner
 from quant_research_platform.storage import atomic, manifests
+from tests.helpers.source_preparation import prepared_source_evidence
 
 _PRIMARY_EXCEPTION_TYPES = (
     RuntimeError,
@@ -54,8 +55,8 @@ def test_content_hash_close_preserves_primary_and_closes_file(
     )
     try:
         with pytest.raises(primary_type) as raised:
-            identity.content_hash_for_files(
-                (("member", path),), error="identity_changed"
+            identity._hash_file_content(
+                path, identity.dataset_file_identity(path), "identity_changed"
             )
         assert raised.value is primary
         assert raw.closed and closed == [True]
@@ -723,27 +724,6 @@ def test_shared_scratch_removes_only_exact_owned_paths(tmp_path: Path) -> None:
     assert not identity.filesystem_exists(owned_directory)
 
 
-def test_content_hash_rechecks_earlier_members_before_return(tmp_path, monkeypatch):
-    first, last = (tmp_path / "first", tmp_path / "last")
-    identity.filesystem_write_bytes(first, b"original")
-    identity.filesystem_write_bytes(last, b"last")
-    real_hash = identity._hash_file_content
-
-    def mutate_earlier(path, *args, **kwargs):
-        result = real_hash(path, *args, **kwargs)
-        if path == last:
-            identity.filesystem_write_bytes(
-                first, b"changed after its own final verification"
-            )
-        return result
-
-    monkeypatch.setattr(identity, "_hash_file_content", mutate_earlier)
-    with pytest.raises(ValueError, match="changed"):
-        identity.content_hash_for_files(
-            (("first", first), ("last", last)), error="changed"
-        )
-
-
 @pytest.mark.parametrize("boundary", ("stat", "open"))
 @pytest.mark.parametrize("failure", ("missing", "memory", "io", "interrupt"))
 def test_content_identity_distinguishes_invalid_from_fatal(
@@ -769,9 +749,11 @@ def test_content_identity_distinguishes_invalid_from_fatal(
         else:
             patch.setattr(identity, "open_filesystem_file", fail)
         with pytest.raises(
-            ValueError if failure == "missing" else type(primary)
+            ValueError if failure == "missing" and boundary == "stat" else type(primary)
         ) as caught:
-            identity.content_hash_for_files((("member", path),), error="changed")
+            identity._hash_file_content(
+                path, identity.dataset_file_identity(path), "changed"
+            )
         if failure != "missing":
             assert caught.value is primary
 
@@ -785,8 +767,8 @@ def test_source_identity_preserves_serious_io(tmp_path, monkeypatch, source, bou
     from quant_research_platform.sources.choice.raw_exports import choice_session
     from quant_research_platform.sources.csmar import interim as csmar
     from quant_research_platform.sources.reference import interim as reference
-    from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.choice_raw import SDK, response, write_css
+    from tests.helpers.paths import StorageLayout
     from tests.sources.reference.test_interim import _write_reference_root
 
     layout = StorageLayout(tmp_path)
@@ -829,6 +811,8 @@ def test_source_identity_preserves_serious_io(tmp_path, monkeypatch, source, bou
         else a_share_fees
     )
     operation = "filesystem_stat" if boundary == "stat" else "open_filesystem_file"
+    if source == "choice" and boundary == "stat":
+        target_owner, operation, path = choice, "filesystem_scandir", root / "css"
     original = getattr(target_owner, operation)
 
     def fail(candidate, *args, **kwargs):
@@ -839,7 +823,7 @@ def test_source_identity_preserves_serious_io(tmp_path, monkeypatch, source, bou
     with monkeypatch.context() as patch:
         patch.setattr(target_owner, operation, fail)
         with pytest.raises(OSError) as caught:
-            owner.source_content_identity(root, data_id)
+            prepared_source_evidence(owner, root, data_id)
         assert caught.value is primary
 
 

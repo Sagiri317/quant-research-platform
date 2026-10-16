@@ -13,8 +13,8 @@ from quant_research_platform.research.factors.price_volume.calculations import (
     calculate_price_volume_factors,
 )
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
-from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.a_share_catalogs import scientific_catalogs
+from tests.helpers.paths import StorageLayout
 
 
 def _produce_factors(root, data_id, inputs, columns, window):

@@ -103,6 +103,7 @@ def model_statistics_inputs(
             "model_id": family["selected_config_id"],
             "model_metadata": {
                 "input_columns": [spec.factor_columns[0]],
+                "sample_filter_mode": "eligible",
                 "model_algorithm": A_SHARE_MODEL_ALGORITHMS[
                     index % len(A_SHARE_MODEL_ALGORITHMS)
                 ],

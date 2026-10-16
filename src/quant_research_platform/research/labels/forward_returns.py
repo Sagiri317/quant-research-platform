@@ -56,38 +56,36 @@ def add_forward_return_labels(
         .to_numpy(dtype=bool)
     )
     assets = result[asset_column].to_numpy(copy=False)
+    entry_positions = np.flatnonzero(
+        (positions >= 0) & (positions + 1 < len(axis)) & can_enter
+    )
+    entry_rows = keys.get_indexer(
+        pd.MultiIndex.from_arrays(
+            [assets[entry_positions], axis.take(positions[entry_positions] + 1)]
+        )
+    )
+    present = entry_rows >= 0
+    entry_positions, entry_rows = entry_positions[present], entry_rows[present]
+    entry_prices = prices[entry_rows]
+    positive = np.isfinite(entry_prices) & (entry_prices > 0)
+    entry_positions, entry_prices = entry_positions[positive], entry_prices[positive]
     for horizon in horizons:
         labels = np.full(len(result), np.nan, dtype="float64")
         available = np.full(len(result), np.datetime64("NaT"), dtype="datetime64[ns]")
-        valid_positions = np.flatnonzero(
-            (positions >= 0) & (positions + 1 + horizon < len(axis)) & can_enter
-        )
-        entry_dates = axis.take(positions[valid_positions] + 1)
+        mature = positions[entry_positions] + 1 + horizon < len(axis)
+        valid_positions = entry_positions[mature]
         exit_dates = axis.take(positions[valid_positions] + 1 + horizon)
-        entry_rows = keys.get_indexer(
-            pd.MultiIndex.from_arrays([assets[valid_positions], entry_dates])
-        )
         exit_rows = keys.get_indexer(
             pd.MultiIndex.from_arrays([assets[valid_positions], exit_dates])
         )
-        present = (entry_rows >= 0) & (exit_rows >= 0)
+        present = exit_rows >= 0
         valid_positions = valid_positions[present]
         exit_dates = exit_dates[present]
-        entry_prices, exit_prices = (
-            prices[entry_rows[present]],
-            prices[exit_rows[present]],
-        )
-        positive = (
-            np.isfinite(entry_prices)
-            & (entry_prices > 0)
-            & np.isfinite(exit_prices)
-            & (exit_prices > 0)
-        )
+        entries, exit_prices = entry_prices[mature][present], prices[exit_rows[present]]
+        positive = np.isfinite(exit_prices) & (exit_prices > 0)
         valid_positions, exit_dates = valid_positions[positive], exit_dates[positive]
         with np.errstate(over="ignore"):
-            values = (exit_prices[positive] - entry_prices[positive]) / entry_prices[
-                positive
-            ]
+            values = (exit_prices[positive] - entries[positive]) / entries[positive]
         finite = np.isfinite(values)
         labels[valid_positions[finite]] = values[finite]
         available[valid_positions[finite]] = exit_dates[finite].to_numpy(

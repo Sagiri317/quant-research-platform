@@ -31,8 +31,8 @@ from quant_research_platform.storage.identity import (
     filesystem_write_text,
     native_filesystem_path,
 )
-from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.choice_raw import SDK, response, write_css
+from tests.helpers.paths import StorageLayout
 
 FIELDS = tuple(field for fields in FINANCIAL_FIELDS.values() for field in fields)
 DATE_FIELDS = ("STMTACTDATE", "ACTUALISSUINGDATE", "ITEMVALUECHANGEDATE")
@@ -111,10 +111,6 @@ def test_financial_css_rejects_ctr_report_type_without_remapping(tmp_path, extra
             request,
         )
     before = _file_hashes(layout.raw_source_root("choice"))
-    with pytest.raises(ValueError, match="choice_financial_css_reporttype_unsupported"):
-        interim.source_content_identity(
-            layout.raw_source_root("choice"), "financial_balance"
-        )
     with pytest.raises(ValueError, match="choice_financial_css_reporttype_unsupported"):
         interim.materialize_interim_data(
             output_roots={
@@ -197,9 +193,7 @@ def test_same_coordinate_overlap_compares_values_and_keeps_request_scope(tmp_pat
             fields=tuple(reversed(FIELDS)),
         )
         _disclosure(session, layout, period="2018-12-31")
-    identity = interim.source_content_identity(
-        layout.raw_source_root("choice"), "financial_balance"
-    )
+    identity = _file_hashes(layout.raw_source_root("choice"))
     result = interim.materialize_interim_data(
         output_roots={
             key: layout.interim_data_root("choice", key)
@@ -212,9 +206,7 @@ def test_same_coordinate_overlap_compares_values_and_keeps_request_scope(tmp_pat
     )
     frame = _read(result)["financial_balance"]
     assert len(frame) == 1 and frame.total_assets.iloc[0] == 0.0
-    assert identity == interim.source_content_identity(
-        layout.raw_source_root("choice"), "financial_balance"
-    )
+    assert identity == _file_hashes(layout.raw_source_root("choice"))
     with pytest.raises(
         PortfolioTargetBlocked, match="choice_first_disclosure_snapshot_missing"
     ):
@@ -252,9 +244,7 @@ def test_request_date_formats_share_semantic_coordinates_and_preserve_raw(
         first != duplicate and first_request.identity() != duplicate_request.identity()
     )
     before = _file_hashes(layout.raw_source_root("choice"))
-    identity = interim.source_content_identity(
-        layout.raw_source_root("choice"), "financial_balance"
-    )
+    identity = _file_hashes(layout.raw_source_root("choice"))
     frames = _read(
         interim.materialize_interim_data(
             output_roots={
@@ -272,9 +262,7 @@ def test_request_date_formats_share_semantic_coordinates_and_preserve_raw(
     assert frames["financial_balance"].report_period.tolist() == [
         pd.Timestamp("2019-12-31")
     ]
-    assert identity == interim.source_content_identity(
-        layout.raw_source_root("choice"), "financial_balance"
-    )
+    assert identity == _file_hashes(layout.raw_source_root("choice"))
     assert _file_hashes(layout.raw_source_root("choice")) == before
 
 
@@ -413,7 +401,7 @@ def test_unfetched_field_is_blocked_and_other_coordinates_cannot_fill_it(
                 indicators=fields[-1:],
                 data={CODE: values[-1:]},
             )
-    before = interim.source_content_identity(layout.raw_source_root("choice"), data_id)
+    before = _file_hashes(layout.raw_source_root("choice"))
     reason = (
         "choice_financial_snapshot_field_missing"
         if financial
@@ -445,9 +433,7 @@ def test_unfetched_field_is_blocked_and_other_coordinates_cannot_fill_it(
                 indicators=fields[-1:],
                 data={CODE: values[-1:]},
             )
-        assert before != interim.source_content_identity(
-            layout.raw_source_root("choice"), data_id
-        )
+        assert before != _file_hashes(layout.raw_source_root("choice"))
         frames = _read(
             interim.materialize_interim_data(
                 output_roots={
@@ -907,9 +893,9 @@ def test_bulk_import_uses_table_scopes_and_keeps_published_identity(
     original_index = interim._raw_index
     opened = []
 
-    def observed_index(root, financial, *, members):
+    def observed_index(root, financial):
         opened.append(financial)
-        return original_index(root, financial, members=members)
+        return original_index(root, financial)
 
     monkeypatch.setattr(interim, "_raw_index", observed_index)
     good = interim.materialize_interim_data(
@@ -1019,8 +1005,10 @@ def test_raw_metadata_invalid_is_source_local(tmp_path, mutation):
         encoding="utf-8",
     )
     with pytest.raises(ValueError):
-        interim.source_content_identity(
-            layout.raw_source_root("choice"), "financial_first_disclosure"
+        interim.materialize_interim_data(
+            raw_root=layout.raw_source_root("choice"),
+            output_roots={"financial_first_disclosure": tmp_path / "invalid-output"},
+            data_ids=("financial_first_disclosure",),
         )
 
 

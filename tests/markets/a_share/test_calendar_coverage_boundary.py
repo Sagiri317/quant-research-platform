@@ -6,9 +6,9 @@ import pytest
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.processed import producer
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
-from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.a_share_catalogs import scientific_catalogs
 from tests.helpers.a_share_sources import _synthetic_interim_frames
+from tests.helpers.paths import StorageLayout
 
 
 @pytest.mark.parametrize("missing_position", [1, 3, 6])

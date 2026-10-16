@@ -52,7 +52,7 @@ def test_missing_trading_prices_remain_missing_and_suspension_preserves_units(
     frame["listing_date"] = frame["timestamp"].min()
     actual = _apply_suspension_semantics(frame)
     assert actual.loc[1, ["close", "open", "high", "low", "adj_open"]].isna().all()
-    assert not a_share_eligibility(actual, "pv_all").iloc[1]
+    assert not a_share_eligibility(actual, "a_share_all").iloc[1]
     assert actual.loc[1, "period_return"] == 0.07
     assert actual.loc[2, "adj_close"] == actual.loc[2, "adj_open"] == 110.0
     raw = actual.loc[2, ["close", "open", "high", "low"]]
@@ -610,7 +610,7 @@ def test_industry_history_uses_effective_standard_and_set_hierarchy(tmp_path) ->
     from tests.helpers.a_share_catalogs import scientific_catalogs
 
     spec = scientific_catalogs().processed.get("market_panel_1d")
-    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.paths import StorageLayout
 
     root = StorageLayout(tmp_path).processed_data_root(
         spec.market_id, spec.kind, spec.data_id
@@ -1003,7 +1003,7 @@ def test_special_treatment_pit_and_late_older_events_persist(tmp_path, reverse):
     )
     from quant_research_platform.storage.datasets import read_dataset
     from quant_research_platform.storage.datasets.writing import write_dataset
-    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.paths import StorageLayout
 
     raw = pd.DataFrame(
         {
@@ -1308,7 +1308,7 @@ def test_industry_mapping_gap_preserves_panel_but_rejects_structural_damage(
             compute()
     else:
         frame = compute()
-        from quant_research_platform.storage.layout import StorageLayout
+        from tests.helpers.paths import StorageLayout
 
         root = StorageLayout(tmp_path).processed_data_root(
             spec.market_id, spec.kind, spec.data_id
@@ -1724,3 +1724,107 @@ def test_industry_unknown_barrier_only_uses_supported_taxonomies(
     )
     for actual, expected in zip((history, versions, changes), before, strict=True):
         pd.testing.assert_frame_equal(actual, expected)
+
+
+@pytest.mark.parametrize("newer_available", ["2023-01-09", "2023-01-10", "2023-01-11"])
+def test_industry_frontier_discards_superseded_cross_standard_conflicts(
+    newer_available,
+):
+    panel = pd.DataFrame(
+        {
+            "asset_id": ["a"],
+            "timestamp": pd.to_datetime(
+                ["2023-01-12" if newer_available == "2023-01-11" else "2023-01-10"]
+            ),
+        }
+    )
+    for column in (
+        "industry_standard_id",
+        "industry_level1_code",
+        "industry_level1_name",
+    ):
+        panel[column] = pd.Series(pd.NA, index=panel.index, dtype="string")
+    panel["is_nonfinancial_industry"] = pd.Series(
+        pd.NA, index=panel.index, dtype="boolean"
+    )
+    history = pd.DataFrame(
+        {
+            "asset_id": ["a"] * 3,
+            "timestamp": pd.to_datetime(["2023-01-10", "2023-01-10", newer_available]),
+            "_industry_event_timestamp": pd.to_datetime(
+                ["2023-01-01", "2023-01-01", "2023-01-05"]
+            ),
+            "industry_standard_id": ["CSRC2012", "CAPCO", "CAPCO"],
+            "industry_level1_code": ["A", "B", "C"],
+            "industry_level1_name": ["old A", "old B", "new C"],
+            "_industry_classification_code": ["A", "B", "C"],
+            "_industry_known": [True] * 3,
+            "is_nonfinancial_industry": [True] * 3,
+        }
+    )
+    history["asset_id"] = history["asset_id"].astype(object)
+    versions = pd.DataFrame(
+        {
+            "industry_standard_id": ["CSRC2012", "CAPCO"],
+            "implement_date": pd.to_datetime(["2012-10-26", "2023-01-01"]),
+            "abandon_date": pd.Series([pd.NaT, pd.NaT], dtype="datetime64[ns]"),
+        }
+    )
+    actual = _asof_industry(
+        panel, history, industry_sets=None, industry_versions=versions
+    )
+    assert actual["industry_level1_code"].tolist() == ["C"]
+    if newer_available == "2023-01-11":
+        # Actual computation history cannot borrow the next day's resolution.
+        with_history = pd.concat(
+            [panel.assign(timestamp=pd.Timestamp("2023-01-10")), panel],
+            ignore_index=True,
+        )
+        for consumed in (with_history, with_history.iloc[:1]):
+            with pytest.raises(ValueError, match="industry_history_standard_conflict"):
+                _asof_industry(
+                    consumed, history, industry_sets=None, industry_versions=versions
+                )
+        future = history.copy()
+        future.loc[2, "timestamp"] = pd.Timestamp("2023-01-13")
+        with pytest.raises(ValueError, match="industry_history_standard_conflict"):
+            _asof_industry(
+                panel, future, industry_sets=None, industry_versions=versions
+            )
+    # A current, unresolved cross-standard frontier remains contradictory.
+    with pytest.raises(ValueError, match="industry_history_standard_conflict"):
+        _asof_industry(
+            panel, history.iloc[:2], industry_sets=None, industry_versions=versions
+        )
+    # Newer information does not repair contradictory same-standard historical facts.
+    contradictory = pd.concat(
+        [history, history.iloc[[0]].assign(_industry_classification_code="D")],
+        ignore_index=True,
+    )
+    with pytest.raises(ValueError, match="industry_history_conflict"):
+        _asof_industry(
+            panel, contradictory, industry_sets=None, industry_versions=versions
+        )
+    # An unknown latest effective state still blocks older proven classifications.
+    history.loc[2, "_industry_known"] = False
+    unknown = _asof_industry(
+        panel, history, industry_sets=None, industry_versions=versions
+    )
+    assert unknown["industry_level1_code"].isna().all()
+
+
+def test_native_forward_returns_declare_units_and_actual_maturity_columns():
+    from quant_research_platform.markets.implementations.a_share.ids import (
+        FORWARD_RETURNS_DATA_ID,
+    )
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        catalog,
+    )
+
+    spec = catalog.processed_catalog().get(FORWARD_RETURNS_DATA_ID)
+    for definition in label_definitions():
+        assert spec.column_units[definition.output_column] == "decimal_return"
+        assert (
+            spec.label_availability_columns[definition.output_column]
+            == definition.available_at_column
+        )

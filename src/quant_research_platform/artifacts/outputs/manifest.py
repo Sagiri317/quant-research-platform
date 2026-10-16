@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from quant_research_platform.artifacts.outputs.evaluation_validation import (
     EVALUATION_ARTIFACTS,
@@ -22,6 +22,8 @@ from quant_research_platform.contracts.outputs import (
 from quant_research_platform.policy.share_safety import (
     evidence_json_value_unsafe_reason,
 )
+from quant_research_platform.storage.identity import require_unaliased_path
+from quant_research_platform.storage.manifests import read_qrp_json_file
 
 _OUTPUT_MANIFEST_KEYS = frozenset(
     {
@@ -75,11 +77,10 @@ def validate_output_manifest(
         raise ValueError("output_manifest_metadata_invalid")
     evidence_payload: dict[str, object] = {}
     if output_definition_id == "prediction_outputs":
-        model_metadata = metadata["model_metadata"]
+        facts = metadata["model_facts"]
         evidence_payload = {
-            "hyperparameters": model_metadata["hyperparameters"],
-            "resolved_hyperparameters": model_metadata["resolved_hyperparameters"],
-            "dependency_status": model_metadata["dependency_status"],
+            "hyperparameters": facts["model"]["hyperparameters"],
+            "candidate_parameters": facts["candidate_parameters"],
         }
     if evidence_json_value_unsafe_reason(evidence_payload) is not None:
         raise ValueError("output_manifest_metadata_invalid")
@@ -186,3 +187,25 @@ def evaluation_output_metadata(
             evaluation_diagnostics
         ),
     }
+
+
+def validate_output_bundle(
+    root: Path, *, expected_definition_id: str | None = None
+) -> tuple[dict[str, object], tuple[Path, ...]]:
+    """Read the manifest once and check its declared member paths."""
+    root = require_unaliased_path(Path(root), error="output_bundle_root_invalid")
+    if not root.is_dir():
+        raise ValueError("output_bundle_root_invalid")
+    manifest = read_qrp_json_file(root / "manifest.json")[1]
+    validate_output_manifest(manifest)
+    if (
+        expected_definition_id is not None
+        and manifest["output_definition_id"] != expected_definition_id
+    ):
+        raise ValueError("output_manifest_definition_id_mismatch")
+    members = tuple(root / name for name in manifest["files"])
+    for path in members:
+        require_unaliased_path(path, error="output_member_path_invalid")
+        if not path.is_file():
+            raise ValueError("output_member_path_invalid")
+    return manifest, members

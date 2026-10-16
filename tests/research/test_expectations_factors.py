@@ -46,7 +46,7 @@ def test_latest_declaration_keeps_same_day_median_and_next_session_gate():
     assert insufficient.iloc[:, 2:].isna().all().all()
 
 
-@pytest.mark.parametrize("freshness", (90, 180))
+@pytest.mark.parametrize("freshness", (30, 90, 180))
 def test_freshness_includes_declaration_day_limit_only(freshness):
     declaration = pd.Timestamp("2025-01-03")
     records = pd.DataFrame(
@@ -383,7 +383,7 @@ def test_extreme_finite_eps_medians_and_mad_persist_without_intermediate_overflo
             trading_sessions=dates,
         ),
     )
-    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.paths import StorageLayout
 
     root = StorageLayout(tmp_path).processed_data_root(
         spec.market_id, spec.kind, spec.data_id
@@ -404,8 +404,8 @@ def test_half_subnormal_forecast_centers_survive_both_medians(
         producer,
     )
     from quant_research_platform.storage.datasets import read_dataset, write_dataset
-    from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.a_share_catalogs import scientific_catalogs
+    from tests.helpers.paths import StorageLayout
 
     small = np.nextafter(0.0, 1.0)
     dates = pd.bdate_range("2020-01-02", periods=2).as_unit("ns")
@@ -460,7 +460,7 @@ def test_half_subnormal_forecast_centers_survive_both_medians(
 
 
 @pytest.mark.parametrize("batch_rows", (3, 10000))
-@pytest.mark.parametrize("freshness", (90, 180))
+@pytest.mark.parametrize("freshness", (30, 90, 180))
 def test_explicit_freshness_controls_native_source_history_and_values(
     tmp_path, freshness, batch_rows, monkeypatch
 ):
@@ -528,7 +528,7 @@ def test_explicit_freshness_controls_native_source_history_and_values(
     )
     saved = read_dataset(root).query("asset_id == '000001'")
     assert prepared == [True]
-    if freshness == 90:
+    if freshness <= 90:
         assert saved.forward_earnings_yield_fy1.isna().all()
     else:
         expected_close = panel.query("asset_id == '000001'").close.to_numpy()

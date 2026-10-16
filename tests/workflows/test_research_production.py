@@ -13,7 +13,6 @@ from quant_research_platform.artifacts.portfolio_ledger import (
 from quant_research_platform.artifacts.statistics import read_statistics_artifact
 from quant_research_platform.research.models.trial_selection import (
     read_selection,
-    select,
 )
 from quant_research_platform.research.portfolios.diagnostics import portfolio_statistics
 from quant_research_platform.research.portfolios.production import backtest
@@ -153,9 +152,7 @@ def test_source_models_reach_paired_native_test_statistics(source_chain, tmp_pat
         saved = read_statistics_artifact(previous)
         with saved.table("prediction_diagnostics.parquet") as diagnostics:
             assert diagnostics.observation_count.gt(20).all()
-            assert not diagnostics.reason.eq(
-                "global_validation_selection_reuses_validation"
-            ).any()
+            assert not diagnostics.reason.eq("selection_reuses_evaluation_window").any()
         with saved.table("model_losses.parquet") as losses:
             assert set(losses.family_id) == set(case.models)
             assert losses.period_id.eq("frozen_test").all()
@@ -236,44 +233,36 @@ def test_source_accounts_reconcile_native_portfolio_statistics(source_chain, tmp
 
 
 @pytest.mark.parametrize(
-    "mutation", ["missing_selection", "wrong_model", "wrong_group", "same_id_selection"]
+    "mutation", ["future_selection", "future_maturity", "invalid_rank"]
 )
-def test_test_account_rejects_unfrozen_or_wrong_model_input(
+def test_account_rejects_invalid_persisted_prediction_facts(
     source_chain, tmp_path, mutation
 ):
+    import json
+    import shutil
+
     case = source_chain
     config = {**case.portfolio_configs["global"], "output": str(tmp_path / "bad")}
     item = dict(config["predictions"][0])
-    if mutation == "missing_selection":
-        del item["selection"]
-        reason = "portfolio_frozen_selection_required"
-    elif mutation == "wrong_model":
-        winner = read_selection(case.selections["global"])["selected_model_id"]
-        other = next(model for model in case.models if model != winner)
-        item["model"] = str(case.final_models["global", other])
-        reason = "portfolio_prediction_model_mismatch"
-    elif mutation == "same_id_selection":
-        original = read_selection(case.selections["global"])
-        other = select(
-            {
-                "scores": original["scores"],
-                "output": str(tmp_path / "other-selection.json"),
-                "selection_metric": original["selection_metric"],
-                "selection_direction": original["selection_direction"],
-                "tie_break_order": original["tie_break_order"],
-                "refit_windows": original["refit_windows"],
-                "refit_cutoff": "2019-08-31",
-            }
-        )
-        assert (
-            read_selection(other)["selected_model_id"] == original["selected_model_id"]
-        )
-        item["selection"] = str(other)
-        reason = "portfolio_test_selection_mismatch"
-    else:
-        item["selection"] = str(case.selections["quarterly"])
-        reason = "portfolio_prediction_selection_mismatch"
+    copied = tmp_path / "predictions"
+    shutil.copytree(item["path"], copied)
+    item["path"] = str(copied)
     config["predictions"] = [item]
+    if mutation == "invalid_rank":
+        frame = pd.read_parquet(copied / "prediction.parquet")
+        frame.loc[0, "prediction_rank_score"] = 1e100
+        frame.to_parquet(copied / "prediction.parquet", index=False)
+        reason = "invalid_prediction_rank_values"
+    else:
+        manifest = json.loads((copied / "manifest.json").read_text())
+        metadata = manifest["metadata"]
+        if mutation == "future_selection":
+            metadata["model_facts"]["selection_cutoff"] = "2099-01-01"
+            reason = "model_selection_after_fit_cutoff"
+        else:
+            metadata["model_metadata"]["label_available_max"] = "2099-01-01"
+            reason = "model_training_label_after_fit_cutoff"
+        (copied / "manifest.json").write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match=reason):
         backtest(config)
     assert not (tmp_path / "bad").exists()

@@ -667,15 +667,14 @@ def test_writer_resolves_nested_nulls_independently_of_parts_and_chunks(
         )
         saved_spec = json.loads((root / "spec.json").read_text())
         assert saved_spec["primary_key"] == key
-        assert manifest["spec_identity"] == canonical_json_hash(saved_spec)
         assert not (set(saved_spec) - {"schema_id"}) & set(manifest)
         assert manifest["schema_hash"] == canonical_json_hash(
             manifest["physical_schema"]
         )
-        assert manifest["logical_dtype_hash"] == canonical_json_hash(
-            manifest["logical_dtypes"]
+        assert (
+            not {"spec_identity", "logical_dtype_hash", "validation_status"}
+            & manifest.keys()
         )
-        assert manifest["validation_status"] == "PASS"
         persisted_rows = []
         for path in sorted((root / "data").rglob("*.parquet")):
             with pq.ParquetFile(path) as parquet:
@@ -930,13 +929,13 @@ def test_spec_semantics_checked_once_per_write_and_read_boundary(tmp_path, monke
     monkeypatch.setattr(DataSpec, "__post_init__", validate)
     root = make_dataset_artifact_root(tmp_path)
     write_dataset(root, make_default_dataset_frame(), spec=spec)
-    # The constructed spec is trusted; the staged wire remains a validation boundary.
-    assert calls == [spec.data_id]
+    # The writer already owns a validated spec; external reads validate the wire once.
+    assert calls == []
     calls.clear()
     open_dataset_session(root, columns=None, time_window=None)
     assert calls == [spec.data_id]
     payload = json.loads((root / "spec.json").read_text())
     payload["column_roles"]["value"] = "context"
     (root / "spec.json").write_text(json.dumps(payload))
-    with pytest.raises(ValueError, match="dataset_manifest_spec_mismatch"):
-        open_dataset_session(root, columns=None, time_window=None)
+    with pytest.raises(ValueError, match="manifest_factor_nan_profile_invalid"):
+        open_dataset_session(root)

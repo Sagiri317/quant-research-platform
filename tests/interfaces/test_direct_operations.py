@@ -175,3 +175,33 @@ def test_inspect_reads_only_the_selected_native_dataset_metadata(tmp_path):
     assert "instance_identity" not in result
     with pytest.raises(ValueError, match="inspection_requires_native_json_metadata"):
         inspect(root / "unrelated.json")
+
+
+@pytest.mark.parametrize("kind", ["date", "path", "nonfinite"])
+def test_source_stage_json_boundary_precedes_materialization(
+    tmp_path, monkeypatch, kind
+):
+    from datetime import date
+
+    from quant_research_platform.sources.csmar import interim
+    from quant_research_platform.sources.prepare import prepare_source
+
+    def forbidden(**kwargs):
+        pytest.fail("non-JSON configuration reached source I/O")
+
+    monkeypatch.setattr(interim, "materialize_interim_data", forbidden)
+    config = {
+        "source_id": "csmar",
+        "raw_root": str(tmp_path / "missing"),
+        "outputs": {"market_bars_1d": str(tmp_path / "output")},
+    }
+    config.update(
+        {
+            "date": {"start_date": date(2020, 1, 1)},
+            "path": {"raw_root": tmp_path / "missing"},
+            "nonfinite": {"chunksize": float("nan")},
+        }[kind]
+    )
+    with pytest.raises(ValueError):
+        prepare_source(config)
+    assert not list(tmp_path.iterdir())

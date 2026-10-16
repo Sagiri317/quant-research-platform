@@ -5,13 +5,11 @@ import json
 import pandas as pd
 import pytest
 
+from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.sources.binance.funding import read_funding_observations
-from quant_research_platform.sources.market import (
-    market_funding_identity,
-    open_market_source,
-)
+from quant_research_platform.sources.market import open_market_source
 from quant_research_platform.sources.tardis.funding import import_funding_history
 from quant_research_platform.sources.tardis.raw import import_slices
 from quant_research_platform.sources.tardis.replay import open_tardis_archive
@@ -272,8 +270,11 @@ def test_selected_validation_funding_never_reads_other_months(tmp_path, monkeypa
         ]
         roots = source.funding_roots("BTCUSDT", time_window=validation)
         assert len(roots) == 1 and roots[0].is_relative_to(archives[1])
+        manifest = json.loads((roots[0] / "response.metadata.json").read_text())
         with read_funding_observations(roots, symbol="BTCUSDT") as observations:
-            expected_identity = observations.identity
+            assert observations.identity == canonical_json_hash(
+                {"sources": [canonical_json_hash(manifest)]}
+            )
             forecasts = tuple(observations.forecasts)
             assert [item.available_at_ns for item in forecasts] == [
                 pd.Timestamp("2026-08-01T00:00:01").value
@@ -288,16 +289,6 @@ def test_selected_validation_funding_never_reads_other_months(tmp_path, monkeypa
         ):
             with read_funding_observations(no_roots, symbol="BTCUSDT"):
                 pytest.fail("selected source cannot discover another month")
-    assert (
-        market_funding_identity(
-            tmp_path,
-            "ledger",
-            symbol="BTCUSDT",
-            archive_paths=archive_paths,
-            time_window=validation,
-        )
-        == expected_identity
-    )
     assert inspected and set(inspected) == set(roots)
 
 

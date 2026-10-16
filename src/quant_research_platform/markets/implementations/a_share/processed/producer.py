@@ -26,6 +26,7 @@ from quant_research_platform.contracts.time import (
 from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_integer_series,
+    strict_timestamp_series,
 )
 from quant_research_platform.markets.implementations.a_share.benchmark import (
     iter_benchmark_weight_snapshots,
@@ -65,6 +66,7 @@ from quant_research_platform.research.labels import engine as label_engine
 from quant_research_platform.research.protocols import a_share
 from quant_research_platform.runtime import resources
 from quant_research_platform.storage.datasets.reading import (
+    _dataset_input_options,
     _prepare_in_filter,
     iter_dataset_chunks,
     materialize_dataset_session,
@@ -108,7 +110,12 @@ def produce_a_share_processed_data(
                 source[data_id] = pd.DataFrame(columns=source_spec.required_columns)
                 continue
             continue
-        session = open_dataset_session(root, columns=None, time_window=None)
+        options = _dataset_input_options(root)
+        if options.get("columns") is not None:
+            options["columns"] = tuple(
+                dict.fromkeys((*source_spec.primary_key, *options["columns"]))
+            )
+        session = open_dataset_session(**options)
         if (
             data_id in _FULL_HISTORY_SOURCE_IDS
             or data_id in spec.optional_source_input_data_ids
@@ -153,7 +160,8 @@ def produce_a_share_processed_data(
     for data_id in spec.processed_input_data_ids:
         dependency = processed.get(data_id)
         root = inputs[data_id]
-        if not filesystem_exists(root):
+        options = _dataset_input_options(root)
+        if not filesystem_exists(options["dataset_root"]):
             raise ValueError(f"missing_processed_dependency: {data_id}")
         columns = None
         if spec.data_id == "fundamental_pit":
@@ -162,8 +170,12 @@ def produce_a_share_processed_data(
             requested = {
                 *factor_engine.factor_panel_input_columns(factor_definitions),
                 "has_legal_fundamental_pit",
-                "listing_date",
             }
+            if any(
+                definition.family in {"price_volume", "market_model"}
+                for definition in factor_definitions
+            ):
+                requested.add("listing_date")
             if any(
                 definition.family == "expectations" for definition in factor_definitions
             ):
@@ -177,13 +189,42 @@ def produce_a_share_processed_data(
             )
         elif spec.kind is ProcessedDataKind.LABEL:
             requested = {
-                *label_engine.label_panel_input_columns(a_share.label_catalog().list()),
+                *label_engine.label_panel_input_columns(
+                    tuple(
+                        definition
+                        for definition in a_share.label_catalog().list()
+                        if definition.output_column in spec.required_columns
+                    )
+                ),
                 "listing_date",
             }
             columns = tuple(
                 column for column in dependency.required_columns if column in requested
             )
-        session = open_dataset_session(root, columns=columns, time_window=None)
+        if (
+            options.get("columns") is not None
+            and columns is not None
+            and not set(columns).difference(
+                {
+                    "market_id",
+                    "asset_id",
+                    "timestamp",
+                    "listing_date",
+                    "has_legal_fundamental_pit",
+                }
+            )
+            <= set(options["columns"])
+        ):
+            raise ValueError("data_operation_input_columns_missing")
+        if columns is not None:
+            options["columns"] = columns
+        elif options.get("columns") is not None:
+            options["columns"] = tuple(
+                dict.fromkeys(
+                    (*dependency.primary_key, "listing_date", *options["columns"])
+                )
+            )
+        session = open_dataset_session(**options)
         if spec.kind is ProcessedDataKind.LABEL or spec.data_id == "execution_mask":
             # Actual supplied PANEL sessions own the future execution/label clock.
             # Each block below reads only its required own-market lookahead.
@@ -215,8 +256,18 @@ def produce_a_share_processed_data(
 
 def _preceding_input_window(session, window):
     """Keep supplied history through the exact cutoff, without a protocol epoch."""
-    minimum = session.manifest["date_min"]
-    start = date.fromisoformat(minimum) if minimum is not None else window.start
+    minimum = session.manifest.get("date_min")
+    if minimum is None:
+        with closing_iterator(
+            iter_dataset_chunks(session.projected_view(("timestamp",)))
+        ) as chunks:
+            minimum = min(
+                (frame.timestamp.min() for frame in chunks if not frame.empty),
+                default=None,
+            )
+        start = pd.Timestamp(minimum).date() if minimum is not None else window.start
+    else:
+        start = date.fromisoformat(minimum)
     if is_datetime_window(window):
         start = pd.Timestamp(start)
     return TimeWindow(min(start, window.start), window.end)
@@ -276,7 +327,13 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
     )
     lookback = factor_engine.factor_lookback_bars(definitions)
     lookahead = (
-        label_engine.label_lookahead_bars(a_share.label_catalog().list())
+        label_engine.label_lookahead_bars(
+            tuple(
+                definition
+                for definition in a_share.label_catalog().list()
+                if definition.output_column in spec.required_columns
+            )
+        )
         if spec.kind is ProcessedDataKind.LABEL
         else 0
     )
@@ -513,7 +570,7 @@ def _processed_axis(
         if panel_source
         else (asset_column, "timestamp")
     )
-    view = replace(session, logical_columns=columns, physical_columns=columns)
+    view = session.projected_view(columns)
     if panel_source:
         boundaries = (
             stock_master.loc[:, ["asset_id", "listing_date"]]
@@ -523,6 +580,11 @@ def _processed_axis(
         )
 
     def with_lifecycles(frame):
+        frame = frame.assign(
+            timestamp=strict_timestamp_series(
+                frame["timestamp"], error="invalid_source_timestamp"
+            )
+        )
         return pd.merge_asof(
             frame.sort_values("timestamp", kind="mergesort"),
             boundaries.astype({asset_column: frame[asset_column].dtype}),
@@ -628,9 +690,7 @@ def _processed_axis(
         if migrating:
             columns = (asset_column, "timestamp", "market_type")
             view = replace(
-                session,
-                logical_columns=columns,
-                physical_columns=columns,
+                session.projected_view(columns),
                 parquet_filters=(
                     *(session.parquet_filters or ()),
                     (
@@ -805,7 +865,11 @@ def _compute_processed_frame(
             how="left",
             validate="one_to_one",
         )
-        definitions = a_share.label_catalog().list()
+        definitions = tuple(
+            definition
+            for definition in a_share.label_catalog().list()
+            if definition.output_column in spec.required_columns
+        )
         pieces = [
             label_engine.calculate_labels_for_panel(
                 group,

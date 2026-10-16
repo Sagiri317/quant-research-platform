@@ -39,10 +39,21 @@ def fingerprint_dataset(
 
 
 def comparison_schema(context: DatasetSession) -> dict[str, Any]:
+    spec = context.spec
     hash_columns = tuple(
-        dict.fromkeys((*context.spec["primary_key"], *context.logical_columns))
+        dict.fromkeys((*spec["primary_key"], *context.logical_columns))
     )
     return {
+        "frequency": spec["frequency"],
+        "grain": spec["grain"],
+        **{
+            name: {
+                column: value
+                for column, value in spec.get(name, {}).items()
+                if column in hash_columns
+            }
+            for name in ("column_roles", "column_units", "label_availability_columns")
+        },
         "physical_schema": physical_schema_from_schema(
             pa.schema([context.arrow_schema.field(column) for column in hash_columns])
         ),

@@ -6,7 +6,6 @@ import hashlib
 import json
 from typing import Final
 
-ROOT_SEED: Final[int] = 42
 UINT32_MODULUS: Final[int] = 2**32
 
 

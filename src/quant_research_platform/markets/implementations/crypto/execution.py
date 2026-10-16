@@ -34,10 +34,8 @@ from quant_research_platform.contracts.validation import (
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.portfolios.accounting import PortfolioEconomics
-from quant_research_platform.research.protocols.crypto_hft import (
-    CryptoMakerPlan,
-)
 
+MAKER_QUOTE_HORIZON_MS = 500
 _NANOSECONDS_PER_MILLISECOND = 1_000_000
 _UTC_DAY_NS = 86_400_000_000_000
 
@@ -1305,7 +1303,7 @@ def _maker_new_order(order_id, side, quantity, state, row, latency_ms):
         price_unit=state.price_unit,
         created_time_ns=timestamp,
         valid_until_ns=timestamp
-        + CryptoMakerPlan.quote_horizon_ms * _NANOSECONDS_PER_MILLISECOND,
+        + MAKER_QUOTE_HORIZON_MS * _NANOSECONDS_PER_MILLISECOND,
         effective_at_ns=timestamp + latency_ms * _NANOSECONDS_PER_MILLISECOND,
     )
 
@@ -1412,7 +1410,7 @@ class MakerCalibration:
         observed = {
             book_context: (
                 start,
-                start + CryptoMakerPlan.quote_horizon_ms * _NANOSECONDS_PER_MILLISECOND,
+                start + MAKER_QUOTE_HORIZON_MS * _NANOSECONDS_PER_MILLISECOND,
             )
         }
         traded = {trade_context: observed[book_context]}
@@ -1843,10 +1841,7 @@ def replay_maker_calibration(
 
         for row in rows:
             timestamp = row["timestamp_ms"] * _NANOSECONDS_PER_MILLISECOND
-            end = (
-                timestamp
-                + CryptoMakerPlan.quote_horizon_ms * _NANOSECONDS_PER_MILLISECOND
-            )
+            end = timestamp + MAKER_QUOTE_HORIZON_MS * _NANOSECONDS_PER_MILLISECOND
             if row["label_available_at_ns"] > cutoff_ns or end > cutoff_ns:
                 raise ValueError("maker_calibration_outcome_not_mature")
             process_until(timestamp)
@@ -2443,10 +2438,9 @@ def simulate_maker(
                 and row["price_prediction"] is not None
             )
             forecast_end = (
-                decision_time_ns
-                + CryptoMakerPlan.quote_horizon_ms * _NANOSECONDS_PER_MILLISECOND
+                decision_time_ns + MAKER_QUOTE_HORIZON_MS * _NANOSECONDS_PER_MILLISECOND
             )
-            lifetime = CryptoMakerPlan.quote_horizon_ms * _NANOSECONDS_PER_MILLISECOND
+            lifetime = MAKER_QUOTE_HORIZON_MS * _NANOSECONDS_PER_MILLISECOND
             if decision_windows_ns is not None:
                 lifetime = min(
                     lifetime, decision_windows_ns[window_index][1] - decision_time_ns
@@ -2735,7 +2729,7 @@ def simulate_maker(
             else {}
         ),
         "latency_ms": config.latency_ms,
-        "quote_horizon_ms": CryptoMakerPlan.quote_horizon_ms,
+        "quote_horizon_ms": MAKER_QUOTE_HORIZON_MS,
         "markout_horizon_ms": config.markout_horizon_ms,
         "queue_model": "estimated_queue_ahead",
         "queue_assumption": (

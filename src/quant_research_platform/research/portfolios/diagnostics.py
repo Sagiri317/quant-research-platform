@@ -11,7 +11,6 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.compute.portfolio_economics import _LedgerEconomics
-from quant_research_platform.contracts.experiments import _model_inference_blocker
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.portfolios import PORTFOLIO_CASH_ASSET_ID
 from quant_research_platform.contracts.validation import (
@@ -34,12 +33,24 @@ from quant_research_platform.research.portfolios.schedules import holding_interv
 from quant_research_platform.research.protocols.a_share import _inference_blocker
 from quant_research_platform.research.statistics import (
     _return_sharpes,
+    _selected_analyses,
     cscv_pbo,
     probabilistic_and_deflated_sharpe,
     return_standard_deviation,
     stationary_bootstrap_mean_ci,
     time_series_inference_summary,
 )
+
+_PORTFOLIO_ANALYSES = (
+    "performance",
+    "benchmark",
+    "attribution",
+    "capacity",
+    "sharpe_inference",
+    "cscv",
+    "group_comparison",
+)
+_CRYPTO_ANALYSES = ("performance", "annualized", "execution", "cost_sensitivity")
 
 
 def _nav_return_roundoff(start: object, end: object, returns: object) -> np.ndarray:
@@ -328,9 +339,10 @@ def build_crypto_portfolio_statistics_tables(
     summarize_ledger,
     table_columns,
 ):
+    analyses = _selected_analyses(config, _CRYPTO_ANALYSES)
     mode = config["execution_mode"]
-    execution_config = config["execution"]
-    statistics_policy = config["statistics"]
+    execution_config = config.get("execution", {})
+    statistics_policy = config.get("statistics", {})
     if not windows:
         raise ValueError("crypto_statistics_windows_required")
     bounds = tuple(
@@ -371,6 +383,18 @@ def build_crypto_portfolio_statistics_tables(
         )
 
     def metric(name, value, count, reason=""):
+        annualized = name in {"annualized_volatility", "sharpe"}
+        day_count = name in {
+            "planned_complete_utc_days",
+            "defined_complete_utc_days",
+            "oos_mean_daily_return",
+        }
+        if (annualized and "annualized" not in analyses) or (
+            not annualized
+            and "performance" not in analyses
+            and not (day_count and "annualized" in analyses)
+        ):
+            return
         if isinstance(value, Fraction):
             value = finite_exact_float(value)
         defined = value is not None and np.isfinite(value)
@@ -403,14 +427,16 @@ def build_crypto_portfolio_statistics_tables(
             if episode is None
             else (episode["start_ns"], episode["terminal_valuation_ns"])
         )
-        observe, finish = _crypto_observations(
-            artifact,
-            windows,
-            execution_config["max_position"]
-            if config["execution_style"] == "maker"
-            else execution_config["position_size"],
-            observation_window_ns=observed,
-        )
+        observe = finish = None
+        if {"performance", "annualized"} & set(analyses):
+            observe, finish = _crypto_observations(
+                artifact,
+                windows,
+                execution_config["max_position"]
+                if config["execution_style"] == "maker"
+                else execution_config["position_size"],
+                observation_window_ns=observed,
+            )
         summary = summarize_ledger(
             artifact,
             batches,
@@ -472,130 +498,117 @@ def build_crypto_portfolio_statistics_tables(
                 "termination": episode["termination"],
                 "stop_reasons": ",".join(episode["stop_reasons"]),
             }
-        daily, inventory, drawdown = finish()
-        for interval in intervals:
-            interval_rows.append(
-                {
-                    **row_key,
-                    "kind": interval["kind"],
-                    "start_at": pd.Timestamp(interval["start_ns"]),
-                    "end_at": pd.Timestamp(interval["end_ns"]),
-                    **{
-                        key: interval[key]
-                        for key in (
-                            "start_nav",
-                            "end_nav",
-                            "gross_pnl",
-                            "net_pnl",
-                            "fees",
-                            "funding",
-                            "turnover",
-                            "fill_events",
-                        )
-                    },
-                }
-            )
-        daily_rows.extend({**row_key, **row} for row in daily)
-        for key in (
-            "initial_capital",
-            "gross_pnl",
-            "net_pnl",
-            "capital_return",
-            "fees",
-            "funding",
-            "turnover",
-            "fill_events",
-            "fill_quantity",
-        ):
-            metric(
-                key,
-                economic[key],
-                int(economic["fill_events"]),
-                economic.get(f"{key}_reason") or "",
-            )
-        metric("terminal_nav", economic["nav"], len(intervals))
-        metric(
-            "continuous_max_drawdown" if episode is None else "episode_max_drawdown",
-            drawdown,
-            len(intervals),
-        )
-        for scope in ("oos", "gap"):
-            if episode is None:
-                metric(
-                    f"{scope}_net_pnl",
-                    sum(row["net_pnl"] for row in intervals if row["kind"] == scope),
-                    sum(row["kind"] == scope for row in intervals),
+        if finish is not None:
+            daily, inventory, drawdown = finish()
+            for interval in intervals:
+                interval_rows.append(
+                    {
+                        **row_key,
+                        "kind": interval["kind"],
+                        "start_at": pd.Timestamp(interval["start_ns"]),
+                        "end_at": pd.Timestamp(interval["end_ns"]),
+                        **{
+                            key: interval[key]
+                            for key in (
+                                "start_nav",
+                                "end_nav",
+                                "gross_pnl",
+                                "net_pnl",
+                                "fees",
+                                "funding",
+                                "turnover",
+                                "fill_events",
+                            )
+                        },
+                    }
                 )
-            state = inventory[scope]
-            for name, value in (
-                ("inventory_mean", state["mean"]),
-                (
-                    "inventory_variance",
-                    state["m2"] / state["duration"] if state["duration"] else None,
-                ),
-                (
-                    "inventory_time_at_limit_fraction",
-                    state["at_limit"] / state["duration"]
-                    if state["duration"]
-                    else None,
-                ),
+            daily_rows.extend({**row_key, **row} for row in daily)
+            for key in (
+                "initial_capital",
+                "gross_pnl",
+                "net_pnl",
+                "capital_return",
+                "fees",
+                "funding",
+                "turnover",
+                "fill_events",
+                "fill_quantity",
             ):
                 metric(
-                    f"{scope}_{name}",
-                    value if state["duration"] else None,
-                    int(state["duration"] > 0),
-                    f"no_{scope}_duration",
+                    key,
+                    economic[key],
+                    int(economic["fill_events"]),
+                    economic.get(f"{key}_reason") or "",
                 )
+            metric("terminal_nav", economic["nav"], len(intervals))
             metric(
-                f"{scope}_inventory_max_abs",
-                state["max_abs"] if state["observations"] else None,
-                state["observations"],
-                f"no_{scope}_observations",
+                "continuous_max_drawdown"
+                if episode is None
+                else "episode_max_drawdown",
+                drawdown,
+                len(intervals),
             )
-        values = np.array(
-            [row["net_return"] for row in daily if row["status"] == "DEFINED"],
-            dtype=np.float64,
-        )
-        count = len(values)
-        metric("planned_complete_utc_days", len(daily), len(daily))
-        metric("defined_complete_utc_days", count, count)
-        daily_missing = any(row["status"] != "DEFINED" for row in daily)
-        day_reason = (
-            "planned_utc_day_valuation_undefined"
-            if daily_missing
-            else "insufficient_complete_utc_days"
-        )
-        metric(
-            "oos_mean_daily_return",
-            float(values.mean()) if count and (not daily_missing) else None,
-            count,
-            day_reason,
-        )
-        if (
-            not daily_missing
-            and count >= statistics_policy["annualization_minimum_observations"]
-        ):
-            defined = [row for row in daily if row["status"] == "DEFINED"]
-            deviation = float(
-                return_standard_deviation(
-                    values,
-                    roundoff=_nav_return_roundoff(
-                        [row["start_nav"] for row in defined],
-                        [row["end_nav"] for row in defined],
-                        values,
+            for scope in ("oos", "gap"):
+                if episode is None:
+                    metric(
+                        f"{scope}_net_pnl",
+                        sum(
+                            row["net_pnl"] for row in intervals if row["kind"] == scope
+                        ),
+                        sum(row["kind"] == scope for row in intervals),
+                    )
+                state = inventory[scope]
+                for name, value in (
+                    ("inventory_mean", state["mean"]),
+                    (
+                        "inventory_variance",
+                        state["m2"] / state["duration"] if state["duration"] else None,
                     ),
+                    (
+                        "inventory_time_at_limit_fraction",
+                        state["at_limit"] / state["duration"]
+                        if state["duration"]
+                        else None,
+                    ),
+                ):
+                    metric(
+                        f"{scope}_{name}",
+                        value if state["duration"] else None,
+                        int(state["duration"] > 0),
+                        f"no_{scope}_duration",
+                    )
+                metric(
+                    f"{scope}_inventory_max_abs",
+                    state["max_abs"] if state["observations"] else None,
+                    state["observations"],
+                    f"no_{scope}_observations",
                 )
+            values = np.array(
+                [row["net_return"] for row in daily if row["status"] == "DEFINED"],
+                dtype=np.float64,
+            )
+            count = len(values)
+            metric("planned_complete_utc_days", len(daily), len(daily))
+            metric("defined_complete_utc_days", count, count)
+            daily_missing = any(row["status"] != "DEFINED" for row in daily)
+            day_reason = (
+                "planned_utc_day_valuation_undefined"
+                if daily_missing
+                else "insufficient_complete_utc_days"
             )
             metric(
-                "annualized_volatility",
-                deviation * np.sqrt(statistics_policy["annualization_periods"]),
+                "oos_mean_daily_return",
+                float(values.mean()) if count and (not daily_missing) else None,
                 count,
-                "return_risk_unresolved",
+                day_reason,
             )
-            metric(
-                "sharpe",
-                float(
-                    _return_sharpes(
+            if "annualized" in analyses and (
+                not daily_missing
+                and count >= statistics_policy["annualization_minimum_observations"]
+            ):
+                defined = [row for row in daily if row["status"] == "DEFINED"]
+                deviation = float(
+                    return_standard_deviation(
                         values,
                         roundoff=_nav_return_roundoff(
                             [row["start_nav"] for row in defined],
@@ -603,62 +616,82 @@ def build_crypto_portfolio_statistics_tables(
                             values,
                         ),
                     )
-                    * np.sqrt(statistics_policy["annualization_periods"])
-                ),
-                count,
-                "zero_daily_return_variance"
-                if deviation == 0
-                else "return_risk_unresolved",
+                )
+                metric(
+                    "annualized_volatility",
+                    deviation * np.sqrt(statistics_policy["annualization_periods"]),
+                    count,
+                    "return_risk_unresolved",
+                )
+                metric(
+                    "sharpe",
+                    float(
+                        _return_sharpes(
+                            values,
+                            roundoff=_nav_return_roundoff(
+                                [row["start_nav"] for row in defined],
+                                [row["end_nav"] for row in defined],
+                                values,
+                            ),
+                        )
+                        * np.sqrt(statistics_policy["annualization_periods"])
+                    ),
+                    count,
+                    "zero_daily_return_variance"
+                    if deviation == 0
+                    else "return_risk_unresolved",
+                )
+            elif "annualized" in analyses:
+                metric("annualized_volatility", None, count, day_reason)
+                metric("sharpe", None, count, day_reason)
+            metric(
+                "pnl_per_fill",
+                economic["net_pnl"] / economic["fill_events"]
+                if economic["fill_events"]
+                else None,
+                int(economic["fill_events"]),
+                "no_fills",
             )
-        else:
-            metric("annualized_volatility", None, count, day_reason)
-            metric("sharpe", None, count, day_reason)
-        metric(
-            "pnl_per_fill",
-            economic["net_pnl"] / economic["fill_events"]
-            if economic["fill_events"]
-            else None,
-            int(economic["fill_events"]),
-            "no_fills",
-        )
-        metric(
-            "pnl_per_notional",
-            economic["net_pnl"] / economic["turnover"]
-            if economic["turnover"]
-            else None,
-            int(economic["fill_events"]),
-            "no_turnover",
-        )
-        for name, value in execution.items():
-            diagnostics.append(
-                {
-                    **row_key,
-                    "metric_id": name,
-                    "value": float(value)
-                    if type(value) in (float, int, bool)
-                    else np.nan,
-                    "text": value if type(value) is str else "",
-                    "status": "DEFINED" if value is not None else "UNDEFINED",
-                    "reason": "" if value is not None else f"{name}_undefined",
-                }
+            metric(
+                "pnl_per_notional",
+                economic["net_pnl"] / economic["turnover"]
+                if economic["turnover"]
+                else None,
+                int(economic["fill_events"]),
+                "no_turnover",
             )
-        base_fee = (
-            execution_config["maker_fee_bps"]
-            if config["execution_style"] == "maker"
-            else execution_config["taker_fee_bps"]
-        )
-        costs.extend(
-            {**row_key, **row}
-            for row in fixed_turnover_cost_sensitivity(
-                turnover=economic["turnover"],
-                net_pnl=economic["net_pnl"],
-                base_fee_bps=base_fee,
-                fee_scenarios_bps=statistics_policy["fee_scenarios_bps"],
-                additional_spread_scenarios_bps=statistics_policy[
-                    "additional_spread_scenarios_bps"
-                ],
+        if "execution" in analyses:
+            for name, value in execution.items():
+                diagnostics.append(
+                    {
+                        **row_key,
+                        "metric_id": name,
+                        "value": float(value)
+                        if type(value) in (float, int, bool)
+                        else np.nan,
+                        "text": value if type(value) is str else "",
+                        "status": "DEFINED" if value is not None else "UNDEFINED",
+                        "reason": "" if value is not None else f"{name}_undefined",
+                    }
+                )
+        if "cost_sensitivity" in analyses:
+            base_fee = (
+                execution_config["maker_fee_bps"]
+                if config["execution_style"] == "maker"
+                else execution_config["taker_fee_bps"]
             )
-        )
+            costs.extend(
+                {**row_key, **row}
+                for row in fixed_turnover_cost_sensitivity(
+                    turnover=economic["turnover"],
+                    net_pnl=economic["net_pnl"],
+                    base_fee_bps=base_fee,
+                    fee_scenarios_bps=statistics_policy["fee_scenarios_bps"],
+                    additional_spread_scenarios_bps=statistics_policy[
+                        "additional_spread_scenarios_bps"
+                    ],
+                )
+            )
 
     root = ledger_path
     if mode == "continuous":
@@ -682,34 +715,35 @@ def build_crypto_portfolio_statistics_tables(
         **costs_total,
     }.items():
         metric(name, value, episode_count)
-    for name, value in {
-        "funding_required_decisions": funding_required,
-        "funding_covered_decisions": funding_covered,
-        "funding_decision_coverage": funding_covered / funding_required
-        if funding_required
-        else None,
-        "funding_selection_status": "PARTIAL"
-        if funding_required and 0 < funding_covered < funding_required
-        else "BLOCKED"
-        if funding_required and not funding_covered
-        else "COMPLETE"
-        if funding_required
-        else "UNDEFINED",
-    }.items():
-        diagnostics.append(
-            {
-                **row_key,
-                "metric_id": name,
-                "value": float(value) if type(value) in (float, int) else np.nan,
-                "text": value if type(value) is str else "",
-                "status": "DEFINED" if value is not None else "UNDEFINED",
-                "reason": ""
-                if value is not None
-                else "funding_decision_counts_unrecorded"
-                if funding_required is None
-                else "no_funding_required_decisions",
-            }
-        )
+    if "execution" in analyses:
+        for name, value in {
+            "funding_required_decisions": funding_required,
+            "funding_covered_decisions": funding_covered,
+            "funding_decision_coverage": funding_covered / funding_required
+            if funding_required
+            else None,
+            "funding_selection_status": "PARTIAL"
+            if funding_required and 0 < funding_covered < funding_required
+            else "BLOCKED"
+            if funding_required and not funding_covered
+            else "COMPLETE"
+            if funding_required
+            else "UNDEFINED",
+        }.items():
+            diagnostics.append(
+                {
+                    **row_key,
+                    "metric_id": name,
+                    "value": float(value) if type(value) in (float, int) else np.nan,
+                    "text": value if type(value) is str else "",
+                    "status": "DEFINED" if value is not None else "UNDEFINED",
+                    "reason": ""
+                    if value is not None
+                    else "funding_decision_counts_unrecorded"
+                    if funding_required is None
+                    else "no_funding_required_decisions",
+                }
+            )
     records = {
         "crypto_portfolio_intervals": interval_rows,
         "crypto_portfolio_daily": daily_rows,
@@ -723,7 +757,16 @@ def build_crypto_portfolio_statistics_tables(
         for name, rows in records.items()
     }
 
-    return tables
+    requested = {"crypto_portfolio_coverage"}
+    if "performance" in analyses:
+        requested.add("crypto_portfolio_intervals")
+    if {"performance", "annualized"} & set(analyses):
+        requested.update(("crypto_portfolio_daily", "crypto_portfolio_statistics"))
+    if "execution" in analyses:
+        requested.add("crypto_execution_diagnostics")
+    if "cost_sensitivity" in analyses:
+        requested.add("crypto_cost_sensitivity")
+    return {name: table for name, table in tables.items() if name in requested}
 
 
 def iter_holding_factor_inputs(
@@ -764,7 +807,11 @@ def iter_holding_factor_inputs(
 
         def stream(root, projection, window):
             return channels.enter_context(
-                closing_iterator(_iter_input_sessions(root, projection, window))
+                closing_iterator(
+                    _iter_input_sessions(
+                        root, projection, window, business_columns=("weight",)
+                    )
+                )
             )
 
         panels = channels.enter_context(
@@ -963,18 +1010,27 @@ def build_portfolio_statistics_tables(
     inputs,
     iter_portfolio_sessions,
 ):
-    from quant_research_platform.storage.datasets.reading import read_dataset
-    from quant_research_platform.storage.datasets.types import DatasetReadMode
+    from quant_research_platform.research.portfolios.production import (
+        _iter_input_sessions,
+        _read_materialized,
+    )
 
+    analyses = _selected_analyses(config, _PORTFOLIO_ANALYSES)
     pieces = []
 
-    calendar = read_dataset(
-        inputs["calendar"],
-        columns=("calendar_date", "source_market_type", "is_trading_day"),
-        time_window=None,
-        mode=DatasetReadMode.MATERIALIZED,
+    calendar = (
+        _read_materialized(
+            inputs["calendar"],
+            ("calendar_date", "source_market_type", "is_trading_day"),
+        )
+        if "attribution" in analyses
+        else None
     )
-    codes = config["benchmark_total_return_indices"]
+    codes = (
+        config.get("benchmark_total_return_indices", {})
+        if {"benchmark", "attribution"} & set(analyses)
+        else {}
+    )
     price_codes = {
         name: code
         for code, (name, _label) in a_share_ids.FORMAL_BENCHMARKS.items()
@@ -982,19 +1038,23 @@ def build_portfolio_statistics_tables(
     }
     if codes:
         endpoint_dates = (
-            holding_intervals(
-                pd.DatetimeIndex(unified_trading_sessions(calendar)), time_window
+            (
+                holding_intervals(
+                    pd.DatetimeIndex(unified_trading_sessions(calendar)), time_window
+                )
+                .loc[:, ["entry_at", "end_at"]]
+                .to_numpy()
+                .ravel()
             )
-            .loc[:, ["entry_at", "end_at"]]
-            .to_numpy()
-            .ravel()
+            if calendar is not None
+            else None
         )
         with closing_iterator(
-            read_dataset(
+            _iter_input_sessions(
                 inputs["index_market"],
-                columns=("source_asset_id", "timestamp", "open", "close"),
-                time_window=time_window,
-                mode=DatasetReadMode.CHUNKED,
+                ("source_asset_id", "timestamp", "open", "close"),
+                time_window,
+                business_columns=("open", "close"),
             )
         ) as chunks:
             for frame in chunks:
@@ -1014,7 +1074,11 @@ def build_portfolio_statistics_tables(
         missing = (
             benchmark.source_asset_id.eq(codes[name])
             & benchmark.open.isna()
-            & benchmark.timestamp.isin(endpoint_dates)
+            & (
+                benchmark.timestamp.isin(endpoint_dates)
+                if endpoint_dates is not None
+                else True
+            )
         )
         if not missing.any():
             continue
@@ -1045,25 +1109,31 @@ def build_portfolio_statistics_tables(
     benchmark["benchmark_id"] = benchmark.source_asset_id.map(
         {code: name for name, code in codes.items()}
     )
-    holding_inputs = {
-        styles: iter_holding_factor_inputs(
-            iter_portfolio_sessions=iter_portfolio_sessions,
-            inputs=inputs,
-            calendar=calendar,
-            time_window=time_window,
-            unified_trading_sessions=unified_trading_sessions,
-            style_columns=styles,
-            risk_config=FactorRiskConfig(**config["risk"]),
-            benchmark_required=any(
-                candidate.benchmark_id is not None
-                for candidate in candidates
-                if candidate.risk_style_columns == styles
-            ),
-        )
-        for styles in dict.fromkeys(
-            candidate.risk_style_columns for candidate in candidates
-        )
-    }
+    if "attribution" in analyses and calendar is None:
+        raise ValueError("portfolio_statistics_attribution_calendar_required")
+    holding_inputs = (
+        {
+            styles: iter_holding_factor_inputs(
+                iter_portfolio_sessions=iter_portfolio_sessions,
+                inputs=inputs,
+                calendar=calendar,
+                time_window=time_window,
+                unified_trading_sessions=unified_trading_sessions,
+                style_columns=styles,
+                risk_config=FactorRiskConfig(**config["risk"]),
+                benchmark_required=any(
+                    candidate.benchmark_id is not None
+                    for candidate in candidates
+                    if candidate.risk_style_columns == styles
+                ),
+            )
+            for styles in dict.fromkeys(
+                candidate.risk_style_columns for candidate in candidates
+            )
+        }
+        if "attribution" in analyses
+        else {}
+    )
     return _portfolio_statistics_tables(
         ledgers=ledgers,
         candidates=candidates,
@@ -1088,11 +1158,17 @@ def _portfolio_statistics_tables(
     holding_inputs,
 ):
     """Project the protocol-selected ledgers into interval-aligned diagnostics."""
+    analyses = _selected_analyses(config, _PORTFOLIO_ANALYSES)
+    benchmark_requested = bool({"benchmark", "attribution"} & set(analyses))
     ids = tuple(candidate.candidate_id for candidate in candidates)
     if len(ids) != len(set(ids)) or set(ledgers) != set(ids):
         raise ValueError("portfolio_statistics_candidate_set_invalid")
-    expected_intervals = holding_intervals(
-        pd.DatetimeIndex(unified_trading_sessions(calendar)), time_window
+    expected_intervals = (
+        holding_intervals(
+            pd.DatetimeIndex(unified_trading_sessions(calendar)), time_window
+        )
+        if calendar is not None
+        else None
     )
     access = config["sample_role"]
     (
@@ -1120,7 +1196,7 @@ def _portfolio_statistics_tables(
     for benchmark_id in dict.fromkeys(
         candidate.benchmark_id
         for candidate in candidates
-        if candidate.benchmark_id is not None
+        if benchmark_requested and candidate.benchmark_id is not None
     ):
         benchmark = benchmark_opens.loc[
             benchmark_opens.benchmark_id.eq(benchmark_id), ["timestamp", "open"]
@@ -1146,10 +1222,12 @@ def _portfolio_statistics_tables(
         fit_streams = {
             styles: sources.enter_context(closing_iterator(iter(inputs)))
             for styles, inputs in holding_inputs.items()
+            if "attribution" in analyses
         }
         sentinel = object()
 
-        for interval_index in range(len(expected_intervals) + 1):
+        interval_index = 0
+        while True:
             group = tuple(
                 next(stream, sentinel) for stream in (*streams, *fit_streams.values())
             )
@@ -1157,11 +1235,19 @@ def _portfolio_statistics_tables(
                 break
             if any(value is sentinel for value in group):
                 raise ValueError("portfolio_statistics_candidate_dates_misaligned")
-            if interval_index >= len(expected_intervals):
+            if expected_intervals is not None and interval_index >= len(
+                expected_intervals
+            ):
                 raise ValueError("portfolio_statistics_window_incomplete")
             batch_group = group[: len(streams)]
             interval_inputs = dict(zip(fit_streams, group[len(streams) :], strict=True))
-            expected = expected_intervals.iloc[interval_index]
+            if expected_intervals is not None:
+                expected = expected_intervals.iloc[interval_index]
+            else:
+                first = portfolio_interval_economics(batch_group[0])
+                expected = pd.Series(
+                    {"entry_at": first["entry_at"], "end_at": first["end_at"]}
+                )
             for styles, holding_input in interval_inputs.items():
                 if (
                     holding_input.decision_at,
@@ -1183,12 +1269,11 @@ def _portfolio_statistics_tables(
                         for name, value in holding_input.fitted.factor_returns.items()
                     )
             for candidate, batch in zip(candidates, batch_group, strict=True):
-                holding_input = interval_inputs[candidate.risk_style_columns]
+                holding_input = interval_inputs.get(candidate.risk_style_columns)
                 candidate_id = candidate.candidate_id
                 previous_end, previous_nav = previous[candidate_id]
                 economic_totals[candidate_id].consume(batch)
                 row = portfolio_interval_economics(batch)
-                expected = expected_intervals.iloc[interval_index]
                 if (row["entry_at"], row["end_at"]) != (
                     expected.entry_at,
                     expected.end_at,
@@ -1222,7 +1307,7 @@ def _portfolio_statistics_tables(
                     benchmark_reason="",
                     sample_role=access,
                 )
-                if candidate.benchmark_id is not None:
+                if benchmark_requested and candidate.benchmark_id is not None:
                     benchmark = benchmarks[candidate.benchmark_id]
                     values = benchmark.reindex([row["entry_at"], row["end_at"]])
                     if values.isna().any():
@@ -1252,100 +1337,124 @@ def _portfolio_statistics_tables(
                         )
                 daily_rows.append(row)
                 daily_by_candidate[candidate_id].append(row)
-                after = pd.Series(
-                    {
-                        value.asset_id: value.value
-                        for value in batch.valuations
-                        if value.phase == "after"
-                        and value.asset_id != PORTFOLIO_CASH_ASSET_ID
-                    }
-                )
-                endpoint = pd.Series(
-                    {
-                        value.asset_id: value.value
-                        for value in batch.valuations
-                        if value.phase == "end"
-                        and value.asset_id != PORTFOLIO_CASH_ASSET_ID
-                    }
-                )
-                held_returns = endpoint.div(after.where(after.ne(0))) - 1.0
                 valuation = _research_valuation_observation(batch, row)
                 if valuation is not None:
                     valuation_by_candidate[candidate_id].append(valuation)
-                    if valuation["estimated_held_assets"]:
+                if "attribution" in analyses:
+                    after = pd.Series(
+                        {
+                            value.asset_id: value.value
+                            for value in batch.valuations
+                            if value.phase == "after"
+                            and value.asset_id != PORTFOLIO_CASH_ASSET_ID
+                        }
+                    )
+                    endpoint = pd.Series(
+                        {
+                            value.asset_id: value.value
+                            for value in batch.valuations
+                            if value.phase == "end"
+                            and value.asset_id != PORTFOLIO_CASH_ASSET_ID
+                        }
+                    )
+                    held_returns = endpoint.div(after.where(after.ne(0))) - 1.0
+                    if valuation is not None and valuation["estimated_held_assets"]:
                         holding_input = replace(
                             holding_input,
                             fitted=None,
                             reason="research_estimated_valuation",
                         )
-                if batch.rights_adjustments or ((after == 0) & (endpoint > 0)).any():
-                    holding_input = replace(
-                        holding_input, fitted=None, reason="zero_valuation_recovery"
-                    )
-                components, reasons, exposures = holding_attribution(
-                    holding_input,
-                    after_notionals=after,
-                    nav_before=row["nav_before"],
-                    nav_post=row["nav_post"],
-                    benchmark_id=candidate.benchmark_id,
-                    benchmark_return=None
-                    if pd.isna(row["benchmark_return"])
-                    else row["benchmark_return"],
-                    holding_returns=held_returns,
-                )
-                components["cost"] = (
-                    -row["cost_drag"] if np.isfinite(row["cost_drag"]) else None
-                )
-                if components["cost"] is None:
-                    reasons["cost"] = (
-                        "nonpositive_start_nav"
-                        if row["nav_before"] == 0
-                        else "nonfinite_result"
-                    )
-                for component, value in components.items():
-                    reason = reasons.get(component, "")
-                    if value is None and component == "benchmark":
-                        reason = (
-                            row["benchmark_reason"]
-                            or "benchmark_total_return_open_missing"
+                    if (
+                        batch.rights_adjustments
+                        or ((after == 0) & (endpoint > 0)).any()
+                    ):
+                        holding_input = replace(
+                            holding_input, fitted=None, reason="zero_valuation_recovery"
                         )
-                    attribution_rows.append(
-                        dict(
-                            candidate_id=candidate_id,
-                            decision_at=holding_input.decision_at,
-                            entry_at=row["entry_at"],
-                            end_at=row["end_at"],
-                            component_id=component,
-                            component_type="detail"
-                            if component
-                            in {
-                                "stock_residual_difference",
-                                "benchmark_replication_gap",
-                            }
-                            else "additive",
-                            value=np.nan if value is None else value,
-                            status="DEFINED"
-                            if value is not None
-                            else "BLOCKED"
-                            if "missing" in reason or "incomplete" in reason
-                            else "UNDEFINED",
-                            reason=reason,
+                    components, reasons, exposures = holding_attribution(
+                        holding_input,
+                        after_notionals=after,
+                        nav_before=row["nav_before"],
+                        nav_post=row["nav_post"],
+                        benchmark_id=candidate.benchmark_id,
+                        benchmark_return=None
+                        if pd.isna(row["benchmark_return"])
+                        else row["benchmark_return"],
+                        holding_returns=held_returns,
+                    )
+                    components["cost"] = (
+                        -row["cost_drag"] if np.isfinite(row["cost_drag"]) else None
+                    )
+                    if components["cost"] is None:
+                        reasons["cost"] = (
+                            "nonpositive_start_nav"
+                            if row["nav_before"] == 0
+                            else "nonfinite_result"
+                        )
+                    for component, value in components.items():
+                        reason = reasons.get(component, "")
+                        if value is None and component == "benchmark":
+                            reason = (
+                                row["benchmark_reason"]
+                                or "benchmark_total_return_open_missing"
+                            )
+                        attribution_rows.append(
+                            dict(
+                                candidate_id=candidate_id,
+                                decision_at=holding_input.decision_at,
+                                entry_at=row["entry_at"],
+                                end_at=row["end_at"],
+                                component_id=component,
+                                component_type="detail"
+                                if component
+                                in {
+                                    "stock_residual_difference",
+                                    "benchmark_replication_gap",
+                                }
+                                else "additive",
+                                value=np.nan if value is None else value,
+                                status="DEFINED"
+                                if value is not None
+                                else "BLOCKED"
+                                if "missing" in reason or "incomplete" in reason
+                                else "UNDEFINED",
+                                reason=reason,
+                            )
+                        )
+                    exposure_rows.extend(
+                        (
+                            dict(
+                                candidate_id=candidate_id,
+                                decision_at=holding_input.decision_at,
+                                entry_at=row["entry_at"],
+                                factor_id=name,
+                                value=float(value),
+                            )
+                            for name, value in exposures.items()
                         )
                     )
-                exposure_rows.extend(
-                    (
-                        dict(
-                            candidate_id=candidate_id,
-                            decision_at=holding_input.decision_at,
-                            entry_at=row["entry_at"],
-                            factor_id=name,
-                            value=float(value),
-                        )
-                        for name, value in exposures.items()
-                    )
-                )
 
                 facts = {(item.asset_id, item.name): item for item in batch.diagnostics}
+                if "attribution" in analyses:
+                    exposure_rows.extend(
+                        dict(
+                            candidate_id=candidate_id,
+                            decision_at=holding_input.decision_at,
+                            entry_at=row["entry_at"],
+                            factor_id=item.name,
+                            value=item.number,
+                        )
+                        for item in batch.diagnostics
+                        if item.asset_id == PORTFOLIO_CASH_ASSET_ID
+                        and item.name.startswith(
+                            (
+                                "target_exposure:",
+                                "realized_exposure:",
+                                "benchmark_exposure:",
+                            )
+                        )
+                        and item.number is not None
+                    )
                 missing_orders = {
                     item.asset_id
                     for item in batch.diagnostics
@@ -1364,59 +1473,61 @@ def _portfolio_statistics_tables(
                         adv_gaps[candidate_id][
                             f"adv_unavailable_{side}_target_notional"
                         ] += abs(desired)
-                deltas = {
-                    item.asset_id: item.number
-                    for item in batch.diagnostics
-                    if item.name == "decision_delta_weight"
-                    and item.asset_id != PORTFOLIO_CASH_ASSET_ID
-                    and (item.number != 0.0)
-                }
-                if deltas:
-                    decision_date = pd.Timestamp(
-                        facts[next(iter(deltas)), "decision_timestamp"].text
-                    )
-                    available = {
-                        asset: facts[asset, "adv20"].number
-                        if (asset, "adv20") in facts
-                        else None
-                        for asset in deltas
+                if "capacity" in analyses:
+                    deltas = {
+                        item.asset_id: item.number
+                        for item in batch.diagnostics
+                        if item.name == "decision_delta_weight"
+                        and item.asset_id != PORTFOLIO_CASH_ASSET_ID
+                        and (item.number != 0.0)
                     }
-                    adv_missing = any(value is None for value in available.values())
-                    for participation in config["execution_assumptions"][
-                        "adv_sensitivities"
-                    ]:
-                        capacities = (
-                            {
-                                asset: available[asset] * participation / abs(delta)
-                                for asset, delta in deltas.items()
-                            }
-                            if not adv_missing
-                            else {}
+                    if deltas:
+                        decision_date = pd.Timestamp(
+                            facts[next(iter(deltas)), "decision_timestamp"].text
                         )
-                        bottleneck = (
-                            min(
-                                capacities,
-                                key=lambda asset: (capacities[asset], asset),
+                        available = {
+                            asset: facts[asset, "adv20"].number
+                            if (asset, "adv20") in facts
+                            else None
+                            for asset in deltas
+                        }
+                        adv_missing = any(value is None for value in available.values())
+                        for participation in config["execution_assumptions"][
+                            "adv_sensitivities"
+                        ]:
+                            capacities = (
+                                {
+                                    asset: available[asset] * participation / abs(delta)
+                                    for asset, delta in deltas.items()
+                                }
+                                if not adv_missing
+                                else {}
                             )
-                            if capacities
-                            else ""
-                        )
-                        capacity_rows.append(
-                            dict(
-                                candidate_id=candidate_id,
-                                decision_timestamp=decision_date,
-                                entry_at=row["entry_at"],
-                                participation=participation,
-                                capacity=capacities[bottleneck]
+                            bottleneck = (
+                                min(
+                                    capacities,
+                                    key=lambda asset: (capacities[asset], asset),
+                                )
                                 if capacities
-                                else np.nan,
-                                bottleneck_asset_id=bottleneck,
-                                status="UNDEFINED" if adv_missing else "DEFINED",
-                                reason="capacity_required_adv_missing"
-                                if adv_missing
-                                else "",
+                                else ""
                             )
-                        )
+                            capacity_rows.append(
+                                dict(
+                                    candidate_id=candidate_id,
+                                    decision_timestamp=decision_date,
+                                    entry_at=row["entry_at"],
+                                    participation=participation,
+                                    capacity=capacities[bottleneck]
+                                    if capacities
+                                    else np.nan,
+                                    bottleneck_asset_id=bottleneck,
+                                    status="UNDEFINED" if adv_missing else "DEFINED",
+                                    reason="capacity_required_adv_missing"
+                                    if adv_missing
+                                    else "",
+                                )
+                            )
+            interval_index += 1
 
     for candidate in candidates:
         candidate_id = candidate.candidate_id
@@ -1426,6 +1537,8 @@ def _portfolio_statistics_tables(
         selected = pd.DataFrame(candidate_rows)
         if selected.empty:
             raise ValueError("portfolio_statistics_empty_candidate")
+        if not {"performance", "benchmark"} & set(analyses):
+            continue
         returns_defined = selected.return_status.eq("DEFINED").all()
         count = len(selected)
         deviation = float(
@@ -1534,7 +1647,7 @@ def _portfolio_statistics_tables(
                         - 1
                     ).min()
                 )
-        if candidate.benchmark_id is not None:
+        if benchmark_requested and candidate.benchmark_id is not None:
             if selected.benchmark_status.ne("BLOCKED").all():
                 benchmark = benchmarks[candidate.benchmark_id]
                 benchmark_initial = Fraction(
@@ -1612,6 +1725,19 @@ def _portfolio_statistics_tables(
                         )
                     }
                 )
+        if "performance" not in analyses:
+            values = {
+                name: value
+                for name, value in values.items()
+                if name
+                in {
+                    "annualized_active_return",
+                    "tracking_error",
+                    "net_information_ratio",
+                    "relative_wealth",
+                    "max_active_drawdown",
+                }
+            }
         undefined_reason = (
             "nonpositive_start_nav"
             if selected.nav_before.eq(0).any()
@@ -1680,13 +1806,17 @@ def _portfolio_statistics_tables(
     matrix = daily.pivot(
         index=["entry_at", "end_at"], columns="candidate_id", values="net_return"
     ).reindex(columns=ids)
-    if tuple(matrix.index) != tuple(
+    if expected_intervals is not None and tuple(matrix.index) != tuple(
         expected_intervals.loc[:, ["entry_at", "end_at"]].itertuples(
             index=False, name=None
         )
     ):
         raise ValueError("portfolio_statistics_window_incomplete")
-    paired_comparison = _group_portfolio_comparison(matrix, config)
+    paired_comparison = (
+        _group_portfolio_comparison(matrix, config)
+        if "group_comparison" in analyses
+        else pd.DataFrame(columns=_PORTFOLIO_COMPARISON_COLUMNS)
+    )
     for index, pair in paired_comparison.iterrows():
         if pair.reason == "nonpositive_start_nav":
             pair_rows = daily.loc[
@@ -1709,16 +1839,8 @@ def _portfolio_statistics_tables(
         paired_comparison[f"{group}_terminal_wealth_reason"] = np.where(
             paired_comparison[f"{group}_terminal_wealth"].isna(), "nonfinite_result", ""
         )
-    if access == "validation":
-        blockers = {
-            candidate.candidate_id: _model_inference_blocker(
-                sample_role=access, selection_groups=(candidate.selection_group,)
-            )
-            for candidate in candidates
-        }
-        inference_ids = tuple(
-            candidate_id for candidate_id in ids if blockers[candidate_id] is None
-        )
+    if {"sharpe_inference", "cscv"} & set(analyses):
+        inference_ids = ids
         inference_matrix = matrix.loc[:, list(inference_ids)]
         before = daily.pivot(
             index=["entry_at", "end_at"],
@@ -1729,14 +1851,13 @@ def _portfolio_statistics_tables(
             index=["entry_at", "end_at"], columns="candidate_id", values="nav_end"
         ).reindex(columns=inference_ids)
         roundoff = _nav_return_roundoff(before, after, inference_matrix)
-        trial_sharpes = _return_sharpes(inference_matrix, roundoff=roundoff)
-        for candidate_id in ids:
-            if blockers[candidate_id] is not None:
-                outputs = (
-                    ("psr", None, blockers[candidate_id]),
-                    ("dsr", None, blockers[candidate_id]),
-                )
-            elif inference_matrix[candidate_id].isna().any():
+        trial_sharpes = (
+            _return_sharpes(inference_matrix, roundoff=roundoff)
+            if "sharpe_inference" in analyses
+            else None
+        )
+        for candidate_id in ids if "sharpe_inference" in analyses else ():
+            if inference_matrix[candidate_id].isna().any():
                 outputs = tuple(
                     (
                         name,
@@ -1780,61 +1901,41 @@ def _portfolio_statistics_tables(
                         sample_role=access,
                     )
                 )
-        blocks = config["statistics"]["cscv_blocks"]
-        if (robustness_blocker := _inference_blocker(config)) is not None:
-            value, status, reason = np.nan, "UNDEFINED", robustness_blocker
-        elif not inference_ids:
-            value, status, reason = (
-                np.nan,
-                "UNDEFINED",
-                next(iter(blockers.values())),
+        if "cscv" in analyses:
+            blocks = config["statistics"]["cscv_blocks"]
+            if not np.isfinite(inference_matrix.to_numpy()).all():
+                value, status, reason = (
+                    np.nan,
+                    "UNDEFINED",
+                    "nonpositive_start_nav"
+                    if before.eq(0).any().any()
+                    else "nonfinite_result",
+                )
+            elif len(matrix) >= blocks:
+                result = cscv_pbo(
+                    inference_matrix,
+                    slice_count=blocks,
+                    return_roundoff=roundoff,
+                )
+                value, status, reason = (result.pbo, result.status, result.reason or "")
+            else:
+                value, status, reason = (
+                    np.nan,
+                    "UNDEFINED",
+                    "cscv_slice_count_invalid",
+                )
+            robustness_rows.append(
+                dict(
+                    candidate_id="joint",
+                    test_id="cscv_pbo",
+                    value=value,
+                    status=status,
+                    reason=reason,
+                    observation_count=len(matrix),
+                    candidate_count=len(inference_ids),
+                    sample_role=access,
+                )
             )
-        elif not np.isfinite(inference_matrix.to_numpy()).all():
-            value, status, reason = (
-                np.nan,
-                "UNDEFINED",
-                "nonpositive_start_nav"
-                if before.eq(0).any().any()
-                else "nonfinite_result",
-            )
-        elif len(matrix) >= blocks:
-            result = cscv_pbo(
-                inference_matrix,
-                slice_count=blocks,
-                return_roundoff=roundoff,
-            )
-            value, status, reason = (result.pbo, result.status, result.reason or "")
-        else:
-            value, status, reason = (
-                np.nan,
-                "UNDEFINED",
-                "cscv_slice_count_invalid",
-            )
-        robustness_rows.append(
-            dict(
-                candidate_id="joint",
-                test_id="cscv_pbo",
-                value=value,
-                status=status,
-                reason=reason,
-                observation_count=len(matrix),
-                candidate_count=len(inference_ids),
-                sample_role=access,
-            )
-        )
-    else:
-        robustness_rows.append(
-            dict(
-                candidate_id="joint",
-                test_id="validation_only",
-                value=np.nan,
-                status="UNDEFINED",
-                reason="test_excluded",
-                observation_count=0,
-                candidate_count=len(ids),
-                sample_role=access,
-            )
-        )
     capacity = pd.DataFrame(
         capacity_rows,
         columns=(
@@ -1852,7 +1953,11 @@ def _portfolio_statistics_tables(
         ["candidate_id", "participation"], sort=False
     ).indices
     for candidate_id in ids:
-        for participation in config["execution_assumptions"]["adv_sensitivities"]:
+        for participation in (
+            config.get("execution_assumptions", {}).get("adv_sensitivities", ())
+            if "capacity" in analyses
+            else ()
+        ):
             sample = capacity.iloc[
                 capacity_groups.get((candidate_id, participation), [])
             ]
@@ -1931,7 +2036,20 @@ def _portfolio_statistics_tables(
         ),
     }
 
-    return tables
+    requested = set()
+    if {"performance", "benchmark"} & set(analyses):
+        requested.update(("portfolio_daily", "portfolio_performance"))
+    if "capacity" in analyses:
+        requested.update(("portfolio_capacity", "portfolio_capacity_summary"))
+    if "attribution" in analyses:
+        requested.update(
+            ("portfolio_attribution", "portfolio_exposures", "holding_factor_returns")
+        )
+    if {"sharpe_inference", "cscv"} & set(analyses):
+        requested.add("portfolio_robustness")
+    if "group_comparison" in analyses:
+        requested.add("portfolio_group_comparison")
+    return {name: table for name, table in tables.items() if name in requested}
 
 
 _PORTFOLIO_COMPARISON_COLUMNS = (
@@ -1998,9 +2116,7 @@ def _group_portfolio_comparison(matrix, config):
         }
     )
     access = config["sample_role"]
-    inference_blocker = _model_inference_blocker(
-        sample_role=access, selection_groups=("global", "quarterly")
-    )
+    inference_blocker = None
     fdr_method = (
         None if _inference_blocker(config) is not None else declaration["fdr_method"]
     )
@@ -2147,51 +2263,77 @@ def portfolio_statistics(config):
     config = qrp_json_mapping_snapshot(config)
     required = {
         "ledgers",
-        "inputs",
         "output",
         "window",
+    }
+    optional = {
         "sample_role",
+        "inputs",
         "benchmark_total_return_indices",
         "risk",
         "adv_sensitivities",
         "statistics",
-    }
-    optional = {
+        "analyses",
         "selection_is_exploratory",
         "expectations",
         "feature_recipe",
         "training_weighting",
     }
+    analyses = _selected_analyses(config, _PORTFOLIO_ANALYSES)
+    if "attribution" in analyses:
+        required.update(("inputs", "risk", "benchmark_total_return_indices"))
+    if "benchmark" in analyses:
+        required.add("benchmark_total_return_indices")
+        if config.get("benchmark_total_return_indices"):
+            required.add("inputs")
+    if "capacity" in analyses:
+        required.add("adv_sensitivities")
+    if "cscv" in analyses:
+        required.add("statistics")
     if required - set(config) or set(config) - required - optional:
         raise ValueError("portfolio_statistics_config_invalid")
-    if config["sample_role"] not in {"validation", "test"}:
+    config.setdefault("sample_role", "exploratory")
+    if type(config["sample_role"]) is not str or not config["sample_role"].strip():
         raise ValueError("statistics_sample_role_invalid")
     if not isinstance(config["ledgers"], list) or not config["ledgers"]:
         raise ValueError("portfolio_statistics_ledgers_required")
-    policy = config["statistics"]
+    policy = config.get("statistics", {})
     paired = isinstance(policy, dict) and "group_comparison" in policy
-    expected = {"cscv_blocks"} | (
+    expected = ({"cscv_blocks"} if "cscv" in analyses else set()) | (
         {"hac_lag", "bootstrap_block", "bootstrap_repetitions", "group_comparison"}
-        if paired
+        if paired and "group_comparison" in analyses
         else set()
     )
-    if not isinstance(policy, dict) or set(policy) != expected:
+    known = {
+        "cscv_blocks",
+        "hac_lag",
+        "bootstrap_block",
+        "bootstrap_repetitions",
+        "group_comparison",
+    }
+    if "group_comparison" in analyses and not paired:
+        raise ValueError("portfolio_statistics_comparison_policy_required")
+    if not isinstance(policy, dict) or expected - set(policy) or set(policy) - known:
         raise ValueError("portfolio_statistics_policy_invalid")
-    if paired and (
-        not isinstance(policy["group_comparison"], dict)
-        or set(policy["group_comparison"])
-        != {
-            "portfolio_ids",
-            "primary_portfolio_id",
-            "fdr_method",
-            "alpha",
-            "seed",
-            "confidence",
-        }
+    if (
+        paired
+        and "group_comparison" in analyses
+        and (
+            not isinstance(policy["group_comparison"], dict)
+            or set(policy["group_comparison"])
+            != {
+                "portfolio_ids",
+                "primary_portfolio_id",
+                "fdr_method",
+                "alpha",
+                "seed",
+                "confidence",
+            }
+        )
     ):
         raise ValueError("portfolio_statistics_comparison_policy_invalid")
-    participation = config["adv_sensitivities"]
-    if (
+    participation = config.get("adv_sensitivities", [])
+    if "capacity" in analyses and (
         not isinstance(participation, list)
         or not participation
         or any(
@@ -2217,10 +2359,7 @@ def portfolio_statistics(config):
             or ledger.capital.candidate_id != candidate.candidate_id
         ):
             raise ValueError("portfolio_statistics_candidate_set_invalid")
-        if (
-            ledger.metadata["sample_role"] != config["sample_role"]
-            or TimeWindow(**ledger.metadata["window"]) != window
-        ):
+        if TimeWindow(**ledger.metadata["window"]) != window:
             raise ValueError("portfolio_statistics_ledger_window_mismatch")
         ledgers[candidate.candidate_id] = ledger
         candidates.append(candidate)
@@ -2229,17 +2368,21 @@ def portfolio_statistics(config):
         candidates=tuple(candidates),
         config={
             **config,
+            "statistics": policy,
             "execution_assumptions": {"adv_sensitivities": participation},
         },
         time_window=window,
         unified_trading_sessions=unified_trading_sessions,
-        inputs=config["inputs"],
+        inputs=config.get("inputs", {}),
         iter_portfolio_sessions=portfolio_sessions.iter_portfolio_sessions,
     )
     metadata = {key: value for key, value in config.items() if key != "output"}
+    if {"sharpe_inference", "cscv", "group_comparison"}.intersection(analyses):
+        metadata["inference_scope"] = "exploratory"
+        metadata["formal_selection_qualification"] = "not_established"
     metadata["candidate_ids"] = list(ledgers)
-    metadata["comparison_portfolio_ids"] = (
-        config["statistics"].get("group_comparison", {}).get("portfolio_ids", [])
+    metadata["comparison_portfolio_ids"] = policy.get("group_comparison", {}).get(
+        "portfolio_ids", []
     )
     return write_statistics_artifact(
         output, metadata=metadata, tables=tables, table_group="portfolio"
@@ -2265,23 +2408,35 @@ def crypto_statistics(config):
     from quant_research_platform.contracts.portfolios import PortfolioCapital
     from quant_research_platform.contracts.time import (
         TimeWindow,
-        crypto_execution_windows,
+        time_window_timestamp_interval,
     )
     from quant_research_platform.storage.atomic import reject_if_exists
     from quant_research_platform.storage.manifests import read_qrp_json_file
 
     config = qrp_json_mapping_snapshot(config)
-    if set(config) != {"ledger", "output", "statistics"}:
+    if {"ledger", "output"} - set(config) or set(config) - {
+        "ledger",
+        "output",
+        "statistics",
+        "analyses",
+    }:
         raise ValueError("crypto_statistics_config_invalid")
-    policy = config["statistics"]
-    if not isinstance(policy, dict) or set(policy) != {
+    analyses = _selected_analyses(config, _CRYPTO_ANALYSES)
+    policy = config.get("statistics", {})
+    expected = set()
+    if "annualized" in analyses:
+        expected.update(("annualization_minimum_observations", "annualization_periods"))
+    if "cost_sensitivity" in analyses:
+        expected.update(("fee_scenarios_bps", "additional_spread_scenarios_bps"))
+    known = {
         "annualization_minimum_observations",
         "annualization_periods",
         "fee_scenarios_bps",
         "additional_spread_scenarios_bps",
-    }:
+    }
+    if not isinstance(policy, dict) or expected - set(policy) or set(policy) - known:
         raise ValueError("crypto_statistics_policy_invalid")
-    if (
+    if "annualized" in analyses and (
         type(policy["annualization_minimum_observations"]) is not int
         or policy["annualization_minimum_observations"] < 2
         or type(policy["annualization_periods"]) not in {int, float}
@@ -2303,10 +2458,42 @@ def crypto_statistics(config):
     ):
         raise ValueError("crypto_statistics_execution_mode_invalid")
     window = TimeWindow(**metadata["window"])
-    windows = crypto_execution_windows(
-        metadata["chronology"], window, sample_role=metadata["sample_role"]
+    start, stop, inclusive = time_window_timestamp_interval(window)
+    start_ns = pd.Timestamp(start).value
+    end_ns = pd.Timestamp(stop).value - (0 if inclusive else 1)
+    declared_windows = metadata.get("oos_windows_ns", [[start_ns, end_ns]])
+    if (
+        not isinstance(declared_windows, list)
+        or not declared_windows
+        or any(
+            not isinstance(bounds, list)
+            or len(bounds) != 2
+            or any(type(value) is not int for value in bounds)
+            or not start_ns <= bounds[0] <= bounds[1] <= end_ns
+            for bounds in declared_windows
+        )
+        or any(
+            left[1] >= right[0]
+            for left, right in zip(declared_windows, declared_windows[1:], strict=False)
+        )
+    ):
+        raise ValueError("crypto_statistics_windows_invalid")
+    folds = (metadata.get("chronology") or {}).get("folds", [])
+    windows = tuple(
+        (
+            folds[-1]["fold_id"]
+            if len(declared_windows) == 1 and folds
+            else f"window_{index}",
+            TimeWindow(pd.Timestamp(begin), pd.Timestamp(end)),
+        )
+        for index, (begin, end) in enumerate(declared_windows)
     )
-    science = {**metadata, "candidate_id": capital.candidate_id, "statistics": policy}
+    science = {
+        **metadata,
+        "candidate_id": capital.candidate_id,
+        "statistics": policy,
+        "analyses": list(analyses),
+    }
     tables = build_crypto_portfolio_statistics_tables(
         ledger_path=source,
         config=science,
@@ -2325,6 +2512,7 @@ def crypto_statistics(config):
             "execution_mode": mode,
             "candidate_ids": [capital.candidate_id],
             "statistics": policy,
+            "analyses": list(analyses),
         },
         tables=tables,
         table_group="crypto_portfolio",

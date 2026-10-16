@@ -23,6 +23,10 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioValuation,
     validate_portfolio_transition,
 )
+from quant_research_platform.contracts.time import (
+    TimeWindow,
+    time_window_timestamp_interval,
+)
 from quant_research_platform.contracts.validation import (
     decode_exact_numeric,
     encode_exact_numeric,
@@ -104,7 +108,7 @@ def write_portfolio_ledger_artifact(
     produce: Callable[[Callable[[PortfolioLedgerBatch], None]], object],
     final_calibration: Callable[[], dict[str, object]] | None = None,
 ) -> Path:
-    """Stream bounded tables, validate persisted economics, then atomic publish."""
+    """Validate canonical economic batches once, then atomically publish tables."""
     if not isinstance(capital, PortfolioCapital):
         raise ValueError("portfolio_ledger_capital_invalid")
     metadata = dict(metadata)
@@ -125,7 +129,7 @@ def write_portfolio_ledger_artifact(
                 )
             buffers = {name: [] for name in _TABLE_TYPES}
             sequence = 0
-            previous = None
+            validation = _LedgerValidation(capital, metadata["window"])
 
             def flush(name: str) -> None:
                 records = buffers[name]
@@ -150,13 +154,8 @@ def write_portfolio_ledger_artifact(
                 records.clear()
 
             def emit(batch: PortfolioLedgerBatch) -> None:
-                nonlocal sequence, previous
-                if (
-                    type(batch) is not PortfolioLedgerBatch
-                    or batch.sequence != sequence
-                ):
-                    raise ValueError("portfolio_ledger_sequence_invalid")
-                previous = validate_portfolio_transition(batch, capital, previous)
+                nonlocal sequence
+                validation.observe(batch)
                 for name in _TABLE_TYPES:
                     for row in getattr(batch, name):
                         buffers[name].append({"sequence": sequence, **asdict(row)})
@@ -169,11 +168,6 @@ def write_portfolio_ledger_artifact(
                 raise ValueError("portfolio_ledger_empty")
             for name in writers:
                 flush(name)
-        with closing_iterator(
-            _iter_batches(staging, capital, metadata["window"])
-        ) as batches:
-            for _ in batches:
-                pass
         calibration = (
             dict(final_calibration()) if final_calibration is not None else None
         )
@@ -288,14 +282,95 @@ def _table_records(root: Path, name: str) -> Iterator[dict[str, object]]:
                     return
 
 
+class _LedgerValidation:
+    """Validate the same canonical stream at publication and consumption."""
+
+    def __init__(self, capital, research_window):
+        self.capital = capital
+        start, end, closed = time_window_timestamp_interval(
+            TimeWindow(research_window["start"], research_window["end"])
+        )
+        self.bounds = (
+            pd.Timestamp(start).value,
+            pd.Timestamp(end).value - (0 if closed else 1),
+        )
+        self.key_index = ExactPrimaryKeyIndex(primary_key=("fill_id",))
+        self.sequence = 0
+        self.previous = None
+
+    def observe(self, batch):
+        if type(batch) is not PortfolioLedgerBatch or batch.sequence != self.sequence:
+            raise ValueError("portfolio_ledger_sequence_invalid")
+        if any(
+            not self.bounds[0] <= row.timestamp_ns <= self.bounds[1]
+            for row in batch.valuations
+        ):
+            raise ValueError("portfolio_ledger_valuation_window_invalid")
+        self.previous = validate_portfolio_transition(
+            batch, self.capital, self.previous
+        )
+        inserted = self.key_index.add_identity_payloads(
+            namespace="fills",
+            payloads=(
+                (row.fill_id.encode("utf-8"), row.asset_id.encode("utf-8"))
+                for row in batch.trades
+            ),
+        )
+        if inserted != len(batch.trades):
+            raise ValueError("portfolio_ledger_duplicate_fill")
+        self.key_index.add_identity_payloads(
+            namespace="fill_orders",
+            payloads=(
+                (row.fill_id.encode("utf-8"), row.order_id.encode("utf-8"))
+                for row in batch.trades
+            ),
+        )
+        for diagnostic in batch.diagnostics:
+            if diagnostic.fill_id is not None and self.key_index.identity_payload_value(
+                namespace="fills", payload=diagnostic.fill_id.encode("utf-8")
+            ) != diagnostic.asset_id.encode("utf-8"):
+                raise ValueError("portfolio_ledger_diagnostic_fill_mismatch")
+            if diagnostic.fill_id is not None and diagnostic.name == "order_id":
+                if diagnostic.text is None and diagnostic.number is None:
+                    raise ValueError("portfolio_ledger_diagnostic_order_mismatch")
+                order_id = (
+                    diagnostic.text
+                    if diagnostic.text is not None
+                    else format(diagnostic.number, "g")
+                )
+                if self.key_index.identity_payload_value(
+                    namespace="fill_orders",
+                    payload=diagnostic.fill_id.encode("utf-8"),
+                ) != order_id.encode("utf-8"):
+                    raise ValueError("portfolio_ledger_diagnostic_order_mismatch")
+        inserted = self.key_index.add_identity_payloads(
+            namespace="rights_adjustments",
+            payloads=(
+                (row.event_id.encode("utf-8"), row.asset_id.encode("utf-8"))
+                for row in batch.rights_adjustments
+            ),
+        )
+        if inserted != len(batch.rights_adjustments):
+            raise ValueError("portfolio_ledger_duplicate_rights_adjustment")
+        inserted = self.key_index.add_identity_payloads(
+            namespace="cashflows",
+            payloads=(
+                (row.flow_id.encode("utf-8"), row.asset_id.encode("utf-8"))
+                for row in batch.cashflows
+            ),
+        )
+        if inserted != len(batch.cashflows):
+            raise ValueError("portfolio_ledger_duplicate_cashflow")
+        self.sequence += 1
+
+
 def _iter_batches(
     root: Path,
     capital: PortfolioCapital,
     research_window: Mapping[str, object],
 ) -> Iterator[PortfolioLedgerBatch]:
-    bounds = tuple(pd.Timestamp(research_window[key]).value for key in ("start", "end"))
+    validation = _LedgerValidation(capital, research_window)
     with closing_iterator(ExitStack()) as stack:
-        key_index = ExactPrimaryKeyIndex(primary_key=("fill_id",))
         readers = {
             name: stack.enter_context(closing_iterator(_table_records(root, name)))
             for name in _TABLE_TYPES
@@ -306,7 +381,6 @@ def _iter_batches(
         }
         pending = {name: next(group, None) for name, group in groups.items()}
         sequence = 0
-        previous = None
         while pending["valuations"] is not None:
             if pending["valuations"][0] != sequence:
                 raise ValueError("portfolio_ledger_sequence_invalid")
@@ -330,62 +404,7 @@ def _iter_batches(
                     pending[name] = next(groups[name], None)
                 tables[name] = tuple(records)
             batch = PortfolioLedgerBatch(sequence, **tables)
-            if any(
-                not bounds[0] <= row.timestamp_ns <= bounds[1]
-                for row in batch.valuations
-            ):
-                raise ValueError("portfolio_ledger_valuation_window_invalid")
-            previous = validate_portfolio_transition(batch, capital, previous)
-            inserted = key_index.add_identity_payloads(
-                namespace="fills",
-                payloads=(
-                    (row.fill_id.encode("utf-8"), row.asset_id.encode("utf-8"))
-                    for row in batch.trades
-                ),
-            )
-            if inserted != len(batch.trades):
-                raise ValueError("portfolio_ledger_duplicate_fill")
-            key_index.add_identity_payloads(
-                namespace="fill_orders",
-                payloads=(
-                    (row.fill_id.encode("utf-8"), row.order_id.encode("utf-8"))
-                    for row in batch.trades
-                ),
-            )
-            for diagnostic in batch.diagnostics:
-                if diagnostic.fill_id is not None and key_index.identity_payload_value(
-                    namespace="fills", payload=diagnostic.fill_id.encode("utf-8")
-                ) != diagnostic.asset_id.encode("utf-8"):
-                    raise ValueError("portfolio_ledger_diagnostic_fill_mismatch")
-                if diagnostic.fill_id is not None and diagnostic.name == "order_id":
-                    order_id = (
-                        diagnostic.text
-                        if diagnostic.text is not None
-                        else format(diagnostic.number, "g")
-                    )
-                    if key_index.identity_payload_value(
-                        namespace="fill_orders",
-                        payload=diagnostic.fill_id.encode("utf-8"),
-                    ) != order_id.encode("utf-8"):
-                        raise ValueError("portfolio_ledger_diagnostic_order_mismatch")
-            inserted = key_index.add_identity_payloads(
-                namespace="rights_adjustments",
-                payloads=(
-                    (row.event_id.encode("utf-8"), row.asset_id.encode("utf-8"))
-                    for row in batch.rights_adjustments
-                ),
-            )
-            if inserted != len(batch.rights_adjustments):
-                raise ValueError("portfolio_ledger_duplicate_rights_adjustment")
-            inserted = key_index.add_identity_payloads(
-                namespace="cashflows",
-                payloads=(
-                    (row.flow_id.encode("utf-8"), row.asset_id.encode("utf-8"))
-                    for row in batch.cashflows
-                ),
-            )
-            if inserted != len(batch.cashflows):
-                raise ValueError("portfolio_ledger_duplicate_cashflow")
+            validation.observe(batch)
             try:
                 yield batch
             except GeneratorExit:

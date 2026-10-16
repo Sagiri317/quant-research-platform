@@ -6,7 +6,6 @@ import hashlib
 import math
 import re
 from collections.abc import Mapping
-from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import date
 from fractions import Fraction
@@ -123,43 +122,6 @@ def interim_catalog() -> InterimDataCatalog:
     )
 
 
-def source_content_identity(raw_root: Path, data_id: str) -> str | None:
-    root = require_unaliased_path(raw_root, error="reference_source_root_invalid")
-    if data_id not in {
-        A_SHARE_EQUITY_EVENTS_DATA_ID,
-        A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID,
-        A_SHARE_FEE_SCHEDULE_DATA_ID,
-    }:
-        raise ValueError("unknown_reference_interim_data_id")
-    if filesystem_exists(root) and not filesystem_is_dir(root):
-        raise ValueError("reference_source_root_invalid")
-    dataset_root = require_unaliased_path(
-        root / data_id, error="reference_source_root_invalid"
-    )
-    if not filesystem_exists(dataset_root):
-        return None
-    if not filesystem_is_dir(dataset_root):
-        raise ValueError("reference_source_root_invalid")
-    required = (
-        (A_SHARE_FEE_CSV_NAME, A_SHARE_FEE_SIDECAR_NAME)
-        if data_id == A_SHARE_FEE_SCHEDULE_DATA_ID
-        else ("metadata.json",)
-    )
-    if not all(filesystem_is_file(dataset_root / name) for name in required):
-        raise ValueError(
-            "equity_event_metadata_missing"
-            if data_id == A_SHARE_EQUITY_EVENTS_DATA_ID
-            else "reference_source_required_member_invalid"
-        )
-    if data_id == A_SHARE_EQUITY_EVENTS_DATA_ID:
-        with _equity_source(root) as (_, identity):
-            return identity
-    if data_id == A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID:
-        with _industry_source(root) as (_, _, identity):
-            return identity
-    return load_a_share_fee_source(reference_root=root).source_identity
-
-
 def materialize_interim_data(
     *,
     raw_root: Path,
@@ -178,48 +140,65 @@ def materialize_interim_data(
         A_SHARE_EQUITY_EVENTS_DATA_ID,
     }:
         raise ValueError("reference_interim_data_ids_invalid")
-    with ExitStack() as retained:
-        root = Path(raw_root)
-        if data_id == A_SHARE_EQUITY_EVENTS_DATA_ID:
-            equity_frame, identity = retained.enter_context(_equity_source(root))
-        elif data_id == A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID:
-            source_metadata, members, identity = retained.enter_context(
-                _industry_source(root)
-            )
-        else:
-            source = load_a_share_fee_source(reference_root=root)
-            identity = source.source_identity
-        if data_id == A_SHARE_EQUITY_EVENTS_DATA_ID:
-            frame = equity_frame
-            if end_date is not None:
-                frame = frame.loc[frame["timestamp"].le(pd.Timestamp(end_date))].copy()
-            spec = _equity_events_spec()
-        elif data_id == A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID:
-            frame = _industry_frame(source_metadata, members)
-            if end_date is not None:
-                frame = frame.loc[frame["timestamp"].le(pd.Timestamp(end_date))].copy()
-            spec = _industry_snapshots_spec()
-        else:
-            frame = _frame_from_rows(source.rows)
-            spec = fee_schedule_spec()
+    root = require_unaliased_path(raw_root, error="reference_source_root_invalid")
+    if filesystem_exists(root) and not filesystem_is_dir(root):
+        raise ValueError("reference_source_root_invalid")
+    dataset_root = require_unaliased_path(
+        root / data_id, error="reference_source_root_invalid"
+    )
+    if not filesystem_exists(dataset_root):
+        return ReferenceInterimImportResult({}, (data_id,))
+    if not filesystem_is_dir(dataset_root):
+        raise ValueError("reference_source_root_invalid")
+    required = (
+        (A_SHARE_FEE_CSV_NAME, A_SHARE_FEE_SIDECAR_NAME)
+        if data_id == A_SHARE_FEE_SCHEDULE_DATA_ID
+        else ("metadata.json",)
+    )
+    if not all(filesystem_is_file(dataset_root / name) for name in required):
+        raise ValueError(
+            "equity_event_metadata_missing"
+            if data_id == A_SHARE_EQUITY_EVENTS_DATA_ID
+            else "reference_source_required_member_invalid"
+        )
+    if data_id == A_SHARE_EQUITY_EVENTS_DATA_ID:
+        equity_frame, identity = _equity_source(root)
+    elif data_id == A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID:
+        source_metadata, members, identity = _industry_source(root)
+    else:
+        source = load_a_share_fee_source(reference_root=root)
+        identity = source.source_identity
+    if data_id == A_SHARE_EQUITY_EVENTS_DATA_ID:
+        frame = equity_frame
+        if end_date is not None:
+            frame = frame.loc[frame["timestamp"].le(pd.Timestamp(end_date))].copy()
+        spec = _equity_events_spec()
+    elif data_id == A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID:
+        frame = _industry_frame(source_metadata, members)
+        if end_date is not None:
+            frame = frame.loc[frame["timestamp"].le(pd.Timestamp(end_date))].copy()
+        spec = _industry_snapshots_spec()
+    else:
+        frame = _frame_from_rows(source.rows)
+        spec = fee_schedule_spec()
 
-        artifact_root = Path(output_roots[spec.data_id])
-        write_dataset(
-            artifact_root,
-            frame,
-            spec=spec,
-            metadata={
-                **(metadata or {}),
-                "source_evidence": {
-                    "source_id": str(SOURCE_ID),
-                    "content_hash": identity,
-                },
+    artifact_root = Path(output_roots[spec.data_id])
+    write_dataset(
+        artifact_root,
+        frame,
+        spec=spec,
+        metadata={
+            **(metadata or {}),
+            "source_evidence": {
+                "source_id": str(SOURCE_ID),
+                "content_hash": identity,
             },
-        )
-        return ReferenceInterimImportResult(
-            artifact_roots={spec.data_id: artifact_root},
-            skipped=(),
-        )
+        },
+    )
+    return ReferenceInterimImportResult(
+        artifact_roots={spec.data_id: artifact_root},
+        skipped=(),
+    )
 
 
 def _frame_from_rows(rows: tuple[FeeSourceRow, ...]) -> pd.DataFrame:
@@ -278,7 +257,6 @@ def _snapshot_date(value):
         raise ValueError("industry_snapshot_date_invalid") from exc
 
 
-@contextmanager
 def _industry_source(reference_root):
     root = Path(reference_root) / A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
     path = root / _INDUSTRY_MANIFEST_NAME
@@ -293,6 +271,11 @@ def _industry_source(reference_root):
         or not metadata["snapshots"]
     ):
         raise ValueError("industry_snapshot_metadata_invalid")
+    candidates = {
+        snapshot.get("candidate_file")
+        for snapshot in metadata["snapshots"]
+        if type(snapshot) is dict and type(snapshot.get("candidate_file")) is str
+    }
     members = {}
     for name, expected_hash in metadata["files"].items():
         if (
@@ -304,15 +287,20 @@ def _industry_source(reference_root):
             raise ValueError("industry_snapshot_member_invalid")
         member = root / name
         identity = dataset_file_identity(member)
-        digest = _hash_file_content(
-            member,
-            identity,
-            "reference_raw_identity_changed",
-            chunk_size=1024 * 1024,
-        )
+        if name in candidates:
+            candidate_raw, candidate = read_qrp_json_file(member)
+            digest = hashlib.sha256(candidate_raw).hexdigest()
+            members[name] = candidate
+        else:
+            digest = _hash_file_content(
+                member,
+                identity,
+                "reference_raw_identity_changed",
+                chunk_size=1024 * 1024,
+            )
+            members[name] = None
         if digest != expected_hash:
             raise ValueError("industry_snapshot_member_hash_mismatch")
-        members[name] = (member, identity)
     seen = set()
     for snapshot in metadata["snapshots"]:
         if type(snapshot) is not dict or set(snapshot) != {
@@ -363,19 +351,13 @@ def _industry_source(reference_root):
             "files": metadata["files"],
         }
     )
-    yield metadata, members, source_identity
+    return metadata, members, source_identity
 
 
 def _industry_frame(metadata, members):
     rows = []
     for snapshot in metadata["snapshots"]:
-        path, expected = members[snapshot["candidate_file"]]
-        raw, candidate = read_qrp_json_file(path)
-        if (
-            hashlib.sha256(raw).hexdigest()
-            != metadata["files"][snapshot["candidate_file"]]
-        ):
-            raise ValueError("reference_raw_identity_changed")
+        candidate = members[snapshot["candidate_file"]]
         if (
             set(candidate) != {"source", "source_sha256", "records"}
             or candidate["source"] != snapshot["document_file"]
@@ -450,7 +432,7 @@ def _industry_frame(metadata, members):
                     row["source_locator"],
                 )
             )
-        del raw, candidate
+        del candidate
     frame = pd.DataFrame(rows, columns=_INDUSTRY_COLUMNS)
     for column in _INDUSTRY_COLUMNS:
         if column not in {
@@ -481,7 +463,6 @@ def _equity_events_spec():
     )
 
 
-@contextmanager
 def _equity_source(reference_root):
     """Admit explicit official equity facts and their evidenced adjusted-unit basis."""
     root = Path(reference_root) / A_SHARE_EQUITY_EVENTS_DATA_ID
@@ -735,4 +716,4 @@ def _equity_source(reference_root):
     identity = canonical_json_hash(
         {"metadata_sha256": hashlib.sha256(raw).hexdigest(), "files": metadata["files"]}
     )
-    yield frame, identity
+    return frame, identity

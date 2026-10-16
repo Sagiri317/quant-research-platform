@@ -28,7 +28,6 @@ from quant_research_platform.contracts.features import (
 from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.contracts.json_codec import (
     canonical_identity_bytes,
-    canonical_json_hash,
     parse_qrp_json_object,
     qrp_json_object_snapshot,
     render_qrp_json_object,
@@ -51,6 +50,8 @@ _DATASET_SPEC_COMMON_KEYS = frozenset(
         "partition_columns",
         "required_columns",
         "column_roles",
+        "column_units",
+        "label_availability_columns",
     }
 )
 _DATASET_SPEC_BASE_KEYS = _DATASET_SPEC_COMMON_KEYS
@@ -70,6 +71,7 @@ _DATASET_SPEC_RESEARCH_KEYS = _DATASET_SPEC_COMMON_KEYS | {
     "factor_columns",
     "feature_columns",
     "feature_transforms",
+    "eligibility_recipe",
     "label_columns",
     "filter_columns",
     "context_columns",
@@ -90,7 +92,6 @@ _DATASET_MANIFEST_RUNTIME_KEYS = frozenset(
         "physical_schema",
         "schema_hash",
         "logical_dtypes",
-        "logical_dtype_hash",
         "partition_row_counts",
         "partition_count",
         "partitions",
@@ -101,7 +102,6 @@ _DATASET_MANIFEST_RUNTIME_KEYS = frozenset(
         "duplicate_primary_key_count",
         "factor_nan_profile",
         "label_nan_profile",
-        "validation_status",
     }
 )
 _LOWER_HEX = frozenset("0123456789abcdef")
@@ -216,15 +216,19 @@ def encode_logical_category_value(value: Mapping[str, Any]) -> tuple[bytes, byte
     )
 
 
-def parse_logical_dtype_metadata(raw: bytes) -> dict[str, Any]:
+def parse_logical_dtype_metadata(
+    raw: bytes, *, selected_columns: tuple[str, ...] | None = None
+) -> dict[str, Any]:
     try:
         payload = parse_qrp_json_object(raw)
     except (TypeError, ValueError) as exc:
         raise ValueError("dataset_logical_dtypes_invalid") from exc
-    return validate_logical_dtype_payload(payload)
+    return validate_logical_dtype_payload(payload, selected_columns=selected_columns)
 
 
-def validate_logical_dtype_payload(value: object) -> dict[str, Any]:
+def validate_logical_dtype_payload(
+    value: object, *, selected_columns: tuple[str, ...] | None = None
+) -> dict[str, Any]:
     if type(value) is not dict or set(value) != {"schema_id", "columns"}:
         raise ValueError("dataset_logical_dtypes_invalid")
     if value.get("schema_id") != "qrp-dataset-part-logical-dtypes":
@@ -241,6 +245,8 @@ def validate_logical_dtype_payload(value: object) -> dict[str, Any]:
         if type(name) is not str or not name or type(kind) is not str or (not kind):
             raise ValueError("dataset_logical_dtypes_invalid")
         names.append(name)
+        if selected_columns is not None and name not in selected_columns:
+            continue
         if kind == "categorical":
             if set(descriptor) != {"name", "kind", "ordered", "categories"}:
                 raise ValueError("dataset_logical_dtypes_invalid")
@@ -746,6 +752,8 @@ def data_spec_payload(spec: DataSpec) -> dict[str, Any]:
         "column_roles": {
             column: role.value for column, role in sorted(spec.column_roles.items())
         },
+        "column_units": dict(spec.column_units),
+        "label_availability_columns": dict(spec.label_availability_columns),
     }
     if isinstance(spec, InterimDataSpec):
         payload.update({"source_id": spec.source_id})
@@ -778,6 +786,7 @@ def data_spec_payload(spec: DataSpec) -> dict[str, Any]:
                 ],
                 "label_columns": list(spec.label_columns),
                 "filter_columns": list(spec.filter_columns),
+                "eligibility_recipe": spec.eligibility_recipe,
                 "context_columns": list(spec.context_columns),
                 "key_coverage": dict(spec.key_coverage),
             }
@@ -789,6 +798,12 @@ def _feature_transform_payload(transform: FeatureTransformSpec) -> dict[str, Any
     return {
         "recipe_id": transform.recipe_id,
         "source_columns": list(transform.source_columns),
+        "clip": transform.clip,
+        "industry_neutralize": transform.industry_neutralize,
+        "size_neutralize": transform.size_neutralize,
+        "center": transform.center,
+        "scale": transform.scale,
+        "impute_missing": transform.impute_missing,
     }
 
 
@@ -851,6 +866,8 @@ def validate_dataset_spec_payload(spec: Mapping[str, Any]) -> None:
         },
         "primary_key": tuple(primary_key),
         "partition_columns": tuple(partition_columns),
+        "column_units": spec.get("column_units"),
+        "label_availability_columns": spec.get("label_availability_columns"),
     }
     if keys == _DATASET_SPEC_BASE_KEYS:
         DataSpec(**common_kwargs)
@@ -912,7 +929,7 @@ def validate_dataset_spec_payload(spec: Mapping[str, Any]) -> None:
         spec.get("feature_columns"), "dataset_feature_columns_invalid", allow_empty=True
     )
     label_columns = _require_string_list(
-        spec.get("label_columns"), "dataset_label_columns_invalid", allow_empty=False
+        spec.get("label_columns"), "dataset_label_columns_invalid", allow_empty=True
     )
     filter_columns = _require_string_list(
         spec.get("filter_columns"), "dataset_filter_columns_invalid", allow_empty=True
@@ -941,6 +958,7 @@ def validate_dataset_spec_payload(spec: Mapping[str, Any]) -> None:
             feature_transforms=tuple(feature_transforms),
             label_columns=tuple(label_columns),
             filter_columns=tuple(filter_columns),
+            eligibility_recipe=spec.get("eligibility_recipe"),
             context_columns=tuple(context_columns),
             key_coverage=dict(key_coverage),
         )
@@ -950,7 +968,10 @@ def validate_dataset_spec_payload(spec: Mapping[str, Any]) -> None:
 
 
 def validate_dataset_manifest_payload(
-    manifest: Mapping[str, Any], *, spec: Mapping[str, Any]
+    manifest: Mapping[str, Any],
+    *,
+    spec: Mapping[str, Any],
+    logical_columns: tuple[str, ...] | None = None,
 ) -> None:
     validate_dataset_spec_payload(spec)
     if (
@@ -958,14 +979,12 @@ def validate_dataset_manifest_payload(
         or manifest.get("schema_id") != "qrp-dataset-manifest"
     ):
         raise ValueError("dataset_manifest_schema_id_invalid")
-    expected_keys = _DATASET_MANIFEST_RUNTIME_KEYS | {"schema_id", "spec_identity"}
+    expected_keys = _DATASET_MANIFEST_RUNTIME_KEYS | {"schema_id"}
     actual_keys = set(manifest)
     if not expected_keys.issubset(actual_keys) or not (
         actual_keys - expected_keys
     ).issubset(_DATASET_METADATA_ALLOWED_KEYS):
         raise ValueError("dataset_manifest_fields_invalid")
-    if manifest["spec_identity"] != canonical_json_hash(spec):
-        raise ValueError("dataset_manifest_spec_mismatch")
     for key in (
         "row_count",
         "file_count",
@@ -985,19 +1004,12 @@ def validate_dataset_manifest_payload(
     validate_physical_schema_payload(physical_schema)
     if list(physical_schema_columns(physical_schema)) != columns:
         raise ValueError("manifest_columns_mismatch")
-    schema_hash = _require_identity_hash(
-        manifest.get("schema_hash"), "manifest_schema_hash_invalid"
+    _require_identity_hash(manifest.get("schema_hash"), "manifest_schema_hash_invalid")
+    logical_dtypes = validate_logical_dtype_payload(
+        manifest.get("logical_dtypes"), selected_columns=logical_columns
     )
-    if canonical_json_hash(physical_schema) != schema_hash:
-        raise ValueError("manifest_schema_hash_mismatch")
-    logical_dtypes = validate_logical_dtype_payload(manifest.get("logical_dtypes"))
     if [item["name"] for item in logical_dtypes["columns"]] != columns:
         raise ValueError("manifest_logical_dtypes_mismatch")
-    logical_dtype_hash = _require_identity_hash(
-        manifest.get("logical_dtype_hash"), "manifest_logical_dtype_hash_invalid"
-    )
-    if canonical_json_hash(logical_dtypes) != logical_dtype_hash:
-        raise ValueError("manifest_logical_dtype_hash_mismatch")
     partitions = _require_string_list(
         manifest.get("partitions"), "manifest_partitions_invalid", allow_empty=False
     )
@@ -1095,14 +1107,6 @@ def validate_dataset_manifest_payload(
                     raise ValueError("manifest_partition_date_mismatch")
     elif date_range is not None:
         raise ValueError("manifest_date_range_invalid")
-    status = manifest.get("validation_status")
-    if not isinstance(status, str) or status not in (
-        "PASS",
-        "FAIL",
-        "NOT_RUN",
-        "BLOCKED",
-    ):
-        raise ValueError("manifest_validation_status_invalid")
     merge_dataset_metadata(
         {},
         {
@@ -1111,44 +1115,6 @@ def validate_dataset_manifest_payload(
             if key in manifest
         },
     )
-
-
-def validate_dataset_primary_key_null_summary(
-    manifest: Mapping[str, Any], *, primary_key
-) -> None:
-    """Require an observed zero null count for every declared primary-key column."""
-    null_counts = manifest.get("null_count_summary")
-    if (
-        not isinstance(primary_key, list)
-        or not primary_key
-        or any(not isinstance(column, str) or not column for column in primary_key)
-        or (not isinstance(null_counts, Mapping))
-    ):
-        raise ValueError("dataset_manifest_not_consumable")
-    try:
-        primary_key_null_counts = tuple(null_counts[column] for column in primary_key)
-    except KeyError:
-        raise ValueError("dataset_manifest_not_consumable") from None
-    if any(type(count) is not int or count != 0 for count in primary_key_null_counts):
-        raise ValueError("dataset_manifest_not_consumable")
-
-
-def validate_dataset_manifest_consumable(
-    manifest: Mapping[str, Any], *, primary_key
-) -> None:
-    """Reject structurally readable manifests that normal consumers cannot use."""
-    non_finite_counts = manifest.get("non_finite_count_summary")
-    if (
-        manifest.get("validation_status") != "PASS"
-        or type(manifest.get("duplicate_primary_key_count")) is not int
-        or manifest.get("duplicate_primary_key_count") != 0
-        or (not isinstance(non_finite_counts, Mapping))
-        or any(
-            type(count) is not int or count != 0 for count in non_finite_counts.values()
-        )
-    ):
-        raise ValueError("dataset_manifest_not_consumable")
-    validate_dataset_primary_key_null_summary(manifest, primary_key=primary_key)
 
 
 def validate_physical_schema_payload(value: object) -> None:
@@ -1289,7 +1255,16 @@ def _validate_feature_transform_payloads(value: object) -> list[FeatureTransform
         raise ValueError("dataset_feature_transforms_invalid")
     transforms = []
     for item in value:
-        if type(item) is not dict or set(item) != {"recipe_id", "source_columns"}:
+        if type(item) is not dict or set(item) != {
+            "recipe_id",
+            "source_columns",
+            "clip",
+            "industry_neutralize",
+            "size_neutralize",
+            "center",
+            "scale",
+            "impute_missing",
+        }:
             raise ValueError("dataset_feature_transforms_invalid")
         sources = _require_string_list(
             item["source_columns"],
@@ -1297,7 +1272,9 @@ def _validate_feature_transform_payloads(value: object) -> list[FeatureTransform
             allow_empty=False,
         )
         try:
-            transforms.append(FeatureTransformSpec(item["recipe_id"], tuple(sources)))
+            transforms.append(
+                FeatureTransformSpec(**{**item, "source_columns": tuple(sources)})
+            )
         except (TypeError, ValueError) as exc:
             raise ValueError("dataset_feature_transforms_invalid") from exc
     return transforms

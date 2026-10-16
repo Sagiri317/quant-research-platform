@@ -1282,6 +1282,7 @@ def iter_label_frames(
     frames: Iterable[pd.DataFrame],
     *,
     horizons_ms: tuple[int, ...],
+    columns: tuple[str, ...] | None = None,
 ) -> Iterator[pd.DataFrame]:
     """Emit HFT labels from two-pass bounded PANEL frames."""
 
@@ -1295,6 +1296,20 @@ def iter_label_frames(
         )
     ):
         raise ValueError("hft_label_horizon_invalid")
+    available = {
+        f"future_mid_{kind}_{horizon}ms"
+        for horizon in horizons
+        for kind in ("return", "direction")
+    }
+    if 500 in horizons:
+        available.add(HFT_MAKER_BID_SELL_PRESSURE_PROXY_COLUMN)
+    selected = available if columns is None else set(columns)
+    if (
+        not selected
+        or not selected <= available
+        or (columns is not None and len(selected) != len(columns))
+    ):
+        raise ValueError("hft_label_columns_invalid")
     tail_rows = max(horizons) // HFT_GRID_MS
     buffer = pd.DataFrame()
     active_segment: str | None = None
@@ -1316,14 +1331,16 @@ def iter_label_frames(
         last_start = 0 if not len(earlier) else int(earlier[-1]) + 1
         retained = min(tail_rows, len(combined) - last_start)
         emit_stop = len(combined) - retained
-        labeled = _label_frame(combined, horizons=horizons)
+        labeled = _label_frame(combined, horizons=horizons, columns=selected)
         if emit_stop:
             yield labeled.iloc[:emit_stop].reset_index(drop=True)
         buffer = combined.iloc[emit_stop:].copy()
         active_segment = str(segments[-1])
         previous_time = int(timestamps[-1])
     if not buffer.empty:
-        yield _label_frame(buffer, horizons=horizons).reset_index(drop=True)
+        yield _label_frame(buffer, horizons=horizons, columns=selected).reset_index(
+            drop=True
+        )
 
 
 def _validated_grid_arrays(
@@ -1398,24 +1415,33 @@ def _identity_frame(frame: pd.DataFrame) -> pd.DataFrame:
     return frame.loc[:, columns].copy()
 
 
-def _label_frame(frame: pd.DataFrame, *, horizons: tuple[int, ...]) -> pd.DataFrame:
-    mid = pd.Series(
-        _finite_column(frame, "mid", "hft_label_mid_invalid"),
-        index=frame.index,
-    )
-    if bool(mid.eq(0).any()):
-        raise ValueError("hft_label_mid_invalid")
+def _label_frame(
+    frame: pd.DataFrame, *, horizons: tuple[int, ...], columns: set[str]
+) -> pd.DataFrame:
     output = _identity_frame(frame)
     segment_groups = frame["segment_id"].ne(frame["segment_id"].shift()).cumsum()
-    grouped = mid.groupby(segment_groups, sort=False)
-    for horizon in horizons:
+    mid_horizons = tuple(
+        horizon
+        for horizon in horizons
+        if any(
+            f"future_mid_{kind}_{horizon}ms" in columns
+            for kind in ("return", "direction")
+        )
+    )
+    if mid_horizons:
+        mid = pd.Series(
+            _finite_column(frame, "mid", "hft_label_mid_invalid"),
+            index=frame.index,
+        )
+        if bool(mid.eq(0).any()):
+            raise ValueError("hft_label_mid_invalid")
+        grouped = mid.groupby(segment_groups, sort=False)
+    for horizon in mid_horizons:
         future = grouped.shift(-(horizon // HFT_GRID_MS))
         same_sign = future.lt(0).eq(mid.lt(0))
         values = (future.where(same_sign) - mid.where(same_sign)) / mid
         # Opposite signs cannot cancel and their difference can overflow.
         values.loc[~same_sign] = future.loc[~same_sign] / mid.loc[~same_sign] - 1.0
-        output[f"future_mid_return_{horizon}ms"] = values
-        output[f"future_mid_direction_{horizon}ms"] = np.sign(values)
         available = (
             pd.to_datetime(frame["timestamp_ms"], unit="ms")
             .groupby(segment_groups, sort=False)
@@ -1423,9 +1449,15 @@ def _label_frame(frame: pd.DataFrame, *, horizons: tuple[int, ...]) -> pd.DataFr
             .where(values.notna())
         )
         for kind in ("return", "direction"):
-            output[f"future_mid_{kind}_{horizon}ms_available_at"] = available
+            column = f"future_mid_{kind}_{horizon}ms"
+            if column in columns:
+                output[column] = values if kind == "return" else np.sign(values)
+        for kind in ("return", "direction"):
+            column = f"future_mid_{kind}_{horizon}ms"
+            if column in columns:
+                output[column + "_available_at"] = available
     proxy = label_catalog().get(HFT_MAKER_BID_SELL_PRESSURE_PROXY_COLUMN)
-    if proxy.horizon in horizons:
+    if proxy.output_column in columns:
         best_bid_quantity = pd.Series(
             _finite_column(
                 frame,

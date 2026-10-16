@@ -143,7 +143,7 @@ def test_bounded_dataset_read_path_never_calls_full_file_pandas_reader(
     assert sum(len(chunk) for chunk in chunks) == 3
 
 
-def test_read_dataset_manifest_failures_are_closed(tmp_path: Path) -> None:
+def test_schema_hash_is_descriptive_and_not_an_admission_gate(tmp_path: Path) -> None:
     root = make_dataset_artifact_root(tmp_path)
     write_dataset(
         root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
@@ -152,8 +152,7 @@ def test_read_dataset_manifest_failures_are_closed(tmp_path: Path) -> None:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["schema_hash"] = "0" * 64
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    with pytest.raises(ValueError, match="manifest_schema_hash_mismatch"):
-        read_dataset(root)
+    assert len(read_dataset(root)) == 3
 
 
 @pytest.mark.parametrize(
@@ -262,7 +261,7 @@ def test_read_dataset_manifest_row_count_mismatch_fails_closed(tmp_path: Path) -
             "manifest_partitions_invalid",
         ),
         ("date_min", "2016-01-01", "manifest_date_range_invalid"),
-        ("validation_status", "pass", "manifest_validation_status_invalid"),
+        ("validation_status", "pass", "dataset_manifest_fields_invalid"),
         ("unknown", "value", "dataset_manifest_fields_invalid"),
     ),
 )

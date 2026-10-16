@@ -278,3 +278,118 @@ def test_offline_publication_revalidates_original_bytes_without_iv(
                     time_window=TimeWindow("2026-08-01", "2026-08-01"),
                 )
             )
+
+
+@pytest.mark.parametrize(
+    "damage", (None, "digest", "coverage", "gzip_tail", "row_tail")
+)
+def test_early_close_finishes_actual_decode_before_source_evidence(
+    tmp_path, monkeypatch, damage
+):
+    import hashlib
+    from collections import Counter
+
+    from quant_research_platform.contracts.json_codec import canonical_json_hash
+    from quant_research_platform.sources.tardis import raw as raw_owner
+    from quant_research_platform.sources.tardis.normalized import _publish_dataset
+    from tests.sources.test_preparation_source_io import CountedFile
+
+    text = "exchange,symbol,timestamp,local_timestamp,id,side,price,amount\n"
+    text += "".join(
+        f"bybit,BTCUSDT,1785542400000000,{1785542400000000 + i},{i},buy,100,2\n"
+        for i in range(2000)
+    )
+    raw = gzip.compress(text.encode(), mtime=0)
+    root = tmp_path / "archive"
+    manifest = _publish_dataset(
+        root,
+        lambda: io.BytesIO(raw),
+        exchange="bybit",
+        dataset_type="trades",
+        symbol="BTCUSDT",
+        date="2026-08-01",
+    )
+    if damage == "coverage":
+        manifest["row_count"] += 1
+    elif damage == "digest":
+        raw = raw[:4] + bytes([raw[4] ^ 1]) + raw[5:]
+    elif damage == "gzip_tail":
+        raw = raw[:-8] + bytes([raw[-8] ^ 1]) + raw[-7:]
+    elif damage == "row_tail":
+        prefix, last = text.rstrip("\n").rsplit("\n", 1)
+        raw = gzip.compress(
+            (prefix + "\n" + last.replace(",buy,", ",bad,") + "\n").encode(), mtime=0
+        )
+        manifest.update(
+            sha256=hashlib.sha256(raw).hexdigest(), compressed_bytes=len(raw)
+        )
+    (root / "data.csv.gz").write_bytes(raw)
+    (root / "manifest.json").write_text(json.dumps(manifest))
+    opened, consumed, handles = Counter(), Counter(), []
+    open_file = raw_owner.open_filesystem_file
+
+    def tracked_file(path, *args, **kwargs):
+        handle = open_file(path, *args, **kwargs)
+        opened[path] += 1
+        handles.append(handle)
+        return CountedFile(handle, path, consumed)
+
+    monkeypatch.setattr(raw_owner, "open_filesystem_file", tracked_file)
+    identities = []
+    records = iter_records(
+        tmp_path,
+        archive_paths=["archive"],
+        time_window=TimeWindow("2026-08-01", "2026-08-01"),
+        expected_scope=("bybit", "BTCUSDT", "trades"),
+        on_verified=identities.append,
+    )
+    assert next(records)["id"] == "0"
+    assert identities == []
+    if damage is None:
+        records.close()
+        assert identities == [canonical_json_hash(manifest)]
+    else:
+        with pytest.raises((ValueError, OSError)):
+            records.close()
+        assert identities == []
+    assert opened == Counter({root / "data.csv.gz": 1})
+    assert consumed == Counter({root / "data.csv.gz": len(raw)})
+    assert handles and all(handle.closed for handle in handles)
+
+
+def test_consumer_failure_stays_primary_and_does_not_finish_source_evidence(
+    tmp_path, monkeypatch
+):
+    from quant_research_platform.policy.lifecycle import closing_iterator
+    from quant_research_platform.sources.tardis.normalized import _publish_dataset
+
+    raw = gzip.compress(
+        b"exchange,symbol,timestamp,local_timestamp,id,side,price,amount\n"
+        + b"bybit,BTCUSDT,1785542400000000,1785542400000001,1,buy,100,2\n" * 2000,
+        mtime=0,
+    )
+    root = tmp_path / "archive"
+    _publish_dataset(
+        root,
+        lambda: io.BytesIO(raw),
+        exchange="bybit",
+        dataset_type="trades",
+        symbol="BTCUSDT",
+        date="2026-08-01",
+    )
+    (root / "data.csv.gz").write_bytes(raw[:-8] + bytes([raw[-8] ^ 1]) + raw[-7:])
+    identities = []
+    records = iter_records(
+        tmp_path,
+        archive_paths=["archive"],
+        time_window=None,
+        on_verified=identities.append,
+    )
+    primary = KeyboardInterrupt("synthetic_consumer_failure")
+    with pytest.raises(KeyboardInterrupt) as caught:
+        with closing_iterator(records):
+            next(records)
+            raise primary
+    assert caught.value is primary
+    assert any("BadGzipFile" in note for note in primary.__notes__)
+    assert identities == []

@@ -105,7 +105,24 @@ def test_statistics_unconsumed_member_not_scanned(tmp_path):
 
 
 @pytest.mark.parametrize("role", ["holdout", "development", "", None])
-def test_statistics_rejects_retired_or_missing_sample_roles(tmp_path, role):
+def test_statistics_preserves_descriptive_roles_and_rejects_empty_roles(tmp_path, role):
+    if role:
+        tables, metadata, _ = _factor_tables(tmp_path)
+        metadata["sample_role"] = role
+        for name, frame in tables.items():
+            if "sample_role" in frame:
+                tables[name] = frame.assign(sample_role=role)
+        root = write_statistics_artifact(
+            tmp_path / "descriptive",
+            metadata=metadata,
+            tables=tables,
+            table_group="factor",
+        )
+        artifact = read_statistics_artifact(root)
+        assert artifact.metadata["sample_role"] == role
+        with artifact.table("factor_diagnostics.parquet") as frame:
+            assert not frame.empty
+        return
     with pytest.raises(ValueError, match="sample_role"):
         write_statistics_artifact(
             tmp_path / "bad",
@@ -142,6 +159,7 @@ def test_public_factor_statistics_projects_custom_native_or_bare_input(
         "grain": "asset_timestamp",
         "primary_key": ["market_id", "asset_id", "timestamp"],
         "partition_columns": ["year"],
+        "column_units": {"custom_return": "decimal_return"},
         "column_roles": {
             "market_id": "key",
             "asset_id": "key",
@@ -272,6 +290,7 @@ def test_public_statistics_rejects_unused_nested_options_before_reading(
             "benchmark_total_return_indices": {},
             "risk": {},
             "adv_sensitivities": [0.1],
+            "analyses": ["cscv"],
             "statistics": {"cscv_blocks": 10, "unused": True},
         }
         function = portfolio_statistics

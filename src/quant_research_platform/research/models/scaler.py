@@ -136,19 +136,27 @@ class ModelMatrixScaler:
                 - offset[columns] / scale[columns]
             )
         for column, exact_offset in enumerate(self.offset_):
-            if exact_offset != Fraction(float(offset[column])):
-                exact_origin = Fraction(self.origin_[column])
-                exact_scale = Fraction(self.scale_[column])
-                for row, value in enumerate(values[:, column]):
-                    standardized = (
-                        Fraction(float(value)) - exact_origin - exact_offset
-                    ) / exact_scale
-                    try:
-                        differences[row, column] = float(standardized)
-                    except OverflowError:
-                        differences[row, column] = (
-                            np.inf if standardized > 0 else -np.inf
-                        )
+            residual = exact_offset - Fraction(float(offset[column]))
+            if not residual:
+                continue
+            # One exact correction per column; ordinary rows remain vectorized.
+            exact_scale = Fraction(self.scale_[column])
+            try:
+                correction = float(residual / exact_scale)
+            except OverflowError:
+                correction = np.inf if residual > 0 else -np.inf
+            with np.errstate(over="ignore", invalid="ignore"):
+                differences[:, column] -= correction
+            for row in np.flatnonzero(~np.isfinite(differences[:, column])):
+                standardized = (
+                    Fraction(float(values[row, column]))
+                    - Fraction(self.origin_[column])
+                    - exact_offset
+                ) / exact_scale
+                try:
+                    differences[row, column] = float(standardized)
+                except OverflowError:
+                    differences[row, column] = np.inf if standardized > 0 else -np.inf
         return pd.DataFrame(differences, index=frame.index, columns=self.columns)
 
     def to_payload(self) -> dict[str, object]:

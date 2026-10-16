@@ -2,15 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import asdict, dataclass
-from typing import ClassVar
-
 import pandas as pd
 
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
-from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import DataFrequency, DataGrain
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
@@ -19,16 +14,10 @@ from quant_research_platform.contracts.json_codec import (
     qrp_json_object_snapshot,
 )
 from quant_research_platform.contracts.labels import LabelDefinition
-from quant_research_platform.contracts.portfolios import (
-    PortfolioCapital,
-)
-from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.time import (
     TimeWindow,
     is_datetime_window,
-    time_value_isoformat,
 )
-from quant_research_platform.contracts.validation import strict_finite_float
 from quant_research_platform.markets.implementations.crypto import ids as market_ids
 
 PROTOCOL_ID = "crypto_hft"
@@ -217,202 +206,8 @@ def label_horizon_ms(label_column):
     return label_catalog().get(label_column).horizon
 
 
-@dataclass(frozen=True)
-class CryptoMakerPlan:
-    quote_horizon_ms: ClassVar[int] = 500
-    maker_fee_bps: float
-    latency_ms: int
-    min_calibration_samples: int
-    inventory_target: float
-    inventory_skew: float
-
-    def __post_init__(self):
-        for key in ("maker_fee_bps", "inventory_target", "inventory_skew"):
-            object.__setattr__(
-                self,
-                key,
-                strict_finite_float(
-                    getattr(self, key), error="crypto_maker_parameters_invalid"
-                ),
-            )
-        if (
-            self.inventory_skew < 0
-            or type(self.latency_ms) is not int
-            or self.latency_ms < 0
-            or type(self.min_calibration_samples) is not int
-            or self.min_calibration_samples <= 0
-        ):
-            raise ValueError("crypto_maker_parameters_invalid")
-
-
-@dataclass(frozen=True)
-class CryptoExecutionPlan:
-    backtest_modes: tuple[str, ...]
-    taker_fee_bps: float
-    latency_ms: int
-    markout_horizon_ms: int
-    latency_scenarios_ms: tuple[int, ...]
-    fee_scenarios_bps: tuple[float, ...]
-    additional_spread_scenarios_bps: tuple[float, ...]
-    maker: CryptoMakerPlan | None = None
-
-    def __post_init__(self):
-        modes = ("continuous", "independent_segments")
-        if (
-            type(self.backtest_modes) is not tuple
-            or not self.backtest_modes
-            or any(
-                type(mode) is not str or mode not in modes
-                for mode in self.backtest_modes
-            )
-            or len(set(self.backtest_modes)) != len(self.backtest_modes)
-        ):
-            raise ValueError("crypto_backtest_modes_invalid")
-        object.__setattr__(
-            self,
-            "backtest_modes",
-            tuple(mode for mode in modes if mode in self.backtest_modes),
-        )
-        fee = strict_finite_float(self.taker_fee_bps, error="crypto_taker_fee_invalid")
-        if (
-            fee < 0
-            or type(self.latency_ms) is not int
-            or self.latency_ms < 0
-            or type(self.markout_horizon_ms) is not int
-            or self.markout_horizon_ms <= 0
-            or type(self.latency_scenarios_ms) is not tuple
-            or any(type(value) is not int for value in self.latency_scenarios_ms)
-            or not self.latency_scenarios_ms
-            or any(value < 0 for value in self.latency_scenarios_ms)
-            or len(set(self.latency_scenarios_ms)) != len(self.latency_scenarios_ms)
-        ):
-            raise ValueError("crypto_execution_parameters_invalid")
-        for values in (self.fee_scenarios_bps, self.additional_spread_scenarios_bps):
-            if type(values) is not tuple or not values:
-                raise ValueError("crypto_cost_sensitivity_invalid")
-            if any(
-                strict_finite_float(value, error="crypto_cost_sensitivity_invalid") < 0
-                for value in values
-            ):
-                raise ValueError("crypto_cost_sensitivity_invalid")
-            if len(set(values)) != len(values):
-                raise ValueError("crypto_cost_sensitivity_invalid")
-        object.__setattr__(self, "taker_fee_bps", fee)
-        for key in ("fee_scenarios_bps", "additional_spread_scenarios_bps"):
-            object.__setattr__(
-                self, key, tuple(float(value) for value in getattr(self, key))
-            )
-
-
-@dataclass(frozen=True)
-class CryptoTakerCandidate:
-    candidate_id: str
-    asset_id: str
-    model_id: str
-    latency_ms: int | None = None
-
-
-@dataclass(frozen=True)
-class CryptoMakerCandidate:
-    candidate_id: str
-    asset_id: str
-    price_model_id: str | None
-    proxy_model_id: str | None
-
-    @property
-    def calibrated(self):
-        return self.price_model_id is not None
-
-    @property
-    def model_ids(self):
-        return (self.price_model_id, self.proxy_model_id) if self.calibrated else ()
-
-
-def portfolio_candidates(selection):
-    """Decode explicit execution candidates without a named strategy roster."""
-    if type(selection) is not list:
-        raise ValueError("research_portfolio_configuration_invalid")
-    result = []
-    for item in selection:
-        if type(item) is not dict:
-            raise ValueError("research_portfolio_configuration_invalid")
-        if set(item) == {"candidate_id", "asset_id", "model_id", "latency_ms"}:
-            if type(item["model_id"]) is not str or not item["model_id"]:
-                raise ValueError("research_portfolio_model_invalid")
-            if item["latency_ms"] is not None and (
-                type(item["latency_ms"]) is not int or item["latency_ms"] < 0
-            ):
-                raise ValueError("crypto_execution_parameters_invalid")
-            candidate = CryptoTakerCandidate(**item)
-        elif set(item) == {
-            "candidate_id",
-            "asset_id",
-            "price_model_id",
-            "proxy_model_id",
-        }:
-            roles = (item["price_model_id"], item["proxy_model_id"])
-            if roles != (None, None) and any(
-                type(value) is not str or not value for value in roles
-            ):
-                raise ValueError("research_portfolio_model_invalid")
-            candidate = CryptoMakerCandidate(**item)
-        else:
-            raise ValueError("research_portfolio_configuration_invalid")
-        if (
-            type(candidate.candidate_id) is not str
-            or not candidate.candidate_id
-            or type(candidate.asset_id) is not str
-            or candidate.asset_id not in HFT_EXECUTION_ASSET_IDS
-        ):
-            raise ValueError("research_portfolio_configuration_invalid")
-        result.append(candidate)
-    return tuple(result)
-
-
-@dataclass(frozen=True)
-class _CryptoResearchPlan:
-    folds: tuple[ExperimentFold, ...]
-    test: TimeWindow
-    initial_capital: float
-    valuation_currency: str
-    exposure_limits: tuple[tuple[str, float, float], ...]
-    execution: CryptoExecutionPlan | None = None
-
-    def payload(self):
-        def window(value):
-            return {
-                "start": time_value_isoformat(value.start, preserve_datetime=True),
-                "end": time_value_isoformat(value.end, preserve_datetime=True),
-            }
-
-        result = {
-            "folds": [
-                {
-                    "fold_id": fold.fold_id,
-                    "train": window(fold.train),
-                    "validation": window(fold.validation),
-                }
-                for fold in self.folds
-            ],
-            "test": window(self.test),
-            "initial_capital": self.initial_capital,
-            "valuation_currency": self.valuation_currency,
-            "exposure_limits": {
-                asset: {"max_order_quantity": order, "max_position_quantity": position}
-                for asset, order, position in self.exposure_limits
-            },
-        }
-        if self.execution is not None:
-            result["execution"] = {
-                key: list(value) if type(value) is tuple else value
-                for key, value in asdict(self.execution).items()
-                if value is not None
-            }
-        return result
-
-
 def research_chronology(value):
-    """Decode the chronology shared by model artifacts and execution plans."""
+    """Decode the chronology shared by model artifacts and execution operations."""
     snapshot = qrp_json_object_snapshot(value)
     if set(snapshot) != {"folds", "test"}:
         raise ValueError("crypto_research_chronology_fields_invalid")
@@ -450,146 +245,6 @@ def research_chronology(value):
     if any(fold.validation.end >= test_window.start for fold in folds):
         raise ValueError("crypto_research_plan_test_window_overlap")
     return tuple(folds), test_window
-
-
-def _research_plan(value: Mapping[str, object]) -> _CryptoResearchPlan:
-    snapshot = qrp_json_object_snapshot(value)
-    if set(snapshot) - {"execution"} != {
-        "folds",
-        "test",
-        "initial_capital",
-        "valuation_currency",
-        "exposure_limits",
-    }:
-        raise ValueError("crypto_research_plan_fields_invalid")
-
-    folds, test_window = research_chronology(
-        {key: snapshot[key] for key in ("folds", "test")}
-    )
-    capital = PortfolioCapital(
-        "crypto_plan",
-        snapshot["initial_capital"],
-        snapshot["valuation_currency"],
-        "linear_perpetual",
-    )
-    if capital.valuation_currency != "USDT":
-        raise ValueError("crypto_research_plan_currency_invalid")
-    raw_limits = snapshot["exposure_limits"]
-    if type(raw_limits) is not dict or set(raw_limits) != set(HFT_EXECUTION_ASSET_IDS):
-        raise ValueError("crypto_research_plan_exposure_limits_required")
-    limits = []
-    for asset, item in sorted(raw_limits.items()):
-        if type(item) is not dict or set(item) != {
-            "max_order_quantity",
-            "max_position_quantity",
-        }:
-            raise ValueError("crypto_research_plan_exposure_limits_invalid")
-        order = strict_finite_float(
-            item["max_order_quantity"],
-            error="crypto_research_plan_exposure_limits_invalid",
-        )
-        position = strict_finite_float(
-            item["max_position_quantity"],
-            error="crypto_research_plan_exposure_limits_invalid",
-        )
-        if min(order, position) <= 0:
-            raise ValueError("crypto_research_plan_exposure_limits_invalid")
-        limits.append((asset, order, position))
-    execution = None
-    if "execution" in snapshot:
-        value = snapshot["execution"]
-        if type(value) is not dict or set(value) - {"maker"} != {
-            "backtest_modes",
-            "taker_fee_bps",
-            "latency_ms",
-            "markout_horizon_ms",
-            "latency_scenarios_ms",
-            "fee_scenarios_bps",
-            "additional_spread_scenarios_bps",
-        }:
-            raise ValueError("crypto_execution_fields_invalid")
-        for key in (
-            "backtest_modes",
-            "latency_scenarios_ms",
-            "fee_scenarios_bps",
-            "additional_spread_scenarios_bps",
-        ):
-            if type(value[key]) is not list:
-                raise ValueError("crypto_execution_scenarios_invalid")
-        if "maker" in value and (
-            type(value["maker"]) is not dict
-            or set(value["maker"])
-            != {
-                "maker_fee_bps",
-                "latency_ms",
-                "min_calibration_samples",
-                "inventory_target",
-                "inventory_skew",
-            }
-        ):
-            raise ValueError("crypto_maker_fields_invalid")
-        execution = CryptoExecutionPlan(
-            **{
-                key: CryptoMakerPlan(**item)
-                if key == "maker" and type(item) is dict
-                else tuple(item)
-                if type(item) is list
-                else item
-                for key, item in value.items()
-            }
-        )
-        if "maker" in value and type(execution.maker) is not CryptoMakerPlan:
-            raise ValueError("crypto_maker_parameters_invalid")
-    return _CryptoResearchPlan(
-        tuple(folds),
-        test_window,
-        float(capital.initial_capital),
-        capital.valuation_currency,
-        tuple(limits),
-        execution,
-    )
-
-
-def validation_windows(plan, output_window):
-    """Return only declared validation intervals intersecting the request."""
-    return tuple(
-        (
-            fold["fold_id"],
-            TimeWindow(
-                max(
-                    pd.Timestamp(fold["validation"]["start"]),
-                    pd.Timestamp(output_window.start),
-                ),
-                min(
-                    pd.Timestamp(fold["validation"]["end"]),
-                    pd.Timestamp(output_window.end),
-                ),
-            ),
-        )
-        for fold in plan["folds"]
-        if pd.Timestamp(fold["validation"]["end"]) >= pd.Timestamp(output_window.start)
-        and pd.Timestamp(fold["validation"]["start"]) <= pd.Timestamp(output_window.end)
-    )
-
-
-def build_signal_specs(*, columns: tuple[str, ...]) -> tuple[SignalSpec, ...]:
-    return tuple(
-        SignalSpec(
-            signal_id=column,
-            source_kind="factor",
-            source_column=column,
-            direction="lower_is_better"
-            if column in {"spread", "relative_spread"}
-            else "higher_is_better",
-        )
-        for column in columns
-    )
-
-
-def build_hft_model_catalog(*, configuration=None) -> ModelCatalog:
-    return ModelCatalog.from_configuration(
-        [] if configuration is None else configuration["models"]
-    )
 
 
 def build_hft_research_dataset_catalog() -> ResearchDatasetCatalog:
@@ -778,3 +433,15 @@ def factor_catalog():
         for column in HFT_EXTERNAL_FIELDS
     )
     return FactorCatalog(definitions)
+
+
+def crypto_execution_windows(plan, output_window, *, sample_role):
+    """Validate the requested final-evaluation extent for this frozen protocol."""
+    if sample_role != "test":
+        raise PermissionError("crypto_execution_requires_frozen_test")
+    boundary = TimeWindow(**plan["test"])
+    if pd.Timestamp(output_window.start) < pd.Timestamp(boundary.start) or pd.Timestamp(
+        output_window.end
+    ) > pd.Timestamp(boundary.end):
+        raise PermissionError("crypto_execution_test_window_invalid")
+    return ((plan["folds"][-1]["fold_id"], output_window),)

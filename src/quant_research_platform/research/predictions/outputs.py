@@ -1,6 +1,6 @@
 """Select each model's own eligible prediction domain."""
 
-from quant_research_platform.contracts.predictions import prediction_window_mask
+from quant_research_platform.contracts.time import prediction_window_mask
 from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_timestamp_series,

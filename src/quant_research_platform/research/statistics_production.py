@@ -9,7 +9,6 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.experiments import (
-    _model_inference_blocker,
     legal_training_rows,
     training_availability_columns,
 )
@@ -20,14 +19,18 @@ from quant_research_platform.contracts.time import (
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.features.transforms import (
+    feature_observation_columns,
+    mask_unobserved_features,
     model_input_validity_columns,
 )
+from quant_research_platform.research.predictions.outputs import prediction_rows
 from quant_research_platform.research.protocols.a_share import (
     _inference_blocker,
 )
 from quant_research_platform.research.randomness import derive_seed
 from quant_research_platform.research.statistics import (
     _apply_fdr,
+    _selected_analyses,
     cross_sectional_rank_ic,
     fama_macbeth_period,
     hac_mean,
@@ -38,7 +41,12 @@ from quant_research_platform.research.statistics import (
     time_series_inference_summary,
 )
 from quant_research_platform.runtime.dataframes import iter_complete_session_frames
-from quant_research_platform.storage.datasets.reading import read_dataset
+from quant_research_platform.storage.datasets.reading import (
+    _dataset_input_options,
+    iter_dataset_chunks,
+    open_dataset_session,
+    read_dataset,
+)
 from quant_research_platform.storage.datasets.types import DatasetReadMode
 
 _PREDICTION_COLUMN = "__prediction_alpha__"
@@ -73,6 +81,7 @@ def build_a_share_factor_statistics_tables(
     dataset_spec,
     config: Mapping[str, object],
     time_window: TimeWindow,
+    dataset_session=None,
 ) -> dict[str, pd.DataFrame]:
     """Publish factor inference once, independently of fitted model artifacts."""
     spec = dataset_spec
@@ -80,15 +89,28 @@ def build_a_share_factor_statistics_tables(
     primary_label = evaluation["primary_label"]
     availability = _statistics_label_availability(config["evaluation"], dataset_spec)
     factors = tuple(evaluation["factors"])
+    analyses = _selected_analyses(config, ("rank_ic", "fama_macbeth"))
     statistics = config["statistics"]
-    families = _factor_families(statistics["factor_fdr_families"], factors)
-    core = tuple(statistics["fama_macbeth_core_factors"])
+    families = (
+        _factor_families(statistics["factor_fdr_families"], factors)
+        if "rank_ic" in analyses
+        else {}
+    )
+    core = (
+        tuple(statistics["fama_macbeth_core_factors"])
+        if "fama_macbeth" in analyses
+        else ()
+    )
     if any(factor not in factors for factor in core):
         raise ValueError("statistics_core_factors_missing")
     max_lags = statistics["hac_lag"]
     methods = (
-        _fdr_method(statistics["fdr_primary"], expected="BH"),
-        _fdr_method(statistics["fdr_robustness"], expected="BY"),
+        (
+            _fdr_method(statistics["fdr_primary"], expected="BH"),
+            _fdr_method(statistics["fdr_robustness"], expected="BY"),
+        )
+        if "rank_ic" in analyses
+        else ()
     )
     window = time_window
     columns = tuple(
@@ -99,10 +121,27 @@ def build_a_share_factor_statistics_tables(
                 primary_label,
                 availability,
                 *factors,
-                "total_market_cap",
+                *feature_observation_columns(factors),
+                *(("total_market_cap",) if "fama_macbeth" in analyses else ()),
             )
         )
     )
+    cutoff = (
+        _statistics_window_bounds(
+            TimeWindow(config["label_cutoff"], config["label_cutoff"])
+        )[1]
+        if "label_cutoff" in config
+        else _statistics_window_bounds(window)[1]
+    )
+    business_columns = {
+        primary_label,
+        *factors,
+        *(("total_market_cap",) if "fama_macbeth" in analyses else ()),
+    }
+    if dataset_session is not None and business_columns - set(
+        dataset_session.logical_columns
+    ):
+        raise ValueError("statistics_required_columns_excluded")
     ranks, periods, input_dates = [], [], []
     chunks = iter_complete_session_frames(
         read_dataset(
@@ -111,7 +150,9 @@ def build_a_share_factor_statistics_tables(
             time_window=window,
             columns=columns,
             mode=DatasetReadMode.CHUNKED,
-        ),
+        )
+        if dataset_session is None
+        else iter_dataset_chunks(dataset_session.projected_view(columns)),
         timestamp_column="timestamp",
     )
     with closing_iterator(chunks):
@@ -119,32 +160,33 @@ def build_a_share_factor_statistics_tables(
             input_dates.append(pd.Timestamp(session["timestamp"].iloc[0]))
             mature = legal_training_rows(
                 session,
-                fitting_cutoff=_statistics_window_bounds(window)[1],
+                fitting_cutoff=cutoff,
                 availability_column=availability,
                 target_column=primary_label,
             )
             if mature.empty:
                 continue
-            ranks.extend(
-                cross_sectional_rank_ic(
-                    mature,
-                    value_columns=factors,
-                    label_column=primary_label,
-                ).to_dict("records")
-            )
-            periods.extend(
-                _fama_macbeth_period_records(
-                    mature,
-                    return_column=primary_label,
-                    factors=factors,
-                    core_factors=core,
+            mature = mask_unobserved_features(mature, factors)
+            if "rank_ic" in analyses:
+                ranks.extend(
+                    cross_sectional_rank_ic(
+                        mature,
+                        value_columns=factors,
+                        label_column=primary_label,
+                    ).to_dict("records")
                 )
-            )
-    period_frame = pd.DataFrame.from_records(
-        periods, columns=_FAMA_MACBETH_PERIOD_COLUMNS
-    )
-    return {
-        "factor_diagnostics": _factor_summary(
+            if "fama_macbeth" in analyses:
+                periods.extend(
+                    _fama_macbeth_period_records(
+                        mature,
+                        return_column=primary_label,
+                        factors=factors,
+                        core_factors=core,
+                    )
+                )
+    tables = {}
+    if "rank_ic" in analyses:
+        tables["factor_diagnostics"] = _factor_summary(
             pd.DataFrame.from_records(ranks, columns=["timestamp", *factors])
             .set_index("timestamp")
             .reindex(input_dates)
@@ -152,21 +194,22 @@ def build_a_share_factor_statistics_tables(
             .reset_index(),
             factors=factors,
             families=families,
-            methods=methods
-            if config["sample_role"] == "validation"
-            and _inference_blocker(config) is None
-            else (None,),
+            methods=methods if _inference_blocker(config) is None else (None,),
             max_lags=max_lags,
-        ),
-        "fama_macbeth": _fama_macbeth_summary(
+        )
+    if "fama_macbeth" in analyses:
+        period_frame = pd.DataFrame.from_records(
+            periods, columns=_FAMA_MACBETH_PERIOD_COLUMNS
+        )
+        tables["fama_macbeth"] = _fama_macbeth_summary(
             period_frame,
             factors=factors,
             core_factors=core,
             max_lags=max_lags,
             input_date_count=len(input_dates),
-        ),
-        "fama_macbeth_periods": period_frame,
-    }
+        )
+        tables["fama_macbeth_periods"] = period_frame
+    return tables
 
 
 def build_a_share_statistics_tables(
@@ -182,12 +225,26 @@ def build_a_share_statistics_tables(
     time_window: TimeWindow,
     prediction_lookup: object,
     global_statistics: object | None,
+    dataset_session=None,
 ) -> dict[str, pd.DataFrame]:
     dataset_id = str(dataset_spec.data_id)
-    selection_group = config["selection_group"]
-    inference_blocker = _model_inference_blocker(
-        sample_role=config["sample_role"],
-        selection_groups=(selection_group,),
+    selection_group = config.get("selection_group", "explicit")
+    inference_blocker = (
+        "selection_reuses_evaluation_window"
+        if any(
+            (cutoff := (entry.get("model_facts") or {}).get("selection_cutoff"))
+            is not None
+            and pd.Timestamp(cutoff)
+            >= _statistics_window_bounds(period_windows[period])[0]
+            for (period, _family), entry in model_entries.items()
+        )
+        or any(
+            selection.get("cutoff") is not None
+            and pd.Timestamp(selection["cutoff"])
+            >= _statistics_window_bounds(period_windows[period])[0]
+            for period, selection in selections.items()
+        )
+        else None
     )
     joint_blocker = _inference_blocker(config)
     primary_label = config["evaluation"]["primary_label"]
@@ -215,8 +272,13 @@ def build_a_share_statistics_tables(
         key: _statistics_window_bounds(window) for key, window in period_windows.items()
     }
     model_start, model_end = _statistics_window_bounds(model_window)
-    family_ids = tuple(
-        family["family_id"] for family in next(iter(selections.values()))["families"]
+    family_ids = (
+        tuple(
+            family["family_id"]
+            for family in next(iter(selections.values()))["families"]
+        )
+        if selections
+        else tuple(config["family_ids"])
     )
     family_columns = {family: index for index, family in enumerate(family_ids)}
     prediction_columns = tuple(family_columns.values())
@@ -233,15 +295,31 @@ def build_a_share_statistics_tables(
                 *(
                     column
                     for item in model_entries.values()
-                    if item["model_metadata"] is not None
-                    for column in model_input_validity_columns(
-                        item["model_metadata"]["input_columns"],
-                        item["model_metadata"]["model_algorithm"],
+                    if selections and item["model_metadata"] is not None
+                    for column in (
+                        *item["model_metadata"]["input_columns"],
+                        *model_input_validity_columns(
+                            item["model_metadata"]["input_columns"],
+                            item["model_metadata"]["model_algorithm"],
+                        ),
                     )
                 ),
             )
         )
     )
+    business_columns = {
+        primary_label,
+        *(
+            column
+            for item in model_entries.values()
+            if selections and item["model_metadata"] is not None
+            for column in item["model_metadata"]["input_columns"]
+        ),
+    }
+    if dataset_session is not None and business_columns - set(
+        dataset_session.logical_columns
+    ):
+        raise ValueError("statistics_required_columns_excluded")
     rank_records: list[dict[str, object]] = []
     comparison_records: list[dict[str, object]] = []
     loss_records: list[dict[str, object]] = []
@@ -252,14 +330,22 @@ def build_a_share_statistics_tables(
             time_window=model_window,
             columns=read_columns,
             mode=DatasetReadMode.CHUNKED,
-        ),
+        )
+        if dataset_session is None
+        else iter_dataset_chunks(dataset_session.projected_view(read_columns)),
         timestamp_column="timestamp",
     )
     with closing_iterator(chunks):
         for session in chunks:
             mature = legal_training_rows(
                 session,
-                fitting_cutoff=_statistics_window_bounds(model_window)[1],
+                fitting_cutoff=(
+                    _statistics_window_bounds(
+                        TimeWindow(config["label_cutoff"], config["label_cutoff"])
+                    )[1]
+                    if "label_cutoff" in config
+                    else _statistics_window_bounds(model_window)[1]
+                ),
                 availability_column=availability,
                 target_column=primary_label,
             )
@@ -273,37 +359,41 @@ def build_a_share_statistics_tables(
                 if len(matches) != 1:
                     raise ValueError("statistics_prediction_period_coverage_invalid")
                 period_id = matches[0]
-                selection = selections[period_id]
+                selection = selections.get(period_id)
                 for family_id in family_ids:
                     entry = model_entries[period_id, family_id]
                     metadata = entry["model_metadata"]
                     if metadata is None:
                         mature[family_columns[family_id]] = np.nan
                         continue
-                    inputs = model_input_validity_columns(
-                        metadata["input_columns"], metadata["model_algorithm"]
+                    expected = (
+                        prediction_rows(session, metadata, period_windows[period_id])
+                        if selections
+                        else session
                     )
-                    eligible = session["eligible"].eq(True) & session.loc[
-                        :, list(inputs)
-                    ].notna().all(axis=1)
-                    keys = session.loc[eligible, ["timestamp", "asset_id"]].copy()
+                    if entry.get("asset_ids") is not None:
+                        expected = expected.loc[
+                            expected.asset_id.isin(entry["asset_ids"])
+                        ]
+                    keys = expected.loc[:, ["timestamp", "asset_id"]].copy()
                     keys["family_id"] = family_id
                     values, found = prediction_lookup.values_for_frame(
                         keys, mark_matched=True
                     )
-                    if not all(found):
+                    if selections and not all(found):
                         raise ValueError("missing_required_prediction_keys")
                     scores = pd.Series(
                         np.asarray(values, dtype="float64"), index=keys.index
                     )
                     mature[family_columns[family_id]] = scores.reindex(mature.index)
-                mature[_PREDICTION_COLUMN] = mature[
-                    family_columns[selection["selected_family_id"]]
-                ]
+                if selection is not None:
+                    mature[_PREDICTION_COLUMN] = mature[
+                        family_columns[selection["selected_family_id"]]
+                    ]
                 rank = cross_sectional_rank_ic(
                     mature,
                     value_columns=(
-                        _PREDICTION_COLUMN,
+                        *((_PREDICTION_COLUMN,) if selection is not None else ()),
                         *prediction_columns,
                     ),
                     label_column=primary_label,
@@ -380,20 +470,21 @@ def build_a_share_statistics_tables(
     rank_by_date = pd.DataFrame.from_records(
         rank_records, columns=["timestamp", _PREDICTION_COLUMN]
     )
-    prediction_summary = _prediction_summary(
-        rank_by_date,
-        prediction_id=prediction_id,
-        inference_blocker=inference_blocker,
-        max_lags=max_lags,
-        block_size=block_size,
-        repetitions=repetitions,
-        seed=derive_seed(
-            root_seed,
-            "a_share_statistics_bootstrap",
-            dataset_id,
-            prediction_id,
-        ),
-    )
+    if selections:
+        prediction_summary = _prediction_summary(
+            rank_by_date,
+            prediction_id=prediction_id,
+            inference_blocker=inference_blocker,
+            max_lags=max_lags,
+            block_size=block_size,
+            repetitions=repetitions,
+            seed=derive_seed(
+                root_seed,
+                "a_share_statistics_bootstrap",
+                dataset_id,
+                prediction_id,
+            ),
+        )
     model_trials = trial_rows.copy()
     model_losses = pd.DataFrame.from_records(
         loss_records,
@@ -440,14 +531,17 @@ def build_a_share_statistics_tables(
         config=config,
     )
     tables = {
-        "prediction_diagnostics": prediction_summary,
-        "model_trials": model_trials,
         "robustness": robustness,
         "model_losses": model_losses,
         "model_comparison": comparison,
-        "model_group_comparison": group_comparison,
         "model_reality_checks": tests,
     }
+    if selections:
+        tables.update(
+            prediction_diagnostics=prediction_summary, model_trials=model_trials
+        )
+    if "group_comparison" in statistics:
+        tables["model_group_comparison"] = group_comparison
     return tables
 
 
@@ -542,8 +636,16 @@ def _paired_group_rankic(
     if set(differences.columns) != set(family_ids):
         raise ValueError("model_group_comparison_family_incomplete")
     access = config["sample_role"]
-    inference_blocker = _model_inference_blocker(
-        sample_role=access, selection_groups=("global", "quarterly")
+    inference_blocker = (
+        "selection_reuses_evaluation_window"
+        if not differences.empty
+        and any(
+            pd.Timestamp(cutoff) >= differences.index.min()
+            for cutoff in getattr(global_statistics, "metadata", {}).get(
+                "selection_cutoffs", []
+            )
+        )
+        else None
     )
     fdr_method = (
         None if _inference_blocker(config) is not None else declaration["fdr_method"]
@@ -842,12 +944,7 @@ def _model_comparison(
             root_seed, "a_share_model_reality_check", dataset_id, sample_role, test_id
         )
         result = None
-        if (
-            joint_blocker is None
-            and sample_role == "validation"
-            and challengers
-            and (len(common) > block_size)
-        ):
+        if joint_blocker is None and challengers and (len(common) > block_size):
             options = dict(block_size=block_size, repetitions=repetitions, seed=seed)
             if test_id == "spa_reality_check":
                 result = spa_reality_check(
@@ -868,8 +965,6 @@ def _model_comparison(
             if result is not None
             else joint_blocker
             if joint_blocker is not None
-            else "test_excluded"
-            if sample_role != "validation"
             else "no_comparison_models"
             if not challengers
             else "bootstrap_block_exceeds_common_observations"
@@ -1107,34 +1202,34 @@ def _fama_macbeth_summary(
     return pd.DataFrame(rows)
 
 
-def _statistics_input_spec(config):
-    from quant_research_platform.contracts.data import DataSpec
-    from quant_research_platform.storage.manifests import read_qrp_json_file
+def _statistics_input_session(config, window):
+    from dataclasses import fields
 
-    path = Path(config["dataset"])
-    if path.is_file():
-        payload = config.get("input_spec")
-        if not isinstance(payload, dict):
-            raise ValueError("parquet_semantic_spec_required")
-        values = dict(payload)
-    else:
-        if "input_spec" in config:
-            raise ValueError("dataset_spec_already_declared")
-        _, payload = read_qrp_json_file(path / "spec.json")
-        values = {
-            key: payload[key]
-            for key in (
-                "data_id",
-                "frequency",
-                "grain",
-                "column_roles",
-                "primary_key",
-                "partition_columns",
-            )
-        }
+    from quant_research_platform.contracts.data import DataSpec
+
+    value = config["dataset"]
+    if "input_spec" in config:
+        if isinstance(value, dict):
+            if "spec" in value:
+                raise ValueError("dataset_spec_already_declared")
+            value = {**value, "spec": config["input_spec"]}
+        else:
+            value = {"path": value, "spec": config["input_spec"]}
+    options = _dataset_input_options(value)
+    session = open_dataset_session(**options).filtered_view(window)
+    payload = session.spec
+    values = {
+        field.name: payload[field.name]
+        for field in fields(DataSpec)
+        if field.init and field.name in payload
+    }
     for key in ("primary_key", "partition_columns"):
         values[key] = tuple(values[key])
-    return DataSpec(**values)
+    from quant_research_platform.contracts.columns import _validate_asset_time_key
+
+    spec = DataSpec(**values)
+    _validate_asset_time_key(spec.primary_key, spec.column_roles)
+    return session, spec
 
 
 def _statistics_label_availability(evaluation, spec):
@@ -1142,13 +1237,22 @@ def _statistics_label_availability(evaluation, spec):
     availability = evaluation.get("label_availability_columns", {})
     if not isinstance(availability, dict) or set(availability) - {label}:
         raise ValueError("statistics_label_availability_invalid")
-    column = availability.get(label, training_availability_columns(label)[0])
+    declared = getattr(spec, "label_availability_columns", {}).get(label)
+    if (
+        label in availability
+        and declared is not None
+        and availability[label] != declared
+    ):
+        raise ValueError("statistics_label_availability_conflict")
+    column = availability.get(label, declared)
+    if column is None:
+        column = training_availability_columns(label)[0]
     if not isinstance(column, str) or not column or column not in spec.column_roles:
         raise ValueError("statistics_label_availability_invalid")
     if str(spec.column_roles.get(label)) != "label":
         raise ValueError("statistics_label_role_invalid")
     if any(
-        str(spec.column_roles.get(factor)) != "factor"
+        str(spec.column_roles.get(factor)) not in {"factor", "feature"}
         for factor in evaluation.get("factors", ())
     ):
         raise ValueError("statistics_factor_role_invalid")
@@ -1168,12 +1272,14 @@ def factor_statistics(config):
         "dataset",
         "output",
         "window",
-        "sample_role",
         "evaluation",
         "statistics",
     }
     optional = {
+        "sample_role",
         "input_spec",
+        "analyses",
+        "label_cutoff",
         "selection_is_exploratory",
         "expectations",
         "feature_recipe",
@@ -1181,7 +1287,8 @@ def factor_statistics(config):
     }
     if set(config) - required - optional or required - set(config):
         raise ValueError("factor_statistics_config_invalid")
-    if config["sample_role"] not in {"validation", "test"}:
+    config.setdefault("sample_role", "exploratory")
+    if type(config["sample_role"]) is not str or not config["sample_role"].strip():
         raise ValueError("statistics_sample_role_invalid")
     evaluation, policy = config["evaluation"], config["statistics"]
     if (
@@ -1190,27 +1297,44 @@ def factor_statistics(config):
         or {"factors", "primary_label"} - set(evaluation)
     ):
         raise ValueError("factor_statistics_evaluation_invalid")
-    if not isinstance(policy, dict) or set(policy) != {
-        "factor_fdr_families",
-        "fama_macbeth_core_factors",
+    analyses = _selected_analyses(config, ("rank_ic", "fama_macbeth"))
+    expected = {"hac_lag"}
+    if "rank_ic" in analyses:
+        expected.update(("factor_fdr_families", "fdr_primary", "fdr_robustness"))
+    if "fama_macbeth" in analyses:
+        expected.add("fama_macbeth_core_factors")
+    known = {
         "hac_lag",
+        "factor_fdr_families",
         "fdr_primary",
         "fdr_robustness",
-    }:
+        "fama_macbeth_core_factors",
+    }
+    if not isinstance(policy, dict) or expected - set(policy) or set(policy) - known:
         raise ValueError("factor_statistics_policy_invalid")
     output = Path(config["output"])
     reject_if_exists(output)
     window = TimeWindow(**config["window"])
-    spec = _statistics_input_spec(config)
+    session, spec = _statistics_input_session(config, window)
     tables = build_a_share_factor_statistics_tables(
-        dataset_path=Path(config["dataset"]),
+        dataset_path=session.root,
+        dataset_session=session,
         dataset_spec=spec,
         config=config,
         time_window=window,
     )
     return write_statistics_artifact(
         output,
-        metadata={key: value for key, value in config.items() if key != "output"},
+        metadata={
+            **{key: value for key, value in config.items() if key != "output"},
+            "inference_scope": "exploratory",
+            "formal_selection_qualification": "not_established",
+            "column_units": {
+                column: unit
+                for column, unit in spec.column_units.items()
+                if column in {evaluation["primary_label"], *evaluation["factors"]}
+            },
+        },
         tables=tables,
         table_group="factor",
     )
@@ -1274,12 +1398,13 @@ def model_statistics(config):
 
     import pyarrow as pa
 
-    from quant_research_platform.artifacts.outputs.bundle_validation import (
+    from quant_research_platform.artifacts.outputs.manifest import (
         validate_output_bundle,
     )
     from quant_research_platform.artifacts.outputs.prediction import (
+        _iter_prediction_member,
         _PredictionLookup,
-        iter_predictions,
+        prediction_model_metadata,
     )
     from quant_research_platform.artifacts.statistics import (
         read_statistics_artifact,
@@ -1295,16 +1420,18 @@ def model_statistics(config):
         "dataset",
         "output",
         "window",
-        "sample_role",
         "evaluation",
         "statistics",
         "root_seed",
-        "selection_group",
         "comparison_model_id",
         "periods",
-        "prediction_id",
     }
     optional = {
+        "sample_role",
+        "family_ids",
+        "selection_group",
+        "prediction_id",
+        "label_cutoff",
         "input_spec",
         "global_statistics",
         "selection_is_exploratory",
@@ -1314,7 +1441,8 @@ def model_statistics(config):
     }
     if required - set(config) or set(config) - required - optional:
         raise ValueError("model_statistics_config_invalid")
-    if config["sample_role"] not in {"validation", "test"}:
+    config.setdefault("sample_role", "exploratory")
+    if type(config["sample_role"]) is not str or not config["sample_role"].strip():
         raise ValueError("statistics_sample_role_invalid")
     evaluation, policy = config["evaluation"], config["statistics"]
     if (
@@ -1334,7 +1462,7 @@ def model_statistics(config):
     if (
         paired != ("global_statistics" in config)
         or paired
-        and config["selection_group"] != "quarterly"
+        and config.get("selection_group") != "quarterly"
     ):
         raise ValueError("model_statistics_comparison_inputs_invalid")
     if paired and (
@@ -1348,8 +1476,28 @@ def model_statistics(config):
     window = TimeWindow(**config["window"])
     if not isinstance(config["periods"], list) or not config["periods"]:
         raise ValueError("statistics_prediction_periods_required")
+    direct = all(
+        isinstance(item, dict) and "selection" not in item for item in config["periods"]
+    )
+    if not direct and any("selection" not in item for item in config["periods"]):
+        raise ValueError("statistics_prediction_selection_mixed")
+    if direct:
+        family_ids = config.get("family_ids")
+        if (
+            not isinstance(family_ids, list)
+            or not family_ids
+            or any(not isinstance(value, str) or not value for value in family_ids)
+            or len(set(family_ids)) != len(family_ids)
+        ):
+            raise ValueError("statistics_candidate_family_declaration_required")
+        family_ids = tuple(family_ids)
+        if paired:
+            raise ValueError("model_statistics_comparison_inputs_invalid")
+    else:
+        if not {"selection_group", "prediction_id"} <= set(config):
+            raise ValueError("model_statistics_selection_fields_required")
+        family_ids = None
     periods, entries, selections = {}, {}, {}
-    family_ids = None
     previous_end = None
     index = ExactPrimaryKeyIndex(primary_key=("timestamp", "asset_id", "family_id"))
     lookup = _PredictionLookup(
@@ -1359,12 +1507,10 @@ def model_statistics(config):
     )
     try:
         for item in config["periods"]:
-            if not isinstance(item, dict) or set(item) != {
-                "period_id",
-                "window",
-                "selection",
-                "predictions",
-            }:
+            if not isinstance(item, dict) or set(item) != (
+                {"period_id", "window", "predictions"}
+                | (set() if direct else {"selection"})
+            ):
                 raise ValueError("statistics_prediction_period_invalid")
             period_id = item["period_id"]
             if not isinstance(period_id, str) or not period_id or period_id in periods:
@@ -1381,35 +1527,32 @@ def model_statistics(config):
                 raise ValueError("statistics_prediction_period_window_invalid")
             previous_end = end
             periods[period_id] = period
-            selection = read_selection(Path(item["selection"]))
-            if selection["selection_group"] != config["selection_group"]:
-                raise ValueError("statistics_selection_group_mismatch")
-            if config["selection_group"] == "quarterly" and pd.Timestamp(
-                selection["cutoff"]
-            ) >= pd.Timestamp(period.start):
-                raise ValueError("statistics_selection_after_prediction_start")
-            if config["sample_role"] == "test" and (
-                start
-                < _statistics_window_bounds(TimeWindow(**selection["test_window"]))[0]
-                or end
-                > _statistics_window_bounds(TimeWindow(**selection["test_window"]))[1]
-            ):
-                raise ValueError("statistics_test_window_mismatch")
-            selections[period_id] = selection
-            wanted = {
-                family["family_id"]: family["selected_config_id"]
-                for family in selection["families"]
-            }
-            if family_ids is None:
-                family_ids = tuple(wanted)
-            elif tuple(wanted) != family_ids:
-                raise ValueError("statistics_candidate_family_coverage_mismatch")
-            for family, winner in wanted.items():
-                if winner is None:
-                    entries[period_id, family] = {
-                        "model_metadata": None,
-                        "model_id": "",
-                    }
+            selection = None
+            if direct:
+                wanted = dict.fromkeys(family_ids)
+            else:
+                selection = read_selection(Path(item["selection"]))
+                if selection["selection_group"] != config["selection_group"]:
+                    raise ValueError("statistics_selection_group_mismatch")
+                if config["selection_group"] == "quarterly" and pd.Timestamp(
+                    selection["cutoff"]
+                ) >= pd.Timestamp(period.start):
+                    raise ValueError("statistics_selection_after_prediction_start")
+                selections[period_id] = selection
+                wanted = {
+                    family["family_id"]: family["selected_config_id"]
+                    for family in selection["families"]
+                }
+                if family_ids is None:
+                    family_ids = tuple(wanted)
+                elif tuple(wanted) != family_ids:
+                    raise ValueError("statistics_candidate_family_coverage_mismatch")
+                for family, winner in wanted.items():
+                    if winner is None:
+                        entries[period_id, family] = {
+                            "model_metadata": None,
+                            "model_id": "",
+                        }
             supplied = set()
             for path in item["predictions"]:
                 metadata = validate_output_bundle(
@@ -1418,36 +1561,30 @@ def model_statistics(config):
                 family = metadata["family_id"]
                 if (
                     family in supplied
-                    or wanted.get(family) != metadata["model_id"]
-                    or metadata["sample_role"] != config["sample_role"]
+                    or family not in wanted
+                    or (not direct and wanted[family] != metadata["model_id"])
                 ):
                     raise ValueError("statistics_prediction_family_mismatch")
-                candidate = next(
-                    entry
-                    for entry in selection["candidates"]
-                    if entry["model_id"] == metadata["model_id"]
-                )
-                if config["sample_role"] == "test":
-                    if (
-                        not metadata.get("selection")
-                        or read_selection(Path(metadata["selection"])) != selection
-                    ):
-                        raise ValueError("statistics_test_selection_mismatch")
-                elif Path(metadata["model"]) not in {
-                    Path(path) for path in candidate["model_paths"]
-                }:
-                    raise ValueError("statistics_selected_training_model_mismatch")
+                facts = metadata["model_facts"]
+                if facts["family_id"] != family:
+                    raise ValueError("statistics_prediction_family_mismatch")
                 supplied.add(family)
-                model_metadata = metadata["model_metadata"]
-                if model_metadata["target_column"] != selection["target_column"]:
+                model_metadata = prediction_model_metadata(metadata)
+                if (
+                    selection is not None
+                    and model_metadata["target_column"] != selection["target_column"]
+                ):
                     raise ValueError("statistics_prediction_target_mismatch")
                 entries[period_id, family] = {
                     "model_metadata": model_metadata,
                     "model_id": metadata["model_id"],
+                    "model_facts": facts,
+                    "asset_ids": metadata.get("asset_ids"),
                 }
                 with closing_iterator(
-                    iter_predictions(
+                    _iter_prediction_member(
                         Path(path),
+                        metadata,
                         columns=("timestamp", "asset_id", "prediction_score"),
                         time_window=period,
                     )
@@ -1463,18 +1600,25 @@ def model_statistics(config):
                             retain_values=True,
                         )
             if supplied != {
-                family for family, winner in wanted.items() if winner is not None
+                family
+                for family, winner in wanted.items()
+                if direct or winner is not None
             }:
                 raise ValueError("statistics_prediction_family_coverage_missing")
-        spec = _statistics_input_spec(config)
+        session, spec = _statistics_input_session(config, window)
         tables = build_a_share_statistics_tables(
-            dataset_path=Path(config["dataset"]),
+            dataset_path=session.root,
+            dataset_session=session,
             dataset_spec=spec,
-            prediction_id=config["prediction_id"],
+            prediction_id=config.get("prediction_id"),
             model_entries=entries,
             selections=selections,
             period_windows=periods,
-            trial_rows=_selection_trial_rows(selections, config["selection_group"]),
+            trial_rows=(
+                _selection_trial_rows(selections, config["selection_group"])
+                if selections
+                else pd.DataFrame()
+            ),
             config=config,
             time_window=window,
             prediction_lookup=lookup,
@@ -1488,6 +1632,31 @@ def model_statistics(config):
         lookup.close()
     return write_statistics_artifact(
         output,
-        metadata={key: value for key, value in config.items() if key != "output"},
+        metadata={
+            **{key: value for key, value in config.items() if key != "output"},
+            "coverage_basis": "model_prediction_domain"
+            if selections
+            else "persisted_prediction_keys",
+            "inference_scope": "exploratory",
+            "formal_selection_qualification": "not_established",
+            "column_units": {
+                column: unit
+                for column, unit in spec.column_units.items()
+                if column == config["evaluation"]["primary_label"]
+            },
+            "selection_cutoffs": sorted(
+                {
+                    str(cutoff)
+                    for cutoff in (
+                        *(selection.get("cutoff") for selection in selections.values()),
+                        *(
+                            (entry.get("model_facts") or {}).get("selection_cutoff")
+                            for entry in entries.values()
+                        ),
+                    )
+                    if cutoff is not None
+                }
+            ),
+        },
         tables=tables,
     )

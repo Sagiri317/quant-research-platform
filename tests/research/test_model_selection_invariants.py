@@ -188,7 +188,7 @@ def test_persisted_trial_correlations_obey_exact_bounds(field, sign):
     import math
 
     from quant_research_platform.contracts.models import (
-        validate_completed_model_trial_metrics,
+        _validate_model_selection_trial_record,
     )
 
     metrics = {
@@ -210,21 +210,17 @@ def test_persisted_trial_correlations_obey_exact_bounds(field, sign):
         "validation_rankic": 1.0,
         "validation_rankic_reason": None,
         "validation_mse": 0.0,
-        "n_train": 2,
+        "model_id": "model",
     }
     metrics[field] = sign
-    validate_completed_model_trial_metrics("model", metrics)
+    _validate_model_selection_trial_record(metrics)
     metrics[field] = sign * math.nextafter(1.0, math.inf)
     with pytest.raises(ValueError, match="invalid_model_metadata"):
-        validate_completed_model_trial_metrics("model", metrics)
+        _validate_model_selection_trial_record(metrics)
 
 
 @pytest.mark.parametrize("axis", ["single_asset_time_series", "cross_sectional"])
-def test_ordered_coverage_releases_consumed_metric_frames(monkeypatch, axis):
-    from quant_research_platform.research.models.trial_selection import (
-        ModelSampleCoverage,
-    )
-
+def test_ordered_metrics_release_consumed_frames(monkeypatch, axis):
     frame = pd.DataFrame(
         {
             "timestamp": pd.date_range("2020-01-01", periods=8),
@@ -244,8 +240,6 @@ def test_ordered_coverage_releases_consumed_metric_frames(monkeypatch, axis):
         evaluate_model_trial_metrics_from_chunks(
             (frame.iloc[4:], frame.iloc[:4]), **kwargs
         )
-    coverage = ModelSampleCoverage({"asset_ids": ["a"]})
-    coverage.add(frame)
     closed = []
 
     def chunks():
@@ -269,26 +263,16 @@ def test_ordered_coverage_releases_consumed_metric_frames(monkeypatch, axis):
         return values
 
     monkeypatch.setattr(trial_selection, "_metric_chunk", observed)
-    actual = evaluate_model_trial_metrics_from_chunks(
-        chunks(), expected_coverage=coverage, **kwargs
-    )
+    actual = evaluate_model_trial_metrics_from_chunks(chunks(), **kwargs)
     assert actual == expected and closed == [True]
     assert all(ref() is None for ref in references)
     with pytest.raises(ValueError, match="non_monotonic_time_chunk_order"):
         evaluate_model_trial_metrics_from_chunks(
-            (frame.iloc[4:], frame.iloc[:4]), expected_coverage=coverage, **kwargs
-        )
-    with pytest.raises(ValueError, match="model_trial_common_coverage_mismatch"):
-        evaluate_model_trial_metrics_from_chunks(
-            (frame.iloc[:4],), expected_coverage=coverage, **kwargs
+            (frame.iloc[4:], frame.iloc[:4]), **kwargs
         )
 
 
 def test_streaming_metric_failure_closes_source():
-    from quant_research_platform.research.models.trial_selection import (
-        ModelSampleCoverage,
-    )
-
     frame = pd.DataFrame(
         {
             "timestamp": pd.date_range("2020-01-01", periods=2),
@@ -297,8 +281,6 @@ def test_streaming_metric_failure_closes_source():
             "prediction": [2.0, np.inf],
         }
     )
-    coverage = ModelSampleCoverage({"asset_ids": ["a"]})
-    coverage.add(frame)
     closed = []
 
     def chunks():
@@ -315,14 +297,13 @@ def test_streaming_metric_failure_closes_source():
             label_column="label",
             prediction_column="prediction",
             validation_axis="single_asset_time_series",
-            expected_coverage=coverage,
         )
     assert closed == [True]
 
 
 def test_completed_trial_keeps_representable_icir_with_unrepresentable_std():
     from quant_research_platform.contracts.models import (
-        validate_completed_model_trial_metrics,
+        _validate_model_selection_trial_record,
     )
 
     tiny = float(np.nextafter(0.0, 1.0))
@@ -345,9 +326,7 @@ def test_completed_trial_keeps_representable_icir_with_unrepresentable_std():
     assert metrics["validation_icir"] == 1.0
     assert metrics["validation_valid_ic_count"] == 2
     assert metrics["validation_icir_reason"] is None
-    metrics.pop("model_id")
-    metrics["n_train"] = 8
-    validate_completed_model_trial_metrics("candidate", metrics)
+    _validate_model_selection_trial_record(metrics)
     for changed in (
         {"validation_std_ic": 0.0},
         {"validation_std_ic": -1.0},
@@ -358,4 +337,4 @@ def test_completed_trial_keeps_representable_icir_with_unrepresentable_std():
         {"validation_icir_reason": "zero_variance"},
     ):
         with pytest.raises(ValueError, match="invalid_model_metadata"):
-            validate_completed_model_trial_metrics("candidate", metrics | changed)
+            _validate_model_selection_trial_record(metrics | changed)

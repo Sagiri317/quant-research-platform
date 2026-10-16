@@ -5,16 +5,14 @@ from __future__ import annotations
 import re
 import stat
 from collections.abc import Iterable, Iterator
-from itertools import groupby, islice
+from itertools import islice
 from pathlib import Path
 
 import pandas as pd
 
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
-    _file_identity_bytes,
     filesystem_stat,
     filesystem_walk,
     require_unaliased_path,
@@ -24,7 +22,6 @@ from .field_mappings import RAW_TABLE_CONTRACTS, missing_raw_column_names
 from .raw_schemas import (
     _infer_dataset_from_header,
     infer_dataset_from_native_export,
-    inspect_raw_export_file,
     iter_export_csv_records,
     parse_raw_filename,
     raw_export_file_identity,
@@ -183,11 +180,18 @@ def _iter_raw_export_paths(root: Path) -> Iterator[Path]:
 
 
 def iter_index_info_rows(
-    export_path: Path, *, expected_identity: DatasetFileIdentity | None
-) -> Iterator[tuple[list[str], list[str]]]:
+    export_path: Path,
+    *,
+    expected_identity: DatasetFileIdentity | None,
+    content_hashes: list[str] | None = None,
+) -> Iterator[tuple[list[str], list[str] | None]]:
     rows = iter(
         _iter_csv_records(
-            export_path, require_exact_width=False, expected_identity=expected_identity
+            export_path,
+            dataset="index_info",
+            require_exact_width=False,
+            expected_identity=expected_identity,
+            content_hashes=content_hashes,
         )
     )
     continuations: list[str] = []
@@ -202,6 +206,9 @@ def iter_index_info_rows(
                 header, record = next(rows)
             except StopIteration:
                 break
+            if record is None:
+                yield header, None
+                continue
             row_number += 1
             if header != [
                 "Indexcd",
@@ -396,6 +403,7 @@ def iter_private_export_chunks(
     dataset: str,
     chunksize: int,
     expected_identity: DatasetFileIdentity | None = None,
+    content_hashes: list[str] | None = None,
 ) -> Iterator[pd.DataFrame]:
     if type(dataset) is not str or dataset not in RAW_TABLE_CONTRACTS:
         raise ValueError("unknown_csmar_dataset")
@@ -403,34 +411,36 @@ def iter_private_export_chunks(
         raise ValueError("invalid_csmar_chunksize")
     export_path = Path(path)
     rows = (
-        iter_index_info_rows(export_path, expected_identity=expected_identity)
+        iter_index_info_rows(
+            export_path,
+            expected_identity=expected_identity,
+            content_hashes=content_hashes,
+        )
         if dataset == "index_info"
         else _iter_csv_records(
             export_path,
             dataset=dataset,
             require_exact_width=True,
             expected_identity=expected_identity,
+            content_hashes=content_hashes,
         )
     )
     emitted = False
     with closing_iterator(rows):
+        header = None
         while True:
             pending = []
-            header = None
             while len(pending) < chunksize:
                 try:
                     header, row = next(rows)
                 except StopIteration:
                     break
-                pending.append(row)
+                if row is not None:
+                    pending.append(row)
             if not pending:
                 if not emitted:
-                    header = read_export_header(
-                        export_path, expected_identity=expected_identity
-                    )
-                    from .field_mappings import validate_raw_column_names
-
-                    validate_raw_column_names(tuple(header), dataset)
+                    if header is None:
+                        raise ValueError("malformed_csmar_csv_row")
                     yield _raw_frame([], header)
                 return
             if dataset == "index_info":
@@ -458,8 +468,13 @@ def _iter_csv_records(
     require_exact_width: bool,
     dataset: str | None = None,
     expected_identity: DatasetFileIdentity | None = None,
-) -> Iterator[tuple[list[str], list[str]]]:
-    rows = iter(iter_export_csv_records(path, expected_identity=expected_identity))
+    content_hashes: list[str] | None = None,
+) -> Iterator[tuple[list[str], list[str] | None]]:
+    rows = iter(
+        iter_export_csv_records(
+            path, expected_identity=expected_identity, content_hashes=content_hashes
+        )
+    )
     with closing_iterator(rows):
         header = physical_header = row = record = None
         header_record = next(rows, None)
@@ -469,14 +484,22 @@ def _iter_csv_records(
         physical_width = len(physical_header)
         selected_positions: frozenset[int] | None = None
         header = physical_header
-        if require_exact_width and dataset is not None:
+        if dataset is not None:
             from quant_research_platform.sources.csmar.field_mappings import (
                 COLUMN_ALIASES,
                 COLUMN_MAPPINGS,
                 validate_raw_column_names,
             )
 
+            matches = [
+                name
+                for name in RAW_TABLE_CONTRACTS
+                if not missing_raw_column_names(tuple(physical_header), name)
+            ]
+            if matches and dataset not in matches:
+                raise ValueError("csmar_raw_export_table_identity_conflict")
             validate_raw_column_names(tuple(physical_header), dataset)
+        if require_exact_width and dataset is not None:
             selected_columns = set(COLUMN_MAPPINGS[dataset])
             selected_columns.update(
                 alias
@@ -493,6 +516,7 @@ def _iter_csv_records(
             header = [physical_header[index] for index in sorted(selected_positions)]
             del physical_header
         del header_record
+        yield header, None
         while True:
             try:
                 record = next(rows)
@@ -536,127 +560,26 @@ def _raw_frame(rows: list[list[str]], header: list[str]) -> pd.DataFrame:
 def dataset_files_with_identity_by_id(
     raw_root: Path,
     *,
-    identity_index: ExactPrimaryKeyIndex | None = None,
     requested_datasets: Iterable[str] | None = None,
 ) -> Iterator[tuple[str, Path, DatasetFileIdentity]]:
-    """Yield inspected files with the identity bound during inspection."""
+    """Select source members; validate schema during actual CSV consumption."""
     root = Path(raw_root)
     requested = _requested_raw_datasets(requested_datasets)
-
-    def iter_files() -> Iterator[tuple[str, Path, DatasetFileIdentity]]:
-        with closing_iterator(_iter_raw_export_paths(root)) as paths:
-            if identity_index is None:
-                index = ExactPrimaryKeyIndex(primary_key=("dataset_path",))
-            else:
-                index = identity_index
-            files = _iter_indexed_raw_export_files(
-                root,
-                paths=paths,
-                index=index,
-                namespace="csmar-dataset-physical-exports",
-                requested_datasets=requested,
-            )
-            for path, identity in files:
-                inspection = inspect_raw_export_file(path, expected_identity=identity)
-                if inspection.missing_required_columns:
-                    raise ValueError("csmar_raw_export_schema_invalid")
-                relative = path.relative_to(root).as_posix().encode("utf-8")
-                dataset = inspection.dataset.encode("utf-8")
-                identity_payload = b"\x00".join(
-                    str(value).encode("ascii")
-                    for value in (
-                        identity.device,
-                        identity.inode,
-                        identity.size,
-                        identity.modified_ns,
-                    )
-                )
-                payload = dataset + b"\x00" + relative + b"\x00" + identity_payload
-                index.add_identity_payloads(
-                    namespace="csmar-dataset-paths",
-                    payloads=((dataset + b"\x00" + relative, payload),),
-                )
-            with closing_iterator(
-                _iter_dataset_file_identities(root, index)
-            ) as records:
-                for _, group in groupby(records, key=lambda item: item[0]):
-                    for _yield_value in group:
-                        try:
-                            yield _yield_value
-                        except GeneratorExit:
-                            return
-
-    return iter_files()
-
-
-def _iter_dataset_file_identities(
-    root: Path, index: ExactPrimaryKeyIndex, *, data_id: str | None = None
-) -> Iterator[tuple[str, Path, DatasetFileIdentity]]:
-    """Replay the inspected inventory without retaining a second member list."""
-    with closing_iterator(
-        index.identity_payload_values(namespace="csmar-dataset-paths")
-    ) as payloads:
-        for payload in payloads:
-            dataset, relative, device, inode, size, modified_ns = payload.split(b"\x00")
-            dataset = dataset.decode("utf-8")
-            if data_id is None or dataset == data_id:
-                _yield_value = (
-                    dataset,
-                    root / relative.decode("utf-8"),
-                    DatasetFileIdentity(
-                        device=int(device),
-                        inode=int(inode),
-                        size=int(size),
-                        modified_ns=int(modified_ns),
-                    ),
-                )
-                try:
-                    yield _yield_value
-                except GeneratorExit:
-                    return
-
-
-def _iter_indexed_raw_export_files(
-    root: Path,
-    *,
-    paths: Iterator[Path],
-    index: ExactPrimaryKeyIndex,
-    namespace: str,
-    requested_datasets: frozenset[str] | None,
-) -> Iterator[tuple[Path, DatasetFileIdentity]]:
-    path_namespace = f"{namespace}-paths"
-    for path in paths:
-        identity = raw_export_file_identity(path)
-        if requested_datasets is not None:
-            candidate = _raw_dataset_candidate(path, expected_identity=identity)
-            if candidate not in requested_datasets:
+    records, physical_members = [], set()
+    with closing_iterator(_iter_raw_export_paths(root)) as paths:
+        for path in paths:
+            identity = raw_export_file_identity(path)
+            dataset = _raw_dataset_candidate(path, expected_identity=identity)
+            if dataset is None or requested is not None and dataset not in requested:
                 continue
-        relative = path.relative_to(root).as_posix().encode("utf-8")
-        payload = relative + b"\x00" + _file_identity_bytes(identity)
-        inserted = index.add_identity_payloads(
-            namespace=namespace,
-            payloads=((_raw_export_physical_key(identity), payload),),
-        )
-        if inserted != 1:
-            raise ValueError("csmar_raw_export_identity_changed")
-        index.add_identity_payloads(
-            namespace=path_namespace, payloads=((relative, payload),)
-        )
-    payloads = iter(index.identity_payload_values(namespace=path_namespace))
-    while True:
-        try:
-            payload = next(payloads)
-        except StopIteration:
-            return
-        relative, device, inode, size, modified_ns = payload.split(b"\x00")
-        path = root / relative.decode("utf-8")
-        identity = DatasetFileIdentity(
-            device=int(device),
-            inode=int(inode),
-            size=int(size),
-            modified_ns=int(modified_ns),
-        )
-        yield (path, identity)
+            physical_key = (identity.device, identity.inode)
+            if physical_key in physical_members:
+                raise ValueError("csmar_raw_export_identity_changed")
+            physical_members.add(physical_key)
+            records.append((dataset, path, identity))
+    yield from sorted(
+        records, key=lambda item: (item[0], item[1].relative_to(root).as_posix())
+    )
 
 
 def _requested_raw_datasets(
@@ -692,9 +615,3 @@ def _raw_dataset_candidate(
     ):
         return None
     return _infer_dataset_from_header(columns)
-
-
-def _raw_export_physical_key(identity: DatasetFileIdentity) -> bytes:
-    return b"\x00".join(
-        str(value).encode("ascii") for value in (identity.device, identity.inode)
-    )

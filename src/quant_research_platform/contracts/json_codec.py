@@ -364,3 +364,10 @@ def _utf8_bytes(value: str) -> bytes:
         return value.encode("utf-8", errors="strict")
     except UnicodeEncodeError as exc:
         raise ValueError("qrp_json_invalid_unicode") from exc
+
+
+def _strict_config(config, required, optional=()):
+    value = qrp_json_mapping_snapshot(config)
+    if set(value) - set(required) - set(optional) or set(required) - set(value):
+        raise ValueError("operation_config_fields_invalid")
+    return value

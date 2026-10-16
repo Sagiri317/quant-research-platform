@@ -168,11 +168,11 @@ def test_complete_time_frames_early_close_reports_cleanup_failures(
 @pytest.mark.parametrize("chunk_rows", (1, 4, 8))
 def test_model_training_concat_keeps_irregularly_selected_rows(chunk_rows):
     from quant_research_platform.contracts.models import ModelSpec
+    from quant_research_platform.research.models.estimators import (
+        build_estimator_from_model_spec,
+    )
     from quant_research_platform.research.models.fitting import (
         _fit_model_result,
-    )
-    from quant_research_platform.research.models.supervised import (
-        build_estimator_from_model_spec,
     )
 
     frame = pd.DataFrame(

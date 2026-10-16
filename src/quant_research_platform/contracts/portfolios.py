@@ -90,7 +90,6 @@ PORTFOLIO_DECISION_REASONS = frozenset(
         PORTFOLIO_DECISION_REASON_MAINTENANCE,
     }
 )
-EXECUTION_RETURN_COLUMN = "forward_return_1d"
 PORTFOLIO_LEDGER_COST_COLUMNS = (
     "commission_cost",
     "stamp_duty_cost",
@@ -835,6 +834,7 @@ class PortfolioCandidateSpec:
     top_quantile: float | None
     benchmark_id: str | None
     risk_style_columns: tuple[str, ...] = ()
+    neutrality: Literal["none", "industry", "size", "industry_size"] = "none"
 
     def __post_init__(self) -> None:
         if type(self.selection_group) is not str or self.selection_group not in {
@@ -873,7 +873,16 @@ class PortfolioCandidateSpec:
             or len(set(self.risk_style_columns)) != len(self.risk_style_columns)
         ):
             raise ValueError("portfolio_candidate_risk_styles_invalid")
+        if type(self.neutrality) is not str or self.neutrality not in {
+            "none",
+            "industry",
+            "size",
+            "industry_size",
+        }:
+            raise ValueError("portfolio_candidate_neutrality_invalid")
         if self.construction == "benchmark_enhanced":
+            if self.neutrality != "none":
+                raise ValueError("portfolio_candidate_neutrality_invalid")
             if self.top_quantile is not None or self.benchmark_id is None:
                 raise ValueError("portfolio_candidate_construction_invalid")
             if not self.risk_style_columns:

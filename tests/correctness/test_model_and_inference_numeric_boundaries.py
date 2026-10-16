@@ -364,7 +364,7 @@ def test_native_linear_fit_and_reload_preserves_finite_extrapolation(
     tmp_path, identity, scale
 ):
     from quant_research_platform.artifacts.outputs.prediction import (
-        read_prediction_output_bundle,
+        read_predictions,
     )
     from quant_research_platform.contracts.models import ModelSpec
     from quant_research_platform.research.models.fitting import prediction_callable
@@ -422,12 +422,11 @@ def test_native_linear_fit_and_reload_preserves_finite_extrapolation(
         window={"start": "2020-01-04", "end": "2020-01-04"},
     )
     np.testing.assert_array_equal(prediction.prediction_score, scores)
-    _, lookup = read_prediction_output_bundle(root)
-    values, found = lookup.values_for_frame(
-        inputs[["timestamp", "asset_id"]], mark_matched=True
+    persisted = read_predictions(root)[0]
+    actual = inputs[["timestamp", "asset_id"]].merge(
+        persisted, on=["timestamp", "asset_id"], validate="one_to_one"
     )
-    assert all(found)
-    np.testing.assert_array_equal(values, scores)
+    np.testing.assert_array_equal(actual.prediction_score, scores)
 
 
 @pytest.mark.parametrize("value", (1e-100, 1.0, 10.0, -1e-100))

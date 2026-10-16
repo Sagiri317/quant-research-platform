@@ -107,6 +107,8 @@ class DataSpec:
     column_roles: Mapping[str, ColumnRole | str]
     primary_key: tuple[str, ...]
     partition_columns: tuple[str, ...]
+    column_units: Mapping[str, str] = field(default_factory=dict)
+    label_availability_columns: Mapping[str, str] = field(default_factory=dict)
     required_columns: tuple[str, ...] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -155,10 +157,27 @@ class DataSpec:
             for column in self.primary_key
             if column_roles[column] is ColumnRole.TIMESTAMP
         ]
-        if not self.partition_columns and timestamps:
-            raise ValueError("unpartitioned_data_must_not_use_timestamp_key")
-        if self.partition_columns and len(timestamps) != 1:
+        if len(timestamps) > 1 or (self.partition_columns and len(timestamps) != 1):
             raise ValueError("invalid_timestamp_primary_key")
+        for name in ("column_units", "label_availability_columns"):
+            values = getattr(self, name)
+            if not isinstance(values, Mapping) or any(
+                type(column) is not str
+                or column not in column_roles
+                or type(value) is not str
+                or not value.strip()
+                for column, value in values.items()
+            ):
+                raise ValueError(f"invalid_{name}")
+            object.__setattr__(self, name, MappingProxyType(dict(values)))
+        for label, availability in self.label_availability_columns.items():
+            if (
+                column_roles[label] is not ColumnRole.LABEL
+                or availability not in column_roles
+                or column_roles[availability]
+                not in {ColumnRole.TIMESTAMP, ColumnRole.CONTEXT, ColumnRole.LABEL}
+            ):
+                raise ValueError("invalid_label_availability_columns")
         object.__setattr__(self, "frequency", frequency)
         object.__setattr__(self, "grain", grain)
         object.__setattr__(self, "column_roles", MappingProxyType(column_roles))

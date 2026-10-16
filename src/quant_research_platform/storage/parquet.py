@@ -6,6 +6,7 @@ import os
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,7 @@ class DatasetPartMetadata:
     row_count: int
     file_size_bytes: int
     logical_dtype_payload: bytes
+    pandas_metadata: bytes | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,10 +40,14 @@ class PreparedMembershipValues:
     values: pa.Array
 
 
-def inspect_dataset_part(path: Path) -> DatasetPartMetadata:
+def inspect_dataset_part(
+    path: Path, *, require_logical_dtypes: bool = True
+) -> DatasetPartMetadata:
     with _opened_parquet(path) as opened:
         parquet_file, handle = opened
-        return _part_metadata(parquet_file, handle=handle)
+        return _part_metadata(
+            parquet_file, handle=handle, require_logical_dtypes=require_logical_dtypes
+        )
 
 
 def iter_dataset_part_batches(
@@ -148,6 +154,7 @@ def _part_metadata(
         logical_dtype_payload=b""
         if logical_dtype_payload is None
         else bytes(logical_dtype_payload),
+        pandas_metadata=metadata.get(b"pandas"),
     )
 
 
@@ -199,11 +206,18 @@ def _top_level_parquet_leaf_positions(
 
 
 def _row_group_may_match(statistics: Any, *, operator: str, value: Any) -> bool:
+    if operator == "year_in" and not value:
+        return False
     if statistics is None or not statistics.has_min_max:
         return True
     minimum = statistics.min
     maximum = statistics.max
     try:
+        if operator == "year_in":
+            if isinstance(minimum, datetime) and minimum.tzinfo is not None:
+                minimum = minimum.astimezone(UTC)
+                maximum = maximum.astimezone(UTC)
+            return any(minimum.year <= year <= maximum.year for year in value)
         if operator == ">=":
             return maximum >= value
         if operator == ">":
@@ -247,10 +261,22 @@ def _filter_arrow_batch(
         if operator == "in":
             if not isinstance(value, PreparedMembershipValues):
                 raise ValueError("invalid_dataset_physical_filter_value")
-        elif operator not in operations:
+        elif operator not in operations and operator != "year_in":
             raise ValueError("unsupported_dataset_physical_filter")
-        if operator == "in":
-            column_values = batch.column(batch.schema.get_field_index(column))
+        column_values = batch.column(batch.schema.get_field_index(column))
+        if pa.types.is_dictionary(column_values.type):
+            column_values = pc.dictionary_decode(column_values)
+        if operator == "year_in":
+            if pa.types.is_timestamp(column_values.type) and column_values.type.tz:
+                column_values = column_values.cast(
+                    pa.timestamp(column_values.type.unit, tz="UTC")
+                )
+            condition = pc.is_in(
+                pc.year(column_values),
+                value_set=pa.array(value, type=pa.int64()),
+                skip_nulls=True,
+            )
+        elif operator == "in":
             condition = pc.is_in(column_values, value_set=value.values, skip_nulls=True)
             if (
                 pa.types.is_floating(column_values.type)
@@ -258,16 +284,17 @@ def _filter_arrow_batch(
             ):
                 condition = pc.or_(condition, pc.equal(column_values, 0.0))
         else:
-            column_values = batch.column(batch.schema.get_field_index(column))
             scalar = (
-                _physical_filter_scalar(batch.schema.field(column), value)
+                _physical_filter_scalar(pa.field(column, column_values.type), value)
                 if pa.types.is_integer(column_values.type)
                 else value
             )
             if pa.types.is_timestamp(column_values.type) or pa.types.is_duration(
                 column_values.type
             ):
-                scalar = _physical_filter_scalar(batch.schema.field(column), value)
+                scalar = _physical_filter_scalar(
+                    pa.field(column, column_values.type), value
+                )
                 if operator == "==":
                     try:
                         scalar = scalar.cast(column_values.type, safe=True)

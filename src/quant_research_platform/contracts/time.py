@@ -110,13 +110,40 @@ def _normalize_datetime(value: datetime) -> datetime:
     return value.astimezone(UTC).replace(tzinfo=None)
 
 
-def crypto_execution_windows(plan, output_window, *, sample_role):
-    """Execution consumes the frozen final test and never validation."""
-    if sample_role != "test":
-        raise PermissionError("crypto_execution_requires_frozen_test")
-    boundary = TimeWindow(**plan["test"])
-    if pd.Timestamp(output_window.start) < pd.Timestamp(boundary.start) or pd.Timestamp(
-        output_window.end
-    ) > pd.Timestamp(boundary.end):
-        raise PermissionError("crypto_execution_test_window_invalid")
-    return ((plan["folds"][-1]["fold_id"], output_window),)
+def _window_payload(window):
+    return {
+        "start": time_value_isoformat(
+            window.start, preserve_datetime=is_datetime_value(window.start)
+        ),
+        "end": None
+        if window.end is None
+        else time_value_isoformat(
+            window.end, preserve_datetime=is_datetime_value(window.start)
+        ),
+    }
+
+
+@dataclass(frozen=True)
+class PredictionWindow:
+    """Prediction extent, optionally through the end of the supplied input."""
+
+    start: date | datetime
+    end: date | datetime | None
+
+    def __post_init__(self) -> None:
+        finite = TimeWindow(self.start, self.start if self.end is None else self.end)
+        object.__setattr__(self, "start", finite.start)
+        if self.end is not None:
+            object.__setattr__(self, "end", finite.end)
+
+
+def prediction_window_mask(timestamps: pd.Series, window) -> pd.Series:
+    """Select actual timestamps without inventing an endpoint for open prediction."""
+    if window.end is None:
+        return timestamps.ge(pd.Timestamp(window.start))
+    lower, upper, closed = time_window_timestamp_interval(window)
+    return timestamps.ge(pd.Timestamp(lower)) & (
+        timestamps.le(pd.Timestamp(upper))
+        if closed
+        else timestamps.lt(pd.Timestamp(upper))
+    )

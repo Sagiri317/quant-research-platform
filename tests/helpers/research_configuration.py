@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from quant_research_platform.catalog.models import ModelCatalog
+from quant_research_platform.contracts.models import _model_spec
 
 CONFIG_ROOT = Path(__file__).resolve().parents[2] / "docs" / "research-rosters"
 
@@ -38,15 +38,36 @@ def research_configuration(
     return config
 
 
+def model_specs(items):
+    """Unpack research-design examples into actual model contract objects."""
+    from dataclasses import replace
+
+    result = []
+    for item in items:
+        fields = {
+            key: value
+            for key, value in item.items()
+            if key
+            not in {
+                "parameter_candidates",
+                "training_asset_ids",
+                "evaluation_asset_ids",
+            }
+        }
+        model = _model_spec(fields)
+        for parameters in item.get("parameter_candidates", ()):
+            replace(model, hyperparameters=parameters)
+        result.append(model)
+    return tuple(result)
+
+
 def configured_models(scenario="pv_all", *, factor_scope="core"):
     name = (
         ("core6" if factor_scope == "core" else "pv25")
         if scenario == "pv_all"
         else scenario
     )
-    return ModelCatalog.from_configuration(
-        research_configuration(name=name)["models"]
-    ).list()
+    return model_specs(research_configuration(name=name)["models"])
 
 
 A_SHARE_MODEL_ALGORITHMS = tuple(
