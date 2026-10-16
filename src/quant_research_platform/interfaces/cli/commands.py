@@ -235,10 +235,13 @@ def _echo_result(result) -> None:
 def main() -> None:
     try:
         app()
-    except FileNotFoundError:
+    except (FileNotFoundError, NotADirectoryError):
         typer.echo("required_input_missing", err=True)
         raise SystemExit(3) from None
     except (ValueError, TypeError, KeyError) as exc:
+        if isinstance(exc.__cause__, (FileNotFoundError, NotADirectoryError)):
+            typer.echo("required_input_missing", err=True)
+            raise SystemExit(3) from None
         typer.echo(sanitize_shared_text(str(exc)), err=True)
         raise SystemExit(2) from None
     except Exception as exc:

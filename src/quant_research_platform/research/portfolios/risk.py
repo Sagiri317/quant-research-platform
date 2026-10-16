@@ -108,10 +108,12 @@ def preprocess_risk_styles(
         for positions in timestamps.groupby(timestamps, sort=False).indices.values():
             current = clipped.iloc[positions]
             fitting = current.loc[eligible.iloc[positions]].dropna()
-            if fitting.empty:
+            if len(fitting) < 2:
                 continue
             if fitting.nunique() == 1:
-                result.iloc[positions, result.columns.get_loc(column)] = 0.0
+                result.iloc[positions, result.columns.get_loc(column)] = np.where(
+                    current.notna(), 0.0, np.nan
+                )
                 continue
             scaler = ModelMatrixScaler.fit(fitting.to_frame(name=column))
             scaled = pd.Series(np.nan, index=current.index, dtype="float64")
@@ -308,6 +310,7 @@ class FactorRiskState:
     def prepare_exposures(
         self, cross: pd.DataFrame, *, include_ineligible: bool = False
     ) -> pd.DataFrame:
+        """Select the risk domain without discarding per-style observations."""
         required = {
             "timestamp",
             "asset_id",
@@ -338,7 +341,7 @@ class FactorRiskState:
                 frame[column], error="factor_risk_numeric_invalid"
             )
         return (
-            frame.dropna(subset=list(required))
+            frame.dropna(subset=list(required.difference(self.style_columns)))
             .loc[
                 lambda item: (
                     item[self.config.weight_column].gt(0)
@@ -376,18 +379,18 @@ class FactorRiskState:
         frame["asset_return"] = strict_real_numeric_series(
             frame.asset_return, error="factor_risk_numeric_invalid"
         )
-        if require_complete and (
-            frame.asset_return.isna().any() or not np.isfinite(frame.asset_return).all()
-        ):
-            raise ValueError("holding_returns_incomplete")
         if frame.empty:
             return None, ()
         if frame.asset_id.duplicated().any() or frame.timestamp.nunique() != 1:
             raise ValueError("factor_return_cross_section_keys_invalid")
-        frame = frame.dropna().loc[lambda item: item[self.config.weight_column].gt(0.0)]
-        if frame.empty:
-            return None, ()
+        # Joint regression availability must not define each style's fit domain.
         frame = preprocess_risk_styles(frame, style_columns=self.style_columns)
+        frame = frame.dropna(subset=list(self.style_columns))
+        if require_complete and (
+            frame.asset_return.isna().any() or not np.isfinite(frame.asset_return).all()
+        ):
+            raise ValueError("holding_returns_incomplete")
+        frame = frame.dropna(subset=["asset_return"])
         projection = frame.iloc[:0]
         if project_ineligible and "eligible" in frame:
             projection = frame.loc[~frame.eligible]

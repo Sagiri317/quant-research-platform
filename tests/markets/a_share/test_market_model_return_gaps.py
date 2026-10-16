@@ -5,7 +5,10 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.compute.market_model import MarketModelRiskState
-from quant_research_platform.research.portfolios.risk import FactorRiskState
+from quant_research_platform.research.portfolios.risk import (
+    FactorRiskState,
+    preprocess_risk_styles,
+)
 from quant_research_platform.storage.datasets import read_dataset
 from tests.helpers.a_share_sources import (
     _prepare,
@@ -72,7 +75,14 @@ def test_native_market_model_return_gap_persists_and_recovers_complete_windows(
             total_market_cap=1000000.0,
             eligible=True,
         )
-        assert len(risk.prepare_exposures(cross)) == count
+        prepared = risk.prepare_exposures(cross)
+        pd.testing.assert_frame_equal(prepared[styles], cross[styles])
+        processed = preprocess_risk_styles(prepared, style_columns=tuple(styles))
+        if day == gap + 310:
+            assert processed.beta_252d.notna().all()
+            assert processed.residual_volatility_60d.isna().all()
+        exposures = risk.current_exposures(processed.dropna(subset=styles))
+        assert len(exposures) == count
     # Exact independent equal-cap regression oracle before and after the barrier.
     returns = bars.pivot(
         index="timestamp", columns="source_asset_id", values="period_return"

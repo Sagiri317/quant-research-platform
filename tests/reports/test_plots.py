@@ -658,3 +658,106 @@ def test_native_metric_plot_preserves_each_comparison_identity(
     assert output.is_file()
     assert len(set(labels)) == 2
     assert row[identity] in labels[0] and other in labels[1]
+
+
+def test_factor_ic_consumes_native_daily_strata_and_filters(tmp_path, monkeypatch):
+    from quant_research_platform.artifacts.outputs.evaluation import (
+        read_evaluation_outputs,
+    )
+    from quant_research_platform.research.evaluations.runner import evaluate
+    from tests.research.crypto_evaluation_test_support import write_evaluation_input
+    from tests.research.test_stratified_evaluation_reuse import _fixture
+
+    frame, config = _fixture(tmp_path, days=3)
+    frame["x"] = [1.0, 2.0, 1.0, 2.0] * 3
+    frame["label"] = [1.0, 2.0, 2.0, 1.0] * 3
+    frame["industry_level1_code"] = ["行业甲", "行业甲", "行业乙", "行业乙"] * 3
+    frame.loc[frame.timestamp.eq("2023-01-03"), "x"] = np.nan
+    config["inputs"] = str(
+        write_evaluation_input(
+            tmp_path / "opposite-input", frame, factors=("x", "z"), labels=("label",)
+        )
+    )
+    config["strata"]["kinds"] = ["industry"]
+    source = evaluate(config)
+    _, tables = read_evaluation_outputs(source, tables=("daily_strata",))
+    assert len(tables["daily_strata"]) == 6
+    captured = []
+    original = plots.plot_factor_ic
+
+    def observed(*args, **kwargs):
+        figure, axes = original(*args, **kwargs)
+        captured.append(axes)
+        return figure, axes
+
+    monkeypatch.setattr(plots, "plot_factor_ic", observed)
+    plot_config = {
+        "kind": "factor_ic",
+        "inputs": str(source / "daily_strata.parquet"),
+        "output": str(tmp_path / "strata.png"),
+        "timezone": "UTC",
+        "sample_role": "validation",
+    }
+    assert plots.plot(plot_config).stat().st_size > 1000
+    assert len(captured[0]) == 4
+    for offset, stratum, value in ((0, "行业乙", -1.0), (2, "行业甲", 1.0)):
+        for axis in captured[0][offset : offset + 2]:
+            assert "stratification='industry'" in axis.get_title()
+            assert f"stratum='{stratum}'" in axis.get_title()
+            np.testing.assert_allclose(
+                axis.lines[0].get_ydata(), [value, np.nan, value]
+            )
+            assert len(axis.lines[0].get_xdata()) == 3
+    filtered = plots.plot(
+        {
+            **plot_config,
+            "output": str(tmp_path / "industry-a.svg"),
+            "row_filters": [["stratum", "==", "行业甲"]],
+        }
+    )
+    assert filtered.stat().st_size > 1000
+    assert len(captured[1]) == 2
+    for axis in captured[1]:
+        assert "行业甲" in axis.get_title()
+        np.testing.assert_allclose(axis.lines[0].get_ydata(), [1, np.nan, 1])
+
+
+@pytest.mark.parametrize("stratified", [False, True])
+def test_factor_ic_rejects_duplicate_dates_in_actual_identity(stratified):
+    row = dict(signal="factor", label="return", timestamp="2026-01-01", ic=1, rankic=1)
+    if stratified:
+        row.update(stratification="size", stratum="1")
+    with pytest.raises(ValueError, match="plot_duplicate_factor_identity"):
+        plots.plot_factor_ic([row, {**row, "ic": -1}], **TIMED)
+
+
+@pytest.mark.parametrize("identity", [{"stratum": "1"}, {"stratification": "size"}])
+def test_factor_ic_rejects_incomplete_stratum_identity(identity):
+    row = dict(signal="factor", label="return", timestamp="2026-01-01", ic=1, rankic=1)
+    with pytest.raises(ValueError, match="plot_factor_stratum_identity_invalid"):
+        plots.plot_factor_ic([{**row, **identity}], **TIMED)
+
+
+def test_factor_ic_distinguishes_missing_and_literal_stratum_labels():
+    rows = [
+        dict(
+            signal="factor",
+            label="return",
+            timestamp="2026-01-01",
+            stratification="industry",
+            stratum=stratum,
+            ic=value,
+            rankic=value,
+        )
+        for stratum, value in ((pd.NA, -1), ("None", 0), ("<NA>", 1))
+    ]
+    _, axes = plots.plot_factor_ic(rows, **TIMED)
+    assert len(axes) == 6
+    actual = {
+        axis.get_title(): axis.lines[0].get_ydata().tolist() for axis in axes[::2]
+    }
+    assert actual == {
+        "factor | return | stratification='industry' | stratum=None": [-1],
+        "factor | return | stratification='industry' | stratum='None'": [0],
+        "factor | return | stratification='industry' | stratum='<NA>'": [1],
+    }

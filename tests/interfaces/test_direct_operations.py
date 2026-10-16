@@ -1,6 +1,7 @@
 """CLI configuration is passed unchanged to the same explicit Python operation."""
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -219,3 +220,64 @@ def test_cli_help_describes_each_registered_operation():
     result = CliRunner().invoke(commands.app, ["explain", "--help"])
     assert result.exit_code == 0
     assert "frozen model" in result.output
+
+
+@pytest.mark.parametrize(
+    "command",
+    [item.name for item in commands.app.registered_commands if item.name != "inspect"],
+)
+@pytest.mark.parametrize("kind", ["missing", "not_a_directory", "malformed"])
+def test_cli_main_classifies_config_errors(
+    tmp_path, monkeypatch, capsys, command, kind
+):
+    path = tmp_path / "config.json"
+    if kind == "malformed":
+        path.write_text("not JSON")
+    elif kind == "not_a_directory":
+        path.write_text("{}")
+        path = path / "config.json"
+    monkeypatch.setattr(sys, "argv", ["qrp", command, "--config", str(path)])
+
+    with pytest.raises(SystemExit) as caught:
+        commands.main()
+
+    assert caught.value.code == (2 if kind == "malformed" else 3)
+    output = capsys.readouterr().err
+    if kind != "malformed":
+        assert output == "required_input_missing\n"
+    assert str(tmp_path) not in output
+
+
+@pytest.mark.parametrize(
+    "error,cause,expected",
+    [
+        (ValueError("dataset_metadata_file_invalid"), None, 2),
+        (ValueError("invalid_source"), FileNotFoundError("private_source"), 3),
+        (ValueError("invalid_source"), NotADirectoryError("private_source"), 3),
+        (ValueError("invalid_source"), PermissionError("private_source"), 2),
+        (FileNotFoundError("private_source"), None, 3),
+        (NotADirectoryError("private_source"), None, 3),
+        (RuntimeError("execution_failed"), None, 1),
+    ],
+)
+def test_cli_main_classifies_operation_errors(
+    tmp_path, monkeypatch, capsys, error, cause, expected
+):
+    from quant_research_platform.research.models import production
+
+    path = tmp_path / "config.json"
+    path.write_text("{}")
+
+    def fail(config):
+        assert config == {}
+        raise error from cause
+
+    monkeypatch.setattr(production, "fit", fail)
+    monkeypatch.setattr(sys, "argv", ["qrp", "fit", "--config", str(path)])
+    with pytest.raises(SystemExit) as caught:
+        commands.main()
+
+    assert caught.value.code == expected
+    output = capsys.readouterr().err
+    assert output == ("required_input_missing\n" if expected == 3 else f"{error}\n")
+    assert "private_source" not in output

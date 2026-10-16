@@ -506,7 +506,7 @@ def plot_returns(rows, *, source_reference, sample_role, timezone):
 
 @_styled
 def plot_factor_ic(rows, *, source_reference, sample_role, timezone, summary=False):
-    """Plot validated metrics or ic_summary rows without recomputing IC/RankIC.
+    """Plot persisted IC metrics, daily strata, or descriptive IC summaries.
 
     IC summaries are descriptive means, not inferential diagnostics. The source
     reason (including not_applicable) controls availability for each metric.
@@ -519,7 +519,30 @@ def plot_factor_ic(rows, *, source_reference, sample_role, timezone, summary=Fal
             and row["sample_role"] != sample_role
         ):
             raise ValueError("plot_sample_role_mismatch")
-        groups[(row["signal"], row["label"])].append(row)
+        key = (row["signal"], row["label"])
+        if "stratification" in row or "stratum" in row:
+            if (
+                "stratification" not in row
+                or "stratum" not in row
+                or not isinstance(row["stratification"], str)
+            ):
+                raise ValueError("plot_factor_stratum_identity_invalid")
+            stratum = None if pd.isna(row["stratum"]) else row["stratum"]
+            if stratum is not None and not isinstance(stratum, str):
+                raise ValueError("plot_factor_stratum_identity_invalid")
+            key += (
+                f"stratification={row['stratification']!r}",
+                f"stratum={stratum!r}",
+            )
+        groups[key].append(row)
+    for items in groups.values():
+        if (summary and len(items) != 1) or (
+            not summary
+            and pd.Index([pd.Timestamp(row["timestamp"]) for row in items])
+            .duplicated()
+            .any()
+        ):
+            raise ValueError("plot_duplicate_factor_identity")
     figure, axes = _figure(
         2 if summary else 2 * len(groups),
         title="IC / Rank IC（描述性统计）",
@@ -559,8 +582,6 @@ def plot_factor_ic(rows, *, source_reference, sample_role, timezone, summary=Fal
                 for row in items
             ]
             if summary:
-                if len(items) != 1:
-                    raise ValueError("plot_duplicate_factor_identity")
                 axis.barh(group_index, values[0], color="#2F6690")
                 if math.isfinite(values[0]):
                     axis.annotate(
@@ -1167,6 +1188,8 @@ def plot(config):
                     "factor_ic": (
                         "signal",
                         "label",
+                        "stratification",
+                        "stratum",
                         "timestamp",
                         "ic",
                         "rankic",

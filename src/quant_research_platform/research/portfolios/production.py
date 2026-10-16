@@ -1406,20 +1406,19 @@ def _enhanced_decision(
         expected.loc[alpha.notna()] = calibration.slope * alpha.loc[alpha.notna()]
     else:
         expected.loc[alpha.notna()] = 0.0
-    complete = current_cross.loc[
-        current_cross.loc[:, risk_style_columns].notna().all(axis=1)
-    ]
-    complete = complete.assign(
-        eligible=complete.asset_id.isin(
+    style_cross = current_cross.assign(
+        eligible=current_cross.asset_id.isin(
             factor_risk.prepare_exposures(current_cross).asset_id
         )
     )
     processed = (
-        preprocess_risk_styles(complete, style_columns=risk_style_columns)
-        if not complete.empty
-        else complete
+        preprocess_risk_styles(style_cross, style_columns=risk_style_columns)
+        if not style_cross.empty
+        else style_cross
     )
-    exposures = factor_risk.current_exposures(processed)
+    exposures = factor_risk.current_exposures(
+        processed.dropna(subset=list(risk_style_columns))
+    )
     try:
         risk = factor_risk.estimate()
     except ValueError as exc:
