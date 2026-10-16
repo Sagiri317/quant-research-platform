@@ -1113,8 +1113,11 @@ signal time 为 t 收盘；entry/exit event time 分别为 t+1/t+1+h 开盘。
 标签 maturity 为所需执行事实与两端价格均已可得的离场交易日开盘。
 行的日频日期使用 session 标签；`available_at` 则持久化离场日真实开盘时刻：
 Asia/Shanghai 09:30 规范到 UTC（现代 A 股为 01:30），不使用该日零点。
-普通 forward-return 与 ON/ID 共用一个交易事件时钟。日期形式的 cutoff 仍严格表示 UTC 零点，
-不会自动扩到日末；离场日 00:30 的拟合和评价不能使用该标签，01:30 才成熟。
+普通 forward-return 与 ON/ID 共用一个交易事件时钟。拟合的 `fit_cutoff` 及
+`evaluate`/`score` 的 `cutoff` 按精确时点解释，日期值表示 UTC 零点，不自动扩到日末；
+离场日 00:30 的拟合和评价不能使用该标签，01:30 才成熟。
+`statistics-factors` 数据路径和 `statistics-model` 的 `label_cutoff` 沿用窗口终点规则：
+日期值包含当日全天，精确时间戳按给定时点；省略时使用所选窗口终点。不能混用两类截止字段。
 不把执行事实的发生时间当成信号日已知信息。
 
 #### 模型目标
