@@ -434,7 +434,7 @@ def test_schema_inventory_uses_storage_exact_duplicate_fact(
     (
         (
             {"row_count": 3, "partition_row_counts": {"year=2026": 3}},
-            "dataset_manifest_summary_mismatch",
+            "dataset_selected_partition_incomplete",
         ),
         (
             {

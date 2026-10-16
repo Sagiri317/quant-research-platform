@@ -324,13 +324,9 @@ def test_native_schema_full_import_and_shared_trade_replay(
 @pytest.mark.parametrize(
     "date,changes",
     [
-        ("2025-12-31", {}),
         ("2026-06-30", {"nq": "1"}),
-        ("2025-01-01", {"nq": None}),
-        ("2025-01-01", {"nq": "3"}),
         ("2025-01-01", {"st": 2}),
         ("2025-01-01", {"st": True}),
-        ("2025-01-01", {"q": "0"}),
     ],
 )
 def test_native_schema_invalid_fields_fail_atomic_full_import(tmp_path, date, changes):
@@ -910,7 +906,12 @@ def test_disjoint_archives_preserve_reset_ids_through_processed_publication(
     window = TimeWindow("2026-07-01T00:00:00", "2026-08-01T00:00:04")
     paths = ("july", "august")
     catalog = processed_catalog.hft_processed_catalog()
-    spec = catalog.get("binance_futures_l2_panel_100ms")
+    from dataclasses import replace
+
+    spec = replace(
+        catalog.get("binance_futures_l2_panel_100ms"),
+        parameters_json=json.dumps({"asset_ids": ["btc_usdt"]}),
+    )
     layout = StorageLayout(project_root=tmp_path / "processed")
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
     opener = partial(open_market_source, archive_paths=paths, time_window=window)
@@ -1031,11 +1032,11 @@ def test_disjoint_archives_preserve_reset_ids_through_processed_publication(
         ]
         assert books == expected_books
         if snapshot_depths[1] < 10:
-            assert boundaries == ["reconnect_boundary", "unsupported_coverage"]
+            assert boundaries == ["connection_closed", "unsupported_coverage"]
             assert stats.invalid_segments == stats.unsupported_coverage == 1
             assert len(stats.coverage_segments) == 1
         else:
-            assert boundaries == ["reconnect_boundary"]
+            assert boundaries == ["connection_closed", "connection_closed"]
             assert stats.invalid_segments == stats.unsupported_coverage == 0
             assert len(stats.coverage_segments) == 2
     if snapshot_depths[1] < 10:
@@ -1278,7 +1279,8 @@ def test_archive_actual_spans_sort_equivalent_cross_midnight_slices(tmp_path):
                 for anchor in anchors.values()
             ]
             assert boundaries == [
-                (anchors["after"].value + 3000000000, "reconnect_boundary")
+                (anchor.value + 4000000001, "connection_closed")
+                for anchor in anchors.values()
             ]
             assert stats.gaps == 0
             summaries.append((books, coverage, boundaries))
@@ -1611,15 +1613,15 @@ def test_native_panel_exact_ofi_publication(tmp_path, case, batch_rows):
         spec = catalog.hft_processed_catalog().get("binance_futures_l2_panel_100ms")
         layout = StorageLayout(tmp_path)
         output = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+        write_dataset(output, frames, spec=spec)
+        panel = read_dataset(output)
+        factor = pd.concat(iter_factor_frames([panel], columns=("ofi_100ms", "spread")))
+        assert factor.spread.notna().all()
         if case == "true_overflow":
-            with pytest.raises(OverflowError):
-                write_dataset(output, frames, spec=spec)
-            assert not output.exists()
+            assert pd.isna(panel.book_ofi_100ms.iloc[-1])
+            assert pd.isna(factor.ofi_100ms.iloc[-1])
         else:
-            write_dataset(output, frames, spec=spec)
-            panel = read_dataset(output)
             assert panel.book_ofi_100ms.iloc[-1] == float(quantity)
-            factor = pd.concat(iter_factor_frames([panel], columns=("ofi_100ms",)))
             assert factor.ofi_100ms.iloc[-1] == float(quantity)
         assert stats.invalid_segments == 0
 
@@ -1664,8 +1666,155 @@ def test_late_snapshot_prefix_excludes_previous_observation(tmp_path):
                 source, FUTURES_MARKET_TYPE, symbol="BTCUSDT", stats=stats
             )
         )
-        assert len(books) == 1 and books[0].source_sequence == 5
+        assert len(books) == 2 and books[0].source_sequence == 5
+        assert books[1].reason == "connection_closed"
+        assert books[1].observed_time_ns == list(stats.coverage_segments.values())[0][1]
         assert (
             list(stats.coverage_segments.values())[0][0]
             == pd.Timestamp("2026-09-01T00:00:04Z").value
         )
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"q": "0"},
+        {"p": "NaN"},
+        {"nq": None},
+        {"nq": "3"},
+        {"nq": "missing"},
+        {"m": None},
+        {"m": "missing"},
+    ],
+)
+def test_identifiable_native_bad_trade_retains_raw_and_splits_only_trade_coverage(
+    tmp_path, bad
+):
+    import gzip
+
+    from quant_research_platform.contracts.order_book import TradeBoundary, TradeEvent
+    from quant_research_platform.sources.binance.replay import iter_agg_trades
+
+    origin = pd.Timestamp("2026-09-01T00:00:00Z").value
+
+    def trade(second, changes=None):
+        payload = {
+            "e": "aggTrade",
+            "E": origin // 1000000 + second * 1000,
+            "T": origin // 1000000 + second * 1000,
+            "s": "BTCUSDT",
+            "st": 1,
+            "a": second,
+            "f": second,
+            "l": second,
+            "p": "100",
+            "q": "2",
+            "nq": "2",
+            "m": False,
+            **(changes or {}),
+        }
+        for field in [
+            name for name, value in (changes or {}).items() if value == "missing"
+        ]:
+            del payload[field]
+        return _line(second, "aggTrade", payload)
+
+    native = (
+        _line(
+            0,
+            "depthSnapshot",
+            {
+                "lastUpdateId": 100,
+                "bids": [[str(100 - i), "2"] for i in range(12)],
+                "asks": [[str(101 + i), "2"] for i in range(12)],
+            },
+        )
+        + _delta(1, 100, 101, 99)
+        + trade(1)
+        + trade(2, bad)
+        + _delta(2, 102, 102, 101)
+        + trade(3)
+        + _delta(3, 103, 103, 102)
+    )
+    slices = _slices(tmp_path / "native", native)
+    published = tmp_path / "published"
+    manifest = import_slices(published, date="2026-09-01", slices=slices)
+    assert (published / manifest["files"][0]["path"]).read_bytes() == slices[
+        0
+    ].read_bytes()
+    with gzip.open(published / manifest["gaps"]["path"], "rt") as stream:
+        gaps = [json.loads(line) for line in stream]
+    assert [gap["reason"] for gap in gaps] == ["invalid_trade_values"]
+    with open_market_source(published) as source:
+        events = list(iter_agg_trades(source, FUTURES_MARKET_TYPE, symbol="BTCUSDT"))
+        trades = [event for event in events if isinstance(event, TradeEvent)]
+        assert len([event for event in events if isinstance(event, TradeBoundary)]) == 1
+        assert [event.transaction_time_ms for event in trades] == [
+            origin // 1000000 + 1000,
+            origin // 1000000 + 3000,
+        ]
+        assert trades[0].observation_id != trades[1].observation_id
+        coverage = source.observation_coverage(
+            market_type=FUTURES_MARKET_TYPE, data_kind="agg_trades", symbol="BTCUSDT"
+        )
+        assert coverage.covering(origin + 1_500_000_000, origin + 2_500_000_000) == ()
+        assert (
+            len(coverage.covering(origin + 3_000_000_000, origin + 3_000_000_000)) == 1
+        )
+        stats = ReconstructionStats()
+        books = list(
+            iter_reconstructed_depth(
+                source, FUTURES_MARKET_TYPE, symbol="BTCUSDT", stats=stats
+            )
+        )
+        assert len([book for book in books if isinstance(book, BookState)]) == 3
+        assert stats.invalid_segments == 0
+
+
+@pytest.mark.parametrize("bad", ["NaN", "-1", "bad"])
+def test_native_bad_depth_waits_for_real_snapshot_and_preserves_original_bytes(
+    tmp_path, bad
+):
+    from quant_research_platform.contracts.order_book import BookBoundary
+
+    snapshot = {
+        "lastUpdateId": 100,
+        "bids": [[str(100 - i), "2"] for i in range(12)],
+        "asks": [[str(101 + i), "2"] for i in range(12)],
+    }
+    native = (
+        _line(0, "depthSnapshot", snapshot)
+        + _delta(1, 100, 101, 99)
+        + _delta(2, 102, 102, 101, bad)
+        + _delta(3, 103, 103, 102)
+        + _line(4, "depthSnapshot", {**snapshot, "lastUpdateId": 104})
+        + _delta(4, 104, 104, 103)
+        + _delta(5, 105, 105, 104)
+    )
+    slices = _slices(tmp_path / "native", native)
+    root = tmp_path / "archive"
+    manifest = import_slices(root, date="2026-09-01", slices=slices)
+    assert (root / manifest["files"][0]["path"]).read_bytes() == slices[0].read_bytes()
+    with open_market_source(root) as source:
+        stats = ReconstructionStats()
+        events = list(
+            iter_reconstructed_depth(
+                source, FUTURES_MARKET_TYPE, symbol="BTCUSDT", stats=stats
+            )
+        )
+    origin = pd.Timestamp("2026-09-01T00:00:00Z").value
+    assert [
+        event.observed_time_ns - origin
+        for event in events
+        if isinstance(event, BookState)
+    ] == [1_000_000_000, 4_000_000_000, 5_000_000_000]
+    assert [
+        event.reason
+        for event in events
+        if isinstance(event, BookBoundary) and event.reason != "connection_closed"
+    ] == ["invalid_numeric"]
+    assert stats.invalid_segments == 1
+    assert all(
+        not (start <= origin + 3_000_000_000 < stop)
+        for start, stop in stats.coverage_segments.values()
+    )

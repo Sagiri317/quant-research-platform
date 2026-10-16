@@ -483,7 +483,7 @@ def test_research_valuation_retains_unquoted_rights_without_claiming_execution(
     batches = list(_ledger(layout, roots))
     assert batches
     facts = [item for batch in batches for item in batch.diagnostics]
-    assert any(item.name == "research_valuation_version" for item in facts)
+    assert any(item.name == "research_valuation_policy" for item in facts)
     if fault == "unknown_reopen_mask":
         assert any(
             item.name == "block_reason" and item.text == "execution_fact_unknown"

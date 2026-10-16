@@ -9,16 +9,23 @@ from typer.testing import CliRunner
 from quant_research_platform.interfaces.cli import commands
 
 
-@pytest.mark.parametrize(
-    "text",
-    ['{"inputs":"first","inputs":"second"}', '{"seed":NaN}', '{"seed":Infinity}', "[]"],
-)
-def test_cli_rejects_non_strict_json_before_computation(tmp_path, monkeypatch, text):
+def test_cli_rejects_non_strict_json_before_computation(tmp_path, monkeypatch):
+    from quant_research_platform.research.models import production
+
     path = tmp_path / "config.json"
-    path.write_text(text)
-    # Parsing is the production JSON boundary, also used by every CLI command.
-    with pytest.raises((ValueError, TypeError)):
-        commands.read_qrp_json_file(path)
+    path.write_text('{"inputs":"first","inputs":"second"}')
+    received = []
+
+    def fit(config):
+        received.append(config)
+
+    monkeypatch.setattr(production, "fit", fit)
+    result = CliRunner().invoke(commands.app, ["fit", "--config", str(path)])
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, ValueError)
+    assert "qrp_json_duplicate_key" in str(result.exception)
+    assert received == []
 
 
 def test_cli_has_independent_operations_without_orchestration_options():
@@ -62,31 +69,13 @@ def test_catalog_cli_is_read_only_and_outputs_native_catalog():
     assert json.loads(result.output)["dataset_id"] == "pv_all"
 
 
-def test_python_and_cli_fit_use_exact_same_configuration(tmp_path, monkeypatch):
-    from quant_research_platform.research.models import production
-
-    configuration = {"inputs": "selected.parquet", "output": "new-model", "seed": 17}
-    path = tmp_path / "fit.json"
-    path.write_text(json.dumps(configuration))
-    received = []
-
-    def fit(value):
-        received.append(value)
-        return Path(value["output"])
-
-    monkeypatch.setattr(production, "fit", fit)
-    result = CliRunner().invoke(commands.app, ["fit", "--config", str(path)])
-    assert result.exit_code == 0, result.exception
-    assert received == [configuration]
-    assert json.loads(result.output) == {"output": "new-model"}
-
-
 @pytest.mark.parametrize(
     "command,module,function",
     (
         ("prepare-source", "sources.prepare", "prepare_source"),
         ("prepare", "markets.prepare", "prepare"),
         ("assemble", "research.datasets.assembler", "assemble"),
+        ("fit", "research.models.production", "fit"),
         ("predict", "research.predictions.runner", "predict"),
         ("score", "research.models.trial_selection", "score"),
         ("select", "research.models.trial_selection", "select"),

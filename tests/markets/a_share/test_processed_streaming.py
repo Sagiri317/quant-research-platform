@@ -1857,3 +1857,70 @@ def test_bound_optional_source_cannot_disappear_into_absence(tmp_path):
             source_catalog=_source_catalog(),
         ) as (frames, _metadata):
             list(frames)
+
+
+def test_price_only_panel_and_factors_do_not_require_industry_evidence(tmp_path):
+    from quant_research_platform.markets.prepare import prepare
+    from tests.helpers.a_share_sources import _prepare, _write_inputs
+
+    dates = pd.bdate_range("2020-01-06", periods=30)
+    source = _synthetic_interim_frames(dates)
+    inputs = _write_inputs(tmp_path / "source", source)
+    full = _prepare(tmp_path / "full", "market_panel_1d", inputs, dates[0], dates[-1])
+    price_only = {
+        key: value
+        for key, value in inputs.items()
+        if key
+        not in {
+            "a_share_industry_snapshots",
+            "industry_classification",
+            "industry_classification_sets",
+            "industry_classification_versions",
+            "stock_info_changes",
+        }
+    }
+    missing = _prepare(
+        tmp_path / "price-only", "market_panel_1d", price_only, dates[0], dates[-1]
+    )
+    left, right = read_dataset(full), read_dataset(missing)
+    for column in (
+        "industry_standard_id",
+        "industry_level1_code",
+        "is_nonfinancial_industry",
+    ):
+        assert right[column].isna().all()
+    pd.testing.assert_frame_equal(
+        left[["asset_id", "timestamp", "adj_open", "adj_close", "amount"]],
+        right[["asset_id", "timestamp", "adj_open", "adj_close", "amount"]],
+    )
+    factors = []
+    for name, panel in (("full", full), ("price-only", missing)):
+        factors.append(
+            read_dataset(
+                prepare(
+                    {
+                        "market_id": "a_share",
+                        "data_id": "price_volume_facts",
+                        "inputs": {"market_panel_1d": str(panel)},
+                        "factor_columns": ["reversal_5d"],
+                        "time_window": {
+                            "start": str(dates[0].date()),
+                            "end": str(dates[-1].date()),
+                        },
+                        "output_root": str(tmp_path / name / "factors"),
+                    }
+                )
+            )
+        )
+    pd.testing.assert_frame_equal(*factors)
+    # Supplied selected evidence still crosses the native source validation boundary.
+    broken = tmp_path / "malformed-industry.parquet"
+    broken.write_bytes(b"invalid selected industry evidence")
+    with pytest.raises((ValueError, OSError)):
+        _prepare(
+            tmp_path / "bad",
+            "market_panel_1d",
+            {**price_only, "a_share_industry_snapshots": broken},
+            dates[0],
+            dates[-1],
+        )

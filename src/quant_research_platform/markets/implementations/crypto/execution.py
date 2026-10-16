@@ -6,6 +6,7 @@ import json
 import math
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from fractions import Fraction
 from itertools import groupby
@@ -15,6 +16,7 @@ from typing import Any
 from quant_research_platform.contracts.order_book import (
     BookBoundary,
     BookState,
+    TradeBoundary,
     TradeEvent,
     index_to_price,
     observation_order_key,
@@ -115,7 +117,23 @@ def _positive_integer(value: object, error: str) -> int:
     return value
 
 
-def _funding_consumer(events: Iterable[FundingEvent], economics: PortfolioEconomics):
+class _AccountPathStop(Exception):
+    """Stop only the exact account path whose next state cannot be identified."""
+
+    def __init__(self, reason, timestamp_ns):
+        self.reason, self.timestamp_ns = reason, timestamp_ns
+        super().__init__(reason)
+
+
+@contextmanager
+def _known_account_path(stopped):
+    try:
+        yield
+    except _AccountPathStop as error:
+        stopped.append(error)
+
+
+def _funding_consumer(events, economics, coverage=None):
     if type(events) is not tuple or any(
         type(event) is not FundingEvent for event in events
     ):
@@ -125,12 +143,36 @@ def _funding_consumer(events: Iterable[FundingEvent], economics: PortfolioEconom
         raise ValueError("portfolio_funding_schedule_invalid")
     pending = iter(events)
     next_event = next(pending, None)
+    previous = 0
 
-    def consume(timestamp_ns: int) -> None:
-        nonlocal next_event
-        while next_event is not None and next_event.timestamp_ns <= timestamp_ns:
+    def consume(timestamp_ns):
+        nonlocal next_event, previous
+        stop = None
+        if economics.quantity and coverage is not None:
+            cursor = previous + 1
+            for start, end in coverage:
+                if end < cursor:
+                    continue
+                if start > cursor or cursor > timestamp_ns:
+                    break
+                cursor = end + 1
+            if cursor <= timestamp_ns:
+                stop = cursor
+        known_until = timestamp_ns if stop is None else stop - 1
+        while next_event is not None and next_event.timestamp_ns <= known_until:
+            if economics.quantity and (
+                next_event.rate is None
+                or next_event.mark_price is None
+                and next_event.rate != 0
+            ):
+                raise _AccountPathStop(
+                    "portfolio_required_funding_missing", next_event.timestamp_ns
+                )
             economics.funding(next_event)
             next_event = next(pending, None)
+        if stop is not None:
+            raise _AccountPathStop("portfolio_required_funding_coverage_missing", stop)
+        previous = max(previous, timestamp_ns)
 
     return consume
 
@@ -232,17 +274,23 @@ class _Metrics:
 class _PendingMarkouts:
     """FIFO of fills awaiting their exact future markout."""
 
-    def __init__(self, metrics, on_fill):
+    def __init__(self, metrics, on_fill, *, stop_context=None):
         self._pending = deque()
         self._metrics = metrics
         self._on_fill = on_fill
+        self._stop_context = stop_context
 
     def __enter__(self) -> _PendingMarkouts:
         return self
 
     def __exit__(self, _exception_type, primary, _traceback):
-        if primary is None:
-            self.expire_all()
+        if isinstance(primary, _AccountPathStop) and self._stop_context is not None:
+            state, coverage = self._stop_context()
+            self.advance(primary.timestamp_ns - 1, state, coverage)
+        if primary is None or isinstance(primary, _AccountPathStop):
+            self.expire_all(
+                reason="observation_truncated" if primary is not None else None
+            )
 
     def add(self, fill):
         self._pending.append(dict(fill))
@@ -481,24 +529,36 @@ def _taker_order_quantity(
 
 
 def _record_execution_result(economics, result, timestamp, mark):
-    if result["net_pnl"] is not None:
-        diagnostics = {
-            key: value
-            for key, value in result.items()
-            if key not in PORTFOLIO_ECONOMIC_SUMMARY_FIELDS
-        }
-        economics.mark(
-            timestamp,
-            mark,
-            diagnostics=(
-                PortfolioDiagnostic(
-                    economics.asset_id if mark is not None else PORTFOLIO_CASH_ASSET_ID,
-                    None,
-                    "execution_summary",
-                    text=json.dumps(diagnostics, sort_keys=True, allow_nan=False),
-                ),
-            ),
+    if result["net_pnl"] is None:
+        # Repeat the last exact prefix valuation, never a stale endpoint estimate.
+        timestamp, mark = economics.last_timestamp, economics.last_mark
+        prefix = economics.mark(timestamp, mark)
+        result.update(
+            {
+                f"known_prefix_{key}": value
+                for key, value in prefix.items()
+                if key != "fees"
+            }
         )
+        result["observed_totals_scope"] = "known_prefix"
+        result["known_prefix_valuation_timestamp_ns"] = timestamp
+    diagnostics = {
+        key: value
+        for key, value in result.items()
+        if key not in PORTFOLIO_ECONOMIC_SUMMARY_FIELDS
+    }
+    economics.mark(
+        timestamp,
+        mark,
+        diagnostics=(
+            PortfolioDiagnostic(
+                economics.asset_id if mark is not None else PORTFOLIO_CASH_ASSET_ID,
+                None,
+                "execution_summary",
+                text=json.dumps(diagnostics, sort_keys=True, allow_nan=False),
+            ),
+        ),
+    )
     return result
 
 
@@ -545,9 +605,9 @@ def simulate_taker(
     asset_id: str,
     funding_events: Iterable[FundingEvent],
     funding_forecasts: Iterable[FundingForecast],
+    funding_coverage=None,
     decision_windows_ns: tuple[tuple[int, int], ...] | None = None,
     observation_window_ns: tuple[int, int] | None = None,
-    on_terminal_book=None,
     on_ledger: Callable[[PortfolioLedgerBatch], None] | None = None,
 ) -> dict[str, Any]:
     """Freeze the net-gain maximizing order at decision time, then execute later."""
@@ -561,6 +621,7 @@ def simulate_taker(
     truncated = observation_stop is not None and (
         decision_windows_ns is None or observation_stop <= decision_windows_ns[-1][1]
     )
+    first_market_gap_ns = None
     censored_count = censored_pending = censored_zero_fill = 0
     censored_quantity = 0.0
     _positive_integer(prediction_horizon_ms, "hft_prediction_horizon_invalid")
@@ -591,7 +652,7 @@ def simulate_taker(
     action_timestamp = 0
     metrics = _Metrics()
     economics = PortfolioEconomics(capital, asset_id, on_ledger)
-    apply_funding = _funding_consumer(funding_events, economics)
+    apply_funding = _funding_consumer(funding_events, economics, funding_coverage)
 
     def resolved_fill(fill):
         economics.diagnostic(dict(fill))
@@ -627,11 +688,17 @@ def simulate_taker(
         * _UTC_DAY_NS
     )
 
+    stopped = []
     with (
         closing_iterator(events),
         closing_iterator(active_decisions),
         closing_iterator(forecasts),
-        _PendingMarkouts(metrics, resolved_fill) as pending,
+        _known_account_path(stopped),
+        _PendingMarkouts(
+            metrics,
+            resolved_fill,
+            stop_context=lambda: (latest_state, observed_coverage),
+        ) as pending,
     ):
         next_event = next(events, None)
         next_forecast = next(forecasts, None)
@@ -639,13 +706,19 @@ def simulate_taker(
         def consume_event(
             event: BookState | BookBoundary,
         ) -> None:
-            nonlocal latest_state, terminal_mid, terminal_timestamp
+            nonlocal latest_state, terminal_mid, terminal_timestamp, first_market_gap_ns
             terminal_timestamp = observation_order_key(event)[0]
             apply_funding(terminal_timestamp)
             if isinstance(event, BookBoundary):
+                if first_market_gap_ns is None and economics.quantity:
+                    first_market_gap_ns = event.observed_time_ns
                 pending.advance(
                     event.observed_time_ns - 1, latest_state, observed_coverage
                 )
+                if orders:
+                    raise _AccountPathStop(
+                        "portfolio_pending_execution_unknown", event.observed_time_ns
+                    )
                 latest_state = None
                 if economics.quantity != 0.0:
                     terminal_mid = None
@@ -705,6 +778,14 @@ def simulate_taker(
                 decision_mid,
             ) = order
             effective_time_ns = effective_time * _NANOSECONDS_PER_MILLISECOND
+            if (
+                latest_state is None
+                or latest_state.segment_id != segment
+                or not _covered(observed_coverage, segment, effective_time_ns)
+            ):
+                raise _AccountPathStop(
+                    "portfolio_pending_execution_unknown", effective_time_ns
+                )
             if signed_quantity > 0:
                 reserved_buy -= Fraction(signed_quantity)
             else:
@@ -817,8 +898,8 @@ def simulate_taker(
             nonlocal action_timestamp
             while orders and orders[0][2] * _NANOSECONDS_PER_MILLISECOND <= target_ns:
                 consume_until(orders[0][2] * _NANOSECONDS_PER_MILLISECOND)
-                order = orders.popleft()
-                execute_order(order)
+                execute_order(orders[0])
+                orders.popleft()
             consume_until(target_ns)
             apply_funding(target_ns)
             action_timestamp = target_ns
@@ -858,8 +939,8 @@ def simulate_taker(
                     "portfolio_episode_initial_valuation_missing"
                 )
             if mark is None and economics.quantity != 0.0:
-                raise PortfolioTargetBlocked(
-                    "portfolio_window_boundary_valuation_missing"
+                raise _AccountPathStop(
+                    "portfolio_window_boundary_valuation_missing", timestamp_ns
                 )
             diagnostic_asset = asset_id if mark is not None else PORTFOLIO_CASH_ASSET_ID
             economics.mark(
@@ -1126,9 +1207,31 @@ def simulate_taker(
                 terminal_mid,
             )
             last_gross, last_net = marked["gross_pnl"], marked["net_pnl"]
-        if on_terminal_book is not None and latest_state is not None:
-            on_terminal_book(latest_state)
+    if stopped:
+        truncated = True
+        end_timestamp, terminal_mid = economics.last_timestamp, economics.last_mark
+        last_gross = last_net = None
+        censored_count = censored_pending = censored_zero_fill = len(orders)
+        censored_quantity = sum(abs(order[4]) for order in orders)
     result = {
+        "market_observation_status": "PARTIAL"
+        if first_market_gap_ns is not None
+        else "COMPLETE",
+        "market_observation_reason": "crypto_execution_book_coverage_incomplete"
+        if first_market_gap_ns is not None
+        else None,
+        "first_market_gap_ns": first_market_gap_ns,
+        "account_path_status": "PARTIAL" if stopped or last_net is None else "COMPLETE",
+        "account_stop_reason": stopped[0].reason
+        if stopped
+        else "portfolio_terminal_valuation_missing"
+        if last_net is None
+        else None,
+        "account_stop_ns": stopped[0].timestamp_ns
+        if stopped
+        else end_timestamp
+        if last_net is None
+        else None,
         "simulation": "decision_time_net_gain_taker",
         "created_orders": created_orders,
         "filled_orders": filled_orders,
@@ -1177,7 +1280,7 @@ def simulate_taker(
         "assumption": "historical_book_zero_market_impact",
         **metrics.payload(),
         "fees": -economics.cost_cashflows,
-        "funding": economics.funding_cashflows,
+        "funding": None if last_net is None else economics.funding_cashflows,
         "initial_capital": capital.initial_capital,
         "valuation_currency": capital.valuation_currency,
         "candidate_id": capital.candidate_id,
@@ -1745,7 +1848,7 @@ def replay_maker_calibration(
             order = sample["order"]
             on_sample(
                 side=order.side,
-                sample_id=sample["sample_id"],
+                sample_id=counts[order.side],
                 decision_ns=order.created_time_ns,
                 prediction_end_ns=order.valid_until_ns,
                 available_ns=sample["available_ns"],
@@ -1762,12 +1865,13 @@ def replay_maker_calibration(
                 event_start=sample["event_start"],
                 event_end=event_count,
             )
+            counts[order.side] += 1
             samples.remove(sample)
 
-        def invalidate_references():
-            for sample in samples:
-                if sample["terminal_reason"] is None:
-                    sample["terminal_reason"] = "book_boundary"
+        def exclude_references():
+            nonlocal excluded
+            excluded += sum(sample["order"].side == "buy" for sample in samples)
+            samples.clear()
 
         def process_until(target):
             nonlocal latest_state, latest_book_id, next_event
@@ -1793,10 +1897,13 @@ def replay_maker_calibration(
                         finish(sample)
                 if event_time == due:
                     event = next_event[1]
-                    if isinstance(event, BookBoundary):
-                        if samples:
-                            record(event)
-                        invalidate_references()
+                    if isinstance(event, TradeBoundary) or (
+                        isinstance(event, TradeEvent) and event.visible_quantity is None
+                    ):
+                        exclude_references()
+                        latest_book_id = None
+                    elif isinstance(event, BookBoundary):
+                        exclude_references()
                         latest_state = latest_book_id = None
                     elif isinstance(event, TradeEvent):
                         if samples:
@@ -1820,7 +1927,7 @@ def replay_maker_calibration(
                             latest_state is not None
                             and state.segment_id != latest_state.segment_id
                         ):
-                            invalidate_references()
+                            exclude_references()
                         latest_state = state
                         latest_book_id = record(state) if samples else None
                     next_event = next(events, None)
@@ -1849,9 +1956,9 @@ def replay_maker_calibration(
                 latest_state is not None
                 and latest_state.segment_id == row["book_segment_id"]
                 and _covered(observed_coverage, row["book_segment_id"], timestamp)
-                and _covered(observed_coverage, row["book_segment_id"], end)
+                and _covered(observed_coverage, row["book_segment_id"], end - 1)
                 and _covered(trade_coverage, row["trade_observation_id"], timestamp)
-                and _covered(trade_coverage, row["trade_observation_id"], end)
+                and _covered(trade_coverage, row["trade_observation_id"], end - 1)
             )
             if not valid or row["proxy_prediction"] < 0.5:
                 excluded += 1
@@ -1870,7 +1977,6 @@ def replay_maker_calibration(
                 samples.append(
                     {
                         "order": order,
-                        "sample_id": counts[side],
                         "prediction": row["price_prediction"],
                         "observed_return": row["price_label"],
                         "available_ns": row["label_available_at_ns"],
@@ -1883,7 +1989,6 @@ def replay_maker_calibration(
                         "event_start": event_count,
                     }
                 )
-                counts[side] += 1
             process_until(timestamp)
         process_until(cutoff_ns)
         if samples:
@@ -1892,18 +1997,21 @@ def replay_maker_calibration(
 
 
 def _checked_trades(
-    trades: Iterable[TradeEvent],
-) -> Iterator[TradeEvent]:
+    trades: Iterable[TradeEvent | TradeBoundary],
+) -> Iterator[TradeEvent | TradeBoundary]:
     previous: tuple[int, ...] | None = None
     active = iter(trades)
     with closing_iterator(active):
         for trade in active:
-            if not isinstance(trade, TradeEvent):
+            if not isinstance(trade, TradeEvent | TradeBoundary):
                 raise TypeError("hft_execution_trade_event_invalid")
             key = observation_order_key(trade)
             if previous is not None and key < previous:
                 raise ValueError("hft_execution_time_non_monotonic")
             previous = key
+            if isinstance(trade, TradeBoundary):
+                yield trade
+                continue
             _positive(trade.quantity, "hft_execution_trade_quantity_invalid")
             if trade.visible_quantity is not None:
                 visible = strict_finite_float(
@@ -1922,12 +2030,12 @@ def _checked_trades(
 
 def _market_events(
     books: Iterable[BookState | BookBoundary],
-    trades: Iterable[TradeEvent],
+    trades: Iterable[TradeEvent | TradeBoundary],
 ) -> Iterator[tuple[tuple[int, ...], object]]:
     book_events = iter(_checked_book_events(books))
     trade_events = iter(_checked_trades(trades))
     book_next: BookState | BookBoundary | None = None
-    trade_next: TradeEvent | None = None
+    trade_next: TradeEvent | TradeBoundary | None = None
     pending_event: object | None = None
     with closing_iterator(book_events), closing_iterator(trade_events):
         book_next = next(book_events, None)
@@ -1996,10 +2104,10 @@ def simulate_maker(
     asset_id,
     funding_events,
     funding_forecasts=(),
+    funding_coverage=None,
     calibrations=None,
     decision_windows_ns=None,
     observation_window_ns=None,
-    on_terminal_book=None,
     on_ledger=None,
 ):
     """Freeze passive quotes at decisions; replay delayed replacements and expiry."""
@@ -2020,6 +2128,7 @@ def simulate_maker(
     truncated = observation_stop is not None and (
         decision_windows_ns is None or observation_stop <= decision_windows_ns[-1][1]
     )
+    first_market_gap_ns = None
     censored_count = censored_pending = censored_zero_fill = 0
     censored_quantity = 0.0
     events = iter(_market_events(book_events, trades))
@@ -2029,7 +2138,7 @@ def simulate_maker(
     commands = deque()
     metrics = _Metrics()
     economics = PortfolioEconomics(capital, asset_id, on_ledger)
-    apply_funding = _funding_consumer(funding_events, economics)
+    apply_funding = _funding_consumer(funding_events, economics, funding_coverage)
     latest_state = next_event = None
     trade_observation_id = None
     active_forecast = next_forecast = None
@@ -2070,6 +2179,23 @@ def simulate_maker(
             trade_coverage[order.trade_observation_id][1],
         )
 
+    def risk_coverage_stop():
+        ends = []
+        for order in (
+            *active.values(),
+            *(order for _, _, order in commands if order is not None),
+        ):
+            end = min(
+                observed_coverage[order.segment_id][1],
+                trade_coverage[order.trade_observation_id][1],
+            )
+            if (
+                end < order.valid_until_ns
+                and order.effective_at_ns < order.valid_until_ns
+            ):
+                ends.append(end)
+        return min(ends) if ends else None
+
     def finish_order(order, timestamp_ns, *, cancelled):
         nonlocal all_lifetime_count, all_lifetime_sum_ns, cancelled_orders
         nonlocal filled_lifetime_count, filled_lifetime_sum_ns
@@ -2084,11 +2210,17 @@ def simulate_maker(
         if cancelled:
             cancelled_orders += 1
 
+    stopped = []
     with (
         closing_iterator(events),
         closing_iterator(decisions),
         closing_iterator(forecasts),
-        _PendingMarkouts(metrics, resolved_fill) as pending,
+        _known_account_path(stopped),
+        _PendingMarkouts(
+            metrics,
+            resolved_fill,
+            stop_context=lambda: (latest_state, observed_coverage),
+        ) as pending,
     ):
         next_event = next(events, None)
         next_forecast = next(forecasts, None)
@@ -2109,11 +2241,14 @@ def simulate_maker(
         def observe_trade_connection(identity, timestamp):
             nonlocal trade_observation_id
             if trade_observation_id is not None and trade_observation_id != identity:
-                cancel_all(timestamp)
+                if active or any(order is not None for _, _, order in commands):
+                    raise _AccountPathStop(
+                        "portfolio_pending_execution_unknown", timestamp
+                    )
             trade_observation_id = identity
 
         def expire_orders(timestamp):
-            # Only the decision-time TTL schedules expiry; observed events cancel gaps.
+            # Only decision-time TTL expires orders; gaps never imply cancellation.
             for order in _maker_expired_orders(active, timestamp):
                 finish_order(order, timestamp, cancelled=True)
             for _ in range(len(commands)):
@@ -2133,19 +2268,27 @@ def simulate_maker(
             )
 
         def process_book(event):
-            nonlocal latest_state
+            nonlocal latest_state, first_market_gap_ns
             if isinstance(event, BookBoundary):
+                if first_market_gap_ns is None and economics.quantity:
+                    first_market_gap_ns = event.observed_time_ns
                 pending.advance(
                     event.observed_time_ns - 1, latest_state, observed_coverage
                 )
-                cancel_all(event.observed_time_ns)
+                if active or any(order is not None for _, _, order in commands):
+                    raise _AccountPathStop(
+                        "portfolio_pending_execution_unknown", event.observed_time_ns
+                    )
                 latest_state = None
                 pending.expire_all()
                 return
             previous = latest_state
             state = event
             if previous is not None and previous.segment_id != state.segment_id:
-                cancel_all(state.observed_time_ns)
+                if active or any(order is not None for _, _, order in commands):
+                    raise _AccountPathStop(
+                        "portfolio_pending_execution_unknown", state.observed_time_ns
+                    )
             latest_state = state
             _resolve_observed_markouts(
                 pending, state, observed_coverage, previous_state=previous
@@ -2176,6 +2319,10 @@ def simulate_maker(
                 order = active.get(side)
                 if order is None or order.segment_id != latest_state.segment_id:
                     continue
+                if trade.visible_quantity is None:
+                    raise _AccountPathStop(
+                        "hft_trade_visible_quantity_unknown", trade.observed_time_ns
+                    )
                 quantity, reason = _maker_trade_fill(order, trade)
                 if quantity <= 0:
                     continue
@@ -2244,13 +2391,22 @@ def simulate_maker(
                 stamp = _maker_next_time(event_time, command_time)
                 if stamp > target:
                     break
+                stop = risk_coverage_stop()
+                if stop is not None and stamp >= stop:
+                    apply_funding(stop - 1)
+                    raise _AccountPathStop("portfolio_pending_execution_unknown", stop)
                 apply_funding(stamp)
                 expire_orders(stamp)
                 if event_time == stamp:
                     market_event_count += 1
                     last_event_time_ns = stamp
                     item = next_event[1]
-                    if isinstance(item, TradeEvent):
+                    if isinstance(item, TradeBoundary):
+                        if active or any(order is not None for _, _, order in commands):
+                            raise _AccountPathStop(
+                                "portfolio_pending_execution_unknown", stamp
+                            )
+                    elif isinstance(item, TradeEvent):
                         process_trade(item)
                     else:
                         process_book(item)
@@ -2291,6 +2447,10 @@ def simulate_maker(
                                     ),
                                 ),
                             )
+            stop = risk_coverage_stop()
+            if stop is not None and target >= stop:
+                apply_funding(stop - 1)
+                raise _AccountPathStop("portfolio_pending_execution_unknown", stop)
             apply_funding(target)
             expire_orders(target)
 
@@ -2321,8 +2481,8 @@ def simulate_maker(
                     "portfolio_episode_initial_valuation_missing"
                 )
             if mark is None and economics.quantity != 0:
-                raise PortfolioTargetBlocked(
-                    "portfolio_window_boundary_valuation_missing"
+                raise _AccountPathStop(
+                    "portfolio_window_boundary_valuation_missing", timestamp
                 )
             diagnostic_asset = asset_id if mark is not None else PORTFOLIO_CASH_ASSET_ID
             economics.mark(
@@ -2666,6 +2826,10 @@ def simulate_maker(
             end_timestamp = max(
                 economics.last_timestamp, last_event_time_ns, decision_time_ns
             )
+            stop = risk_coverage_stop()
+            if stop is not None:
+                apply_funding(stop - 1)
+                raise _AccountPathStop("portfolio_pending_execution_unknown", stop)
             for order in active.values():
                 finish_order(order, order.valid_until_ns, cancelled=True)
             active.clear()
@@ -2683,9 +2847,37 @@ def simulate_maker(
         )
         last_gross = None if marked is None else marked["gross_pnl"]
         last_net = None if marked is None else marked["net_pnl"]
-        if on_terminal_book is not None and latest_state is not None:
-            on_terminal_book(latest_state)
+    if stopped:
+        truncated = True
+        end_timestamp, terminal_mid = economics.last_timestamp, economics.last_mark
+        last_gross = last_net = None
+        censored_orders = (
+            *active.values(),
+            *(order for _, _, order in commands if order is not None),
+        )
+        censored_count = len(censored_orders)
+        censored_pending = len(commands)
+        censored_zero_fill = sum(not order.had_fill for order in censored_orders)
+        censored_quantity = float(sum(order.remaining for order in censored_orders))
     result = {
+        "market_observation_status": "PARTIAL"
+        if first_market_gap_ns is not None
+        else "COMPLETE",
+        "market_observation_reason": "crypto_execution_book_coverage_incomplete"
+        if first_market_gap_ns is not None
+        else None,
+        "first_market_gap_ns": first_market_gap_ns,
+        "account_path_status": "PARTIAL" if stopped or last_net is None else "COMPLETE",
+        "account_stop_reason": stopped[0].reason
+        if stopped
+        else "portfolio_terminal_valuation_missing"
+        if last_net is None
+        else None,
+        "account_stop_ns": stopped[0].timestamp_ns
+        if stopped
+        else end_timestamp
+        if last_net is None
+        else None,
         "simulation": "event_ordered_public_l2_maker",
         "created_orders": created_orders,
         "filled_orders": filled_orders,
@@ -2768,7 +2960,7 @@ def simulate_maker(
         "assumption": "historical_book_zero_market_impact",
         **metrics.payload(),
         "fees": -economics.cost_cashflows,
-        "funding": economics.funding_cashflows,
+        "funding": None if last_net is None else economics.funding_cashflows,
         "initial_capital": capital.initial_capital,
         "valuation_currency": capital.valuation_currency,
         "candidate_id": capital.candidate_id,

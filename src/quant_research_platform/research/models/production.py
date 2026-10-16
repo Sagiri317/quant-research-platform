@@ -51,6 +51,7 @@ def fit_model(
     fit_cutoff,
     candidate_parameters=None,
     label_availability_column=None,
+    declared_columns=(),
 ):
     """Fit one candidate on its legal observed domain."""
     cutoff = strict_timestamp_series(
@@ -83,6 +84,7 @@ def fit_model(
         spec,
         fitting_cutoff=cutoff,
         availability_column=label_availability_column,
+        declared_columns=declared_columns,
     )
     if prepared.training.empty:
         raise ValueError("model_training_sample_empty")
@@ -254,6 +256,11 @@ def fit(config: Mapping) -> Path:
             "candidate_parameters", dict(spec.hyperparameters)
         ),
         "label_unit": config["label_unit"],
+        "input_units": {
+            column: declared["column_units"][column]
+            for column in spec.input_columns
+            if column in declared.get("column_units", {})
+        },
         "selection": config.get("selection"),
         "selection_cutoff": None if selection is None else selection["cutoff"],
         "test_window": None if test is None else _window_payload(test),
@@ -268,6 +275,7 @@ def fit(config: Mapping) -> Path:
             label_column=spec.target_column,
             sample_filter_mode=spec.sample_filter_mode,
             availability_column=availability,
+            declared_columns=declared["column_roles"],
         )
         frames = iter_dataset_chunks(
             session.filtered_view(
@@ -311,6 +319,7 @@ def fit(config: Mapping) -> Path:
             fit_cutoff=cutoff,
             candidate_parameters=config.get("candidate_parameters"),
             label_availability_column=availability,
+            declared_columns=declared["column_roles"],
         )
         from quant_research_platform.research.models.persisted import save_model
 

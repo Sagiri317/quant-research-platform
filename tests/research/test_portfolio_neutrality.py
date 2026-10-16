@@ -212,3 +212,198 @@ def test_neutral_projection_satisfies_kkt_on_active_and_boundary_assets():
     assert reduced_gradient[active] == pytest.approx(np.zeros(active.sum()), abs=1e-7)
     assert (reduced_gradient[~active] >= -1e-7).all()
     assert (weights >= 0.0).all()
+
+
+@pytest.mark.parametrize("missing", ["absent", "null", "zero", "negative", "industry"])
+def test_missing_neutral_context_carries_nonrebalance_account_and_blocks_target(
+    missing,
+):
+    from quant_research_platform.research.portfolios.production import _build_session
+    from tests.research.test_portfolio_decision_execution import _decision_inputs
+
+    inputs = _decision_inputs()
+    inputs["candidate"] = replace(
+        inputs["candidate"],
+        construction="top20_equal_weight",
+        top_quantile=0.5,
+        benchmark_id=None,
+        risk_style_columns=(),
+        rebalance_schedule="weekly-last-trading-day",
+        neutrality="industry" if missing == "industry" else "size",
+    )
+    inputs["enhanced_decision"] = None
+    if missing == "absent":
+        inputs["dataset"] = inputs["dataset"].drop(columns="float_market_cap")
+    elif missing != "industry":
+        inputs["dataset"]["float_market_cap"] = {
+            "null": np.nan,
+            "zero": 0.0,
+            "negative": -1.0,
+        }[missing]
+    account, _, _, _, ledger = _build_session(**inputs)
+    assert account.nav_after == 100.0
+    assert account.post_trade_cash == 0.0
+    assert ledger.executed_delta_notional.tolist() == [0.0, 0.0]
+    assert ledger.post_trade_notional.tolist() == [50.0, 50.0]
+    diagnostics = ledger.attrs["neutrality_exposures"]
+    for kind in ("target", "realized"):
+        assert diagnostics[f"{kind}_exposure_status"] == "UNDEFINED"
+        assert (
+            diagnostics[f"{kind}_exposure_reason"]
+            == "target_neutrality_benchmark_empty"
+        )
+        assert diagnostics[f"{kind}_exposure_excluded_weight"] is None
+    assert not any(key.startswith("benchmark_exposure:") for key in diagnostics)
+    inputs["candidate"] = replace(inputs["candidate"], rebalance_schedule="daily")
+    with pytest.raises(
+        PortfolioTargetBlocked, match="target_neutrality_benchmark_empty"
+    ):
+        _build_session(**inputs)
+
+
+def test_enhanced_nonrebalance_unknown_industry_preserves_held_account(
+    tmp_path, monkeypatch
+):
+    from tests.research.test_portfolio_production import (
+        RISK_STYLE_COLUMNS,
+        _build_producer,
+        _inputs,
+    )
+
+    frames, fees, window = _inputs()
+    frames["panel"] = frames["panel"].assign(
+        period_return=0.0,
+        float_market_cap=1000.0,
+        industry_standard_id="fixture",
+        industry_level1_code="known",
+        is_nonfinancial_industry=True,
+    )
+    frames["panel"].loc[
+        frames["panel"].timestamp.eq("2023-01-04"), "industry_level1_code"
+    ] = pd.NA
+    frames["benchmark"] = frames["panel"][["asset_id", "timestamp"]].assign(
+        benchmark_id="csi500", weight=0.5
+    )
+    candidate = PortfolioCandidateSpec(
+        "enhanced",
+        "global",
+        "benchmark_enhanced",
+        "champion",
+        "weekly-last-trading-day",
+        None,
+        "csi500",
+        RISK_STYLE_COLUMNS,
+    )
+    batches, _ = _build_producer(
+        tmp_path,
+        monkeypatch,
+        frames=frames,
+        fee_frame=fees,
+        output_window=window,
+        candidate=candidate,
+        typed_batches=True,
+    )
+    batches = list(batches)
+    matched = []
+    for batch in batches:
+        facts = {
+            row.name: row.text
+            for row in batch.diagnostics
+            if row.asset_id == "__cash__"
+        }
+        if facts.get("target_exposure_reason") == "portfolio_industry_context_missing":
+            matched.append(batch)
+            assert facts["target_exposure_status"] == "UNDEFINED"
+            assert facts["realized_exposure_status"] == "UNDEFINED"
+            assert not batch.trades and not batch.cashflows
+            before = {
+                row.asset_id: row.quantity
+                for row in batch.valuations
+                if row.phase == "before"
+            }
+            after = {
+                row.asset_id: row.quantity
+                for row in batch.valuations
+                if row.phase == "after"
+            }
+            assert before == after
+    assert len(matched) == 1
+
+
+@pytest.mark.parametrize("schedule", ["daily", "weekly-last-trading-day"])
+def test_unheld_missing_cap_does_not_make_known_exposures_undefined(schedule):
+    from quant_research_platform.research.portfolios.production import _build_session
+    from tests.research.test_portfolio_decision_execution import _decision_inputs
+
+    inputs = _decision_inputs(benchmark=(0.5, 0.5, 0.0))
+    inputs["candidate"] = replace(
+        inputs["candidate"],
+        construction="top20_equal_weight",
+        top_quantile=0.5,
+        benchmark_id=None,
+        risk_style_columns=(),
+        rebalance_schedule=schedule,
+        neutrality="size",
+    )
+    inputs["enhanced_decision"] = None
+    inputs["dataset"].loc[inputs["dataset"].asset_id.eq("c"), "float_market_cap"] = (
+        np.nan
+    )
+    account, _, _, _, ledger = _build_session(**inputs)
+    assert account.nav_after == 100.0
+    assert ledger.attrs["neutrality_exposures"]["realized_exposure_status"] == "DEFINED"
+    assert ledger.attrs["neutrality_exposures"]["target_exposure_status"] == "DEFINED"
+    assert not ledger.loc[ledger.asset_id.eq("c"), "post_trade_notional"].any()
+
+
+def test_absent_cap_column_is_local_to_actual_scheduled_neutral_target(
+    tmp_path, monkeypatch
+):
+    from tests.research.test_portfolio_production import _build_producer, _inputs
+
+    frames, fees, _ = _inputs()
+    frames["dataset"] = frames["dataset"].drop(columns="float_market_cap")
+    candidate = PortfolioCandidateSpec(
+        "missing-cap",
+        "global",
+        "top20_equal_weight",
+        "ridge",
+        "weekly-last-trading-day",
+        0.5,
+        None,
+        neutrality="size",
+    )
+    batches, _ = _build_producer(
+        tmp_path,
+        monkeypatch,
+        frames=frames,
+        fee_frame=fees,
+        output_window=TimeWindow("2023-01-03", "2023-01-06"),
+        candidate=candidate,
+        typed_batches=True,
+    )
+    selected = list(batches)
+    assert len(selected) == 2
+    for batch in selected:
+        assert not batch.trades
+        assert all(
+            row.value == 100.0 for row in batch.valuations if row.asset_id == "__cash__"
+        )
+        assert any(
+            row.name == "realized_exposure_reason"
+            and row.text == "target_neutrality_benchmark_empty"
+            for row in batch.diagnostics
+        )
+    longer, _ = _build_producer(
+        tmp_path,
+        monkeypatch,
+        frames=frames,
+        fee_frame=fees,
+        output_window=TimeWindow("2023-01-03", "2023-01-10"),
+        candidate=candidate,
+        typed_batches=True,
+    )
+    with pytest.raises(
+        PortfolioTargetBlocked, match="target_neutrality_benchmark_empty"
+    ):
+        list(longer)

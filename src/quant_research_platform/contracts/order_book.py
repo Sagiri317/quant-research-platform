@@ -76,6 +76,25 @@ class TradeEvent:
         return self.observed_time_ns // 1_000_000
 
 
+@dataclass(frozen=True)
+class TradeBoundary:
+    """A located invalid trade observation; it cannot supply executable liquidity."""
+
+    source_sequence: int
+    event_time_ms: int
+    transaction_time_ms: int
+    observed_time_ns: int
+    receive_time: str
+    receive_monotonic_ns: int | None
+    observation_id: str
+    market_type: str
+    reason: str
+
+    @property
+    def observed_time_ms(self) -> int:
+        return self.observed_time_ns // 1_000_000
+
+
 def validate_price_unit(value: object) -> str:
     _positive_decimal(value, error="order_book_price_unit_invalid")
     return value
@@ -136,7 +155,7 @@ def _positive_decimal(value: object, *, error: str) -> Decimal:
 
 
 def observation_order_key(
-    event: BookState | BookBoundary | TradeEvent,
+    event: BookState | BookBoundary | TradeEvent | TradeBoundary,
 ) -> tuple[int, ...]:
     """Use only the selected source's real clocks and stable native order."""
     if event.receive_monotonic_ns is None:

@@ -82,6 +82,7 @@ def hft_processed_catalog() -> ProcessedDataCatalog:
                 "binance_futures_l2_panel_100ms",
                 ProcessedDataKind.PANEL,
                 HFT_PANEL_COLUMNS,
+                parameters={"asset_ids": ["btc_usdt", "eth_usdt"]},
             ),
             _spec(
                 "binance_futures_microstructure_factors_100ms",
@@ -91,7 +92,12 @@ def hft_processed_catalog() -> ProcessedDataCatalog:
                 semantic_role=ColumnRole.FACTOR,
                 parameters={"asset_ids": ["btc_usdt", "eth_usdt"]},
             ),
-            _spec(HFT_SOL_PANEL_DATA_ID, ProcessedDataKind.PANEL, HFT_PANEL_COLUMNS),
+            _spec(
+                HFT_SOL_PANEL_DATA_ID,
+                ProcessedDataKind.PANEL,
+                HFT_PANEL_COLUMNS,
+                parameters={"asset_ids": ["sol_usdt"]},
+            ),
             _spec(
                 HFT_INFORMATION_PANEL_DATA_ID,
                 ProcessedDataKind.PANEL,
@@ -126,6 +132,7 @@ def hft_processed_catalog() -> ProcessedDataCatalog:
                 HFT_SPOT_PANEL_DATA_ID,
                 ProcessedDataKind.PANEL,
                 HFT_PANEL_COLUMNS,
+                parameters={"asset_ids": ["btc_usdt", "eth_usdt"]},
             ),
             _spec(
                 HFT_SPOT_CONTEXT_DATA_ID,

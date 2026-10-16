@@ -220,7 +220,7 @@ def test_actual_risk_estimate_retains_tail_after_latest_missing_session(
 
 
 @pytest.mark.parametrize("batch", [3, 53])
-def test_all_microstructure_factors_persist_finite_ratios_and_fail_true_overflow(
+def test_all_microstructure_factors_persist_finite_ratios_and_localize_true_overflow(
     tmp_path, batch
 ):
     frames = _panel(end=5100, batch=batch, extreme=True)
@@ -254,8 +254,11 @@ def test_all_microstructure_factors_persist_finite_ratios_and_fail_true_overflow
     assert factors.trade_flow_imbalance_5s.iloc[-1] == 1
     assert factors.taker_buy_pressure_500ms.iloc[-1] == 4
     panel["book_ofi_100ms"] = 8e307
-    with pytest.raises(OverflowError):
-        list(iter_factor_frames([panel], columns=("ofi_500ms",)))
+    local = pd.concat(
+        iter_factor_frames([panel], columns=("ofi_500ms", "spread")), ignore_index=True
+    )
+    assert local.ofi_500ms.isna().all()
+    assert local.spread.notna().all()
 
 
 def test_force_order_ratio_uses_finite_final_mass_and_preserves_epoch_and_age():

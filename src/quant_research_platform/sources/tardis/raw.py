@@ -29,6 +29,8 @@ from quant_research_platform.sources.binance.ids import (
 )
 from quant_research_platform.sources.binance.replay import native_trade_identities
 from quant_research_platform.sources.binance.validation import (
+    _visible_trade_quantity,
+    strict_boolean,
     strict_iso_timestamp,
     strict_non_negative_float,
     strict_non_negative_integer,
@@ -112,14 +114,14 @@ def _validate_state(channel, symbol, native):
         if native.get("e") != "forceOrder" or type(native.get("o")) is not dict:
             raise ValueError("tardis_force_order_invalid")
         order = native["o"]
-        if order.get("s") != symbol or order.get("S") not in {"BUY", "SELL"}:
+        if order.get("s") != symbol:
             raise ValueError("tardis_force_order_invalid")
+        if order.get("S") not in {"BUY", "SELL"}:
+            order["S"] = None
         strict_non_negative_integer(native.get("E"), error="tardis_state_time_invalid")
         strict_non_negative_integer(order.get("T"), error="tardis_state_time_invalid")
         for field in ("q", "l", "z"):
-            strict_non_negative_float(
-                order.get(field), error="tardis_force_order_quantity_invalid"
-            )
+            _nullable_state_value(order, field, strict_non_negative_float)
         return
     if channel != "takerlongshortRatio" and native.get("symbol") != symbol:
         raise ValueError("tardis_state_symbol_invalid")
@@ -135,21 +137,40 @@ def _validate_state(channel, symbol, native):
         else ("longShortRatio", "longAccount", "shortAccount")
     )
     for field in fields:
-        strict_non_negative_float(native.get(field), error="tardis_state_value_invalid")
+        _nullable_state_value(
+            native,
+            field,
+            strict_positive_float
+            if channel == "premiumIndex"
+            else strict_non_negative_float,
+        )
     if channel == "premiumIndex":
-        strict_positive_float(
-            native.get("markPrice"), error="tardis_mark_price_invalid"
-        )
-        strict_positive_float(
-            native.get("indexPrice"), error="tardis_index_price_invalid"
-        )
-        strict_non_negative_integer(
-            native.get("nextFundingTime"), error="tardis_state_time_invalid"
-        )
+        _nullable_state_value(native, "nextFundingTime", strict_non_negative_integer)
         from quant_research_platform.contracts.validation import strict_finite_float
 
         for field in ("lastFundingRate", "interestRate"):
-            strict_finite_float(native.get(field), error="tardis_state_value_invalid")
+            _nullable_state_value(native, field, strict_finite_float)
+
+
+def _nullable_state_value(payload, field, validate):
+    try:
+        validate(payload.get(field), error="tardis_state_value_invalid")
+    except ValueError:
+        payload[field] = None
+
+
+def _valid_trade_values(exchange, native, observed_ns):
+    try:
+        strict_boolean(native.get("m"), error="tardis_trade_value_invalid")
+        strict_positive_float(native.get("p"), error="tardis_trade_value_invalid")
+        _visible_trade_quantity(
+            FUTURES_MARKET_TYPE if exchange == EXCHANGE else SPOT_MARKET_TYPE,
+            native,
+            historical_time=observed_ns // 1_000_000,
+        )
+    except ValueError:
+        return False
+    return True
 
 
 def _date(value: str) -> dt.date:
@@ -294,6 +315,7 @@ def iter_native_slice(
                     native,
                     source_schema=SCHEMA_ID,
                     observed_time_ns=observed,
+                    validate_values=False,
                 )
             elif channel == "depthSnapshot":
                 if (
@@ -393,6 +415,19 @@ class _ObservedStreams:
         observed = strict_iso_timestamp(
             timestamp, error="tardis_observed_time_invalid"
         ).value
+        if channel == "aggTrade" and not _valid_trade_values(
+            self.exchange, native, observed
+        ):
+            if key in self.active:
+                interval = self.active.pop(key)
+                interval["end_ns"] = observed
+                if interval["start_ns"] < observed:
+                    closed.append(interval)
+            return (
+                None,
+                closed,
+                {"reason": "invalid_trade_values", "stream": value["stream"]},
+            )
         interval = self.active.get(key)
         if interval is None:
             identity = f"tardis:{offset}:{number}:{symbol}:{kind}"
@@ -523,7 +558,10 @@ def _publish_slices(
                                             raise ValueError(
                                                 "tardis_price_level_invalid"
                                             )
-                                        precision = price_decimal_places(level[0])
+                                        try:
+                                            precision = price_decimal_places(level[0])
+                                        except ValueError:
+                                            continue
                                         decimal_places[symbol] = max(
                                             decimal_places.get(symbol, 0), precision
                                         )
@@ -533,10 +571,14 @@ def _publish_slices(
                                         *(len(native[name]) for name in names),
                                     )
                             elif channel == "aggTrade":
-                                decimal_places[symbol] = max(
-                                    decimal_places.get(symbol, 0),
-                                    price_decimal_places(native["p"]),
-                                )
+                                try:
+                                    precision = price_decimal_places(native.get("p"))
+                                except ValueError:
+                                    precision = None
+                                if precision is not None:
+                                    decimal_places[symbol] = max(
+                                        decimal_places.get(symbol, 0), precision
+                                    )
                             counts[stream] = counts.get(stream, 0) + 1
                             if first is None:
                                 first = timestamp

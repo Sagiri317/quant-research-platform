@@ -75,7 +75,7 @@ def test_auxiliary_input_delay_rejects_invalid_values(delay):
         )
 
 
-def test_derivative_ages_are_channel_specific_and_all_required():
+def test_derivative_ages_are_channel_specific_and_all_selected_channels_required():
     base = hft_processed_catalog().get(ids.HFT_DERIVATIVE_DATA_ID)
     ages = dict.fromkeys(HFT_DERIVATIVE_CHANNELS, 15000)
     spec = _configured_spec(
@@ -91,6 +91,42 @@ def test_derivative_ages_are_channel_specific_and_all_required():
     ):
         with pytest.raises(ValueError, match="max_age_ms_invalid"):
             _configured_spec(base, {"parameters": {"max_age_ms": bad}})
+
+
+def test_selected_derivative_requires_only_its_actual_channel_age():
+    spec = _configured_spec(
+        hft_processed_catalog().get(ids.HFT_DERIVATIVE_DATA_ID),
+        {
+            "factor_columns": ["log_open_interest"],
+            "parameters": {"max_age_ms": {"openInterest": 15000}},
+        },
+    )
+    assert json.loads(spec.parameters_json)["max_age_ms"] == {"openInterest": 15000}
+    assert "openInterest_age_ms" in spec.required_columns
+    assert "premiumIndex_age_ms" not in spec.required_columns
+
+
+@pytest.mark.parametrize(
+    "ages",
+    [
+        {},
+        {"premiumIndex": 15000},
+        {"openInterest": 0},
+        {"openInterest": -1},
+        {"openInterest": True},
+        {"openInterest": 1.5},
+        {"openInterest": 15000, "unknown": 15000},
+    ],
+)
+def test_selected_derivative_rejects_missing_or_invalid_actual_channel_age(ages):
+    with pytest.raises(ValueError, match="max_age_ms_invalid"):
+        _configured_spec(
+            hft_processed_catalog().get(ids.HFT_DERIVATIVE_DATA_ID),
+            {
+                "factor_columns": ["log_open_interest"],
+                "parameters": {"max_age_ms": ages},
+            },
+        )
 
 
 @pytest.mark.parametrize("values", [[], ["sol_usdt", "sol_usdt"], ["unknown"], [True]])

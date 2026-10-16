@@ -4,6 +4,7 @@ import json
 
 import pandas as pd
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from quant_research_platform.artifacts.outputs.manifest import (
@@ -187,3 +188,61 @@ def test_consumed_prediction_rank_rejects_values_outside_centered_rank_domain(
         read_predictions(root, columns=("prediction_rank_score",))
     projected, _ = read_predictions(root, columns=("prediction_score",))
     assert projected.prediction_score.tolist() == [0.25]
+
+
+def test_prediction_writer_statistics_prune_actual_decoding(tmp_path, monkeypatch):
+    frame = pd.concat(
+        [make_price_volume_prediction_output_frame()] * 4, ignore_index=True
+    )
+    frame["timestamp"] = pd.to_datetime(
+        [
+            "2014-01-03T00:00:00",
+            "2014-02-03T00:00:00",
+            "2014-02-03T23:59:59.999999999",
+            "2014-03-03T00:00:00",
+        ],
+        format="ISO8601",
+    )
+    frame["prediction_score"] = [0.25, 0.5, 0.75, 1.0]
+    metadata = frame.attrs["prediction_metadata"]
+    metadata.update(
+        prediction_window={"start": "2014-01-03", "end": "2014-03-03"},
+        prediction_rows=len(frame),
+        effective_prediction_end=frame.timestamp.max().isoformat(),
+    )
+    root = write_prediction_outputs(
+        output_path=tmp_path / "prediction",
+        output_chunks=[frame.iloc[:1], frame.iloc[1:3], frame.iloc[3:]],
+        metadata=metadata,
+    )
+    with pq.ParquetFile(root / "prediction.parquet") as parquet:
+        assert parquet.metadata.num_row_groups == 3
+        for index in range(3):
+            group = parquet.metadata.row_group(index)
+            assert group.column(0).statistics.has_min_max
+            assert all(group.column(i).statistics is None for i in range(1, 4))
+    decoded = []
+    original = pq.ParquetFile.iter_batches
+
+    def observe(self, *args, **kwargs):
+        decoded.extend(kwargs["row_groups"])
+        yield from original(self, *args, **kwargs)
+
+    monkeypatch.setattr(pq.ParquetFile, "iter_batches", observe)
+    for window, expected in (
+        (TimeWindow("2014-02-03", "2014-02-03"), frame.iloc[1:3]),
+        (
+            TimeWindow(
+                "2014-02-04T07:59:59.999999999+08:00",
+                "2014-02-04T07:59:59.999999999+08:00",
+            ),
+            frame.iloc[2:3],
+        ),
+    ):
+        decoded.clear()
+        selected, _ = read_predictions(root, time_window=window)
+        pd.testing.assert_frame_equal(selected, expected.reset_index(drop=True))
+        assert decoded == [1]
+    decoded.clear()
+    pd.testing.assert_frame_equal(read_predictions(root)[0], frame)
+    assert decoded == [0, 1, 2]

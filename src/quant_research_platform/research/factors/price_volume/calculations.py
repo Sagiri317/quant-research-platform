@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from decimal import Decimal, localcontext
 from fractions import Fraction
 from itertools import accumulate
-from math import hypot, sqrt
+from math import fsum, hypot, sqrt
 from statistics import mean as arithmetic_mean
 
 import numpy as np
@@ -378,8 +378,15 @@ def _calculate_values(
         _, exponent = np.frexp(np.max(np.abs(current), axis=1, keepdims=True))
         scaled = np.ldexp(current, -exponent)
         denominator = np.sum(np.abs(scaled), axis=1)
+        numerator = np.sum(scaled, axis=1)
+        # Only cancellation at the reduction's error scale needs stable summation.
+        near_cancellation = np.abs(numerator) <= (
+            np.finfo("float64").eps * current.shape[1] * denominator
+        )
+        for row in np.flatnonzero(near_cancellation & (denominator != 0)):
+            numerator[row] = fsum(scaled[row])
         result = np.divide(
-            np.abs(np.sum(scaled, axis=1)),
+            np.abs(numerator),
             denominator,
             out=np.full(len(current), np.nan),
             where=denominator != 0,

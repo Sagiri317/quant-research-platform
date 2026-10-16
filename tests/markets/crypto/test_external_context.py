@@ -694,3 +694,96 @@ def test_external_adjacent_mid_returns_keep_order_and_chunk_state(steps):
     expected = float((Fraction(end) - Fraction(start)) / Fraction(start))
     assert full.bybit_return_100ms.iloc[-1] == expected
     assert full.bybit_return_500ms.iloc[-1] == expected
+
+
+@pytest.mark.parametrize("bad_field", ["price", "amount", "side"])
+def test_external_bad_trade_value_does_not_erase_quotes_or_unrelated_flow(bad_field):
+    times = pd.date_range("2026-08-01", periods=12, freq="100ms")
+    frame = pd.DataFrame(
+        {
+            "market_id": "crypto",
+            "asset_id": "btc_usdt",
+            "timestamp": times,
+            "segment_id": "s",
+            "mid": 100.0,
+        }
+    )
+    quotes = [
+        {
+            "local_timestamp": time.value // 1000,
+            "timestamp": time.value // 1000,
+            "bid_price": 99.0,
+            "ask_price": 101.0,
+        }
+        for time in times
+    ]
+    trades = [
+        {
+            "local_timestamp": time.value // 1000,
+            "timestamp": time.value // 1000,
+            "side": "buy",
+            "amount": 1.0,
+            "price": 100.0,
+        }
+        for time in times
+    ]
+    trades[4][bad_field] = None
+    result = pd.concat(
+        iter_external_context_frames(
+            [frame.iloc[:5], frame.iloc[5:]],
+            quotes=quotes,
+            trades=trades,
+            venue="bybit",
+            base_units_per_amount=1.0,
+            max_age_ms=100,
+        ),
+        ignore_index=True,
+    )
+    assert result.bybit_mid_usdt.notna().all()
+    assert result.bybit_return_100ms.iloc[1:].eq(0).all()
+    assert result.bybit_observed_signed_notional_flow_500ms.iloc[5:9].isna().all()
+    assert result.bybit_observed_signed_notional_flow_500ms.iloc[9:].eq(500).all()
+    if bad_field == "price":
+        assert result.bybit_observed_signed_base_flow_500ms.iloc[5:].eq(5).all()
+        assert result.bybit_observed_tfi_500ms.iloc[5:].eq(1).all()
+    else:
+        assert result.bybit_observed_signed_base_flow_500ms.iloc[5:9].isna().all()
+
+
+def test_new_invalid_quote_replaces_prior_quote_until_valid_observation():
+    times = pd.date_range("2026-08-01", periods=5, freq="100ms")
+    frame = pd.DataFrame(
+        {
+            "market_id": "crypto",
+            "asset_id": "btc_usdt",
+            "timestamp": times,
+            "segment_id": "s",
+            "mid": 100.0,
+        }
+    )
+    quotes = [
+        {
+            "local_timestamp": times[index].value // 1000,
+            "timestamp": times[index].value // 1000,
+            "bid_price": bid,
+            "ask_price": 101.0,
+        }
+        for index, bid in ((0, 99.0), (1, None), (3, 99.0))
+    ]
+    result = pd.concat(
+        iter_external_context_frames(
+            [frame.iloc[:2], frame.iloc[2:]],
+            quotes=quotes,
+            trades=(),
+            venue="bybit",
+            base_units_per_amount=1.0,
+            max_age_ms=1000,
+        ),
+        ignore_index=True,
+    )
+    assert result.bybit_mid_usdt.iloc[[0, 3, 4]].eq(100).all()
+    assert result.bybit_mid_usdt.iloc[1:3].isna().all()
+    assert result.bybit_quote_age_ms.tolist() == [0, 0, 100, 0, 100]
+    assert result.bybit_quote_observed_at.iloc[2] == times[1]
+    assert result.bybit_return_100ms.iloc[1:4].isna().all()
+    assert result.bybit_return_100ms.iloc[4] == 0

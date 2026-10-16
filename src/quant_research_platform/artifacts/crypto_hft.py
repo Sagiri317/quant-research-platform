@@ -378,7 +378,8 @@ def summarize_crypto_ledger(artifact, batches, *, windows_ns=None, consume_batch
     )
     if execution is None:
         raise ValueError("crypto_execution_summary_missing")
-    if expected is not None:
+    partial = execution.get("account_path_status") == "PARTIAL"
+    if expected is not None and not partial:
         if marker_index != len(expected):
             raise ValueError("crypto_ledger_window_marker_missing")
         if any(accumulated.values()) or previous != tuple(

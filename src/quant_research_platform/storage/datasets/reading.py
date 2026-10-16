@@ -29,7 +29,6 @@ from quant_research_platform.storage.datasets.inventory import (
     DatasetSessionInventory,
 )
 from quant_research_platform.storage.datasets.paths import (
-    format_year_partition_label,
     parse_year_partition_label,
     relative_partition_label,
     timestamp_column_from_spec_payload,
@@ -80,6 +79,7 @@ class DatasetSession:
     parquet_filters: tuple[tuple[str, str, Any], ...] | None
     all_paths: tuple[Path, ...]
     read_paths: tuple[Path, ...]
+    _expected_partition_rows: tuple[tuple[str, int], ...] | None = None
 
     @property
     def spec(self) -> dict[str, Any]:
@@ -127,6 +127,12 @@ class DatasetSession:
             )
             if self.native
             else self.read_paths,
+            _expected_partition_rows=_select_partition_row_counts(
+                self._expected_partition_rows,
+                _partition_years_for_selection(None, time_window),
+            )
+            if self.native and tuple(spec["partition_columns"]) == ("year",)
+            else self._expected_partition_rows,
             time_window=time_window,
             parquet_filters=(
                 *(self.parquet_filters or ()),
@@ -433,18 +439,17 @@ def open_dataset_session(
         raise ValueError("dataset_manifest_schema_id_invalid")
     validate_dataset_manifest_payload(manifest, spec=spec_payload, logical_columns=())
     inventory = DatasetSessionInventory(data_root=data_root)
+    expected_partition_rows = None
     if files is None:
-        partition_years = None if years is None else set(years)
-        if time_window is not None and tuple(spec_payload["partition_columns"]) == (
-            "year",
-        ):
-            start, end = time_window_date_bounds(time_window)
-            window_years = set(range(int(start.year), int(end.year) + 1))
-            partition_years = (
-                window_years
-                if partition_years is None
-                else partition_years & window_years
-            )
+        partition_years = _partition_years_for_selection(
+            years,
+            time_window
+            if tuple(spec_payload["partition_columns"]) == ("year",)
+            else None,
+        )
+        expected_partition_rows = _select_partition_row_counts(
+            tuple(manifest["partition_row_counts"].items()), partition_years
+        )
         inventory.discover(spec_payload, years=partition_years)
     else:
         for path in _selected_paths(root, files):
@@ -452,9 +457,6 @@ def open_dataset_session(
                 inventory.add(path)
             except ValueError as exc:
                 raise ValueError("invalid_dataset_part_files") from exc
-    paths = inventory.paths
-    if not paths and files is None and years is None and time_window is None:
-        raise ValueError("dataset_data_dir_missing")
     session = _build_dataset_session(
         root=root,
         data_root=data_root,
@@ -466,7 +468,33 @@ def open_dataset_session(
         row_filters=row_filters,
         years=_validated_years(years),
     )
-    return session
+    return replace(session, _expected_partition_rows=expected_partition_rows)
+
+
+def _partition_years_for_selection(years, time_window):
+    selected = None if years is None else set(years)
+    if time_window is not None:
+        start, end = time_window_date_bounds(time_window)
+        window_years = set(range(int(start.year), int(end.year) + 1))
+        selected = window_years if selected is None else selected & window_years
+    return selected
+
+
+def _select_partition_row_counts(partition_rows, years):
+    if partition_rows is None:
+        return None
+    return tuple(
+        (partition, rows)
+        for partition, rows in partition_rows
+        if years is None
+        or (
+            years
+            and (
+                partition == "unpartitioned"
+                or parse_year_partition_label(partition) in years
+            )
+        )
+    )
 
 
 def _build_dataset_session(
@@ -513,6 +541,8 @@ def _build_dataset_session(
     selected_paths = prune_paths_for_time_window(
         data_root, all_paths, spec=spec_payload, time_window=time_window
     )
+    if years == ():
+        selected_paths = ()
     if years is not None and tuple(spec_payload["partition_columns"]) == ("year",):
         selected_paths = tuple(
             path
@@ -553,9 +583,6 @@ def iter_dataset_chunks(
     batch_observer: Callable[[pa.RecordBatch, pd.DataFrame], None] | None = None,
 ) -> Iterator[pd.DataFrame]:
     rows_per_batch = _validated_batch_rows(batch_rows)
-    if not context.read_paths:
-        yield _empty_frame(context, context.logical_columns)
-        return
     key_index = None
     keys = None
 
@@ -682,6 +709,16 @@ def iter_dataset_file_batches(
         else {}
     )
     expected = pa.schema([context.arrow_schema.field(column) for column in columns])
+    expected_rows = dict(context._expected_partition_rows or ())
+    observed_rows = dict.fromkeys(expected_rows, 0)
+    present_partitions = {
+        relative_partition_label(context.data_root, path) for path in context.read_paths
+    }
+    if any(
+        rows and partition not in present_partitions
+        for partition, rows in expected_rows.items()
+    ):
+        raise ValueError("dataset_selected_partition_incomplete")
 
     def validate_metadata(metadata):
         try:
@@ -706,8 +743,14 @@ def iter_dataset_file_batches(
         merged = merge_logical_dtype_payloads([declared_logical, current])
         if merged != declared_logical:
             raise ValueError("manifest_logical_dtypes_mismatch")
+        if context._expected_partition_rows is not None:
+            if partition not in expected_rows and metadata.row_count:
+                raise ValueError("dataset_selected_partition_incomplete")
+            if partition in observed_rows:
+                observed_rows[partition] += metadata.row_count
 
     for path in context.read_paths:
+        partition = relative_partition_label(context.data_root, path)
         with closing_iterator(
             iter_declared_parquet_member_batches(
                 path,
@@ -724,6 +767,8 @@ def iter_dataset_file_batches(
                     yield path, frame
                 except GeneratorExit:
                     return
+    if observed_rows != expected_rows:
+        raise ValueError("dataset_selected_partition_incomplete")
 
 
 def dataset_primary_key_schema(
@@ -992,18 +1037,12 @@ def prune_paths_for_time_window(
     )
     if partition_columns != ("year",):
         return paths
-    start, end = time_window_date_bounds(time_window)
-    years = {
-        format_year_partition_label(year)
-        for year in range(int(start.year), int(end.year) + 1)
-    }
+    years = _partition_years_for_selection(None, time_window)
     return tuple(
         path
         for path in paths
         if path.parent == Path(data_root)
-        or format_year_partition_label(
-            parse_year_partition_label(relative_partition_label(data_root, path))
-        )
+        or parse_year_partition_label(relative_partition_label(data_root, path))
         in years
     )
 

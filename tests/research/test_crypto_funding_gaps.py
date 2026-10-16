@@ -16,7 +16,6 @@ from quant_research_platform.contracts.portfolios import (
     FundingEvent,
     FundingForecast,
     PortfolioCapital,
-    PortfolioTargetBlocked,
 )
 from quant_research_platform.markets.implementations.crypto.execution import (
     TakerConfig,
@@ -166,55 +165,64 @@ def test_no_covered_forecast_decision_stays_blocked(forecasts):
         events=(),
         settlement_qualification=(),
     )
-    with pytest.raises(
-        PortfolioTargetBlocked, match="portfolio_expected_funding_missing"
-    ):
-        _execute_portfolio(
-            execution_mode="continuous",
-            execute=lambda **kwargs: simulate_taker(
-                **kwargs,
-                prediction_column="prediction",
-                prediction_horizon_ms=50,
-                config=TakerConfig(1.0, 2.0, 0, 0.0, 50),
-                observed_coverage={"s1": (0, 101_000_000)},
-                capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
-                asset_id="btc_usdt",
-                decision_windows_ns=((0, 100_000_000),),
-            ),
-            books=[_state(0), _state(100)],
-            trades=None,
-            decisions=[{"timestamp_ms": 0, "prediction": 0.02}],
-            funding=funding,
-            coverage={"s1": (0, 101_000_000)},
-            trade_coverage=SimpleNamespace(covering=lambda *_: ("trade",)),
-            bounds=((0, 100_000_000),),
-            on_ledger=None,
-            on_episode=None,
-        )
+    result = _execute_portfolio(
+        execution_mode="continuous",
+        execute=lambda **kwargs: simulate_taker(
+            **kwargs,
+            prediction_column="prediction",
+            prediction_horizon_ms=50,
+            config=TakerConfig(1.0, 2.0, 0, 0.0, 50),
+            observed_coverage={"s1": (0, 101_000_000)},
+            capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
+            asset_id="btc_usdt",
+            decision_windows_ns=((0, 100_000_000),),
+        ),
+        books=[_state(0), _state(100)],
+        trades=None,
+        decisions=[{"timestamp_ms": 0, "prediction": 0.02}],
+        funding=funding,
+        coverage={"s1": (0, 101_000_000)},
+        trade_coverage=SimpleNamespace(covering=lambda *_: ("trade",)),
+        bounds=((0, 100_000_000),),
+        on_ledger=None,
+        on_episode=None,
+    )
+    assert result["selection_status"] == "BLOCKED"
+    assert result["net_pnl"] == 0 and result["created_orders"] == 0
 
 
 @pytest.mark.parametrize("missing", ["settlement", "book", "trade"])
-def test_forecast_gap_policy_does_not_relax_actual_source_coverage(missing):
+def test_flat_path_does_not_require_unconsumed_source_coverage(missing):
     funding = SimpleNamespace(
-        identity="f" * 64,
         coverage=() if missing == "settlement" else ((0, 101_000_000),),
+        forecasts=(),
+        events=(),
+        settlement_qualification=(),
     )
-    with pytest.raises(PortfolioTargetBlocked, match="coverage_incomplete"):
-        _execute_portfolio(
-            execution_mode="continuous",
-            execute=lambda **_: pytest.fail("unqualified execution"),
-            books=(),
-            trades=None,
-            decisions=(),
-            funding=funding,
-            coverage={} if missing == "book" else {"s1": (0, 101_000_000)},
-            trade_coverage=SimpleNamespace(
-                covering=lambda *_: () if missing == "trade" else ("trade",)
-            ),
-            bounds=((0, 100_000_000),),
-            on_ledger=None,
-            on_episode=None,
-        )
+    result = _execute_portfolio(
+        execution_mode="continuous",
+        execute=lambda **kwargs: simulate_taker(
+            **kwargs,
+            prediction_column="prediction",
+            prediction_horizon_ms=50,
+            config=TakerConfig(1.0, 2.0, 0, 0.0, 50),
+            observed_coverage={} if missing == "book" else {"s1": (0, 101_000_000)},
+            capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
+            asset_id="btc_usdt",
+            decision_windows_ns=((0, 100_000_000),),
+        ),
+        books=() if missing == "book" else [_state(0), _state(100)],
+        trades=None,
+        decisions=(),
+        funding=funding,
+        coverage={} if missing == "book" else {"s1": (0, 101_000_000)},
+        trade_coverage=None,
+        bounds=((0, 100_000_000),),
+        on_ledger=None,
+        on_episode=None,
+    )
+    assert result["net_pnl"] == 0 and result["created_orders"] == 0
+    assert result["account_path_status"] == "COMPLETE"
 
 
 @pytest.mark.parametrize(
@@ -334,18 +342,6 @@ def test_independent_episode_gap_does_not_block_covered_sibling(
             on_episode=emit,
         )
 
-    if all_uncovered:
-        with pytest.raises(
-            PortfolioTargetBlocked, match="portfolio_expected_funding_missing"
-        ):
-            write_crypto_episode_artifact(
-                tmp_path / "episodes",
-                capital=capital,
-                metadata=metadata,
-                produce=produce,
-            )
-        assert not (tmp_path / "episodes").exists()
-        return
     root = write_crypto_episode_artifact(
         tmp_path / "episodes", capital=capital, metadata=metadata, produce=produce
     )
@@ -357,14 +353,17 @@ def test_independent_episode_gap_does_not_block_covered_sibling(
         ),
     )
     assert [s["execution"]["selection_status"] for s in summaries] == [
-        "COMPLETE",
+        "BLOCKED" if all_uncovered else "COMPLETE",
         "BLOCKED",
     ]
     assert [s["execution"]["funding_decision_coverage"] for s in summaries] == [
-        1.0,
+        0.0 if all_uncovered else 1.0,
         0.0,
     ]
-    assert [s["economics"]["fill_events"] for s in summaries] == [1, 0]
+    assert [s["economics"]["fill_events"] for s in summaries] == [
+        0 if all_uncovered else 1,
+        0,
+    ]
     assert [s["economics"]["initial_capital"] for s in summaries] == [1000.0, 1000.0]
 
     statistic = read_statistics_artifact(
@@ -378,12 +377,15 @@ def test_independent_episode_gap_does_not_block_covered_sibling(
     )
     with statistic.table("crypto_execution_diagnostics.parquet") as frame:
         aggregate = frame.loc[frame.episode_id.eq("all")].set_index("metric_id")
-        assert aggregate.loc["funding_selection_status", "text"] == "PARTIAL"
-        assert aggregate.loc["funding_decision_coverage", "value"] == 0.5
-        assert set(frame.loc[frame.metric_id.eq("selection_status"), "text"]) == {
-            "COMPLETE",
-            "BLOCKED",
-        }
+        assert aggregate.loc["funding_selection_status", "text"] == (
+            "BLOCKED" if all_uncovered else "PARTIAL"
+        )
+        assert aggregate.loc["funding_decision_coverage", "value"] == (
+            0.0 if all_uncovered else 0.5
+        )
+        assert set(frame.loc[frame.metric_id.eq("selection_status"), "text"]) == (
+            {"BLOCKED"} if all_uncovered else {"COMPLETE", "BLOCKED"}
+        )
     with statistic.table("crypto_portfolio_statistics.parquet") as frame:
         assert (
             not frame.loc[frame.episode_id.eq("all"), "metric_id"]

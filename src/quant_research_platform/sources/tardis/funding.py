@@ -17,6 +17,7 @@ from quant_research_platform.sources.binance.funding import (
     FUNDING_COLUMNS,
     FUNDING_SCHEMA_ID,
     _manifest,
+    _nullable_funding_value,
     _records,
     _settlement_response,
     settlement_endpoint,
@@ -164,22 +165,19 @@ def import_funding_history(
                         error="tardis_funding_observed_time_invalid",
                     ).value
                     mark = value["data"]
-                    until = (
-                        strict_non_negative_integer(
-                            mark.get("T"),
-                            error="tardis_funding_forecast_time_invalid",
-                        )
-                        * 1_000_000
+                    until = _nullable_funding_value(
+                        mark.get("T"), strict_non_negative_integer
                     )
-                    rate = strict_finite_float(
-                        mark["r"],
-                        error="tardis_funding_forecast_rate_invalid",
+                    if until is not None:
+                        until *= 1_000_000
+                    rate = _nullable_funding_value(mark.get("r"), strict_finite_float)
+                    price = _nullable_funding_value(
+                        mark.get("p"), strict_positive_float
                     )
-                    price = strict_positive_float(
-                        mark.get("p"),
-                        error="tardis_funding_forecast_mark_invalid",
+                    projection = tuple(
+                        (parsed, mark.get(field) if parsed is None else None)
+                        for field, parsed in (("T", until), ("r", rate), ("p", price))
                     )
-                    projection = (until, rate, price)
                     if observed < previous_observed:
                         raise ValueError("tardis_funding_forecast_order_invalid")
                     if observed == previous_observed:
@@ -187,22 +185,31 @@ def import_funding_history(
                             raise ValueError("tardis_funding_forecast_conflict")
                         continue
                     previous_observed, previous_projection = observed, projection
-                    if until > observed:
-                        forecast = FundingForecast(
-                            observed, until, ((until, -rate * price),)
+                    if until is None or until <= observed:
+                        forecast = FundingForecast(observed, observed, ())
+                    else:
+                        amount = (
+                            0.0
+                            if rate == 0.0 and price is None
+                            else None
+                            if rate is None or price is None
+                            else _nullable_funding_value(
+                                -rate * price, strict_finite_float
+                            )
                         )
-                        _yield_value = (
-                            "forecast",
-                            observed,
-                            until,
-                            None,
-                            None,
-                            [list(item) for item in forecast.cashflows],
-                        )
-                        try:
-                            yield _yield_value
-                        except GeneratorExit:
-                            return
+                        forecast = FundingForecast(observed, until, ((until, amount),))
+                    _yield_value = (
+                        "forecast",
+                        observed,
+                        forecast.known_until_ns,
+                        None,
+                        None,
+                        [list(item) for item in forecast.cashflows],
+                    )
+                    try:
+                        yield _yield_value
+                    except GeneratorExit:
+                        return
                     value = mark = forecast = None
 
     def validate(root):

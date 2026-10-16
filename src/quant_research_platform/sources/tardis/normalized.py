@@ -123,9 +123,28 @@ def _rows(path, *, exchange, dataset_type, symbol, date, sha256):
                     try:
                         row[key] = float(value)
                     except ValueError:
-                        raise ValueError("tardis_normalized_numeric_invalid") from None
-                    if not math.isfinite(row[key]):
-                        raise ValueError("tardis_normalized_numeric_invalid")
+                        row[key] = None
+                    if row[key] is not None and (
+                        not math.isfinite(row[key])
+                        or (
+                            key
+                            in {
+                                "price",
+                                "amount",
+                                "ask_price",
+                                "bid_price",
+                                "mark_price",
+                                "index_price",
+                                "last_price",
+                            }
+                            and row[key] <= 0
+                        )
+                        or (
+                            key in {"ask_amount", "bid_amount", "open_interest"}
+                            and row[key] < 0
+                        )
+                    ):
+                        row[key] = None
             observed = row["local_timestamp"]
             if (
                 observed is None
@@ -136,11 +155,7 @@ def _rows(path, *, exchange, dataset_type, symbol, date, sha256):
                 raise ValueError("tardis_normalized_observation_invalid")
             previous = observed
             if dataset_type == "trades" and row["side"] not in {"buy", "sell"}:
-                raise ValueError("tardis_normalized_side_invalid")
-            if dataset_type == "trades" and any(
-                row[key] is None or row[key] <= 0 for key in ("price", "amount")
-            ):
-                raise ValueError("tardis_normalized_trade_value_invalid")
+                row["side"] = None
             _yield_value = number, row
             try:
                 yield _yield_value

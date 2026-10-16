@@ -344,6 +344,148 @@ def _roles(
     }
 
 
+def _microstructure_inputs(column):
+    """Declare only the values used by each mathematical definition."""
+
+    def depth(level):
+        return (f"bid_depth_{level}", f"ask_depth_{level}")
+
+    if column == "spread":
+        return ("book_spread",)
+    if column == "relative_spread":
+        return ("book_spread", "mid")
+    if column in {"microprice", "microprice_deviation"}:
+        return (*depth(1), "book_spread", *(("mid",) if column == "microprice" else ()))
+    if column.startswith("imbalance_"):
+        return tuple(
+            name
+            for level in column.split("_")[1:]
+            if level.isdigit()
+            for name in depth(int(level))
+        )
+    if column in {"return_100ms", "return_500ms", "realized_volatility_1s"}:
+        return ("mid",)
+    if column == "top10_depth_per_spread":
+        return (*depth(10), "book_spread")
+    if column == "near_depth_share_1_10":
+        return (*depth(1), *depth(10))
+    if column.startswith("depth_normalized_ofi_"):
+        return ("book_ofi_100ms", *depth(1))
+    if column.startswith("ofi_"):
+        return ("book_ofi_100ms",)
+    if column.startswith("trade_flow_imbalance_"):
+        return (
+            "observed_signed_trade_volume_100ms",
+            "observed_taker_buy_volume_100ms",
+            "observed_taker_sell_volume_100ms",
+        )
+    if column == "signed_trade_flow_100ms":
+        return ("observed_signed_trade_volume_100ms",)
+    side = "buy" if "buy" in column else "sell"
+    return (
+        f"observed_taker_{side}_volume_100ms",
+        *(
+            (f"{'ask' if side == 'buy' else 'bid'}_depth_1",)
+            if "pressure" in column
+            else ()
+        ),
+    )
+
+
+def derivative_channels(columns):
+    """Resolve selected factor and context columns to native state channels."""
+    channels = set()
+    for column in columns:
+        if column in {
+            "mark_mid_basis",
+            "mark_index_basis",
+            "perp_index_basis",
+            "funding_rate",
+            "time_to_next_funding",
+        }:
+            channels.add("premiumIndex")
+        elif "open_interest" in column:
+            channels.add("openInterest")
+        elif "force_order" in column:
+            channels.add("forceOrder")
+        elif column in {
+            "top_position_long_short_ratio",
+            "top_account_long_short_ratio",
+            "global_account_long_short_ratio",
+            "taker_long_short_ratio",
+        }:
+            channels.add(
+                {
+                    "top_position_long_short_ratio": "topLongShortPositionRatio",
+                    "top_account_long_short_ratio": "topLongShortAccountRatio",
+                    "global_account_long_short_ratio": "globalLongShortAccountRatio",
+                    "taker_long_short_ratio": "takerlongshortRatio",
+                }[column]
+            )
+        else:
+            channels.update(
+                channel
+                for channel in HFT_DERIVATIVE_CHANNELS
+                if column.startswith(channel + "_")
+            )
+    return tuple(channel for channel in HFT_DERIVATIVE_CHANNELS if channel in channels)
+
+
+def spot_dependencies(columns, *, perpetual=False):
+    """Resolve each side of a spot/perpetual definition independently."""
+    factors = []
+    inputs = []
+    for name in columns:
+        if name == "spot_perp_basis":
+            inputs.append("mid")
+            continue
+        if name not in HFT_SPOT_FACTOR_COLUMNS:
+            continue
+        divergence = name.startswith("spot_perp_")
+        if perpetual and not divergence:
+            continue
+        name = (
+            name.removeprefix("lagged_")
+            .removeprefix("spot_perp_")
+            .removeprefix("spot_")
+            .replace("_divergence", "")
+        )
+        name = name.replace("normalized_ofi_", "depth_normalized_ofi_").replace(
+            "tfi_", "trade_flow_imbalance_"
+        )
+        factors.append(name)
+        inputs.extend(_microstructure_inputs(name))
+    if not perpetual:
+        inputs.append("observed_utc")
+    return tuple(dict.fromkeys(inputs)), tuple(dict.fromkeys(factors))
+
+
+def cross_asset_inputs(columns):
+    fields = []
+    for column in columns:
+        if column not in HFT_CROSS_ASSET_FACTOR_COLUMNS:
+            continue
+        name = column.split("_", 1)[1].removeprefix("lagged_")
+        fields.append(
+            {
+                "normalized_ofi_500ms": "depth_normalized_ofi_500ms",
+                "tfi_500ms": "trade_flow_imbalance_500ms",
+            }.get(name, name)
+        )
+    return tuple(dict.fromkeys(fields))
+
+
+def external_channels(columns):
+    channels = set()
+    for column in columns:
+        name = column.partition("_")[2]
+        if name.startswith(("observed_", "trade_")):
+            channels.add("trades")
+        elif name in HFT_EXTERNAL_FIELDS or name.startswith("quote_"):
+            channels.add("quotes")
+    return tuple(kind for kind in ("quotes", "trades") if kind in channels)
+
+
 def factor_catalog():
     from quant_research_platform.catalog.factors import FactorCatalog
     from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
@@ -353,20 +495,7 @@ def factor_catalog():
             factor_id=column,
             market_id=market_ids.MARKET_ID,
             factor_set=FactorSet.STANDARD,
-            input_columns=(
-                "mid",
-                "book_spread",
-                "bid_depth_1",
-                "ask_depth_1",
-                "bid_depth_5",
-                "ask_depth_5",
-                "bid_depth_10",
-                "ask_depth_10",
-                "book_ofi_100ms",
-                "observed_signed_trade_volume_100ms",
-                "observed_taker_buy_volume_100ms",
-                "observed_taker_sell_volume_100ms",
-            ),
+            input_columns=_microstructure_inputs(column),
             output_column=column,
             family="microstructure",
             required_input_data_id="binance_futures_microstructure_factors_100ms",
@@ -380,7 +509,9 @@ def factor_catalog():
             factor_id=column,
             market_id=market_ids.MARKET_ID,
             factor_set=FactorSet.STANDARD,
-            input_columns=("mid",),
+            input_columns=("mid",)
+            if column in {"mark_mid_basis", "perp_index_basis"}
+            else ("timestamp",),
             output_column=column,
             family="derivatives_state",
             required_input_data_id=market_ids.HFT_DERIVATIVE_DATA_ID,
@@ -394,7 +525,7 @@ def factor_catalog():
             factor_id=column,
             market_id=market_ids.MARKET_ID,
             factor_set=FactorSet.STANDARD,
-            input_columns=("mid",),
+            input_columns=spot_dependencies((column,))[0],
             output_column=column,
             family="spot_perp",
             required_input_data_id=market_ids.HFT_SPOT_CONTEXT_DATA_ID,
@@ -408,7 +539,7 @@ def factor_catalog():
             factor_id=column,
             market_id=market_ids.MARKET_ID,
             factor_set=FactorSet.STANDARD,
-            input_columns=HFT_INFORMATION_COLUMNS,
+            input_columns=cross_asset_inputs((column,)),
             output_column=column,
             family="cross_asset",
             required_input_data_id=market_ids.HFT_CROSS_ASSET_DATA_ID,
@@ -422,7 +553,9 @@ def factor_catalog():
             factor_id=f"{venue}_{column}",
             market_id=market_ids.MARKET_ID,
             factor_set=FactorSet.STANDARD,
-            input_columns=("mid",),
+            input_columns=("mid",)
+            if column in {"price_difference", "relative_mid_dispersion"}
+            else ("timestamp",),
             output_column=f"{venue}_{column}",
             family="external_price_discovery",
             required_input_data_id=data_id,

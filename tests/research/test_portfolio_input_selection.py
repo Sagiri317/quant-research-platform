@@ -127,6 +127,23 @@ def test_rights_unit_proof_reuses_selected_panel_and_keeps_history(
 def test_calibration_selection_preserves_duplicate_observations(
     tmp_path, native_schedule
 ):
+    from quant_research_platform.storage.datasets import write_dataset
+    from tests.helpers.portfolio_inputs import _interim_specs
+
+    calendar_dates = pd.date_range("2023-01-01", "2023-02-02")
+    calendar_root = tmp_path / "calendar"
+    write_dataset(
+        calendar_root,
+        pd.DataFrame(
+            {
+                "timestamp": calendar_dates,
+                "calendar_date": calendar_dates,
+                "source_market_type": 1,
+                "is_trading_day": True,
+            }
+        ),
+        spec=_interim_specs().get("trading_calendar"),
+    )
     days = pd.date_range("2023-01-01", periods=8, freq="4D")
     observations = pd.DataFrame(
         [
@@ -188,6 +205,8 @@ def test_calibration_selection_preserves_duplicate_observations(
         {
             "observations": options,
             "scheduled_intervals": schedule,
+            "rebalance_schedule": "daily",
+            "calendar": str(calendar_root),
             "cutoff": "2023-02-01",
             "selection_group": "global",
             "output": str(tmp_path / "calibration.json"),
@@ -205,6 +224,8 @@ def test_calibration_selection_preserves_duplicate_observations(
             {
                 "observations": {**options, "columns": ["prediction_rank_score"]},
                 "scheduled_intervals": schedule,
+                "rebalance_schedule": "daily",
+                "calendar": str(calendar_root),
                 "cutoff": "2023-02-01",
                 "selection_group": "global",
                 "output": str(tmp_path / "excluded.json"),

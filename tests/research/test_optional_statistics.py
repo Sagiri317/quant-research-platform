@@ -24,8 +24,8 @@ from quant_research_platform.research.portfolios.diagnostics import portfolio_st
 from quant_research_platform.research.statistics_production import factor_statistics
 
 
-def _cash_ledger(root):
-    candidate = PortfolioCandidateSpec(
+def _cash_ledger(root, *, candidate=None):
+    candidate = candidate or PortfolioCandidateSpec(
         candidate_id="cash",
         selection_group="global",
         construction="top20_equal_weight",
@@ -36,7 +36,7 @@ def _cash_ledger(root):
     )
     dates = pd.bdate_range("2024-01-02", periods=4)
     capital = PortfolioCapital(
-        candidate_id="cash",
+        candidate_id=candidate.candidate_id,
         initial_capital=1000.0,
         valuation_currency="CNY",
         valuation_method="adjusted_notional",
@@ -121,6 +121,7 @@ def _cash_ledger(root):
 def test_ledger_only_analyses_do_not_open_market_inputs(
     tmp_path, monkeypatch, analyses
 ):
+    from quant_research_platform.research.portfolios import production
     from quant_research_platform.storage.datasets import reading
 
     ledger = tmp_path / "ledger"
@@ -130,6 +131,7 @@ def test_ledger_only_analyses_do_not_open_market_inputs(
         raise AssertionError("unrequested market data read")
 
     monkeypatch.setattr(reading, "read_dataset", unexpected)
+    monkeypatch.setattr(production, "read_dataset", unexpected)
     config = {
         "ledgers": [str(ledger)],
         "window": window,
@@ -606,3 +608,115 @@ def test_portfolio_statistics_role_is_optional_description(tmp_path, sample_role
     assert artifact.metadata["sample_role"] == (sample_role or "exploratory")
     with artifact.table("portfolio_performance.parquet") as values:
         assert values.set_index("metric_id").loc["terminal_nav", "value"] == 1000.0
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+def test_benchmark_only_preserves_nonapplicable_candidates(
+    tmp_path, monkeypatch, mixed
+):
+    import pyarrow.parquet as pq
+
+    from quant_research_platform.artifacts.statistics import _ARROW_SCHEMAS
+    from quant_research_platform.research.portfolios import production
+    from quant_research_platform.storage.datasets import reading, write_dataset
+    from tests.helpers.portfolio_inputs import _interim_specs
+
+    ledger = tmp_path / "cash"
+    window = _cash_ledger(ledger)
+    config = {
+        "ledgers": [str(ledger)],
+        "window": window,
+        "analyses": ["benchmark"],
+        "benchmark_total_return_indices": {},
+        "output": str(tmp_path / "benchmark"),
+    }
+    if mixed:
+        candidate = PortfolioCandidateSpec(
+            candidate_id="enhanced",
+            selection_group="global",
+            construction="benchmark_enhanced",
+            prediction_selector="explicit",
+            rebalance_schedule="daily",
+            top_quantile=None,
+            benchmark_id="csi500",
+            risk_style_columns=("size",),
+        )
+        enhanced = tmp_path / "enhanced"
+        assert _cash_ledger(enhanced, candidate=candidate) == window
+        config["ledgers"].append(str(enhanced))
+        dates = pd.bdate_range(window["start"], window["end"])
+        source = tmp_path / "index"
+        write_dataset(
+            source,
+            pd.DataFrame(
+                {
+                    "source_asset_id": "H00905",
+                    "timestamp": dates,
+                    "trade_date": dates,
+                    "index_name": "CSI500 total return",
+                    "open": [100.0, 100.0, 110.0, 99.0],
+                    "close": [100.0, 100.0, 110.0, 99.0],
+                    "period_return": np.nan,
+                }
+            ),
+            spec=_interim_specs().get("index_market"),
+        )
+        config["benchmark_total_return_indices"] = {"csi500": "H00905"}
+        config["inputs"] = {
+            "index_market": {"path": str(source), "columns": ["open", "close"]}
+        }
+    else:
+
+        def unexpected(*args, **kwargs):
+            raise AssertionError("nonapplicable benchmark opened market inputs")
+
+        monkeypatch.setattr(reading, "read_dataset", unexpected)
+        monkeypatch.setattr(production, "read_dataset", unexpected)
+        monkeypatch.setattr(production, "_iter_input_sessions", unexpected)
+
+    artifact = read_statistics_artifact(portfolio_statistics(config))
+    assert set(artifact._members) == {
+        "portfolio_daily.parquet",
+        "portfolio_performance.parquet",
+    }
+    with artifact.table("portfolio_daily.parquet") as daily:
+        simple = daily.loc[daily.candidate_id.eq("cash")]
+        assert len(simple) == 2
+        assert simple.benchmark_status.eq("NOT_APPLICABLE").all()
+        assert (
+            simple[["benchmark_return", "active_return", "relative_wealth"]]
+            .isna()
+            .all()
+            .all()
+        )
+        if mixed:
+            enhanced = daily.loc[daily.candidate_id.eq("enhanced")]
+            assert len(enhanced) == 2 and enhanced.benchmark_status.eq("DEFINED").all()
+            assert enhanced.benchmark_return.to_numpy() == pytest.approx(
+                [0.1, -0.1], rel=2e-14, abs=0
+            )
+            assert enhanced.active_return.to_numpy() == pytest.approx(
+                [-0.1, 0.1], rel=2e-14, abs=0
+            )
+    member = "portfolio_performance.parquet"
+    assert (
+        pq.read_schema(artifact.root / member).remove_metadata()
+        == _ARROW_SCHEMAS[member]
+    )
+    with artifact.table(member) as performance:
+        if mixed:
+            assert set(performance.candidate_id) == {"enhanced"}
+            assert set(performance.metric_id) == {
+                "annualized_active_return",
+                "tracking_error",
+                "net_information_ratio",
+                "relative_wealth",
+                "max_active_drawdown",
+            }
+            assert performance.status.eq("DEFINED").all()
+            assert performance.set_index("metric_id").loc[
+                "relative_wealth", "value"
+            ] == pytest.approx(100.0 / 99.0, rel=2e-14, abs=0)
+        else:
+            assert performance.empty
+            assert list(performance.columns) == _ARROW_SCHEMAS[member].names

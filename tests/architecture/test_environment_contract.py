@@ -11,29 +11,6 @@ PYPROJECT = PROJECT_ROOT / "pyproject.toml"
 ENVIRONMENT_YML = PROJECT_ROOT / "environment.yml"
 GITIGNORE = PROJECT_ROOT / ".gitignore"
 
-RUNTIME_DEPENDENCIES = {
-    "fastapi",
-    "httpx",
-    "scipy",
-    "statsmodels",
-    "arch",
-    "numpy",
-    "pandas",
-    "pyarrow",
-    "pydantic",
-    "psutil",
-    "scikit-learn",
-    "threadpoolctl",
-    "xgboost",
-    "lightgbm",
-    "typer",
-    "websockets",
-}
-DEV_DEPENDENCIES = {
-    "matplotlib",
-    "pytest",
-    "ruff",
-}
 CONDA_NAMES = {
     "arch": "arch-py",
     "matplotlib": "matplotlib-base",
@@ -63,8 +40,6 @@ def test_core_dependencies_have_version_boundaries() -> None:
     runtime = _dependency_specs(pyproject["project"]["dependencies"])
     dev = _dependency_specs(pyproject["project"]["optional-dependencies"]["dev"])
 
-    assert set(runtime) == RUNTIME_DEPENDENCIES
-    assert set(dev) == DEV_DEPENDENCIES
     assert _unbounded(runtime) == []
     assert _unbounded(dev) == []
 

@@ -382,15 +382,15 @@ def test_zero_value_retained_units_are_counted_in_valuation_diagnostics():
         _research_valuation_observation,
     )
     from quant_research_platform.research.portfolios.production import (
-        RESEARCH_VALUATION_VERSION,
+        RESEARCH_VALUATION_POLICY,
     )
 
     diagnostics = [
         PortfolioDiagnostic(
             "__cash__",
             None,
-            "research_valuation_version",
-            text=RESEARCH_VALUATION_VERSION,
+            "research_valuation_policy",
+            text=RESEARCH_VALUATION_POLICY,
         ),
         *(
             PortfolioDiagnostic(

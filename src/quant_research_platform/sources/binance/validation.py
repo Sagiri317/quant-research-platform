@@ -18,6 +18,7 @@ def validate_market_payload(
     *,
     source_schema: str = "qrp-binance-recorder",
     observed_time_ns: int | None = None,
+    validate_values: bool = True,
 ) -> dict[str, Any]:
     """Validate one public stream payload without endpoint ownership."""
 
@@ -63,10 +64,14 @@ def validate_market_payload(
                     payload.get(key), error="binance_recorder_depth_id_invalid"
                 )
         validate_depth_update_levels(
-            payload.get("b"), error="binance_recorder_depth_bids_invalid"
+            payload.get("b"),
+            error="binance_recorder_depth_bids_invalid",
+            validate_values=validate_values,
         )
         validate_depth_update_levels(
-            payload.get("a"), error="binance_recorder_depth_asks_invalid"
+            payload.get("a"),
+            error="binance_recorder_depth_asks_invalid",
+            validate_values=validate_values,
         )
         return payload
     for key in ("a", "f", "l", "T"):
@@ -75,11 +80,20 @@ def validate_market_payload(
         )
     if payload["l"] < payload["f"]:
         raise ValueError("binance_recorder_trade_id_range_invalid")
-    strict_positive_float(
-        payload.get("p"), error="binance_recorder_trade_price_invalid"
-    )
-    _visible_trade_quantity(market_type, payload, historical_time=historical_time)
-    strict_boolean(payload.get("m"), error="binance_recorder_trade_side_invalid")
+    if validate_values:
+        strict_boolean(payload.get("m"), error="binance_recorder_trade_side_invalid")
+    if (
+        validate_values
+        and market_type == FUTURES_MARKET_TYPE
+        and (historical_time is None or historical_time >= 1767139200000)
+        and "nq" not in payload
+    ):
+        raise ValueError("binance_recorder_trade_visible_quantity_invalid")
+    if validate_values:
+        strict_positive_float(
+            payload.get("p"), error="binance_recorder_trade_price_invalid"
+        )
+        _visible_trade_quantity(market_type, payload, historical_time=historical_time)
     return payload
 
 
@@ -128,7 +142,9 @@ def strict_non_negative_integer(value: object, *, error: str) -> int:
     return number
 
 
-def validate_depth_update_levels(value: object, *, error: str) -> None:
+def validate_depth_update_levels(
+    value: object, *, error: str, validate_values: bool = True
+) -> None:
     """Validate raw Binance ``[price, quantity]`` pairs without normalizing."""
 
     if not isinstance(value, list):
@@ -136,8 +152,9 @@ def validate_depth_update_levels(value: object, *, error: str) -> None:
     for level in value:
         if not isinstance(level, list) or len(level) != 2:
             raise ValueError(error)
-        strict_positive_float(level[0], error=error)
-        strict_non_negative_float(level[1], error=error)
+        if validate_values:
+            strict_positive_float(level[0], error=error)
+            strict_non_negative_float(level[1], error=error)
 
 
 def _strict_integer(value: object, *, error: str) -> int:

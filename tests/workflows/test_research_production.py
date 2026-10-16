@@ -320,6 +320,8 @@ def test_frozen_alpha_schedules_use_real_mature_prediction_returns(
             config = {
                 "observations": str(root / "observations.parquet"),
                 "scheduled_intervals": str(root / "intervals.parquet"),
+                "rebalance_schedule": schedule,
+                "calendar": str(case.paths["trading_calendar"]),
                 "cutoff": case.validation["end"],
                 "selection_group": group,
                 "output": str(root / "calibration.json"),
@@ -327,7 +329,10 @@ def test_frozen_alpha_schedules_use_real_mature_prediction_returns(
             output = calibrate(config)
             payload = json.loads(output.read_text())
             frozen, cutoff = frozen_alpha_calibration(
-                payload, cutoff=case.validation["end"], selection_group=group
+                payload,
+                cutoff=case.validation["end"],
+                selection_group=group,
+                rebalance_schedule=schedule,
             )
             assert frozen.coverage >= 0.8 and frozen.valid_rebalance_dates >= 6
             assert pd.Timestamp(cutoff) == pd.Timestamp(case.validation["end"])

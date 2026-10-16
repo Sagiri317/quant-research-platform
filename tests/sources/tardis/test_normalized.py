@@ -318,7 +318,8 @@ def test_early_close_finishes_actual_decode_before_source_evidence(
     elif damage == "row_tail":
         prefix, last = text.rstrip("\n").rsplit("\n", 1)
         raw = gzip.compress(
-            (prefix + "\n" + last.replace(",buy,", ",bad,") + "\n").encode(), mtime=0
+            (prefix + "\n" + last.replace(",BTCUSDT,", ",ETHUSDT,") + "\n").encode(),
+            mtime=0,
         )
         manifest.update(
             sha256=hashlib.sha256(raw).hexdigest(), compressed_bytes=len(raw)
@@ -393,3 +394,32 @@ def test_consumer_failure_stays_primary_and_does_not_finish_source_evidence(
     assert caught.value is primary
     assert any("BadGzipFile" in note for note in primary.__notes__)
     assert identities == []
+
+
+def test_bad_numeric_cell_keeps_raw_row_and_unrelated_fields(tmp_path, monkeypatch):
+    raw = gzip.compress(
+        b"exchange,symbol,timestamp,local_timestamp,id,side,price,amount\nbybit,BTCUSDT,1785542400000000,1785542400000001,1,buy,NaN,2\nbybit,BTCUSDT,1785542400000000,1785542400000002,2,sell,100,-1\nbybit,BTCUSDT,1785542400000000,1785542400000003,3,sell,101,1\nbybit,BTCUSDT,1785542400000000,1785542400000004,4,unknown,102,2\n",
+        mtime=0,
+    )
+    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: Response(raw))
+    root = tmp_path / "archive"
+    manifest = download_dataset(
+        root,
+        exchange="bybit",
+        dataset_type="trades",
+        symbol="BTCUSDT",
+        date="2026-08-01",
+    )
+    assert manifest["row_count"] == 4
+    assert (root / "data.csv.gz").read_bytes() == raw
+    rows = list(
+        iter_records(
+            root.parent,
+            archive_paths=(root.name,),
+            time_window=TimeWindow("2026-08-01", "2026-08-01"),
+        )
+    )
+    assert rows[0]["price"] is None and rows[0]["amount"] == 2
+    assert rows[1]["price"] == 100 and rows[1]["amount"] is None
+    assert rows[2]["price"] == 101 and rows[2]["amount"] == 1
+    assert rows[3]["side"] is None and rows[3]["amount"] == 2

@@ -332,6 +332,8 @@ def run_a_share_acceptance(project_root: Path):
             {
                 "observations": str(calibration_root / "observations.parquet"),
                 "scheduled_intervals": str(calibration_root / "intervals.parquet"),
+                "rebalance_schedule": "weekly-last-trading-day",
+                "calendar": str(case.paths["trading_calendar"]),
                 "cutoff": validation["end"],
                 "selection_group": group,
                 "output": str(calibration_root / "calibration.json"),

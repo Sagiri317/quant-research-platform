@@ -311,7 +311,16 @@ class TardisArchive:
                             return
                         continue
                     if identity is None:
-                        continue
+                        if _gap is None or _gap.get("reason") != "invalid_trade_values":
+                            continue
+                        identity = (
+                            closed[-1]["observation_id"]
+                            if closed
+                            else (
+                                f"tardis:{member['offset_minutes']}:{number}:"
+                                f"{raw_symbol}:agg_trades"
+                            )
+                        )
                     depth = channel != "aggTrade"
                     payload = value["data"]
                     if market_type == SPOT_MARKET_TYPE:
@@ -340,7 +349,7 @@ class TardisArchive:
                             + identity
                             if depth
                             else None,
-                            "price_unit": self.manifest["price_units"][symbol],
+                            "price_unit": self.manifest["price_units"].get(symbol),
                         },
                     )
                     try:
@@ -412,16 +421,18 @@ class TardisArchive:
         ) != (row["start_ns"], row["end_ns"]):
             raise ValueError("tardis_observation_interval_mismatch")
 
-    def iter_state_observations(self, *, symbol):
+    def iter_state_observations(self, *, symbol, channels=STATE_CHANNELS):
         """Yield native states with observed clocks and disconnect generations."""
         if (
             self.manifest["exchange"] != EXCHANGE
             or symbol.lower() not in self.manifest["symbols"]
-            or not set(STATE_CHANNELS) <= set(self.manifest["requested_channels"])
+            or not set(channels) <= set(STATE_CHANNELS)
         ):
             raise ValueError("tardis_derivative_scope_invalid")
         with closing_iterator(self._stream_records(symbol, "state", None)) as records:
             for record in records:
+                if record["channel"] is not None and record["channel"] not in channels:
+                    continue
                 observed = strict_iso_timestamp(
                     record["receive_time"], error="tardis_observed_time_invalid"
                 ).value
@@ -437,7 +448,13 @@ class TardisArchive:
                     return
 
     def iter_market_records(self, *, symbol, market_type, data_kinds, end_ns=None):
-        self.market_metadata(market_type, symbol)
+        expected = (
+            FUTURES_MARKET_TYPE
+            if self.manifest["exchange"] == EXCHANGE
+            else SPOT_MARKET_TYPE
+        )
+        if market_type != expected or symbol.lower() not in self.manifest["symbols"]:
+            raise ValueError("tardis_market_identity_invalid")
         depth = tuple(data_kinds) == ("depth_snapshot", "depth")
         if not depth and tuple(data_kinds) != ("agg_trades",):
             raise ValueError("tardis_market_record_kind_invalid")
@@ -606,13 +623,31 @@ class _TardisArchives:
         }
 
     def market_metadata(self, market_type, symbol):
-        values = [
-            archive.market_metadata(market_type, symbol) for archive in self.archives
-        ]
-        return {
-            "price_unit": min((value["price_unit"] for value in values), key=Fraction),
-            "snapshot_limit": max(value["snapshot_limit"] for value in values),
-        }
+        # Missing observations in one declared day do not erase another day's
+        # authentic precision or snapshot facts for this same instrument.
+        units, limits = [], []
+        for archive in self.archives:
+            expected = (
+                FUTURES_MARKET_TYPE
+                if archive.manifest["exchange"] == EXCHANGE
+                else SPOT_MARKET_TYPE
+            )
+            if (
+                market_type != expected
+                or symbol.lower() not in archive.manifest["symbols"]
+            ):
+                raise ValueError("tardis_market_identity_invalid")
+            unit = archive.manifest["price_units"].get(symbol)
+            limit = archive.manifest["snapshot_limits"].get(symbol)
+            if unit is not None:
+                units.append(unit)
+            if limit is not None:
+                limits.append(limit)
+        if not units:
+            raise PortfolioTargetBlocked("tardis_price_observations_missing")
+        if not limits:
+            raise PortfolioTargetBlocked("tardis_depth_snapshot_missing")
+        return {"price_unit": min(units, key=Fraction), "snapshot_limit": max(limits)}
 
     def observation_coverage(self, **scope):
         return _ArchiveCoverage(
@@ -649,15 +684,17 @@ class _TardisArchives:
                     except GeneratorExit:
                         return
 
-    def iter_state_observations(self, *, symbol):
+    def iter_state_observations(self, *, symbol, channels=STATE_CHANNELS):
         return self._cursor_resources.enter_context(
-            closing_iterator(self._iter_state_observations(symbol=symbol))
+            closing_iterator(
+                self._iter_state_observations(symbol=symbol, channels=channels)
+            )
         )
 
-    def _iter_state_observations(self, *, symbol):
+    def _iter_state_observations(self, *, symbol, channels):
         for archive in self.archives:
             with closing_iterator(
-                archive.iter_state_observations(symbol=symbol)
+                archive.iter_state_observations(symbol=symbol, channels=channels)
             ) as records:
                 for _yield_value in records:
                     try:

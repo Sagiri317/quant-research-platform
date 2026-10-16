@@ -141,7 +141,6 @@ def produce_a_share_processed_data(
             "trading_calendar",
             "trading_no_limit",
             "special_treatment_changes",
-            "a_share_industry_snapshots",
         }.difference(source_sessions)
         if missing:
             raise ValueError(
@@ -757,7 +756,7 @@ def _prepare_panel_source(source, stocks):
         industry_sets=source.get("industry_classification_sets"),
         industry_versions=source.get("industry_classification_versions"),
         industry_changes=source.get("stock_info_changes"),
-        industry_snapshots=source["a_share_industry_snapshots"],
+        industry_snapshots=source.get("a_share_industry_snapshots"),
         no_limit_history=source.get("trading_no_limit"),
         special_treatment_history=source.get("special_treatment_changes"),
     )

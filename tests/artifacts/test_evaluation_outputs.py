@@ -1,5 +1,6 @@
 """Numeric evaluation publication validates the complete primary-key domain."""
 
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -103,3 +104,23 @@ def test_evaluation_publishes_numeric_members_and_reads_only_requested_summaries
         output, tables=("ic_summary", "group_spread_summary")
     )
     assert summary["ic_summary"].mean_ic.iloc[0] > 0
+    with pytest.raises(ValueError, match="dataset_parquet_footer_invalid"):
+        read_evaluation_outputs(output, tables=("metrics",))
+    (output / "metrics.parquet").unlink()
+    _, selected = read_evaluation_outputs(output, tables=("ic_summary",))
+    pd.testing.assert_frame_equal(selected["ic_summary"], tables["ic_summary"])
+    with pytest.raises(ValueError, match="output_member_path_invalid"):
+        read_evaluation_outputs(output)
+    with pytest.raises(ValueError, match="output_member_path_invalid"):
+        read_evaluation_outputs(output, tables=("metrics",))
+    original = tables["ic_summary"].copy()
+    invalid = original.copy()
+    invalid["mean_ic"] = 2.0
+    invalid.to_parquet(output / "ic_summary.parquet", index=False)
+    with pytest.raises(ValueError):
+        read_evaluation_outputs(output, tables=("ic_summary",))
+    original.to_parquet(output / "ic_summary.parquet", index=False)
+    manifest["metadata"]["evaluation_diagnostics"]["metric_rows"] = -1
+    (output / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="output_manifest_metadata_invalid"):
+        read_evaluation_outputs(output, tables=("ic_summary",))

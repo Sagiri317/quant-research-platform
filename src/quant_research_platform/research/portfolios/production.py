@@ -23,7 +23,7 @@ from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_DECISION_REASON_MAINTENANCE,
     PORTFOLIO_DECISION_REASON_SIMPLE,
     PORTFOLIO_LEDGER_COST_COLUMNS,
-    RESEARCH_VALUATION_VERSION,
+    RESEARCH_VALUATION_POLICY,
     ExecutedTrade,
     ExecutionAssumptions,
     PortfolioCandidateSpec,
@@ -57,6 +57,7 @@ from quant_research_platform.research.portfolios.accounting import (
     AlphaCalibration,
     ExecutionAccounting,
     alpha_calibration_intervals,
+    alpha_interval_semantics,
     calibrate_expected_alpha,
     execute_continuous_target,
 )
@@ -176,6 +177,7 @@ class _ResearchValuationMarks:
         )
 
     def project(self, view):
+        settled_lifecycles = []
         for event in view.rights_events.itertuples(index=False):
             identity = (event.asset_id, event.listing_date)
             if not getattr(event, "unit_basis_proved", True) or not getattr(
@@ -196,6 +198,7 @@ class _ResearchValuationMarks:
                 and Fraction(event.remaining_old_units_per_old_unit) == 0
             ):
                 self.cancelled_lifecycles.add(identity)
+                settled_lifecycles.append(identity)
                 self.rights_quotes.pop(identity, None)
         observed = view.panel.set_index("asset_id")
         current = view.valuation.set_index("asset_id").copy()
@@ -210,7 +213,7 @@ class _ResearchValuationMarks:
                 raise ValueError("portfolio_return_invalid")
         if self.rights_quotes:
             current = current.astype({"adj_open": "object", "adj_close": "object"})
-        for asset, listing in self.rights_quotes:
+        for asset, listing in (*self.rights_quotes, *settled_lifecycles):
             if asset not in current.index and asset not in self.last.index:
                 current.loc[asset, "listing_date"] = listing
                 current.loc[asset, "timestamp"] = view.timestamp
@@ -512,8 +515,12 @@ def backtest_a_share(
         ).date(),
         pd.Timestamp(output_window.end).date(),
     )
+    dataset_options = _dataset_input_options(inputs["dataset"])
+    dataset_options["columns"] = ("timestamp", "asset_id")
+    dataset_session = open_dataset_session(**dataset_options)
+    declared_columns = dataset_session.spec["column_roles"]
     domains = tuple(
-        (window, model_input_validity_columns(columns, algorithm))
+        (window, model_input_validity_columns(columns, algorithm, declared_columns))
         for window, columns, algorithm in prediction_domains
     )
 
@@ -530,7 +537,8 @@ def backtest_a_share(
 
     dataset_business_columns = (
         ("float_market_cap",)
-        if candidate.construction == "top20_float_cap" or candidate.neutrality != "none"
+        if candidate.construction == "top20_float_cap"
+        or (candidate.neutrality != "none" and "float_market_cap" in declared_columns)
         else ()
     )
     dataset_columns = tuple(
@@ -635,6 +643,7 @@ def backtest_a_share(
                     dataset_columns,
                     history,
                     business_columns=dataset_business_columns,
+                    session=dataset_session,
                 )
             )
         )
@@ -852,7 +861,8 @@ def backtest_a_share(
             endpoint_timestamp = output_intervals.loc[decision_timestamp, "end_at"]
             next_view = panel_at(next_timestamp)
             next_panel = next_view.valuation
-            endpoint_panel = panel_at(endpoint_timestamp).valuation
+            endpoint_view = panel_at(endpoint_timestamp)
+            endpoint_panel = endpoint_view.valuation
             enhanced_decision: _EnhancedDecision | None = None
             target_override: pd.Series | None = None
             decision_reason = PORTFOLIO_DECISION_REASON_SIMPLE
@@ -943,12 +953,16 @@ def backtest_a_share(
                         else holdings.multiply(0.0)
                     )
                     decision_reason = PORTFOLIO_DECISION_REASON_BENCHMARK
+            missing_industry_context = False
             if enhanced:
                 required_assets = benchmark_weights.index.union(holdings.index)
                 industry = _industry_group_codes(
                     view.valuation.set_index("asset_id"), "industry_level1_code"
                 ).reindex(required_assets)
-                if industry.isna().any():
+                missing_industry_context = industry.isna().any()
+                if missing_industry_context and (
+                    initializing or scheduled or maintenance
+                ):
                     raise PortfolioTargetBlocked("portfolio_industry_context_missing")
             execution_units, execution_lives, recoveries, adjustments = (
                 _apply_rights_events(
@@ -993,6 +1007,16 @@ def backtest_a_share(
                 market_name_for_type=market_name_for_type,
                 unquoted_assets=_unquoted_assets(next_panel),
             )
+            if missing_industry_context:
+                asset_ledger.attrs["neutrality_exposures"] = {
+                    f"{kind}_exposure_{field}": value
+                    for kind in ("target", "realized")
+                    for field, value in (
+                        ("status", "UNDEFINED"),
+                        ("reason", "portfolio_industry_context_missing"),
+                        ("excluded_weight", None),
+                    )
+                }
             yielded_value = _ledger_batch(
                 account=account,
                 asset_ledger=asset_ledger,
@@ -1012,6 +1036,7 @@ def backtest_a_share(
                 decision_delta=decision_delta,
                 next_panel=next_panel,
                 endpoint_panel=endpoint_panel,
+                endpoint_events=endpoint_view.rights_events,
             )
             held_units = pd.Series(
                 {
@@ -1066,6 +1091,9 @@ def backtest_a_share(
                 {
                     "schema_id": "qrp-final-alpha-calibration",
                     "selection_group": candidate.selection_group,
+                    "interval_semantics": alpha_interval_semantics(
+                        candidate.rebalance_schedule
+                    ),
                     "cutoff": pd.Timestamp(output_window.end).date().isoformat(),
                     "inputs": {
                         key: [
@@ -1099,7 +1127,12 @@ def _read_materialized(
 
 
 def _iter_input_sessions(
-    source, columns: tuple[str, ...], time_window: TimeWindow, *, business_columns=()
+    source,
+    columns: tuple[str, ...],
+    time_window: TimeWindow,
+    *,
+    business_columns=(),
+    session=None,
 ) -> Iterator[pd.DataFrame]:
     options = _dataset_input_options(source)
     if options.get("columns") is not None and not set(business_columns) <= set(
@@ -1107,7 +1140,9 @@ def _iter_input_sessions(
     ):
         raise ValueError("portfolio_input_business_columns_excluded")
     options["columns"] = columns
-    session = open_dataset_session(**options).filtered_view(time_window)
+    session = (
+        open_dataset_session(**options) if session is None else session
+    ).filtered_view(time_window)
     with closing_iterator(
         _iter_dataset_session_frames(session, columns)
     ) as delegated_chunks:
@@ -1504,16 +1539,34 @@ def _build_session(
     alpha = alpha.reindex(dataset.index)
     prediction_eligible = eligible & alpha.notna()
     neutrality = None
+    neutrality_reason = "nonpositive_nav"
+    scheduled = is_rebalance_session(
+        decision_timestamp, next_timestamp, candidate.rebalance_schedule
+    )
     if candidate.neutrality != "none" and nav > 0:
         industry = (
-            _industry_group_codes(panel.set_index("asset_id"), "industry_level1_code")
+            _industry_group_codes(
+                panel.set_index("asset_id").reindex(
+                    columns=["industry_standard_id", "industry_level1_code"]
+                ),
+                "industry_level1_code",
+            )
             if candidate.neutrality in {"industry", "industry_size"}
             else None
         )
-        neutrality = _neutrality_context(
-            eligible, dataset["float_market_cap"], industry, candidate.neutrality
-        )
-        prediction_eligible &= prediction_eligible.index.isin(neutrality.index)
+        try:
+            neutrality = _neutrality_context(
+                eligible,
+                dataset.get("float_market_cap", pd.Series(np.nan, index=dataset.index)),
+                industry,
+                candidate.neutrality,
+            )
+        except PortfolioTargetBlocked as exc:
+            if scheduled:
+                raise
+            neutrality_reason = str(exc)
+        if neutrality is not None:
+            prediction_eligible &= prediction_eligible.index.isin(neutrality.index)
     optimization: OptimizationResult | None = None
     if nav == 0:
         target = pd.Series(0.0, index=holdings.index, dtype="float64")
@@ -1521,9 +1574,7 @@ def _build_session(
         target = target_override.copy(deep=True)
     elif enhanced_decision is not None:
         target = enhanced_decision.benchmark_weights.copy(deep=True)
-    elif is_rebalance_session(
-        decision_timestamp, next_timestamp, candidate.rebalance_schedule
-    ):
+    elif scheduled:
         if not prediction_eligible.any():
             if neutrality is not None:
                 raise PortfolioTargetBlocked("target_selection_unavailable")
@@ -1548,9 +1599,7 @@ def _build_session(
     else:
         target = holdings.div(nav).copy(deep=True)
     raw_target = target.copy(deep=True)
-    if neutrality is not None and is_rebalance_session(
-        decision_timestamp, next_timestamp, candidate.rebalance_schedule
-    ):
+    if neutrality is not None and scheduled:
         target = _project_neutral_target(target, neutrality)
     target = target.loc[target.ne(0.0)]
     current = holdings.copy(deep=True)
@@ -1720,10 +1769,7 @@ def _build_session(
             optimization.weights.index != PORTFOLIO_CASH_ASSET_ID
         ]
     orders_requested = (
-        is_rebalance_session(
-            decision_timestamp, next_timestamp, candidate.rebalance_schedule
-        )
-        or decision_reason == PORTFOLIO_DECISION_REASON_MAINTENANCE
+        scheduled or decision_reason == PORTFOLIO_DECISION_REASON_MAINTENANCE
     )
     decision_delta = (
         target.reindex(assets, fill_value=0.0)
@@ -1940,12 +1986,24 @@ def _build_session(
             for kind in ("target", "realized")
             for field, value in (
                 ("status", "UNDEFINED"),
-                ("reason", "nonpositive_nav"),
+                ("reason", neutrality_reason),
                 ("excluded_weight", None),
             )
         }
-        for name in ("raw_target_weight", "target_weight", "realized_weight"):
-            asset_ledger[name] = np.nan
+        for name, weights in (
+            ("raw_target_weight", raw_target),
+            ("target_weight", target),
+            (
+                "realized_weight",
+                asset_ledger.set_index("asset_id").post_trade_notional
+                / account.nav_after
+                if account.nav_after > 0
+                else pd.Series(dtype="float64"),
+            ),
+        ):
+            asset_ledger[name] = (
+                asset_ledger.asset_id.map(weights) if nav > 0 else np.nan
+            )
     return (account, adv, optimization, decision_delta, asset_ledger)
 
 
@@ -2074,6 +2132,7 @@ def _ledger_batch(
     decision_delta: pd.Series,
     next_panel: pd.DataFrame,
     endpoint_panel: pd.DataFrame,
+    endpoint_events: pd.DataFrame | None = None,
 ) -> PortfolioLedgerBatch:
     """Build economic facts directly from one isolated accounting snapshot."""
     trades, cashflows, valuations, diagnostics = [], [], [], []
@@ -2082,6 +2141,102 @@ def _ledger_batch(
         "entry": next_panel.set_index("asset_id"),
         "end": endpoint_panel.set_index("asset_id"),
     }
+
+    boundary_entitlements = {}
+    endpoint_event_lives = (
+        {
+            (event.asset_id, event.listing_date)
+            for event in endpoint_events.itertuples(index=False)
+            if event.kind != "quote"
+        }
+        if endpoint_events is not None
+        else set()
+    )
+
+    def endpoint_mark(asset, quantity, lifecycle):
+        if not quantity:
+            return 0.0
+        marks = mark_frames["end"]
+        if (asset, pd.Timestamp(lifecycle)) not in endpoint_event_lives:
+            if asset not in marks.index or marks.loc[
+                asset, "listing_date"
+            ] != pd.Timestamp(lifecycle):
+                raise PortfolioTargetBlocked("portfolio_held_lifecycle_unproven")
+            mark = marks.loc[asset, "adj_open"]
+            if pd.isna(mark):
+                raise PortfolioTargetBlocked("portfolio_held_return_missing")
+            return mark
+        # An available replacement is the value of the old claim immediately
+        # before settlement. It is never exposed as a tradable market quote.
+        units = pd.Series({asset: quantity}, dtype="object")
+        lives = pd.Series({asset: pd.Timestamp(lifecycle)})
+        units, lives, cash, events = _apply_rights_events(
+            endpoint_events, units, lives, end_timestamp
+        )
+        active = units.loc[units.ne(0)]
+        if not active.index.isin(marks.index).all():
+            raise PortfolioTargetBlocked("portfolio_successor_valuation_missing")
+        if (
+            not marks.listing_date.reindex(active.index)
+            .eq(lives.reindex(active.index))
+            .all()
+        ):
+            raise PortfolioTargetBlocked("portfolio_held_lifecycle_unproven")
+        prices = marks.adj_open.reindex(active.index)
+        if prices.isna().any():
+            raise PortfolioTargetBlocked("portfolio_held_return_missing")
+        value = Fraction(cash) + sum(
+            (
+                Fraction(units.loc[item]) * Fraction(price)
+                for item, price in prices.items()
+            ),
+            Fraction(),
+        )
+        if events:
+            boundary_entitlements[asset] = float(
+                sum(
+                    (
+                        Fraction(units.loc[item]) * Fraction(price)
+                        for item, price in prices.items()
+                        if pd.notna(marks.loc[item, "research_open_mark_at"])
+                    ),
+                    Fraction(),
+                )
+            )
+            diagnostics.extend(
+                (
+                    PortfolioDiagnostic(
+                        asset,
+                        None,
+                        "research_end_mark_at",
+                        text=end_timestamp.isoformat(),
+                    ),
+                    PortfolioDiagnostic(
+                        asset, None, "research_end_mark_age_days", number=0.0
+                    ),
+                    PortfolioDiagnostic(
+                        asset,
+                        None,
+                        "research_end_mark_kind",
+                        text="evidenced_rights_entitlement",
+                    ),
+                    PortfolioDiagnostic(
+                        asset,
+                        None,
+                        "research_end_listing_date",
+                        text=pd.Timestamp(lifecycle).isoformat(),
+                    ),
+                    PortfolioDiagnostic(
+                        asset,
+                        None,
+                        "research_end_evidence_identity",
+                        text=",".join(
+                            dict.fromkeys(event.evidence_identity for event in events)
+                        ),
+                    ),
+                )
+            )
+        return value / Fraction(quantity)
 
     def emit(asset, before, after, fill_id, values):
         if asset == PORTFOLIO_CASH_ASSET_ID:
@@ -2104,12 +2259,7 @@ def _ledger_batch(
                 (Fraction(row.quantity) for row in trades if row.asset_id == asset),
                 Fraction(),
             )
-            # Extinguished holdings need no quote or linkage to a later lifecycle.
-            end_mark = 0.0
-            if after_quantity:
-                if asset not in mark_frames["end"].index:
-                    raise PortfolioTargetBlocked("portfolio_held_lifecycle_unproven")
-                end_mark = mark_frames["end"].loc[asset, "adj_open"]
+            end_mark = endpoint_mark(asset, after_quantity, lifecycle)
             if pd.isna(entry_mark):
                 if (
                     held_units.get(asset, 0)
@@ -2118,17 +2268,6 @@ def _ledger_batch(
                 ):
                     raise PortfolioTargetBlocked("portfolio_held_return_missing")
                 entry_mark = 0.0
-            if after_quantity and (
-                mark_frames["entry"].loc[asset, "listing_date"]
-                != mark_frames["end"].loc[asset, "listing_date"]
-            ):
-                if (
-                    "research_previous_listing_date" not in mark_frames["end"]
-                    or mark_frames["end"].loc[asset, "research_previous_listing_date"]
-                    != mark_frames["entry"].loc[asset, "listing_date"]
-                ):
-                    raise PortfolioTargetBlocked("portfolio_held_lifecycle_unproven")
-                end_mark = 0.0
             before_quantity = Fraction(held_units.get(asset, 0))
             before_lifecycle = lifecycle
             before_mark = entry_mark
@@ -2287,7 +2426,9 @@ def _ledger_batch(
             },
         )
         for phase, marks in mark_frames.items():
-            if phase == "end" and valuations[-1].quantity == 0:
+            if phase == "end" and (
+                valuations[-1].quantity == 0 or asset in boundary_entitlements
+            ):
                 continue
             if asset not in marks.index or pd.isna(
                 mark_at := marks.loc[asset, "research_open_mark_at"]
@@ -2347,7 +2488,7 @@ def _ledger_batch(
             if optimization_result is not None
             and decision_reason == PORTFOLIO_DECISION_REASON_BENCHMARK
             else decision_reason,
-            "research_valuation_version": RESEARCH_VALUATION_VERSION,
+            "research_valuation_policy": RESEARCH_VALUATION_POLICY,
             **asset_ledger.attrs.get("neutrality_exposures", {}),
             **asset_ledger.attrs.get("realized_constraints", {}),
             **(
@@ -2387,7 +2528,12 @@ def _ledger_batch(
     unquoted = _unquoted_assets(endpoint_panel)
     end_values = [row for row in valuations if row.phase == "end"]
     nav_end = sum(row.value for row in end_values)
-    unquoted_value = sum(row.value for row in end_values if row.asset_id in unquoted)
+    unquoted_value = sum(
+        boundary_entitlements.get(
+            row.asset_id, row.value if row.asset_id in unquoted else 0.0
+        )
+        for row in end_values
+    )
     diagnostics.extend(
         PortfolioDiagnostic(
             PORTFOLIO_CASH_ASSET_ID,
@@ -2603,7 +2749,10 @@ def backtest(config: Mapping) -> Path:
         ):
             raise ValueError("portfolio_calibration_not_frozen")
         frozen, _ = frozen_alpha_calibration(
-            payload, cutoff=payload["cutoff"], selection_group=candidate.selection_group
+            payload,
+            cutoff=payload["cutoff"],
+            selection_group=candidate.selection_group,
+            rebalance_schedule=candidate.rebalance_schedule,
         )
     final = []
 
@@ -2660,6 +2809,8 @@ def calibrate(config: Mapping) -> Path:
     required = {
         "observations",
         "scheduled_intervals",
+        "rebalance_schedule",
+        "calendar",
         "cutoff",
         "selection_group",
         "output",
@@ -2716,6 +2867,19 @@ def calibrate(config: Mapping) -> Path:
             )
         else:
             frames[name] = _read_materialized(config[name], columns)
+    from quant_research_platform.markets.implementations.a_share.calendar import (
+        unified_trading_sessions,
+    )
+
+    semantics = alpha_interval_semantics(config["rebalance_schedule"])
+    calendar = _read_materialized(config["calendar"], _CALENDAR_COLUMNS)
+    expected = alpha_calibration_intervals(
+        unified_trading_sessions(calendar), config["rebalance_schedule"]
+    )
+    supplied = frames["scheduled_intervals"].apply(pd.to_datetime, errors="raise")
+    matched = supplied.merge(expected, on=list(expected), how="left", indicator=True)
+    if not matched["_merge"].eq("both").all():
+        raise ValueError("alpha_calibration_interval_semantics_mismatch")
     result = calibrate_expected_alpha(
         frames["observations"],
         scheduled_intervals=frames["scheduled_intervals"],
@@ -2726,9 +2890,11 @@ def calibrate(config: Mapping) -> Path:
         {
             "schema_id": "qrp-final-alpha-calibration",
             "selection_group": config["selection_group"],
+            "interval_semantics": semantics,
             "cutoff": pd.Timestamp(config["cutoff"]).isoformat(),
             "inputs": {
-                key: config[key] for key in ("observations", "scheduled_intervals")
+                key: config[key]
+                for key in ("observations", "scheduled_intervals", "calendar")
             },
             "calibration": asdict(result),
         },

@@ -784,6 +784,7 @@ def validate_model_facts(facts, metadata):
         "fit_windows",
         "fit_cutoff",
         "label_unit",
+        "input_units",
     }
     if not isinstance(facts, Mapping) or not required <= set(facts):
         raise ValueError("model_facts_invalid")
@@ -821,6 +822,13 @@ def validate_model_facts(facts, metadata):
     if list(spec.input_columns) != metadata["input_columns"]:
         raise ValueError("model_facts_metadata_mismatch")
 
+    units = facts["input_units"]
+    if not isinstance(units, Mapping) or set(units) - set(spec.input_columns):
+        raise ValueError("model_input_units_invalid")
+    for unit in units.values():
+        _validate_non_empty_string(unit, "model_input_units_invalid")
+        if not unit.strip():
+            raise ValueError("model_input_units_invalid")
     validate_model_fit_facts(facts, metadata)
 
 
@@ -890,9 +898,9 @@ def _validate_model_prediction_window(facts, window):
 
 
 def validate_model_input_roles(
-    declared, spec, *, include_target=False, selected_columns=None
+    declared, spec, *, include_target=False, selected_columns=None, input_units=None
 ):
-    """Check only model-consumed scientific roles in an already-opened input."""
+    """Check model-consumed roles and explicit unit conflicts in the opened input."""
     consumed = {*spec.input_columns, *((spec.target_column,) if include_target else ())}
     if selected_columns is not None and consumed - set(selected_columns):
         raise ValueError("model_input_projection_missing")
@@ -906,3 +914,7 @@ def validate_model_input_roles(
             raise ValueError("model_feature_role_mismatch")
     if include_target and roles.get(spec.target_column) != "label":
         raise ValueError("model_target_role_mismatch")
+    actual_units = declared.get("column_units", {})
+    for column, unit in (input_units or {}).items():
+        if column in actual_units and actual_units[column] != unit:
+            raise ValueError(f"model_input_unit_mismatch: {column}")

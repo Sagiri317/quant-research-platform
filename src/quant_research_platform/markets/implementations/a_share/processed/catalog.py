@@ -145,6 +145,7 @@ def processed_catalog() -> ProcessedDataCatalog:
                     "industry_classification_sets",
                     "industry_classification_versions",
                     "stock_info_changes",
+                    "a_share_industry_snapshots",
                 ),
                 source_input_data_ids=(
                     "market_bars_1d",

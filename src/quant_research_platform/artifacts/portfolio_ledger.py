@@ -12,6 +12,7 @@ import pandas as pd
 import pyarrow as pa
 
 from quant_research_platform.compute.portfolio_economics import _LedgerEconomics
+from quant_research_platform.contracts.json_codec import parse_qrp_json_object
 from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_CASH_ASSET_ID,
     ExecutedTrade,
@@ -235,6 +236,7 @@ def summarize_portfolio_ledger(
     | None = None,
 ) -> dict[str, object]:
     economics = _LedgerEconomics(capital)
+    account_stop_reason = None
     result = {
         "candidate_id": capital.candidate_id,
         "initial_capital": capital.initial_capital,
@@ -243,6 +245,11 @@ def summarize_portfolio_ledger(
     }
     with closing_iterator(batches):
         for batch in batches:
+            for row in batch.diagnostics:
+                if row.name == "execution_summary" and row.text is not None:
+                    execution = parse_qrp_json_object(row.text.encode("utf-8"))
+                    if execution.get("account_path_status") == "PARTIAL":
+                        account_stop_reason = execution["account_stop_reason"]
             calibration = {
                 row.name.removeprefix("alpha_"): row.text
                 if row.text is not None
@@ -257,6 +264,12 @@ def summarize_portfolio_ledger(
             result.update(economics.summary())
             if consume_batch is not None:
                 consume_batch(batch, result, increment)
+    if account_stop_reason is not None:
+        result["account_path_status"] = "PARTIAL"
+        result["observed_totals_scope"] = "known_prefix"
+        for name in ("gross_pnl", "net_pnl", "nav", "capital_return", "funding"):
+            result[name] = None
+            result[f"{name}_reason"] = account_stop_reason
     return result
 
 

@@ -2,7 +2,6 @@
 
 import json
 from array import array
-from bisect import bisect_left
 from collections import deque
 from contextlib import ExitStack
 from dataclasses import replace
@@ -74,6 +73,7 @@ from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
 from quant_research_platform.sources.binance import ids as binance_ids
 from quant_research_platform.sources.binance.funding import read_funding_observations
 from quant_research_platform.sources.binance.replay import (
+    ReconstructionStats,
     iter_agg_trades,
     iter_reconstructed_depth,
 )
@@ -96,8 +96,8 @@ def _window_bounds(windows):
     )
 
 
-def _books_until(run, *, reconstruct_depth, symbol, end_ns):
-    source = reconstruct_depth(run, symbol=symbol, end_ns=end_ns)
+def _books_until(run, *, reconstruct_depth, symbol, end_ns, stats=None):
+    source = reconstruct_depth(run, symbol=symbol, end_ns=end_ns, stats=stats)
     with closing_iterator(source):
         for event in source:
             value = event
@@ -254,7 +254,9 @@ def _prediction_rows(
                 "asset_id",
                 *metadata["input_columns"],
                 *model_input_validity_columns(
-                    tuple(metadata["input_columns"]), metadata["model_algorithm"]
+                    tuple(metadata["input_columns"]),
+                    metadata["model_algorithm"],
+                    session.spec["column_roles"],
                 ),
                 *required_filter_columns(metadata["sample_filter_mode"]),
                 *HFT_EXECUTION_CONTEXT_COLUMNS,
@@ -289,7 +291,9 @@ def _prediction_rows(
     chunks = iter_dataset_chunks(session)
     with closing_iterator(chunks):
         for frame in chunks:
-            required = prediction_rows(frame, metadata, window)
+            required = prediction_rows(
+                frame, metadata, window, declared_columns=session.spec["column_roles"]
+            )
             if assets is not None:
                 required = required.loc[required.asset_id.isin(assets)]
             required_keys = pd.MultiIndex.from_frame(
@@ -336,31 +340,20 @@ def _prediction_rows(
         raise ValueError("misaligned_persisted_prediction_keys")
 
 
-def _market_coverage_check(coverage, trade_coverage, bounds):
-    if not any(
-        start <= bounds[0][0] and bounds[-1][1] < end
-        for start, end in coverage.values()
-    ):
-        raise PortfolioTargetBlocked("crypto_execution_book_coverage_incomplete")
-    if len(trade_coverage.covering(bounds[0][0], bounds[-1][1])) != 1:
-        raise PortfolioTargetBlocked("crypto_execution_trade_coverage_incomplete")
-
-
-def _funding_check(funding, bounds):
-    cursor, final = bounds[0][0], bounds[-1][1]
-    for start, end in funding.coverage:
-        if end < cursor:
-            continue
-        if start > cursor:
-            break
-        if end >= final:
-            return
-        cursor = end + 1
-    raise PortfolioTargetBlocked("binance_funding_coverage_incomplete")
+def _execution_coverage(run, *, reconstruct_depth, symbol, end_ns):
+    """Use the selected execution source's reconstructed half-open coverage."""
+    stats = ReconstructionStats()
+    events = reconstruct_depth(
+        run, symbol=symbol, end_ns=end_ns, stats=stats, output_levels=0
+    )
+    with closing_iterator(events):
+        for _ in events:
+            pass
+    return stats.coverage_segments
 
 
 class _EpisodeCursor:
-    """Own one source lookahead and an explicitly handed-back book or forecast."""
+    """Own source lookahead and causal state for the next declared episode."""
 
     def __init__(self, source, key, *, sticky=False):
         self.source = iter(source)
@@ -386,12 +379,12 @@ class _EpisodeCursor:
             self._next()
         if self.carried is not None:
             value = self.carried
-            if not self.sticky:
+            if not self.sticky and not bootstrap:
                 self.carried = None
             yield value
         while self.pending is not None and self.key(self.pending) < stop:
             value, self.pending = self.pending, None
-            if self.sticky:
+            if self.sticky or bootstrap:
                 self.retain(value)
             yield value
             self._next()
@@ -407,72 +400,55 @@ def _qualified_episodes(coverage, trade_coverage, funding, bounds):
     if final == np.iinfo(np.int64).max:
         raise ValueError("crypto_execution_window_overflow")
     stop = final + 1
-    book_intervals = iter(sorted(coverage.values()))
-    trades = trade_coverage.intervals()
-
-    def funding_intervals():
-        left, right = funding.coverage[0]
-        for begin, end in funding.coverage[1:]:
-            if begin == right + 1:
-                right = end
-            else:
-                yield left, right + 1
-                left, right = begin, end
-        yield left, right + 1
-
-    funded_intervals = funding_intervals()
-    bad_settlements = tuple(
-        event.timestamp_ns
-        for event in funding.events
-        if event.rate is None or event.mark_price is None
+    books = iter(sorted(coverage.values()))
+    trades = (
+        trade_coverage.intervals()
+        if trade_coverage is not None
+        else iter(((start, stop),))
     )
-    with closing_iterator(trades), closing_iterator(funded_intervals):
-        book, trade = next(book_intervals, None), next(trades, None)
-        funded = next(funded_intervals, None)
-        while book is not None and trade is not None and funded is not None:
-            edge = min(book[1], trade[1], funded[1])
-            left = max(start, book[0], trade[0], funded[0])
-            right = min(stop, edge)
+    funding_cuts = set()
+    previous_end = None
+    for begin, end in funding.coverage:
+        if previous_end is not None and begin == previous_end + 1:
+            funding_cuts.discard(begin)
+        else:
+            funding_cuts.add(begin)
+        if end < np.iinfo(np.int64).max:
+            funding_cuts.add(end + 1)
+        previous_end = end
+    for event in funding.events:
+        if event.rate is None or event.mark_price is None and event.rate != 0:
+            funding_cuts.update((event.timestamp_ns, event.timestamp_ns + 1))
+    with closing_iterator(trades):
+        book, trade = next(books, None), next(trades, None)
+        while book is not None and trade is not None:
+            edge = min(book[1], trade[1])
+            left, right = max(start, book[0], trade[0]), min(stop, edge)
             if left < right:
-                cuts = bad_settlements[
-                    bisect_left(bad_settlements, left) : bisect_left(
-                        bad_settlements, right
-                    )
-                ]
-                for cut in cuts:
-                    if left < cut:
-                        _yield_value = left, cut, "TRUNCATED", ("funding_coverage_end",)
-                        try:
-                            yield _yield_value
-                        except GeneratorExit:
-                            return
-                    left = cut + 1
-                if left < right:
-                    reasons = []
-                    if right == stop:
-                        reasons.append("planned_oos_end")
-                    if right == book[1]:
-                        reasons.append("book_coverage_end")
-                    if right == trade[1]:
-                        reasons.append("trade_coverage_end")
-                    if right == funded[1]:
-                        reasons.append("funding_coverage_end")
-                    _yield_value = (
-                        left,
-                        right,
-                        "PLANNED_END" if right == stop else "TRUNCATED",
-                        tuple(sorted(reasons)),
-                    )
-                    try:
-                        yield _yield_value
-                    except GeneratorExit:
-                        return
+                reasons = []
+                if right == stop:
+                    reasons.append("planned_oos_end")
+                if right == book[1]:
+                    reasons.append("book_coverage_end")
+                if trade_coverage is not None and right == trade[1]:
+                    reasons.append("trade_coverage_end")
+                for cut in sorted(
+                    value for value in funding_cuts if left < value < right
+                ):
+                    yield left, cut, "TRUNCATED", ("funding_coverage_end",)
+                    left = cut
+                if right in funding_cuts:
+                    reasons.append("funding_coverage_end")
+                yield (
+                    left,
+                    right,
+                    "PLANNED_END" if right == stop else "TRUNCATED",
+                    tuple(sorted(reasons)),
+                )
             if book[1] == edge:
-                book = next(book_intervals, None)
+                book = next(books, None)
             if trade[1] == edge:
                 trade = next(trades, None)
-            if funded[1] == edge:
-                funded = next(funded_intervals, None)
 
 
 def _execute_episodes(
@@ -502,13 +478,11 @@ def _execute_episodes(
         cursor = _EpisodeCursor(iterator, key, sticky=sticky)
         streams[name] = cursor
     count = 0
-    funding_required = funding_covered = 0
     for start, stop, termination, reasons in _qualified_episodes(
         coverage, trade_coverage, funding, bounds
     ):
 
         def produce(emit, start=start, stop=stop):
-            nonlocal funding_required, funding_covered
             kwargs = {
                 "book_events": streams["books"].window(start, stop, bootstrap=True),
                 "funding_events": tuple(
@@ -517,21 +491,16 @@ def _execute_episodes(
                     if start <= event.timestamp_ns < stop
                 ),
                 "funding_forecasts": streams["forecasts"].window(start, stop),
+                "funding_coverage": funding.coverage,
                 "observation_window_ns": (start, stop),
                 "on_ledger": emit,
-                "on_terminal_book": streams["books"].retain,
             }
             if "trades" in streams:
                 kwargs["trades"] = streams["trades"].window(start, stop)
                 kwargs["quote_schedule"] = streams["decisions"].window(start, stop)
             else:
                 kwargs["decisions"] = streams["decisions"].window(start, stop)
-            result = execute(**kwargs)
-            funding_required += result["funding_required_decisions"]
-            funding_covered += result["funding_covered_decisions"]
-            if result["net_pnl"] is None:
-                raise PortfolioTargetBlocked("portfolio_terminal_valuation_missing")
-            return result
+            return execute(**kwargs)
 
         on_episode(
             start_ns=start,
@@ -543,8 +512,6 @@ def _execute_episodes(
         count += 1
     if not count:
         raise PortfolioTargetBlocked("crypto_execution_qualified_episode_missing")
-    if funding_required and not funding_covered:
-        raise PortfolioTargetBlocked("portfolio_expected_funding_missing")
     return {"episode_count": count}
 
 
@@ -611,12 +578,11 @@ def _execute_portfolio(
             )
     if execution_mode != "continuous":
         raise ValueError("crypto_execution_mode_invalid")
-    _funding_check(funding, bounds)
-    _market_coverage_check(coverage, trade_coverage, bounds)
     kwargs = {
         "book_events": books,
         "funding_events": funding.events,
         "funding_forecasts": funding.forecasts,
+        "funding_coverage": funding.coverage,
         "on_ledger": on_ledger,
     }
     if trades is None:
@@ -625,10 +591,6 @@ def _execute_portfolio(
         kwargs["trades"] = trades
         kwargs["quote_schedule"] = decisions
     result = execute(**kwargs)
-    if result["selection_status"] == "BLOCKED":
-        raise PortfolioTargetBlocked("portfolio_expected_funding_missing")
-    if result["net_pnl"] is None:
-        raise PortfolioTargetBlocked("portfolio_terminal_valuation_missing")
     return result
 
 
@@ -688,10 +650,7 @@ def _backtest_inputs(config):
     ):
         raise ValueError("crypto_execution_asset_invalid")
     panel = read_dataset_manifest_evidence(Path(config["panel"]))
-    coverage = panel["producer_diagnostics"]["reconstruction"][config["symbol"]][
-        "coverage_segments"
-    ]
-    return window, windows, capital, coverage, panel
+    return window, windows, capital, panel
 
 
 def _source_coordinates(run, panel, symbol):
@@ -748,7 +707,7 @@ def backtest_taker(config):
         _BACKTEST_KEYS | {"predictions"},
         {"archive_paths", "input_spec", "chronology"},
     )
-    window, windows, capital, coverage, panel = _backtest_inputs(config)
+    window, windows, capital, panel = _backtest_inputs(config)
     execution = TakerConfig(
         **_strict_config(config["execution"], TakerConfig.__dataclass_fields__)
     )
@@ -782,6 +741,17 @@ def backtest_taker(config):
             ) as funding,
         ):
             _source_coordinates(run, panel, symbol)
+            source_stats = ReconstructionStats()
+            coverage = (
+                _execution_coverage(
+                    run,
+                    reconstruct_depth=reconstruct,
+                    symbol=symbol,
+                    end_ns=bounds[-1][1],
+                )
+                if config["execution_mode"] == "independent_segments"
+                else source_stats.coverage_segments
+            )
             return _execute_portfolio(
                 execution_mode=config["execution_mode"],
                 execute=partial(
@@ -799,6 +769,7 @@ def backtest_taker(config):
                     reconstruct_depth=reconstruct,
                     symbol=symbol,
                     end_ns=bounds[-1][1],
+                    stats=source_stats,
                 ),
                 trades=None,
                 decisions=_prediction_rows(
@@ -811,11 +782,7 @@ def backtest_taker(config):
                 ),
                 funding=funding,
                 coverage=coverage,
-                trade_coverage=run.observation_coverage(
-                    market_type=binance_ids.FUTURES_MARKET_TYPE,
-                    data_kind="agg_trades",
-                    symbol=symbol,
-                ),
+                trade_coverage=None,
                 bounds=bounds,
                 on_ledger=on_ledger,
                 on_episode=on_episode,
@@ -835,15 +802,16 @@ def _paired_validation(streams, *, asset_id):
             if proxy.timestamp < price.timestamp:
                 proxy = next(streams[1], None)
                 continue
-            if any(
-                getattr(price, column) != getattr(proxy, column)
-                for column in HFT_EXECUTION_CONTEXT_COLUMNS
-            ):
-                raise ValueError("maker_calibration_context_misaligned")
             if all(
-                isinstance(getattr(price, column), str) and getattr(price, column)
+                isinstance(getattr(row, column), str) and getattr(row, column)
+                for row in (price, proxy)
                 for column in HFT_EXECUTION_CONTEXT_COLUMNS
             ):
+                if any(
+                    getattr(price, column) != getattr(proxy, column)
+                    for column in HFT_EXECUTION_CONTEXT_COLUMNS
+                ):
+                    raise ValueError("maker_calibration_context_misaligned")
                 _yield_value = {
                     "timestamp_ms": pd.Timestamp(price.timestamp).value // 1_000_000,
                     "asset_id": asset_id,
@@ -1011,9 +979,6 @@ def _produce_maker_calibration(*, on_table, config, model_evidence):
     ) as run:
         _source_coordinates(run, panel, symbol)
         price_unit = run.market_metadata(market_type, symbol)["price_unit"]
-        coverage = panel["producer_diagnostics"]["reconstruction"][symbol][
-            "coverage_segments"
-        ]
         trade_coverage = run.observation_coverage(
             market_type=market_type, data_kind="agg_trades", symbol=symbol
         )
@@ -1122,12 +1087,14 @@ def _produce_maker_calibration(*, on_table, config, model_evidence):
                 )
 
             cutoff = cutoff_at.value
+            source_stats = ReconstructionStats()
             result = replay_maker_calibration(
                 _books_until(
                     run,
                     reconstruct_depth=reconstruct_depth,
                     symbol=symbol,
                     end_ns=cutoff,
+                    stats=source_stats,
                 ),
                 read_trades(run, symbol=symbol, end_ms=cutoff // 1000000),
                 _paired_validation(
@@ -1148,7 +1115,7 @@ def _produce_maker_calibration(*, on_table, config, model_evidence):
                 ),
                 order_quantity=reference["order_quantity"],
                 latency_ms=reference["latency_ms"],
-                observed_coverage=coverage,
+                observed_coverage=source_stats.coverage_segments,
                 trade_coverage=trade_coverage,
                 cutoff_ns=cutoff,
                 on_sample=observe,
@@ -1279,7 +1246,7 @@ def backtest_maker(config):
         _BACKTEST_KEYS | {"models", "calibration"},
         {"archive_paths", "input_spec", "chronology"},
     )
-    window, windows, capital, coverage, panel = _backtest_inputs(config)
+    window, windows, capital, panel = _backtest_inputs(config)
     execution = MakerConfig(
         **_strict_config(config["execution"], MakerConfig.__dataclass_fields__)
     )
@@ -1376,12 +1343,19 @@ def backtest_maker(config):
                         or proxy is None
                         or any(
                             price[key] != proxy[key]
-                            for key in (
-                                "timestamp_ms",
-                                "fold_id",
-                                *HFT_EXECUTION_CONTEXT_COLUMNS,
-                            )
+                            for key in ("timestamp_ms", "fold_id")
                         )
+                    ):
+                        raise ValueError("maker_prediction_keys_misaligned")
+                    if not all(
+                        isinstance(row[key], str) and row[key]
+                        for row in (price, proxy)
+                        for key in HFT_EXECUTION_CONTEXT_COLUMNS
+                    ):
+                        continue
+                    if any(
+                        price[key] != proxy[key]
+                        for key in HFT_EXECUTION_CONTEXT_COLUMNS
                     ):
                         raise ValueError("maker_prediction_keys_misaligned")
                     yield {
@@ -1438,6 +1412,18 @@ def backtest_maker(config):
             ) as funding,
         ):
             _source_coordinates(run, panel, symbol)
+            reconstruct = partial(iter_reconstructed_depth, market_type=market_type)
+            source_stats = ReconstructionStats()
+            coverage = (
+                _execution_coverage(
+                    run,
+                    reconstruct_depth=reconstruct,
+                    symbol=symbol,
+                    end_ns=bounds[-1][1],
+                )
+                if config["execution_mode"] == "independent_segments"
+                else source_stats.coverage_segments
+            )
             trade_coverage = run.observation_coverage(
                 market_type=market_type, data_kind="agg_trades", symbol=symbol
             )
@@ -1455,11 +1441,10 @@ def backtest_maker(config):
                 ),
                 books=_books_until(
                     run,
-                    reconstruct_depth=partial(
-                        iter_reconstructed_depth, market_type=market_type
-                    ),
+                    reconstruct_depth=reconstruct,
                     symbol=symbol,
                     end_ns=bounds[-1][1],
+                    stats=source_stats,
                 ),
                 trades=iter_agg_trades(
                     run,
@@ -1735,7 +1720,6 @@ def validate_maker_calibration(artifact, metadata):
             start_header = next(starts, None)
             end_header = next(ends, None)
             previous_start = previous_end = latest_state = None
-            covered = 0
             for sample_id, pair in enumerate(zip_longest(*samples)):
                 buy, sell = pair
                 if (
@@ -1812,11 +1796,8 @@ def validate_maker_calibration(artifact, metadata):
                     and previous_end.event_at >= expiry
                     or end_header is not None
                     and end_header.event_at < expiry
-                    or start > covered
-                    and (initial != covered or start != covered + 1)
                 ):
                     raise ValueError("crypto_calibration_event_coordinates_invalid")
-                covered = max(covered, stop)
                 while window and window[0].event_id < start:
                     event = window.popleft()
                     if event.kind in ("book", "boundary"):
@@ -1888,8 +1869,9 @@ def validate_maker_calibration(artifact, metadata):
                         row.terminal_reason == "post_only_crossing_rejected"
                     )
                     totals["samples"] += 1
-            if end_header is not None:
-                raise ValueError("crypto_calibration_event_coordinates_invalid")
+            while end_header is not None:
+                totals["events"] += end_header.row_count
+                end_header = next(ends, None)
             for _event in native_events:
                 pass
         for side, row in summaries.items():

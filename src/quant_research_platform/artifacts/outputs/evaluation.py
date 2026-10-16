@@ -361,7 +361,9 @@ def read_evaluation_outputs(
     ):
         raise ValueError("evaluation_tables_invalid")
     manifest, _members = validate_output_bundle(
-        root, expected_definition_id="evaluation_outputs"
+        root,
+        expected_definition_id="evaluation_outputs",
+        selected_files=tuple(f"{name}.parquet" for name in tables),
     )
     metadata = manifest["metadata"]
     spec = EvaluationSpec(

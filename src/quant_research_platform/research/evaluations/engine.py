@@ -350,6 +350,7 @@ def build_evaluation_result_from_frames(
     spec: EvaluationSpec,
     asset_column: str,
     source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
+    declared_columns=None,
 ) -> EvaluationResult:
     state = _EvaluationStreamingState(
         spec=spec,
@@ -360,6 +361,7 @@ def build_evaluation_result_from_frames(
             spec=spec,
             asset_column=asset_column,
             source_columns_by_kind=source_columns_by_kind,
+            declared_columns=declared_columns,
             summary_state=state,
         )
         if spec.evaluation_axis == "single_asset_time_series"
@@ -368,6 +370,7 @@ def build_evaluation_result_from_frames(
             spec=spec,
             asset_column=asset_column,
             source_columns_by_kind=source_columns_by_kind,
+            declared_columns=declared_columns,
             summary_state=state,
         )
     )
@@ -433,6 +436,7 @@ def _iter_single_asset_time_series_output_chunks(
     spec: EvaluationSpec,
     asset_column: str,
     source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
+    declared_columns=None,
     summary_state: _EvaluationStreamingState | None = None,
 ) -> Iterator[_EvaluationOutputChunk]:
     """Yield one bounded across-time correlation row per signal-label pair."""
@@ -469,6 +473,7 @@ def _iter_single_asset_time_series_output_chunks(
         spec=spec,
         asset_column=asset_column,
         source_columns_by_kind=source_columns_by_kind,
+        declared_columns=declared_columns,
     )
     with closing_iterator(work_frames):
         for filtered, filter_metadata in work_frames:
@@ -594,6 +599,7 @@ def _iter_evaluation_output_chunks(
     spec: EvaluationSpec,
     asset_column: str,
     source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
+    declared_columns=None,
     summary_state: _EvaluationStreamingState | None = None,
 ) -> Iterator[_EvaluationOutputChunk]:
     """Yield bounded pairs and optionally consume them into research summaries."""
@@ -602,6 +608,7 @@ def _iter_evaluation_output_chunks(
         spec=spec,
         asset_column=asset_column,
         source_columns_by_kind=source_columns_by_kind,
+        declared_columns=declared_columns,
     )
     with closing_iterator(work_frames):
         for filtered, filter_metadata in work_frames:
@@ -704,6 +711,7 @@ def _iter_evaluation_work_frames(
     spec: EvaluationSpec,
     asset_column: str,
     source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
+    declared_columns=None,
 ) -> Iterator[tuple[pd.DataFrame, dict[str, object]]]:
     from quant_research_platform.research.filtering import apply_filter_mode
 
@@ -726,7 +734,6 @@ def _iter_evaluation_work_frames(
                 asset_column,
                 *(signal.source_column for signal in spec.signals),
                 *label_columns,
-                *feature_observation_columns(feature_columns),
                 *required_filter_columns(spec.filter_mode),
             )
         )
@@ -739,7 +746,15 @@ def _iter_evaluation_work_frames(
             missing = sorted(required.difference(frame.columns))
             if missing:
                 raise ValueError(f"missing_evaluation_columns: {', '.join(missing)}")
+            schema = frame.columns if declared_columns is None else declared_columns
+            observation_columns = feature_observation_columns(feature_columns, schema)
             selected = [column for column in work_columns if column in frame.columns]
+            selected.extend(
+                column
+                for column in observation_columns
+                if column in frame and column not in selected
+            )
+
             projected = frame.loc[:, selected]
             filtered, filter_metadata = apply_filter_mode(
                 projected, mode=spec.filter_mode, metadata_key="filter_mode"
@@ -747,7 +762,7 @@ def _iter_evaluation_work_frames(
             filter_metadata["timestamps"] = projected.timestamp
             filter_metadata["asset_ids"] = projected[asset_column]
             normalized = normalize_signal_frame(
-                mask_unobserved_features(filtered, feature_columns),
+                mask_unobserved_features(filtered, feature_columns, schema),
                 signals=spec.signals,
                 timestamp_column="timestamp",
                 source_columns_by_kind=source_columns_by_kind,

@@ -121,7 +121,7 @@ def build_a_share_factor_statistics_tables(
                 primary_label,
                 availability,
                 *factors,
-                *feature_observation_columns(factors),
+                *feature_observation_columns(factors, spec.column_roles),
                 *(("total_market_cap",) if "fama_macbeth" in analyses else ()),
             )
         )
@@ -166,7 +166,7 @@ def build_a_share_factor_statistics_tables(
             )
             if mature.empty:
                 continue
-            mature = mask_unobserved_features(mature, factors)
+            mature = mask_unobserved_features(mature, factors, spec.column_roles)
             if "rank_ic" in analyses:
                 ranks.extend(
                     cross_sectional_rank_ic(
@@ -301,6 +301,7 @@ def build_a_share_statistics_tables(
                         *model_input_validity_columns(
                             item["model_metadata"]["input_columns"],
                             item["model_metadata"]["model_algorithm"],
+                            dataset_spec.column_roles,
                         ),
                     )
                 ),
@@ -367,7 +368,12 @@ def build_a_share_statistics_tables(
                         mature[family_columns[family_id]] = np.nan
                         continue
                     expected = (
-                        prediction_rows(session, metadata, period_windows[period_id])
+                        prediction_rows(
+                            session,
+                            metadata,
+                            period_windows[period_id],
+                            declared_columns=dataset_spec.column_roles,
+                        )
                         if selections
                         else session
                     )

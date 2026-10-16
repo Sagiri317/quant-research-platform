@@ -203,13 +203,13 @@ def _market(monkeypatch):
     monkeypatch.setattr(
         portfolio, "open_market_source", lambda *_args, **_kwargs: nullcontext(source)
     )
-    monkeypatch.setattr(
-        portfolio,
-        "iter_reconstructed_depth",
-        lambda *_args, **_kwargs: iter(
-            _state(t) for t in (2100, 2150, 2650, 2700, 8600, 8800, 9000)
-        ),
-    )
+
+    def books(*_args, stats=None, **_kwargs):
+        if stats is not None:
+            stats.coverage_segments["s1"] = (0, 10_000_000_000)
+        yield from (_state(t) for t in (2100, 2150, 2650, 2700, 8600, 8800, 9000))
+
+    monkeypatch.setattr(portfolio, "iter_reconstructed_depth", books)
     monkeypatch.setattr(
         portfolio,
         "iter_agg_trades",

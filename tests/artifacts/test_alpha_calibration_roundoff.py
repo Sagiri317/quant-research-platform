@@ -178,6 +178,7 @@ def test_rank_and_open_return_roundoff_survives_final_json_and_freeze(
         artifact.final_alpha_calibration,
         cutoff=pd.Timestamp("2023-12-31"),
         selection_group="global",
+        rebalance_schedule="daily",
     )
     assert frozen == calibration
     summary = summarize_portfolio_ledger(artifact.capital, artifact.iter_chunks())

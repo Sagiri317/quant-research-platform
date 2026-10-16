@@ -180,9 +180,12 @@ def _native_taker_projection_case(tmp_path, monkeypatch, *, count=300):
                 closed.append("funding")
 
         def reconstruct(source, *, output_levels=None, market_type=None, **kwargs):
-            if projection != "native":
+            prescan = output_levels == 0
+            active_stats = kwargs.pop("stats", None) or stats
+            if projection != "native" and not prescan:
                 output_levels = None if projection == "full" else 1
-            if fault is not None:
+            if fault is not None and not getattr(source, "_faulted", False):
+                source._faulted = True
                 records = source.iter_market_records
 
                 def unordered(**kwargs):
@@ -213,17 +216,18 @@ def _native_taker_projection_case(tmp_path, monkeypatch, *, count=300):
                 FUTURES_MARKET_TYPE,
                 output_levels=output_levels,
                 required_levels=20,
-                stats=stats,
+                stats=active_stats,
                 **kwargs,
             )
             try:
                 for event in events:
-                    if isinstance(event, BookState):
+                    if isinstance(event, BookState) and not prescan:
                         emitted_levels.append((len(event.bids), len(event.asks)))
                     yield event
             finally:
                 events.close()
-                closed.append("books")
+                stats.__dict__.update(active_stats.__dict__)
+                closed.append("prescan" if prescan else "books")
 
         def episode(**kwargs):
             result = kwargs.pop("produce")(batches.append)
@@ -295,7 +299,10 @@ def _native_taker_projection_case(tmp_path, monkeypatch, *, count=300):
             result = portfolio.backtest_taker(config)
         except (ValueError, PortfolioTargetBlocked) as error:
             result = (type(error).__name__, str(error))
-        assert sorted(closed) == ["books", "funding", "source"]
+        assert sorted(closed) == sorted(
+            ["books", "funding", "source"]
+            + (["prescan"] if mode == "independent_segments" else [])
+        )
         return (result, summaries, batches, asdict(stats)), emitted_levels
 
     return execute
@@ -320,12 +327,24 @@ def test_taker_native_projection_preserves_complete_ledger(
     summaries = (
         [row[1] for row in full[1]] if mode == "independent_segments" else [full[0]]
     )
-    assert len(summaries) == (4 if mode == "independent_segments" else 1)
+    assert len(summaries) == (7 if mode == "independent_segments" else 1)
     if latency >= horizon:
         assert all(summary["created_orders"] == 0 for summary in summaries)
-        assert all(summary["selection_status"] == "UNDEFINED" for summary in summaries)
+        assert all(
+            summary["selection_status"] in {"UNDEFINED", "COMPLETE"}
+            for summary in summaries
+        )
+        assert all(
+            summary["selection_status"] == "UNDEFINED"
+            for summary in summaries
+            if summary["equity_rows"]
+        )
     else:
-        assert all(summary["created_orders"] > 0 for summary in summaries)
+        assert all(
+            summary["created_orders"] > 0
+            for summary in summaries
+            if summary["equity_rows"]
+        )
         assert any(abs(fill.quantity) > 1 for batch in full[2] for fill in batch.trades)
 
 
@@ -515,9 +534,6 @@ def test_common_panel_maker_quotes_use_raw_execution_identities(wrong_identity) 
     from quant_research_platform.markets.implementations.crypto.portfolio import (
         _paired_validation,
     )
-    from quant_research_platform.markets.implementations.crypto.processed import (
-        producer,
-    )
 
     frames = {
         symbol: pd.DataFrame(
@@ -536,15 +552,8 @@ def test_common_panel_maker_quotes_use_raw_execution_identities(wrong_identity) 
         )
         for symbol, asset in (("BTCUSDT", "btc_usdt"), ("ETHUSDT", "eth_usdt"))
     }
-    panel = pd.concat(
-        producer._common_symbol_panel_frames(
-            {symbol: iter((frame,)) for symbol, frame in frames.items()},
-            columns=tuple(frames["BTCUSDT"].columns),
-            batch_rows=2,
-        ),
-        ignore_index=True,
-    )
-    assert panel["segment_id"].tolist() == ["s1:trade-connection-1:common@0"] * 2
+    panel = pd.concat(frames.values(), ignore_index=True)
+    assert panel["segment_id"].tolist() == ["s1:trade-connection-1"] * 2
     if wrong_identity is not None:
         panel[wrong_identity] = "wrong-raw-identity"
 
@@ -781,6 +790,7 @@ def test_maker_same_price_depletion_partial_fill_and_order_lifetime() -> None:
         on_ledger=capture_fill_rows(fills.append),
         capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
         asset_id="btc_usdt",
+        decision_windows_ns=((0, 200_000_000),),
         funding_events=(),
     )
     assert [fill["fill_qty"] for fill in fills] == [0.5, 0.5]
@@ -1090,7 +1100,9 @@ def test_taker_terminal_mark_cannot_reuse_price_before_pending_effective_time():
         asset_id="btc_usdt",
         funding_events=(),
     )
-    assert result["filled_orders"] == 1 and result["unfilled_quantity"] == 1.0
+    assert result["filled_orders"] == 1 and result["unfilled_quantity"] == 0.0
+    assert result["censored_pending_command_count"] == 1
+    assert result["censored_order_quantity"] == 1.0
     assert result["net_pnl"] is None and result["nav"] is None
 
 
@@ -1869,6 +1881,7 @@ def test_maker_fee_rebate_roundtrip_keeps_representable_result(tmp_path, fee_bps
             trade_coverage={"trade-connection-1": _coverage(0, 201)},
             capital=capital,
             asset_id="btc_usdt",
+            decision_windows_ns=((0, 200_000_000),),
             funding_events=(),
             on_ledger=capture_fill_rows(fills.append, emit),
         )

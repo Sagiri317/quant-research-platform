@@ -18,6 +18,7 @@ from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_BLOCK_REASONS,
     PORTFOLIO_CASH_ASSET_ID,
     PORTFOLIO_LEDGER_COST_COLUMNS,
+    REBALANCE_SCHEDULES,
     ExecutedTrade,
     ExecutionAssumptions,
     FundingEvent,
@@ -181,7 +182,7 @@ class PortfolioEconomics:
         return fill_id
 
     def funding(self, event: FundingEvent) -> None:
-        if self.quantity == 0:
+        if self.quantity == 0 or event.rate == 0 and event.mark_price is None:
             return
         if event.rate is None or event.mark_price is None:
             raise PortfolioTargetBlocked("portfolio_required_funding_missing")
@@ -1146,7 +1147,23 @@ def portfolio_interval_economics(batch: PortfolioLedgerBatch) -> dict[str, objec
     }
 
 
-def frozen_alpha_calibration(payload, *, cutoff, selection_group):
+def alpha_interval_semantics(rebalance_schedule):
+    """Only the scientific return horizon, independent of candidate identity."""
+    if (
+        type(rebalance_schedule) is not str
+        or rebalance_schedule not in REBALANCE_SCHEDULES
+    ):
+        raise ValueError("unsupported_rebalance_schedule")
+    return {
+        "rebalance_schedule": rebalance_schedule,
+        "return_convention": (
+            "next_execution_open_to_following_rebalance_execution_open"
+        ),
+        "calendar_convention": "a_share_unified_trading_sessions",
+    }
+
+
+def frozen_alpha_calibration(payload, *, cutoff, selection_group, rebalance_schedule):
     """Validate the final validation calibration bound to its actual group inputs."""
     if (
         type(payload) is not dict
@@ -1157,9 +1174,12 @@ def frozen_alpha_calibration(payload, *, cutoff, selection_group):
             "cutoff",
             "inputs",
             "calibration",
+            "interval_semantics",
         }
         or (
-            payload["schema_id"] != "qrp-final-alpha-calibration"
+            payload["interval_semantics"]
+            != alpha_interval_semantics(rebalance_schedule)
+            or payload["schema_id"] != "qrp-final-alpha-calibration"
             or payload["selection_group"] != selection_group
             or pd.Timestamp(payload["cutoff"]) != pd.Timestamp(cutoff)
             or (type(payload["calibration"]) is not dict)

@@ -509,3 +509,66 @@ def test_derivative_relative_changes_keep_adjacent_prices_and_oi(steps, field):
         )
     assert result.open_interest_change_30s.iloc[:300].isna().all()
     assert result.open_interest_change_30s.iloc[300] == float((Fraction(price) - 3) / 3)
+
+
+@pytest.mark.parametrize("side", [None, "unknown"])
+def test_native_unknown_force_order_side_is_local_flow_barrier(tmp_path, side):
+    from quant_research_platform.sources.market import open_market_source
+    from quant_research_platform.sources.tardis.raw import import_slices
+    from tests.helpers.tardis import _line, _slices
+
+    origin = pd.Timestamp("2026-09-01").value
+    native = b""
+    for second, value in ((0, "SELL"), (5, side), (6, "BUY")):
+        stamp = origin // 1_000_000 + second * 1000
+        native += _line(
+            second,
+            "forceOrder",
+            {
+                "e": "forceOrder",
+                "E": stamp,
+                "o": {
+                    "s": "BTCUSDT",
+                    "S": value,
+                    "T": stamp,
+                    "q": "2",
+                    "l": "2",
+                    "z": "2",
+                },
+            },
+        )
+    archive_root = tmp_path / "archive"
+    import_slices(
+        archive_root,
+        date="2026-09-01",
+        slices=_slices(tmp_path / "native", native, count=1),
+        symbols=("btcusdt",),
+        channels=("forceOrder",),
+    )
+    panel = pd.DataFrame(
+        {
+            "market_id": "crypto",
+            "asset_id": "btc_usdt",
+            "timestamp": pd.date_range("2026-09-01", periods=101, freq="100ms"),
+            "segment_id": "book",
+        }
+    )
+    with open_market_source(archive_root) as source:
+        observations = list(source.iter_state_observations(symbol="BTCUSDT"))
+    assert observations[1][2]["o"]["S"] is None
+    result = pd.concat(
+        iter_derivative_factor_frames(
+            (panel.iloc[:53], panel.iloc[53:]),
+            observations=observations,
+            max_age_ms={"forceOrder": 10000},
+            columns=(
+                "observed_force_order_imbalance_5s",
+                "time_since_observed_force_order",
+            ),
+        ),
+        ignore_index=True,
+    )
+    assert result.time_since_observed_force_order.iloc[50] == 0
+    assert result.forceOrder_age_ms.iloc[50] == 0
+    assert result.observed_force_order_imbalance_5s.iloc[50:100].isna().all()
+    assert result.observed_force_order_imbalance_5s.iloc[100] == 1

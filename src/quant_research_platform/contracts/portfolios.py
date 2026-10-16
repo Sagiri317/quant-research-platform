@@ -46,7 +46,7 @@ REBALANCE_SCHEDULES = {
     "monthly-last-trading-day",
 }
 PORTFOLIO_CASH_ASSET_ID = "__cash__"
-RESEARCH_VALUATION_VERSION = "RESEARCH_DELISTING_ZERO_V1"
+RESEARCH_VALUATION_POLICY = "evidenced_rights_or_confirmed_delisting_zero"
 PORTFOLIO_ECONOMIC_SUMMARY_FIELDS = frozenset(
     {
         "gross_pnl",
@@ -502,7 +502,11 @@ class FundingEvent:
 
 @dataclass(frozen=True, slots=True)
 class FundingForecast:
-    """Known funding coverage and expected cash per long unit, not settlements."""
+    """Known funding coverage and expected cash per long unit, not settlements.
+
+    Equal availability and horizon replace earlier knowledge without asserting
+    any future coverage. Such an observation cannot contain cashflows.
+    """
 
     available_at_ns: int
     known_until_ns: int
@@ -512,7 +516,7 @@ class FundingForecast:
         if (
             type(self.available_at_ns) is not int
             or type(self.known_until_ns) is not int
-            or not 0 <= self.available_at_ns < self.known_until_ns
+            or not 0 <= self.available_at_ns <= self.known_until_ns
             or type(self.cashflows) is not tuple
         ):
             raise ValueError("portfolio_funding_forecast_coverage_invalid")
@@ -627,14 +631,14 @@ def validate_portfolio_transition(
     ]
     if research_marks:
         policy = [
-            row for row in research_marks if row.name == "research_valuation_version"
+            row for row in research_marks if row.name == "research_valuation_policy"
         ]
         if (
             len(policy) != 1
             or policy[0].asset_id != PORTFOLIO_CASH_ASSET_ID
-            or policy[0].text != RESEARCH_VALUATION_VERSION
+            or policy[0].text != RESEARCH_VALUATION_POLICY
         ):
-            raise ValueError("portfolio_research_valuation_version_invalid")
+            raise ValueError("portfolio_research_valuation_policy_invalid")
     trades_by_asset = defaultdict(list)
     flows_by_asset = defaultdict(list)
     diagnostics_by_asset = defaultdict(dict)

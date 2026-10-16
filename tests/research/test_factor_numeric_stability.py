@@ -252,3 +252,56 @@ def test_signed_amount_cancellation_persists_rank_direction(
     )
     assert model.directions == (1.0, 1.0)
     assert model.predict(saved)[0] < model.predict(saved)[1]
+
+
+@pytest.mark.parametrize("batch_rows", [1, 1000])
+def test_trend_efficiency_cancellation_survives_producer_persistence_and_rank_model(
+    tmp_path, monkeypatch, batch_rows
+):
+    from quant_research_platform.research.models.rank_ensemble import (
+        EqualWeightRankEnsembleFactory,
+    )
+
+    dates = pd.bdate_range("2024-01-02", periods=60).as_unit("ns")
+    sequences = {
+        "small": [0.1, 1e-18, -0.1] + [0.0] * 57,
+        "larger": [0.1, 2e-18, -0.1] + [0.0] * 57,
+        "ordinary": [0.01] * 60,
+        "missing": [0.01] * 59 + [np.nan],
+        "zero": [0.0] * 60,
+    }
+    panel = pd.DataFrame(
+        [
+            dict(
+                market_id="a_share",
+                asset_id=asset,
+                timestamp=date,
+                listing_date=dates[0],
+                period_return=value,
+            )
+            for asset, values in sequences.items()
+            for date, value in zip(dates, values, strict=True)
+        ]
+    )
+    monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", batch_rows)
+    saved = _produce_factors(
+        tmp_path,
+        "price_volume_facts",
+        {"market_panel_1d": panel},
+        ("trend_efficiency_60d",),
+        TimeWindow(dates[-1], dates[-1]),
+    )
+    values = saved.set_index("asset_id").trend_efficiency_60d
+    for asset in ("small", "larger", "ordinary"):
+        terms = list(map(Fraction, sequences[asset]))
+        expected = float(abs(sum(terms)) / sum(map(abs, terms)))
+        assert values[asset] == pytest.approx(expected, rel=1e-15, abs=0.0)
+    assert values[["missing", "zero"]].isna().all()
+    training = saved.loc[saved.asset_id.isin(("small", "larger"))].copy()
+    training["label"] = training.asset_id.map({"small": 1.0, "larger": 2.0})
+    model = EqualWeightRankEnsembleFactory(("trend_efficiency_60d",), "label").fit(
+        training, training.label.to_numpy()
+    )
+    assert model.directions == (1.0,)
+    scores = pd.Series(model.predict(training), index=training.asset_id)
+    assert scores["small"] < scores["larger"]

@@ -233,7 +233,7 @@ def test_quiet_valid_book_persists_without_fabricated_gap() -> None:
         )
     )
     assert [_row_timestamp_ms(row) for row in rows] == [0, 100, 200, 300, 400, 500]
-    assert {row["segment_id"] for row in rows} == {"s1:trade-connection-1"}
+    assert {row["segment_id"] for row in rows} == {"s1"}
 
 
 def test_panel_excludes_pre_interval_trades_and_keeps_stream_clocks_separate() -> None:
@@ -284,9 +284,9 @@ def test_explicit_book_boundary_stops_panel_until_new_segment() -> None:
         )
     )
     assert [(_row_timestamp_ms(row), row["segment_id"]) for row in rows] == [
-        (0, "s1:trade-connection-1"),
-        (100, "s1:trade-connection-1"),
-        (200, "s1:trade-connection-1"),
+        (0, "s1"),
+        (100, "s1"),
+        (200, "s1"),
     ]
 
 
@@ -1081,7 +1081,7 @@ def test_panel_exact_cancellation_survives_events_and_batches(batch_rows):
         )
     ).iloc[-1]
     assert row.book_ofi_100ms == 0.0
-    with pytest.raises(OverflowError):
+    row = pd.concat(
         list(
             iter_panel_frames(
                 books[:3],
@@ -1097,6 +1097,9 @@ def test_panel_exact_cancellation_survives_events_and_batches(batch_rows):
                 batch_rows=batch_rows,
             )
         )
+    ).iloc[-1]
+    assert pd.isna(row.book_ofi_100ms)
+    assert row.book_spread > 0 and row.bid_depth_1 == 1e308
 
 
 @pytest.mark.parametrize("steps", (0, 1, 2))

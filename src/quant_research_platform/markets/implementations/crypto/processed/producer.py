@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, replace
 from functools import partial
@@ -14,6 +14,7 @@ from itertools import chain, islice
 import pandas as pd
 
 from quant_research_platform.contracts.json_codec import canonical_json_hash
+from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
 from quant_research_platform.contracts.time import TimeWindow, is_datetime_window
 from quant_research_platform.markets.implementations.crypto.hft import (
     HFT_GRID_MS,
@@ -36,9 +37,14 @@ from quant_research_platform.markets.implementations.crypto.ids import (
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.protocols.crypto_hft import (
+    HFT_DERIVATIVE_FACTOR_COLUMNS,
     HFT_FACTOR_COLUMNS,
+    cross_asset_inputs,
+    derivative_channels,
+    external_channels,
     factor_catalog,
     label_catalog,
+    spot_dependencies,
 )
 from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
 from quant_research_platform.sources.binance import ids as binance_ids
@@ -100,17 +106,40 @@ def produce_hft_processed_data(
     metadata = {}
     with ExitStack() as readers:
         if spec.data_id == panel_id:
+            selected_assets = json.loads(spec.parameters_json).get("asset_ids")
+            if selected_assets is not None:
+                supported = {
+                    canonical_crypto_asset_id(symbol): symbol for symbol in symbols
+                }
+                if not set(selected_assets) <= supported.keys():
+                    raise ValueError("data_operation_asset_ids_invalid")
+                symbols = tuple(supported[asset] for asset in selected_assets)
             run = readers.enter_context(open_run(raw_root))
             source_info = run.hft_source_info()
             start_ms, end_ms = (
                 _milliseconds(time_window.start, ceil=True),
                 _milliseconds(time_window.end),
             )
+            market_metadata, unavailable = {}, {}
+            for symbol in symbols:
+                try:
+                    market_metadata[symbol] = run.market_metadata(market_type, symbol)
+                except PortfolioTargetBlocked as error:
+                    if str(error) not in {
+                        "tardis_price_observations_missing",
+                        "tardis_depth_snapshot_missing",
+                    }:
+                        raise
+                    unavailable[symbol] = str(error)
+            if not market_metadata:
+                raise PortfolioTargetBlocked("hft_source_assets_unavailable")
             stats = {symbol: make_stats() for symbol in symbols}
             batch_rows = DEFAULT_BATCH_ROWS
             symbol_rows = max(1, batch_rows // len(symbols))
 
             def symbol_frames(symbol):
+                if symbol in unavailable:
+                    return iter(())
                 active = stats[symbol]
                 return iter_panel_frames(
                     reconstruct_depth(
@@ -133,28 +162,11 @@ def produce_hft_processed_data(
                     batch_rows=symbol_rows,
                 )
 
-            synchronize = market_type == binance_ids.FUTURES_MARKET_TYPE and tuple(
-                symbols
-            ) == tuple(binance_ids.RESEARCH_SYMBOLS)
-
-            def independent_frames():
-                for symbol in symbols:
-                    with closing_iterator(symbol_frames(symbol)) as active:
-                        for _yield_value in active:
-                            try:
-                                yield _yield_value
-                            except GeneratorExit:
-                                return
-
             def frames():
-                source = (
-                    _common_symbol_panel_frames(
-                        {symbol: symbol_frames(symbol) for symbol in symbols},
-                        columns=spec.required_columns,
-                        batch_rows=batch_rows,
-                    )
-                    if synchronize
-                    else independent_frames()
+                source = _union_panel_frames(
+                    (symbol_frames(symbol) for symbol in symbols),
+                    columns=spec.required_columns,
+                    batch_rows=batch_rows,
                 )
                 with closing_iterator(iter(source)) as active:
                     for frame in active:
@@ -163,10 +175,11 @@ def produce_hft_processed_data(
                         except GeneratorExit:
                             return
                 metadata["producer_diagnostics"] = {
-                    "observation_grid": "common_btc_eth_observed_timestamps"
-                    if synchronize
-                    else "independent_asset_observed_timestamps",
+                    "observation_grid": "independent_asset_observed_timestamps",
                     **source_info,
+                    "requested_assets": list(symbols),
+                    "available_assets": list(market_metadata),
+                    "unavailable_assets": unavailable,
                     "reconstruction": {
                         symbol: asdict(value) for symbol, value in stats.items()
                     },
@@ -174,10 +187,7 @@ def produce_hft_processed_data(
 
             metadata["source_evidence"] = {
                 **run.source_identity,
-                "market_metadata": {
-                    symbol: run.market_metadata(market_type, symbol)
-                    for symbol in symbols
-                },
+                "market_metadata": market_metadata,
             }
             data = frames()
 
@@ -252,14 +262,9 @@ def produce_hft_processed_data(
                     )
                 )
             )
-            options = _dataset_input_options(root)
-            if options.get("columns") is not None and not set(inputs).difference(
-                {"market_id", "asset_id", "timestamp", "segment_id"}
-            ) <= set(options["columns"]):
-                raise ValueError("data_operation_input_columns_missing")
-            session = open_dataset_session(
-                **{**options, "columns": inputs}
-            ).filtered_view(computation_window)
+            session = _selected_context_session(root, inputs).filtered_view(
+                computation_window
+            )
             metadata["inputs"] = {input_id: str(session.root)}
             data = _panel_frame_producer(
                 session,
@@ -292,121 +297,6 @@ def _output_frames(frames, time_window):
             ]
             if not selected.empty:
                 yield selected
-
-
-def _common_symbol_panel_frames(
-    frames_by_symbol: dict[str, Iterable[pd.DataFrame]],
-    *,
-    columns: tuple[str, ...],
-    batch_rows: int,
-) -> Iterator[pd.DataFrame]:
-    """Merge sorted symbol rows by timestamp, independent of frame boundaries."""
-    if set(frames_by_symbol) != set(binance_ids.RESEARCH_SYMBOLS) or batch_rows < len(
-        binance_ids.RESEARCH_SYMBOLS
-    ):
-        raise ValueError("hft_common_panel_inputs_invalid")
-    dtypes = {}
-    timestamp_position = columns.index("timestamp")
-    segment_position = columns.index("segment_id")
-
-    def rows(frames: Iterable[pd.DataFrame]) -> Iterator[tuple[object, ...]]:
-        previous = None
-        with closing_iterator(iter(frames)) as active:
-            for frame in active:
-                if tuple(frame.columns) != columns:
-                    raise ValueError("hft_panel_frame_columns_invalid")
-                dtypes.update(frame.dtypes)
-                for row in frame.itertuples(index=False, name=None):
-                    timestamp = row[timestamp_position]
-                    if previous is not None and timestamp <= previous:
-                        raise ValueError("hft_symbol_panel_timestamp_invalid")
-                    previous = timestamp
-                    try:
-                        yield row
-                    except GeneratorExit:
-                        return
-
-    streams = [
-        rows(frames_by_symbol[symbol]) for symbol in binance_ids.RESEARCH_SYMBOLS
-    ]
-    records: list[tuple[object, ...]] = []
-    previous_common_time = None
-    common_start_ns = None
-    with ExitStack() as live:
-        active = [live.enter_context(closing_iterator(stream)) for stream in streams]
-        empty = object()
-        current = [next(stream, empty) for stream in active]
-        if any(row is empty for row in current):
-            for stream in active:
-                for _row in stream:
-                    pass
-            return
-        ended = False
-        while not ended:
-            target = max(row[timestamp_position] for row in current)
-            for index, stream in enumerate(active):
-                while current[index][timestamp_position] < target:
-                    try:
-                        current[index] = next(stream)
-                    except StopIteration:
-                        ended = True
-                        break
-                if ended:
-                    break
-            if ended:
-                break
-            if any(row[timestamp_position] != target for row in current):
-                continue
-            if records and len(records) + len(current) > batch_rows:
-                _yield_value = pd.DataFrame.from_records(
-                    records, columns=columns
-                ).astype(dtypes)
-                try:
-                    yield _yield_value
-                except GeneratorExit:
-                    return
-                records.clear()
-            if (
-                previous_common_time is None
-                or target - previous_common_time
-                != pd.Timedelta(milliseconds=HFT_GRID_MS)
-            ):
-                common_start_ns = pd.Timestamp(target).value
-            previous_common_time = target
-            records.extend(
-                (
-                    *row[:segment_position],
-                    f"{row[segment_position]}:common@{common_start_ns}",
-                    *row[segment_position + 1 :],
-                )
-                for row in current
-            )
-            for index, stream in enumerate(active):
-                try:
-                    current[index] = next(stream)
-                except StopIteration:
-                    ended = True
-            if len(records) >= batch_rows:
-                _yield_value = pd.DataFrame.from_records(
-                    records, columns=columns
-                ).astype(dtypes)
-                try:
-                    yield _yield_value
-                except GeneratorExit:
-                    return
-                records.clear()
-        if ended:
-            for stream in active:
-                for _row in stream:
-                    pass
-        if records:
-            _yield_value = pd.DataFrame.from_records(records, columns=columns).astype(
-                dtypes
-            )
-            try:
-                yield _yield_value
-            except GeneratorExit:
-                return
 
 
 def _milliseconds(value: dt.datetime, *, ceil: bool = False) -> int:
@@ -458,31 +348,49 @@ def produce_derivative_processed_data(
     raw_root=None,
 ):
     """Align auxiliary states upstream of the unchanged exact-key assembler."""
-    max_age_ms = json.loads(spec.parameters_json)["max_age_ms"]
+    parameters = json.loads(spec.parameters_json)
+    channels = derivative_channels(spec.required_columns)
+    max_age_ms = parameters["max_age_ms"]
+    if not set(channels) <= set(max_age_ms):
+        raise ValueError("data_operation_max_age_ms_required")
+    selected = tuple(
+        name for name in spec.required_columns if name in HFT_DERIVATIVE_FACTOR_COLUMNS
+    )
     root = inputs[HFT_PANEL_DATA_ID]
     with ExitStack() as readers:
         archive = readers.enter_context(open_archive(raw_root))
-        options = _dataset_input_options(root)
-        if options.get("columns") is not None:
-            options["columns"] = tuple(
-                dict.fromkeys(
-                    (
-                        "market_id",
-                        "asset_id",
-                        "timestamp",
-                        "segment_id",
-                        *options["columns"],
-                    )
+        required = tuple(
+            dict.fromkeys(
+                (
+                    "market_id",
+                    "asset_id",
+                    "timestamp",
+                    "segment_id",
+                    *(
+                        column
+                        for name in selected
+                        for column in factor_catalog().get(name).input_columns
+                    ),
                 )
             )
-        session = open_dataset_session(**options).filtered_view(
-            _computation_window(
-                time_window,
-                history_ms=max(
-                    300_000,
-                    30_000 + json.loads(spec.parameters_json).get("input_delay_ms", 0),
-                ),
+        )
+        history = max(
+            (
+                {
+                    "open_interest_change_30s": 30_000,
+                    "open_interest_change_1m": 60_000,
+                    "open_interest_change_5m": 300_000,
+                    "observed_force_order_imbalance_5s": 5000,
+                    "observed_force_order_imbalance_30s": 30_000,
+                }.get(name, 0)
+                for name in selected
             ),
+            default=0,
+        )
+        session = _selected_context_session(root, required).filtered_view(
+            _computation_window(
+                time_window, history_ms=history + parameters.get("input_delay_ms", 0)
+            )
         )
         metadata = {
             "source_evidence": dict(archive.source_identity),
@@ -506,7 +414,10 @@ def produce_derivative_processed_data(
             }[first["asset_id"].iloc[0]]
             yield from iter_derivative_factor_frames(
                 chain((first,), frames),
-                observations=archive.iter_state_observations(symbol=symbol),
+                observations=archive.iter_state_observations(
+                    symbol=symbol, channels=channels
+                ),
+                columns=selected,
                 max_age_ms=max_age_ms,
                 input_delay_ms=json.loads(spec.parameters_json).get(
                     "input_delay_ms", 0
@@ -528,6 +439,24 @@ def produce_derivative_processed_data(
             yield (data, metadata)
 
 
+def _selected_context_session(root, columns):
+    """Project the chosen definition while leaving absent values locally unknown."""
+    options = _dataset_input_options(root)
+    session = open_dataset_session(**{**options, "columns": None})
+    keys = ("market_id", "asset_id", "timestamp")
+    selected = options.get("columns")
+    support = {*keys, "segment_id", "timestamp_ms", "observed_utc"}
+    if selected is not None:
+        # A supplied selector is configuration, not an observed missing value.
+        session.projected_view(tuple(dict.fromkeys((*keys, *selected))))
+        business = set(columns).intersection(session.arrow_schema.names) - support
+        if not business <= set(selected):
+            raise ValueError("data_operation_input_columns_missing")
+    available = tuple(name for name in columns if name in session.arrow_schema.names)
+
+    return session.projected_view(tuple(dict.fromkeys((*keys, *available))))
+
+
 @contextmanager
 def produce_spot_perp_context(
     spec, *, inputs, time_window, processed_catalog, source_catalog
@@ -537,20 +466,12 @@ def produce_spot_perp_context(
     sessions = {}
     for data_id in (HFT_PANEL_DATA_ID, HFT_SPOT_PANEL_DATA_ID):
         root = inputs[data_id]
-        options = _dataset_input_options(root)
-        if options.get("columns") is not None:
-            options["columns"] = tuple(
-                dict.fromkeys(
-                    (
-                        "market_id",
-                        "asset_id",
-                        "timestamp",
-                        "segment_id",
-                        *options["columns"],
-                    )
-                )
-            )
-        sessions[data_id] = open_dataset_session(**options).filtered_view(
+        dependencies, factors = spot_dependencies(
+            spec.required_columns, perpetual=data_id == HFT_PANEL_DATA_ID
+        )
+        sessions[data_id] = _selected_context_session(
+            root, (*dependencies, *(("segment_id",) if factors else ()))
+        ).filtered_view(
             _computation_window(time_window, history_ms=500)
             if data_id == HFT_PANEL_DATA_ID
             else TimeWindow(_EPOCH, time_window.end)
@@ -592,6 +513,7 @@ def produce_spot_perp_context(
                         iter_spot_perp_factor_frames(
                             perpetual,
                             spot_frames=spot,
+                            columns=spec.required_columns,
                             max_age_ms=max_age_ms,
                             input_delay_ms=json.loads(spec.parameters_json).get(
                                 "input_delay_ms", 0
@@ -710,14 +632,10 @@ def produce_cross_asset_context(
     sessions = {}
     for data_id in spec.processed_input_data_ids:
         root = inputs[data_id]
-        options = _dataset_input_options(root)
-        if options.get("columns") is not None:
-            options["columns"] = tuple(
-                dict.fromkeys(
-                    ("market_id", "asset_id", "timestamp", *options["columns"])
-                )
-            )
-        sessions[data_id] = open_dataset_session(**options).filtered_view(
+        dependencies = (
+            () if data_id == target_id else cross_asset_inputs(spec.required_columns)
+        )
+        sessions[data_id] = _selected_context_session(root, dependencies).filtered_view(
             time_window if data_id == target_id else TimeWindow(_EPOCH, time_window.end)
         )
     metadata = {
@@ -787,6 +705,16 @@ def produce_normalized_context(
 ):
     """Publish source-verified external information on Binance BTC/ETH keys."""
     parameters = json.loads(spec.parameters_json)
+    symbols = set(EXTERNAL_INSTRUMENTS[parameters["venue"]]["symbols"].values())
+    if (
+        not isinstance(archives, Mapping)
+        or not set(archives) <= symbols
+        or any(
+            not isinstance(kinds, Mapping) or not set(kinds) <= {"quotes", "trades"}
+            for kinds in archives.values()
+        )
+    ):
+        raise ValueError("normalized_source_archives_invalid")
     root = inputs[HFT_PANEL_DATA_ID]
     computation_window = _computation_window(
         time_window,
@@ -796,20 +724,21 @@ def produce_normalized_context(
     # Stale observed clocks remain meaningful after factor freshness expires.
     # Keep the source prefix, including prior-day observations and native units.
     source_window = TimeWindow(_EPOCH, time_window.end)
-    options = _dataset_input_options(root)
-    if options.get("columns") is not None:
-        options["columns"] = tuple(
-            dict.fromkeys(
-                (
-                    "market_id",
-                    "asset_id",
-                    "timestamp",
-                    "segment_id",
-                    *options["columns"],
-                )
-            )
+    selected_channels = external_channels(spec.required_columns)
+    needs_mid = any(
+        name.endswith(("_price_difference", "_relative_mid_dispersion"))
+        for name in spec.required_columns
+    )
+    needs_history = any(
+        name.removeprefix(parameters["venue"] + "_").startswith(
+            ("return_", "observed_")
         )
-    session = open_dataset_session(**options).filtered_view(computation_window)
+        for name in spec.required_columns
+    )
+    session = _selected_context_session(
+        root,
+        (*(("segment_id",) if needs_history else ()), *(("mid",) if needs_mid else ())),
+    ).filtered_view(computation_window)
     metadata = {
         "source_evidence": {
             "schema_id": source_schema_id,
@@ -836,8 +765,9 @@ def produce_normalized_context(
         symbol = parameters["symbols"][asset]
         yield from iter_external_context_frames(
             chain((first,), frames),
-            quotes=sources[symbol]["quotes"],
-            trades=sources[symbol]["trades"],
+            columns=spec.required_columns,
+            quotes=sources.get(symbol, {}).get("quotes", ()),
+            trades=sources.get(symbol, {}).get("trades", ()),
             venue=parameters["venue"],
             base_units_per_amount=parameters["base_units_per_amount"][asset],
             max_age_ms=parameters["max_age_ms"],
@@ -845,7 +775,8 @@ def produce_normalized_context(
         )
 
     identities = {
-        symbol: {kind: [] for kind in kinds} for symbol, kinds in archives.items()
+        symbol: {kind: [] for kind in kinds if kind in selected_channels}
+        for symbol, kinds in archives.items()
     }
     with closing_iterator(ExitStack()) as readers:
         sources = {
@@ -866,6 +797,7 @@ def produce_normalized_context(
                     )
                 )
                 for kind, paths in kinds.items()
+                if kind in selected_channels
             }
             for symbol, kinds in archives.items()
         }

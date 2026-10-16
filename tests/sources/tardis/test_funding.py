@@ -1,6 +1,7 @@
 """Native settlement identity and vendor forecast availability are distinct."""
 
 import json
+import math
 
 import pandas as pd
 import pytest
@@ -346,7 +347,6 @@ def test_separate_native_funding_archives_cannot_supply_continuous_months(tmp_pa
     from types import SimpleNamespace
 
     from quant_research_platform.markets.implementations.crypto.portfolio import (
-        _funding_check,
         _qualified_episodes,
     )
 
@@ -365,10 +365,6 @@ def test_separate_native_funding_archives_cannot_supply_continuous_months(tmp_pa
         assert len(roots) == 3
         with read_funding_observations(roots, symbol="BTCUSDT") as observations:
             assert observations.coverage == intervals
-            with pytest.raises(
-                PortfolioTargetBlocked, match="binance_funding_coverage_incomplete"
-            ):
-                _funding_check(observations, bounds)
             market_span = (bounds[0][0], bounds[0][1] + 1)
             episodes = list(
                 _qualified_episodes(
@@ -379,13 +375,13 @@ def test_separate_native_funding_archives_cannot_supply_continuous_months(tmp_pa
                 )
             )
             assert [(item[0], item[1]) for item in episodes] == [
-                (start, end + 1) for start, end in intervals
+                (intervals[0][0], intervals[0][1] + 1),
+                (intervals[0][1] + 1, intervals[1][0]),
+                (intervals[1][0], intervals[1][1] + 1),
+                (intervals[1][1] + 1, intervals[2][0]),
+                (intervals[2][0], intervals[2][1] + 1),
             ]
-            assert [item[2] for item in episodes] == [
-                "TRUNCATED",
-                "TRUNCATED",
-                "PLANNED_END",
-            ]
+            assert [item[2] for item in episodes] == ["TRUNCATED"] * 4 + ["PLANNED_END"]
 
 
 def test_selected_archive_or_funding_missing_does_not_fall_back(tmp_path):
@@ -450,19 +446,17 @@ def test_native_forecast_type_is_checked_before_numeric_conversion(
             end_ms=start + 600000 - 1,
             request_limit=1000,
         )
-        if expected is None:
-            with pytest.raises(
-                ValueError, match="tardis_funding_forecast_rate_invalid"
-            ):
-                import_funding_history(archive, **kwargs)
-            assert not (destination / "funding/BTCUSDT").exists()
-        else:
-            import_funding_history(archive, **kwargs)
-            with read_funding_observations(
-                (destination / "funding/BTCUSDT/observations",), symbol="BTCUSDT"
-            ) as observed:
-                forecasts = tuple(observed.forecasts)
+        import_funding_history(archive, **kwargs)
+        with read_funding_observations(
+            (destination / "funding/BTCUSDT/observations",), symbol="BTCUSDT"
+        ) as observed:
+            forecasts = tuple(observed.forecasts)
+            if expected is None:
+                assert forecasts[0].cashflows[0][1] is None
+            else:
                 assert forecasts[0].cashflows[0][1] == pytest.approx(expected)
+                if rate == "0":
+                    assert math.copysign(1.0, forecasts[0].cashflows[0][1]) == -1.0
     assert {p.name: p.read_bytes() for p in destination.glob("*.gz")} == original
 
 
@@ -767,8 +761,11 @@ def test_equivalent_utc_funding_retransmission_is_idempotent(
         )
         with read_funding_observations(roots, symbol="BTCUSDT") as source:
             forecasts = tuple(source.forecasts)
-            assert len(forecasts) == (0 if expired else 1)
-            if not expired:
+            assert len(forecasts) == 1
+            if expired:
+                assert forecasts[0].known_until_ns == forecasts[0].available_at_ns
+                assert forecasts[0].cashflows == ()
+            else:
                 assert forecasts[0].cashflows == (((start + 10000) * 1_000_000, -5.0),)
             assert (
                 source.settlement_qualification[0]["verification"]

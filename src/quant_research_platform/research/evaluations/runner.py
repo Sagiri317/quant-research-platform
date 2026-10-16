@@ -147,7 +147,8 @@ def evaluate(config):
                         signal.source_column
                         for signal in spec.signals
                         if signal.source_kind == "feature"
-                    )
+                    ),
+                    declared["column_roles"],
                 ),
                 *spec.label_columns,
                 *spec.label_availability_columns.values(),
@@ -182,6 +183,7 @@ def evaluate(config):
                     *model_input_validity_columns(
                         tuple(model_metadata["input_columns"]),
                         model_metadata["model_algorithm"],
+                        declared["column_roles"],
                     ),
                     *required_filter_columns(model_metadata["sample_filter_mode"]),
                 )
@@ -217,7 +219,10 @@ def evaluate(config):
                     metadata,
                 ) in predictions.items():
                     expected = prediction_rows(
-                        frame, prediction_model_metadata(metadata), window
+                        frame,
+                        prediction_model_metadata(metadata),
+                        window,
+                        declared_columns=declared["column_roles"],
                     )
                     if metadata.get("asset_ids") is not None:
                         expected = expected.loc[
@@ -273,6 +278,7 @@ def evaluate(config):
         prepared(),
         spec=spec,
         asset_column="asset_id",
+        declared_columns=declared["column_roles"],
         source_columns_by_kind={
             kind: tuple(
                 signal.source_column

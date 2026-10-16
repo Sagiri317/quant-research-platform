@@ -12,23 +12,19 @@ from quant_research_platform.storage.datasets.reading import _dataset_input_opti
 from quant_research_platform.storage.datasets.writing import write_dataset
 
 
-def _request(config, *, name_key):
-    required = {"market_id", name_key, "inputs", "time_window", "output_root"}
-    if (
-        not isinstance(config, Mapping)
-        or not required <= set(config)
-        or set(config)
-        - required
-        - (
-            {"source", "parameters", "factor_columns", "label_columns", "base_panel"}
-            if name_key == "data_id"
-            else {"source", "parameters"}
-        )
-    ):
+def _request(config):
+    required = {"market_id", "data_id", "inputs", "time_window", "output_root"}
+    if not required <= set(config) or set(config) - required - {
+        "source",
+        "parameters",
+        "factor_columns",
+        "label_columns",
+        "base_panel",
+    }:
         raise ValueError("data_operation_fields_invalid")
     if any(
         type(config[key]) is not str or not config[key]
-        for key in ("market_id", name_key, "output_root")
+        for key in ("market_id", "data_id", "output_root")
     ):
         raise ValueError("data_operation_value_invalid")
     inputs = config["inputs"]
@@ -51,7 +47,7 @@ def _request(config, *, name_key):
 def prepare(config: Mapping) -> Path:
     """Compute one declared market dataset without discovering upstream paths."""
     config = qrp_json_mapping_snapshot(config)
-    inputs, window = _request(config, name_key="data_id")
+    inputs, window = _request(config)
     market = config["market_id"]
     source = config.get("source")
     if market == "a_share":
@@ -239,6 +235,7 @@ def _configured_spec(spec, config):
     from quant_research_platform.markets.implementations.crypto import ids
     from quant_research_platform.research.protocols.crypto_hft import (
         HFT_DERIVATIVE_CHANNELS,
+        derivative_channels,
     )
 
     parameters = config.get("parameters", {})
@@ -254,6 +251,9 @@ def _configured_spec(spec, config):
             "information_assets",
             "target_assets",
         },
+        ids.HFT_PANEL_DATA_ID: {"asset_ids"},
+        ids.HFT_SPOT_PANEL_DATA_ID: {"asset_ids"},
+        ids.HFT_SOL_PANEL_DATA_ID: {"asset_ids"},
         ids.HFT_INFORMATION_STATE_DATA_ID: {"asset_ids"},
         ids.HFT_FACTOR_DATA_ID: {"asset_ids"},
         ids.HFT_LABEL_DATA_ID: {"asset_ids"},
@@ -277,7 +277,11 @@ def _configured_spec(spec, config):
     if "max_age_ms" in parameters:
         ages = parameters["max_age_ms"]
         if spec.data_id == ids.HFT_DERIVATIVE_DATA_ID:
-            if type(ages) is not dict or set(ages) != set(HFT_DERIVATIVE_CHANNELS):
+            if (
+                type(ages) is not dict
+                or not ages
+                or not set(ages) <= set(HFT_DERIVATIVE_CHANNELS)
+            ):
                 raise ValueError("data_operation_max_age_ms_invalid")
             ages = list(ages.values())
         else:
@@ -288,6 +292,22 @@ def _configured_spec(spec, config):
         if field in parameters:
             _asset_ids(parameters[field], field=field)
     actual = {**json.loads(spec.parameters_json), **parameters}
+    if (
+        spec.data_id
+        in {
+            ids.HFT_PANEL_DATA_ID,
+            ids.HFT_SPOT_PANEL_DATA_ID,
+            ids.HFT_SOL_PANEL_DATA_ID,
+        }
+        and "asset_ids" in actual
+    ):
+        supported = (
+            {"sol_usdt"}
+            if spec.data_id == ids.HFT_SOL_PANEL_DATA_ID
+            else {"btc_usdt", "eth_usdt"}
+        )
+        if not set(actual["asset_ids"]) <= supported:
+            raise ValueError("data_operation_asset_ids_invalid")
     if "max_age_ms" in dynamic:
         if "max_age_ms" not in actual:
             raise ValueError("data_operation_max_age_ms_required")
@@ -390,6 +410,36 @@ def _configured_spec(spec, config):
                 for name, role in spec.column_roles.items()
                 if role != ColumnRole.FACTOR
             }
+            if spec.data_id == ids.HFT_DERIVATIVE_DATA_ID:
+                channels = derivative_channels(factors)
+                roles = {
+                    name: role
+                    for name, role in roles.items()
+                    if name in spec.primary_key
+                    or any(name.startswith(channel + "_") for channel in channels)
+                }
+            elif spec.data_id in ids.HFT_EXTERNAL_DATA_IDS.values():
+                from quant_research_platform.research.protocols.crypto_hft import (
+                    external_channels,
+                )
+
+                channels = external_channels(factors)
+                prefixes = tuple(kind.removesuffix("s") + "_" for kind in channels)
+                roles = {
+                    name: role
+                    for name, role in roles.items()
+                    if name in spec.primary_key
+                    or any(
+                        name.split("_", 1)[1].startswith(prefix) for prefix in prefixes
+                    )
+                }
+            elif spec.data_id == ids.HFT_CROSS_ASSET_DATA_ID:
+                assets = {name.split("_", 1)[0] for name in factors}
+                roles = {
+                    name: role
+                    for name, role in roles.items()
+                    if name in spec.primary_key or name.split("_", 1)[0] in assets
+                }
             # Scientific input order is explicit; supporting keys never become factors.
             roles.update((name, ColumnRole.FACTOR) for name in factors)
             spec = replace(spec, column_roles=roles)
@@ -447,4 +497,8 @@ def _configured_spec(spec, config):
         )
         if "labels" in actual:
             actual["labels"] = [item.to_manifest() for item in selected]
+    if spec.data_id == ids.HFT_DERIVATIVE_DATA_ID and not set(
+        derivative_channels(spec.required_columns)
+    ) <= set(actual["max_age_ms"]):
+        raise ValueError("data_operation_max_age_ms_invalid")
     return replace(spec, parameters_json=json.dumps(actual))

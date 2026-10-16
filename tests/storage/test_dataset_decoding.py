@@ -132,6 +132,8 @@ def test_dataset_file_batches_preserve_output_across_files(
         lambda path, **_kwargs: iter((batches[Path(path)],)),
     )
     context = SimpleNamespace(
+        data_root=tmp_path,
+        _expected_partition_rows=None,
         logical_dtypes=logical_dtype_payload_from_frame(expected[0]),
         parquet_filters=None,
         read_paths=paths,

@@ -4,9 +4,7 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.research.datasets.validation import (
-    validate_evaluation_input,
     validate_research_dataset,
-    validate_research_input,
 )
 from tests.helpers.research_specs import make_dummy_research_dataset_spec
 
@@ -35,26 +33,74 @@ def test_research_dataset_validation_rejects_duplicate_dataframe_columns(
         validate_research_dataset(duplicate, spec)
 
 
-def test_evaluation_and_prediction_inputs_require_declared_columns() -> None:
-    spec = make_dummy_research_dataset_spec()
-    frame = _research_frame()
-    validate_evaluation_input(
-        frame, spec, signal_columns=("factor_1",), label_columns=("label_1",)
-    )
-    validate_research_input(frame, spec, input_columns=("factor_1",))
-    with pytest.raises(ValueError, match="invalid_evaluation_signal_columns"):
-        validate_evaluation_input(
-            frame, spec, signal_columns=("factor_2",), label_columns=("label_1",)
-        )
-    with pytest.raises(ValueError, match="invalid_evaluation_label_columns"):
-        validate_evaluation_input(
-            frame.drop(columns=["label_1"]),
-            spec,
-            signal_columns=("factor_1",),
-            label_columns=("label_1",),
-        )
-    with pytest.raises(ValueError, match="invalid_prediction_input_columns"):
-        validate_research_input(frame, spec, input_columns=("factor_2",))
+@pytest.mark.parametrize("operation", ("fit", "evaluate"))
+@pytest.mark.parametrize(
+    "case",
+    (
+        "valid",
+        "undeclared_input",
+        "wrong_input_role",
+        "undeclared_label",
+        "missing_label",
+    ),
+)
+def test_direct_consumers_require_actual_declared_inputs(tmp_path, operation, case):
+    from quant_research_platform.research.evaluations.runner import evaluate
+    from quant_research_platform.research.models.production import fit
+    from tests.correctness.test_direct_model_operations import data, fit_config
+
+    source = data(tmp_path)
+    config = fit_config(tmp_path, source)
+    declared = config["input_spec"]
+    if case == "undeclared_input":
+        del declared["column_roles"]["x"]
+    elif case == "wrong_input_role":
+        declared["column_roles"]["x"] = "context"
+    elif case == "undeclared_label":
+        del declared["column_roles"]["label"]
+    elif case == "missing_label":
+        pd.read_parquet(source).drop(columns="label").to_parquet(source, index=False)
+    if operation == "fit":
+        run = fit
+        expected = {
+            "undeclared_input": "model_feature_role_mismatch",
+            "wrong_input_role": "model_feature_role_mismatch",
+            "undeclared_label": "model_target_role_mismatch",
+            "missing_label": "dataset_column_not_found",
+        }
+    else:
+        run = evaluate
+        config = {
+            "inputs": str(source),
+            "input_spec": declared,
+            "output": str(tmp_path / "evaluation"),
+            "evaluation": {
+                "evaluation_id": "declared-inputs",
+                "market_id": "a_share",
+                "research_dataset_id": "synthetic",
+                "signals": [
+                    {"signal_id": "x", "source_kind": "feature", "source_column": "x"}
+                ],
+                "label_columns": ["label"],
+                "n_groups": 2,
+            },
+            "window": {"start": "2020-01-01", "end": "2020-01-03"},
+            "cutoff": "2020-01-03",
+        }
+        expected = {
+            "undeclared_input": "evaluation_signal_role_mismatch",
+            "wrong_input_role": "evaluation_signal_role_mismatch",
+            "undeclared_label": "evaluation_label_role_mismatch",
+            "missing_label": "dataset_column_not_found",
+        }
+    if case == "valid":
+        assert run(config).is_dir()
+    else:
+        with pytest.raises(ValueError, match=expected[case]):
+            run(config)
+        assert not (
+            tmp_path / ("linear" if operation == "fit" else "evaluation")
+        ).exists()
 
 
 def _research_frame() -> pd.DataFrame:

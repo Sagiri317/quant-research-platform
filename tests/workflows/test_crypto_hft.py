@@ -18,10 +18,7 @@ from quant_research_platform.artifacts.portfolio_ledger import (
     write_portfolio_ledger_artifact,
 )
 from quant_research_platform.contracts.data import DataSpec
-from quant_research_platform.contracts.portfolios import (
-    PortfolioCapital,
-    PortfolioTargetBlocked,
-)
+from quant_research_platform.contracts.portfolios import PortfolioCapital
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.crypto import portfolio
 from quant_research_platform.markets.implementations.crypto.execution import (
@@ -261,10 +258,23 @@ def test_native_taker_latency_changes_fills_and_is_reported(tmp_path):
     assert all(fills) and len(set(fills)) == 3
 
 
-def test_funding_failure_is_asset_scoped_and_keeps_old_good(tmp_path, monkeypatch):
+@pytest.mark.parametrize("exposed", [False, True])
+def test_funding_unknown_is_asset_scoped_and_keeps_old_good(
+    tmp_path, monkeypatch, exposed
+):
     root = tmp_path / "inputs"
     _inputs(root, [8600, 8600, 9000, 9000], assets=["btc_usdt", "eth_usdt"] * 2)
     _market(monkeypatch)
+    source_trades = portfolio.iter_agg_trades
+    monkeypatch.setattr(
+        portfolio,
+        "iter_agg_trades",
+        lambda *args, **kwargs: (
+            iter(())
+            if kwargs["symbol"] == "ETHUSDT" and not exposed
+            else source_trades(*args, **kwargs)
+        ),
+    )
 
     def funding(_roots, *, symbol):
         return nullcontext(
@@ -309,20 +319,48 @@ def test_funding_failure_is_asset_scoped_and_keeps_old_good(tmp_path, monkeypatc
         }
     )
     saved = {p.relative_to(btc): p.read_bytes() for p in btc.rglob("*") if p.is_file()}
-    with pytest.raises(PortfolioTargetBlocked, match="funding_coverage_incomplete"):
-        portfolio.backtest_maker(
-            {
-                **config,
-                "output": str(tmp_path / "eth"),
-                "asset_id": "eth_usdt",
-                "symbol": "ETHUSDT",
-            }
+    btc_artifact = read_portfolio_ledger_artifact(btc)
+    btc_summary = summarize_crypto_ledger(btc_artifact, btc_artifact.iter_chunks())
+    assert btc_summary["execution"]["account_path_status"] == "COMPLETE"
+    assert btc_summary["economics"]["fill_events"] == 1
+    eth = portfolio.backtest_maker(
+        {
+            **config,
+            "output": str(tmp_path / "eth"),
+            "asset_id": "eth_usdt",
+            "symbol": "ETHUSDT",
+        }
+    )
+    artifact = read_portfolio_ledger_artifact(eth)
+    batches = list(artifact.iter_chunks())
+    summary = summarize_crypto_ledger(artifact, iter(batches))
+    execution, economics = summary["execution"], summary["economics"]
+    fills = [fill for batch in batches for fill in batch.trades]
+    if exposed:
+        assert [
+            (fill.asset_id, fill.timestamp_ns, fill.quantity) for fill in fills
+        ] == [("eth_usdt", 8_700_000_000, 1)]
+        assert execution["account_path_status"] == "PARTIAL"
+        assert (
+            execution["account_stop_reason"]
+            == "portfolio_required_funding_coverage_missing"
         )
-    assert not (tmp_path / "eth").exists()
+        assert execution["account_stop_ns"] == 8_700_000_001
+        assert execution["known_prefix_valuation_timestamp_ns"] == 8_700_000_000
+        assert execution["censored_active_order_count"] > 0
+        assert economics["observed_totals_scope"] == "known_prefix"
+        assert economics["net_pnl"] is economics["nav"] is economics["funding"] is None
+    else:
+        # Certified empty trade flow leaves the account flat throughout the window.
+        assert not fills
+        assert execution["account_path_status"] == "COMPLETE"
+        assert execution["account_stop_reason"] is None
+        assert economics["net_pnl"] == economics["funding"] == 0.0
+        assert economics["nav"] == 1000.0
     assert saved == {
         p.relative_to(btc): p.read_bytes() for p in btc.rglob("*") if p.is_file()
     }
-    # Failure of a separate explicit asset does not poison later operations.
+    # A local unknown account path does not poison later explicit asset operations.
     assert portfolio.backtest_maker(
         {
             **config,

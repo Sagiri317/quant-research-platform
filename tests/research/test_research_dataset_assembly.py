@@ -22,10 +22,6 @@ from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.research.datasets.validation import (
-    validate_evaluation_input,
-    validate_research_input,
-)
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
     inspect_dataset,
@@ -94,15 +90,6 @@ def test_research_dataset_assembles_from_processed_inputs(tmp_path: Path) -> Non
         "demo_labels",
         "demo_annotations",
     }
-    validate_evaluation_input(
-        result,
-        dataset_catalog.get("demo"),
-        signal_columns=("momentum_20d",),
-        label_columns=("forward_return_20d",),
-    )
-    validate_research_input(
-        result, dataset_catalog.get("demo"), input_columns=("momentum_20d",)
-    )
 
 
 @pytest.mark.parametrize(

@@ -165,7 +165,10 @@ Bybit 与 OKX normalized 来源在 `data/raw/tardis/<exchange>/` 下按配置选
 owner，提交前重核完整源身份；缺少已声明文件、身份变化或结构不合法不能以空列表替代，
 失败保留已验证旧产物。公开源与 CSMAR 原件分别保留，不伪造供应商字段或修改原始附件。
 
-`a_share_industry_snapshots` 是正式 PANEL 的显式输入，source_id 为 reference。
+`a_share_industry_snapshots` 是 source_id 为 reference 的可选 PANEL 输入。纯价格、量价因子
+不强制行业来源；缺少行业证据时分类与非金融标志保留 NULL，不推定为非金融或回填当前行业。
+确实消费行业的中性化、适用性或风险计算按所需时点和有效域处理缺失；显式供给的行业证据仍须通过
+其选中来源、PIT、未知屏障和真实冲突检查。
 Interim 的 observation_date 保留观察期，publication_date 保留页面公开日，timestamp
 为日期型公开日之后的次日下界；按角色窗口末端裁剪，保留窗口起点前的历史状态。
 PANEL 在真实交易日轴上实施可用日规则。分类词典、历史资产身份、未知屏障与混合标准

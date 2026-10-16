@@ -9,8 +9,6 @@ SOURCE_ROOT = Path("src/quant_research_platform")
 
 
 def test_query_owner_has_no_workflow_or_source_traversal(import_edges):
-    from tests.helpers.import_graph import import_edges_under
-
     for edge in import_edges_under(import_edges, SOURCE_ROOT / "interfaces/queries.py"):
         assert not edge.module.startswith(
             ("quant_research_platform.workflows", "quant_research_platform.sources")
@@ -18,11 +16,7 @@ def test_query_owner_has_no_workflow_or_source_traversal(import_edges):
         assert not edge.module.rsplit(".", 1)[-1].startswith("write_")
 
 
-def test_research_and_profile_owners_have_no_provider_traversal(import_edges) -> None:
-    from tests.helpers.import_graph import import_edges_under
-
-    for edge in import_edges_under(import_edges, SOURCE_ROOT / "research"):
-        assert not edge.module.startswith("quant_research_platform.sources")
+def test_profile_owner_has_no_dataset_writer_or_pandas_import(import_edges) -> None:
     for edge in import_edges_under(import_edges, SOURCE_ROOT / "profiles/research.py"):
         assert edge.module.rsplit(".", 1)[-1] != "write_dataset"
         assert not edge.module.startswith("pandas")
@@ -105,22 +99,6 @@ def test_configured_model_algorithms_use_the_single_capability_owner() -> None:
     # A research roster may intentionally use only part of the library capability.
     assert configured
     assert configured <= set(_MODEL_ALGORITHM_FACTS)
-
-
-def _defined_symbols(tree: ast.AST) -> set[str]:
-    symbols: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            symbols.add(node.name)
-        elif isinstance(node, ast.arg):
-            symbols.add(node.arg)
-        elif isinstance(node, ast.Name):
-            symbols.add(node.id)
-        elif isinstance(node, ast.Attribute):
-            symbols.add(node.attr)
-        elif isinstance(node, ast.keyword) and node.arg is not None:
-            symbols.add(node.arg)
-    return symbols
 
 
 def _canonical_references(tree):

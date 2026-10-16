@@ -773,3 +773,36 @@ def test_zero_quantity_without_live_orders_validates_history_before_skipping_rep
         ValueError, match="crypto_calibration_event_coordinates_invalid"
     ):
         model.select(**kwargs)
+
+
+@pytest.mark.parametrize("coverage_stop", [499_999_999, 500_000_000, 500_000_001])
+def test_calibration_execution_coverage_matches_half_open_quote_lifetime(coverage_stop):
+    samples = []
+    row = {
+        **_quote(0, book_segment_id="s1"),
+        "price_prediction": 0.0,
+        "price_label": 0.003,
+        "proxy_prediction": 1.0,
+        "label_available_at_ns": 500_000_000,
+    }
+    result = replay_maker_calibration(
+        [_state(0)],
+        [_trade(100, price="99.4", quantity="1", maker_buyer=True)],
+        [row],
+        order_quantity=1.0,
+        latency_ms=0,
+        observed_coverage={"s1": (0, coverage_stop)},
+        trade_coverage={"trade-connection-1": (0, coverage_stop)},
+        cutoff_ns=500_000_000,
+        on_sample=lambda **sample: samples.append(sample),
+        on_event=lambda **_event: None,
+    )
+    if coverage_stop < 500_000_000:
+        assert result == {"samples": {"buy": 0, "sell": 0}, "excluded_decisions": 1}
+        assert not samples
+    else:
+        assert result == {"samples": {"buy": 1, "sell": 1}, "excluded_decisions": 0}
+        assert {sample["side"]: sample["filled"] for sample in samples} == {
+            "buy": 1.0,
+            "sell": 0.0,
+        }

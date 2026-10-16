@@ -57,20 +57,6 @@ def predict(config: Mapping) -> Path:
     _validate_model_prediction_window(facts, window)
     from quant_research_platform.contracts.filtering import required_filter_columns
 
-    columns = tuple(
-        dict.fromkeys(
-            (
-                "timestamp",
-                "asset_id",
-                *result.metadata["input_columns"],
-                *model_input_validity_columns(
-                    tuple(result.metadata["input_columns"]),
-                    result.metadata["model_algorithm"],
-                ),
-                *required_filter_columns(result.metadata["sample_filter_mode"]),
-            )
-        )
-    )
     # ponytail: open prediction streams prior rows too; add lower-only read filters
     # if that scan becomes costly, rather than inventing a finite endpoint.
     source = config["inputs"]
@@ -83,7 +69,25 @@ def predict(config: Mapping) -> Path:
     options.setdefault("columns", ("timestamp", "asset_id"))
     session = open_dataset_session(**options)
     validate_model_input_roles(
-        session.spec, _model_spec(facts["model"]), selected_columns=selected_columns
+        session.spec,
+        _model_spec(facts["model"]),
+        selected_columns=selected_columns,
+        input_units=facts["input_units"],
+    )
+    columns = tuple(
+        dict.fromkeys(
+            (
+                "timestamp",
+                "asset_id",
+                *result.metadata["input_columns"],
+                *model_input_validity_columns(
+                    tuple(result.metadata["input_columns"]),
+                    result.metadata["model_algorithm"],
+                    session.spec["column_roles"],
+                ),
+                *required_filter_columns(result.metadata["sample_filter_mode"]),
+            )
+        )
     )
     if window.end is not None:
         session = session.filtered_view(TimeWindow(window.start, window.end))
@@ -96,7 +100,12 @@ def predict(config: Mapping) -> Path:
             iter_complete_time_frames(iter(frames), timestamp_column="timestamp")
         ) as source:
             for frame in source:
-                usable = prediction_rows(frame, result.metadata, window)
+                usable = prediction_rows(
+                    frame,
+                    result.metadata,
+                    window,
+                    declared_columns=session.spec["column_roles"],
+                )
                 if usable.empty:
                     continue
                 values = prediction_callable(

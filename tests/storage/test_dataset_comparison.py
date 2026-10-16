@@ -137,6 +137,8 @@ def test_reader_propagates_decode_failure(
 ) -> None:
 
     class Context:
+        data_root = Path(".")
+        _expected_partition_rows = ()
         read_paths = (Path("part.parquet"),)
         physical_columns = ("value",)
         logical_columns = ("value",)
@@ -181,6 +183,8 @@ def test_dataset_iterator_context_preserves_caller_primary(
     frame = pd.DataFrame({"value": [1]})
 
     class Context:
+        data_root = Path(".")
+        _expected_partition_rows = ()
         read_paths = (Path("part.parquet"),)
         physical_columns = ("value",)
         logical_columns = ("value",)

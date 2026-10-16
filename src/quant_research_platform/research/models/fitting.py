@@ -344,9 +344,10 @@ def _collect_training_frame(
     *,
     fitting_cutoff: object,
     availability_column: str | None = None,
+    declared_columns=(),
 ) -> PreparedTraining:
     validity_columns = model_input_validity_columns(
-        spec.input_columns, spec.model_algorithm
+        spec.input_columns, spec.model_algorithm, declared_columns
     )
     required = set((*spec.input_columns, *validity_columns))
     required.add(spec.target_column)
@@ -547,13 +548,14 @@ def model_training_read_columns(
     label_column: str,
     sample_filter_mode,
     availability_column=None,
+    declared_columns=(),
 ) -> tuple[str, ...]:
     return tuple(
         dict.fromkeys(
             (
                 *primary_key,
                 *input_columns,
-                *canonical_feature_validity_columns(input_columns),
+                *canonical_feature_validity_columns(input_columns, declared_columns),
                 label_column,
                 "eligible",
                 *(

@@ -17,32 +17,41 @@ from quant_research_platform.contracts.models import _model_algorithm_facts
 from quant_research_platform.contracts.validation import strict_finite_numeric_series
 
 
-def canonical_feature_validity_columns(input_columns):
-    """Project consumed encodings to their canonical structural-validity values."""
+def canonical_feature_validity_columns(input_columns, declared_columns):
+    """Resolve structural dependencies only from declared canonical companions."""
+    declared = set(declared_columns)
     values = []
     for column in input_columns:
         for prefix in reversed(FEATURE_PREFIXES):
             if column.startswith(prefix):
-                values.append(FEATURE_PREFIXES[0] + column[len(prefix) :])
-                break
+                suffix = column[len(prefix) :]
+                value = FEATURE_PREFIXES[0] + suffix
+                if value in declared and any(
+                    companion + suffix in declared for companion in FEATURE_PREFIXES[1:]
+                ):
+                    values.append(value)
+                    break
     return tuple(dict.fromkeys(values))
 
 
-def feature_observation_columns(columns):
-    """Return observation flags only for canonical values, not indicator signals."""
+def feature_observation_columns(columns, declared_columns):
+    """Return declared observation companions, without interpreting ordinary names."""
+    declared = set(declared_columns)
     return tuple(
         dict.fromkeys(
             "feature_observed_" + column[len("feature_") :]
             for column in columns
             if column.startswith("feature_")
-            and not column.startswith(("feature_missing_", "feature_observed_"))
+            and "feature_observed_" + column[len("feature_") :] in declared
         )
     )
 
 
-def mask_unobserved_features(frame: pd.DataFrame, columns) -> pd.DataFrame:
-    """Exclude technical fill values from statistical samples using observed flags."""
-    flags = feature_observation_columns(columns)
+def mask_unobserved_features(
+    frame: pd.DataFrame, columns, declared_columns
+) -> pd.DataFrame:
+    """Exclude technical fill values using the full declared input schema."""
+    flags = feature_observation_columns(columns, declared_columns)
     if not flags:
         return frame
     result = frame.copy()
@@ -59,7 +68,7 @@ def mask_unobserved_features(frame: pd.DataFrame, columns) -> pd.DataFrame:
     return result
 
 
-def model_input_validity_columns(input_columns, model_algorithm):
+def model_input_validity_columns(input_columns, model_algorithm, declared_columns):
     """Own structural and direct-input validity for every model consumer."""
     direct = (
         ()
@@ -67,7 +76,12 @@ def model_input_validity_columns(input_columns, model_algorithm):
         else input_columns
     )
     return tuple(
-        dict.fromkeys((*canonical_feature_validity_columns(input_columns), *direct))
+        dict.fromkeys(
+            (
+                *canonical_feature_validity_columns(input_columns, declared_columns),
+                *direct,
+            )
+        )
     )
 
 

@@ -157,15 +157,18 @@ def test_taker_missing_forecast_and_boundary_price_fail_without_future_fill():
         **kwargs,
     )
     assert result["selection_status"] == "BLOCKED" and result["created_orders"] == 0
-    with pytest.raises(
-        PortfolioTargetBlocked, match="portfolio_window_boundary_valuation_missing"
-    ):
-        simulate_taker(
-            [_state(0), _state(30)],
-            [{"timestamp_ms": 0, "prediction": 0.02}],
-            funding_forecasts=(FundingForecast(0, 1000000000, ()),),
-            **kwargs,
-        )
+    result = simulate_taker(
+        [_state(0), _state(30)],
+        [{"timestamp_ms": 0, "prediction": 0.02}],
+        funding_forecasts=(FundingForecast(0, 1000000000, ()),),
+        **kwargs,
+    )
+    assert result["account_path_status"] == "PARTIAL"
+    assert (
+        result["account_stop_reason"] == "portfolio_window_boundary_valuation_missing"
+    )
+    assert result["net_pnl"] is None
+    assert result["known_prefix_net_pnl"] is not None
 
 
 def test_independent_episode_collection_resets_capital_and_funding_boundaries(tmp_path):
@@ -419,10 +422,11 @@ def test_funding_cut_between_books_carries_information_without_account_state():
         on_ledger=None,
         on_episode=emit,
     )
-    assert count == 2 and len(observed) == 2
-    assert observed[1][0]["start_ns"] == 30000001
-    assert [row[1]["funding"] for row in observed] == [0.0, 1.0]
-    assert [row[1]["initial_capital"] for row in observed] == [1000.0, 1000.0]
+    assert count == 2 and len(observed) == 3
+    assert observed[1][0]["start_ns"] == 30000000
+    assert observed[2][0]["start_ns"] == 30000001
+    assert [row[1]["funding"] for row in observed] == [0.0, 0.0, 1.0]
+    assert [row[1]["initial_capital"] for row in observed] == [1000.0] * 3
     for episode, _result, batches in observed:
         assert all(
             episode["start_ns"] <= value.timestamp_ns < episode["stop_ns"]
@@ -519,7 +523,6 @@ def test_persisted_funding_days_intersect_market_coverage_without_bridging(tmp_p
     from types import SimpleNamespace
 
     from quant_research_platform.markets.implementations.crypto.portfolio import (
-        _funding_check,
         _qualified_episodes,
     )
     from quant_research_platform.sources.binance.funding import (
@@ -545,16 +548,14 @@ def test_persisted_funding_days_intersect_market_coverage_without_bridging(tmp_p
     trades = SimpleNamespace(intervals=lambda: iter(((5, 22), (24, 45))))
     bounds = ((0, 49),)
     with read_funding_observations(tuple(roots), symbol="BTCUSDT") as source:
-        with pytest.raises(
-            PortfolioTargetBlocked, match="binance_funding_coverage_incomplete"
-        ):
-            _funding_check(source, bounds)
         episodes = list(_qualified_episodes(books, trades, source, bounds))
         assert [(row[0], row[1]) for row in episodes] == [
             (5, 10),
+            (10, 20),
             (20, 22),
             (24, 25),
             (27, 30),
+            (30, 40),
             (40, 45),
         ]
         assert all(row[2] == "TRUNCATED" for row in episodes)
@@ -567,7 +568,6 @@ def test_funding_nanosecond_adjacency_keeps_maximal_episode(next_start, continuo
     from types import SimpleNamespace
 
     from quant_research_platform.markets.implementations.crypto.portfolio import (
-        _funding_check,
         _qualified_episodes,
     )
 
@@ -577,16 +577,9 @@ def test_funding_nanosecond_adjacency_keeps_maximal_episode(next_start, continuo
     books = {"whole": (0, 21)}
     trades = SimpleNamespace(intervals=lambda: iter(((0, 21),)))
     bounds = ((0, 20),)
-    if continuous:
-        _funding_check(source, bounds)
-    else:
-        with pytest.raises(
-            PortfolioTargetBlocked, match="binance_funding_coverage_incomplete"
-        ):
-            _funding_check(source, bounds)
     episodes = list(_qualified_episodes(books, trades, source, bounds))
     assert [(row[0], row[1]) for row in episodes] == (
-        [(0, 21)] if continuous else [(0, 10), (11, 21)]
+        [(0, 21)] if continuous else [(0, 10), (10, 11), (11, 21)]
     )
 
 
@@ -664,9 +657,13 @@ def test_native_episode_cut_points_keep_half_open_endpoints_across_funding_roots
             (start + 4 * second, start + 5 * second),
         ]
         if missing:
+            # Identified zero-rate settlements need no mark and create no cut.
             expected[:2] = [
-                (start + 2, start + second),
-                (start + 2 * second + 2, start + 3 * second - 1),
+                (start, start + 1),
+                (start + 1, start + second),
+                (start + 2 * second, start + 2 * second + 1),
+                (start + 2 * second + 1, start + 2 * second + 2),
+                (start + 2 * second + 2, start + 3 * second),
             ]
         assert [(left, right) for left, right, *_ in actual] == expected
         assert all(row[2] == "TRUNCATED" for row in actual)

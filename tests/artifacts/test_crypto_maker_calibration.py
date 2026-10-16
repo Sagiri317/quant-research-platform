@@ -205,6 +205,7 @@ def maker_calibration_tables():
         "unit_invalid",
         "unit_mixed",
         "tail",
+        "tail_after_cutoff",
         "empty",
     ],
 )
@@ -264,12 +265,14 @@ def test_mature_shared_maker_tape_round_trip_and_rejects_corruption(
         tables["crypto_maker_events"] = (
             tables["crypto_maker_events"].loc[lambda frame: frame.event_id.lt(4)].copy()
         )
-    elif mutation == "tail":
+    elif mutation in {"tail", "tail_after_cutoff"}:
         extra = (
             tables["crypto_maker_events"].loc[lambda frame: frame.event_id.eq(4)].copy()
         )
         extra.event_id = 5
         extra.event_at += pd.Timedelta(milliseconds=100)
+        if mutation == "tail_after_cutoff":
+            extra.event_at = pd.Timestamp("1970-01-01T00:00:04")
         tables["crypto_maker_events"] = pd.concat(
             [tables["crypto_maker_events"], extra], ignore_index=True
         )
@@ -294,6 +297,20 @@ def test_mature_shared_maker_tape_round_trip_and_rejects_corruption(
     else:
         tables["crypto_maker_samples"].loc[1, "price_prediction"] = 0.001
         tables["crypto_maker_samples"].loc[1, "forecast_error"] = -0.001
+    if mutation == "tail":
+        # A valid unused tail is retained source evidence, not a corrupt sample.
+        saved = statistics.write_statistics_artifact(
+            tmp_path / "unused-tail",
+            metadata=envelope,
+            tables=produce,
+            table_group="crypto_maker_calibration",
+            validate_tables=validate_maker_calibration,
+        )
+        statistics.read_statistics_artifact(
+            saved, validate_tables=validate_maker_calibration
+        )
+        assert _bytes(root) == original
+        return
     with pytest.raises(
         ValueError,
         match="order_book_price_unit_invalid"
@@ -334,7 +351,9 @@ def test_mature_shared_maker_tape_round_trip_and_rejects_corruption(
     assert _bytes(root) == original
 
 
-@pytest.mark.parametrize("finish", ["normal", "writer_failure"])
+@pytest.mark.parametrize(
+    "finish", ["normal", "writer_failure", "trade_gap", "book_gap", "visible_gap"]
+)
 def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
     tmp_path, monkeypatch, maker_calibration_tables, finish
 ):
@@ -408,13 +427,42 @@ def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
         closed, emitted, frames = ([], [], [])
 
         def books(*_args, closed=closed, **_kwargs):
+            _kwargs["stats"].coverage_segments.update(coverage)
             try:
-                yield from (_state(stamp) for stamp in (2100, 2150, 2650, 2700))
+                if finish == "book_gap":
+                    from tests.markets.crypto.test_hft import _boundary
+
+                    yield _state(2100)
+                    yield _boundary(2150)
+                    yield from (_state(stamp) for stamp in (2200, 2650, 2700))
+                else:
+                    yield from (_state(stamp) for stamp in (2100, 2150, 2650, 2700))
             finally:
                 closed.append("books")
 
         def trades(*_args, closed=closed, **_kwargs):
             try:
+                if finish == "trade_gap":
+                    from quant_research_platform.contracts.order_book import (
+                        TradeBoundary,
+                    )
+
+                    event = _trade(2150, price="99.5", quantity="3", maker_buyer=True)
+                    yield TradeBoundary(
+                        **{
+                            name: getattr(event, name)
+                            for name in TradeBoundary.__dataclass_fields__
+                            if name != "reason"
+                        },
+                        reason="invalid_numeric",
+                    )
+                if finish == "visible_gap":
+                    from dataclasses import replace
+
+                    yield replace(
+                        _trade(2150, price="99.5", quantity="3", maker_buyer=True),
+                        visible_quantity=None,
+                    )
                 yield from (
                     _trade(stamp, price="99.5", quantity="3", maker_buyer=True)
                     for stamp in (2180, 2400)
@@ -451,7 +499,7 @@ def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
                 validate_tables=portfolio.validate_maker_calibration,
             )
 
-        if finish != "normal":
+        if finish == "writer_failure":
             with pytest.raises(KeyboardInterrupt) as caught:
                 write()
             assert caught.value is primary and len(emitted) == 2
@@ -463,6 +511,43 @@ def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
             root,
             validate_tables=portfolio.validate_maker_calibration,
         )
+        if finish in {"trade_gap", "book_gap", "visible_gap"}:
+            with artifact.table("crypto_maker_samples.parquet") as samples:
+                assert len(samples) == 2
+                assert samples.sample_id.eq(0).all()
+                assert samples.decision_at.eq(pd.Timestamp(2200, unit="ms")).all()
+                assert samples.initial_book_event_id.gt(0).all()
+            with artifact.table("crypto_maker_calibration.parquet") as summary:
+                assert summary.sample_count.eq(1).all()
+            for corruption in ("referenced_trade", "coordinates"):
+                changed = {}
+                for member in expected:
+                    with artifact.table(f"{member}.parquet") as actual:
+                        changed[member] = actual.copy()
+                if corruption == "referenced_trade":
+                    tape = changed["crypto_maker_events"]
+                    tape.loc[
+                        tape.event_kind.eq("trade")
+                        & tape.event_at.eq(pd.Timestamp(2400, unit="ms")),
+                        "quantity",
+                    ] = 0.0
+                else:
+                    changed["crypto_maker_samples"]["initial_book_event_id"] = 0
+                with pytest.raises(
+                    ValueError,
+                    match="crypto_calibration_(reference_response|event_coordinates)_invalid",
+                ):
+                    statistics.write_statistics_artifact(
+                        tmp_path / corruption,
+                        metadata=envelope,
+                        tables=lambda on_table, changed=changed: [
+                            on_table(name, frame) for name, frame in changed.items()
+                        ],
+                        table_group="crypto_maker_calibration",
+                        validate_tables=portfolio.validate_maker_calibration,
+                    )
+            assert sorted(closed) == sorted(["books", "trades", *MAKER_MODEL_IDS])
+            return
         for name, frame in expected.items():
             with artifact.table(f"{name}.parquet") as actual:
                 pd.testing.assert_frame_equal(actual, frame)
@@ -654,14 +739,14 @@ def test_maker_calibration_streams_many_events_without_full_table_reads(
                 event_batch_rows.append(len(frame))
             on_table(name, frame)
 
-        monkeypatch.setattr(
-            portfolio,
-            "iter_reconstructed_depth",
-            lambda *_args, **_kwargs: (
+        def books(*_args, stats, **_kwargs):
+            stats.coverage_segments.update(coverage)
+            yield from (
                 _state(first + index * 1000, bid_levels=bids, ask_levels=asks)
                 for index in range(count)
-            ),
-        )
+            )
+
+        monkeypatch.setattr(portfolio, "iter_reconstructed_depth", books)
         monkeypatch.setattr(
             portfolio, "iter_agg_trades", lambda *_args, **_kwargs: iter(())
         )

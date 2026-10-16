@@ -243,7 +243,9 @@ def write_parquet_chunks(
         handle = open_filesystem_file(path, "xb")
         with closing_iterator(handle):
             require_unaliased_path(path.parent, error="invalid_output_write_path")
-            with parquet_table_writer(handle, compression="zstd") as write_table:
+            with parquet_table_writer(
+                handle, compression="zstd", statistics=("timestamp",)
+            ) as write_table:
                 key_index = ExactPrimaryKeyIndex(primary_key=("timestamp", "asset_id"))
                 for frame in active_frames:
                     if not isinstance(frame, pd.DataFrame):

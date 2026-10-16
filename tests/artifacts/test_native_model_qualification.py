@@ -17,6 +17,7 @@ from tests.correctness.test_direct_model_operations import data, fit_config
         "seed",
         "parameters",
         "fit_window",
+        "input_unit_whitespace",
     ],
 )
 def test_model_reader_rejects_wrong_learning_evidence_without_changing_good_model(
@@ -44,6 +45,8 @@ def test_model_reader_rejects_wrong_learning_evidence_without_changing_good_mode
         model["facts"]["model"]["random_seed"] += 1
     elif mutation == "parameters":
         model["facts"]["candidate_parameters"] = {"fit_intercept": False}
+    elif mutation == "input_unit_whitespace":
+        model["facts"]["input_units"] = {"x": " "}
     else:
         model["facts"]["fit_windows"][0]["start"] = "2020-01-02"
     (bad / "model.json").write_text(json.dumps(model))

@@ -259,7 +259,8 @@ def test_perpetual_execution_roundtrip_keeps_collateral_funding_and_delayed_fill
             asset_id="btc_usdt",
             funding_events=(FundingEvent(75000000, rate, 100.0),),
             on_ledger=emit,
-            observed_coverage={"s1": _coverage(0, 100)},
+            decision_windows_ns=((0, 100_000_000),),
+            observed_coverage={"s1": _coverage(0, 101)},
         )
         if mode == "taker":
             return simulate_taker(
@@ -281,7 +282,7 @@ def test_perpetual_execution_roundtrip_keeps_collateral_funding_and_delayed_fill
             [_trade(50, price="99.4", quantity="1", maker_buyer=True)],
             [_quote(0, book_segment_id="s1")],
             config=_maker_config(),
-            trade_coverage={"trade-connection-1": _coverage(0, 100)},
+            trade_coverage={"trade-connection-1": _coverage(0, 101)},
             **kwargs,
         )
 
@@ -352,14 +353,24 @@ def test_perpetual_execution_roundtrip_keeps_collateral_funding_and_delayed_fill
         for batch in batches
     )
     old_manifest = Path(native_filesystem_path(root / "manifest.json")).read_bytes()
-    with pytest.raises(
-        PortfolioTargetBlocked, match="portfolio_required_funding_missing"
-    ):
-        write_portfolio_ledger_artifact(
-            tmp_path / (mode + "_missing"),
-            **envelope,
-            produce=lambda emit: run(emit, None),
-        )
+    missing_root = write_portfolio_ledger_artifact(
+        tmp_path / (mode + "_missing"),
+        **envelope,
+        produce=lambda emit: run(emit, None),
+    )
+    from quant_research_platform.artifacts.crypto_hft import summarize_crypto_ledger
+
+    partial = read_portfolio_ledger_artifact(missing_root)
+    missing_summary = summarize_crypto_ledger(partial, partial.iter_chunks())
+    assert missing_summary["execution"]["account_path_status"] == "PARTIAL"
+    assert (
+        missing_summary["execution"]["account_stop_reason"]
+        == "portfolio_required_funding_missing"
+    )
+    assert missing_summary["economics"]["net_pnl"] is None
+    assert missing_summary["economics"]["funding"] is None
+    assert missing_summary["execution"]["known_prefix_funding"] == 0.0
+    assert missing_summary["economics"]["fill_events"] == 1
     assert (
         Path(native_filesystem_path(root / "manifest.json")).read_bytes()
         == old_manifest
@@ -1021,6 +1032,7 @@ def test_unidentified_alpha_survives_publication_and_blocks_freezing(
             artifact.final_alpha_calibration,
             cutoff=pd.Timestamp("2023-12-31"),
             selection_group="global",
+            rebalance_schedule="daily",
         )
 
 
@@ -1093,6 +1105,7 @@ def test_degenerate_alpha_diagnostics_survive_ledger_and_freeze(
         artifact.final_alpha_calibration,
         cutoff=pd.Timestamp("2019-12-31"),
         selection_group="global",
+        rebalance_schedule="daily",
     )
     assert frozen == calibration
     summary = ledger_artifact.summarize_portfolio_ledger(
@@ -1327,6 +1340,13 @@ def _alpha_metadata(cutoff):
 def _alpha_payload(calibration, envelope):
     return {
         "schema_id": "qrp-final-alpha-calibration",
+        "interval_semantics": {
+            "rebalance_schedule": "daily",
+            "return_convention": (
+                "next_execution_open_to_following_rebalance_execution_open"
+            ),
+            "calendar_convention": "a_share_unified_trading_sessions",
+        },
         "selection_group": "global",
         "cutoff": envelope["metadata"]["window"]["end"],
         "inputs": {},

@@ -84,16 +84,16 @@ def _nav_return_roundoff(start: object, end: object, returns: object) -> np.ndar
 
 def _research_valuation_observation(batch, economics):
     """Summarize explicit research marks without changing the execution path."""
-    from quant_research_platform.research.portfolios.production import (
-        RESEARCH_VALUATION_VERSION,
+    from quant_research_platform.contracts.portfolios import (
+        RESEARCH_VALUATION_POLICY,
     )
 
     facts = {(item.asset_id, item.name): item for item in batch.diagnostics}
-    version = facts.get((PORTFOLIO_CASH_ASSET_ID, "research_valuation_version"))
-    if version is None:
+    policy = facts.get((PORTFOLIO_CASH_ASSET_ID, "research_valuation_policy"))
+    if policy is None:
         return None
-    if version.text != RESEARCH_VALUATION_VERSION:
-        raise ValueError("portfolio_research_valuation_version_invalid")
+    if policy.text != RESEARCH_VALUATION_POLICY:
+        raise ValueError("portfolio_research_valuation_policy_invalid")
     values = {
         phase: {
             row.asset_id: row.value
@@ -157,7 +157,10 @@ def fixed_turnover_cost_sensitivity(
     turnover = strict_finite_float(
         turnover, error="hft_cost_sensitivity_result_invalid"
     )
-    net_pnl = strict_finite_float(net_pnl, error="hft_cost_sensitivity_result_invalid")
+    if net_pnl is not None:
+        net_pnl = strict_finite_float(
+            net_pnl, error="hft_cost_sensitivity_result_invalid"
+        )
     base_fee_bps = strict_finite_float(
         base_fee_bps, error="hft_cost_sensitivity_result_invalid"
     )
@@ -182,7 +185,7 @@ def fixed_turnover_cost_sensitivity(
                     "fee_bps": fee,
                     "additional_spread_bps": spread,
                     "cost_delta": change,
-                    "net_pnl": net_pnl - change,
+                    "net_pnl": None if net_pnl is None else net_pnl - change,
                     "method": "constant_actual_turnover_additive_sensitivity",
                 }
             )
@@ -205,8 +208,9 @@ def _crypto_observations(ledger, windows, limit, *, observation_window_ns=None):
     inventory = {
         scope: {
             "duration": 0,
+            "scale": 0.0,
             "mean": 0.0,
-            "m2": 0.0,
+            "variance": 0.0,
             "at_limit": 0,
             "max_abs": 0.0,
             "observations": 0,
@@ -241,9 +245,20 @@ def _crypto_observations(ledger, windows, limit, *, observation_window_ns=None):
                 continue
             state = inventory[scope]
             new_duration = state["duration"] + weight
-            delta = previous_position - state["mean"]
-            state["mean"] += delta * weight / new_duration
-            state["m2"] += weight * delta * (previous_position - state["mean"])
+            scale = max(state["scale"], abs(previous_position))
+            if scale:
+                # Merge normalized population moments, without ns-sized products.
+                rescale = state["scale"] / scale
+                old_mean = state["mean"] * rescale
+                value = previous_position / scale
+                old_weight = state["duration"] / new_duration
+                new_weight = weight / new_duration
+                state["mean"] = old_weight * old_mean + new_weight * value
+                state["variance"] = (
+                    old_weight * state["variance"] * rescale * rescale
+                    + old_weight * new_weight * (value - old_mean) ** 2
+                )
+                state["scale"] = scale
             state["duration"] = new_duration
             state["at_limit"] += weight * int(abs(previous_position) >= limit)
             state["max_abs"] = max(state["max_abs"], abs(previous_position))
@@ -278,12 +293,14 @@ def _crypto_observations(ledger, windows, limit, *, observation_window_ns=None):
         state["observations"] += 1
         previous_timestamp, previous_position = (timestamp, position)
 
-    def finish():
+    def finish(*, observation_end_ns=None):
         daily = []
         for index, (fold, start, end) in enumerate(bounds):
             observed_start, observed_end = (
                 (start, end) if observation_window_ns is None else observation_window_ns
             )
+            if observation_end_ns is not None:
+                observed_end = observation_end_ns
             point = (max(start, observed_start) + day_ns - 1) // day_ns * day_ns
             while point + day_ns <= min(end, observed_end):
                 start_nav = (
@@ -365,20 +382,21 @@ def build_crypto_portfolio_statistics_tables(
         key: 0.0
         for key in ("fees", "funding", "turnover", "fill_events", "fill_quantity")
     }
+    costs_reasons = {}
+    observed_total_names = {"fees", "turnover", "fill_events", "fill_quantity"}
+    partial_observed_totals = False
     cursor = bounds[0][0]
     envelope_stop = bounds[-1][1] + 1
     candidate_key = {"candidate_id": config["candidate_id"], "execution_mode": mode}
 
-    def cover(start, stop, kind):
+    def cover(start, stop, kind, reason="not_covered_by_qualified_episode"):
         coverage.append(
             {
                 **candidate_key,
                 "start_at": pd.Timestamp(start),
                 "stop_at": pd.Timestamp(stop),
                 "kind": kind,
-                "reason": ""
-                if kind == "covered"
-                else "not_covered_by_qualified_episode",
+                "reason": "" if kind == "covered" else reason,
             }
         )
 
@@ -414,6 +432,7 @@ def build_crypto_portfolio_statistics_tables(
     def consume_episode(episode, artifact, batches):
         nonlocal covered_ns, episode_count, truncated_count, cursor, row_key
         nonlocal funding_required, funding_covered
+        nonlocal partial_observed_totals
         observed_start, observed_end = (
             (bounds[0][0], bounds[-1][1])
             if episode is None
@@ -444,37 +463,64 @@ def build_crypto_portfolio_statistics_tables(
             consume_batch=observe,
         )
         economic = summary["economics"]
+        execution = summary["execution"]
+        partial_reason = (
+            execution["account_stop_reason"]
+            if execution.get("account_path_status") == "PARTIAL"
+            else ""
+        )
+        observed_prefix = execution.get(
+            "observed_totals_scope"
+        ) == "known_prefix" or bool(partial_reason)
+        partial_observed_totals |= observed_prefix
+        drawdown_reason = partial_reason or (
+            execution["market_observation_reason"]
+            if execution.get("market_observation_status") == "PARTIAL"
+            else ""
+        )
         if episode is None:
             intervals = summary["intervals"]
             start, stop = (bounds[0][0], envelope_stop)
         else:
             start, stop = (episode["start_ns"], episode["stop_ns"])
             observed = (start, episode["terminal_valuation_ns"])
-            intervals = [
-                {
-                    "kind": "episode",
-                    "start_ns": start,
-                    "end_ns": observed[1],
-                    "start_nav": economic["initial_capital"],
-                    "end_nav": economic["nav"],
-                    **{
-                        name: economic[name]
-                        for name in (
-                            "gross_pnl",
-                            "net_pnl",
-                            "fees",
-                            "funding",
-                            "turnover",
-                            "fill_events",
-                        )
-                    },
-                }
-            ]
+            intervals = (
+                []
+                if partial_reason
+                else [
+                    {
+                        "kind": "episode",
+                        "start_ns": start,
+                        "end_ns": observed[1],
+                        "start_nav": economic["initial_capital"],
+                        "end_nav": economic["nav"],
+                        **{
+                            name: economic[name]
+                            for name in (
+                                "gross_pnl",
+                                "net_pnl",
+                                "fees",
+                                "funding",
+                                "turnover",
+                                "fill_events",
+                            )
+                        },
+                    }
+                ]
+            )
             truncated_count += episode["termination"] == "TRUNCATED"
+        planned_stop = stop
+        if partial_reason:
+            stop = min(stop, execution["known_prefix_valuation_timestamp_ns"] + 1)
+            if episode is not None:
+                observed_end = episode["stop_ns"] - 1
         if cursor < start:
             cover(cursor, start, "missing")
-        cover(start, stop, "covered")
-        cursor = stop
+        if start < stop:
+            cover(start, stop, "covered")
+        if stop < planned_stop:
+            cover(stop, planned_stop, "missing", partial_reason)
+        cursor = planned_stop
         covered_ns += stop - start
         for name in costs_total:
             costs_total[name] = (
@@ -482,7 +528,8 @@ def build_crypto_portfolio_statistics_tables(
                 if economic[name] is None or costs_total[name] is None
                 else costs_total[name] + economic[name]
             )
-        execution = summary["execution"]
+            if economic[name] is None:
+                costs_reasons[name] = economic.get(f"{name}_reason") or partial_reason
         if (
             funding_required is not None
             and "funding_required_decisions" in execution
@@ -499,7 +546,7 @@ def build_crypto_portfolio_statistics_tables(
                 "stop_reasons": ",".join(episode["stop_reasons"]),
             }
         if finish is not None:
-            daily, inventory, drawdown = finish()
+            daily, inventory, drawdown = finish(observation_end_ns=observed_end)
             for interval in intervals:
                 interval_rows.append(
                     {
@@ -535,53 +582,103 @@ def build_crypto_portfolio_statistics_tables(
                 "fill_quantity",
             ):
                 metric(
-                    key,
+                    f"known_prefix_{key}"
+                    if observed_prefix and key in observed_total_names
+                    else key,
                     economic[key],
                     int(economic["fill_events"]),
                     economic.get(f"{key}_reason") or "",
                 )
-            metric("terminal_nav", economic["nav"], len(intervals))
+            metric(
+                "terminal_nav",
+                economic["nav"],
+                len(intervals),
+                economic.get("nav_reason") or "",
+            )
             metric(
                 "continuous_max_drawdown"
                 if episode is None
                 else "episode_max_drawdown",
-                drawdown,
+                None if drawdown_reason else drawdown,
                 len(intervals),
+                drawdown_reason,
             )
             for scope in ("oos", "gap"):
+                state = inventory[scope]
+                expected_duration = sum(
+                    max(0, min(end, observed_end) - max(start, observed_start))
+                    for start, end in bounds
+                )
+                if scope == "gap":
+                    expected_duration = (
+                        observed_end - observed_start - expected_duration
+                    )
+                incomplete = (
+                    bool(partial_reason) and state["duration"] < expected_duration
+                )
+                stop_at = execution.get("account_stop_ns")
+                unknown_extreme = (
+                    partial_reason == "portfolio_pending_execution_unknown"
+                    and stop_at is not None
+                    and observed_start <= stop_at <= observed_end
+                    and (any(start <= stop_at <= end for start, end in bounds))
+                    == (scope == "oos")
+                )
                 if episode is None:
+                    scope_intervals = [row for row in intervals if row["kind"] == scope]
+                    pnl_incomplete = (
+                        bool(partial_reason)
+                        and sum(
+                            row["end_ns"] - row["start_ns"] for row in scope_intervals
+                        )
+                        < expected_duration
+                    )
                     metric(
                         f"{scope}_net_pnl",
-                        sum(
-                            row["net_pnl"] for row in intervals if row["kind"] == scope
-                        ),
-                        sum(row["kind"] == scope for row in intervals),
+                        None
+                        if pnl_incomplete
+                        else sum(row["net_pnl"] for row in scope_intervals),
+                        len(scope_intervals),
+                        partial_reason if pnl_incomplete else "",
                     )
-                state = inventory[scope]
-                for name, value in (
-                    ("inventory_mean", state["mean"]),
-                    (
-                        "inventory_variance",
-                        state["m2"] / state["duration"] if state["duration"] else None,
-                    ),
+                inventory_mean = state["mean"] * state["scale"]
+                mean_underflow = state["mean"] != 0 and inventory_mean == 0
+                variance = state["variance"] * state["scale"] * state["scale"]
+                variance_underflow = state["variance"] > 0 and variance == 0
+                for name, value, underflow in (
+                    ("inventory_mean", inventory_mean, mean_underflow),
+                    ("inventory_variance", variance, variance_underflow),
                     (
                         "inventory_time_at_limit_fraction",
                         state["at_limit"] / state["duration"]
                         if state["duration"]
                         else None,
+                        False,
                     ),
                 ):
                     metric(
                         f"{scope}_{name}",
-                        value if state["duration"] else None,
+                        value
+                        if state["duration"] and not incomplete and not underflow
+                        else None,
                         int(state["duration"] > 0),
-                        f"no_{scope}_duration",
+                        partial_reason
+                        if incomplete
+                        else f"no_{scope}_duration"
+                        if not state["duration"]
+                        else f"nonzero_{name.removeprefix('inventory_')}_underflow"
+                        if underflow
+                        else "",
                     )
                 metric(
                     f"{scope}_inventory_max_abs",
-                    state["max_abs"] if state["observations"] else None,
+                    state["max_abs"]
+                    if state["observations"] and not (incomplete or unknown_extreme)
+                    else None,
                     state["observations"],
-                    f"no_{scope}_observations",
+                    partial_reason
+                    if incomplete or unknown_extreme
+                    else f"no_{scope}_observations",
                 )
             values = np.array(
                 [row["net_return"] for row in daily if row["status"] == "DEFINED"],
@@ -598,9 +695,9 @@ def build_crypto_portfolio_statistics_tables(
             )
             metric(
                 "oos_mean_daily_return",
-                float(values.mean()) if count and (not daily_missing) else None,
+                float(mean(values)) if count and (not daily_missing) else None,
                 count,
-                day_reason,
+                day_reason if daily_missing or not count else "",
             )
             if "annualized" in analyses and (
                 not daily_missing
@@ -647,18 +744,18 @@ def build_crypto_portfolio_statistics_tables(
             metric(
                 "pnl_per_fill",
                 economic["net_pnl"] / economic["fill_events"]
-                if economic["fill_events"]
+                if economic["fill_events"] and economic["net_pnl"] is not None
                 else None,
                 int(economic["fill_events"]),
-                "no_fills",
+                economic.get("net_pnl_reason") or "no_fills",
             )
             metric(
                 "pnl_per_notional",
                 economic["net_pnl"] / economic["turnover"]
-                if economic["turnover"]
+                if economic["turnover"] and economic["net_pnl"] is not None
                 else None,
                 int(economic["fill_events"]),
-                "no_turnover",
+                economic.get("net_pnl_reason") or "no_turnover",
             )
         if "execution" in analyses:
             for name, value in execution.items():
@@ -681,7 +778,13 @@ def build_crypto_portfolio_statistics_tables(
                 else execution_config["taker_fee_bps"]
             )
             costs.extend(
-                {**row_key, **row}
+                {
+                    **row_key,
+                    **row,
+                    "method": "constant_known_prefix_turnover_additive_sensitivity"
+                    if observed_prefix
+                    else row["method"],
+                }
                 for row in fixed_turnover_cost_sensitivity(
                     turnover=economic["turnover"],
                     net_pnl=economic["net_pnl"],
@@ -714,7 +817,14 @@ def build_crypto_portfolio_statistics_tables(
         "truncated_episode_count": truncated_count,
         **costs_total,
     }.items():
-        metric(name, value, episode_count)
+        metric(
+            f"known_prefix_{name}"
+            if partial_observed_totals and name in observed_total_names
+            else name,
+            value,
+            episode_count,
+            costs_reasons.get(name, ""),
+        )
     if "execution" in analyses:
         for name, value in {
             "funding_required_decisions": funding_required,
@@ -1158,6 +1268,8 @@ def _portfolio_statistics_tables(
     holding_inputs,
 ):
     """Project the protocol-selected ledgers into interval-aligned diagnostics."""
+    from quant_research_platform.artifacts.statistics import STATISTICS_TABLE_COLUMNS
+
     analyses = _selected_analyses(config, _PORTFOLIO_ANALYSES)
     benchmark_requested = bool({"benchmark", "attribution"} & set(analyses))
     ids = tuple(candidate.candidate_id for candidate in candidates)
@@ -2007,7 +2119,10 @@ def _portfolio_statistics_tables(
     tables = {
         "portfolio_daily": daily,
         "portfolio_group_comparison": paired_comparison,
-        "portfolio_performance": pd.DataFrame(summary_rows),
+        "portfolio_performance": pd.DataFrame.from_records(
+            summary_rows,
+            columns=STATISTICS_TABLE_COLUMNS["portfolio_performance.parquet"],
+        ),
         "portfolio_capacity": capacity,
         "portfolio_capacity_summary": pd.DataFrame(capacity_summary),
         "portfolio_attribution": pd.DataFrame(attribution_rows),

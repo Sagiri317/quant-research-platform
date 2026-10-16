@@ -526,3 +526,209 @@ def test_native_temporal_selection_does_not_discover_unconsumed_year_members(
     assert ignored not in visited
     with pytest.raises(ValueError, match="invalid_dataset_part_files"):
         read_dataset(root)
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        {},
+        {"years": [2021]},
+        {"years": [2019, 2021]},
+        {"time_window": TimeWindow("2021-01-01", "2021-01-01")},
+        {
+            "time_window": TimeWindow(
+                "2021-01-01T00:00:00.000000001", "2021-01-01T00:00:00.000000001"
+            )
+        },
+        {
+            "years": [2021],
+            "time_window": TimeWindow("2020-01-01", "2021-01-01"),
+        },
+        {"years": [2021], "row_filters": (("asset_id", "==", "missing"),)},
+    ],
+)
+@pytest.mark.parametrize("missing", ["one", "whole_partition"])
+def test_native_selected_partition_requires_declared_raw_rows(
+    tmp_path, selection, missing
+):
+    root = tmp_path / "native"
+    values = frame()
+    write_dataset(
+        root,
+        (values.iloc[[i]] for i in range(len(values))),
+        spec=replace(spec(), partition_columns=("year",)),
+    )
+    # Each input row is a separate member; the exact-window row is removed first.
+    (root / "data/year=2021/part-001.parquet").unlink()
+    if missing == "whole_partition":
+        for path in (root / "data/year=2021").glob("*.parquet"):
+            path.unlink()
+        (root / "data/year=2021").rmdir()
+    with pytest.raises(ValueError, match="dataset_selected_partition_incomplete"):
+        read_dataset(root, columns=["value"], **selection)
+
+
+def test_native_partition_checks_follow_views_and_explicit_subsets(tmp_path):
+    root = tmp_path / "native"
+    values = frame()
+    write_dataset(
+        root,
+        (values.iloc[[i]] for i in range(len(values))),
+        spec=replace(spec(), partition_columns=("year",)),
+    )
+    for path in (root / "data/year=2020").glob("*.parquet"):
+        path.unlink()
+    session = reading.open_dataset_session(root, years=[2019, 2020, 2021])
+    intact = session.filtered_view(TimeWindow("2021-01-01", "2021-01-01"))
+    assert reading.materialize_dataset_session(intact)["value"].tolist() == [3, 4, 5]
+    missing = session.filtered_view(TimeWindow("2020-01-01", "2020-01-01"))
+    with pytest.raises(ValueError, match="dataset_selected_partition_incomplete"):
+        reading.materialize_dataset_session(missing.projected_view(["value"]))
+    assert reading.materialize_dataset_session(
+        intact.filtered_view(TimeWindow("2019-01-01", "2020-12-31"))
+    ).empty
+    assert reading.materialize_dataset_session(
+        intact.filtered_view(TimeWindow("2019-01-01", "2021-12-31"))
+    )["value"].tolist() == [3, 4, 5]
+    selected = "data/year=2021/part-000.parquet"
+    (root / "data/year=2021/part-001.parquet").unlink()
+    subset = reading.open_dataset_session(root, files=[selected])
+    subset = subset.filtered_view(TimeWindow("2021-01-01", "2021-01-01"))
+    assert reading.materialize_dataset_session(subset.projected_view(["value"]))[
+        "value"
+    ].tolist() == [3]
+    with pytest.raises(ValueError, match="invalid_dataset_part_files"):
+        read_dataset(root, files=["data/year=2021/part-001.parquet"])
+    for selection in (
+        {"files": []},
+        {"years": []},
+        {"years": [2022]},
+        {"time_window": TimeWindow("2022-01-01", "2022-12-31")},
+        {"years": [2020], "time_window": TimeWindow("2021-01-01", "2021-12-31")},
+    ):
+        actual = read_dataset(root, columns=["value"], **selection)
+        pd.testing.assert_frame_equal(actual, values.loc[:0, ["value"]].iloc[:0])
+    assert read_dataset(root, years=[2019])["value"].tolist() == [1]
+
+
+@pytest.mark.parametrize("partition_columns", [(), ("year",)])
+def test_native_empty_and_no_match_selections_keep_declared_dtypes(
+    tmp_path, partition_columns
+):
+    values = frame()
+    for name, source in (("empty", values.iloc[:0]), ("full", values)):
+        root = tmp_path / name
+        write_dataset(
+            root, source, spec=replace(spec(), partition_columns=partition_columns)
+        )
+        for selection in (
+            {},
+            {"years": []},
+            {"years": [2022]},
+            {"time_window": TimeWindow("2021-06-01", "2021-06-01")},
+            {"row_filters": (("asset_id", "==", "missing"),)},
+        ):
+            actual = read_dataset(root, columns=["value"], **selection)
+            if name == "empty" or selection:
+                pd.testing.assert_frame_equal(
+                    actual, values.loc[:0, ["value"]].iloc[:0]
+                )
+
+
+def test_native_partition_counts_use_footers_and_keep_row_group_pruning(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "native"
+    values = frame()
+    write_dataset(root, values, spec=replace(spec(), partition_columns=("year",)))
+    path = root / "data/year=2021/part-000.parquet"
+    with pq.ParquetFile(path) as parquet:
+        table = parquet.read()
+    pq.write_table(table, path, row_group_size=1, write_statistics=["timestamp"])
+    opened, decoded = [], []
+    original_open = reading.iter_dataset_part_batches
+    original_batches = pq.ParquetFile.iter_batches
+
+    def observe_open(path, **kwargs):
+        opened.append(path)
+        yield from original_open(path, **kwargs)
+
+    def observe_batches(self, *args, **kwargs):
+        decoded.extend(kwargs["row_groups"])
+        yield from original_batches(self, *args, **kwargs)
+
+    monkeypatch.setattr(reading, "iter_dataset_part_batches", observe_open)
+    monkeypatch.setattr(pq.ParquetFile, "iter_batches", observe_batches)
+    selected = read_dataset(
+        root,
+        columns=["value"],
+        time_window=TimeWindow(
+            "2021-01-01T00:00:00.000000001", "2021-01-01T00:00:00.000000001"
+        ),
+    )
+    pd.testing.assert_frame_equal(
+        selected, values.loc[[3], ["value"]].reset_index(drop=True)
+    )
+    assert opened == [path]
+    assert decoded == [1]
+
+
+def test_native_incomplete_stream_raises_only_at_exhaustion_and_closes_early(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "native"
+    values = frame().iloc[2:]
+    write_dataset(root, (values.iloc[[i]] for i in range(len(values))), spec=spec())
+    (root / "data/part-001.parquet").unlink()
+    closed = []
+    original = reading.iter_dataset_part_batches
+
+    def observe(path, **kwargs):
+        try:
+            yield from original(path, **kwargs)
+        finally:
+            closed.append(path.name)
+
+    monkeypatch.setattr(reading, "iter_dataset_part_batches", observe)
+    chunks = read_dataset(root, mode="chunked")
+    assert next(chunks)["value"].tolist() == [3]
+    chunks.close()
+    assert closed == ["part-000.parquet"]
+    with pytest.raises(ValueError, match="dataset_selected_partition_incomplete"):
+        list(read_dataset(root, mode="chunked"))
+    for path in (root / "data").glob("*.parquet"):
+        path.unlink()
+    with pytest.raises(ValueError, match="dataset_selected_partition_incomplete"):
+        read_dataset(root)
+
+
+def test_native_implicit_reads_reject_undeclared_nonempty_partitions(tmp_path):
+    import shutil
+
+    root, extra = tmp_path / "native", tmp_path / "extra"
+    declared = replace(spec(), partition_columns=("year",))
+    values = frame()
+    write_dataset(root, values, spec=declared)
+    added = values.iloc[[0]].copy()
+    added.loc[added.index[0], "timestamp"] = pd.Timestamp("2022-01-01")
+    write_dataset(extra, added, spec=declared)
+    member = Path("data/year=2022/part-000.parquet")
+    (root / member).parent.mkdir(parents=True)
+    shutil.copyfile(extra / member, root / member)
+
+    for selection in (
+        {},
+        {"years": [2022]},
+        {"time_window": TimeWindow("2022-01-01", "2022-01-01")},
+    ):
+        with pytest.raises(ValueError, match="dataset_selected_partition_incomplete"):
+            read_dataset(root, **selection)
+    expected = values.iloc[[0]]
+    pd.testing.assert_frame_equal(
+        read_dataset(root, years=[2019]), expected.reset_index(drop=True)
+    )
+    subset = reading.open_dataset_session(root, files=[member.as_posix()])
+    subset = subset.filtered_view(TimeWindow("2022-01-01", "2022-01-01"))
+    pd.testing.assert_frame_equal(
+        reading.materialize_dataset_session(subset), added.reset_index(drop=True)
+    )

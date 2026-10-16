@@ -382,6 +382,7 @@ def _build_producer(
             root=root,
             time_window=time_window,
             arrow_schema=SimpleNamespace(names=tuple(frames[target].columns)),
+            spec={"column_roles": dict.fromkeys(frames[target].columns, "context")},
             read_paths=(root / "synthetic.parquet",),
             logical_columns=tuple(columns)
             if columns is not None
@@ -2560,6 +2561,7 @@ def test_final_alpha_includes_last_mature_session_and_persists_without_fake_trad
         artifact.final_alpha_calibration,
         cutoff=window.end,
         selection_group=candidate.selection_group,
+        rebalance_schedule=candidate.rebalance_schedule,
     )
     assert restored == final_state
     assert cutoff == pd.Timestamp(window.end).date().isoformat()
@@ -2568,6 +2570,7 @@ def test_final_alpha_includes_last_mature_session_and_persists_without_fake_trad
             artifact.final_alpha_calibration,
             cutoff="2023-01-09",
             selection_group=candidate.selection_group,
+            rebalance_schedule=candidate.rebalance_schedule,
         )
 
 

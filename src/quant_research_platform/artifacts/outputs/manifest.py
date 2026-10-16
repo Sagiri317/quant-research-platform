@@ -190,9 +190,12 @@ def evaluation_output_metadata(
 
 
 def validate_output_bundle(
-    root: Path, *, expected_definition_id: str | None = None
+    root: Path,
+    *,
+    expected_definition_id: str | None = None,
+    selected_files: tuple[str, ...] | None = None,
 ) -> tuple[dict[str, object], tuple[Path, ...]]:
-    """Read the manifest once and check its declared member paths."""
+    """Read shared metadata once and check only the selected declared paths."""
     root = require_unaliased_path(Path(root), error="output_bundle_root_invalid")
     if not root.is_dir():
         raise ValueError("output_bundle_root_invalid")
@@ -203,7 +206,14 @@ def validate_output_bundle(
         and manifest["output_definition_id"] != expected_definition_id
     ):
         raise ValueError("output_manifest_definition_id_mismatch")
-    members = tuple(root / name for name in manifest["files"])
+    if selected_files is not None and any(
+        name not in manifest["files"] for name in selected_files
+    ):
+        raise ValueError("output_file_path_invalid")
+    members = tuple(
+        root / name
+        for name in (manifest["files"] if selected_files is None else selected_files)
+    )
     for path in members:
         require_unaliased_path(path, error="output_member_path_invalid")
         if not path.is_file():

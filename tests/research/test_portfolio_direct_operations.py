@@ -296,7 +296,7 @@ def test_consumed_ledger_rejects_unsupported_research_valuation_policy(
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    from quant_research_platform.contracts.portfolios import RESEARCH_VALUATION_VERSION
+    from quant_research_platform.contracts.portfolios import RESEARCH_VALUATION_POLICY
 
     batch = _account()
     batch = replace(
@@ -306,8 +306,8 @@ def test_consumed_ledger_rejects_unsupported_research_valuation_policy(
             PortfolioDiagnostic(
                 "__cash__",
                 None,
-                "research_valuation_version",
-                text=RESEARCH_VALUATION_VERSION,
+                "research_valuation_policy",
+                text=RESEARCH_VALUATION_POLICY,
             ),
         ),
     )
@@ -322,12 +322,10 @@ def test_consumed_ledger_rejects_unsupported_research_valuation_policy(
     table = pq.read_table(path)
     rows = table.to_pylist()
     for row in rows:
-        if row["name"] == "research_valuation_version":
+        if row["name"] == "research_valuation_policy":
             row["text"] = "unsupported_scientific_policy"
     pq.write_table(pa.Table.from_pylist(rows, schema=table.schema), path)
-    with pytest.raises(
-        ValueError, match="portfolio_research_valuation_version_invalid"
-    ):
+    with pytest.raises(ValueError, match="portfolio_research_valuation_policy_invalid"):
         if consume == "iterate":
             list(artifacts.read_portfolio_ledger_artifact(root).iter_chunks())
         else:

@@ -14,7 +14,6 @@ from quant_research_platform.artifacts.portfolio_ledger import (
 from quant_research_platform.artifacts.statistics import read_statistics_artifact
 from quant_research_platform.contracts.portfolios import (
     PortfolioCapital,
-    PortfolioTargetBlocked,
 )
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.crypto import ids, portfolio
@@ -254,7 +253,7 @@ def test_native_midnight_models_reach_frozen_backtests(tmp_path, monkeypatch, ga
     expected_offsets = {
         None: [0, 100, 200, 300, 400],
         "depth": [0, 100],
-        "agg_trades": [0, 100, 400],
+        "agg_trades": [0, 100, 200, 300, 400],
     }[gap_kind]
     expected_times = {
         pd.Timestamp(chronology["test"]["start"]) + pd.Timedelta(offset, unit="ms")
@@ -351,50 +350,47 @@ def test_native_midnight_models_reach_frozen_backtests(tmp_path, monkeypatch, ga
                         calibration=calibrations[asset] if calibrated else None,
                     )
                     backtest = portfolio.backtest_maker
-                if gap_kind is not None:
-                    reason = (
-                        "crypto_execution_"
-                        + ("book" if gap_kind == "depth" else "trade")
-                        + "_coverage_incomplete"
+                ledger = backtest(config)
+                artifact = read_portfolio_ledger_artifact(ledger)
+                batches = list(artifact.iter_chunks())
+                summary = summarize_crypto_ledger(artifact, iter(batches))
+                assert summary["execution"]["selection_status"] == "COMPLETE"
+                assert summary["execution"]["market_event_count"] > 0
+                assert summary["execution"]["no_eligible_decisions"] is False
+                if style == "taker":
+                    # These genuine forecasts do not clear the spread and fee.
+                    assert summary["economics"]["fill_events"] == 0
+                    assert summary["economics"]["nav"] == 1000.0
+                elif gap_kind is not None:
+                    assert summary["execution"]["account_path_status"] == "PARTIAL"
+                    assert summary["economics"]["net_pnl"] is None
+                    assert summary["execution"]["censored_active_order_count"] > 0
+                    stop = summary["execution"]["account_stop_ns"]
+                    assert all(
+                        fill.timestamp_ns < stop
+                        for batch in batches
+                        for fill in batch.trades
                     )
-                    with pytest.raises(
-                        PortfolioTargetBlocked, match="^" + reason + "$"
-                    ):
-                        backtest(config)
-                    assert not output.exists()
                 else:
-                    ledger = backtest(config)
-                    artifact = read_portfolio_ledger_artifact(ledger)
-                    batches = list(artifact.iter_chunks())
-                    summary = summarize_crypto_ledger(artifact, iter(batches))
-                    assert summary["execution"]["selection_status"] == "COMPLETE"
-                    assert summary["execution"]["market_event_count"] > 0
-                    assert summary["execution"]["no_eligible_decisions"] is False
-                    if style == "taker":
-                        # These genuine forecasts do not clear the spread and fee.
-                        assert summary["economics"]["fill_events"] == 0
-                        assert summary["economics"]["nav"] == 1000.0
-                    else:
-                        assert summary["economics"]["fill_events"] == 2
-                        assert summary["economics"]["gross_pnl"] == pytest.approx(0.8)
-                        assert summary["economics"]["fees"] == pytest.approx(
-                            -0.02002 if asset == "btc_usdt" else -0.04002
-                        )
-                        assert summary["execution"]["maker_prediction_used"] is (
-                            style == "maker_calibrated"
-                        )
-                    assert artifact.metadata["sample_role"] == "test"
-                    assert artifact.metadata["window"] == chronology["test"]
-                    assert batches and any(batch.valuations for batch in batches)
-                    if repeat == 0:
-                        results[asset, style] = (batches, summary, _bytes(output))
-                    else:
-                        old_batches, old_summary, original_bytes = results[asset, style]
-                        assert batches == old_batches
-                        assert summary == old_summary
-                        assert (
-                            _bytes(output.with_name(f"0-{asset}-{style}"))
-                            == original_bytes
-                        )
+                    assert summary["economics"]["fill_events"] == 2
+                    assert summary["economics"]["gross_pnl"] == pytest.approx(0.8)
+                    assert summary["economics"]["fees"] == pytest.approx(
+                        -0.02002 if asset == "btc_usdt" else -0.04002
+                    )
+                    assert summary["execution"]["maker_prediction_used"] is (
+                        style == "maker_calibrated"
+                    )
+                assert artifact.metadata["sample_role"] == "test"
+                assert artifact.metadata["window"] == chronology["test"]
+                assert batches and any(batch.valuations for batch in batches)
+                if repeat == 0:
+                    results[asset, style] = (batches, summary, _bytes(output))
+                else:
+                    old_batches, old_summary, original_bytes = results[asset, style]
+                    assert batches == old_batches
+                    assert summary == old_summary
+                    assert (
+                        _bytes(output.with_name(f"0-{asset}-{style}")) == original_bytes
+                    )
         assert _bytes(learned) == frozen
         assert _bytes(tmp_path / "predictions") == prediction_bytes

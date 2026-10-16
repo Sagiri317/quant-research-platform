@@ -58,6 +58,14 @@ class FundingObservations:
     settlement_qualification: tuple[dict, ...]
 
 
+def _nullable_funding_value(value, validate):
+    """Mask only a local numeric value in an otherwise identified observation."""
+    try:
+        return validate(value, error="binance_funding_value_invalid")
+    except ValueError:
+        return None
+
+
 def settlement_endpoint(source_id, symbol):
     """Bind supported settlement provenance to its actual supplier endpoint."""
     if symbol not in RESEARCH_SYMBOLS:
@@ -154,12 +162,8 @@ def _settlement_response(raw, *, source_id, symbol, start_ms, end_ms, request_li
         events.append(
             FundingEvent(
                 timestamp * 1_000_000,
-                strict_finite_float(
-                    row.get("fundingRate"), error="binance_funding_rate_invalid"
-                ),
-                strict_positive_float(
-                    row.get("markPrice"), error="binance_funding_mark_invalid"
-                ),
+                _nullable_funding_value(row.get("fundingRate"), strict_finite_float),
+                _nullable_funding_value(row.get("markPrice"), strict_positive_float),
             )
         )
     return events, {

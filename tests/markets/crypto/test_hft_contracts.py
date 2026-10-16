@@ -278,7 +278,10 @@ def test_trade_gap_is_missing_not_zero_volume() -> None:
             trade_coverage={"trade-connection-1": _coverage(0, 100)},
         )
     )
-    assert missing == []
+    assert [_row_timestamp_ms(row) for row in missing] == [100, 200]
+    assert all(pd.isna(row["trade_volume_100ms"]) for row in missing)
+    assert all(pd.isna(row["trade_observation_id"]) for row in missing)
+    assert all(row["book_spread"] == 1.0 for row in missing)
     complete = list(
         _panel_rows(
             books,
@@ -325,7 +328,10 @@ def test_trade_reconnect_does_not_make_first_partial_interval_valid() -> None:
             },
         )
     )
-    assert [_row_timestamp_ms(row) for row in rows] == [100, 300]
+    assert [_row_timestamp_ms(row) for row in rows] == [100, 200, 300]
+    assert rows[0]["trade_volume_100ms"] == rows[2]["trade_volume_100ms"] == 0.0
+    assert pd.isna(rows[1]["trade_volume_100ms"])
+    assert len({row["segment_id"] for row in rows}) == 1
 
 
 def test_maker_uses_local_observation_order_for_same_time_events() -> None:
@@ -468,7 +474,7 @@ def test_maker_max_abs_position_updates_on_terminal_fill() -> None:
     assert result["max_abs_position"] == 1.0
 
 
-def test_maker_order_expires_at_first_missing_trade_coverage_boundary() -> None:
+def test_maker_order_is_censored_at_first_missing_trade_coverage_boundary() -> None:
     fills: list[dict[str, object]] = []
     result = simulate_maker(
         [_state(0)],
@@ -486,12 +492,16 @@ def test_maker_order_expires_at_first_missing_trade_coverage_boundary() -> None:
         funding_events=(),
     )
     assert fills == []
-    assert result["average_order_lifetime_ms"] == 75.0
+    assert result["average_order_lifetime_ms"] is None
     assert result["created_orders"] == 2
-    assert result["zero_fill_orders"] == 2
+    assert result["account_path_status"] == "PARTIAL"
+    assert result["account_stop_ns"] == 75_000_000
+    assert result["censored_active_order_count"] == 2
+    assert result["zero_fill_orders"] == result["cancelled_orders"] == 0
+    assert result["net_pnl"] is None
 
 
-def test_maker_terminal_order_uses_coverage_validity_end() -> None:
+def test_maker_terminal_order_is_unknown_at_coverage_validity_end() -> None:
     result = simulate_maker(
         [_state(0)],
         [],
@@ -503,7 +513,10 @@ def test_maker_terminal_order_uses_coverage_validity_end() -> None:
         asset_id="btc_usdt",
         funding_events=(),
     )
-    assert result["average_order_lifetime_ms"] == 75.0
+    assert result["average_order_lifetime_ms"] is None
+    assert result["account_path_status"] == "PARTIAL"
+    assert result["account_stop_ns"] == 75_000_000
+    assert result["censored_active_order_count"] == 2
 
 
 def test_maker_requires_matching_book_and_trade_schedule_identity() -> None:
@@ -653,7 +666,7 @@ def test_price_coordinates_preserve_exact_integers_before_storage_admission():
 
 @pytest.mark.parametrize("latency", [0, 100])
 @pytest.mark.parametrize("trade_arrives_first", [False, True])
-def test_maker_observed_trade_gap_discards_active_and_pending_before_new_quote(
+def test_maker_observed_trade_gap_preserves_unknown_active_and_pending_risk(
     latency, trade_arrives_first
 ):
     from dataclasses import replace
@@ -675,8 +688,13 @@ def test_maker_observed_trade_gap_discards_active_and_pending_before_new_quote(
         funding_events=(),
     )
     assert result["fill_quantity"] == 0
-    assert result["created_orders"] == 4
-    assert result["average_order_lifetime_ms"] == 97.5
+    assert result["created_orders"] == 2
+    assert result["account_path_status"] == "PARTIAL"
+    assert result["account_stop_ns"] == 75_000_000
+    assert result["censored_active_order_count"] == 2
+    assert result["censored_pending_command_count"] == (2 if latency else 0)
+    assert result["cancelled_orders"] == result["zero_fill_orders"] == 0
+    assert result["net_pnl"] is None
 
 
 @pytest.mark.parametrize("kind", ["maker", "taker"])
@@ -793,6 +811,7 @@ def test_maker_visible_quantity_controls_persisted_fill_and_nav(
                 trade_coverage={"trade-connection-1": _coverage(0, 300)},
                 capital=capital,
                 asset_id="btc_usdt",
+                decision_windows_ns=((0, 200_000_000),),
                 funding_events=(),
                 on_ledger=emit,
             )

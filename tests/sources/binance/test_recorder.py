@@ -1244,7 +1244,7 @@ def test_recorder_recovers_exhausted_known_depth_with_new_connection_and_snapsho
             else:
                 states.append(event.update_id)
     assert states == [100, 102]
-    assert boundaries == ["one_sided_book"]
+    assert boundaries == ["one_sided_book", "connection_closed"]
     assert stats.valid_segments == 2
     assert stats.recovered_segments == 1
     assert stats.one_sided_books == 1

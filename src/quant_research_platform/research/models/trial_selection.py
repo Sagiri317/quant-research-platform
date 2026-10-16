@@ -132,6 +132,7 @@ def evaluate_model_trial_metrics_from_chunks(
         raise ValueError("model_validation_axis_invalid")
 
     def metric_chunks():
+        asset = None
         with closing_iterator(
             iter_complete_time_frames(iter(chunks), timestamp_column="timestamp")
         ) as source:
@@ -143,6 +144,18 @@ def evaluate_model_trial_metrics_from_chunks(
                     label_column=label_column,
                     prediction_column=prediction_column,
                 )
+                if validation_axis == "single_asset_time_series":
+                    assets = frame["asset_id"]
+                    unique_assets = assets.drop_duplicates()
+                    if (
+                        len(unique_assets) != 1
+                        or assets.isna().any()
+                        or (asset is not None and unique_assets.iloc[0] != asset)
+                    ):
+                        raise ValueError(
+                            "single_asset_time_series_evaluation_requires_one_asset"
+                        )
+                    asset = unique_assets.iloc[0]
                 if validation_axis == "cross_sectional":
                     ranks = values.groupby("timestamp_ns", sort=False)[
                         ["label", "prediction"]
@@ -594,10 +607,6 @@ def score(config):
                         "timestamp",
                         "asset_id",
                         *model_metadata["input_columns"],
-                        *model_input_validity_columns(
-                            tuple(model_metadata["input_columns"]),
-                            model_metadata["model_algorithm"],
-                        ),
                         *required_filter_columns(model_metadata["sample_filter_mode"]),
                     )
                 )
@@ -632,15 +641,32 @@ def score(config):
                     _model_spec(facts["model"]),
                     selected_columns=selected_columns,
                 )
+                read_columns = tuple(
+                    dict.fromkeys(
+                        (
+                            *columns,
+                            *model_input_validity_columns(
+                                tuple(model_metadata["input_columns"]),
+                                model_metadata["model_algorithm"],
+                                session.spec["column_roles"],
+                            ),
+                        )
+                    )
+                )
                 keys = []
                 with closing_iterator(
                     iter_dataset_chunks(
-                        session.filtered_view(declared_window).projected_view(columns)
+                        session.filtered_view(declared_window).projected_view(
+                            read_columns
+                        )
                     )
                 ) as input_chunks:
                     for frame in input_chunks:
                         expected = prediction_rows(
-                            frame, model_metadata, declared_window
+                            frame,
+                            model_metadata,
+                            declared_window,
+                            declared_columns=session.spec["column_roles"],
                         )
                         if prediction.get("asset_ids") is not None:
                             expected = expected.loc[

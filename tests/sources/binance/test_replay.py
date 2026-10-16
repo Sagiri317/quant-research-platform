@@ -863,7 +863,13 @@ def test_gap_emits_boundary_and_recovery_never_reuses_old_book(tmp_path: Path) -
                 run, FUTURES_MARKET_TYPE, symbol="BTCUSDT", required_levels=1
             )
         )
-        assert [type(event) for event in events] == [BookState, BookBoundary, BookState]
+        assert [type(event) for event in events] == [
+            BookState,
+            BookBoundary,
+            BookState,
+            BookBoundary,
+        ]
+        assert events[-1].reason == "connection_closed"
         assert events[1].reason == "sequence_gap"
         assert events[1].transaction_time_ms == 20
         assert events[2].segment_id == "s2"
@@ -1421,8 +1427,10 @@ def test_native_connection_must_match_record_symbol_and_stream(
             for event in iter_reconstructed_depth(
                 run, FUTURES_MARKET_TYPE, symbol="BTCUSDT", required_levels=2
             ):
-                assert isinstance(event, BookState)
-                count += 1
+                assert isinstance(event, BookState | BookBoundary)
+                if isinstance(event, BookBoundary):
+                    assert event.reason == "connection_closed"
+                count += isinstance(event, BookState)
             assert count == 1
         else:
             assert (
@@ -1740,12 +1748,10 @@ def test_coverage_empty_connections_keep_facts_without_sweep_contribution(
 def test_partial_connection_overlap_has_one_panel_and_execution_domain(
     tmp_path, overlap
 ):
-    from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
     from quant_research_platform.markets.implementations.crypto.hft import (
         iter_panel_frames,
     )
     from quant_research_platform.markets.implementations.crypto.portfolio import (
-        _market_coverage_check,
         _qualified_episodes,
     )
     from quant_research_platform.sources.binance.funding import FundingObservations
@@ -1840,17 +1846,13 @@ def test_partial_connection_overlap_has_one_panel_and_execution_domain(
             batch_rows=10,
         )
     )
+    assert len(frames) == 1
     if overlap:
-        assert frames == []
-        with pytest.raises(
-            PortfolioTargetBlocked, match="crypto_execution_trade_coverage_incomplete"
-        ):
-            _market_coverage_check(book_coverage, coverage(), bounds)
+        assert frames[0].trade_count_100ms.isna().all()
+        assert frames[0].trade_volume_100ms.isna().all()
     else:
-        assert len(frames) == 1
         assert frames[0].trade_count_100ms.tolist() == [1]
         assert frames[0].trade_volume_100ms.tolist() == [2.0]
-        _market_coverage_check(book_coverage, coverage(), bounds)
     funding = FundingObservations(
         "synthetic",
         ((start.value, start.value + 300 * 10**6),),

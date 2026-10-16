@@ -18,6 +18,7 @@ import pandas as pd
 from quant_research_platform.contracts.order_book import (
     BookBoundary,
     BookState,
+    TradeBoundary,
     TradeEvent,
     index_to_price,
 )
@@ -37,7 +38,9 @@ from quant_research_platform.research.protocols.crypto_hft import (
     HFT_MAKER_BID_SELL_PRESSURE_PROXY_COLUMN,
     HFT_SPOT_CONTEXT_COLUMNS,
     HFT_SPOT_FACTOR_COLUMNS,
+    factor_catalog,
     label_catalog,
+    spot_dependencies,
 )
 
 HFT_GRID_MS = 100
@@ -65,7 +68,7 @@ def _ofi_units(previous_bid, current_bid, previous_ask, current_ask):
 
 def iter_panel_frames(
     book_events: Iterable[BookState | BookBoundary],
-    trades: Iterable[TradeEvent],
+    trades: Iterable[TradeEvent | TradeBoundary],
     *,
     market_id: str,
     asset_id: str,
@@ -75,7 +78,7 @@ def iter_panel_frames(
     trade_coverage: Callable[[int, int], tuple[str, ...]],
     batch_rows: int,
 ) -> Iterator[pd.DataFrame]:
-    """Sample one fully covered depth segment and trade connection per grid."""
+    """Keep covered book grids; unknown trade bins remain nullable."""
 
     if type(start_ms) is not int or type(end_ms) is not int or end_ms < start_ms:
         raise ValueError("hft_panel_window_invalid")
@@ -93,7 +96,7 @@ def iter_panel_frames(
     active_trades = iter(trades)
     with closing_iterator(active_books), closing_iterator(active_trades):
         next_book: BookState | BookBoundary | None = None
-        next_trade: TradeEvent | None = None
+        next_trade: TradeEvent | TradeBoundary | None = None
         current_state: BookState | None = None
         previous_bbo: tuple[tuple[int, int], tuple[int, int]] | None = None
         previous_book_time: int | None = None
@@ -110,13 +113,16 @@ def iter_panel_frames(
             interval_start_ns = interval_start * _NANOSECONDS_PER_MILLISECOND
             book_ofi = 0
             trade_count = 0
+            valid_trade_bin = True
             trade_volume = 0
             signed_trade_volume = 0
             taker_buy_volume = 0
             taker_sell_volume = 0
             trade_source_sequence_min: int | None = None
             trade_source_sequence_max: int | None = None
-            trade_connections = trade_coverage(interval_start_ns, grid_time_ns)
+            # Trade sums consume (start, end], unlike the book baseline at start.
+            trade_start_ns = min(grid_time_ns, interval_start_ns + 1)
+            trade_connections = trade_coverage(trade_start_ns, grid_time_ns)
             while (
                 next_book is not None and _book_observed_time(next_book) <= grid_time_ns
             ):
@@ -161,7 +167,7 @@ def iter_panel_frames(
                 if current_bbo is not None:
                     previous_bbo = current_bbo
             while next_trade is not None:
-                if not isinstance(next_trade, TradeEvent):
+                if not isinstance(next_trade, (TradeEvent, TradeBoundary)):
                     raise TypeError("hft_trade_event_invalid")
                 if next_trade.observed_time_ns > grid_time_ns:
                     break
@@ -171,6 +177,10 @@ def iter_panel_frames(
                 previous_trade_time = trade_time
                 trade = next_trade
                 next_trade = next(active_trades, None)
+                if isinstance(trade, TradeBoundary):
+                    if trade_start_ns <= trade_time <= grid_time_ns:
+                        valid_trade_bin = False
+                    continue
                 quantity = strict_finite_float(
                     trade.quantity,
                     error="hft_trade_quantity_invalid",
@@ -233,23 +243,35 @@ def iter_panel_frames(
                     * HFT_GRID_MS
                 )
                 continue
-            if len(trade_connections) != 1:
-                continue
+            # The stream may have just consumed a local invalid-observation
+            # boundary; refresh the same causal interval after that event.
+            trade_connections = trade_coverage(trade_start_ns, grid_time_ns)
+            trades_known = len(trade_connections) == 1 and valid_trade_bin
             _append_panel_columns(
                 buffers,
                 current_state,
                 grid_time,
                 market_id=market_id,
                 asset_id=asset_id,
-                trade_observation_id=trade_connections[0],
-                trade_source_sequence_min=trade_source_sequence_min,
-                trade_source_sequence_max=trade_source_sequence_max,
-                book_ofi=book_ofi / (1 << 1074),
-                trade_count=trade_count,
-                trade_volume=trade_volume / (1 << 1074),
-                signed_trade_volume=signed_trade_volume / (1 << 1074),
-                taker_buy_volume=taker_buy_volume / (1 << 1074),
-                taker_sell_volume=taker_sell_volume / (1 << 1074),
+                trade_observation_id=trade_connections[0] if trades_known else None,
+                trade_source_sequence_min=trade_source_sequence_min
+                if trades_known
+                else None,
+                trade_source_sequence_max=trade_source_sequence_max
+                if trades_known
+                else None,
+                book_ofi=_quantity_float(book_ofi),
+                trade_count=trade_count if trades_known else None,
+                trade_volume=_quantity_float(trade_volume) if trades_known else np.nan,
+                signed_trade_volume=_quantity_float(signed_trade_volume)
+                if trades_known
+                else np.nan,
+                taker_buy_volume=_quantity_float(taker_buy_volume)
+                if trades_known
+                else np.nan,
+                taker_sell_volume=_quantity_float(taker_sell_volume)
+                if trades_known
+                else np.nan,
             )
             if len(buffers["timestamp"]) >= batch_rows:
                 _yield_value = _panel_frame(buffers)
@@ -279,14 +301,26 @@ def _book_observed_time(
     return event.observed_time_ns
 
 
+def _quantity_float(units):
+    """Only an unrepresentable derived total is unknown, not its source rows."""
+    try:
+        return units / (1 << 1074)
+    except OverflowError:
+        return np.nan
+
+
 def _panel_frame(buffers):
     for column in (
         "transaction_time_ms",
         "book_receive_monotonic_ns",
         "trade_source_sequence_min",
         "trade_source_sequence_max",
+        "trade_count_100ms",
     ):
         buffers[column] = pd.array(buffers[column], dtype="Int64")
+    buffers["trade_observation_id"] = pd.array(
+        buffers["trade_observation_id"], dtype="string"
+    )
     frame = pd.DataFrame(buffers)
     buffers.clear()
     return frame
@@ -342,11 +376,11 @@ def _append_panel_columns(
     *,
     market_id: str,
     asset_id: str,
-    trade_observation_id: str,
+    trade_observation_id: str | None,
     trade_source_sequence_min: int | None,
     trade_source_sequence_max: int | None,
     book_ofi: float,
-    trade_count: int,
+    trade_count: int | None,
     trade_volume: float,
     signed_trade_volume: float,
     taker_buy_volume: float,
@@ -371,7 +405,7 @@ def _append_panel_columns(
     buffers["market_id"].append(market_id)
     buffers["asset_id"].append(asset_id)
     buffers["timestamp"].append(_timestamp(grid_time))
-    buffers["segment_id"].append(f"{state.segment_id}:{trade_observation_id}")
+    buffers["segment_id"].append(state.segment_id)
     buffers["book_segment_id"].append(state.segment_id)
     buffers["book_observation_id"].append(state.observation_id)
     buffers["trade_observation_id"].append(trade_observation_id)
@@ -392,10 +426,14 @@ def _append_panel_columns(
     buffers["book_spread"].append(spread)
     buffers["bid_depth_1"].append(bid_depth_1)
     buffers["ask_depth_1"].append(ask_depth_1)
-    buffers["bid_depth_5"].append(bid_depth_5)
-    buffers["ask_depth_5"].append(ask_depth_5)
-    buffers["bid_depth_10"].append(bid_depth_10)
-    buffers["ask_depth_10"].append(ask_depth_10)
+    buffers["bid_depth_5"].append(bid_depth_5 if math.isfinite(bid_depth_5) else np.nan)
+    buffers["ask_depth_5"].append(ask_depth_5 if math.isfinite(ask_depth_5) else np.nan)
+    buffers["bid_depth_10"].append(
+        bid_depth_10 if math.isfinite(bid_depth_10) else np.nan
+    )
+    buffers["ask_depth_10"].append(
+        ask_depth_10 if math.isfinite(ask_depth_10) else np.nan
+    )
     buffers["book_ofi_100ms"].append(book_ofi)
     buffers["trade_count_100ms"].append(trade_count)
     buffers["trade_volume_100ms"].append(trade_volume)
@@ -412,29 +450,17 @@ def _timestamp(value: int) -> dt.datetime:
 def iter_factor_frames(
     frames: Iterable[pd.DataFrame], *, columns: Iterable[str] | None = None
 ) -> Iterator[pd.DataFrame]:
-    """Derive HFT factors from bounded persisted PANEL frames."""
-
+    """Compute each selected definition from its own inputs and complete windows."""
     selected = set(HFT_FACTOR_COLUMNS if columns is None else columns)
     if not selected <= set(HFT_FACTOR_COLUMNS):
         raise ValueError("hft_factor_columns_invalid")
-    needed = set(selected)
-    dependencies = {
-        "microprice": {"microprice_deviation"},
-        "microprice_deviation": {"imbalance_1"},
-        "imbalance_1_minus_10": {"imbalance_1", "imbalance_10"},
-        "imbalance_5_minus_10": {"imbalance_5", "imbalance_10"},
-    }
-    for name in (
-        "microprice",
-        "microprice_deviation",
-        "imbalance_1_minus_10",
-        "imbalance_5_minus_10",
-    ):
-        if name in needed:
-            needed.update(dependencies[name])
-    flow_columns = {
-        name
-        for name in needed
+    definitions = {name: factor_catalog().get(name).input_columns for name in selected}
+    required = tuple(
+        dict.fromkeys(name for names in definitions.values() for name in names)
+    )
+    rolling = {
+        name: {"100ms": 1, "500ms": 5, "1s": 10, "5s": 50}[name.rsplit("_", 1)[1]]
+        for name in selected
         if name.startswith(("trade_flow_imbalance_", "depth_normalized_ofi_"))
         or name
         in {
@@ -445,45 +471,32 @@ def iter_factor_frames(
             "taker_buy_pressure_500ms",
         }
     }
-    if flow_columns:
-        needed.update(
-            {
-                "ofi_100ms",
-                "signed_trade_flow_100ms",
-                "taker_buy_volume_100ms",
-                "taker_sell_volume_100ms",
-            }
+    # Only aggregate the channels consumed by this definition. Missing samples
+    # keep their grid positions, so recovery cannot shrink a market-time window.
+    rolling_inputs = {
+        name: tuple(
+            column
+            for column in definitions[name]
+            if not ("pressure" in name and column.endswith("depth_1"))
         )
-    flow_windows = tuple(
-        (count, suffix)
-        for count, suffix in ((1, "100ms"), (5, "500ms"), (10, "1s"), (50, "5s"))
-        if flow_columns
-        & (
-            {
-                f"trade_flow_imbalance_{suffix}",
-                f"ofi_{suffix}",
-                f"depth_normalized_ofi_{suffix}",
-            }
-            | (
-                {"taker_sell_pressure_500ms", "taker_buy_pressure_500ms"}
-                if count == 5
-                else set()
-            )
-        )
-    )
-    depth_levels = {level for level in (1, 5, 10) if f"imbalance_{level}" in needed}
-    if flow_columns or "near_depth_share_1_10" in needed:
-        depth_levels.add(1)
-    if needed & {"near_depth_share_1_10", "top10_depth_per_spread"}:
-        depth_levels.add(10)
-    active_segment: str | None = None
-    previous_time: int | None = None
-    previous_mid: float | None = None
-    return_tail: deque[float] = deque(maxlen=10)
-    mid_tail: deque[float] = deque(maxlen=6)
-    flow_tail: deque[tuple[Fraction, ...]] = deque(maxlen=50)
-    flow_totals = dict.fromkeys((count for count, _ in flow_windows), (0,) * 6)
-    active_asset = None
+        for name in rolling
+    }
+    histories = {
+        column: deque(maxlen=50)
+        for columns in rolling_inputs.values()
+        for column in columns
+    }
+    windows = {
+        (column, count)
+        for name, count in rolling.items()
+        for column in rolling_inputs[name]
+    }
+    totals = {key: Fraction() for key in windows}
+    missing = dict.fromkeys(windows, 0)
+    mids = deque(maxlen=6)
+    returns = deque(maxlen=10)
+    previous_mid = np.nan
+    active_segment = previous_time = active_asset = None
     for source in frames:
         if source.empty:
             continue
@@ -492,210 +505,163 @@ def iter_factor_frames(
         if len(assets) != 1:
             raise ValueError("hft_factor_mixed_assets")
         if active_asset != assets[0]:
-            active_segment = previous_time = previous_mid = None
-            return_tail.clear()
-            mid_tail.clear()
-            flow_tail.clear()
+            active_segment = previous_time = None
         active_asset = assets[0]
         timestamps, segments, boundaries = _validated_grid_arrays(
-            frame,
-            active_segment=active_segment,
-            previous_time=previous_time,
+            frame, active_segment=active_segment, previous_time=previous_time
         )
-        mid = _finite_column(frame, "mid", "hft_factor_mid_invalid")
-        spread = _finite_column(frame, "book_spread", "hft_factor_book_invalid")
-        if bool(np.any(mid <= 0)) or bool(np.any(spread <= 0)):
-            raise ValueError("hft_factor_book_invalid")
-        depth = {
-            levels: (
-                _finite_column(
-                    frame,
-                    f"bid_depth_{levels}",
-                    "hft_factor_depth_invalid",
-                ),
-                _finite_column(
-                    frame,
-                    f"ask_depth_{levels}",
-                    "hft_factor_depth_invalid",
-                ),
-            )
-            for levels in depth_levels
-        }
-        returns = np.full(len(frame), np.nan, dtype="float64")
-        same_segment = ~boundaries
-        returns[1:][same_segment[1:]] = (
-            mid[1:][same_segment[1:]] - mid[:-1][same_segment[1:]]
-        ) / mid[:-1][same_segment[1:]]
-        if not boundaries[0] and previous_mid is not None:
-            returns[0] = (mid[0] - previous_mid) / previous_mid
-        volatility = np.full(len(frame), np.nan, dtype="float64")
-        return_500ms = np.full(len(frame), np.nan, dtype="float64")
-        for index, value in (
-            enumerate(returns)
-            if needed & {"return_500ms", "realized_volatility_1s"}
-            else ()
-        ):
-            if boundaries[index]:
-                return_tail.clear()
-                mid_tail.clear()
-            mid_tail.append(float(mid[index]))
-            if len(mid_tail) == 6:
-                return_500ms[index] = (mid[index] - mid_tail[0]) / mid_tail[0]
-            if math.isfinite(value):
-                return_tail.append(float(value))
-            else:
-                return_tail.clear()
-            if "realized_volatility_1s" in needed and len(return_tail) == 10:
-                volatility[index] = stdev(return_tail)
+        inputs = {name: _nullable_numeric_column(frame, name) for name in required}
         output = _identity_frame(frame)
-        if "spread" in needed:
-            output["spread"] = spread
-        if "relative_spread" in needed:
-            output["relative_spread"] = spread / mid
-        for levels in (
-            level for level in depth_levels if f"imbalance_{level}" in needed
-        ):
-            bid_depth, ask_depth = depth[levels]
-            imbalance = np.full(len(frame), np.nan, dtype="float64")
-            for index, (bid_value, ask_value) in enumerate(
-                zip(bid_depth, ask_depth, strict=True)
-            ):
-                bid = Fraction(float(bid_value))
-                ask = Fraction(float(ask_value))
-                total = bid + ask
-                if total > 0:
-                    # Round once; proportional float depths must stay constant.
-                    imbalance[index] = float((bid - ask) / total)
-            output[f"imbalance_{levels}"] = imbalance
-        if "microprice_deviation" in needed:
-            microprice_deviation = 0.5 * spread * output["imbalance_1"].to_numpy()
-            output["microprice"] = mid + microprice_deviation
-            output["microprice_deviation"] = microprice_deviation
-        for name, source_name, error in (
-            ("ofi_100ms", "book_ofi_100ms", "hft_factor_ofi_invalid"),
-            (
-                "signed_trade_flow_100ms",
-                "observed_signed_trade_volume_100ms",
-                "hft_factor_trade_flow_invalid",
-            ),
-            (
-                "taker_buy_volume_100ms",
-                "observed_taker_buy_volume_100ms",
-                "hft_factor_trade_flow_invalid",
-            ),
-            (
-                "taker_sell_volume_100ms",
-                "observed_taker_sell_volume_100ms",
-                "hft_factor_trade_flow_invalid",
-            ),
-        ):
-            if name in needed:
-                output[name] = _finite_column(frame, source_name, error)
-        for name, values in (
-            ("return_100ms", returns),
-            ("return_500ms", return_500ms),
-            ("realized_volatility_1s", volatility),
-        ):
-            if name in needed:
-                output[name] = values
-        if "top10_depth_per_spread" in needed:
-            output["top10_depth_per_spread"] = [
-                float(
-                    (Fraction(float(bid)) + Fraction(float(ask)))
-                    / Fraction(float(width))
-                )
-                for bid, ask, width in zip(*depth[10], spread, strict=True)
-            ]
-        expanded = {
-            column: np.full(len(frame), np.nan)
-            for column in needed
-            if column not in output
-        }
-        if flow_columns:
-            ofi = output["ofi_100ms"].to_numpy()
-            signed = output["signed_trade_flow_100ms"].to_numpy()
-            buys = output["taker_buy_volume_100ms"].to_numpy()
-            sells = output["taker_sell_volume_100ms"].to_numpy()
-        for index in range(len(frame)) if flow_columns else ():
+        calculated = {name: np.full(len(frame), np.nan) for name in selected}
+        for index in range(len(frame)):
             if boundaries[index]:
-                flow_tail.clear()
-                flow_totals = dict.fromkeys(flow_totals, (0,) * 6)
-            bid, ask = depth[1][0][index], depth[1][1][index]
-            current = tuple(
-                Fraction(float(value))
-                for value in (
-                    signed[index],
-                    buys[index],
-                    sells[index],
-                    ofi[index],
-                    bid,
-                    ask,
+                for history in histories.values():
+                    history.clear()
+                totals = {key: Fraction() for key in windows}
+                missing = dict.fromkeys(windows, 0)
+                mids.clear()
+                returns.clear()
+                previous_mid = np.nan
+            current = {name: float(values[index]) for name, values in inputs.items()}
+            exact = {
+                name: Fraction(value) if math.isfinite(value) else None
+                for name, value in current.items()
+            }
+            for (name, count), total in totals.items():
+                history = histories[name]
+                old = history[-count] if len(history) >= count else Fraction()
+                value = exact[name]
+                totals[name, count] = total + (value or 0) - (old or 0)
+                missing[name, count] += int(value is None) - int(old is None)
+            for name, history in histories.items():
+                history.append(exact[name])
+            mid = current.get("mid", np.nan)
+            with np.errstate(over="ignore", invalid="ignore"):
+                step_return = (
+                    (mid - previous_mid) / previous_mid
+                    if previous_mid > 0 and mid > 0
+                    else np.nan
                 )
-            )
-            for count, totals in flow_totals.items():
-                expired = flow_tail[-count] if len(flow_tail) >= count else (0,) * 6
-                flow_totals[count] = tuple(
-                    total + value - old
-                    for total, value, old in zip(totals, current, expired, strict=True)
-                )
-            flow_tail.append(current)
-            for count, suffix in flow_windows:
-                if len(flow_tail) < count:
+            previous_mid = mid
+            if mid > 0:
+                mids.append(mid)
+            else:
+                mids.clear()
+            if math.isfinite(step_return):
+                returns.append(step_return)
+            else:
+                returns.clear()
+            for name, dependencies in definitions.items():
+                result = np.nan
+                values = [exact[column] for column in dependencies]
+                if any(value is None for value in values):
                     continue
-                signed_total, buy_total, sell_total, total_ofi, bid_total, ask_total = (
-                    flow_totals[count]
-                )
-                volume = buy_total + sell_total
-                if volume > 0 and f"trade_flow_imbalance_{suffix}" in needed:
-                    expanded[f"trade_flow_imbalance_{suffix}"][index] = float(
-                        signed_total / volume
-                    )
-                if count > 1:
-                    if f"ofi_{suffix}" in needed:
-                        expanded[f"ofi_{suffix}"][index] = float(total_ofi)
-                    total_depth = bid_total + ask_total
-                    if total_depth > 0 and f"depth_normalized_ofi_{suffix}" in needed:
-                        expanded[f"depth_normalized_ofi_{suffix}"][index] = float(
-                            total_ofi * count / total_depth
+                if name in rolling:
+                    count = rolling[name]
+                    accumulated = rolling_inputs[name]
+                    if any(
+                        len(histories[column]) < count or missing[column, count]
+                        for column in accumulated
+                    ):
+                        continue
+                    sums = {column: totals[column, count] for column in accumulated}
+                    if name.startswith("trade_flow_imbalance_"):
+                        total = (
+                            sums["observed_taker_buy_volume_100ms"]
+                            + sums["observed_taker_sell_volume_100ms"]
                         )
-                if count == 5:
-                    if bid > 0 and "taker_sell_pressure_500ms" in needed:
-                        expanded["taker_sell_pressure_500ms"][index] = float(
-                            sell_total / current[4]
-                        )
-                    if ask > 0 and "taker_buy_pressure_500ms" in needed:
-                        expanded["taker_buy_pressure_500ms"][index] = float(
-                            buy_total / current[5]
-                        )
-        if "near_depth_share_1_10" in needed:
-            for index, (bid1, ask1, bid10, ask10) in enumerate(
-                zip(*depth[1], *depth[10], strict=True)
-            ):
-                total10 = Fraction(float(bid10)) + Fraction(float(ask10))
-                if total10 > 0:
-                    expanded["near_depth_share_1_10"][index] = float(
-                        (Fraction(float(bid1)) + Fraction(float(ask1))) / total10
-                    )
-        for level in (1, 5):
-            if f"imbalance_{level}_minus_10" in needed:
-                expanded[f"imbalance_{level}_minus_10"] = (
-                    output[f"imbalance_{level}"] - output["imbalance_10"]
-                )
-        output = output.assign(**expanded)
-        yield output.loc[
-            :,
-            [name for name in output if name not in HFT_FACTOR_COLUMNS]
-            + [name for name in HFT_FACTOR_COLUMNS if name in selected],
-        ]
+                        if total > 0:
+                            result = sums["observed_signed_trade_volume_100ms"] / total
+                    elif name.startswith("depth_normalized_ofi_"):
+                        total = sums["bid_depth_1"] + sums["ask_depth_1"]
+                        if total > 0:
+                            result = sums["book_ofi_100ms"] * count / total
+                    elif name.startswith("ofi_"):
+                        result = sums["book_ofi_100ms"]
+                    else:
+                        volume, depth = dependencies
+                        if exact[depth] > 0:
+                            result = sums[volume] / exact[depth]
+                elif name == "spread":
+                    result = values[0]
+                elif name == "relative_spread":
+                    result = values[0] / values[1]
+                elif name.startswith("imbalance_") or name in {
+                    "microprice",
+                    "microprice_deviation",
+                }:
+                    bid, ask = values[:2]
+                    if bid + ask > 0:
+                        result = (bid - ask) / (bid + ask)
+                        if "minus" in name:
+                            bid10, ask10 = values[2:]
+                            result = (
+                                result - (bid10 - ask10) / (bid10 + ask10)
+                                if bid10 + ask10 > 0
+                                else np.nan
+                            )
+                        elif name in {"microprice", "microprice_deviation"}:
+                            result *= exact["book_spread"] / 2
+                            if name == "microprice":
+                                result += exact["mid"]
+                elif name == "top10_depth_per_spread":
+                    result = (values[0] + values[1]) / values[2]
+                elif name == "near_depth_share_1_10":
+                    if values[2] + values[3] > 0:
+                        result = (values[0] + values[1]) / (values[2] + values[3])
+                elif name == "return_100ms":
+                    result = step_return
+                elif name == "return_500ms":
+                    if len(mids) == 6:
+                        result = (mid - mids[0]) / mids[0]
+                elif name == "realized_volatility_1s":
+                    if len(returns) == 10:
+                        result = stdev(returns)
+                else:
+                    result = values[0]
+                try:
+                    value = float(result)
+                except OverflowError:
+                    continue
+                if math.isfinite(value):
+                    calculated[name][index] = value
+        yield output.assign(
+            **{
+                name: calculated[name]
+                for name in HFT_FACTOR_COLUMNS
+                if name in selected
+            }
+        )
         active_segment = str(segments[-1])
         previous_time = int(timestamps[-1])
-        previous_mid = float(mid[-1])
+
+
+def _nullable_numeric_column(frame, column, *, signed_mid=False):
+    """Localize identifiable non-finite/domain-invalid observations to their cell."""
+    if column not in frame:
+        return np.full(len(frame), np.nan)
+    values = pd.to_numeric(frame[column], errors="coerce").to_numpy(
+        dtype="float64", na_value=np.nan, copy=True
+    )
+    valid = np.isfinite(values)
+    valid &= ~frame[column].map(
+        lambda value: isinstance(value, (bool, np.bool_))
+    ).to_numpy(dtype=bool)
+    if column == "mid" and signed_mid:
+        valid &= values != 0
+    elif column in {"mid", "book_spread", "best_bid_qty"}:
+        valid &= values > 0
+    elif column.startswith(("bid_depth_", "ask_depth_", "observed_taker_")):
+        valid &= values >= 0
+    values[~valid] = np.nan
+    return values
 
 
 def iter_derivative_factor_frames(
-    frames, *, observations, max_age_ms, input_delay_ms=0
+    frames, *, observations, max_age_ms, input_delay_ms=0, columns=None
 ):
     """Align native perpetual states to one asset's causal, complete 100ms grid."""
+    selected = set(HFT_DERIVATIVE_FACTOR_COLUMNS if columns is None else columns)
     active_segment = previous_time = active_epoch = None
     flow_start_ns = None
     states = {}
@@ -766,7 +732,15 @@ def iter_derivative_factor_frames(
                     if channel == "forceOrder":
                         # z is observed cumulative filled base quantity, not order q.
                         order = payload["o"]
-                        quantity = float(order["z"])
+                        quantity = _state_number(order.get("z"), nonnegative=True)
+                        if not math.isfinite(quantity) or order.get("S") not in {
+                            "BUY",
+                            "SELL",
+                        }:
+                            liquidations.clear()
+                            flow_start_ns = max(flow_start_ns, observed_ns)
+                            event = next(events, None)
+                            continue
                         if observed_ns > information_ns - 30_000_000_000 and (
                             count or observed_ns > information_ns - 100_000_000
                         ):
@@ -796,33 +770,38 @@ def iter_derivative_factor_frames(
                     values[channel + "_event_at"][row] = np.datetime64(
                         int(event_ms) * 1_000_000, "ns"
                     )
-                    if age <= max_age_ms[channel]:
+                    if age <= max_age_ms.get(channel, -1):
                         fresh[channel] = payload
                 premium = fresh.get("premiumIndex")
                 if premium is not None:
-                    mark, index, mid = (
-                        float(premium["markPrice"]),
-                        float(premium["indexPrice"]),
-                        float(frame["mid"].iloc[row]),
+                    mark = _state_number(premium.get("markPrice"), positive=True)
+                    index_price = _state_number(
+                        premium.get("indexPrice"), positive=True
+                    )
+                    mid = (
+                        _state_number(frame["mid"].iloc[row], positive=True)
+                        if selected & {"mark_mid_basis", "perp_index_basis"}
+                        and "mid" in frame
+                        else np.nan
                     )
                     values["mark_mid_basis"][row] = (mark - mid) / mid
-                    values["mark_index_basis"][row] = (mark - index) / index
-                    values["perp_index_basis"][row] = (mid - index) / index
-                    values["funding_rate"][row] = float(premium["lastFundingRate"])
-                    seconds = (
-                        int(premium["nextFundingTime"]) * 1_000_000 - decision_ns
-                    ) / 1_000_000_000
-                    if seconds >= 0:
-                        values["time_to_next_funding"][row] = seconds
-                oi = (
-                    float(fresh["openInterest"]["openInterest"])
-                    if "openInterest" in fresh
-                    else np.nan
+                    values["mark_index_basis"][row] = (mark - index_price) / index_price
+                    values["perp_index_basis"][row] = (mid - index_price) / index_price
+                    values["funding_rate"][row] = _state_number(
+                        premium.get("lastFundingRate")
+                    )
+                    next_funding = premium.get("nextFundingTime")
+                    if next_funding is not None:
+                        seconds = (
+                            int(next_funding) * 1_000_000 - decision_ns
+                        ) / 1_000_000_000
+                        if seconds >= 0:
+                            values["time_to_next_funding"][row] = seconds
+                oi = _state_number(
+                    fresh.get("openInterest", {}).get("openInterest"), positive=True
                 )
                 if oi > 0:
                     values["log_open_interest"][row] = math.log(oi)
-                else:
-                    oi = np.nan
                 invalid += int(not np.isfinite(oi))
                 oi_values[count % 3001] = oi
                 invalid_prefix[count % 3001] = invalid
@@ -862,8 +841,12 @@ def iter_derivative_factor_frames(
                     ) / 1_000_000_000
                 for channel, name, field in ratio_fields:
                     if channel in fresh:
-                        values[name][row] = float(fresh[channel][field])
+                        values[name][row] = _state_number(
+                            fresh[channel].get(field), nonnegative=True
+                        )
                 count += 1
+            for name in HFT_DERIVATIVE_FACTOR_COLUMNS:
+                values[name][~np.isfinite(values[name])] = np.nan
             _yield_value = result.assign(**values)
             try:
                 yield _yield_value
@@ -872,22 +855,41 @@ def iter_derivative_factor_frames(
             active_segment, previous_time = str(segments[-1]), int(timestamps[-1])
 
 
-def _microstructure_context_rows(frames):
+def _state_number(value, *, positive=False, nonnegative=False):
+    if value is None or isinstance(value, bool):
+        return np.nan
+    try:
+        value = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return np.nan
+    return (
+        value
+        if math.isfinite(value)
+        and (not positive or value > 0)
+        and (not nonnegative or value >= 0)
+        else np.nan
+    )
+
+
+def _microstructure_context_rows(frames, *, factors=None):
     """Reuse the microstructure owner; retain only rows needed for causal context."""
     with closing_iterator(iter(frames)) as source:
         panels, inputs = tee(frame for frame in source if not frame.empty)
-        with closing_iterator(
-            iter_factor_frames(
-                inputs,
-                columns=(
-                    "return_100ms",
-                    "ofi_500ms",
-                    "depth_normalized_ofi_500ms",
-                    "trade_flow_imbalance_500ms",
-                    "return_500ms",
-                ),
+        selected = (
+            (
+                "return_100ms",
+                "ofi_500ms",
+                "depth_normalized_ofi_500ms",
+                "trade_flow_imbalance_500ms",
+                "return_500ms",
             )
-        ) as factors:
+            if factors is None
+            else factors
+        )
+        calculated_frames = (
+            iter_factor_frames(inputs, columns=selected) if selected else inputs
+        )
+        with closing_iterator(calculated_frames) as factors:
             for panel, calculated in zip(panels, factors, strict=True):
                 times = (
                     pd.to_datetime(panel["timestamp"])
@@ -898,23 +900,25 @@ def _microstructure_context_rows(frames):
                     pd.to_datetime(panel["observed_utc"], utc=True)
                     .to_numpy(dtype="datetime64[ns]")
                     .astype("int64")
+                    if "observed_utc" in panel
+                    else np.full(len(panel), np.iinfo("int64").min, dtype="int64")
                 )
                 if bool(np.any(observed > times)):
                     raise ValueError("hft_information_observed_after_grid")
-                columns = calculated[
-                    [
+                columns = calculated.reindex(
+                    columns=[
                         "return_100ms",
                         "ofi_500ms",
                         "depth_normalized_ofi_500ms",
                         "trade_flow_imbalance_500ms",
                         "return_500ms",
                     ]
-                ].to_numpy(dtype="float64")
+                ).to_numpy(dtype="float64")
                 for timestamp, mid, book_time, segment, value in zip(
                     times,
-                    panel["mid"].to_numpy(dtype="float64"),
+                    _nullable_numeric_column(panel, "mid"),
                     observed,
-                    panel["segment_id"],
+                    panel.get("segment_id", [None] * len(panel)),
                     columns,
                     strict=True,
                 ):
@@ -936,14 +940,29 @@ def _microstructure_context_rows(frames):
 
 
 def iter_spot_perp_factor_frames(
-    perpetual_frames, *, spot_frames, max_age_ms, batch_rows, input_delay_ms=0
+    perpetual_frames,
+    *,
+    spot_frames,
+    max_age_ms,
+    batch_rows,
+    input_delay_ms=0,
+    columns=None,
 ):
     """Causally align one information asset without changing the execution grid."""
+    selected = HFT_SPOT_FACTOR_COLUMNS if columns is None else columns
     last = previous = None
     records = []
     with (
-        closing_iterator(_microstructure_context_rows(perpetual_frames)) as perpetual,
-        closing_iterator(_microstructure_context_rows(spot_frames)) as spot,
+        closing_iterator(
+            _microstructure_context_rows(
+                perpetual_frames, factors=spot_dependencies(selected, perpetual=True)[1]
+            )
+        ) as perpetual,
+        closing_iterator(
+            _microstructure_context_rows(
+                spot_frames, factors=spot_dependencies(selected)[1]
+            )
+        ) as spot,
     ):
         upcoming = next(spot, None)
         for point in perpetual:
@@ -1025,18 +1044,17 @@ def iter_cross_asset_factor_frames(
     def rows(frames):
         with closing_iterator(iter(frames)) as source:
             for frame in source:
-                for row in frame.itertuples(index=False):
-                    _yield_value = (
-                        pd.Timestamp(row.timestamp).value,
-                        row.return_100ms,
-                        row.return_500ms,
-                        row.depth_normalized_ofi_500ms,
-                        row.trade_flow_imbalance_500ms,
+                values = [
+                    _nullable_numeric_column(frame, name)
+                    for name in (
+                        "return_100ms",
+                        "return_500ms",
+                        "depth_normalized_ofi_500ms",
+                        "trade_flow_imbalance_500ms",
                     )
-                    try:
-                        yield _yield_value
-                    except GeneratorExit:
-                        return
+                ]
+                for row in zip(frame["timestamp"], *values, strict=True):
+                    yield (pd.Timestamp(row[0]).value, *row[1:])
 
     records = []
     with ExitStack() as readers:
@@ -1092,7 +1110,6 @@ def iter_cross_asset_factor_frames(
                     if (
                         prior is not None
                         and last[0] - prior[0] == 100_000_000
-                        and math.isfinite(last[1])
                         and stamp - prior[0] <= max_age_ms * 1_000_000
                     ):
                         row[prefix + "lagged_return_100ms"] = prior[1]
@@ -1122,8 +1139,15 @@ def iter_external_context_frames(
     base_units_per_amount,
     max_age_ms,
     input_delay_ms=0,
+    columns=None,
 ):
     """Align observed external quotes and base/notional trade flow to Binance time."""
+    selected = (
+        HFT_EXTERNAL_FIELDS
+        if columns is None
+        else tuple(name.removeprefix(venue + "_") for name in columns)
+    )
+    needs_history = any(name.startswith(("return_", "observed_")) for name in selected)
     active_segment = previous_time = None
     mids = deque(maxlen=6)
     bins = deque(maxlen=5)
@@ -1150,11 +1174,22 @@ def iter_external_context_frames(
             if source.empty:
                 continue
             frame = _with_timestamp_ms(source.reset_index(drop=True))
-            timestamps, segments, boundaries = _validated_grid_arrays(
-                frame,
-                active_segment=active_segment,
-                previous_time=previous_time,
-            )
+            if needs_history:
+                timestamps, segments, boundaries = _validated_grid_arrays(
+                    frame,
+                    active_segment=active_segment,
+                    previous_time=previous_time,
+                )
+            else:
+                timestamps = frame["timestamp_ms"].to_numpy(dtype="int64")
+                if (
+                    np.any(timestamps < 0)
+                    or np.any(np.diff(timestamps) <= 0)
+                    or (previous_time is not None and timestamps[0] <= previous_time)
+                ):
+                    raise ValueError("hft_grid_time_invalid")
+                segments = np.full(len(frame), "pointwise", dtype=object)
+                boundaries = np.zeros(len(frame), dtype=bool)
             records = []
             for index, stamp in enumerate(timestamps):
                 decision_us = int(stamp) * 1000
@@ -1167,9 +1202,17 @@ def iter_external_context_frames(
                     latest_quote = quote
                     quote = next(quote_rows, None)
                 buy = sell = buy_notional = sell_notional = Fraction()
+                valid_base_bin = valid_notional_bin = True
                 while trade is not None and trade["local_timestamp"] <= information_us:
                     latest_trade = trade
                     if trade["local_timestamp"] > information_us - 100_000:
+                        if trade["amount"] is None or trade.get("side") not in {
+                            "buy",
+                            "sell",
+                        }:
+                            valid_base_bin = valid_notional_bin = False
+                            trade = next(trade_rows, None)
+                            continue
                         if venue == "okx":
                             event_time = trade["timestamp"]
                             if transition_start <= event_time < transition_end:
@@ -1180,7 +1223,11 @@ def iter_external_context_frames(
                                 before if event_time < transition_start else after
                             )
                         quantity = Fraction(trade["amount"]) * multiplier
-                        notional = quantity * Fraction(trade["price"])
+                        if trade["price"] is None:
+                            valid_notional_bin = False
+                            notional = Fraction()
+                        else:
+                            notional = quantity * Fraction(trade["price"])
                         if trade["side"] == "buy":
                             buy += quantity
                             buy_notional += notional
@@ -1188,7 +1235,16 @@ def iter_external_context_frames(
                             sell += quantity
                             sell_notional += notional
                     trade = next(trade_rows, None)
-                bins.append((buy, sell, buy_notional, sell_notional))
+                bins.append(
+                    (
+                        buy,
+                        sell,
+                        buy_notional,
+                        sell_notional,
+                        valid_base_bin,
+                        valid_notional_bin,
+                    )
+                )
                 count += 1
                 row = {name: np.nan for name in HFT_EXTERNAL_FIELDS}
                 row.update(
@@ -1225,7 +1281,11 @@ def iter_external_context_frames(
                         else bid / 2 + ask / 2
                     )
                     mids.append(mid)
-                    binance_mid = float(frame["mid"].iloc[index])
+                    binance_mid = (
+                        _state_number(frame["mid"].iloc[index], positive=True)
+                        if "mid" in frame
+                        else np.nan
+                    )
                     row.update(
                         mid_usdt=mid,
                         spread_usdt=ask - bid,
@@ -1243,7 +1303,9 @@ def iter_external_context_frames(
                         row["return_500ms"] = (mid - mids[0]) / mids[0]
                 else:
                     mids.clear()
-                if (count - 1) * 100 >= 500 + input_delay_ms:
+                if (count - 1) * 100 >= 500 + input_delay_ms and all(
+                    value[4] for value in bins
+                ):
                     total_buy = sum((value[0] for value in bins), Fraction())
                     total_sell = sum((value[1] for value in bins), Fraction())
                     total = total_buy + total_sell
@@ -1254,7 +1316,12 @@ def iter_external_context_frames(
                         )
                         for name, value in (
                             ("observed_signed_base_flow_500ms", signed),
-                            ("observed_signed_notional_flow_500ms", signed_notional),
+                            (
+                                "observed_signed_notional_flow_500ms",
+                                signed_notional
+                                if all(value[5] for value in bins)
+                                else np.nan,
+                            ),
                             ("observed_tfi_500ms", signed / total),
                         ):
                             try:
@@ -1396,16 +1463,6 @@ def _with_timestamp_ms(frame: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def _finite_column(frame: pd.DataFrame, column: str, error: str) -> np.ndarray:
-    try:
-        values = frame[column].to_numpy(dtype="float64", copy=False)
-    except (KeyError, TypeError, ValueError, OverflowError) as exc:
-        raise ValueError(error) from exc
-    if not np.isfinite(values).all():
-        raise ValueError(error)
-    return values
-
-
 def _identity_frame(frame: pd.DataFrame) -> pd.DataFrame:
     columns = [
         key
@@ -1430,18 +1487,26 @@ def _label_frame(
     )
     if mid_horizons:
         mid = pd.Series(
-            _finite_column(frame, "mid", "hft_label_mid_invalid"),
+            _nullable_numeric_column(frame, "mid", signed_mid=True),
             index=frame.index,
         )
-        if bool(mid.eq(0).any()):
-            raise ValueError("hft_label_mid_invalid")
         grouped = mid.groupby(segment_groups, sort=False)
     for horizon in mid_horizons:
         future = grouped.shift(-(horizon // HFT_GRID_MS))
         same_sign = future.lt(0).eq(mid.lt(0))
         values = (future.where(same_sign) - mid.where(same_sign)) / mid
-        # Opposite signs cannot cancel and their difference can overflow.
         values.loc[~same_sign] = future.loc[~same_sign] / mid.loc[~same_sign] - 1.0
+        complete = (
+            pd.concat(
+                tuple(
+                    grouped.shift(-step) for step in range(horizon // HFT_GRID_MS + 1)
+                ),
+                axis=1,
+            )
+            .notna()
+            .all(axis=1)
+        )
+        values = values.where(complete & np.isfinite(values))
         available = (
             pd.to_datetime(frame["timestamp_ms"], unit="ms")
             .groupby(segment_groups, sort=False)
@@ -1459,25 +1524,13 @@ def _label_frame(
     proxy = label_catalog().get(HFT_MAKER_BID_SELL_PRESSURE_PROXY_COLUMN)
     if proxy.output_column in columns:
         best_bid_quantity = pd.Series(
-            _finite_column(
-                frame,
-                "best_bid_qty",
-                "hft_label_best_bid_quantity_invalid",
-            ),
+            _nullable_numeric_column(frame, "best_bid_qty"),
             index=frame.index,
         )
-        if bool(best_bid_quantity.le(0).any()):
-            raise ValueError("hft_label_best_bid_quantity_invalid")
         taker_sell_volume = pd.Series(
-            _finite_column(
-                frame,
-                "observed_taker_sell_volume_100ms",
-                "hft_label_taker_sell_volume_invalid",
-            ),
+            _nullable_numeric_column(frame, "observed_taker_sell_volume_100ms"),
             index=frame.index,
         )
-        if bool(taker_sell_volume.lt(0).any()):
-            raise ValueError("hft_label_taker_sell_volume_invalid")
         grouped_sell = taker_sell_volume.groupby(segment_groups, sort=False)
         steps = proxy.horizon // HFT_GRID_MS
         future_sell_volume = pd.concat(
@@ -1491,6 +1544,6 @@ def _label_frame(
             pd.to_datetime(frame["timestamp_ms"], unit="ms")
             .groupby(segment_groups, sort=False)
             .shift(-steps)
-            .where(future_sell_volume.notna())
+            .where(output[HFT_MAKER_BID_SELL_PRESSURE_PROXY_COLUMN].notna())
         )
     return output

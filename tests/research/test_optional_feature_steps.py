@@ -198,11 +198,11 @@ def test_observation_mask_excludes_fill_without_masking_indicator_signals():
     )
     original = frame.copy()
     columns = ("feature_x", "feature_y", "feature_missing_x", "feature_observed_x")
-    assert transforms.feature_observation_columns(columns) == (
+    assert transforms.feature_observation_columns(columns, frame.columns) == (
         "feature_observed_x",
         "feature_observed_y",
     )
-    result = transforms.mask_unobserved_features(frame, columns)
+    result = transforms.mask_unobserved_features(frame, columns, frame.columns)
     assert result.feature_x.isna().tolist() == [True, False, False]
     assert result.feature_y.isna().tolist() == [False, True, False]
     pd.testing.assert_series_equal(result.feature_missing_x, frame.feature_missing_x)
@@ -210,11 +210,11 @@ def test_observation_mask_excludes_fill_without_masking_indicator_signals():
     pd.testing.assert_frame_equal(frame, original)
     with pytest.raises(ValueError, match="feature_observation_column_missing"):
         transforms.mask_unobserved_features(
-            frame.drop(columns="feature_observed_x"), ("feature_x",)
+            frame.drop(columns="feature_observed_x"), ("feature_x",), frame.columns
         )
     with pytest.raises(ValueError, match="invalid_feature_observation_flag"):
         transforms.mask_unobserved_features(
-            frame.assign(feature_observed_x=[0, 1, 2]), ("feature_x",)
+            frame.assign(feature_observed_x=[0, 1, 2]), ("feature_x",), frame.columns
         )
 
 

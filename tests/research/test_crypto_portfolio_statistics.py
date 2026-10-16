@@ -439,20 +439,6 @@ def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav
     metadata = _metadata(plan, candidate, mode="independent_segments")
     first = pd.Timestamp(window.start).value
     day, hour = (pd.Timedelta(days=1).value, pd.Timedelta(hours=1).value)
-    from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
-    from quant_research_platform.markets.implementations.crypto.portfolio import (
-        _market_coverage_check,
-    )
-
-    with pytest.raises(PortfolioTargetBlocked, match="book_coverage_incomplete"):
-        _market_coverage_check(
-            {
-                "first": (first, first + hour),
-                "second": (first + 2 * day, first + 2 * day + hour),
-            },
-            SimpleNamespace(covering=lambda *_: ()),
-            ((first, pd.Timestamp(window.end).value),),
-        )
 
     def produce(emit_episode, *, price_delta=0.0):
         for offset, fee, price in ((0, 1.0, 200.0), (2 * day, 2.0, 150.0)):

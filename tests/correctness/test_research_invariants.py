@@ -1524,6 +1524,7 @@ def test_flag_only_model_rejects_structural_invalidity_but_keeps_ordinary_missin
         inputs,
         label_column="label",
         sample_filter_mode="unfiltered",
+        declared_columns=(*inputs, "feature_x"),
     )
     assert "feature_x" in columns
     frame = pd.DataFrame(
@@ -1548,6 +1549,7 @@ def test_flag_only_model_rejects_structural_invalidity_but_keeps_ordinary_missin
             sample_filter_mode="unfiltered",
         ),
         fitting_cutoff=pd.Timestamp("2024-01-02"),
+        declared_columns=frame.columns,
     )
     training = prepared.training
     assert training.asset_id.tolist() == ["a", "b"]

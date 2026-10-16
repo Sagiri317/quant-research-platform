@@ -90,10 +90,7 @@ class ChoiceRequest:
         ):
             raise ValueError("choice_request_invalid")
         for text in (*self.arguments, self.sdk_version):
-            if evidence_text_unsafe_reason(text) not in {
-                None,
-                "stock_sample",
-            }:
+            if evidence_text_unsafe_reason(text) is not None:
                 raise ValueError("choice_request_unsafe")
         if not re.fullmatch(r"[A-Za-z0-9_.,-]+", self.arguments[0]):
             raise ValueError("choice_request_identifier_invalid")
@@ -281,14 +278,11 @@ def _validate_response_metadata(value: dict[str, object]) -> None:
         items = value[name]
         if type(items) is not list or any(type(item) is not str for item in items):
             raise ValueError("choice_response_type_invalid")
-        if any(
-            evidence_text_unsafe_reason(item) not in {None, "stock_sample"}
-            for item in items
-        ):
+        if any(evidence_text_unsafe_reason(item) is not None for item in items):
             raise ValueError("choice_response_metadata_unsafe")
     if type(value["ErrorMsg"]) is not str:
         raise ValueError("choice_response_type_invalid")
-    if evidence_text_unsafe_reason(value["ErrorMsg"]) not in {None, "stock_sample"}:
+    if evidence_text_unsafe_reason(value["ErrorMsg"]) is not None:
         raise ValueError("choice_response_message_unsafe")
     indicators = value["Indicators"]
     if len(indicators) != len(set(indicators)) or any(
