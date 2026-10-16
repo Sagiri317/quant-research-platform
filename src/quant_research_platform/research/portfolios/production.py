@@ -124,7 +124,6 @@ _ENHANCED_PANEL_COLUMNS = (
     "amount",
     "market_type",
     "period_return",
-    "float_market_cap",
     "industry_standard_id",
     "industry_level1_code",
     "is_nonfinancial_industry",
@@ -541,6 +540,13 @@ def backtest_a_share(
         or (candidate.neutrality != "none" and "float_market_cap" in declared_columns)
         else ()
     )
+    if (
+        candidate.neutrality in {"size", "industry_size"}
+        and candidate.size_cap_column in declared_columns
+    ):
+        dataset_business_columns = tuple(
+            dict.fromkeys((*dataset_business_columns, candidate.size_cap_column))
+        )
     dataset_columns = tuple(
         dict.fromkeys(
             (
@@ -615,7 +621,11 @@ def backtest_a_share(
     research_marks = _ResearchValuationMarks()
     with ExitStack() as input_channels:
         history = TimeWindow(sessions[0], sessions[-1])
-        panel_columns = _ENHANCED_PANEL_COLUMNS if enhanced else _PANEL_COLUMNS
+        panel_columns = (
+            (*_ENHANCED_PANEL_COLUMNS, factor_risk.config.weight_column)
+            if enhanced
+            else _PANEL_COLUMNS
+        )
         if candidate.neutrality in {"industry", "industry_size"}:
             panel_columns = tuple(
                 dict.fromkeys(
@@ -723,6 +733,7 @@ def backtest_a_share(
                     panel=panel,
                     risk_frames=risk_frames,
                     style_columns=risk_style_columns,
+                    weight_column=factor_risk.config.weight_column,
                 )
                 risk_frames.clear()
 
@@ -1204,6 +1215,7 @@ def _enhanced_risk_cross(
     panel: pd.DataFrame,
     risk_frames: list[pd.DataFrame],
     style_columns: tuple[str, ...],
+    weight_column: str = "total_market_cap",
 ) -> pd.DataFrame:
     panel_by_asset = panel.set_index("asset_id")
     assets = pd.Index(sorted(set(panel_by_asset.index)), dtype="string")
@@ -1215,8 +1227,8 @@ def _enhanced_risk_cross(
         .reindex(assets)
         .astype("float64")
     )
-    result["float_market_cap"] = (
-        pd.to_numeric(panel_by_asset["float_market_cap"], errors="raise")
+    result[weight_column] = (
+        pd.to_numeric(panel_by_asset[weight_column], errors="raise")
         .reindex(assets)
         .astype("float64")
     )
@@ -1562,6 +1574,7 @@ def _build_session(
                 dataset.get("float_market_cap", pd.Series(np.nan, index=dataset.index)),
                 industry,
                 candidate.neutrality,
+                size_market_cap=dataset.get(candidate.size_cap_column),
             )
         except PortfolioTargetBlocked as exc:
             if scheduled:
@@ -2757,6 +2770,9 @@ def backtest(config: Mapping) -> Path:
             rebalance_schedule=candidate.rebalance_schedule,
         )
     final = []
+    risk_config = (
+        FactorRiskConfig(**config.get("risk_config", {})) if enhanced else None
+    )
 
     def produce(emit):
         with closing_iterator(
@@ -2767,9 +2783,7 @@ def backtest(config: Mapping) -> Path:
                 prediction_domains=tuple(domains),
                 prediction_lookup=lookup,
                 assumptions=assumptions,
-                risk_config=FactorRiskConfig(**config["risk_config"])
-                if "risk_config" in config
-                else None,
+                risk_config=risk_config,
                 optimizer_config=OptimizerConfig(**config["optimizer_config"])
                 if "optimizer_config" in config
                 else None,
@@ -2788,6 +2802,8 @@ def backtest(config: Mapping) -> Path:
 
     metadata = {
         **dict(config),
+        "candidate": asdict(candidate),
+        **({"risk_config": asdict(risk_config)} if enhanced else {}),
         "window": dict(config["output_window"]),
         "initial_holding_convention": "preheld_benchmark" if enhanced else "cash",
     }

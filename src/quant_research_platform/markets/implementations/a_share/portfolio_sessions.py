@@ -76,6 +76,7 @@ def _portfolio_session_evidence(
         "amount",
         "period_return",
         "float_market_cap",
+        "total_market_cap",
         "industry_standard_id",
         "industry_level1_code",
     }

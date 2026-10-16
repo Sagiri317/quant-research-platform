@@ -34,6 +34,10 @@ def build_simple_target_weights(
     float_market_cap: pd.Series | None = None,
     neutrality: Literal["none", "industry", "size", "industry_size"] = "none",
     industry: pd.Series | None = None,
+    total_market_cap: pd.Series | None = None,
+    size_cap_column: Literal[
+        "total_market_cap", "float_market_cap"
+    ] = "total_market_cap",
 ) -> pd.Series:
     """Build one target from current eligible signal and capitalization facts."""
 
@@ -54,12 +58,25 @@ def build_simple_target_weights(
     )
     if portfolio_mode == "long_short" and top_quantile + bottom_quantile > 1.0:
         raise ValueError("target_quantiles_invalid")
+    if type(size_cap_column) is not str or size_cap_column not in {
+        "total_market_cap",
+        "float_market_cap",
+    }:
+        raise ValueError("target_size_cap_column_invalid")
     context = None
     if neutrality != "none":
         if portfolio_mode != "long_only":
             raise ValueError("target_neutrality_requires_long_only")
         context = _neutrality_context(
-            eligibility, float_market_cap, industry, neutrality
+            eligibility,
+            float_market_cap,
+            industry,
+            neutrality,
+            size_market_cap=(
+                total_market_cap
+                if size_cap_column == "total_market_cap"
+                else float_market_cap
+            ),
         )
         eligibility = eligibility & eligibility.index.isin(context.index)
     valid = eligibility & values.notna() & np.isfinite(values)
@@ -215,7 +232,9 @@ def _validate_quantile(value: float, error: str) -> float:
     return numeric
 
 
-def _neutrality_context(eligible, float_market_cap, industry, neutrality):
+def _neutrality_context(
+    eligible, float_market_cap, industry, neutrality, *, size_market_cap=None
+):
     """Use the full lawful benchmark domain, including assets without scores."""
     if type(neutrality) is not str or neutrality not in {
         "industry",
@@ -254,6 +273,18 @@ def _neutrality_context(eligible, float_market_cap, industry, neutrality):
         for code in sorted(codes.unique()):
             context[f"industry:{code}"] = codes.eq(code).astype(float)
     if neutrality in {"size", "industry_size"}:
-        size = np.log(capitals)
+        if size_market_cap is None:
+            raise PortfolioTargetBlocked("target_neutrality_size_missing")
+        if (
+            not isinstance(size_market_cap, pd.Series)
+            or not size_market_cap.index.is_unique
+        ):
+            raise ValueError("target_size_market_cap_invalid")
+        size_capitals = _numeric_series(
+            size_market_cap, context.index, "target_size_market_cap_invalid"
+        )
+        if not (size_capitals.gt(0) & np.isfinite(size_capitals)).all():
+            raise PortfolioTargetBlocked("target_neutrality_size_missing")
+        size = np.log(size_capitals)
         context["size"] = _mad_winsorize(size, {0: np.arange(len(size))})
     return context

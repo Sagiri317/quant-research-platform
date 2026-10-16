@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import ExitStack
-from dataclasses import replace
+from dataclasses import asdict, replace
 from fractions import Fraction
 from statistics import mean
 
@@ -1043,7 +1043,7 @@ def iter_holding_factor_inputs(
                     stock_master_root=inputs["stock_master"],
                     equity_events_root=inputs.get("equity_events"),
                     panel_root=inputs["panel"],
-                    panel_columns=_ENHANCED_PANEL_COLUMNS,
+                    panel_columns=(*_ENHANCED_PANEL_COLUMNS, risk.config.weight_column),
                     calendar=calendar,
                     time_window=history,
                 )
@@ -1103,6 +1103,7 @@ def iter_holding_factor_inputs(
                         panel=current,
                         risk_frames=risk_frames,
                         style_columns=style_columns,
+                        weight_column=risk.config.weight_column,
                     ).copy(deep=True)
 
                 for root, context in context_frames.items():
@@ -1267,6 +1268,9 @@ def build_portfolio_statistics_tables(
                         "neutrality",
                         "risk_style_columns",
                     )
+                ) or (
+                    pair[0].neutrality in {"size", "industry_size"}
+                    and pair[0].size_cap_column != pair[1].size_cap_column
                 ):
                     raise ValueError("portfolio_group_comparison_strategy_mismatch")
     pieces = []
@@ -2540,6 +2544,8 @@ def portfolio_statistics(config):
     if {"sharpe_inference", "cscv", "group_comparison"}.intersection(analyses):
         metadata["inference_scope"] = "exploratory"
         metadata["formal_selection_qualification"] = "not_established"
+    if "attribution" in analyses:
+        metadata["risk"] = asdict(FactorRiskConfig(**config["risk"]))
     metadata.update(comparison_metadata)
     metadata["analyses"] = list(analyses)
     metadata["execution_mode"] = "continuous"

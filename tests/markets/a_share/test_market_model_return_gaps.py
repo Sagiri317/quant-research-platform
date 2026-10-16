@@ -69,7 +69,7 @@ def test_native_market_model_return_gap_persists_and_recovers_complete_windows(
         cross = factors.loc[factors.timestamp.eq(dates[day])].assign(
             industry_standard_id="CSRC2012",
             industry_level1_code="A",
-            float_market_cap=1000000.0,
+            total_market_cap=1000000.0,
             eligible=True,
         )
         assert len(risk.prepare_exposures(cross)) == count

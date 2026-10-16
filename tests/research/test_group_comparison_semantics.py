@@ -451,3 +451,21 @@ def test_native_portfolio_slot_and_fixed_strategy_are_bound(tmp_path, change):
     # The group-specific invariant does not restrict independent performance analyses.
     config["analyses"] = ["performance"]
     portfolio_statistics(config)
+
+
+@pytest.mark.parametrize("neutrality", ["none", "industry", "size", "industry_size"])
+def test_native_paired_size_basis_matches_only_when_consumed(tmp_path, neutrality):
+    config = _portfolio_pair(
+        tmp_path,
+        base_changes={"neutrality": neutrality},
+        change={"size_cap_column": "float_market_cap"},
+    )
+    if neutrality in {"size", "industry_size"}:
+        with pytest.raises(
+            ValueError, match="portfolio_group_comparison_strategy_mismatch"
+        ):
+            portfolio_statistics(config)
+        assert not (tmp_path / "statistics").exists()
+        config["analyses"] = ["performance"]
+    output = portfolio_statistics(config)
+    assert output.is_dir()

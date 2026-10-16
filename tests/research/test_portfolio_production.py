@@ -69,6 +69,7 @@ def test_enhanced_decision_requires_history_for_current_industry_domain() -> Non
             "asset_id": [f"a{index}" for index in range(20)],
             "industry_standard_id": "CSRC2012",
             "industry_level1_code": "A",
+            "total_market_cap": 100 + x,
             "float_market_cap": 100 + x,
             "style": x,
             "asset_return": np.sin(x) / 100,
@@ -156,6 +157,7 @@ def _inputs() -> tuple[dict[str, pd.DataFrame], pd.DataFrame, TimeWindow]:
                 "adj_open": 100.0 + timestamp.day * (1 if asset == "a" else 2),
                 "adj_close": 100.0 + timestamp.day * (1 if asset == "a" else 2),
                 "amount": 1000.0,
+                "total_market_cap": 1000.0 if asset == "a" else 2000.0,
                 "market_type": 1,
                 "is_a_share_scope": True,
                 "is_trading": True,
@@ -177,6 +179,7 @@ def _inputs() -> tuple[dict[str, pd.DataFrame], pd.DataFrame, TimeWindow]:
                 "asset_id": asset,
                 "timestamp": timestamp,
                 "eligible": True,
+                "total_market_cap": 1000.0 if asset == "a" else 2000.0,
                 "float_market_cap": 1000.0 if asset == "a" else 2000.0,
             }
             for asset in assets
@@ -271,6 +274,7 @@ def _build_producer(
     identity_overrides=None,
     raw_bar_orders=None,
     initial_nav=100.0,
+    risk_config=None,
 ):
     final_calibrations = [] if final_calibrations is None else final_calibrations
     enhanced = candidate is not None and candidate.construction == "benchmark_enhanced"
@@ -509,6 +513,7 @@ def _build_producer(
             prepare_trade_cost=prepare_trade_cost,
             market_name_for_type=lambda _value: "shanghai",
             unified_trading_sessions=unified_trading_sessions,
+            risk_config=risk_config,
             on_final_calibration=final_calibrations.append,
             shared_alpha_facts=shared_alpha_facts,
             shared_risk_fits=shared_risk_fits,
@@ -924,6 +929,7 @@ def test_enhanced_membership_maintenance_keeps_explicit_benchmark_target(
         adj_open=100.0,
         adj_close=100.0,
         period_return=0.0,
+        total_market_cap=1000.0,
         float_market_cap=1000.0,
         industry_standard_id="CSRC2012",
         industry_level1_code="A01",
@@ -1451,6 +1457,7 @@ def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
         adj_open=100.0,
         adj_close=100.0,
         period_return=0.0,
+        total_market_cap=1000.0,
         float_market_cap=1000.0,
         industry_standard_id="CSRC2012",
         industry_level1_code="A01",
@@ -2125,6 +2132,7 @@ def test_simple_producer_handles_universe_arrival_and_zero_weight_departure(
                     "asset_id": "c",
                     "timestamp": arrival_dates,
                     "eligible": False,
+                    "total_market_cap": 1000.0,
                     "float_market_cap": 1000.0,
                 }
             ),
@@ -2194,6 +2202,7 @@ def test_enhanced_risk_fits_styles_on_eligible_and_retains_ineligible_asset_axis
             "asset_id": assets,
             "industry_standard_id": "CSRC2012",
             "industry_level1_code": ["A", "B"] * 60 + ["A"],
+            "total_market_cap": 10000 + axis,
             "float_market_cap": 10000 + axis,
             "eligible": [True] * 120 + [False],
             "asset_return": np.sin(axis) / 100,
@@ -2263,6 +2272,7 @@ def test_zero_mad_risk_style_preserves_identifiable_factor_return():
             "timestamp": pd.Timestamp("2023-01-03"),
             "industry_standard_id": "CSRC2012",
             "industry_level1_code": "I",
+            "total_market_cap": 1.0,
             "float_market_cap": 1.0,
             "style": values,
             "asset_return": 0.01 + 0.02 * values,
@@ -2283,6 +2293,7 @@ def test_risk_cross_uses_all_a_facts_and_persisted_styles():
             "asset_id": ["a", "b"],
             "timestamp": pd.Timestamp("2024-01-02"),
             "period_return": [0.01, -0.01],
+            "total_market_cap": [100.0, 200.0],
             "float_market_cap": [100.0, 200.0],
             "industry_standard_id": "CSRC2012",
             "industry_level1_code": ["A", "B"],
@@ -2423,6 +2434,7 @@ def test_enhanced_producer_blocks_only_required_unknown_industry(
     frames, fee_frame, output_window = _inputs()
     frames["panel"] = frames["panel"].assign(
         period_return=0.001,
+        total_market_cap=frames["panel"].asset_id.map({"a": 1000.0, "b": 2000.0}),
         float_market_cap=frames["panel"].asset_id.map({"a": 1000.0, "b": 2000.0}),
         industry_standard_id="CSRC2012",
         industry_level1_code="A01",
@@ -2719,6 +2731,7 @@ def test_enhanced_risk_scaler_uses_complete_known_industry_domain(extra_style):
             "asset_id": [f"a{i}" for i in range(count)],
             "industry_standard_id": "CSRC2012",
             "industry_level1_code": "A",
+            "total_market_cap": 100.0 + x,
             "float_market_cap": 100.0 + x,
             "eligible": True,
             "style": x,
@@ -3120,6 +3133,7 @@ def test_holding_projection_does_not_change_fit_or_specific_risk_history(styles)
             "asset_id": [f"asset_{i}" for i in range(120)],
             "industry_standard_id": "CSRC2012",
             "industry_level1_code": ["A"] * 60 + ["B"] * 60,
+            "total_market_cap": np.geomspace(100.0, 100000.0, 120),
             "float_market_cap": np.geomspace(100.0, 100000.0, 120),
             "eligible": True,
             "asset_return": rng.normal(0, 0.02, 120),
@@ -3134,6 +3148,7 @@ def test_holding_projection_does_not_change_fit_or_specific_risk_history(styles)
             asset_id="held_st",
             eligible=False,
             asset_return=0.07,
+            total_market_cap=abs(extreme),
             float_market_cap=abs(extreme),
             **dict.fromkeys(styles, extreme),
         )

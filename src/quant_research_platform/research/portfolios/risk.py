@@ -34,7 +34,7 @@ class FactorRiskConfig:
     minimum_cross_section: int = 100
     diagonal_shrinkage: float = 0.20
     annualization: float = 252.0
-    weight_column: str = "float_market_cap"
+    weight_column: str = "total_market_cap"
     weighting: str = "sqrt_cap"
 
     def __post_init__(self):

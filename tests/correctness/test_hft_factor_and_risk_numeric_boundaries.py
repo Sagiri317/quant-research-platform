@@ -170,6 +170,7 @@ def test_actual_risk_estimate_retains_tail_after_latest_missing_session(
     half_life, magnitude
 ):
     config = FactorRiskConfig(
+        weight_column="float_market_cap",
         minimum_cross_section=10,
         minimum_factor_dates=2,
         minimum_specific_dates=2,

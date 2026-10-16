@@ -34,7 +34,11 @@ def _source(
     roles.update(
         {
             column: ColumnRole.FACTOR
-            for column in ("momentum_20d", "log_float_market_cap")
+            for column in (
+                "momentum_20d",
+                "log_total_market_cap",
+                "log_float_market_cap",
+            )
             if column in frame
         }
     )
@@ -94,7 +98,7 @@ def test_single_factor_canonical_uses_auxiliary_size_without_putting_it_in_model
         eligible=True,
         industry_standard_id="test",
         industry_level1_code="A",
-        log_float_market_cap=np.arange(120) / 10,
+        log_total_market_cap=np.arange(120) / 10,
         unrelated_context="unused",
     )
     root, _ = _source(tmp_path, frame)
@@ -115,7 +119,7 @@ def test_single_factor_canonical_uses_auxiliary_size_without_putting_it_in_model
         "eligible",
         "industry_standard_id",
         "industry_level1_code",
-        "log_float_market_cap",
+        "log_total_market_cap",
     }
     assert "unrelated_context" not in calls[0][2]
     actual = read_dataset(output)
@@ -123,7 +127,7 @@ def test_single_factor_canonical_uses_auxiliary_size_without_putting_it_in_model
     assert spec["label_columns"] == []
     assert spec["context_columns"] == []
     assert spec["factor_columns"] == ["momentum_20d"]
-    assert "log_float_market_cap" not in actual
+    assert "log_total_market_cap" not in actual
     assert "eligible" not in actual
     expected = a_share_feature_pipeline(frame, factor_columns=("momentum_20d",))
     np.testing.assert_allclose(
@@ -366,7 +370,7 @@ def test_input_column_selection_bounds_business_candidates_but_keeps_dependencie
         eligible=True,
         industry_standard_id="test",
         industry_level1_code="A",
-        log_float_market_cap=np.arange(120) / 10,
+        log_total_market_cap=np.arange(120) / 10,
         return_next=0.1,
     )
     root, _ = _source(tmp_path, frame)
@@ -380,7 +384,7 @@ def test_input_column_selection_bounds_business_candidates_but_keeps_dependencie
     assert spec["label_columns"] == []
     assert spec["context_columns"] == []
     assert read_dataset(output).feature_observed_momentum_20d.eq(1).all()
-    config["factor_columns"] = ["log_float_market_cap"]
+    config["factor_columns"] = ["log_total_market_cap"]
     config["output_root"] = str(tmp_path / "invalid_factor")
     with pytest.raises(ValueError, match="assemble_factor_not_selected"):
         assembler.assemble(config)
@@ -567,3 +571,46 @@ def test_assemble_json_configuration_rejects_runtime_objects_before_io(tmp_path)
     with pytest.raises(ValueError, match="qrp_json_unsupported_value"):
         assembler.assemble({"inputs": {"x": {"path": tmp_path / "missing"}}})
     assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize(
+    "size_column", ["log_total_market_cap", "log_float_market_cap"]
+)
+def test_size_choice_projects_and_persists_exact_dependency(tmp_path, size_column):
+    frame = _frame().assign(
+        eligible=True,
+        log_total_market_cap=np.tile([1.0, 2.0, 3.0, 4.0], 30),
+        log_float_market_cap=np.tile([1.0, 3.0, 2.0, 4.0], 30),
+    )
+    root, _ = _source(tmp_path, frame)
+    options = {"industry_neutralize": False, "clip": "none"}
+    if size_column == "log_float_market_cap":
+        options["size_column"] = size_column
+    output = assembler.assemble(
+        _config(
+            tmp_path,
+            root,
+            feature_recipe="a_share_canonical",
+            feature_transform=options,
+        )
+    )
+    inspection = inspect_dataset(output)
+    assert inspection.spec["feature_transforms"][0]["size_column"] == size_column
+    parameters = inspection.manifest["parameters"]
+    assert parameters["feature_transform"]["size_column"] == size_column
+    assert set(parameters["input_columns"][root.name]) == {
+        *PLATFORM_ASSET_TIME_KEY,
+        "momentum_20d",
+        "eligible",
+        size_column,
+    }
+    expected = a_share_feature_pipeline(
+        frame,
+        factor_columns=("momentum_20d",),
+        industry_neutralize=False,
+        clip="none",
+        size_column=size_column,
+    )
+    np.testing.assert_allclose(
+        read_dataset(output).feature_momentum_20d, expected.feature_momentum_20d
+    )

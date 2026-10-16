@@ -59,7 +59,7 @@ EXECUTION_ASSUMPTIONS = ExecutionAssumptions(
     adv_sensitivities=(0.01, 0.02, 0.05, 0.10),
 )
 RISK_STYLE_COLUMNS = (
-    "log_float_market_cap",
+    "log_total_market_cap",
     "beta_252d",
     "momentum_252_20",
     "residual_volatility_60d",

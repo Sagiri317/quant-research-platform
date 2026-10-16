@@ -20,11 +20,17 @@ class FeatureTransformSpec:
     center: bool = True
     scale: bool = True
     impute_missing: bool = True
+    size_column: str = "log_total_market_cap"
 
     def __post_init__(self) -> None:
         if type(self.recipe_id) is not str or self.recipe_id not in FEATURE_RECIPES:
             raise ValueError("unsupported_feature_recipe")
         _validate_column_tuple(self.source_columns, "source_columns")
+        if type(self.size_column) is not str or self.size_column not in {
+            "log_total_market_cap",
+            "log_float_market_cap",
+        }:
+            raise ValueError("invalid_feature_size_column")
         clip = self.clip
         if clip is None:
             clip = "mad" if self.recipe_id == "a_share_canonical" else "quantile_1_99"
@@ -47,9 +53,9 @@ class FeatureTransformSpec:
         if self.industry_neutralize:
             columns.extend(("industry_standard_id", "industry_level1_code"))
         if self.size_neutralize and any(
-            column != "log_float_market_cap" for column in self.source_columns
+            column != self.size_column for column in self.source_columns
         ):
-            columns.append("log_float_market_cap")
+            columns.append(self.size_column)
         return tuple(columns)
 
     @property

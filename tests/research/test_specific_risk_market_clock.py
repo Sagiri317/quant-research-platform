@@ -17,7 +17,7 @@ def _cross(day, prefix, multiplier):
             "asset_id": [f"{prefix}{i}" for i in range(5)],
             "industry_standard_id": "S",
             "industry_level1_code": "I",
-            "float_market_cap": 100.0,
+            "total_market_cap": 100.0,
             "eligible": True,
             "asset_return": [multiplier * x for x in (-0.02, -0.01, 0, 0.01, 0.02)],
         }

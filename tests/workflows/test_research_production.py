@@ -93,16 +93,40 @@ def test_native_enhancement_is_capacity_limited_and_postcost_feasible(source_cha
         assert all(value <= 0.05 + 1e-8 for value in participation)
 
 
-def test_native_postcost_boundary_is_rejected_without_output(source_chain, tmp_path):
+def test_native_postcost_boundary_is_rejected_without_output(
+    source_chain, tmp_path, monkeypatch
+):
+    from quant_research_platform.research.portfolios import production
     from quant_research_platform.research.portfolios.production import (
         PortfolioTargetBlocked,
     )
 
+    optimized, executed = [], []
+    solve = production.optimize_portfolio
+    execute = production.execute_continuous_target
+
+    def observe_solution(assets, **kwargs):
+        result = solve(assets, **kwargs)
+        optimized.append((assets.set_index("asset_id"), result))
+        return result
+
+    def observe_execution(*args, **kwargs):
+        result = execute(*args, **kwargs)
+        executed.append(result)
+        return result
+
+    monkeypatch.setattr(production, "optimize_portfolio", observe_solution)
+    monkeypatch.setattr(production, "execute_continuous_target", observe_execution)
     original = source_chain.enhanced_configs["global"]
     destination = tmp_path / "infeasible"
+    # Near-exact replication forces drift rebalancing, whose known fees change
+    # post-trade weights. Keep the real solver, risk model and execution costs;
+    # do not rely on an alpha-driven optimum landing on a default name bound.
+    name_limit = 1e-8
     config = {
         **original,
         "assumptions": {**original["assumptions"], "initial_nav": 1e9},
+        "optimizer_config": {"active_name_limit": name_limit},
         "output": str(destination),
     }
     with pytest.raises(
@@ -110,6 +134,22 @@ def test_native_postcost_boundary_is_rejected_without_output(source_chain, tmp_p
     ):
         backtest(config)
     assert not destination.exists()
+    assert len(optimized) == 1
+    assets, solution = optimized[0]
+    benchmark = assets.loc[~assets.is_cash, "benchmark_weight"]
+    target_active = solution.weights.reindex(benchmark.index) - benchmark
+    assert target_active.abs().max() <= name_limit + 1e-8
+    assert solution.expected_transaction_cost > 0.0
+    # The last execution is the decision-time projection, before its rejection.
+    projected = executed[-1]
+    assert projected.nav_after < projected.nav_before
+    weights = (
+        projected.asset_ledger.set_index("asset_id").post_trade_notional
+        / projected.nav_after
+    )
+    assert (
+        weights.reindex(benchmark.index) - benchmark
+    ).abs().max() > name_limit + 1e-8
 
 
 def test_source_models_reach_paired_native_test_statistics(source_chain, tmp_path):

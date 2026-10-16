@@ -1215,6 +1215,7 @@ def test_resolved_feature_options_are_the_persisted_transform_configuration():
                 "clip": transform.clip,
                 "industry_neutralize": True,
                 "size_neutralize": True,
+                "size_column": "log_total_market_cap",
                 "center": True,
                 "scale": True,
                 "impute_missing": True,
@@ -1225,3 +1226,16 @@ def test_resolved_feature_options_are_the_persisted_transform_configuration():
         with pytest.raises(ValueError, match="dataset_feature_transforms_invalid"):
             validate_dataset_spec_payload(payload)
     assert identities[0] != identities[1]
+
+
+def test_persisted_feature_size_cannot_be_inferred_from_new_defaults():
+    factor = make_demo_research_dataset_spec().factor_columns[0]
+    transform = FeatureTransformSpec("a_share_canonical", (factor,))
+    payload = data_spec_payload(
+        make_demo_research_dataset_spec(
+            feature_columns=transform.output_columns, feature_transforms=(transform,)
+        )
+    )
+    del payload["feature_transforms"][0]["size_column"]
+    with pytest.raises(ValueError, match="dataset_feature_transforms_invalid"):
+        validate_dataset_spec_payload(payload)

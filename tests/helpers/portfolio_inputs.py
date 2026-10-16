@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from math import log
+
 import pandas as pd
 
 from quant_research_platform.catalog.processed import (
@@ -107,6 +109,7 @@ def _processed_specs() -> ProcessedDataCatalog:
             "market_type": ColumnRole.CONTEXT,
             "period_return": ColumnRole.CONTEXT,
             "float_market_cap": ColumnRole.CONTEXT,
+            "total_market_cap": ColumnRole.CONTEXT,
             "industry_standard_id": ColumnRole.KEY,
             "industry_level1_code": ColumnRole.KEY,
             "is_nonfinancial_industry": ColumnRole.CONTEXT,
@@ -172,7 +175,7 @@ def _processed_specs() -> ProcessedDataCatalog:
         for data_id, columns in (
             (
                 "price_volume_facts",
-                ("log_float_market_cap", "momentum_252_20", "amihud_60d"),
+                ("log_total_market_cap", "momentum_252_20", "amihud_60d"),
             ),
             ("fundamental_factors", ("earnings_yield",)),
             ("market_model_factors", ("beta_252d", "residual_volatility_60d")),
@@ -278,6 +281,7 @@ def _frames(dates: pd.DatetimeIndex | None = None) -> dict[str, pd.DataFrame]:
     )
     panel["period_return"] = 0.001
     panel["float_market_cap"] = panel["asset_id"].map({"a": 1_000.0, "b": 2_000.0})
+    panel["total_market_cap"] = panel["asset_id"].map({"a": 2_000.0, "b": 5_000.0})
     panel["industry_standard_id"] = "CSRC2012"
     panel["industry_level1_code"] = "A"
     panel["is_nonfinancial_industry"] = True
@@ -373,11 +377,10 @@ def _frames(dates: pd.DatetimeIndex | None = None) -> dict[str, pd.DataFrame]:
                 "market_id",
                 "asset_id",
                 "timestamp",
-                "log_float_market_cap",
                 "momentum_252_20",
                 "amihud_60d",
             ],
-        ].copy(),
+        ].assign(log_total_market_cap=dataset.total_market_cap.map(log)),
         "fundamental_factors": dataset.loc[
             :, ["market_id", "asset_id", "timestamp"]
         ].assign(earnings_yield=0.01),

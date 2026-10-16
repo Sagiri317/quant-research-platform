@@ -761,7 +761,7 @@ def test_named_feature_recipe_assembles_complete_sessions_and_persists_identity(
 
     layout = StorageLayout(project_root=tmp_path)
     transform = FeatureTransformSpec(recipe, ("factor",))
-    context = ("industry_standard_id", "industry_level1_code", "log_float_market_cap")
+    context = ("industry_standard_id", "industry_level1_code", "log_total_market_cap")
     frame = pd.DataFrame(
         {
             "market_id": "a_share",
@@ -772,7 +772,7 @@ def test_named_feature_recipe_assembles_complete_sessions_and_persists_identity(
             "eligible": True,
             "industry_standard_id": "fixture",
             "industry_level1_code": "A",
-            "log_float_market_cap": np.arange(120) * 0.01,
+            "log_total_market_cap": np.arange(120) * 0.01,
         }
     )
     frame.loc[119, "factor"] = 1000.0
@@ -852,6 +852,7 @@ def test_named_feature_recipe_assembles_complete_sessions_and_persists_identity(
             "clip": transform.clip,
             "industry_neutralize": True,
             "size_neutralize": True,
+            "size_column": "log_total_market_cap",
             "center": True,
             "scale": True,
             "impute_missing": True,

@@ -23,7 +23,7 @@ def _risk_cross(returns, caps, timestamp="2023-01-02"):
             "asset_id": [str(i) for i in range(len(returns))],
             "industry_standard_id": "fixture",
             "industry_level1_code": "one",
-            "float_market_cap": caps,
+            "total_market_cap": caps,
             "asset_return": returns,
         }
     )
@@ -428,7 +428,7 @@ def test_native_rank_one_industry_covariance_reaches_actual_optimizer():
             "asset_id": [f"asset{index}" for index in range(15)],
             "industry_standard_id": "CSRC2012",
             "industry_level1_code": ["A"] * 5 + ["B"] * 5 + ["C"] * 5,
-            "float_market_cap": 1.0,
+            "total_market_cap": 1.0,
             "asset_return": 1e50,
         }
     )

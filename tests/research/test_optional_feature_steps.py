@@ -66,18 +66,26 @@ def test_industry_only_uses_industry_intercepts_without_size():
     np.testing.assert_allclose(result.feature_x, expected, rtol=0, atol=1e-13)
 
 
-def test_size_only_and_size_source_never_regress_on_itself():
+@pytest.mark.parametrize(
+    "size_column", ["log_total_market_cap", "log_float_market_cap"]
+)
+def test_size_only_and_size_source_never_regress_on_itself(size_column):
     sizes = np.arange(120, dtype=float)
     frame = pd.DataFrame(
         {
             "timestamp": pd.Timestamp("2024-01-02"),
             "eligible": True,
             "x": 2 * sizes + np.sin(sizes),
-            "log_float_market_cap": sizes,
+            size_column: sizes,
         }
     )
     result = _apply(
-        frame, clip="none", industry_neutralize=False, center=False, scale=False
+        frame,
+        clip="none",
+        industry_neutralize=False,
+        center=False,
+        scale=False,
+        size_column=size_column,
     )
     design = np.column_stack((np.ones(len(sizes)), sizes))
     expected = frame.x - design @ np.linalg.lstsq(design, frame.x, rcond=None)[0]
@@ -87,15 +95,16 @@ def test_size_only_and_size_source_never_regress_on_itself():
         (
             FeatureTransformSpec(
                 "a_share_canonical",
-                ("log_float_market_cap",),
+                (size_column,),
                 clip="none",
+                size_column=size_column,
                 industry_neutralize=False,
                 center=False,
                 scale=False,
             ),
         ),
     )
-    np.testing.assert_array_equal(self_result.feature_log_float_market_cap, sizes)
+    np.testing.assert_array_equal(self_result["feature_" + size_column], sizes)
 
 
 def test_optional_steps_keep_missing_observed_and_scope_distinct():
@@ -127,7 +136,7 @@ def test_neutralization_reuses_only_identical_valid_domains(monkeypatch):
             "z": values * 3,
             "industry_standard_id": "test",
             "industry_level1_code": "A",
-            "log_float_market_cap": np.arange(n) / 10,
+            "log_total_market_cap": np.arange(n) / 10,
         }
     )
     frame.loc[0, "z"] = np.nan
@@ -254,3 +263,94 @@ def test_zero_variance_convention_depends_on_requested_math(center, scale, defin
         assert result.feature_observed_x.eq(0).all()
         assert result.feature_missing_x.eq(1).all()
     assert diagnostic["zero_variance_by_factor"]["x"] == int(scale)
+
+
+@pytest.mark.parametrize(
+    "size_column", ["log_total_market_cap", "log_float_market_cap"]
+)
+def test_size_selection_changes_only_equal_weight_regression_covariate(size_column):
+    # Four distinct capitalization pairs, repeated to meet the 100-row domain.
+    total = np.tile([1.0, 2.0, 3.0, 4.0], 30)
+    floating = np.tile([1.0, 3.0, 2.0, 4.0], 30)
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.Timestamp("2024-01-02"),
+            "eligible": True,
+            "x": np.tile([1.0, 2.0, 4.0, 8.0], 30),
+            "log_total_market_cap": total,
+            "log_float_market_cap": floating,
+        }
+    )
+    options = (
+        {} if size_column == "log_total_market_cap" else {"size_column": size_column}
+    )
+    actual = _apply(frame, clip="none", industry_neutralize=False, **options)
+    # Equal-weight intercept and slope: 2.3 for total, 1.9 for floating.
+    slope = 2.3 if size_column == "log_total_market_cap" else 1.9
+    residual = frame.x - 3.75 - slope * (frame[size_column] - 2.5)
+    expected = residual / np.sqrt(np.mean(residual**2))
+    np.testing.assert_allclose(actual.feature_x, expected, rtol=1e-14, atol=1e-14)
+    for column in ("x", "log_total_market_cap", "log_float_market_cap"):
+        pd.testing.assert_series_equal(actual[column], frame[column])
+    spec = FeatureTransformSpec("a_share_canonical", ("x",), **options)
+    assert spec.support_columns == (
+        "eligible",
+        "industry_standard_id",
+        "industry_level1_code",
+        size_column,
+    )
+    assert FeatureTransformSpec(
+        "a_share_canonical", (size_column,), **options
+    ).support_columns == ("eligible", "industry_standard_id", "industry_level1_code")
+
+
+def test_missing_total_size_never_falls_back_to_float():
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.Timestamp("2024-01-02"),
+            "eligible": True,
+            "x": np.sin(np.arange(120)),
+            "log_float_market_cap": np.arange(120, dtype=float),
+        }
+    )
+    with pytest.raises(ValueError, match="feature_size_context_missing"):
+        _apply(frame, industry_neutralize=False)
+    actual = _apply(
+        frame.assign(log_total_market_cap=np.nan), industry_neutralize=False
+    )
+    assert actual.feature_x.isna().all()
+    assert actual.feature_observed_x.eq(0).all()
+    assert (
+        _apply(frame, industry_neutralize=False, size_neutralize=False)
+        .feature_x.notna()
+        .all()
+    )
+    assert (
+        _apply(frame, industry_neutralize=False, size_column="log_float_market_cap")
+        .feature_x.notna()
+        .all()
+    )
+
+
+@pytest.mark.parametrize("size_column", [None, 1, [], "float_market_cap", "anything"])
+def test_size_column_requires_a_named_raw_log_factor(size_column):
+    with pytest.raises(ValueError, match="invalid_feature_size_column"):
+        FeatureTransformSpec("a_share_canonical", ("x",), size_column=size_column)
+
+
+def test_size_default_does_not_change_raw_factor_or_market_model_dependencies():
+    from quant_research_platform.research.protocols.a_share import (
+        MARKET_MODEL_FACTORS,
+        RISK_STYLE_COLUMNS,
+        factor_catalog,
+    )
+
+    catalog = factor_catalog()
+    assert RISK_STYLE_COLUMNS[0] == "log_total_market_cap"
+    for capitalization in ("total", "float"):
+        assert catalog.get(
+            f"price_volume_log_{capitalization}_market_cap"
+        ).input_columns == (f"{capitalization}_market_cap",)
+    for column in MARKET_MODEL_FACTORS:
+        assert "float_market_cap" in catalog.get(column).input_columns
+        assert "total_market_cap" not in catalog.get(column).input_columns

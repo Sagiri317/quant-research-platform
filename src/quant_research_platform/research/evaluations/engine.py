@@ -878,7 +878,7 @@ def build_scoped_evaluation_result(
                 )
                 classification = focal.copy()
                 for column in (
-                    "float_market_cap",
+                    "total_market_cap",
                     "amount",
                     "median_forecast_age_days_fy1",
                 ):
@@ -1020,7 +1020,7 @@ def _evaluation_strata(frame, strata):
         if kind == "industry":
             values = mature.industry_level1_code.astype("string")
         elif kind in {"size", "liquidity"}:
-            column = "float_market_cap" if kind == "size" else "amount"
+            column = "total_market_cap" if kind == "size" else "amount"
             numeric = mature[column]
             invalid = numeric.notna() & (~np.isfinite(numeric) | numeric.lt(0))
             quality[kind + "_invalid"] = int(invalid.sum())

@@ -143,7 +143,7 @@ def test_feature_transforms_reject_invalid_numeric_sources(value: object) -> Non
         eligible=True,
         industry_standard_id="fixture",
         industry_level1_code="A",
-        log_float_market_cap=0.0,
+        log_total_market_cap=0.0,
     )
     spec = FeatureTransformSpec("a_share_canonical", ("factor",))
     with pytest.raises(ValueError, match="invalid_feature_factor"):

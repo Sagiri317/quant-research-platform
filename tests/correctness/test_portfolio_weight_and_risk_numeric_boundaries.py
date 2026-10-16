@@ -117,6 +117,7 @@ def _cross(count=100):
             "asset_id": [f"synthetic_{i:03d}" for i in range(count)],
             "industry_standard_id": "fixture",
             "industry_level1_code": ["large"] * (count // 2) + ["small"] * (count // 2),
+            "total_market_cap": 1.0,
             "float_market_cap": 1.0,
             "asset_return": [1e308] * (count // 2) + [1.0] * (count // 2),
         }
@@ -140,10 +141,10 @@ def test_two_industry_wls_keeps_small_constant_response_and_zero_residuals(order
 
 def _full_wls_fraction_oracle(exposures, cross):
     aligned = cross.set_index("asset_id").reindex(exposures.index)
-    weights = [Fraction(isqrt(int(cap))) for cap in aligned.float_market_cap]
+    weights = [Fraction(isqrt(int(cap))) for cap in aligned.total_market_cap]
     assert all(
         weight**2 == Fraction(float(cap))
-        for weight, cap in zip(weights, aligned.float_market_cap, strict=True)
+        for weight, cap in zip(weights, aligned.total_market_cap, strict=True)
     )
     x = [[Fraction(float(value)) for value in row] for row in exposures.to_numpy()]
     y = [Fraction(float(value)) for value in aligned.asset_return]
@@ -193,7 +194,7 @@ def test_weighted_style_and_residuals_match_independent_full_normal_system(
     magnitude, style_count
 ):
     frame = _cross()
-    frame["float_market_cap"] = np.tile([1.0, 4.0, 16.0, 64.0, 256.0], 20)
+    frame["total_market_cap"] = np.tile([1.0, 4.0, 16.0, 64.0, 256.0], 20)
     frame["style"] = np.tile([-2.0, -1.0, 0.0, 1.0, 2.0], 20)
     styles = ("style",) + tuple(f"style_{i}" for i in range(1, style_count))
     rng = np.random.default_rng(61003)
@@ -255,6 +256,7 @@ def _panel(assets, dates):
             "amount": 1000.0,
             "market_type": 1,
             "period_return": 0.0,
+            "total_market_cap": 1.0,
             "float_market_cap": 1.0,
             "industry_standard_id": "CSRC2012",
             "industry_level1_code": (

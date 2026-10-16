@@ -460,7 +460,7 @@ def _resolved_strata(config, *, spec, declared):
     columns = [
         {
             "industry": "industry_level1_code",
-            "size": "float_market_cap",
+            "size": "total_market_cap",
             "liquidity": "amount",
         }[kind]
         for kind in kinds
@@ -592,7 +592,7 @@ def _scoped_evaluate(config, *, spec, session, source, columns, cutoff, window, 
     focal["classification_columns"] = [
         column
         for kind, column in (
-            ("size", "float_market_cap"),
+            ("size", "total_market_cap"),
             ("liquidity", "amount"),
             ("forecast_age", "median_forecast_age_days_fy1"),
         )

@@ -36,7 +36,7 @@ def test_transform_prediction_publication_keeps_real_domain(
             "eligible": True,
             "industry_standard_id": "CSRC2012",
             "industry_level1_code": "industry",
-            "log_float_market_cap": 20 + np.arange(count) * 0.01,
+            "log_total_market_cap": 20 + np.arange(count) * 0.01,
             "x": np.sin(np.arange(count)),
             "float_market_cap": 100.0,
             "forward_return_20d": np.arange(count) * 0.001,
@@ -44,7 +44,7 @@ def test_transform_prediction_publication_keeps_real_domain(
         }
     )
     raw.loc[count - 2, "x"] = np.nan
-    raw.loc[count - 1, "log_float_market_cap"] = np.nan
+    raw.loc[count - 1, "log_total_market_cap"] = np.nan
     frame = (
         apply_feature_transforms(
             raw, (FeatureTransformSpec("a_share_canonical", ("x",)),)

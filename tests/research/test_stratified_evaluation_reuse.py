@@ -30,7 +30,7 @@ def _fixture(tmp_path, *, days=1):
             "label_available_at": pd.Timestamp("2023-01-02"),
             "eligible": True,
             "industry_level1_code": ["A", "A", None, "<NA>"] * days,
-            "float_market_cap": [0.0, 1.0, 2.0, 3.0] * days,
+            "total_market_cap": [0.0, 1.0, 2.0, 3.0] * days,
             "amount": [1.0, 1.0, 2.0, 3.0] * days,
         }
     )
@@ -63,6 +63,82 @@ def _fixture(tmp_path, *, days=1):
     }
     config["sample_scope"] = "own"
     return frame, config
+
+
+def test_size_strata_use_total_cap_with_opposite_float_cap_order(tmp_path):
+    frame, config = _fixture(tmp_path)
+    frame["total_market_cap"] = [4.0, 3.0, 2.0, 1.0]
+    frame["float_market_cap"] = [0.1, 0.2, 0.3, 0.4]
+    config["inputs"] = str(
+        write_evaluation_input(
+            tmp_path / "opposite", frame, factors=("x", "z"), labels=("label",)
+        )
+    )
+    _, tables = read_evaluation_outputs(
+        evaluate(config), tables=("metrics", "daily_strata")
+    )
+    size = tables["daily_strata"].query("stratification == 'size'")
+    # The smallest total-cap company has a missing signal. Float-cap ordering
+    # would instead assign the first, observed company to the smallest bin.
+    assert size.set_index("stratum").n_obs.to_dict() == {"1": 0, "2": 1, "3": 2}
+    liquidity = tables["daily_strata"].query("stratification == 'liquidity'")
+    assert liquidity.set_index("stratum").n_obs.to_dict() == {"2": 2, "3": 1}
+    assert tables["metrics"].n_obs.tolist() == [3]
+
+
+@pytest.mark.parametrize("missing", ([0, 1], [0, 1, 2, 3]))
+def test_missing_total_cap_is_local_to_size_strata(tmp_path, missing):
+    frame, config = _fixture(tmp_path)
+    _, baseline = read_evaluation_outputs(
+        evaluate(config),
+        tables=(
+            "metrics",
+            "grouped_label_values",
+            "ic_summary",
+            "group_spread_summary",
+            "daily_strata",
+        ),
+    )
+    frame.loc[missing, "total_market_cap"] = np.nan
+    frame["float_market_cap"] = [1.0, 2.0, 3.0, 4.0]
+    config["inputs"] = str(
+        write_evaluation_input(
+            tmp_path / "missing", frame, factors=("x", "z"), labels=("label",)
+        )
+    )
+    config["output"] = str(tmp_path / "missing-evaluation")
+    _, actual = read_evaluation_outputs(
+        evaluate(config),
+        tables=(
+            "metrics",
+            "grouped_label_values",
+            "ic_summary",
+            "group_spread_summary",
+            "daily_strata",
+        ),
+    )
+    for name in (
+        "metrics",
+        "grouped_label_values",
+        "ic_summary",
+        "group_spread_summary",
+    ):
+        pd.testing.assert_frame_equal(actual[name], baseline[name], check_exact=True)
+    for kind in ("industry", "liquidity"):
+        pd.testing.assert_frame_equal(
+            actual["daily_strata"]
+            .loc[actual["daily_strata"].stratification.eq(kind)]
+            .reset_index(drop=True),
+            baseline["daily_strata"]
+            .loc[baseline["daily_strata"].stratification.eq(kind)]
+            .reset_index(drop=True),
+            check_exact=True,
+        )
+    size = actual["daily_strata"].query("stratification == 'size'")
+    undefined = size.loc[size.stratum.isna()]
+    assert undefined.stratum_rows.tolist() == [len(missing)]
+    assert undefined.n_obs.tolist() == [sum(frame.loc[missing, "x"].notna())]
+    assert size.stratum_rows.sum() == len(frame)
 
 
 def test_native_own_common_strata_and_persisted_reduction(tmp_path, monkeypatch):
@@ -299,7 +375,7 @@ def test_local_bad_classification_and_literal_fractional_age(tmp_path):
             "label": np.arange(n, dtype=float),
             "label_available_at": pd.Timestamp("2023-01-02"),
             "eligible": True,
-            "float_market_cap": [-1.0, np.inf, np.nan] + [0.0] * (n - 3),
+            "total_market_cap": [-1.0, np.inf, np.nan] + [0.0] * (n - 3),
             "amount": [-2.0, np.inf, np.nan] + [1.0] * (n - 3),
         }
     )
@@ -368,7 +444,7 @@ def test_scans_each_actual_input_selection_once(tmp_path, monkeypatch):
         }
     )
     assert len(scans) == 1
-    assert {"x", "z", "float_market_cap", "amount"} <= set(scans[0])
+    assert {"x", "z", "total_market_cap", "amount"} <= set(scans[0])
 
 
 def test_hac20_by_is_one_full_family_and_alt_policy_applies(tmp_path):
@@ -388,7 +464,7 @@ def test_hac20_by_is_one_full_family_and_alt_policy_applies(tmp_path):
             "label_available_at": pd.Timestamp("2023-01-02"),
             "eligible": True,
             "industry_level1_code": ["A"] * 6 * len(dates) + ["B"] * 6 * len(dates),
-            "float_market_cap": np.tile(np.arange(n, dtype=float), len(dates)),
+            "total_market_cap": np.tile(np.arange(n, dtype=float), len(dates)),
             "amount": rng.uniform(size=n * len(dates)),
         }
     )

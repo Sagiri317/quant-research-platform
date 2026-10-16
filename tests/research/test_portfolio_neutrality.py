@@ -36,6 +36,7 @@ def test_projection_handcheck_includes_unpredicted_benchmark_assets(
         pd.Series([np.nan, 1.0, np.nan, np.nan], index=assets),
         eligible=pd.Series(True, index=assets),
         float_market_cap=caps,
+        total_market_cap=caps,
         industry=pd.Series(["A", "A", "B", "B"], index=assets)
         if neutrality != "size"
         else None,
@@ -61,6 +62,7 @@ def test_projection_failure_does_not_silently_relax(monkeypatch):
             pd.Series({"a": 1.0}),
             eligible=pd.Series({"a": True}),
             float_market_cap=pd.Series({"a": 1.0}),
+            total_market_cap=pd.Series({"a": 1.0}),
             neutrality="size",
         )
 
@@ -273,6 +275,7 @@ def test_enhanced_nonrebalance_unknown_industry_preserves_held_account(
     frames, fees, window = _inputs()
     frames["panel"] = frames["panel"].assign(
         period_return=0.0,
+        total_market_cap=1000.0,
         float_market_cap=1000.0,
         industry_standard_id="fixture",
         industry_level1_code="known",

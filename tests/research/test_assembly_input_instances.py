@@ -317,7 +317,7 @@ def test_borrowed_feature_does_not_disable_default_factor_transform(tmp_path, fe
         eligible=True,
         industry_standard_id="test",
         industry_level1_code="A",
-        log_float_market_cap=np.arange(120) / 10,
+        log_total_market_cap=np.arange(120) / 10,
         **{feature: np.arange(120, dtype=float)},
     )
     _, spec = _source(tmp_path, frame)

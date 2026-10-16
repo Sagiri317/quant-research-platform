@@ -749,6 +749,7 @@ def test_enhanced_risk_state_uses_mature_estimates_and_produces_psd_risk() -> No
     factor_risk = FactorRiskState(
         style_columns=style_columns,
         config=FactorRiskConfig(
+            weight_column="float_market_cap",
             minimum_cross_section=2,
         ),
     )
@@ -818,6 +819,7 @@ def test_factor_risk_projects_history_to_current_industry_domain() -> None:
     state = FactorRiskState(
         style_columns=("style",),
         config=FactorRiskConfig(
+            weight_column="float_market_cap",
             minimum_cross_section=10,
             minimum_factor_dates=3,
             minimum_specific_dates=3,
@@ -888,6 +890,7 @@ def test_factor_risk_windows_and_decay_follow_observed_sessions() -> None:
     specific_state = FactorRiskState(
         style_columns=("style",),
         config=FactorRiskConfig(
+            weight_column="float_market_cap",
             minimum_cross_section=10,
             minimum_factor_dates=3,
             minimum_specific_dates=3,
@@ -896,6 +899,7 @@ def test_factor_risk_windows_and_decay_follow_observed_sessions() -> None:
     factor_state = FactorRiskState(
         style_columns=("style",),
         config=FactorRiskConfig(
+            weight_column="float_market_cap",
             minimum_cross_section=10,
             minimum_factor_dates=3,
             minimum_specific_dates=3,
@@ -1246,9 +1250,10 @@ def test_factor_return_wls_uses_sqrt_cap_statistical_weight():
             **{column: rng.normal(size=count) for column in RISK_STYLE_COLUMNS},
         }
     )
-    fit = FactorRiskState(style_columns=RISK_STYLE_COLUMNS).fit_return_session(
-        cross, require_complete=True
-    )
+    fit = FactorRiskState(
+        style_columns=RISK_STYLE_COLUMNS,
+        config=FactorRiskConfig(weight_column="float_market_cap"),
+    ).fit_return_session(cross, require_complete=True)
     assert fit is not None
     expected = sm.WLS(
         fit.asset_returns,

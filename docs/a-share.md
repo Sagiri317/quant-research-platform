@@ -952,8 +952,11 @@ FULL_Exp = FULL Fusion features + 4 expectations  # 完整融合特征加预期�
 `assemble.feature_recipe=null` 保留原始因子；`label_columns=[]` 可生成仅供预测的无标签数据集。
 选用配方后，`feature_transform` 可分别设置 `clip`、`industry_neutralize`、`size_neutralize`、
 `center`、`scale`、`impute_missing`。`clip` 支持 `none`、`mad`、`quantile_1_99`；
-其余字段为布尔值。关闭某步骤就不要求该步骤专用上下文，不自动补算未选因子。
-固定顺序为裁剪、中性化、中心化、总体标准差缩放；尺寸因子不回归掉自己。
+上述其余字段为布尔值。`size_column` 默认 `log_total_market_cap`，也可显式选择
+`log_float_market_cap`；仅启用规模中性化且处理其他因子时依赖所选规模列。
+配置及原生特征元数据保存实际 `size_column`，不把旧口径产物解释成新默认。
+关闭某步骤就不要求该步骤专用上下文，不自动补算未选因子。
+固定顺序为裁剪、中性化、中心化、总体标准差缩放；所选规模因子不回归掉自己。
 中心化不改变单位，标准化输出无量纲。仅缩放而不中心化时，零方差结果未定义；
 中心化并缩放的常数截面按配方输出零。
 
@@ -983,7 +986,7 @@ MAD=0 -> 不裁剪并记录诊断。
 
 ```text
 行业虚拟变量
-+ 去均值的 log_float_market_cap
++ 去均值的 log_total_market_cap（默认，可显式选流通口径）
 无截距
 等权 OLS 残差
 ```
@@ -1628,10 +1631,24 @@ SE/t/p/CI 使用按再平衡日期聚类的稳健推断，置信水平为 95%；
 
 ### 5.19 风险模型
 
+市值字段按经济用途分别使用，不设影响所有模块的全局市值开关：
+
+- 公司规模暴露及大小盘分组默认使用总市值；已有 `log_float_market_cap` 与
+  `log_total_market_cap` 原始因子各自保留含义，选择流通规模需要显式声明。
+- 基本面估值分母保持现有 `total_market_cap`（CSMAR `Dsmvtl3`）口径，
+  不用 A 股流通部分替代公司整体股权价值，也不重新构造另一种同名总市值。
+- 换手率使用 A 股流通股数；通过市值除以价格推算时，股类、日期、单位及未复权价格必须匹配。
+- 自建流通市值组合与市场收益代理继续使用 A 股流通市值。市场收益的权重使用此前可获得的值。
+  普通流通市值不等于自由流通调整市值；实际指数的行业目标及比较权重直接使用其历史成分权重。
+- 规模解释变量、投资基准权重和回归统计权重独立。特征中性化默认等权，
+  Fama–MacBeth 保留等权与总市值加权结果；风险收益回归默认使用总市值平方根统计权重。
+- 市值缺失不自动改用另一口径，只影响真正依赖该字段的计算。
+  成交容量、模型日期权重与衰减、账户净值收益不因规模口径切换而改变。
+
 风险风格：
 
 ```text
-Size          = log_float_market_cap
+Size          = log_total_market_cap
 Beta          = beta_252d
 Momentum      = momentum_252_20
 Residual Vol  = residual_volatility_60d
@@ -1686,13 +1703,14 @@ All-A 每个 union 会话仍按当日 eligible 股票及其上一有效收盘流
 无截距
 ```
 
-统计权重：
+统计权重默认使用 `FactorRiskConfig.weight_column="total_market_cap"`，可显式选
+`"float_market_cap"`；当前加权方式为 `weighting="sqrt_cap"`。统计权重为：
 
-`sqrt(float_market_cap)`
+`sqrt(total_market_cap)`
 
 若通过预乘的 OLS 实现，矩阵乘数为：
 
-`float_market_cap ** 0.25`
+`total_market_cap ** 0.25`
 
 样本检查：
 
@@ -1802,7 +1820,11 @@ cash = 0
 简单分位数等权/流通市值加权组合按 `top_quantile` 构建。
 `neutrality` 可选 `none`（默认）、`industry`、`size`、`industry_size`。
 选择中性化时，在完整合法流通市值基准域内，求与原始目标最接近的非负、总权重为 1 的目标，
-使所选行业权重及稳健 log 市值暴露与基准一致。没有预测的合法基准成员仍可进入约束解，
+使所选行业权重及稳健 log 市值暴露与基准一致。规模暴露默认读取
+`size_cap_column="total_market_cap"`，可显式选择 `"float_market_cap"`；
+参考域及基准权重仍由原有流通市值确定，不随规模列切换。规模列缺失不改用另一列，
+也不删除缺失成员后重新归一化基准来声称全域规模中性。仅行业中性不依赖总市值。
+没有预测的合法基准成员仍可进入约束解，
 不能先裁掉它们再声称全域中性。约束不可行时明确失败，不静默降级或伪造协方差。
 这些简单组合不额外启用增强组合的目标换手、跟踪误差和主动权重边界。
 非调仓日仅延续已知持仓时，行业或规模上下文缺失不阻断已知数量与现金记账；

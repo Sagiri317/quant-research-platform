@@ -839,6 +839,9 @@ class PortfolioCandidateSpec:
     benchmark_id: str | None
     risk_style_columns: tuple[str, ...] = ()
     neutrality: Literal["none", "industry", "size", "industry_size"] = "none"
+    size_cap_column: Literal["total_market_cap", "float_market_cap"] = (
+        "total_market_cap"
+    )
 
     def __post_init__(self) -> None:
         if type(self.selection_group) is not str or self.selection_group not in {
@@ -884,6 +887,11 @@ class PortfolioCandidateSpec:
             "industry_size",
         }:
             raise ValueError("portfolio_candidate_neutrality_invalid")
+        if type(self.size_cap_column) is not str or self.size_cap_column not in {
+            "total_market_cap",
+            "float_market_cap",
+        }:
+            raise ValueError("portfolio_candidate_size_cap_column_invalid")
         if self.construction == "benchmark_enhanced":
             if self.neutrality != "none":
                 raise ValueError("portfolio_candidate_neutrality_invalid")

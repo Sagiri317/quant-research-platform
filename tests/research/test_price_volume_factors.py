@@ -1151,7 +1151,7 @@ def test_market_model_extreme_positive_prices_persist_usable_risk_styles(tmp_pat
     current = saved.loc[saved.timestamp.eq(dates[-1])].assign(
         industry_standard_id="CSRC2012",
         industry_level1_code="A",
-        float_market_cap=1000.0,
+        total_market_cap=1000.0,
         eligible=True,
     )
     assert current.residual_volatility_60d.eq(0.0).all()

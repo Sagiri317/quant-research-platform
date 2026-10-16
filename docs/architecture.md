@@ -184,6 +184,8 @@ agent 可让独立候选/折分别运行；外层多任务与模型、BLAS/OpenM
 `assemble` 的 `label_columns=[]` 生成无标签预测输入，不要求标签产物。
 `feature_transform` 可选择 `clip`（`none`、`mad`、`quantile_1_99`）、
 `industry_neutralize`、`size_neutralize`、`center`、`scale` 与 `impute_missing`。
+`size_column` 默认 `log_total_market_cap`，可显式选择 `log_float_market_cap`；
+依赖投影、计算和持久化语义均使用同一选择，关闭规模中性化不要求辅助规模列。
 命名 recipe 只提供默认组合，元数据保存解析后的实际参数。执行顺序固定为裁剪、
 中性化、中心化、总体标准差缩放；关闭的步骤不要求其支持列。
 

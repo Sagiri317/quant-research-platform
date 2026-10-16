@@ -214,13 +214,13 @@ def test_canonical_pipeline_is_executable_without_a_scenario_bypass():
             "timestamp": pd.Timestamp("2020-01-01"),
             "industry_standard_id": "CSRC2012",
             "industry_level1_code": np.where(np.arange(n) % 2, "A", "B"),
-            "log_float_market_cap": np.sin(np.arange(n) / 11) + 10,
+            "log_total_market_cap": np.sin(np.arange(n) / 11) + 10,
             "x": np.cos(np.arange(n) / 7),
             "eligible": np.arange(n) > 4,
         }
     )
     frame.loc[10:15, "x"] = np.nan
-    columns = ("x", "log_float_market_cap")
+    columns = ("x", "log_total_market_cap")
     transforms = (FeatureTransformSpec("a_share_canonical", columns),)
     assert len(transforms) == 1 and transforms[0].recipe_id == "a_share_canonical"
     pd.testing.assert_frame_equal(

@@ -69,6 +69,7 @@ def _native_inputs(tmp_path, *, fault=None, open_assets=6):
                 else 100.0,
                 "amount": 1000.0,
                 "period_return": 0.0,
+                "total_market_cap": 1000.0,
                 "float_market_cap": 1000.0,
                 "industry_standard_id": "fixture",
                 "industry_level1_code": "one",

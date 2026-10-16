@@ -130,7 +130,7 @@ def test_insufficient_neutralization_is_missing_not_observed_zero() -> None:
             "eligible": True,
             "industry_standard_id": "CSRC2012",
             "industry_level1_code": "A",
-            "log_float_market_cap": [1.0, 2.0],
+            "log_total_market_cap": [1.0, 2.0],
             "factor": [1.0, 2.0],
         }
     )
@@ -149,7 +149,7 @@ def test_missing_factor_in_other_industry_does_not_change_valid_neutralization()
             "eligible": True,
             "industry_standard_id": "CSRC2012",
             "industry_level1_code": ["A"] * 200 + ["B"],
-            "log_float_market_cap": np.linspace(1.0, 3.0, 201),
+            "log_total_market_cap": np.linspace(1.0, 3.0, 201),
             "factor": [*np.sin(np.arange(200)), np.nan],
         }
     )
@@ -158,7 +158,7 @@ def test_missing_factor_in_other_industry_does_not_change_valid_neutralization()
         kwargs = (
             {
                 "industry_column": "industry_level1_code",
-                "size_column": "log_float_market_cap",
+                "size_column": "log_total_market_cap",
                 "rescale": False,
             }
             if operation is _neutralize_cross_section
@@ -325,7 +325,7 @@ def test_neutralization_constant_has_no_artificial_alpha_and_keeps_small_variati
             "eligible": True,
             "industry_standard_id": "CSRC2012",
             "industry_level1_code": ["A", "B"] * 60,
-            "log_float_market_cap": np.linspace(15.17, 24.81, 120),
+            "log_total_market_cap": np.linspace(15.17, 24.81, 120),
             "factor": 2.3 + variation * np.sin(axis),
         }
     )
@@ -359,7 +359,7 @@ def test_exact_industry_size_span_is_zero_but_one_ulp_signal_survives(
             "asset_id": [f"asset_{i}" for i in index],
             "industry_standard_id": "CSRC2012",
             "industry_level1_code": industry.astype(str),
-            "log_float_market_cap": size,
+            "log_total_market_cap": size,
             "factor": 3.0 + 4.0 * industry + 2.0 * size,
             "eligible": True,
         }
@@ -370,7 +370,7 @@ def test_exact_industry_size_span_is_zero_but_one_ulp_signal_survives(
         frame,
         factor_columns=("factor",),
         industry_column="industry_level1_code",
-        size_column="log_float_market_cap",
+        size_column="log_total_market_cap",
         rescale=False,
     )
     assert residual.factor.eq(0.0).all()
@@ -416,7 +416,7 @@ def test_neutralization_preserves_single_ulp_projection(offset, changed):
             "timestamp": pd.Timestamp("2020-01-02"),
             "industry_standard_id": "CSRC2012",
             "industry_level1_code": "A",
-            "log_float_market_cap": size,
+            "log_total_market_cap": size,
             "factor": values,
             "eligible": True,
         }
@@ -425,7 +425,7 @@ def test_neutralization_preserves_single_ulp_projection(offset, changed):
         frame,
         factor_columns=("factor",),
         industry_column="industry_level1_code",
-        size_column="log_float_market_cap",
+        size_column="log_total_market_cap",
         rescale=False,
     )
     np.testing.assert_array_equal(actual["factor"], residuals)
@@ -445,20 +445,20 @@ def test_auxiliary_size_winsorization_matches_full_configuration():
             "eligible": True,
             "industry_standard_id": "CSRC2012",
             "industry_level1_code": "A",
-            "log_float_market_cap": size,
+            "log_total_market_cap": size,
             "factor": np.sin(np.arange(120)),
         }
     )
     single = a_share_feature_pipeline(frame, factor_columns=("factor",))
     full = a_share_feature_pipeline(
-        frame, factor_columns=("factor", "log_float_market_cap")
+        frame, factor_columns=("factor", "log_total_market_cap")
     )
     pd.testing.assert_series_equal(
         single.feature_factor, full.feature_factor, check_exact=True
     )
-    assert "feature_log_float_market_cap" not in single
+    assert "feature_log_total_market_cap" not in single
     frame.loc[0, "factor"] = np.nan
-    frame.loc[1, "log_float_market_cap"] = np.nan
+    frame.loc[1, "log_total_market_cap"] = np.nan
     frame.loc[2, "industry_level1_code"] = None
     result = a_share_feature_pipeline(frame, factor_columns=("factor",))
     assert result.feature_factor.iloc[0] == 0.0
@@ -473,7 +473,7 @@ def test_exact_nonzero_size_variation_is_not_svd_rank_failure():
             "timestamp": pd.Timestamp("2024-01-02"),
             "industry_standard_id": "CSRC2012",
             "industry_level1_code": "A",
-            "log_float_market_cap": size,
+            "log_total_market_cap": size,
             "factor": np.resize([1.0, 3.0], 120),
         }
     )
@@ -481,17 +481,17 @@ def test_exact_nonzero_size_variation_is_not_svd_rank_failure():
         frame,
         factor_columns=("factor",),
         industry_column="industry_level1_code",
-        size_column="log_float_market_cap",
+        size_column="log_total_market_cap",
         rescale=False,
     )
     assert result.factor.eq(0.0).all()
-    frame["log_float_market_cap"] = 1.0
+    frame["log_total_market_cap"] = 1.0
     assert (
         _neutralize_cross_section(
             frame,
             factor_columns=("factor",),
             industry_column="industry_level1_code",
-            size_column="log_float_market_cap",
+            size_column="log_total_market_cap",
             rescale=False,
         )
         .factor.isna()
@@ -507,7 +507,7 @@ def test_canonical_industry_residuals_keep_same_code_standards_distinct():
             "industry_standard_id": ["CSRC2012"] * 60 + ["CAPCO"] * 60,
             "industry_level1_code": "A",
             "factor": [10.0] * 60 + [20.0] * 60,
-            "log_float_market_cap": np.arange(120, dtype="float64"),
+            "log_total_market_cap": np.arange(120, dtype="float64"),
         }
     )
     before = frame.copy(deep=True)
@@ -545,15 +545,15 @@ def test_native_neutralization_zscore_publishes_representable_extreme_cross_sect
             "eligible": True,
             "industry_standard_id": "CSRC2012",
             "industry_level1_code": "A",
-            "log_float_market_cap": 4.0 + positions / 100,
+            "log_total_market_cap": 4.0 + positions / 100,
             "earnings_yield": values * scale,
             "label": 0.1,
         }
     )
     if cancellation:
-        frame["log_float_market_cap"] = [4.0] * 49 + [5.0] + [6.0] * 50
+        frame["log_total_market_cap"] = [4.0] * 49 + [5.0] + [6.0] * 50
         frame["earnings_yield"] = [-1e308] * 49 + [1e-20] + [1e308] * 50
-    x = [Fraction(float(v)) for v in frame.log_float_market_cap]
+    x = [Fraction(float(v)) for v in frame.log_total_market_cap]
     y = [Fraction(float(v)) for v in frame.earnings_yield]
     mx, my = sum(x) / 100, sum(y) / 100
     slope = sum((a - mx) * (b - my) for a, b in zip(x, y, strict=True)) / sum(
@@ -573,7 +573,7 @@ def test_native_neutralization_zscore_publishes_representable_extreme_cross_sect
                 frame,
                 factor_columns=("earnings_yield",),
                 industry_column="industry_level1_code",
-                size_column="log_float_market_cap",
+                size_column="log_total_market_cap",
                 rescale=False,
             )
     else:
@@ -581,7 +581,7 @@ def test_native_neutralization_zscore_publishes_representable_extreme_cross_sect
             frame,
             factor_columns=("earnings_yield",),
             industry_column="industry_level1_code",
-            size_column="log_float_market_cap",
+            size_column="log_total_market_cap",
             rescale=False,
         )
         np.testing.assert_array_equal(
@@ -598,7 +598,7 @@ def test_native_neutralization_zscore_publishes_representable_extreme_cross_sect
         filter_columns=("eligible",),
         filter_column_roles={"eligible": ColumnRole.UNIVERSE},
         context_columns=(
-            "log_float_market_cap",
+            "log_total_market_cap",
             "industry_standard_id",
             "industry_level1_code",
         ),

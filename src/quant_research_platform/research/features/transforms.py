@@ -101,6 +101,7 @@ def apply_feature_transforms(
         clip=recipe.clip,
         industry_neutralize=recipe.industry_neutralize,
         size_neutralize=recipe.size_neutralize,
+        size_column=recipe.size_column,
         center=recipe.center,
         scale=recipe.scale,
         impute_missing=recipe.impute_missing,
@@ -382,7 +383,7 @@ def a_share_feature_pipeline(
     *,
     factor_columns: tuple[str, ...],
     recipe_id: str = "a_share_canonical",
-    size_column: str = "log_float_market_cap",
+    size_column: str = "log_total_market_cap",
     industry_column: str = "industry_level1_code",
     diagnostics: dict | None = None,
     clip: str | None = None,
@@ -402,6 +403,7 @@ def a_share_feature_pipeline(
         center,
         scale,
         impute_missing,
+        size_column=size_column,
     )
     if "eligible" not in frame:
         raise ValueError("feature_eligibility_required")

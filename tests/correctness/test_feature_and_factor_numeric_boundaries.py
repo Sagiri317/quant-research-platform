@@ -256,7 +256,7 @@ def test_extreme_mad_preserves_complete_canonical_features_under_units_change(tm
             "eligible": True,
             "industry_standard_id": "CSRC2012",
             "industry_level1_code": "A",
-            "log_float_market_cap": 4 + np.sin(np.arange(100)),
+            "log_total_market_cap": 4 + np.sin(np.arange(100)),
             "factor": values,
         }
     )
@@ -325,7 +325,7 @@ def test_canonical_degeneracy_diagnostics_accumulate_in_native_manifest(
         "eligible": ColumnRole.UNIVERSE,
         "industry_standard_id": ColumnRole.CONTEXT,
         "industry_level1_code": ColumnRole.CONTEXT,
-        "log_float_market_cap": ColumnRole.CONTEXT,
+        "log_total_market_cap": ColumnRole.CONTEXT,
     }
     source_spec = ProcessedDataSpec(
         data_id="feature_input",
@@ -349,7 +349,7 @@ def test_canonical_degeneracy_diagnostics_accumulate_in_native_manifest(
                     "eligible": [True] * 101 + [False],
                     "industry_standard_id": "CSRC2012",
                     "industry_level1_code": "A",
-                    "log_float_market_cap": 4 + np.sin(np.arange(102)),
+                    "log_total_market_cap": 4 + np.sin(np.arange(102)),
                 }
             )
             for i, timestamp in enumerate(pd.bdate_range("2020-01-01", periods=3))
@@ -376,7 +376,7 @@ def test_canonical_degeneracy_diagnostics_accumulate_in_native_manifest(
         context_columns=(
             "industry_standard_id",
             "industry_level1_code",
-            "log_float_market_cap",
+            "log_total_market_cap",
         ),
     )
     root = assemble_research_dataset(
@@ -395,7 +395,7 @@ def test_canonical_degeneracy_diagnostics_accumulate_in_native_manifest(
     diagnostic = inspect_dataset(root).manifest["producer_diagnostics"]
     assert diagnostic["canonical_features"]["mad_zero_by_input"] == {
         "factor": 2,
-        "log_float_market_cap": 0,
+        "log_total_market_cap": 0,
     }
     assert diagnostic["canonical_features"]["zero_variance_by_factor"] == {"factor": 2}
     assert len(result) == len(source)

@@ -90,6 +90,7 @@ def _decision_inputs(*, benchmark=(0.5, 0.5), holdings=None, fee_rate=0.0):
                 "asset_id": assets,
                 "timestamp": day,
                 "eligible": True,
+                "total_market_cap": 1000.0,
                 "float_market_cap": 1000.0,
             }
         ),

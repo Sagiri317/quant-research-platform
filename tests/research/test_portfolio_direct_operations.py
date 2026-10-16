@@ -484,6 +484,7 @@ def test_explicit_native_fit_prediction_and_backtest_roundtrip(
     summary = artifacts.summarize_portfolio_ledger(ledger.capital, iter(batches))
     assert np.isfinite(summary["nav"])
     assert summary["fees"] > 0
+    assert ledger.metadata["candidate"]["size_cap_column"] == "total_market_cap"
     assert ledger.metadata["initial_holding_convention"] == "cash"
     assert ledger.metadata.get("sample_role") == (
         "custom-backtest-label" if selected_inputs else None
