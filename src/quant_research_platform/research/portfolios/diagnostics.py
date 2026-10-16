@@ -155,7 +155,7 @@ def fixed_turnover_cost_sensitivity(
         fee = strict_finite_float(fee, error="hft_cost_sensitivity_invalid")
         for spread in additional_spread_scenarios_bps:
             spread = strict_finite_float(spread, error="hft_cost_sensitivity_invalid")
-            if min(fee, spread) < 0:
+            if spread < 0:
                 raise ValueError("hft_cost_sensitivity_invalid")
             exact_change = (
                 Fraction(turnover)

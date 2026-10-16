@@ -1,0 +1,22 @@
+{
+  "market_id": "a_share",
+  "dataset_id": "selected-factor-batches",
+  "inputs": {
+    "panel": "results/panel",
+    "momentum_batch": {
+      "path": "results/momentum-batch",
+      "columns": ["momentum_20d"]
+    },
+    "volatility_batch": {
+      "path": "results/volatility-batch",
+      "columns": ["volatility_20d"]
+    }
+  },
+  "base_input_data_id": "panel",
+  "factor_columns": ["momentum_20d", "volatility_20d"],
+  "feature_columns": [],
+  "feature_recipe": null,
+  "label_columns": [],
+  "time_window": {"start": "2019-01-01", "end": "2023-12-31"},
+  "output_root": "results/selected-factor-batches"
+}

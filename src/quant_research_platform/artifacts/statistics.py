@@ -108,6 +108,8 @@ _ARROW_SCHEMAS = {
             pa.field("p_value", pa.float64()),
             pa.field("ci_lower", pa.float64()),
             pa.field("ci_upper", pa.float64()),
+            pa.field("bootstrap_status", pa.string()),
+            pa.field("bootstrap_reason", pa.string()),
             pa.field("bootstrap_lower", pa.float64()),
             pa.field("bootstrap_upper", pa.float64()),
             pa.field("bootstrap_block_size", pa.int64()),
@@ -198,6 +200,8 @@ _ARROW_SCHEMAS = {
             pa.field("p_value", pa.float64()),
             pa.field("ci_lower", pa.float64()),
             pa.field("ci_upper", pa.float64()),
+            pa.field("bootstrap_status", pa.string()),
+            pa.field("bootstrap_reason", pa.string()),
             pa.field("bootstrap_lower", pa.float64()),
             pa.field("bootstrap_upper", pa.float64()),
             pa.field("bootstrap_block_size", pa.int64()),
@@ -978,7 +982,13 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
         result[column] = result[column].astype(str)
     for column in _COUNT_COLUMNS[member]:
         values = strict_integer_series(
-            result[column], error="statistics_table_count_invalid"
+            result[column],
+            error="statistics_table_count_invalid",
+            allow_null=(
+                member in {"prediction_diagnostics.parquet", "model_comparison.parquet"}
+                and column
+                in {"bootstrap_block_size", "bootstrap_repetitions", "bootstrap_seed"}
+            ),
         )
         if values.lt(0).any():
             raise ValueError("statistics_table_count_invalid")
@@ -1030,6 +1040,10 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
                 "bootstrap_upper",
             )
             if column in result
+            and not (
+                member in {"prediction_diagnostics.parquet", "model_comparison.parquet"}
+                and column in {"bootstrap_lower", "bootstrap_upper"}
+            )
         ]
         if (
             result.loc[defined, measurements].isna().any().any()
@@ -1044,6 +1058,8 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
                         "prediction_diagnostics.parquet",
                         "model_comparison.parquet",
                         "factor_stratified_diagnostics.parquet",
+                        "factor_diagnostics.parquet",
+                        "fama_macbeth.parquet",
                     }
                 ],
             ]
@@ -1055,7 +1071,45 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
         ):
             raise ValueError("statistics_table_status_value_invalid")
         if member in {"prediction_diagnostics.parquet", "model_comparison.parquet"}:
-            if result["mean"].notna().ne(result.observation_count.gt(0)).any():
+            bootstrap_defined = result.bootstrap_status.eq("DEFINED")
+            if (
+                not result.bootstrap_status.isin(("DEFINED", "UNDEFINED")).all()
+                or result.loc[bootstrap_defined, ["bootstrap_lower", "bootstrap_upper"]]
+                .isna()
+                .any()
+                .any()
+                or result.loc[
+                    ~bootstrap_defined, ["bootstrap_lower", "bootstrap_upper"]
+                ]
+                .notna()
+                .any()
+                .any()
+                or result.loc[bootstrap_defined, "bootstrap_reason"].ne("").any()
+                or result.loc[~bootstrap_defined, "bootstrap_reason"]
+                .str.strip()
+                .eq("")
+                .any()
+                or result.loc[
+                    bootstrap_defined,
+                    ["bootstrap_block_size", "bootstrap_repetitions", "bootstrap_seed"],
+                ]
+                .isna()
+                .any()
+                .any()
+            ):
+                raise ValueError("statistics_table_bootstrap_status_value_invalid")
+        if member in {
+            "prediction_diagnostics.parquet",
+            "model_comparison.parquet",
+            "factor_diagnostics.parquet",
+            "fama_macbeth.parquet",
+        }:
+            count = result[
+                "period_count"
+                if member == "fama_macbeth.parquet"
+                else "observation_count"
+            ]
+            if result["mean"].notna().ne(count.gt(0)).any():
                 raise ValueError("statistics_table_descriptive_mean_count_invalid")
         for column in ("p_value", "fdr_adjusted_p_value", "white_p_value"):
             if column in result and (not result[column].dropna().between(0, 1).all()):

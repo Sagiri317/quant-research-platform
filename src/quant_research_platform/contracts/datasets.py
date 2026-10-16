@@ -232,11 +232,6 @@ def _validate_feature_transforms(
     )
     if len(set(transformed_features)) != len(transformed_features):
         raise ValueError("feature_transform_outputs_must_not_contain_duplicates")
-    missing_outputs = sorted(set(feature_columns).difference(transformed_features))
-    if missing_outputs:
-        raise ValueError(
-            "feature_columns_without_transform: " + ", ".join(missing_outputs)
-        )
     undeclared_outputs = sorted(set(transformed_features).difference(feature_columns))
     if undeclared_outputs:
         raise ValueError(

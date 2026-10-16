@@ -2180,3 +2180,28 @@ def test_taker_subnormal_notional_keeps_complete_fee_through_roundtrip(tmp_path)
     assert fees == [-expected_fee]
     summary = summarize_crypto_ledger(saved, saved.iter_chunks())["economics"]
     assert summary["net_pnl"] == -expected_fee
+
+
+@pytest.mark.parametrize(
+    "fee,expected", [(-2.0, 6.0), (-1.0, 5.0), (0.0, 4.0), (1.0, 3.0)]
+)
+def test_cost_sensitivity_accepts_signed_maker_rebates(fee, expected):
+    row = fixed_turnover_cost_sensitivity(
+        turnover=10000.0,
+        net_pnl=5.0,
+        base_fee_bps=-1.0,
+        fee_scenarios_bps=(fee,),
+        additional_spread_scenarios_bps=(0.0,),
+    )[0]
+    assert row["net_pnl"] == pytest.approx(expected)
+
+
+def test_cost_sensitivity_still_rejects_negative_additional_spread():
+    with pytest.raises(ValueError, match="hft_cost_sensitivity_invalid"):
+        fixed_turnover_cost_sensitivity(
+            turnover=10000.0,
+            net_pnl=5.0,
+            base_fee_bps=-1.0,
+            fee_scenarios_bps=(-2.0,),
+            additional_spread_scenarios_bps=(-1.0,),
+        )

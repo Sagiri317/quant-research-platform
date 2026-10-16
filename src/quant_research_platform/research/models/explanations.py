@@ -620,6 +620,20 @@ def _summaries(rows, period):
     return pd.concat(results, ignore_index=True)
 
 
+def _temporal_step_nanoseconds(value):
+    if (
+        type(value) not in {int, float}
+        or (type(value) is float and not np.isfinite(value))
+        or value <= 0
+    ):
+        raise ValueError("explanation_step_seconds_invalid")
+    # Interpret declared seconds exactly at the timestamp's nanosecond resolution.
+    nanoseconds = Fraction(str(value)) * 1_000_000_000
+    if nanoseconds.denominator != 1 or nanoseconds > pd.Timedelta.max.value:
+        raise ValueError("explanation_step_seconds_invalid")
+    return int(nanoseconds)
+
+
 def _permutation_config(value, columns):
     config = _strict_config(
         value,
@@ -659,7 +673,7 @@ def _permutation_config(value, columns):
         ):
             raise ValueError("explanation_temporal_parameters_required")
         _positive(config["block_size"], "block_size")
-        _positive(config["step_seconds"], "step_seconds")
+        _temporal_step_nanoseconds(config["step_seconds"])
         if "rankic" in config["metrics"]:
             raise ValueError("explanation_temporal_rankic_not_supported")
     else:
@@ -676,6 +690,7 @@ def _permutation_segments(frame, config):
         if any(len(index) < 2 for index in segments):
             raise ValueError("explanation_permutation_cross_section_too_small")
         return segments
+    step_ns = _temporal_step_nanoseconds(config["step_seconds"])
     episode = config["episode_column"]
     if frame[episode].isna().any() or frame.asset_id.nunique() != 1:
         raise ValueError("explanation_temporal_requires_one_asset_and_episodes")
@@ -688,7 +703,7 @@ def _permutation_segments(frame, config):
         if (
             previous is None
             or key != previous[0]
-            or (row.timestamp - previous[1]).total_seconds() != config["step_seconds"]
+            or row.timestamp.value - previous[1].value != step_ns
         ):
             if current:
                 segments.append(np.asarray(current))

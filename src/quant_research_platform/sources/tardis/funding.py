@@ -3,8 +3,6 @@
 import hashlib
 from pathlib import Path
 
-import pandas as pd
-
 from quant_research_platform.contracts.json_codec import (
     canonical_json_hash,
 )
@@ -31,8 +29,7 @@ from quant_research_platform.sources.binance.validation import (
     strict_non_negative_integer,
     strict_positive_float,
 )
-from quant_research_platform.sources.tardis.raw import SLICE_MINUTES, iter_native_slice
-from quant_research_platform.sources.tardis.replay import _archive_span
+from quant_research_platform.sources.tardis.raw import iter_native_slice
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.identity import (
     dataset_file_identity,
@@ -53,39 +50,39 @@ def import_funding_history(
     start_ms,
     end_ms,
     request_limit,
+    output_root=None,
 ):
-    """Preserve source bytes and publish forecasts with vendor availability."""
-    selected = [
-        item
-        for item in archive.archives
-        if pd.Timestamp(start_ms, unit="ms", tz="UTC").to_pydatetime()
-        == _archive_span(item.manifest)[0]
-    ]
-    if len(selected) != 1:
-        raise ValueError("tardis_funding_archive_window_invalid")
-    archive = selected[0]
+    """Publish independent settlement coverage and native forecast observations.
+
+    output_root contains settlements.json and observations/. A single market
+    archive supplies the default location; multiple archives require a destination.
+    Forecast timestamps retain their native availability, including any prefix.
+    """
+    archives = archive.archives
     endpoint = settlement_endpoint(source_id, symbol)
     if (
         symbol not in RESEARCH_SYMBOLS
-        or archive.manifest["exchange"] != "binance-futures"
+        or not archives
+        or any(
+            item.manifest["exchange"] != "binance-futures"
+            or symbol.lower() not in item.manifest["symbols"]
+            for item in archives
+        )
     ):
         raise ValueError("binance_funding_symbol_invalid")
-    midnight = strict_iso_timestamp(
-        archive.manifest["date"] + "T00:00:00Z", error="tardis_funding_date_invalid"
-    ).value
-    first = archive.manifest["files"][0]["offset_minutes"]
-    stop = archive.manifest["files"][-1]["offset_minutes"] + SLICE_MINUTES
-    start_ns = midnight + first * 60 * 10**9
-    end_ns = midnight + stop * 60 * 10**9
     if (
         type(http_status) is not int
         or http_status != 200
         or type(start_ms) is not int
-        or start_ms * 1_000_000 != start_ns
         or type(end_ms) is not int
-        or (end_ms + 1) * 1_000_000 != end_ns
+        or not 0 <= start_ms <= end_ms
     ):
         raise ValueError("tardis_funding_request_coverage_invalid")
+    if output_root is None:
+        if len(archives) != 1:
+            raise ValueError("tardis_funding_output_required")
+        output_root = archives[0].funding_root(symbol).parent
+    start_ns = start_ms * 1_000_000
     path = require_unaliased_path(
         Path(response_path), error="tardis_funding_source_invalid"
     )
@@ -125,7 +122,11 @@ def import_funding_history(
             "status": "COMPLETE",
         },
         "provenance": "tardis_market_manifest:"
-        + canonical_json_hash(archive.source_identity),
+        + canonical_json_hash(
+            archives[0].source_identity
+            if len(archives) == 1
+            else archive.source_identity
+        ),
         "settlement_source": native,
     }
 
@@ -141,7 +142,9 @@ def import_funding_history(
             )
         previous_observed = -1
         previous_projection = None
-        for member in archive.manifest["files"]:
+        for archive, member in (
+            (item, member) for item in archives for member in item.manifest["files"]
+        ):
             records = iter_native_slice(
                 archive.root / member["path"],
                 date=archive.manifest["date"],
@@ -233,4 +236,4 @@ def import_funding_history(
                 validate=validate,
             )
 
-    atomic_write_directory(archive.funding_root(symbol).parent, publish)
+    atomic_write_directory(Path(output_root), publish)

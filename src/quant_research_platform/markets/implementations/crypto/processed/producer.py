@@ -114,7 +114,10 @@ def produce_hft_processed_data(
                 if not set(selected_assets) <= supported.keys():
                     raise ValueError("data_operation_asset_ids_invalid")
                 symbols = tuple(supported[asset] for asset in selected_assets)
-            run = readers.enter_context(open_run(raw_root))
+            # Keep all declared initialization history; discard only future archives.
+            run = readers.enter_context(
+                open_run(raw_root, time_window=TimeWindow(_EPOCH, time_window.end))
+            )
             source_info = run.hft_source_info()
             start_ms, end_ms = (
                 _milliseconds(time_window.start, ceil=True),
@@ -358,7 +361,10 @@ def produce_derivative_processed_data(
     )
     root = inputs[HFT_PANEL_DATA_ID]
     with ExitStack() as readers:
-        archive = readers.enter_context(open_archive(raw_root))
+        # State alignment can consume a prefix older than the output warmup.
+        archive = readers.enter_context(
+            open_archive(raw_root, time_window=TimeWindow(_EPOCH, time_window.end))
+        )
         required = tuple(
             dict.fromkeys(
                 (

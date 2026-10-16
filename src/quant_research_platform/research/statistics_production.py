@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
+from statistics import mean
 
 import numpy as np
 import pandas as pd
@@ -56,6 +57,15 @@ _MODEL_ROBUSTNESS_TESTS = (
     "stepm_superior_models",
     "model_confidence_set",
 )
+_MODEL_ANALYSES = (
+    "model_losses",
+    "prediction_hac",
+    "prediction_bootstrap",
+    "model_comparison",
+    *_MODEL_ROBUSTNESS_TESTS,
+)
+
+
 _FAMA_MACBETH_PERIOD_COLUMNS = (
     "regression_id",
     "coefficient_id",
@@ -250,24 +260,18 @@ def build_a_share_statistics_tables(
     joint_blocker = _inference_blocker(config)
     primary_label = config["evaluation"]["primary_label"]
     availability = _statistics_label_availability(config["evaluation"], dataset_spec)
+    analyses = _selected_analyses(config, _MODEL_ANALYSES)
     statistics = config.get("statistics")
     root_seed = config.get("root_seed")
     if (
         type(primary_label) is not str
         or type(availability) is not str
         or type(statistics) is not dict
-        or (type(root_seed) is not int)
     ):
         raise ValueError("statistics_protocol_invalid")
     max_lags = statistics.get("hac_lag")
     block_size = statistics.get("bootstrap_block")
     repetitions = statistics.get("bootstrap_repetitions")
-    if (
-        type(max_lags) is not int
-        or type(block_size) is not int
-        or type(repetitions) is not int
-    ):
-        raise ValueError("statistics_protocol_invalid")
     model_window = time_window
     period_bounds = {
         key: _statistics_window_bounds(window) for key, window in period_windows.items()
@@ -283,8 +287,12 @@ def build_a_share_statistics_tables(
     )
     family_columns = {family: index for index, family in enumerate(family_ids)}
     prediction_columns = tuple(family_columns.values())
-    benchmark_id = config["comparison_model_id"]
-    if benchmark_id not in family_ids:
+    benchmark_id = config.get("comparison_model_id")
+    needs_benchmark = bool(
+        set(analyses)
+        & {"model_comparison", "spa_reality_check", "stepm_superior_models"}
+    )
+    if needs_benchmark and benchmark_id not in family_ids:
         raise ValueError("statistics_model_benchmark_missing")
     read_columns = tuple(
         dict.fromkeys(
@@ -481,24 +489,38 @@ def build_a_share_statistics_tables(
                     )
     if prediction_lookup.coverage_counts() != (0, 0):
         raise ValueError("prediction_dataset_coverage_mismatch")
-    rank_by_date = pd.DataFrame.from_records(
-        rank_records, columns=["timestamp", _PREDICTION_COLUMN]
-    )
-    if selections:
-        prediction_summary = _prediction_summary(
-            rank_by_date,
-            prediction_id=prediction_id,
-            inference_blocker=inference_blocker,
-            max_lags=max_lags,
-            block_size=block_size,
-            repetitions=repetitions,
-            seed=derive_seed(
-                root_seed,
-                "a_share_statistics_bootstrap",
-                dataset_id,
-                prediction_id,
-            ),
+    rank_by_date = pd.DataFrame.from_records(rank_records)
+    prediction_summaries = []
+    if set(analyses) & {"prediction_hac", "prediction_bootstrap"}:
+        summaries = (
+            [(prediction_id, _PREDICTION_COLUMN)]
+            if selections
+            else list(family_columns.items())
+            if "analyses" in config
+            else []
         )
+        for identity, column in summaries:
+            prediction_summaries.append(
+                _prediction_summary(
+                    rank_by_date.loc[:, [column]].rename(
+                        columns={column: _PREDICTION_COLUMN}
+                    ),
+                    prediction_id=identity,
+                    inference_blocker=inference_blocker,
+                    max_lags=max_lags if "prediction_hac" in analyses else None,
+                    block_size=block_size
+                    if "prediction_bootstrap" in analyses
+                    else None,
+                    repetitions=repetitions
+                    if "prediction_bootstrap" in analyses
+                    else None,
+                    seed=derive_seed(
+                        root_seed, "a_share_statistics_bootstrap", dataset_id, identity
+                    )
+                    if "prediction_bootstrap" in analyses
+                    else None,
+                )
+            )
     model_trials = trial_rows.copy()
     model_losses = pd.DataFrame.from_records(
         loss_records,
@@ -537,6 +559,7 @@ def build_a_share_statistics_tables(
         repetitions=repetitions,
         root_seed=root_seed,
         dataset_id=dataset_id,
+        analyses=analyses,
     )
     group_comparison = _paired_group_rankic(
         model_losses,
@@ -548,16 +571,19 @@ def build_a_share_statistics_tables(
             config, dataset_spec, time_window, selections
         ),
     )
-    tables = {
-        "robustness": robustness,
-        "model_losses": model_losses,
-        "model_comparison": comparison,
-        "model_reality_checks": tests,
-    }
-    if selections:
-        tables.update(
-            prediction_diagnostics=prediction_summary, model_trials=model_trials
+    tables = {}
+    if "model_losses" in analyses:
+        tables["model_losses"] = model_losses
+    if "model_comparison" in analyses:
+        tables["model_comparison"] = comparison
+    if set(analyses) & set(_MODEL_ROBUSTNESS_TESTS):
+        tables.update(robustness=robustness, model_reality_checks=tests)
+    if prediction_summaries:
+        tables["prediction_diagnostics"] = pd.concat(
+            prediction_summaries, ignore_index=True
         )
+    if selections and "analyses" not in config:
+        tables["model_trials"] = model_trials
     if "group_comparison" in statistics:
         tables["model_group_comparison"] = group_comparison
     return tables
@@ -907,10 +933,10 @@ def _prediction_summary(
     *,
     prediction_id: str,
     inference_blocker: str | None,
-    max_lags: int,
-    block_size: int,
-    repetitions: int,
-    seed: int,
+    max_lags: int | None,
+    block_size: int | None,
+    repetitions: int | None,
+    seed: int | None,
 ) -> pd.DataFrame:
     values = (
         rank_by_date[_PREDICTION_COLUMN].dropna()
@@ -922,13 +948,21 @@ def _prediction_summary(
         "prediction_id": prediction_id,
         "observation_count": count,
         "status": "UNDEFINED",
-        "reason": inference_blocker or "hac_lag_exceeds_observations",
-        "mean": float(values.mean()) if count else np.nan,
+        "reason": inference_blocker
+        or ("not_requested" if max_lags is None else "hac_lag_exceeds_observations"),
+        "mean": float(mean(values)) if count else np.nan,
         "standard_error": np.nan,
         "t_statistic": np.nan,
         "p_value": np.nan,
         "ci_lower": np.nan,
         "ci_upper": np.nan,
+        "bootstrap_status": "UNDEFINED",
+        "bootstrap_reason": inference_blocker
+        or (
+            "not_requested"
+            if block_size is None
+            else "bootstrap_insufficient_observations"
+        ),
         "bootstrap_lower": np.nan,
         "bootstrap_upper": np.nan,
         "bootstrap_block_size": block_size,
@@ -936,30 +970,41 @@ def _prediction_summary(
         "bootstrap_seed": seed,
         "input_date_count": len(rank_by_date),
     }
-    if inference_blocker is not None or count < max(2, max_lags + 1):
+    if inference_blocker is not None:
         return pd.DataFrame([row])
-    try:
-        inference = hac_mean(values, max_lags=max_lags)
-        bootstrap = stationary_bootstrap_mean_ci(
-            values, block_size=block_size, repetitions=repetitions, seed=seed
-        )
-    except ValueError as exc:
-        if str(exc) not in {"hac_inference_undefined", "bootstrap_inference_undefined"}:
-            raise
-        row["reason"] = str(exc)
-        return pd.DataFrame([row])
-    row.update(
-        status="DEFINED",
-        reason=None,
-        mean=inference.mean,
-        standard_error=inference.standard_error,
-        t_statistic=inference.t_statistic,
-        p_value=inference.p_value,
-        ci_lower=inference.confidence_interval[0],
-        ci_upper=inference.confidence_interval[1],
-        bootstrap_lower=bootstrap.lower,
-        bootstrap_upper=bootstrap.upper,
-    )
+    if max_lags is not None and count >= max(2, max_lags + 1):
+        try:
+            inference = hac_mean(values, max_lags=max_lags)
+        except ValueError as exc:
+            if str(exc) != "hac_inference_undefined":
+                raise
+            row["reason"] = str(exc)
+        else:
+            row.update(
+                status="DEFINED",
+                reason=None,
+                standard_error=inference.standard_error,
+                t_statistic=inference.t_statistic,
+                p_value=inference.p_value,
+                ci_lower=inference.confidence_interval[0],
+                ci_upper=inference.confidence_interval[1],
+            )
+    if block_size is not None and count >= 2:
+        try:
+            bootstrap = stationary_bootstrap_mean_ci(
+                values, block_size=block_size, repetitions=repetitions, seed=seed
+            )
+        except ValueError as exc:
+            if str(exc) != "bootstrap_inference_undefined":
+                raise
+            row["bootstrap_reason"] = str(exc)
+        else:
+            row.update(
+                bootstrap_status="DEFINED",
+                bootstrap_reason=None,
+                bootstrap_lower=bootstrap.lower,
+                bootstrap_upper=bootstrap.upper,
+            )
     return pd.DataFrame([row])
 
 
@@ -1001,12 +1046,13 @@ def _model_comparison(
     root_seed,
     dataset_id,
     joint_blocker=None,
+    analyses=_MODEL_ANALYSES,
 ):
     common = rank_by_date.loc[:, list(family_ids)].dropna()
     losses = -common
     challengers = tuple(family for family in family_ids if family != benchmark_id)
     comparisons = []
-    for family in challengers:
+    for family in challengers if "model_comparison" in analyses else ():
         difference = common[family] - common[benchmark_id]
         summary = _prediction_summary(
             pd.DataFrame({_PREDICTION_COLUMN: difference}),
@@ -1029,12 +1075,17 @@ def _model_comparison(
     test_rows = []
     robustness_rows = []
     joint_blocker = joint_blocker or inference_blocker
-    for test_id in _MODEL_ROBUSTNESS_TESTS:
+    for test_id in (test for test in _MODEL_ROBUSTNESS_TESTS if test in analyses):
         seed = derive_seed(
             root_seed, "a_share_model_reality_check", dataset_id, sample_role, test_id
         )
         result = None
-        if joint_blocker is None and challengers and (len(common) > block_size):
+        has_candidates = (
+            len(family_ids) > 1
+            if test_id == "model_confidence_set"
+            else bool(challengers)
+        )
+        if joint_blocker is None and has_candidates and (len(common) > block_size):
             options = dict(block_size=block_size, repetitions=repetitions, seed=seed)
             if test_id == "spa_reality_check":
                 result = spa_reality_check(
@@ -1056,7 +1107,7 @@ def _model_comparison(
             else joint_blocker
             if joint_blocker is not None
             else "no_comparison_models"
-            if not challengers
+            if not has_candidates
             else "bootstrap_block_exceeds_common_observations"
         )
         robustness_rows.append(
@@ -1259,7 +1310,7 @@ def _fama_macbeth_summary(
             "period_count": count,
             "status": "UNDEFINED",
             "reason": "hac_lag_exceeds_observations",
-            "mean": np.nan,
+            "mean": float(mean(values)) if count else np.nan,
             "standard_error": np.nan,
             "t_statistic": np.nan,
             "p_value": np.nan,
@@ -1500,6 +1551,8 @@ def _factor_statistics_from_evaluations(config):
             or metadata["evaluation_axis"] != "cross_sectional"
         ):
             raise ValueError("factor_statistics_evaluation_science_missing")
+        if len(paths) > 1 and not metadata["input_facts"].get("input_observations"):
+            raise ValueError("factor_statistics_evaluation_observations_missing")
         scope = metadata["sample_scope"]
         if scope in scopes:
             raise ValueError("factor_statistics_evaluation_duplicate_scope")
@@ -1519,6 +1572,11 @@ def _factor_statistics_from_evaluations(config):
                 "strata",
                 "common_rule",
             )
+        }
+        current["input_facts"] = {
+            key: value
+            for key, value in current["input_facts"].items()
+            if key != "selector"
         }
         if binding is not None and current != binding:
             raise ValueError("factor_statistics_evaluation_inputs_incompatible")
@@ -1877,11 +1935,12 @@ def model_statistics(config):
         "window",
         "evaluation",
         "statistics",
-        "root_seed",
-        "comparison_model_id",
         "periods",
     }
     optional = {
+        "analyses",
+        "root_seed",
+        "comparison_model_id",
         "sample_role",
         "family_ids",
         "selection_group",
@@ -1896,6 +1955,7 @@ def model_statistics(config):
     }
     if required - set(config) or set(config) - required - optional:
         raise ValueError("model_statistics_config_invalid")
+    analyses = _selected_analyses(config, _MODEL_ANALYSES)
     config.setdefault("sample_role", "exploratory")
     if type(config["sample_role"]) is not str or not config["sample_role"].strip():
         raise ValueError("statistics_sample_role_invalid")
@@ -1906,11 +1966,37 @@ def model_statistics(config):
         or "primary_label" not in evaluation
     ):
         raise ValueError("model_statistics_evaluation_invalid")
+    if not isinstance(policy, dict):
+        raise ValueError("model_statistics_policy_invalid")
+    needed = set()
+    if (
+        set(analyses) & {"prediction_hac", "model_comparison"}
+        or "group_comparison" in policy
+    ):
+        needed.add("hac_lag")
+    if "group_comparison" in policy:
+        needed |= {"bootstrap_block", "bootstrap_repetitions"}
+    if set(analyses) & {
+        "prediction_bootstrap",
+        "model_comparison",
+        *_MODEL_ROBUSTNESS_TESTS,
+    }:
+        needed |= {"bootstrap_block", "bootstrap_repetitions"}
+        if type(config.get("root_seed")) is not int:
+            raise ValueError("model_statistics_config_invalid")
+    if set(analyses) & {
+        "model_comparison",
+        "spa_reality_check",
+        "stepm_superior_models",
+    }:
+        if not isinstance(config.get("comparison_model_id"), str):
+            raise ValueError("model_statistics_config_invalid")
     if (
         not isinstance(policy, dict)
         or set(policy)
         - {"hac_lag", "bootstrap_block", "bootstrap_repetitions", "group_comparison"}
-        or {"hac_lag", "bootstrap_block", "bootstrap_repetitions"} - set(policy)
+        or needed - set(policy)
+        or any(type(policy[key]) is not int for key in needed if key in policy)
     ):
         raise ValueError("model_statistics_policy_invalid")
     paired = "group_comparison" in policy

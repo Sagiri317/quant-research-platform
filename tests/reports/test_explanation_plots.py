@@ -11,6 +11,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from quant_research_platform.artifacts.explanations import (
@@ -441,3 +443,83 @@ def test_native_importance_from_mixed_artifact_is_not_labeled_as_test(tmp_path):
         measure="native_importance",
     )
     assert "测试集" not in figure._supxlabel.get_text()
+
+
+@pytest.mark.parametrize(
+    "measure,member",
+    [("mean_abs_contribution", "summary"), ("native_importance", "native_importance")],
+)
+def test_selected_summary_reader_and_plot_ignore_unconsumed_members(
+    tmp_path, measure, member
+):
+    source = explanation_fixture(tmp_path / "explain")
+    _, original = read_explanation(source)
+    for name in set(original) - {member}:
+        (source / f"{name}.parquet").unlink()
+    _, selected = read_explanation(source, members=[member])
+    assert set(selected) == {member}
+    pd.testing.assert_frame_equal(selected[member], original[member])
+    config = {
+        "kind": "explanation_summary",
+        "measure": measure,
+        "inputs": str(source),
+        "output": str(tmp_path / "summary.png"),
+    }
+    assert plots.plot(config).stat().st_size > 1000
+    with pytest.raises(FileNotFoundError):
+        read_explanation(source)
+    (source / f"{member}.parquet").unlink()
+    with pytest.raises(FileNotFoundError):
+        read_explanation(source, members=[member])
+    with pytest.raises(FileNotFoundError):
+        plots.plot({**config, "output": str(tmp_path / "missing.png")})
+
+
+def test_waterfall_reads_and_validates_pair_without_summary(tmp_path):
+    source = explanation_fixture(tmp_path / "explain")
+    (source / "summary.parquet").unlink()
+    (source / "native_importance.parquet").unlink()
+    _, tables = read_explanation(source, members=["contributions"])
+    assert set(tables) == {"predictions", "contributions"}
+    config = {
+        "kind": "explanation_waterfall",
+        "inputs": str(source),
+        "output": str(tmp_path / "waterfall.png"),
+        "timestamp": "2026-01-02T09:30:00.000000123",
+        "asset_id": "asset-A",
+    }
+    assert plots.plot(config).stat().st_size > 1000
+    tables["contributions"].loc[0, "contribution"] += 1.0
+    member_path = source / "contributions.parquet"
+    pq.write_table(
+        pa.Table.from_pandas(
+            tables["contributions"], schema=pq.read_schema(member_path)
+        ),
+        member_path,
+    )
+    with pytest.raises(ValueError, match="explanation_additivity_failed"):
+        read_explanation(source, members=["predictions"])
+    with pytest.raises(ValueError, match="explanation_additivity_failed"):
+        plots.plot({**config, "output": str(tmp_path / "invalid.png")})
+    (source / "predictions.parquet").unlink()
+    with pytest.raises(FileNotFoundError):
+        read_explanation(source, members=["contributions"])
+    with pytest.raises(FileNotFoundError):
+        plots.plot({**config, "output": str(tmp_path / "missing.png")})
+
+
+def test_selected_summary_still_checks_own_coverage_and_publication_requires_all(
+    tmp_path,
+):
+    source = explanation_fixture(tmp_path / "explain")
+    metadata, tables = read_explanation(source, members=["summary"])
+    with pytest.raises(ValueError, match="explanation_members_invalid"):
+        write_explanation(tmp_path / "incomplete", metadata=metadata, tables=tables)
+    tables["summary"].loc[0, "observation_count"] = 2
+    member_path = source / "summary.parquet"
+    pq.write_table(
+        pa.Table.from_pandas(tables["summary"], schema=pq.read_schema(member_path)),
+        member_path,
+    )
+    with pytest.raises(ValueError, match="explanation_summary_coverage_invalid"):
+        read_explanation(source, members=["summary"])

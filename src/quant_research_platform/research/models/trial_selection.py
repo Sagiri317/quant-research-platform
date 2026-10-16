@@ -169,8 +169,6 @@ def evaluate_model_trial_metrics_from_chunks(
                     values["label_prediction"] = frame[
                         label_prediction_column
                     ].to_numpy(dtype="float64")
-                    if not np.isfinite(values["label_prediction"]).all():
-                        raise ValueError("model_selection_mse_unrepresentable")
                 yield values
 
     with closing_iterator(metric_chunks()) as source:
@@ -206,6 +204,7 @@ def _cross_sectional_metric_summary(
     }
     row_count = 0
     squared_errors = _ScaledSquareAccumulator()
+    mse_defined = True
     current_timestamp: int | None = None
     timestamp_state: _TimestampMetricState | None = None
     for row in rows:
@@ -234,19 +233,24 @@ def _cross_sectional_metric_summary(
         )
         residual = label_prediction - label
         if not np.isfinite(residual):
-            raise ValueError("model_selection_mse_unrepresentable")
+            mse_defined = False
         timestamp_state.ic.update(label, prediction)
         if validation_axis == "cross_sectional":
             timestamp_state.rank.update(float(label_rank), float(prediction_rank))
-        squared_errors.add(residual)
+        if mse_defined:
+            squared_errors.add(residual)
     if timestamp_state is not None:
         row_count += timestamp_state.ic.count
         _add_correlation_aggregate(stats, "ic", timestamp_state.ic.result()[0])
         _add_correlation_aggregate(stats, "rankic", timestamp_state.rank.result()[0])
-    result = {
-        "validation_rows": row_count,
-        "validation_mse": squared_errors.result(row_count),
-    }
+    mse = None
+    if mse_defined:
+        try:
+            mse = squared_errors.result(row_count)
+        except ValueError as exc:
+            if str(exc) != "model_selection_mse_unrepresentable":
+                raise
+    result = {"validation_rows": row_count, "validation_mse": mse}
     for prefix in ("ic", "rankic"):
         summary = _summarize_correlation_aggregates(
             count=int(stats[f"{prefix}_count"]),

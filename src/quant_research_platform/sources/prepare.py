@@ -13,7 +13,9 @@ def prepare_source(config: Mapping):
     if (
         not isinstance(config, Mapping)
         or not required <= set(config)
-        or set(config) - required - {"start_date", "end_date", "chunksize"}
+        or set(config)
+        - required
+        - {"start_date", "end_date", "chunksize", "fee_csv", "fee_sidecar"}
     ):
         raise ValueError("source_prepare_fields_invalid")
     if type(config["raw_root"]) is not str or not config["raw_root"]:
@@ -47,9 +49,14 @@ def prepare_source(config: Mapping):
         raise ValueError("source_prepare_source_invalid")
     if "chunksize" in config and source != "csmar":
         raise ValueError("source_prepare_chunksize_not_consumed")
+    for key in ("fee_csv", "fee_sidecar"):
+        if key in config and (
+            source != "reference" or type(config[key]) is not str or not config[key]
+        ):
+            raise ValueError("source_prepare_fee_files_invalid")
     kwargs = {
         key: config[key]
-        for key in ("start_date", "end_date", "chunksize")
+        for key in ("start_date", "end_date", "chunksize", "fee_csv", "fee_sidecar")
         if key in config
     }
     return materialize_interim_data(

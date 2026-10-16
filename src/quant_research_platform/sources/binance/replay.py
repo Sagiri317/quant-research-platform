@@ -406,8 +406,6 @@ class RecorderRun:
             or FUTURES_MARKET_TYPE not in self.manifest["market_types"]
         ):
             raise ValueError("hft_futures_run_missing")
-        if tuple(self.manifest["symbols"]) != RESEARCH_SYMBOLS:
-            raise ValueError("hft_symbols_incomplete")
         return {
             "raw_record_count": sum(
                 item["record_count"] for item in self.manifest["files"]
@@ -662,7 +660,12 @@ def _validate_run_manifest(value: object) -> None:
     if (
         value["venue"] != "binance"
         or not isinstance(value.get("symbols"), list)
-        or value["symbols"] != list(RESEARCH_SYMBOLS)
+        or not value["symbols"]
+        or any(
+            type(symbol) is not str or symbol not in RESEARCH_SYMBOLS
+            for symbol in value["symbols"]
+        )
+        or len(set(value["symbols"])) != len(value["symbols"])
     ):
         raise ValueError("binance_replay_run_manifest_identity_invalid")
     statuses = {"PASS", "PARTIAL", "FAIL"}
@@ -678,7 +681,7 @@ def _validate_run_manifest(value: object) -> None:
         raise ValueError("binance_replay_run_manifest_invalid")
     market_metadata = value.get("market_metadata")
     if not isinstance(market_metadata, dict) or set(market_metadata) != set(
-        RESEARCH_SYMBOLS
+        value["symbols"]
     ):
         raise ValueError("binance_replay_market_metadata_invalid")
     for symbol_metadata in market_metadata.values():
@@ -709,7 +712,7 @@ def _validate_run_manifest(value: object) -> None:
     present_tuples: set[tuple[str, str, str]] = set()
     for item in files:
         _validate_file_manifest(
-            item, markets=set(market_types), symbols=set(RESEARCH_SYMBOLS)
+            item, markets=set(market_types), symbols=set(value["symbols"])
         )
         path = Path(item["path"])
         normalized_path = path.as_posix()
@@ -724,7 +727,7 @@ def _validate_run_manifest(value: object) -> None:
     )
     required_tuples = {
         (symbol, market, data_kind)
-        for symbol in RESEARCH_SYMBOLS
+        for symbol in value["symbols"]
         for market in market_types
         for data_kind in stream_kinds
     }

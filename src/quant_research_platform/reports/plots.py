@@ -1079,7 +1079,14 @@ def plot(config):
 
         if output.resolve().is_relative_to(source.resolve()):
             raise ValueError("plot_output_inside_input")
-        metadata, tables = read_explanation(source)
+        members = (
+            ["native_importance"]
+            if config.get("measure") == "native_importance"
+            else ["summary"]
+            if kind == "explanation_summary"
+            else ["predictions", "contributions"]
+        )
+        metadata, tables = read_explanation(source, members=members)
         common = {
             "source_reference": str(source),
             "sample_role": config["sample_role"],

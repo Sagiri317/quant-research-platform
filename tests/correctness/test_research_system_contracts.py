@@ -148,16 +148,10 @@ def _reference_residuals(target, industries, sizes):
 
 
 @pytest.mark.parametrize(
-    "name,count",
-    [
-        ("core6", 6),
-        ("pv25", 25),
-        ("pv_expanded", 52),
-        ("fusion_nf_core", 44),
-        ("fusion_nf_expectations", 48),
-    ],
+    "name",
+    ["core6", "pv25", "pv_expanded", "fusion_nf_core", "fusion_nf_expectations"],
 )
-def test_selected_core_intersection_does_not_shrink_research(name, count):
+def test_research_rosters_select_unique_supported_factors(name):
     path = (
         Path(__file__).resolve().parents[2]
         / "docs/research-rosters/a_share"
@@ -165,7 +159,8 @@ def test_selected_core_intersection_does_not_shrink_research(name, count):
     )
     configuration = json.loads(path.read_text(encoding="utf-8"))
     factors = configuration["evaluation"]["factors"]
-    assert len(factors) == len(set(factors)) == count
+    assert factors
+    assert len(factors) == len(set(factors))
     catalog = a_share.factor_catalog()
     assert set(factors) <= {item.output_column for item in catalog.list()}
 

@@ -130,75 +130,98 @@ def materialize_interim_data(
     start_date: str | None = None,
     end_date: str | None = None,
     metadata: Mapping[str, object] | None = None,
+    fee_csv: Path | None = None,
+    fee_sidecar: Path | None = None,
 ) -> ReferenceInterimImportResult:
-    if type(data_ids) is not tuple or len(data_ids) != 1:
+    """Import independent reference tables, retaining causal state history.
+
+    start_date is unsupported: state established before a research window remains
+    necessary. end_date bounds industry/equity knowledge; fee intervals stay intact.
+    Each output publishes independently; this is not a multi-output transaction.
+    """
+    if start_date is not None:
+        raise ValueError("reference_start_date_not_consumed")
+    if (
+        type(data_ids) is not tuple
+        or not data_ids
+        or any(type(data_id) is not str for data_id in data_ids)
+        or len(set(data_ids)) != len(data_ids)
+        or not set(data_ids)
+        <= {
+            A_SHARE_FEE_SCHEDULE_DATA_ID,
+            A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID,
+            A_SHARE_EQUITY_EVENTS_DATA_ID,
+        }
+    ):
         raise ValueError("reference_interim_data_ids_invalid")
-    data_id = data_ids[0]
-    if type(data_id) is not str or data_id not in {
-        A_SHARE_FEE_SCHEDULE_DATA_ID,
-        A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID,
-        A_SHARE_EQUITY_EVENTS_DATA_ID,
-    }:
-        raise ValueError("reference_interim_data_ids_invalid")
+    if (fee_csv is None) != (fee_sidecar is None):
+        raise ValueError("a_share_fee_source_pair_required")
+    if fee_csv is not None and A_SHARE_FEE_SCHEDULE_DATA_ID not in data_ids:
+        raise ValueError("reference_fee_files_not_consumed")
     root = require_unaliased_path(raw_root, error="reference_source_root_invalid")
     if filesystem_exists(root) and not filesystem_is_dir(root):
         raise ValueError("reference_source_root_invalid")
-    dataset_root = require_unaliased_path(
-        root / data_id, error="reference_source_root_invalid"
-    )
-    if not filesystem_exists(dataset_root):
-        return ReferenceInterimImportResult({}, (data_id,))
-    if not filesystem_is_dir(dataset_root):
-        raise ValueError("reference_source_root_invalid")
-    required = (
-        (A_SHARE_FEE_CSV_NAME, A_SHARE_FEE_SIDECAR_NAME)
-        if data_id == A_SHARE_FEE_SCHEDULE_DATA_ID
-        else ("metadata.json",)
-    )
-    if not all(filesystem_is_file(dataset_root / name) for name in required):
-        raise ValueError(
-            "equity_event_metadata_missing"
-            if data_id == A_SHARE_EQUITY_EVENTS_DATA_ID
-            else "reference_source_required_member_invalid"
-        )
-    if data_id == A_SHARE_EQUITY_EVENTS_DATA_ID:
-        equity_frame, identity = _equity_source(root)
-    elif data_id == A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID:
-        source_metadata, members, identity = _industry_source(root)
-    else:
-        source = load_a_share_fee_source(reference_root=root)
-        identity = source.source_identity
-    if data_id == A_SHARE_EQUITY_EVENTS_DATA_ID:
-        frame = equity_frame
-        if end_date is not None:
-            frame = frame.loc[frame["timestamp"].le(pd.Timestamp(end_date))].copy()
-        spec = _equity_events_spec()
-    elif data_id == A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID:
-        frame = _industry_frame(source_metadata, members)
-        if end_date is not None:
-            frame = frame.loc[frame["timestamp"].le(pd.Timestamp(end_date))].copy()
-        spec = _industry_snapshots_spec()
-    else:
-        frame = _frame_from_rows(source.rows)
-        spec = fee_schedule_spec()
+    written = {}
+    skipped = []
+    for data_id in data_ids:
+        if data_id != A_SHARE_FEE_SCHEDULE_DATA_ID or fee_csv is None:
+            dataset_root = require_unaliased_path(
+                root / data_id, error="reference_source_root_invalid"
+            )
+            if not filesystem_exists(dataset_root):
+                skipped.append(data_id)
+                continue
+            if not filesystem_is_dir(dataset_root):
+                raise ValueError("reference_source_root_invalid")
+            required = (
+                (A_SHARE_FEE_CSV_NAME, A_SHARE_FEE_SIDECAR_NAME)
+                if data_id == A_SHARE_FEE_SCHEDULE_DATA_ID
+                else ("metadata.json",)
+            )
+            if not all(filesystem_is_file(dataset_root / name) for name in required):
+                raise ValueError(
+                    "equity_event_metadata_missing"
+                    if data_id == A_SHARE_EQUITY_EVENTS_DATA_ID
+                    else "reference_source_required_member_invalid"
+                )
+        if data_id == A_SHARE_EQUITY_EVENTS_DATA_ID:
+            equity_frame, identity = _equity_source(root)
+        elif data_id == A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID:
+            source_metadata, members, identity = _industry_source(root)
+        else:
+            source = load_a_share_fee_source(
+                reference_root=root, fee_csv=fee_csv, fee_sidecar=fee_sidecar
+            )
+            identity = source.source_identity
+        if data_id == A_SHARE_EQUITY_EVENTS_DATA_ID:
+            frame = equity_frame
+            if end_date is not None:
+                frame = frame.loc[frame["timestamp"].le(pd.Timestamp(end_date))].copy()
+            spec = _equity_events_spec()
+        elif data_id == A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID:
+            frame = _industry_frame(source_metadata, members)
+            if end_date is not None:
+                frame = frame.loc[frame["timestamp"].le(pd.Timestamp(end_date))].copy()
+            spec = _industry_snapshots_spec()
+        else:
+            frame = _frame_from_rows(source.rows)
+            spec = fee_schedule_spec()
 
-    artifact_root = Path(output_roots[spec.data_id])
-    write_dataset(
-        artifact_root,
-        frame,
-        spec=spec,
-        metadata={
-            **(metadata or {}),
-            "source_evidence": {
-                "source_id": str(SOURCE_ID),
-                "content_hash": identity,
+        artifact_root = Path(output_roots[spec.data_id])
+        write_dataset(
+            artifact_root,
+            frame,
+            spec=spec,
+            metadata={
+                **(metadata or {}),
+                "source_evidence": {
+                    "source_id": str(SOURCE_ID),
+                    "content_hash": identity,
+                },
             },
-        },
-    )
-    return ReferenceInterimImportResult(
-        artifact_roots={spec.data_id: artifact_root},
-        skipped=(),
-    )
+        )
+        written[spec.data_id] = artifact_root
+    return ReferenceInterimImportResult(written, tuple(skipped))
 
 
 def _frame_from_rows(rows: tuple[FeeSourceRow, ...]) -> pd.DataFrame:

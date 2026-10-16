@@ -67,6 +67,8 @@ def tables(request):
         p_value=0.05,
         ci_lower=0.0,
         ci_upper=0.4,
+        bootstrap_status="DEFINED",
+        bootstrap_reason="",
         bootstrap_lower=0.0,
         bootstrap_upper=0.4,
         fdr_method="BH",
@@ -522,6 +524,8 @@ def test_undefined_model_inference_preserves_descriptive_mean(
     frame = tables[name]
     frame.loc[0, "status"] = "UNDEFINED"
     frame.loc[0, "reason"] = "global_validation_selection_reuses_validation"
+    frame.loc[0, "bootstrap_status"] = "UNDEFINED"
+    frame.loc[0, "bootstrap_reason"] = "global_validation_selection_reuses_validation"
     inference_columns = [
         "standard_error",
         "t_statistic",
@@ -1052,3 +1056,30 @@ def test_statistics_all_numeric_tables_reject_duplicate_primary_keys(
             table_group=group,
         )
     assert not (tmp_path / "unpublished").exists()
+
+
+@pytest.mark.parametrize(
+    "member", ["factor_diagnostics.parquet", "fama_macbeth.parquet"]
+)
+def test_undefined_descriptive_mean_requires_actual_observations(
+    tables, metadata, member
+):
+    frame = tables[member.removesuffix(".parquet")].copy()
+    frame["status"] = "UNDEFINED"
+    frame["reason"] = "no_observations"
+    frame["input_date_count"] = 0
+    frame[
+        "period_count" if member == "fama_macbeth.parquet" else "observation_count"
+    ] = 0
+    for column in (
+        "standard_error",
+        "t_statistic",
+        "p_value",
+        "ci_lower",
+        "ci_upper",
+        "fdr_adjusted_p_value",
+    ):
+        if column in frame:
+            frame[column] = float("nan")
+    with pytest.raises(ValueError, match="descriptive_mean_count_invalid"):
+        statistics._validated_frame(frame, member=member, metadata=metadata)

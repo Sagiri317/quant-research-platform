@@ -123,7 +123,6 @@ def test_local_panel_window_keeps_public_industry_history_and_unknown_barrier(tm
         },
         raw_root=raw_root / "reference",
         data_ids=(interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID,),
-        start_date="2020-01-06",
         end_date="2020-01-10",
     )
     snapshots = read_dataset(

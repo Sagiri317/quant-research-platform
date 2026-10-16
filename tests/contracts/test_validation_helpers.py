@@ -234,7 +234,7 @@ def test_strict_timestamp_series_returns_naive_utc_for_aware_values() -> None:
     ]
 
 
-def test_strict_timestamp_series_rejects_dst_mixed_offsets() -> None:
+def test_strict_timestamp_series_normalizes_dst_offsets() -> None:
     zone = ZoneInfo("America/New_York")
     values = pd.Series(
         [
@@ -242,14 +242,31 @@ def test_strict_timestamp_series_rejects_dst_mixed_offsets() -> None:
             pd.Timestamp("2024-07-15T12:00:00", tz=zone),
         ]
     )
-
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        with pytest.raises(ValueError, match="invalid_contract_timestamp"):
-            validation.strict_timestamp_series(
-                values,
-                error="invalid_contract_timestamp",
-            )
+        result = validation.strict_timestamp_series(
+            values, error="invalid_contract_timestamp"
+        )
+    assert result.tolist() == [
+        pd.Timestamp("2024-01-15T17:00:00"),
+        pd.Timestamp("2024-07-15T16:00:00"),
+    ]
+
+
+def test_strict_timestamp_series_normalizes_explicit_mixed_offsets_with_null():
+    values = pd.Series(
+        ["2024-01-01T00:00:00+00:00", None, "2024-01-01T00:00:00+01:00"],
+        index=["first", "missing", "last"],
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        result = validation.strict_timestamp_series(
+            values, error="invalid_contract_timestamp", allow_null=True
+        )
+    assert result.index.equals(values.index)
+    assert result.iloc[0] == pd.Timestamp("2024-01-01T00:00:00")
+    assert pd.isna(result.iloc[1])
+    assert result.iloc[2] == pd.Timestamp("2023-12-31T23:00:00")
 
 
 @pytest.mark.parametrize(
@@ -325,9 +342,8 @@ def test_strict_timestamp_series_falls_back_when_vectorized_parse_loses_value(
     "values",
     [
         ["2024-01-01T00:00:00+00:00", "2024-01-01T00:00:00"],
-        ["2024-01-01T00:00:00+00:00", "2024-01-01T00:00:00+01:00"],
     ],
-    ids=["aware-naive", "mixed-offsets"],
+    ids=["aware-naive"],
 )
 def test_strict_timestamp_series_rejects_mixed_timezone_inputs_without_warnings(
     values: list[str],

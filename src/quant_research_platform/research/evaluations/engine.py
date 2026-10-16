@@ -774,6 +774,62 @@ def _iter_evaluation_work_frames(
                 return
 
 
+def _evaluation_input_observation_id(raw, focal, columns):
+    """Hash canonical consumed columns, independent of layout and null payloads."""
+    import hashlib
+
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    columns = sorted(columns)
+    observed = raw.loc[:, columns].copy()
+    consumed = [
+        column
+        for column in columns
+        if column not in {"timestamp", "asset_id", "market_id", "eligible"}
+    ]
+    observed[consumed] = focal.loc[:, consumed].reindex(raw.index)
+    observed = observed.sort_values(["timestamp", "asset_id"])
+    table = pa.Table.from_pandas(
+        observed, preserve_index=False
+    ).replace_schema_metadata(None)
+    arrays, names = [], []
+    for name in table.column_names:
+        values = table[name].combine_chunks()
+        if pa.types.is_dictionary(values.type):
+            values = values.dictionary_decode()
+        if pa.types.is_string(values.type):
+            values = values.cast(pa.large_string())
+        elif pa.types.is_binary(values.type):
+            values = values.cast(pa.large_binary())
+        valid = pc.is_valid(values)
+        kind = values.type
+        if values.null_count == len(values):
+            values = pa.repeat(pa.scalar(0, type=pa.uint8()), len(values))
+        else:
+            fill = (
+                ""
+                if pa.types.is_string(kind) or pa.types.is_large_string(kind)
+                else b""
+                if pa.types.is_binary(kind) or pa.types.is_large_binary(kind)
+                else False
+                if pa.types.is_boolean(kind)
+                else 0
+            )
+            if pa.types.is_temporal(kind):
+                scalar = pa.scalar(0, type=pa.int64()).cast(kind)
+            else:
+                scalar = pa.scalar(fill, type=kind)
+            values = pc.fill_null(values, scalar)
+        arrays.extend((values, valid))
+        names.extend(("value:" + name, "valid:" + name))
+    canonical = pa.Table.from_arrays(arrays, names=names)
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, canonical.schema) as writer:
+        writer.write_table(canonical)
+    return hashlib.sha256(sink.getvalue()).hexdigest()
+
+
 def build_scoped_evaluation_result(
     frames, *, spec, sources, cutoff, sample_scope, strata
 ):
@@ -817,6 +873,9 @@ def build_scoped_evaluation_result(
                 metadata["timestamps"] = raw.timestamp
                 metadata["asset_ids"] = raw.asset_id
                 timestamp = raw.timestamp.iloc[0]
+                input_observation_id = _evaluation_input_observation_id(
+                    raw, focal, sources[0]["columns"]
+                )
                 classification = focal.copy()
                 for column in (
                     "float_market_cap",
@@ -920,7 +979,13 @@ def build_scoped_evaluation_result(
                             stratum_records.extend(daily.to_dict("records"))
                 daily = daily_frame(stratum_records, "daily_strata")
                 state.consume(metrics, grouped, facts)
-                facts.update(daily_coverage=coverage, daily_strata=daily)
+                facts.update(
+                    daily_coverage=coverage,
+                    daily_strata=daily,
+                    input_observations={
+                        pd.Timestamp(timestamp).isoformat(): input_observation_id
+                    },
+                )
                 yield metrics, grouped, facts
 
     chunks = outputs()

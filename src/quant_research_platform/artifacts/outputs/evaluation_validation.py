@@ -110,7 +110,7 @@ def validate_evaluation_science(metadata):
     if type(peers) is not list or (metadata["sample_scope"] == "own" and peers):
         raise ValueError("evaluation_comparison_inputs_invalid")
     for facts in [metadata["input_facts"], *peers]:
-        if type(facts) is not dict or set(facts) != {
+        if type(facts) is not dict or set(facts) - {"input_observations"} != {
             "selector",
             "columns",
             "column_units",
@@ -123,6 +123,15 @@ def validate_evaluation_science(metadata):
             "market_id",
         }:
             raise ValueError("evaluation_input_facts_invalid")
+        observations = facts.get("input_observations", {})
+        if type(observations) is not dict or any(
+            type(date) is not str
+            or type(digest) is not str
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+            for date, digest in observations.items()
+        ):
+            raise ValueError("evaluation_input_observations_invalid")
         if (
             type(facts["selector"]) is not dict
             or type(facts["selector"].get("path")) is not str

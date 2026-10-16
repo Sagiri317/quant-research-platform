@@ -215,7 +215,8 @@ def test_derivative_five_minute_warmup_is_bounded(tmp_path, monkeypatch, native_
     ]
 
     @contextmanager
-    def archive(_root):
+    def archive(_root, *, time_window):
+        assert time_window.start == pd.Timestamp("1970-01-01")
         yield SimpleNamespace(
             source_identity={}, iter_state_observations=lambda **kwargs: iter(events)
         )

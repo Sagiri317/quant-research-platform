@@ -1,4 +1,7 @@
-"""Explicit read-only numerical schema inventory."""
+"""Read-only inventory for the legacy project data/{interim,processed,research} layout.
+
+This diagnostic scans that layout only; it is not a dataset admission interface.
+"""
 
 from __future__ import annotations
 

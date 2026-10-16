@@ -326,3 +326,53 @@ Python `research.models.explanations.explain(config)` 与 CLI `qrp explain --con
 `explanation_summary`、`explanation_waterfall` 只消费 EXPLAIN，支持 PNG/SVG/PDF 与中文字体。
 前者选择贡献绝对均值或 native_importance、period 和 top_n；后者精确选择 timestamp、asset_id，
 保留有符号其余贡献、存储残差与真实输出。无定义解释展示原因，不画假零。
+
+### 输入实例与已有特征复用
+
+`assemble.inputs` 的键是本次输入实例名，可以为同一原生 `data_id` 的不同目录分别命名。
+原生 `data_id` 及科学声明保留，不要求为横向拼接改写原件身份。`base_input_data_id`
+指本次基表实例，`sparse_input_data_ids` 同样引用实例名。相同输出列仍要求唯一生产者；
+公共行情、资格、行业等辅助列通过
+输入 `columns` 投影选定权威来源，不能按输入顺序覆盖。唯一可用依赖仍可自动补入。
+
+`feature_columns` 选择已经物化的特征，省略时取输入实际投影中的 FEATURE 列；
+可用 `factor_columns=[]` 不选原始因子，这些已有列不重新变换。
+已声明的 observed/missing 伴随列、单位、标签成熟事实与原变换说明随复用保留，
+再次组装或评价不能把它们当作未经处理的原始值。新生成特征与复用列同名时明确失败。
+解析后的输入实例、原生 data ID、实际消费列、filter/context、recipe 和目标列写入参数记录。
+当前命名目录仍可提供省略字段的既有便利默认，实际解析结果才是本次计算事实。
+
+### 按消费成员读取解释与校准
+
+`read_explanation(path, members=[...])` 只读取选定成员；省略时保持完整读取。
+summary/native 重要性图不依赖未消费的贡献明细，waterfall 读取预测及贡献，仍核对键、
+状态与加和关系。请求 predictions 或 contributions 会成对读取二者，不能借投影绕过该关系。
+发布时仍验证完整解释产物。账本中的可选最终 alpha 校准仅在实际访问时读取；
+净值图和基础绩效不依赖这个无关成员，账本现金、成交与权益勾稽保留。
+
+`temporal_blocks.step_seconds` 允许可精确表示为正整数纳秒的秒数，例如 0.1、1.5 或 1e-9；
+连续性按整数纳秒差检查，不把微小缺口截断成完整会话。需要舍入到纳秒的数值仍拒绝。
+候选评分中不可表示的辅助 MSE 保存为未定义，合法 IC/RankIC 保留；这不改变
+选型指标全未定义时的既有顺序规则。明确请求的解释 MSE 仍遵守其数值可定义合同。
+
+所有已经带明确时区的时刻都转换为 UTC，包括跨夏令时 offset 的输入；
+未声明解释依据的 naive/aware 混合仍拒绝，不猜测机器时区。
+
+### 模型统计的独立分析
+
+`statistics-model.analyses` 可选 `model_losses`、`prediction_hac`、
+`prediction_bootstrap`、`model_comparison`、`spa_reality_check`、
+`stepm_superior_models`、`model_confidence_set`。省略保持既有整套默认。
+仅所选分析要求其专用参数和输入：损失表不要求比较基线或 bootstrap；MCS 不因其它
+比较方法而要求基线。模型比较仍采用既定 HAC 与 bootstrap 组合，不改变损失或阈值。
+paired group 比较另外需要自己的 bootstrap 参数，并使用其声明的 seed。
+
+HAC 的 status/reason 与 bootstrap_status/bootstrap_reason 分开保存；某项推断未定义
+不会删除另一个合法结果或真实描述均值。零观测不能伪造均值。缺失日期的时间序号口径、
+FDR、选型指标及正式研究门槛仍按既有合同，本轮不静默替换估计量。
+
+省略 sample_scope 的 own 评价与显式 own 采用相同日事实路径。复用 own/common 时，
+来源路径只作为出处，配对核验真实日期、资产、所消费信号/标签/资格及支持事实。
+这些事实在原有逐日计算过程中形成，不重读原始数据、不扫描整个输入树，也不绑定软件
+版本或物理分区；搬迁和行列重排不改变资格。不同实际资产域或标签不能冒称同一焦点研究。
+已有特征继承的变换说明同样参与必要科学核验与预测年龄分层。

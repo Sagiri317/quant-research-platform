@@ -160,7 +160,7 @@ def test_factor_evaluation_pair_rejects_real_input_change(tmp_path):
     )
     manifest_path = common / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
-    manifest["metadata"]["input_facts"]["selector"]["path"] += "-different"
+    manifest["metadata"]["input_facts"]["label_semantics"] = {"label": {"horizon": 99}}
     manifest_path.write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="evaluation.*incompatible"):
         factor_statistics(

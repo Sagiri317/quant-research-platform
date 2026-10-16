@@ -682,7 +682,12 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
             "price_volume": list(PV25_FACTORS)
         }
         config["statistics"]["fama_macbeth_core_factors"] = list(CORE6_FACTORS)
-        model = model_statistics_inputs(spec, config, TimeWindow(dates[0], cutoff))
+        model = model_statistics_inputs(
+            spec,
+            config,
+            TimeWindow(dates[0], cutoff),
+            selected="stats_demo_equal_weight_rank_ensemble",
+        )
         for selection in model["selections"].values():
             selection["cutoff"] = str(cutoff)
         statistics_tables = build_a_share_statistics_tables(
@@ -1305,7 +1310,9 @@ def test_model_family_names_preserve_factor_statistics_and_native_names(
         assert factor_diagnostics.observation_count.eq(len(dates)).all()
         assert factor_diagnostics.status.eq("UNDEFINED").all()
         assert factor_diagnostics.reason.eq("hac_inference_undefined").all()
-        assert factor_diagnostics["mean"].isna().all()
+        assert factor_diagnostics["mean"].tolist() == pytest.approx(
+            [1.0] * len(factor_diagnostics)
+        )
         assert tables["prediction_diagnostics"]["mean"].iloc[0] == pytest.approx(-1.0)
         periods = tables["fama_macbeth_periods"]
         slopes = periods.loc[periods.coefficient_id.eq(factor), "value"]
@@ -1562,9 +1569,14 @@ def test_native_fmb_float_publication_survives_statistics_roundtrip(
         assert summary.status.eq("UNDEFINED").all()
         assert summary.reason.eq("hac_inference_undefined").all()
         assert (
+            summary.loc[summary.coefficient_id.eq(factor), "mean"]
+            .eq(float(exact))
+            .all()
+        )
+        assert summary.loc[summary.coefficient_id.eq("intercept"), "mean"].eq(0.0).all()
+        assert (
             summary[
                 [
-                    "mean",
                     "standard_error",
                     "t_statistic",
                     "p_value",

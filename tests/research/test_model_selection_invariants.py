@@ -164,22 +164,68 @@ def test_model_selection_mse_scales_before_squaring(residual: float) -> None:
     assert whole["validation_rankic"] is None
 
 
-def test_model_selection_mse_rejects_unrepresentable_final_value() -> None:
+@pytest.mark.parametrize("magnitude", [1e155, 1e-200, 1e308])
+def test_model_selection_undefined_mse_preserves_correlations(magnitude) -> None:
     frame = pd.DataFrame(
         {
-            "timestamp": pd.to_datetime(["2024-01-01"]),
-            "asset_id": "a",
-            "label": 0.0,
-            "prediction": 1e155,
+            "timestamp": pd.to_datetime(["2024-01-01"] * 3),
+            "asset_id": ["a", "b", "c"],
+            "label": [-magnitude, 0.0, magnitude],
+            "prediction": [magnitude, 0.0, -magnitude],
         }
     )
-    with pytest.raises(ValueError, match="model_selection_mse_unrepresentable"):
-        evaluate_model_trial_metrics_from_chunks(
-            (frame,),
-            model_id="model",
-            label_column="label",
-            prediction_column="prediction",
+    arguments = dict(
+        model_id="model", label_column="label", prediction_column="prediction"
+    )
+    whole = evaluate_model_trial_metrics_from_chunks((frame,), **arguments)
+    split = evaluate_model_trial_metrics_from_chunks(
+        (frame.iloc[:1], frame.iloc[1:]), **arguments
+    )
+    assert split == whole
+    assert whole["validation_rows"] == 3
+    assert whole["validation_mse"] is None
+    assert whole["validation_ic"] == -1.0
+    assert whole["validation_rankic"] == -1.0
+    from quant_research_platform.contracts.models import (
+        _validate_model_selection_trial_record,
+    )
+
+    _validate_model_selection_trial_record(whole)
+    for metric, maximize in (("validation_ic", True), ("validation_mse", False)):
+        other = dict(whole, model_id="defined", validation_ic=0.0, validation_mse=1.0)
+        assert (
+            select_best_validation_trial(
+                pd.DataFrame([whole, other]),
+                trial_id_column="model_id",
+                selection_metric=metric,
+                maximize=maximize,
+                validation_metric_columns=(metric,),
+                test_metric_columns=(),
+            )
+            == "defined"
         )
+
+
+@pytest.mark.parametrize("economic", [np.inf, np.nan])
+def test_auxiliary_economic_prediction_does_not_poison_rank_score(economic):
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-01"] * 3),
+            "asset_id": ["a", "b", "c"],
+            "label": [1.0, 2.0, 3.0],
+            "prediction": [1.0, 2.0, 3.0],
+            "economic_prediction": [economic, 2.0, 3.0],
+        }
+    )
+    metrics = evaluate_model_trial_metrics_from_chunks(
+        (frame,),
+        model_id="model",
+        label_column="label",
+        prediction_column="prediction",
+        label_prediction_column="economic_prediction",
+    )
+    assert metrics["validation_mse"] is None
+    assert metrics["validation_ic"] == metrics["validation_rankic"] == 1.0
 
 
 @pytest.mark.parametrize("field", ["validation_ic", "validation_rankic"])
@@ -338,3 +384,46 @@ def test_completed_trial_keeps_representable_icir_with_unrepresentable_std():
     ):
         with pytest.raises(ValueError, match="invalid_model_metadata"):
             _validate_model_selection_trial_record(metrics | changed)
+
+
+@pytest.mark.parametrize(
+    "metric,direction",
+    [("validation_rankic", "maximize"), ("validation_mse", "minimize")],
+)
+def test_undefined_auxiliary_mse_survives_score_select_roundtrip(
+    tmp_path, metric, direction
+):
+    import json
+    from pathlib import Path
+
+    from quant_research_platform.research.models.trial_selection import (
+        read_selection,
+        score,
+        select,
+    )
+    from tests.research.test_prediction_runner_model_selection import candidates
+
+    _, config = candidates(tmp_path)
+    labels = pd.read_parquet(config["labels"])
+    labels["label"] *= 1e156
+    labels.to_parquet(config["labels"], index=False)
+    score(config)
+    scored = json.loads(Path(config["output"]).read_text())
+    assert all(row["validation_mse"] is None for row in scored["metrics"])
+    assert all(row["validation_rankic"] == 1.0 for row in scored["metrics"])
+    frozen = read_selection(
+        select(
+            {
+                "scores": config["output"],
+                "output": str(tmp_path / "selection.json"),
+                "selection_metric": metric,
+                "selection_direction": direction,
+                "tie_break_order": config["candidate_ids"],
+                "refit_windows": [{"start": "2020-01-01", "end": "2020-01-06"}],
+                "refit_cutoff": "2020-01-06",
+            }
+        )
+    )
+    assert frozen["metrics"] == scored["metrics"]
+    assert frozen["test_window"] == config["test_window"]
+    assert frozen["selected_model_id"] == config["candidate_ids"][0]

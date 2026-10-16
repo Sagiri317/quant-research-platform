@@ -188,7 +188,7 @@ def attribution_additivity(base, contributions, output, relative):
     return residual, tolerance, ""
 
 
-def _validate(metadata, tables):
+def _validate(metadata, tables, *, partial=False):
     if not isinstance(metadata, dict) or metadata.get("kind") != "MODEL_EXPLANATION":
         raise ValueError("explanation_metadata_invalid")
     for key in ("model", "model_id", "model_algorithm", "target_column", "label_unit"):
@@ -278,7 +278,11 @@ def _validate(metadata, tables):
         expected.update(("permutation_repeats", "permutation_summary"))
     if set(methods) - {"native_importance", "permutation"}:
         expected.update(("predictions", "contributions", "summary"))
-    if not expected or set(tables) != expected:
+    if (
+        not expected
+        or not tables
+        or (set(tables) - expected if partial else set(tables) != expected)
+    ):
         raise ValueError("explanation_members_invalid")
     result = {}
     for name, frame in tables.items():
@@ -395,6 +399,7 @@ def _validate(metadata, tables):
                 or tolerance != row.additivity_tolerance
             ):
                 raise ValueError("explanation_additivity_failed")
+    if "summary" in result:
         summary = result["summary"]
         if (
             summary.observation_count.gt(summary.sample_count).any()
@@ -403,7 +408,10 @@ def _validate(metadata, tables):
             or summary.status.eq("DEFINED").ne(summary.observation_count.gt(0)).any()
             or summary.mean_abs_contribution.lt(0).any()
             or not summary.absolute_share.dropna().between(0, 1).all()
-            or not summary.loc[summary.period.eq("all"), "observation_count"]
+        ):
+            raise ValueError("explanation_summary_coverage_invalid")
+        if "predictions" in result and (
+            not summary.loc[summary.period.eq("all"), "observation_count"]
             .eq(int(defined.sum()))
             .all()
             or not summary.loc[summary.period.eq("all"), "sample_count"]
@@ -440,21 +448,44 @@ def write_explanation(path: Path, *, metadata: dict, tables: dict) -> Path:
     return path
 
 
-def read_explanation(path: Path) -> tuple[dict, dict[str, pd.DataFrame]]:
-    """Read the selected persisted numbers, never reload a predictor or rerun SHAP."""
+def read_explanation(
+    path: Path, *, members: list[str] | tuple[str, ...] | None = None
+) -> tuple[dict, dict[str, pd.DataFrame]]:
+    """Read selected members; row attributions also require their prediction pair.
+
+    Omit members to validate the complete artifact. Summaries and native importance
+    are independently consumable; no predictor is loaded or explanation rerun.
+    """
     path = Path(path)
     metadata = read_qrp_json_file(path / "metadata.json")[1]
-    members = metadata.get("members")
+    declared = metadata.get("members")
     if (
-        type(members) is not list
-        or len(members) != len(set(members))
-        or set(members) - set(_SCHEMAS)
+        type(declared) is not list
+        or any(type(name) is not str for name in declared)
+        or len(declared) != len(set(declared))
+        or set(declared) - set(_SCHEMAS)
     ):
         raise ValueError("explanation_members_invalid")
+    selected = declared if members is None else members
+    if (
+        not isinstance(selected, (list, tuple))
+        or not selected
+        or any(type(name) is not str for name in selected)
+        or len(selected) != len(set(selected))
+        or set(selected) - set(declared)
+    ):
+        raise ValueError("explanation_members_invalid")
+    needed = set(selected)
+    if needed & {"predictions", "contributions"}:
+        needed.update(("predictions", "contributions"))
+    if needed - set(declared):
+        raise ValueError("explanation_members_invalid")
     tables = {}
-    for name in members:
+    for name in declared:
+        if name not in needed:
+            continue
         with _opened_parquet(path / (name + ".parquet")) as (parquet, _handle):
             if parquet.schema_arrow.remove_metadata() != _SCHEMAS[name]:
                 raise ValueError("explanation_table_schema_invalid")
             tables[name] = parquet.read().to_pandas()
-    return metadata, _validate(metadata, tables)
+    return metadata, _validate(metadata, tables, partial=members is not None)

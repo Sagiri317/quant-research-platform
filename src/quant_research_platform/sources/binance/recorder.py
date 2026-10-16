@@ -1,4 +1,4 @@
-"""Read-only Binance BTCUSDT Spot and USDⓈ-M recorder."""
+"""Read-only Binance supported-symbol Spot and USDⓈ-M recorder."""
 
 from __future__ import annotations
 
@@ -123,7 +123,15 @@ class RecorderConfig:
     def validate(self) -> None:
         if type(self.scope) is not str or self.scope not in RECORDER_STREAMS_BY_SCOPE:
             raise ValueError("binance_recorder_scope_invalid")
-        if self.symbols != RESEARCH_SYMBOLS:
+        if (
+            type(self.symbols) is not tuple
+            or not self.symbols
+            or any(
+                type(symbol) is not str or symbol not in RESEARCH_SYMBOLS
+                for symbol in self.symbols
+            )
+            or len(set(self.symbols)) != len(self.symbols)
+        ):
             raise ValueError("binance_recorder_symbols_invalid")
         strict_positive_float(
             self.duration_seconds,
@@ -1168,7 +1176,11 @@ def record(config: RecorderConfig) -> dict[str, Any]:
 
 
 def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
-    streams = RECORDER_STREAMS_BY_SCOPE[config.scope]
+    streams = tuple(
+        stream
+        for stream in RECORDER_STREAMS_BY_SCOPE[config.scope]
+        if stream.symbol in config.symbols
+    )
     market_types = RECORDING_SCOPE_MARKET_TYPES[config.scope]
     writer = _RunWriter(root)
     stats = _CaptureStats(writer=writer)

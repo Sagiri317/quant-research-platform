@@ -89,9 +89,6 @@ def evaluate(config):
         },
     )
     reject_if_exists(Path(config["output"]))
-    scoped = any(
-        key in config for key in ("sample_scope", "comparison_inputs", "strata")
-    )
     config.setdefault("sample_scope", "own")
     if config["sample_scope"] not in {"own", "common"} or (
         config["sample_scope"] == "own" and "comparison_inputs" in config
@@ -176,14 +173,26 @@ def evaluate(config):
             )
         )
     )
-    strata, extra_columns = _resolved_strata(config, spec=spec, declared=declared)
+    strata, extra_columns = _resolved_strata(
+        config,
+        spec=spec,
+        declared={
+            **declared,
+            "feature_transforms": [
+                *declared.get("feature_transforms", []),
+                *session.manifest.get("producer_diagnostics", {})
+                .get("reused_feature_transforms", {})
+                .values(),
+            ],
+        },
+    )
     supports_daily = (
         str(spec.market_id) == "a_share"
         and spec.evaluation_axis == "cross_sectional"
         and spec.filter_mode == "eligible"
         and not prediction_sources
     )
-    if scoped and (config["sample_scope"] == "common" or strata or supports_daily):
+    if config["sample_scope"] == "common" or strata or supports_daily:
         columns = tuple(
             dict.fromkeys(
                 (
@@ -380,16 +389,34 @@ def _evaluation_source_facts(source, session, *, columns, signals, availability)
     selector["path"] = str(Path(selector["path"]).resolve())
     roles = declared["column_roles"]
     units = declared.get("column_units", {})
+    reused = session.manifest.get("producer_diagnostics", {}).get(
+        "reused_feature_transforms", {}
+    )
+    transforms = []
+    for signal in sorted(signals):
+        for transform in [
+            *declared.get("feature_transforms", []),
+            *([reused[signal]] if signal in reused else []),
+        ]:
+            for source_column in transform["source_columns"]:
+                if signal in {
+                    prefix + source_column
+                    for prefix in ("feature_", "feature_missing_", "feature_observed_")
+                }:
+                    fact = {**transform, "source_columns": [source_column]}
+                    if fact not in transforms:
+                        transforms.append(fact)
     return qrp_json_mapping_snapshot(
         {
             "selector": selector,
+            "input_observations": {},
             "columns": {column: roles[column] for column in columns},
             "column_units": {column: units.get(column) for column in columns},
             "observed_columns": {
                 column: list(feature_observation_columns((column,), roles))
                 for column in signals
             },
-            "feature_transforms": declared.get("feature_transforms", []),
+            "feature_transforms": transforms,
             "signal_units": {column: units.get(column) for column in signals},
             "label_units": {label: units.get(label) for label in availability},
             "label_availability_columns": availability,

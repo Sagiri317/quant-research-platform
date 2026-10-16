@@ -50,6 +50,10 @@ walk-forward 明确每次拟合、决策、预测与评价窗口，样本不永�
 裸 Parquet 需要本操作要求的列角色、单位、主键和可用时间依据；列名不证明 PIT。
 
 [操作示例](configs/) 中的路径需替换为实际已准备输入。
+[同族多批因子装配](configs/assemble-factor-batches.json)明确实例及列投影；
+[已有特征复用](configs/assemble-existing-features.json)只选择物化列，不重复处理，
+已声明的观测/缺失伴随列自动保留。前者仅拼接原始因子，后者保留 eligible，
+用于无标签特征输入；训练时另选实际标签及其成熟列。
 [ON/ID准备](configs/prepare-on-id.json)、[共同域分层评价](configs/evaluate-stratified-a-share.json)与
 [持久化日表归约](configs/statistics-stratified-a-share.json)分别调用现有 prepare、evaluate、statistics-factors；
 own 评价需另选新输出、sample_scope=own 并移除 comparison_inputs。两份评价的焦点信号、输入和分层规格应保持一致。

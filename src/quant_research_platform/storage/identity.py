@@ -254,8 +254,6 @@ def filesystem_gzip_open(path: Path, mode: str, *, encoding: str):
 
 def require_artifact_root(root: Path) -> Path:
     candidate = Path(root)
-    if candidate.name == "data":
-        raise ValueError("dataset_root_must_be_artifact_root")
     return require_unaliased_path(candidate, error="invalid_dataset_part_files")
 
 

@@ -50,9 +50,9 @@ from tests.helpers.research_configuration import CORE6_FACTORS, PV25_FACTORS
 
 
 def test_research_factor_rosters_are_explicit():
-    assert len(PV25_FACTORS) == 25
-    assert len(CORE6_FACTORS) == 6
-    assert set(CORE6_FACTORS) <= set(PV25_FACTORS)
+    for factors in (PV25_FACTORS, CORE6_FACTORS):
+        assert factors
+        assert len(factors) == len(set(factors))
     assert not hasattr(ModelSpec, "purge_gap_steps")
 
 

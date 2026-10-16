@@ -32,6 +32,7 @@ from quant_research_platform.research.datasets.validation import (
 )
 from quant_research_platform.research.features.transforms import (
     apply_feature_transforms,
+    canonical_feature_validity_columns,
 )
 from quant_research_platform.research.filtering import (
     A_SHARE_ELIGIBILITY_FACTS,
@@ -342,6 +343,18 @@ def _validate_research_input_specs(
     _require_columns_from_roles_or_kinds(
         tuple(
             column
+            for column in dataset_spec.feature_columns
+            if column not in _generated_feature_columns(dataset_spec)
+        ),
+        role_by_column=role_by_column,
+        kind_by_column=kind_by_column,
+        allowed_roles={ColumnRole.FEATURE},
+        allowed_kinds=set(),
+        error_name="invalid_research_feature_columns",
+    )
+    _require_columns_from_roles_or_kinds(
+        tuple(
+            column
             for column in dataset_spec.label_columns
             if column not in _generated_semantic_columns(dataset_spec)
         ),
@@ -402,7 +415,7 @@ def _require_no_duplicate_output_columns(
     requested = (
         set(_required_input_columns(dataset_spec))
         .difference(dataset_spec.primary_key)
-        .difference(dataset_spec.feature_columns)
+        .difference(_generated_feature_columns(dataset_spec))
         .difference(_generated_semantic_columns(dataset_spec))
     )
     producers: dict[str, list[str]] = {}
@@ -430,7 +443,8 @@ def _require_research_required_columns_available(
         set(_required_input_columns(dataset_spec))
         .difference(available)
         .difference(
-            dataset_spec.feature_columns + _generated_semantic_columns(dataset_spec)
+            _generated_feature_columns(dataset_spec)
+            + _generated_semantic_columns(dataset_spec)
         )
     )
     if missing:
@@ -449,6 +463,14 @@ def _ordered_output_columns(dataset_spec: ResearchDatasetSpec) -> tuple[str, ...
                 *dataset_spec.context_columns,
             )
         )
+    )
+
+
+def _generated_feature_columns(spec: ResearchDatasetSpec) -> tuple[str, ...]:
+    return tuple(
+        column
+        for transform in spec.feature_transforms
+        for column in transform.output_columns
     )
 
 
@@ -537,6 +559,7 @@ def assemble(config: Mapping) -> Path:
     required = {"market_id", "dataset_id", "inputs", "time_window", "output_root"}
     optional = {
         "factor_columns",
+        "feature_columns",
         "label_columns",
         "feature_recipe",
         "feature_transform",
@@ -605,13 +628,10 @@ def assemble(config: Mapping) -> Path:
     actual_specs = {}
     for data_id, session in sessions.items():
         declared = session.spec
-        if (
-            declared["data_id"] != data_id
-            or declared.get("market_id", config["market_id"]) != config["market_id"]
-        ):
+        if declared.get("market_id", config["market_id"]) != config["market_id"]:
             raise ValueError("research_input_semantics_mismatch")
         actual_specs[data_id] = ProcessedDataSpec(
-            data_id=data_id,
+            data_id=declared["data_id"],
             market_id=config["market_id"],
             kind=declared.get("kind", "panel"),
             frequency=declared["frequency"],
@@ -648,6 +668,13 @@ def assemble(config: Mapping) -> Path:
         for column, role in item.column_roles.items()
         if role is ColumnRole.LABEL and column in sessions[data_id].logical_columns
     }
+    selected_features = {
+        column for column, role in selected_roles.items() if role is ColumnRole.FEATURE
+    }
+    reused_features = config.get(
+        "feature_columns",
+        [column for column in selected_roles if column in selected_features],
+    )
     factors = config.get(
         "factor_columns",
         [
@@ -672,6 +699,7 @@ def assemble(config: Mapping) -> Path:
     sparse_inputs = config.get("sparse_input_data_ids", [])
     for name, values in (
         ("factor_columns", factors),
+        ("feature_columns", reused_features),
         ("label_columns", labels),
         ("filter_columns", filters),
         ("context_columns", context),
@@ -679,7 +707,6 @@ def assemble(config: Mapping) -> Path:
     ):
         if (
             type(values) is not list
-            or (name == "factor_columns" and not values)
             or any(type(value) is not str or not value for value in values)
             or len(set(values)) != len(values)
         ):
@@ -693,6 +720,40 @@ def assemble(config: Mapping) -> Path:
         raise ValueError("assemble_factor_not_available")
     if set(factors) - selected_factors:
         raise ValueError("assemble_factor_not_selected")
+    if set(reused_features) - selected_features:
+        raise ValueError("assemble_feature_not_selected")
+    if not factors and not reused_features:
+        raise ValueError("research_factor_or_feature_columns_required")
+    # A selected feature and its declared companions remain one producer's facts.
+    feature_producers = {}
+    for column in tuple(reused_features):
+        candidates = [
+            name
+            for name, session in sessions.items()
+            if column in session.logical_columns
+        ]
+        if len(candidates) != 1:
+            raise ValueError("duplicate_research_output_columns: " + column)
+        name = candidates[0]
+        declared = actual_specs[name].required_columns
+        companions = [column]
+        for value in canonical_feature_validity_columns((column,), declared):
+            suffix = value[len("feature_") :]
+            companions.extend(
+                c
+                for c in (
+                    value,
+                    "feature_missing_" + suffix,
+                    "feature_observed_" + suffix,
+                )
+                if c in declared
+            )
+        for companion in companions:
+            if companion in feature_producers and feature_producers[companion] != name:
+                raise ValueError("duplicate_research_output_columns: " + companion)
+            feature_producers[companion] = name
+            if companion not in reused_features:
+                reused_features.append(companion)
     generated_labels = {"model_target"} if config["market_id"] == "a_share" else set()
     if (
         set(labels)
@@ -717,7 +778,7 @@ def assemble(config: Mapping) -> Path:
     business_columns = set((*factors, *labels, *filters, *context))
     recipe = config.get(
         "feature_recipe",
-        "a_share_canonical" if config["market_id"] == "a_share" else None,
+        "a_share_canonical" if config["market_id"] == "a_share" and factors else None,
     )
     options = config.get("feature_transform", {})
     if not isinstance(options, Mapping) or set(options) - {
@@ -738,15 +799,36 @@ def assemble(config: Mapping) -> Path:
         if recipe is not None
         else ()
     )
-    features = tuple(
+    generated_features = tuple(
         column for transform in transforms for column in transform.output_columns
     )
+    if set(generated_features).intersection(reused_features):
+        raise ValueError("assemble_feature_output_conflict")
+    features = (*reused_features, *generated_features)
     labels, context = list(labels), list(context)
-    availability = {
-        label: maturity
-        for item in actual_specs.values()
-        for label, maturity in item.label_availability_columns.items()
-    }
+    availability = {}
+    maturity_producers = {}
+    for label in (
+        *labels,
+        *(("forward_return_20d",) if "model_target" in labels else ()),
+    ):
+        candidates = [
+            name
+            for name, session in sessions.items()
+            if label in session.logical_columns
+        ]
+        if len(candidates) > 1:
+            raise ValueError("duplicate_research_output_columns: " + label)
+        if candidates:
+            maturity = actual_specs[candidates[0]].label_availability_columns.get(label)
+            if maturity:
+                availability[label] = maturity
+                if (
+                    maturity in maturity_producers
+                    and maturity_producers[maturity] != candidates[0]
+                ):
+                    raise ValueError("duplicate_research_output_columns: " + maturity)
+                maturity_producers[maturity] = candidates[0]
     if "model_target" in labels:
         if "forward_return_20d" not in availability:
             raise ValueError("model_target_label_availability_required")
@@ -769,14 +851,17 @@ def assemble(config: Mapping) -> Path:
         **dict.fromkeys(factors, ColumnRole.FACTOR),
         **dict.fromkeys(features, ColumnRole.FEATURE),
         **dict.fromkeys(labels, ColumnRole.LABEL),
-        **{column: roles.get(column, ColumnRole.UNIVERSE) for column in filters},
+        **{
+            column: selected_roles.get(column, ColumnRole.UNIVERSE)
+            for column in filters
+        },
         **dict.fromkeys(context, ColumnRole.CONTEXT),
     }
     units = {
         column: unit
-        for item in actual_specs.values()
+        for name, item in actual_specs.items()
         for column, unit in item.column_units.items()
-        if column in output_roles
+        if column in output_roles and column in sessions[name].logical_columns
     }
     for transform in transforms:
         for factor in transform.source_columns:
@@ -820,19 +905,38 @@ def assemble(config: Mapping) -> Path:
     # Explicit input columns bound business candidates; dependency-only columns
     # can still support the declared calculation without leaking into output X.
     required_inputs = set(_required_input_columns(spec))
+    # Explicit projections select the authority for shared dependencies. A dependency
+    # omitted from every projection may be recovered only from a unique producer.
+    producers = {}
+    for column in required_inputs.difference(spec.primary_key).difference(
+        (*_generated_feature_columns(spec), *_generated_semantic_columns(spec))
+    ):
+        if column in feature_producers or column in maturity_producers:
+            producers[column] = feature_producers.get(
+                column, maturity_producers.get(column)
+            )
+            continue
+        candidates = [
+            data_id
+            for data_id, session in sessions.items()
+            if column in session.logical_columns
+        ]
+        if not candidates and column not in business_columns:
+            candidates = [
+                data_id
+                for data_id, item in actual_specs.items()
+                if column in item.required_columns
+            ]
+        if len(candidates) > 1:
+            raise ValueError("duplicate_research_output_columns: " + column)
+        if candidates:
+            producers[column] = candidates[0]
     consumed_specs = {}
     for data_id, item in actual_specs.items():
         consumed = {
             column: role
             for column, role in item.column_roles.items()
-            if column in item.primary_key
-            or (
-                column in required_inputs
-                and (
-                    column in sessions[data_id].logical_columns
-                    or column not in business_columns
-                )
-            )
+            if column in item.primary_key or producers.get(column) == data_id
         }
         consumed_specs[data_id] = replace(
             item,
@@ -848,6 +952,22 @@ def assemble(config: Mapping) -> Path:
                 if label in consumed and maturity in consumed
             },
         )
+    spec = replace(
+        spec,
+        column_units={
+            **{
+                column: unit
+                for column, unit in spec.column_units.items()
+                if column in generated_features or column == "model_target"
+            },
+            **{
+                column: unit
+                for item in consumed_specs.values()
+                for column, unit in item.column_units.items()
+                if column in output_roles
+            },
+        },
+    )
     _validate_research_input_specs(spec, consumed_specs)
     existing = ()
     projected = {}
@@ -857,13 +977,45 @@ def assemble(config: Mapping) -> Path:
         )
         projected[data_id] = sessions[data_id].projected_view(columns)
         existing = tuple(dict.fromkeys((*existing, *columns)))
+    feature_lineage = {}
+    for name, session in sessions.items():
+        columns = {
+            column for column, producer in feature_producers.items() if producer == name
+        }
+        if not columns:
+            continue
+        inherited = session.manifest.get("producer_diagnostics", {}).get(
+            "reused_feature_transforms", {}
+        )
+        feature_lineage.update(
+            {column: inherited[column] for column in columns if column in inherited}
+        )
+        for transform in session.spec.get("feature_transforms", []):
+            outputs = FeatureTransformSpec(
+                **{**transform, "source_columns": tuple(transform["source_columns"])}
+            ).output_columns
+            feature_lineage.update(
+                {column: transform for column in outputs if column in columns}
+            )
     return _assemble_research_dataset_from_sessions(
         output_root=Path(config["output_root"]),
         spec=spec,
         time_window=window,
         input_sessions=projected,
         metadata={
+            "producer_diagnostics": {"reused_feature_transforms": feature_lineage},
             "parameters": {
+                "base_input_data_id": base_input,
+                "input_data_ids": {
+                    name: session.spec["data_id"] for name, session in sessions.items()
+                },
+                "input_columns": {
+                    name: list(session.logical_columns)
+                    for name, session in projected.items()
+                },
+                "feature_columns": list(reused_features),
+                "filter_columns": list(filters),
+                "context_columns": list(context),
                 "factor_columns": list(factors),
                 "label_columns": list(labels),
                 "feature_recipe": recipe,
@@ -885,6 +1037,6 @@ def assemble(config: Mapping) -> Path:
                 ),
                 "sparse_input_data_ids": sparse_inputs,
                 "time_window": dict(bounds),
-            }
+            },
         },
     )

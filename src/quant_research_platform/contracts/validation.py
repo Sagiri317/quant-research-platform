@@ -162,12 +162,7 @@ def strict_timestamp_series(
             error=error,
         )
     if isinstance(parsed.dtype, pd.DatetimeTZDtype):
-        local_naive = parsed.dt.tz_localize(None)
-        utc_naive = parsed.dt.tz_convert("UTC").dt.tz_localize(None)
-        offsets = local_naive - utc_naive
-        if offsets.min() < offsets.max():
-            raise ValueError(error)
-        parsed = utc_naive
+        parsed = parsed.dt.tz_convert("UTC").dt.tz_localize(None)
     try:
         return pd.Series(parsed, index=series.index, dtype="datetime64[ns]")
     except (TypeError, ValueError, OverflowError):
@@ -186,7 +181,6 @@ def _strict_timestamp_series_fallback(
 ) -> pd.Series:
     parsed_values: list[pd.Timestamp | pd.NaTType] = []
     aware: bool | None = None
-    offset: object = None
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
@@ -205,10 +199,7 @@ def _strict_timestamp_series_fallback(
                 timestamp_aware = timestamp_offset is not None
                 if aware is None:
                     aware = timestamp_aware
-                    offset = timestamp_offset
-                elif timestamp_aware != aware or (
-                    timestamp_aware and timestamp_offset != offset
-                ):
+                elif timestamp_aware != aware:
                     raise ValueError(error)
                 if timestamp_aware:
                     timestamp = timestamp.tz_convert("UTC").tz_localize(None)

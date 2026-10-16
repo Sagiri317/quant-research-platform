@@ -307,10 +307,19 @@ def test_permutation_requires_calibrated_rank_mse(tmp_path):
     assert tables["permutation_summary"].status.eq("DEFINED").all()
 
 
-def test_temporal_blocks_split_episodes_and_reject_gaps(tmp_path):
+@pytest.mark.parametrize("step_seconds", [86400, 0.1])
+def test_temporal_blocks_split_episodes_and_reject_gaps(tmp_path, step_seconds):
     _, frame, config = _case(tmp_path)
     frame = frame.loc[frame.asset_id.eq("a")].copy()
     frame["episode"] = "first"
+    future = frame.timestamp.ge("2020-01-06")
+    frame["timestamp"] = frame.timestamp.astype("datetime64[ns]")
+    frame.loc[future, "timestamp"] = pd.date_range(
+        "2020-01-06",
+        periods=int(future.sum()),
+        freq=pd.Timedelta(seconds=step_seconds),
+    ).as_unit("ns")
+    frame["label_available_at"] = frame.timestamp
     frame.to_parquet(config["inputs"], index=False)
     config["input_spec"]["column_roles"]["episode"] = "context"
     config["selection"].update(max_dates=None, max_rows=5)
@@ -324,12 +333,13 @@ def test_temporal_blocks_split_episodes_and_reject_gaps(tmp_path):
         "root_seed": 12,
         "episode_column": "episode",
         "block_size": 2,
-        "step_seconds": 86400,
+        "step_seconds": step_seconds,
     }
-    _, tables = read_explanation(explain(config))
+    metadata, tables = read_explanation(explain(config))
+    assert metadata["permutation"]["config"]["step_seconds"] == step_seconds
     assert tables["permutation_summary"].period_count.eq(1).all()
     config["output"] += "-gap"
-    frame = frame.loc[frame.timestamp.ne("2020-01-08")]
+    frame = frame.drop(frame.index[7])
     frame.to_parquet(config["inputs"], index=False)
     with pytest.raises(ValueError, match="episode_too_short"):
         explain(config)
@@ -791,3 +801,71 @@ def test_xgboost_squared_log_error_still_has_identity_prediction_output(tmp_path
         tables["predictions"].explained_output, tables["predictions"].prediction_score
     )
     assert tables["predictions"].status.eq("DEFINED").all()
+
+
+@pytest.mark.parametrize("step_seconds", [0.1, 0.000000001, 1, 1.5])
+def test_temporal_permutation_exact_subsecond_continuity(step_seconds):
+    from quant_research_platform.research.models.explanations import (
+        _permutation_config,
+        _permutation_segments,
+    )
+
+    config = _permutation_config(
+        {
+            "metrics": ["ic"],
+            "cutoff": "2020-01-10",
+            "axis": "temporal_blocks",
+            "groups": {"x": ["x"]},
+            "repeats": 1,
+            "root_seed": 12,
+            "episode_column": "episode",
+            "block_size": 2,
+            "step_seconds": step_seconds,
+        },
+        ["x"],
+    )
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range(
+                "2020-01-06", periods=6, freq=pd.Timedelta(seconds=step_seconds)
+            ).as_unit("ns"),
+            "asset_id": "a",
+            "episode": "first",
+        }
+    )
+    assert [part.tolist() for part in _permutation_segments(frame, config)] == [
+        list(range(6))
+    ]
+    frame.loc[3:, "timestamp"] += pd.Timedelta(1, unit="ns")
+    assert [part.tolist() for part in _permutation_segments(frame, config)] == [
+        [0, 1, 2],
+        [3, 4, 5],
+    ]
+    frame.loc[1, "timestamp"] += pd.Timedelta(1, unit="ns")
+    with pytest.raises(ValueError, match="episode_too_short"):
+        _permutation_segments(frame, config)
+
+
+@pytest.mark.parametrize(
+    "step", [True, "0.1", 0, -0.1, np.nan, np.inf, 1e-10, 0.1000000001]
+)
+def test_temporal_permutation_rejects_unrepresentable_steps(step):
+    from quant_research_platform.research.models.explanations import _permutation_config
+
+    with pytest.raises(
+        ValueError, match="step_seconds_invalid|qrp_json_nonfinite_number"
+    ):
+        _permutation_config(
+            {
+                "metrics": ["ic"],
+                "cutoff": "2020-01-10",
+                "axis": "temporal_blocks",
+                "groups": {"x": ["x"]},
+                "repeats": 1,
+                "root_seed": 12,
+                "episode_column": "episode",
+                "block_size": 2,
+                "step_seconds": step,
+            },
+            ["x"],
+        )

@@ -85,12 +85,19 @@ class AShareFeeSource:
 def load_a_share_fee_source(
     *,
     reference_root: Path,
+    fee_csv: Path | None = None,
+    fee_sidecar: Path | None = None,
 ) -> AShareFeeSource:
-    """Read the designated reference CSV and its metadata sidecar."""
+    """Read an explicit CSV/sidecar pair, or the existing reference-root default."""
+
+    if (fee_csv is None) != (fee_sidecar is None):
+        raise ValueError("a_share_fee_source_pair_required")
 
     root = Path(reference_root) / "a_share_fee_schedule"
-    csv_path = root / A_SHARE_FEE_CSV_NAME
-    sidecar_path = root / A_SHARE_FEE_SIDECAR_NAME
+    csv_path = root / A_SHARE_FEE_CSV_NAME if fee_csv is None else Path(fee_csv)
+    sidecar_path = (
+        root / A_SHARE_FEE_SIDECAR_NAME if fee_sidecar is None else Path(fee_sidecar)
+    )
     csv_identity = _file_identity(csv_path)
     sidecar_identity = _file_identity(sidecar_path)
     metadata, sidecar_sha256 = _read_sidecar(sidecar_path, sidecar_identity)
@@ -103,8 +110,8 @@ def load_a_share_fee_source(
     digest = hashlib.sha256()
     for name, member_hash in sorted(
         (
-            (A_SHARE_FEE_CSV_NAME, csv_sha256),
-            (A_SHARE_FEE_SIDECAR_NAME, sidecar_sha256),
+            (csv_path.name, csv_sha256),
+            (sidecar_path.name, sidecar_sha256),
         )
     ):
         for value in (name, member_hash):

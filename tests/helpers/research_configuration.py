@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from quant_research_platform.contracts.models import _model_spec
+from quant_research_platform.contracts.models import _MODEL_ALGORITHM_FACTS, _model_spec
 
 CONFIG_ROOT = Path(__file__).resolve().parents[2] / "docs" / "research-rosters"
 
@@ -70,9 +70,7 @@ def configured_models(scenario="pv_all", *, factor_scope="core"):
     return model_specs(research_configuration(name=name)["models"])
 
 
-A_SHARE_MODEL_ALGORITHMS = tuple(
-    model["model_algorithm"] for model in research_configuration()["models"]
-)
+A_SHARE_MODEL_ALGORITHMS = tuple(_MODEL_ALGORITHM_FACTS)
 
 
 PV25_FACTORS = tuple(research_configuration(name="pv25")["evaluation"]["factors"])

@@ -917,8 +917,8 @@ def materialize_interim_data(
     raw_root: Path,
     output_roots: Mapping[str, Path],
     data_ids: tuple[str, ...] = DEFAULT_INTERIM_DATA_IDS,
-    start_date: str | None = "2014-01-01",
-    end_date: str | None = "2025-12-31",
+    start_date: str | None = None,
+    end_date: str | None = None,
     chunksize: int = 500000,
     metadata: Mapping[str, object] | None = None,
 ) -> InterimImportResult:

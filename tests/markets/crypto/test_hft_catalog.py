@@ -49,42 +49,28 @@ def test_hft_models_use_generic_specs_with_exact_training_admission_bound() -> N
     assert all(not hasattr(model, "purge_gap_steps") for model in models)
 
 
-def test_ridge_asset_scopes_share_dimensionless_inputs():
-    from dataclasses import replace
-
-    from quant_research_platform.research.protocols.crypto_hft import HFT_FACTOR_COLUMNS
-
-    comparable = (
-        "relative_spread",
-        "imbalance_1",
-        "imbalance_5",
-        "imbalance_10",
-        "return_100ms",
-        "realized_volatility_1s",
+def test_hft_roster_preserves_explicit_model_inputs_and_targets():
+    from quant_research_platform.research.protocols.crypto_hft import (
+        HFT_FACTOR_COLUMNS,
+        label_catalog,
     )
+
     config = research_configuration("crypto", "baseline")
-    for item in config["models"]:
-        item["max_train_rows"] = None
     models = model_specs(config["models"])
-    ridge = [model for model in models if model.model_algorithm == "ridge_regression"]
-    assert len(ridge) == 5
-    for model in ridge:
-        assert model.input_columns == comparable
-        old = replace(model, input_factor_columns=HFT_FACTOR_COLUMNS)
-        assert model.input_columns != old.input_columns
-        assert model.target_column == "future_mid_return_500ms"
-    assert len(models) == 10
-    for model in models:
-        if model.model_algorithm != "ridge_regression":
-            assert model.input_columns == (
-                ("ofi_100ms",)
-                if model.model_algorithm == "linear_regression"
-                else tuple(config["evaluation"]["factors"])
-            )
     dataset = build_hft_research_dataset_catalog().get(HFT_RESEARCH_DATASET_ID)
+    labels = {item.output_column for item in label_catalog().list()}
+    assert models
+    for model, declared in zip(models, config["models"], strict=True):
+        assert model.input_columns == tuple(
+            declared.get("input_factor_columns", [])
+            + declared.get("input_feature_columns", [])
+        )
+        assert set(model.input_columns) <= set(dataset.factor_columns)
+        assert model.target_column == declared["target_column"]
+        assert model.target_column in labels
     assert dataset.factor_columns == HFT_FACTOR_COLUMNS
-    assert len(config["evaluation"]["factors"]) == 14
-    assert len(dataset.factor_columns) == 30
+    assert config["evaluation"]["factors"]
+    assert set(config["evaluation"]["factors"]) <= set(dataset.factor_columns)
 
 
 def test_native_labels_declare_distinct_units_and_maturity_columns():

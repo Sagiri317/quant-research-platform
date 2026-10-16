@@ -1,0 +1,18 @@
+{
+  "market_id": "a_share",
+  "dataset_id": "selected-existing-features",
+  "inputs": {
+    "features": {
+      "path": "results/feature-dataset",
+      "columns": ["feature_momentum_20d", "eligible"]
+    }
+  },
+  "base_input_data_id": "features",
+  "factor_columns": [],
+  "feature_columns": ["feature_momentum_20d"],
+  "feature_recipe": null,
+  "filter_columns": ["eligible"],
+  "label_columns": [],
+  "time_window": {"start": "2024-01-01", "end": "2025-12-31"},
+  "output_root": "results/selected-existing-features"
+}

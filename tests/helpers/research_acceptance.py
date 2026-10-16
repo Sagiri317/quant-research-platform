@@ -74,20 +74,14 @@ def prepare_a_share_acceptance(root: Path):
     paths = {}
     for source, names in source_groups.items():
         outputs = {name: str(root / "normalized" / name) for name in sorted(names)}
-        requests = (
-            [{name: path} for name, path in outputs.items()]
-            if source == "reference"
-            else [outputs]
+        receipt = prepare_source(
+            {
+                "source_id": source,
+                "raw_root": str(root / "data/raw" / source),
+                "outputs": outputs,
+            }
         )
-        for requested in requests:
-            receipt = prepare_source(
-                {
-                    "source_id": source,
-                    "raw_root": str(root / "data/raw" / source),
-                    "outputs": requested,
-                }
-            )
-            assert not receipt.skipped, receipt.skipped
+        assert not receipt.skipped, receipt.skipped
         paths.update({name: Path(path) for name, path in outputs.items()})
     history = {"start": "2016-07-21", "end": "2019-10-31"}
     for name in processed_names:

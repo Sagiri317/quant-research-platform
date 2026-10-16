@@ -260,6 +260,16 @@ def _write_evaluation_artifact_chunks(
             for item in active_chunks:
                 value = item
                 metrics, grouped, metadata = value
+                if "input_observations" in metadata:
+                    if (
+                        science is None
+                        or "input_observations" not in science["input_facts"]
+                    ):
+                        raise ValueError("evaluation_input_observations_missing")
+                    observations = science["input_facts"]["input_observations"]
+                    if set(observations) & set(metadata["input_observations"]):
+                        raise ValueError("evaluation_input_observations_duplicate")
+                    observations.update(metadata["input_observations"])
                 validate_output_frame(
                     metrics,
                     required=required["metrics"],

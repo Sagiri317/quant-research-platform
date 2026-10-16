@@ -241,7 +241,6 @@ def test_public_industry_source_reaches_interim_and_real_panel(tmp_path):
         raw_root=raw_root / "reference",
         output_roots={data_id: root},
         data_ids=(data_id,),
-        start_date="2019-01-01",
         end_date="2020-12-31",
     )
     snapshots = read_dataset(root)
@@ -328,7 +327,6 @@ def test_industry_snapshot_range_uses_publication_not_observation(tmp_path):
         },
         raw_root=root / "reference",
         data_ids=(data_id,),
-        start_date="2011-01-01",
         end_date="2023-12-31",
     )
     frame = read_dataset(layout.interim_data_root("reference", data_id))

@@ -699,7 +699,7 @@ def _validate_model_selection_trial_record(trial: object) -> None:
             )
         ):
             raise ValueError("invalid_model_metadata")
-    if (
+    if trial["validation_mse"] is not None and (
         type(trial["validation_mse"]) not in {int, float}
         or not np.isfinite(float(trial["validation_mse"]))
         or trial["validation_mse"] < 0

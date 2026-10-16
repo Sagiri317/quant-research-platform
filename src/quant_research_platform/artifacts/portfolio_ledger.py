@@ -95,7 +95,14 @@ class PortfolioLedgerArtifact:
     metadata: dict
     root: Path
     capital: PortfolioCapital
-    final_alpha_calibration: Mapping[str, object] | None = None
+    _final_alpha_calibration_member: str | None = None
+
+    @property
+    def final_alpha_calibration(self) -> Mapping[str, object] | None:
+        """Load optional final calibration only when explicitly consumed."""
+        if self._final_alpha_calibration_member is None:
+            return None
+        return read_qrp_json_file(self.root / self._final_alpha_calibration_member)[1]
 
     def iter_chunks(self) -> Iterator[PortfolioLedgerBatch]:
         yield from _iter_batches(self.root, self.capital, self.metadata["window"])
@@ -216,9 +223,7 @@ def read_portfolio_ledger_artifact(
         manifest["metadata"],
         root,
         PortfolioCapital(**manifest["capital"]),
-        read_qrp_json_file(root / "final_alpha_calibration.json")[1]
-        if manifest.get("final_alpha_calibration") is not None
-        else None,
+        manifest.get("final_alpha_calibration"),
     )
     if consume_batches is not None:
         with closing_iterator(artifact.iter_chunks()) as batches:
