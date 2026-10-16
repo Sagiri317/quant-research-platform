@@ -347,6 +347,8 @@ def build_a_share_statistics_tables(
     )
     with closing_iterator(chunks):
         for session in chunks:
+            if session.empty:
+                continue
             mature = legal_training_rows(
                 session,
                 fitting_cutoff=(
@@ -489,6 +491,8 @@ def build_a_share_statistics_tables(
                     )
     if prediction_lookup.coverage_counts() != (0, 0):
         raise ValueError("prediction_dataset_coverage_mismatch")
+    if not rank_records:
+        raise ValueError("statistics_model_observations_empty")
     rank_by_date = pd.DataFrame.from_records(rank_records)
     prediction_summaries = []
     if set(analyses) & {"prediction_hac", "prediction_bootstrap"}:
