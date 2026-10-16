@@ -250,6 +250,18 @@ def test_zero_nav_rights_recovery_persists_amounts_and_undefined_returns(
                 )
             ]
         )
+    if tiny:
+        from tests.helpers.benchmark_references import reference_input
+
+        manifest["analyses"].append("benchmark_comparison")
+        manifest["execution_mode"] = "continuous"
+        manifest["comparison_benchmarks"] = [
+            reference_input(
+                tmp_path / "tiny-reference.parquet",
+                [initial, initial, initial, 500.0, 500.0],
+                dates=dates[1:],
+            )
+        ]
     tables = _portfolio_statistics_tables(
         ledgers=ledgers,
         candidates=candidates,
@@ -283,20 +295,17 @@ def test_zero_nav_rights_recovery_persists_amounts_and_undefined_returns(
     )
     assert first.net_return.iloc[3] == (0.0 if is_cash else 0.1)
     if tiny:
-        enhanced_id = next(
-            candidate.candidate_id
-            for candidate in candidates
-            if candidate.benchmark_id is not None
-        )
-        enhanced = daily.loc[daily.candidate_id.eq(enhanced_id)]
-        assert enhanced.benchmark_status.tolist() == [
-            "DEFINED",
-            "DEFINED",
-            "UNDEFINED",
-            "DEFINED",
-        ]
-        assert enhanced.benchmark_reason.iloc[2] == "nonfinite_result"
-        assert enhanced.relative_wealth.eq(1.0).all()
+        compared = tables["portfolio_benchmark_intervals"]
+        for _, enhanced in compared.groupby("candidate_id"):
+            assert enhanced.benchmark_status.tolist() == [
+                "DEFINED",
+                "DEFINED",
+                "UNDEFINED",
+                "DEFINED",
+            ]
+            assert enhanced.benchmark_reason.iloc[2] == "nonfinite_result"
+            assert enhanced.relative_wealth.iloc[:2].eq(1).all()
+            assert enhanced.relative_wealth.iloc[2:].isna().all()
     performance = tables["portfolio_performance"].set_index(
         ["candidate_id", "metric_id"]
     )
@@ -319,6 +328,7 @@ def test_zero_nav_rights_recovery_persists_amounts_and_undefined_returns(
     metadata = statistics_metadata(
         TimeWindow(window["start"], window["end"]),
         sample_role=access,
+        execution_mode="continuous",
         candidate_ids=[c.candidate_id for c in candidates],
         comparison_portfolio_ids=manifest["statistics"]["group_comparison"][
             "portfolio_ids"

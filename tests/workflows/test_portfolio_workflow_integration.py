@@ -422,7 +422,6 @@ def test_native_adv_gap_preserves_portfolio_statistics(tmp_path):
             "statistics": policy,
             "analyses": [
                 "performance",
-                "benchmark",
                 "attribution",
                 "capacity",
                 "sharpe_inference",

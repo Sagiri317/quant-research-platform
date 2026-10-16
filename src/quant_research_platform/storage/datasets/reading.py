@@ -80,6 +80,7 @@ class DatasetSession:
     all_paths: tuple[Path, ...]
     read_paths: tuple[Path, ...]
     _expected_partition_rows: tuple[tuple[str, int], ...] | None = None
+    _allow_infinite_columns: tuple[str, ...] = ()
 
     @property
     def spec(self) -> dict[str, Any]:
@@ -296,6 +297,18 @@ def _dataset_input_options(value):
             type(item) not in (tuple, list) or len(item) != 3 for item in filters
         ):
             raise ValueError("dataset_row_filters_invalid")
+        for column, operator, items in filters:
+            if type(column) is not str or not column:
+                raise ValueError("dataset_row_filters_invalid")
+            if (
+                options.get("spec") is not None
+                and column not in options["spec"].required_columns
+            ):
+                raise ValueError("dataset_filter_column_not_found")
+            if type(operator) is not str or operator not in {"==", "in"}:
+                raise ValueError("unsupported_dataset_physical_filter")
+            if operator == "in" and (type(items) not in (tuple, list) or not items):
+                raise ValueError("invalid_dataset_physical_filter_value")
         options["row_filters"] = tuple(
             (
                 column,
@@ -625,8 +638,15 @@ def iter_dataset_chunks(
                 key_index = ExactPrimaryKeyIndex(primary_key=keys)
             if key_index.add_table(pa.Table.from_batches([batch])):
                 raise ValueError("duplicate_dataset_primary_key")
-        for column in batch.columns:
-            if pa.types.is_floating(column.type) and pc.any(pc.is_inf(column)).as_py():
+        for field, column in zip(batch.schema, batch.columns, strict=True):
+            if (
+                (
+                    field.name not in context._allow_infinite_columns
+                    or field.name in keys
+                )
+                and pa.types.is_floating(column.type)
+                and pc.any(pc.is_inf(column)).as_py()
+            ):
                 raise ValueError("dataset_infinite_value")
         if batch_observer is not None:
             batch_observer(batch, frame)

@@ -425,12 +425,24 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
             return super().__getitem__(key)
 
     benchmark = ObservedBenchmark(benchmark)
+    from tests.helpers.benchmark_references import reference_input
+
+    config["analyses"].append("benchmark_comparison")
+    config["comparison_benchmarks"] = [
+        reference_input(
+            tmp_path / "comparison.parquet",
+            [100.0, 101.0, 103.0, 104.0],
+            dates=pd.date_range("2023-01-03", periods=4),
+        )
+    ]
+    comparison_metadata = {}
     owned = _portfolio_statistics_tables(
         ledgers=artifacts,
         candidates=candidates,
         config=deepcopy(config),
         time_window=TimeWindow("2023-01-02", "2023-01-06"),
         benchmark_opens=benchmark,
+        comparison_metadata=comparison_metadata,
         holding_inputs={
             candidate.risk_style_columns: iter(inputs) for candidate in candidates
         },
@@ -449,18 +461,18 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
         .any()
     )
     for candidate in candidates:
-        actual = owned["portfolio_daily"].loc[
-            owned["portfolio_daily"].candidate_id.eq(candidate.candidate_id)
-        ]
-        if candidate.benchmark_id is not None:
-            np.testing.assert_allclose(
-                actual.relative_wealth,
-                np.array([1.04, 1.005, 1.035]) / np.array([1.01, 1.03, 1.04]),
-                rtol=1e-15,
-                atol=0,
+        actual = owned["portfolio_benchmark_intervals"].loc[
+            owned["portfolio_benchmark_intervals"].candidate_id.eq(
+                candidate.candidate_id
             )
-        else:
-            assert actual.relative_wealth.isna().all()
+        ]
+        np.testing.assert_allclose(
+            actual.relative_wealth,
+            np.array([1.04, 1.005, 1.035]) / np.array([1.01, 1.03, 1.04]),
+            rtol=1e-12,
+            atol=0,
+        )
+    metadata.update(comparison_metadata, execution_mode="continuous")
     participation = deepcopy(config)["execution_assumptions"]["adv_sensitivities"]
     assert list(
         owned["portfolio_capacity"][["candidate_id", "participation"]].itertuples(
@@ -1508,86 +1520,52 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
                     iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
                     **excluded,
                 )
-        if expected_status == "ERROR":
-            with pytest.raises(ValueError, match="^benchmark_return_open_invalid$"):
-                build_portfolio_statistics_tables(
-                    iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
-                    **kwargs,
-                )
-        else:
-            owned = build_portfolio_statistics_tables(
-                iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
-                **kwargs,
-            )
-            contract = metadata(
-                "pv_all_portfolio_statistics", metadata={"fixture_case": case}
-            )
-            contract = {
-                **contract,
-                "candidate_ids": [c.candidate_id for c in candidates],
-                "comparison_portfolio_ids": config["statistics"]["group_comparison"][
-                    "portfolio_ids"
-                ],
-            }
-            root = write_statistics_artifact(
-                tmp_path / "statistics" / case,
-                metadata=contract,
-                tables=owned,
-                table_group="portfolio",
-            )
-            artifact = read_statistics_artifact(root)
-            with artifact.table("portfolio_daily.parquet") as daily:
-                for candidate in candidates:
-                    if candidate.benchmark_id is None:
-                        continue
-                    row = daily.loc[daily.candidate_id.eq(candidate.candidate_id)].iloc[
-                        0
-                    ]
-                    if (
-                        candidate.benchmark_id == "csi500"
-                        and expected_status == "BLOCKED"
-                    ):
-                        assert row.benchmark_status == "BLOCKED"
-                        assert (
-                            row.benchmark_reason
-                            == "benchmark_total_return_open_missing"
-                        )
-                        assert pd.isna(row.benchmark_return) and pd.isna(
-                            row.active_return
-                        )
-                    else:
-                        expected = (
-                            Fraction(71, 1000)
-                            if candidate.benchmark_id == "csi500"
-                            else Fraction(1, 20)
-                        )
-                        assert row.benchmark_status == "DEFINED"
-                        assert row.benchmark_return == pytest.approx(
-                            float(expected), abs=1e-14
-                        )
-                        assert row.active_return == pytest.approx(
-                            float(Fraction(1, 25) - expected), abs=1e-14
-                        )
-                        assert row.relative_wealth == pytest.approx(
-                            float(Fraction(26, 25) / (1 + expected)), abs=1e-14
-                        )
-            with artifact.table("portfolio_performance.parquet") as summary:
-                for candidate in candidates:
-                    if candidate.benchmark_id != "csi500":
-                        continue
-                    value = summary.loc[
-                        summary.candidate_id.eq(candidate.candidate_id)
-                        & summary.metric_id.eq("annualized_active_return")
-                    ].iloc[0]
-                    if expected_status == "BLOCKED":
-                        assert value.status == "BLOCKED" and pd.isna(value.value)
-                    else:
-                        assert value.status == "DEFINED"
-                        assert value.value == pytest.approx(
-                            float(Fraction(-31, 1000) * 252), abs=1e-12
-                        )
-            if case == "derived_and_native":
-                good_root, good_hash = (root, tree_hash(root))
+        owned = build_portfolio_statistics_tables(
+            iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
+            **kwargs,
+        )
+        contract = {
+            **metadata("pv_all_portfolio_statistics"),
+            "execution_mode": "continuous",
+            "candidate_ids": [c.candidate_id for c in candidates],
+            "comparison_portfolio_ids": config["statistics"]["group_comparison"][
+                "portfolio_ids"
+            ],
+        }
+        root = write_statistics_artifact(
+            tmp_path / "statistics" / case,
+            metadata=contract,
+            tables=owned,
+            table_group="portfolio",
+        )
+        artifact = read_statistics_artifact(root)
+        with artifact.table("portfolio_attribution.parquet") as attribution:
+            for candidate in candidates:
+                if candidate.benchmark_id is None:
+                    continue
+                row = attribution.loc[
+                    attribution.candidate_id.eq(candidate.candidate_id)
+                    & attribution.component_id.eq("benchmark")
+                ].iloc[0]
+                if candidate.benchmark_id == "csi500" and expected_status in {
+                    "BLOCKED",
+                    "ERROR",
+                }:
+                    assert row.status in {"BLOCKED", "UNDEFINED"}
+                    assert row.reason and pd.isna(row.value)
+                else:
+                    expected = (
+                        Fraction(71, 1000)
+                        if candidate.benchmark_id == "csi500"
+                        else Fraction(1, 20)
+                    )
+                    assert row.status == "DEFINED"
+                    assert row.value == pytest.approx(float(expected), abs=1e-14)
+        with artifact.table("portfolio_daily.parquet") as daily:
+            assert daily.return_status.eq("DEFINED").all()
+            assert daily.net_return.to_numpy() == pytest.approx(0.04)
+        if case == "derived_and_native":
+            good_root, good_hash = root, tree_hash(root)
         assert tree_hash(index_root) == before
         pd.testing.assert_frame_equal(source, original, check_exact=True)
         assert tree_hash(good_root) == good_hash

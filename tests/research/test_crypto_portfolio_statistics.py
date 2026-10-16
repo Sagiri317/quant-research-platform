@@ -61,6 +61,7 @@ def _statistics(ledger, output, plan):
     return crypto_statistics(
         {
             "ledger": str(ledger),
+            "analyses": ["performance", "annualized", "execution", "cost_sensitivity"],
             "output": str(output),
             "statistics": {
                 "annualization_minimum_observations": 2,
@@ -318,7 +319,7 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
                         == 0.0
                     )
                     rows = daily.loc[daily.candidate_id.eq(candidate.candidate_id)]
-                    assert len(rows) == 5 and rows.benchmark_return.eq(0).all()
+                    assert len(rows) == 5 and "benchmark_return" not in rows
                     assert rows.iloc[-1].start_nav == 1500.0
                     assert rows.iloc[-1].net_return == -0.1
                     if missing_boundary:

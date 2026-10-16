@@ -157,3 +157,238 @@ def _validate_label_input_frame(
     if result.duplicated([asset_column, date_column]).any():
         raise ValueError("duplicate_forward_return_asset_timestamp")
     return result
+
+
+def add_on_id_decomposition(
+    frame: pd.DataFrame,
+    *,
+    horizons: tuple[int, ...],
+    sessions: Sequence[object],
+) -> pd.DataFrame:
+    """Decompose adjusted prices on an explicit session and listing-lifecycle axis.
+
+    Each component has its own price dependencies. Event clocks are Shanghai
+    exchange events represented as UTC-naive instants, not vendor publication.
+    """
+    from quant_research_platform.contracts.validation import strict_real_numeric_series
+
+    horizons = _validate_horizons(horizons)
+    result = _validate_label_input_frame(
+        frame,
+        asset_column="asset_id",
+        date_column="timestamp",
+        execution_price_column="adj_open",
+    )
+    required = {"adj_close", "listing_date", "can_enter"}
+    if required - set(result):
+        raise ValueError("missing_on_id_columns")
+    raw_axis = strict_timestamp_series(
+        pd.Series(tuple(sessions)), error="invalid_on_id_sessions"
+    )
+    axis = pd.DatetimeIndex(raw_axis)
+    if (
+        axis.empty
+        or axis.has_duplicates
+        or not axis.is_monotonic_increasing
+        or not axis.equals(axis.normalize())
+        or not result.timestamp.isin(axis).all()
+    ):
+        raise ValueError("invalid_on_id_sessions")
+    result["listing_date"] = strict_timestamp_series(
+        result.listing_date, error="invalid_on_id_listing_date", allow_null=True
+    )
+    for column in ("adj_open", "adj_close"):
+        result[column] = strict_real_numeric_series(
+            result[column], error="invalid_on_id_price_type"
+        )
+    result["can_enter"] = strict_bool_series(
+        result.can_enter, error="invalid_on_id_can_enter", allow_null=True
+    )
+    pieces = [
+        _on_id_asset_decomposition(group, axis, horizons)
+        for _, group in result.groupby("asset_id", sort=False)
+    ]
+    return pd.concat(pieces, ignore_index=True) if pieces else result
+
+
+def _on_id_asset_decomposition(group, axis, horizons):
+    block = group.sort_values("timestamp").set_index("timestamp").reindex(axis)
+    n = len(block)
+    prices = block[["adj_open", "adj_close"]].to_numpy(dtype="float64")
+    missing = np.isnan(prices)
+    invalid = ~np.isfinite(prices) & ~missing | (prices <= 0)
+    day = _on_id_log_ratio(prices[:, 1], prices[:, 0])
+    night = np.full(n, np.nan)
+    night[:-1] = _on_id_log_ratio(prices[1:, 0], prices[:-1, 1])
+    day_missing, day_invalid = missing.any(axis=1), invalid.any(axis=1)
+    night_missing = np.r_[missing[1:, 0] | missing[:-1, 1], False]
+    night_invalid = np.r_[invalid[1:, 0] | invalid[:-1, 1], False]
+    life = block.listing_date.to_numpy(dtype="datetime64[ns]")
+    life_reasons = {}
+
+    def lifecycle_reason(offset):
+        if offset not in life_reasons:
+            reasons = np.full(n, "insufficient_future_sessions", dtype=object)
+            count = max(0, n - offset)
+            if count:
+                dependencies = np.lib.stride_tricks.sliding_window_view(
+                    life, offset + 1
+                )
+                unknown = np.isnat(dependencies).any(axis=1)
+                crossed = (
+                    (dependencies != life[:count, None])
+                    & ~np.isnat(dependencies)
+                    & ~np.isnat(life[:count, None])
+                ).any(axis=1)
+                reasons[:count] = None
+                reasons[:count][unknown] = "unknown_listing_lifecycle"
+                reasons[:count][crossed] = "lifecycle_boundary"
+            reasons[np.isnat(life)] = "unknown_listing_lifecycle"
+            life_reasons[offset] = reasons
+        return life_reasons[offset].copy()
+
+    def shifted(values, offset, fill):
+        output = np.full(n, fill, dtype=values.dtype)
+        if offset < n:
+            output[: n - offset] = values[offset:]
+        return output
+
+    def window(values, start, width, *, total=False):
+        output = np.full(n, np.nan if total else False, dtype=float if total else bool)
+        count = max(0, n - start - width + 1)
+        if count:
+            windows = np.lib.stride_tricks.sliding_window_view(values[start:], width)
+            output[:count] = windows.sum(axis=1) if total else windows.any(axis=1)
+        return output
+
+    def publish(
+        name,
+        values,
+        price_missing,
+        price_invalid,
+        offset,
+        hour,
+        minute=0,
+        permission=False,
+    ):
+        reasons = lifecycle_reason(offset)
+        reasons[pd.isna(reasons) & price_missing] = "missing_price"
+        reasons[(pd.isna(reasons) | (reasons == "missing_price")) & price_invalid] = (
+            "invalid_price"
+        )
+        if permission:
+            allowed = block.can_enter
+            reasons[allowed.isna().to_numpy()] = "entry_permission_unknown"
+            reasons[allowed.eq(False).fillna(False).to_numpy(dtype=bool)] = (
+                "entry_not_allowed"
+            )
+            reasons[np.isnat(life)] = "unknown_listing_lifecycle"
+        legal = pd.isna(reasons)
+        reasons[legal & ~np.isfinite(values)] = "nonfinite_result"
+        legal = pd.isna(reasons)
+        values = np.where(legal, values, np.nan).astype("float64")
+        maturity = np.full(n, np.datetime64("NaT"), dtype="datetime64[ns]")
+        count = max(0, n - offset)
+        if count:
+            event = (
+                (axis[offset:] + pd.Timedelta(hours=hour, minutes=minute))
+                .tz_localize("Asia/Shanghai")
+                .tz_convert("UTC")
+                .tz_localize(None)
+                .to_numpy(dtype="datetime64[ns]")
+            )
+            maturity[:count] = np.where(legal[:count], event, np.datetime64("NaT"))
+        block[name] = values
+        block[f"{name}_available_at"] = maturity
+        block[f"{name}_reason"] = pd.array(reasons, dtype="string")
+
+    publish("on_id_pre_entry_log_return", night, night_missing, night_invalid, 1, 9, 30)
+    endpoint_parts = []
+    for _, lifecycle in group.groupby("listing_date", sort=False, dropna=False):
+        clean = lifecycle.copy()
+        clean["adj_open"] = clean.adj_open.where(
+            np.isfinite(clean.adj_open) & clean.adj_open.gt(0)
+        )
+        endpoint_parts.append(
+            add_forward_return_labels(clean, horizons=horizons, sessions=axis)
+        )
+    endpoints = pd.concat(endpoint_parts).set_index("timestamp").reindex(axis)
+    for horizon in horizons:
+        intraday = f"on_id_holding_intraday_log_return_{horizon}d"
+        overnight = f"on_id_holding_overnight_log_return_{horizon}d"
+        endpoint = f"on_id_endpoint_return_{horizon}d"
+        publish(
+            intraday,
+            window(day, 1, horizon, total=True),
+            window(day_missing, 1, horizon),
+            window(day_invalid, 1, horizon),
+            horizon,
+            15,
+        )
+        publish(
+            overnight,
+            window(night, 1, horizon, total=True),
+            window(night_missing, 1, horizon),
+            window(night_invalid, 1, horizon),
+            horizon + 1,
+            9,
+            30,
+        )
+        publish(
+            endpoint,
+            endpoints[forward_return_label_column(horizon)].to_numpy(dtype=float),
+            shifted(missing[:, 0], 1, False)
+            | shifted(missing[:, 0], horizon + 1, False),
+            shifted(invalid[:, 0], 1, False)
+            | shifted(invalid[:, 0], horizon + 1, False),
+            horizon + 1,
+            9,
+            30,
+            permission=True,
+        )
+        with np.errstate(over="ignore", invalid="ignore"):
+            reconstructed = np.expm1(block[intraday] + block[overnight])
+        comparable = np.isfinite(block[[intraday, overnight, endpoint]]).all(
+            axis=1
+        ) & np.isfinite(reconstructed)
+        # Bound roundoff in cancelling log legs as well as the endpoint scale.
+        magnitude = window(np.abs(day), 1, horizon, total=True) + window(
+            np.abs(night), 1, horizon, total=True
+        )
+        tolerance = (
+            1e-12
+            + 1e-10 * np.abs(block[endpoint])
+            + 8 * np.finfo(float).eps * magnitude * (1 + np.abs(block[endpoint]))
+        )
+        if ((np.abs(reconstructed - block[endpoint]) > tolerance) & comparable).any():
+            raise ValueError("on_id_endpoint_mismatch")
+        block[f"on_id_decomposition_qualified_{horizon}d"] = comparable.to_numpy(
+            dtype=bool
+        )
+        reasons = (
+            block[f"{endpoint}_reason"]
+            .fillna(block[f"{intraday}_reason"])
+            .fillna(block[f"{overnight}_reason"])
+        )
+        reasons = reasons.mask(
+            ~np.isfinite(reconstructed) & reasons.isna(), "nonfinite_result"
+        )
+        block[f"on_id_decomposition_reason_{horizon}d"] = reasons.astype("string")
+    block.index.name = "timestamp"
+    return block.loc[group.timestamp].reset_index()
+
+
+def _on_id_log_ratio(numerator, denominator):
+    """Preserve tiny relative moves without overflowing wide finite ratios."""
+    valid = (
+        np.isfinite(numerator)
+        & np.isfinite(denominator)
+        & (numerator > 0)
+        & (denominator > 0)
+    )
+    result = np.full(len(numerator), np.nan)
+    near = valid & (numerator * 0.5 <= denominator) & (denominator * 0.5 <= numerator)
+    result[near] = np.log1p((numerator[near] - denominator[near]) / denominator[near])
+    far = valid & ~near
+    result[far] = np.log(numerator[far]) - np.log(denominator[far])
+    return result

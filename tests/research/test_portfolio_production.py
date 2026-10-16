@@ -3086,11 +3086,6 @@ def test_cash_exposure_is_post_execution_ledger_cash(
         sample_role="validation",
         return_status="DEFINED",
         return_reason="",
-        benchmark_return=np.nan,
-        active_return=np.nan,
-        relative_wealth=np.nan,
-        benchmark_status="UNDEFINED",
-        benchmark_reason="not_requested",
     )
     daily = pd.DataFrame(
         [row], columns=STATISTICS_TABLE_COLUMNS["portfolio_daily.parquet"]

@@ -7,6 +7,7 @@ from quant_research_platform.artifacts.statistics import (
     read_statistics_artifact,
     write_statistics_artifact,
 )
+from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.statistics_production import (
     build_a_share_factor_statistics_tables,
@@ -368,6 +369,7 @@ def test_failed_family_keeps_planned_inference_members_without_fake_prediction(
     assert len(lost) == len(dates)
     assert lost.status.eq("UNDEFINED").all()
     assert lost.reason.eq("family_training_failed").all()
+    assert lost.target_domain_id.eq(canonical_json_hash([])).all()
     assert lost.config_id.eq("").all()
     assert set(tables["model_trials"].family_id) == {"working", "failed"}
     assert tables["model_comparison"].prediction_id.tolist() == ["failed"]

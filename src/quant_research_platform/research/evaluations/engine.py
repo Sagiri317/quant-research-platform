@@ -49,8 +49,8 @@ type _EvaluationOutputChunk = tuple[pd.DataFrame, pd.DataFrame, dict[str, object
 class _EvaluationStreamingState:
     def __init__(self, *, spec: EvaluationSpec) -> None:
         self._spec = spec
-        self._filter_columns_used: tuple[str, ...] = ()
-        self._filter_definition = ""
+        self._filter_columns_used = required_filter_columns(spec.filter_mode)
+        self._filter_definition = filter_definition(spec.filter_mode)
         self._rows_input = 0
         self._rows_after_filter_mode = 0
         self._rows_after_signal_label_dropna = 0
@@ -772,3 +772,211 @@ def _iter_evaluation_work_frames(
                 yield normalized, filter_metadata
             except GeneratorExit:
                 return
+
+
+def build_scoped_evaluation_result(
+    frames, *, spec, sources, cutoff, sample_scope, strata
+):
+    """Evaluate complete focal dates using unchanged own-domain signal transforms."""
+    from dataclasses import replace
+
+    from quant_research_platform.artifacts.outputs.evaluation_daily import daily_frame
+    from quant_research_platform.contracts.experiments import label_maturity_mask
+    from quant_research_platform.research.filtering import apply_filter_mode
+
+    state = _EvaluationStreamingState(spec=spec)
+    primary = strata.get("primary_label")
+
+    def prepare(raw, source):
+        selected, metadata = apply_filter_mode(
+            raw, mode=spec.filter_mode, metadata_key="filter_mode"
+        )
+        selected = mask_unobserved_features(
+            selected, source["signal_columns"], source["declared"]["column_roles"]
+        ).copy()
+        for column in source["signal_columns"]:
+            selected[column] = selected[column].where(np.isfinite(selected[column]))
+        for label, availability in source["availability"].items():
+            mature = label_maturity_mask(
+                selected,
+                fitting_cutoff=cutoff,
+                availability_column=availability,
+                target_column=label,
+            )
+            selected[label] = selected[label].where(
+                mature & np.isfinite(selected[label])
+            )
+        return selected, metadata
+
+    def outputs():
+        with closing_iterator(iter(frames)) as active:
+            for raw, raw_peers in active:
+                if raw.empty:
+                    continue
+                focal, metadata = prepare(raw, sources[0])
+                metadata["timestamps"] = raw.timestamp
+                metadata["asset_ids"] = raw.asset_id
+                timestamp = raw.timestamp.iloc[0]
+                classification = focal.copy()
+                for column in (
+                    "float_market_cap",
+                    "amount",
+                    "median_forecast_age_days_fy1",
+                ):
+                    if column in raw:
+                        classification[column] = raw.loc[focal.index, column]
+                groups, quality = _evaluation_strata(classification, strata)
+                mature_counts = {
+                    label: int(focal[label].notna().sum())
+                    for label in spec.label_columns
+                }
+                # Normalize on the focal eligible population before intersection.
+                normalized = normalize_signal_frame(focal, signals=spec.signals)
+                if sample_scope == "common":
+                    valid = np.isfinite(
+                        focal[sources[0]["signal_columns"]].to_numpy(dtype=float)
+                    ).all(axis=1)
+                    keys = pd.MultiIndex.from_frame(focal[["timestamp", "asset_id"]])
+                    aligned_peers = []
+                    for raw_peer, source in zip(raw_peers, sources[1:], strict=True):
+                        if raw_peer is None:
+                            valid[:] = False
+                            continue
+                        peer, _ = prepare(raw_peer, source)
+                        aligned = peer.set_index(["timestamp", "asset_id"]).reindex(
+                            keys
+                        )
+                        valid &= np.isfinite(
+                            aligned[source["signal_columns"]].to_numpy(dtype=float)
+                        ).all(axis=1)
+                        aligned_peers.append(aligned)
+                    for label in spec.label_columns:
+                        domain = valid & focal[label].notna().to_numpy()
+                        for peer in aligned_peers:
+                            domain &= peer[label].notna().to_numpy()
+                        for peer in aligned_peers:
+                            if not np.equal(
+                                focal[label].to_numpy()[domain],
+                                peer[label].to_numpy()[domain],
+                            ).all():
+                                raise ValueError("evaluation_common_label_mismatch")
+                        normalized[label] = normalized[label].where(domain)
+                coverage = daily_frame(
+                    [
+                        {
+                            "timestamp": timestamp,
+                            "label": label,
+                            "dataset_rows": len(raw),
+                            "eligible_rows": len(focal),
+                            "mature_rows": mature_counts[label],
+                            "domain_rows": int(normalized[label].notna().sum()),
+                            **{
+                                key: value if label == primary else None
+                                for key, value in quality.items()
+                            },
+                        }
+                        for label in spec.label_columns
+                    ],
+                    "daily_coverage",
+                )
+                metrics, grouped, facts = _evaluate_filtered_frame(
+                    normalized, metadata, spec=spec, asset_column="asset_id"
+                )
+                stratum_records = []
+                if primary is not None:
+                    stratum_spec = replace(
+                        spec,
+                        label_columns=(primary,),
+                        label_availability_columns={
+                            primary: spec.label_availability_columns[primary]
+                        },
+                    )
+                    for kind, assignments in groups.items():
+                        labels = (
+                            [item[0] for item in strata["age_bounds"]]
+                            if kind == "forecast_age"
+                            else list(assignments.drop_duplicates())
+                        )
+                        if kind == "forecast_age" and assignments.isna().any():
+                            labels.append(pd.NA)
+                        for label in labels:
+                            keep = (
+                                assignments.isna()
+                                if pd.isna(label)
+                                else assignments.eq(label).fillna(False)
+                            )
+                            subset = normalized.loc[assignments.index[keep]]
+                            daily, _, _ = _evaluate_filtered_frame(
+                                subset,
+                                metadata,
+                                spec=stratum_spec,
+                                asset_column="asset_id",
+                            )
+                            daily = daily.assign(
+                                stratification=kind,
+                                stratum=label,
+                                stratum_rows=int(keep.sum()),
+                            )
+                            stratum_records.extend(daily.to_dict("records"))
+                daily = daily_frame(stratum_records, "daily_strata")
+                state.consume(metrics, grouped, facts)
+                facts.update(daily_coverage=coverage, daily_strata=daily)
+                yield metrics, grouped, facts
+
+    chunks = outputs()
+    return EvaluationResult(
+        chunks,
+        lambda: (
+            state.diagnostics(),
+            state.ic_summary(),
+            state.group_spread_summary(),
+            state.coverage_summary(),
+        ),
+        chunks.close,
+    )
+
+
+def _evaluation_strata(frame, strata):
+    """Classify the original mature focal population, retaining local invalidity."""
+    quality = dict.fromkeys(
+        (
+            "age_missing",
+            "fractional_boundary_unassigned",
+            "age_invalid",
+            "size_invalid",
+            "liquidity_invalid",
+        )
+    )
+    if not strata:
+        return {}, quality
+    mature = frame.loc[frame[strata["primary_label"]].notna()]
+    groups = {}
+    for kind in strata["kinds"]:
+        if kind == "industry":
+            values = mature.industry_level1_code.astype("string")
+        elif kind in {"size", "liquidity"}:
+            column = "float_market_cap" if kind == "size" else "amount"
+            numeric = mature[column]
+            invalid = numeric.notna() & (~np.isfinite(numeric) | numeric.lt(0))
+            quality[kind + "_invalid"] = int(invalid.sum())
+            values = (
+                np.ceil(numeric.mask(invalid).rank(method="average", pct=True) * 3)
+                .astype("Int64")
+                .astype("string")
+            )
+        else:
+            age = mature[strata["age_column"]]
+            invalid = age.notna() & (
+                ~np.isfinite(age) | ~age.between(0, strata["forecast_freshness_days"])
+            )
+            values = pd.Series(pd.NA, index=mature.index, dtype="string")
+            for label, low, high in strata["age_bounds"]:
+                values.loc[age.between(low, high)] = label
+            quality["age_missing"] = int(age.isna().sum())
+            quality["age_invalid"] = int(invalid.sum())
+            fractional = age.notna() & ~invalid & values.isna()
+            quality["fractional_boundary_unassigned"] = int(fractional.sum())
+            values = values.loc[~fractional]
+        if not mature.empty:
+            groups[kind] = values
+    return groups, quality

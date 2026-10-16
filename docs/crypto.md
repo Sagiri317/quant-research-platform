@@ -685,11 +685,11 @@ markout 在时钟越过目标纳秒或确认该时刻事件已耗尽后结算，
 
 ## 统计、报告与只读展示
 
-收益/成本口径使用完整UTC日收益、ddof=1、零收益cash基准、
+收益/成本口径使用完整UTC日收益、ddof=1、
 真实 gap 的独立经济贡献、固定实际 turnover 的附加费用敏感性；实际比较集合由调用者显式声明。
 
 正式日频收益仅使用完整落在同一 OOS 折及同一连续账本或独立段内的 UTC 日，以实际连续 NAV 为分母，
-年化按显式 `statistics.annualization_periods` 与样本标准差计算，常规 Crypto 日频研究填写 365；
+基础 `annualized` 分析的年化按显式 `statistics.annualization_periods` 与样本标准差计算，常规 Crypto 日频研究填写 365；
 实际参数随统计产物保存，不将其他系数伪称为 365 日口径。年化还要求显式的最小完整日观测数。计划内完整日若缺失边界估值，
 正式日频均值与年化指标全部 `UNDEFINED`，不会只选剩余有效日。
 细粒度事件 NAV、连续回撤、库存、费用、资金费和空档贡献仍保留于账本及统计产物。
@@ -703,7 +703,11 @@ PARTIAL 的全窗净值、收益及依赖未知路径的指标为 UNDEFINED；�
 统计行按 candidate、execution_mode 和 episode_id 保留范围；独立段不拼接为连续收益。
 报告展示数据覆盖、因子诊断、模型与验证、OOS 预测、共同样本比较、maker 校准、组合、执行、
 费用敏感性、库存、日频统计、validation/test 证据、readiness/blockers 和运行资源观测。
-Crypto 的日频统计为经济描述，不发布 SPA、StepM、MCS、PSR、DSR 或 PBO 推断矩阵。
+Crypto 的基础日频统计为经济描述，不发布 SPA、StepM、MCS、PSR、DSR 或 PBO 推断矩阵。
+显式选择的市场回归独立输出 HAC 推断，要求完整配对日轴；参考序列与环境比较合同见架构文档。
+通用比较轴在 UTC 日、OOS 折及 episode 边界切分，首尾不足一天的区间仍保存，不能用于完整日年化或跨段拼接。
+省略 analyses 只计算 performance；零收益现金假设不再作为所有组合的隐含指数比较。
+通用比较的日频年化默认 365、至少 2 个完整 UTC 日，可通过 statistics.annualization_periods 与 annualization_minimum_observations 覆盖；实际参数写入 comparison_method。
 
 研究图片通过明确输入路径引用已发布数值产物，
 使用同一查询入口显示持久化统计与账本曲线。连续曲线和各独立段分别展示，Crypto 时间轴使用 UTC；

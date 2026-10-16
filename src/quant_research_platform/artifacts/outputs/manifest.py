@@ -104,7 +104,14 @@ def validate_output_manifest(
         if logical_name in logical_files:
             raise ValueError("output_files_invalid")
         logical_files.add(logical_name)
-    if files != list(_OUTPUT_DEFINITION_FILES[output_definition_id]):
+    expected_files = list(_OUTPUT_DEFINITION_FILES[output_definition_id])
+    if output_definition_id == "evaluation_outputs":
+        expected_files.extend(
+            f"{name}.parquet"
+            for name in ("daily_coverage", "daily_strata")
+            if name in metadata.get("optional_member_rows", {})
+        )
+    if files != expected_files:
         raise ValueError("output_manifest_definition_files_mismatch")
     return value
 

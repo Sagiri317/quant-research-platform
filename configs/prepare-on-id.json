@@ -1,0 +1,18 @@
+{
+  "market_id": "a_share",
+  "data_id": "on_id_decomposition",
+  "inputs": {
+    "market_panel_1d": "results/panel",
+    "execution_mask": "results/execution"
+  },
+  "parameters": {
+    "horizons": [
+      20
+    ]
+  },
+  "time_window": {
+    "start": "2024-01-01",
+    "end": "2025-12-31"
+  },
+  "output_root": "results/on-id-20d"
+}

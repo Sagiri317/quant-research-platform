@@ -10,6 +10,15 @@ from pathlib import Path
 import pandas as pd
 import pyarrow as pa
 
+from quant_research_platform.artifacts.outputs.evaluation_daily import (
+    DAILY_KEYS,
+    DAILY_SCHEMAS,
+    METRICS_SCHEMA,
+    daily_frame,
+    daily_key_table,
+    validate_daily_counts,
+    validate_daily_frame,
+)
 from quant_research_platform.artifacts.outputs.evaluation_validation import (
     EVALUATION_ARTIFACTS,
     validate_evaluation_artifact_structure,
@@ -29,6 +38,10 @@ from quant_research_platform.contracts.evaluations import (
     EvaluationSpec,
     strict_non_negative_count_series,
 )
+from quant_research_platform.contracts.filtering import (
+    filter_definition,
+    required_filter_columns,
+)
 from quant_research_platform.contracts.time import time_value_isoformat
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
@@ -42,6 +55,37 @@ from quant_research_platform.storage.manifests import write_manifest
 from quant_research_platform.storage.parquet import parquet_table_writer
 
 _EVALUATION_PENDING_TABLE_LIMIT = 64
+
+
+class _EvaluationDateKeys:
+    """Validate chronological daily keys while retaining only the current date."""
+
+    def __init__(self, *, primary_key):
+        self.primary_key = primary_key
+        self.timestamp = None
+        self.index = None
+
+    def add_table(self, table):
+        timestamps = strict_timestamp_series(
+            pd.Series(table["timestamp"].to_numpy()),
+            error="invalid_evaluation_timestamp_values",
+        )
+        if not timestamps.is_monotonic_increasing or (
+            len(timestamps)
+            and self.timestamp is not None
+            and timestamps.iloc[0] < self.timestamp
+        ):
+            raise ValueError("evaluation_timestamp_order_invalid")
+        start = 0
+        for timestamp in timestamps.drop_duplicates():
+            stop = int(timestamps.searchsorted(timestamp, side="right"))
+            if timestamp != self.timestamp:
+                self.timestamp = timestamp
+                self.index = ExactPrimaryKeyIndex(primary_key=self.primary_key)
+            if self.index.add_table(table.slice(start, stop - start)):
+                return True
+            start = stop
+        return False
 
 
 def write_evaluation_outputs_from_chunks(
@@ -95,6 +139,7 @@ def write_evaluation_outputs_from_chunks(
             ic_summary=ic_summary,
             group_spread_summary=group_spread_summary,
             spec=spec,
+            timestamp_count=evaluation_diagnostics.timestamp_count,
         )
         facts["ic_summary_rows"] = len(ic_summary)
         facts["group_spread_summary_rows"] = len(group_spread_summary)
@@ -120,7 +165,13 @@ def write_evaluation_outputs_from_chunks(
                     evaluation_diagnostics=evaluation_diagnostics,
                     science=metadata,
                 ),
-                files=EVALUATION_ARTIFACTS,
+                files=[
+                    *EVALUATION_ARTIFACTS,
+                    *(
+                        f"{name}.parquet"
+                        for name in (metadata or {}).get("optional_member_rows", {})
+                    ),
+                ],
             ),
         )
 
@@ -144,11 +195,16 @@ def _write_evaluation_artifact_chunks(
         "grouped_label_values": EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
     }
     key_indexes = {
-        "metrics": ExactPrimaryKeyIndex(primary_key=("timestamp", "signal", "label")),
-        "grouped_label_values": ExactPrimaryKeyIndex(
+        "metrics": _EvaluationDateKeys(primary_key=("timestamp", "signal", "label")),
+        "grouped_label_values": _EvaluationDateKeys(
             primary_key=("timestamp", "signal", "label", "group")
         ),
     }
+    optional = (science or {}).get("optional_member_rows", {})
+    for name in optional:
+        paths[name] = temp_root / f"{name}.parquet"
+        required[name] = tuple(DAILY_SCHEMAS[name].names)
+        key_indexes[name] = _EvaluationDateKeys(primary_key=DAILY_KEYS[name])
     row_counts = dict.fromkeys(paths, 0)
     empty_frames = {}
     pending_tables = {name: [] for name in paths}
@@ -163,8 +219,8 @@ def _write_evaluation_artifact_chunks(
     min_timestamp: str | None = None
     max_timestamp: str | None = None
     skipped_timestamp_count = 0
-    filter_columns_used: tuple[str, ...] = ()
-    filter_definition_value = ""
+    filter_columns_used = required_filter_columns(spec.filter_mode)
+    filter_definition_value = filter_definition(spec.filter_mode)
     with closing_iterator(ExitStack()) as resources:
 
         def flush(name):
@@ -187,7 +243,11 @@ def _write_evaluation_artifact_chunks(
             if frame.empty:
                 empty_frames[name] = frame.copy()
                 return
-            table = pa.Table.from_pandas(frame, preserve_index=False)
+            table = pa.Table.from_pandas(
+                frame,
+                schema=METRICS_SCHEMA if name == "metrics" else DAILY_SCHEMAS.get(name),
+                preserve_index=False,
+            )
             pending_tables[name].append(table)
             pending_rows[name] += len(frame)
             if (
@@ -229,6 +289,36 @@ def _write_evaluation_artifact_chunks(
                     science=science,
                     validate_pairs=True,
                 )
+                for name in optional:
+                    frame = metadata[name]
+                    validate_daily_frame(
+                        frame,
+                        name=name,
+                        spec=spec,
+                        science=science,
+                        check_domains=False,
+                    )
+                    if key_indexes[name].add_table(daily_key_table(frame, name)):
+                        raise ValueError(f"duplicate_evaluation_{name}_keys")
+                    if name == "daily_strata":
+                        for kind, block in frame.groupby("stratification", sort=False):
+                            science["stratum_domains"][kind] = sorted(
+                                set(science["stratum_domains"][kind])
+                                | {
+                                    None if pd.isna(value) else value
+                                    for value in block.stratum
+                                },
+                                key=lambda value: (value is not None, value or ""),
+                            )
+                    write_frame(name, frame)
+                if optional:
+                    validate_daily_counts(
+                        metrics,
+                        metadata["daily_coverage"],
+                        metadata["daily_strata"],
+                        spec=spec,
+                        science=science,
+                    )
                 timestamps = strict_timestamp_series(
                     metrics["timestamp"], error="evaluation_diagnostics_inconsistent"
                 )
@@ -292,10 +382,7 @@ def _write_evaluation_artifact_chunks(
                     str(column) for column in metadata["filter_columns_used"]
                 )
                 chunk_filter_definition = str(metadata["filter_definition"])
-                if not filter_definition_value:
-                    filter_columns_used = chunk_filter_columns
-                    filter_definition_value = chunk_filter_definition
-                elif (
+                if (
                     filter_columns_used != chunk_filter_columns
                     or filter_definition_value != chunk_filter_definition
                 ):
@@ -307,9 +394,17 @@ def _write_evaluation_artifact_chunks(
     for name, columns in required.items():
         if row_counts[name] == 0:
             write_parquet(
-                empty_frames.get(name, pd.DataFrame(columns=list(columns))),
+                empty_frames.get(
+                    name,
+                    daily_frame([], name)
+                    if name in DAILY_SCHEMAS
+                    else pd.DataFrame(columns=list(columns)),
+                ),
                 paths[name],
+                schema=METRICS_SCHEMA if name == "metrics" else DAILY_SCHEMAS.get(name),
             )
+    for name in optional:
+        science["optional_member_rows"][name] = row_counts[name]
     return {
         "rows_input": rows_input,
         "rows_after_filter_mode": rows_after_filter_mode,
@@ -327,46 +422,12 @@ def _write_evaluation_artifact_chunks(
     }
 
 
-def read_evaluation_outputs(
-    root: Path,
-    *,
-    tables: tuple[str, ...] = (
-        "metrics",
-        "grouped_label_values",
-        "ic_summary",
-        "group_spread_summary",
-    ),
-) -> tuple[dict[str, object], dict[str, pd.DataFrame]]:
-    """Read requested numeric members once and validate their scientific contracts."""
+def _evaluation_spec(metadata):
     from quant_research_platform.artifacts.outputs.evaluation_validation import (
         require_signal_metadata_list,
     )
-    from quant_research_platform.artifacts.outputs.manifest import (
-        validate_output_bundle,
-    )
-    from quant_research_platform.storage.datasets.reading import (
-        iter_declared_parquet_member_batches,
-    )
 
-    required = {
-        "metrics": EVALUATION_METRICS_COLUMNS,
-        "grouped_label_values": EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
-        "ic_summary": EVALUATION_IC_SUMMARY_COLUMNS,
-        "group_spread_summary": EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS,
-    }
-    if (
-        not tables
-        or len(tables) != len(set(tables))
-        or any(name not in required for name in tables)
-    ):
-        raise ValueError("evaluation_tables_invalid")
-    manifest, _members = validate_output_bundle(
-        root,
-        expected_definition_id="evaluation_outputs",
-        selected_files=tuple(f"{name}.parquet" for name in tables),
-    )
-    metadata = manifest["metadata"]
-    spec = EvaluationSpec(
+    return EvaluationSpec(
         evaluation_id=metadata["evaluation_id"],
         market_id=metadata["market_id"],
         research_dataset_id=metadata["research_dataset_id"],
@@ -379,23 +440,114 @@ def read_evaluation_outputs(
         filter_mode=metadata["filter_mode"],
         n_groups=metadata["evaluation_diagnostics"]["n_groups"],
     )
-    result = {}
-    for name in tables:
-        with closing_iterator(
-            iter_declared_parquet_member_batches(
-                Path(root) / f"{name}.parquet", columns=required[name]
+
+
+_EVALUATION_COLUMNS = {
+    "metrics": EVALUATION_METRICS_COLUMNS,
+    "grouped_label_values": EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
+    "ic_summary": EVALUATION_IC_SUMMARY_COLUMNS,
+    "group_spread_summary": EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS,
+    **{name: tuple(schema.names) for name, schema in DAILY_SCHEMAS.items()},
+}
+
+
+def _iter_evaluation_member_batches(root, *, name, metadata, time_window=None):
+    """One selected-member semantic owner shared by materialized and streaming reads."""
+    from quant_research_platform.contracts.time import time_window_timestamp_interval
+    from quant_research_platform.storage.datasets.reading import (
+        iter_declared_parquet_member_batches,
+    )
+
+    spec = _evaluation_spec(metadata)
+    keys = DAILY_KEYS.get(
+        name,
+        {
+            "metrics": ("timestamp", "signal", "label"),
+            "grouped_label_values": ("timestamp", "signal", "label", "group"),
+            "ic_summary": ("signal", "label"),
+            "group_spread_summary": ("signal", "label"),
+        }.get(name),
+    )
+    seen = (
+        _EvaluationDateKeys(primary_key=keys)
+        if "timestamp" in keys
+        else ExactPrimaryKeyIndex(primary_key=keys)
+    )
+    filters = None
+    if time_window is not None:
+        if "timestamp" not in _EVALUATION_COLUMNS[name]:
+            raise ValueError("evaluation_summary_window_not_supported")
+        start, stop, closed = time_window_timestamp_interval(time_window)
+        if "window" not in metadata:
+            raise ValueError("evaluation_science_metadata_missing")
+        from quant_research_platform.contracts.time import TimeWindow
+
+        original_start, original_stop, original_closed = time_window_timestamp_interval(
+            TimeWindow(**metadata["window"])
+        )
+        if (
+            start < original_start
+            or stop > original_stop
+            or (stop == original_stop and closed and not original_closed)
+        ):
+            raise ValueError("evaluation_read_window_outside")
+        filters = [
+            ("timestamp", ">=", start),
+            ("timestamp", "<=" if closed else "<", stop),
+        ]
+
+    def check_schema(part):
+        if name == "metrics" and part.schema.remove_metadata() != METRICS_SCHEMA:
+            if "timestamp" in part.schema.names and part.schema.field(
+                "timestamp"
+            ).type != pa.timestamp("ns"):
+                raise ValueError("evaluation_metrics_timestamp_invalid")
+            raise ValueError("evaluation_metrics_schema_invalid")
+        if (
+            name in DAILY_SCHEMAS
+            and part.schema.remove_metadata() != DAILY_SCHEMAS[name]
+        ):
+            raise ValueError("evaluation_daily_schema_invalid")
+
+    count = 0
+    with closing_iterator(
+        iter_declared_parquet_member_batches(
+            Path(root) / f"{name}.parquet",
+            parquet_filters=filters,
+            metadata_observer=check_schema,
+        )
+    ) as chunks:
+        for frame in chunks:
+            validate_output_frame(
+                frame,
+                required=_EVALUATION_COLUMNS[name],
+                error_name=f"evaluation_{name}",
             )
-        ) as chunks:
-            frames = list(chunks)
-        frame = (
-            pd.concat(frames, ignore_index=True)
-            if frames
-            else pd.DataFrame(columns=required[name])
-        )
-        validate_output_frame(
-            frame, required=required[name], error_name=f"evaluation_{name}"
-        )
-        expected_rows = metadata["evaluation_diagnostics"][
+            if name in DAILY_SCHEMAS:
+                validate_daily_frame(frame, name=name, spec=spec, science=metadata)
+                table = daily_key_table(frame, name)
+            else:
+                validate_evaluation_artifact_structure(
+                    **{
+                        key: frame if key == name else pd.DataFrame(columns=columns)
+                        for key, columns in _EVALUATION_COLUMNS.items()
+                        if key not in DAILY_SCHEMAS
+                    },
+                    spec=spec,
+                    science=metadata,
+                    timestamp_count=metadata["evaluation_diagnostics"][
+                        "timestamp_count"
+                    ],
+                )
+                table = pa.Table.from_pandas(frame, preserve_index=False)
+            if seen.add_table(table):
+                raise ValueError(f"duplicate_evaluation_{name}_keys")
+            count += len(frame)
+            yield frame
+    expected = (
+        metadata.get("optional_member_rows", {}).get(name)
+        if name in DAILY_SCHEMAS
+        else metadata["evaluation_diagnostics"][
             {
                 "metrics": "metric_rows",
                 "grouped_label_values": "grouped_label_value_rows",
@@ -403,27 +555,76 @@ def read_evaluation_outputs(
                 "group_spread_summary": "group_spread_summary_rows",
             }[name]
         ]
-        if len(frame) != expected_rows:
-            raise ValueError("evaluation_member_row_count_mismatch")
-        result[name] = frame
+    )
+    if time_window is None and count != expected:
+        raise ValueError("evaluation_member_row_count_mismatch")
+
+
+def read_evaluation_outputs(
+    root: Path,
+    *,
+    tables=("metrics", "grouped_label_values", "ic_summary", "group_spread_summary"),
+    time_window=None,
+):
+    """Validate selected members, optionally slicing persisted daily rows."""
+    from quant_research_platform.artifacts.outputs.manifest import (
+        validate_output_bundle,
+    )
+
+    if (
+        not tables
+        or len(tables) != len(set(tables))
+        or any(name not in _EVALUATION_COLUMNS for name in tables)
+    ):
+        raise ValueError("evaluation_tables_invalid")
+    manifest, _ = validate_output_bundle(
+        root,
+        expected_definition_id="evaluation_outputs",
+        selected_files=tuple(f"{name}.parquet" for name in tables),
+    )
+    metadata = manifest["metadata"]
+    result = {}
+    for name in tables:
+        with closing_iterator(
+            _iter_evaluation_member_batches(
+                root, name=name, metadata=metadata, time_window=time_window
+            )
+        ) as chunks:
+            frames = list(chunks)
+        result[name] = (
+            pd.concat(frames, ignore_index=True)
+            if frames
+            else daily_frame([], name)
+            if name in DAILY_SCHEMAS
+            else pd.DataFrame(columns=_EVALUATION_COLUMNS[name])
+        )
     validate_evaluation_artifact_structure(
         **{
             name: result.get(name, pd.DataFrame(columns=columns))
-            for name, columns in required.items()
+            for name, columns in _EVALUATION_COLUMNS.items()
+            if name not in DAILY_SCHEMAS
         },
-        spec=spec,
+        spec=_evaluation_spec(metadata),
         science=metadata,
         validate_pairs={"metrics", "grouped_label_values"} <= set(result),
+        timestamp_count=metadata["evaluation_diagnostics"]["timestamp_count"],
+    )
+    validate_daily_counts(
+        result.get("metrics"),
+        result.get("daily_coverage"),
+        result.get("daily_strata"),
+        spec=_evaluation_spec(metadata),
+        science=metadata,
     )
     return manifest, result
 
 
-def write_parquet(frame: pd.DataFrame, path: Path) -> Path:
+def write_parquet(frame: pd.DataFrame, path: Path, *, schema=None) -> Path:
     """Write one member inside its caller-owned atomic bundle staging directory."""
     path = Path(path)
     require_unaliased_path(path, error="invalid_output_write_path")
     with closing_iterator(open_filesystem_file(path, "xb")) as handle:
-        table = pa.Table.from_pandas(frame, preserve_index=False)
+        table = pa.Table.from_pandas(frame, schema=schema, preserve_index=False)
         with parquet_table_writer(handle, compression="zstd") as write_table:
             write_table(table)
         handle.flush()

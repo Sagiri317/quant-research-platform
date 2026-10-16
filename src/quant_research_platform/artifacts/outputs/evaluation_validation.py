@@ -7,6 +7,7 @@ import pandas as pd
 from quant_research_platform.contracts.evaluations import (
     CORRELATION_RAW_REASON_CODES,
     CORRELATION_SUMMARY_REASON_CODES,
+    EVALUATION_FORECAST_AGE_BOUNDS,
     GROUP_SPREAD_REASON_CODES,
     EvaluationDiagnostics,
     EvaluationSpec,
@@ -67,15 +68,28 @@ _EVALUATION_DIAGNOSTIC_KEYS = frozenset(
 )
 
 
+EVALUATION_SCIENCE_KEYS = frozenset(
+    {
+        "sample_scope",
+        "input_facts",
+        "comparison_inputs",
+        "strata",
+        "stratum_domains",
+        "optional_member_rows",
+        "common_rule",
+    }
+)
+
+
 def validate_evaluation_science(metadata):
-    """Validate the optional actual evaluation window, knowledge cutoff and role."""
+    """Validate actual input, window, units and optional daily-member facts."""
     from quant_research_platform.contracts.time import TimeWindow
 
-    if type(metadata) is not dict or set(metadata) != {
-        "window",
-        "cutoff",
-        "sample_role",
-    }:
+    base = {"window", "cutoff", "sample_role"}
+    if type(metadata) is not dict or set(metadata) not in (
+        base,
+        base | EVALUATION_SCIENCE_KEYS,
+    ):
         raise ValueError("evaluation_science_metadata_invalid")
     if type(metadata["sample_role"]) is not str or not metadata["sample_role"].strip():
         raise ValueError("evaluation_sample_role_invalid")
@@ -85,6 +99,130 @@ def validate_evaluation_science(metadata):
         for value in (window.start, window.end, metadata["cutoff"])
     ):
         raise ValueError("evaluation_science_time_invalid")
+    if "sample_scope" not in metadata:
+        return
+    if (
+        metadata["sample_scope"] not in {"own", "common"}
+        or metadata["common_rule"] != "mask_only_no_retransform"
+    ):
+        raise ValueError("evaluation_sample_scope_invalid")
+    peers = metadata["comparison_inputs"]
+    if type(peers) is not list or (metadata["sample_scope"] == "own" and peers):
+        raise ValueError("evaluation_comparison_inputs_invalid")
+    for facts in [metadata["input_facts"], *peers]:
+        if type(facts) is not dict or set(facts) != {
+            "selector",
+            "columns",
+            "column_units",
+            "observed_columns",
+            "feature_transforms",
+            "signal_units",
+            "label_units",
+            "label_availability_columns",
+            "label_semantics",
+            "market_id",
+        }:
+            raise ValueError("evaluation_input_facts_invalid")
+        if (
+            type(facts["selector"]) is not dict
+            or type(facts["selector"].get("path")) is not str
+            or not facts["selector"]["path"]
+        ):
+            raise ValueError("evaluation_input_facts_invalid")
+        for key in (
+            "columns",
+            "column_units",
+            "observed_columns",
+            "signal_units",
+            "label_units",
+            "label_availability_columns",
+            "label_semantics",
+        ):
+            if type(facts[key]) is not dict:
+                raise ValueError("evaluation_input_facts_invalid")
+        if type(facts["feature_transforms"]) is not list or any(
+            unit is not None and (type(unit) is not str or not unit)
+            for key in ("column_units", "signal_units", "label_units")
+            for unit in facts[key].values()
+        ):
+            raise ValueError("evaluation_input_units_invalid")
+        if (
+            set(facts["column_units"]) != set(facts["columns"])
+            or set(facts["signal_units"]) != set(facts["observed_columns"])
+            or set(facts["label_units"]) != set(facts["label_availability_columns"])
+        ):
+            raise ValueError("evaluation_input_facts_invalid")
+        for label, availability in facts["label_availability_columns"].items():
+            if (
+                facts["columns"].get(label) != "label"
+                or availability not in facts["columns"]
+                or facts["label_units"][label] != facts["column_units"].get(label)
+            ):
+                raise ValueError("evaluation_input_facts_invalid")
+        for signal, companions in facts["observed_columns"].items():
+            if (
+                facts["columns"].get(signal) not in {"factor", "feature"}
+                or type(companions) is not list
+                or any(column not in facts["columns"] for column in companions)
+                or facts["signal_units"][signal] != facts["column_units"].get(signal)
+            ):
+                raise ValueError("evaluation_input_facts_invalid")
+        if facts["label_units"] != metadata["input_facts"]["label_units"]:
+            raise ValueError("evaluation_label_units_mismatch")
+    strata = metadata["strata"]
+    if type(strata) is not dict or type(metadata["stratum_domains"]) is not dict:
+        raise ValueError("evaluation_strata_invalid")
+    if strata:
+        allowed = {
+            "primary_label",
+            "kinds",
+            "forecast_freshness_days",
+            "population",
+            "age_column",
+            "age_bounds",
+        }
+        if (
+            set(strata) - allowed
+            or not {"primary_label", "kinds", "population", "age_bounds"} <= set(strata)
+            or strata["population"]
+            != "focal_eligible_primary_label_mature_before_common"
+        ):
+            raise ValueError("evaluation_strata_invalid")
+        kinds = strata["kinds"]
+        if (
+            type(kinds) is not list
+            or not kinds
+            or len(set(kinds)) != len(kinds)
+            or set(kinds) - {"industry", "size", "liquidity", "forecast_age"}
+        ):
+            raise ValueError("evaluation_strata_invalid")
+        if "forecast_age" in kinds:
+            if (
+                strata.get("forecast_freshness_days") not in {90, 180}
+                or strata.get("age_column") != "median_forecast_age_days_fy1"
+                or strata["age_bounds"]
+                != [
+                    list(item)
+                    for item in EVALUATION_FORECAST_AGE_BOUNDS
+                    if item[2] <= strata["forecast_freshness_days"]
+                ]
+            ):
+                raise ValueError("evaluation_age_bounds_invalid")
+    if set(metadata["stratum_domains"]) != set(strata.get("kinds", [])) or any(
+        type(values) is not list
+        or any(value is not None and type(value) is not str for value in values)
+        or len(values) != len(set(values))
+        for values in metadata["stratum_domains"].values()
+    ):
+        raise ValueError("evaluation_stratum_domains_invalid")
+    counts = metadata["optional_member_rows"]
+    if (
+        type(counts) is not dict
+        or set(counts) not in (set(), {"daily_coverage", "daily_strata"})
+        or any(type(value) is not int or value < 0 for value in counts.values())
+        or ((strata or metadata["sample_scope"] == "common") and not counts)
+    ):
+        raise ValueError("evaluation_optional_members_invalid")
 
 
 def validate_evaluation_output_metadata_shape(
@@ -94,10 +232,17 @@ def validate_evaluation_output_metadata_shape(
     if type(metadata) is not dict or set(metadata) not in (
         _EVALUATION_OUTPUT_METADATA_KEYS,
         _EVALUATION_OUTPUT_METADATA_KEYS | science,
+        _EVALUATION_OUTPUT_METADATA_KEYS | science | EVALUATION_SCIENCE_KEYS,
     ):
         raise ValueError("output_manifest_metadata_invalid")
     if science <= set(metadata):
-        validate_evaluation_science({key: metadata[key] for key in science})
+        validate_evaluation_science(
+            {
+                key: metadata[key]
+                for key in science
+                | (EVALUATION_SCIENCE_KEYS if "sample_scope" in metadata else set())
+            }
+        )
     for key in (
         "evaluation_id",
         "run_type",
@@ -119,6 +264,24 @@ def validate_evaluation_output_metadata_shape(
     signals = require_signal_metadata_list(
         metadata, "signals", "output_manifest_metadata_invalid"
     )
+    if "input_facts" in metadata:
+        facts = metadata["input_facts"]
+        if (
+            facts["label_availability_columns"] != label_availability_columns
+            or set(facts["signal_units"])
+            != {
+                signal.source_column
+                for signal in signals
+                if signal.source_kind != "prediction"
+            }
+            or set(facts["label_units"]) != set(label_columns)
+        ):
+            raise ValueError("evaluation_input_facts_invalid")
+        if (
+            metadata["strata"]
+            and metadata["strata"]["primary_label"] not in label_columns
+        ):
+            raise ValueError("evaluation_strata_invalid")
     if not label_columns:
         raise ValueError("output_manifest_metadata_invalid")
 
@@ -304,6 +467,7 @@ def validate_evaluation_artifact_structure(
     spec: EvaluationSpec,
     science: dict | None = None,
     validate_pairs: bool = False,
+    timestamp_count: int | None = None,
 ) -> None:
     for frame in (metrics, grouped_label_values, ic_summary, group_spread_summary):
         _validate_signal_label_membership(frame, spec=spec)
@@ -338,8 +502,6 @@ def validate_evaluation_artifact_structure(
             or not metrics["rankic_reason"].eq("not_applicable").all()
         ):
             raise ValueError("single_asset_time_series_evaluation_artifact_invalid")
-    elif metrics["rankic_reason"].eq("not_applicable").any():
-        raise ValueError("cross_sectional_evaluation_artifact_invalid")
     _reject_duplicate_keys(metrics, ("timestamp", "signal", "label"), "metrics")
     _reject_duplicate_keys(
         grouped_label_values,
@@ -352,13 +514,12 @@ def validate_evaluation_artifact_structure(
         ("signal", "label"),
         "group_spread_summary",
     )
-    strict_non_negative_count_series(metrics["n_obs"])
+    _validate_correlation_metrics(metrics, spec=spec)
     strict_non_negative_count_series(grouped_label_values["n_obs"])
     groups = strict_positive_group_series(grouped_label_values["group"])
     if bool(groups.gt(spec.n_groups).any()):
         raise ValueError("evaluation_group_out_of_range")
     for frame, columns in (
-        (metrics, ("ic", "rankic", "n_obs")),
         (grouped_label_values, ("mean_label_value", "group", "n_obs")),
         (
             ic_summary,
@@ -388,9 +549,6 @@ def validate_evaluation_artifact_structure(
                 error="invalid_evaluation_numeric_values",
                 allow_null=True,
             )
-    for column in ("ic", "rankic"):
-        if bool(metrics[column].dropna().abs().gt(1.0).any()):
-            raise ValueError("invalid_evaluation_correlation_values")
     for column in ("mean_ic", "mean_rankic"):
         if bool(ic_summary[column].dropna().abs().gt(1.0).any()):
             raise ValueError("invalid_evaluation_correlation_values")
@@ -399,6 +557,31 @@ def validate_evaluation_artifact_structure(
             ic_summary[column],
             error="invalid_evaluation_summary_values",
         )
+    for statistic in ("ic", "rankic"):
+        counts = ic_summary[f"valid_{statistic}_count"]
+        maximum = (
+            min(1, timestamp_count)
+            if timestamp_count is not None
+            and spec.evaluation_axis == "single_asset_time_series"
+            else timestamp_count
+        )
+        if maximum is not None and counts.gt(maximum).any():
+            raise ValueError("invalid_evaluation_summary_count_values")
+        empty = counts.eq(0)
+        expected_empty = (
+            "not_applicable"
+            if statistic == "rankic"
+            and spec.evaluation_axis == "single_asset_time_series"
+            else "no_valid_observations"
+        )
+        if (
+            ic_summary[f"mean_{statistic}"].notna().ne(~empty).any()
+            or ic_summary[f"positive_{statistic}_rate"].notna().ne(~empty).any()
+            or ic_summary.loc[empty, f"{statistic}_reason"].ne(expected_empty).any()
+            or ic_summary.loc[empty, f"{statistic}ir_reason"].ne(expected_empty).any()
+            or ic_summary.loc[empty, f"{statistic}ir"].notna().any()
+        ):
+            raise ValueError("invalid_evaluation_summary_count_values")
     for column in ("std_ic", "std_rankic"):
         _validate_reason_pair(
             ic_summary[column],
@@ -438,16 +621,6 @@ def validate_evaluation_artifact_structure(
     if bool(monotonicity.lt(-1).any() or monotonicity.gt(1).any()):
         raise ValueError("invalid_evaluation_summary_values")
     _validate_reason_pair(
-        metrics["ic"],
-        metrics["ic_reason"],
-        allowed=CORRELATION_RAW_REASON_CODES,
-    )
-    _validate_reason_pair(
-        metrics["rankic"],
-        metrics["rankic_reason"],
-        allowed=CORRELATION_RAW_REASON_CODES,
-    )
-    _validate_reason_pair(
         ic_summary["mean_ic"],
         ic_summary["ic_reason"],
         allowed=CORRELATION_SUMMARY_REASON_CODES,
@@ -472,6 +645,45 @@ def validate_evaluation_artifact_structure(
         group_spread_summary["group_monotonicity_score_reason"],
         allowed=GROUP_SPREAD_REASON_CODES,
     )
+    if validate_pairs and spec.evaluation_axis == "cross_sectional":
+        expected = {
+            (row.timestamp, row.signal, row.label): int(row.n_obs)
+            for row in metrics.itertuples(index=False)
+            if row.n_obs >= 2
+        }
+        observed = {}
+        for row in grouped_label_values.itertuples(index=False):
+            if row.n_obs <= 0 or pd.isna(row.mean_label_value):
+                raise ValueError("evaluation_group_observations_invalid")
+            key = (row.timestamp, row.signal, row.label)
+            observed[key] = observed.get(key, 0) + int(row.n_obs)
+        if observed != expected:
+            raise ValueError("evaluation_metric_group_observations_mismatch")
+
+
+def _validate_correlation_metrics(metrics, *, spec):
+    """Own correlation values, counts and undefined reasons for all daily tables."""
+    _validate_signal_label_membership(metrics, spec=spec)
+    strict_non_negative_count_series(metrics["n_obs"])
+    for column in ("ic", "rankic"):
+        values = metrics[column]
+        if pd.api.types.is_bool_dtype(values) or (
+            not pd.api.types.is_numeric_dtype(values) and not values.isna().all()
+        ):
+            raise ValueError("invalid_evaluation_numeric_values")
+        strict_finite_numeric_series(
+            values, error="invalid_evaluation_numeric_values", allow_null=True
+        )
+        if values.dropna().abs().gt(1).any():
+            raise ValueError("invalid_evaluation_correlation_values")
+        _validate_reason_pair(
+            values, metrics[column + "_reason"], allowed=CORRELATION_RAW_REASON_CODES
+        )
+    if (
+        spec.evaluation_axis == "cross_sectional"
+        and metrics.rankic_reason.eq("not_applicable").any()
+    ):
+        raise ValueError("cross_sectional_evaluation_artifact_invalid")
     for value_column, reason_column in (
         ("ic", "ic_reason"),
         ("rankic", "rankic_reason"),
@@ -493,21 +705,6 @@ def validate_evaluation_artifact_structure(
                     raise ValueError("invalid_evaluation_statistic_reason")
             elif insufficient:
                 raise ValueError("invalid_evaluation_statistic_reason")
-
-    if validate_pairs and spec.evaluation_axis == "cross_sectional":
-        expected = {
-            (row.timestamp, row.signal, row.label): int(row.n_obs)
-            for row in metrics.itertuples(index=False)
-            if row.n_obs >= 2
-        }
-        observed = {}
-        for row in grouped_label_values.itertuples(index=False):
-            if row.n_obs <= 0 or pd.isna(row.mean_label_value):
-                raise ValueError("evaluation_group_observations_invalid")
-            key = (row.timestamp, row.signal, row.label)
-            observed[key] = observed.get(key, 0) + int(row.n_obs)
-        if observed != expected:
-            raise ValueError("evaluation_metric_group_observations_mismatch")
 
 
 def _reject_duplicate_keys(

@@ -241,6 +241,16 @@ def _configured_spec(spec, config):
     parameters = config.get("parameters", {})
     if type(parameters) is not dict:
         raise ValueError("data_operation_parameters_invalid")
+    if spec.market_id == "a_share" and spec.data_id == "on_id_decomposition":
+        from quant_research_platform.markets.implementations.a_share.processed.catalog import (  # noqa: E501
+            on_id_decomposition_spec,
+        )
+
+        if set(parameters) - {"horizons"}:
+            raise ValueError("data_operation_parameter_not_consumed")
+        if {"factor_columns", "label_columns", "base_panel"}.intersection(config):
+            raise ValueError("on_id_selection_uses_horizons")
+        return on_id_decomposition_spec(parameters.get("horizons", [20]))
     dynamic = {
         "expectations_factors": {"freshness_days"},
         ids.HFT_DERIVATIVE_DATA_ID: {"max_age_ms", "input_delay_ms"},

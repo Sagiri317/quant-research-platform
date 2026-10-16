@@ -63,6 +63,9 @@ from quant_research_platform.research.factors.expectations.calculations import (
     _prepare_expectations,
 )
 from quant_research_platform.research.labels import engine as label_engine
+from quant_research_platform.research.labels.forward_returns import (
+    add_on_id_decomposition,
+)
 from quant_research_platform.research.protocols import a_share
 from quant_research_platform.runtime import resources
 from quant_research_platform.storage.datasets.reading import (
@@ -147,6 +150,7 @@ def produce_a_share_processed_data(
                 "a_share_panel_source_data_missing: " + ", ".join(sorted(missing))
             )
     dependencies = {}
+    panel_axis = None
     factor_definitions = (
         tuple(
             definition
@@ -186,6 +190,19 @@ def produce_a_share_processed_data(
             columns = tuple(
                 column for column in dependency.required_columns if column in requested
             )
+        elif spec.data_id == "on_id_decomposition":
+            columns = (
+                (
+                    "market_id",
+                    "asset_id",
+                    "timestamp",
+                    "listing_date",
+                    "adj_open",
+                    "adj_close",
+                )
+                if data_id == "market_panel_1d"
+                else ("market_id", "asset_id", "timestamp", "can_enter")
+            )
         elif spec.kind is ProcessedDataKind.LABEL:
             requested = {
                 *label_engine.label_panel_input_columns(
@@ -224,6 +241,27 @@ def produce_a_share_processed_data(
                 )
             )
         session = open_dataset_session(**options)
+        if spec.data_id == "on_id_decomposition" and data_id == "market_panel_1d":
+            # Bare member selections have no independent full-session inventory.
+            if not session.native and options.get("files") is not None:
+                raise ValueError("on_id_panel_session_domain_unproven")
+            session = replace(
+                session, _allow_infinite_columns=("adj_open", "adj_close")
+            )
+            # Selectors restrict observations, never the declared PANEL clock.
+            # Native inventories or one declared bare PANEL file own the domain.
+            # Read only keys/lifecycles outside the selected prices.
+            axis_options = {
+                key: value
+                for key, value in options.items()
+                if key not in {"years", "time_window", "row_filters", "columns"}
+            }
+            if session.native:
+                axis_options.pop("files", None)
+            panel_axis = open_dataset_session(
+                **axis_options,
+                columns=("market_id", "asset_id", "timestamp", "listing_date"),
+            )
         if spec.kind is ProcessedDataKind.LABEL or spec.data_id == "execution_mask":
             # Actual supplied PANEL sessions own the future execution/label clock.
             # Each block below reads only its required own-market lookahead.
@@ -245,12 +283,43 @@ def produce_a_share_processed_data(
         source=source,
         source_sessions=source_sessions,
         dependencies=dependencies,
+        panel_axis=panel_axis,
     )
     with closing_iterator(data):
         first = next((frame for frame in data if not frame.empty), None)
         if first is None:
             raise ValueError("processed_output_empty")
-        yield (chain((first,), data), {})
+        metadata = {}
+        if spec.data_id == "on_id_decomposition":
+            clocks = {"on_id_pre_entry_log_return": "next_session_open_09:30"}
+            for horizon in json.loads(spec.parameters_json)["horizons"]:
+                close_clock = f"session_{horizon}_close_15:00"
+                open_clock = f"session_{horizon + 1}_open_09:30"
+                clocks.update(
+                    {
+                        f"on_id_holding_intraday_log_return_{horizon}d": close_clock,
+                        f"on_id_holding_overnight_log_return_{horizon}d": open_clock,
+                        f"on_id_endpoint_return_{horizon}d": open_clock,
+                    }
+                )
+            metadata["producer_diagnostics"] = {
+                "label_semantics": {
+                    label: {
+                        "price_basis": "supplier_adjusted_open_close",
+                        "corporate_action_validation": "not_performed",
+                        "pre_entry_is_not_holding_return": True,
+                        "costs_or_strategy_profit_estimated": False,
+                        "component_clock": clock,
+                        "timezone": "Asia/Shanghai",
+                        "stored_timezone": "UTC",
+                        "availability_basis": (
+                            "endpoint_event_time_not_vendor_publication_time"
+                        ),
+                    }
+                    for label, clock in clocks.items()
+                }
+            }
+        yield (chain((first,), data), metadata)
 
 
 def _preceding_input_window(session, window):
@@ -272,7 +341,9 @@ def _preceding_input_window(session, window):
     return TimeWindow(min(start, window.start), window.end)
 
 
-def _processed_frames(spec, *, time_window, source, source_sessions, dependencies):
+def _processed_frames(
+    spec, *, time_window, source, source_sessions, dependencies, panel_axis=None
+):
     if spec.data_id == "benchmark_weights":
         yield from _benchmark_frames(source, source_sessions["index_weights"])
         return
@@ -280,6 +351,8 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
     reference = (
         source_sessions["market_bars_1d"]
         if panel_source
+        else panel_axis
+        if panel_axis is not None
         else next(iter(dependencies.values()))
     )
     stocks = (
@@ -336,6 +409,8 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
         if spec.kind is ProcessedDataKind.LABEL
         else 0
     )
+    if spec.data_id == "on_id_decomposition":
+        lookahead = max(json.loads(spec.parameters_json)["horizons"]) + 1
     events = None
     if spec.data_id == "execution_mask":
         lookahead = EXECUTION_LOOKAHEAD_SESSIONS
@@ -434,6 +509,30 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
         for data_id, session in dependencies.items():
             view = session.filtered_view(read_window)
             frames[data_id] = materialize_dataset_session(view)
+        if panel_axis is not None:
+            keys = ["market_id", "asset_id", "timestamp"]
+            declared = materialize_dataset_session(
+                panel_axis.filtered_view(read_window)
+            )
+            for selected in frames.values():
+                if (
+                    selected.merge(
+                        declared[keys],
+                        on=keys,
+                        how="left",
+                        indicator=True,
+                        validate="one_to_one",
+                    )["_merge"]
+                    .eq("left_only")
+                    .any()
+                ):
+                    raise ValueError("on_id_input_key_outside_panel")
+            frames["market_panel_1d"] = declared.merge(
+                frames["market_panel_1d"][[*keys, "adj_open", "adj_close"]],
+                on=keys,
+                how="left",
+                validate="one_to_one",
+            )
         current_source = dict(source)
         if panel_source:
             view = reference.filtered_view(read_window)
@@ -857,6 +956,31 @@ def _compute_processed_frame(
                 validate="one_to_one",
             )
         return calculated.loc[:, list(spec.required_columns)]
+    if spec.data_id == "on_id_decomposition":
+        panel = dependencies["market_panel_1d"].merge(
+            dependencies["execution_mask"],
+            on=["market_id", "asset_id", "timestamp"],
+            how="left",
+            validate="one_to_one",
+        )
+        pieces = []
+        for asset, group in panel.groupby("asset_id", sort=False):
+            axis = trading_sessions if asset_sessions is None else asset_sessions[asset]
+            # The read window already includes the largest requested lookahead.
+            # Avoid expanding every bounded block over the entire source history.
+            axis = axis[
+                bisect_left(axis, group.timestamp.min()) : bisect_right(
+                    axis, group.timestamp.max()
+                )
+            ]
+            pieces.append(
+                add_on_id_decomposition(
+                    group,
+                    horizons=tuple(json.loads(spec.parameters_json)["horizons"]),
+                    sessions=axis,
+                )
+            )
+        return pd.concat(pieces, ignore_index=True).loc[:, list(spec.required_columns)]
     if spec.kind is ProcessedDataKind.LABEL:
         panel = dependencies["market_panel_1d"].merge(
             dependencies["execution_mask"],

@@ -438,14 +438,13 @@ def build_a_share_statistics_tables(
                     column = family_columns[family_id]
                     value = daily[column]
                     defined = bool(np.isfinite(value))
-                    paired_assets = (
-                        mature.loc[
-                            mature[[column, primary_label]].notna().all(axis=1),
-                            "asset_id",
-                        ]
-                        .astype(str)
-                        .sort_values()
-                    )
+                    paired = mature.loc[
+                        mature[[column, primary_label]].notna().all(axis=1),
+                        ["asset_id", primary_label],
+                    ].copy()
+                    paired["asset_id"] = paired.asset_id.astype(str)
+                    paired = paired.sort_values("asset_id")
+                    paired_assets = paired.asset_id
                     loss_records.append(
                         {
                             "timestamp": timestamp,
@@ -459,6 +458,14 @@ def build_a_share_statistics_tables(
                             "observation_count": len(paired_assets),
                             "asset_coverage_id": canonical_json_hash(
                                 paired_assets.tolist()
+                            ),
+                            "target_domain_id": canonical_json_hash(
+                                [
+                                    [asset, float(label)]
+                                    for asset, label in paired.itertuples(
+                                        index=False, name=None
+                                    )
+                                ]
                             ),
                             "status": "DEFINED" if defined else "UNDEFINED",
                             "reason": None
@@ -507,6 +514,7 @@ def build_a_share_statistics_tables(
             "common_date",
             "common_observation_count",
             "asset_coverage_id",
+            "target_domain_id",
         ),
     )
     comparison_by_date = (
@@ -535,6 +543,9 @@ def build_a_share_statistics_tables(
         selection_group=selection_group,
         family_ids=family_ids,
         config=config,
+        target_metadata=_model_target_metadata(
+            config, dataset_spec, time_window, selections
+        ),
     )
     tables = {
         "robustness": robustness,
@@ -551,8 +562,47 @@ def build_a_share_statistics_tables(
     return tables
 
 
+def _model_target_metadata(config, spec, window, selections):
+    """Describe the actual evaluation target without binding unrelated inputs."""
+    label = config["evaluation"]["primary_label"]
+    availability = _statistics_label_availability(config["evaluation"], spec)
+    cutoff = (
+        _statistics_window_bounds(
+            TimeWindow(config["label_cutoff"], config["label_cutoff"])
+        )[1]
+        if "label_cutoff" in config
+        else _statistics_window_bounds(window)[1]
+    )
+    return {
+        "selection_group": config.get("selection_group", "explicit"),
+        "coverage_basis": "model_prediction_domain"
+        if selections
+        else "persisted_prediction_keys",
+        "sample_role": config["sample_role"],
+        "window": {"start": str(window.start), "end": str(window.end)},
+        "evaluation": {
+            **config["evaluation"],
+            "label_availability_columns": {label: availability},
+        },
+        "evaluation_axis": "cross_sectional",
+        "column_roles": {label: str(spec.column_roles[label])},
+        "column_units": {
+            column: unit
+            for column, unit in spec.column_units.items()
+            if column == label
+        },
+        "label_cutoff": cutoff.isoformat(),
+    }
+
+
 def _paired_group_rankic(
-    quarterly, *, global_statistics, selection_group, family_ids, config
+    quarterly,
+    *,
+    global_statistics,
+    selection_group,
+    family_ids,
+    config,
+    target_metadata,
 ):
     columns = (
         "family_id",
@@ -590,6 +640,30 @@ def _paired_group_rankic(
         return pd.DataFrame(columns=columns)
     if global_statistics is None:
         raise ValueError("global_comparison_statistics_required")
+    left_metadata = global_statistics.metadata
+    label = target_metadata["evaluation"]["primary_label"]
+    left_unit = left_metadata.get("column_units", {}).get(label)
+    right_unit = target_metadata["column_units"].get(label)
+    if (
+        selection_group != "quarterly"
+        or left_metadata.get("selection_group") != "global"
+        or target_metadata["selection_group"] != "quarterly"
+        or any(
+            metadata.get("coverage_basis") != "model_prediction_domain"
+            or metadata.get("evaluation_axis") != "cross_sectional"
+            or metadata.get("column_roles", {}).get(label) != "label"
+            for metadata in (left_metadata, target_metadata)
+        )
+        or left_metadata.get("evaluation", {}).get("primary_label") != label
+        or left_metadata.get("sample_role") != target_metadata["sample_role"]
+        or "window" not in left_metadata
+        or _statistics_window_bounds(TimeWindow(**left_metadata["window"]))
+        != _statistics_window_bounds(TimeWindow(**target_metadata["window"]))
+        or left_unit is not None
+        and right_unit is not None
+        and left_unit != right_unit
+    ):
+        raise ValueError("model_group_comparison_target_metadata_invalid")
     statistics = config["statistics"]
     declaration = statistics["group_comparison"]
     keys = ["timestamp", "family_id"]
@@ -611,6 +685,15 @@ def _paired_group_rankic(
                         right.loc[
                             left.status.eq("DEFINED") & right.status.eq("DEFINED"),
                             "asset_coverage_id",
+                        ]
+                    )
+                    or not left.loc[
+                        left.status.eq("DEFINED") & right.status.eq("DEFINED"),
+                        "target_domain_id",
+                    ].equals(
+                        right.loc[
+                            left.status.eq("DEFINED") & right.status.eq("DEFINED"),
+                            "target_domain_id",
                         ]
                     )
                     or not left.loc[
@@ -1274,6 +1357,8 @@ def factor_statistics(config):
     from quant_research_platform.storage.atomic import reject_if_exists
 
     config = qrp_json_mapping_snapshot(config)
+    if "evaluation_inputs" in config:
+        return _factor_statistics_from_evaluations(config)
     required = {
         "dataset",
         "output",
@@ -1343,6 +1428,369 @@ def factor_statistics(config):
         },
         tables=tables,
         table_group="factor",
+    )
+
+
+def _factor_statistics_from_evaluations(config):
+    """Reduce published daily facts without reopening their dataset producers."""
+    from contextlib import ExitStack
+
+    from quant_research_platform.artifacts.outputs.evaluation import (
+        _evaluation_spec,
+        _iter_evaluation_member_batches,
+    )
+    from quant_research_platform.artifacts.outputs.evaluation_daily import (
+        daily_frame,
+        validate_daily_counts,
+    )
+    from quant_research_platform.artifacts.outputs.manifest import (
+        validate_output_bundle,
+    )
+    from quant_research_platform.artifacts.statistics import (
+        STATISTICS_TABLE_COLUMNS,
+        write_statistics_artifact,
+    )
+    from quant_research_platform.research.statistics import fdr_adjust
+    from quant_research_platform.storage.atomic import reject_if_exists
+
+    required = {"evaluation_inputs", "output", "statistics"}
+    optional = {"window", "analyses", "sample_role", "evaluation"}
+    if required - set(config) or set(config) - required - optional:
+        raise ValueError("factor_statistics_evaluation_config_invalid")
+    paths = config["evaluation_inputs"]
+    if (
+        type(paths) is not list
+        or not paths
+        or any(type(path) is not str or not path for path in paths)
+    ):
+        raise ValueError("factor_statistics_evaluation_inputs_invalid")
+    analyses = _selected_analyses(config, ("rank_ic", "stratified_ic"))
+    if "rank_ic" in analyses and len(paths) != 1:
+        raise ValueError("factor_statistics_rank_ic_multiple_evaluations")
+    policy = config["statistics"]
+    needed = {"hac_lag"}
+    if "stratified_ic" in analyses:
+        needed |= {"fdr_method", "fdr_alpha"}
+    if "rank_ic" in analyses:
+        needed |= {"factor_fdr_families", "fdr_primary", "fdr_robustness"}
+    if (
+        type(policy) is not dict
+        or set(policy) != needed
+        or type(policy.get("hac_lag")) is not int
+        or policy["hac_lag"] < 0
+    ):
+        raise ValueError("factor_statistics_policy_invalid")
+    lag = policy["hac_lag"]
+    if "stratified_ic" in analyses:
+        fdr_adjust([0.5], method=policy["fdr_method"], alpha=policy["fdr_alpha"])
+    reject_if_exists(Path(config["output"]))
+    entries = []
+    scopes = set()
+    binding = None
+    for path in paths:
+        manifest, _ = validate_output_bundle(
+            Path(path),
+            expected_definition_id="evaluation_outputs",
+            selected_files=("metrics.parquet",),
+        )
+        metadata = manifest["metadata"]
+        if (
+            "input_facts" not in metadata
+            or metadata["evaluation_axis"] != "cross_sectional"
+        ):
+            raise ValueError("factor_statistics_evaluation_science_missing")
+        scope = metadata["sample_scope"]
+        if scope in scopes:
+            raise ValueError("factor_statistics_evaluation_duplicate_scope")
+        scopes.add(scope)
+        current = {
+            key: metadata[key]
+            for key in (
+                "market_id",
+                "evaluation_axis",
+                "signals",
+                "label_columns",
+                "label_availability_columns",
+                "filter_mode",
+                "window",
+                "cutoff",
+                "input_facts",
+                "strata",
+                "common_rule",
+            )
+        }
+        if binding is not None and current != binding:
+            raise ValueError("factor_statistics_evaluation_inputs_incompatible")
+        binding = current
+        requested = TimeWindow(**config.get("window", metadata["window"]))
+        low, high = _statistics_window_bounds(requested)
+        original_low, original_high = _statistics_window_bounds(
+            TimeWindow(**metadata["window"])
+        )
+        if low < original_low or high > original_high:
+            raise ValueError("factor_statistics_evaluation_window_outside")
+        entries.append(
+            (
+                Path(path),
+                metadata,
+                None if low == original_low and high == original_high else requested,
+            )
+        )
+    config.setdefault("window", entries[0][1]["window"])
+    config.setdefault("sample_role", entries[0][1]["sample_role"])
+    if type(config["sample_role"]) is not str or not config["sample_role"].strip():
+        raise ValueError("statistics_sample_role_invalid")
+    series = {}
+    input_counts = {}
+    input_dates = {}
+    for path, metadata, window in entries:
+        scope = metadata["sample_scope"]
+        input_dates[scope] = []
+        for signal in metadata["signals"]:
+            for label in metadata["label_columns"]:
+                series[(signal["signal_id"], label, scope, "all", None)] = {
+                    "ic": [],
+                    "rankic": [],
+                    "pairs": 0,
+                    "dates": 0,
+                    "rankic_daily": [],
+                }
+        members = ["metrics"]
+        if metadata["optional_member_rows"]:
+            members += ["daily_coverage", "daily_strata"]
+        validate_output_bundle(
+            path,
+            expected_definition_id="evaluation_outputs",
+            selected_files=tuple(name + ".parquet" for name in members),
+        )
+        date_count = 0
+        with closing_iterator(ExitStack()) as stack:
+            streams = {
+                name: stack.enter_context(
+                    closing_iterator(
+                        iter_complete_session_frames(
+                            _iter_evaluation_member_batches(
+                                path, name=name, metadata=metadata, time_window=window
+                            ),
+                            timestamp_column="timestamp",
+                        )
+                    )
+                )
+                for name in members
+            }
+
+            def next_date(stream):
+                return next((frame for frame in stream if not frame.empty), None)
+
+            heads = {
+                name: next_date(stream)
+                for name, stream in streams.items()
+                if name != "metrics"
+            }
+            for metrics in streams["metrics"]:
+                if metrics.empty:
+                    continue
+                timestamp = metrics.timestamp.iloc[0]
+                date_count += 1
+                input_dates[scope].append(timestamp)
+                daily = {}
+                for name in heads:
+                    head = heads[name]
+                    if (
+                        head is not None
+                        and not head.empty
+                        and head.timestamp.iloc[0] < timestamp
+                    ):
+                        raise ValueError("evaluation_daily_dates_mismatch")
+                    daily[name] = (
+                        head
+                        if head is not None
+                        and not head.empty
+                        and head.timestamp.iloc[0] == timestamp
+                        else None
+                    )
+                    if daily[name] is not None:
+                        heads[name] = next_date(streams[name])
+                coverage = daily.get("daily_coverage")
+                if "daily_coverage" in members and coverage is None:
+                    raise ValueError("evaluation_daily_dates_mismatch")
+                validate_daily_counts(
+                    metrics,
+                    coverage,
+                    daily.get("daily_strata")
+                    if daily.get("daily_strata") is not None
+                    else daily_frame([], "daily_strata")
+                    if "daily_strata" in members
+                    else None,
+                    spec=_evaluation_spec(metadata),
+                    science=metadata,
+                )
+                for name, frame in (
+                    ("metrics", metrics),
+                    ("daily_strata", daily.get("daily_strata")),
+                ):
+                    if frame is None:
+                        continue
+                    for row in frame.itertuples(index=False):
+                        kind = "all" if name == "metrics" else row.stratification
+                        stratum = (
+                            None
+                            if name == "metrics" or pd.isna(row.stratum)
+                            else row.stratum
+                        )
+                        values = series.setdefault(
+                            (row.signal, row.label, scope, kind, stratum),
+                            {"ic": [], "rankic": [], "pairs": 0, "dates": 0},
+                        )
+                        if "rank_ic" in analyses and name == "metrics":
+                            values["rankic_daily"].append(float(row.rankic))
+                        values["dates"] += 1
+                        values["pairs"] += int(row.n_obs)
+                        for statistic in ("ic", "rankic"):
+                            value = getattr(row, statistic)
+                            if pd.notna(value):
+                                values[statistic].append(float(value))
+            if any(head is not None and not head.empty for head in heads.values()):
+                raise ValueError("evaluation_daily_dates_mismatch")
+        input_counts[scope] = date_count
+    tables = {}
+    if "stratified_ic" in analyses:
+        rows = []
+        for key, values in series.items():
+            for statistic in ("ic", "rankic"):
+                observations = values[statistic]
+                row = dict(
+                    zip(
+                        (
+                            "signal",
+                            "label",
+                            "sample_scope",
+                            "stratification",
+                            "stratum",
+                        ),
+                        key,
+                        strict=True,
+                    )
+                )
+                row.update(
+                    statistic=statistic,
+                    input_date_count=input_counts[key[2]],
+                    observed_date_count=values["dates"],
+                    observation_count=len(observations),
+                    observation_pairs=values["pairs"],
+                    mean=float(np.mean(observations)) if observations else np.nan,
+                    standard_error=np.nan,
+                    t_statistic=np.nan,
+                    p_value=np.nan,
+                    ci_lower=np.nan,
+                    ci_upper=np.nan,
+                    status="UNDEFINED",
+                    reason="insufficient_dates_for_hac",
+                    hac_lag=lag,
+                    fdr_method=policy["fdr_method"],
+                    fdr_alpha=policy["fdr_alpha"],
+                    fdr_adjusted_p_value=np.nan,
+                    defined_hypothesis_count=0,
+                )
+                if len(observations) >= max(2, lag + 1):
+                    try:
+                        inference = hac_mean(observations, max_lags=lag)
+                    except ValueError as error:
+                        if str(error) != "hac_inference_undefined":
+                            raise
+                        row["reason"] = str(error)
+                    else:
+                        row.update(
+                            status="DEFINED",
+                            reason=None,
+                            mean=inference.mean,
+                            standard_error=inference.standard_error,
+                            t_statistic=inference.t_statistic,
+                            p_value=inference.p_value,
+                            ci_lower=inference.confidence_interval[0],
+                            ci_upper=inference.confidence_interval[1],
+                        )
+                rows.append(row)
+        defined = [row for row in rows if row["status"] == "DEFINED"]
+        if defined:
+            adjusted = fdr_adjust(
+                [row["p_value"] for row in defined],
+                method=policy["fdr_method"],
+                alpha=policy["fdr_alpha"],
+            )
+            for row, value in zip(defined, adjusted.adjusted_p_values, strict=True):
+                row["fdr_adjusted_p_value"] = float(value)
+        for row in rows:
+            row["defined_hypothesis_count"] = len(defined)
+        tables["factor_stratified_diagnostics"] = pd.DataFrame.from_records(
+            rows,
+            columns=STATISTICS_TABLE_COLUMNS["factor_stratified_diagnostics.parquet"],
+        )
+    if "rank_ic" in analyses:
+        evaluation = config.get("evaluation")
+        if not isinstance(evaluation, dict) or set(evaluation) != {
+            "primary_label",
+            "factors",
+        }:
+            raise ValueError("factor_statistics_evaluation_invalid")
+        factors = tuple(evaluation["factors"])
+        if (
+            set(factors) - {signal["signal_id"] for signal in entries[0][1]["signals"]}
+            or evaluation["primary_label"] not in entries[0][1]["label_columns"]
+        ):
+            raise ValueError("factor_statistics_evaluation_invalid")
+        scope = entries[0][1]["sample_scope"]
+        ranks = pd.DataFrame(
+            {
+                "timestamp": input_dates[scope],
+                **{
+                    factor: series[
+                        (factor, evaluation["primary_label"], scope, "all", None)
+                    ]["rankic_daily"]
+                    for factor in factors
+                },
+            }
+        )
+        tables["factor_diagnostics"] = _factor_summary(
+            ranks,
+            factors=factors,
+            families=_factor_families(policy["factor_fdr_families"], factors),
+            methods=(
+                _fdr_method(policy["fdr_primary"], expected="BH"),
+                _fdr_method(policy["fdr_robustness"], expected="BY"),
+            ),
+            max_lags=lag,
+        )
+    return write_statistics_artifact(
+        Path(config["output"]),
+        table_group="factor",
+        tables=tables,
+        metadata={
+            **{key: value for key, value in config.items() if key != "output"},
+            "evaluation_binding": binding,
+            "family_scopes": sorted(scopes),
+            "scope_facts": {
+                metadata["sample_scope"]: {
+                    "comparison_inputs": metadata["comparison_inputs"],
+                    "sample_role": metadata["sample_role"],
+                }
+                for _, metadata, _ in entries
+            },
+            "stratum_domains": {
+                kind: sorted(
+                    {key[4] for key in series if key[3] == kind},
+                    key=lambda value: (value is not None, value or ""),
+                )
+                for kind in binding["strata"].get("kinds", [])
+            },
+            "input_date_counts": input_counts,
+            "inference_scope": "exploratory",
+            "formal_selection_qualification": "not_established",
+            "hac_lag_unit": "observed_dates_with_defined_statistic",
+            "multiple_testing_scope": (
+                "all_defined_signals_labels_strata_scopes_ic_rankic_in_explicit_inputs"
+            ),
+        },
     )
 
 
@@ -1640,16 +2088,9 @@ def model_statistics(config):
         output,
         metadata={
             **{key: value for key, value in config.items() if key != "output"},
-            "coverage_basis": "model_prediction_domain"
-            if selections
-            else "persisted_prediction_keys",
+            **_model_target_metadata(config, spec, window, selections),
             "inference_scope": "exploratory",
             "formal_selection_qualification": "not_established",
-            "column_units": {
-                column: unit
-                for column, unit in spec.column_units.items()
-                if column == config["evaluation"]["primary_label"]
-            },
             "selection_cutoffs": sorted(
                 {
                     str(cutoff)

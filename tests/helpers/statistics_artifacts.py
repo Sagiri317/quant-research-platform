@@ -149,6 +149,14 @@ def portfolio_statistics_config(sample_role="validation", *, configuration=None)
     )
     config = statistics_config(sample_role=sample_role)
     config.update(
+        analyses=[
+            "performance",
+            "attribution",
+            "capacity",
+            "sharpe_inference",
+            "cscv",
+            "group_comparison",
+        ],
         execution_assumptions=asdict(EXECUTION_ASSUMPTIONS),
         risk=asdict(FactorRiskConfig()),
         benchmark_total_return_indices={"csi500": "H00905", "csi1000": "H00852"},

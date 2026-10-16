@@ -611,24 +611,21 @@ def test_portfolio_statistics_role_is_optional_description(tmp_path, sample_role
 
 
 @pytest.mark.parametrize("mixed", [False, True])
-def test_benchmark_only_preserves_nonapplicable_candidates(
+def test_comparison_only_supports_simple_and_enhanced_without_risk(
     tmp_path, monkeypatch, mixed
 ):
-    import pyarrow.parquet as pq
-
-    from quant_research_platform.artifacts.statistics import _ARROW_SCHEMAS
     from quant_research_platform.research.portfolios import production
-    from quant_research_platform.storage.datasets import reading, write_dataset
-    from tests.helpers.portfolio_inputs import _interim_specs
+    from tests.helpers.benchmark_references import reference_input
 
     ledger = tmp_path / "cash"
     window = _cash_ledger(ledger)
+    reference = reference_input(tmp_path / "index.parquet", [100.0, 110.0, 99.0])
     config = {
         "ledgers": [str(ledger)],
         "window": window,
-        "analyses": ["benchmark"],
-        "benchmark_total_return_indices": {},
-        "output": str(tmp_path / "benchmark"),
+        "analyses": ["benchmark_comparison"],
+        "comparison_benchmarks": [reference],
+        "output": str(tmp_path / "statistics"),
     }
     if mixed:
         candidate = PortfolioCandidateSpec(
@@ -644,79 +641,30 @@ def test_benchmark_only_preserves_nonapplicable_candidates(
         enhanced = tmp_path / "enhanced"
         assert _cash_ledger(enhanced, candidate=candidate) == window
         config["ledgers"].append(str(enhanced))
-        dates = pd.bdate_range(window["start"], window["end"])
-        source = tmp_path / "index"
-        write_dataset(
-            source,
-            pd.DataFrame(
-                {
-                    "source_asset_id": "H00905",
-                    "timestamp": dates,
-                    "trade_date": dates,
-                    "index_name": "CSI500 total return",
-                    "open": [100.0, 100.0, 110.0, 99.0],
-                    "close": [100.0, 100.0, 110.0, 99.0],
-                    "period_return": np.nan,
-                }
-            ),
-            spec=_interim_specs().get("index_market"),
-        )
-        config["benchmark_total_return_indices"] = {"csi500": "H00905"}
-        config["inputs"] = {
-            "index_market": {"path": str(source), "columns": ["open", "close"]}
-        }
-    else:
 
-        def unexpected(*args, **kwargs):
-            raise AssertionError("nonapplicable benchmark opened market inputs")
+    def unexpected(*args, **kwargs):
+        raise AssertionError("comparison opened construction or risk inputs")
 
-        monkeypatch.setattr(reading, "read_dataset", unexpected)
-        monkeypatch.setattr(production, "read_dataset", unexpected)
-        monkeypatch.setattr(production, "_iter_input_sessions", unexpected)
-
+    monkeypatch.setattr(production, "_iter_input_sessions", unexpected)
+    monkeypatch.setattr(production, "_read_materialized", unexpected)
     artifact = read_statistics_artifact(portfolio_statistics(config))
     assert set(artifact._members) == {
-        "portfolio_daily.parquet",
-        "portfolio_performance.parquet",
+        "portfolio_benchmark_intervals.parquet",
+        "portfolio_benchmark_metrics.parquet",
     }
-    with artifact.table("portfolio_daily.parquet") as daily:
-        simple = daily.loc[daily.candidate_id.eq("cash")]
-        assert len(simple) == 2
-        assert simple.benchmark_status.eq("NOT_APPLICABLE").all()
-        assert (
-            simple[["benchmark_return", "active_return", "relative_wealth"]]
-            .isna()
-            .all()
-            .all()
-        )
-        if mixed:
-            enhanced = daily.loc[daily.candidate_id.eq("enhanced")]
-            assert len(enhanced) == 2 and enhanced.benchmark_status.eq("DEFINED").all()
-            assert enhanced.benchmark_return.to_numpy() == pytest.approx(
-                [0.1, -0.1], rel=2e-14, abs=0
+    with artifact.table("portfolio_benchmark_intervals.parquet") as intervals:
+        for _, rows in intervals.groupby("candidate_id"):
+            assert rows.benchmark_return.tolist() == pytest.approx([0.1, -0.1])
+            assert rows.return_difference.tolist() == pytest.approx([-0.1, 0.1])
+            assert rows.relative_wealth.tolist() == pytest.approx([1 / 1.1, 1 / 0.99])
+            assert rows.status.eq("DEFINED").all()
+    with artifact.table("portfolio_benchmark_metrics.parquet") as metrics:
+        for _, rows in metrics.groupby("candidate_id"):
+            selected = rows.set_index("metric_id")
+            assert selected.loc["relative_wealth", "value"] == pytest.approx(100 / 99)
+            assert selected.loc["tracking_error", "value"] == pytest.approx(
+                0.1 * 2**0.5 * 252**0.5
             )
-            assert enhanced.active_return.to_numpy() == pytest.approx(
-                [-0.1, 0.1], rel=2e-14, abs=0
+            assert selected.loc["maximum_relative_drawdown", "value"] == pytest.approx(
+                1 / 1.1 - 1
             )
-    member = "portfolio_performance.parquet"
-    assert (
-        pq.read_schema(artifact.root / member).remove_metadata()
-        == _ARROW_SCHEMAS[member]
-    )
-    with artifact.table(member) as performance:
-        if mixed:
-            assert set(performance.candidate_id) == {"enhanced"}
-            assert set(performance.metric_id) == {
-                "annualized_active_return",
-                "tracking_error",
-                "net_information_ratio",
-                "relative_wealth",
-                "max_active_drawdown",
-            }
-            assert performance.status.eq("DEFINED").all()
-            assert performance.set_index("metric_id").loc[
-                "relative_wealth", "value"
-            ] == pytest.approx(100.0 / 99.0, rel=2e-14, abs=0)
-        else:
-            assert performance.empty
-            assert list(performance.columns) == _ARROW_SCHEMAS[member].names

@@ -199,6 +199,14 @@ def test_source_accounts_reconcile_native_portfolio_statistics(source_chain, tmp
     output = portfolio_statistics(
         {
             "ledgers": list(map(str, paths)),
+            "analyses": [
+                "performance",
+                "attribution",
+                "capacity",
+                "sharpe_inference",
+                "cscv",
+                "group_comparison",
+            ],
             "inputs": inputs,
             "output": str(tmp_path / "statistics"),
             "window": case.test,

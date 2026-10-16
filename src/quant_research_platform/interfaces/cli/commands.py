@@ -90,6 +90,13 @@ def predict(config: Config) -> None:
     _echo_result(predict(read_qrp_json_file(config)[1]))
 
 
+@app.command("explain")
+def explain(config: Config) -> None:
+    from quant_research_platform.research.models.explanations import explain
+
+    _echo_result(explain(read_qrp_json_file(config)[1]))
+
+
 @app.command("score")
 def score(config: Config) -> None:
     from quant_research_platform.research.models.trial_selection import score

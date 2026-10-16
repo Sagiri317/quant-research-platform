@@ -2319,3 +2319,40 @@ ADV 范围/参与率
 字段或覆盖缺失不构成永久备用语义、虚假值、当前状态历史回填、缩短窗口或隐藏模型变化的理由。
 
 数据获取、延期和验收进度属于操作事实，不改变本研究合同；真实运行状态从对应持久化证据读取。
+
+## 独立 ON/ID 标签诊断
+
+使用现有 `prepare`，选择 `data_id=on_id_decomposition`，输入 `market_panel_1d` 与 `execution_mask`。
+`parameters.horizons` 默认 `[20]`，可从 1/5/10/20/60/120 日中显式选择；一次结果可供多个研究配置使用。
+端点复用现有 forward-return 数学 owner，不要求先提供另一份 forward_returns 文件。
+
+对信号会话 t 和期限 h：
+
+- pre-entry：t 收盘到 t+1 开盘的对数收益，独立列出，不属于持有期收益。
+- ID：t+1 至 t+h 的 h 个开盘到收盘对数收益之和。
+- ON：上述各收盘到下一开盘的 h 个对数收益之和。
+- endpoint：t+1 开盘到 t+h+1 开盘的简单收益，沿用原 can_enter 资格。
+
+`expm1(ID+ON)` 与 endpoint 在科学数值误差内对账；这不要求独立浮点运算逐位一致。
+pre-entry、ID、ON 不因 can_enter=False 自动抹掉；完整分解 qualified 同时要求合法端点及两个分量。
+内部 close 缺失可以令分解未知而端点仍合法；缺退出 open 不能抹掉已经完整的 ID。
+非正或非有限价格只影响真实依赖它的组件，不补零、不未来填充，不阻塞其他合法资产/日期。
+
+新值列为 `on_id_pre_entry_log_return`，以及各 h 的
+`on_id_holding_intraday_log_return_{h}d`、`on_id_holding_overnight_log_return_{h}d`、`on_id_endpoint_return_{h}d`。
+每个值有自己的 `_available_at` 和 `_reason`，另存分解 qualified 与原因。
+数值使用 LABEL role，DataSpec 明确成熟映射；对数分量单位为 `log_return`，端点为 `decimal_return`。
+新成熟时点按 Asia/Shanghai 开盘09:30、收盘15:00规范到UTC：pre-entry为t+1开盘，ID为t+h收盘，
+ON/endpoint为t+h+1开盘。原 forward-return 的会话日期成熟口径不在此修改。
+这些是收益事件时钟，不冒称供应商历史发布时点已经独立验证。
+
+生产使用真实本资产会话轴和上市生命周期，停牌/未知报价不能压缩期限，已知休市不计会话；不跨重上市连接。
+原生输入的文件、年份、日期和行筛选仍以完整声明 PANEL 键域建轴，将未选价格保留为未知。
+裸目录的成员列表不能独立证明完整会话域，明确拒绝；裸单文件按调用者声明的完整 PANEL 域使用，
+其行/时间筛选从未筛文件保留键轴。这不是对供应商全市场日历完整性的独立证明。
+
+输出说明沿 selected-label 的 `producer_diagnostics.label_semantics` 经 assemble 和 evaluate 保留。
+供应商复权 open/close 的代数恒等式不等于独立公司行动验证，不含费用、仓位、强制兑付或策略净利润。
+信号条件研究可用现有 assemble/evaluate 评价这些不同标签及其真实覆盖，不能把分组标签均值改名为持仓 PnL。
+
+ON/ID 准备表只通过 parameters.horizons 选择期限，各期限的分量整组输出，不接受 label_columns、factor_columns 或 base_panel。

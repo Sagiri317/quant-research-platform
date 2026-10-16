@@ -33,6 +33,48 @@ from quant_research_platform.storage.parquet import (
 )
 
 _ARROW_SCHEMAS = {
+    "factor_stratified_diagnostics.parquet": pa.schema(
+        [
+            *[
+                pa.field(name, pa.string(), nullable=name == "stratum")
+                for name in (
+                    "signal",
+                    "label",
+                    "sample_scope",
+                    "stratification",
+                    "stratum",
+                    "statistic",
+                )
+            ],
+            *[
+                pa.field(name, pa.int64(), nullable=False)
+                for name in (
+                    "input_date_count",
+                    "observed_date_count",
+                    "observation_count",
+                    "observation_pairs",
+                )
+            ],
+            *[
+                pa.field(name, pa.float64())
+                for name in (
+                    "mean",
+                    "standard_error",
+                    "t_statistic",
+                    "p_value",
+                    "ci_lower",
+                    "ci_upper",
+                )
+            ],
+            pa.field("status", pa.string(), nullable=False),
+            pa.field("reason", pa.string()),
+            pa.field("hac_lag", pa.int64(), nullable=False),
+            pa.field("fdr_method", pa.string(), nullable=False),
+            pa.field("fdr_alpha", pa.float64(), nullable=False),
+            pa.field("fdr_adjusted_p_value", pa.float64()),
+            pa.field("defined_hypothesis_count", pa.int64(), nullable=False),
+        ]
+    ),
     "factor_diagnostics.parquet": pa.schema(
         [
             pa.field("family_id", pa.string()),
@@ -139,6 +181,7 @@ _ARROW_SCHEMAS = {
             pa.field("common_date", pa.int64()),
             pa.field("common_observation_count", pa.int64()),
             pa.field("asset_coverage_id", pa.string()),
+            pa.field("target_domain_id", pa.string()),
         ]
     ),
     "model_comparison.parquet": pa.schema(
@@ -240,11 +283,6 @@ _ARROW_SCHEMAS = {
             pa.field("realized_turnover", pa.float64()),
             pa.field("return_status", pa.string()),
             pa.field("return_reason", pa.string()),
-            pa.field("benchmark_return", pa.float64()),
-            pa.field("active_return", pa.float64()),
-            pa.field("relative_wealth", pa.float64()),
-            pa.field("benchmark_status", pa.string()),
-            pa.field("benchmark_reason", pa.string()),
             pa.field("sample_role", pa.string()),
         ]
     ),
@@ -457,7 +495,6 @@ _ARROW_SCHEMAS = {
             pa.field("start_nav", pa.float64()),
             pa.field("end_nav", pa.float64()),
             pa.field("net_return", pa.float64()),
-            pa.field("benchmark_return", pa.float64()),
             pa.field("status", pa.string()),
             pa.field("reason", pa.string()),
         ]
@@ -509,8 +546,104 @@ _ARROW_SCHEMAS = {
         ]
     ),
 }
+_COMPARISON_MEMBERS = (
+    "portfolio_benchmark_intervals.parquet",
+    "portfolio_benchmark_metrics.parquet",
+    "portfolio_market_exposure.parquet",
+    "portfolio_regime_comparison.parquet",
+)
+_COMPARISON_IDENTITY = (
+    "candidate_id",
+    "execution_mode",
+    "episode_id",
+    "fold_id",
+    "reference_id",
+    "reference_kind",
+    "sample_role",
+)
+for _member in _COMPARISON_MEMBERS:
+    _fields = [
+        pa.field(name, pa.string(), nullable=False) for name in _COMPARISON_IDENTITY
+    ]
+    if _member == "portfolio_benchmark_intervals.parquet":
+        _fields += [
+            pa.field(name, pa.timestamp("ns"), nullable=False)
+            for name in ("start_at", "end_at")
+        ]
+        _fields += [
+            pa.field(name, pa.float64())
+            for name in (
+                "portfolio_return",
+                "benchmark_return",
+                "return_difference",
+                "portfolio_wealth",
+                "benchmark_wealth",
+                "relative_wealth",
+            )
+        ]
+        _fields += [
+            pa.field(name, pa.string(), nullable=False)
+            for name in (
+                "portfolio_status",
+                "portfolio_reason",
+                "benchmark_status",
+                "benchmark_reason",
+                "status",
+                "reason",
+            )
+        ]
+    else:
+        if _member == "portfolio_regime_comparison.parquet":
+            _fields.append(pa.field("regime", pa.string(), nullable=False))
+        _fields.append(
+            pa.field(
+                "coefficient_id"
+                if _member == "portfolio_market_exposure.parquet"
+                else "metric_id",
+                pa.string(),
+                nullable=False,
+            )
+        )
+        _fields.append(pa.field("value", pa.float64()))
+        if _member == "portfolio_market_exposure.parquet":
+            _fields += [
+                pa.field(name, pa.float64())
+                for name in (
+                    "standard_error",
+                    "t_statistic",
+                    "p_value",
+                    "ci_lower",
+                    "ci_upper",
+                )
+            ]
+        _fields += [
+            pa.field(name, pa.int64(), nullable=False)
+            for name in ("observation_count", "planned_observation_count")
+        ]
+        _fields += [
+            pa.field(name, pa.string(), nullable=False) for name in ("status", "reason")
+        ]
+        if _member == "portfolio_market_exposure.parquet":
+            _fields += [
+                pa.field(name, pa.timestamp("ns"), nullable=False)
+                for name in ("start_at", "end_at")
+            ]
+            _fields += [
+                pa.field("hac_lag", pa.int64(), nullable=False),
+                pa.field("confidence", pa.float64(), nullable=False),
+            ]
+    if _member == "portfolio_market_exposure.parquet":
+        _fields += [
+            pa.field("fdr_method", pa.string(), nullable=False),
+            pa.field("planned_hypothesis_count", pa.int64(), nullable=False),
+            pa.field("defined_hypothesis_count", pa.int64(), nullable=False),
+            pa.field("fdr_adjusted_p_value", pa.float64()),
+        ]
+    _ARROW_SCHEMAS[_member] = pa.schema(_fields)
+
 STATISTICS_TABLE_GROUPS = {
     "factor": (
+        "factor_stratified_diagnostics.parquet",
         "factor_diagnostics.parquet",
         "fama_macbeth.parquet",
         "fama_macbeth_periods.parquet",
@@ -525,6 +658,7 @@ STATISTICS_TABLE_GROUPS = {
         "model_reality_checks.parquet",
     ),
     "portfolio": (
+        *_COMPARISON_MEMBERS,
         "portfolio_daily.parquet",
         "portfolio_group_comparison.parquet",
         "portfolio_performance.parquet",
@@ -541,6 +675,7 @@ STATISTICS_TABLE_GROUPS = {
         "crypto_maker_calibration.parquet",
     ),
     "crypto_portfolio": (
+        *_COMPARISON_MEMBERS,
         "crypto_portfolio_intervals.parquet",
         "crypto_portfolio_daily.parquet",
         "crypto_portfolio_statistics.parquet",
@@ -551,6 +686,7 @@ STATISTICS_TABLE_GROUPS = {
 }
 _EMPTY_TABLE_MEMBERS = frozenset(
     {
+        *_COMPARISON_MEMBERS,
         "crypto_maker_events.parquet",
         "crypto_maker_samples.parquet",
         "crypto_portfolio_daily.parquet",
@@ -831,6 +967,11 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
         if not field.nullable and result[field.name].isna().any():
             raise ValueError("statistics_table_null_invalid")
     for column in _STRING_COLUMNS[member]:
+        if member == "factor_stratified_diagnostics.parquet" and column == "stratum":
+            if any(type(value) is not str for value in result[column].dropna()):
+                raise ValueError("statistics_stratum_invalid")
+            result[column] = result[column].astype("string")
+            continue
         values = result[column]
         if values.isna().any():
             result[column] = values.astype("string").fillna("")
@@ -902,6 +1043,7 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
                     not in {
                         "prediction_diagnostics.parquet",
                         "model_comparison.parquet",
+                        "factor_stratified_diagnostics.parquet",
                     }
                 ],
             ]
@@ -1087,6 +1229,7 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
     if member == "model_losses.parquet":
         if (
             not result.asset_coverage_id.str.fullmatch("[0-9a-f]{64}").all()
+            or not result.target_domain_id.str.fullmatch("[0-9a-f]{64}").all()
             or not result["loss"].dropna().between(-1, 1).all()
             or (not result["common_date"].isin((0, 1)).all())
             or (result["common_observation_count"] > result["observation_count"]).any()
@@ -1096,6 +1239,109 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
             .any()
         ):
             raise ValueError("statistics_model_loss_invalid")
+    if member in _COMPARISON_MEMBERS:
+        if (
+            not result.execution_mode.isin(("continuous", "independent_segments")).all()
+            or not result.reference_kind.isin(("benchmark", "control")).all()
+            or result[["candidate_id", "episode_id", "reference_id", "sample_role"]]
+            .eq("")
+            .any()
+            .any()
+        ):
+            raise ValueError("statistics_comparison_identity_invalid")
+        continuous = result.execution_mode.eq("continuous")
+        if (
+            continuous & ~result.episode_id.eq("continuous")
+            | ~continuous & ~result.episode_id.str.fullmatch(r"[0-9]+_[0-9]+")
+        ).any():
+            raise ValueError("statistics_episode_id_invalid")
+        suffix = {
+            "portfolio_benchmark_intervals.parquet": ("start_at", "end_at"),
+            "portfolio_benchmark_metrics.parquet": ("metric_id",),
+            "portfolio_market_exposure.parquet": ("coefficient_id",),
+            "portfolio_regime_comparison.parquet": ("regime", "metric_id"),
+        }[member]
+        if result.duplicated([*_COMPARISON_IDENTITY, *suffix]).any():
+            raise ValueError("statistics_table_duplicate_keys")
+        status_values = [
+            (
+                "status",
+                "reason",
+                "return_difference"
+                if member == "portfolio_benchmark_intervals.parquet"
+                else "value",
+            )
+        ]
+        if member == "portfolio_benchmark_intervals.parquet":
+            status_values += [
+                ("portfolio_status", "portfolio_reason", "portfolio_return"),
+                ("benchmark_status", "benchmark_reason", "benchmark_return"),
+            ]
+        for status, reason, value in status_values:
+            defined = result[status].eq("DEFINED")
+            if (
+                not result[status]
+                .isin(("DEFINED", "UNDEFINED", "NOT_APPLICABLE"))
+                .all()
+                or not defined.eq(result[value].notna()).all()
+                or result.loc[defined, reason].ne("").any()
+                or result.loc[~defined, reason].eq("").any()
+            ):
+                raise ValueError("statistics_table_status_value_invalid")
+        if (
+            "planned_observation_count" in result
+            and result.observation_count.gt(result.planned_observation_count).any()
+        ):
+            raise ValueError("statistics_comparison_count_invalid")
+        if "start_at" in result and not result.start_at.lt(result.end_at).all():
+            raise ValueError("statistics_comparison_interval_invalid")
+        if (
+            member == "portfolio_market_exposure.parquet"
+            and not result.confidence.between(0, 1, inclusive="neither").all()
+        ):
+            raise ValueError("statistics_comparison_confidence_invalid")
+    if member == "portfolio_market_exposure.parquet":
+        hypothesis = result.coefficient_id.isin(
+            ("alpha", "market_return_intercept", "beta")
+        )
+        if (
+            not result.fdr_method.eq("BY").all()
+            or result.defined_hypothesis_count.gt(result.planned_hypothesis_count).any()
+            or not result.coefficient_id.isin(
+                ("alpha", "market_return_intercept", "beta", "correlation", "r_squared")
+            ).all()
+            or not result.p_value.dropna().between(0, 1).all()
+            or not result.fdr_adjusted_p_value.dropna().between(0, 1).all()
+            or result.loc[
+                hypothesis & result.status.eq("DEFINED"),
+                [
+                    "standard_error",
+                    "t_statistic",
+                    "p_value",
+                    "ci_lower",
+                    "ci_upper",
+                    "fdr_adjusted_p_value",
+                ],
+            ]
+            .isna()
+            .any()
+            .any()
+            or result.loc[
+                ~hypothesis,
+                [
+                    "standard_error",
+                    "t_statistic",
+                    "p_value",
+                    "ci_lower",
+                    "ci_upper",
+                    "fdr_adjusted_p_value",
+                ],
+            ]
+            .notna()
+            .any()
+            .any()
+        ):
+            raise ValueError("statistics_exposure_inference_invalid")
     if member in {
         "crypto_portfolio_daily.parquet",
         "crypto_portfolio_statistics.parquet",
@@ -1122,14 +1368,14 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
         ):
             raise ValueError("statistics_table_status_value_invalid")
         if member == "crypto_portfolio_daily.parquet" and (
-            result.loc[defined, ["start_nav", "end_nav", "benchmark_return"]]
-            .isna()
-            .any()
-            .any()
+            result.loc[defined, ["start_nav", "end_nav"]].isna().any().any()
             or result.loc[defined, "start_nav"].le(0).any()
         ):
             raise ValueError("statistics_table_status_value_invalid")
-    if member in STATISTICS_TABLE_GROUPS["crypto_portfolio"]:
+    if (
+        member in STATISTICS_TABLE_GROUPS["crypto_portfolio"]
+        and member not in _COMPARISON_MEMBERS
+    ):
         if not result.execution_mode.isin(("continuous", "independent_segments")).all():
             raise ValueError("statistics_execution_mode_invalid")
         if result.candidate_id.str.strip().eq("").any():
@@ -1194,9 +1440,9 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
             keys = ("candidate_id", "execution_mode", "episode_id", *suffix)
         if result.duplicated(list(keys)).any():
             raise ValueError("statistics_table_duplicate_keys")
-    if (
-        member in STATISTICS_TABLE_GROUPS["portfolio"]
-        and member != "portfolio_group_comparison.parquet"
+    if member in STATISTICS_TABLE_GROUPS["portfolio"] and member not in (
+        "portfolio_group_comparison.parquet",
+        *_COMPARISON_MEMBERS,
     ):
         keys = {
             "portfolio_daily.parquet": ("candidate_id", "entry_at"),
@@ -1310,7 +1556,6 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
                     )
                 ).all()
                 or result.loc[~positive_start, ratios].notna().any().any()
-                or result.loc[~defined_return, "active_return"].notna().any()
             ):
                 raise ValueError("statistics_return_status_invalid")
         if "end_at" in result and (not result.entry_at.lt(result.end_at).all()):
@@ -1343,6 +1588,118 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
     }.get(member)
     if keys is not None and result.duplicated(list(keys)).any():
         raise ValueError("statistics_table_duplicate_keys")
+    if member == "factor_stratified_diagnostics.parquet":
+        _validate_factor_stratified(result, metadata)
     _validate_table_binding(result, member=member, metadata=metadata)
     result.index = pd.RangeIndex(len(result))
     return result
+
+
+def _validate_factor_stratified(frame, metadata):
+    """Bind concrete factor summaries to their persisted EVAL inputs and family."""
+    binding = metadata.get("evaluation_binding", {})
+    policy = metadata.get("statistics", {})
+    if frame.duplicated(
+        ["signal", "label", "sample_scope", "stratification", "stratum", "statistic"]
+    ).any():
+        raise ValueError("statistics_stratified_duplicate_keys")
+    signals = {item["signal_id"] for item in binding.get("signals", [])}
+    scopes = set(metadata.get("family_scopes", []))
+    expected = {
+        (signal, label, scope, "all", None, statistic)
+        for signal in signals
+        for label in binding.get("label_columns", [])
+        for scope in scopes
+        for statistic in ("ic", "rankic")
+    }
+    expected.update(
+        (signal, binding["strata"]["primary_label"], scope, kind, stratum, statistic)
+        for kind, strata in metadata.get("stratum_domains", {}).items()
+        for stratum in strata
+        for signal in signals
+        for scope in scopes
+        for statistic in ("ic", "rankic")
+    )
+    actual = {
+        (
+            row.signal,
+            row.label,
+            row.sample_scope,
+            row.stratification,
+            None if pd.isna(row.stratum) else row.stratum,
+            row.statistic,
+        )
+        for row in frame.itertuples(index=False)
+    }
+    if actual != expected:
+        raise ValueError("statistics_stratified_domain_incomplete")
+    if (
+        not frame.signal.isin(
+            [item["signal_id"] for item in binding.get("signals", [])]
+        ).all()
+        or not frame.label.isin(binding.get("label_columns", [])).all()
+        or not frame.sample_scope.isin(metadata.get("family_scopes", [])).all()
+        or not frame.statistic.isin(("ic", "rankic")).all()
+    ):
+        raise ValueError("statistics_stratified_domain_invalid")
+    if (
+        not (
+            frame.input_date_count.ge(frame.observed_date_count)
+            & frame.observed_date_count.ge(frame.observation_count)
+        ).all()
+        or frame["mean"].notna().ne(frame.observation_count.gt(0)).any()
+        or frame.observation_pairs.lt(2 * frame.observation_count).any()
+    ):
+        raise ValueError("statistics_stratified_count_invalid")
+    for scope, block in frame.groupby("sample_scope"):
+        if not block.input_date_count.eq(
+            metadata.get("input_date_counts", {}).get(scope)
+        ).all():
+            raise ValueError("statistics_stratified_count_invalid")
+    for key in ("hac_lag", "fdr_method", "fdr_alpha"):
+        if not frame[key].eq(policy.get(key)).all():
+            raise ValueError("statistics_stratified_policy_invalid")
+    if (
+        not frame.fdr_method.isin(("BH", "BY")).all()
+        or not frame.fdr_alpha.between(0, 1, inclusive="neither").all()
+    ):
+        raise ValueError("statistics_stratified_policy_invalid")
+    defined = frame.status.eq("DEFINED")
+    if (
+        frame.fdr_adjusted_p_value.notna().ne(defined).any()
+        or not frame.defined_hypothesis_count.eq(int(defined.sum())).all()
+    ):
+        raise ValueError("statistics_stratified_fdr_invalid")
+    if (
+        (defined & frame.observation_count.le(frame.hac_lag)).any()
+        or (defined & frame.observation_count.lt(2)).any()
+        or not frame["mean"].dropna().between(-1, 1).all()
+    ):
+        raise ValueError("statistics_stratified_inference_invalid")
+    sufficient = frame.observation_count.ge(2) & frame.observation_count.gt(
+        frame.hac_lag
+    )
+    if (
+        (defined & frame.standard_error.le(0)).any()
+        or (defined & frame.fdr_adjusted_p_value.lt(frame.p_value)).any()
+        or frame.loc[~defined & sufficient, "reason"]
+        .ne("hac_inference_undefined")
+        .any()
+        or frame.loc[~sufficient, "reason"].ne("insufficient_dates_for_hac").any()
+    ):
+        raise ValueError("statistics_stratified_inference_invalid")
+    for kind, block in frame.groupby("stratification", sort=False):
+        if kind == "all":
+            if (
+                block.stratum.notna().any()
+                or not block.observed_date_count.eq(block.input_date_count).all()
+            ):
+                raise ValueError("statistics_stratified_domain_invalid")
+        elif (
+            kind not in binding.get("strata", {}).get("kinds", [])
+            or not block.label.eq(binding["strata"]["primary_label"]).all()
+            or not block.stratum.dropna()
+            .isin(metadata.get("stratum_domains", {}).get(kind, []))
+            .all()
+        ):
+            raise ValueError("statistics_stratified_domain_invalid")

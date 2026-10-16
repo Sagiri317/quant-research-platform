@@ -23,12 +23,22 @@ def tables(request):
         or selected
         in {
             "factor_diagnostics",
+            "factor_stratified_diagnostics",
             "fama_macbeth",
             "fama_macbeth_periods",
         }
         else "research"
     )
     row = dict(
+        signal="factor",
+        label="label",
+        sample_scope="own",
+        stratification="all",
+        stratum=None,
+        statistic="rankic",
+        observed_date_count=32,
+        observation_pairs=320,
+        hac_lag=20,
         family_id="family",
         factor_id="factor",
         prediction_id="prediction",
@@ -76,6 +86,7 @@ def tables(request):
         common_date=1,
         common_observation_count=32,
         asset_coverage_id="d" * 64,
+        target_domain_id="e" * 64,
         block_size=20,
         repetitions=10000,
         alpha=0.05,
@@ -97,6 +108,15 @@ def tables(request):
         result["model_group_comparison"] = pa.Table.from_pylist(
             [], schema=statistics._ARROW_SCHEMAS["model_group_comparison.parquet"]
         ).to_pandas()
+    if "factor_stratified_diagnostics" in result:
+        new = result["factor_stratified_diagnostics"]
+        result["factor_stratified_diagnostics"] = pd.concat(
+            [new.assign(statistic="ic"), new], ignore_index=True
+        )
+        result["factor_stratified_diagnostics"]["defined_hypothesis_count"] = 2
+        result["factor_stratified_diagnostics"]["stratum"] = result[
+            "factor_stratified_diagnostics"
+        ]["stratum"].astype("string")
     for frame in result.values():
         if "timestamp" in frame:
             frame["timestamp"] = frame["timestamp"].astype("datetime64[ns]")
@@ -106,6 +126,14 @@ def tables(request):
 @pytest.fixture
 def metadata(tables):
     return {
+        "evaluation_binding": {
+            "signals": [{"signal_id": "factor"}],
+            "label_columns": ["label"],
+            "strata": {},
+        },
+        "family_scopes": ["own"],
+        "input_date_counts": {"own": 32},
+        "statistics": {"hac_lag": 20, "fdr_method": "BH", "fdr_alpha": 0.05},
         "sample_role": "validation",
         "window": {"start": "2023-01-02", "end": "2023-03-31"},
     }
@@ -239,7 +267,7 @@ def test_research_table_counts_reject_lossy_coercion(
     if name == "model_group_comparison":
         tables[name] = pd.DataFrame([_defined_group_comparison_row()])
     count = "period_count" if name == "fama_macbeth" else "observation_count"
-    tables[name][count] = pd.Series([value], dtype=object)
+    tables[name][count] = pd.Series([value] * len(tables[name]), dtype=object)
     with pytest.raises(ValueError, match="statistics_table_count_invalid"):
         statistics.write_statistics_artifact(
             tmp_path / "rejected",
@@ -286,6 +314,20 @@ def test_group_comparison_integral_counts_round_trip(tmp_path, tables, metadata,
 def test_research_measurement_domains(tmp_path, tables, metadata, table, column, value):
     tables[table].loc[0, column] = value
     _assert_rejected_at_write_and_read(tmp_path, tables, metadata, f"{table}.parquet")
+
+
+@pytest.mark.parametrize("value", [None, "", "not-a-domain", "A" * 64])
+def test_model_target_domain_is_required_at_write_and_read(
+    tmp_path, tables, metadata, value
+):
+    tables["model_losses"].loc[0, "target_domain_id"] = value
+    _assert_rejected_at_write_and_read(
+        tmp_path,
+        tables,
+        metadata,
+        "model_losses.parquet",
+        error="statistics_model_loss_invalid",
+    )
 
 
 @pytest.mark.parametrize(
@@ -383,7 +425,6 @@ def crypto_tables():
         turnover=100.0,
         fill_events=1,
         net_return=0.1,
-        benchmark_return=0.0,
         status="DEFINED",
         reason="",
         value=0.2,
@@ -404,6 +445,7 @@ def crypto_tables():
             ]
         )
         for member in statistics.STATISTICS_TABLE_GROUPS["crypto_portfolio"]
+        if member.startswith("crypto_")
     }
     result["crypto_portfolio_coverage"].loc[0, "kind"] = "covered"
     result["crypto_execution_diagnostics"].loc[0, ["value", "text"]] = [
@@ -470,7 +512,7 @@ def test_crypto_text_diagnostics_and_undefined_daily_are_preserved(
         assert frame.loc[0, "status"] == "UNDEFINED"
         assert pd.isna(frame.loc[0, "net_return"])
         assert frame.loc[0, "start_nav"] == 100.0
-        assert frame.loc[0, "benchmark_return"] == 0.0
+        assert "benchmark_return" not in frame
 
 
 @pytest.mark.parametrize("name", ("prediction_diagnostics", "model_comparison"))
@@ -784,6 +826,7 @@ def test_paired_rankic_and_champion_diagnostics_reach_native_artifacts(
                 common_date=values.notna().astype(int).to_numpy(),
                 common_observation_count=3,
                 asset_coverage_id="d" * 64,
+                target_domain_id="e" * 64,
             )
         )
         for group, values in ranks.items()
@@ -805,7 +848,16 @@ def test_paired_rankic_and_champion_diagnostics_reach_native_artifacts(
     expected = {}
     global_artifact = None
     for group in ("global", "quarterly"):
-        bound = {**metadata, "sample_role": access}
+        bound = {
+            **metadata,
+            "sample_role": access,
+            "selection_group": group,
+            "coverage_basis": "model_prediction_domain",
+            "evaluation": {"primary_label": "label"},
+            "evaluation_axis": "cross_sectional",
+            "column_roles": {"label": "label"},
+            "column_units": {},
+        }
         if group == "global" and access == "validation":
             bound["selection_cutoffs"] = [metadata["window"]["end"]]
         selected = {name: table.copy(deep=True) for name, table in tables.items()}
@@ -831,6 +883,7 @@ def test_paired_rankic_and_champion_diagnostics_reach_native_artifacts(
                 selection_group=group,
                 family_ids=("family",),
                 config=config,
+                target_metadata=bound,
             )
         logical = tmp_path / group
         root = statistics.write_statistics_artifact(

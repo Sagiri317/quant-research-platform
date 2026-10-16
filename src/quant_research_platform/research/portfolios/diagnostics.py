@@ -23,6 +23,16 @@ from quant_research_platform.research.portfolios.accounting import (
     capacity_quantiles,
     portfolio_interval_economics,
 )
+from quant_research_platform.research.portfolios.comparison import (
+    COMPARISON_ANALYSES,
+    _nav_return_roundoff,
+    comparison_tables,
+    selected_portfolio_analyses,
+    validate_comparison_config,
+)
+from quant_research_platform.research.portfolios.comparison import (
+    endpoint_return as comparison_endpoint_return,
+)
 from quant_research_platform.research.portfolios.risk import (
     FactorRiskConfig,
     FactorRiskState,
@@ -33,7 +43,6 @@ from quant_research_platform.research.portfolios.schedules import holding_interv
 from quant_research_platform.research.protocols.a_share import _inference_blocker
 from quant_research_platform.research.statistics import (
     _return_sharpes,
-    _selected_analyses,
     cscv_pbo,
     probabilistic_and_deflated_sharpe,
     return_standard_deviation,
@@ -43,43 +52,20 @@ from quant_research_platform.research.statistics import (
 
 _PORTFOLIO_ANALYSES = (
     "performance",
-    "benchmark",
     "attribution",
     "capacity",
     "sharpe_inference",
     "cscv",
     "group_comparison",
+    *COMPARISON_ANALYSES,
 )
-_CRYPTO_ANALYSES = ("performance", "annualized", "execution", "cost_sensitivity")
-
-
-def _nav_return_roundoff(start: object, end: object, returns: object) -> np.ndarray:
-    """Enclose NAV-ratio rounding using adjacent float64 operand values.
-
-    One outward ULP encloses each rounded NAV. Outward division/subtraction
-    bounds cover both (end / start - 1) and ((end - start) / start).
-    """
-    before = np.asarray(start, dtype="float64")
-    after = np.asarray(end, dtype="float64")
-    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
-        lower = np.nextafter(
-            np.nextafter(after, -np.inf)
-            / np.nextafter(before, np.where(after >= 0, np.inf, -np.inf)),
-            -np.inf,
-        )
-        upper = np.nextafter(
-            np.nextafter(after, np.inf)
-            / np.nextafter(before, np.where(after >= 0, -np.inf, np.inf)),
-            np.inf,
-        )
-        lower = np.nextafter(lower - 1.0, -np.inf)
-        upper = np.nextafter(upper - 1.0, np.inf)
-        data = np.asarray(returns, dtype="float64")
-        return np.where(
-            (before > 0) & np.isfinite(data),
-            np.maximum(np.abs(data - lower), np.abs(upper - data)),
-            np.inf,
-        )
+_CRYPTO_ANALYSES = (
+    "performance",
+    "annualized",
+    "execution",
+    "cost_sensitivity",
+    *COMPARISON_ANALYSES,
+)
 
 
 def _research_valuation_observation(batch, economics):
@@ -335,7 +321,6 @@ def _crypto_observations(ledger, windows, limit, *, observation_window_ns=None):
                         "start_nav": np.nan if start_nav is None else start_nav,
                         "end_nav": np.nan if end_nav is None else end_nav,
                         "net_return": np.nan if net_return is None else net_return,
-                        "benchmark_return": 0.0,
                         "status": "UNDEFINED" if reason else "DEFINED",
                         "reason": reason,
                     }
@@ -344,6 +329,91 @@ def _crypto_observations(ledger, windows, limit, *, observation_window_ns=None):
         return (daily, inventory, drawdown)
 
     return (observe, finish)
+
+
+def _crypto_comparison_axis(
+    *, windows, episode, summary, daily, capital, row_key, sample_role
+):
+    """Partition OOS/episode windows using summary endpoints without overlap."""
+    execution = summary["execution"]
+    partial_reason = (
+        execution.get("account_stop_reason")
+        if execution.get("account_path_status") == "PARTIAL"
+        else ""
+    )
+    prefix_end = (
+        execution.get("known_prefix_valuation_timestamp_ns") if partial_reason else None
+    )
+    marks = {}
+    for interval in summary["intervals"]:
+        for side in ("start", "end"):
+            marks[interval[f"{side}_ns"]] = interval[f"{side}_nav"]
+    for row in daily:
+        marks[row["start_at"].value] = row["start_nav"]
+        marks[row["end_at"].value] = row["end_nav"]
+    if episode is None:
+        marks[pd.Timestamp(windows[0][1].start).value] = capital.initial_capital
+    else:
+        marks[episode["start_ns"]] = capital.initial_capital
+        if not partial_reason:
+            marks[episode["terminal_valuation_ns"]] = summary["economics"]["nav"]
+    rows = []
+    for fold, window in windows:
+        start, end = pd.Timestamp(window.start).value, pd.Timestamp(window.end).value
+        if episode is not None:
+            start, end = (
+                max(start, episode["start_ns"]),
+                min(end, episode["stop_ns"] - 1),
+            )
+        if start >= end:
+            continue
+        points = sorted(
+            {
+                start,
+                end,
+                *(
+                    row[column].value
+                    for row in daily
+                    if row["fold_id"] == fold
+                    for column in ("start_at", "end_at")
+                    if start < row[column].value < end
+                ),
+            }
+        )
+        for begin, stop in zip(points, points[1:], strict=False):
+            before, after = marks.get(begin), marks.get(stop)
+            reason = (
+                partial_reason
+                if partial_reason and (prefix_end is None or stop > prefix_end)
+                else "portfolio_endpoint_missing"
+                if before is None or after is None or pd.isna(before) or pd.isna(after)
+                else "nonpositive_start_nav"
+                if before <= 0
+                else ""
+            )
+            value = (
+                None
+                if reason
+                else finite_exact_float(
+                    Fraction(float(after)) / Fraction(float(before)) - 1
+                )
+            )
+            if value is None and not reason:
+                reason = "nonfinite_result"
+            rows.append(
+                {
+                    **row_key,
+                    "fold_id": fold,
+                    "sample_role": sample_role,
+                    "start_at": pd.Timestamp(begin),
+                    "end_at": pd.Timestamp(stop),
+                    "start_nav": np.nan if before is None else before,
+                    "end_nav": np.nan if after is None else after,
+                    "portfolio_return": np.nan if value is None else value,
+                    "portfolio_reason": reason,
+                }
+            )
+    return rows
 
 
 def build_crypto_portfolio_statistics_tables(
@@ -356,7 +426,7 @@ def build_crypto_portfolio_statistics_tables(
     summarize_ledger,
     table_columns,
 ):
-    analyses = _selected_analyses(config, _CRYPTO_ANALYSES)
+    analyses = selected_portfolio_analyses(config, _CRYPTO_ANALYSES)
     mode = config["execution_mode"]
     execution_config = config.get("execution", {})
     statistics_policy = config.get("statistics", {})
@@ -376,6 +446,8 @@ def build_crypto_portfolio_statistics_tables(
         [],
         [],
     )
+    comparison_rows = []
+    comparison_requested = bool(set(analyses).intersection(COMPARISON_ANALYSES))
     covered_ns = episode_count = truncated_count = 0
     funding_required = funding_covered = 0
     costs_total = {
@@ -447,7 +519,7 @@ def build_crypto_portfolio_statistics_tables(
             else (episode["start_ns"], episode["terminal_valuation_ns"])
         )
         observe = finish = None
-        if {"performance", "annualized"} & set(analyses):
+        if {"performance", "annualized"} & set(analyses) or comparison_requested:
             observe, finish = _crypto_observations(
                 artifact,
                 windows,
@@ -547,6 +619,18 @@ def build_crypto_portfolio_statistics_tables(
             }
         if finish is not None:
             daily, inventory, drawdown = finish(observation_end_ns=observed_end)
+            if comparison_requested:
+                comparison_rows.extend(
+                    _crypto_comparison_axis(
+                        windows=windows,
+                        episode=episode,
+                        summary=summary,
+                        daily=daily,
+                        capital=artifact.capital,
+                        row_key=row_key,
+                        sample_role=config["sample_role"],
+                    )
+                )
             for interval in intervals:
                 interval_rows.append(
                     {
@@ -876,7 +960,35 @@ def build_crypto_portfolio_statistics_tables(
         requested.add("crypto_execution_diagnostics")
     if "cost_sensitivity" in analyses:
         requested.add("crypto_cost_sensitivity")
-    return {name: table for name, table in tables.items() if name in requested}
+    result = {name: table for name, table in tables.items() if name in requested}
+    if comparison_requested:
+        axis = pd.DataFrame.from_records(
+            comparison_rows,
+            columns=(
+                "candidate_id",
+                "execution_mode",
+                "episode_id",
+                "fold_id",
+                "sample_role",
+                "start_at",
+                "end_at",
+                "portfolio_return",
+                "portfolio_reason",
+                "start_nav",
+                "end_nav",
+            ),
+        )
+        result.update(
+            comparison_tables(
+                axis,
+                config=config,
+                analyses=analyses,
+                currencies={config["candidate_id"]: config["valuation_currency"]},
+                clock="utc",
+                metadata=config,
+            )
+        )
+    return result
 
 
 def iter_holding_factor_inputs(
@@ -1119,13 +1231,44 @@ def build_portfolio_statistics_tables(
     unified_trading_sessions,
     inputs,
     iter_portfolio_sessions,
+    comparison_metadata=None,
 ):
     from quant_research_platform.research.portfolios.production import (
         _iter_input_sessions,
         _read_materialized,
     )
 
-    analyses = _selected_analyses(config, _PORTFOLIO_ANALYSES)
+    analyses = selected_portfolio_analyses(config, _PORTFOLIO_ANALYSES)
+    if "group_comparison" in analyses:
+        declaration = config["statistics"].get("group_comparison")
+        if declaration is not None:
+            by_id = {candidate.candidate_id: candidate for candidate in candidates}
+            for portfolio_id in declaration["portfolio_ids"]:
+                pair = [
+                    by_id.get(f"{group}_{portfolio_id}")
+                    for group in ("global", "quarterly")
+                ]
+                if any(
+                    candidate is None or candidate.selection_group != group
+                    for candidate, group in zip(
+                        pair, ("global", "quarterly"), strict=True
+                    )
+                ):
+                    raise ValueError(
+                        "portfolio_group_comparison_selection_group_invalid"
+                    )
+                if any(
+                    getattr(pair[0], field) != getattr(pair[1], field)
+                    for field in (
+                        "construction",
+                        "rebalance_schedule",
+                        "top_quantile",
+                        "benchmark_id",
+                        "neutrality",
+                        "risk_style_columns",
+                    )
+                ):
+                    raise ValueError("portfolio_group_comparison_strategy_mismatch")
     pieces = []
 
     calendar = (
@@ -1138,7 +1281,7 @@ def build_portfolio_statistics_tables(
     )
     codes = (
         config.get("benchmark_total_return_indices", {})
-        if {"benchmark", "attribution"} & set(analyses)
+        if {"attribution"} & set(analyses)
         else {}
     )
     price_codes = {
@@ -1201,10 +1344,7 @@ def build_portfolio_statistics_tables(
             .rename(columns={"close": "total_close"})
             .join(prices)
         )
-        if ((~np.isfinite(required) | required.le(0)) & required.notna()).any(
-            axis=None
-        ):
-            raise ValueError("benchmark_return_open_invalid")
+        required = required.where(np.isfinite(required) & required.gt(0))
         open_mantissa, open_exponent = np.frexp(required.open.to_numpy())
         total_mantissa, total_exponent = np.frexp(required.total_close.to_numpy())
         close_mantissa, close_exponent = np.frexp(required.close.to_numpy())
@@ -1253,6 +1393,7 @@ def build_portfolio_statistics_tables(
         calendar=calendar,
         unified_trading_sessions=unified_trading_sessions,
         holding_inputs=holding_inputs,
+        comparison_metadata=comparison_metadata,
     )
 
 
@@ -1266,12 +1407,13 @@ def _portfolio_statistics_tables(
     calendar,
     unified_trading_sessions,
     holding_inputs,
+    comparison_metadata=None,
 ):
     """Project the protocol-selected ledgers into interval-aligned diagnostics."""
     from quant_research_platform.artifacts.statistics import STATISTICS_TABLE_COLUMNS
 
-    analyses = _selected_analyses(config, _PORTFOLIO_ANALYSES)
-    benchmark_requested = bool({"benchmark", "attribution"} & set(analyses))
+    analyses = selected_portfolio_analyses(config, _PORTFOLIO_ANALYSES)
+    benchmark_requested = bool({"attribution"} & set(analyses))
     ids = tuple(candidate.candidate_id for candidate in candidates)
     if len(ids) != len(set(ids)) or set(ledgers) != set(ids):
         raise ValueError("portfolio_statistics_candidate_set_invalid")
@@ -1413,40 +1555,21 @@ def _portfolio_statistics_tables(
                     if row["nav_before"] == 0
                     else "nonfinite_result",
                     benchmark_return=np.nan,
-                    active_return=np.nan,
-                    relative_wealth=np.nan,
-                    benchmark_status="NOT_APPLICABLE",
                     benchmark_reason="",
                     sample_role=access,
                 )
                 if benchmark_requested and candidate.benchmark_id is not None:
                     benchmark = benchmarks[candidate.benchmark_id]
-                    values = benchmark.reindex([row["entry_at"], row["end_at"]])
-                    if values.isna().any():
-                        row.update(
-                            benchmark_status="BLOCKED",
-                            benchmark_reason="benchmark_total_return_open_missing",
-                        )
-                    elif not np.isfinite(values).all() or values.le(0).any():
-                        raise ValueError("benchmark_return_open_invalid")
-                    else:
-                        value = finite_exact_float(
-                            Fraction(float(values.iloc[1]))
-                            / Fraction(float(values.iloc[0]))
-                            - 1
-                        )
-                        row.update(
-                            benchmark_return=np.nan if value is None else value,
-                            active_return=np.nan
-                            if value is None
-                            else row["net_return"] - value,
-                            benchmark_status="UNDEFINED"
-                            if value is None
-                            else "DEFINED",
-                            benchmark_reason="nonfinite_result"
-                            if value is None
-                            else "",
-                        )
+                    value, _reason = comparison_endpoint_return(
+                        benchmark.get(row["entry_at"], np.nan),
+                        benchmark.get(row["end_at"], np.nan),
+                    )
+                    row["benchmark_return"] = value
+                    row["benchmark_reason"] = (
+                        "benchmark_total_return_open_missing"
+                        if _reason == "reference_endpoint_missing"
+                        else _reason
+                    )
                 daily_rows.append(row)
                 daily_by_candidate[candidate_id].append(row)
                 valuation = _research_valuation_observation(batch, row)
@@ -1649,7 +1772,7 @@ def _portfolio_statistics_tables(
         selected = pd.DataFrame(candidate_rows)
         if selected.empty:
             raise ValueError("portfolio_statistics_empty_candidate")
-        if not {"performance", "benchmark"} & set(analyses):
+        if not {"performance"} & set(analyses):
             continue
         returns_defined = selected.return_status.eq("DEFINED").all()
         count = len(selected)
@@ -1759,103 +1882,11 @@ def _portfolio_statistics_tables(
                         - 1
                     ).min()
                 )
-        if benchmark_requested and candidate.benchmark_id is not None:
-            if selected.benchmark_status.ne("BLOCKED").all():
-                benchmark = benchmarks[candidate.benchmark_id]
-                benchmark_initial = Fraction(
-                    float(benchmark.loc[selected.entry_at.iloc[0]])
-                )
-                relative = pd.Series(
-                    [
-                        finite_exact_float(
-                            Fraction(nav)
-                            * benchmark_initial
-                            / Fraction(artifact.capital.initial_capital)
-                            / Fraction(float(benchmark.loc[end]))
-                        )
-                        for nav, end in zip(
-                            selected.nav_end, selected.end_at, strict=True
-                        )
-                    ],
-                    dtype="float64",
-                )
-                for row, value in zip(
-                    candidate_rows,
-                    relative,
-                    strict=True,
-                ):
-                    row["relative_wealth"] = float(value)
-                benchmark = benchmarks[candidate.benchmark_id]
-                active_roundoff = (
-                    _nav_return_roundoff(
-                        selected.nav_before, selected.nav_end, selected.net_return
-                    )
-                    + _nav_return_roundoff(
-                        benchmark.reindex(selected.entry_at).to_numpy(),
-                        benchmark.reindex(selected.end_at).to_numpy(),
-                        selected.benchmark_return,
-                    )
-                    + np.where(
-                        np.isfinite(selected.active_return),
-                        np.spacing(np.abs(selected.active_return.to_numpy())),
-                        np.inf,
-                    )
-                )
-                active_sd = float(
-                    return_standard_deviation(
-                        selected.active_return, roundoff=active_roundoff
-                    )
-                )
-                values.update(
-                    annualized_active_return=float(
-                        selected.active_return.mean(skipna=False) * 252
-                    ),
-                    tracking_error=active_sd * np.sqrt(252),
-                    net_information_ratio=float(
-                        _return_sharpes(
-                            selected.active_return, roundoff=active_roundoff
-                        )
-                        * np.sqrt(252)
-                    ),
-                    relative_wealth=float(relative.iloc[-1]),
-                    max_active_drawdown=float(
-                        (
-                            relative / relative.cummax(skipna=False).clip(lower=1) - 1
-                        ).min(skipna=False)
-                    ),
-                )
-            else:
-                values.update(
-                    {
-                        name: np.nan
-                        for name in (
-                            "annualized_active_return",
-                            "tracking_error",
-                            "net_information_ratio",
-                            "relative_wealth",
-                            "max_active_drawdown",
-                        )
-                    }
-                )
-        if "performance" not in analyses:
-            values = {
-                name: value
-                for name, value in values.items()
-                if name
-                in {
-                    "annualized_active_return",
-                    "tracking_error",
-                    "net_information_ratio",
-                    "relative_wealth",
-                    "max_active_drawdown",
-                }
-            }
         undefined_reason = (
             "nonpositive_start_nav"
             if selected.nav_before.eq(0).any()
             else "nonfinite_result"
             if not returns_defined
-            or selected.benchmark_status.eq("UNDEFINED").any()
             or selected[
                 [
                     "gross_return",
@@ -1872,30 +1903,13 @@ def _portfolio_statistics_tables(
             else "statistic_not_identified"
         )
         for name, value in values.items():
-            blocked = (
-                name
-                in {
-                    "annualized_active_return",
-                    "tracking_error",
-                    "net_information_ratio",
-                    "relative_wealth",
-                    "max_active_drawdown",
-                }
-                and selected.benchmark_status.eq("BLOCKED").any()
-            )
             summary_rows.append(
                 dict(
                     candidate_id=candidate_id,
                     metric_id=name,
                     value=value if np.isfinite(value) else np.nan,
-                    status="BLOCKED"
-                    if blocked
-                    else "DEFINED"
-                    if np.isfinite(value)
-                    else "UNDEFINED",
-                    reason="benchmark_total_return_open_missing"
-                    if blocked
-                    else ""
+                    status="DEFINED" if np.isfinite(value) else "UNDEFINED",
+                    reason=""
                     if np.isfinite(value)
                     else "nonfinite_result"
                     if np.isinf(value)
@@ -1903,8 +1917,6 @@ def _portfolio_statistics_tables(
                     in {
                         "capital_return",
                         "cagr",
-                        "relative_wealth",
-                        "max_active_drawdown",
                     }
                     or name.endswith(("_capital_return", "_target_notional"))
                     else undefined_reason,
@@ -2117,7 +2129,9 @@ def _portfolio_statistics_tables(
                         )
                     )
     tables = {
-        "portfolio_daily": daily,
+        "portfolio_daily": daily.reindex(
+            columns=STATISTICS_TABLE_COLUMNS["portfolio_daily.parquet"]
+        ),
         "portfolio_group_comparison": paired_comparison,
         "portfolio_performance": pd.DataFrame.from_records(
             summary_rows,
@@ -2152,7 +2166,7 @@ def _portfolio_statistics_tables(
     }
 
     requested = set()
-    if {"performance", "benchmark"} & set(analyses):
+    if {"performance"} & set(analyses):
         requested.update(("portfolio_daily", "portfolio_performance"))
     if "capacity" in analyses:
         requested.update(("portfolio_capacity", "portfolio_capacity_summary"))
@@ -2164,7 +2178,35 @@ def _portfolio_statistics_tables(
         requested.add("portfolio_robustness")
     if "group_comparison" in analyses:
         requested.add("portfolio_group_comparison")
-    return {name: table for name, table in tables.items() if name in requested}
+    result = {name: table for name, table in tables.items() if name in requested}
+    if set(analyses).intersection(COMPARISON_ANALYSES):
+        axis = daily.rename(
+            columns={
+                "entry_at": "start_at",
+                "net_return": "portfolio_return",
+                "return_reason": "portfolio_reason",
+            }
+        ).assign(
+            execution_mode="continuous",
+            episode_id="continuous",
+            fold_id="",
+            start_nav=daily.nav_before,
+            end_nav=daily.nav_end,
+        )
+        result.update(
+            comparison_tables(
+                axis,
+                config=config,
+                analyses=analyses,
+                currencies={
+                    key: ledger.capital.valuation_currency
+                    for key, ledger in ledgers.items()
+                },
+                clock="trading_day_open",
+                metadata={} if comparison_metadata is None else comparison_metadata,
+            )
+        )
+    return result
 
 
 _PORTFOLIO_COMPARISON_COLUMNS = (
@@ -2393,20 +2435,21 @@ def portfolio_statistics(config):
         "expectations",
         "feature_recipe",
         "training_weighting",
+        "comparison_benchmarks",
+        "comparison_controls",
+        "market_exposure",
+        "regime_comparison",
     }
-    analyses = _selected_analyses(config, _PORTFOLIO_ANALYSES)
+    analyses = selected_portfolio_analyses(config, _PORTFOLIO_ANALYSES)
     if "attribution" in analyses:
         required.update(("inputs", "risk", "benchmark_total_return_indices"))
-    if "benchmark" in analyses:
-        required.add("benchmark_total_return_indices")
-        if config.get("benchmark_total_return_indices"):
-            required.add("inputs")
     if "capacity" in analyses:
         required.add("adv_sensitivities")
     if "cscv" in analyses:
         required.add("statistics")
     if required - set(config) or set(config) - required - optional:
         raise ValueError("portfolio_statistics_config_invalid")
+    validate_comparison_config(config, analyses)
     config.setdefault("sample_role", "exploratory")
     if type(config["sample_role"]) is not str or not config["sample_role"].strip():
         raise ValueError("statistics_sample_role_invalid")
@@ -2478,6 +2521,7 @@ def portfolio_statistics(config):
             raise ValueError("portfolio_statistics_ledger_window_mismatch")
         ledgers[candidate.candidate_id] = ledger
         candidates.append(candidate)
+    comparison_metadata = {}
     tables = build_portfolio_statistics_tables(
         ledgers=ledgers,
         candidates=tuple(candidates),
@@ -2490,11 +2534,15 @@ def portfolio_statistics(config):
         unified_trading_sessions=unified_trading_sessions,
         inputs=config.get("inputs", {}),
         iter_portfolio_sessions=portfolio_sessions.iter_portfolio_sessions,
+        comparison_metadata=comparison_metadata,
     )
     metadata = {key: value for key, value in config.items() if key != "output"}
     if {"sharpe_inference", "cscv", "group_comparison"}.intersection(analyses):
         metadata["inference_scope"] = "exploratory"
         metadata["formal_selection_qualification"] = "not_established"
+    metadata.update(comparison_metadata)
+    metadata["analyses"] = list(analyses)
+    metadata["execution_mode"] = "continuous"
     metadata["candidate_ids"] = list(ledgers)
     metadata["comparison_portfolio_ids"] = policy.get("group_comparison", {}).get(
         "portfolio_ids", []
@@ -2534,9 +2582,14 @@ def crypto_statistics(config):
         "output",
         "statistics",
         "analyses",
+        "comparison_benchmarks",
+        "comparison_controls",
+        "market_exposure",
+        "regime_comparison",
     }:
         raise ValueError("crypto_statistics_config_invalid")
-    analyses = _selected_analyses(config, _CRYPTO_ANALYSES)
+    analyses = selected_portfolio_analyses(config, _CRYPTO_ANALYSES)
+    validate_comparison_config(config, analyses)
     policy = config.get("statistics", {})
     expected = set()
     if "annualized" in analyses:
@@ -2551,12 +2604,14 @@ def crypto_statistics(config):
     }
     if not isinstance(policy, dict) or expected - set(policy) or set(policy) - known:
         raise ValueError("crypto_statistics_policy_invalid")
-    if "annualized" in analyses and (
-        type(policy["annualization_minimum_observations"]) is not int
-        or policy["annualization_minimum_observations"] < 2
-        or type(policy["annualization_periods"]) not in {int, float}
-        or not np.isfinite(policy["annualization_periods"])
-        or policy["annualization_periods"] <= 0
+    if (
+        "annualized" in analyses or set(analyses).intersection(COMPARISON_ANALYSES)
+    ) and (
+        type(policy.get("annualization_minimum_observations", 2)) is not int
+        or policy.get("annualization_minimum_observations", 2) < 2
+        or type(policy.get("annualization_periods", 365.0)) not in {int, float}
+        or not np.isfinite(policy.get("annualization_periods", 365.0))
+        or policy.get("annualization_periods", 365.0) <= 0
     ):
         raise ValueError("crypto_statistics_annualization_invalid")
     output = Path(config["output"])
@@ -2605,7 +2660,19 @@ def crypto_statistics(config):
     )
     science = {
         **metadata,
+        **{
+            key: value
+            for key, value in config.items()
+            if key
+            in {
+                "comparison_benchmarks",
+                "comparison_controls",
+                "market_exposure",
+                "regime_comparison",
+            }
+        },
         "candidate_id": capital.candidate_id,
+        "valuation_currency": capital.valuation_currency,
         "statistics": policy,
         "analyses": list(analyses),
     }
@@ -2628,6 +2695,18 @@ def crypto_statistics(config):
             "candidate_ids": [capital.candidate_id],
             "statistics": policy,
             "analyses": list(analyses),
+            **{
+                key: value
+                for key, value in science.items()
+                if key
+                in {
+                    "comparison_benchmarks",
+                    "comparison_controls",
+                    "market_exposure",
+                    "regime_comparison",
+                    "comparison_method",
+                }
+            },
         },
         tables=tables,
         table_group="crypto_portfolio",

@@ -120,6 +120,12 @@ def test_partial_funding_gap_native_port_stat_publication(tmp_path):
     statistic = read_statistics_artifact(
         crypto_statistics(
             {
+                "analyses": [
+                    "performance",
+                    "annualized",
+                    "execution",
+                    "cost_sensitivity",
+                ],
                 "ledger": str(root),
                 "output": str(tmp_path / "statistics"),
                 "statistics": _policy(),
@@ -369,6 +375,12 @@ def test_independent_episode_gap_does_not_block_covered_sibling(
     statistic = read_statistics_artifact(
         crypto_statistics(
             {
+                "analyses": [
+                    "performance",
+                    "annualized",
+                    "execution",
+                    "cost_sensitivity",
+                ],
                 "ledger": str(root),
                 "output": str(tmp_path / "statistics"),
                 "statistics": _policy(),

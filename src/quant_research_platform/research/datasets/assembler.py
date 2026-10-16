@@ -60,6 +60,25 @@ def _assemble_research_dataset_from_sessions(
 ) -> Path:
     artifact_root = require_artifact_root(output_root)
     metadata = dict(metadata or {})
+    label_semantics = {}
+    for session in input_sessions.values():
+        semantics = session.manifest.get("producer_diagnostics", {}).get(
+            "label_semantics", {}
+        )
+        for label, facts in semantics.items():
+            if (
+                label not in spec.label_availability_columns
+                or label not in session.logical_columns
+            ):
+                continue
+            if label in label_semantics and label_semantics[label] != facts:
+                raise ValueError("research_label_semantics_conflict")
+            label_semantics[label] = facts
+    if label_semantics:
+        metadata["producer_diagnostics"] = {
+            **metadata.get("producer_diagnostics", {}),
+            "label_semantics": label_semantics,
+        }
     diagnostics = None
     if spec.feature_transforms:
         metadata["producer_diagnostics"] = dict(

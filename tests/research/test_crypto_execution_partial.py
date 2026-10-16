@@ -145,6 +145,12 @@ def test_actual_source_close_overrides_reference_panel_and_reaches_statistics(
     statistic = read_statistics_artifact(
         crypto_statistics(
             {
+                "analyses": [
+                    "performance",
+                    "annualized",
+                    "execution",
+                    "cost_sensitivity",
+                ],
                 "ledger": str(root),
                 "output": str(tmp_path / "statistics"),
                 "statistics": _policy(),
@@ -230,6 +236,12 @@ def test_funding_unknown_stops_only_exposed_account_and_publishes(
     read_statistics_artifact(
         crypto_statistics(
             {
+                "analyses": [
+                    "performance",
+                    "annualized",
+                    "execution",
+                    "cost_sensitivity",
+                ],
                 "ledger": str(root),
                 "output": str(tmp_path / "statistics"),
                 "statistics": _policy(),
@@ -319,6 +331,12 @@ def test_book_gap_without_pending_orders_preserves_identifiable_endpoint(
     statistic = read_statistics_artifact(
         crypto_statistics(
             {
+                "analyses": [
+                    "performance",
+                    "annualized",
+                    "execution",
+                    "cost_sensitivity",
+                ],
                 "ledger": str(root),
                 "output": str(tmp_path / "statistics"),
                 "statistics": _policy(),
@@ -458,6 +476,12 @@ def test_native_bad_trade_stops_current_account_without_future_fills(tmp_path, m
     statistic = read_statistics_artifact(
         crypto_statistics(
             {
+                "analyses": [
+                    "performance",
+                    "annualized",
+                    "execution",
+                    "cost_sensitivity",
+                ],
                 "ledger": str(root),
                 "output": str(tmp_path / "statistics"),
                 "statistics": _policy(),
@@ -698,6 +722,12 @@ def test_partial_independent_account_does_not_erase_later_declared_episode(
     statistic = read_statistics_artifact(
         crypto_statistics(
             {
+                "analyses": [
+                    "performance",
+                    "annualized",
+                    "execution",
+                    "cost_sensitivity",
+                ],
                 "ledger": str(root),
                 "output": str(tmp_path / "statistics"),
                 "statistics": _policy(),

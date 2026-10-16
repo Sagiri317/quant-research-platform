@@ -1,0 +1,32 @@
+{
+  "ledgers": ["results/portfolio-ledger"],
+  "output": "results/portfolio-comparison",
+  "window": {"start": "2025-01-01", "end": "2025-12-31"},
+  "analyses": ["performance", "benchmark_comparison", "market_exposure", "regime_comparison"],
+  "comparison_benchmarks": [
+    {
+      "reference_id": "selected-market-index",
+      "input": {
+        "path": "data/index-levels.parquet",
+        "spec": {
+          "data_id": "index_levels",
+          "frequency": "1d",
+          "grain": "asset_timestamp",
+          "primary_key": ["timestamp", "asset_id"],
+          "partition_columns": [],
+          "column_roles": {"timestamp": "timestamp", "asset_id": "key", "open": "context"}
+        },
+        "row_filters": [["asset_id", "==", "selected-index"]]
+      },
+      "representation": "endpoint_level",
+      "timestamp_column": "timestamp",
+      "value_column": "open",
+      "valuation_currency": "CNY",
+      "timestamp_basis": "trading_day_open",
+      "return_basis": "gross_total_return",
+      "cost_basis": "frictionless"
+    }
+  ],
+  "market_exposure": {"hac_lag": 20, "confidence": 0.95, "minimum_observations": 60},
+  "regime_comparison": {"threshold": 0.0}
+}

@@ -27,6 +27,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+explain = ["shap>=0.50,<0.51"]
 dev = [
   "matplotlib>=3.11,<4",
   "pytest>=9,<10",

@@ -730,6 +730,252 @@ def plot_series(
     return figure, axes
 
 
+def _explanation_context(metadata, sample_role):
+    actual_role = metadata.get("sample_role")
+    if sample_role is not None and sample_role != actual_role:
+        raise ValueError("plot_sample_role_mismatch")
+    return actual_role
+
+
+@_styled
+def _plot_explanation_summary(
+    metadata,
+    tables,
+    *,
+    source_reference,
+    sample_role,
+    measure="mean_abs_contribution",
+    period="all",
+    top_n=20,
+):
+    """Plot persisted importance with its own method, units and availability."""
+    sample_role = _explanation_context(metadata, sample_role)
+    native = measure == "native_importance"
+    if native:
+        sample_role = None
+    member = "native_importance" if native else "summary"
+    if member not in tables:
+        raise ValueError("plot_explanation_measure_unavailable")
+    selected = tables[member]
+    if native:
+        if selected.kind.nunique() != 1 or selected.unit.nunique() != 1:
+            raise ValueError("plot_explanation_importance_units_mixed")
+        value_column = "value"
+        unit = selected.unit.iloc[0]
+        method = selected.kind.iloc[0]
+        title = "模型原生重要性"
+        xlabel = "原生重要性"
+        unavailable = selected.loc[selected.status.ne("DEFINED")]
+        states = sorted(
+            {f"{row.status}: {row.reason}" for row in unavailable.itertuples()}
+        )
+        detail = "模型拟合时的原生重要性；不是逐预测贡献或 SHAP"
+        if states:
+            detail += f"；不可用 {len(unavailable)} 个（{'；'.join(states)}）"
+    else:
+        selected = selected.loc[selected.period.eq(period)]
+        if selected.empty:
+            raise ValueError("plot_explanation_period_unavailable")
+        value_column = "mean_abs_contribution"
+        unit = metadata["unit"]
+        method = metadata["attribution"]["method"]
+        title = "模型特征贡献"
+        xlabel = "按时间点等权平均绝对贡献"
+        detail = f"时期：{period}；输出空间：{metadata['output_space']}"
+        coverage = sorted(
+            {
+                f"观测 {row.observation_count}/{row.sample_count}，"
+                f"时间点 {row.date_count}/{row.sample_date_count}"
+                for row in selected.itertuples()
+            }
+        )
+        detail += "；可解释覆盖：" + " / ".join(coverage)
+        unavailable = selected.loc[selected.status.ne("DEFINED")]
+        if not unavailable.empty:
+            detail += "；" + "；".join(
+                sorted(
+                    {f"{row.status}: {row.reason}" for row in unavailable.itertuples()}
+                )
+            )
+    selected = selected.sort_values(
+        [value_column, "feature"], ascending=[False, True], na_position="last"
+    )
+    total = len(selected)
+    selected = selected.head(top_n)
+    figure, axes = _figure(
+        1,
+        title=f"{title} | {metadata['target_column']}",
+        source_reference=source_reference,
+        sample_role=sample_role,
+    )
+    figure.set_figheight(max(4.5, 0.42 * len(selected) + 2.7))
+    axis = axes[0]
+    rows = selected.to_dict("records")
+    values = [
+        math.nan if row["status"] != "DEFINED" else _number(row[value_column])
+        for row in rows
+    ]
+    displayed, scale = _scale(values)
+    axis.barh(range(len(rows)), displayed, color="#2F6690")
+    axis.set_yticks(range(len(rows)), [fill(row["feature"], 38) for row in rows])
+    axis.set_ylim(len(rows) - 0.4, -0.6)
+    axis.set_xlabel(f"{xlabel}（{unit}{scale}）")
+    axis.set_title(f"方法：{method}", fontsize=9)
+    _note(axis, fill(detail + f"；展示前 {len(rows)}/{total} 个特征，未重新归一化", 76))
+    for index, (row, value) in enumerate(zip(rows, displayed, strict=True)):
+        axis.annotate(
+            f"{row[value_column]:.4g}"
+            if math.isfinite(value)
+            else f"{row['status']}: {row['reason']}",
+            (value if math.isfinite(value) else 0, index),
+            xytext=(5, 0),
+            textcoords="offset points",
+            va="center",
+            fontsize=9,
+        )
+    axis.axvline(0, color="#8895A7", linewidth=0.8)
+    axis.margins(x=0.2)
+    axis.grid(axis="x", alpha=0.5)
+    return figure, axes
+
+
+@_styled
+def _plot_explanation_waterfall(
+    metadata,
+    tables,
+    *,
+    timestamp,
+    asset_id,
+    source_reference,
+    sample_role,
+    top_n=20,
+):
+    """Show one saved additive explanation, keeping omitted signed contributions."""
+    sample_role = _explanation_context(metadata, sample_role)
+    if not {"predictions", "contributions"} <= set(tables):
+        raise ValueError("plot_explanation_contributions_unavailable")
+    from quant_research_platform.contracts.time import _coerce_bound
+
+    try:
+        selected_time = pd.Timestamp(_coerce_bound(timestamp))
+    except (ValueError, TypeError):
+        raise ValueError("plot_timestamp_invalid") from None
+    if pd.isna(selected_time):
+        raise ValueError("plot_timestamp_invalid")
+    predictions = tables["predictions"]
+    selected = predictions.loc[
+        predictions.timestamp.eq(selected_time) & predictions.asset_id.eq(asset_id)
+    ]
+    if len(selected) != 1:
+        raise ValueError("plot_explanation_observation_unavailable")
+    prediction = selected.iloc[0]
+    if prediction.status != "DEFINED":
+        figure, axes = _figure(
+            1,
+            title=f"单条预测贡献 | {metadata['target_column']}",
+            source_reference=source_reference,
+            sample_role=sample_role,
+        )
+        axes[0].set_title(f"{selected_time.isoformat()} | {asset_id}", fontsize=9)
+        axes[0].set_xlabel(f"{metadata['output_space']}（{metadata['unit']}）")
+        axes[0].set_xticks([])
+        axes[0].set_yticks([])
+        _note(
+            axes[0],
+            f"{prediction.status}: {prediction.reason}；"
+            f"实际被解释输出={prediction.explained_output:.5g}；贡献不可用",
+        )
+        return figure, axes
+    contributions = tables["contributions"]
+    selected = contributions.loc[
+        contributions.timestamp.eq(selected_time) & contributions.asset_id.eq(asset_id)
+    ].copy()
+    selected["absolute"] = selected.contribution.abs()
+    selected = selected.sort_values(["absolute", "feature"], ascending=[False, True])
+    visible = selected.head(top_n)
+    residual = _number(prediction.additivity_residual)
+    tolerance = _number(prediction.additivity_tolerance)
+    base = _number(prediction.base_value)
+    actual = _number(prediction.explained_output)
+    values = [_number(value) for value in selected.contribution.tolist()]
+    scaled, scale = _scale([base, *values, actual, residual])
+    labels = ["基准值", *visible.feature.tolist()]
+    displayed = scaled[: len(visible) + 1]
+    annotations = [f"{base:.5g}", *[f"{value:+.5g}" for value in values[:top_n]]]
+    remainder = values[top_n:]
+    if remainder:
+        labels.append(f"其他 {len(remainder)} 个特征（有符号合计）")
+        displayed.append(math.fsum(scaled[top_n + 1 : -2]))
+        try:
+            annotations.append(f"{math.fsum(remainder):+.5g}")
+        except OverflowError:
+            annotations.append(f"{displayed[-1]:+.5g}{scale}")
+    if residual != 0:
+        labels.append("数值残差修正")
+        displayed.append(-scaled[-1])
+        annotations.append(f"{-residual:+.5g}")
+    labels.append("实际被解释输出")
+    displayed.append(scaled[-2])
+    annotations.append(f"{actual:.5g}")
+    figure, axes = _figure(
+        1,
+        title=f"单条预测贡献 | {metadata['target_column']}",
+        source_reference=source_reference,
+        sample_role=sample_role,
+    )
+    figure.set_figheight(max(5, 0.42 * len(labels) + 3))
+    axis = axes[0]
+    extents = [0.0]
+    running = displayed[0]
+    for index, value in enumerate(displayed):
+        endpoint = index in (0, len(displayed) - 1)
+        start = 0 if endpoint else running
+        stop = value if endpoint else math.fsum((running, value))
+        if not endpoint:
+            running = stop
+        extents.extend((start, stop))
+        axis.barh(
+            index,
+            value,
+            left=start,
+            color="#2F6690" if endpoint else "#B45E5E" if value >= 0 else "#2B8A78",
+            alpha=0.9,
+        )
+        axis.annotate(
+            annotations[index],
+            (max(start, stop), index),
+            xytext=(5, 0),
+            textcoords="offset points",
+            va="center",
+            fontsize=9,
+        )
+        if index < len(displayed) - 1:
+            axis.plot([stop, stop], [index + 0.4, index + 0.6], color="#8895A7", lw=0.8)
+    axis.set_yticks(range(len(labels)), [fill(label, 38) for label in labels])
+    axis.invert_yaxis()
+    axis.set_xlabel(f"{metadata['output_space']}（{metadata['unit']}{scale}）")
+    axis.set_title(
+        f"{selected_time.isoformat()} | {asset_id} | "
+        f"方法：{metadata['attribution']['method']}",
+        fontsize=9,
+    )
+    _note(
+        axis,
+        fill(
+            f"基准：{metadata['attribution']['baseline']}；"
+            f"存储加和残差={residual:.3g}；容差={tolerance:.3g}；"
+            "红色为正贡献，绿色为负贡献",
+            85,
+        ),
+    )
+    axis.axvline(0, color="#8895A7", linewidth=0.8)
+    low, high = min(extents), max(extents)
+    padding = (high - low) * 0.2 or 0.1
+    axis.set_xlim(low - padding if low < 0 else 0, high + padding)
+    axis.grid(axis="x", alpha=0.5)
+    return figure, axes
+
+
 def plot(config):
     """Render one explicitly selected persisted numerical input to a new image."""
     from io import BytesIO
@@ -750,6 +996,8 @@ def plot(config):
         "returns": set(),
         "factor_ic": {"summary"},
         "activity": set(),
+        "explanation_summary": {"measure", "period", "top_n"},
+        "explanation_waterfall": {"top_n"},
         "series": {
             "x_column",
             "value_columns",
@@ -761,14 +1009,16 @@ def plot(config):
     }
     for name, fields in optional.items():
         fields.add("sample_role")
-        if name != "curve":
+        if name not in {"curve", "explanation_summary", "explanation_waterfall"}:
             fields.add("row_filters")
     kind = config.get("kind")
     if kind in {"curve", "returns", "factor_ic", "activity"} or (
         kind == "series" and config.get("categorical", False) is not True
     ):
         required.add("timezone")
-    if kind == "metrics":
+    if kind == "explanation_waterfall":
+        required.update(("timestamp", "asset_id"))
+    elif kind == "metrics":
         required.update(("metric_id", "units"))
     elif kind == "series":
         required.update(("x_column", "value_columns", "title", "units"))
@@ -784,17 +1034,67 @@ def plot(config):
         "output",
         *(["sample_role"] if "sample_role" in config else []),
         *(["timezone"] if "timezone" in required else []),
-        *(key for key in ("metric_id", "units", "title", "x_column") if key in config),
+        *(
+            key
+            for key in (
+                "metric_id",
+                "units",
+                "title",
+                "x_column",
+                "timestamp",
+                "asset_id",
+                "period",
+            )
+            if key in config
+        ),
     ):
         if type(config[key]) is not str or not config[key]:
             raise ValueError("plot_config_value_invalid")
+    if kind.startswith("explanation_"):
+        if type(config.get("top_n", 20)) is not int or config.get("top_n", 20) < 1:
+            raise ValueError("plot_top_n_invalid")
+        if kind == "explanation_summary":
+            if config.get("measure", "mean_abs_contribution") not in (
+                "mean_abs_contribution",
+                "native_importance",
+            ):
+                raise ValueError("plot_explanation_measure_invalid")
+            if config.get("measure") == "native_importance" and "period" in config:
+                raise ValueError("plot_explanation_unused_period")
     config.setdefault("sample_role", None)
     output = Path(config["output"])
     if output.suffix not in {".png", ".svg", ".pdf"}:
         raise ValueError("plot_output_format_invalid")
     reject_if_exists(output)
     source = Path(config["inputs"])
-    if kind == "curve":
+    if kind.startswith("explanation_"):
+        from quant_research_platform.artifacts.explanations import read_explanation
+
+        if output.resolve().is_relative_to(source.resolve()):
+            raise ValueError("plot_output_inside_input")
+        metadata, tables = read_explanation(source)
+        common = {
+            "source_reference": str(source),
+            "sample_role": config["sample_role"],
+            "top_n": config.get("top_n", 20),
+        }
+        if kind == "explanation_summary":
+            figure, _axes = _plot_explanation_summary(
+                metadata,
+                tables,
+                measure=config.get("measure", "mean_abs_contribution"),
+                period=config.get("period", "all"),
+                **common,
+            )
+        else:
+            figure, _axes = _plot_explanation_waterfall(
+                metadata,
+                tables,
+                timestamp=config["timestamp"],
+                asset_id=config["asset_id"],
+                **common,
+            )
+    elif kind == "curve":
         from quant_research_platform.interfaces.queries import portfolio_curve
 
         curve = portfolio_curve(

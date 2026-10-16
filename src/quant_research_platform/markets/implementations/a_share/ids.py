@@ -15,6 +15,7 @@ PRICE_VOLUME_DATA_ID = "price_volume_facts"
 FUNDAMENTAL_PIT_ID = "fundamental_pit"
 FUNDAMENTAL_DATA_ID = "fundamental_factors"
 FORWARD_RETURNS_DATA_ID = "forward_returns"
+ON_ID_DECOMPOSITION_DATA_ID = "on_id_decomposition"
 
 FORMAL_BENCHMARKS = MappingProxyType(
     {

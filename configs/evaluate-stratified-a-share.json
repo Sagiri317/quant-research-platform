@@ -1,0 +1,48 @@
+{
+  "inputs": "results/focal-dataset",
+  "output": "results/factor-common-evaluation",
+  "window": {
+    "start": "2024-01-01",
+    "end": "2025-12-31"
+  },
+  "cutoff": "2025-12-31",
+  "sample_role": "exploratory",
+  "sample_scope": "common",
+  "comparison_inputs": [
+    {
+      "inputs": "results/peer-dataset",
+      "signal_columns": [
+        "feature_momentum_252_20",
+        "feature_reversal_5d"
+      ]
+    }
+  ],
+  "strata": {
+    "primary_label": "forward_return_20d",
+    "kinds": [
+      "industry",
+      "size",
+      "liquidity"
+    ]
+  },
+  "evaluation": {
+    "evaluation_id": "factor-common",
+    "market_id": "a_share",
+    "research_dataset_id": "selected-factors",
+    "signals": [
+      {
+        "signal_id": "momentum",
+        "source_kind": "feature",
+        "source_column": "feature_momentum_252_20",
+        "direction": "higher_is_better",
+        "transform": "identity"
+      }
+    ],
+    "label_columns": [
+      "forward_return_20d"
+    ],
+    "evaluation_axis": "cross_sectional",
+    "filter_mode": "eligible",
+    "n_groups": 5
+  }
+}

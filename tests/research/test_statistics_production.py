@@ -131,15 +131,18 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
     for selection in model["selections"].values():
         selection["cutoff"] = str(cutoff)
     metadata = {
+        **statistics_production._model_target_metadata(
+            config, spec, TimeWindow(dates[0], cutoff), model["selections"]
+        ),
         "selection_cutoffs": [str(cutoff)],
         "sample_role": "validation",
-        "window": {"start": "2019-01-01", "end": str(cutoff.date())},
+        "window": {"start": str(dates[0]), "end": str(cutoff)},
     }
     factor_metadata = {
         **metadata,
         "window": {
             **metadata["window"],
-            "start": "2014-01-02"
+            "start": "2014-01-02 00:00:00"
             if full_factor_history
             else metadata["window"]["start"],
         },
@@ -494,6 +497,12 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
                     selection_group="quarterly",
                     family_ids=families,
                     config=quarterly_config,
+                    target_metadata=statistics_production._model_target_metadata(
+                        quarterly_config,
+                        spec,
+                        TimeWindow(dates[0], cutoff),
+                        model["selections"],
+                    ),
                 )
 
 
@@ -1052,11 +1061,22 @@ def test_model_inference_uses_selection_information_before_calling_backends(
 @pytest.mark.parametrize("has_observations", (False, True))
 def test_paired_model_rankic_consumes_explicit_comparison_config(has_observations):
     comparison_config = statistics_config()
+    target_metadata = {
+        "selection_group": "quarterly",
+        "coverage_basis": "model_prediction_domain",
+        "sample_role": "validation",
+        "window": {"start": "2023-01-03", "end": "2023-01-03"},
+        "evaluation": {"primary_label": "label"},
+        "evaluation_axis": "cross_sectional",
+        "column_roles": {"label": "label"},
+        "column_units": {},
+    }
     families = ("baseline", "challenger")
     columns = (
         "timestamp",
         "family_id",
         "asset_coverage_id",
+        "target_domain_id",
         "observation_count",
         "sample_role",
         "loss",
@@ -1068,6 +1088,7 @@ def test_paired_model_rankic_consumes_explicit_comparison_config(has_observation
                 pd.Timestamp("2023-01-03"),
                 family,
                 "a" * 64,
+                "b" * 64,
                 2,
                 "validation",
                 -0.5,
@@ -1081,6 +1102,8 @@ def test_paired_model_rankic_consumes_explicit_comparison_config(has_observation
     )
 
     class GlobalStatistics:
+        metadata = {**target_metadata, "selection_group": "global"}
+
         @contextmanager
         def table(self, member):
             assert member == "model_losses.parquet"
@@ -1092,6 +1115,7 @@ def test_paired_model_rankic_consumes_explicit_comparison_config(has_observation
         selection_group="quarterly",
         family_ids=families,
         config=comparison_config,
+        target_metadata=target_metadata,
     )
     assert set(paired.family_id) == set(families)
     assert paired.observation_count.eq(int(has_observations)).all()
@@ -1211,8 +1235,14 @@ def test_model_family_names_preserve_factor_statistics_and_native_names(
                 return (len(dates) * len(assets) * 2 - len(self.matched), 0)
 
         metadata = {
+            **statistics_production._model_target_metadata(
+                config,
+                spec,
+                TimeWindow(dates[0], cutoff),
+                {"fixture": selection_payload},
+            ),
             "sample_role": access,
-            "window": {"start": str(dates[0].date()), "end": str(cutoff.date())},
+            "window": {"start": str(dates[0]), "end": str(cutoff)},
         }
         factor_metadata = metadata
         statistics_tables = build_a_share_statistics_tables(
@@ -1303,6 +1333,7 @@ def test_model_family_names_preserve_factor_statistics_and_native_names(
             selection_group="quarterly",
             family_ids=families,
             config={**config, "selection_group": "quarterly"},
+            target_metadata={**metadata, "selection_group": "quarterly"},
         )
         assert paired.family_id.tolist() == list(families)
         assert paired.observation_count.eq(len(dates)).all()

@@ -31,6 +31,15 @@ if TYPE_CHECKING:
     from quant_research_platform.contracts.signals import SignalSpec as _SignalSpec
 
 
+EVALUATION_FORECAST_AGE_BOUNDS = (
+    ("0-7", 0, 7),
+    ("8-30", 8, 30),
+    ("31-60", 31, 60),
+    ("61-90", 61, 90),
+    ("91-180", 91, 180),
+)
+
+
 EVALUATION_METRICS_COLUMNS = (
     "timestamp",
     "signal",

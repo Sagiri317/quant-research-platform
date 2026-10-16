@@ -4,7 +4,7 @@
 
 agent 选择研究问题、实际输入路径、参数、时间窗、操作顺序、新输出位置及重算范围。
 代码只执行明确请求的计算，并核验本次科学资格。来源准备、组装、fit、predict、
-evaluate/score/select、calibrate、backtest、statistics 和 plot 互相独立。
+evaluate/score/select、explain、calibrate、backtest、statistics 和 plot 互相独立。
 
 不存在 DAG/planner、阶段阶梯、自动补上游、源码失效传播、自动复用搜索、latest 指针、
 请求 hash 身份、强制研究 run 或整研究 COMPLETE 门槛。相同输入可在新位置重新计算；
@@ -19,6 +19,7 @@ evaluate/score/select、calibrate、backtest、statistics 和 plot 互相独立�
 - `research.datasets.assembler.assemble(config)`：明确表、因子、标签和 feature_recipe
 - `research.models.production.fit(config)`：一次真实拟合及 append-only trial；选择后的最终重新拟合仍用该函数
 - `research.predictions.runner.predict(config)`：读取保存模型，按保存列顺序做新预测；`artifacts.outputs.prediction.read_predictions(path)` / `iter_predictions(path)` 只读已有预测
+- `research.models.explanations.explain(config)`：明确冻结模型、解释方法及样本，保存独立解释数值
 - `research.models.trial_selection.score(config)` / `select(config)`：完整有序候选的成熟验证评分及明确规则选择
 - `research.portfolios.production.calibrate(config)` / `backtest(config)`：A 股监督校准与实际账户计算
 - `markets.implementations.crypto.portfolio.calibrate_maker(config)` / `backtest_taker(config)` / `backtest_maker(config)`：各自独立数学和事件时钟
@@ -213,3 +214,108 @@ Sharpe 推断、CSCV 和组间比较。未选分析不读取其专用输入，�
 
 PRED 只保存下游实际需要的 recipe、训练域、成熟/拟合/选择截止及必要标定，不复制 scaler、
 特征重要性或依赖包版本。拟合状态属于模型产物。已有预测可直接用于下游；不要求模型文件仍在。
+
+## 共同因子域、分层与持久化评价复用
+
+`evaluate` 的 `sample_scope` 明确选择 `own` 或 `common`，默认 `own`。
+共同域/分层扩展限 A 股 cross_sectional、eligible 域中的 factor/feature 信号；预测信号和 Crypto 不使用这套截面分层合同。
+`comparison_inputs` 只描述真实输入选择器与其参与共同域的因子/特征列，不用研究昵称证明配置相同。
+共同域逐标签核对精确资产/日期、资格、真实 observed 值及各自成熟时点；只在最终共同域内要求标签值一致。
+原有特征值不重做中性化，完整焦点截面的信号变换先于共同域掩码；peer 缺日期保留空共同域诊断。
+
+可选 `strata` 明确主标签及行业、规模、流动性或预测年龄分层。
+先在焦点 eligible 且主标签成熟的总体定义层，再施加共同域，不能在收缩后的样本重新排名。
+缺失层与真实行业字符串分开；可定位的非法数值只使相应分类未知，另存 invalid 计数。
+年龄字面闭区间之间的小数未分配不等于真正缺失。
+日评价、覆盖和分层由同一个 EVAL writer 发布，正式 selected-reader 与流式消费者共用其实际语义校验。
+持久化日表按 timestamp 非递减；同一天可跨批次延续，但主键不能重复。键校验只保留当前日期，避免全历史键集合。
+预测年龄读取 median_forecast_age_days_fy1（原列单位 days），须选用该原始 factor 或声明由它生成的 feature，
+freshness 选择 90 或 180 天；闭区间为 0–7、8–30、31–60、61–90，
+180 天配置另含 91–180。7.5 等区间间隙单列未分配计数，负值、无穷及超范围年龄为非法分类，NaN 才计真正缺失。
+
+`factor_statistics(evaluation_inputs=[...])` 显式消费已发布 EVAL 日表并可切窗，不重读 DATASET、重算 IC 或触发 FMB。
+`dataset` 计算路径与持久化输入路径互斥；原有 FMB 仍由实际数据计算 owner 承担。
+`stratified_ic` 使用本次声明的 HAC/FDR 参数，常用研究配方为 lag=20、BY、alpha=0.05；它们不是不可改的阶段版本。
+校正家族一次覆盖本次明确输入的 scope、信号、层和 IC/RankIC，不能逐层校正后拼接或冒称覆盖全部历史探索。
+两份 own/common 归约核焦点实际输入、信号、单位、成熟、窗口与分层事实，不以 evaluation_id/data_id 昵称放行。
+
+## 研究比较的科学绑定
+
+G/Q 模型比较核实际选择组和目标语义，不能把任意季度 STAT 填进 `global_statistics` 当作全局组。
+`model_losses.target_domain_id` 在本次已有逐日遍历中记录实际参与统计的成熟目标样本：排序资产键与标签值。
+它与资产域、计数共同保证配对差值使用同一目标，不是整个数据集身份、缓存键或后续输入改写探测。
+不同路径、data_id、分区与未消费因子可继续独立使用；成熟列名字或截止不同但实际目标域相同不必误拒绝。
+已知单位冲突仍拒绝，未知不推断为已知。
+组合的组间比较同时核原生 candidate.selection_group 与固定构造事实，不能由候选 ID 前缀授予研究角色；
+相同预测或相同现金轨迹本身不是错误。
+
+## 任意组合的可选基准比较
+
+`portfolio_statistics` 与 `crypto_statistics` 省略 `analyses` 时均只计算 `performance`。
+其他分析必须显式选择；未选分析不读取其专用输入。组合构造的 `benchmark_id` 只属于构造与持仓归因，
+通用比较使用独立的 `comparison_benchmarks`，简单组合、增强组合和 Crypto 均可选多个参考序列。
+旧 `benchmark` 分析和日表中的重复宽列由以下长表替代，不保留平行比较入口。
+
+- `benchmark_comparison`：配对区间收益、收益差、财富比与相对风险指标。
+- `market_exposure`：完整配对时间轴上的市场回归，显式 `hac_lag`、`confidence`、`minimum_observations`。
+- `regime_comparison`：按显式 `threshold` 区分参考市场区间收益，输出描述性统计。
+- `control_comparison`：读取明确提供的已有对照收益，不自动重跑回测。
+
+每个参考项声明 `reference_id`、`input`、`representation`、`value_column`。科学事实 `valuation_currency`、
+`timestamp_basis`、`return_basis`、`cost_basis` 必须可解析得到，可显式声明或复用输入 DataSpec/manifest.parameters 的事实；冲突拒绝。`endpoint_level` 使用 `timestamp_column`；
+`interval_simple_return` 使用 `start_column`、`end_column`，收益单位由数据规格或显式 `return_unit` 给出。
+`timestamp_basis` 为 trading_day_open/trading_day_close/utc；`return_basis` 为 price/gross_total_return/net_total_return/strategy_net/constant_cash；
+`cost_basis` 为 frictionless/execution_costs/zero_cash；区间收益单位为 decimal 或 percent。
+trading_day_open/close 的时间列保存午夜会话日期标签，名称说明估值相位；utc 才保存真实 UTC 时刻，不能混用 ON/ID 事件成熟时刻。
+文件、年份、时间及行列筛选复用原输入选择器；混合多个未筛选序列不能当作一条指数。
+`comparison_controls` 使用同一描述结构，明确策略净收益与执行成本口径。
+
+两个市场共用 `portfolio_benchmark_intervals`、`portfolio_benchmark_metrics`、
+`portfolio_market_exposure`、`portfolio_regime_comparison` 长表，保存 candidate、execution、episode、fold、reference 身份。
+区间两端时钟、币种和收益口径必须相容。价格指数和全收益指数分别声明，不暗中替代或换汇。
+局部缺点、非正点位及无穷值使依赖区间未知，计划区间和观测计数仍保留；不能填零或丢弃后冒称完整覆盖。
+缺某个参考源只影响其比较，已有组合绩效继续保留。
+
+市场回归仅在完整合格配对日轴上计算系数与推断，缺口时保留原因及计数，不把有缺口的日期压紧后套 HAC。
+回归一次以本次候选、参考、episode、fold 的截距与 beta 为 BY 校正家族，保存计划/有效假设数。
+A 股比较按 252 日年化；Crypto 比较默认 365 日、至少 2 个完整 UTC 日，可由现有 statistics 字段覆盖并保存实际参数。
+未提供无风险收益时截距叫 `market_return_intercept`；请求无风险序列但缺失时不能退回零利率，constant_cash 不能冒充无风险输入。
+按当期实现的市场收益划分环境属于 `ex_post_descriptive`，预先选阈值也不使它成为当期可交易信号。
+这些结果帮助区分市场暴露和相对表现，不单凭正收益或显著截距证明因子因果有效。
+对照序列只有收益时只作描述比较，不能声称已证明股票池、成本、调仓等研究设计一致。
+
+## 冻结模型解释
+
+Python `research.models.explanations.explain(config)` 与 CLI `qrp explain --config ...` 共享入口。
+解释读取现有 MODEL，不拟合、不改 scaler、不重新选择模型。输出独立 EXPLAIN，预测、组合和统计都不依赖它。
+`explain` 可选依赖组提供 SHAP；只选模型原生重要性时不需要 SHAP 或输入数据。
+
+必需字段是 `model`、`output`、非空 `methods`。只有 `native_importance` 时不传数据选项。
+贡献方法一次选择一个：`affine`、`linear_shap`、`rank`、`native_tree`、`tree_shap_path`、`tree_shap_interventional`；
+还可同时选择 `native_importance`、`permutation`。方法须与真实模型匹配，不能用另一种解释静默替代。
+有逐行贡献或置换时另传 `inputs`、有限 `window`、`sample_role`、`selection`、`output_space`。
+`selection` 明确 `max_rows`、`max_dates`、`root_seed`，可选 `asset_ids`；`max_dates=null` 表示全窗口。
+先保留选中时间的完整截面，再抽展示/评分行，rank 不在展示子集重新排名。
+解释输入不支持 `row_filters`，资产展示筛选通过 `selection.asset_ids`，避免无意改动 rank 截面。
+
+`output_space` 为 `model_output`、`raw_margin` 或 `calibrated_label`，按真实模型能力使用。
+非恒等目标变换的原生树贡献只解释 raw margin，不把它标成收益。
+`linear_shap`、`tree_shap_interventional` 必须明确 `background`：inputs、window、max_rows、root_seed。
+背景逐行受真实拟合窗口、精确拟合截止和训练资产域约束，但标为历史参考分布，不冒称还原全部训练样本。
+抽样使用有界 reservoir；其余方法不接收未使用的背景选项。
+
+贡献表保存 timestamp、asset_id、feature、input_value、contribution；预测表保存基值、真实输出、预测分数、
+加和残差与容差及逐行状态。不可表示或强抵消导致解释精度丢失时保留有效预测，贡献标 UNDEFINED 与原因，
+不能用巨大项幅度容差伪装解释成功。summary 给出有符号/绝对均值、绝对占比、排序与覆盖，另可按 month/quarter 汇总。
+贡献汇总先逐日取截面均值，再对日期等权，不按展示行数跨日期加权。
+原生重要性表记录真实方法和单位，不能统一叫 SHAP，更不能自动叫样本外有效性。
+
+置换配置明确 `metrics`（ic/rankic/mse）、成熟 `cutoff`、`groups`、`repeats`、`root_seed`、`axis`。
+`within_timestamp` 在日期截面内置换；`temporal_blocks` 明确 episode_column、block_size、step_seconds，
+要求单资产连续窗口、max_dates=null，只支持 ic/mse，不跨独立 episode 或缺口重排。
+同组列一起置换；原始与置换后的评分键保持一致。rank 的 MSE 只在 calibrated_label 尺度计算。
+重复结果与均值/标准差均保存，未成熟标签不参与，测试集结果不反馈为自动调参。
+
+`explanation_summary`、`explanation_waterfall` 只消费 EXPLAIN，支持 PNG/SVG/PDF 与中文字体。
+前者选择贡献绝对均值或 native_importance、period 和 top_n；后者精确选择 timestamp、asset_id，
+保留有符号其余贡献、存储残差与真实输出。无定义解释展示原因，不画假零。

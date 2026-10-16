@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from quant_research_platform.catalog.processed import ProcessedDataCatalog
 from quant_research_platform.contracts.columns import (
     PLATFORM_ASSET_TIME_KEY,
@@ -20,6 +22,7 @@ from quant_research_platform.markets.implementations.a_share.ids import (
     FUNDAMENTAL_PIT_ID,
     MARKET_ID,
     MARKET_PANEL_ID,
+    ON_ID_DECOMPOSITION_DATA_ID,
     PRICE_VOLUME_DATA_ID,
 )
 from quant_research_platform.research.factors.expectations.definitions import (
@@ -225,6 +228,7 @@ def processed_catalog() -> ProcessedDataCatalog:
                 processed_input_data_ids=(MARKET_PANEL_ID, EXECUTION_MASK_ID),
                 label_columns=LABEL_COLUMNS,
             ),
+            on_id_decomposition_spec(),
             _spec(
                 BENCHMARK_WEIGHTS_ID,
                 ProcessedDataKind.ANNOTATION,
@@ -301,3 +305,53 @@ def _role(
     }:
         return ColumnRole.MASK
     return ColumnRole.CONTEXT
+
+
+def on_id_decomposition_spec(horizons=(20,)) -> ProcessedDataSpec:
+    """Declare one reusable decomposition, with explicit component label clocks."""
+    if (
+        type(horizons) not in (tuple, list)
+        or not horizons
+        or any(
+            type(value) is not int or value not in LABEL_HORIZONS for value in horizons
+        )
+        or len(set(horizons)) != len(horizons)
+    ):
+        raise ValueError("on_id_horizons_invalid")
+    roles = {
+        column: ColumnRole.TIMESTAMP if column == "timestamp" else ColumnRole.KEY
+        for column in PLATFORM_ASSET_TIME_KEY
+    }
+    roles["listing_date"] = ColumnRole.CONTEXT
+    labels = {"on_id_pre_entry_log_return": "log_return"}
+    for horizon in horizons:
+        labels.update(
+            {
+                f"on_id_holding_intraday_log_return_{horizon}d": "log_return",
+                f"on_id_holding_overnight_log_return_{horizon}d": "log_return",
+                f"on_id_endpoint_return_{horizon}d": "decimal_return",
+            }
+        )
+    for column in labels:
+        roles[column] = ColumnRole.LABEL
+        roles[f"{column}_available_at"] = ColumnRole.CONTEXT
+        roles[f"{column}_reason"] = ColumnRole.CONTEXT
+    for horizon in horizons:
+        roles[f"on_id_decomposition_qualified_{horizon}d"] = ColumnRole.MASK
+        roles[f"on_id_decomposition_reason_{horizon}d"] = ColumnRole.CONTEXT
+    return ProcessedDataSpec(
+        data_id=ON_ID_DECOMPOSITION_DATA_ID,
+        market_id=MARKET_ID,
+        kind=ProcessedDataKind.LABEL,
+        frequency=DataFrequency.DAILY,
+        grain=DataGrain.ASSET_TIMESTAMP,
+        column_roles=roles,
+        column_units=labels,
+        label_availability_columns={
+            column: f"{column}_available_at" for column in labels
+        },
+        primary_key=PLATFORM_ASSET_TIME_KEY,
+        partition_columns=("year",),
+        processed_input_data_ids=(MARKET_PANEL_ID, EXECUTION_MASK_ID),
+        parameters_json=json.dumps({"horizons": list(horizons)}),
+    )

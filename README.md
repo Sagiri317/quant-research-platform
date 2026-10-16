@@ -16,6 +16,7 @@ qrp prepare --config configs/prepare-financial.json
 qrp assemble --config <组装配置.json>
 qrp fit --config configs/fit-a-share.json
 qrp predict --config configs/predict-a-share.json
+qrp explain --config configs/explain-model.json
 qrp score --config <验证评分配置.json>
 qrp select --config <候选选择配置.json>
 qrp calibrate --config <A股校准配置.json>
@@ -49,9 +50,16 @@ walk-forward 明确每次拟合、决策、预测与评价窗口，样本不永�
 裸 Parquet 需要本操作要求的列角色、单位、主键和可用时间依据；列名不证明 PIT。
 
 [操作示例](configs/) 中的路径需替换为实际已准备输入。
+[ON/ID准备](configs/prepare-on-id.json)、[共同域分层评价](configs/evaluate-stratified-a-share.json)与
+[持久化日表归约](configs/statistics-stratified-a-share.json)分别调用现有 prepare、evaluate、statistics-factors；
+own 评价需另选新输出、sample_scope=own 并移除 comparison_inputs。两份评价的焦点信号、输入和分层规格应保持一致。
+[冻结模型解释](configs/explain-model.json)的背景必须落在该模型实际拟合域内；
+[组合基准比较](configs/statistics-benchmark-a-share.json)需替换真实指数代码、时钟、币种及价格/全收益口径，不能只改显示名称。
+组合统计默认只计算绩效，额外分析通过 analyses 显式选择。
 [科研选择参考](docs/research-rosters/) 保留有序模型、参数候选、因子、资产与研究窗口；
 它们供研究者选用，不是运行默认值、配置模板或自动编排入口。
-复杂配置拒绝未知字段、重复 JSON key、非法类型、非有限值、重复成员和未消费选项。
+复杂配置按各操作合同校验字段、类型和必要数值，拒绝重复 JSON key。
+未选择的统计分析不读取其专用输入；解释等严格接口拒绝未消费选项。
 候选及输入列顺序具有含义，不能自行排序去重。
 
 ## 只读查询与图表
@@ -71,6 +79,7 @@ qrp catalog dataset pv_all
 缺中文字体明确报错。纯绘图函数仍返回 `(figure, axes)`，由调用者关闭。
 图表消费正式数值：金额净值与回撤、IC/RankIC、成本换手、收益分布和指标比较；
 `series` 明确选择现有数值列，可展示基准、年度/月度、滚动风险、分组、暴露归因、覆盖、暂估、ON/ID及小时序列。
+`explanation_summary` 与 `explanation_waterfall` 读取已发布解释产物，不加载模型或 SHAP。
 不从采样曲线重建正式指标，不补零、不连接未定义缺口；独立 episode 不拼接。
 Crypto 合法负权益保持原值。用途说明与实际窗口一起保存，窗口名称本身不证明样本外资格。
 

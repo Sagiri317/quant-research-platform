@@ -1,0 +1,19 @@
+{
+  "evaluation_inputs": [
+    "results/factor-own-evaluation",
+    "results/factor-common-evaluation"
+  ],
+  "output": "results/factor-stratified-statistics",
+  "window": {
+    "start": "2024-01-01",
+    "end": "2025-12-31"
+  },
+  "analyses": [
+    "stratified_ic"
+  ],
+  "statistics": {
+    "hac_lag": 20,
+    "fdr_method": "BY",
+    "fdr_alpha": 0.05
+  }
+}

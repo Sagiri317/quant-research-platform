@@ -465,6 +465,7 @@ def test_test_set_keeps_rankic_by_and_explicit_exploratory_exclusion():
                 timestamp=date,
                 family_id=family,
                 asset_coverage_id="a" * 64,
+                target_domain_id="b" * 64,
                 observation_count=100,
                 sample_role="test",
                 status="DEFINED",
@@ -478,6 +479,17 @@ def test_test_set_keeps_rankic_by_and_explicit_exploratory_exclusion():
     quarterly["loss"] += rng.normal(-0.01, 0.04, len(quarterly))
 
     class GlobalStatistics:
+        metadata = {
+            "selection_group": "global",
+            "coverage_basis": "model_prediction_domain",
+            "sample_role": "test",
+            "window": {"start": str(dates[0]), "end": str(dates[-1])},
+            "evaluation": {"primary_label": "label"},
+            "evaluation_axis": "cross_sectional",
+            "column_roles": {"label": "label"},
+            "column_units": {},
+        }
+
         @contextmanager
         def table(self, member):
             assert member == "model_losses.parquet"
@@ -490,6 +502,10 @@ def test_test_set_keeps_rankic_by_and_explicit_exploratory_exclusion():
             selection_group="quarterly",
             family_ids=families,
             config=value,
+            target_metadata={
+                **GlobalStatistics.metadata,
+                "selection_group": "quarterly",
+            },
         )
 
     ordinary = compare(manifest)
