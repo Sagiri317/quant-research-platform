@@ -103,6 +103,8 @@ def write_a_share_raw_fixture(
                 }
 
     _write_csmar(root, "market_bars_1d", bars())
+    # This synthetic price/share path has no distributions or share actions.
+    _write_csmar(root, "corporate_actions", ())
     _write_csmar(
         root,
         "stock_master",

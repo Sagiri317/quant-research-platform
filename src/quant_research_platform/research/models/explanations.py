@@ -23,7 +23,10 @@ from quant_research_platform.compute.dataframe.cross_section import (
     _average_ranks,
     _pearson_correlation_result,
 )
-from quant_research_platform.contracts.experiments import label_maturity_mask
+from quant_research_platform.contracts.experiments import (
+    DEFAULT_ROOT_SEED,
+    label_maturity_mask,
+)
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.json_codec import _strict_config
 from quant_research_platform.contracts.models import (
@@ -53,6 +56,7 @@ from quant_research_platform.research.models.trial_selection import (
     _ScaledSquareAccumulator,
 )
 from quant_research_platform.research.predictions.outputs import prediction_rows
+from quant_research_platform.research.randomness import derive_seed
 from quant_research_platform.runtime.dataframes import iter_complete_time_frames
 from quant_research_platform.storage.atomic import reject_if_exists
 from quant_research_platform.storage.datasets.reading import (
@@ -77,11 +81,11 @@ def _seed(value):
 
 def _selection(value):
     selected = _strict_config(
-        value, {"max_rows", "max_dates", "root_seed"}, {"asset_ids"}
+        value, {"max_rows", "max_dates"}, {"asset_ids", "root_seed"}
     )
     for name in ("max_rows", "max_dates"):
         _positive(selected[name], name, allow_none=name == "max_dates")
-    _seed(selected["root_seed"])
+    _seed(selected.setdefault("root_seed", DEFAULT_ROOT_SEED))
     assets = selected.get("asset_ids")
     if assets is not None and (
         type(assets) is not list
@@ -159,7 +163,9 @@ def _prediction_frames(session, result, window, *, extra=()):
 
 def _context(session, result, window, selection, *, extra=()):
     retained = []
-    rng = np.random.default_rng(selection["root_seed"])
+    rng = np.random.default_rng(
+        derive_seed(selection["root_seed"], "explanation_dates")
+    )
     seen = 0
     limit = selection["max_dates"]
     with closing_iterator(
@@ -189,9 +195,9 @@ def _selected_indices(context, selection):
         indices = indices[context.asset_id.isin(selection["asset_ids"])]
     if len(indices) > selection["max_rows"]:
         indices = np.sort(
-            np.random.default_rng(selection["root_seed"]).choice(
-                indices, selection["max_rows"], replace=False
-            )
+            np.random.default_rng(
+                derive_seed(selection["root_seed"], "explanation_rows")
+            ).choice(indices, selection["max_rows"], replace=False)
         )
     if not len(indices):
         raise ValueError("explanation_sample_empty")
@@ -200,10 +206,10 @@ def _selected_indices(context, selection):
 
 def _background(config, result, facts):
     config = _strict_config(
-        config, {"inputs", "window", "max_rows", "root_seed"}, {"input_spec"}
+        config, {"inputs", "window", "max_rows"}, {"input_spec", "root_seed"}
     )
     _positive(config["max_rows"], "background_rows")
-    _seed(config["root_seed"])
+    _seed(config.setdefault("root_seed", DEFAULT_ROOT_SEED))
     window = PredictionWindow(**config["window"])
     if window.end is None or pd.Timestamp(window.end) > pd.Timestamp(
         facts["fit_cutoff"]
@@ -212,7 +218,9 @@ def _background(config, result, facts):
     session = _session(config["inputs"], config.get("input_spec"), result, facts)
     if not hasattr(result.prediction_model, "scaler"):
         raise ValueError("explanation_background_method_not_supported")
-    rng = np.random.default_rng(config["root_seed"])
+    rng = np.random.default_rng(
+        derive_seed(config["root_seed"], "explanation_background")
+    )
     selected = pd.DataFrame()
     priorities = np.empty(0)
     with closing_iterator(_prediction_frames(session, result, window)) as source:
@@ -378,7 +386,13 @@ def _attributions(result, context, indices, method, background, output_space):
                             contributions[row, column] = float(
                                 Fraction(float(coefficients[column]))
                                 * (
-                                    Fraction(float(selected.iloc[row][columns[column]]))
+                                    Fraction(
+                                        float(
+                                            scale.input_matrix(
+                                                selected.loc[:, columns]
+                                            ).iloc[row, column]
+                                        )
+                                    )
                                     - Fraction(scale.origin_[column])
                                     - scale.offset_[column]
                                 )
@@ -473,6 +487,11 @@ def _attributions(result, context, indices, method, background, output_space):
         else:
             raise ValueError("explanation_method_invalid")
     contributions = np.asarray(contributions, dtype="float64")
+    if getattr(getattr(predictor, "scaler", None), "medians", ()):
+        contributions = (
+            contributions[:, : len(columns)] + contributions[:, len(columns) :]
+        )
+        method_facts["missing_indicators"] = "aggregated_with_original_feature"
     base = np.broadcast_to(np.asarray(base, dtype="float64"), (len(selected),)).copy()
     if output_space == "calibrated_label":
         intercept, slope = predictor.label_calibration
@@ -523,6 +542,9 @@ def _native_importance(result, facts):
     unit = "dimensionless"
     if algorithm in LINEAR_EXPLANATION_ALGORITHMS:
         coefficients, _ = _linear_parameters(predictor)
+        if predictor.scaler.medians:
+            count = len(result.metadata["input_columns"])
+            coefficients = coefficients[:count] + coefficients[count:]
         signed = dict(zip(result.metadata["input_columns"], coefficients, strict=True))
         kind, unit = "absolute_standardized_coefficient", facts["label_unit"]
     elif isinstance(predictor, (RankEnsemblePredictor, ICWeightedRankEnsemble)):
@@ -637,8 +659,8 @@ def _temporal_step_nanoseconds(value):
 def _permutation_config(value, columns):
     config = _strict_config(
         value,
-        {"metrics", "cutoff", "axis", "groups", "repeats", "root_seed"},
-        {"episode_column", "block_size", "step_seconds"},
+        {"metrics", "cutoff", "axis", "groups", "repeats"},
+        {"episode_column", "block_size", "step_seconds", "root_seed"},
     )
     if (
         type(config["metrics"]) is not list
@@ -648,7 +670,7 @@ def _permutation_config(value, columns):
     ):
         raise ValueError("explanation_permutation_metrics_invalid")
     _positive(config["repeats"], "repeats")
-    _seed(config["root_seed"])
+    _seed(config.setdefault("root_seed", DEFAULT_ROOT_SEED))
     groups = config["groups"]
     if not isinstance(groups, dict) or not groups:
         raise ValueError("explanation_permutation_groups_required")
@@ -741,12 +763,22 @@ def _permutation(result, facts, frame, indices, availability, config, output_spa
         raise ValueError("explanation_mature_labels_empty")
     segments = _permutation_segments(frame, config)
     baseline = _output(result, frame, output_space)[1]
-    rng = np.random.default_rng(config["root_seed"])
     predictions = [("baseline", 0, baseline)]
     for name, columns in config["groups"].items():
         for repeat in range(config["repeats"]):
             shuffled = frame.copy()
             for segment in segments:
+                # Shared sample identities keep paired model interventions aligned.
+                rng = np.random.default_rng(
+                    derive_seed(
+                        config["root_seed"],
+                        "explanation_permutation",
+                        config["axis"],
+                        name,
+                        repeat,
+                        _sample_keys(frame.loc[segment]),
+                    )
+                )
                 if config["axis"] == "within_timestamp":
                     order = rng.permutation(segment)
                 else:

@@ -23,6 +23,7 @@ def calculate_factors_for_panel(
     definitions: Sequence[FactorDefinition],
     output_window: TimeWindow | None = None,
     history_keys: tuple[str, ...] = ("asset_id",),
+    min_fresh_fraction: float = 0.75,
 ) -> pd.DataFrame:
     requested = tuple(definitions)
     _require_factor_input_columns(panel_frame, requested)
@@ -55,6 +56,7 @@ def calculate_factors_for_panel(
         factor_columns=tuple(definition.output_column for definition in requested),
         output_window=output_window,
         history_keys=history_keys,
+        min_fresh_fraction=min_fresh_fraction,
     )
     return _with_keys(
         output_source,
@@ -68,6 +70,7 @@ def _market_model_frames(
     *,
     trading_calendar: pd.DataFrame | None,
     market_history: pd.DataFrame | None,
+    min_fresh_fraction: float = 0.75,
 ) -> Iterator[pd.DataFrame]:
     from quant_research_platform.compute.market_model import MarketModelRiskState
     from quant_research_platform.contracts.validation import (
@@ -107,7 +110,7 @@ def _market_model_frames(
     )
     event = next(events, None)
     membership = {}
-    state = MarketModelRiskState()
+    state = MarketModelRiskState(min_fresh_fraction=min_fresh_fraction)
     for panel in panels:
         pieces = []
         for timestamp, cross in panel.sort_values(

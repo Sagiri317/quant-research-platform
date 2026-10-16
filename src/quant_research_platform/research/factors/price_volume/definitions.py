@@ -78,6 +78,41 @@ _PRICE_VOLUME_INPUT_WINDOWS.update(
 )
 
 
+# Only sample statistics admit partial observations within the nominal window.
+PRICE_VOLUME_PARTIAL_STATISTICS = frozenset(
+    factor
+    for factor in _PRICE_VOLUME_INPUT_WINDOWS
+    if (
+        factor in {"amount_shock_20d", "volume_shock_20d"}
+        or factor.startswith(
+            (
+                "avg_amount_",
+                "volatility_",
+                "downside_volatility_",
+                "amihud_",
+                "skewness_",
+            )
+        )
+        or factor.endswith("_corr_20d")
+        or factor
+        in {
+            "log_avg_amount_20d",
+            "turnover_20d",
+            "turnover_60d",
+            "turnover_250d",
+            "amount_volatility_20d",
+            "turnover_volatility_20d",
+            "upside_volatility_20d",
+            "kurtosis_60d",
+            "amount_cv_126d",
+            "turnover_cv_126d",
+            "abnormal_turnover_20_250",
+            "amplitude_20d",
+        }
+    )
+)
+
+
 def price_volume_factor_definitions(
     *,
     market_id: MarketId,
@@ -112,7 +147,9 @@ def price_volume_factor_definitions(
                     "log_float_market_cap",
                 }
                 else FactorSet.STANDARD,
-                input_columns=inputs,
+                input_columns=(*inputs, "filling_flag")
+                if column in PRICE_VOLUME_PARTIAL_STATISTICS
+                else inputs,
                 output_column=column,
                 display_name=column,
                 description=(
@@ -121,6 +158,15 @@ def price_volume_factor_definitions(
                         "sessions; missing amounts propagate."
                     )
                     if column == "zero_amount_ratio_20d"
+                    else (
+                        "Statistic over the full nominal own-market session window; "
+                        "requires ceil(min_fresh_fraction * window) jointly valid "
+                        "fresh "
+                        "observations (default 0.75), plus mathematical sample minima. "
+                        "Numeric denominators use actual valid samples; confirmed "
+                        "suspension valuations do not increase the fresh count."
+                    )
+                    if column in PRICE_VOLUME_PARTIAL_STATISTICS
                     else (
                         "Price-volume factor using complete session windows or exact "
                         "endpoints; missing required observations and invalid "

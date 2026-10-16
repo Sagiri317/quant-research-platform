@@ -89,6 +89,8 @@ Crypto 合法负权益保持原值。用途说明与实际窗口一起保存，�
 
 ## 合同与验证
 
+[已批准研究规则与实施状态索引](docs/specifications.md)区分已决定、工作树实现和已验证发布；旧审查手册不再作为平行真值。
+
 - [架构、API 与读写边界](docs/architecture.md)
 - [来源与数据资格](docs/data.md)
 - [A 股数学和经济合同](docs/a-share.md)

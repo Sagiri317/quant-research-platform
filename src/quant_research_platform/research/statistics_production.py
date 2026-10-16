@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from fractions import Fraction
 from pathlib import Path
 from statistics import mean
 
@@ -10,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.experiments import (
+    DEFAULT_ROOT_SEED,
     legal_training_rows,
     training_availability_columns,
 )
@@ -117,8 +119,8 @@ def build_a_share_factor_statistics_tables(
     max_lags = statistics["hac_lag"]
     methods = (
         (
-            _fdr_method(statistics["fdr_primary"], expected="BH"),
-            _fdr_method(statistics["fdr_robustness"], expected="BY"),
+            _fdr_method(statistics["fdr_primary"], expected="BY"),
+            _fdr_method(statistics["fdr_robustness"], expected="BH"),
         )
         if "rank_ic" in analyses
         else ()
@@ -262,16 +264,34 @@ def build_a_share_statistics_tables(
     availability = _statistics_label_availability(config["evaluation"], dataset_spec)
     analyses = _selected_analyses(config, _MODEL_ANALYSES)
     statistics = config.get("statistics")
-    root_seed = config.get("root_seed")
+    root_seed = config.get("root_seed", DEFAULT_ROOT_SEED)
     if (
         type(primary_label) is not str
         or type(availability) is not str
         or type(statistics) is not dict
     ):
         raise ValueError("statistics_protocol_invalid")
+    head_fraction = config["evaluation"].get("head_fraction", 0.2)
+    if type(head_fraction) not in (int, float) or not 0 < head_fraction <= 1:
+        raise ValueError("model_statistics_head_fraction_invalid")
+    raw_label = config["evaluation"].get(
+        "raw_return_label",
+        "forward_return_20d"
+        if "forward_return_20d" in dataset_spec.column_roles
+        else None,
+    )
+    if raw_label is not None and (type(raw_label) is not str or not raw_label):
+        raise ValueError("model_statistics_raw_return_label_invalid")
+    if "model_losses" not in analyses:
+        raw_label = None
+    raw_availability = (
+        _statistics_label_availability({"primary_label": raw_label}, dataset_spec)
+        if raw_label is not None
+        else None
+    )
     max_lags = statistics.get("hac_lag")
     block_size = statistics.get("bootstrap_block")
-    repetitions = statistics.get("bootstrap_repetitions")
+    repetitions = statistics.get("bootstrap_repetitions", 2000)
     model_window = time_window
     period_bounds = {
         key: _statistics_window_bounds(window) for key, window in period_windows.items()
@@ -301,6 +321,7 @@ def build_a_share_statistics_tables(
                 "eligible",
                 primary_label,
                 availability,
+                *((raw_label, raw_availability) if raw_label is not None else ()),
                 *(
                     column
                     for item in model_entries.values()
@@ -319,6 +340,7 @@ def build_a_share_statistics_tables(
     )
     business_columns = {
         primary_label,
+        *((raw_label,) if raw_label is not None else ()),
         *(
             column
             for item in model_entries.values()
@@ -333,6 +355,7 @@ def build_a_share_statistics_tables(
     rank_records: list[dict[str, object]] = []
     comparison_records: list[dict[str, object]] = []
     loss_records: list[dict[str, object]] = []
+    predictive_records: list[dict[str, object]] = []
     chunks = iter_complete_session_frames(
         read_dataset(
             dataset_path,
@@ -372,11 +395,41 @@ def build_a_share_statistics_tables(
                     raise ValueError("statistics_prediction_period_coverage_invalid")
                 period_id = matches[0]
                 selection = selections.get(period_id)
+                raw_mature = (
+                    legal_training_rows(
+                        session,
+                        fitting_cutoff=(
+                            _statistics_window_bounds(
+                                TimeWindow(
+                                    config["label_cutoff"], config["label_cutoff"]
+                                )
+                            )[1]
+                            if "label_cutoff" in config
+                            else _statistics_window_bounds(model_window)[1]
+                        ),
+                        availability_column=raw_availability,
+                        target_column=raw_label,
+                    )[raw_label]
+                    if raw_label is not None
+                    else pd.Series(dtype="float64")
+                )
                 for family_id in family_ids:
                     entry = model_entries[period_id, family_id]
                     metadata = entry["model_metadata"]
                     if metadata is None:
                         mature[family_columns[family_id]] = np.nan
+                        predictive_records.append(
+                            dict(
+                                timestamp=timestamp,
+                                family_id=family_id,
+                                **_prediction_quality(
+                                    pd.Series(dtype="float64"),
+                                    mature[primary_label],
+                                    raw_mature,
+                                    head_fraction=head_fraction,
+                                ),
+                            )
+                        )
                         continue
                     expected = (
                         prediction_rows(
@@ -403,10 +456,26 @@ def build_a_share_statistics_tables(
                         np.asarray(values, dtype="float64"), index=keys.index
                     )
                     mature[family_columns[family_id]] = scores.reindex(mature.index)
+                    eligible_scores = scores.reindex(
+                        session.index[session.eligible.fillna(False)]
+                    )
+                    predictive_records.append(
+                        dict(
+                            timestamp=timestamp,
+                            family_id=family_id,
+                            **_prediction_quality(
+                                eligible_scores,
+                                mature[primary_label],
+                                raw_mature,
+                                head_fraction=head_fraction,
+                            ),
+                        )
+                    )
                 if selection is not None:
-                    mature[_PREDICTION_COLUMN] = mature[
-                        family_columns[selection["selected_family_id"]]
-                    ]
+                    winner = selection["selected_family_id"]
+                    mature[_PREDICTION_COLUMN] = (
+                        mature[family_columns[winner]] if winner is not None else np.nan
+                    )
                 rank = cross_sectional_rank_ic(
                     mature,
                     value_columns=(
@@ -578,6 +647,9 @@ def build_a_share_statistics_tables(
     tables = {}
     if "model_losses" in analyses:
         tables["model_losses"] = model_losses
+        tables["model_prediction_metrics"] = pd.DataFrame.from_records(
+            predictive_records
+        )
     if "model_comparison" in analyses:
         tables["model_comparison"] = comparison
     if set(analyses) & set(_MODEL_ROBUSTNESS_TESTS):
@@ -591,6 +663,65 @@ def build_a_share_statistics_tables(
     if "group_comparison" in statistics:
         tables["model_group_comparison"] = group_comparison
     return tables
+
+
+def _prediction_quality(scores, target, raw_returns, *, head_fraction):
+    """Keep the prediction cohort fixed before inspecting future outcomes."""
+    scores = scores.loc[np.isfinite(scores)]
+    paired = target.reindex(scores.index)
+    valid = np.isfinite(paired)
+    error = sum(
+        (Fraction(float(y)) - Fraction(float(p))) ** 2
+        for y, p in zip(paired.loc[valid], scores.loc[valid], strict=True)
+    )
+    baseline = sum(Fraction(float(y)) ** 2 for y in paired.loc[valid])
+    count = int(valid.sum())
+
+    def represent(value):
+        try:
+            result = float(value)
+        except OverflowError:
+            return np.nan
+        return result if np.isfinite(result) else np.nan
+
+    mse = represent(error / count) if count else np.nan
+    baseline_mse = represent(baseline / count) if count else np.nan
+    r2 = represent(1 - error / baseline) if count and baseline else np.nan
+    head = scores.iloc[:0]
+    if len(scores):
+        cutoff = scores.nlargest(int(np.ceil(len(scores) * head_fraction))).iloc[-1]
+        head = scores.loc[scores.ge(cutoff)]
+    returns = raw_returns.reindex(head.index)
+    observed = returns.loc[np.isfinite(returns)]
+    pool = raw_returns.loc[np.isfinite(raw_returns)]
+    head_mean = float(mean(observed)) if len(observed) else np.nan
+    pool_mean = float(mean(pool)) if len(pool) else np.nan
+    excess = (
+        represent(Fraction(head_mean) - Fraction(pool_mean))
+        if len(observed) and len(pool)
+        else np.nan
+    )
+    return {
+        "prediction_count": len(scores),
+        "target_count": count,
+        "mse": mse,
+        "baseline_mse": baseline_mse,
+        "oos_r2": r2,
+        "oos_r2_reason": None
+        if np.isfinite(r2)
+        else "no_valid_targets"
+        if not count
+        else "zero_baseline_error"
+        if not baseline
+        else "nonfinite_result",
+        "head_selected_count": len(head),
+        "head_evaluable_count": len(observed),
+        "head_coverage": len(observed) / len(head) if len(head) else np.nan,
+        "pool_evaluable_count": len(pool),
+        "head_mean_raw_return": head_mean,
+        "pool_mean_raw_return": pool_mean,
+        "head_excess_raw_return": excess,
+    }
 
 
 def _model_target_metadata(config, spec, window, selections):
@@ -614,6 +745,24 @@ def _model_target_metadata(config, spec, window, selections):
         "evaluation": {
             **config["evaluation"],
             "label_availability_columns": {label: availability},
+        },
+        "prediction_metrics": {
+            "head_fraction": config["evaluation"].get("head_fraction", 0.2),
+            "raw_return_label": config["evaluation"].get(
+                "raw_return_label",
+                "forward_return_20d"
+                if "forward_return_20d" in spec.column_roles
+                else None,
+            ),
+            "baseline": "zero_prediction",
+            "aggregation": "date_equal_mse; oos_r2=1-mean(mse)/mean(baseline_mse)",
+            "head_selection": (
+                "finite_predictions_before_labels; ceil_fraction_cutoff_including_ties"
+            ),
+            "return_basis": (
+                "gross_raw_horizon; "
+                "same_date_eligible_pool_equal_weight; no_compounding"
+            ),
         },
         "evaluation_axis": "cross_sectional",
         "column_roles": {label: str(spec.column_roles[label])},
@@ -816,6 +965,8 @@ def _paired_group_rankic(
         )
         if inference is not None:
             estimate = inference.loc[family]
+            if estimate["status"] != "DEFINED":
+                row["bootstrap_reason"] = estimate["reason"]
             for key in (
                 "status",
                 "reason",
@@ -948,6 +1099,8 @@ def _prediction_summary(
         else pd.Series(dtype="float64")
     )
     count = len(values)
+    if count != len(rank_by_date):
+        inference_blocker = inference_blocker or "incomplete_session_clock"
     row = {
         "prediction_id": prediction_id,
         "observation_count": count,
@@ -1053,6 +1206,8 @@ def _model_comparison(
     analyses=_MODEL_ANALYSES,
 ):
     common = rank_by_date.loc[:, list(family_ids)].dropna()
+    if len(common) != len(rank_by_date):
+        inference_blocker = inference_blocker or "incomplete_session_clock"
     losses = -common
     challengers = tuple(family for family in family_ids if family != benchmark_id)
     comparisons = []
@@ -1313,7 +1468,9 @@ def _fama_macbeth_summary(
             "coefficient_id": coefficient_id,
             "period_count": count,
             "status": "UNDEFINED",
-            "reason": "hac_lag_exceeds_observations",
+            "reason": "incomplete_session_clock"
+            if count != input_date_count
+            else "hac_lag_exceeds_observations",
             "mean": float(mean(values)) if count else np.nan,
             "standard_error": np.nan,
             "t_statistic": np.nan,
@@ -1324,7 +1481,7 @@ def _fama_macbeth_summary(
             "white_undefined_period_count": white_undefined,
             "input_date_count": input_date_count,
         }
-        if count >= max(2, max_lags + 1):
+        if count == input_date_count and count >= max(2, max_lags + 1):
             try:
                 inference = hac_mean(values, max_lags=max_lags)
             except ValueError as exc:
@@ -1447,6 +1604,9 @@ def factor_statistics(config):
     analyses = _selected_analyses(config, ("rank_ic", "fama_macbeth"))
     expected = {"hac_lag"}
     if "rank_ic" in analyses:
+        if isinstance(policy, dict):
+            policy = {"fdr_primary": "BY_5pct", "fdr_robustness": "BH_5pct", **policy}
+            config["statistics"] = policy
         expected.update(("factor_fdr_families", "fdr_primary", "fdr_robustness"))
     if "fama_macbeth" in analyses:
         expected.add("fama_macbeth_core_factors")
@@ -1525,6 +1685,14 @@ def _factor_statistics_from_evaluations(config):
         raise ValueError("factor_statistics_rank_ic_multiple_evaluations")
     policy = config["statistics"]
     needed = {"hac_lag"}
+    if isinstance(policy, dict):
+        defaults = {}
+        if "rank_ic" in analyses:
+            defaults.update(fdr_primary="BY_5pct", fdr_robustness="BH_5pct")
+        if "stratified_ic" in analyses:
+            defaults.update(fdr_method="BY", fdr_alpha=0.05)
+        policy = defaults | policy
+        config["statistics"] = policy
     if "stratified_ic" in analyses:
         needed |= {"fdr_method", "fdr_alpha"}
     if "rank_ic" in analyses:
@@ -1748,14 +1916,18 @@ def _factor_statistics_from_evaluations(config):
                     ci_lower=np.nan,
                     ci_upper=np.nan,
                     status="UNDEFINED",
-                    reason="insufficient_dates_for_hac",
+                    reason="incomplete_session_clock"
+                    if len(observations) != input_counts[key[2]]
+                    else "insufficient_dates_for_hac",
                     hac_lag=lag,
                     fdr_method=policy["fdr_method"],
                     fdr_alpha=policy["fdr_alpha"],
                     fdr_adjusted_p_value=np.nan,
                     defined_hypothesis_count=0,
                 )
-                if len(observations) >= max(2, lag + 1):
+                if len(observations) == input_counts[key[2]] and len(
+                    observations
+                ) >= max(2, lag + 1):
                     try:
                         inference = hac_mean(observations, max_lags=lag)
                     except ValueError as error:
@@ -1819,8 +1991,8 @@ def _factor_statistics_from_evaluations(config):
             factors=factors,
             families=_factor_families(policy["factor_fdr_families"], factors),
             methods=(
-                _fdr_method(policy["fdr_primary"], expected="BH"),
-                _fdr_method(policy["fdr_robustness"], expected="BY"),
+                _fdr_method(policy["fdr_primary"], expected="BY"),
+                _fdr_method(policy["fdr_robustness"], expected="BH"),
             ),
             max_lags=lag,
         )
@@ -1966,7 +2138,13 @@ def model_statistics(config):
     evaluation, policy = config["evaluation"], config["statistics"]
     if (
         not isinstance(evaluation, dict)
-        or set(evaluation) - {"primary_label", "label_availability_columns"}
+        or set(evaluation)
+        - {
+            "primary_label",
+            "label_availability_columns",
+            "head_fraction",
+            "raw_return_label",
+        }
         or "primary_label" not in evaluation
     ):
         raise ValueError("model_statistics_evaluation_invalid")
@@ -1986,7 +2164,8 @@ def model_statistics(config):
         *_MODEL_ROBUSTNESS_TESTS,
     }:
         needed |= {"bootstrap_block", "bootstrap_repetitions"}
-        if type(config.get("root_seed")) is not int:
+        seed = config.setdefault("root_seed", DEFAULT_ROOT_SEED)
+        if type(seed) is not int or not 0 <= seed < 2**32:
             raise ValueError("model_statistics_config_invalid")
     if set(analyses) & {
         "model_comparison",
@@ -1995,6 +2174,8 @@ def model_statistics(config):
     }:
         if not isinstance(config.get("comparison_model_id"), str):
             raise ValueError("model_statistics_config_invalid")
+    if "bootstrap_repetitions" in needed:
+        policy.setdefault("bootstrap_repetitions", 2000)
     if (
         not isinstance(policy, dict)
         or set(policy)

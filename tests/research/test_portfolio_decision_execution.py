@@ -17,7 +17,6 @@ from quant_research_platform.contracts.portfolios import (
     ExecutionAssumptions,
     PortfolioCandidateSpec,
     PortfolioCapital,
-    PortfolioTargetBlocked,
 )
 from quant_research_platform.markets.implementations.a_share.execution import (
     fee_schedule_from_frame,
@@ -37,8 +36,8 @@ def _decision_inputs(*, benchmark=(0.5, 0.5), holdings=None, fee_rate=0.0):
             "asset_id": assets,
             "listing_date": life,
             "timestamp": day,
-            "adj_open": 100.0,
-            "adj_close": 100.0,
+            "open": 100.0,
+            "close": 100.0,
             "amount": 1000.0,
             "market_type": 1,
             "is_trading": True,
@@ -107,6 +106,9 @@ def _decision_inputs(*, benchmark=(0.5, 0.5), holdings=None, fee_rate=0.0):
         held_units=values.map(lambda value: Fraction(value) / 100),
         cash=0.0,
         recovery_cash=0.0,
+        decision_receivable=0.0,
+        receivable=0.0,
+        locked_quantities={},
         nav=100.0,
         amount_history={(asset, life): deque([1000.0] * 20) for asset in assets},
         alpha=alpha,
@@ -126,9 +128,7 @@ def test_future_execution_changes_actual_constraints_without_changing_target(tmp
     base["execution"].loc[base["execution"].asset_id.eq("a"), "can_exit"] = False
     baseline = production._build_session(**base)
     changed = _decision_inputs()
-    changed["next_panel"].loc[changed["next_panel"].asset_id.eq("a"), "adj_open"] = (
-        150.0
-    )
+    changed["next_panel"].loc[changed["next_panel"].asset_id.eq("a"), "open"] = 150.0
     changed["execution"].loc[changed["execution"].asset_id.eq("a"), "can_exit"] = False
     account, adv, optimized, delta, snapshot = production._build_session(**changed)
     pd.testing.assert_series_equal(optimized.weights, baseline[2].weights)
@@ -179,10 +179,15 @@ def test_future_execution_changes_actual_constraints_without_changing_target(tmp
         decision_delta=delta,
         next_panel=changed["next_panel"],
         endpoint_panel=changed["endpoint_panel"],
+        endpoint_events=pd.DataFrame(),
+        corporate_events=pd.DataFrame(),
+        endpoint_corporate_events=pd.DataFrame(),
+        entitlements=production.EquityEntitlements(),
+        execution_lives=changed["next_panel"].set_index("asset_id").listing_date,
     )
     path = write_portfolio_ledger_artifact(
         tmp_path / "drift",
-        capital=PortfolioCapital("timing", 125.0, "CNY", "adjusted_notional"),
+        capital=PortfolioCapital("timing", 125.0, "CNY", "cash_equity"),
         metadata={"window": {"start": "2023-01-03", "end": "2023-01-05"}},
         produce=lambda emit: emit(batch),
     )
@@ -220,11 +225,13 @@ def test_known_fees_cannot_make_frozen_holding_exceed_decision_limit(monkeypatch
         )
         inputs["amount_history"].pop(("a", pd.Timestamp("2000-01-01")))
         if rate:
-            with pytest.raises(
-                PortfolioTargetBlocked,
-                match="portfolio_post_trade_constraints_infeasible",
-            ):
-                production._build_session(**inputs)
+            account, _, optimized, _, ledger = production._build_session(**inputs)
+            assert optimized is None
+            assert account.asset_ledger.executed_delta_notional.eq(0.0).all()
+            assert account.nav_after == account.nav_before
+            assert ledger.attrs["decision_availability"]["decision_skip_reason"] == (
+                "portfolio_post_trade_constraints_infeasible"
+            )
         else:
             account, _, _, _, _ = production._build_session(**inputs)
             assert (
@@ -253,7 +260,7 @@ def test_exact_zero_active_missing_risk_is_zero_but_future_active_is_undefined(m
     _, _, optimized, _, snapshot = production._build_session(**inputs)
     assert optimized.predicted_tracking_error == 0.0
     assert snapshot.attrs["realized_constraints"]["realized_tracking_error"] == 0.0
-    inputs["next_panel"].loc[inputs["next_panel"].asset_id.eq("a"), "adj_open"] = 150.0
+    inputs["next_panel"].loc[inputs["next_panel"].asset_id.eq("a"), "open"] = 150.0
     inputs["execution"]["can_exit"] = False
     _, _, changed, _, snapshot = production._build_session(**inputs)
     pd.testing.assert_series_equal(changed.weights, optimized.weights)
@@ -312,7 +319,7 @@ def test_zero_nav_neutrality_has_no_defined_weights_or_exposures():
 def test_future_zero_nav_keeps_valid_target_and_reports_undefined_actual_risk():
     inputs = _decision_inputs()
     baseline = production._build_session(**inputs)
-    inputs["next_panel"]["adj_open"] = 0.0
+    inputs["next_panel"]["open"] = 0.0
     account, _, optimized, _, snapshot = production._build_session(**inputs)
     pd.testing.assert_series_equal(optimized.weights, baseline[2].weights)
     assert account.nav_after == 0.0

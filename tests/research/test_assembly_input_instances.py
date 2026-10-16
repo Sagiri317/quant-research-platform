@@ -220,7 +220,15 @@ def test_native_features_reuse_without_recomputation_preserves_model_contract(
         }
     )
     fitted, model_facts = load_model(model)
-    assert fitted.metadata["rows_after_input_label_dropna"] == 4
+    # The second row has no original observed model input; technical zero fill
+    # and its missingness flag do not turn it into a training observation.
+    assert actual.feature_observed_momentum_20d.eq(0).tolist() == [
+        False,
+        True,
+        False,
+        False,
+    ]
+    assert fitted.metadata["rows_after_input_label_dropna"] == 3
     assert model_facts["input_units"] == {"feature_momentum_20d": "dimensionless"}
 
 

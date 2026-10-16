@@ -59,6 +59,19 @@ def tables(request):
         white_reason="",
         timestamp=pd.Timestamp("2023-01-02"),
         observation_count=32,
+        prediction_count=32,
+        target_count=32,
+        mse=0.2,
+        baseline_mse=0.4,
+        oos_r2=0.5,
+        oos_r2_reason="",
+        head_selected_count=7,
+        head_evaluable_count=7,
+        head_coverage=1.0,
+        pool_evaluable_count=32,
+        head_mean_raw_return=0.3,
+        pool_mean_raw_return=0.1,
+        head_excess_raw_return=0.2,
         input_date_count=32,
         period_count=32,
         mean=0.2,
@@ -157,7 +170,11 @@ def test_table_consumer_primary_exception_is_preserved(tmp_path, tables, metadat
 @pytest.mark.parametrize(
     "member",
     (
-        *statistics.STATISTICS_TABLE_GROUPS["research"],
+        *(
+            member
+            for member in statistics.STATISTICS_TABLE_GROUPS["research"]
+            if member != "model_prediction_metrics.parquet"
+        ),
         *statistics.STATISTICS_TABLE_GROUPS["factor"],
     ),
 )
@@ -175,7 +192,13 @@ def test_research_table_rejects_invalid_values_at_write_and_read(
     elif mutation == "undefined":
         tables[name].loc[0, "status"] = "UNDEFINED"
     else:
-        count = "period_count" if name == "fama_macbeth" else "observation_count"
+        count = (
+            "period_count"
+            if name == "fama_macbeth"
+            else "prediction_count"
+            if name == "model_prediction_metrics"
+            else "observation_count"
+        )
         tables[name].loc[0, count] = -1
     error = (
         "statistics_table_count_invalid"
@@ -268,7 +291,13 @@ def test_research_table_counts_reject_lossy_coercion(
     name = member.removesuffix(".parquet")
     if name == "model_group_comparison":
         tables[name] = pd.DataFrame([_defined_group_comparison_row()])
-    count = "period_count" if name == "fama_macbeth" else "observation_count"
+    count = (
+        "period_count"
+        if name == "fama_macbeth"
+        else "prediction_count"
+        if name == "model_prediction_metrics"
+        else "observation_count"
+    )
     tables[name][count] = pd.Series([value] * len(tables[name]), dtype=object)
     with pytest.raises(ValueError, match="statistics_table_count_invalid"):
         statistics.write_statistics_artifact(
@@ -906,8 +935,11 @@ def test_paired_rankic_and_champion_diagnostics_reach_native_artifacts(
                     row.mean_difference == row.quarterly_mean - row.global_mean == 0.125
                 )
                 assert row.fdr_family_size == 1
-                assert row.status == (
-                    "UNDEFINED" if access == "validation" else "DEFINED"
+                assert row.status == "UNDEFINED"
+                assert row.reason == (
+                    "selection_reuses_evaluation_window"
+                    if access == "validation"
+                    else "incomplete_session_clock"
                 )
         with artifact.table("prediction_diagnostics.parquet") as diagnostic:
             expected[group] = (
@@ -921,9 +953,7 @@ def test_paired_rankic_and_champion_diagnostics_reach_native_artifacts(
         assert rows[0]["input_date_count"] - rows[0]["observation_count"] == (
             1 if group == "global" else 0
         )
-        assert rows[0]["status"] == (
-            "UNDEFINED" if group == "global" and access == "validation" else "DEFINED"
-        )
+        assert rows[0]["status"] == ("UNDEFINED" if group == "global" else "DEFINED")
 
 
 def test_native_model_persistence_preserves_std_reason_in_statistics(
@@ -1083,3 +1113,49 @@ def test_undefined_descriptive_mean_requires_actual_observations(
             frame[column] = float("nan")
     with pytest.raises(ValueError, match="descriptive_mean_count_invalid"):
         statistics._validated_frame(frame, member=member, metadata=metadata)
+
+
+@pytest.mark.parametrize("start,pnl", ((3e16, 6.0), (1.0, 1e-20), (1e-100, 1e-120)))
+def test_equity_return_uses_money_rounding_bound_without_erasing_small_pnl(start, pnl):
+    from fractions import Fraction
+
+    from quant_research_platform.contracts.time import TimeWindow
+    from tests.helpers.statistics_artifacts import statistics_metadata
+
+    member = "portfolio_daily.parquet"
+    net_return = float(Fraction(pnl) / Fraction(start))
+    end = float(Fraction(start) + Fraction(pnl))
+    row = dict(
+        candidate_id="raw",
+        sample_role="validation",
+        entry_at=pd.Timestamp("2024-01-02"),
+        end_at=pd.Timestamp("2024-01-03"),
+        nav_before=start,
+        nav_post=start,
+        nav_end=end,
+        cash_post=0.0,
+        cash_weight_post=0.0,
+        gross_return=net_return,
+        net_return=net_return,
+        cost_drag=0.0,
+        target_turnover=0.0,
+        requested_turnover=0.0,
+        realized_turnover=0.0,
+        return_status="DEFINED",
+        return_reason="",
+    )
+    frame = pd.DataFrame([row], columns=statistics.STATISTICS_TABLE_COLUMNS[member])
+    metadata = statistics_metadata(
+        TimeWindow("2024-01-01", "2024-01-04"), candidate_ids=["raw"]
+    )
+    result = statistics._validated_frame(frame, member=member, metadata=metadata)
+    assert result.net_return.iloc[0] == net_return
+    assert result.net_return.iloc[0] > 0
+    corrupted = frame.copy()
+    corrupted.loc[0, "net_return"] += 1e-10
+    with pytest.raises(ValueError, match="statistics_return_status_invalid"):
+        statistics._validated_frame(corrupted, member=member, metadata=metadata)
+    missing = frame.copy()
+    missing.loc[0, "net_return"] = float("nan")
+    with pytest.raises(ValueError, match="statistics_return_status_invalid"):
+        statistics._validated_frame(missing, member=member, metadata=metadata)

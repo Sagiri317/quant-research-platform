@@ -251,6 +251,7 @@ def _panel(assets, dates):
             "market_id": "a_share",
             "asset_id": assets * len(dates),
             "timestamp": dates.repeat(len(assets)),
+            "open": 1.0,
             "adj_open": 1.0,
             "adj_close": 1.0,
             "amount": 1000.0,
@@ -287,8 +288,8 @@ def test_native_panel_feeds_risk_state_and_holding_attribution(tmp_path):
         dates, [1e-308, 1.0, 1e308], [1.0, 1.0, 2.0], strict=True
     ):
         current = panel.timestamp.eq(day)
-        panel.loc[current & large, ["adj_open", "adj_close", "close"]] = big
-        panel.loc[current & ~large, ["adj_open", "adj_close", "close"]] = small
+        panel.loc[current & large, ["open", "adj_open", "adj_close", "close"]] = big
+        panel.loc[current & ~large, ["open", "adj_open", "adj_close", "close"]] = small
     panel.loc[large & panel.timestamp.ne(dates[0]), "period_return"] = 1e308
     panel.loc[~large & panel.timestamp.eq(dates[2]), "period_return"] = 1.0
     spec = _processed_specs().get("market_panel_1d")
@@ -299,6 +300,8 @@ def test_native_panel_feeds_risk_state_and_holding_attribution(tmp_path):
     state = FactorRiskState(
         style_columns=(),
         config=FactorRiskConfig(
+            factor_window=2,
+            specific_window=2,
             minimum_factor_dates=2,
             minimum_specific_dates=2,
             factor_half_life=1.0,
@@ -425,6 +428,9 @@ def test_native_simple_production_and_ledger_keep_representable_positive_target(
         holdings=pd.Series(dtype="float64"),
         held_units=pd.Series(dtype="object"),
         recovery_cash=0.0,
+        decision_receivable=0.0,
+        receivable=0.0,
+        locked_quantities={},
         cash=1.0,
         nav=1.0,
         amount_history={
@@ -458,9 +464,7 @@ def test_native_simple_production_and_ledger_keep_representable_positive_target(
     )
     ledger_root = write_test_sessions(
         tmp_path / "ledger",
-        capital=PortfolioCapital(
-            "extreme_capitalization", 1.0, "CNY", "adjusted_notional"
-        ),
+        capital=PortfolioCapital("extreme_capitalization", 1.0, "CNY", "cash_equity"),
         metadata={"window": {"start": "2023-01-02", "end": "2023-01-04"}},
         ledger_chunks=iter((frame,)),
     )
@@ -538,8 +542,10 @@ def test_native_market_model_relisting_resets_beta_and_residual_warmup(tmp_path)
     np.testing.assert_array_equal(actual[columns], expected[columns])
     assert actual.beta_252d.iloc[:251].isna().all()
     assert np.isfinite(actual.beta_252d.iloc[251])
-    assert actual.residual_volatility_60d.iloc[:310].isna().all()
-    assert np.isfinite(actual.residual_volatility_60d.iloc[310])
+    # The mature 60-session residual window needs 45 fresh residuals.
+    # The first residual is available with beta at lifecycle session 252.
+    assert actual.residual_volatility_60d.iloc[:295].isna().all()
+    assert np.isfinite(actual.residual_volatility_60d.iloc[295])
 
 
 def test_lagged_risk_preserves_prior_eligibility_and_resets_new_life():
@@ -553,6 +559,8 @@ def test_lagged_risk_preserves_prior_eligibility_and_resets_new_life():
     state = FactorRiskState(
         style_columns=(),
         config=FactorRiskConfig(
+            factor_window=3,
+            specific_window=3,
             minimum_cross_section=10,
             minimum_factor_dates=2,
             minimum_specific_dates=2,

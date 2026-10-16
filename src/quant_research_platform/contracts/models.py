@@ -15,6 +15,7 @@ from quant_research_platform.contracts.columns import _validate_asset_time_key
 from quant_research_platform.contracts.evaluations import (
     CORRELATION_SUMMARY_REASON_CODES,
 )
+from quant_research_platform.contracts.experiments import DEFAULT_ROOT_SEED
 from quant_research_platform.contracts.filtering import (
     SampleFilterMode,
     filter_definition,
@@ -202,7 +203,7 @@ class TrainingWeighting:
 
 @dataclass(frozen=True, kw_only=True)
 class ModelSpec:
-    """A model request with no hidden research defaults."""
+    """A model request with explicit resolved research parameters."""
 
     model_id: str
     model_algorithm: str
@@ -211,7 +212,7 @@ class ModelSpec:
     target_column: str
     sample_filter_mode: SampleFilterMode = "eligible"
     hyperparameters: Mapping[str, object] = field(default_factory=dict)
-    random_seed: int | None = None
+    random_seed: int = DEFAULT_ROOT_SEED
     max_train_rows: int | None = None
     training_weighting: TrainingWeighting = field(default_factory=TrainingWeighting)
 
@@ -255,13 +256,12 @@ class ModelSpec:
         reject_filter_input_columns(self.input_feature_columns)
         if self.target_column in self.input_columns:
             raise ValueError("model_target_column_in_inputs")
-        if self.random_seed is not None and (
-            type(self.random_seed) is not int or isinstance(self.random_seed, bool)
-        ):
-            raise TypeError("random_seed must be an integer or None")
+        if type(self.random_seed) is not int:
+            raise TypeError("random_seed must be an integer")
+        if not 0 <= self.random_seed < 2**32:
+            raise ValueError("random_seed must be a uint32-compatible integer")
         if (
-            self.random_seed is not None
-            and "random_state" in hyperparameters
+            "random_state" in hyperparameters
             and hyperparameters["random_state"] != self.random_seed
         ):
             raise ValueError("model_random_seed_conflicts_with_random_state")
@@ -451,14 +451,40 @@ def validate_model_metadata_core(
     if scaler is not None:
         if (
             type(scaler) is not dict
-            or set(scaler)
+            or set(scaler) - {"input_columns", "medians", "native_missing"}
             != {
                 "columns",
                 "weighted_mean_origin",
                 "weighted_mean_offset",
                 "weighted_population_scale",
             }
-            or scaler["columns"] != metadata["input_columns"]
+            or ("medians" in scaler) != ("input_columns" in scaler)
+            or (
+                "native_missing" in scaler
+                and (scaler["native_missing"] is not True or "medians" in scaler)
+            )
+            or (
+                "medians" in scaler
+                and (
+                    type(scaler["medians"]) is not list
+                    or type(scaler["input_columns"]) is not list
+                )
+            )
+            or scaler.get("input_columns", scaler["columns"])
+            != metadata["input_columns"]
+            or (
+                "medians" in scaler
+                and (
+                    len(scaler["medians"]) != len(metadata["input_columns"])
+                    or not all(
+                        type(value) in {int, float} and np.isfinite(value)
+                        for value in scaler["medians"]
+                    )
+                    or scaler["columns"]
+                    != metadata["input_columns"]
+                    + [f"{column}__missing" for column in metadata["input_columns"]]
+                )
+            )
             or type(scaler["weighted_mean_origin"]) is not list
             or type(scaler["weighted_mean_offset"]) is not list
             or type(scaler["weighted_population_scale"]) is not list

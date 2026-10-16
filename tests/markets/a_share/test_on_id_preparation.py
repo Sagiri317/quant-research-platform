@@ -8,6 +8,7 @@ from quant_research_platform.markets.implementations.a_share.processed import pr
 from quant_research_platform.markets.prepare import prepare
 from quant_research_platform.storage.datasets import read_dataset
 from quant_research_platform.storage.datasets.reading import open_dataset_session
+from tests.helpers.a_share_sources import _calendar_input
 from tests.research.test_prepare_selection import _input
 
 
@@ -20,9 +21,12 @@ def _inputs(tmp_path, *, native=True):
                 "asset_id": asset,
                 "timestamp": day,
                 "listing_date": pd.Timestamp("2020-01-01"),
+                "market_type": 4 if asset == "a" else 1,
                 "adj_open": 100.0 + i + number,
                 "adj_close": 101.0 + i + number,
-                "is_trading": i != 2,
+                "is_trading": True,
+                "selected": i != 2,
+                "filling_flag": 0,
             }
             for number, asset in enumerate(("a", "b", "c"))
             for i, day in enumerate(dates)
@@ -30,13 +34,10 @@ def _inputs(tmp_path, *, native=True):
         ]
     )
     return frame, {
-        "market_panel_1d": _input(tmp_path, "market_panel_1d", frame, native=native),
-        "execution_mask": _input(
-            tmp_path,
-            "execution_mask",
-            frame[["market_id", "asset_id", "timestamp"]].assign(can_enter=True),
-            native=native,
+        "trading_calendar": str(
+            _calendar_input(tmp_path / "calendar", {1: dates, 4: dates[::2]})
         ),
+        "market_panel_1d": _input(tmp_path, "market_panel_1d", frame, native=native),
     }
 
 
@@ -106,20 +107,20 @@ def test_prepare_roundtrip_and_narrow_slice(tmp_path, monkeypatch, native, block
     a = full.loc[full.asset_id.eq("a")].iloc[0]
     a_axis = frame.loc[frame.asset_id.eq("a"), "timestamp"].sort_values()
     assert a.on_id_endpoint_return_1d_available_at == a_axis.iloc[2] + pd.Timedelta(
-        hours=1, minutes=30
+        hours=7
     )
 
 
 def test_price_filter_keeps_full_declared_axis_and_unknown_prices(tmp_path):
     frame, inputs = _inputs(tmp_path)
-    inputs["market_panel_1d"]["row_filters"] = [["is_trading", "==", True]]
+    inputs["market_panel_1d"]["row_filters"] = [["selected", "==", True]]
     result = read_dataset(
         prepare(
             _request(tmp_path / "filtered", inputs, frame, parameters={"horizons": [1]})
         )
     )
-    assert len(result) == int(frame.is_trading.sum())
-    assert result.timestamp.isin(frame.loc[frame.is_trading, "timestamp"]).all()
+    assert len(result) == int(frame.selected.sum())
+    assert result.timestamp.isin(frame.loc[frame.selected, "timestamp"]).all()
     b = result.loc[result.asset_id.eq("b")].reset_index(drop=True)
     assert pd.isna(b.on_id_endpoint_return_1d.iloc[0])
     assert b.on_id_endpoint_return_1d_reason.iloc[0] == "missing_price"
@@ -144,8 +145,7 @@ def test_noncontiguous_year_selection_keeps_sessions_unknown(tmp_path):
     first = result.loc[result.asset_id.eq("b")].iloc[0]
     assert np.isfinite(first.on_id_endpoint_return_1d)
     assert first.on_id_endpoint_return_1d_available_at == (
-        result.loc[result.asset_id.eq("b"), "timestamp"].iloc[2]
-        + pd.Timedelta(hours=1, minutes=30)
+        result.loc[result.asset_id.eq("b"), "timestamp"].iloc[2] + pd.Timedelta(hours=7)
     )
 
 
@@ -339,20 +339,15 @@ def test_native_file_selection_uses_inventory_without_compacting_clock(tmp_path)
     assert np.isfinite(row.on_id_endpoint_return_1d)
 
 
-def test_execution_key_outside_panel_is_rejected(tmp_path):
+def test_price_labels_need_no_execution_mask(tmp_path):
     frame, inputs = _inputs(tmp_path)
-    keys = frame[["market_id", "asset_id", "timestamp"]].assign(can_enter=True)
-    keys = pd.concat(
-        [keys, keys.iloc[:1].assign(asset_id="outside")], ignore_index=True
-    )
-    inputs["execution_mask"] = _input(
-        tmp_path / "invalid", "execution_mask", keys, native=True
-    )
-    with pytest.raises(ValueError, match="a_share_input_key_outside_panel"):
+    assert set(inputs) == {"market_panel_1d", "trading_calendar"}
+    result = read_dataset(
         prepare(
             _request(tmp_path / "output", inputs, frame, parameters={"horizons": [1]})
         )
-    assert not (tmp_path / "output").exists()
+    )
+    assert result.on_id_endpoint_return_1d.notna().any()
 
 
 def test_actual_panel_axis_survives_market_migration_and_suspension(tmp_path):
@@ -368,17 +363,15 @@ def test_actual_panel_axis_survives_market_migration_and_suspension(tmp_path):
             "adj_close": np.arange(101.0, 111.0),
             "market_type": [1, 1, 1, 4, 4, 4, 4, 4, 4, 4],
             "is_trading": True,
+            "filling_flag": 0,
         }
     )
     frame.loc[2, ["adj_open", "adj_close"]] = np.nan
     frame.loc[2, "is_trading"] = False
     inputs = {
         "market_panel_1d": _input(tmp_path, "market_panel_1d", frame, native=True),
-        "execution_mask": _input(
-            tmp_path,
-            "execution_mask",
-            frame[["market_id", "asset_id", "timestamp"]].assign(can_enter=True),
-            native=True,
+        "trading_calendar": str(
+            _calendar_input(tmp_path / "calendar", {1: own, 4: dates})
         ),
     }
     result = read_dataset(
@@ -390,7 +383,7 @@ def test_actual_panel_axis_survives_market_migration_and_suspension(tmp_path):
     )
     assert result.on_id_endpoint_return_5d_available_at.iloc[0] == own[
         6
-    ] + pd.Timedelta(hours=1, minutes=30)
+    ] + pd.Timedelta(hours=7)
     assert result.on_id_endpoint_return_5d.iloc[0] == (106.0 - 101.0) / 101.0
     assert result.on_id_decomposition_reason_5d.iloc[0] == "missing_price"
     assert result.on_id_endpoint_return_1d_reason.iloc[0] == "missing_price"
@@ -399,14 +392,10 @@ def test_actual_panel_axis_survives_market_migration_and_suspension(tmp_path):
 def test_bare_directory_member_selection_cannot_define_a_sparse_clock(tmp_path):
     frame, inputs = _inputs(tmp_path, native=False)
     dates = sorted(frame.timestamp.unique())[:6]
-    for data_id in inputs:
+    for data_id in ("market_panel_1d",):
         directory = tmp_path / f"parts-{data_id}"
         directory.mkdir()
-        source = (
-            frame
-            if data_id == "market_panel_1d"
-            else frame[["market_id", "asset_id", "timestamp"]].assign(can_enter=True)
-        )
+        source = frame
         for i, day in enumerate(dates):
             source.loc[source.timestamp.eq(day)].to_parquet(
                 directory / f"part-{i}.parquet", index=False

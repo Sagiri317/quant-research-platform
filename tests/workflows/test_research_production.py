@@ -46,13 +46,13 @@ def test_a_share_real_source_model_portfolio_chain(source_chain):
         assert metadata["model"] == str(case.final_models[group, family])
 
 
-def test_native_enhancement_is_capacity_limited_and_postcost_feasible(source_chain):
+def test_native_enhancement_obeys_capacity_and_postcost_limits(source_chain):
     from quant_research_platform.research.portfolios.optimizer import OptimizerConfig
 
     limits = OptimizerConfig()
     for path in source_chain.enhanced_ledgers.values():
         ledger = read_portfolio_ledger_artifact(path)
-        assert ledger.capital.initial_capital == 1e12
+        assert ledger.capital.initial_capital == 2e9
         participation, active = [], []
         optimized = 0
         for batch in ledger.iter_chunks():
@@ -89,17 +89,14 @@ def test_native_enhancement_is_capacity_limited_and_postcost_feasible(source_cha
             active.extend(deviation)
         assert optimized > 0
         assert max(map(abs, active)) > 1e-6
-        assert max(participation) == pytest.approx(0.05, abs=1e-8)
+        assert participation and max(participation) > 0
         assert all(value <= 0.05 + 1e-8 for value in participation)
 
 
-def test_native_postcost_boundary_is_rejected_without_output(
+def test_native_postcost_boundary_skips_trading_and_keeps_marks(
     source_chain, tmp_path, monkeypatch
 ):
     from quant_research_platform.research.portfolios import production
-    from quant_research_platform.research.portfolios.production import (
-        PortfolioTargetBlocked,
-    )
 
     optimized, executed = [], []
     solve = production.optimize_portfolio
@@ -112,7 +109,9 @@ def test_native_postcost_boundary_is_rejected_without_output(
 
     def observe_execution(*args, **kwargs):
         result = execute(*args, **kwargs)
-        executed.append(result)
+        if "share_quantities" not in kwargs:
+            # Capture the decision-time projection, not realized next-open marks.
+            executed.append((*optimized[-1], result))
         return result
 
     monkeypatch.setattr(production, "optimize_portfolio", observe_solution)
@@ -129,27 +128,72 @@ def test_native_postcost_boundary_is_rejected_without_output(
         "optimizer_config": {"active_name_limit": name_limit},
         "output": str(destination),
     }
-    with pytest.raises(
-        PortfolioTargetBlocked, match="portfolio_post_trade_constraints_infeasible"
-    ):
-        backtest(config)
-    assert not destination.exists()
-    assert len(optimized) == 1
-    assets, solution = optimized[0]
-    benchmark = assets.loc[~assets.is_cash, "benchmark_weight"]
-    target_active = solution.weights.reindex(benchmark.index) - benchmark
-    assert target_active.abs().max() <= name_limit + 1e-8
-    assert solution.expected_transaction_cost > 0.0
-    # The last execution is the decision-time projection, before its rejection.
-    projected = executed[-1]
-    assert projected.nav_after < projected.nav_before
-    weights = (
-        projected.asset_ledger.set_index("asset_id").post_trade_notional
-        / projected.nav_after
+    ledger = read_portfolio_ledger_artifact(backtest(config))
+    batches = list(ledger.iter_chunks())
+    skipped_dates = set()
+    for batch in batches:
+        facts = {item.name: item.text for item in batch.diagnostics if item.text}
+        if facts.get("decision_status") != "SKIPPED":
+            continue
+        assert (
+            facts["decision_skip_reason"]
+            == "portfolio_post_trade_constraints_infeasible"
+        )
+        assert not batch.trades and not batch.cashflows
+        assert batch.valuations
+        assert any(item.quantity > 0 for item in batch.valuations)
+        skipped_dates.add(pd.Timestamp(batch.valuations[0].timestamp_ns).date())
+    assert skipped_dates
+    summary = summarize_portfolio_ledger(ledger.capital, iter(batches))
+    assert summary["fees"] > 0 and summary["fill_events"] > 0
+    # Preserve a concrete rejected decision: its optimizer solution respects the
+    # nominal limit, but real projected fees break the post-cost name constraint.
+    witnesses = 0
+    for assets, solution, projected in executed:
+        if projected.execution_date not in skipped_dates:
+            continue
+        benchmark = assets.loc[~assets.is_cash, "benchmark_weight"]
+        target_active = solution.weights.reindex(benchmark.index) - benchmark
+        assert target_active.abs().max() <= name_limit + 1e-8
+        assert solution.expected_transaction_cost > 0.0
+        assert projected.nav_after < projected.nav_before
+        weights = (
+            projected.asset_ledger.set_index("asset_id").post_trade_notional
+            / projected.nav_after
+        )
+        assert (
+            weights.reindex(benchmark.index) - benchmark
+        ).abs().max() > name_limit + 1e-8
+        witnesses += 1
+    assert witnesses == len(skipped_dates)
+
+
+def test_native_excess_capital_skips_capacity_infeasible_targets(
+    source_chain, tmp_path
+):
+    original = source_chain.enhanced_configs["global"]
+    # At 1e12, the first cash-funded 0.5% per-name lower bound exceeds 5% ADV.
+    # Keep the actual risk model, optimizer, costs and raw-share account path.
+    ledger = read_portfolio_ledger_artifact(
+        backtest(
+            {
+                **original,
+                "assumptions": {**original["assumptions"], "initial_nav": 1e12},
+                "output": str(tmp_path / "capacity-infeasible"),
+            }
+        )
     )
-    assert (
-        weights.reindex(benchmark.index) - benchmark
-    ).abs().max() > name_limit + 1e-8
+    batches = list(ledger.iter_chunks())
+    assert len(batches) > 1
+    for batch in batches:
+        facts = {item.name: item.text for item in batch.diagnostics if item.text}
+        assert facts["decision_status"] == "SKIPPED"
+        assert facts["decision_skip_reason"] == "optimizer_capacity_bounds_infeasible"
+        assert not batch.trades and not batch.cashflows
+        assert batch.valuations
+    summary = summarize_portfolio_ledger(ledger.capital, iter(batches))
+    assert summary["fees"] == 0
+    assert summary["nav"] == ledger.capital.initial_capital
 
 
 def test_source_models_reach_paired_native_test_statistics(source_chain, tmp_path):
@@ -269,7 +313,7 @@ def test_source_accounts_reconcile_native_portfolio_statistics(source_chain, tmp
         }
         for path in paths:
             ledger = read_portfolio_ledger_artifact(path)
-            assert ledger.capital.initial_capital == 1e12
+            assert ledger.capital.initial_capital == 2e9
             actual = summarize_portfolio_ledger(ledger.capital, ledger.iter_chunks())
             selected = metrics.loc[
                 metrics.candidate_id.eq(ledger.capital.candidate_id)

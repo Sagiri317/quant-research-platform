@@ -140,6 +140,7 @@ def test_weighted_scaler_finite_population_bound(half_life):
     weights = equal_timestamp_sample_weights(
         pd.to_datetime(["2024-01-02"] * 2 + ["2024-01-03"] * 2),
         TrainingWeighting(half_life_periods=half_life),
+        trading_sessions=pd.date_range("2024-01-02", "2024-01-03"),
     )
     scaler = ModelMatrixScaler.fit(frame, sample_weight=weights)
     assert scaler.mean_ == (0.0,)
@@ -176,7 +177,8 @@ def test_adjacent_positive_price_labels_keep_distinct_model_targets(tmp_path):
             "asset_id": np.repeat(["a", "b"], 22),
             "timestamp": np.tile(dates, 2),
             "adj_open": 3.0,
-            "can_enter": True,
+            "filling_flag": 0,
+            "is_trading": True,
         }
     )
     exits = [np.nextafter(3.0, np.inf), np.nextafter(np.nextafter(3.0, np.inf), np.inf)]
@@ -189,7 +191,8 @@ def test_adjacent_positive_price_labels_keep_distinct_model_targets(tmp_path):
     restored = pd.read_parquet(tmp_path / "labels.parquet")
     first = restored.loc[restored.timestamp == dates[0]].assign(eligible=True)
     expected = [float((Fraction(value) - 3) / 3) for value in exits]
-    assert first.forward_return_20d.tolist() == expected
+    np.testing.assert_allclose(first.forward_return_20d, expected, rtol=1e-14, atol=0)
+    assert 0 < first.forward_return_20d.iloc[0] < first.forward_return_20d.iloc[1]
     np.testing.assert_allclose(_a_share_model_target(first), [-1, 1], rtol=1e-15)
 
 
@@ -261,7 +264,7 @@ def test_public_builder_small_nav_cash_and_fee_publish(
     frames["dataset"]["eligible"] = (
         frames["dataset"].asset_id.eq("b") if trade else False
     )
-    frames["panel"][["adj_open", "adj_close"]] = 1.0
+    frames["panel"][["open", "close"]] = 1.0
     fees["rate"] = 0.0
     fees.loc[fees.fee_code.eq("BROKER_COMMISSION") & fees.side.eq("buy"), "rate"] = 0.2
     assumptions = ExecutionAssumptions(initial_nav, 0.0, 0.0, 1.0, (1.0,))
@@ -275,7 +278,7 @@ def test_public_builder_small_nav_cash_and_fee_publish(
         typed_batches=True,
     )
     capital = PortfolioCapital(
-        "synthetic_quantile_equal_weight", initial_nav, "CNY", "adjusted_notional"
+        "synthetic_quantile_equal_weight", initial_nav, "CNY", "cash_equity"
     )
     metadata = {
         "sample_role": "validation",

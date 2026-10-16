@@ -5,13 +5,13 @@
   "methods": ["native_importance", "linear_shap"],
   "window": {"start": "2025-01-01", "end": "2025-12-31"},
   "sample_role": "evaluation",
-  "selection": {"max_rows": 1000, "max_dates": 20, "root_seed": 17},
+  "selection": {"max_rows": 1000, "max_dates": 20, "root_seed": 42},
   "output_space": "model_output",
   "period": "month",
   "background": {
     "inputs": "results/model-inputs",
     "window": {"start": "2024-01-01", "end": "2024-12-31"},
     "max_rows": 200,
-    "root_seed": 17
+    "root_seed": 42
   }
 }

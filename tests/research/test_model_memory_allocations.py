@@ -138,6 +138,7 @@ def test_scaler_and_linear_fit_match_original_arithmetic(kind, weighting, monkey
         weights = equal_timestamp_sample_weights(
             timestamps,
             TrainingWeighting(half_life_periods=2) if weighting == "decayed" else None,
+            trading_sessions=pd.date_range(timestamps.min(), timestamps.max()),
         )
     else:
         weights = np.geomspace(np.nextafter(0.0, 1.0), 1.0, len(frame))

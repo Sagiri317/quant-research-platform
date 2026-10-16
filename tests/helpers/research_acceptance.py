@@ -2,6 +2,7 @@
 
 import json
 from dataclasses import asdict
+from math import ceil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -41,7 +42,9 @@ def prepare_a_share_acceptance(root: Path):
     write_a_share_raw_fixture(
         StorageLayout(root),
         benchmark_total_return_indices=indices,
-        formal_dataset_start="2017-10-01",
+        # Supply enough earlier risk exposures for 378 fresh factor dates
+        # within a complete 504-session history before the unchanged test split.
+        formal_dataset_start="2017-07-01",
         history_end="2019-10-31",
         validation_start="2019-01-01",
     )
@@ -60,7 +63,7 @@ def prepare_a_share_acceptance(root: Path):
         name
         for target in processed_names
         for name in catalog.get(target).source_input_data_ids
-    } | {"a_share_fee_schedule", "index_market"}
+    } | {"a_share_fee_schedule", "index_market", "corporate_actions"}
     source_groups = {
         "choice": {
             "financial_balance",
@@ -83,7 +86,7 @@ def prepare_a_share_acceptance(root: Path):
         )
         assert not receipt.skipped, receipt.skipped
         paths.update({name: Path(path) for name, path in outputs.items()})
-    history = {"start": "2016-07-21", "end": "2019-10-31"}
+    history = {"start": "2016-04-21", "end": "2019-10-31"}
     for name in processed_names:
         spec = catalog.get(name)
         selected = (*spec.source_input_data_ids, *spec.processed_input_data_ids)
@@ -109,9 +112,36 @@ def prepare_a_share_acceptance(root: Path):
         paths["market_model_factors"],
         columns=("timestamp", "asset_id", "beta_252d", "residual_volatility_60d"),
     )
+    calendar = read_dataset(paths["trading_calendar"])
+    sessions = pd.DatetimeIndex(
+        calendar.loc[
+            calendar.source_market_type.eq(4)
+            & calendar.is_trading_day
+            & calendar.calendar_date.between(history["start"], history["end"]),
+            "calendar_date",
+        ].sort_values()
+    )
+    # All 100 fixture assets predate the supplied calendar and quote every day.
+    # Market eligibility first becomes provable on session 252. The default
+    # 75% policy then needs 189 paired returns and 45 fresh residuals, while
+    # both rolling histories must also have their full nominal session spans.
+    listing_sessions, beta_window, residual_window = 252, 252, 60
+    first_beta = max(beta_window - 1, listing_sessions + ceil(0.75 * beta_window) - 2)
+    first_risk = max(residual_window - 1, first_beta + ceil(0.75 * residual_window) - 1)
+    for column, first in (
+        ("beta_252d", first_beta),
+        ("residual_volatility_60d", first_risk),
+    ):
+        assert (
+            risk_rows.loc[risk_rows.timestamp.lt(sessions[first]), column].isna().all()
+        )
+        first_cross = risk_rows.loc[risk_rows.timestamp.eq(sessions[first])]
+        assert first_cross.asset_id.nunique() == 100
+        assert first_cross[column].notna().all()
     complete_crosses = risk_rows.dropna().groupby("timestamp").asset_id.nunique()
-    assert complete_crosses.loc[complete_crosses.eq(100)].index.min() == pd.Timestamp(
-        "2018-09-14"
+    assert (
+        complete_crosses.loc[complete_crosses.eq(100)].index.min()
+        == sessions[first_risk]
     )
     factors = research_configuration()["evaluation"]["factors"]
     dataset = assemble(
@@ -249,10 +279,11 @@ def run_a_share_acceptance(project_root: Path):
                     "fees": "a_share_fee_schedule",
                     "market_bars": "market_bars_1d",
                     "stock_master": "stock_master",
+                    "corporate_actions": "corporate_actions",
                 }.items()
             },
         }
-        # Keep all compared accounts at equal synthetic capital; ADV binds first.
+        # Keep compared accounts equal and reachable from cash at the 5% ADV cap.
         config = {
             "candidate": {
                 "candidate_id": group + "_champion_top20",
@@ -278,7 +309,7 @@ def run_a_share_acceptance(project_root: Path):
             "sample_role": "test",
             "assumptions": {
                 **asdict(a_share.EXECUTION_ASSUMPTIONS),
-                "initial_nav": 1e12,
+                "initial_nav": 2e9,
             },
         }
         config["assumptions"]["adv_sensitivities"] = list(
@@ -293,7 +324,7 @@ def run_a_share_acceptance(project_root: Path):
         case.portfolio_configs[group] = config
         enhanced = {
             **config,
-            "input_window": {"start": "2018-09-14", "end": "2019-10-31"},
+            "input_window": case.history,
             "candidate": {
                 **config["candidate"],
                 "candidate_id": group + "_champion_enhanced",
@@ -358,7 +389,7 @@ def run_a_share_acceptance(project_root: Path):
             frozen["calibration"]["slope"]
         }
         assert frozen["calibration"]["slope"] > 0
-        assert account.metadata["initial_holding_convention"] == "preheld_benchmark"
+        assert account.metadata["initial_holding_convention"] == "cash"
         assert (
             summarize_portfolio_ledger(account.capital, account.iter_chunks())[
                 "fill_events"

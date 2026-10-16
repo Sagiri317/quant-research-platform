@@ -1043,7 +1043,15 @@ def iter_holding_factor_inputs(
                     stock_master_root=inputs["stock_master"],
                     equity_events_root=inputs.get("equity_events"),
                     panel_root=inputs["panel"],
-                    panel_columns=(*_ENHANCED_PANEL_COLUMNS, risk.config.weight_column),
+                    panel_columns=(
+                        *(
+                            column
+                            for column in _ENHANCED_PANEL_COLUMNS
+                            if column != "open"
+                        ),
+                        risk.config.weight_column,
+                    ),
+                    mark_price_columns=("adj_open", "adj_close"),
                     calendar=calendar,
                     time_window=history,
                 )
@@ -2461,6 +2469,8 @@ def portfolio_statistics(config):
         raise ValueError("portfolio_statistics_ledgers_required")
     policy = config.get("statistics", {})
     paired = isinstance(policy, dict) and "group_comparison" in policy
+    if paired and "group_comparison" in analyses:
+        policy.setdefault("bootstrap_repetitions", 2000)
     expected = ({"cscv_blocks"} if "cscv" in analyses else set()) | (
         {"hac_lag", "bootstrap_block", "bootstrap_repetitions", "group_comparison"}
         if paired and "group_comparison" in analyses

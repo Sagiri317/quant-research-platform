@@ -66,9 +66,13 @@ def compute_ic_and_grouped_label_values(
                         signal_ranks,
                         label_ranks_by_mask[mask_key],
                     )
-                    groups = _assign_groups_from_ranks(signal_ranks, n_groups)
+                    predicted = np.isfinite(signal_values)
+                    groups = _assign_groups_from_ranks(
+                        _average_ranks(signal_values[predicted]), n_groups
+                    )
+                    predicted_labels = label_values[predicted]
                     for group in np.unique(groups):
-                        group_mask = groups == group
+                        group_mask = (groups == group) & np.isfinite(predicted_labels)
                         grouped_records.append(
                             {
                                 "timestamp": timestamp,
@@ -76,8 +80,10 @@ def compute_ic_and_grouped_label_values(
                                 "label": label,
                                 "group": group,
                                 "mean_label_value": float(
-                                    mean(label_valid[group_mask])
-                                ),
+                                    mean(predicted_labels[group_mask])
+                                )
+                                if group_mask.any()
+                                else np.nan,
                                 "n_obs": int(group_mask.sum()),
                             }
                         )

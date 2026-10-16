@@ -152,6 +152,7 @@ def test_linear_shap_uses_exact_explicit_historical_mean(tmp_path, algorithm):
         tables["predictions"].base_value, expected_baseline, rtol=1e-12, atol=1e-14
     )
     assert metadata["attribution"]["background"]["kind"] == "historical_reference"
+    assert metadata["attribution"]["background"]["root_seed"] == 1
     assert (
         metadata["attribution"]["background"]["training_sample_reconstructed"] is False
     )
@@ -397,7 +398,7 @@ def test_rank_hand_calculation_ties_missing_values_and_single_asset(tmp_path):
     assert single["summary"].absolute_share.isna().all()
 
 
-def test_ic_rank_excluded_feature_is_not_fabricated_importance(tmp_path):
+def test_ic_rank_undefined_ic_feature_retains_zero_importance(tmp_path):
     _, frame, _ = _case(tmp_path)
     frame["y"] = 1.0
     spec = ModelSpec(
@@ -423,8 +424,8 @@ def test_ic_rank_excluded_feature_is_not_fabricated_importance(tmp_path):
     }
     _, tables = read_explanation(explain(config))
     excluded = tables["native_importance"].set_index("feature").loc["y"]
-    assert excluded.status == "NOT_APPLICABLE"
-    assert pd.isna(excluded.value)
+    assert excluded.status == "DEFINED"
+    assert excluded.value == 0.0
     assert (
         tables["contributions"]
         .loc[lambda x: x.feature.eq("y"), "contribution"]
@@ -869,3 +870,65 @@ def test_temporal_permutation_rejects_unrepresentable_steps(step):
             },
             ["x"],
         )
+
+
+def test_explanation_default_seed_and_stable_permutation_streams(tmp_path):
+    _, _, config = _case(tmp_path)
+    _permutation(config, metrics=["mse"])
+    config["selection"].pop("root_seed")
+    config["permutation"].pop("root_seed")
+    config["permutation"]["groups"] = {"x": ["x"], "y": ["y"]}
+    state = np.random.get_state()
+    metadata, first = read_explanation(explain(config))
+    after = np.random.get_state()
+    assert state[0] == after[0]
+    np.testing.assert_array_equal(state[1], after[1])
+    assert state[2:] == after[2:]
+    assert metadata["selection"]["root_seed"] == 42
+    assert metadata["permutation"]["config"]["root_seed"] == 42
+    config["output"] += "-explicit"
+    config["selection"]["root_seed"] = 42
+    config["permutation"]["root_seed"] = 42
+    _, explicit = read_explanation(explain(config))
+    for name in first:
+        pd.testing.assert_frame_equal(first[name], explicit[name])
+    config["output"] += "-reordered-extended"
+    config["permutation"]["groups"] = {"y": ["y"], "x": ["x"]}
+    config["permutation"]["repeats"] = 5
+    _, extended = read_explanation(explain(config))
+    keys = ["group", "repeat", "metric"]
+    expected = first["permutation_repeats"].sort_values(keys).reset_index(drop=True)
+    actual = extended["permutation_repeats"]
+    actual = actual.loc[actual["repeat"].lt(3)].sort_values(keys).reset_index(drop=True)
+    pd.testing.assert_frame_equal(expected, actual)
+
+
+@pytest.mark.parametrize("section", ["selection", "permutation"])
+def test_explanation_explicit_null_seed_is_rejected(tmp_path, section):
+    _, _, config = _case(tmp_path)
+    _permutation(config)
+    config[section]["root_seed"] = None
+    with pytest.raises(ValueError, match="explanation_seed_invalid"):
+        explain(config)
+
+
+def test_background_seed_default_matches_explicit_and_rejects_null(tmp_path):
+    _, _, config = _case(tmp_path)
+    config["methods"] = ["linear_shap"]
+    config["background"] = {
+        "inputs": config["inputs"],
+        "input_spec": config["input_spec"],
+        "window": {"start": "2020-01-01", "end": "2020-01-05"},
+        "max_rows": 10,
+    }
+    metadata, first = read_explanation(explain(config))
+    assert metadata["attribution"]["background"]["root_seed"] == 42
+    config["output"] += "-explicit"
+    config["background"]["root_seed"] = 42
+    _, second = read_explanation(explain(config))
+    for name in first:
+        pd.testing.assert_frame_equal(first[name], second[name])
+    config["output"] += "-null"
+    config["background"]["root_seed"] = None
+    with pytest.raises(ValueError, match="explanation_seed_invalid"):
+        explain(config)

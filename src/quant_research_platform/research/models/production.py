@@ -52,6 +52,7 @@ def fit_model(
     candidate_parameters=None,
     label_availability_column=None,
     declared_columns=(),
+    trading_calendar=None,
 ):
     """Fit one candidate on its legal observed domain."""
     cutoff = strict_timestamp_series(
@@ -85,6 +86,7 @@ def fit_model(
         fitting_cutoff=cutoff,
         availability_column=label_availability_column,
         declared_columns=declared_columns,
+        trading_calendar=trading_calendar,
     )
     if prepared.training.empty:
         raise ValueError("model_training_sample_empty")
@@ -140,6 +142,7 @@ def fit(config: Mapping) -> Path:
             "asset_ids",
             "input_spec",
             "family_id",
+            "trading_calendar",
         },
     )
     output = Path(config["output"])
@@ -181,8 +184,6 @@ def fit(config: Mapping) -> Path:
         )
 
         validate_model_selection([spec])
-    if spec.random_seed is None:
-        raise ValueError("explicit_model_seed_required")
     cutoff = strict_timestamp_series(
         pd.Series([config["fit_cutoff"]]), error="invalid_fit_cutoff"
     ).iloc[0]
@@ -249,6 +250,7 @@ def fit(config: Mapping) -> Path:
     if type(family_id) is not str or not family_id or family_id == "champion":
         raise ValueError("model_family_id_invalid")
     facts = {
+        "trading_calendar": config.get("trading_calendar"),
         "family_id": family_id,
         "asset_ids": config.get("asset_ids"),
         "market_id": str(market),
@@ -281,6 +283,8 @@ def fit(config: Mapping) -> Path:
             availability_column=availability,
             declared_columns=declared["column_roles"],
         )
+        if spec.training_weighting.half_life_periods is not None:
+            columns = (*columns, "market_type")
         frames = iter_dataset_chunks(
             session.filtered_view(
                 TimeWindow(windows[0].start, windows[-1].end)
@@ -316,6 +320,19 @@ def fit(config: Mapping) -> Path:
                         raise ValueError("model_training_keys_invalid")
                     yield frame
 
+        calendar = None
+        if spec.training_weighting.half_life_periods is not None:
+            if "trading_calendar" not in config:
+                raise ValueError("training_decay_calendar_required")
+            from quant_research_platform.storage.datasets.reading import (
+                materialize_dataset_session,
+            )
+
+            calendar = materialize_dataset_session(
+                open_dataset_session(
+                    **_dataset_input_options(config["trading_calendar"])
+                )
+            )
         result = fit_model(
             checked_frames(),
             spec,
@@ -324,6 +341,7 @@ def fit(config: Mapping) -> Path:
             candidate_parameters=config.get("candidate_parameters"),
             label_availability_column=availability,
             declared_columns=declared["column_roles"],
+            trading_calendar=calendar,
         )
         from quant_research_platform.research.models.persisted import save_model
 

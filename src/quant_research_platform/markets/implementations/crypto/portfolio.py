@@ -621,6 +621,15 @@ def _execution_asset(config):
 
 def _backtest_inputs(config):
     _execution_asset(config)
+    if "funding_roots" in config:
+        roots = config["funding_roots"]
+        if (
+            type(roots) is not list
+            or not roots
+            or any(type(root) is not str or not root for root in roots)
+            or len(set(roots)) != len(roots)
+        ):
+            raise ValueError("crypto_funding_roots_invalid")
     reject_if_exists(Path(config["output"]))
     chronology = config.get("chronology")
     window = _window(config["prediction_window"])
@@ -708,7 +717,7 @@ def backtest_taker(config):
     config = _strict_config(
         config,
         _BACKTEST_KEYS | {"predictions"},
-        {"archive_paths", "input_spec", "chronology"},
+        {"archive_paths", "input_spec", "chronology", "funding_roots"},
     )
     window, windows, capital, panel = _backtest_inputs(config)
     execution = TakerConfig(
@@ -740,7 +749,10 @@ def backtest_taker(config):
                 Path(config["source"]), archive_paths=config.get("archive_paths")
             ) as run,
             read_funding_observations(
-                run.funding_roots(symbol, time_window=window), symbol=symbol
+                tuple(config["funding_roots"])
+                if "funding_roots" in config
+                else run.funding_roots(symbol, time_window=window),
+                symbol=symbol,
             ) as funding,
         ):
             _source_coordinates(run, panel, symbol)
@@ -1245,7 +1257,7 @@ def backtest_maker(config):
     config = _strict_config(
         config,
         _BACKTEST_KEYS | {"models", "calibration"},
-        {"archive_paths", "input_spec", "chronology"},
+        {"archive_paths", "input_spec", "chronology", "funding_roots"},
     )
     window, windows, capital, panel = _backtest_inputs(config)
     execution = MakerConfig(
@@ -1409,7 +1421,10 @@ def backtest_maker(config):
                 Path(config["source"]), archive_paths=config.get("archive_paths")
             ) as run,
             read_funding_observations(
-                run.funding_roots(symbol, time_window=window), symbol=symbol
+                tuple(config["funding_roots"])
+                if "funding_roots" in config
+                else run.funding_roots(symbol, time_window=window),
+                symbol=symbol,
             ) as funding,
         ):
             _source_coordinates(run, panel, symbol)

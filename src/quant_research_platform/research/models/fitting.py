@@ -29,11 +29,17 @@ from quant_research_platform.contracts.models import (
     _thaw_model_hyperparameters,
 )
 from quant_research_platform.contracts.time import time_value_isoformat
-from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.contracts.validation import (
+    strict_finite_numeric_series,
+    strict_timestamp_series,
+)
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.features.transforms import (
     canonical_feature_validity_columns,
+    feature_observation_columns,
+    mask_unobserved_features,
     model_input_validity_columns,
+    model_observed_input_mask,
 )
 from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.research.models.rank_ensemble import (
@@ -64,17 +70,27 @@ class PreparedTraining:
     input_columns: tuple[str, ...]
     training_weighting: TrainingWeighting
     rank_inputs: bool
+    native_missing: bool = False
+    trading_sessions: object = None
 
     @cached_property
     def preprocessing(self):
         # Begin the trial before learning; candidates share only immutable fit facts.
         weights = equal_timestamp_sample_weights(
-            self.training["timestamp"], self.training_weighting
+            self.training["timestamp"],
+            self.training_weighting,
+            trading_sessions=self.trading_sessions,
         )
         if self.rank_inputs:
             return weights, None, self.training
+        if self.training.loc[:, self.input_columns].isna().all(axis=0).any():
+            raise ValueError("model_training_feature_all_missing")
         matrix = self.training.loc[:, self.input_columns]
-        scaler = ModelMatrixScaler.fit(matrix, sample_weight=weights)
+        scaler = ModelMatrixScaler.fit(
+            matrix,
+            sample_weight=weights,
+            missing="native" if self.native_missing else "impute",
+        )
         return weights, scaler, scaler.transform(matrix)
 
 
@@ -115,7 +131,7 @@ def validate_model_state(predictor: object, metadata: dict[str, object]) -> None
         except (TypeError, ValueError):
             raise ValueError("model_state_metadata_mismatch") from None
         if (
-            coefficients.shape != (len(spec.input_columns) + 1,)
+            coefficients.shape != (len(predictor.scaler.columns) + 1,)
             or not np.isfinite(coefficients).all()
         ):
             raise ValueError("model_state_metadata_mismatch")
@@ -178,8 +194,8 @@ def validate_model_state(predictor: object, metadata: dict[str, object]) -> None
                 raise ValueError("model_state_metadata_mismatch")
         try:
             inputs_match = (
-                actual.n_features_in_ == len(spec.input_columns)
-                and tuple(actual.feature_names_in_) == spec.input_columns
+                actual.n_features_in_ == len(predictor.scaler.columns)
+                and tuple(actual.feature_names_in_) == predictor.scaler.columns
             )
         except AttributeError:
             raise ValueError("model_state_metadata_mismatch") from None
@@ -345,6 +361,7 @@ def _collect_training_frame(
     fitting_cutoff: object,
     availability_column: str | None = None,
     declared_columns=(),
+    trading_calendar=None,
 ) -> PreparedTraining:
     validity_columns = model_input_validity_columns(
         spec.input_columns, spec.model_algorithm, declared_columns
@@ -363,6 +380,11 @@ def _collect_training_frame(
             (
                 "timestamp",
                 "asset_id",
+                *(
+                    ("market_type",)
+                    if spec.training_weighting.half_life_periods is not None
+                    else ()
+                ),
                 *spec.input_columns,
                 *validity_columns,
                 spec.target_column,
@@ -385,12 +407,26 @@ def _collect_training_frame(
     ) as work_frames:
         for chunk in work_frames:
             chunk = chunk.reset_index(drop=True)
+            for column in tuple(
+                dict.fromkeys((*spec.input_columns, *validity_columns))
+            ):
+                strict_finite_numeric_series(
+                    chunk[column],
+                    error=f"invalid_training_value: {column}",
+                    allow_null=True,
+                )
             keep = legal_training_mask(
                 chunk,
                 fitting_cutoff=fitting_cutoff,
                 availability_column=availability_columns[0],
-                feature_columns=validity_columns,
+                feature_columns=(),
                 target_column=spec.target_column,
+            )
+            keep &= model_observed_input_mask(
+                chunk, spec.input_columns, declared_columns
+            )
+            chunk = mask_unobserved_features(
+                chunk, spec.input_columns, declared_columns
             )
             filtered, metadata = apply_filter_mode(
                 chunk, mode=spec.sample_filter_mode, metadata_key="sample_filter_mode"
@@ -404,6 +440,7 @@ def _collect_training_frame(
             selected_columns = [
                 "timestamp",
                 *(("asset_id",) if "asset_id" in filtered.columns else ()),
+                *(("market_type",) if "market_type" in filtered.columns else ()),
                 *spec.input_columns,
                 spec.target_column,
                 availability_columns[0],
@@ -411,17 +448,17 @@ def _collect_training_frame(
             usable = filtered.loc[keep.loc[filtered.index], selected_columns].copy()
             if usable.empty:
                 continue
-            if spec.max_train_rows is not None:
-                usable = _apply_training_controls(usable, spec)
-            retained.append(usable)
-            retained_rows += len(usable)
-            if spec.max_train_rows is not None:
-                while retained_rows - len(retained[0]) >= spec.max_train_rows:
-                    retained_rows -= len(retained.popleft())
-                excess = retained_rows - spec.max_train_rows
-                if excess > 0:
-                    retained[0] = retained[0].iloc[excess:].copy()
-                    retained_rows -= excess
+            blocks = (
+                (usable,)
+                if spec.max_train_rows is None
+                else (block for _, block in usable.groupby("timestamp", sort=False))
+            )
+            for block in blocks:
+                retained.append(block)
+                retained_rows += len(block)
+                if spec.max_train_rows is not None:
+                    while retained_rows > spec.max_train_rows and len(retained) > 1:
+                        retained_rows -= len(retained.popleft())
     training = (
         retained[0]
         if len(retained) == 1
@@ -468,6 +505,36 @@ def _collect_training_frame(
         "rows_input": rows_input,
         "rows_after_filter_mode": rows_after_filter,
     }
+    sessions = None
+    if spec.training_weighting.half_life_periods is not None:
+        if trading_calendar is None or "market_type" not in training:
+            raise ValueError("training_decay_own_market_calendar_required")
+        from quant_research_platform.markets.implementations.a_share.calendar import (
+            market_type_calendar_state,
+        )
+
+        markets = training.market_type.drop_duplicates()
+        if markets.empty or markets.isna().any():
+            raise ValueError("training_decay_own_market_calendar_required")
+        dates = pd.date_range(
+            training.timestamp.min().normalize(),
+            training.timestamp.max().normalize(),
+            freq="D",
+        )
+        state = None
+        for market in markets:
+            observed = market_type_calendar_state(trading_calendar, market).reindex(
+                dates
+            )
+            if observed.isna().any():
+                raise ValueError("training_decay_calendar_coverage_missing")
+            if state is not None and not np.array_equal(
+                observed.to_numpy(), state.to_numpy()
+            ):
+                raise ValueError("training_decay_common_session_clock_required")
+            state = observed
+        assert state is not None
+        sessions = state.index[state.to_numpy(dtype=bool)]
     return PreparedTraining(
         training,
         row_counts,
@@ -476,6 +543,8 @@ def _collect_training_frame(
         spec.training_weighting,
         spec.model_algorithm
         in {"equal_weight_rank_ensemble", "ic_weighted_rank_ensemble"},
+        _native_missing(spec),
+        sessions,
     )
 
 
@@ -556,6 +625,11 @@ def model_training_read_columns(
                 *primary_key,
                 *input_columns,
                 *canonical_feature_validity_columns(input_columns, declared_columns),
+                *feature_observation_columns(input_columns, declared_columns),
+                *feature_observation_columns(
+                    canonical_feature_validity_columns(input_columns, declared_columns),
+                    declared_columns,
+                ),
                 label_column,
                 "eligible",
                 *(
@@ -584,5 +658,21 @@ def _apply_training_controls(frame: pd.DataFrame, spec: ModelSpec) -> pd.DataFra
         result["timestamp"], error="invalid_model_training_timestamp"
     )
     if spec.max_train_rows is not None:
-        result = result.tail(spec.max_train_rows)
+        counts = result.groupby("timestamp", sort=True).size()
+        retained = counts.iloc[::-1].cumsum() <= spec.max_train_rows
+        result = result.loc[result.timestamp.isin(retained.index[retained])]
     return result.reset_index(drop=True)
+
+
+def _native_missing(spec):
+    if spec.model_algorithm == "linear_regression":
+        return False
+    estimator = estimators.build_estimator_from_model_spec(spec)
+    if spec.model_algorithm in {
+        "equal_weight_rank_ensemble",
+        "ic_weighted_rank_ensemble",
+    }:
+        return False
+    from sklearn.utils import get_tags
+
+    return bool(get_tags(estimator).input_tags.allow_nan)

@@ -760,8 +760,8 @@ def test_legacy_rank_ic_reduces_one_persisted_evaluation(tmp_path):
             "statistics": {
                 "hac_lag": 1,
                 "factor_fdr_families": {"selected": ["score"]},
-                "fdr_primary": "BH_5pct",
-                "fdr_robustness": "BY_5pct",
+                "fdr_primary": "BY_5pct",
+                "fdr_robustness": "BH_5pct",
             },
         }
     )
@@ -801,7 +801,18 @@ def test_selected_metrics_reader_rejects_non_native_physical_type(tmp_path):
 
 @pytest.mark.parametrize(
     "mutation",
-    ("duplicate", "scope", "stratum", "pairs", "reason", "family_count", "missing_all"),
+    (
+        "duplicate",
+        "scope",
+        "stratum",
+        "pairs",
+        "reason",
+        "family_count",
+        "missing_all",
+        "false_clock",
+        "missing_clock",
+        "defined_gap",
+    ),
 )
 def test_stratified_statistics_semantics_shared_by_writer_and_reader(
     tmp_path, mutation
@@ -811,14 +822,18 @@ def test_stratified_statistics_semantics_shared_by_writer_and_reader(
 
     from quant_research_platform.artifacts.statistics import write_statistics_artifact
 
-    _, config = _fixture(tmp_path)
+    _, config = _fixture(tmp_path, days=3 if mutation == "defined_gap" else 1)
     output = evaluate(config)
     root = factor_statistics(
         {
             "evaluation_inputs": [str(output)],
             "output": str(tmp_path / "stats"),
             "analyses": ["stratified_ic"],
-            "statistics": {"hac_lag": 20, "fdr_method": "BY", "fdr_alpha": 0.05},
+            "statistics": {
+                "hac_lag": 1 if mutation == "defined_gap" else 20,
+                "fdr_method": "BY",
+                "fdr_alpha": 0.05,
+            },
         }
     )
     artifact = read_statistics_artifact(root)
@@ -839,6 +854,25 @@ def test_stratified_statistics_semantics_shared_by_writer_and_reader(
         frame.loc[0, "observation_pairs"] = 0
     elif mutation == "reason":
         frame.loc[0, "reason"] = "unexplained"
+    elif mutation == "false_clock":
+        complete = frame.observation_count.eq(frame.input_date_count)
+        assert complete.any()
+        frame.loc[complete, "reason"] = "incomplete_session_clock"
+    elif mutation == "missing_clock":
+        incomplete = frame.observation_count.lt(frame.input_date_count)
+        assert incomplete.any()
+        frame.loc[incomplete, "reason"] = "insufficient_dates_for_hac"
+    elif mutation == "defined_gap":
+        row = frame.index[frame.observation_count.eq(3)][0]
+        frame.loc[row, "observation_count"] = 2
+        frame.loc[row, "status"] = "DEFINED"
+        frame.loc[row, "reason"] = ""
+        frame.loc[row, "standard_error"] = 0.1
+        frame.loc[row, "t_statistic"] = frame.loc[row, "mean"] / 0.1
+        frame.loc[row, ["p_value", "fdr_adjusted_p_value"]] = 0.5
+        frame.loc[row, "ci_lower"] = frame.loc[row, "mean"] - 0.2
+        frame.loc[row, "ci_upper"] = frame.loc[row, "mean"] + 0.2
+        frame["defined_hypothesis_count"] = 1
     else:
         frame["defined_hypothesis_count"] = 1
     with pytest.raises(ValueError):

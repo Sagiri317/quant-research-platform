@@ -25,14 +25,13 @@ def _cross(day, prefix, multiplier):
 
 
 @pytest.mark.parametrize("closed", [False, True])
-@pytest.mark.parametrize("shared", [False, True])
 def test_specific_risk_distinguishes_market_closure_from_missing_open_observations(
-    closed, shared
+    closed,
 ):
     state = FactorRiskState(
         style_columns=(),
         config=FactorRiskConfig(
-            factor_window=10,
+            factor_window=3,
             specific_window=2,
             minimum_factor_dates=1,
             minimum_specific_dates=1,
@@ -41,7 +40,6 @@ def test_specific_risk_distinguishes_market_closure_from_missing_open_observatio
             annualization=1.0,
         ),
     )
-    cache = {} if shared else None
     for index, (prefix, multiplier) in enumerate((("A", 1), ("B", 1), ("A", 2))):
         cross = _cross(f"2023-01-0{index + 2}", prefix, multiplier)
         closed_assets = (
@@ -49,13 +47,7 @@ def test_specific_risk_distinguishes_market_closure_from_missing_open_observatio
             if closed and index == 1
             else frozenset()
         )
-        if cache is not None:
-            # A second independent owner can supply the same immutable regression fit.
-            fitted, industries = state._fit_return_session(cross)
-            cache[index] = (industries, (fitted.factor_returns, fitted.residuals))
-        state.observe_return_session(
-            cross, closed_assets=closed_assets, shared_fits=cache, fit_key=index
-        )
+        state.observe_return_session(cross, closed_assets=closed_assets)
     expected = 0.0004 / 3 + 0.0016 * 2 / 3 if closed else 0.0016
     assert state.estimate().specific_variance["A0"] == pytest.approx(expected)
     assert len(state._residuals["A0"]) == (2 if closed else 1)

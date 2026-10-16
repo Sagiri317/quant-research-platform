@@ -246,7 +246,7 @@ def test_declared_feature_companions_close_projection_and_keep_producer_domains(
     )
     frame = _canonical()
     case = fit_frame(tmp_path, frame, _linear(column=indicator, feature=True))
-    assert case.result.metadata["rows_after_input_label_dropna"] == 3
+    assert case.result.metadata["rows_after_input_label_dropna"] == 2
     spec = _evaluation("feature_x")
     declared = case.config["input_spec"]
     declared["column_roles"]["feature_x"] = "feature"
@@ -289,7 +289,7 @@ def test_declared_feature_companions_close_projection_and_keep_producer_domains(
             prediction_window={"start": "2024-01-04", "end": "2024-01-05"},
         )
     )
-    assert len(read_predictions(prediction)[0]) == 3
+    assert len(read_predictions(prediction)[0]) == 2
 
 
 @pytest.mark.parametrize("invalid", ["missing", "nonbinary", "null"])
@@ -408,7 +408,7 @@ def test_ordinary_prefixed_rank_feature_preserves_missing_neutral_domain(tmp_pat
             random_seed=1,
         ),
     )
-    assert case.result.metadata["rows_after_input_label_dropna"] == 3
+    assert case.result.metadata["rows_after_input_label_dropna"] == 2
     source = tmp_path / "future.parquet"
     frame.assign(timestamp=pd.Timestamp("2024-01-02")).to_parquet(source, index=False)
     output = predict(
@@ -421,7 +421,7 @@ def test_ordinary_prefixed_rank_feature_preserves_missing_neutral_domain(tmp_pat
         )
     )
     saved = read_predictions(output)[0].set_index("asset_id")
-    assert len(saved) == 3 and saved.loc["b", "prediction_score"] == 0.0
+    assert len(saved) == 2 and "b" not in saved.index
 
 
 def test_canonical_observation_projection_matches_factor_statistics(tmp_path):
@@ -446,8 +446,8 @@ def test_canonical_observation_projection_matches_factor_statistics(tmp_path):
                 statistics={
                     "hac_lag": 0,
                     "factor_fdr_families": {"features": ["feature_x"]},
-                    "fdr_primary": "BH_5pct",
-                    "fdr_robustness": "BY_5pct",
+                    "fdr_primary": "BY_5pct",
+                    "fdr_robustness": "BH_5pct",
                 },
             )
         )

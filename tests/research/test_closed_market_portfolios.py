@@ -19,11 +19,6 @@ from quant_research_platform.markets.implementations.a_share import (
 from quant_research_platform.markets.implementations.a_share.calendar import (
     unified_trading_sessions,
 )
-from quant_research_platform.markets.implementations.a_share.execution import (
-    fee_schedule_from_frame,
-    prepare_trade_cost,
-    require_fee_coverage,
-)
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.portfolios import production
 from quant_research_platform.research.portfolios.diagnostics import (
@@ -264,6 +259,9 @@ def _native_inputs(tmp_path, *, fault=None, open_assets=6):
     data = panel[["market_id", "asset_id", "timestamp", "float_market_cap"]].assign(
         eligible=True, signal=1.0, label=0.0
     )
+    # This fixture uses identical raw and research price paths, with no actions.
+    panel["open"] = panel.adj_open
+    panel["close"] = panel.adj_close
     roots = write_market_evidence(tmp_path, panel, bars=bars, stocks=stocks)
     specs = _processed_specs()
     dataset_spec = make_demo_research_dataset_spec(
@@ -298,6 +296,7 @@ def _native_inputs(tmp_path, *, fault=None, open_assets=6):
         "fees": roots["a_share_fee_schedule"],
         "market_bars": roots["market_bars_1d"],
         "stock_master": roots["stock_master"],
+        "corporate_actions": roots["corporate_actions"],
         "risk_context": (),
     }
     return inputs, roots, calendar, panel
@@ -324,7 +323,6 @@ def _ledger(layout, roots):
             return 0, 0
 
     return production.backtest_a_share(
-        iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
         candidate=candidate,
         inputs=layout,
         output_window=TimeWindow("2022-12-30", "2023-01-06"),
@@ -339,11 +337,6 @@ def _ledger(layout, roots):
             ),
         ),
         assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,)),
-        fee_schedule_from_frame=fee_schedule_from_frame,
-        require_fee_coverage=require_fee_coverage,
-        prepare_trade_cost=prepare_trade_cost,
-        market_name_for_type=lambda market: "shanghai" if market == 1 else "shenzhen",
-        unified_trading_sessions=unified_trading_sessions,
     )
 
 
@@ -380,9 +373,7 @@ def test_closed_market_ledger_reopens_on_current_target_and_keeps_native_endpoin
         assert before.end_notional.sum() == pytest.approx(
             after.pre_trade_notional.sum()
         )
-    capital = PortfolioCapital(
-        "closed_market_portfolio", 100.0, "CNY", "adjusted_notional"
-    )
+    capital = PortfolioCapital("closed_market_portfolio", 100.0, "CNY", "cash_equity")
     metadata = {
         "window": {"start": "2022-12-30", "end": "2023-01-06"},
         "sample_role": "validation",
@@ -412,9 +403,7 @@ def test_closed_market_ledger_reopens_on_current_target_and_keeps_native_endpoin
             *chunks[0].trades[1:],
         ),
     )
-    capital = PortfolioCapital(
-        "closed_market_portfolio", 100.0, "CNY", "adjusted_notional"
-    )
+    capital = PortfolioCapital("closed_market_portfolio", 100.0, "CNY", "cash_equity")
     metadata = {
         "window": {"start": "2022-12-30", "end": "2023-01-06"},
         "sample_role": "validation",
@@ -533,24 +522,24 @@ def test_native_partial_quote_becomes_phase_ordered_research_anchor(tmp_path, ph
         view for view in views if view.timestamp == pd.Timestamp("2023-01-05")
     )
     raw = partial.panel.set_index("asset_id").loc["a0"]
-    assert raw[f"adj_{phase}"] == 12.0
-    assert pd.isna(raw[f"adj_{'close' if phase == 'open' else 'open'}"])
-    assert partial.valuation.set_index("asset_id").loc["a0", f"adj_{phase}"] == 12.0
+    assert raw[phase] == 12.0
+    assert pd.isna(raw["close" if phase == "open" else "open"])
+    assert partial.valuation.set_index("asset_id").loc["a0", phase] == 12.0
 
     marks = production._ResearchValuationMarks()
     projected = {
         view.timestamp: marks.project(view).set_index("asset_id") for view in views
     }
     current = projected[pd.Timestamp("2023-01-05")].loc["a0"]
-    assert current[f"adj_{phase}"] == 12.0
+    assert current[phase] == 12.0
     other = "close" if phase == "open" else "open"
     # Missing open uses only yesterday's 11, never the later real close of 12.
     # A real open of 12 may anchor the later missing close.
-    assert current[f"adj_{other}"] == (12.0 if phase == "open" else 11.0)
+    assert current[other] == (12.0 if phase == "open" else 11.0)
     assert pd.notna(current[f"research_{other}_mark_at"])
     assert pd.isna(current[f"research_{phase}_mark_at"])
     next_day = projected[pd.Timestamp("2023-01-06")].loc["a0"]
-    assert next_day.adj_open == next_day.adj_close == 12.0
+    assert next_day.open == next_day.close == 12.0
     assert partial.panel.set_index("asset_id").loc["a0"].equals(raw)
     batches = list(_ledger(layout, roots))
     assert all(np.isfinite(row.value) for batch in batches for row in batch.valuations)
@@ -811,9 +800,7 @@ def test_native_ledger_rejects_terminal_relisting_and_preserves_published_artifa
     from hashlib import sha256
 
     layout, roots, _, _ = _native_inputs(tmp_path / "control")
-    capital = PortfolioCapital(
-        "closed_market_portfolio", 100.0, "CNY", "adjusted_notional"
-    )
+    capital = PortfolioCapital("closed_market_portfolio", 100.0, "CNY", "cash_equity")
     metadata = {
         "window": {"start": "2022-12-30", "end": "2023-01-06"},
         "sample_role": "validation",

@@ -183,7 +183,12 @@ def test_evaluation_science_ignores_unconsumed_transform_and_keeps_borrowed(tmp_
 @pytest.mark.parametrize(
     "analysis,policy,extra,members",
     [
-        ("model_losses", {}, {}, {"model_losses.parquet"}),
+        (
+            "model_losses",
+            {},
+            {},
+            {"model_losses.parquet", "model_prediction_metrics.parquet"},
+        ),
         ("prediction_hac", {"hac_lag": 0}, {}, {"prediction_diagnostics.parquet"}),
         (
             "prediction_bootstrap",
@@ -205,8 +210,9 @@ def test_evaluation_science_ignores_unconsumed_transform_and_keeps_borrowed(tmp_
         ),
     ],
 )
+@pytest.mark.parametrize("seed_mode", ["override", "omitted", "explicit42", "null"])
 def test_public_model_analysis_subsets_require_only_used_inputs(
-    tmp_path, analysis, policy, extra, members
+    tmp_path, analysis, policy, extra, members, seed_mode
 ):
     from tests.research.test_prediction_runner_model_selection import candidates
 
@@ -230,6 +236,15 @@ def test_public_model_analysis_subsets_require_only_used_inputs(
             }
         ],
     }
+    if seed_mode != "override":
+        config.pop("root_seed", None)
+        if seed_mode in {"explicit42", "null"}:
+            config["root_seed"] = 42 if seed_mode == "explicit42" else None
+    randomized = analysis not in {"model_losses", "prediction_hac"}
+    if randomized and seed_mode == "null":
+        with pytest.raises(ValueError, match="model_statistics_config_invalid"):
+            production.model_statistics(config)
+        return
     artifact = read_statistics_artifact(production.model_statistics(config))
     assert set(artifact._members) == members
     if "prediction_diagnostics.parquet" in members:
@@ -239,7 +254,19 @@ def test_public_model_analysis_subsets_require_only_used_inputs(
                 assert saved.bootstrap_reason.eq("not_requested").all()
                 assert saved.bootstrap_seed.isna().all()
             else:
+                from quant_research_platform.research.randomness import derive_seed
+
                 assert saved.reason.eq("not_requested").all()
+                root_seed = 1 if seed_mode == "override" else 42
+                assert saved.bootstrap_seed.tolist() == [
+                    derive_seed(
+                        root_seed,
+                        "a_share_statistics_bootstrap",
+                        scoring["label_spec"]["data_id"],
+                        identity,
+                    )
+                    for identity in saved.prediction_id
+                ]
     if "model_reality_checks.parquet" in members:
         with artifact.table("model_reality_checks.parquet") as saved:
             assert set(saved.test_id) == {analysis}

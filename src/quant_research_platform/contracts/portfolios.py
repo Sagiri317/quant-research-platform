@@ -31,11 +31,6 @@ EQUITY_EVENT_COLUMNS = (
     "successor_asset_id",
     "successor_listing_date",
     "successor_units_per_old_unit",
-    "shares_per_old_unit",
-    "unit_basis_date",
-    "successor_shares_per_unit",
-    "successor_unit_basis_date",
-    "unit_source_locator",
     "evidence_identity",
     "source_locator",
 )
@@ -74,6 +69,7 @@ PORTFOLIO_DECISION_REASON_MAINTENANCE = "benchmark_maintenance"
 PORTFOLIO_BLOCK_REASONS = frozenset(
     {
         "market_blocked",
+        "locked_shares",
         "execution_fact_unknown",
         "research_unquoted_valuation",
         "adv_unavailable",
@@ -110,7 +106,7 @@ class PortfolioCapital:
     candidate_id: str
     initial_capital: float
     valuation_currency: str
-    valuation_method: Literal["adjusted_notional", "linear_perpetual"]
+    valuation_method: Literal["cash_equity", "linear_perpetual"]
 
     def __post_init__(self) -> None:
         if (
@@ -120,7 +116,7 @@ class PortfolioCapital:
             or not self.valuation_currency.isascii()
             or not self.valuation_currency.isalpha()
             or not self.valuation_currency.isupper()
-            or self.valuation_method not in {"adjusted_notional", "linear_perpetual"}
+            or self.valuation_method not in {"cash_equity", "linear_perpetual"}
         ):
             raise ValueError("portfolio_capital_invalid")
         value = strict_finite_float(
@@ -161,6 +157,8 @@ class PortfolioValuation:
     mark_price: float | Fraction = 1.0
     cost_basis: float = 0.0
     lifecycle_id: str | None = None
+    receivable: float = 0.0
+    locked_quantity: float | Fraction = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,7 +172,7 @@ class PortfolioDiagnostic:
 
 @dataclass(frozen=True, slots=True)
 class PortfolioRightsAdjustment:
-    """Evidence-linked nontrade change of an existing adjusted-unit entitlement."""
+    """Evidence-linked nontrade change in actual shares and cash entitlements."""
 
     event_id: str
     timestamp_ns: int
@@ -187,6 +185,14 @@ class PortfolioRightsAdjustment:
     target_lifecycle_id: str | None
     target_quantity: float | Fraction
     evidence_identity: str
+    kind: str = "recovery"
+    phase: Literal["after", "end"] = "after"
+    entitlement_quantity: float | Fraction = 0.0
+    receivable_before: float = 0.0
+    receivable_after: float = 0.0
+    locked_quantity_before: float | Fraction = 0.0
+    locked_quantity_after: float | Fraction = 0.0
+    entitlement_record_at_ns: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,6 +233,13 @@ class PortfolioLedgerBatch:
                     "quantity_after",
                     "cash_amount",
                     "target_quantity",
+                    "receivable",
+                    "receivable_before",
+                    "receivable_after",
+                    "locked_quantity",
+                    "locked_quantity_before",
+                    "locked_quantity_after",
+                    "entitlement_quantity",
                 ):
                     if not hasattr(row, name):
                         continue
@@ -239,6 +252,10 @@ class PortfolioLedgerBatch:
                         "quantity_after",
                         "target_quantity",
                         "mark_price",
+                        "locked_quantity",
+                        "locked_quantity_before",
+                        "locked_quantity_after",
+                        "entitlement_quantity",
                     }:
                         continue
                     if value is not None and (
@@ -268,6 +285,7 @@ class PortfolioLedgerBatch:
                 "realized_pnl",
                 "funding",
                 "recovery",
+                "dividend",
                 "commission_cost",
                 "stamp_duty_cost",
                 "transfer_fee_cost",
@@ -275,7 +293,10 @@ class PortfolioLedgerBatch:
                 "impact_cost",
             }
             or (row.fill_id is not None and row.fill_id not in fills)
-            or ((row.kind in {"funding", "recovery"}) != (row.fill_id is None))
+            or (
+                (row.kind in {"funding", "recovery", "dividend"})
+                != (row.fill_id is None)
+            )
             for row in self.cashflows
         ):
             raise ValueError("portfolio_ledger_cashflow_invalid")
@@ -303,17 +324,22 @@ class PortfolioLedgerBatch:
                     float(
                         row.quantity * Fraction(row.mark_price)
                         - Fraction(row.cost_basis)
+                        + Fraction(row.receivable)
                     )
                     if isinstance(row.quantity, Fraction)
                     else fma(row.quantity, row.mark_price, -row.cost_basis)
+                    + row.receivable
                 )
             except OverflowError:
                 raise ValueError("portfolio_ledger_valuation_invalid") from None
             # Cost and final values round independently; the product need not fit.
             tolerance = ulp(row.cost_basis) + ulp(row.value) + ulp(expected)
-            if row.mark_price < 0 or not isclose(
-                row.value, expected, rel_tol=0.0, abs_tol=tolerance
-            ):
+            if (
+                row.receivable < 0
+                or row.locked_quantity < 0
+                or (row.locked_quantity and row.locked_quantity > row.quantity)
+                or row.mark_price < 0
+            ) or not isclose(row.value, expected, rel_tol=0.0, abs_tol=tolerance):
                 raise ValueError("portfolio_ledger_valuation_invalid")
         if any(PORTFOLIO_CASH_ASSET_ID not in phase for phase in phases.values()):
             raise ValueError("portfolio_ledger_cash_valuation_missing")
@@ -335,7 +361,11 @@ class PortfolioLedgerBatch:
         ):
             raise ValueError("portfolio_ledger_cashflow_fill_mismatch")
         if any(
-            row.quantity != row.value or row.mark_price != 1.0 or row.cost_basis != 0.0
+            row.quantity != row.value
+            or row.mark_price != 1.0
+            or row.cost_basis != 0.0
+            or row.receivable != 0
+            or row.locked_quantity != 0
             for row in self.valuations
             if row.asset_id == PORTFOLIO_CASH_ASSET_ID
         ):
@@ -343,119 +373,236 @@ class PortfolioLedgerBatch:
         tolerance = sum(
             portfolio_notional_tolerance(abs(row.value)) for row in before.values()
         )
-        cash_before = before[PORTFOLIO_CASH_ASSET_ID].value
-        cash_after = after[PORTFOLIO_CASH_ASSET_ID].value
-        if (
-            not isclose(
-                cash_after - cash_before,
-                sum(row.amount for row in self.cashflows),
-                rel_tol=0.0,
-                abs_tol=tolerance,
-            )
-            or end[PORTFOLIO_CASH_ASSET_ID].value != cash_after
-        ):
-            raise ValueError("portfolio_ledger_cash_reconciliation_invalid")
-        deltas = defaultdict(lambda: [0, 0])
+        for flow in self.cashflows:
+            if not before[flow.asset_id].timestamp_ns <= flow.timestamp_ns <= end[
+                flow.asset_id
+            ].timestamp_ns or (
+                flow.fill_id is not None
+                and flow.timestamp_ns != after[flow.asset_id].timestamp_ns
+            ):
+                raise ValueError("portfolio_ledger_cashflow_timing_invalid")
         quantities = {asset: value.quantity for asset, value in before.items()}
         lives = {asset: value.lifecycle_id for asset, value in before.items()}
+        receivables = {asset: value.receivable for asset, value in before.items()}
+        locked = {asset: value.locked_quantity for asset, value in before.items()}
         event_ids = set()
-        recovery = defaultdict(float)
-        for event in self.rights_adjustments:
-            if (
-                type(event.event_id) is not str
-                or not event.event_id
-                or type(event.lifecycle_id) is not str
-                or not event.lifecycle_id
-                or type(event.evidence_identity) is not str
-                or event.event_id in event_ids
-                or event.asset_id not in assets
-                or event.timestamp_ns != after[event.asset_id].timestamp_ns
-                or event.quantity_before <= 0
-                or event.quantity_after < 0
-                or event.cash_amount < 0
-                or event.target_quantity < 0
-                or len(event.evidence_identity) != 64
-                or any(c not in "0123456789abcdef" for c in event.evidence_identity)
-                or event.lifecycle_id != lives[event.asset_id]
-                or not _quantity_equal(
-                    event.quantity_before, quantities[event.asset_id]
-                )
-            ):
-                raise ValueError("portfolio_rights_adjustment_invalid")
-            event_ids.add(event.event_id)
-            event_flows = [
+        covered_flows = set()
+        for phase, prior, current in (("after", before, after), ("end", after, end)):
+            entry_at = after[PORTFOLIO_CASH_ASSET_ID].timestamp_ns
+            phase_flows = [
                 flow
                 for flow in self.cashflows
-                if flow.kind == "recovery"
-                and flow.flow_id == f"recovery:{event.event_id}"
+                if (flow.timestamp_ns <= entry_at) == (phase == "after")
             ]
-            if (
-                (event.cash_amount > 0) != bool(event_flows)
-                or len(event_flows) > 1
-                or any(
-                    flow.asset_id != event.asset_id or flow.amount != event.cash_amount
-                    for flow in event_flows
-                )
-            ):
-                raise ValueError("portfolio_recovery_reconciliation_invalid")
-            change = event.quantity_after - event.quantity_before
-            quantities[event.asset_id] = event.quantity_after
-            deltas[event.asset_id][0] += change
-            deltas[event.asset_id][1] = max(deltas[event.asset_id][1], abs(change))
-            recovery[event.asset_id] += event.cash_amount
-            if event.target_asset_id is None:
-                if event.target_lifecycle_id is not None or event.target_quantity != 0:
-                    raise ValueError("portfolio_rights_conversion_invalid")
-            else:
-                target = event.target_asset_id
-                if (
-                    target not in assets
-                    or not event.target_lifecycle_id
-                    or event.target_quantity <= 0
-                    or (
-                        quantities[target] != 0
-                        and lives[target] != event.target_lifecycle_id
-                    )
-                ):
-                    raise ValueError("portfolio_rights_conversion_invalid")
-                quantities[target] = (
-                    Fraction(quantities[target]) + event.target_quantity
-                )
-                lives[target] = event.target_lifecycle_id
-                deltas[target][0] += event.target_quantity
-                deltas[target][1] = max(deltas[target][1], event.target_quantity)
-        for asset in assets:
             if not isclose(
-                recovery[asset],
-                sum(
-                    row.amount
-                    for row in self.cashflows
-                    if row.asset_id == asset and row.kind == "recovery"
-                ),
+                current[PORTFOLIO_CASH_ASSET_ID].value
+                - prior[PORTFOLIO_CASH_ASSET_ID].value,
+                sum(flow.amount for flow in phase_flows),
                 rel_tol=0,
                 abs_tol=tolerance,
             ):
-                raise ValueError("portfolio_recovery_reconciliation_invalid")
-            if lives[asset] != after[asset].lifecycle_id:
-                raise ValueError("portfolio_rights_lifecycle_invalid")
-        for trade in self.trades:
-            deltas[trade.asset_id][0] += trade.quantity
-            deltas[trade.asset_id][1] = max(
-                deltas[trade.asset_id][1], abs(trade.quantity)
-            )
-            if trade.timestamp_ns != after[trade.asset_id].timestamp_ns:
-                raise ValueError("portfolio_ledger_fill_timing_invalid")
+                raise ValueError("portfolio_ledger_cash_reconciliation_invalid")
+            for event in (row for row in self.rights_adjustments if row.phase == phase):
+                asset = event.asset_id
+                if (
+                    type(event.event_id) is not str
+                    or not event.event_id
+                    or event.event_id in event_ids
+                    or asset not in assets
+                    or type(event.lifecycle_id) is not str
+                    or not event.lifecycle_id
+                    or (event.kind == "recovery" and event.lifecycle_id != lives[asset])
+                    or event.kind
+                    not in {
+                        "recovery",
+                        "registration",
+                        "dividend",
+                        "stock_distribution",
+                        "unlock",
+                    }
+                    or not prior[asset].timestamp_ns
+                    <= event.timestamp_ns
+                    <= current[asset].timestamp_ns
+                    or event.quantity_before < 0
+                    or event.quantity_after < 0
+                    or event.cash_amount < 0
+                    or event.target_quantity < 0
+                    or event.entitlement_quantity < 0
+                    or event.receivable_before < 0
+                    or event.receivable_after < 0
+                    or event.locked_quantity_before < 0
+                    or event.locked_quantity_after < 0
+                    or type(event.evidence_identity) is not str
+                    or len(event.evidence_identity) != 64
+                    or any(c not in "0123456789abcdef" for c in event.evidence_identity)
+                    or not _quantity_equal(event.quantity_before, quantities[asset])
+                    or not _quantity_equal(event.locked_quantity_before, locked[asset])
+                    or not isclose(
+                        event.receivable_before,
+                        receivables[asset],
+                        rel_tol=0,
+                        abs_tol=tolerance,
+                    )
+                ):
+                    raise ValueError("portfolio_rights_adjustment_invalid")
+                quantity_change = event.quantity_after - event.quantity_before
+                locked_change = (
+                    event.locked_quantity_after - event.locked_quantity_before
+                )
+                receivable_change = event.receivable_after - event.receivable_before
+                if event.kind != "recovery":
+                    expected_stages = {
+                        "registration": {"registration"},
+                        "dividend": {"effective", "settlement"},
+                        "stock_distribution": {"effective"},
+                        "unlock": {"unlock"},
+                    }
+                    if (
+                        event.event_id.rsplit(":", 1)[-1]
+                        not in expected_stages[event.kind]
+                    ):
+                        raise ValueError("portfolio_entitlement_stage_invalid")
+                    if event.target_asset_id is not None or event.target_quantity:
+                        raise ValueError("portfolio_rights_conversion_invalid")
+                    if event.entitlement_quantity <= 0:
+                        raise ValueError("portfolio_registration_entitlement_invalid")
+                    if (
+                        type(event.entitlement_record_at_ns) is not int
+                        or event.entitlement_record_at_ns > event.timestamp_ns
+                    ):
+                        raise ValueError("portfolio_registration_record_date_invalid")
+                    if event.kind == "registration" and (
+                        (
+                            event.entitlement_record_at_ns == event.timestamp_ns
+                            and not _quantity_equal(
+                                event.entitlement_quantity, event.quantity_before
+                            )
+                        )
+                        or quantity_change
+                        or locked_change
+                        or receivable_change
+                        or event.cash_amount
+                    ):
+                        raise ValueError("portfolio_registration_entitlement_invalid")
+                    if event.kind == "dividend" and (
+                        quantity_change
+                        or locked_change
+                        or receivable_change + event.cash_amount < -tolerance
+                        or (
+                            event.cash_amount
+                            and not isclose(
+                                receivable_change,
+                                -event.cash_amount,
+                                rel_tol=0,
+                                abs_tol=tolerance,
+                            )
+                        )
+                    ):
+                        raise ValueError("portfolio_dividend_reconciliation_invalid")
+                    if event.kind == "stock_distribution" and (
+                        quantity_change < 0
+                        or not _quantity_equal(quantity_change, locked_change)
+                        or receivable_change
+                        or event.cash_amount
+                    ):
+                        raise ValueError("portfolio_stock_distribution_invalid")
+                    if event.kind == "unlock" and (
+                        quantity_change
+                        or locked_change > 0
+                        or receivable_change
+                        or event.cash_amount
+                    ):
+                        raise ValueError("portfolio_share_unlock_invalid")
+                elif receivable_change or locked_change:
+                    raise ValueError("portfolio_recovery_reconciliation_invalid")
+                event_ids.add(event.event_id)
+                flow_kind = "dividend" if event.kind == "dividend" else "recovery"
+                flow_id = f"{flow_kind}:{event.event_id}"
+                matches = [flow for flow in phase_flows if flow.flow_id == flow_id]
+                if (
+                    (event.cash_amount > 0) != bool(matches)
+                    or len(matches) > 1
+                    or any(
+                        flow.asset_id != asset
+                        or flow.kind != flow_kind
+                        or flow.amount != event.cash_amount
+                        for flow in matches
+                    )
+                ):
+                    raise ValueError("portfolio_recovery_reconciliation_invalid")
+                covered_flows.update(flow.flow_id for flow in matches)
+                if (
+                    event.kind == "stock_distribution"
+                    and event.quantity_after > event.quantity_before
+                ):
+                    if event.quantity_before and lives[asset] != event.lifecycle_id:
+                        raise ValueError("portfolio_rights_lifecycle_invalid")
+                    lives[asset] = event.lifecycle_id
+                quantities[asset] = event.quantity_after
+                receivables[asset] = event.receivable_after
+                locked[asset] = event.locked_quantity_after
+                if event.target_asset_id is None:
+                    if (
+                        event.target_lifecycle_id is not None
+                        or event.target_quantity != 0
+                    ):
+                        raise ValueError("portfolio_rights_conversion_invalid")
+                else:
+                    target = event.target_asset_id
+                    if (
+                        target not in assets
+                        or not event.target_lifecycle_id
+                        or event.target_quantity <= 0
+                        or (
+                            quantities[target] != 0
+                            and lives[target] != event.target_lifecycle_id
+                        )
+                    ):
+                        raise ValueError("portfolio_rights_conversion_invalid")
+                    quantities[target] = (
+                        Fraction(quantities[target]) + event.target_quantity
+                    )
+                    lives[target] = event.target_lifecycle_id
+            if phase == "after":
+                for trade in self.trades:
+                    if trade.timestamp_ns != after[trade.asset_id].timestamp_ns:
+                        raise ValueError("portfolio_ledger_fill_timing_invalid")
+                    if quantities[trade.asset_id] == 0 and trade.quantity > 0:
+                        lives[trade.asset_id] = current[trade.asset_id].lifecycle_id
+                    quantities[trade.asset_id] += trade.quantity
+            for asset in assets:
+                if not _quantity_equal(
+                    quantities[asset],
+                    current[asset].quantity,
+                    *(
+                        abs(trade.quantity)
+                        for trade in self.trades
+                        if trade.asset_id == asset
+                    ),
+                ):
+                    raise ValueError("portfolio_ledger_position_reconciliation_invalid")
+                if quantities[asset] == 0 and current[asset].quantity == 0:
+                    lives[asset] = current[asset].lifecycle_id
+                if lives[asset] != current[asset].lifecycle_id:
+                    raise ValueError("portfolio_rights_lifecycle_invalid")
+                if not _quantity_equal(
+                    locked[asset], current[asset].locked_quantity
+                ) or not isclose(
+                    receivables[asset],
+                    current[asset].receivable,
+                    rel_tol=0,
+                    abs_tol=tolerance,
+                ):
+                    raise ValueError("portfolio_entitlement_reconciliation_invalid")
+                quantities[asset] = current[asset].quantity
+        if any(row.phase not in {"after", "end"} for row in self.rights_adjustments):
+            raise ValueError("portfolio_rights_adjustment_invalid")
         for flow in self.cashflows:
-            if flow.timestamp_ns != after[flow.asset_id].timestamp_ns:
-                raise ValueError("portfolio_ledger_cashflow_timing_invalid")
-        for asset in before.keys() - {PORTFOLIO_CASH_ASSET_ID}:
-            delta, trade_quantity_scale = deltas[asset]
-            if not _quantity_equal(
-                before[asset].quantity + delta,
-                after[asset].quantity,
-                trade_quantity_scale,
+            if (
+                flow.kind in {"recovery", "dividend"}
+                and flow.flow_id not in covered_flows
             ):
-                raise ValueError("portfolio_ledger_position_reconciliation_invalid")
+                raise ValueError("portfolio_recovery_reconciliation_invalid")
         if any(
             type(row.name) is not str
             or not row.name
@@ -577,7 +724,7 @@ def validate_portfolio_transition(
     before, after, end = (phases[phase] for phase in ("before", "after", "end"))
     tolerance = portfolio_notional_tolerance(
         sum(row.value for row in before.values())
-        if capital.valuation_method == "adjusted_notional"
+        if capital.valuation_method == "cash_equity"
         else capital.initial_capital
     )
     if previous is None:
@@ -614,7 +761,13 @@ def validate_portfolio_transition(
                 if (
                     old is not None
                     and current is not None
-                    and old.cost_basis != current.cost_basis
+                    and (
+                        old.cost_basis != current.cost_basis
+                        or old.receivable != current.receivable
+                        or not _quantity_equal(
+                            old.locked_quantity, current.locked_quantity
+                        )
+                    )
                 ):
                     raise ValueError("portfolio_ledger_cost_basis_invalid")
                 if (
@@ -648,7 +801,7 @@ def validate_portfolio_transition(
         flows_by_asset[flow.asset_id].append(flow)
     for diagnostic in batch.diagnostics:
         if (
-            capital.valuation_method == "adjusted_notional"
+            capital.valuation_method == "cash_equity"
             and diagnostic.name in diagnostics_by_asset[diagnostic.asset_id]
         ):
             raise ValueError("portfolio_ledger_diagnostic_keys_invalid")
@@ -659,7 +812,7 @@ def validate_portfolio_transition(
             raise ValueError("portfolio_ledger_execution_timing_invalid")
         trades = trades_by_asset[asset]
         flows = flows_by_asset[asset]
-        if capital.valuation_method == "adjusted_notional":
+        if capital.valuation_method == "cash_equity":
             diagnostics = diagnostics_by_asset[asset]
             rights_quantity = sum(
                 (
@@ -669,6 +822,7 @@ def validate_portfolio_transition(
                 )
                 + (event.target_quantity if event.target_asset_id == asset else 0)
                 for event in batch.rights_adjustments
+                if event.phase == "after"
             )
             executable_value = float(
                 (Fraction(initial.quantity) + rights_quantity)
@@ -705,7 +859,9 @@ def validate_portfolio_transition(
                     and (
                         adv is not None
                         or trades
-                        or any(flow.kind != "recovery" for flow in flows)
+                        or any(
+                            flow.kind not in {"recovery", "dividend"} for flow in flows
+                        )
                     )
                 ):
                     raise ValueError("portfolio_ledger_adv_unavailable_invalid")
@@ -736,7 +892,7 @@ def validate_portfolio_transition(
                     or (desired < 0 and executed > 0)
                     or (desired == 0 and executed != 0)
                     or abs(executed) > abs(desired) + tolerance
-                    or (abs(target.number - post.value) > tolerance)
+                    or (abs(target.number - (post.value - post.receivable)) > tolerance)
                     != (reason is not None)
                 ):
                     raise ValueError("portfolio_ledger_direction_invalid")
@@ -758,26 +914,21 @@ def validate_portfolio_transition(
             if any(
                 row.kind in {"funding", "realized_pnl"} or row.amount > 0.0
                 for row in flows
-                if row.kind not in {"principal", "recovery"}
+                if row.kind not in {"principal", "recovery", "dividend"}
             ):
                 raise ValueError("portfolio_ledger_cost_invalid")
             if (
-                (
-                    initial.quantity != 0
-                    and initial.mark_price != post.mark_price
-                    and not batch.rights_adjustments
+                initial.quantity != 0
+                and initial.mark_price != post.mark_price
+                and not batch.rights_adjustments
+            ) or any(
+                not isclose(
+                    trade.notional,
+                    float(Fraction(trade.quantity) * Fraction(post.mark_price)),
+                    rel_tol=0.0,
+                    abs_tol=tolerance,
                 )
-                or post.lifecycle_id != final.lifecycle_id
-                or final.quantity != post.quantity
-                or any(
-                    not isclose(
-                        trade.notional,
-                        float(Fraction(trade.quantity) * Fraction(post.mark_price)),
-                        rel_tol=0.0,
-                        abs_tol=tolerance,
-                    )
-                    for trade in trades
-                )
+                for trade in trades
             ):
                 raise ValueError("portfolio_ledger_return_state_invalid")
         elif asset != PORTFOLIO_CASH_ASSET_ID:
@@ -803,7 +954,7 @@ def validate_portfolio_transition(
                 or final.cost_basis != post.cost_basis
             ):
                 raise ValueError("portfolio_ledger_cost_basis_invalid")
-    if capital.valuation_method == "adjusted_notional" and not isclose(
+    if capital.valuation_method == "cash_equity" and not isclose(
         sum(diagnostics_by_asset[asset]["target_notional"].number for asset in before),
         sum(row.value for row in after.values())
         - sum(
@@ -842,6 +993,8 @@ class PortfolioCandidateSpec:
     size_cap_column: Literal["total_market_cap", "float_market_cap"] = (
         "total_market_cap"
     )
+    industry_neutrality_limit: float = 0.02
+    size_neutrality_limit: float = 0.2
 
     def __post_init__(self) -> None:
         if type(self.selection_group) is not str or self.selection_group not in {
@@ -892,6 +1045,14 @@ class PortfolioCandidateSpec:
             "float_market_cap",
         }:
             raise ValueError("portfolio_candidate_size_cap_column_invalid")
+        for name in ("industry_neutrality_limit", "size_neutrality_limit"):
+            value = strict_finite_float(
+                getattr(self, name),
+                error="portfolio_candidate_neutrality_limit_invalid",
+            )
+            if value < 0:
+                raise ValueError("portfolio_candidate_neutrality_limit_invalid")
+            object.__setattr__(self, name, value)
         if self.construction == "benchmark_enhanced":
             if self.neutrality != "none":
                 raise ValueError("portfolio_candidate_neutrality_invalid")

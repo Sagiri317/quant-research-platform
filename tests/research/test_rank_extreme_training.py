@@ -67,11 +67,18 @@ def test_sparse_decay_preserves_direction_weight_and_calibration(
         random_seed=17,
         training_weighting=TrainingWeighting(half_life_periods=1),
     )
-    weights = equal_timestamp_sample_weights(frame.timestamp, spec.training_weighting)
+    weights = equal_timestamp_sample_weights(
+        frame.timestamp, spec.training_weighting, trading_sessions=dates
+    )
     assert (weights > 0).all() and np.isfinite(weights).all()
     if not ordinary:
         assert weights[:assets].max() <= np.nextafter(0.0, 1.0) * 4
-    case = fit_frame(tmp_path, frame, spec)
+    calendar = pd.DataFrame(
+        dict(calendar_date=dates, source_market_type=1, is_trading_day=True)
+    )
+    case = fit_frame(
+        tmp_path, frame.assign(market_type=1), spec, trading_calendar=calendar
+    )
     predictor = case.result.prediction_model
     expected = np.array(
         [-1.0]

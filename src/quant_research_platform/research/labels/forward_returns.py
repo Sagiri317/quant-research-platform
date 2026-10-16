@@ -23,12 +23,14 @@ def add_forward_return_labels(
     date_column: str = "timestamp",
     execution_price_column: str = "adj_open",
     sessions: Sequence[object],
-    can_enter_column: str = "can_enter",
 ) -> pd.DataFrame:
-    """Add next-open to exit-open returns, available at the A-share exit open.
+    """Add fixed-session real-open returns independently of execution permissions.
 
-    Session labels identify trading dates; availability is the actual 09:30
-    Asia/Shanghai exchange event represented as a UTC-naive instant.
+    Endpoints require real observed quotes; suspension valuation carries are not
+    price observations. Interior missing quotes never shift either endpoint.
+    The wd-adjusted opening price depends on that session's closing inputs.
+    Availability is therefore the exit session's 15:00 Asia/Shanghai close,
+    represented as a UTC-naive instant, without changing the opening endpoints.
     """
 
     horizons = _validate_horizons(horizons)
@@ -38,8 +40,6 @@ def add_forward_return_labels(
         date_column=date_column,
         execution_price_column=execution_price_column,
     )
-    if can_enter_column not in validated.columns:
-        raise ValueError(f"missing_forward_return_columns: {can_enter_column}")
     axis = _session_axis(sessions)
     result = validated.sort_values([asset_column, date_column], kind="mergesort")
     price = strict_finite_numeric_series(
@@ -50,19 +50,9 @@ def add_forward_return_labels(
     keys = pd.MultiIndex.from_arrays([result[asset_column], result[date_column]])
     positions = axis.get_indexer(result[date_column])
     prices = price.to_numpy(dtype="float64", copy=False)
-    can_enter = (
-        strict_bool_series(
-            result[can_enter_column],
-            error="invalid_forward_return_can_enter",
-            allow_null=True,
-        )
-        .fillna(False)
-        .to_numpy(dtype=bool)
-    )
+    real_quote, _ = _quote_observation_masks(result)
     assets = result[asset_column].to_numpy(copy=False)
-    entry_positions = np.flatnonzero(
-        (positions >= 0) & (positions + 1 < len(axis)) & can_enter
-    )
+    entry_positions = np.flatnonzero((positions >= 0) & (positions + 1 < len(axis)))
     entry_rows = keys.get_indexer(
         pd.MultiIndex.from_arrays(
             [assets[entry_positions], axis.take(positions[entry_positions] + 1)]
@@ -71,7 +61,7 @@ def add_forward_return_labels(
     present = entry_rows >= 0
     entry_positions, entry_rows = entry_positions[present], entry_rows[present]
     entry_prices = prices[entry_rows]
-    positive = np.isfinite(entry_prices) & (entry_prices > 0)
+    positive = np.isfinite(entry_prices) & (entry_prices > 0) & real_quote[entry_rows]
     entry_positions, entry_prices = entry_positions[positive], entry_prices[positive]
     for horizon in horizons:
         labels = np.full(len(result), np.nan, dtype="float64")
@@ -86,19 +76,42 @@ def add_forward_return_labels(
         valid_positions = valid_positions[present]
         exit_dates = exit_dates[present]
         entries, exit_prices = entry_prices[mature][present], prices[exit_rows[present]]
-        positive = np.isfinite(exit_prices) & (exit_prices > 0)
+        positive = (
+            np.isfinite(exit_prices)
+            & (exit_prices > 0)
+            & real_quote[exit_rows[present]]
+        )
         valid_positions, exit_dates = valid_positions[positive], exit_dates[positive]
         with np.errstate(over="ignore"):
             values = (exit_prices[positive] - entries[positive]) / entries[positive]
         finite = np.isfinite(values)
         labels[valid_positions[finite]] = values[finite]
         available[valid_positions[finite]] = _a_share_session_event(
-            exit_dates[finite], hour=9, minute=30
+            exit_dates[finite], hour=15
         )
         label_column = forward_return_label_column(horizon)
         result[label_column] = labels
         result[f"{label_column}_available_at"] = available
     return result.reset_index(drop=True)
+
+
+def _quote_observation_masks(frame):
+    """Validate quote facts locally without changing their values or dtypes."""
+    missing = {"filling_flag", "is_trading"}.difference(frame.columns)
+    if missing:
+        raise ValueError(
+            "missing_forward_return_columns: " + ", ".join(sorted(missing))
+        )
+    filling = strict_finite_numeric_series(
+        frame.filling_flag, error="invalid_forward_return_filling_flag", allow_null=True
+    )
+    trading = strict_bool_series(
+        frame.is_trading, error="invalid_forward_return_is_trading", allow_null=True
+    )
+    return (
+        (filling.eq(0) & trading.fillna(False)).fillna(False).to_numpy(dtype=bool),
+        (filling.eq(1) & trading.eq(False)).fillna(False).to_numpy(dtype=bool),
+    )
 
 
 def forward_return_label_column(horizon: int) -> str:
@@ -182,8 +195,9 @@ def add_on_id_decomposition(
 ) -> pd.DataFrame:
     """Decompose adjusted prices on an explicit session and listing-lifecycle axis.
 
-    Each component has its own price dependencies. Event clocks are Shanghai
-    exchange events represented as UTC-naive instants, not vendor publication.
+    Each component has its own price dependencies. Availability includes the
+    wd adjustment's closing inputs, represented as UTC-naive Shanghai exchange
+    events; this does not certify vendor publication times.
     """
     from quant_research_platform.contracts.validation import strict_real_numeric_series
 
@@ -194,7 +208,7 @@ def add_on_id_decomposition(
         date_column="timestamp",
         execution_price_column="adj_open",
     )
-    required = {"adj_close", "listing_date", "can_enter"}
+    required = {"adj_close", "listing_date", "filling_flag", "is_trading"}
     if required - set(result):
         raise ValueError("missing_on_id_columns")
     raw_axis = strict_timestamp_series(
@@ -216,9 +230,8 @@ def add_on_id_decomposition(
         result[column] = strict_real_numeric_series(
             result[column], error="invalid_on_id_price_type"
         )
-    result["can_enter"] = strict_bool_series(
-        result.can_enter, error="invalid_on_id_can_enter", allow_null=True
-    )
+    real_quote, suspended = _quote_observation_masks(result)
+    result.loc[~(real_quote | suspended), ["adj_open", "adj_close"]] = np.nan
     pieces = [
         _on_id_asset_decomposition(group, axis, horizons)
         for _, group in result.groupby("asset_id", sort=False)
@@ -231,6 +244,7 @@ def _on_id_asset_decomposition(group, axis, horizons):
     n = len(block)
     prices = block[["adj_open", "adj_close"]].to_numpy(dtype="float64")
     missing = np.isnan(prices)
+    real_quote, _ = _quote_observation_masks(block)
     invalid = ~np.isfinite(prices) & ~missing | (prices <= 0)
     day = _on_id_log_ratio(prices[:, 1], prices[:, 0])
     night = np.full(n, np.nan)
@@ -284,20 +298,12 @@ def _on_id_asset_decomposition(group, axis, horizons):
         offset,
         hour,
         minute=0,
-        permission=False,
     ):
         reasons = lifecycle_reason(offset)
         reasons[pd.isna(reasons) & price_missing] = "missing_price"
         reasons[(pd.isna(reasons) | (reasons == "missing_price")) & price_invalid] = (
             "invalid_price"
         )
-        if permission:
-            allowed = block.can_enter
-            reasons[allowed.isna().to_numpy()] = "entry_permission_unknown"
-            reasons[allowed.eq(False).fillna(False).to_numpy(dtype=bool)] = (
-                "entry_not_allowed"
-            )
-            reasons[np.isnat(life)] = "unknown_listing_lifecycle"
         legal = pd.isna(reasons)
         reasons[legal & ~np.isfinite(values)] = "nonfinite_result"
         legal = pd.isna(reasons)
@@ -311,7 +317,7 @@ def _on_id_asset_decomposition(group, axis, horizons):
         block[f"{name}_available_at"] = maturity
         block[f"{name}_reason"] = pd.array(reasons, dtype="string")
 
-    publish("on_id_pre_entry_log_return", night, night_missing, night_invalid, 1, 9, 30)
+    publish("on_id_pre_entry_log_return", night, night_missing, night_invalid, 1, 15)
     endpoint_parts = []
     for _, lifecycle in group.groupby("listing_date", sort=False, dropna=False):
         clean = lifecycle.copy()
@@ -340,20 +346,17 @@ def _on_id_asset_decomposition(group, axis, horizons):
             window(night_missing, 1, horizon),
             window(night_invalid, 1, horizon),
             horizon + 1,
-            9,
-            30,
+            15,
         )
         publish(
             endpoint,
             endpoints[forward_return_label_column(horizon)].to_numpy(dtype=float),
-            shifted(missing[:, 0], 1, False)
-            | shifted(missing[:, 0], horizon + 1, False),
+            shifted(missing[:, 0] | ~real_quote, 1, False)
+            | shifted(missing[:, 0] | ~real_quote, horizon + 1, False),
             shifted(invalid[:, 0], 1, False)
             | shifted(invalid[:, 0], horizon + 1, False),
             horizon + 1,
-            9,
-            30,
-            permission=True,
+            15,
         )
         with np.errstate(over="ignore", invalid="ignore"):
             reconstructed = np.expm1(block[intraday] + block[overnight])

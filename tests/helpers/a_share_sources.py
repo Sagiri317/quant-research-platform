@@ -324,3 +324,27 @@ def _published_inputs(layout, spec):
             for name in spec.processed_input_data_ids
         },
     }
+
+
+def _calendar_input(root, sessions_by_market):
+    """Write explicit synthetic O/C facts for caller-declared test markets."""
+    frames = []
+    for market, sessions in sessions_by_market.items():
+        sessions = pd.DatetimeIndex(sessions)
+        days = pd.date_range(sessions.min(), sessions.max()).as_unit("ns")
+        opened = days.isin(sessions)
+        frames.append(
+            pd.DataFrame(
+                {
+                    "timestamp": days,
+                    "calendar_date": days,
+                    "source_market_type": market,
+                    "is_trading_day": opened,
+                    "source_day_of_week": days.dayofweek,
+                    "source_state": np.where(opened, "O", "C"),
+                }
+            )
+        )
+    return _write_inputs(
+        root, {"trading_calendar": pd.concat(frames, ignore_index=True)}
+    )["trading_calendar"]

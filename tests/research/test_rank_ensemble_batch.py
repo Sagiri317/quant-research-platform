@@ -66,16 +66,20 @@ def test_batched_rank_preserves_rank_and_prediction_values(
     expected = _legacy_ranks(frame, columns)
     actual = rank._rank_frame_columns(frame, columns)
     np.testing.assert_allclose(actual, expected, rtol=0, atol=np.finfo(float).eps)
+    weighted = expected @ np.asarray(predictor.weights, dtype="float64")
+    weighted[frame.loc[:, columns].isna().all(axis=1)] = np.nan
     np.testing.assert_allclose(
         predictor.predict(frame),
-        expected @ np.asarray(predictor.weights, dtype="float64"),
+        weighted,
         rtol=8 * np.finfo(float).eps,
         atol=8 * np.finfo(float).eps,
     )
     equal = rank.RankEnsemblePredictor(columns, (1.0, -1.0, 1.0, -1.0))
+    equal_scores = expected @ np.asarray(equal.directions) / len(columns)
+    equal_scores[frame.loc[:, columns].isna().all(axis=1)] = np.nan
     np.testing.assert_allclose(
         equal.predict(frame),
-        expected @ np.asarray(equal.directions) / len(columns),
+        equal_scores,
         rtol=8 * np.finfo(float).eps,
         atol=8 * np.finfo(float).eps,
     )

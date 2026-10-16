@@ -54,10 +54,14 @@ writer 一次核验本产物的 schema、跨批 PK、覆盖和科学关系，再
 不能按物理 chunk 分开，也不能改成历史训练截面。
 标签不能插补；派生目标成熟时钟先规范化为真实时间，再取参与标签的最晚可用时点。
 任何参与标签的时钟未知，该依赖截面的派生成熟时间也未知；其他合法截面仍可计算。预测不等待未来标签。
+A 股当前 wd 价格收益标签保留固定会话的经济开盘端点；复权调整来源依赖当日收盘，
+普通 forward-return 的 `available_at` 因此为退出会话 Asia/Shanghai 15:00（现代 UTC 07:00）。
+ON/ID 的 pre-entry、ID、ON/endpoint 分别在 t+1、t+h、t+h+1 会话收盘达到可用门槛。
+经济开盘事件仍为 09:30；此 EOD 日频研究约定不等同于已核实供应商实际发布时点。
 
 G 需要协议要求的完整验证历史；Q 只用决策前成熟历史。测试指标不参与选型。
 候选失败/合法未定义不等于缺候选，任何 defined 值包括负值都优于 undefined，
-全 undefined 按预声明顺序选择。最终重新拟合保存真实 fit_windows/cutoff，离散窗不填平。
+全 undefined 不产生胜者；只有定义的指标相等时使用预声明顺序。最终重新拟合保存真实 fit_windows/cutoff，离散窗不填平。
 测试评估核模型、选择、参数、预处理和必要校准实际冻结记录；不能靠布尔 is_oos 放行。
 
 科研选择参考在 `research-rosters/`，只用于人工/agent 研究设计，不由运行代码加载为默认值。
@@ -224,6 +228,16 @@ Sharpe 推断、CSCV 和组间比较。未选分析不读取其专用输入，�
 PRED 只保存下游实际需要的 recipe、训练域、成熟/拟合/选择截止及必要标定，不复制 scaler、
 特征重要性或依赖包版本。拟合状态属于模型产物。已有预测可直接用于下游；不要求模型文件仍在。
 
+模型统计的 `model_losses` 分析同时保存逐日预测描述表，字段与单位见
+[模型预测描述指标](data.md#模型预测描述指标)。Head 20% 先由全部有限预测固定成员并纳入阈值并列，
+再核标签成熟；分组评价也先按预测分组。最高组没有可评价标签时保留零观察组，
+不把下一组替作最高组计算 spread。描述指标不依赖 IC 是否有定义。
+
+多重检验主方案为 BY，BH 为辅助；模型统计 bootstrap 默认 2000 次，显式 repetitions 覆盖原值并存入元数据。
+HAC、bootstrap、模型联合检验、FMB 和分层推断不把已知缺失日期压紧：
+实际输入日期轴上缺少有效统计量时推断记 `incomplete_session_clock`，有效值的描述均值仍保留。
+完全未出现在输入中的交易日仍依赖上游完整市场日历事实，不能用普通工作日索引冒充交易日历。
+
 ## 共同因子域、分层与持久化评价复用
 
 `evaluate` 的 `sample_scope` 明确选择 `own` 或 `common`，默认 `own`。
@@ -275,7 +289,7 @@ G/Q 模型比较核实际选择组和目标语义，不能把任意季度 STAT �
 `interval_simple_return` 使用 `start_column`、`end_column`，收益单位由数据规格或显式 `return_unit` 给出。
 `timestamp_basis` 为 trading_day_open/trading_day_close/utc；`return_basis` 为 price/gross_total_return/net_total_return/strategy_net/constant_cash；
 `cost_basis` 为 frictionless/execution_costs/zero_cash；区间收益单位为 decimal 或 percent。
-trading_day_open/close 的时间列保存午夜会话日期标签，名称说明估值相位；utc 才保存真实 UTC 时刻，不能混用 ON/ID 事件成熟时刻。
+trading_day_open/close 的时间列保存午夜会话日期标签，名称说明估值相位；utc 才保存真实 UTC 时刻，不能混用 ON/ID 经济事件或标签可用时刻。
 文件、年份、时间及行列筛选复用原输入选择器；混合多个未筛选序列不能当作一条指数。
 `comparison_controls` 使用同一描述结构，明确策略净收益与执行成本口径。
 
@@ -293,6 +307,16 @@ A 股比较按 252 日年化；Crypto 比较默认 365 日、至少 2 个完整 
 这些结果帮助区分市场暴露和相对表现，不单凭正收益或显著截距证明因子因果有效。
 对照序列只有收益时只作描述比较，不能声称已证明股票池、成本、调仓等研究设计一致。
 
+## 随机种子约定
+
+`model.random_seed` 省略时在配置解析中规范化为 42；显式合法种子原样传入后端，
+不自动按模型、折或季度重派生。解释及随机统计的根种子同样在各自配置解析中默认 42；
+显式 null 不等于省略。实际解析种子随参数/模型产物保存，不修改进程全局随机状态。
+解释日期、行、背景通过既有 `derive_seed` 按用途独立派生；置换按 axis、group、repeat
+及 segment 样本键派生，不包含 model_id、worker 身份或执行顺序。
+匹配比较要求相同根种子、数据域、样本资格和抽样/置换配置；不能仅凭相同 seed 声称支持集相同。
+既有统计派生规则与显式非默认种子保留，不承诺跨环境逐位一致。
+
 ## 冻结模型解释
 
 Python `research.models.explanations.explain(config)` 与 CLI `qrp explain --config ...` 共享入口。
@@ -303,13 +327,15 @@ Python `research.models.explanations.explain(config)` 与 CLI `qrp explain --con
 贡献方法一次选择一个：`affine`、`linear_shap`、`rank`、`native_tree`、`tree_shap_path`、`tree_shap_interventional`；
 还可同时选择 `native_importance`、`permutation`。方法须与真实模型匹配，不能用另一种解释静默替代。
 有逐行贡献或置换时另传 `inputs`、有限 `window`、`sample_role`、`selection`、`output_space`。
-`selection` 明确 `max_rows`、`max_dates`、`root_seed`，可选 `asset_ids`；`max_dates=null` 表示全窗口。
+`selection` 明确 `max_rows`、`max_dates`，可选 `asset_ids`；`root_seed` 省略时为 42，显式值覆盖默认。
+`max_dates=null` 表示全窗口。
 先保留选中时间的完整截面，再抽展示/评分行，rank 不在展示子集重新排名。
 解释输入不支持 `row_filters`，资产展示筛选通过 `selection.asset_ids`，避免无意改动 rank 截面。
 
 `output_space` 为 `model_output`、`raw_margin` 或 `calibrated_label`，按真实模型能力使用。
 非恒等目标变换的原生树贡献只解释 raw margin，不把它标成收益。
-`linear_shap`、`tree_shap_interventional` 必须明确 `background`：inputs、window、max_rows、root_seed。
+`linear_shap`、`tree_shap_interventional` 必须明确 `background`：inputs、window、max_rows；
+background 的 `root_seed` 省略时为 42，显式值覆盖默认。
 背景逐行受真实拟合窗口、精确拟合截止和训练资产域约束，但标为历史参考分布，不冒称还原全部训练样本。
 抽样使用有界 reservoir；其余方法不接收未使用的背景选项。
 
@@ -319,7 +345,8 @@ Python `research.models.explanations.explain(config)` 与 CLI `qrp explain --con
 贡献汇总先逐日取截面均值，再对日期等权，不按展示行数跨日期加权。
 原生重要性表记录真实方法和单位，不能统一叫 SHAP，更不能自动叫样本外有效性。
 
-置换配置明确 `metrics`（ic/rankic/mse）、成熟 `cutoff`、`groups`、`repeats`、`root_seed`、`axis`。
+置换配置明确 `metrics`（ic/rankic/mse）、成熟 `cutoff`、`groups`、`repeats`、`axis`；
+`root_seed` 省略时为 42，显式值覆盖默认。
 `within_timestamp` 在日期截面内置换；`temporal_blocks` 明确 episode_column、block_size、step_seconds，
 要求单资产连续窗口、max_dates=null，只支持 ic/mse，不跨独立 episode 或缺口重排。
 同组列一起置换；原始与置换后的评分键保持一致。rank 的 MSE 只在 calibrated_label 尺度计算。
@@ -340,7 +367,15 @@ Python `research.models.explanations.explain(config)` 与 CLI `qrp explain --con
 `feature_columns` 选择已经物化的特征，省略时取输入实际投影中的 FEATURE 列；
 可用 `factor_columns=[]` 不选原始因子，这些已有列不重新变换。
 已声明的 observed/missing 伴随列、单位、标签成熟事实与原变换说明随复用保留，
-再次组装或评价不能把它们当作未经处理的原始值。新生成特征与复用列同名时明确失败。
+再次组装或评价不能把它们当作未经处理的原始值。省略配方及变换参数时，
+已有完整目标组输出的因子直接复用，仅为未处理的新增因子生成默认特征；
+显式配方/参数要求的新生成特征与复用列同名时明确失败。
+组装的基表及每个辅助输入各自只扫描一次选定文件。辅助输入的物理分区可按资产排列，
+因此先物化本次已投影、已裁窗的辅助行，再按真实时点稳定排序并对齐完整基表截面；
+内存占用与本次选定的辅助输入行相关，不为每个基表块重扫辅助年度文件。
+基表仍沿用完整截面迭代器的时序校验。辅助排序不修改时间精度或主键。
+strict/sparse 主键覆盖仍在整个请求窗口校验，
+包含基表前、间隙及末尾的辅助多余键；失败或关闭时关闭所有输入迭代器。
 解析后的输入实例、原生 data ID、实际消费列、filter/context、recipe 和目标列写入参数记录。
 当前命名目录仍可提供省略字段的既有便利默认，实际解析结果才是本次计算事实。
 
@@ -367,7 +402,8 @@ summary/native 重要性图不依赖未消费的贡献明细，waterfall 读取�
 `stepm_superior_models`、`model_confidence_set`。省略保持既有整套默认。
 仅所选分析要求其专用参数和输入：损失表不要求比较基线或 bootstrap；MCS 不因其它
 比较方法而要求基线。模型比较仍采用既定 HAC 与 bootstrap 组合，不改变损失或阈值。
-paired group 比较另外需要自己的 bootstrap 参数，并使用其声明的 seed。
+需要随机分析的模型统计配置将省略的 `root_seed` 规范化为 42，显式值覆盖默认；
+非随机分析不因此要求随机参数。paired group 比较另外需要自己的 bootstrap 参数，并使用其声明的 seed。
 
 HAC 的 status/reason 与 bootstrap_status/bootstrap_reason 分开保存；某项推断未定义
 不会删除另一个合法结果或真实描述均值。零观测不能伪造均值。缺失日期的时间序号口径、

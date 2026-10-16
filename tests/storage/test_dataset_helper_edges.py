@@ -1212,6 +1212,7 @@ def test_resolved_feature_options_are_the_persisted_transform_configuration():
             {
                 "recipe_id": recipe,
                 "source_columns": [factor],
+                "output_groups": ["processed"],
                 "clip": transform.clip,
                 "industry_neutralize": True,
                 "size_neutralize": True,

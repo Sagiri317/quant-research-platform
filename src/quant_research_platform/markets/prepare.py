@@ -253,6 +253,8 @@ def _configured_spec(spec, config):
         return on_id_decomposition_spec(parameters.get("horizons", [20]))
     dynamic = {
         "expectations_factors": {"freshness_days"},
+        "price_volume_facts": {"min_fresh_fraction"},
+        "market_model_factors": {"min_fresh_fraction"},
         ids.HFT_DERIVATIVE_DATA_ID: {"max_age_ms", "input_delay_ms"},
         ids.HFT_SPOT_CONTEXT_DATA_ID: {"max_age_ms", "input_delay_ms"},
         ids.HFT_CROSS_ASSET_DATA_ID: {
@@ -274,6 +276,11 @@ def _configured_spec(spec, config):
     }.get(spec.data_id, set())
     if set(parameters) - dynamic:
         raise ValueError("data_operation_parameter_not_consumed")
+    if "min_fresh_fraction" in parameters and (
+        type(parameters["min_fresh_fraction"]) not in (int, float)
+        or not 0 < parameters["min_fresh_fraction"] <= 1
+    ):
+        raise ValueError("data_operation_min_fresh_fraction_invalid")
     if "freshness_days" in parameters and (
         type(parameters["freshness_days"]) is not int
         or parameters["freshness_days"] <= 0
@@ -511,4 +518,15 @@ def _configured_spec(spec, config):
         derivative_channels(spec.required_columns)
     ) <= set(actual["max_age_ms"]):
         raise ValueError("data_operation_max_age_ms_invalid")
+    if spec.market_id == "a_share" and spec.data_id == "price_volume_facts":
+        from quant_research_platform.research.factors.engine import factor_lookback_bars
+        from quant_research_platform.research.protocols.a_share import factor_catalog
+
+        selected = tuple(
+            definition
+            for definition in factor_catalog().list()
+            if definition.output_column in spec.required_columns
+        )
+        if not factor_lookback_bars(selected):
+            spec = replace(spec, optional_source_input_data_ids=("trading_calendar",))
     return replace(spec, parameters_json=json.dumps(actual))

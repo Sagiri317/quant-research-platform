@@ -64,7 +64,7 @@ def select_best_validation_trial(
     validation_metric_columns: Collection[str],
     test_metric_columns: Collection[str],
     tie_break_order: tuple[str, ...] | None = None,
-) -> str:
+) -> str | None:
     """Select the best trial using a validation metric."""
     validate_trial_metric_columns(
         selection_metric=selection_metric,
@@ -103,6 +103,8 @@ def select_best_validation_trial(
         str(value) for value in selected_trials[trial_id_column]
     ):
         raise ValueError("trial_tie_break_order_mismatch")
+    if not defined.any():
+        return None
     order = {value: index for index, value in enumerate(ordered_ids)}
     ordered = selected_trials.assign(
         _undefined=~defined,
@@ -204,6 +206,9 @@ def _cross_sectional_metric_summary(
     }
     row_count = 0
     squared_errors = _ScaledSquareAccumulator()
+    date_errors = _ScaledSquareAccumulator()
+    date_count = 0
+    date_rows = 0
     mse_defined = True
     current_timestamp: int | None = None
     timestamp_state: _TimestampMetricState | None = None
@@ -212,6 +217,10 @@ def _cross_sectional_metric_summary(
         timestamp_ns = int(timestamp_ns) if validation_axis == "cross_sectional" else 0
         if current_timestamp != timestamp_ns:
             if timestamp_state is not None:
+                squared_errors.add(date_errors.root_mean_square(date_rows))
+                date_count += 1
+                date_errors = _ScaledSquareAccumulator()
+                date_rows = 0
                 row_count += timestamp_state.ic.count
                 _add_correlation_aggregate(stats, "ic", timestamp_state.ic.result()[0])
                 _add_correlation_aggregate(
@@ -237,16 +246,19 @@ def _cross_sectional_metric_summary(
         timestamp_state.ic.update(label, prediction)
         if validation_axis == "cross_sectional":
             timestamp_state.rank.update(float(label_rank), float(prediction_rank))
+        date_rows += 1
         if mse_defined:
-            squared_errors.add(residual)
+            date_errors.add(residual)
     if timestamp_state is not None:
+        squared_errors.add(date_errors.root_mean_square(date_rows))
+        date_count += 1
         row_count += timestamp_state.ic.count
         _add_correlation_aggregate(stats, "ic", timestamp_state.ic.result()[0])
         _add_correlation_aggregate(stats, "rankic", timestamp_state.rank.result()[0])
     mse = None
     if mse_defined:
         try:
-            mse = squared_errors.result(row_count)
+            mse = squared_errors.result(date_count)
         except ValueError as exc:
             if str(exc) != "model_selection_mse_unrepresentable":
                 raise
@@ -315,6 +327,9 @@ class _ScaledSquareAccumulator:
             self.scale = magnitude
             return
         self.scaled_sum += (magnitude / self.scale) ** 2
+
+    def root_mean_square(self, count: int) -> float:
+        return float(self.scale * np.sqrt(self.scaled_sum / count)) if count else 0.0
 
     def result(self, count: int) -> float:
         if count <= 0 or self.scale == 0.0:
@@ -971,7 +986,12 @@ def _selection_decisions(value):
             }
         )
     if not winners:
-        raise ValueError("selection_has_no_completed_candidate")
+        return {
+            "family_tie_break_order": family_order,
+            "families": families,
+            "selected_family_id": None,
+            "selected_model_id": None,
+        }
     selected_family = select_best_validation_trial(
         pd.DataFrame(winners),
         trial_id_column="model_id",
@@ -1014,6 +1034,8 @@ def _validate_refit_scope(value):
     eligible_families = [
         item for item in value["families"] if item["selected_config_id"] is not None
     ]
+    if not eligible_families:
+        return {}, cutoff.isoformat()
     declared = value["refit_windows"]
     if type(declared) is list:
         declared = {item["family_id"]: declared for item in eligible_families}

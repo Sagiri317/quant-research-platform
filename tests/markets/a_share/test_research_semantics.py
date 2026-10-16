@@ -117,7 +117,7 @@ def test_a_share_model_target_zero_variance_does_not_invalidate_other_date() -> 
     frame["forward_return_20d_available_at"] = frame["timestamp"] + pd.offsets.BDay(21)
     result = _add_a_share_semantic_columns(frame, spec)
 
-    assert result.loc[result["timestamp"].eq("2024-01-02"), "model_target"].isna().all()
+    assert result.loc[result["timestamp"].eq("2024-01-02"), "model_target"].eq(0).all()
     assert result.loc[
         result["timestamp"].eq("2024-01-03"), "model_target"
     ].tolist() == pytest.approx([-1.0, 1.0])
@@ -308,7 +308,7 @@ def test_a_share_assembler_persists_only_eligible_sample_truth(
     assert {"scenario_universe", "can_enter", "can_exit"}.isdisjoint(result)
     assert result["eligible"].tolist() == [True, True, True]
     if constant:
-        assert result.model_target.isna().all()
+        assert result.model_target.eq(0).all()
     else:
         assert result["model_target"].iloc[:2].tolist() == pytest.approx([-1.0, 1.0])
         assert pd.isna(result.loc[2, "model_target"])

@@ -331,7 +331,7 @@ positive-denominator liquidity contribution such as Amihud = NaN  # 分母要求
 
 所有正式滚动窗口按完整市场交易日数计算，不压缩掉停牌交易日。
 
-信号日停牌或非正常交易股票不满足 eligible。
+停牌不自动排除研究域 `eligible`；因子各自核验所需报价与观察，买卖执行独立核验 `can_enter` / `can_exit`。
 
 #### 5.4.3 历史行业
 
@@ -567,18 +567,16 @@ CORE6/PV25/PV-expanded各6，fusion_nf_core为12，fusion_nf_expectations为16�
 
 `scenario universe` 是协议/组装内部概念，不与 `eligible` 并列持久化为第二真值。
 
-A 股基础信号资格：
+A 股基础研究范围（`eligible`）：
 
 ```text
 正式 A 股市场范围
-listed >= 252 market sessions  # 上市交易日数量门槛
-非 ST/PT
-信号日正常交易 / 未停牌
-满足有效且为正的流动性 / 价格要求
+listed >= minimum_listing_sessions  # 默认 252，本市场会话数
+默认排除 ST/*ST/PT，可分别配置 exclude_st / exclude_pt
 仅使用信号收盘时已知信息
 ```
 
-上市会话事实由同一个市场日历 owner 生成。`listing_age_trading_days` 仅在从上市日开始的市场归属有证据时保存精确年龄；首次行情的市场不能反填到上市日，未知年龄保持 NULL。`has_252_trading_sessions` 是 nullable boolean 原始资格事实：完整历史时准确判断门槛；初始历史未知但已证实归属区间累计达到 252 个合法市场会话时为 True；尚不能证明时为 NULL。迁市场按各段真实市场日历计数，不把无报价的开市会话压缩掉。它与 ST、交易状态、价格和流动性事实共同派生唯一 `eligible`，不是另一份样本过滤结果；所有研究和组合资格消费者继续使用统一资格 owner。首次已知归属之前的 PANEL 行保持未知市场和未知价格，不从未来借市场、补价格或默认可交易。
+上市会话事实由同一个市场日历 owner 生成。`listing_age_trading_days` 仅在从上市日开始的市场归属有证据时保存精确年龄；首次行情的市场不能反填到上市日，未知年龄保持 NULL。`has_252_trading_sessions` 是 nullable boolean 原始资格事实：完整历史时准确判断门槛；初始历史未知但已证实归属区间累计达到 252 个合法市场会话时为 True；尚不能证明时为 NULL。迁市场按各段真实市场日历计数，不把无报价的开市会话压缩掉。它与研究市场范围及所选 ST/PT 排除事实共同派生 `eligible`，不是另一份样本过滤结果。未知必要事实不肯定为合格，原始 nullable 事实与已知排除继续区分。停牌、价格或成交量缺失不自动改变研究范围；因子有效域与执行许可由各自消费者核验。独立 `assemble` 可设置 `minimum_listing_sessions`（默认 252）、`exclude_st` / `exclude_pt`（默认 true）；改变年龄阈值时使用已证明的 `listing_age_trading_days`，设为 0 时不要求年龄事实。关闭 ST/PT 排除时不要求对应事实，解析参数保存到原生 spec 与 metadata。首次已知归属之前的 PANEL 行保持未知市场和未知价格，不从未来借市场、补价格或默认可交易。
 
 非金融融合场景还要求：
 
@@ -602,14 +600,16 @@ can_exit
 
 `t+1 市场交易日复权开盘入场是否合法`
 
-因此信号 `t` 的标签检查 `can_enter[t]`，不得再次位移到 `t+1`。
+组合消费信号 `t` 的 `can_enter[t]`，不得再次位移到 `t+1`。
 
-执行掩码不得持久化为面向模型的研究特征/上下文列；标签或组合在需要时，通过明确连接使用执行产物。
+执行掩码不得持久化为面向模型的研究特征/上下文列；组合通过明确连接使用执行产物。
+普通 forward-return 与 ON/ID endpoint 标签只依赖 PANEL 价格及端点观测事实，不依赖 execution_mask。
+涨跌停、买卖许可与组合清算规则不决定固定期限价格标签是否有效。
 
-QRP 训练标签采用唯一的 execution-aware realized label：构造信号 t 的标签时，
-该定义必需的未来入场执行事实决定标签有效性；与该期限无关的更晚事实不得
-反向改写已成熟或已发布的历史 model_target。未来执行事实不得进入特征、eligible
-或拟合截止时尚未成熟的训练样本。不存在 execution-unaware 的备用 target。
+QRP 训练标签采用唯一的固定期限价格收益定义：两端必须是真实正常交易观测，
+即 `filling_flag=0`、`is_trading=True` 且复权开盘价有限、为正。与该期限无关的更晚事实
+不得反向改写已成熟或已发布的历史 model_target。未来执行事实不得进入特征或 eligible，
+尚未成熟的标签不得进入拟合截止时的训练样本。
 
 执行 owner 使用 nullable boolean：True/False 是已知允许/禁止，NULL 是 unknown。
 缺失交易状态、涨跌停或必要价格不得被肯定化；已确认停牌为禁止，尾部缺少
@@ -949,6 +949,22 @@ FULL_Exp = FULL Fusion features + 4 expectations  # 完整融合特征加预期�
 
 已处理事实存储经济原始因子、经济标签与市场事实；只有确定 `eligible` 后，才创建场景专属规范特征。
 
+`assemble.feature_groups` 整批选择 `raw`（原始因子）、`processed`（当前配方处理后）、
+`pre_neutral`（同样裁剪及中心/缩放，但跳过行业/规模中性化）；可同时选择三组。
+有配方时默认 `["raw", "processed"]`，无配方时默认 `["raw"]`。
+每组覆盖本次显式选择的全部 `factor_columns`，不提供逐因子处理开关。
+`processed` 列名为 `feature_<factor>`；`pre_neutral` 为 `feature_pre_neutral_<factor>`，
+各自有对应 `feature_missing_…` 与 `feature_observed_…` 伴随列。
+只输出处理组时，原始因子只作为计算依赖读取，不混入输出因子列；上游原始产物不变。
+组共用裁剪结果，各列/组仍独立决定有效域；只选择 `pre_neutral` 不要求行业/规模上下文。
+原生配方保存 `output_groups`，操作参数保存 `feature_groups` 与实际 `input_columns`；
+下游通过显式列选择使用其中一组或多组。列名冲突明确拒绝。
+显式 `feature_groups` 也约束已物化 FEATURE 列的复用，按其原生配方来源识别版本；
+无版本来源的 FEATURE 列归为 `processed`。例如 `["raw"]` 不会自动夹带已处理列。
+显式 `feature_columns` 与组选择冲突时拒绝；不设置 `feature_groups` 时保留既有默认复用。
+省略配方时，已有完整输出组的因子默认直接复用，只为尚无该组输出的新增因子计算；
+显式指定配方/变换参数而产生同名输出时仍拒绝。`feature_recipe=null` 可明确关闭新特征生成。
+
 `assemble.feature_recipe=null` 保留原始因子；`label_columns=[]` 可生成仅供预测的无标签数据集。
 选用配方后，`feature_transform` 可分别设置 `clip`、`industry_neutralize`、`size_neutralize`、
 `center`、`scale`、`impute_missing`。`clip` 支持 `none`、`mad`、`quantile_1_99`；
@@ -1029,11 +1045,11 @@ observed canonical values = 0  # 零方差时已观测特征的规范值
 记录诊断
 ```
 
-`producer_diagnostics.canonical_features.zero_variance_by_factor` 按因子累计中性化后
+`producer_diagnostics.canonical_features.zero_variance_by_factor` 按输出组后缀累计处理后
 至少两条有效观测且总体方差为零的日期截面数；诊断在完整日期截面上计算，跨存储分块累计，
 与规范特征一同由原生 writer 发布，并由 reader 读取。
 
-目标零方差或有效样本数不足时，该日期无效。
+目标有效值至少两个的常数截面输出零；原 NULL 保持 NULL，单有效值与全缺截面无效。
 
 zscore 之后不再裁剪。
 
@@ -1101,7 +1117,9 @@ A 股经济时间线：
 
 `1d / 120d`
 
-若信号行 `can_enter` 为假或 unknown，所有依赖该入场的标签均缺失。
+标签两端各要求 `filling_flag=0`、`is_trading=True` 且 `adj_open` 有限、为正；
+端点停牌、填充或必要事实未知时标签缺失，即使存在前值填充价格也不能视作真实端点。
+`can_enter`、`can_exit` 与涨跌停限制不影响价格标签资格。
 
 卖出限制不延长固定标签期限；标签仍定义固定期限经济收益，而不是模拟清算结果。
 
@@ -1111,17 +1129,19 @@ A 股经济时间线：
 
 signal time 为 t 收盘；entry/exit event time 分别为 t+1/t+1+h 开盘。
 对有限正价格端点，收益按`(exit-entry)/entry`局部稳定计算，避免先求比值再减1合并接近零的可分辨收益；
-普通、常量及非法端点的资格规则保持，最终不可表示值仍缺失。该计算由标签生产者唯一实现，不改标签期限或成熟时点。
-日线一字板判定使用入场日 OHLC，information availability 为入场日收盘；
-标签 maturity 为所需执行事实与两端价格均已可得的离场交易日开盘。
-行的日频日期使用 session 标签；`available_at` 则持久化离场日真实开盘时刻：
-Asia/Shanghai 09:30 规范到 UTC（现代 A 股为 01:30），不使用该日零点。
-普通 forward-return 与 ON/ID 共用一个交易事件时钟。拟合的 `fit_cutoff` 及
+两端满足上述观测资格时按此计算；最终不可表示值仍缺失。该计算由标签生产者唯一实现，不改标签期限或经济开盘端点。
+日线一字板判定使用入场日 OHLC，属于执行事实，不参与标签资格或成熟判断；
+经济价格事件仍为入场/离场日 Asia/Shanghai 09:30 开盘；当前 wd 复权价格口径的
+调整来源依赖当日收盘，因此标签不能在离场开盘时被视作已可用。
+行的日频日期使用 session 标签；`available_at` 持久化固定离场交易日的收盘时刻：
+Asia/Shanghai 15:00 规范到 UTC（现代 A 股为 07:00），不使用该日零点或 09:30。
+这是日频研究的 EOD 可用性约定，不声称已核实供应商盘中实际发布时点。
+普通 forward-return 与 ON/ID 分别记录经济事件及所依赖价格来源的可用时钟。拟合的 `fit_cutoff` 及
 `evaluate`/`score` 的 `cutoff` 按精确时点解释，日期值表示 UTC 零点，不自动扩到日末；
-离场日 00:30 的拟合和评价不能使用该标签，01:30 才成熟。
+离场日 UTC 01:30 或 06:59 的拟合和评价不能使用该标签，07:00 才达到成熟门槛。
 `statistics-factors` 数据路径和 `statistics-model` 的 `label_cutoff` 沿用窗口终点规则：
 日期值包含当日全天，精确时间戳按给定时点；省略时使用所选窗口终点。不能混用两类截止字段。
-不把执行事实的发生时间当成信号日已知信息。
+不把未来端点价格或执行事实当成信号日已知信息。
 
 #### 模型目标
 
@@ -1134,11 +1154,23 @@ Asia/Shanghai 09:30 规范到 UTC（现代 A 股为 01:30），不使用该日�
 
 一行缺失只影响该行，不得污染整个横截面。
 
-零方差 / 有效样本不足 -> 该日期目标无效。
+默认 `target_transform="date_zscore"`，总体标准差分母为有效样本数；
+至少两个有效值的常数截面为零，原 NULL 保留；单有效或全缺截面为 NULL。
+`target_clip` 默认 `none`，可独立选择 `mad` 或 `quantile_1_99`，复用特征裁剪数学。
+可选 `raw` 输出原始收益（允许单有效值）；`percentile` 使用平均并列名次除以有效数，
+至少两个有效值，例如两个相同值均为 0.75；`industry_size_residual` 为等权行业截距与
+`log_total_market_cap` 回归残差，保留收益单位，不再 zscore。
+残差目标只使用信号日同一行的历史行业/规模事实；行业标准与代码共同标识行业，
+缺少事实的行不参与裁剪及回归，不用未来行业/规模回填。沿用现有中性化样本门槛
+`n >= max(100, 5p)` 及可识别性检查。其余模式不要求这些专用输入。
+原始 `forward_return_20d` 始终保留且不缩尾/改写，所有标签均不插补。
+目标模式、裁剪参数和实际输入列写入原生元数据；raw/残差目标单位为 `decimal_return`，
+zscore/percentile 为 `dimensionless`。
 
-只存在一份 `model_target` 真值。其 `model_target_available_at` 是该截面真正参与规范化的
+每份数据集按所选模式只生成一列 `model_target`。其 `model_target_available_at` 是该截面真正参与规范化的
 合格非缺失标签成熟时点的最大值；没有有效目标的行保持 NaT。训练与验证消费该独立成熟列。
-逐资产原始 `forward_return_20d_available_at` 保持自身端点时间，不因其他市场较晚成熟而改写。
+无裁剪的 `raw` 目标不参与截面运算，直接沿用自身标签时钟；开启裁剪时仍采用参与截面的最晚时钟。
+逐资产原始 `forward_return_20d_available_at` 保持自身价格来源可用时点，不因其他市场较晚成熟而改写。
 标签端点及 execution mask 的分批 lookahead 共用正式 PANEL 的完整资产会话域：包含开市未知报价
 与停牌占位，排除已知闭市，遵守历史市场迁移，不按稀疏原始报价压缩期限。
 
@@ -1728,7 +1760,7 @@ n >= max(100, 5p)
 history = 504 sessions  # 因子协方差历史长度
 EWMA half-life = 126  # 因子协方差指数加权半衰期
 20% 对角收缩
->= 252 个完整日期
+完整 504 会话跨度，默认 >= ceil(0.75 * 504) = 378 个 fresh 拟合日期
 ```
 
 特异方差：
@@ -1736,10 +1768,10 @@ EWMA half-life = 126  # 因子协方差指数加权半衰期
 ```text
 trailing residual^2 = 252 sessions  # 特异方差使用的残差平方历史
 EWMA half-life = 63  # 特异方差指数加权半衰期
->= 126 个有效观测
+完整 252 个自身市场会话跨度，默认 >= ceil(0.75 * 252) = 189 个 fresh 残差观测
 ```
 
-不进行成对删除。
+不进行成对删除。窗口缺失日期仍占会话，不能只累计有效日期后压缩衰减或提前发布。已确认停牌的零收益可参与数值回归及残差估计，但不增加 fresh 计数；未知收益不补零。因子日期只有满足回归最低 fresh 截面样本数时才计 fresh；特异风险按资产自身市场会话衰减，已知闭市不推进该资产时钟。`min_fresh_fraction` 默认 0.75；显式 `minimum_factor_dates` / `minimum_specific_dates` 可覆盖最低 fresh 数，但不能跳过完整窗口跨度。
 
 协方差必须有限、对称且为 PSD。
 
@@ -1797,7 +1829,8 @@ ADV participation <= configured cap  # 参与率服从配置上限
 ```
 
 Alpha 或风险不足时执行已定义的仅基准分支，这是合法协议结果。
-求解器不可行、数值失败或独立解后验证失败，均是正式目标 `FAILED`。
+可证明的预算、换手、容量或冻结持仓约束不可行，记录本次调仓 `SKIPPED`，
+继续原持仓记账；通用求解器失败、数值失败及无法归因为经济约束的解后验证失败仍报错。
 
 可投资集合：
 
@@ -1806,29 +1839,33 @@ Alpha 或风险不足时执行已定义的仅基准分支，这是合法协议�
 outside-index target = 0  # 指数外目标权重
 金融成分股固定在基准，active=0
 非金融成分股允许倾斜
-缺少合法预测/风险/PIT 上下文 -> active=0，不删除
+缺预测旧仓保留且不加仓；风险/PIT缺失按其实际依赖标未定义，不编造零风险
 ```
 
 首次 OOS 增强持仓：
 
 ```text
-历史基准权重
-cash = 0
+初始股票持仓 = 0
+cash = initial_capital
 ```
 
-首次主动再平衡正常计入成本。
+首次实际买入正常计入成本和容量，只豁免常规换手上限；未成交不消耗此建仓标记。
 
 ### 5.21 简单组合构建
 
 简单分位数等权/流通市值加权组合按 `top_quantile` 构建。
 `neutrality` 可选 `none`（默认）、`industry`、`size`、`industry_size`。
 选择中性化时，在完整合法流通市值基准域内，求与原始目标最接近的非负、总权重为 1 的目标，
-使所选行业权重及稳健 log 市值暴露与基准一致。规模暴露默认读取
+使所选行业权重及标准化稳健 log 市值暴露处于基准允许偏离带内。
+`industry_neutrality_limit=0.02` 为行业 ±2 个百分点，
+`size_neutrality_limit=0.2` 为 Size ±0.2 个标准化单位；显式 0 表示精确匹配。
+Size 顺序为 log、市值截面 MAD 缩尾、总体标准差标准化。规模暴露默认读取
 `size_cap_column="total_market_cap"`，可显式选择 `"float_market_cap"`；
 参考域及基准权重仍由原有流通市值确定，不随规模列切换。规模列缺失不改用另一列，
 也不删除缺失成员后重新归一化基准来声称全域规模中性。仅行业中性不依赖总市值。
-没有预测的合法基准成员仍可进入约束解，
-不能先裁掉它们再声称全域中性。约束不可行时明确失败，不静默降级或伪造协方差。
+基准域不随预测缺失缩小；已有缺预测持仓不加仓，未持有的缺预测成员不新买入。
+不能先裁掉基准成员再声称全域中性。经济约束不可行时跳过本次调仓并记录原因，
+继续实际持仓、权益和估值；数值失败单独报错，不静默降级或伪造协方差。
 这些简单组合不额外启用增强组合的目标换手、跟踪误差和主动权重边界。
 非调仓日仅延续已知持仓时，行业或规模上下文缺失不阻断已知数量与现金记账；
 相应目标/实际敞口记录 `UNDEFINED` 和具体原因，不伪造基准或零敞口。
@@ -1836,12 +1873,15 @@ cash = 0
 
 账本分开记录原始目标、约束目标、基准和实际成交权重及暴露。未来执行限制或价格变化会使实际
 组合偏离目标；未知暴露、域外持仓及非正 NAV 明确记录未定义原因与可知的排除权重，不能把
-部分已知暴露当作完整结果。执行、现金、ADV 与成本共用实际经济账本。
+部分已知暴露当作完整结果。中性暴露以股票腿为分母，现金单列；
+基准未知行业权重保留，不将已知 95% 重新归一为 100%。
+执行、现金、ADV 与成本共用实际经济账本。
 
 固定预测的持仓对照可选择 `quantile_equal_weight_half_step`：换仓日先由原简单组合 owner
 生成完整等权目标，再与仍合格且有有效预测的当前持仓权重各取一半。首次从现金开始只建半仓；
 剩余现金不重归一化；这是 `neutrality=none` 时的最终目标。启用中性化时，该半仓权重
-是原始目标，随后投影为总权重 1 的约束目标。失去资格或预测的旧仓目标归零，实际卖出仍遵守原交易限制。
+是原始目标，随后投影为总权重 1 的约束目标。失去资格的旧仓按独立退出规则处理；
+仅预测缺失的旧仓保留且不加仓，实际卖出仍遵守原交易限制。
 该构造在本次组合参数中记录，可显式选用原模型和预测；报告同时比较毛/净收益、风险、现金和换手，
 不能把敞口差异导致的收益变化只归因为交易成本。该固定规则不根据回测收益调节。
 
@@ -2184,11 +2224,11 @@ Fundamental19 一个家族
 
 主方案：
 
-`Benjamini-Hochberg q=5%`
-
-稳健性方案：
-
 `Benjamini-Yekutieli q=5%`
+
+辅助方案：
+
+`Benjamini-Hochberg q=5%`
 
 FDR 家族不按结果删减成员；其他显式因子选择同样使用其完整预注册家族。
 BH/BY发现性FDR仅validation；test只保留raw OOS/HAC，FDR记NOT_APPLICABLE。
@@ -2217,7 +2257,7 @@ FDR 永不动态改变 CORE/FULL 因子成员。
 
 ```text
 stationary block length = 20  # 平稳自助法区块长度
-reps = 10000
+reps = 2000  # 默认；可显式配置为10000等其他次数
 alpha = 5%
 派生固定种子
 ```
@@ -2307,8 +2347,16 @@ ADV 范围/参与率
 
 `42`
 
-研究者按模型、折或季度明确选择确定性子种子，并通过 `model.random_seed` 传给每次拟合；
-拟合要求显式种子，不能假定单操作入口会从全研究配置自动派生。
+配置解析时，省略 `model.random_seed` 默认使用 42；显式合法种子原样传给模型后端，
+不因模型名、折或季度被隐式重派生。需要独立子种子时，由研究者明确选择并传入。
+解释的 selection、background、permutation 各自的 `root_seed`，以及需要随机分析的
+模型统计 `root_seed`，省略时同样规范化为 42；显式值覆盖默认，显式 null 不能当作省略。
+非随机评价不因此新增随机参数。
+
+解释日期、展示行、背景及置换使用既有确定性派生 owner 和各自稳定用途键；
+不修改进程全局随机状态，也不以执行顺序或 worker 身份派生。
+匹配比较使用相同根种子、数据域、样本资格和抽样/置换配置；种子相同本身不保证资格一致。
+paired group 比较继续使用其声明的 bootstrap 种子。
 
 不得使用 Python 进程随机化的 `hash()`。
 
@@ -2358,7 +2406,7 @@ ADV 范围/参与率
 
 ## 独立 ON/ID 标签诊断
 
-使用现有 `prepare`，选择 `data_id=on_id_decomposition`，输入 `market_panel_1d` 与 `execution_mask`。
+使用现有 `prepare`，选择 `data_id=on_id_decomposition`，输入 `market_panel_1d` 和显式 `trading_calendar`。
 `parameters.horizons` 默认 `[20]`，可从 1/5/10/20/60/120 日中显式选择；一次结果可供多个研究配置使用。
 端点复用现有 forward-return 数学 owner，不要求先提供另一份 forward_returns 文件。
 
@@ -2367,10 +2415,11 @@ ADV 范围/参与率
 - pre-entry：t 收盘到 t+1 开盘的对数收益，独立列出，不属于持有期收益。
 - ID：t+1 至 t+h 的 h 个开盘到收盘对数收益之和。
 - ON：上述各收盘到下一开盘的 h 个对数收益之和。
-- endpoint：t+1 开盘到 t+h+1 开盘的简单收益，沿用原 can_enter 资格。
+- endpoint：t+1 开盘到 t+h+1 开盘的简单收益，两端要求 `filling_flag=0`、`is_trading=True` 且有限正 `adj_open`。
 
 `expm1(ID+ON)` 与 endpoint 在科学数值误差内对账；这不要求独立浮点运算逐位一致。
-pre-entry、ID、ON 不因 can_enter=False 自动抹掉；完整分解 qualified 同时要求合法端点及两个分量。
+pre-entry、ID、ON 与 endpoint 均不由 can_enter/can_exit 决定；完整分解 qualified 同时要求合法端点及两个分量。
+ON/ID 内部已确认停牌沿用既有估值/零路径约定，不因此将停牌端点认作真实成交价格。
 内部 close 缺失可以令分解未知而端点仍合法；缺退出 open 不能抹掉已经完整的 ID。
 非正或非有限价格只影响真实依赖它的组件，不补零、不未来填充，不阻塞其他合法资产/日期。
 
@@ -2378,18 +2427,28 @@ pre-entry、ID、ON 不因 can_enter=False 自动抹掉；完整分解 qualified
 `on_id_holding_intraday_log_return_{h}d`、`on_id_holding_overnight_log_return_{h}d`、`on_id_endpoint_return_{h}d`。
 每个值有自己的 `_available_at` 和 `_reason`，另存分解 qualified 与原因。
 数值使用 LABEL role，DataSpec 明确成熟映射；对数分量单位为 `log_return`，端点为 `decimal_return`。
-新成熟时点按 Asia/Shanghai 开盘09:30、收盘15:00规范到UTC：pre-entry为t+1开盘，ID为t+h收盘，
-ON/endpoint为t+h+1开盘；原 forward-return 与 endpoint 共用相同的真实开盘成熟时点。
-这些是收益事件时钟，不冒称供应商历史发布时点已经独立验证。
+经济收益端点仍按上述开盘/收盘事件定义；wd 复权价格的调整来源依赖当日收盘，
+故可用时点按 Asia/Shanghai 15:00 收盘规范到 UTC（现代 A 股为 07:00）：
+pre-entry 为 t+1 收盘，ID 为 t+h 收盘，ON/endpoint 为 t+h+1 收盘。
+普通 forward-return 与 endpoint 共用退出会话收盘的成熟门槛，经济开盘端点和期限不变。
+这是日频研究 EOD 可用性约定，区别于 09:30 的经济开盘事件；不冒称供应商历史实际发布时点已经独立验证。
 
-生产使用真实本资产会话轴和上市生命周期，停牌/未知报价不能压缩期限，已知休市不计会话；不跨重上市连接。
-原生输入的文件、年份、日期和行筛选仍以完整声明 PANEL 键域建轴，将未选价格保留为未知。
+生产使用显式本市场日历及 PANEL 已知市场归属、上市生命周期补齐计算轴，停牌/未知报价不能压缩期限，已知休市不计会话；不跨重上市连接。
+内部未知报价不移动固定端点，只影响依赖该报价的分量；普通端点收益不要求内部路径完整。
+输入选择器排除的报价和 PANEL 原件内部整日缺行均保留真实日历会话，未知报价不补价；公开输出仍限制在所请求的观察键。缺少必要日历或已知市场区间的 O/C 日期证据是输入错误，与局部缺行情区分。市场归属或上市生命周期未知只使该资产当前区间不可用；不猜测归属，后续有证据区间重新积累完整窗口。
+原生输入的文件、年份、日期和行筛选保留完整声明的市场/生命周期事实，由显式日历补齐计算轴，将未选价格保留为未知。
 输出仅保留选中 PANEL 信号键与请求输出窗口的交集，不把用于确定时钟的未选行重新发布。
-裸目录的成员列表不能独立证明完整会话域，明确拒绝；裸单文件按调用者声明的完整 PANEL 域使用，
-其行/时间筛选从未筛文件保留键轴。这不是对供应商全市场日历完整性的独立证明。
+裸目录的成员列表不能独立证明完整资产/生命周期域，明确拒绝；裸单文件按调用者声明的 PANEL 资产域使用，
+其行/时间筛选从未筛文件保留市场/生命周期事实，交易日期仍要求显式日历证据。
 
 输出说明沿 selected-label 的 `producer_diagnostics.label_semantics` 经 assemble 和 evaluate 保留。
 供应商复权 open/close 的代数恒等式不等于独立公司行动验证，不含费用、仓位、强制兑付或策略净利润。
 信号条件研究可用现有 assemble/evaluate 评价这些不同标签及其真实覆盖，不能把分组标签均值改名为持仓 PnL。
 
 ON/ID 准备表只通过 parameters.horizons 选择期限，各期限的分量整组输出，不接受 label_columns、factor_columns 或 base_panel。
+
+### 消费独立 PANEL 的计算时钟与 fresh 参数
+
+`price_volume_facts`、`market_model_factors`、`forward_returns`、`on_id_decomposition`、`execution_mask` 显式消费 `trading_calendar`；PANEL 的 `market_type`、`listing_date` 与已知 `delisting_date` 界定自身市场和生命周期。日历只填计算键，不编造行情或恢复被选择器排除的公开输出。
+
+`price_volume_facts` 与 `market_model_factors` 接受 `parameters.min_fresh_fraction`，默认 0.75，可显式指定 (0,1] 并保存实际参数。适用统计窗口须走满名义会话跨度，达到 ceil(fraction × w) fresh；`filling_flag=0` 才计 fresh，停牌数值和未知报价按各计算公式区别处理。端点、路径与极值不自动套用部分窗口规则。

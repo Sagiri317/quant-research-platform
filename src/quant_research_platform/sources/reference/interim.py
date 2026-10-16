@@ -487,7 +487,7 @@ def _equity_events_spec():
 
 
 def _equity_source(reference_root):
-    """Admit explicit official equity facts and their evidenced adjusted-unit basis."""
+    """Admit official facts stated per actual share and lifecycle."""
     root = Path(reference_root) / A_SHARE_EQUITY_EVENTS_DATA_ID
     path = root / "metadata.json"
     dataset_file_identity(path)
@@ -535,19 +535,13 @@ def _equity_source(reference_root):
         "observed_at",
         "currency",
         "amount_per_share",
-        "shares_per_old_unit",
         "remaining_old_units_per_old_unit",
         "successor_asset_id",
         "successor_listing_date",
         "successor_shares_per_old_share",
-        "successor_shares_per_unit",
-        "unit_basis_date",
-        "successor_unit_basis_date",
         "source_url",
         "document_file",
         "source_locator",
-        "unit_document_file",
-        "unit_source_locator",
     }
 
     def number(value, *, positive=False):
@@ -571,7 +565,6 @@ def _equity_source(reference_root):
                 "kind",
                 "source_url",
                 "source_locator",
-                "unit_source_locator",
             )
         ):
             raise ValueError("equity_event_row_invalid")
@@ -582,7 +575,8 @@ def _equity_source(reference_root):
             raise ValueError("equity_event_asset_invalid")
         kind = event["kind"]
         if (
-            kind not in {"quote", "cash_recovery", "cancel", "conversion"}
+            kind
+            not in {"quote", "cash_recovery", "cancel", "conversion", "share_change"}
             or event["currency"] != "CNY"
         ):
             raise ValueError("equity_event_kind_or_currency_invalid")
@@ -604,7 +598,7 @@ def _equity_source(reference_root):
             )
         ):
             raise ValueError("equity_event_source_invalid")
-        for key in ("document_file", "unit_document_file"):
+        for key in ("document_file",):
             if type(event[key]) is not str or event[key] not in members:
                 raise ValueError("equity_event_member_invalid")
         try:
@@ -620,23 +614,15 @@ def _equity_source(reference_root):
                 observed.tz_convert("Asia/Shanghai").tz_localize(None).normalize()
             )
             observed = observed.tz_convert("UTC").tz_localize(None)
-            unit_date = pd.Timestamp(_snapshot_date(event["unit_basis_date"]))
-            if (
-                not listed
-                <= unit_date
-                <= max(effective, published + pd.Timedelta(days=1))
-            ):
-                raise ValueError("equity_event_unit_basis_invalid")
             if listed > effective or observed_market_date < published:
                 raise ValueError("invalid_date_order")
         except (TypeError, ValueError) as exc:
             raise ValueError("equity_event_date_invalid") from exc
-        old_shares = number(event["shares_per_old_unit"], positive=True)
         remaining = number(event["remaining_old_units_per_old_unit"])
         value = None
         if kind in {"quote", "cash_recovery"}:
             amount = number(event["amount_per_share"], positive=kind == "quote")
-            value = Fraction(amount) * Fraction(old_shares)
+            value = amount
         elif event["amount_per_share"] is not None:
             raise ValueError("equity_event_kind_fields_invalid")
         if (kind == "quote" and remaining != 1) or (
@@ -644,13 +630,10 @@ def _equity_source(reference_root):
         ):
             raise ValueError("equity_event_kind_fields_invalid")
         successor, successor_listing, ratio = None, pd.NaT, None
-        successor_unit_date, basis = pd.NaT, None
         successor_keys = (
             "successor_asset_id",
             "successor_listing_date",
             "successor_shares_per_old_share",
-            "successor_shares_per_unit",
-            "successor_unit_basis_date",
         )
         if kind == "conversion":
             successor = event["successor_asset_id"]
@@ -667,17 +650,7 @@ def _equity_source(reference_root):
             ):
                 raise ValueError("equity_event_successor_invalid")
             shares = number(event["successor_shares_per_old_share"], positive=True)
-            basis = number(event["successor_shares_per_unit"], positive=True)
-            successor_unit_date = pd.Timestamp(
-                _snapshot_date(event["successor_unit_basis_date"])
-            )
-            if (
-                not successor_listing
-                <= successor_unit_date
-                <= max(effective, published + pd.Timedelta(days=1))
-            ):
-                raise ValueError("equity_event_unit_basis_invalid")
-            ratio = Fraction(shares) * Fraction(old_shares) / Fraction(basis)
+            ratio = shares
         elif any(event[key] is not None for key in successor_keys):
             raise ValueError("equity_event_kind_fields_invalid")
         available = published + pd.Timedelta(days=1)
@@ -685,8 +658,7 @@ def _equity_source(reference_root):
             {
                 "event": event,
                 "files": {
-                    name: metadata["files"][name]
-                    for name in (event["document_file"], event["unit_document_file"])
+                    name: metadata["files"][name] for name in (event["document_file"],)
                 },
             }
         )
@@ -707,11 +679,6 @@ def _equity_source(reference_root):
                 successor,
                 successor_listing,
                 None if ratio is None else encode_exact_numeric(ratio),
-                encode_exact_numeric(old_shares),
-                unit_date,
-                None if basis is None else encode_exact_numeric(basis),
-                successor_unit_date,
-                event["unit_source_locator"],
                 evidence,
                 event["source_locator"],
             )
@@ -724,8 +691,6 @@ def _equity_source(reference_root):
         "available_at",
         "observed_at",
         "successor_listing_date",
-        "unit_basis_date",
-        "successor_unit_basis_date",
     }
     for column in EQUITY_EVENT_COLUMNS:
         frame[column] = (

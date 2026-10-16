@@ -647,7 +647,8 @@ def test_native_entirely_absent_peer_keeps_own_real_research_and_reports_univers
             random_seed=1,
         ),
     )
-    assert result.result.metadata["rows_after_input_label_dropna"] == 17
+    # The first return is unavailable, but its observed spread remains usable.
+    assert result.result.metadata["rows_after_input_label_dropna"] == 18
     btc_only = prepare(
         {
             "market_id": "crypto",

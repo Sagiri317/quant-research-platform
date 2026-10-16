@@ -243,9 +243,28 @@ RAW_TABLE_CONTRACTS = MappingProxyType(
             table_code="BDT_Trdchg",
             required_columns=("Symbol", "Chgtype", "Annoudt", "Execudt"),
         ),
+        "corporate_actions": _RawTableContract(
+            table_code="TRDNEW_Cptl",
+            required_columns=(
+                "Stkcd",
+                "Disttyp",
+                "Exdistdt",
+                "Markettype",
+                "Annodt",
+                "Paydt",
+                "Amount",
+                "Roprc",
+            ),
+        ),
         "equity_changes": _RawTableContract(
             table_code="FN_FN046",
-            required_columns=("Stkcd", "Accper", "Typrep"),
+            required_columns=(
+                "Stkcd",
+                "Accper",
+                "Typrep",
+                "DataSources",
+                "SubjectCode",
+            ),
         ),
         "analyst_forecast": _RawTableContract(
             table_code="AF_Forecast",
@@ -453,10 +472,22 @@ COLUMN_MAPPINGS = {
         "Annoudt": "announcement_date",
         "Execudt": "effective_date",
     },
+    "corporate_actions": {
+        "Stkcd": "stock_code",
+        "Disttyp": "kind",
+        "Exdistdt": "timestamp",
+        "Markettype": "market_type",
+        "Annodt": "announcement_date",
+        "Paydt": "settlement_date",
+        "Amount": "amount",
+        "Roprc": "subscription_price",
+    },
     "equity_changes": {
         "Stkcd": "stock_code",
         "Accper": "report_period",
         "Typrep": "report_type",
+        "DataSources": "data_source",
+        "SubjectCode": "subject_code",
     },
     "analyst_forecast": {
         "Stkcd": "stock_code",

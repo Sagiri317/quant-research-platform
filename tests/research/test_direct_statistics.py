@@ -54,8 +54,8 @@ def _factor_tables(tmp_path):
             "factor_fdr_families": {"family": ["factor"]},
             "fama_macbeth_core_factors": [],
             "hac_lag": 1,
-            "fdr_primary": "BH_5pct",
-            "fdr_robustness": "BY_5pct",
+            "fdr_primary": "BY_5pct",
+            "fdr_robustness": "BH_5pct",
         },
     }
     window = TimeWindow(dates[0].date(), dates[-1].date())
@@ -136,8 +136,9 @@ def test_statistics_preserves_descriptive_roles_and_rejects_empty_roles(tmp_path
 
 @pytest.mark.parametrize("bare", [False, True])
 @pytest.mark.parametrize("intraday", [False, True])
+@pytest.mark.parametrize("omit_fdr_defaults", [False, True])
 def test_public_factor_statistics_projects_custom_native_or_bare_input(
-    tmp_path, bare, intraday
+    tmp_path, bare, intraday, omit_fdr_defaults
 ):
     from quant_research_platform.contracts.data import DataSpec
     from quant_research_platform.research.statistics_production import factor_statistics
@@ -197,12 +198,17 @@ def test_public_factor_statistics_projects_custom_native_or_bare_input(
             "factor_fdr_families": {"family": ["factor"]},
             "fama_macbeth_core_factors": [],
             "hac_lag": 1,
-            "fdr_primary": "BH_5pct",
-            "fdr_robustness": "BY_5pct",
+            "fdr_primary": "BY_5pct",
+            "fdr_robustness": "BH_5pct",
         },
         **({"input_spec": declared} if bare else {}),
     }
+    if omit_fdr_defaults:
+        config["statistics"].pop("fdr_primary")
+        config["statistics"].pop("fdr_robustness")
     result = read_statistics_artifact(factor_statistics(config))
+    assert result.metadata["statistics"]["fdr_primary"] == "BY_5pct"
+    assert result.metadata["statistics"]["fdr_robustness"] == "BH_5pct"
     with result.table("factor_diagnostics.parquet") as actual:
         assert actual.factor_id.eq("factor").all()
         assert actual.input_date_count.eq(12).all()
@@ -259,8 +265,8 @@ def test_public_statistics_rejects_unused_nested_options_before_reading(
                 "factor_fdr_families": {"f": ["x"]},
                 "fama_macbeth_core_factors": [],
                 "hac_lag": 1,
-                "fdr_primary": "BH_5pct",
-                "fdr_robustness": "BY_5pct",
+                "fdr_primary": "BY_5pct",
+                "fdr_robustness": "BH_5pct",
                 "hac_lga": 2,
             },
         }

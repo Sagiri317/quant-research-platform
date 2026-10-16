@@ -158,6 +158,8 @@ class _EvaluationStreamingState:
                     if monotonicity_count == 0
                     else monotonicity_sum / monotonicity_count
                 )
+                if not math.isfinite(top) or not math.isfinite(bottom):
+                    return
                 _add_group_spread_observation(
                     self._spread,
                     str(signal),
@@ -185,6 +187,9 @@ class _EvaluationStreamingState:
                     previous_value = None
                     monotonicity_sum = 0.0
                     monotonicity_count = 0
+                if first_value is None:
+                    first_value = float(mean_label_value)
+                last_value = float(mean_label_value)
                 if pd.isna(mean_label_value):
                     previous_value = None
                     continue

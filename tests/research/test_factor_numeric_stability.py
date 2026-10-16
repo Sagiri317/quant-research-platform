@@ -14,6 +14,7 @@ from quant_research_platform.research.factors.price_volume.calculations import (
 )
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
 from tests.helpers.a_share_catalogs import scientific_catalogs
+from tests.helpers.a_share_sources import _calendar_input
 from tests.helpers.paths import StorageLayout
 
 
@@ -22,6 +23,11 @@ def _produce_factors(root, data_id, inputs, columns, window):
     layout = StorageLayout(root)
     input_paths = {}
     for input_id, frame in inputs.items():
+        if input_id == "market_panel_1d":
+            frame = frame.assign(filling_flag=0, market_type=1)
+            input_paths["trading_calendar"] = _calendar_input(
+                root / "calendar", {1: pd.DatetimeIndex(frame.timestamp.unique())}
+            )
         base = profile.processed.get(input_id)
         spec = replace(
             base,
@@ -94,12 +100,22 @@ def test_abnormal_turnover_exact_windows_persist_across_chunks(
         stop = dates.get_loc(row.timestamp) + 1
         values = sequences[row.asset_id][stop - 250 : stop]
         value = np.nan
-        if stop >= 250 and np.isfinite(values).all():
-            total = sum(map(Fraction, values))
+        if (
+            stop >= 250
+            and np.isfinite(values).sum() >= 188
+            and np.isfinite(values[-20:]).sum() >= 15
+        ):
+            observed = [value for value in values if np.isfinite(value)]
+            short = [value for value in values[-20:] if np.isfinite(value)]
+            total = sum(map(Fraction, observed))
             if total > 0:
-                value = float(250 * sum(map(Fraction, values[-20:])) / (20 * total))
+                value = float(
+                    len(observed) * sum(map(Fraction, short)) / (len(short) * total)
+                )
         expected.append(value)
-    np.testing.assert_array_equal(saved.abnormal_turnover_20_250, expected)
+    np.testing.assert_allclose(
+        saved.abnormal_turnover_20_250, expected, rtol=1e-15, atol=0
+    )
     assert saved.loc[
         saved.asset_id.eq("extreme") & saved.timestamp.eq(dates[249]),
         "abnormal_turnover_20_250",
@@ -306,3 +322,53 @@ def test_trend_efficiency_cancellation_survives_producer_persistence_and_rank_mo
     assert model.directions == (1.0,)
     scores = pd.Series(model.predict(training), index=training.asset_id)
     assert scores["small"] < scores["larger"]
+
+
+@pytest.mark.parametrize("case", ("ordinary", "adjacent", "extreme", "cancellation"))
+def test_partial_correlation_matches_independent_exact_binary_oracle(case):
+    from decimal import Decimal, localcontext
+
+    rng = np.random.default_rng(719)
+    x, y = rng.normal(size=40), rng.normal(size=40)
+    if case == "adjacent":
+        x = 1e200 + np.arange(40) * np.spacing(1e200)
+    elif case == "extreme":
+        x[0], x[1], y[2] = 1e308, -1e308, np.nextafter(0.0, 1.0)
+    elif case == "cancellation":
+        x = np.tile([1.0, 0.0, -1.0, 0.0], 10)
+        y = np.tile([1e-200, 1.0, 0.0, -1.0], 10)
+    x[5::8] = np.nan
+    y[7::8] = np.nan
+    frame = pd.DataFrame(
+        {
+            "asset_id": "a",
+            "timestamp": pd.date_range("2020-01-01", periods=40),
+            "period_return": x,
+            "amount": y,
+            "filling_flag": 0,
+        }
+    )
+    actual = calculate_price_volume_factors(
+        frame, factor_columns=("return_amount_corr_20d",)
+    )
+    for end in range(19, 40):
+        left, right = x[end - 19 : end + 1], y[end - 19 : end + 1]
+        paired = np.isfinite(left) & np.isfinite(right)
+        if paired.sum() < 15:
+            assert np.isnan(actual.return_amount_corr_20d.iloc[end])
+            continue
+        a, b = list(map(Fraction, left[paired])), list(map(Fraction, right[paired]))
+        n = len(a)
+        cov = n * sum(u * v for u, v in zip(a, b, strict=True)) - sum(a) * sum(b)
+        aa = n * sum(u * u for u in a) - sum(a) ** 2
+        bb = n * sum(v * v for v in b) - sum(b) ** 2
+        squared = cov * cov / (aa * bb)
+        with localcontext() as context:
+            context.prec = 90
+            expected = float(
+                (Decimal(squared.numerator) / Decimal(squared.denominator)).sqrt()
+            )
+        expected = -expected if cov < 0 else expected
+        assert actual.return_amount_corr_20d.iloc[end] == pytest.approx(
+            expected, rel=2e-14, abs=0
+        )

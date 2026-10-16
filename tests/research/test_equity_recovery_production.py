@@ -60,15 +60,12 @@ def recovered_batches(
                 successor_asset_id=successor,
                 successor_listing_date="2023-01-03",
                 successor_shares_per_old_share=0.5,
-                successor_shares_per_unit=4.0,
-                successor_unit_basis_date="2023-01-03",
             ),
             dict(
                 base,
                 event_id="successor-quote",
                 asset_id=successor,
                 listing_date="2023-01-03",
-                shares_per_old_unit=4.0,
                 amount_per_share=8.0,
             ),
         ]
@@ -124,9 +121,7 @@ def recovered_batches(
 )
 def test_actual_reference_evidence_reaches_retained_equity_ledger(tmp_path, kind):
     batches = recovered_batches(tmp_path, kind)
-    capital = PortfolioCapital(
-        "closed_market_portfolio", 100.0, "CNY", "adjusted_notional"
-    )
+    capital = PortfolioCapital("closed_market_portfolio", 100.0, "CNY", "cash_equity")
     previous = None
     economics = _LedgerEconomics(capital)
     for batch in batches:
@@ -147,14 +142,14 @@ def test_actual_reference_evidence_reaches_retained_equity_ledger(tmp_path, kind
     assert len(affected) == (0 if kind == "quote" else 1)
     assert len(cash) == (1 if kind.startswith("cash") else 0)
     if cash:
-        assert cash[0].amount == pytest.approx(float(initial * 6))
+        assert cash[0].amount == pytest.approx(float(initial * 3))
     if kind in {"conversion", "same_code_conversion"}:
-        assert affected[0].target_quantity == initial / 4
+        assert affected[0].target_quantity == initial / 2
         successor = "000001" if kind == "same_code_conversion" else "000002"
         assert any(
             row.asset_id == successor
-            and row.quantity == initial / 4
-            and row.mark_price == 32
+            and row.quantity == initial / 2
+            and row.mark_price == 8
             for batch in batches
             for row in batch.valuations
             if row.phase == "after"
@@ -194,8 +189,6 @@ def test_unvalued_successor_blocks_without_synthetic_quote(tmp_path):
                 successor_asset_id="000002",
                 successor_listing_date="2023-01-03",
                 successor_shares_per_old_share=0.5,
-                successor_shares_per_unit=4.0,
-                successor_unit_basis_date="2023-01-03",
             )
         ]
 
@@ -233,15 +226,12 @@ def _replacement_events(kind, *, cash_per_share=50.0, publication="2023-01-03"):
                 successor_asset_id=successor,
                 successor_listing_date="2023-01-03",
                 successor_shares_per_old_share=0.5,
-                successor_shares_per_unit=4.0,
-                successor_unit_basis_date="2023-01-03",
             )
             successor_quote = dict(
                 base,
                 event_id="successor-quote",
                 asset_id=successor,
                 listing_date="2023-01-03",
-                shares_per_old_unit=4.0,
                 effective_date="2023-01-03",
                 publication_date=publication,
                 amount_per_share=100.0,
@@ -253,20 +243,20 @@ def _replacement_events(kind, *, cash_per_share=50.0, publication="2023-01-03"):
 
 
 def _flat_prices(frame):
-    return frame.assign(adj_open=100.0, adj_close=100.0)
+    return frame.assign(open=50.0, close=50.0, adj_open=100.0, adj_close=100.0)
 
 
 @pytest.mark.parametrize(
     "kind,cash_per_share,replacement_value",
     [
-        ("cash_cancel", 50.0, 100.0),
-        ("partial", 25.0, 100.0),
-        ("cash_cancel", 25.0, 50.0),
-        ("cash_cancel", 75.0, 150.0),
+        ("cash_cancel", 50.0, 50.0),
+        ("partial", 25.0, 50.0),
+        ("cash_cancel", 25.0, 25.0),
+        ("cash_cancel", 75.0, 75.0),
         ("cash_cancel", 0.0, 0.0),
         ("cancel", 0.0, 0.0),
-        ("conversion", 0.0, 100.0),
-        ("same_code_conversion", 0.0, 100.0),
+        ("conversion", 0.0, 50.0),
+        ("same_code_conversion", 0.0, 50.0),
     ],
 )
 def test_available_replacement_is_atomic_in_every_wealth_snapshot(
@@ -280,28 +270,31 @@ def test_available_replacement_is_atomic_in_every_wealth_snapshot(
     )
     boundary, settlement = batches[1:3]
     old = {row.phase: row for row in boundary.valuations if row.asset_id == "000001"}
-    assert old["after"].mark_price == 100.0
-    assert old["end"].value == pytest.approx(
-        float(old["after"].quantity) * replacement_value
+    assert old["after"].mark_price == 50.0
+    # Recognition applies the actual share/cash transition at the endpoint.
+    # Wealth remains atomic even when the original security disappears.
+    opening = {
+        row.asset_id: row for row in settlement.valuations if row.phase == "before"
+    }
+    ending = {row.asset_id: row for row in boundary.valuations if row.phase == "end"}
+    for asset, row in ending.items():
+        if asset not in opening:
+            assert row.quantity == row.value == row.receivable == 0
+            continue
+        assert opening[asset].quantity == row.quantity
+        assert opening[asset].value == row.value
+        assert opening[asset].lifecycle_id == row.lifecycle_id
+    before_wealth = sum(
+        row.value for row in boundary.valuations if row.phase == "after"
     )
-    assert old["end"].quantity == old["after"].quantity
-    assert any(
-        row.name == "research_end_mark_kind"
-        and row.text == "evidenced_rights_entitlement"
-        for row in boundary.diagnostics
+    after_wealth = sum(row.value for row in ending.values())
+    assert after_wealth - before_wealth == pytest.approx(
+        float(old["after"].quantity) * (replacement_value - 50.0), abs=1e-13
     )
-    opening = next(
-        row
-        for row in settlement.valuations
-        if row.asset_id == "000001" and row.phase == "before"
-    )
-    assert opening.quantity == old["end"].quantity
-    assert opening.value == old["end"].value
-    assert opening.lifecycle_id == old["end"].lifecycle_id
     economic = portfolio_interval_economics(boundary)
     assert economic["gross_return"] == pytest.approx(
         float(old["after"].quantity)
-        * (replacement_value - 100.0)
+        * (replacement_value - 50.0)
         / economic["nav_before"],
         abs=1e-14,
     )
@@ -310,13 +303,13 @@ def test_available_replacement_is_atomic_in_every_wealth_snapshot(
     )
     adjustments = [event for batch in batches for event in batch.rights_adjustments]
     assert len(adjustments) == 1
-    assert not boundary.rights_adjustments
+    assert len(boundary.rights_adjustments) == 1
+    assert boundary.rights_adjustments[0].phase == "end"
+    assert not settlement.rights_adjustments
     assert not any(
         trade.asset_id == "000001" for batch in batches[1:] for trade in batch.trades
     )
-    capital = PortfolioCapital(
-        "closed_market_portfolio", 100.0, "CNY", "adjusted_notional"
-    )
+    capital = PortfolioCapital("closed_market_portfolio", 100.0, "CNY", "cash_equity")
     previous = None
     for batch in batches:
         previous = validate_portfolio_transition(batch, capital, previous)
@@ -356,7 +349,7 @@ def test_equal_replacement_native_statistics_has_no_artificial_drawdown_or_volat
     ledger = write_portfolio_ledger_artifact(
         tmp_path / "ledger",
         capital=PortfolioCapital(
-            "closed_market_portfolio", 100.0, "CNY", "adjusted_notional"
+            "closed_market_portfolio", 100.0, "CNY", "cash_equity"
         ),
         metadata={
             "window": window,
@@ -414,7 +407,9 @@ def test_future_publication_cannot_change_earlier_held_wealth(tmp_path):
         assert left.valuations == right.valuations
         assert left.trades == right.trades
         assert left.cashflows == right.cashflows
-    assert not any(batch.rights_adjustments for batch in changed)
+    assert not any(batch.rights_adjustments for batch in changed[:-1])
+    assert len(changed[-1].rights_adjustments) == 1
+    assert changed[-1].rights_adjustments[0].phase == "end"
     assert portfolio_interval_economics(changed[-1])["gross_return"] > 0.0
 
 
@@ -490,20 +485,15 @@ def test_event_wealth_and_cash_count_are_chunk_and_reporting_window_invariant(
         ledger = write_portfolio_ledger_artifact(
             tmp_path / f"ledger-{first}",
             capital=PortfolioCapital(
-                candidate.candidate_id, capital, "CNY", "adjusted_notional"
+                candidate.candidate_id, capital, "CNY", "cash_equity"
             ),
             metadata={"window": window, "candidate": asdict(candidate)},
             produce=lambda emit, selected=selected: [emit(batch) for batch in selected],
         )
         restored = list(read_portfolio_ledger_artifact(ledger).iter_chunks())
-        assert (
-            sum(
-                flow.kind == "recovery"
-                for batch in restored
-                for flow in batch.cashflows
-            )
-            == 1
-        )
+        assert sum(
+            flow.kind == "recovery" for batch in restored for flow in batch.cashflows
+        ) == (1 if first <= 1 else 0)
         result = read_statistics_artifact(
             portfolio_statistics(
                 {
@@ -533,8 +523,6 @@ def test_rights_only_successor_can_settle_to_cash_without_disappearing(tmp_path)
             event_id="successor-quote",
             asset_id="000002",
             listing_date="2023-01-03",
-            unit_basis_date="2023-01-03",
-            shares_per_old_unit=4.0,
             effective_date="2023-01-03",
             publication_date="2023-01-03",
             amount_per_share=100.0,
@@ -558,8 +546,6 @@ def test_rights_only_successor_can_settle_to_cash_without_disappearing(tmp_path)
                 successor_asset_id="000002",
                 successor_listing_date="2023-01-03",
                 successor_shares_per_old_share=0.5,
-                successor_shares_per_unit=4.0,
-                successor_unit_basis_date="2023-01-03",
             ),
             successor,
             dict(
@@ -576,11 +562,9 @@ def test_rights_only_successor_can_settle_to_cash_without_disappearing(tmp_path)
         tmp_path / "inputs",
         "cash_cancel",
         events_override=events,
-        panel_transform=lambda frame: frame.assign(adj_open=100.0, adj_close=100.0),
+        panel_transform=_flat_prices,
     )
-    capital = PortfolioCapital(
-        "closed_market_portfolio", 100.0, "CNY", "adjusted_notional"
-    )
+    capital = PortfolioCapital("closed_market_portfolio", 100.0, "CNY", "cash_equity")
     previous = None
     for batch in batches:
         previous = validate_portfolio_transition(batch, capital, previous)
@@ -597,7 +581,7 @@ def test_rights_only_successor_can_settle_to_cash_without_disappearing(tmp_path)
         if row.phase == "after" and row.asset_id == "000001"
     )
     assert len(recovery) == 1
-    assert recovery[0].amount == pytest.approx(float(initial * 100), rel=1e-14, abs=0.0)
+    assert recovery[0].amount == pytest.approx(float(initial * 50), rel=1e-14, abs=0.0)
     assert not any(
         trade.asset_id in {"000001", "000002"}
         for batch in batches[1:]
@@ -610,3 +594,134 @@ def test_rights_only_successor_can_settle_to_cash_without_disappearing(tmp_path)
         produce=lambda emit: [emit(batch) for batch in batches],
     )
     assert list(read_portfolio_ledger_artifact(root).iter_chunks()) == batches
+
+
+def test_suspended_forced_share_change_preserves_wealth_with_or_without_quote(tmp_path):
+    import numpy as np
+    import pandas as pd
+
+    from quant_research_platform.sources.reference import interim
+    from tests.helpers.portfolio_inputs import _interim_specs
+    from tests.research.test_closed_market_portfolios import _native_inputs
+    from tests.sources.reference.test_equity_events import write_equity_source
+
+    def produce(root, quoted):
+        layout, roots, _, _ = _native_inputs(root, fault="normal_open")
+        for target, input_key in (
+            ("market_panel_1d", "panel"),
+            ("market_bars_1d", "market_bars"),
+            ("execution_mask", "execution"),
+            ("stock_master", "stock_master"),
+            ("fixture", "dataset"),
+        ):
+            frame = read_dataset(roots[target])
+            asset_column = (
+                "source_asset_id"
+                if target in {"market_bars_1d", "stock_master"}
+                else "asset_id"
+            )
+            frame[asset_column] = frame[asset_column].replace({"a0": "000001"})
+            affected = frame[asset_column].eq("000001")
+            suspended = affected & frame.timestamp.ge("2023-01-04")
+            if target == "market_panel_1d":
+                frame.loc[affected, ["open", "close", "adj_open", "adj_close"]] = 100.0
+                frame.loc[suspended, ["open", "close"]] = 50.0 if quoted else np.nan
+                frame.loc[suspended, "is_trading"] = False
+                frame.loc[suspended, ["amount", "volume"]] = 0.0
+            elif target == "market_bars_1d":
+                frame.loc[suspended, "filling_flag"] = 1
+            elif target == "execution_mask":
+                # Execution masks are indexed by the prior decision session.
+                decisions = affected & frame.timestamp.ge("2023-01-03")
+                frame.loc[decisions, ["can_enter", "can_exit"]] = False
+            destination = root / "changed" / target
+            spec = (
+                _interim_specs().get(target)
+                if target in {"market_bars_1d", "stock_master"}
+                else make_demo_research_dataset_spec(
+                    data_id="fixture",
+                    factor_columns=("signal",),
+                    label_columns=("label",),
+                    filter_columns=("eligible",),
+                    context_columns=("float_market_cap",),
+                )
+                if target == "fixture"
+                else _processed_specs().get(target)
+            )
+            write_dataset(destination, frame, spec=spec)
+            layout[input_key] = roots[target] = destination
+        raw = root / "raw"
+        write_equity_source(
+            raw,
+            events=lambda base: [
+                dict(
+                    base,
+                    event_id="forced-share-change",
+                    effective_date="2023-01-04",
+                    publication_date="2023-01-03",
+                    asset_id="000001",
+                    kind="share_change",
+                    amount_per_share=None,
+                    remaining_old_units_per_old_unit=2.0,
+                )
+            ],
+        )
+        imported = interim.materialize_interim_data(
+            output_roots={"a_share_equity_events": root / "equity-events"},
+            raw_root=raw,
+            data_ids=("a_share_equity_events",),
+        )
+        layout["equity_events"] = imported.artifact_roots["a_share_equity_events"]
+        return list(_ledger(layout, roots))
+
+    unquoted = produce(tmp_path / "unquoted", False)
+    quoted = produce(tmp_path / "quoted", True)
+    for batches in (unquoted, quoted):
+        assert not any(
+            trade.asset_id == "000001"
+            and trade.timestamp_ns >= pd.Timestamp("2023-01-04").value
+            for batch in batches
+            for trade in batch.trades
+        )
+    for left, right in zip(unquoted, quoted, strict=True):
+        assert left.valuations == right.valuations
+        assert left.trades == right.trades
+        assert left.cashflows == right.cashflows
+    affected = [
+        row
+        for batch in unquoted
+        for row in batch.valuations
+        if row.asset_id == "000001"
+    ]
+    before_change = next(
+        row
+        for row in affected
+        if row.phase == "after" and row.timestamp_ns == pd.Timestamp("2023-01-03").value
+    )
+    assert before_change.quantity > 0 and before_change.mark_price == 100.0
+    changed = [
+        row for row in affected if row.timestamp_ns >= pd.Timestamp("2023-01-04").value
+    ]
+    assert changed
+    for row in changed:
+        assert row.quantity == before_change.quantity * 2
+        assert row.mark_price == 50.0
+        assert row.value == pytest.approx(before_change.value)
+    adjustments = [event for batch in unquoted for event in batch.rights_adjustments]
+    assert len(adjustments) == 1
+    assert adjustments[0].quantity_after == adjustments[0].quantity_before * 2
+    assert not any(
+        trade.asset_id == "000001"
+        and trade.timestamp_ns >= pd.Timestamp("2023-01-04").value
+        for batch in unquoted
+        for trade in batch.trades
+    )
+    ledger = write_portfolio_ledger_artifact(
+        tmp_path / "share-change-ledger",
+        capital=PortfolioCapital(
+            "closed_market_portfolio", 100.0, "CNY", "cash_equity"
+        ),
+        metadata={"window": {"start": "2022-12-30", "end": "2023-01-06"}},
+        produce=lambda emit: [emit(batch) for batch in unquoted],
+    )
+    assert list(read_portfolio_ledger_artifact(ledger).iter_chunks()) == unquoted

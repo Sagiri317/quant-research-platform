@@ -58,7 +58,10 @@ def test_native_narrow_outputs_equal_full_with_actual_history_and_lookahead(
         config = {
             "market_id": "a_share",
             "data_id": name,
-            "inputs": {key: str(inputs[key]) for key in spec.processed_input_data_ids},
+            "inputs": {
+                key: str(inputs[key])
+                for key in (*spec.processed_input_data_ids, *spec.source_input_data_ids)
+            },
             **(
                 {"factor_columns": ["reversal_5d"]}
                 if name == "price_volume_facts"
@@ -102,7 +105,7 @@ def test_native_narrow_outputs_equal_full_with_actual_history_and_lookahead(
         axis = dates[::3] if row.asset_id == "000001" else dates
         assert row.forward_return_5d_available_at == axis[
             axis.get_loc(row.timestamp) + 6
-        ] + pd.Timedelta(hours=1, minutes=30)
+        ] + pd.Timedelta(hours=7)
 
     # Future prices exist for labels; they must not influence causal factors.
     panel = read_dataset(inputs["market_panel_1d"])
@@ -116,7 +119,10 @@ def test_native_narrow_outputs_equal_full_with_actual_history_and_lookahead(
             {
                 "market_id": "a_share",
                 "data_id": "price_volume_facts",
-                "inputs": {"market_panel_1d": str(future_changed)},
+                "inputs": {
+                    "market_panel_1d": str(future_changed),
+                    "trading_calendar": str(inputs["trading_calendar"]),
+                },
                 "factor_columns": ["reversal_5d"],
                 "time_window": window,
                 "output_root": str(tmp_path / "causal-factors"),

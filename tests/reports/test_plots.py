@@ -438,7 +438,7 @@ def test_series_keeps_independent_episodes_in_separate_panels():
 
 @pytest.mark.parametrize(
     "valuation_method,expected_hour",
-    [("linear_perpetual", 8), ("adjusted_notional", 0)],
+    [("linear_perpetual", 8), ("cash_equity", 0)],
 )
 def test_curve_clock_distinguishes_crypto_epoch_from_daily_civil_dates(
     valuation_method, expected_hour

@@ -14,7 +14,11 @@ from quant_research_platform.markets.prepare import prepare
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
 from quant_research_platform.storage.datasets import reading as dataset_reading
 from quant_research_platform.storage.datasets.reading import open_dataset_session
-from tests.helpers.a_share_sources import _synthetic_interim_frames, _write_inputs
+from tests.helpers.a_share_sources import (
+    _calendar_input,
+    _synthetic_interim_frames,
+    _write_inputs,
+)
 
 
 def _panel(dates):
@@ -25,6 +29,7 @@ def _panel(dates):
             "asset_id": "a",
             "timestamp": dates,
             "listing_date": pd.Timestamp("2000-01-01"),
+            "market_type": 1,
             "adj_open": price,
             "adj_close": price,
             "open": price,
@@ -33,6 +38,7 @@ def _panel(dates):
             "close": price,
             "limit_status": 0,
             "is_trading": True,
+            "filling_flag": 0,
             "selected": True,
         }
     )
@@ -57,6 +63,14 @@ def _save(root, name, frame, *, per_row=False):
 
 
 def _run(root, target, panel, inputs, **options):
+    inputs = {
+        **inputs,
+        "trading_calendar": str(
+            _calendar_input(
+                root.parent / (root.name + "-calendar"), {1: panel.timestamp.unique()}
+            )
+        ),
+    }
     return read_dataset(
         prepare(
             {
@@ -118,11 +132,6 @@ def test_selected_observations_leave_true_future_sessions_unknown(
     inputs = {"market_panel_1d": source}
     options = {}
     if target != "execution_mask":
-        inputs["execution_mask"] = _save(
-            tmp_path,
-            "execution_mask",
-            panel[["market_id", "asset_id", "timestamp"]].assign(can_enter=True),
-        )
         options = (
             {"label_columns": ["forward_return_1d"]}
             if target == "forward_returns"
@@ -132,7 +141,8 @@ def test_selected_observations_leave_true_future_sessions_unknown(
     if selector == "files":
         assert skipped_reads
         assert all(
-            columns <= {"market_id", "asset_id", "timestamp", "listing_date"}
+            columns
+            <= {"market_id", "asset_id", "timestamp", "listing_date", "market_type"}
             for columns in skipped_reads
         )
     expected = dates[:1] if selector == "time_window" else dates.delete(1)
@@ -154,7 +164,7 @@ def test_selected_observations_leave_true_future_sessions_unknown(
         if selector != "time_window":
             assert np.isfinite(result[label].iloc[1])
             assert result[f"{label}_available_at"].iloc[1] == dates[4] + pd.Timedelta(
-                hours=1, minutes=30
+                hours=7
             )
 
 
@@ -270,17 +280,9 @@ def test_native_market_model_selection_preserves_declared_composition_and_recove
     assert len(result) == len(panel) - 1
     styles = ["beta_252d", "residual_volatility_60d"]
     assert result.loc[result.timestamp.eq(dates[gap - 1]), styles].notna().all().all()
-    for column, recovery in zip(styles, (253, 312), strict=True):
-        assert (
-            result.loc[
-                result.timestamp.between(dates[gap], dates[gap + recovery - 1]), column
-            ]
-            .isna()
-            .all()
-        )
-        assert (
-            result.loc[result.timestamp.eq(dates[gap + recovery]), column].notna().all()
-        )
+    # The omitted observation and subsequent weight gap advance calendar time;
+    # sufficient valid pairs and residuals remain inside the nominal windows.
+    assert result.loc[result.timestamp.ge(dates[gap]), styles].notna().all().all()
 
 
 def test_market_model_unrepresentable_closed_interval_does_not_abort_open_market():

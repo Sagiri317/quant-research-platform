@@ -20,7 +20,7 @@ def write_equity_source(raw_root, *, events=None):
     root = raw_root / "a_share_equity_events"
     root.mkdir(parents=True, exist_ok=True)
     document = (
-        b"Synthetic official evidence. CNY per share; one old unit is two shares."
+        b"Synthetic official evidence. CNY per share; ordinary holder share quantities."
     )
     (root / "evidence.txt").write_bytes(document)
     event = {
@@ -33,19 +33,13 @@ def write_equity_source(raw_root, *, events=None):
         "observed_at": "2026-10-13T00:00:00Z",
         "currency": "CNY",
         "amount_per_share": 2.5,
-        "shares_per_old_unit": 2.0,
         "remaining_old_units_per_old_unit": 1.0,
         "successor_asset_id": None,
         "successor_listing_date": None,
         "successor_shares_per_old_share": None,
-        "successor_shares_per_unit": None,
-        "unit_basis_date": "2023-01-03",
-        "successor_unit_basis_date": None,
         "source_url": "https://www.sse.com.cn/synthetic-equity-evidence",
         "document_file": "evidence.txt",
         "source_locator": "page:1",
-        "unit_document_file": "evidence.txt",
-        "unit_source_locator": "page:1",
     }
     metadata = {
         "schema_id": "a_share_equity_events",
@@ -81,8 +75,6 @@ def test_equity_event_raw_to_persisted_normalization_preserves_units_and_dates(
                 successor_asset_id="000002",
                 successor_listing_date="2023-01-03",
                 successor_shares_per_old_share=0.5,
-                successor_unit_basis_date="2023-01-03",
-                successor_shares_per_unit=4.0,
             ),
         ]
 
@@ -99,11 +91,11 @@ def test_equity_event_raw_to_persisted_normalization_preserves_units_and_dates(
     frame = read_dataset(result.artifact_roots["a_share_equity_events"]).set_index(
         "event_id"
     )
-    assert decode_exact_numeric(frame.loc["quote-1", "value_per_old_unit"]) == 5.0
-    assert decode_exact_numeric(frame.loc["cash", "value_per_old_unit"]) == 6.0
+    assert decode_exact_numeric(frame.loc["quote-1", "value_per_old_unit"]) == 2.5
+    assert decode_exact_numeric(frame.loc["cash", "value_per_old_unit"]) == 3.0
     assert (
         decode_exact_numeric(frame.loc["convert", "successor_units_per_old_unit"])
-        == 0.25
+        == 0.5
     )
     assert frame.timestamp.eq(pd.Timestamp("2023-01-04")).all()
     assert frame.effective_at.eq(pd.Timestamp("2023-01-03")).all()
@@ -115,7 +107,7 @@ def test_equity_event_raw_to_persisted_normalization_preserves_units_and_dates(
 @pytest.mark.parametrize(
     "damage",
     [
-        "unit",
+        "amount",
         "document",
         "hash",
         "future_publication",
@@ -142,10 +134,10 @@ def test_equity_evidence_invalid_never_publishes_over_old_good(tmp_path, damage)
     path = root / "metadata.json"
     metadata = json.loads(path.read_text())
     event = metadata["events"][0]
-    if damage == "unit":
-        event["shares_per_old_unit"] = None
+    if damage == "amount":
+        event["amount_per_share"] = None
     elif damage == "document":
-        event["unit_document_file"] = "missing.txt"
+        event["document_file"] = "missing.txt"
     elif damage == "hash":
         (root / "evidence.txt").write_bytes(b"replaced")
     elif damage == "future_publication":
@@ -172,11 +164,11 @@ def test_equity_evidence_invalid_never_publishes_over_old_good(tmp_path, damage)
 
 
 def native_equity_inputs(
-    tmp_path, *, events=None, wrong_basis=False, panel_transform=None
+    tmp_path, *, events=None, panel_transform=None, fault="delisted"
 ):
     from tests.research.test_closed_market_portfolios import _native_inputs
 
-    inputs, roots, calendar, _panel = _native_inputs(tmp_path, fault="delisted")
+    inputs, roots, calendar, _panel = _native_inputs(tmp_path, fault=fault)
     for target, input_key in (
         ("market_panel_1d", "panel"),
         ("market_bars_1d", "market_bars"),
@@ -186,9 +178,10 @@ def native_equity_inputs(
         column = "asset_id" if target == "market_panel_1d" else "source_asset_id"
         frame[column] = frame[column].replace({"a0": "000001"})
         if target == "market_panel_1d":
-            frame = frame.loc[
-                ~(frame.asset_id.eq("000001") & frame.timestamp.gt("2023-01-02"))
-            ].copy()
+            if fault == "delisted":
+                frame = frame.loc[
+                    ~(frame.asset_id.eq("000001") & frame.timestamp.gt("2023-01-02"))
+                ].copy()
             selected = frame.asset_id.eq("000001")
             frame.loc[selected, "close"] = frame.loc[selected, "adj_close"] / 2
             if panel_transform is not None:
@@ -203,17 +196,7 @@ def native_equity_inputs(
         roots[target] = inputs[input_key] = root
     raw = tmp_path / "raw"
 
-    def with_units(base):
-        base = dict(base, unit_basis_date="2022-12-30")
-        rows = events(base) if events is not None else [base]
-        for row in rows:
-            if wrong_basis and row["listing_date"] == "2022-12-01":
-                row["shares_per_old_unit"] = 3
-            if pd.Timestamp(row["unit_basis_date"]) < pd.Timestamp(row["listing_date"]):
-                row["unit_basis_date"] = row["listing_date"]
-        return rows
-
-    write_equity_source(raw, events=with_units)
+    write_equity_source(raw, events=events)
     imported = interim.materialize_interim_data(
         output_roots={"a_share_equity_events": tmp_path / "rights"},
         raw_root=raw,
@@ -223,11 +206,16 @@ def native_equity_inputs(
     return (inputs, roots, calendar)
 
 
-@pytest.mark.parametrize("wrong_basis", [False, True])
+@pytest.mark.parametrize("adjusted_scale", [1, 3])
 def test_native_source_to_session_carries_recovery_without_forged_panel_row(
-    tmp_path, wrong_basis
+    tmp_path, adjusted_scale
 ):
-    layout, roots, calendar = native_equity_inputs(tmp_path, wrong_basis=wrong_basis)
+    layout, roots, calendar = native_equity_inputs(
+        tmp_path,
+        panel_transform=lambda frame: frame.assign(
+            adj_close=frame.adj_close * adjusted_scale
+        ),
+    )
     source = portfolio_sessions.iter_portfolio_sessions(
         market_bars_root=layout["market_bars"],
         stock_master_root=layout["stock_master"],
@@ -243,8 +231,8 @@ def test_native_source_to_session_carries_recovery_without_forged_panel_row(
     assert "000001" not in set(recovered[0].panel.asset_id)
     event = recovered[0].rights_events.iloc[0]
     assert event.asset_id == "000001"
-    assert event.value_per_old_unit == (7.5 if wrong_basis else 5.0)
-    assert bool(event.unit_basis_proved) is (not wrong_basis)
+    assert event.value_per_old_unit == 2.5
+    assert bool(event.entitlement_proved)
     assert ("000001", pd.Timestamp("2022-12-01")) in recovered[
         0
     ].confirmed_delisted_lifecycles
@@ -286,19 +274,16 @@ def test_source_exact_event_values_preserve_extreme_finite_final_amounts(tmp_pat
 
     def events(base):
         return [
-            dict(base, shares_per_old_unit=1e300, amount_per_share=1e300),
+            dict(base, amount_per_share=1e300),
             dict(
                 base,
                 event_id="conversion",
                 kind="conversion",
                 amount_per_share=None,
                 remaining_old_units_per_old_unit=0.0,
-                shares_per_old_unit=1e300,
                 successor_asset_id="000002",
                 successor_listing_date="2023-01-03",
                 successor_shares_per_old_share=1e300,
-                successor_unit_basis_date="2023-01-03",
-                successor_shares_per_unit=1e-300,
             ),
         ]
 
@@ -318,20 +303,18 @@ def test_source_exact_event_values_preserve_extreme_finite_final_amounts(tmp_pat
     multiplier = decode_exact_numeric(
         frame.loc["conversion", "successor_units_per_old_unit"]
     )
-    assert quote == Fraction(1e300) ** 2
-    assert multiplier == Fraction(1e300) ** 2 / Fraction(1e-300)
+    assert quote == Fraction(1e300)
+    assert multiplier == Fraction(1e300)
     assert float(Fraction(1) / quote * quote) == 1.0
     assert Fraction(1) / multiplier * multiplier == 1
 
 
-def test_equity_unit_integer_does_not_round_before_exact_normalization(tmp_path):
+def test_per_share_integer_does_not_round_before_exact_normalization(tmp_path):
     raw = tmp_path / "raw"
     shares = 2**53 + 1
     write_equity_source(
         raw,
-        events=lambda base: [
-            dict(base, amount_per_share=1, shares_per_old_unit=shares)
-        ],
+        events=lambda base: [dict(base, amount_per_share=shares)],
     )
     imported = interim.materialize_interim_data(
         output_roots={
@@ -479,7 +462,6 @@ def test_future_event_attachment_does_not_change_prior_session_event_proof(tmp_p
         effective_date="2023-01-10",
         publication_date="2023-01-09",
         document_file="future.txt",
-        unit_document_file="future.txt",
     )
     attachment = b"Synthetic future fact and unit evidence."
     (source / "future.txt").write_bytes(attachment)
@@ -547,13 +529,10 @@ def test_proved_conversion_qualifies_external_successor_but_not_active_distribut
             successor_asset_id="000001",
             successor_listing_date="2023-01-03",
             successor_shares_per_old_share=0.5,
-            successor_unit_basis_date="2023-01-03",
-            successor_shares_per_unit=1,
         )
         successor = dict(
             base,
             event_id="a-successor",
-            shares_per_old_unit=1,
             listing_date="2023-01-03",
             kind="cash_recovery",
         )
@@ -603,13 +582,10 @@ def test_circular_conversion_cannot_revive_the_extinguished_original_life(tmp_pa
             successor_asset_id="000001",
             successor_listing_date="2023-01-03",
             successor_shares_per_old_share=1,
-            successor_unit_basis_date="2023-01-03",
-            successor_shares_per_unit=1,
         )
         backward = dict(
             forward,
             event_id="backward",
-            shares_per_old_unit=1,
             listing_date="2023-01-03",
             successor_listing_date="2022-12-01",
         )
@@ -627,3 +603,42 @@ def test_circular_conversion_cannot_revive_the_extinguished_original_life(tmp_pa
     )
     with pytest.raises(ValueError, match="equity_event_successor_lineage_cycle"):
         list(source)
+
+
+def test_explicit_ordinary_holder_share_change_uses_same_lifecycle_without_price_basis(
+    tmp_path,
+):
+    raw = tmp_path / "raw"
+    write_equity_source(
+        raw,
+        events=lambda base: [
+            dict(
+                base,
+                kind="share_change",
+                amount_per_share=None,
+                remaining_old_units_per_old_unit=0.16,
+            )
+        ],
+    )
+    imported = interim.materialize_interim_data(
+        output_roots={"a_share_equity_events": tmp_path / "rights"},
+        raw_root=raw,
+        data_ids=("a_share_equity_events",),
+    )
+    events = read_dataset(imported.artifact_roots["a_share_equity_events"])
+    stocks = pd.DataFrame(
+        {
+            "asset_id": ["000001"],
+            "listing_date": pd.to_datetime(["2022-12-01"]),
+            "stock_effective_date": pd.to_datetime(["2022-12-01"]),
+            "delisting_date": [pd.Timestamp.max.normalize()],
+        }
+    )
+    qualified = portfolio_sessions._qualify_equity_events(
+        events, pd.Series(pd.to_datetime(["2023-01-04"])), stocks, {}
+    )
+    assert qualified.entitlement_proved.all()
+    assert (
+        decode_exact_numeric(qualified.remaining_old_units_per_old_unit.iloc[0]) == 0.16
+    )
+    assert "shares_per_old_unit" not in qualified

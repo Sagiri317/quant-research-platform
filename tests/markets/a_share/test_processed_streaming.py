@@ -989,7 +989,7 @@ def test_asynchronous_own_market_label_endpoints_and_mask_batches(
             / panel.iloc[1].adj_open
         )
         assert label.loc[dates[0], column + "_available_at"] == (
-            pd.Timestamp(f"{exit_date.date()} 09:30", tz="Asia/Shanghai")
+            pd.Timestamp(f"{exit_date.date()} 15:00", tz="Asia/Shanghai")
             .tz_convert("UTC")
             .tz_localize(None)
         )
@@ -1000,10 +1000,6 @@ def test_asynchronous_own_market_label_endpoints_and_mask_batches(
 def test_own_market_all_label_horizons_preserve_unknown_and_suspended_sessions(
     tmp_path, missing_entry
 ):
-    from quant_research_platform.markets.implementations.a_share.execution import (
-        derive_execution_mask,
-    )
-
     dates = pd.bdate_range("2020-01-02", periods=135).as_unit("ns")
     source = _synthetic_interim_frames(dates)
     bars = source["market_bars_1d"]
@@ -1032,7 +1028,6 @@ def test_own_market_all_label_horizons_preserve_unknown_and_suspended_sessions(
         dependencies={},
         trading_sessions=tuple(dates),
     )
-    mask = derive_execution_mask(panel)
     axes = {
         asset: tuple(group.timestamp.sort_values())
         for asset, group in panel.groupby("asset_id")
@@ -1043,7 +1038,7 @@ def test_own_market_all_label_horizons_preserve_unknown_and_suspended_sessions(
     output = producer._compute_processed_frame(
         spec,
         source={},
-        dependencies={"market_panel_1d": panel, "execution_mask": mask},
+        dependencies={"market_panel_1d": panel},
         trading_sessions=tuple(dates),
         asset_sessions=axes,
     )
@@ -1055,8 +1050,9 @@ def test_own_market_all_label_horizons_preserve_unknown_and_suspended_sessions(
     own_panel = panel.query("asset_id == '000001'").set_index("timestamp")
     for horizon in (1, 5, 10, 20, 60, 120):
         column = f"forward_return_{horizon}d"
-        if missing_entry:
+        if missing_entry or horizon == 1:
             assert pd.isna(saved.loc[dates[0], column])
+            assert pd.isna(saved.loc[dates[0], column + "_available_at"])
         else:
             exit_date = axes["000001"][horizon + 1]
             assert (
@@ -1068,7 +1064,7 @@ def test_own_market_all_label_horizons_preserve_unknown_and_suspended_sessions(
                 / own_panel.loc[dates[1], "adj_open"]
             )
             assert saved.loc[dates[0], column + "_available_at"] == (
-                pd.Timestamp(f"{exit_date.date()} 09:30", tz="Asia/Shanghai")
+                pd.Timestamp(f"{exit_date.date()} 15:00", tz="Asia/Shanghai")
                 .tz_convert("UTC")
                 .tz_localize(None)
             )
@@ -1242,6 +1238,12 @@ def test_factor_warmup_uses_own_sessions_across_closure_and_migration(
         .reset_index(drop=True)
     )
     layout = StorageLayout(tmp_path)
+    calendar_spec = _source_catalog().get("trading_calendar")
+    write_dataset(
+        layout.interim_data_root(calendar_spec.source_id, "trading_calendar"),
+        source["trading_calendar"],
+        spec=calendar_spec,
+    )
     write_dataset(
         layout.processed_data_root(
             panel_spec.market_id, panel_spec.kind, panel_spec.data_id
@@ -1906,7 +1908,10 @@ def test_price_only_panel_and_factors_do_not_require_industry_evidence(tmp_path)
                     {
                         "market_id": "a_share",
                         "data_id": "price_volume_facts",
-                        "inputs": {"market_panel_1d": str(panel)},
+                        "inputs": {
+                            "market_panel_1d": str(panel),
+                            "trading_calendar": str(inputs["trading_calendar"]),
+                        },
                         "factor_columns": ["reversal_5d"],
                         "time_window": {
                             "start": str(dates[0].date()),

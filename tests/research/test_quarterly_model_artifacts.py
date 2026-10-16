@@ -89,7 +89,7 @@ def test_trial_selection_prefers_defined_negative_and_tie_breaks_undefined() -> 
             test_metric_columns=(),
             tie_break_order=("undefined", "defined"),
         )
-        == "undefined"
+        is None
     )
 
 
@@ -153,7 +153,8 @@ def test_training_retention_preserves_trailing_rows_and_same_day_order(cap, chun
     ].copy()
     expected["timestamp"] = expected["timestamp"].dt.as_unit("ns")
     if cap is not None:
-        expected = expected.tail(cap)
+        counts = expected.groupby("timestamp", sort=True).size().iloc[::-1].cumsum()
+        expected = expected.loc[expected.timestamp.isin(counts.index[counts <= cap])]
     prepared = fitting._collect_training_frame(
         (frame.iloc[start : start + chunk_rows] for start in range(0, 32, chunk_rows)),
         spec,
@@ -288,7 +289,9 @@ def test_shared_preprocessing_matches_independent_candidate_states(monkeypatch):
             for key, value in reference.metadata.items()
             if key not in numerical
         }
-        assert result.metadata["scaler"]["columns"] == list(specs[0].input_columns)
+        assert result.metadata["scaler"]["input_columns"] == list(
+            specs[0].input_columns
+        )
         assert set(result.metadata["feature_importance"]) == set(
             reference.metadata["feature_importance"]
         )

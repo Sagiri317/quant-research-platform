@@ -167,14 +167,14 @@ def test_market_model_keeps_only_known_closed_history_and_aligned_returns(
     assert (
         actual.loc[dates[639], ["beta_252d", "residual_volatility_60d"]].notna().all()
     )
-    if not known_closed:
-        assert (
-            actual.loc[dates[641], ["beta_252d", "residual_volatility_60d"]]
-            .isna()
-            .all()
-        )
-        return
-    assert dates[640] not in actual.index
+    if known_closed:
+        assert dates[640] not in actual.index
+    else:
+        assert dates[640] in actual.index
+        gap = panel.loc[panel.asset_id.eq("000001") & panel.timestamp.eq(dates[640])]
+        assert gap.period_return.isna().all()
+    # A single unknown pair does not erase sufficient observations in the
+    # nominal window. Its missing lagged cap also invalidates the next pair.
     assert (
         actual.loc[dates[641], ["beta_252d", "residual_volatility_60d"]].notna().all()
     )
@@ -191,9 +191,13 @@ def test_market_model_keeps_only_known_closed_history_and_aligned_returns(
                 for row in eligible.itertuples()
             )
             / denominator
-            if denominator
+            if np.isfinite(denominator) and denominator > 0
             else np.nan
         )
+        if not known_closed and timestamp in (dates[640], dates[641]):
+            # Required quote missing at 640; required lagged weight missing at
+            # 641. Neither can be replaced by a survivor-only market proxy.
+            market = np.nan
         stock = cross.loc[cross.asset_id.eq("000001")]
         if stock.empty:
             pending *= 1 + Fraction.from_float(market)
@@ -205,22 +209,29 @@ def test_market_model_keeps_only_known_closed_history_and_aligned_returns(
             )
             pending = Fraction(1)
             value = stock.period_return.iloc[0]
-            if np.isfinite(interval) and np.isfinite(value):
-                history.append((interval, value))
-            else:
-                history.clear()
-            residual = np.nan
+            value = np.nan if pd.isna(value) else float(value)
+            history.append((interval, value))
+            if not known_closed and timestamp in (dates[640], dates[641]):
+                assert np.isnan(history[-1][0])
+            expected_beta = residual = np.nan
             if len(history) >= 252:
-                values = np.array(history[-252:])
-                alpha, expected_beta = np.linalg.lstsq(
-                    np.column_stack((np.ones(252), values[:, 0])),
-                    values[:, 1],
-                    rcond=None,
-                )[0]
-                residual = values[-1, 1] - alpha - expected_beta * values[-1, 0]
+                window = np.array(history[-252:])
+                paired = window[np.isfinite(window).all(axis=1)]
+                if len(paired) >= 189:
+                    alpha, expected_beta = np.linalg.lstsq(
+                        np.column_stack((np.ones(len(paired)), paired[:, 0])),
+                        paired[:, 1],
+                        rcond=None,
+                    )[0]
+                    if np.isfinite(window[-1]).all():
+                        residual = value - alpha - expected_beta * interval
             residuals.append(residual)
+            expected_volatility = np.nan
             if len(residuals) >= 60:
-                expected_volatility = np.std(residuals[-60:], ddof=0)
+                window = np.asarray(residuals[-60:])
+                valid = window[np.isfinite(window)]
+                if len(valid) >= 45:
+                    expected_volatility = np.std(valid, ddof=0)
             if timestamp == dates[641]:
                 assert actual.loc[timestamp, "beta_252d"] == pytest.approx(
                     expected_beta, rel=1e-12
@@ -229,7 +240,12 @@ def test_market_model_keeps_only_known_closed_history_and_aligned_returns(
                     timestamp, "residual_volatility_60d"
                 ] == pytest.approx(expected_volatility, rel=1e-12, abs=1e-16)
         previous_caps.update(
-            dict(zip(cross.asset_id, cross.float_market_cap, strict=True))
+            {
+                asset: np.nan if pd.isna(cap) else float(cap)
+                for asset, cap in zip(
+                    cross.asset_id, cross.float_market_cap, strict=True
+                )
+            }
         )
     assert actual.iloc[-1].beta_252d == pytest.approx(expected_beta, rel=1e-12)
     assert actual.iloc[-1].residual_volatility_60d == pytest.approx(

@@ -156,7 +156,7 @@ def test_zero_nav_rights_recovery_persists_amounts_and_undefined_returns(
                 "candidate_id": candidate.candidate_id,
                 "initial_capital": initial,
                 "valuation_currency": "CNY",
-                "valuation_method": "adjusted_notional",
+                "valuation_method": "cash_equity",
             }
         )
         metadata = {
@@ -532,7 +532,7 @@ def test_exact_quantity_encoding_exceeds_float_without_losing_amount_ledger(
             "candidate_id": "exact",
             "initial_capital": 1.0,
             "valuation_currency": "CNY",
-            "valuation_method": "adjusted_notional",
+            "valuation_method": "cash_equity",
         }
     )
     metadata = {

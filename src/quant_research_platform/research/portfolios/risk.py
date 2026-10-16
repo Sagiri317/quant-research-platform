@@ -6,12 +6,13 @@ from array import array
 from dataclasses import dataclass
 from decimal import Decimal, localcontext
 from fractions import Fraction
-from math import lcm
+from math import ceil, lcm
 
 import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.validation import (
+    strict_bool_series,
     strict_real_numeric_series,
     strict_timestamp_series,
 )
@@ -29,8 +30,9 @@ class FactorRiskConfig:
     specific_window: int = 252
     factor_half_life: float = 126.0
     specific_half_life: float = 63.0
-    minimum_factor_dates: int = 252
-    minimum_specific_dates: int = 126
+    minimum_factor_dates: int | None = None
+    minimum_specific_dates: int | None = None
+    min_fresh_fraction: float = 0.75
     minimum_cross_section: int = 100
     diagonal_shrinkage: float = 0.20
     annualization: float = 252.0
@@ -38,6 +40,23 @@ class FactorRiskConfig:
     weighting: str = "sqrt_cap"
 
     def __post_init__(self):
+        if (
+            type(self.min_fresh_fraction) not in {int, float}
+            or not np.isfinite(self.min_fresh_fraction)
+            or not 0 < self.min_fresh_fraction <= 1
+        ):
+            raise ValueError("factor_risk_config_invalid")
+        for name in ("factor_window", "specific_window"):
+            if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
+                raise ValueError("factor_risk_config_invalid")
+        for name, window in (
+            ("minimum_factor_dates", self.factor_window),
+            ("minimum_specific_dates", self.specific_window),
+        ):
+            if getattr(self, name) is None:
+                object.__setattr__(
+                    self, name, max(2, ceil(self.min_fresh_fraction * window))
+                )
         for name in (
             "factor_window",
             "specific_window",
@@ -304,6 +323,7 @@ class FactorRiskState:
         self._listings: dict[str, pd.Timestamp] = {}
         self._residuals: dict[str, array] = {}
         self._residual_sessions: dict[str, array] = {}
+        self._residual_fresh: dict[str, array] = {}
         self._session_count = 0
         self._specific_session_counts: dict[str, int] = {}
 
@@ -572,9 +592,19 @@ class FactorRiskState:
         cross: pd.DataFrame,
         *,
         closed_assets=frozenset(),
-        shared_fits=None,
-        fit_key=None,
     ) -> None:
+        fresh = (
+            strict_bool_series(
+                cross["is_trading"],
+                error="factor_risk_trading_invalid",
+                allow_null=True,
+            ).fillna(False)
+            if "is_trading" in cross
+            else cross["asset_return"].notna()
+        )
+        fresh_by_asset = pd.Series(
+            fresh.to_numpy(dtype=bool), index=cross.asset_id.astype(str)
+        )
         listings = strict_timestamp_series(
             cross["listing_date"], error="factor_risk_listing_invalid"
         )
@@ -582,6 +612,7 @@ class FactorRiskState:
             if asset in self._listings and self._listings[asset] != listing:
                 self._residuals.pop(asset, None)
                 self._residual_sessions.pop(asset, None)
+                self._residual_fresh.pop(asset, None)
                 self._specific_session_counts.pop(asset, None)
             self._listings[asset] = listing
         for asset in self._listings:
@@ -589,17 +620,8 @@ class FactorRiskState:
                 self._specific_session_counts[asset] = (
                     self._specific_session_counts.get(asset, 0) + 1
                 )
-        if shared_fits is None or fit_key not in shared_fits:
-            fitted, industries = self._fit_return_session(cross)
-            fact = (
-                industries,
-                None if fitted is None else (fitted.factor_returns, fitted.residuals),
-            )
-            if shared_fits is not None:
-                shared_fits[fit_key] = fact
-        else:
-            fact = shared_fits[fit_key]
-        industries, fitted = fact
+        fitted, industries = self._fit_return_session(cross)
+        fitted = None if fitted is None else (fitted.factor_returns, fitted.residuals)
         self._industry_codes.update(industries)
         self._session_count += 1
         while (
@@ -618,9 +640,11 @@ class FactorRiskState:
             ):
                 sessions.pop(0)
                 values.pop(0)
+                self._residual_fresh[asset].pop(0)
             if not sessions:
                 del self._residual_sessions[asset]
                 del self._residuals[asset]
+                del self._residual_fresh[asset]
         if fitted is None:
             return
         factor_returns, residual_values = fitted
@@ -631,6 +655,10 @@ class FactorRiskState:
         row: dict[str, object] = {
             "timestamp": timestamp,
             "session": self._session_count,
+            "fresh": int(
+                fresh_by_asset.reindex(residual_values.index).fillna(False).sum()
+            )
+            >= max(self.config.minimum_cross_section, 5 * len(exposure_columns)),
         }
         row.update(
             zip(
@@ -646,6 +674,9 @@ class FactorRiskState:
             strict=True,
         ):
             self._residuals.setdefault(asset, array("d")).append(float(residual))
+            self._residual_fresh.setdefault(asset, array("b")).append(
+                bool(fresh_by_asset.loc[asset])
+            )
             self._residual_sessions.setdefault(asset, array("Q")).append(
                 self._specific_session_counts[asset]
             )
@@ -683,7 +714,10 @@ class FactorRiskState:
         return result
 
     def estimate(self) -> FactorRiskEstimate:
-        if len(self._factor_rows) < self.config.minimum_factor_dates:
+        if (
+            self._session_count < self.config.factor_window
+            or len(self._factor_rows) < self.config.minimum_factor_dates
+        ):
             raise ValueError("factor_risk_factor_history_insufficient")
         industry_columns = tuple(
             f"industry_{code}" for code in sorted(self._industry_codes)
@@ -691,11 +725,15 @@ class FactorRiskState:
         columns = (*industry_columns, *self.style_columns)
         factor_returns = (
             pd.DataFrame(self._factor_rows)
-            .reindex(columns=["session", "timestamp", *columns])
+            .reindex(columns=["session", "timestamp", "fresh", *columns])
             .dropna()
         )
-        if len(factor_returns) < self.config.minimum_factor_dates:
+        if (
+            len(factor_returns) < self.config.minimum_factor_dates
+            or factor_returns["fresh"].sum() < self.config.minimum_factor_dates
+        ):
             raise ValueError("factor_risk_factor_history_insufficient")
+        factor_returns.pop("fresh")
         factor_ages = self._session_count - factor_returns.pop("session").to_numpy()
         covariance = _ewma_covariance(
             factor_returns.loc[:, list(columns)].to_numpy(dtype="float64"),
@@ -709,7 +747,11 @@ class FactorRiskState:
         maximum_magnitude = np.sqrt(np.finfo(np.float64).max)
         minimum_magnitude = np.sqrt(np.finfo(np.float64).tiny)
         for asset, values in self._residuals.items():
-            if len(values) >= self.config.minimum_specific_dates:
+            if (
+                self._specific_session_counts[asset] >= self.config.specific_window
+                and sum(self._residual_fresh[asset])
+                >= self.config.minimum_specific_dates
+            ):
                 values = np.asarray(values)
                 absolute_values = np.abs(values)
                 ages = self._specific_session_counts[asset] - np.asarray(

@@ -20,6 +20,7 @@ from quant_research_platform.markets.implementations.crypto.processed.catalog im
 from quant_research_platform.markets.prepare import prepare
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
 from quant_research_platform.storage.datasets.reading import open_dataset_session
+from tests.helpers.a_share_sources import _calendar_input
 
 
 def _input(root, name, frame, *, native, crypto=False):
@@ -146,24 +147,25 @@ def test_selected_a_share_label_bounds_real_lookahead_and_persisted_schema(
         tmp_path,
         "market_panel_1d",
         pd.DataFrame(
-            {**keys, "adj_open": np.arange(10.0, 20.0), "listing_date": dates[0]}
+            {
+                **keys,
+                "adj_open": np.arange(10.0, 20.0),
+                "listing_date": dates[0],
+                "market_type": 1,
+                "filling_flag": 0,
+                "is_trading": True,
+            }
         ),
         native=native,
     )
-    mask = _input(
-        tmp_path,
-        "execution_mask",
-        pd.DataFrame({**keys, "can_enter": True}),
-        native=native,
-    )
-    panel["columns"] = ["adj_open"]
-    mask["columns"] = ["can_enter"]
+    panel["columns"] = ["adj_open", "filling_flag", "is_trading"]
     observed = []
     materialize = producer.materialize_dataset_session
 
     def record(session):
         frame = materialize(session)
-        observed.append(frame.timestamp.max())
+        if "adj_open" in frame:
+            observed.append(frame.timestamp.max())
         return frame
 
     monkeypatch.setattr(producer, "materialize_dataset_session", record)
@@ -171,7 +173,12 @@ def test_selected_a_share_label_bounds_real_lookahead_and_persisted_schema(
         _request(
             tmp_path,
             "forward_returns",
-            {"market_panel_1d": panel, "execution_mask": mask},
+            {
+                "market_panel_1d": panel,
+                "trading_calendar": str(
+                    _calendar_input(tmp_path / "calendar", {1: dates})
+                ),
+            },
             "2024-01-02",
             "2024-01-02",
             label_columns=["forward_return_1d"],
@@ -181,7 +188,7 @@ def test_selected_a_share_label_bounds_real_lookahead_and_persisted_schema(
     assert max(observed) == dates[2]
     assert result.forward_return_1d.tolist() == pytest.approx([1 / 11])
     assert result.forward_return_1d_available_at.tolist() == [
-        dates[2] + pd.Timedelta(hours=1, minutes=30)
+        dates[2] + pd.Timedelta(hours=7)
     ]
     assert set(result) == {
         "market_id",
@@ -286,6 +293,7 @@ def test_selected_factor_keeps_actual_history_before_output_window(
             "asset_id": "a",
             "timestamp": dates,
             "listing_date": dates[0],
+            "market_type": 1,
             "adj_close": np.arange(1.0, 26.0),
         }
     )
@@ -303,7 +311,12 @@ def test_selected_factor_keeps_actual_history_before_output_window(
             _request(
                 tmp_path,
                 "price_volume_facts",
-                {"market_panel_1d": source},
+                {
+                    "market_panel_1d": source,
+                    "trading_calendar": str(
+                        _calendar_input(tmp_path / "calendar", {1: dates})
+                    ),
+                },
                 str(dates[-1].date()),
                 str(dates[-1].date()),
                 factor_columns=["momentum_20d"],

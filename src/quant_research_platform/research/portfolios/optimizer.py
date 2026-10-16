@@ -176,37 +176,91 @@ def optimize_portfolio(
         frozen=frozen,
         config=config,
     )
+    # These are necessary box constraints, independent of the numerical solver.
+    # Report proven economic infeasibility separately from solver failures.
+    tolerance = 1e-8
+    lower, upper = np.asarray(bounds, dtype="float64").T
+    if lower.sum() > 1.0 + tolerance or upper.sum() < 1.0 - tolerance:
+        raise ValueError("optimizer_budget_bounds_infeasible")
+    capacity = assumptions.adv_participation * adv / nav
+    reachable_lower = np.maximum(lower, current - capacity)
+    reachable_upper = np.minimum(upper, current + capacity)
+    if (
+        np.any(reachable_lower > reachable_upper + tolerance)
+        or reachable_lower.sum() > 1.0 + tolerance
+        or reachable_upper.sum() < 1.0 - tolerance
+    ):
+        raise ValueError("optimizer_capacity_bounds_infeasible")
+    minimum_turnover = max(
+        np.maximum(reachable_lower - current, 0.0).sum(),
+        np.maximum(current - reachable_upper, 0.0).sum(),
+    )
+    if minimum_turnover > config.target_turnover_limit + tolerance:
+        raise ValueError("optimizer_turnover_bounds_infeasible")
 
     def risk(weights: np.ndarray) -> float:
         active = weights - benchmark
         return sum(_risk_variances(active, exposure, covariance, specific))
 
+    relative_exposure = _stock_leg_exposures(exposure, benchmark, cash)
+
+    # Exact derivatives avoid forward-difference bias at no-trade kinks.
+    # np.sign(0) selects the valid zero subgradient of absolute value.
+    def risk_jacobian(weights: np.ndarray) -> np.ndarray:
+        active = weights - benchmark
+        factor_active = active @ exposure
+        return -(
+            exposure @ (covariance @ factor_active + covariance.T @ factor_active)
+            + 2.0 * specific * active
+        )
+
+    def exposure_jacobian(weights, matrix, limit):
+        return (
+            limit * (~cash)[None, :] - np.sign(matrix.T @ weights)[:, None] * matrix.T
+        )
+
     constraints = [
-        {"type": "eq", "fun": lambda weights: float(weights.sum() - 1.0)},
+        {
+            "type": "eq",
+            "fun": lambda weights: float(weights.sum() - 1.0),
+            "jac": lambda weights: np.ones(len(weights)),
+        },
         {
             "type": "ineq",
             "fun": lambda weights: float(
                 config.tracking_error_limit**2 - risk(weights)
             ),
+            "jac": risk_jacobian,
         },
         {
             "type": "ineq",
             "fun": lambda weights: float(
                 config.target_turnover_limit - 0.5 * np.abs(weights - current).sum()
             ),
+            "jac": lambda weights: -0.5 * np.sign(weights - current),
         },
         {
             "type": "ineq",
             "fun": lambda weights: (
-                config.industry_active_limit
-                - np.abs(exposure[:, : len(industry_columns)].T @ (weights - benchmark))
+                config.industry_active_limit * weights[~cash].sum()
+                - np.abs(relative_exposure[:, : len(industry_columns)].T @ weights)
+            ),
+            "jac": lambda weights: exposure_jacobian(
+                weights,
+                relative_exposure[:, : len(industry_columns)],
+                config.industry_active_limit,
             ),
         },
         {
             "type": "ineq",
             "fun": lambda weights: (
-                config.style_active_limit
-                - np.abs(exposure[:, len(industry_columns) :].T @ (weights - benchmark))
+                config.style_active_limit * weights[~cash].sum()
+                - np.abs(relative_exposure[:, len(industry_columns) :].T @ weights)
+            ),
+            "jac": lambda weights: exposure_jacobian(
+                weights,
+                relative_exposure[:, len(industry_columns) :],
+                config.style_active_limit,
             ),
         },
         {
@@ -214,6 +268,7 @@ def optimize_portfolio(
             "fun": lambda weights: (
                 assumptions.adv_participation - np.abs(weights - current) * nav / adv
             ),
+            "jac": lambda weights: np.diag(-np.sign(weights - current) * nav / adv),
         },
     ]
     result = minimize(
@@ -243,6 +298,7 @@ def optimize_portfolio(
         industry_count=len(industry_columns),
         nav=nav,
         assumptions=assumptions,
+        cash=cash,
     )
     active = weights - benchmark
     factor_variance, specific_variance = _risk_variances(
@@ -340,6 +396,18 @@ def _bounds(
     return tuple(bounds)
 
 
+def _stock_leg_exposures(exposure, benchmark, cash):
+    """Center stock exposures on the full benchmark stock leg, excluding cash."""
+    reference = benchmark.copy()
+    reference[cash] = 0.0
+    gross = reference.sum()
+    if gross <= 0 and exposure.shape[1]:
+        raise ValueError("optimizer_benchmark_stock_leg_missing")
+    centered = exposure - (exposure.T @ (reference / gross) if gross > 0 else 0.0)
+    centered[cash] = 0.0
+    return centered
+
+
 def _verify_solution(
     weights: np.ndarray,
     *,
@@ -354,6 +422,7 @@ def _verify_solution(
     industry_count: int,
     nav: float,
     assumptions: ExecutionAssumptions,
+    cash: np.ndarray | None = None,
 ) -> None:
     tolerance = 1e-08
     active = weights - benchmark
@@ -373,14 +442,18 @@ def _verify_solution(
         raise ValueError("optimizer_solution_invalid")
     if 0.5 * np.abs(weights - current).sum() > config.target_turnover_limit + tolerance:
         raise ValueError("optimizer_solution_invalid")
+    if cash is None:
+        cash = np.zeros(len(weights), dtype=bool)
+    relative_exposure = _stock_leg_exposures(exposure, benchmark, cash)
+    stock_gross = weights[~cash].sum()
     if np.any(
-        np.abs(exposure[:, :industry_count].T @ active)
-        > config.industry_active_limit + tolerance
+        np.abs(relative_exposure[:, :industry_count].T @ weights)
+        > config.industry_active_limit * stock_gross + tolerance
     ):
         raise ValueError("optimizer_solution_invalid")
     if np.any(
-        np.abs(exposure[:, industry_count:].T @ active)
-        > config.style_active_limit + tolerance
+        np.abs(relative_exposure[:, industry_count:].T @ weights)
+        > config.style_active_limit * stock_gross + tolerance
     ):
         raise ValueError("optimizer_solution_invalid")
     if np.any(
@@ -414,39 +487,87 @@ def _validate_config(config: OptimizerConfig) -> None:
         raise ValueError("optimizer_config_invalid")
 
 
-def _project_neutral_target(target, context):
-    """Minimize 0.5 ||w-q||², w>=0, sum(w)=1 and A w=A b over full U."""
+def _project_neutral_target(target, context, *, industry_limit=0.02, size_limit=0.2):
+    """Project stock-leg weights within explicit benchmark exposure bands."""
+    for limit in (industry_limit, size_limit):
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int | float)
+            or not np.isfinite(limit)
+            or limit < 0
+        ):
+            raise ValueError("target_neutrality_limit_invalid")
     q = target.reindex(context.index, fill_value=0.0).to_numpy(dtype="float64")
     if not np.isfinite(q).all() or np.any(q < 0):
         raise ValueError("target_weights_invalid")
     b = context.benchmark_weight.to_numpy(dtype="float64")
     exposures = context.drop(columns="benchmark_weight").to_numpy(dtype="float64").T
-    matrix = np.vstack((np.ones(len(b)), exposures))
+    limits = np.array(
+        [
+            industry_limit if name.startswith("industry:") else size_limit
+            for name in context.columns.drop("benchmark_weight")
+        ],
+        dtype="float64",
+    )
+    exact = exposures[limits == 0]
+    industry_rows = np.array(
+        [
+            name.startswith("industry:")
+            for name in context.columns.drop("benchmark_weight")
+        ]
+    )
+    if industry_rows.any() and np.all(exposures[industry_rows].sum(axis=0) == 1):
+        reference_coverage = float((exposures[industry_rows] @ b).sum())
+        if abs(1.0 - reference_coverage) > limits[industry_rows].sum() + 1e-8:
+            raise PortfolioTargetBlocked("target_neutrality_infeasible")
+    bounded = exposures[limits > 0]
+    bands = limits[limits > 0]
+    matrix = np.vstack((np.ones(len(b)), exact))
+    right_hand_side = np.concatenate(([1.0], exact @ b))
     # Remove only algebraically redundant equalities; retain their residual checks.
-    _, singular, vectors = np.linalg.svd(matrix, full_matrices=False)
+    left, singular, vectors = np.linalg.svd(matrix, full_matrices=False)
     rank = np.count_nonzero(
         singular > singular[0] * max(matrix.shape) * np.finfo(float).eps
     )
     constraints = vectors[:rank]
-    values = constraints @ b
-    solved = minimize(
-        lambda w: float(0.5 * np.dot(w - q, w - q)),
-        b,
-        jac=lambda w: w - q,
-        method="SLSQP",
-        bounds=[(0.0, None)] * len(b),
-        constraints={
+    values = (left[:, :rank].T @ right_hand_side) / singular[:rank]
+    if not np.allclose(
+        matrix @ (constraints.T @ values), right_hand_side, rtol=0.0, atol=1e-8
+    ):
+        raise PortfolioTargetBlocked("target_neutrality_infeasible")
+    optimizer_constraints = [
+        {
             "type": "eq",
             "fun": lambda w: constraints @ w - values,
             "jac": lambda w: constraints,
-        },
+        }
+    ]
+    if len(bands):
+        optimizer_constraints.append(
+            {
+                "type": "ineq",
+                "fun": lambda w: np.concatenate(
+                    (bands - bounded @ (w - b), bands + bounded @ (w - b))
+                ),
+                "jac": lambda w: np.vstack((-bounded, bounded)),
+            }
+        )
+    solved = minimize(
+        lambda w: float(0.5 * np.dot(w - q, w - q)),
+        b / b.sum(),
+        jac=lambda w: w - q,
+        method="SLSQP",
+        bounds=[(0.0, None)] * len(b),
+        constraints=optimizer_constraints,
         options={"ftol": 1e-12, "maxiter": 1000},
     )
     if not solved.success:
         raise PortfolioTargetBlocked("target_neutrality_solver_failed")
     weights = np.maximum(solved.x, 0.0)
-    if not np.isfinite(weights).all() or not np.allclose(
-        matrix @ weights, matrix @ b, rtol=0.0, atol=1e-8
+    if (
+        not np.isfinite(weights).all()
+        or not np.allclose(matrix @ weights, right_hand_side, rtol=0.0, atol=1e-8)
+        or np.any(np.abs(exposures @ (weights - b)) > limits + 1e-8)
     ):
         raise PortfolioTargetBlocked("target_neutrality_infeasible")
     return pd.Series(

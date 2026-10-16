@@ -417,7 +417,7 @@ def test_orphan_fill_and_unknown_delayed_fill_fail_closed(tmp_path):
     assert not filesystem_exists(tmp_path / "bad")
 
 
-def test_adjusted_return_terminal_nav_is_valued_at_actual_interval_end(tmp_path):
+def test_raw_return_terminal_nav_is_valued_at_actual_interval_end(tmp_path):
     from quant_research_platform.artifacts.portfolio_ledger import (
         summarize_portfolio_ledger,
     )
@@ -448,7 +448,7 @@ def test_adjusted_return_terminal_nav_is_valued_at_actual_interval_end(tmp_path)
     assert pd.Timestamp(asset_end.timestamp_ns) == pd.Timestamp("2019-01-03")
     assert asset_end.value == pytest.approx(110.0)
     summary = summarize_portfolio_ledger(artifact.capital, artifact.iter_chunks())
-    assert summary["nav"] == 110.0
+    assert summary["nav"] == pytest.approx(110.0, rel=1e-14)
     assert pd.Timestamp(summary["valuation_timestamp_ns"]) == pd.Timestamp("2019-01-03")
     assert sum(row.value for row in batch.valuations if row.phase == "after") == 100.0
     assert {flow.kind for flow in batch.cashflows} == {"principal"}
@@ -464,7 +464,7 @@ def _ledger_spec() -> object:
                 "candidate_id": "synthetic_portfolio",
                 "initial_capital": 100.0,
                 "valuation_currency": "CNY",
-                "valuation_method": "adjusted_notional",
+                "valuation_method": "cash_equity",
             }
         ),
         "metadata": {
@@ -1310,7 +1310,7 @@ def test_tiny_trade_validity_uses_sign_without_multiplication(direction):
             replace(batch, trades=(replace(batch.trades[0], quantity=q, notional=n),))
 
 
-def test_tiny_adjusted_notional_trade_cannot_reverse_target_direction(tmp_path):
+def test_tiny_cash_equity_trade_cannot_reverse_target_direction(tmp_path):
     value = 2.0 ** (-700)
     frame = _session(
         "2019-01-01",

@@ -119,13 +119,19 @@ def test_simple_size_neutrality_preserves_float_reference_and_can_select_float()
             eligible, floating, None, "size", size_market_cap=selected
         )
         np.testing.assert_allclose(context.benchmark_weight, floating / floating.sum())
-        np.testing.assert_allclose(context["size"], np.log(selected))
+        log_size = np.log(selected)
+        median = np.median(log_size)
+        mad = np.median(np.abs(log_size - median))
+        clipped = log_size.clip(median - 3 * 1.4826 * mad, median + 3 * 1.4826 * mad)
+        expected_size = (clipped - clipped.mean()) / clipped.std(ddof=0)
+        np.testing.assert_allclose(context["size"], expected_size, atol=1e-12)
         weights = build_simple_target_weights(
             signal,
             eligible=eligible,
             float_market_cap=floating,
             total_market_cap=total,
             neutrality="size",
+            size_neutrality_limit=0.0,
             size_cap_column=column,
         )
         assert weights @ context["size"] == pytest.approx(
@@ -139,6 +145,7 @@ def test_simple_size_neutrality_preserves_float_reference_and_can_select_float()
         float_market_cap=floating,
         total_market_cap=total,
         neutrality="size",
+        size_neutrality_limit=0.0,
     )
     np.testing.assert_allclose(default, results[0])
     cap_weighted = build_simple_target_weights(

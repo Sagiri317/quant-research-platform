@@ -87,8 +87,7 @@ def ic_weighted_rank_ensemble(spec: ModelSpec, params: dict[str, object]) -> obj
 
 
 def _set_random_state(params: dict[str, object], spec: ModelSpec) -> None:
-    if spec.random_seed is not None:
-        params.setdefault("random_state", spec.random_seed)
+    params.setdefault("random_state", spec.random_seed)
 
 
 _MODEL_ESTIMATOR_FACTORIES: dict[

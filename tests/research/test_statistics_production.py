@@ -688,6 +688,8 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
             TimeWindow(dates[0], cutoff),
             selected="stats_demo_equal_weight_rank_ensemble",
         )
+        for entry in model["model_entries"].values():
+            entry["model_metadata"]["input_columns"] = [CORE6_FACTORS[0]]
         for selection in model["selections"].values():
             selection["cutoff"] = str(cutoff)
         statistics_tables = build_a_share_statistics_tables(
@@ -725,8 +727,10 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
     assert set(factors["family_id"]) == {"price_volume"}
     assert set(factors["fdr_method"]) == {"BH", "BY"}
     assert set(factors["planned_hypothesis_count"]) == {len(PV25_FACTORS)}
-    assert set(factors["defined_hypothesis_count"]) == {2}
-    assert set(factors["missing_hypothesis_count"]) == {len(PV25_FACTORS) - 2}
+    assert set(factors["defined_hypothesis_count"]) == {0}
+    assert factors.reason.eq("incomplete_session_clock").all()
+    assert factors.loc[factors.observation_count.eq(20), "mean"].notna().all()
+    assert set(factors["missing_hypothesis_count"]) == {len(PV25_FACTORS)}
     prediction = outputs[0]["prediction_diagnostics"].iloc[0]
     assert prediction["observation_count"] == 20
     assert prediction["status"] == "UNDEFINED"
@@ -736,6 +740,8 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         42, "a_share_statistics_bootstrap", "stats_demo", "prediction"
     )
     fmb = outputs[0]["fama_macbeth"]
+    assert fmb.reason.eq("incomplete_session_clock").all()
+    assert fmb.loc[fmb.period_count.eq(20), "mean"].notna().all()
     assert {"equal:single:" + CORE6_FACTORS[0], "equal:core_multifactor"}.issubset(
         set(fmb["regression_id"])
     )
@@ -836,7 +842,25 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         persisted_summary = table.loc[
             table.regression_id.eq("equal:single:" + CORE6_FACTORS[0])
         ].set_index("coefficient_id")
+        assert persisted_summary.status.eq("UNDEFINED").all()
+        assert persisted_summary.reason.eq("incomplete_session_clock").all()
+        # The declared 25-date window has five unavailable dates. Preserve the
+        # HAC oracle separately on an explicitly bounded complete 20-date input.
+        complete_summary = (
+            statistics_production._fama_macbeth_summary(
+                persisted_periods,
+                factors=(CORE6_FACTORS[0],),
+                core_factors=(),
+                max_lags=19,
+                input_date_count=20,
+            )
+            .query("regression_id == @persisted_periods.regression_id.iloc[0]")
+            .set_index("coefficient_id")
+        )
         for coefficient, values in expected_periods.items():
+            assert persisted_summary.loc[coefficient, "mean"] == pytest.approx(
+                np.mean(values)
+            )
             values = np.asarray(values)
             actual = persisted_periods.loc[
                 persisted_periods.coefficient_id.eq(coefficient)
@@ -866,7 +890,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
                 "ci_upper",
             ]
             np.testing.assert_allclose(
-                persisted_summary.loc[coefficient, fields].astype(float),
+                complete_summary.loc[coefficient, fields].astype(float),
                 expected,
                 rtol=1e-11,
                 atol=1e-14,
@@ -1483,7 +1507,8 @@ def test_native_fmb_float_publication_survives_statistics_roundtrip(
                 "timestamp": timestamp,
                 "asset_id": asset,
                 "adj_open": 1.0 + (offset * price_change if index >= 21 else 0.0),
-                "can_enter": True,
+                "filling_flag": 0,
+                "is_trading": True,
             }
             for index, timestamp in enumerate(axis)
             for asset, offset in zip(("A", "B", "C"), (-1, 0, 1), strict=True)
@@ -1536,8 +1561,8 @@ def test_native_fmb_float_publication_survives_statistics_roundtrip(
             "factor_fdr_families": {"fundamental": [factor]},
             "fama_macbeth_core_factors": [],
             "hac_lag": 19,
-            "fdr_primary": "BH_5pct",
-            "fdr_robustness": "BY_5pct",
+            "fdr_primary": "BY_5pct",
+            "fdr_robustness": "BH_5pct",
         },
     }
     tables = build_a_share_factor_statistics_tables(
@@ -1857,7 +1882,9 @@ def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_pat
                 assert actual.observation_count.eq(12).all()
         with factor_statistics.table("fama_macbeth.parquet") as summary:
             assert summary.period_count.eq(len(expected_dates)).all()
-            assert summary.status.eq("DEFINED").all()
+            assert summary.status.eq("UNDEFINED").all()
+            assert summary.reason.eq("incomplete_session_clock").all()
+            assert summary["mean"].notna().all()
         mature_dates[horizon] = expected_dates[expected_dates >= dates[0]]
     assert targets == ["forward_return_5d", "forward_return_20d"]
     assert len(mature_dates[5]) == 39 and len(mature_dates[20]) == 24

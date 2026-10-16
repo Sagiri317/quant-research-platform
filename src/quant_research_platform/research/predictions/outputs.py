@@ -6,7 +6,9 @@ from quant_research_platform.contracts.validation import (
     strict_timestamp_series,
 )
 from quant_research_platform.research.features.transforms import (
+    mask_unobserved_features,
     model_input_validity_columns,
+    model_observed_input_mask,
 )
 from quant_research_platform.research.filtering import apply_filter_mode
 
@@ -36,6 +38,10 @@ def prediction_rows(frame, metadata, window, *, declared_columns=()):
             error=f"invalid_prediction_input: {column}",
             allow_null=True,
         )
-    return filtered.loc[
-        filtered.loc[:, list(validity)].notna().all(axis=1)
-    ].sort_values(["timestamp", "asset_id"], kind="stable")
+    observed = model_observed_input_mask(
+        filtered, metadata["input_columns"], declared_columns
+    )
+    filtered = mask_unobserved_features(
+        filtered, metadata["input_columns"], declared_columns
+    )
+    return filtered.loc[observed].sort_values(["timestamp", "asset_id"], kind="stable")

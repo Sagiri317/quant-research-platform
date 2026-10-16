@@ -169,6 +169,7 @@ def processed_catalog() -> ProcessedDataCatalog:
                 ProcessedDataKind.ANNOTATION,
                 EXECUTION_COLUMNS,
                 processed_input_data_ids=(MARKET_PANEL_ID,),
+                source_input_data_ids=("trading_calendar",),
             ),
             _spec(
                 FUNDAMENTAL_PIT_ID,
@@ -188,6 +189,7 @@ def processed_catalog() -> ProcessedDataCatalog:
                 ProcessedDataKind.FACTOR,
                 (*PLATFORM_ASSET_TIME_KEY, *FACTOR_COLUMNS),
                 processed_input_data_ids=(MARKET_PANEL_ID,),
+                source_input_data_ids=("trading_calendar",),
                 factor_columns=FACTOR_COLUMNS,
             ),
             _spec(
@@ -225,7 +227,8 @@ def processed_catalog() -> ProcessedDataCatalog:
                 FORWARD_RETURNS_DATA_ID,
                 ProcessedDataKind.LABEL,
                 (*PLATFORM_ASSET_TIME_KEY, *LABEL_COLUMNS),
-                processed_input_data_ids=(MARKET_PANEL_ID, EXECUTION_MASK_ID),
+                processed_input_data_ids=(MARKET_PANEL_ID,),
+                source_input_data_ids=("trading_calendar",),
                 label_columns=LABEL_COLUMNS,
             ),
             on_id_decomposition_spec(),
@@ -283,6 +286,9 @@ def _spec(
         source_input_data_ids=source_input_data_ids,
         optional_source_input_data_ids=optional_source_input_data_ids,
         processed_input_data_ids=processed_input_data_ids,
+        parameters_json=json.dumps({"min_fresh_fraction": 0.75})
+        if data_id in {PRICE_VOLUME_DATA_ID, "market_model_factors"}
+        else "{}",
     )
 
 
@@ -352,6 +358,7 @@ def on_id_decomposition_spec(horizons=(20,)) -> ProcessedDataSpec:
         },
         primary_key=PLATFORM_ASSET_TIME_KEY,
         partition_columns=("year",),
-        processed_input_data_ids=(MARKET_PANEL_ID, EXECUTION_MASK_ID),
+        processed_input_data_ids=(MARKET_PANEL_ID,),
+        source_input_data_ids=("trading_calendar",),
         parameters_json=json.dumps({"horizons": list(horizons)}),
     )

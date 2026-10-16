@@ -152,6 +152,7 @@ def test_amihud_representable_mean_survives_native_write_and_read(tmp_path, wind
             "timestamp": pd.bdate_range("2020-01-01", periods=window),
             "period_return": 1.0,
             "amount": 1e-308,
+            "filling_flag": 0,
         }
     )
     definitions = price_volume_factor_definitions(
@@ -201,6 +202,7 @@ def test_amihud_individual_quotient_can_exceed_float_range_when_mean_is_finite()
             "timestamp": pd.bdate_range("2020-01-01", periods=20),
             "period_return": [10.0, *([0.0] * 19)],
             "amount": 1e-308,
+            "filling_flag": 0,
         }
     )
     from quant_research_platform.research.factors.price_volume.calculations import (
@@ -211,6 +213,11 @@ def test_amihud_individual_quotient_can_exceed_float_range_when_mean_is_finite()
     expected = float(Fraction(10) / Fraction.from_float(1e-308) / 20)
     assert result.amihud_20d.iloc[-1] == pytest.approx(expected, rel=1e-15)
     panel.loc[3, "amount"] = 0
+    partial = calculate_price_volume_factors(panel, factor_columns=("amihud_20d",))
+    expected_partial = float(Fraction(10) / Fraction.from_float(1e-308) / 19)
+    assert partial.amihud_20d.iloc[-1] == pytest.approx(expected_partial, rel=1e-15)
+    # Fewer than 15 valid observations fails the 75% freshness threshold.
+    panel.loc[3:8, "amount"] = 0
     assert (
         calculate_price_volume_factors(panel, factor_columns=("amihud_20d",))
         .amihud_20d.isna()

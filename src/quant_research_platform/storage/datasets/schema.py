@@ -71,7 +71,12 @@ _DATASET_SPEC_RESEARCH_KEYS = _DATASET_SPEC_COMMON_KEYS | {
     "factor_columns",
     "feature_columns",
     "feature_transforms",
+    "target_transform",
+    "target_clip",
     "eligibility_recipe",
+    "minimum_listing_sessions",
+    "exclude_st",
+    "exclude_pt",
     "label_columns",
     "filter_columns",
     "context_columns",
@@ -784,9 +789,14 @@ def data_spec_payload(spec: DataSpec) -> dict[str, Any]:
                     _feature_transform_payload(transform)
                     for transform in spec.feature_transforms
                 ],
+                "target_transform": spec.target_transform,
+                "target_clip": spec.target_clip,
                 "label_columns": list(spec.label_columns),
                 "filter_columns": list(spec.filter_columns),
                 "eligibility_recipe": spec.eligibility_recipe,
+                "minimum_listing_sessions": spec.minimum_listing_sessions,
+                "exclude_st": spec.exclude_st,
+                "exclude_pt": spec.exclude_pt,
                 "context_columns": list(spec.context_columns),
                 "key_coverage": dict(spec.key_coverage),
             }
@@ -798,6 +808,7 @@ def _feature_transform_payload(transform: FeatureTransformSpec) -> dict[str, Any
     return {
         "recipe_id": transform.recipe_id,
         "source_columns": list(transform.source_columns),
+        "output_groups": list(transform.output_groups),
         "clip": transform.clip,
         "industry_neutralize": transform.industry_neutralize,
         "size_neutralize": transform.size_neutralize,
@@ -957,9 +968,14 @@ def validate_dataset_spec_payload(spec: Mapping[str, Any]) -> None:
             factor_columns=tuple(factor_columns),
             feature_columns=tuple(feature_columns),
             feature_transforms=tuple(feature_transforms),
+            target_transform=spec.get("target_transform", "date_zscore"),
+            target_clip=spec.get("target_clip", "none"),
             label_columns=tuple(label_columns),
             filter_columns=tuple(filter_columns),
             eligibility_recipe=spec.get("eligibility_recipe"),
+            minimum_listing_sessions=spec.get("minimum_listing_sessions", 252),
+            exclude_st=spec.get("exclude_st", True),
+            exclude_pt=spec.get("exclude_pt", True),
             context_columns=tuple(context_columns),
             key_coverage=dict(key_coverage),
         )
@@ -1259,6 +1275,7 @@ def _validate_feature_transform_payloads(value: object) -> list[FeatureTransform
         if type(item) is not dict or set(item) != {
             "recipe_id",
             "source_columns",
+            "output_groups",
             "clip",
             "industry_neutralize",
             "size_neutralize",
@@ -1275,7 +1292,19 @@ def _validate_feature_transform_payloads(value: object) -> list[FeatureTransform
         )
         try:
             transforms.append(
-                FeatureTransformSpec(**{**item, "source_columns": tuple(sources)})
+                FeatureTransformSpec(
+                    **{
+                        **item,
+                        "source_columns": tuple(sources),
+                        "output_groups": tuple(
+                            _require_string_list(
+                                item["output_groups"],
+                                "dataset_feature_transforms_invalid",
+                                allow_empty=False,
+                            )
+                        ),
+                    }
+                )
             )
         except (TypeError, ValueError) as exc:
             raise ValueError("dataset_feature_transforms_invalid") from exc

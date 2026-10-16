@@ -31,12 +31,16 @@ from quant_research_platform.research.datasets.validation import (
     validate_research_dataset,
 )
 from quant_research_platform.research.features.transforms import (
+    _industry_group_codes,
+    _mad_winsorize,
+    _neutralize_cross_section,
+    _winsorize,
     apply_feature_transforms,
     canonical_feature_validity_columns,
 )
 from quant_research_platform.research.filtering import (
-    A_SHARE_ELIGIBILITY_FACTS,
     a_share_eligibility,
+    a_share_eligibility_columns,
 )
 from quant_research_platform.runtime.dataframes import iter_complete_time_frames
 from quant_research_platform.storage.datasets.reading import (
@@ -118,8 +122,8 @@ def _iter_joined_processed_chunks(
         "timestamp",
         *(key for key in dataset_spec.primary_key if key != "timestamp"),
     )
-    start, stop, closed = time_window_timestamp_interval(time_window)
-    start, stop = pd.Timestamp(start), pd.Timestamp(stop)
+    _, stop, closed = time_window_timestamp_interval(time_window)
+    stop = pd.Timestamp(stop)
     if not closed:
         stop -= pd.Timedelta(1, "ns")
     pending = None
@@ -128,6 +132,32 @@ def _iter_joined_processed_chunks(
             iter_dataset_chunks(base_session), timestamp_column="timestamp"
         )
     ) as chunks:
+        auxiliary = {}
+        for data_id in dataset_spec.input_data_ids:
+            if data_id == dataset_spec.base_input_data_id:
+                continue
+            # Physical partitions may be asset-major. Read selected rows once,
+            # then order their actual timestamps before slicing base domains.
+            frame = materialize_dataset_session(
+                sessions[data_id].filtered_view(time_window)
+            )
+            timestamps = strict_timestamp_series(
+                frame.timestamp, error="invalid_time_chunk_timestamp_values"
+            )
+            order = timestamps.argsort(kind="mergesort")
+            auxiliary[data_id] = (
+                frame.iloc[order].reset_index(drop=True),
+                timestamps.iloc[order].reset_index(drop=True),
+            )
+
+        def auxiliary_through(end):
+            inputs = {}
+            for data_id, (frame, timestamps) in auxiliary.items():
+                split = int(timestamps.searchsorted(end, side="right"))
+                inputs[data_id] = frame.iloc[:split]
+                auxiliary[data_id] = (frame.iloc[split:], timestamps.iloc[split:])
+            return inputs
+
         for frame in chunks:
             if frame.empty:
                 continue
@@ -135,8 +165,7 @@ def _iter_joined_processed_chunks(
                 end = pd.Timestamp(pending.timestamp.iloc[-1])
                 chunk = _join_processed_inputs(
                     dataset_spec=dataset_spec,
-                    sessions=sessions,
-                    time_window=TimeWindow(start, end),
+                    input_frames=auxiliary_through(end),
                     base_frame=pending,
                     diagnostics=diagnostics,
                 )
@@ -144,24 +173,18 @@ def _iter_joined_processed_chunks(
                 yield chunk.sort_values(
                     list(physical_order), kind="mergesort", ignore_index=True
                 )
-                start = end + pd.Timedelta(1, "ns")
             pending = frame
         if pending is None:
             # An empty base still has no authority to hide auxiliary extra keys.
-            for data_id, session in sessions.items():
-                if data_id != dataset_spec.base_input_data_id:
-                    auxiliary = materialize_dataset_session(
-                        session.filtered_view(time_window)
+            for data_id, auxiliary in auxiliary_through(stop).items():
+                if len(auxiliary):
+                    raise ValueError(
+                        f"extra_research_input_keys: {data_id}: {len(auxiliary)}"
                     )
-                    if len(auxiliary):
-                        raise ValueError(
-                            f"extra_research_input_keys: {data_id}: {len(auxiliary)}"
-                        )
             raise ValueError("no_research_dataset_sessions")
         chunk = _join_processed_inputs(
             dataset_spec=dataset_spec,
-            sessions=sessions,
-            time_window=TimeWindow(start, stop),
+            input_frames=auxiliary_through(stop),
             base_frame=pending,
             diagnostics=diagnostics,
         )
@@ -174,8 +197,7 @@ def _iter_joined_processed_chunks(
 def _join_processed_inputs(
     *,
     dataset_spec: ResearchDatasetSpec,
-    sessions: Mapping[str, DatasetSession],
-    time_window: TimeWindow,
+    input_frames: Mapping[str, pd.DataFrame],
     base_frame: pd.DataFrame,
     diagnostics: dict | None = None,
 ) -> pd.DataFrame:
@@ -186,9 +208,7 @@ def _join_processed_inputs(
     for input_data_id in dataset_spec.input_data_ids:
         if input_data_id == base:
             continue
-        input_frame = materialize_dataset_session(
-            sessions[input_data_id].filtered_view(time_window)
-        )
+        input_frame = input_frames[input_data_id]
         validate_research_dataset(input_frame, dataset_spec, require_all_columns=False)
         _validate_input_key_coverage(
             base_keys,
@@ -254,9 +274,16 @@ def _required_input_columns(spec: ResearchDatasetSpec) -> tuple[str, ...]:
     columns = list(_ordered_output_columns(spec))
     for transform in spec.feature_transforms:
         columns.extend(transform.support_columns)
+        columns.extend(transform.source_columns)
     generated = _generated_semantic_columns(spec)
     if "eligible" in generated:
-        columns.extend(A_SHARE_ELIGIBILITY_FACTS)
+        columns.extend(
+            a_share_eligibility_columns(
+                minimum_listing_sessions=spec.minimum_listing_sessions,
+                exclude_st=spec.exclude_st,
+                exclude_pt=spec.exclude_pt,
+            )
+        )
         if spec.eligibility_recipe in {"a_share_nonfinancial", "a_share_fundamental"}:
             columns.extend(
                 (
@@ -269,6 +296,10 @@ def _required_input_columns(spec: ResearchDatasetSpec) -> tuple[str, ...]:
         if spec.eligibility_recipe == "a_share_fundamental":
             columns.append("has_legal_fundamental_pit")
     if "model_target" in generated:
+        if spec.target_transform == "industry_size_residual":
+            columns.extend(
+                ("industry_standard_id", "industry_level1_code", "log_total_market_cap")
+            )
         columns.extend(
             (
                 "eligible",
@@ -339,6 +370,20 @@ def _validate_research_input_specs(
         allowed_roles={ColumnRole.FACTOR},
         allowed_kinds={ProcessedDataKind.FACTOR},
         error_name="invalid_research_factor_columns",
+    )
+    _require_columns_from_roles_or_kinds(
+        tuple(
+            dict.fromkeys(
+                column
+                for transform in dataset_spec.feature_transforms
+                for column in transform.source_columns
+            )
+        ),
+        role_by_column=role_by_column,
+        kind_by_column=kind_by_column,
+        allowed_roles={ColumnRole.FACTOR, ColumnRole.CONTEXT},
+        allowed_kinds=set(),
+        error_name="invalid_feature_transform_sources",
     )
     _require_columns_from_roles_or_kinds(
         tuple(
@@ -496,11 +541,12 @@ def _add_a_share_semantic_columns(
         return frame
     result = frame.copy()
     if "eligible" in generated:
-        missing = sorted(set(A_SHARE_ELIGIBILITY_FACTS).difference(frame.columns))
-        if missing:
-            raise ValueError("a_share_eligibility_facts_missing: " + ", ".join(missing))
         result["eligible"] = a_share_eligibility(
-            result, dataset_spec.eligibility_recipe
+            result,
+            dataset_spec.eligibility_recipe,
+            minimum_listing_sessions=dataset_spec.minimum_listing_sessions,
+            exclude_st=dataset_spec.exclude_st,
+            exclude_pt=dataset_spec.exclude_pt,
         )
     if "model_target" in generated:
         if "forward_return_20d" not in result.columns:
@@ -508,27 +554,39 @@ def _add_a_share_semantic_columns(
         maturity = dataset_spec.label_availability_columns.get("forward_return_20d")
         if maturity is None:
             raise ValueError("model_target_label_availability_required")
-        result["model_target"] = _a_share_model_target(result)
+        result["model_target"] = _a_share_model_target(
+            result,
+            transform=dataset_spec.target_transform,
+            clip=dataset_spec.target_clip,
+        )
         participating = result.model_target.notna()
         clocks = strict_timestamp_series(
             result[maturity].where(participating),
             error="invalid_model_target_label_availability",
             allow_null=True,
         )
-        unknown = (
-            (participating & clocks.isna())
-            .groupby(result.timestamp, sort=False)
-            .transform("any")
-        )
-        result["model_target_available_at"] = (
-            clocks.groupby(result.timestamp, sort=False)
-            .transform("max")
-            .where(participating & ~unknown)
-        )
+        if (
+            dataset_spec.target_transform == "raw"
+            and dataset_spec.target_clip == "none"
+        ):
+            result["model_target_available_at"] = clocks
+        else:
+            unknown = (
+                (participating & clocks.isna())
+                .groupby(result.timestamp, sort=False)
+                .transform("any")
+            )
+            result["model_target_available_at"] = (
+                clocks.groupby(result.timestamp, sort=False)
+                .transform("max")
+                .where(participating & ~unknown)
+            )
     return result
 
 
-def _a_share_model_target(frame: pd.DataFrame) -> pd.Series:
+def _a_share_model_target(
+    frame: pd.DataFrame, *, transform: str = "date_zscore", clip: str = "none"
+) -> pd.Series:
     values = strict_finite_numeric_series(
         frame["forward_return_20d"],
         error="invalid_a_share_model_target_label",
@@ -537,15 +595,44 @@ def _a_share_model_target(frame: pd.DataFrame) -> pd.Series:
     eligible = strict_bool_series(
         frame["eligible"], error="invalid_a_share_eligibility"
     )
+    scoped = frame.loc[eligible].copy()
+    scoped["forward_return_20d"] = values.loc[eligible]
+    if transform == "industry_size_residual":
+        sizes = strict_finite_numeric_series(
+            scoped["log_total_market_cap"],
+            error="invalid_neutralization_size",
+            allow_null=True,
+        )
+        scoped = scoped.loc[
+            _industry_group_codes(scoped).notna() & sizes.notna()
+        ].copy()
+    groups = scoped.groupby("timestamp", sort=False).indices
+    if clip == "mad":
+        scoped["forward_return_20d"] = _mad_winsorize(scoped.forward_return_20d, groups)
+    elif clip == "quantile_1_99":
+        scoped["forward_return_20d"] = _winsorize(scoped.forward_return_20d, groups)
+    if transform == "industry_size_residual":
+        scoped["industry_level1_code"] = _industry_group_codes(scoped)
+        scoped = _neutralize_cross_section(
+            scoped,
+            factor_columns=("forward_return_20d",),
+            industry_column="industry_level1_code",
+            size_column="log_total_market_cap",
+            rescale=False,
+            time_groups=groups,
+        )
     target = pd.Series(np.nan, index=frame.index, dtype="float64")
-    for _timestamp, positions in frame.groupby("timestamp", sort=False).groups.items():
-        valid = positions[eligible.loc[positions] & values.loc[positions].notna()]
-        if len(valid) < 2:
-            continue
-        valid_values = values.loc[valid].to_numpy(dtype="float64", copy=False)
-        if (valid_values == valid_values[0]).all():
-            continue
-        target.loc[valid] = _stable_zscore(values.loc[valid])
+    for positions in groups.values():
+        group = scoped.forward_return_20d.iloc[positions]
+        valid = group.dropna()
+        if transform in {"raw", "industry_size_residual"}:
+            target.loc[group.index] = group
+        elif len(valid) >= 2:
+            target.loc[group.index] = (
+                _stable_zscore(group)
+                if transform == "date_zscore"
+                else group.rank(method="average", pct=True)
+            )
     return target
 
 
@@ -563,11 +650,17 @@ def assemble(config: Mapping) -> Path:
         "label_columns",
         "feature_recipe",
         "feature_transform",
+        "feature_groups",
+        "target_transform",
+        "target_clip",
         "base_input_data_id",
         "sparse_input_data_ids",
         "context_columns",
         "filter_columns",
         "eligibility_recipe",
+        "minimum_listing_sessions",
+        "exclude_st",
+        "exclude_pt",
     }
     if (
         not isinstance(config, Mapping)
@@ -754,6 +847,30 @@ def assemble(config: Mapping) -> Path:
             feature_producers[companion] = name
             if companion not in reused_features:
                 reused_features.append(companion)
+    feature_lineage = {}
+    for name, session in sessions.items():
+        columns = {
+            column for column, producer in feature_producers.items() if producer == name
+        }
+        if not columns:
+            continue
+        inherited = session.manifest.get("producer_diagnostics", {}).get(
+            "reused_feature_transforms", {}
+        )
+        feature_lineage.update(
+            {column: inherited[column] for column in columns if column in inherited}
+        )
+        for transform in session.spec.get("feature_transforms", []):
+            outputs = FeatureTransformSpec(
+                **{
+                    **transform,
+                    "source_columns": tuple(transform["source_columns"]),
+                    "output_groups": tuple(transform["output_groups"]),
+                }
+            ).output_columns
+            feature_lineage.update(
+                {column: transform for column in outputs if column in columns}
+            )
     generated_labels = {"model_target"} if config["market_id"] == "a_share" else set()
     if (
         set(labels)
@@ -775,11 +892,59 @@ def assemble(config: Mapping) -> Path:
     )
     if set(context) - set(selected_roles) - generated_context:
         raise ValueError("assemble_context_not_selected")
+    if {"target_transform", "target_clip"}.intersection(config) and (
+        config["market_id"] != "a_share" or "model_target" not in labels
+    ):
+        raise ValueError("assemble_target_transform_requires_model_target")
     business_columns = set((*factors, *labels, *filters, *context))
     recipe = config.get(
         "feature_recipe",
         "a_share_canonical" if config["market_id"] == "a_share" and factors else None,
     )
+    groups = config.get("feature_groups", ["raw", "processed"] if recipe else ["raw"])
+    if (
+        type(groups) is not list
+        or not groups
+        or any(type(group) is not str for group in groups)
+        or len(set(groups)) != len(groups)
+        or any(group not in {"raw", "processed", "pre_neutral"} for group in groups)
+    ):
+        raise ValueError("assemble_feature_groups_invalid")
+    if "feature_groups" in config:
+        reused_groups = dict.fromkeys(reused_features, "processed")
+        for column, lineage in feature_lineage.items():
+            transform = FeatureTransformSpec(
+                **{
+                    **lineage,
+                    "source_columns": tuple(lineage["source_columns"]),
+                    "output_groups": tuple(lineage["output_groups"]),
+                }
+            )
+            for group in transform.output_groups:
+                if column in replace(transform, output_groups=(group,)).output_columns:
+                    reused_groups[column] = group
+        if "feature_columns" in config and any(
+            reused_groups[column] not in groups for column in config["feature_columns"]
+        ):
+            raise ValueError("assemble_feature_group_conflict")
+        reused_features = [
+            column for column in reused_features if reused_groups[column] in groups
+        ]
+        feature_producers = {
+            column: name
+            for column, name in feature_producers.items()
+            if column in reused_features
+        }
+        feature_lineage = {
+            column: value
+            for column, value in feature_lineage.items()
+            if column in reused_features
+        }
+    processed_groups = tuple(group for group in groups if group != "raw")
+    if not processed_groups:
+        recipe = None
+    elif recipe is None and not reused_features:
+        raise ValueError("assemble_feature_groups_requires_recipe")
     options = config.get("feature_transform", {})
     if not isinstance(options, Mapping) or set(options) - {
         "clip",
@@ -796,10 +961,30 @@ def assemble(config: Mapping) -> Path:
     if recipe is None and options:
         raise ValueError("assemble_feature_transform_requires_recipe")
     transforms = (
-        (FeatureTransformSpec(recipe, tuple(factors), **options),)
+        (
+            FeatureTransformSpec(
+                recipe, tuple(factors), output_groups=processed_groups, **options
+            ),
+        )
         if recipe is not None
         else ()
     )
+    if transforms and "feature_recipe" not in config and not options:
+        transform = transforms[0]
+        pending_sources = tuple(
+            factor
+            for factor in factors
+            if not set(
+                replace(transform, source_columns=(factor,)).output_columns
+            ).issubset(reused_features)
+        )
+        transforms = (
+            (replace(transform, source_columns=pending_sources),)
+            if pending_sources
+            else ()
+        )
+        if not transforms:
+            recipe = None
     generated_features = tuple(
         column for transform in transforms for column in transform.output_columns
     )
@@ -846,10 +1031,11 @@ def assemble(config: Mapping) -> Path:
     context = tuple(dict.fromkeys(context))
     if set(sparse_inputs) - set(inputs) or base_input in sparse_inputs:
         raise ValueError("assemble_sparse_inputs_invalid")
+    output_factors = factors if "raw" in groups else []
     source = actual_specs[base_input]
     output_roles = {
         **{column: source.column_roles[column] for column in source.primary_key},
-        **dict.fromkeys(factors, ColumnRole.FACTOR),
+        **dict.fromkeys(output_factors, ColumnRole.FACTOR),
         **dict.fromkeys(features, ColumnRole.FEATURE),
         **dict.fromkeys(labels, ColumnRole.LABEL),
         **{
@@ -865,15 +1051,29 @@ def assemble(config: Mapping) -> Path:
         if column in output_roles and column in sessions[name].logical_columns
     }
     for transform in transforms:
-        for factor in transform.source_columns:
-            for prefix in ("feature_missing_", "feature_observed_"):
-                units[prefix + factor] = "dimensionless"
-            if transform.scale:
-                units["feature_" + factor] = "dimensionless"
-            elif factor in units:
-                units["feature_" + factor] = units[factor]
+        for group in transform.output_groups:
+            for factor in transform.source_columns:
+                suffix = ("pre_neutral_" if group == "pre_neutral" else "") + factor
+                for prefix in ("feature_missing_", "feature_observed_"):
+                    units[prefix + suffix] = "dimensionless"
+                source_unit = next(
+                    (
+                        item.column_units[factor]
+                        for item in actual_specs.values()
+                        if factor in item.column_units
+                    ),
+                    None,
+                )
+                if transform.scale:
+                    units["feature_" + suffix] = "dimensionless"
+                elif source_unit is not None:
+                    units["feature_" + suffix] = source_unit
     if "model_target" in labels:
-        units["model_target"] = "dimensionless"
+        units["model_target"] = (
+            "decimal_return"
+            if config.get("target_transform") in {"raw", "industry_size_residual"}
+            else "dimensionless"
+        )
     spec = ResearchDatasetSpec(
         data_id=config["dataset_id"],
         market_id=config["market_id"],
@@ -883,15 +1083,21 @@ def assemble(config: Mapping) -> Path:
         partition_columns=("year",),
         input_data_ids=tuple(inputs),
         base_input_data_id=base_input,
-        factor_columns=tuple(factors),
+        factor_columns=tuple(output_factors),
         feature_columns=features,
         feature_transforms=transforms,
+        target_transform=config.get("target_transform", "date_zscore"),
+        target_clip=config.get("target_clip", "none"),
         label_columns=labels,
         filter_columns=tuple(filters),
         context_columns=context,
         eligibility_recipe=config.get(
-            "eligibility_recipe", defaults.eligibility_recipe if defaults else None
+            "eligibility_recipe",
+            defaults.eligibility_recipe if defaults else None,
         ),
+        minimum_listing_sessions=config.get("minimum_listing_sessions", 252),
+        exclude_st=config.get("exclude_st", True),
+        exclude_pt=config.get("exclude_pt", True),
         column_roles=output_roles,
         column_units=units,
         label_availability_columns={
@@ -978,26 +1184,6 @@ def assemble(config: Mapping) -> Path:
         )
         projected[data_id] = sessions[data_id].projected_view(columns)
         existing = tuple(dict.fromkeys((*existing, *columns)))
-    feature_lineage = {}
-    for name, session in sessions.items():
-        columns = {
-            column for column, producer in feature_producers.items() if producer == name
-        }
-        if not columns:
-            continue
-        inherited = session.manifest.get("producer_diagnostics", {}).get(
-            "reused_feature_transforms", {}
-        )
-        feature_lineage.update(
-            {column: inherited[column] for column in columns if column in inherited}
-        )
-        for transform in session.spec.get("feature_transforms", []):
-            outputs = FeatureTransformSpec(
-                **{**transform, "source_columns": tuple(transform["source_columns"])}
-            ).output_columns
-            feature_lineage.update(
-                {column: transform for column in outputs if column in columns}
-            )
     return _assemble_research_dataset_from_sessions(
         output_root=Path(config["output_root"]),
         spec=spec,
@@ -1020,7 +1206,13 @@ def assemble(config: Mapping) -> Path:
                 "factor_columns": list(factors),
                 "label_columns": list(labels),
                 "feature_recipe": recipe,
+                "feature_groups": groups,
+                "target_transform": spec.target_transform,
+                "target_clip": spec.target_clip,
                 "eligibility_recipe": spec.eligibility_recipe,
+                "minimum_listing_sessions": spec.minimum_listing_sessions,
+                "exclude_st": spec.exclude_st,
+                "exclude_pt": spec.exclude_pt,
                 "feature_transform": (
                     {
                         name: getattr(transforms[0], name)

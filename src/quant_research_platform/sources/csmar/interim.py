@@ -73,6 +73,7 @@ DEFAULT_INTERIM_DATA_IDS: tuple[str, ...] = (
     "trading_no_limit",
     "special_treatment_changes",
     "equity_changes",
+    "corporate_actions",
     "analyst_forecast",
 )
 SOURCE_ASSET_TIME_COLUMNS: tuple[str, ...] = (
@@ -279,11 +280,23 @@ SPECIAL_TREATMENT_CHANGE_COLUMNS = (
     "is_st",
     "is_pt",
 )
+CORPORATE_ACTION_COLUMNS = (
+    "source_asset_id",
+    "timestamp",
+    "kind",
+    "market_type",
+    "announcement_date",
+    "settlement_date",
+    "amount",
+    "subscription_price",
+)
 EQUITY_CHANGE_COLUMNS = (
     "source_asset_id",
     "timestamp",
     "report_period",
     "report_type",
+    "data_source",
+    "subject_code",
 )
 ANALYST_FORECAST_COLUMNS = (
     "source_asset_id",
@@ -317,6 +330,7 @@ INTERIM_COLUMNS_BY_DATA_ID: dict[str, tuple[str, ...]] = {
     "trading_no_limit": TRADING_NO_LIMIT_COLUMNS,
     "special_treatment_changes": SPECIAL_TREATMENT_CHANGE_COLUMNS,
     "equity_changes": EQUITY_CHANGE_COLUMNS,
+    "corporate_actions": CORPORATE_ACTION_COLUMNS,
     "analyst_forecast": ANALYST_FORECAST_COLUMNS,
 }
 
@@ -355,6 +369,8 @@ def normalize_raw_frame(
             error="invalid_csmar_index_code",
         )
 
+    if data_id == "corporate_actions":
+        return _normalize_corporate_actions(mapped)
     if data_id == "trading_calendar":
         return _normalize_trading_calendar_frame(mapped)
     if data_id == "index_membership":
@@ -775,6 +791,50 @@ def normalize_raw_frame(
     raise ValueError(f"unsupported_csmar_data_id: {data_id}")
 
 
+def _normalize_corporate_actions(mapped: pd.DataFrame) -> pd.DataFrame:
+    """Preserve distribution facts without inferring holder entitlements."""
+    result = mapped.copy()
+    result["source_asset_id"] = result["stock_code"].astype("string")
+    result["timestamp"] = strict_timestamp_series(
+        result["timestamp"], error="invalid_corporate_action_ex_date"
+    ).dt.normalize()
+    result["kind"] = strict_string_series(
+        result["kind"], error="invalid_corporate_action_kind"
+    ).astype("string")
+    counts = {
+        "raw_rows": len(result),
+        "retained_before_date_filter_rows": len(result),
+    }
+    counts["unsupported_kind_rows"] = int(
+        (~result["kind"].isin({"CA", "SD", "RO", "DS", "GQ", "SN"})).sum()
+    )
+    # Optional facts can be unknown without erasing an otherwise identified event.
+    for column in ("announcement_date", "settlement_date"):
+        values = result[column].replace(r"^\s*$", pd.NA, regex=True)
+        dates = pd.to_datetime(values, errors="coerce", format="%Y-%m-%d")
+        counts[f"invalid_{column}_rows"] = int((values.notna() & dates.isna()).sum())
+        result[column] = dates.astype("datetime64[ns]").dt.normalize()
+    for column in ("amount", "subscription_price", "market_type"):
+        values = result[column].replace(r"^\s*$", pd.NA, regex=True)
+        numeric = pd.to_numeric(values, errors="coerce").astype("float64")
+        valid = np.isfinite(numeric)
+        if column == "market_type":
+            valid &= (
+                numeric.eq(np.floor(numeric)) & numeric.ge(-(2**63)) & numeric.lt(2**63)
+            )
+        counts[f"invalid_{column}_rows"] = int((values.notna() & ~valid).sum())
+        result[column] = numeric.where(valid)
+        if column == "market_type":
+            result[column] = result[column].astype("Int64")
+    result = (
+        result.loc[:, CORPORATE_ACTION_COLUMNS]
+        .sort_values(["source_asset_id", "timestamp", "kind"], kind="mergesort")
+        .reset_index(drop=True)
+    )
+    result.attrs["source_row_counts"] = counts
+    return result
+
+
 def _normalize_state_change_frame(frame: pd.DataFrame, data_id: str) -> pd.DataFrame:
     result = frame
     result["source_asset_id"] = result["stock_code"]
@@ -861,6 +921,10 @@ def _normalize_state_change_frame(frame: pd.DataFrame, data_id: str) -> pd.DataF
     result["report_type"] = strict_string_series(
         result["report_type"], error="invalid_equity_change_report_type"
     )
+    for column in ("data_source", "subject_code"):
+        result[column] = strict_string_series(
+            result[column], error=f"invalid_equity_change_{column}"
+        )
     return (
         result.loc[:, EQUITY_CHANGE_COLUMNS]
         .sort_values(["source_asset_id", "timestamp"], kind="mergesort")
@@ -948,7 +1012,7 @@ def materialize_interim_data(
             diagnostics["exact_duplicate_count"] = 0
             target_metadata["producer_diagnostics"] = diagnostics
             source_row_counts = None
-            if data_id in {"analyst_forecast", "index_info"}:
+            if data_id in {"analyst_forecast", "index_info", "corporate_actions"}:
                 source_row_counts = {}
                 diagnostics["source_row_counts"] = source_row_counts
             frames = _iter_normalized_interim_frames(
@@ -1128,8 +1192,16 @@ def _interim_spec(data_id: str, columns: tuple[str, ...]) -> InterimDataSpec:
         primary_key = ("source_asset_id", "timestamp", "changed_item")
     elif data_id == "special_treatment_changes":
         primary_key = ("source_asset_id", "timestamp", "change_type")
+    elif data_id == "corporate_actions":
+        primary_key = ("source_asset_id", "timestamp", "kind")
     elif data_id == "equity_changes":
-        primary_key = ("source_asset_id", "timestamp", "report_type")
+        primary_key = (
+            "source_asset_id",
+            "timestamp",
+            "report_type",
+            "data_source",
+            "subject_code",
+        )
     elif data_id in {"index_membership", "index_weights"}:
         primary_key = ("source_asset_id", "constituent_asset_id", "timestamp")
     elif data_id in FINANCIAL_COLUMNS_BY_DATA_ID:

@@ -21,6 +21,7 @@ class FeatureTransformSpec:
     scale: bool = True
     impute_missing: bool = True
     size_column: str = "log_total_market_cap"
+    output_groups: tuple[str, ...] = ("processed",)
 
     def __post_init__(self) -> None:
         if type(self.recipe_id) is not str or self.recipe_id not in FEATURE_RECIPES:
@@ -31,6 +32,19 @@ class FeatureTransformSpec:
             "log_float_market_cap",
         }:
             raise ValueError("invalid_feature_size_column")
+        if (
+            type(self.output_groups) is not tuple
+            or not self.output_groups
+            or any(type(group) is not str for group in self.output_groups)
+            or len(set(self.output_groups)) != len(self.output_groups)
+            or any(
+                group not in {"processed", "pre_neutral"}
+                for group in self.output_groups
+            )
+        ):
+            raise ValueError("invalid_feature_output_groups")
+        if len(set(self.output_columns)) != len(self.output_columns):
+            raise ValueError("feature_transform_outputs_must_not_contain_duplicates")
         clip = self.clip
         if clip is None:
             clip = "mad" if self.recipe_id == "a_share_canonical" else "quantile_1_99"
@@ -50,10 +64,12 @@ class FeatureTransformSpec:
     @property
     def support_columns(self) -> tuple[str, ...]:
         columns = ["eligible"]
-        if self.industry_neutralize:
+        if "processed" in self.output_groups and self.industry_neutralize:
             columns.extend(("industry_standard_id", "industry_level1_code"))
-        if self.size_neutralize and any(
-            column != self.size_column for column in self.source_columns
+        if (
+            "processed" in self.output_groups
+            and self.size_neutralize
+            and any(column != self.size_column for column in self.source_columns)
         ):
             columns.append(self.size_column)
         return tuple(columns)
@@ -61,7 +77,8 @@ class FeatureTransformSpec:
     @property
     def output_columns(self) -> tuple[str, ...]:
         return tuple(
-            prefix + column
+            prefix + ("pre_neutral_" if group == "pre_neutral" else "") + column
+            for group in self.output_groups
             for column in self.source_columns
             for prefix in FEATURE_PREFIXES
         )

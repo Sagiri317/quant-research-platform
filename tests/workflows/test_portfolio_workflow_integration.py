@@ -204,7 +204,7 @@ def test_native_statistics_short_and_zero_maturity_windows(
             assert diagnostics.reason.eq(
                 "selection_reuses_evaluation_window"
                 if group == "global"
-                else "hac_lag_exceeds_observations"
+                else "incomplete_session_clock"
             ).all()
         with artifact.table("robustness.parquet") as robustness:
             assert robustness.status.eq("UNDEFINED").all()
@@ -212,7 +212,7 @@ def test_native_statistics_short_and_zero_maturity_windows(
             assert robustness.reason.eq(
                 "selection_reuses_evaluation_window"
                 if group == "global"
-                else "bootstrap_block_exceeds_common_observations"
+                else "incomplete_session_clock"
             ).all()
         if group == "quarterly":
             with artifact.table("model_group_comparison.parquet") as paired:
@@ -352,6 +352,7 @@ def test_native_adv_gap_preserves_portfolio_statistics(tmp_path):
             "fees": "a_share_fee_schedule",
             "market_bars": "market_bars_1d",
             "stock_master": "stock_master",
+            "corporate_actions": "corporate_actions",
         }.items()
     }
     assumptions = {

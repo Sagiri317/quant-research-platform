@@ -41,6 +41,8 @@ def test_projection_handcheck_includes_unpredicted_benchmark_assets(
         if neutrality != "size"
         else None,
         neutrality=neutrality,
+        industry_neutrality_limit=0.0,
+        size_neutrality_limit=0.0,
     )
     assert weights.tolist() == pytest.approx(expected, abs=1e-8)
     assert weights.sum() == pytest.approx(1.0, abs=1e-10)
@@ -59,10 +61,10 @@ def test_projection_failure_does_not_silently_relax(monkeypatch):
     )
     with pytest.raises(PortfolioTargetBlocked, match="target_neutrality_solver_failed"):
         build_simple_target_weights(
-            pd.Series({"a": 1.0}),
-            eligible=pd.Series({"a": True}),
-            float_market_cap=pd.Series({"a": 1.0}),
-            total_market_cap=pd.Series({"a": 1.0}),
+            pd.Series({"a": 1.0, "b": 0.0}),
+            eligible=pd.Series({"a": True, "b": True}),
+            float_market_cap=pd.Series({"a": 1.0, "b": 2.0}),
+            total_market_cap=pd.Series({"a": 1.0, "b": 2.0}),
             neutrality="size",
         )
 
@@ -99,6 +101,8 @@ def test_neutral_target_and_blocked_realized_exposure_are_distinct(
         0.5,
         None,
         neutrality="industry_size",
+        industry_neutrality_limit=0.0,
+        size_neutrality_limit=0.0,
     )
     batches, _ = _build_producer(
         tmp_path,
@@ -124,7 +128,7 @@ def test_neutral_target_and_blocked_realized_exposure_are_distinct(
     assert replace(candidate, neutrality="none").neutrality == "none"
 
 
-def test_nonrebalance_holding_outside_benchmark_marks_both_exposures_unknown(
+def test_nonrebalance_blocked_exit_keeps_realized_exposure_unknown(
     tmp_path, monkeypatch
 ):
     from tests.research.test_portfolio_production import _build_producer, _inputs
@@ -152,6 +156,13 @@ def test_nonrebalance_holding_outside_benchmark_marks_both_exposures_unknown(
         & frames["dataset"].timestamp.ge("2023-01-09"),
         "eligible",
     ] = False
+    # Loss of research eligibility requests an independent exit; a real execution
+    # restriction is needed to leave the old position outside the benchmark.
+    frames["execution"].loc[
+        frames["execution"].asset_id.eq("b")
+        & frames["execution"].timestamp.ge("2023-01-09"),
+        "can_exit",
+    ] = False
     candidate = PortfolioCandidateSpec(
         "neutral",
         "global",
@@ -174,18 +185,41 @@ def test_nonrebalance_holding_outside_benchmark_marks_both_exposures_unknown(
         typed_batches=True,
     )
     matched = []
+    initial_cash = []
     for batch in batches:
         facts = {
             row.name: row.number if row.number is not None else row.text
             for row in batch.diagnostics
             if row.asset_id == "__cash__"
         }
-        if facts.get("target_exposure_status") == "UNDEFINED":
-            matched.append(facts)
+        if pd.Timestamp(facts["decision_timestamp"]) < pd.Timestamp("2023-01-06"):
+            initial_cash.append(batch)
+            assert not batch.trades
+            assert all(row.asset_id == "__cash__" for row in batch.valuations)
             for kind in ("target", "realized"):
-                assert facts[f"{kind}_exposure_reason"] == "outside_benchmark_domain"
-                assert facts[f"{kind}_exposure_excluded_weight"] > 0.0
-                assert not any(key.startswith(f"{kind}_exposure:") for key in facts)
+                assert facts[f"{kind}_exposure_status"] == "UNDEFINED"
+                assert facts[f"{kind}_exposure_reason"] == "nonpositive_stock_value"
+            continue
+        if pd.Timestamp(facts["decision_timestamp"]) >= pd.Timestamp("2023-01-09"):
+            matched.append(batch)
+            assert facts["target_exposure_status"] == "DEFINED"
+            assert facts["target_exposure_excluded_weight"] == 0.0
+            assert facts["target_exposure:industry:fixture:a"] == pytest.approx(1.0)
+            assert facts["realized_exposure_status"] == "UNDEFINED"
+            assert facts["realized_exposure_reason"] == "outside_benchmark_domain"
+            assert facts["realized_exposure_excluded_weight"] > 0.0
+            assert not any(key.startswith("realized_exposure:") for key in facts)
+            held = {row.phase: row for row in batch.valuations if row.asset_id == "b"}
+            assert held["before"].quantity > 0
+            assert held["after"].quantity == held["before"].quantity
+            assert held["after"].value > 0
+            assert not any(row.asset_id == "b" for row in batch.trades)
+            target = {
+                row.name: row.number for row in batch.diagnostics if row.asset_id == "b"
+            }
+            assert target["target_weight"] == 0.0
+            assert target["decision_delta_weight"] < 0.0
+    assert initial_cash
     assert matched
 
 
@@ -202,7 +236,9 @@ def test_neutral_projection_satisfies_kkt_on_active_and_boundary_assets():
         index=list("abcde"),
     )
     target = pd.Series([1.0, 0.0, 0.0, 0.0, 0.0], index=context.index)
-    weights = _project_neutral_target(target, context).to_numpy()
+    weights = _project_neutral_target(
+        target, context, industry_limit=0.0, size_limit=0.0
+    ).to_numpy()
     matrix = np.vstack((np.ones(5), context["size"]))
     gradient = weights - target.to_numpy()
     active = weights > 1e-9
@@ -329,7 +365,14 @@ def test_enhanced_nonrebalance_unknown_industry_preserves_held_account(
                 for row in batch.valuations
                 if row.phase == "after"
             }
-            assert before == after
+            assert before.keys() == after.keys()
+            for asset in before:
+                if asset == "__cash__":
+                    assert before[asset] == pytest.approx(
+                        after[asset], abs=1e-10, rel=0.0
+                    )
+                else:
+                    assert before[asset] == after[asset]
     assert len(matched) == 1
 
 
@@ -384,6 +427,7 @@ def test_absent_cap_column_is_local_to_actual_scheduled_neutral_target(
         output_window=TimeWindow("2023-01-03", "2023-01-06"),
         candidate=candidate,
         typed_batches=True,
+        model_inputs=("total_market_cap",),
     )
     selected = list(batches)
     assert len(selected) == 2
@@ -405,6 +449,7 @@ def test_absent_cap_column_is_local_to_actual_scheduled_neutral_target(
         output_window=TimeWindow("2023-01-03", "2023-01-10"),
         candidate=candidate,
         typed_batches=True,
+        model_inputs=("total_market_cap",),
     )
     with pytest.raises(
         PortfolioTargetBlocked, match="target_neutrality_benchmark_empty"

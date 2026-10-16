@@ -148,13 +148,13 @@ def label_definitions() -> tuple[LabelDefinition, ...]:
             label_id=f"forward_return_{horizon}d",
             market_id=market_ids.MARKET_ID,
             family="forward_return",
-            input_columns=("adj_open", "can_enter"),
+            input_columns=("adj_open", "filling_flag", "is_trading"),
             output_column=forward_return_label_column(horizon),
             label_timing="signal_close_to_next_open_to_horizon_open",
             horizon=horizon,
             lookahead=horizon + 1,
-            entry_rule="next_market_session_adjusted_open",
-            exit_rule="entry_plus_horizon_market_sessions_open",
+            entry_rule="next_market_session_real_adjusted_open",
+            exit_rule="entry_plus_horizon_market_sessions_real_adjusted_open",
         )
         for horizon in LABEL_HORIZONS
     )

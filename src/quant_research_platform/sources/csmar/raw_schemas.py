@@ -81,7 +81,15 @@ def infer_dataset_from_native_export(path: str | Path) -> str:
     """Infer the dataset only from an explicit native CSMAR table file name."""
 
     export_path = Path(path)
-    stem = re.sub(r"\d+$", "", export_path.stem)
+    raw_only = re.fullmatch(
+        r"raw__(?P<table>[A-Za-z0-9_]+)__part-\d+__observed-\d{8}\.csv",
+        export_path.name,
+    )
+    stem = (
+        raw_only.group("table")
+        if raw_only is not None
+        else re.sub(r"\d+$", "", export_path.stem)
+    )
     for dataset, contract in _field_mappings.RAW_TABLE_CONTRACTS.items():
         if contract.table_code == stem:
             return dataset

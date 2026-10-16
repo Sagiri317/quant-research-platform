@@ -42,6 +42,7 @@ def _panel():
                     asset_id=asset,
                     timestamp=dates,
                     is_trading=True,
+                    filling_flag=0,
                     limit_status=0.0,
                     open=10.0,
                     high=10.0,
@@ -82,7 +83,14 @@ def test_unknown_execution_survives_persistence_as_unknown_portfolio_permission(
         definitions=label_definitions(),
         sessions=panel.timestamp.unique(),
     )
-    assert pd.isna(labeled.loc[0, "forward_return_1d"])
+    if column == "is_trading":
+        assert pd.isna(labeled.loc[0, "forward_return_1d"])
+        assert pd.isna(labeled.loc[0, "forward_return_1d_available_at"])
+    else:
+        assert labeled.loc[0, "forward_return_1d"] == pytest.approx(1 / 11)
+        assert labeled.loc[0, "forward_return_1d_available_at"] == panel.timestamp.iloc[
+            2
+        ] + pd.Timedelta(hours=7)
 
 
 def test_positive_no_limit_evidence_and_unknown_special_treatment():
@@ -117,17 +125,29 @@ def test_only_required_future_facts_determine_realized_target():
     assert labels.loc[0, "forward_return_20d"] == pytest.approx(31 / 11 - 1)
     assert labels.loc[0, "forward_return_20d_available_at"] == panel.timestamp.iloc[
         21
-    ] + pd.Timedelta(hours=1, minutes=30)
+    ] + pd.Timedelta(hours=7)
     later = panel.copy()
     later.loc[23, "limit_status"] = np.nan
     changed, _ = targets(later)
     pd.testing.assert_series_equal(
         original.iloc[[0, 25, 50]], changed.iloc[[0, 25, 50]]
     )
-    required = panel.copy()
-    required.loc[1, "limit_status"] = np.nan
-    changed, _ = targets(required)
-    assert pd.isna(changed.iloc[0]) and pd.notna(original.iloc[0])
+    unknown_permission = panel.copy()
+    unknown_permission.loc[1, "limit_status"] = np.nan
+    changed, changed_labels = targets(unknown_permission)
+    pd.testing.assert_series_equal(original, changed, rtol=1e-14, atol=0)
+    pd.testing.assert_series_equal(
+        labels.forward_return_20d,
+        changed_labels.forward_return_20d,
+        rtol=1e-14,
+        atol=0,
+    )
+    for endpoint in (1, 21):
+        required = panel.copy()
+        required.loc[endpoint, "adj_open"] = np.nan
+        changed, changed_labels = targets(required)
+        assert pd.isna(changed.iloc[0]) and pd.notna(original.iloc[0])
+        assert pd.isna(changed_labels.loc[0, "forward_return_20d_available_at"])
 
 
 def test_frozen_scaler_constant_and_true_unit_scale_reload_predict(tmp_path):

@@ -86,7 +86,7 @@ def candidates(
 def test_candidate_domains_survive_new_common_comparison(tmp_path):
     cases, config = candidates(tmp_path)
     frames = [read_predictions(path)[0] for path in config["predictions"]]
-    assert [len(frame) for frame in frames] == [6, 9]
+    assert [len(frame) for frame in frames] == [6, 6]
     before = [
         (Path(path) / "prediction.parquet").read_bytes()
         for path in config["predictions"]
@@ -185,7 +185,7 @@ def test_future_labels_do_not_change_prior_causal_selection(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "values,expected", [([-0.4, None], "a"), ([None, None], "b"), ([1.0, 1.0], "b")]
+    "values,expected", [([-0.4, None], "a"), ([None, None], None), ([1.0, 1.0], "b")]
 )
 def test_defined_negative_and_all_undefined_keep_declared_ties(values, expected):
     rows = pd.DataFrame({"candidate": ["a", "b"], "validation_rankic": values})

@@ -21,6 +21,8 @@ def _prices(count=25):
             "adj_open": 100.0 * 1.1 ** np.arange(count),
             "adj_close": 105.0 * 1.1 ** np.arange(count),
             "can_enter": True,
+            "filling_flag": 0,
+            "is_trading": True,
         }
     )
 
@@ -56,10 +58,10 @@ def test_hand_calculation_and_endpoint_owner():
         ] + pd.Timedelta(hours=7)
         assert result[f"{overnight}_available_at"].iloc[0] == frame.timestamp.iloc[
             horizon + 1
-        ] + pd.Timedelta(hours=1, minutes=30)
+        ] + pd.Timedelta(hours=7)
     assert result.on_id_pre_entry_log_return_available_at.iloc[
         0
-    ] == frame.timestamp.iloc[1] + pd.Timedelta(hours=1, minutes=30)
+    ] == frame.timestamp.iloc[1] + pd.Timedelta(hours=7)
 
 
 @pytest.mark.parametrize(
@@ -92,7 +94,8 @@ def test_exit_and_entry_permission_have_independent_domains():
     row = _calculate(frame, (1,)).iloc[0]
     assert np.isfinite(row.on_id_holding_intraday_log_return_1d)
     assert np.isfinite(row.on_id_holding_overnight_log_return_1d)
-    assert row.on_id_endpoint_return_1d_reason == "entry_not_allowed"
+    assert pd.isna(row.on_id_endpoint_return_1d_reason)
+    assert np.isfinite(row.on_id_endpoint_return_1d)
 
 
 def test_lifecycles_and_unknown_listing_are_retained():
@@ -154,10 +157,8 @@ def test_all_supported_horizons_and_permission_unknown():
         assert result[f"on_id_holding_intraday_log_return_{horizon}d"].iloc[
             0
         ] == pytest.approx(horizon * np.log(1.05))
-        assert (
-            result[f"on_id_endpoint_return_{horizon}d_reason"].iloc[0]
-            == "entry_permission_unknown"
-        )
+        assert pd.isna(result[f"on_id_endpoint_return_{horizon}d_reason"].iloc[0])
+        assert np.isfinite(result[f"on_id_endpoint_return_{horizon}d"].iloc[0])
         assert np.isfinite(
             result[f"on_id_holding_overnight_log_return_{horizon}d"].iloc[0]
         )
@@ -188,3 +189,51 @@ def test_nonfinite_endpoint_does_not_erase_finite_log_components():
     assert row.on_id_endpoint_return_1d_reason == "nonfinite_result"
     assert pd.isna(row.on_id_endpoint_return_1d_available_at)
     assert not row.on_id_decomposition_qualified_1d
+
+
+def test_real_endpoints_and_interior_suspension_valuation_are_distinct():
+    frame = _prices(5).drop(columns="can_enter")
+    frame.loc[2, ["filling_flag", "is_trading"]] = [1, False]
+    frame.loc[2, ["adj_open", "adj_close"]] = frame.loc[1, "adj_close"]
+    row = _calculate(frame, (2,)).iloc[0]
+    assert np.isfinite(row.on_id_endpoint_return_2d)
+    assert row.on_id_decomposition_qualified_2d
+    # The same carry cannot be used as the exact entry or exit endpoint.
+    row = _calculate(frame, (1,)).iloc[0]
+    assert pd.isna(row.on_id_endpoint_return_1d)
+    assert pd.isna(row.on_id_endpoint_return_1d_available_at)
+    assert np.isfinite(row.on_id_holding_intraday_log_return_1d)
+    # An unknown row with an unexplained positive value is not a known path.
+    frame.loc[2, "filling_flag"] = np.nan
+    row = _calculate(frame, (2,)).iloc[0]
+    assert np.isfinite(row.on_id_endpoint_return_2d)
+    assert pd.isna(row.on_id_holding_intraday_log_return_2d)
+    assert not row.on_id_decomposition_qualified_2d
+
+
+@pytest.mark.parametrize("endpoint", (1, 3))
+@pytest.mark.parametrize(
+    "flag,trading", ((1, False), (np.nan, pd.NA), (0, False), (0, pd.NA))
+)
+def test_on_id_rejects_nonreal_endpoint_even_when_price_is_positive(
+    endpoint, flag, trading
+):
+    frame = _prices(5).drop(columns="can_enter")
+    frame["is_trading"] = frame.is_trading.astype("boolean")
+    frame.loc[endpoint, ["filling_flag", "is_trading"]] = [flag, trading]
+    row = _calculate(frame, (2,)).iloc[0]
+    assert pd.isna(row.on_id_endpoint_return_2d)
+    assert pd.isna(row.on_id_endpoint_return_2d_available_at)
+    assert not row.on_id_decomposition_qualified_2d
+
+
+def test_string_quote_facts_match_typed_suspension_facts():
+    typed = _prices(5)
+    typed.loc[2, ["filling_flag", "is_trading"]] = [1, False]
+    typed.loc[2, ["adj_open", "adj_close"]] = typed.loc[1, "adj_close"]
+    textual = typed.copy()
+    textual["filling_flag"] = textual.filling_flag.astype(str)
+    textual["is_trading"] = textual.is_trading.map({True: "true", False: "false"})
+    expected, actual = _calculate(typed, (1, 2)), _calculate(textual, (1, 2))
+    columns = [column for column in expected if column.startswith("on_id_")]
+    pd.testing.assert_frame_equal(actual[columns], expected[columns], check_exact=False)

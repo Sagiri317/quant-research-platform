@@ -83,6 +83,7 @@ def _interim_specs() -> InterimDataCatalog:
                     "index_market",
                     "market_bars_1d",
                     "stock_master",
+                    "corporate_actions",
                     "a_share_equity_events",
                 )
             ),
@@ -103,6 +104,7 @@ def _processed_specs() -> ProcessedDataCatalog:
         column_roles={
             **common,
             "listing_date": ColumnRole.CONTEXT,
+            "open": ColumnRole.CONTEXT,
             "adj_open": ColumnRole.CONTEXT,
             "adj_close": ColumnRole.CONTEXT,
             "amount": ColumnRole.CONTEXT,
@@ -233,6 +235,7 @@ def _frames(dates: pd.DatetimeIndex | None = None) -> dict[str, pd.DataFrame]:
                 "market_id": "a_share",
                 "asset_id": asset,
                 "timestamp": timestamp,
+                "open": 100.0,
                 "adj_open": 100.0,
                 "adj_close": 100.0,
                 "amount": 10_000.0,
@@ -365,6 +368,23 @@ def _frames(dates: pd.DatetimeIndex | None = None) -> dict[str, pd.DataFrame]:
     return {
         "market_bars_1d": bars.reindex(
             columns=csmar_catalog().get("market_bars_1d").required_columns
+        ),
+        "corporate_actions": pd.DataFrame(
+            {
+                column: pd.Series(
+                    dtype=(
+                        "datetime64[ns]"
+                        if column
+                        in {"timestamp", "announcement_date", "settlement_date"}
+                        else "float64"
+                        if column in {"amount", "subscription_price"}
+                        else "Int64"
+                        if column == "market_type"
+                        else "string"
+                    )
+                )
+                for column in csmar_catalog().get("corporate_actions").required_columns
+            }
         ),
         "stock_master": stocks.reindex(
             columns=csmar_catalog().get("stock_master").required_columns

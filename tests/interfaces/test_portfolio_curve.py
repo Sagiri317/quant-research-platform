@@ -16,7 +16,7 @@ from quant_research_platform.interfaces.queries import portfolio_curve
 
 
 def _published_curve(tmp_path):
-    capital = PortfolioCapital("candidate", 100.0, "CNY", "adjusted_notional")
+    capital = PortfolioCapital("candidate", 100.0, "CNY", "cash_equity")
 
     def produce(emit):
         for sequence in range(3):

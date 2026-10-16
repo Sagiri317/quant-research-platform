@@ -102,6 +102,17 @@ def test_owner_layer_import_boundaries_are_enforced(
             "quant_research_platform.storage.datasets",
         ),
         (
+            SOURCE_ROOT / "contracts/example.py",
+            "from quant_research_platform.research.randomness "
+            "import DEFAULT_ROOT_SEED\n",
+            "quant_research_platform.research.randomness.DEFAULT_ROOT_SEED",
+        ),
+        (
+            SOURCE_ROOT / "contracts/example.py",
+            "from quant_research_platform.compute import market_model\n",
+            "quant_research_platform.compute.market_model",
+        ),
+        (
             SOURCE_ROOT / "runtime/example.py",
             "from quant_research_platform.reports import verification_summary\n",
             "quant_research_platform.reports.verification_summary",

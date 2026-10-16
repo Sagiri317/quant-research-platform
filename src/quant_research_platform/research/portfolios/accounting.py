@@ -13,7 +13,11 @@ import numpy as np
 import pandas as pd
 from scipy.stats import t as student_t
 
-from quant_research_platform.compute.portfolio_economics import _LedgerEconomics
+from quant_research_platform.compute.portfolio_economics import (
+    _LedgerEconomics,
+    cash_equity_pnl,
+    cash_equity_positions,
+)
 from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_BLOCK_REASONS,
     PORTFOLIO_CASH_ASSET_ID,
@@ -26,6 +30,7 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioCashFlow,
     PortfolioDiagnostic,
     PortfolioLedgerBatch,
+    PortfolioRightsAdjustment,
     PortfolioTargetBlocked,
     PortfolioValuation,
     TradeCostComponents,
@@ -54,6 +59,363 @@ _LEDGER_COLUMNS = (
     "slippage_cost",
     "impact_cost",
 )
+
+
+def adjust_carried_share_mark(
+    mark, corporate_events, rights_events, *, asset, listing, timestamp, mark_at
+):
+    """Carry an unquoted raw-share claim through evidenced ex-date changes."""
+    grouped = {}
+    evidence = []
+    for event in corporate_events.itertuples(index=False):
+        if event.asset_id != asset or event.listing_date != listing:
+            continue
+        effective = pd.Timestamp(event.effective_at)
+        if (
+            not mark_at < effective <= timestamp
+            or pd.Timestamp(event.available_at) > timestamp
+        ):
+            continue
+        evidence.append(event.evidence_identity)
+        if not event.entitlement_proved:
+            raise PortfolioTargetBlocked("portfolio_held_rights_unproved")
+        cash, shares, ratios = grouped.setdefault(
+            effective, [Fraction(), Fraction(), []]
+        )
+        if event.kind == "cash_dividend":
+            cash += Fraction(event.cash_per_share)
+        elif event.kind == "stock_distribution":
+            shares += Fraction(event.additional_shares_per_share)
+        else:
+            raise PortfolioTargetBlocked("portfolio_held_rights_unproved")
+        if cash < 0 or shares < 0:
+            raise PortfolioTargetBlocked("portfolio_held_rights_unproved")
+        grouped[effective] = [cash, shares, ratios]
+    for event in rights_events.itertuples(index=False):
+        if (
+            event.asset_id != asset
+            or event.listing_date != listing
+            or event.kind != "share_change"
+        ):
+            continue
+        effective = pd.Timestamp(event.effective_at)
+        if (
+            not mark_at < effective <= timestamp
+            or pd.Timestamp(event.available_at) > timestamp
+        ):
+            continue
+        evidence.append(event.evidence_identity)
+        ratio = Fraction(event.remaining_old_units_per_old_unit)
+        if not event.entitlement_proved or ratio <= 0:
+            raise PortfolioTargetBlocked("portfolio_held_rights_unproved")
+        grouped.setdefault(effective, [Fraction(), Fraction(), []])[2].append(ratio)
+    result = Fraction(mark)
+    for effective in sorted(grouped):
+        cash, shares, ratios = grouped[effective]
+        result = (result - cash) / (1 + shares)
+        for ratio in ratios:
+            result /= ratio
+        if result < 0:
+            raise PortfolioTargetBlocked("portfolio_unquoted_ex_price_invalid")
+    return result, tuple(dict.fromkeys(evidence))
+
+
+class EquityEntitlements:
+    """One owner for registered raw-share rights, receivables and share locks."""
+
+    def __init__(self):
+        self.registered = {}
+        self.registration_emitted = set()
+        self.completed = set()
+        self._receivables = {}
+        self.locked_quantities = {}
+        self._claims = {}
+
+    @property
+    def receivables(self):
+        values = {
+            asset: finite_exact_float(value)
+            for asset, value in self._receivables.items()
+        }
+        if any(value is None for value in values.values()):
+            raise PortfolioTargetBlocked("portfolio_dividend_amount_unrepresentable")
+        return values
+
+    def _adjustment(
+        self,
+        event,
+        units,
+        timestamp,
+        *,
+        stage,
+        phase,
+        quantity_after=None,
+        cash=0.0,
+        receivable_after=None,
+        locked_after=None,
+    ):
+        asset = event.asset_id
+        quantity = Fraction(units.get(asset, 0))
+        receivable = self.receivables.get(asset, 0.0)
+        locked = self.locked_quantities.get(asset, Fraction())
+        exact_receivable = (
+            self._receivables.get(asset, Fraction())
+            if receivable_after is None
+            else Fraction(receivable_after)
+        )
+        rounded_receivable = finite_exact_float(exact_receivable)
+        if rounded_receivable is None or exact_receivable < 0:
+            raise PortfolioTargetBlocked("portfolio_dividend_amount_unrepresentable")
+        record = PortfolioRightsAdjustment(
+            event_id=f"{event.event_id}:{stage}",
+            timestamp_ns=int(timestamp.value),
+            asset_id=asset,
+            lifecycle_id=pd.Timestamp(event.listing_date).date().isoformat(),
+            quantity_before=quantity,
+            quantity_after=quantity if quantity_after is None else quantity_after,
+            cash_amount=cash,
+            target_asset_id=None,
+            target_lifecycle_id=None,
+            target_quantity=Fraction(),
+            evidence_identity=event.evidence_identity,
+            kind=(
+                "dividend"
+                if event.kind == "cash_dividend" and stage != "registration"
+                else "stock_distribution"
+                if stage == "effective"
+                else stage
+            ),
+            phase=phase,
+            entitlement_quantity=self.registered[event.event_id],
+            entitlement_record_at_ns=int(pd.Timestamp(event.record_at).value),
+            receivable_before=receivable,
+            receivable_after=rounded_receivable,
+            locked_quantity_before=locked,
+            locked_quantity_after=locked if locked_after is None else locked_after,
+        )
+        units.loc[asset] = record.quantity_after
+        self._receivables[asset] = exact_receivable
+        self.locked_quantities[asset] = record.locked_quantity_after
+        return record
+
+    def register(self, corporate_events, units, lives, timestamp, *, phase="end"):
+        """Snapshot holdings after record-date trading, before any ex-date changes."""
+        adjustments = []
+        for event in corporate_events.itertuples(index=False):
+            if (
+                event.event_id in self.registered
+                or pd.Timestamp(event.record_at) != timestamp
+            ):
+                continue
+            quantity = (
+                Fraction(units.get(event.asset_id, 0))
+                if lives.get(event.asset_id) == event.listing_date
+                else Fraction()
+            )
+            available = pd.Timestamp(event.available_at) <= timestamp
+            self.registered[event.event_id] = quantity
+            if quantity and available and event.entitlement_proved:
+                adjustments.append(
+                    self._adjustment(
+                        event,
+                        units.copy(),
+                        timestamp,
+                        stage="registration",
+                        phase=phase,
+                    )
+                )
+                self.registration_emitted.add(event.event_id)
+        return tuple(adjustments)
+
+    def process(
+        self, corporate_events, rights_events, units, lives, timestamp, *, phase="after"
+    ):
+        """Apply opening entitlements; a sold original holding keeps its claim."""
+        updated, identities = units.astype("object").copy(), lives.copy()
+        adjustments = []
+        cash = Fraction()
+        for event in corporate_events.itertuples(index=False):
+            if pd.Timestamp(event.available_at) > timestamp:
+                continue
+            held = Fraction(updated.get(event.asset_id, 0))
+            relevant_holding = (
+                held and identities.get(event.asset_id) == event.listing_date
+            )
+            entitlement = self.registered.get(event.event_id)
+            if entitlement == 0:
+                continue
+            if timestamp < pd.Timestamp(event.effective_at):
+                continue
+            if not event.entitlement_proved:
+                if relevant_holding or entitlement:
+                    raise PortfolioTargetBlocked("portfolio_held_rights_unproved")
+                continue
+            if entitlement is None:
+                if relevant_holding:
+                    raise PortfolioTargetBlocked(
+                        "portfolio_registration_snapshot_missing"
+                    )
+                self.registered[event.event_id] = Fraction()
+                continue
+            if not entitlement:
+                continue
+            if event.event_id not in self.registration_emitted:
+                adjustments.append(
+                    self._adjustment(
+                        event,
+                        updated,
+                        timestamp,
+                        stage="registration",
+                        phase=phase,
+                    )
+                )
+                self.registration_emitted.add(event.event_id)
+            key = (event.event_id, "effective")
+            if key not in self.completed:
+                if event.kind == "cash_dividend":
+                    claim = finite_exact_float(
+                        entitlement * Fraction(event.cash_per_share)
+                    )
+                    if claim is None or claim < 0:
+                        raise PortfolioTargetBlocked(
+                            "portfolio_dividend_amount_unrepresentable"
+                        )
+                    self._claims[event.event_id] = claim
+                    adjustments.append(
+                        self._adjustment(
+                            event,
+                            updated,
+                            timestamp,
+                            stage="effective",
+                            phase=phase,
+                            receivable_after=self._receivables.get(
+                                event.asset_id, Fraction()
+                            )
+                            + Fraction(claim),
+                        )
+                    )
+                elif event.kind == "stock_distribution":
+                    shares = entitlement * Fraction(event.additional_shares_per_share)
+                    if shares < 0 or (
+                        held and identities.get(event.asset_id) != event.listing_date
+                    ):
+                        raise PortfolioTargetBlocked("portfolio_held_rights_unproved")
+                    identities.loc[event.asset_id] = event.listing_date
+                    self._claims[event.event_id] = shares
+                    adjustments.append(
+                        self._adjustment(
+                            event,
+                            updated,
+                            timestamp,
+                            stage="effective",
+                            phase=phase,
+                            quantity_after=held + shares,
+                            locked_after=self.locked_quantities.get(
+                                event.asset_id, Fraction()
+                            )
+                            + shares,
+                        )
+                    )
+                else:
+                    raise PortfolioTargetBlocked("portfolio_held_rights_unproved")
+                self.completed.add(key)
+            key = (event.event_id, "settlement")
+            if (
+                pd.notna(event.settlement_at)
+                and timestamp >= pd.Timestamp(event.settlement_at)
+                and key not in self.completed
+            ):
+                claim = self._claims.pop(event.event_id)
+                if event.kind == "cash_dividend":
+                    cash += Fraction(claim)
+                    adjustments.append(
+                        self._adjustment(
+                            event,
+                            updated,
+                            timestamp,
+                            stage="settlement",
+                            phase=phase,
+                            cash=claim,
+                            receivable_after=self._receivables[event.asset_id]
+                            - Fraction(claim),
+                        )
+                    )
+                else:
+                    adjustments.append(
+                        self._adjustment(
+                            event,
+                            updated,
+                            timestamp,
+                            stage="unlock",
+                            phase=phase,
+                            locked_after=self.locked_quantities[event.asset_id] - claim,
+                        )
+                    )
+                self.completed.add(key)
+        for event in rights_events.itertuples(index=False):
+            if event.kind == "quote" or (event.event_id, "rights") in self.completed:
+                continue
+            quantity = Fraction(updated.get(event.asset_id, 0))
+            if not quantity or identities.get(event.asset_id) != event.listing_date:
+                continue
+            if not event.entitlement_proved:
+                raise PortfolioTargetBlocked("portfolio_held_rights_unproved")
+            if self.locked_quantities.get(event.asset_id, 0):
+                raise PortfolioTargetBlocked("portfolio_locked_reorganization_unproved")
+            remainder = quantity * Fraction(event.remaining_old_units_per_old_unit)
+            amount = (
+                finite_exact_float(quantity * Fraction(event.value_per_old_unit))
+                if event.kind == "cash_recovery"
+                else 0.0
+            )
+            if amount is None:
+                raise PortfolioTargetBlocked(
+                    "portfolio_recovery_amount_unrepresentable"
+                )
+            target = event.successor_asset_id if event.kind == "conversion" else None
+            target_life = event.successor_listing_date if target is not None else None
+            target_quantity = (
+                quantity * Fraction(event.successor_units_per_old_unit)
+                if target is not None
+                else Fraction()
+            )
+            updated.loc[event.asset_id] = remainder
+            if target is not None:
+                if (
+                    updated.get(target, 0) != 0
+                    and identities.get(target) != target_life
+                ):
+                    raise PortfolioTargetBlocked(
+                        "portfolio_simultaneous_lifecycles_unrepresentable"
+                    )
+                updated.loc[target] = Fraction(updated.get(target, 0)) + target_quantity
+                identities.loc[target] = target_life
+            adjustments.append(
+                PortfolioRightsAdjustment(
+                    event.event_id,
+                    int(timestamp.value),
+                    event.asset_id,
+                    pd.Timestamp(event.listing_date).date().isoformat(),
+                    quantity,
+                    remainder,
+                    amount,
+                    target,
+                    pd.Timestamp(target_life).date().isoformat()
+                    if target is not None
+                    else None,
+                    target_quantity,
+                    event.evidence_identity,
+                    phase=phase,
+                    receivable_before=self.receivables.get(event.asset_id, 0.0),
+                    receivable_after=self.receivables.get(event.asset_id, 0.0),
+                )
+            )
+            self.completed.add((event.event_id, "rights"))
+            cash += Fraction(amount)
+        result = finite_exact_float(cash)
+        if result is None:
+            raise PortfolioTargetBlocked("portfolio_recovery_amount_unrepresentable")
+        return updated, identities, result, tuple(adjustments)
 
 
 class PortfolioEconomics:
@@ -281,6 +643,7 @@ class ExecutionAccounting:
     _pre_trade_cash: float
     _post_trade_cash: float
     cost_source_identity: str
+    receivable: float = 0.0
 
     def __post_init__(self) -> None:
         if not isinstance(self._asset_ledger, pd.DataFrame):
@@ -334,6 +697,9 @@ class ExecutionAccounting:
             raise ValueError("execution_ledger_notional_invalid")
         if (numeric.loc[:, list(PORTFOLIO_LEDGER_COST_COLUMNS)] < 0.0).any().any():
             raise ValueError("execution_ledger_cost_invalid")
+        receivable = _finite_nonnegative(
+            self.receivable, "execution_receivable_invalid"
+        )
         nav_before = _finite_nonnegative(self._nav_before, "execution_nav_invalid")
         tolerance = portfolio_notional_tolerance(nav_before)
         desired = numeric["target_notional"] - numeric["pre_trade_notional"]
@@ -367,9 +733,9 @@ class ExecutionAccounting:
         total_cost = float(
             numeric.loc[:, list(PORTFOLIO_LEDGER_COST_COLUMNS)].sum().sum()
         )
-        nav_after = float(numeric["post_trade_notional"].sum() + post_cash)
+        nav_after = float(numeric["post_trade_notional"].sum() + post_cash + receivable)
         if not np.isclose(
-            numeric["pre_trade_notional"].sum() + pre_cash,
+            numeric["pre_trade_notional"].sum() + pre_cash + receivable,
             nav_before,
             rtol=0.0,
             atol=tolerance,
@@ -404,7 +770,9 @@ class ExecutionAccounting:
     @property
     def nav_after(self) -> float:
         return float(
-            self._asset_ledger["post_trade_notional"].sum() + self._post_trade_cash
+            self._asset_ledger["post_trade_notional"].sum()
+            + self._post_trade_cash
+            + self.receivable
         )
 
     @property
@@ -678,6 +1046,11 @@ def execute_continuous_target(
     assumptions: ExecutionAssumptions,
     cost_source_identity: str,
     unquoted_assets: frozenset[str] = frozenset(),
+    receivable: float = 0.0,
+    locked_notional: pd.Series | None = None,
+    share_quantities: pd.Series | None = None,
+    locked_share_quantities: pd.Series | None = None,
+    execution_prices: pd.Series | None = None,
 ) -> ExecutionAccounting:
     """Execute sell-first, cash-constrained continuous-weight orders."""
 
@@ -688,6 +1061,7 @@ def execute_continuous_target(
     ):
         raise ValueError("execution_inputs_invalid")
     nav_value = _finite_nonnegative(nav, "execution_nav_invalid")
+    receivable = _finite_nonnegative(receivable, "execution_receivable_invalid")
     assets = _canonical_assets(current_weights, target_weights, allow_empty=True)
     current = _weight_values(current_weights, assets, "current_weights_invalid")
     target = _weight_values(target_weights, assets, "target_weights_invalid")
@@ -718,6 +1092,31 @@ def execute_continuous_target(
 
     pre_notional = current * nav_value
     target_notional = target * nav_value
+    locked = (
+        pd.Series(0.0, index=assets)
+        if locked_notional is None
+        else _weight_values(locked_notional, assets, "execution_locked_invalid")
+    )
+    if locked.lt(0).any() or (locked > pre_notional + tolerance).any():
+        raise ValueError("execution_locked_invalid")
+    exact_sale_limits = None
+    if share_quantities is not None:
+        if execution_prices is None or locked_share_quantities is None:
+            raise ValueError("execution_share_inputs_invalid")
+        exact_sale_limits = {}
+        for asset in assets:
+            quantity = Fraction(share_quantities.get(asset, 0))
+            locked_quantity = Fraction(locked_share_quantities.get(asset, 0))
+            price = Fraction(execution_prices.get(asset, 0))
+            if not 0 <= locked_quantity <= quantity or price < 0:
+                raise ValueError("execution_share_inputs_invalid")
+            exact_limit = (quantity - locked_quantity) * price
+            limit = float(exact_limit)
+            if Fraction(limit) > exact_limit:
+                limit = np.nextafter(limit, -np.inf)
+            exact_sale_limits[asset] = limit
+    elif locked_share_quantities is not None or execution_prices is not None:
+        raise ValueError("execution_share_inputs_invalid")
     desired = target_notional - pre_notional
     adv = _asset_values(average_daily_volume, assets, "execution_adv_invalid")
     participation = assumptions.adv_participation
@@ -738,7 +1137,12 @@ def execute_continuous_target(
         if reason := blocked_reason(asset, exit_[asset]):
             record["reason"] = reason
             continue
-        amount = min(-desired_delta, float(capacity[asset]))
+        amount = min(
+            -desired_delta,
+            float(capacity[asset]),
+            max(0.0, float(pre_notional[asset] - locked[asset])),
+            exact_sale_limits[asset] if exact_sale_limits is not None else np.inf,
+        )
         cost = None
         if amount > 0.0:
             cost = _validated_trade_cost(
@@ -756,10 +1160,17 @@ def execute_continuous_target(
         _update_ledger_row(
             record,
             executed_delta=-amount,
-            reason="adv_capacity" if amount < -desired_delta - tolerance else None,
+            reason=(
+                "locked_shares"
+                if locked[asset] > 0
+                and amount >= pre_notional[asset] - locked[asset] - tolerance
+                else "adv_capacity"
+            )
+            if amount < -desired_delta - tolerance
+            else None,
             cost=cost,
         )
-    pre_trade_cash = nav_value - float(pre_notional.sum())
+    pre_trade_cash = nav_value - float(pre_notional.sum()) - receivable
     if -tolerance <= pre_trade_cash < 0.0:
         pre_trade_cash = 0.0
     sell_notional = float(-sell_delta.sum())
@@ -861,7 +1272,7 @@ def execute_continuous_target(
     if -tolerance <= post_trade_cash < 0.0:
         post_trade_cash = 0.0
     post_trade = pre_notional + sell_delta + buy_delta
-    nav_after = float(post_trade.sum() + post_trade_cash)
+    nav_after = float(post_trade.sum() + post_trade_cash + receivable)
     expected_nav_after = nav_value - total_cost
     if post_trade_cash < -tolerance or not np.isfinite(nav_after) or nav_after < 0.0:
         raise ValueError("execution_cash_invalid")
@@ -883,6 +1294,7 @@ def execute_continuous_target(
         _pre_trade_cash=pre_trade_cash,
         _post_trade_cash=post_trade_cash,
         cost_source_identity=cost_source_identity,
+        receivable=receivable,
     )
 
 
@@ -1053,46 +1465,48 @@ def portfolio_interval_economics(batch: PortfolioLedgerBatch) -> dict[str, objec
         float(sum(end.values())),
     )
     costs = -sum(
-        row.amount
+        Fraction(row.amount)
         for row in batch.cashflows
         if row.kind in PORTFOLIO_LEDGER_COST_COLUMNS
     )
     other_flows = [
         row
         for row in batch.cashflows
-        if row.kind not in {*PORTFOLIO_LEDGER_COST_COLUMNS, "principal", "recovery"}
+        if row.kind
+        not in {*PORTFOLIO_LEDGER_COST_COLUMNS, "principal", "recovery", "dividend"}
     ]
     if other_flows or endpoint <= entry or b < 0 or a < 0 or e < 0:
         raise ValueError("portfolio_interval_economic_scope_invalid")
     tolerance = portfolio_notional_tolerance(b)
-    rights_change = 0.0
-    if batch.rights_adjustments:
-        initial = {
-            row.asset_id: row for row in batch.valuations if row.phase == "before"
-        }
-        post = {row.asset_id: row for row in batch.valuations if row.phase == "after"}
-        rights_change = sum(
-            float(
-                (
-                    Fraction(post[asset].quantity)
-                    - sum(
-                        (
-                            Fraction(trade.quantity)
-                            for trade in batch.trades
-                            if trade.asset_id == asset
-                        ),
-                        Fraction(),
-                    )
+    initial = {row.asset_id: row for row in batch.valuations if row.phase == "before"}
+    post = {row.asset_id: row for row in batch.valuations if row.phase == "after"}
+    rights_change = sum(
+        float(
+            (
+                Fraction(post[asset].quantity)
+                - sum(
+                    (
+                        Fraction(trade.quantity)
+                        for trade in batch.trades
+                        if trade.asset_id == asset
+                    ),
+                    Fraction(),
                 )
-                * Fraction(post[asset].mark_price)
             )
-            - initial[asset].value
-            for asset in initial
-            if asset != PORTFOLIO_CASH_ASSET_ID
-        ) + sum(row.amount for row in batch.cashflows if row.kind == "recovery")
+            * Fraction(post[asset].mark_price)
+        )
+        + post[asset].receivable
+        - initial[asset].value
+        for asset in initial
+        if asset != PORTFOLIO_CASH_ASSET_ID
+    ) + sum(
+        row.amount
+        for row in batch.cashflows
+        if row.kind in {"recovery", "dividend"} and row.timestamp_ns <= entry.value
+    )
     if not np.isclose(
         a,
-        b + rights_change - costs,
+        b + rights_change - float(costs),
         rtol=0,
         atol=max(tolerance, portfolio_notional_tolerance(a)),
     ):
@@ -1114,6 +1528,12 @@ def portfolio_interval_economics(batch: PortfolioLedgerBatch) -> dict[str, objec
         value = finite_exact_float(Fraction(numerator) / Fraction(denominator))
         return np.nan if value is None else value
 
+    net_pnl = cash_equity_pnl(
+        cash_equity_positions(row for row in batch.valuations if row.phase == "before"),
+        cash_equity_positions(row for row in batch.valuations if row.phase == "end"),
+        batch.cashflows,
+        batch.rights_adjustments,
+    )
     turnover = (
         sum((abs(Fraction(value)) for value in executed.values()), Fraction())
         + abs(sum((Fraction(value) for value in executed.values()), Fraction()))
@@ -1136,8 +1556,8 @@ def portfolio_interval_economics(batch: PortfolioLedgerBatch) -> dict[str, objec
         "cash_post": after[PORTFOLIO_CASH_ASSET_ID],
         "cash_weight_post": ratio(after[PORTFOLIO_CASH_ASSET_ID], a),
         "nav_end": e,
-        "gross_return": ratio(Fraction(e) - Fraction(b) + Fraction(costs), b),
-        "net_return": ratio(Fraction(e) - Fraction(b), b),
+        "gross_return": ratio(net_pnl + Fraction(costs), b),
+        "net_return": ratio(net_pnl, b),
         "cost_drag": ratio(costs, b),
         "target_turnover": 0.5 * sum(abs(value) for value in decision.values())
         if b > 0

@@ -1976,12 +1976,12 @@ def test_adjusted_open_preserves_units_through_storage_and_labels(
     loaded = read_dataset(built.artifact_roots["market_bars_1d"])
     np.testing.assert_array_equal(loaded.adj_open, loaded.adj_close)
     panel = loaded.rename(columns={"source_asset_id": "asset_id"}).assign(
-        can_enter=True
+        is_trading=True
     )
     labeled = add_forward_return_labels(panel, horizons=(1,), sessions=sessions)
     assert labeled.forward_return_1d.iloc[0] == pytest.approx(0.0 if split else 0.5)
     assert labeled.forward_return_1d_available_at.iloc[0] == sessions[2] + pd.Timedelta(
-        hours=1, minutes=30
+        hours=7
     )
     assert labeled.forward_return_1d.iloc[1:].isna().all()
 

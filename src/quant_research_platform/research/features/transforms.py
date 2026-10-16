@@ -79,10 +79,30 @@ def model_input_validity_columns(input_columns, model_algorithm, declared_column
         dict.fromkeys(
             (
                 *canonical_feature_validity_columns(input_columns, declared_columns),
+                *feature_observation_columns(input_columns, declared_columns),
+                *feature_observation_columns(
+                    canonical_feature_validity_columns(input_columns, declared_columns),
+                    declared_columns,
+                ),
                 *direct,
             )
         )
     )
+
+
+def model_observed_input_mask(frame, input_columns, declared_columns):
+    """A model needs at least one original input, not only missingness flags."""
+    originals = tuple(
+        dict.fromkeys(
+            (
+                canonical_feature_validity_columns((column,), declared_columns)
+                or (column,)
+            )[0]
+            for column in input_columns
+        )
+    )
+    observed = mask_unobserved_features(frame, originals, declared_columns)
+    return observed.loc[:, originals].notna().any(axis=1)
 
 
 def apply_feature_transforms(
@@ -106,6 +126,7 @@ def apply_feature_transforms(
         scale=recipe.scale,
         impute_missing=recipe.impute_missing,
         diagnostics=diagnostics,
+        output_groups=recipe.output_groups,
     )
 
 
@@ -392,6 +413,7 @@ def a_share_feature_pipeline(
     center: bool = True,
     scale: bool = True,
     impute_missing: bool = True,
+    output_groups: tuple[str, ...] = ("processed",),
 ) -> pd.DataFrame:
     """Clip, neutralize, center and scale in that fixed order on eligible rows."""
     recipe = FeatureTransformSpec(
@@ -404,7 +426,10 @@ def a_share_feature_pipeline(
         scale,
         impute_missing,
         size_column=size_column,
+        output_groups=output_groups,
     )
+    industry_neutralize = industry_neutralize and "processed" in output_groups
+    size_neutralize = size_neutralize and "processed" in output_groups
     if "eligible" not in frame:
         raise ValueError("feature_eligibility_required")
     universe = frame["eligible"]
@@ -458,44 +483,49 @@ def a_share_feature_pipeline(
     )
     feature_values: dict[str, pd.Series] = {}
     result = frame.copy()
-    context_present = (
-        winsorized[industry_column].notna()
-        if industry_neutralize
-        else pd.Series(True, index=scoped.index)
-    )
-    for factor in factor_columns:
-        values = residualized[factor]
-        raw_missing = scoped[factor].isna()
-        if variance_counts is not None:
-            variance_counts.setdefault(factor, 0)
-        scoped_feature = pd.Series(np.nan, index=scoped.index, dtype="float64")
-        identifiable = pd.Series(False, index=scoped.index)
-        for positions in time_groups.values():
-            group = values.iloc[positions]
-            observed = group.dropna()
-            if (
-                scale
-                and variance_counts is not None
-                and len(observed) >= 2
-                and observed.eq(observed.iloc[0]).all()
+    for group_name in output_groups:
+        group_frame = winsorized if group_name == "pre_neutral" else residualized
+        context_present = (
+            winsorized[industry_column].notna()
+            if industry_neutralize and group_name == "processed"
+            else pd.Series(True, index=scoped.index)
+        )
+        for factor in factor_columns:
+            values = group_frame[factor]
+            raw_missing = scoped[factor].isna()
+            suffix = ("pre_neutral_" if group_name == "pre_neutral" else "") + factor
+            if variance_counts is not None:
+                variance_counts.setdefault(suffix, 0)
+            scoped_feature = pd.Series(np.nan, index=scoped.index, dtype="float64")
+            identifiable = pd.Series(False, index=scoped.index)
+            for positions in time_groups.values():
+                group = values.iloc[positions]
+                observed = group.dropna()
+                if (
+                    scale
+                    and variance_counts is not None
+                    and len(observed) >= 2
+                    and observed.eq(observed.iloc[0]).all()
+                ):
+                    variance_counts[suffix] += 1
+                transformed = _center_scale(group, center=center, scale=scale)
+                scoped_feature.iloc[positions] = transformed
+                identifiable.iloc[positions] = transformed.notna().any()
+            final_missing = raw_missing | scoped_feature.isna()
+            context_valid = context_present
+            if group_name == "processed" and needs_size and factor != size_column:
+                context_valid = context_valid & scoped[size_column].notna()
+            ordinary_missing = (
+                raw_missing & identifiable & context_valid & impute_missing
+            )
+            feature = pd.Series(np.nan, index=result.index, dtype="float64")
+            feature.loc[scoped.index] = scoped_feature.mask(ordinary_missing, 0.0)
+            missing = pd.Series(0, index=result.index, dtype="int8")
+            observed = pd.Series(0, index=result.index, dtype="int8")
+            missing.loc[scoped.index] = final_missing.astype("int8")
+            observed.loc[scoped.index] = final_missing.eq(False).astype("int8")
+            for prefix, values in zip(
+                FEATURE_PREFIXES, (feature, missing, observed), strict=True
             ):
-                variance_counts[factor] += 1
-            transformed = _center_scale(group, center=center, scale=scale)
-            scoped_feature.iloc[positions] = transformed
-            identifiable.iloc[positions] = transformed.notna().any()
-        final_missing = raw_missing | scoped_feature.isna()
-        context_valid = context_present
-        if needs_size and factor != size_column:
-            context_valid = context_valid & scoped[size_column].notna()
-        ordinary_missing = raw_missing & identifiable & context_valid & impute_missing
-        feature = pd.Series(np.nan, index=result.index, dtype="float64")
-        feature.loc[scoped.index] = scoped_feature.mask(ordinary_missing, 0.0)
-        missing = pd.Series(0, index=result.index, dtype="int8")
-        observed = pd.Series(0, index=result.index, dtype="int8")
-        missing.loc[scoped.index] = final_missing.astype("int8")
-        observed.loc[scoped.index] = final_missing.eq(False).astype("int8")
-        for prefix, values in zip(
-            FEATURE_PREFIXES, (feature, missing, observed), strict=True
-        ):
-            feature_values[prefix + factor] = values
+                feature_values[prefix + suffix] = values
     return pd.concat((result, pd.DataFrame(feature_values, index=result.index)), axis=1)

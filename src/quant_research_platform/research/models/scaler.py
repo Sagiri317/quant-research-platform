@@ -21,6 +21,9 @@ class ModelMatrixScaler:
     origin_: tuple[float, ...]
     offset_: tuple[Fraction, ...]
     scale_: tuple[float, ...]
+    input_columns: tuple[str, ...] = ()
+    medians: tuple[float, ...] = ()
+    native_missing: bool = False
 
     @property
     def mean_(self) -> tuple[float, ...]:
@@ -35,10 +38,57 @@ class ModelMatrixScaler:
         frame: pd.DataFrame,
         *,
         sample_weight: object | None = None,
+        missing: str | None = None,
     ) -> ModelMatrixScaler:
         columns = tuple(str(column) for column in frame.columns)
+        input_columns, medians = (), ()
         if frame.empty or not columns or frame.columns.has_duplicates:
             raise ValueError("model_scaler_columns_invalid")
+        if missing is not None:
+            values = np.column_stack(
+                [
+                    strict_finite_numeric_series(
+                        frame[column],
+                        error=f"invalid_model_scaler_column: {column}",
+                        allow_null=True,
+                    ).to_numpy(dtype="float64")
+                    for column in columns
+                ]
+            )
+            if np.isnan(values).all(axis=0).any():
+                raise ValueError("model_training_feature_all_missing")
+            if missing == "native":
+                return cls(
+                    columns,
+                    (0.0,) * len(columns),
+                    (Fraction(),) * len(columns),
+                    (1.0,) * len(columns),
+                    native_missing=True,
+                )
+            medians = []
+            for index in range(len(columns)):
+                observed = np.sort(values[~np.isnan(values[:, index]), index])
+                middle = len(observed) // 2
+                medians.append(
+                    float(observed[middle])
+                    if len(observed) % 2
+                    else float(
+                        (
+                            Fraction(float(observed[middle - 1]))
+                            + Fraction(float(observed[middle]))
+                        )
+                        / 2
+                    )
+                )
+            medians = tuple(medians)
+            if set(columns) & {f"{column}__missing" for column in columns}:
+                raise ValueError("model_missing_indicator_name_collision")
+            expanded = frame.fillna(dict(zip(columns, medians, strict=True)))
+            for column in columns:
+                expanded[f"{column}__missing"] = frame[column].isna().astype(float)
+            input_columns = columns
+            frame = expanded
+            columns = tuple(expanded.columns)
         values = _finite_matrix(frame, columns)
         weights = _weights(sample_weight, len(values))
         original_weights = weights
@@ -115,9 +165,36 @@ class ModelMatrixScaler:
             origin_=tuple(float(value) for value in origin),
             offset_=tuple(exact_offsets),
             scale_=tuple(float(value) for value in scale),
+            input_columns=input_columns,
+            medians=medians,
         )
 
+    def input_matrix(self, frame: pd.DataFrame) -> pd.DataFrame:
+        if tuple(str(column) for column in frame.columns) != (
+            self.input_columns or self.columns
+        ):
+            raise ValueError("model_scaler_columns_mismatch")
+        if not self.medians:
+            return frame
+        result = frame.fillna(dict(zip(self.input_columns, self.medians, strict=True)))
+        for column in self.input_columns:
+            result[f"{column}__missing"] = frame[column].isna().astype(float)
+        return result
+
     def transform(self, frame: pd.DataFrame) -> pd.DataFrame:
+        frame = self.input_matrix(frame)
+        if self.native_missing:
+            return pd.DataFrame(
+                {
+                    column: strict_finite_numeric_series(
+                        frame[column],
+                        error=f"invalid_model_scaler_column: {column}",
+                        allow_null=True,
+                    )
+                    for column in self.columns
+                },
+                index=frame.index,
+            ).astype("float64")
         if tuple(str(column) for column in frame.columns) != self.columns:
             raise ValueError("model_scaler_columns_mismatch")
         values = _finite_matrix(frame, self.columns)
@@ -161,6 +238,15 @@ class ModelMatrixScaler:
 
     def to_payload(self) -> dict[str, object]:
         return {
+            **(
+                {
+                    "input_columns": list(self.input_columns),
+                    "medians": list(self.medians),
+                }
+                if self.medians
+                else {}
+            ),
+            **({"native_missing": True} if self.native_missing else {}),
             "columns": list(self.columns),
             "weighted_mean_origin": list(self.origin_),
             "weighted_mean_offset": [
@@ -178,10 +264,12 @@ class ScaledPredictor:
     scaler: ModelMatrixScaler
 
     def predict(self, frame: pd.DataFrame) -> np.ndarray:
-        return np.asarray(
+        predictions = np.asarray(
             self.estimator.predict(self.scaler.transform(frame)),
             dtype="float64",
         )
+        predictions[frame.isna().all(axis=1)] = np.nan
+        return predictions
 
     def __getattr__(self, name: str) -> object:
         return getattr(object.__getattribute__(self, "estimator"), name)
@@ -193,7 +281,9 @@ class LinearScaledPredictor:
     scaler: ModelMatrixScaler
 
     def predict(self, frame: pd.DataFrame) -> np.ndarray:
+        missing_rows = frame.isna().all(axis=1).to_numpy()
         values = self.scaler.transform(frame).to_numpy(dtype="float64")
+        frame = self.scaler.input_matrix(frame)
         coefficients = np.asarray(self.coefficients, dtype="float64")
         with np.errstate(over="ignore", invalid="ignore"):
             predictions = coefficients[0] + values @ coefficients[1:]
@@ -224,6 +314,7 @@ class LinearScaledPredictor:
                 predictions[row] = float(exact)
             except OverflowError:
                 predictions[row] = np.inf if exact > 0 else -np.inf
+        predictions[missing_rows] = np.nan
         return predictions
 
     @property
@@ -232,7 +323,10 @@ class LinearScaledPredictor:
 
 
 def equal_timestamp_sample_weights(
-    timestamps: object, weighting: TrainingWeighting | None = None
+    timestamps: object,
+    weighting: TrainingWeighting | None = None,
+    *,
+    trading_sessions=None,
 ) -> np.ndarray:
     """Assign equal timestamp mass, then decay and normalize to training rows."""
 
@@ -244,11 +338,20 @@ def equal_timestamp_sample_weights(
     timestamp_count = int(values.nunique())
     if weighting.half_life_periods is None:
         return len(values) / (timestamp_count * counts.astype("float64"))
-    periods = pd.Index(values.unique()).sort_values()
+    if trading_sessions is None:
+        raise ValueError("training_decay_calendar_required")
+    periods = pd.DatetimeIndex(pd.to_datetime(trading_sessions, errors="raise"))
+    if (
+        periods.has_duplicates
+        or periods.isna().any()
+        or not periods.is_monotonic_increasing
+    ):
+        raise ValueError("training_decay_calendar_invalid")
+    indices = periods.get_indexer(values)
+    if (indices < 0).any():
+        raise ValueError("training_decay_calendar_coverage_missing")
     with np.errstate(over="ignore", under="ignore"):
-        age = (
-            len(periods) - 1 - periods.get_indexer(values)
-        ) / weighting.half_life_periods
+        age = (indices.max() - indices) / weighting.half_life_periods
         total_mass = float((np.exp2(-age) / counts).sum())
         weights = np.exp2(np.log2(len(values) / total_mass) - np.log2(counts) - age)
     if (weights <= 0.0).any():

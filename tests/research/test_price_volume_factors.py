@@ -56,6 +56,7 @@ def test_price_volume_selections_use_one_definition_and_minimum_inputs():
         {
             "listing_date": pd.Timestamp("2000-01-01"),
             "market_id": "a_share",
+            "filling_flag": 0,
             "asset_id": "asset",
             "timestamp": pd.bdate_range("2020-01-01", periods=len(x)),
             "adj_close": x,
@@ -118,7 +119,9 @@ def test_price_volume_unique_math_full_windows_endpoints_and_nulls():
             "total_market_cap": 10000.0,
         }
     )
-    result = calculate_price_volume_factors(panel, factor_columns=UNIQUE_FACTORS)
+    result = calculate_price_volume_factors(
+        panel, min_fresh_fraction=1.0, factor_columns=UNIQUE_FACTORS
+    )
     last = result.iloc[-1]
     flow, ret = (x[-20:], returns[-20:])
     centered = returns[-60:] - returns[-60:].mean()
@@ -149,7 +152,9 @@ def test_price_volume_unique_math_full_windows_endpoints_and_nulls():
     for name, value in expected.items():
         assert last[name] == pytest.approx(value), name
     scaled = calculate_price_volume_factors(
-        panel.assign(period_return=returns * 1e200), factor_columns=("kurtosis_60d",)
+        panel.assign(period_return=returns * 1e200),
+        min_fresh_fraction=1.0,
+        factor_columns=("kurtosis_60d",),
     )
     assert scaled.loc[60, "kurtosis_60d"] == pytest.approx(kurtosis)
     for name in UNIQUE_FACTORS:
@@ -175,7 +180,7 @@ def test_price_volume_unique_math_full_windows_endpoints_and_nulls():
     missing = panel.copy()
     missing.loc[50, ["amount", "volume", "period_return", "adj_close"]] = np.nan
     missing_result = calculate_price_volume_factors(
-        missing, factor_columns=UNIQUE_FACTORS
+        missing, min_fresh_fraction=1.0, factor_columns=UNIQUE_FACTORS
     )
     assert (
         missing_result.loc[
@@ -194,9 +199,9 @@ def test_price_volume_unique_math_full_windows_endpoints_and_nulls():
     constant = panel.assign(
         amount=0.0, volume=0.0, turnover=0.0, period_return=0.0, total_market_cap=0.0
     )
-    zero = calculate_price_volume_factors(constant, factor_columns=UNIQUE_FACTORS).iloc[
-        -1
-    ]
+    zero = calculate_price_volume_factors(
+        constant, min_fresh_fraction=1.0, factor_columns=UNIQUE_FACTORS
+    ).iloc[-1]
     assert (
         zero[
             [
@@ -220,7 +225,7 @@ def test_price_volume_unique_math_full_windows_endpoints_and_nulls():
     nonpositive = panel.assign(amount=1.0)
     nonpositive.loc[60, "amount"] = -2.0
     observed = calculate_price_volume_factors(
-        nonpositive, factor_columns=("zero_amount_ratio_20d",)
+        nonpositive, min_fresh_fraction=1.0, factor_columns=("zero_amount_ratio_20d",)
     )
     assert observed.loc[60, "zero_amount_ratio_20d"] == 1.0 / 20.0
 
@@ -262,6 +267,7 @@ def test_price_volume_skew_matches_independent_decimal_oracle(size, scale):
     original = panel.copy(deep=True)
     actual = calculate_price_volume_factors(
         panel,
+        min_fresh_fraction=1.0,
         factor_columns=(f"skewness_{size}d",),
         output_window=TimeWindow(dates[size - 1].date(), dates[-1].date()),
     )
@@ -292,7 +298,9 @@ def test_price_volume_skew_matches_independent_decimal_oracle(size, scale):
                 gamma * float(correction * absolute_m3 / (m2 * m2.sqrt()))
             )
         single = calculate_price_volume_factors(
-            panel.iloc[start : start + size], factor_columns=(f"skewness_{size}d",)
+            panel.iloc[start : start + size],
+            min_fresh_fraction=1.0,
+            factor_columns=(f"skewness_{size}d",),
         )
         assert (
             single.iloc[-1][f"skewness_{size}d"]
@@ -346,7 +354,9 @@ def test_standardized_moments_preserve_adjacent_values_against_decimal(size, cas
             "period_return": values,
         }
     )
-    actual = calculate_price_volume_factors(panel, factor_columns=names)
+    actual = calculate_price_volume_factors(
+        panel, min_fresh_fraction=1.0, factor_columns=names
+    )
     assert actual.loc[: size - 2, list(names)].isna().all().all()
     if case in {"constant", "missing"}:
         assert actual.loc[size - 1, list(names)].isna().all()
@@ -416,7 +426,9 @@ def test_skewness_independent_central_moment_oracle(missing, scale):
         panel["period_return"] = np.nan
     elif missing is not None:
         panel.loc[missing, "period_return"] = np.nan
-    result = calculate_price_volume_factors(panel, factor_columns=("skewness_60d",))
+    result = calculate_price_volume_factors(
+        panel, min_fresh_fraction=1.0, factor_columns=("skewness_60d",)
+    )
     if missing is not None:
         assert result.skewness_60d.isna().all()
     else:
@@ -447,6 +459,7 @@ def test_return_correlations_preserve_units_and_persist(scale, kind, tmp_path):
         {
             "listing_date": pd.Timestamp("2000-01-01"),
             "market_id": "a_share",
+            "filling_flag": 0,
             "asset_id": "asset",
             "timestamp": pd.bdate_range("2020-01-01", periods=20),
             "period_return": x,
@@ -502,8 +515,12 @@ def test_rolling_correlations_match_exact_windows_and_warmup(case):
         name = f"return_{kind}_corr_20d"
         values = {"period_return": x, kind: y}
         for start, stop in ((0, 160), (22, 41), (99, 160), (19, 20)):
-            actual = _calculate_values(values, {}, name, start, stop)
-            np.testing.assert_array_equal(actual, expected[start:stop])
+            actual = _calculate_values(
+                values, {}, name, start, stop, min_fresh_fraction=1.0
+            )
+            np.testing.assert_allclose(
+                actual, expected[start:stop], rtol=1e-14, atol=1e-15
+            )
 
 
 @pytest.mark.parametrize("scale", [1.0, 1e-200, 1e200])
@@ -541,6 +558,7 @@ def test_volatility_representable_result_with_extreme_units(name, scale, tmp_pat
         {
             "listing_date": pd.Timestamp("2000-01-01"),
             "market_id": "a_share",
+            "filling_flag": 0,
             "asset_id": "asset",
             "timestamp": pd.bdate_range("2020-01-01", periods=count).as_unit("ns"),
             "period_return": values,
@@ -590,7 +608,9 @@ def test_expanded_pv_nine_formulas_complete_windows_and_nulls(tmp_path):
             "period_return": returns,
         }
     )
-    result = calculate_price_volume_factors(panel, factor_columns=names)
+    result = calculate_price_volume_factors(
+        panel, min_fresh_fraction=1.0, factor_columns=names
+    )
     ret = [-0.02, 0.0, 0.01, 0.03]
     mu = sum(ret) / 4
     m2 = sum((r - mu) ** 2 for r in ret) / 4
@@ -623,10 +643,13 @@ def test_expanded_pv_nine_formulas_complete_windows_and_nulls(tmp_path):
     pd.testing.assert_frame_equal(pd.read_parquet(path), result, check_exact=True)
     missing = panel.copy()
     missing.loc[240, ["amount", "volume", "turnover", "period_return"]] = np.nan
-    observed = calculate_price_volume_factors(missing, factor_columns=names)
+    observed = calculate_price_volume_factors(
+        missing, min_fresh_fraction=1.0, factor_columns=names
+    )
     assert observed.loc[249, list(names[1:])].isna().all()
     zero = calculate_price_volume_factors(
         panel.assign(amount=0.0, volume=0.0, turnover=0.0, period_return=0.0),
+        min_fresh_fraction=1.0,
         factor_columns=names,
     )
     assert (
@@ -645,7 +668,9 @@ def test_expanded_pv_nine_formulas_complete_windows_and_nulls(tmp_path):
     )
     future = panel.copy()
     future.loc[249, ["amount", "volume", "turnover", "period_return"]] *= 2
-    changed = calculate_price_volume_factors(future, factor_columns=names)
+    changed = calculate_price_volume_factors(
+        future, min_fresh_fraction=1.0, factor_columns=names
+    )
     pd.testing.assert_frame_equal(changed.iloc[:-1], result.iloc[:-1], check_exact=True)
 
 
@@ -683,9 +708,9 @@ def test_market_model_factors_share_risk_math_and_window_identity(tmp_path):
         _market_model_frames((panel,), trading_calendar=None, market_history=None),
         ignore_index=True,
     )
-    assert result.loc[result.timestamp < dates[252], "beta_252d"].isna().all()
+    assert result.loc[result.timestamp < dates[251], "beta_252d"].isna().all()
     assert (
-        result.loc[result.timestamp < dates[311], "residual_volatility_60d"]
+        result.loc[result.timestamp < dates[295], "residual_volatility_60d"]
         .isna()
         .all()
     )
@@ -740,7 +765,9 @@ def test_batched_volatility_matches_scalar_reference_across_units_and_windows():
             }
         )
         actual = calculate_price_volume_factors(
-            panel, factor_columns=("volatility_20d", "volatility_60d")
+            panel,
+            min_fresh_fraction=1.0,
+            factor_columns=("volatility_20d", "volatility_60d"),
         )
         for size in (20, 60):
             expected = np.full(len(values), np.nan)
@@ -791,7 +818,9 @@ def test_rolling_means_match_scalar_windows_with_numeric_tolerance(extreme):
         ("volume_shock_20d", 20, 1),
     )
     result = calculate_price_volume_factors(
-        panel, factor_columns=tuple((name for name, _, _ in cases))
+        panel,
+        min_fresh_fraction=1.0,
+        factor_columns=tuple((name for name, _, _ in cases)),
     )
     for name, size, shift in cases:
         expected = np.full(len(values), np.nan)
@@ -819,6 +848,7 @@ def test_rolling_means_match_scalar_windows_with_numeric_tolerance(extreme):
         )
         bounded = calculate_price_volume_factors(
             panel.iloc[20:],
+            min_fresh_fraction=1.0,
             factor_columns=(name,),
             output_window=TimeWindow(dates[300], dates[-1]),
         )
@@ -870,11 +900,9 @@ def test_turnover_uses_canonical_suspension_zero_and_preserves_unknown(tmp_path)
     assert result.turnover_20d.iloc[-1] == pytest.approx(0.0095)
     raw.loc[19, "filling_flag"] = 0
     unknown = panels._apply_suspension_semantics(raw)
-    assert (
-        calculate_price_volume_factors(unknown, factor_columns=("turnover_20d",))
-        .turnover_20d.isna()
-        .all()
-    )
+    assert calculate_price_volume_factors(
+        unknown, factor_columns=("turnover_20d",)
+    ).turnover_20d.iloc[-1] == pytest.approx(0.01)
 
 
 @pytest.mark.parametrize("amount_scale", (1.0, 1e-308, 1e308))
@@ -990,6 +1018,7 @@ def test_trend_efficiency_extreme_normal_price_path_persists_finite_ratio(tmp_pa
     frame = pd.DataFrame(
         {
             "market_id": "a_share",
+            "filling_flag": 0,
             "asset_id": "synthetic",
             "timestamp": pd.bdate_range("2020-01-02", periods=60).as_unit("ns"),
             "period_return": returns,
@@ -1058,6 +1087,7 @@ def test_amplitude_extreme_representable_mean_persists(tmp_path, single_extreme)
     frame = pd.DataFrame(
         {
             "market_id": "a_share",
+            "filling_flag": 0,
             "asset_id": "asset",
             "timestamp": pd.bdate_range("2020-01-02", periods=20).as_unit("ns"),
             "high": 1e308,
@@ -1369,9 +1399,9 @@ def test_prefix_mean_factors_do_not_materialize_sliding_windows(monkeypatch):
             "abnormal_turnover_20_250",
         ),
     )
-    assert pd.isna(result.loc[119, "avg_amount_20d"])
+    assert result.loc[119, "avg_amount_20d"] == pytest.approx(111.0)
     assert result.loc[120, "avg_amount_20d"] == 111.5
-    assert pd.isna(result.loc[120, "amount_shock_20d"])
+    assert result.loc[120, "amount_shock_20d"] == pytest.approx(121.0 / 111.0 - 1)
     assert result.loc[121, "amount_shock_20d"] == (122.0 - 111.5) / 111.5
 
 

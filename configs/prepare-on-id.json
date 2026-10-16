@@ -3,7 +3,7 @@
   "data_id": "on_id_decomposition",
   "inputs": {
     "market_panel_1d": "results/panel",
-    "execution_mask": "results/execution"
+    "trading_calendar": "data/interim/trading_calendar"
   },
   "parameters": {
     "horizons": [

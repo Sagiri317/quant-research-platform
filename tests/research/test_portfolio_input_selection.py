@@ -1,4 +1,4 @@
-"""Portfolio source selection preserves history, unit proof and sample multiplicity."""
+"""Source selection preserves history, entitlements and sample multiplicity."""
 
 import json
 from collections import Counter
@@ -76,9 +76,9 @@ def test_session_inputs_intersect_years_source_window_history_files_and_filters(
     )
 
 
-@pytest.mark.parametrize("exclude_basis", [False, True])
-def test_rights_unit_proof_reuses_selected_panel_and_keeps_history(
-    tmp_path, monkeypatch, exclude_basis
+@pytest.mark.parametrize("exclude_history", [False, True])
+def test_raw_rights_entitlement_is_independent_of_adjusted_panel_history(
+    tmp_path, monkeypatch, exclude_history
 ):
     from tests.sources.reference.test_equity_events import native_equity_inputs
 
@@ -94,8 +94,8 @@ def test_rights_unit_proof_reuses_selected_panel_and_keeps_history(
     monkeypatch.setattr(portfolio_sessions, "open_dataset_session", observed)
     panel = {
         "path": str(inputs["panel"]),
-        "years": [2023] if exclude_basis else [2022, 2023],
-        "columns": ["adj_open", "adj_close", "amount"],
+        "years": [2023] if exclude_history else [2022, 2023],
+        "columns": ["open", "close", "amount"],
     }
     views = list(
         portfolio_sessions.iter_portfolio_sessions(
@@ -119,7 +119,7 @@ def test_rights_unit_proof_reuses_selected_panel_and_keeps_history(
         )
     )
     assert len(views) == 1
-    assert views[0].rights_events.unit_basis_proved.tolist() == [not exclude_basis]
+    assert views[0].rights_events.entitlement_proved.tolist() == [True]
     assert calls[inputs["panel"]] == 1
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, time
+from typing import Final
 
 import pandas as pd
 
@@ -13,6 +14,8 @@ from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_timestamp_series,
 )
+
+DEFAULT_ROOT_SEED: Final[int] = 42
 
 
 @dataclass(frozen=True, kw_only=True)

@@ -31,6 +31,7 @@ def _holding_paths(
     for name, source in (
         ("benchmark", "benchmark_weights"),
         ("equity_events", "a_share_equity_events"),
+        ("corporate_actions", "corporate_actions"),
         ("calendar", "trading_calendar"),
         ("index_market", "index_market"),
     ):
@@ -72,7 +73,7 @@ def test_extreme_valid_ledgers_keep_finite_group_bootstrap(tmp_path):
                 "candidate_id": candidate,
                 "initial_capital": 100000000.0,
                 "valuation_currency": "CNY",
-                "valuation_method": "adjusted_notional",
+                "valuation_method": "cash_equity",
             }
         )
         metadata = {
@@ -314,7 +315,7 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
                 "candidate_id": candidate.candidate_id,
                 "initial_capital": 1000.0,
                 "valuation_currency": "CNY",
-                "valuation_method": "adjusted_notional",
+                "valuation_method": "cash_equity",
             }
         )
         metadata = {
@@ -716,6 +717,7 @@ def test_holding_input_reader_freezes_decision_universe_over_holding_interval(
             "market_id": "a_share",
             "timestamp": dates.repeat(105),
             "asset_id": assets * 4,
+            "open": prices.ravel(),
             "adj_open": prices.ravel(),
             "adj_close": prices.ravel(),
             "amount": 1000000.0,
@@ -1008,7 +1010,7 @@ def test_declared_ledger_family_preserves_descriptive_inference(
                 "candidate_id": candidate.candidate_id,
                 "initial_capital": 1000.0,
                 "valuation_currency": "CNY",
-                "valuation_method": "adjusted_notional",
+                "valuation_method": "cash_equity",
             }
         )
         metadata = {
@@ -1386,9 +1388,7 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
     ledger_frame.attrs["end_timestamp"] = dates[2]
     ledgers = {}
     for candidate in candidates:
-        capital = PortfolioCapital(
-            candidate.candidate_id, 1000.0, "CNY", "adjusted_notional"
-        )
+        capital = PortfolioCapital(candidate.candidate_id, 1000.0, "CNY", "cash_equity")
         contract = metadata(candidate.candidate_id)
         root = write_test_sessions(
             tmp_path / "ledgers" / candidate.candidate_id,

@@ -33,6 +33,7 @@ from quant_research_platform.markets.implementations.a_share.benchmark import (
 )
 from quant_research_platform.markets.implementations.a_share.calendar import (
     CURRENT_MARKET_TYPES,
+    market_type_calendar_state,
     unified_trading_sessions,
 )
 from quant_research_platform.markets.implementations.a_share.execution import (
@@ -62,6 +63,7 @@ from quant_research_platform.research.factors.expectations.calculations import (
     FORECAST_FRESHNESS_DAYS,
     _prepare_expectations,
 )
+from quant_research_platform.research.filtering import A_SHARE_ELIGIBILITY_FACTS
 from quant_research_platform.research.labels import engine as label_engine
 from quant_research_platform.research.labels.forward_returns import (
     add_on_id_decomposition,
@@ -182,22 +184,22 @@ def produce_a_share_processed_data(
             if any(
                 definition.family == "market_model" for definition in factor_definitions
             ):
-                requested.add("market_type")
+                requested.update(
+                    ("market_type", "filling_flag", *A_SHARE_ELIGIBILITY_FACTS)
+                )
             columns = tuple(
                 column for column in dependency.required_columns if column in requested
             )
         elif spec.data_id == "on_id_decomposition":
             columns = (
-                (
-                    "market_id",
-                    "asset_id",
-                    "timestamp",
-                    "listing_date",
-                    "adj_open",
-                    "adj_close",
-                )
-                if data_id == "market_panel_1d"
-                else ("market_id", "asset_id", "timestamp", "can_enter")
+                "market_id",
+                "asset_id",
+                "timestamp",
+                "listing_date",
+                "adj_open",
+                "adj_close",
+                "filling_flag",
+                "is_trading",
             )
         elif spec.kind is ProcessedDataKind.LABEL:
             requested = {
@@ -244,19 +246,9 @@ def produce_a_share_processed_data(
         uses_panel_clock = (
             spec.kind is ProcessedDataKind.LABEL
             or spec.data_id == "execution_mask"
-            or any(
-                definition.family in {"price_volume", "market_model"}
-                for definition in factor_definitions
-            )
+            or bool(factor_engine.factor_lookback_bars(factor_definitions))
         )
-        selected_observations = any(
-            options.get(name) is not None for name in ("files", "years", "time_window")
-        ) or bool(options.get("row_filters"))
-        if (
-            uses_panel_clock
-            and (selected_observations or spec.data_id == "on_id_decomposition")
-            and data_id == "market_panel_1d"
-        ):
+        if uses_panel_clock and data_id == "market_panel_1d":
             # Bare member selections have no independent full-session inventory.
             if not session.native and options.get("files") is not None:
                 raise ValueError("a_share_panel_session_domain_unproven")
@@ -270,10 +262,16 @@ def produce_a_share_processed_data(
             }
             if session.native:
                 axis_options.pop("files", None)
-            panel_axis = open_dataset_session(
-                **axis_options,
-                columns=("market_id", "asset_id", "timestamp", "listing_date"),
+            axis_columns = (
+                "market_id",
+                "asset_id",
+                "timestamp",
+                "listing_date",
+                "market_type",
             )
+            if "delisting_date" in session.arrow_schema.names:
+                axis_columns += ("delisting_date",)
+            panel_axis = open_dataset_session(**axis_options, columns=axis_columns)
         if spec.kind is ProcessedDataKind.LABEL or spec.data_id == "execution_mask":
             # Actual supplied PANEL sessions own the future execution/label clock.
             # Each block below reads only its required own-market lookahead.
@@ -302,22 +300,51 @@ def produce_a_share_processed_data(
         if first is None:
             raise ValueError("processed_output_empty")
         metadata = {}
+        if spec.data_id == "forward_returns":
+            metadata["producer_diagnostics"] = {
+                "label_semantics": {
+                    definition.output_column: {
+                        "price_basis": "real_observed_adjusted_open",
+                        "endpoint_observation": "filling_flag_0_and_is_trading_true",
+                        "entry_offset_sessions": 1,
+                        "exit_offset_sessions": definition.horizon + 1,
+                        "session_axis": "explicit_own_market_calendar_sessions",
+                        "execution_permissions_applied": False,
+                        "economic_price_event": "open_09:30",
+                        "availability_basis": "wd_adjustment_inputs_at_session_close",
+                        "timezone": "Asia/Shanghai",
+                        "stored_timezone": "UTC",
+                    }
+                    for definition in a_share.label_catalog().list()
+                    if definition.output_column in spec.required_columns
+                }
+            }
         if spec.data_id == "on_id_decomposition":
-            clocks = {"on_id_pre_entry_log_return": "next_session_open_09:30"}
+            clocks = {"on_id_pre_entry_log_return": "next_session_close_15:00"}
             for horizon in json.loads(spec.parameters_json)["horizons"]:
                 close_clock = f"session_{horizon}_close_15:00"
-                open_clock = f"session_{horizon + 1}_open_09:30"
+                exit_clock = f"session_{horizon + 1}_close_15:00"
                 clocks.update(
                     {
                         f"on_id_holding_intraday_log_return_{horizon}d": close_clock,
-                        f"on_id_holding_overnight_log_return_{horizon}d": open_clock,
-                        f"on_id_endpoint_return_{horizon}d": open_clock,
+                        f"on_id_holding_overnight_log_return_{horizon}d": exit_clock,
+                        f"on_id_endpoint_return_{horizon}d": exit_clock,
                     }
                 )
             metadata["producer_diagnostics"] = {
                 "label_semantics": {
                     label: {
                         "price_basis": "supplier_adjusted_open_close",
+                        **(
+                            {
+                                "endpoint_observation": (
+                                    "filling_flag_0_and_is_trading_true"
+                                )
+                            }
+                            if label.startswith("on_id_endpoint_return_")
+                            else {"confirmed_suspension_valuation_retained": True}
+                        ),
+                        "execution_permissions_applied": False,
                         "corporate_action_validation": "not_performed",
                         "pre_entry_is_not_holding_return": True,
                         "costs_or_strategy_profit_estimated": False,
@@ -325,7 +352,7 @@ def produce_a_share_processed_data(
                         "timezone": "Asia/Shanghai",
                         "stored_timezone": "UTC",
                         "availability_basis": (
-                            "endpoint_event_time_not_vendor_publication_time"
+                            "wd_adjustment_inputs_at_session_close_not_vendor_publication_time"
                         ),
                     }
                     for label, clock in clocks.items()
@@ -388,6 +415,20 @@ def _processed_frames(
         or spec.kind is ProcessedDataKind.FACTOR,
     )
     lower, upper, closed = time_window_timestamp_interval(time_window)
+    declared_axis = None
+    if panel_axis is not None:
+        calendar = source.get("trading_calendar")
+        if calendar is None or calendar.empty:
+            raise ValueError("a_share_panel_calendar_required")
+        declared_axis = _calendar_panel_axis(
+            materialize_dataset_session(panel_axis), calendar
+        )
+        sessions = tuple(sorted(declared_axis.timestamp.unique()))
+        sessions = tuple(pd.Timestamp(value) for value in sessions)
+        asset_sessions = {
+            asset: tuple(group.timestamp.sort_values())
+            for asset, group in declared_axis.groupby("asset_id", sort=False)
+        }
     if panel_source:
         source["observed_market_sessions"] = observed_sessions
         history_start = pd.Timestamp(
@@ -461,9 +502,9 @@ def _processed_frames(
                     dependencies["market_panel_1d"].filtered_view(window)
                 )
                 if panel_axis is not None:
-                    declared = materialize_dataset_session(
-                        panel_axis.filtered_view(window)
-                    )
+                    declared = declared_axis.loc[
+                        declared_axis.timestamp.between(core[0], core[-1])
+                    ]
                     panel, _ = _align_panel_observations(
                         declared, {"market_panel_1d": panel}
                     )
@@ -475,6 +516,9 @@ def _processed_frames(
                     frames,
                     trading_calendar=source["trading_calendar"],
                     market_history=market_history,
+                    min_fresh_fraction=json.loads(spec.parameters_json).get(
+                        "min_fresh_fraction", 0.75
+                    ),
                 )
             ) as calculated:
                 for output in calculated:
@@ -532,9 +576,9 @@ def _processed_frames(
         output_keys = None
         if panel_axis is not None:
             keys = ["market_id", "asset_id", "timestamp"]
-            declared = materialize_dataset_session(
-                panel_axis.filtered_view(read_window)
-            )
+            declared = declared_axis.loc[
+                declared_axis.timestamp.between(read_start, read_end)
+            ]
             frames["market_panel_1d"], output_keys = _align_panel_observations(
                 declared, frames
             )
@@ -631,6 +675,90 @@ def _processed_frames(
         del output, frames, current_source
 
 
+def _calendar_panel_axis(panel, calendar):
+    """Fill evidenced own-market segments; unknown membership is a local barrier."""
+    if panel.empty:
+        return panel
+    panel = panel.sort_values(["asset_id", "timestamp"], kind="mergesort").reset_index(
+        drop=True
+    )
+    unknown = panel[["listing_date", "market_type"]].isna().any(axis=1)
+    previous_unknown = unknown.groupby(panel.asset_id).shift(fill_value=False)
+    panel["_calendar_segment"] = (
+        (unknown | previous_unknown).groupby(panel.asset_id).cumsum()
+    )
+    stop = panel.timestamp.max()
+    states = {
+        market: market_type_calendar_state(calendar, market)
+        for market in panel.market_type.dropna().unique()
+    }
+    for market, observed in panel.groupby("market_type", sort=False):
+        state = states[market].reindex(pd.DatetimeIndex(observed.timestamp))
+        if state.isna().any():
+            raise ValueError("a_share_panel_calendar_coverage_missing")
+        if not state.all():
+            raise ValueError("a_share_input_key_outside_calendar")
+    columns = [
+        "market_id",
+        "asset_id",
+        "timestamp",
+        "listing_date",
+        "market_type",
+        "_calendar_segment",
+    ]
+    pieces = [panel.loc[unknown, columns]]
+    for asset, asset_rows in panel.groupby("asset_id", sort=False):
+        for (_, _), lifecycle in asset_rows.loc[~unknown.loc[asset_rows.index]].groupby(
+            ["listing_date", "_calendar_segment"], sort=False
+        ):
+            first = lifecycle.iloc[0]
+            # A later explicit lifecycle or unknown membership bounds this segment.
+            later = asset_rows.loc[
+                (asset_rows.timestamp > first.timestamp)
+                & (
+                    asset_rows._calendar_segment.ne(first._calendar_segment)
+                    | asset_rows.listing_date.ne(first.listing_date)
+                )
+            ]
+            segment_end = (
+                stop if later.empty else later.timestamp.min() - pd.Timedelta(days=1)
+            )
+            changes = lifecycle.loc[
+                lifecycle.market_type.ne(lifecycle.market_type.shift()).fillna(True)
+            ]
+            for position, (_, row) in enumerate(changes.iterrows()):
+                start = max(row.timestamp, row.listing_date)
+                end = segment_end
+                if position + 1 < len(changes):
+                    end = min(
+                        end, changes.iloc[position + 1].timestamp - pd.Timedelta(days=1)
+                    )
+                if pd.notna(row.get("delisting_date", pd.NaT)):
+                    end = min(end, row.delisting_date)
+                if end < start:
+                    continue
+                days = pd.date_range(start, end).as_unit("ns")
+                state = states[row.market_type].reindex(days)
+                if state.isna().any():
+                    raise ValueError("a_share_panel_calendar_coverage_missing")
+                pieces.append(
+                    pd.DataFrame(
+                        {
+                            "market_id": row.market_id,
+                            "asset_id": asset,
+                            "timestamp": days[state.to_numpy(dtype=bool)],
+                            "listing_date": row.listing_date,
+                            "market_type": row.market_type,
+                            "_calendar_segment": row["_calendar_segment"],
+                        }
+                    )
+                )
+    declared = pd.concat(pieces, ignore_index=True)
+    if declared.duplicated(["market_id", "asset_id", "timestamp"]).any():
+        raise ValueError("a_share_panel_lifecycle_overlap")
+    return declared
+
+
 def _align_panel_observations(declared, dependencies):
     """Retain the full clock while selected rows alone define published signals."""
     keys = ["market_id", "asset_id", "timestamp"]
@@ -657,6 +785,11 @@ def _align_panel_observations(declared, dependencies):
         indicator="_panel_observed",
     )
     panel["_panel_observed"] = panel["_panel_observed"].eq("both")
+    unknown = panel[["listing_date", "market_type"]].isna().any(axis=1)
+    if unknown.any():
+        for column in observed:
+            panel[column] = panel[column].where(~unknown)
+
     return panel, selected[keys]
 
 
@@ -983,7 +1116,12 @@ def _compute_processed_frame(
         calculated = factor_engine.calculate_factors_for_panel(
             input_frame,
             definitions=definitions,
-            history_keys=("asset_id", "listing_date"),
+            history_keys=("asset_id", "listing_date", "_calendar_segment")
+            if "_calendar_segment" in input_frame
+            else ("asset_id", "listing_date"),
+            min_fresh_fraction=json.loads(spec.parameters_json).get(
+                "min_fresh_fraction", 0.75
+            ),
             output_window=None
             if panel_sessions is None
             else TimeWindow(panel_sessions[0], panel_sessions[-1]),
@@ -1000,14 +1138,13 @@ def _compute_processed_frame(
             )
         return calculated.loc[:, list(spec.required_columns)]
     if spec.data_id == "on_id_decomposition":
-        panel = dependencies["market_panel_1d"].merge(
-            dependencies["execution_mask"],
-            on=["market_id", "asset_id", "timestamp"],
-            how="left",
-            validate="one_to_one",
-        )
+        panel = dependencies["market_panel_1d"]
         pieces = []
-        for asset, group in panel.groupby("asset_id", sort=False):
+        group_keys = ["asset_id"] + (
+            ["_calendar_segment"] if "_calendar_segment" in panel else []
+        )
+        for key, group in panel.groupby(group_keys, sort=False):
+            asset = key[0]
             axis = trading_sessions if asset_sessions is None else asset_sessions[asset]
             # The read window already includes the largest requested lookahead.
             # Avoid expanding every bounded block over the entire source history.
@@ -1025,12 +1162,7 @@ def _compute_processed_frame(
             )
         return pd.concat(pieces, ignore_index=True).loc[:, list(spec.required_columns)]
     if spec.kind is ProcessedDataKind.LABEL:
-        panel = dependencies["market_panel_1d"].merge(
-            dependencies["execution_mask"],
-            on=["market_id", "asset_id", "timestamp"],
-            how="left",
-            validate="one_to_one",
-        )
+        panel = dependencies["market_panel_1d"]
         definitions = tuple(
             definition
             for definition in a_share.label_catalog().list()
@@ -1042,10 +1174,13 @@ def _compute_processed_frame(
                 definitions=definitions,
                 sessions=trading_sessions
                 if asset_sessions is None
-                else asset_sessions[asset],
+                else asset_sessions[key[0]],
             )
-            for (asset, _listing_date), group in panel.groupby(
-                ["asset_id", "listing_date"], sort=False
+            for key, group in panel.groupby(
+                ["asset_id", "listing_date"]
+                + (["_calendar_segment"] if "_calendar_segment" in panel else []),
+                sort=False,
+                dropna=False,
             )
         ]
         return pd.concat(pieces, ignore_index=True).loc[:, list(spec.required_columns)]

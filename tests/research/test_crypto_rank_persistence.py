@@ -103,7 +103,7 @@ def test_rank_retains_missing_inputs_and_only_defined_ic_columns(tmp_path):
             "timestamp": pd.Timestamp("2020-01-01"),
             "asset_id": ["a", "b", "c"],
             "x": [1.0, 2.0, 3.0],
-            "undefined": [np.nan] * 3,
+            "undefined": [1.0, np.nan, 1.0],
             "label": [1.0, 2.0, 3.0],
             "eligible": True,
             "label_available_at": pd.Timestamp("2020-01-01"),
@@ -118,8 +118,12 @@ def test_rank_retains_missing_inputs_and_only_defined_ic_columns(tmp_path):
     )
     result = fit_frame(tmp_path, frame, spec).result
     assert result.metadata["input_columns"] == ["x", "undefined"]
-    assert result.prediction_model.columns == ("x",)
-    assert result.metadata["rank_parameters"]["columns"] == ["x"]
+    assert result.prediction_model.columns == ("x", "undefined")
+    assert result.prediction_model.weights == (1.0, 0.0)
+    assert result.metadata["rank_parameters"]["columns"] == ["x", "undefined"]
+    future = pd.DataFrame({"x": [np.nan, np.nan], "undefined": [1.0, np.nan]})
+    scores = result.prediction_model.predict(future)
+    assert scores[0] == 0.0 and np.isnan(scores[1])
 
 
 @pytest.mark.parametrize("field", ["fit_cutoff", "train_start", "train_end"])

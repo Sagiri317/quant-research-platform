@@ -334,8 +334,11 @@ def test_assembly_keeps_nanosecond_windows_through_persisted_inputs(
     pd.testing.assert_frame_equal(result, frame, check_exact=True)
 
 
+@pytest.mark.parametrize("auxiliary_order", ["time", "asset"])
 def test_research_dataset_session_complete_chunks_preserve_output(
     tmp_path: Path,
+    monkeypatch,
+    auxiliary_order,
 ) -> None:
     frame = _research_rows_for_dates(
         ["2014-01-02", "2014-01-03", "2014-01-06", "2014-01-07", "2014-01-08"]
@@ -349,6 +352,8 @@ def test_research_dataset_session_complete_chunks_preserve_output(
     write_demo_processed_inputs(default_layout, processed_catalog, frame=frame)
     for spec in processed_catalog.list():
         source = frame.loc[:, list(spec.column_roles)]
+        if auxiliary_order == "asset" and spec.data_id != "demo_annotations":
+            source = source.sort_values(["asset_id", "timestamp"], ignore_index=True)
         root = tiny_layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
         write_dataset(
             root,
@@ -389,6 +394,18 @@ def test_research_dataset_session_complete_chunks_preserve_output(
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
     )
+    from collections import Counter
+
+    from quant_research_platform.storage.datasets import reading
+
+    opens = Counter()
+    original = reading.iter_declared_parquet_member_batches
+
+    def measured(path, **kwargs):
+        opens[Path(path)] += 1
+        yield from original(path, **kwargs)
+
+    monkeypatch.setattr(reading, "iter_declared_parquet_member_batches", measured)
     tiny_root = assemble_research_dataset(
         inputs={
             item.data_id: tiny_layout.processed_data_root(
@@ -405,6 +422,9 @@ def test_research_dataset_session_complete_chunks_preserve_output(
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
     )
+    assert len(opens) == 3 * len(frame)
+    assert set(opens.values()) == {1}
+    monkeypatch.setattr(reading, "iter_declared_parquet_member_batches", original)
     default = pd.concat(
         read_dataset(
             default_layout.research_dataset_root(MarketId("a_share"), "demo"),
@@ -849,6 +869,7 @@ def test_named_feature_recipe_assembles_complete_sessions_and_persists_identity(
         {
             "recipe_id": recipe,
             "source_columns": ["factor"],
+            "output_groups": ["processed"],
             "clip": transform.clip,
             "industry_neutralize": True,
             "size_neutralize": True,
@@ -878,3 +899,132 @@ def _research_rows_for_dates(dates: list[str]) -> pd.DataFrame:
                 }
             )
     return pd.DataFrame(rows)
+
+
+def test_join_closes_every_open_input_on_coverage_failure(tmp_path, monkeypatch):
+    layout = StorageLayout(project_root=tmp_path)
+    processed = make_demo_processed_catalog()
+    dataset = make_research_dataset_catalog(
+        filter_column_roles={"eligible": ColumnRole.UNIVERSE}
+    )
+    frame = _research_rows_for_dates(
+        ["2014-01-02", "2014-01-03", "2014-01-06", "2014-01-07", "2014-01-08"]
+    )
+    for spec in processed.list():
+        source = frame.loc[:, list(spec.column_roles)]
+        if spec.data_id == "demo_labels":
+            source = source.iloc[1:]
+        write_dataset(
+            layout.processed_data_root(spec.market_id, spec.kind, spec.data_id),
+            (source.iloc[i : i + 1] for i in range(len(source))),
+            spec=spec,
+        )
+    started, closed = [], []
+    original = assembler_module.iter_dataset_chunks
+
+    def observed(session, **kwargs):
+        started.append(session.spec["data_id"])
+        try:
+            yield from original(session, **kwargs)
+        finally:
+            closed.append(session.spec["data_id"])
+
+    from quant_research_platform.storage.datasets import reading
+
+    monkeypatch.setattr(assembler_module, "iter_dataset_chunks", observed)
+    monkeypatch.setattr(reading, "iter_dataset_chunks", observed)
+    with pytest.raises(ValueError, match="missing_research_input_keys"):
+        assemble_research_dataset(
+            inputs={
+                item.data_id: layout.processed_data_root(
+                    item.market_id, item.kind, item.data_id
+                )
+                for item in processed.list()
+            },
+            output_root=tmp_path / "failed-output",
+            dataset_catalog=dataset,
+            processed_catalog=processed,
+            dataset_id="demo",
+            time_window=TimeWindow("2014-01-02", "2014-01-08"),
+        )
+    assert len(started) == 3
+    assert sorted(started) == sorted(closed)
+    assert not (tmp_path / "failed-output").exists()
+
+
+@pytest.mark.parametrize("storage", ["native", "parquet"])
+@pytest.mark.parametrize("dtype", ["datetime64[us]", "datetime64[ns]"])
+@pytest.mark.parametrize(
+    "end,count", [("2024-01-02", 3), ("2024-01-02T00:00:00.000000999", 1)]
+)
+def test_auxiliary_timestamp_units_preserve_nanosecond_window(
+    tmp_path, dtype, end, count, storage
+):
+    from quant_research_platform.contracts.data import DataSpec
+
+    times = (pd.Timestamp("2024-01-02") + pd.to_timedelta([0, 1, 2], unit="us")).astype(
+        dtype
+    )
+    inputs = {}
+    for data_id, column, role in (
+        ("base", "factor", "factor"),
+        ("aux", "label", "label"),
+    ):
+        frame = pd.DataFrame(
+            {"asset_id": "a", "timestamp": times, column: [1.0, 2.0, 3.0]}
+        )
+        spec = DataSpec(
+            data_id=data_id,
+            frequency="tick",
+            grain="asset_timestamp",
+            primary_key=("asset_id", "timestamp"),
+            partition_columns=("year",),
+            column_roles={"asset_id": "key", "timestamp": "timestamp", column: role},
+        )
+        if storage == "native":
+            root = tmp_path / data_id
+            write_dataset(
+                root, (frame.iloc[i : i + 1] for i in range(len(frame))), spec=spec
+            )
+            inputs[data_id] = str(root)
+        else:
+            root = tmp_path / (data_id + ".parquet")
+            frame.to_parquet(root, index=False)
+            inputs[data_id] = {
+                "path": str(root),
+                "spec": {
+                    "data_id": data_id,
+                    "frequency": "tick",
+                    "grain": "asset_timestamp",
+                    "primary_key": ["asset_id", "timestamp"],
+                    "partition_columns": ["year"],
+                    "column_roles": {
+                        "asset_id": "key",
+                        "timestamp": "timestamp",
+                        column: role,
+                    },
+                },
+            }
+    root = assembler_module.assemble(
+        {
+            "market_id": "crypto",
+            "dataset_id": "units",
+            "inputs": inputs,
+            "base_input_data_id": "base",
+            "factor_columns": ["factor"],
+            "label_columns": ["label"],
+            "filter_columns": [],
+            "time_window": {
+                "start": "2024-01-02T00:00:00" if "T" in end else "2024-01-02",
+                "end": end,
+            },
+            "output_root": str(tmp_path / "output"),
+        }
+    )
+    result = read_dataset(root)
+    assert len(result) == count
+    pd.testing.assert_series_equal(
+        result.timestamp,
+        pd.Series(times[:count].astype("datetime64[ns]"), name="timestamp"),
+    )
+    assert result.label.tolist() == [1.0, 2.0, 3.0][:count]

@@ -84,6 +84,8 @@ STRING_CODE_DTYPES = {
     "DeclareDate": str,
     "Accper": str,
     "Typrep": str,
+    "DataSources": str,
+    "SubjectCode": str,
     "ChangeDate": str,
     "ChangedItem": str,
     "ValueBefore": str,
@@ -603,7 +605,8 @@ def _raw_frame(
     )
     for column in frame.columns:
         if (
-            column not in consumed
+            dataset == "corporate_actions"
+            or column not in consumed
             or column in STRING_CODE_DTYPES
             or column in INDEX_INFO_SOURCE_CODE_COLUMNS
         ):

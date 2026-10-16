@@ -26,11 +26,13 @@ class RankEnsemblePredictor:
 
     def predict(self, frame: pd.DataFrame) -> np.ndarray:
         directions = self.directions or (1.0,) * len(self.columns)
-        return (
+        scores = (
             _rank_frame_columns(frame, self.columns)
             @ np.asarray(directions, dtype="float64")
             / len(self.columns)
         )
+        scores[frame.loc[:, self.columns].isna().all(axis=1)] = np.nan
+        return scores
 
 
 @dataclass(frozen=True)
@@ -85,19 +87,18 @@ class ICWeightedRankEnsemble:
         sample_weight=None,
     ) -> ICWeightedRankEnsemble:
         weights = []
-        defined_columns: list[str] = []
-        for column, correlation in _training_rank_correlations(
+        defined_count = 0
+        for _column, correlation in _training_rank_correlations(
             frame, input_columns, label_column, sample_weight
         ):
-            if correlation is not None:
-                defined_columns.append(column)
-                weights.append(correlation)
-        if not weights:
+            weights.append(Fraction() if correlation is None else correlation)
+            defined_count += correlation is not None
+        if not defined_count:
             raise ValueError("all_ensemble_correlations_undefined")
         normalizer = sum(map(abs, weights), Fraction())
         if normalizer == 0.0:
             raise ValueError("all_ensemble_correlations_zero")
-        columns = tuple(defined_columns)
+        columns = input_columns
         normalized = np.asarray(
             [float(value / normalizer) for value in weights], dtype="float64"
         )
@@ -108,7 +109,9 @@ class ICWeightedRankEnsemble:
 
     def predict(self, frame: pd.DataFrame) -> np.ndarray:
         ranks = _rank_frame_columns(frame, self.columns)
-        return ranks @ np.asarray(self.weights, dtype="float64")
+        scores = ranks @ np.asarray(self.weights, dtype="float64")
+        scores[frame.loc[:, self.columns].isna().all(axis=1)] = np.nan
+        return scores
 
 
 def rank_model_parameters(

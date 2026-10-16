@@ -52,7 +52,8 @@ def test_missing_trading_prices_remain_missing_and_suspension_preserves_units(
     frame["listing_date"] = frame["timestamp"].min()
     actual = _apply_suspension_semantics(frame)
     assert actual.loc[1, ["close", "open", "high", "low", "adj_open"]].isna().all()
-    assert not a_share_eligibility(actual, "a_share_all").iloc[1]
+    # Research membership does not certify a usable price or an executable trade.
+    assert a_share_eligibility(actual, "a_share_all").iloc[1]
     assert actual.loc[1, "period_return"] == 0.07
     assert actual.loc[2, "adj_close"] == actual.loc[2, "adj_open"] == 110.0
     raw = actual.loc[2, ["close", "open", "high", "low"]]
@@ -312,7 +313,7 @@ def test_execution_mask_is_independent_and_uses_signal_row_legality() -> None:
     assert pd.isna(result["can_exit"].iloc[2])
 
 
-def test_execution_mask_and_label_consumer_share_signal_row_timing() -> None:
+def test_execution_mask_and_label_consumer_have_independent_price_eligibility() -> None:
     sessions = pd.bdate_range("2024-01-01", periods=4)
     panel = pd.DataFrame(
         {
@@ -321,6 +322,7 @@ def test_execution_mask_and_label_consumer_share_signal_row_timing() -> None:
             "asset_id": "asset",
             "timestamp": sessions,
             "is_trading": True,
+            "filling_flag": 0,
             "limit_status": [0, 1, 0, 0],
             "open": [10.0, 11.0, 12.0, 13.0],
             "high": [10.0, 11.0, 12.0, 13.0],
@@ -331,14 +333,14 @@ def test_execution_mask_and_label_consumer_share_signal_row_timing() -> None:
     )
     mask = derive_execution_mask(panel)
     labeled = calculate_labels_for_panel(
-        panel.merge(mask, on=["market_id", "asset_id", "timestamp"]),
+        panel,
         definitions=(label_definitions()[0],),
         sessions=sessions,
     )
 
     assert mask["can_enter"].iloc[:3].tolist() == [False, True, True]
     assert pd.isna(mask["can_enter"].iloc[3])
-    assert pd.isna(labeled.loc[0, "forward_return_1d"])
+    assert labeled.loc[0, "forward_return_1d"] == pytest.approx(12.0 / 11.0 - 1.0)
     assert labeled.loc[1, "forward_return_1d"] == pytest.approx(13.0 / 12.0 - 1.0)
 
 
@@ -1378,7 +1380,10 @@ def test_public_suspension_placeholders_keep_fixed_horizon_returns(tmp_path):
         {
             "market_id": "a_share",
             "data_id": "execution_mask",
-            "inputs": {"market_panel_1d": str(panel)},
+            "inputs": {
+                "market_panel_1d": str(panel),
+                "trading_calendar": paths["trading_calendar"],
+            },
             "time_window": window,
             "output_root": str(tmp_path / "execution"),
         }
@@ -1389,7 +1394,7 @@ def test_public_suspension_placeholders_keep_fixed_horizon_returns(tmp_path):
             "data_id": "forward_returns",
             "inputs": {
                 "market_panel_1d": str(panel),
-                "execution_mask": str(execution),
+                "trading_calendar": paths["trading_calendar"],
             },
             "time_window": window,
             "output_root": str(tmp_path / "labels"),
@@ -1397,14 +1402,15 @@ def test_public_suspension_placeholders_keep_fixed_horizon_returns(tmp_path):
     )
     saved = read_dataset(root)
     row = saved.loc[saved.asset_id.eq("000001") & saved.timestamp.eq(dates[0])].iloc[0]
-    assert row.forward_return_1d == 0.0
-    assert row.forward_return_1d_available_at == dates[2] + pd.Timedelta(
-        hours=1, minutes=30
-    )
+    assert pd.isna(row.forward_return_1d)
+    assert pd.isna(row.forward_return_1d_available_at)
+    masks = read_dataset(execution)
+    entry_into_pause = masks.loc[
+        masks.asset_id.eq("000001") & masks.timestamp.eq(dates[1])
+    ].iloc[0]
+    assert not entry_into_pause.can_enter
     assert row.forward_return_5d == pytest.approx(0.2)
-    assert row.forward_return_5d_available_at == dates[6] + pd.Timedelta(
-        hours=1, minutes=30
-    )
+    assert row.forward_return_5d_available_at == dates[6] + pd.Timedelta(hours=7)
 
 
 def test_listing_age_keeps_unavailable_master_date_unknown():

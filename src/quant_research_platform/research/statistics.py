@@ -952,13 +952,15 @@ def time_series_inference_summary(
             raise ValueError("time_series_inference_nonfinite")
         valid = values.notna()
         count = int(valid.sum())
-        if count < max(2, max_lags + 1):
+        if count != len(values) or count < max(2, max_lags + 1):
             rows.append(
                 {
                     identity_column: column,
                     "observation_count": count,
                     "status": "UNDEFINED",
-                    "reason": "hac_lag_exceeds_observations",
+                    "reason": "incomplete_session_clock"
+                    if count != len(values)
+                    else "hac_lag_exceeds_observations",
                     "mean": float(_mean(values.loc[valid])) if count else np.nan,
                     "standard_error": np.nan,
                     "t_statistic": np.nan,

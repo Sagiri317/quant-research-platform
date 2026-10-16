@@ -148,7 +148,28 @@ def write_market_evidence(root, panel, *, bars=None, stocks=None):
             }
         )
     roots = {}
-    for target, frame in (("market_bars_1d", bars), ("stock_master", stocks)):
+    corporate_spec = interim_catalog().get("corporate_actions")
+    empty_actions = pd.DataFrame(
+        {
+            column: pd.Series(
+                dtype=(
+                    "datetime64[ns]"
+                    if column in {"timestamp", "announcement_date", "settlement_date"}
+                    else "float64"
+                    if column in {"amount", "subscription_price"}
+                    else "Int64"
+                    if column == "market_type"
+                    else "string"
+                )
+            )
+            for column in corporate_spec.required_columns
+        }
+    )
+    for target, frame in (
+        ("market_bars_1d", bars),
+        ("stock_master", stocks),
+        ("corporate_actions", empty_actions),
+    ):
         spec = interim_catalog().get(target)
         destination = root / target
         write_dataset(
@@ -344,6 +365,9 @@ def continuous_ledger_batch(
 
 
 def ledger_frame(*, account, **kwargs):
+    from quant_research_platform.research.portfolios.accounting import (
+        EquityEntitlements,
+    )
     from quant_research_platform.research.portfolios.production import _ledger_batch
 
     returns = kwargs.pop("returns")
@@ -352,11 +376,11 @@ def ledger_frame(*, account, **kwargs):
             "asset_id": account.asset_ledger.asset_id,
             "research_open_mark_at": pd.NaT,
             "listing_date": pd.Timestamp("2000-01-01"),
-            "adj_open": 1.0,
+            "open": 1.0,
         }
     )
     endpoint = quoted.copy()
-    endpoint["adj_open"] = 1.0 + endpoint.asset_id.map(returns).fillna(0.0)
+    endpoint["open"] = 1.0 + endpoint.asset_id.map(returns).fillna(0.0)
     return session_frame(
         _ledger_batch(
             account=account,
@@ -373,6 +397,13 @@ def ledger_frame(*, account, **kwargs):
             end_timestamp=pd.Timestamp(account.execution_date),
             next_panel=quoted,
             endpoint_panel=endpoint,
+            endpoint_events=pd.DataFrame(),
+            corporate_events=pd.DataFrame(),
+            endpoint_corporate_events=pd.DataFrame(),
+            entitlements=EquityEntitlements(),
+            execution_lives=pd.Series(
+                pd.Timestamp("2000-01-01"), index=account.asset_ledger.asset_id
+            ),
             **kwargs,
         )
     )

@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from fractions import Fraction
+from math import ulp
 from pathlib import Path
 
 import pandas as pd
@@ -167,6 +168,25 @@ _ARROW_SCHEMAS = {
             pa.field("value", pa.float64()),
             pa.field("white_p_value", pa.float64()),
             pa.field("white_reason", pa.string()),
+        ]
+    ),
+    "model_prediction_metrics.parquet": pa.schema(
+        [
+            pa.field("timestamp", pa.timestamp("ns")),
+            pa.field("family_id", pa.string()),
+            pa.field("prediction_count", pa.int64()),
+            pa.field("target_count", pa.int64()),
+            pa.field("mse", pa.float64()),
+            pa.field("baseline_mse", pa.float64()),
+            pa.field("oos_r2", pa.float64()),
+            pa.field("oos_r2_reason", pa.string()),
+            pa.field("head_selected_count", pa.int64()),
+            pa.field("head_evaluable_count", pa.int64()),
+            pa.field("head_coverage", pa.float64()),
+            pa.field("pool_evaluable_count", pa.int64()),
+            pa.field("head_mean_raw_return", pa.float64()),
+            pa.field("pool_mean_raw_return", pa.float64()),
+            pa.field("head_excess_raw_return", pa.float64()),
         ]
     ),
     "model_losses.parquet": pa.schema(
@@ -657,6 +677,7 @@ STATISTICS_TABLE_GROUPS = {
         "model_trials.parquet",
         "robustness.parquet",
         "model_losses.parquet",
+        "model_prediction_metrics.parquet",
         "model_comparison.parquet",
         "model_group_comparison.parquet",
         "model_reality_checks.parquet",
@@ -1017,11 +1038,13 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
         ).astype("float64")
     if result.empty and member not in _EMPTY_TABLE_MEMBERS:
         raise ValueError("statistics_table_empty")
-    if (
-        member
-        in (*STATISTICS_TABLE_GROUPS["research"], *STATISTICS_TABLE_GROUPS["factor"])
-        and member != "model_group_comparison.parquet"
-    ):
+    if member in (
+        *STATISTICS_TABLE_GROUPS["research"],
+        *STATISTICS_TABLE_GROUPS["factor"],
+    ) and member not in {
+        "model_group_comparison.parquet",
+        "model_prediction_metrics.parquet",
+    }:
         if not result.status.isin(("DEFINED", "UNDEFINED")).all():
             raise ValueError("statistics_table_status_invalid")
         defined = result.status.eq("DEFINED")
@@ -1280,6 +1303,17 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
                 .all()
             ):
                 raise ValueError("statistics_terminal_wealth_invalid")
+    if member == "model_prediction_metrics.parquet":
+        if (
+            result.duplicated(["timestamp", "family_id"]).any()
+            or result.target_count.gt(result.prediction_count).any()
+            or result.head_selected_count.gt(result.prediction_count).any()
+            or result.head_evaluable_count.gt(result.head_selected_count).any()
+            or not result.head_coverage.dropna().between(0, 1).all()
+            or result.loc[result.oos_r2.notna(), "oos_r2_reason"].ne("").any()
+            or result.loc[result.oos_r2.isna(), "oos_r2_reason"].eq("").any()
+        ):
+            raise ValueError("statistics_prediction_metrics_invalid")
     if member == "model_losses.parquet":
         if (
             not result.asset_coverage_id.str.fullmatch("[0-9a-f]{64}").all()
@@ -1584,11 +1618,26 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
                 index=result.index,
                 dtype="float64",
             )
-            if not (
-                result.net_return.eq(expected_return)
-                | (result.net_return.isna() & expected_return.isna())
-            ).all():
-                raise ValueError("statistics_return_status_invalid")
+            for actual, expected, start, end in zip(
+                result.net_return,
+                expected_return,
+                result.nav_before,
+                result.nav_end,
+                strict=True,
+            ):
+                if pd.isna(actual) or pd.isna(expected):
+                    if pd.isna(actual) and pd.isna(expected):
+                        continue
+                    raise ValueError("statistics_return_status_invalid")
+                # Raw-price PnL cancels before rounding; stored money totals round
+                # independently. Allow their monetary rounding, not a fixed atol.
+                rounding = (
+                    2 * (Fraction(ulp(start)) + Fraction(ulp(end))) / Fraction(start)
+                    + Fraction(ulp(actual))
+                    + Fraction(ulp(expected))
+                )
+                if abs(Fraction(actual) - Fraction(expected)) > rounding:
+                    raise ValueError("statistics_return_status_invalid")
             defined_return = positive_start & result.net_return.notna()
             if (
                 not result.return_status.eq(
@@ -1733,13 +1782,18 @@ def _validate_factor_stratified(frame, metadata):
     sufficient = frame.observation_count.ge(2) & frame.observation_count.gt(
         frame.hac_lag
     )
+    incomplete = frame.observation_count.lt(frame.input_date_count)
     if (
-        (defined & frame.standard_error.le(0)).any()
+        (defined & incomplete).any()
+        or (defined & frame.standard_error.le(0)).any()
         or (defined & frame.fdr_adjusted_p_value.lt(frame.p_value)).any()
-        or frame.loc[~defined & sufficient, "reason"]
+        or frame.loc[incomplete, "reason"].ne("incomplete_session_clock").any()
+        or frame.loc[~defined & ~incomplete & sufficient, "reason"]
         .ne("hac_inference_undefined")
         .any()
-        or frame.loc[~sufficient, "reason"].ne("insufficient_dates_for_hac").any()
+        or frame.loc[~incomplete & ~sufficient, "reason"]
+        .ne("insufficient_dates_for_hac")
+        .any()
     ):
         raise ValueError("statistics_stratified_inference_invalid")
     for kind, block in frame.groupby("stratification", sort=False):

@@ -201,3 +201,35 @@ def test_native_estimator_defaults_and_nan_pass_typed_state_checks(algorithm, tm
     if algorithm == "ridge_regression":
         predictor.estimator.alpha = -0.0
     fitting.validate_model_state(predictor, metadata)
+
+
+@pytest.mark.parametrize("seed", [None, True, -1, 2**32])
+def test_model_seed_rejects_unseeded_or_invalid_requests(seed):
+    with pytest.raises((TypeError, ValueError), match="random_seed"):
+        ModelSpec(
+            model_id="ridge",
+            model_algorithm="ridge_regression",
+            input_feature_columns=("x",),
+            target_column="label",
+            random_seed=seed,
+        )
+
+
+@pytest.mark.parametrize("seed", [42, 0, 731])
+def test_model_seed_default_override_and_persisted_backend_identity(tmp_path, seed):
+    from quant_research_platform.contracts.models import _model_spec
+    from quant_research_platform.research.models.persisted import load_model
+    from quant_research_platform.research.models.production import fit
+    from tests.research.test_model_explanations import _case
+
+    case, _, _ = _case(tmp_path, "ridge_regression")
+    config = dict(case.config, output=str(tmp_path / "seed-model"))
+    config["model"] = dict(config["model"])
+    if seed == 42:
+        del config["model"]["random_seed"]
+    else:
+        config["model"]["random_seed"] = seed
+    assert _model_spec(config["model"]).random_seed == seed
+    result, _ = load_model(fit(config))
+    assert result.metadata["random_seed"] == seed
+    assert result.prediction_model.estimator.random_state == seed

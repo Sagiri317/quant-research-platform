@@ -8,7 +8,16 @@ from quant_research_platform.research.models.persisted import load_model
 from quant_research_platform.research.models.production import fit
 
 
-def fit_frame(root, frame, spec, *, cutoff=None, market_id="crypto", parameters=None):
+def fit_frame(
+    root,
+    frame,
+    spec,
+    *,
+    cutoff=None,
+    market_id="crypto",
+    parameters=None,
+    trading_calendar=None,
+):
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     path = root / "input.parquet"
@@ -42,9 +51,24 @@ def fit_frame(root, frame, spec, *, cutoff=None, market_id="crypto", parameters=
             "column_roles": roles,
         },
     }
-    config["model"]["random_seed"] = (
-        spec.random_seed if spec.random_seed is not None else 42
-    )
+    if trading_calendar is not None:
+        calendar_path = root / "calendar.parquet"
+        trading_calendar.to_parquet(calendar_path, index=False)
+        config["trading_calendar"] = {
+            "path": str(calendar_path),
+            "spec": {
+                "data_id": "calendar",
+                "frequency": "1d",
+                "grain": "source_market_calendar_date",
+                "primary_key": ["calendar_date", "source_market_type"],
+                "partition_columns": [],
+                "column_roles": {
+                    "calendar_date": "timestamp",
+                    "source_market_type": "key",
+                    "is_trading_day": "mask",
+                },
+            },
+        }
     if parameters is not None:
         config["candidate_parameters"] = parameters
     output = fit(config)

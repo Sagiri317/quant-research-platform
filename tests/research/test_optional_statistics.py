@@ -39,7 +39,7 @@ def _cash_ledger(root, *, candidate=None):
         candidate_id=candidate.candidate_id,
         initial_capital=1000.0,
         valuation_currency="CNY",
-        valuation_method="adjusted_notional",
+        valuation_method="cash_equity",
     )
     window = {"start": str(dates[0].date()), "end": str(dates[-1].date())}
 
@@ -234,8 +234,8 @@ def test_rank_ic_only_uses_declared_maturity_and_no_market_cap(
         "statistics": {
             "hac_lag": 0,
             "factor_fdr_families": {"signals": ["signal"]},
-            "fdr_primary": "BH_5pct",
-            "fdr_robustness": "BY_5pct",
+            "fdr_primary": "BY_5pct",
+            "fdr_robustness": "BH_5pct",
         },
     }
     if sample_role is None:
@@ -250,7 +250,7 @@ def test_rank_ic_only_uses_declared_maturity_and_no_market_cap(
     assert len(projections) == 1 and set(projections[0]) == set(frame) - {"unused"}
     with artifact.table("factor_diagnostics.parquet") as values:
         assert values.observation_count.eq(4).all()
-        assert values.fdr_method.tolist() == ["BH", "BY"]
+        assert values.fdr_method.tolist() == ["BY", "BH"]
     with pytest.raises(ValueError, match="statistics_table_member_invalid"):
         with artifact.table("fama_macbeth.parquet"):
             pass
@@ -382,6 +382,7 @@ def test_explicit_prediction_family_statistics_need_no_models_or_selection(
     assert artifact.metadata["formal_selection_qualification"] == "not_established"
     assert set(artifact._members) == {
         "model_losses.parquet",
+        "model_prediction_metrics.parquet",
         "model_comparison.parquet",
         "model_reality_checks.parquet",
         "robustness.parquet",
@@ -390,7 +391,7 @@ def test_explicit_prediction_family_statistics_need_no_models_or_selection(
         assert len(losses) == 6
         assert losses.groupby("family_id").observation_count.first().to_dict() == {
             "linear_regression": 2,
-            "ic_weighted_rank_ensemble": 3,
+            "ic_weighted_rank_ensemble": 2,
         }
         assert losses.common_observation_count.eq(2).all()
     excluded_label = {
@@ -427,7 +428,7 @@ def test_nav_continuity_uses_economic_amount_tolerance(mark, allowed):
         candidate_id="marked",
         initial_capital=1000.0,
         valuation_currency="CNY",
-        valuation_method="adjusted_notional",
+        valuation_method="cash_equity",
     )
     batches = []
     for index, price in enumerate((500.0, mark)):

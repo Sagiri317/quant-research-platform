@@ -50,9 +50,12 @@ def _styled(function):
         with mpl.rc_context(
             {
                 "font.family": family,
-                "font.size": 10,
-                "axes.titlesize": 11,
-                "axes.labelsize": 10,
+                "font.size": 11,
+                "axes.titlesize": 12,
+                "axes.labelsize": 11,
+                "figure.facecolor": "white",
+                "axes.facecolor": "white",
+                "savefig.facecolor": "white",
                 "axes.spines.top": False,
                 "axes.spines.right": False,
                 "axes.edgecolor": "#8895A7",
@@ -92,7 +95,7 @@ def _figure(count, *, title, source_reference, sample_role, ratios=None):
         layout="constrained",
         gridspec_kw={"height_ratios": ratios} if ratios else None,
     )
-    figure.suptitle(title, fontsize=14)
+    figure.suptitle(title, fontsize=16, fontweight="bold")
     role_label = dict(train="训练集", validation="验证集", test="测试集").get(
         sample_role, sample_role or "样本"
     )
@@ -230,9 +233,9 @@ def plot_portfolio_curve(curve, *, sample_role, timezone):
         nav_axis, dd_axis = axes[2 * index : 2 * index + 2]
         points = part["points"]
         values = [_number(row["nav"]) for row in points]
-        if curve.get(
-            "valuation_method", "adjusted_notional"
-        ) != "linear_perpetual" and any(value < 0 for value in values):
+        if curve.get("valuation_method", "cash_equity") != "linear_perpetual" and any(
+            value < 0 for value in values
+        ):
             raise ValueError("plot_nav_negative")
         times = _times(
             [

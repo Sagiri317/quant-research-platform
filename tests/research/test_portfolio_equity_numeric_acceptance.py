@@ -25,6 +25,7 @@ from quant_research_platform.contracts.portfolios import (
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share import portfolio_sessions
 from quant_research_platform.research.portfolios import production
+from quant_research_platform.research.portfolios.accounting import EquityEntitlements
 from quant_research_platform.research.portfolios.diagnostics import (
     _portfolio_statistics_tables,
 )
@@ -55,7 +56,7 @@ def test_finite_money_survives_exact_units_and_native_ledger_roundtrip(
 ):
     frames, fees, window = _inputs()
     fees["rate"] = 0.0
-    frames["panel"].loc[:, ["adj_open", "adj_close"]] = price
+    frames["panel"].loc[:, ["open", "close"]] = price
     chunks, _ = _build_producer(
         tmp_path / "inputs",
         monkeypatch,
@@ -93,7 +94,7 @@ def test_finite_money_survives_exact_units_and_native_ledger_roundtrip(
             "candidate_id": "independent_numeric_portfolio",
             "initial_capital": float(capital),
             "valuation_currency": "CNY",
-            "valuation_method": "adjusted_notional",
+            "valuation_method": "cash_equity",
         }
     )
     metadata = {
@@ -120,7 +121,7 @@ def test_finite_money_survives_exact_units_and_native_ledger_roundtrip(
     assert list(artifact.iter_chunks()) == batches
     economics = _LedgerEconomics(
         PortfolioCapital(
-            "independent_numeric_portfolio", float(capital), "CNY", "adjusted_notional"
+            "independent_numeric_portfolio", float(capital), "CNY", "cash_equity"
         )
     )
     for batch in artifact.iter_chunks():
@@ -140,7 +141,7 @@ def test_finite_money_survives_exact_units_and_native_ledger_roundtrip(
         assert summary["fill_quantity"] == represented_units
 
 
-def test_active_share_cash_event_cannot_duplicate_adjusted_distribution(tmp_path):
+def test_active_share_recovery_requires_terminated_holder_entitlement(tmp_path):
     def events(base):
         return [dict(base, kind="cash_recovery", amount_per_share=3.0)]
 
@@ -165,7 +166,8 @@ def test_active_share_cash_event_cannot_duplicate_adjusted_distribution(tmp_path
     events = pd.concat(view.rights_events for view in sessions)
     assert not events.entitlement_proved.all()
     with pytest.raises(PortfolioTargetBlocked, match="portfolio_held_rights_unproved"):
-        production._apply_rights_events(
+        EquityEntitlements().process(
+            pd.DataFrame(),
             events,
             pd.Series({"000001": Fraction(1)}),
             pd.Series({"000001": pd.Timestamp("2022-12-01")}),
@@ -179,7 +181,7 @@ def test_fully_sold_rights_do_not_require_next_lifecycle_linkage(
 ):
     frames, fees, window = _inputs()
     fees["rate"] = 0.0
-    frames["panel"].loc[:, ["adj_open", "adj_close"]] = 10.0
+    frames["panel"].loc[:, ["open", "close"]] = 10.0
     frames["dataset"].loc[
         frames["dataset"].asset_id.eq("b")
         & frames["dataset"].timestamp.ge("2023-01-04"),
@@ -223,14 +225,11 @@ def test_admitted_recovery_reaches_native_statistics_without_losing_money(
 ):
     def huge_price(panel):
         panel = panel.copy()
-        panel.loc[panel.asset_id.eq("000001"), ["adj_open", "adj_close"]] = 1e308
-        anchor = panel.asset_id.eq("000001") & panel.timestamp.eq("2022-12-30")
-        panel.loc[anchor, "adj_close"] = 10.0
-        panel.loc[anchor, "close"] = 1.0
+        panel.loc[panel.asset_id.eq("000001"), ["open", "close"]] = 1e308
         return panel
 
     def huge_event(base):
-        return [dict(base, amount_per_share=1e308, shares_per_old_unit=10)]
+        return [dict(base, amount_per_share=1e308)]
 
     batches = recovered_batches(
         tmp_path / "source",
@@ -243,12 +242,12 @@ def test_admitted_recovery_reaches_native_statistics_without_losing_money(
             row
             for batch in batches
             for row in batch.valuations
-            if row.asset_id == "000001" and row.mark_price > Fraction(1e308)
+            if row.asset_id == "000001" and row.mark_price == Fraction(1e308)
         ]
         assert quoted
         for row in quoted:
-            assert row.mark_price == Fraction(1e308) * 10
-            assert row.value == float(Fraction(row.quantity) * Fraction(1e308) * 10)
+            assert row.mark_price == Fraction(1e308)
+            assert row.value == float(Fraction(row.quantity) * Fraction(1e308))
             assert np.isfinite(row.value)
     final_nav = float(
         sum(
@@ -280,7 +279,7 @@ def test_admitted_recovery_reaches_native_statistics_without_losing_money(
                 "candidate_id": candidate.candidate_id,
                 "initial_capital": 100.0,
                 "valuation_currency": "CNY",
-                "valuation_method": "adjusted_notional",
+                "valuation_method": "cash_equity",
             }
         )
         metadata = {
@@ -392,7 +391,7 @@ def test_native_writer_rejects_negative_zero_valued_long_only_rights(tmp_path):
             "candidate_id": "invalid_negative_rights",
             "initial_capital": 100.0,
             "valuation_currency": "CNY",
-            "valuation_method": "adjusted_notional",
+            "valuation_method": "cash_equity",
         }
     )
     metadata = {

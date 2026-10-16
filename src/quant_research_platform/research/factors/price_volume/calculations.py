@@ -1,4 +1,4 @@
-"""Price-volume calculations using complete session windows and exact endpoints."""
+"""Price-volume statistics on nominal sessions, complete paths and exact endpoints."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from decimal import Decimal, localcontext
 from fractions import Fraction
 from itertools import accumulate
-from math import fsum, hypot, sqrt
+from math import ceil, fsum
 from statistics import mean as arithmetic_mean
 
 import numpy as np
@@ -25,7 +25,11 @@ from quant_research_platform.contracts.validation import (
     strict_timestamp_series,
 )
 
-from .definitions import _PRICE_VOLUME_INPUT_WINDOWS, PRICE_VOLUME_LIBRARY
+from .definitions import (
+    _PRICE_VOLUME_INPUT_WINDOWS,
+    PRICE_VOLUME_LIBRARY,
+    PRICE_VOLUME_PARTIAL_STATISTICS,
+)
 
 
 def calculate_price_volume_factors(
@@ -34,8 +38,19 @@ def calculate_price_volume_factors(
     factor_columns: Iterable[str] | None = None,
     output_window: TimeWindow | None = None,
     history_keys: tuple[str, ...] = ("asset_id",),
+    min_fresh_fraction: float = 0.75,
 ) -> pd.DataFrame:
-    """Calculate only requested columns and output rows, preserving warmup inputs."""
+    """Consume a complete own-market session grid, preserving lifecycle warmup.
+
+    Native PANEL callers supply filling_flag. For generic numeric-only callers,
+    supplied finite numeric observations are treated as fresh observations.
+    """
+    if (
+        isinstance(min_fresh_fraction, (bool, np.bool_))
+        or not np.isfinite(min_fresh_fraction)
+        or not 0 < min_fresh_fraction <= 1
+    ):
+        raise ValueError("price_volume_min_fresh_fraction_invalid")
     requested = tuple(
         dict.fromkeys(
             PRICE_VOLUME_LIBRARY if factor_columns is None else factor_columns
@@ -55,7 +70,8 @@ def calculate_price_volume_factors(
     missing = [name for name in (*keys, *names) if name not in panel]
     if missing:
         raise ValueError("price_volume_inputs_missing: " + ", ".join(missing))
-    ordered = panel.loc[:, (*keys, *names)].copy()
+    status = ("filling_flag",) if "filling_flag" in panel else ()
+    ordered = panel.loc[:, (*keys, *names, *status)].copy()
     ordered["timestamp"] = strict_timestamp_series(
         ordered["timestamp"], error="price_volume_timestamp_invalid"
     )
@@ -77,6 +93,17 @@ def calculate_price_volume_factors(
             ).to_numpy(dtype="float64", copy=False)
             for name in names
         }
+        statistical_values = values
+        if status:
+            known = group["filling_flag"].isin((0, 1)).to_numpy(dtype=bool)
+            statistical_values = {
+                name: np.where(known, value, np.nan) for name, value in values.items()
+            }
+        fresh = (
+            group["filling_flag"].eq(0).fillna(False).to_numpy(dtype=bool)
+            if status
+            else np.ones(len(group), dtype=bool)
+        )
         start, stop = 0, len(group)
         if bounds is not None:
             lower, upper, closed = bounds
@@ -86,9 +113,20 @@ def calculate_price_volume_factors(
                     upper, side="right" if closed else "left"
                 )
             )
-        sums = {}
+        sums, statistical_sums = {}, {}
         for factor in requested:
-            output[factor].append(_calculate_values(values, sums, factor, start, stop))
+            partial = factor in PRICE_VOLUME_PARTIAL_STATISTICS
+            output[factor].append(
+                _calculate_values(
+                    statistical_values if partial else values,
+                    statistical_sums if partial else sums,
+                    factor,
+                    start,
+                    stop,
+                    fresh=fresh,
+                    min_fresh_fraction=min_fresh_fraction,
+                )
+            )
     ordered = ordered.loc[:, ("asset_id", "timestamp")]
     if bounds is not None:
         lower, upper, closed = bounds
@@ -109,9 +147,19 @@ def calculate_price_volume_factors(
 
 
 def _calculate_values(
-    values: dict[str, np.ndarray], sums: dict, factor: str, start: int, stop: int
+    values: dict[str, np.ndarray],
+    sums: dict,
+    factor: str,
+    start: int,
+    stop: int,
+    *,
+    fresh: np.ndarray | None = None,
+    min_fresh_fraction: float = 0.75,
 ) -> np.ndarray:
     names, windows = _PRICE_VOLUME_INPUT_WINDOWS[factor]
+    if fresh is None:
+        fresh = np.ones(len(values[names[0]]), dtype=bool)
+    minimum = ceil(min_fresh_fraction * windows[0]) if windows else 0
     size = windows[0] if windows else 0
     source_name = (
         "turnover"
@@ -151,18 +199,52 @@ def _calculate_values(
     if factor.endswith("_corr_20d"):
         other = values[factor.removeprefix("return_").removesuffix("_corr_20d")]
         begin = first - size + 1
-        finite = np.isfinite(source[begin:stop]) & np.isfinite(other[begin:stop])
-        moments = _CorrelationMoments()
-        for offset, position in enumerate(range(begin, stop)):
-            if offset >= size and finite[offset - size]:
-                moments.remove(
-                    float(source[position - size]), float(other[position - size])
+        left = sliding_window_view(source[begin:stop], size)
+        right = sliding_window_view(other[begin:stop], size)
+        paired = np.isfinite(left) & np.isfinite(right)
+        counts = paired.sum(axis=1)
+        fresh_pairs = paired & sliding_window_view(fresh[begin:stop], size)
+        valid = (fresh_pairs.sum(axis=1) >= minimum) & (counts >= 2)
+        left, right, paired = left[valid], right[valid], paired[valid]
+        counts = counts[valid]
+        exceptional = np.zeros(len(left), dtype=bool)
+        centered = []
+        for current in (left, right):
+            anchor = current[np.arange(len(current)), np.argmax(paired, axis=1)]
+            with np.errstate(over="ignore", invalid="ignore"):
+                differences = np.where(paired, current - anchor[:, None], 0.0)
+                scale = np.max(np.abs(differences), axis=1, keepdims=True)
+                normalized = np.divide(
+                    differences, scale, out=np.zeros_like(differences), where=scale > 0
                 )
-            if finite[offset]:
-                moments.update(float(source[position]), float(other[position]))
-            if position >= first and moments.count == size:
-                value, _reason = moments.result()
-                output[position - start] = np.nan if value is None else value
+            exceptional |= ~np.isfinite(normalized).all(axis=1)
+            exceptional |= ((differences != 0) & (normalized == 0)).any(axis=1)
+            mean = normalized.sum(axis=1) / counts
+            centered.append(np.where(paired, normalized - mean[:, None], 0.0))
+        x, y = centered
+        products = x * y
+        covariance = products.sum(axis=1)
+        denominator = np.sqrt((x * x).sum(axis=1)) * np.sqrt((y * y).sum(axis=1))
+        result = np.divide(
+            covariance,
+            denominator,
+            out=np.full(len(left), np.nan),
+            where=denominator > 0,
+        )
+        # Cancellation-sensitive and extreme-range windows retain the exact owner.
+        exceptional |= (denominator > 0) & (
+            np.abs(covariance)
+            <= size * np.finfo(float).eps * np.abs(products).sum(axis=1)
+        )
+        for index in np.flatnonzero(exceptional):
+            moments = _CorrelationMoments()
+            for x_value, y_value in zip(
+                left[index][paired[index]], right[index][paired[index]], strict=True
+            ):
+                moments.update(float(x_value), float(y_value))
+            value, _reason = moments.result()
+            result[index] = np.nan if value is None else value
+        output[first - start :][valid] = np.clip(result, -1.0, 1.0)
         return output
 
     def window(column: np.ndarray) -> np.ndarray:
@@ -210,8 +292,41 @@ def _calculate_values(
         valid &= complete_window("close", "nonzero")
     if factor.startswith("amihud_"):
         valid &= complete_window("amount", "positive")
+    partial = factor in PRICE_VOLUME_PARTIAL_STATISTICS
+    numeric = np.isfinite(source)
+    for name in extra_names:
+        numeric &= np.isfinite(values[name])
+    if factor == "amplitude_20d":
+        numeric &= values["close"] != 0
+    if factor.startswith("amihud_"):
+        numeric &= values["amount"] > 0
+
+    def window_count(mask: np.ndarray, width: int = size) -> np.ndarray:
+        prefix = np.empty(len(mask) + 1, dtype=np.int64)
+        prefix[0] = 0
+        np.cumsum(mask, dtype=np.int64, out=prefix[1:])
+        return (
+            prefix[first + 1 - shift : stop + 1 - shift]
+            - prefix[first + 1 - shift - width : stop + 1 - shift - width]
+        )
+
+    counts = window_count(numeric)
+    if partial:
+        valid = window_count(numeric & fresh) >= minimum
+        math_minimum = (
+            4
+            if factor.startswith("kurtosis_")
+            else 3
+            if factor.startswith("skewness_")
+            else 2
+            if "volatility" in factor
+            and not factor.startswith(("downside", "upside"))
+            or "_cv_" in factor
+            else 1
+        )
+        valid &= counts >= math_minimum
     if shift:
-        valid &= np.isfinite(source[first:stop])
+        valid &= np.isfinite(source[first:stop]) & fresh[first:stop]
     if shift or factor in {
         "log_avg_amount_20d",
         "avg_amount_20d",
@@ -225,11 +340,12 @@ def _calculate_values(
         totals, unit = sums[source_name]
         result = np.full(np.count_nonzero(valid), np.nan)
         for index, position in enumerate(np.flatnonzero(valid) + first):
+            count = int(counts[position - first])
             total = totals[position + 1 - shift] - totals[position + 1 - shift - size]
             if shift:
                 if total:
                     numerator, denominator = float(source[position]).as_integer_ratio()
-                    numerator = numerator * size * unit - denominator * total
+                    numerator = numerator * count * unit - denominator * total
                     denominator *= total
                     try:
                         result[index] = numerator / denominator
@@ -239,24 +355,24 @@ def _calculate_values(
                         )
             elif factor == "log_avg_amount_20d":
                 if total > 0:
-                    mean = total / (size * unit)
-                    if mean > 5e-324 or total * (1 << 1074) >= size * unit:
+                    mean = total / (count * unit)
+                    if mean > 5e-324 or total * (1 << 1074) >= count * unit:
                         result[index] = np.log(mean)
                     else:
                         with localcontext() as context:
                             context.prec = 80
                             result[index] = float(
-                                (Decimal(total) / Decimal(size * unit)).ln()
+                                (Decimal(total) / Decimal(count * unit)).ln()
                             )
             else:
-                result[index] = total / (size * unit)
+                result[index] = total / (count * unit)
         output[first - start :][valid] = result
         return output
     if factor in {"amount_cv_126d", "turnover_cv_126d"}:
         current = window(source)[valid]
-        _, exponent = np.frexp(np.max(np.abs(current), axis=1, keepdims=True))
+        _, exponent = np.frexp(np.nanmax(np.abs(current), axis=1, keepdims=True))
         scaled = np.ldexp(current, -exponent)
-        center = scaled.mean(axis=1)
+        center = np.nanmean(scaled, axis=1)
         deviation = _sample_standard_deviation(scaled)
         result = np.divide(
             deviation, center, out=np.full(len(current), np.nan), where=center > 0
@@ -267,13 +383,14 @@ def _calculate_values(
             (current != 0) & (scaled == 0)
         ).any(axis=1)
         for index in np.flatnonzero(exceptional):
-            terms = tuple(map(Fraction, current[index]))
-            mean = sum(terms, Fraction()) / size
+            terms = tuple(map(Fraction, current[index][np.isfinite(current[index])]))
+            count = len(terms)
+            mean = sum(terms, Fraction()) / count
             if mean <= 0:
                 result[index] = np.nan
                 continue
             squared = sum((value - mean) ** 2 for value in terms) / (
-                (size - 1) * mean * mean
+                (count - 1) * mean * mean
             )
             with localcontext() as context:
                 context.prec = 80
@@ -287,22 +404,32 @@ def _calculate_values(
             sums[source_name] = _binary_prefix(source)
         totals, _unit = sums[source_name]
         short = windows[1]
+        short_numeric = window_count(numeric, short)
+        short_fresh = window_count(numeric & fresh, short)
+        valid &= short_fresh >= ceil(min_fresh_fraction * short)
         result = np.full(np.count_nonzero(valid), np.nan)
         for index, position in enumerate(np.flatnonzero(valid) + first + 1):
             denominator = totals[position] - totals[position - size]
             if denominator > 0:
-                numerator = size * (totals[position] - totals[position - short])
+                numerator = int(counts[position - first - 1]) * (
+                    totals[position] - totals[position - short]
+                )
                 try:
-                    result[index] = numerator / (short * denominator)
+                    result[index] = numerator / (
+                        int(short_numeric[position - first - 1]) * denominator
+                    )
                 except OverflowError:
                     # Preserve the nonfinite result of an unrepresentable signed ratio.
                     result[index] = np.inf if numerator > 0 else -np.inf
         output[first - start :][valid] = result
         return output
-    matrix = window(source)
+    matrix = window(np.where(numeric, source, np.nan)) if partial else window(source)
     if factor in {"skewness_20d", "skewness_60d", "kurtosis_60d"}:
-        valid &= np.min(matrix, axis=1) != np.max(matrix, axis=1)
+        valid &= np.min(
+            np.where(np.isfinite(matrix), matrix, np.inf), axis=1
+        ) != np.max(np.where(np.isfinite(matrix), matrix, -np.inf), axis=1)
     current = matrix[valid]
+    sample_counts = counts[valid]
     extra = {name: window(values[name])[valid] for name in extra_names}
     if factor.startswith("volatility_") or factor in {
         "amount_volatility_20d",
@@ -315,44 +442,52 @@ def _calculate_values(
             if factor.startswith("downside")
             else np.maximum(current, 0.0)
         )
-        result = np.fromiter(
-            (
-                scale * (hypot(*(row / scale)) / sqrt(size))
-                if (scale := float(np.max(np.abs(row))))
-                else 0.0
-                for row in clipped
-            ),
-            dtype=float,
+        scale = np.nanmax(np.abs(clipped), axis=1, keepdims=True)
+        normalized = np.divide(
+            clipped, scale, out=np.zeros_like(clipped), where=scale > 0
+        )
+        result = scale[:, 0] * np.sqrt(
+            np.nansum(normalized * normalized, axis=1) / sample_counts
         )
     elif factor == "max_return_20d":
         result = np.max(current, axis=1)
     elif factor == "top5_return_mean_20d":
-        result = np.fromiter(
-            (arithmetic_mean(row) for row in np.partition(current, -5, axis=1)[:, -5:]),
-            dtype=float,
+        top = np.partition(current, -5, axis=1)[:, -5:]
+        scale = np.max(np.abs(top), axis=1, keepdims=True)
+        normalized = np.divide(top, scale, out=np.zeros_like(top), where=scale > 0)
+        total = normalized.sum(axis=1)
+        result = (total / 5) * scale[:, 0]
+        exceptional = ((top != 0) & (normalized == 0)).any(axis=1) | (
+            np.abs(total) <= 5 * np.finfo(float).eps * np.abs(normalized).sum(axis=1)
         )
+        for index in np.flatnonzero(exceptional):
+            result[index] = arithmetic_mean(top[index])
     elif factor == "min_return_20d":
         result = np.min(current, axis=1)
     elif factor in {"skewness_20d", "skewness_60d", "kurtosis_60d"}:
         # Binary scaling preserves adjacent values and bounds anchor subtraction.
         # Center the differences so the original offset cannot round away the mean.
-        _, exponent = np.frexp(np.max(np.abs(current), axis=1, keepdims=True))
+        _, exponent = np.frexp(np.nanmax(np.abs(current), axis=1, keepdims=True))
         normalized = np.ldexp(current, -exponent)
-        differences = normalized - normalized[:, :1]
-        centered = differences - np.mean(differences, axis=1, keepdims=True)
-        centered /= np.max(np.abs(centered), axis=1, keepdims=True)
-        moment_2 = np.mean(centered * centered, axis=1)
+        anchor = normalized[
+            np.arange(len(normalized)), np.argmax(np.isfinite(normalized), axis=1)
+        ]
+        differences = normalized - anchor[:, None]
+        centered = differences - np.nanmean(differences, axis=1, keepdims=True)
+        centered /= np.nanmax(np.abs(centered), axis=1, keepdims=True)
+        moment_2 = np.nanmean(centered * centered, axis=1)
+        size = sample_counts
         if factor == "kurtosis_60d":
-            moment_4 = np.mean(centered**4, axis=1)
+            moment_4 = np.nanmean(centered**4, axis=1)
             result = (
                 (size - 1)
                 / ((size - 2) * (size - 3))
                 * ((size + 1) * (moment_4 / (moment_2 * moment_2) - 3.0) + 6.0)
             )
         else:
-            moment_3 = np.mean(centered**3, axis=1)
+            moment_3 = np.nanmean(centered**3, axis=1)
             result = (
-                sqrt(size * (size - 1))
+                np.sqrt(size * (size - 1))
                 / (size - 2)
                 * (moment_3 / (moment_2 * np.sqrt(moment_2)))
             )
@@ -365,7 +500,12 @@ def _calculate_values(
         denominator = extra["close"] if factor == "amplitude_20d" else extra["amount"]
         return_mantissa, return_exponent = np.frexp(numerator)
         amount_mantissa, amount_exponent = np.frexp(denominator)
-        quotients = return_mantissa / amount_mantissa
+        quotients = np.divide(
+            return_mantissa,
+            amount_mantissa,
+            out=np.full_like(return_mantissa, np.nan),
+            where=amount_mantissa != 0,
+        )
         exponents = return_exponent - amount_exponent
         scale = np.max(
             np.where(
@@ -375,7 +515,7 @@ def _calculate_values(
             keepdims=True,
         )
         normalized = np.ldexp(quotients, exponents - scale)
-        result = np.ldexp(np.mean(normalized, axis=1), scale[:, 0])
+        result = np.ldexp(np.nanmean(normalized, axis=1), scale[:, 0])
     elif factor == "trend_efficiency_60d":
         _, exponent = np.frexp(np.max(np.abs(current), axis=1, keepdims=True))
         scaled = np.ldexp(current, -exponent)
@@ -500,8 +640,8 @@ def _calculate_values(
 
 def _binary_prefix(values: np.ndarray) -> tuple[list[int], int]:
     # Exact binary sums make subtraction safe across windows and chunk boundaries.
-    # Missing values are zero only inside this accumulator; the caller's complete
-    # window mask excludes every result containing them.
+    # Missing values are zero only inside this accumulator; callers use numeric
+    # sample counts and separate fresh-observation validity gates.
     ratios = [
         float(value).as_integer_ratio() if np.isfinite(value) else (0, 1)
         for value in values
@@ -521,6 +661,15 @@ def _binary_prefix(values: np.ndarray) -> tuple[list[int], int]:
 
 
 def _sample_standard_deviation(windows: np.ndarray) -> np.ndarray:
+    finite = np.isfinite(windows)
+    if not finite.all():
+        counts = finite.sum(axis=1)
+        result = np.full(len(windows), np.nan)
+        for count in np.unique(counts[counts >= 2]):
+            selected = counts == count
+            compact = windows[selected][finite[selected]].reshape(-1, count)
+            result[selected] = _sample_standard_deviation(compact)
+        return result
     # Subtract first to preserve adjacent prices; scale before squaring to keep
     # representable deviations finite even at extreme economic units.
     with np.errstate(over="ignore"):

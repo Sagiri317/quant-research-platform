@@ -56,67 +56,83 @@ def _validated_bool_mask(frame: pd.DataFrame, column: str) -> pd.Series:
     raise ValueError(f"invalid_filter_column_dtype: {column}")
 
 
-A_SHARE_ELIGIBILITY_FACTS = (
-    "is_a_share_scope",
-    "is_trading",
-    "is_st",
-    "is_pt",
-    "has_252_trading_sessions",
-    "close",
-    "adj_close",
-    "volume",
-    "amount",
-    "turnover",
-)
 _A_SHARE_FUSION_ELIGIBILITY_FACTS = (
     "is_nonfinancial_industry",
     "has_legal_fundamental_pit",
 )
 
 
-def a_share_eligibility(frame: pd.DataFrame, recipe: str) -> pd.Series:
+def a_share_eligibility_columns(
+    *,
+    minimum_listing_sessions: int = 252,
+    exclude_st: bool = True,
+    exclude_pt: bool = True,
+) -> tuple[str, ...]:
+    """Select only the facts used by the requested research scope."""
+    if (
+        type(minimum_listing_sessions) is not int
+        or minimum_listing_sessions < 0
+        or type(exclude_st) is not bool
+        or type(exclude_pt) is not bool
+    ):
+        raise ValueError("invalid_a_share_eligibility_parameters")
+    columns = ["is_a_share_scope"]
+    if exclude_st:
+        columns.append("is_st")
+    if exclude_pt:
+        columns.append("is_pt")
+    if minimum_listing_sessions:
+        columns.append(
+            "has_252_trading_sessions"
+            if minimum_listing_sessions == 252
+            else "listing_age_trading_days"
+        )
+    return tuple(columns)
+
+
+A_SHARE_ELIGIBILITY_FACTS = a_share_eligibility_columns()
+
+
+def a_share_eligibility(
+    frame: pd.DataFrame,
+    recipe: str,
+    *,
+    minimum_listing_sessions: int = 252,
+    exclude_st: bool = True,
+    exclude_pt: bool = True,
+) -> pd.Series:
+    """Derive research membership without imposing factor or execution validity.
+
+    Unknown relevant facts are retained in the input and never affirmed as eligible.
+    """
     if recipe not in {"a_share_all", "a_share_nonfinancial", "a_share_fundamental"}:
         raise ValueError("invalid_a_share_eligibility_recipe")
-    bool_facts = {
-        column: strict_bool_series(
-            frame[column],
-            error=f"invalid_a_share_eligibility_fact: {column}",
-            allow_null=True,
-        )
-        for column in (
-            "is_a_share_scope",
-            "is_trading",
-            "is_st",
-            "is_pt",
-            "has_252_trading_sessions",
-        )
-    }
-    numeric_facts = {
-        column: strict_finite_numeric_series(
-            frame[column],
-            error=f"invalid_a_share_eligibility_fact: {column}",
-            allow_null=True,
-        )
-        for column in (
-            "close",
-            "adj_close",
-            "volume",
-            "amount",
-            "turnover",
-        )
-    }
-    eligible = (
-        bool_facts["is_a_share_scope"]
-        & bool_facts["is_trading"]
-        & ~bool_facts["is_st"]
-        & ~bool_facts["is_pt"]
-        & bool_facts["has_252_trading_sessions"]
-        & numeric_facts["close"].gt(0.0)
-        & numeric_facts["adj_close"].gt(0.0)
-        & numeric_facts["volume"].gt(0.0)
-        & numeric_facts["amount"].gt(0.0)
-        & numeric_facts["turnover"].gt(0.0)
-    ).fillna(False)
+    columns = a_share_eligibility_columns(
+        minimum_listing_sessions=minimum_listing_sessions,
+        exclude_st=exclude_st,
+        exclude_pt=exclude_pt,
+    )
+    missing = sorted(set(columns).difference(frame.columns))
+    if missing:
+        raise ValueError("a_share_eligibility_facts_missing: " + ", ".join(missing))
+    eligible = pd.Series(True, index=frame.index, dtype="boolean")
+    for column in columns:
+        if column == "listing_age_trading_days":
+            values = strict_finite_numeric_series(
+                frame[column],
+                error=f"invalid_a_share_eligibility_fact: {column}",
+                allow_null=True,
+            )
+            if ((values.dropna() < 0) | (values.dropna() % 1 != 0)).any():
+                raise ValueError(f"invalid_a_share_eligibility_fact: {column}")
+            eligible &= values.ge(minimum_listing_sessions)
+        else:
+            fact = strict_bool_series(
+                frame[column],
+                error=f"invalid_a_share_eligibility_fact: {column}",
+                allow_null=True,
+            )
+            eligible &= ~fact if column in {"is_st", "is_pt"} else fact
     if recipe in {"a_share_nonfinancial", "a_share_fundamental"}:
         required = (
             ("is_nonfinancial_industry",)
@@ -126,12 +142,11 @@ def a_share_eligibility(frame: pd.DataFrame, recipe: str) -> pd.Series:
         for column in required:
             if column not in frame:
                 raise ValueError(f"a_share_eligibility_facts_missing: {column}")
-            bool_facts[column] = strict_bool_series(
+            eligible &= strict_bool_series(
                 frame[column],
                 error=f"invalid_a_share_eligibility_fact: {column}",
                 allow_null=True,
-            ).fillna(False)
-            eligible &= bool_facts[column]
+            )
         for column in (
             "industry_standard_id",
             "industry_level1_code",
@@ -141,4 +156,4 @@ def a_share_eligibility(frame: pd.DataFrame, recipe: str) -> pd.Series:
                 raise ValueError(f"a_share_eligibility_facts_missing: {column}")
             values = frame[column].astype("string").str.strip()
             eligible &= values.notna() & values.ne("")
-    return eligible.astype(bool)
+    return eligible.fillna(False).astype(bool)

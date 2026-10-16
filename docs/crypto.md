@@ -522,6 +522,17 @@ XOOMAR 的 `data.history` 最多 5000 条、跨场所并按时间倒序；原响
 `known_until_ns=time_ns, cashflows=[]` 的零未来知识观测，不沿用旧预测或补造未来时点。有效更新只恢复之后的决策。
 两者投影到既有资金费列与 `FundingObservations`，保持预测和实际记账责任分离。
 
+现有 `backtest_taker(config)` / `backtest_maker(config)` 可选 `funding_roots`，
+值为按覆盖起点排列、非空且不重复的原生资金费目录路径字符串列表；每个目录直接含
+`response.csv` 与 `response.metadata.json`。独立 `import_funding_history(output_root=...)`
+产物使用其 `observations/` 子目录，无需复制或搬到行情归档下。只选择本资产需要的文件与日期；
+各根的证券须匹配 `symbol`，覆盖不可重叠，间隔不会自动补齐。
+省略字段时沿用行情来源的资金费路径选择；显式选择缺失、畸形或错误证券时直接失败，
+不回退行情目录。所选路径随账本 metadata 保存；该配置不改变 PANEL、模型或独立评估输入。
+回测窗口仍由 `prediction_window` 指定，结算请求覆盖保持自身真实 UTC 纳秒范围；
+预测可保留窗口前最后已知更新，结算不会变成预测。费率为小数，mark 为 USDT/资产单位，
+实际长仓资金现金流为 `-quantity × rate × mark_price`；时钟和未知规则见下文。
+
 `sources/binance/funding.py` 读取录制目录同级的
 `funding/<symbol>/response.csv` 与 `response.metadata.json`，复用原生来源接纳合同。
 列为 `kind,time_ns,known_until_ns,rate,mark_price,cashflows`。

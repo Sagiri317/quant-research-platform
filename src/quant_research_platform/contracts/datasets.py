@@ -29,10 +29,35 @@ class ResearchDatasetSpec(DataSpec):
     filter_columns: tuple[str, ...] = ()
     context_columns: tuple[str, ...] = ()
     eligibility_recipe: str | None = None
+    minimum_listing_sessions: int = 252
+    exclude_st: bool = True
+    exclude_pt: bool = True
+    target_transform: str = "date_zscore"
+    target_clip: str = "none"
     key_coverage: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        if type(self.target_transform) is not str or self.target_transform not in {
+            "date_zscore",
+            "raw",
+            "percentile",
+            "industry_size_residual",
+        }:
+            raise ValueError("invalid_target_transform")
+        if type(self.target_clip) is not str or self.target_clip not in {
+            "none",
+            "mad",
+            "quantile_1_99",
+        }:
+            raise ValueError("invalid_target_clip")
+        if (
+            type(self.minimum_listing_sessions) is not int
+            or self.minimum_listing_sessions < 0
+            or type(self.exclude_st) is not bool
+            or type(self.exclude_pt) is not bool
+        ):
+            raise ValueError("invalid_a_share_eligibility_parameters")
         object.__setattr__(self, "market_id", validate_market_id(self.market_id))
         if self.eligibility_recipe is not None and (
             self.market_id != "a_share"
@@ -116,8 +141,6 @@ class ResearchDatasetSpec(DataSpec):
             )
         _validate_feature_transforms(
             self.feature_transforms,
-            factor_columns=self.factor_columns,
-            context_columns=self.context_columns,
             feature_columns=self.feature_columns,
         )
         reserved = set(self.label_columns).union(
@@ -207,24 +230,10 @@ def _validate_semantic_column_roles(
 def _validate_feature_transforms(
     feature_transforms: tuple[FeatureTransformSpec, ...],
     *,
-    factor_columns: tuple[str, ...],
-    context_columns: tuple[str, ...],
     feature_columns: tuple[str, ...],
 ) -> None:
     if len(feature_transforms) > 1:
         raise ValueError("feature_recipe_must_be_exclusive")
-    source_columns = {
-        column
-        for transform in feature_transforms
-        for column in transform.source_columns
-    }
-    allowed_sources = set(factor_columns).union(context_columns)
-    missing_sources = sorted(source_columns.difference(allowed_sources))
-    if missing_sources:
-        raise ValueError(
-            "feature_transform_source_not_in_factor_or_context_columns: "
-            + ", ".join(missing_sources)
-        )
     transformed_features = tuple(
         column
         for transform in feature_transforms

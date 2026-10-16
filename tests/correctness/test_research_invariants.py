@@ -93,19 +93,99 @@ def test_session_label_uses_next_open_and_persists_availability() -> None:
             "timestamp": sessions,
             "adj_open": [10.0, 11.0, 12.0, 13.0, 14.0],
             "can_enter": [False, True, True, True, True],
+            "filling_flag": 0,
+            "is_trading": True,
         }
     )
     result = add_forward_return_labels(
         panel,
         horizons=(1,),
         sessions=sessions,
-        can_enter_column="can_enter",
     )
-    assert pd.isna(result.loc[0, "forward_return_1d"])
+    assert result.loc[0, "forward_return_1d"] == pytest.approx(12.0 / 11.0 - 1.0)
     assert result.loc[1, "forward_return_1d"] == pytest.approx(13.0 / 12.0 - 1.0)
     assert result.loc[1, "forward_return_1d_available_at"] == sessions[
         3
-    ] + pd.Timedelta(hours=1, minutes=30)
+    ] + pd.Timedelta(hours=7)
+
+
+@pytest.mark.parametrize("permission", [False, True, None])
+def test_forward_labels_ignore_execution_and_signal_row_quote_facts(permission):
+    sessions = pd.bdate_range("2024-01-01", periods=4)
+    panel = pd.DataFrame(
+        {
+            "asset_id": "asset",
+            "timestamp": sessions,
+            "adj_open": [None, 10.0, 12.0, 15.0],
+            "filling_flag": [1, 0, 0, 0],
+            "is_trading": [False, True, True, True],
+            "can_enter": permission,
+            "can_exit": permission,
+            "eligible": permission,
+        }
+    )
+    result = add_forward_return_labels(panel, horizons=(1,), sessions=sessions)
+    assert result.loc[0, "forward_return_1d"] == pytest.approx(0.2)
+    assert result.loc[0, "forward_return_1d_available_at"] == sessions[
+        2
+    ] + pd.Timedelta(hours=7)
+    without_permissions = add_forward_return_labels(
+        panel.drop(columns=["can_enter", "can_exit", "eligible"]),
+        horizons=(1,),
+        sessions=sessions,
+    )
+    pd.testing.assert_frame_equal(
+        result.filter(like="forward_return_"),
+        without_permissions.filter(like="forward_return_"),
+    )
+
+
+@pytest.mark.parametrize("endpoint", [1, 2])
+@pytest.mark.parametrize(
+    "fact,value",
+    [
+        ("filling_flag", 1),
+        ("filling_flag", None),
+        ("is_trading", False),
+        ("is_trading", None),
+    ],
+)
+def test_forward_labels_reject_carried_or_unknown_endpoint_quotes(
+    endpoint, fact, value
+):
+    sessions = pd.bdate_range("2024-01-01", periods=5)
+    panel = pd.DataFrame(
+        {
+            "asset_id": "asset",
+            "timestamp": sessions,
+            "adj_open": [10.0, 11.0, 12.0, 13.0, 14.0],
+            "filling_flag": pd.Series(0, index=range(5), dtype="Int64"),
+            "is_trading": pd.Series(True, index=range(5), dtype="boolean"),
+        }
+    )
+    panel.loc[endpoint, fact] = value
+    result = add_forward_return_labels(panel, horizons=(1,), sessions=sessions)
+    assert pd.isna(result.loc[0, "forward_return_1d"])
+    assert pd.isna(result.loc[0, "forward_return_1d_available_at"])
+    # A later valid quote must not shift the fixed-horizon endpoint.
+    assert result.loc[2, "forward_return_1d"] == pytest.approx(14.0 / 13.0 - 1.0)
+
+
+def test_forward_labels_do_not_skip_missing_endpoint_sessions():
+    sessions = pd.bdate_range("2024-01-01", periods=5)
+    for missing in (1, 2):
+        panel = pd.DataFrame(
+            {
+                "asset_id": "asset",
+                "timestamp": sessions,
+                "adj_open": [10.0, 11.0, 12.0, 13.0, 14.0],
+                "filling_flag": 0,
+                "is_trading": True,
+            }
+        ).drop(index=missing)
+        result = add_forward_return_labels(panel, horizons=(1,), sessions=sessions)
+        assert pd.isna(result.loc[0, "forward_return_1d"])
+        assert pd.isna(result.loc[0, "forward_return_1d_available_at"])
 
 
 def test_model_scaler_uses_equal_timestamp_weights_and_zero_variance_zero() -> None:
@@ -218,9 +298,10 @@ def test_supervised_fit_uses_only_mature_training_rows_and_scaler() -> None:
         estimator=build_estimator_from_model_spec(spec),
     )
     fitted = result
-    assert fitted.metadata["scaler"]["columns"] == ["feature"]
-    assert fitted.prediction_model.scaler.mean_ == (1.5,)
-    assert fitted.prediction_model.scaler.scale_ == (0.5,)
+    assert fitted.metadata["scaler"]["input_columns"] == ["feature"]
+    assert fitted.metadata["scaler"]["columns"] == ["feature", "feature__missing"]
+    assert fitted.prediction_model.scaler.mean_ == (1.5, 0.0)
+    assert fitted.prediction_model.scaler.scale_ == (0.5, 1.0)
     assert fitted.metadata["rows_after_input_label_dropna"] == 2
     assert fitted.metadata["train_end"] == "2024-01-01"
     frame.loc[2:, ["feature", "model_target"]] = [[1e9, -1e9], [-1e9, 1e9]]
@@ -537,7 +618,7 @@ def test_calibration_intervals_use_adjacent_execution_opens_across_holidays():
 def test_market_risk_uses_daily_intercept_residuals_and_previous_session_caps(
     changed_eligibility,
 ):
-    state = MarketModelRiskState(window=4, residual_window=3)
+    state = MarketModelRiskState(window=4, residual_window=3, min_fresh_fraction=1.0)
     histories = {asset: [] for asset in ("a", "b")}
     residuals = {asset: [] for asset in histories}
     previous_caps = {}
@@ -735,7 +816,7 @@ def test_ineligible_market_risk_still_rejects_invalid_nonnull_inputs(column, val
 
 
 def test_enhanced_risk_state_uses_mature_estimates_and_produces_psd_risk() -> None:
-    dates = pd.bdate_range("2022-01-03", periods=564)
+    dates = pd.bdate_range("2022-01-03", periods=815)
     style_columns = (
         "log_float_market_cap",
         "beta_252d",
@@ -819,6 +900,8 @@ def test_factor_risk_projects_history_to_current_industry_domain() -> None:
     state = FactorRiskState(
         style_columns=("style",),
         config=FactorRiskConfig(
+            factor_window=6,
+            specific_window=6,
             weight_column="float_market_cap",
             minimum_cross_section=10,
             minimum_factor_dates=3,
@@ -873,13 +956,14 @@ def test_forward_labels_reject_invalid_economic_prices_and_overflow(
             "timestamp": dates,
             "adj_open": [1.0, entry, exit_price],
             "can_enter": True,
+            "filling_flag": 0,
+            "is_trading": True,
         }
     )
     result = add_forward_return_labels(
         frame,
         horizons=(1,),
         sessions=dates,
-        can_enter_column="can_enter",
     )
     assert pd.isna(result.loc[0, "forward_return_1d"])
     assert pd.isna(result.loc[0, "forward_return_1d_available_at"])
@@ -921,6 +1005,23 @@ def test_factor_risk_windows_and_decay_follow_observed_sessions() -> None:
             }
         )
 
+    # Keep the four-session numerical oracle separate from the default
+    # 504/252-session expiry regressions below.
+    oracle_state = FactorRiskState(
+        style_columns=("style",),
+        config=FactorRiskConfig(
+            weight_column="float_market_cap",
+            minimum_cross_section=10,
+            factor_window=4,
+            specific_window=4,
+            minimum_factor_dates=3,
+            minimum_specific_dates=3,
+        ),
+    )
+    # Mature the factor clock without inventing asset-specific observations.
+    # The specific-risk regression still has its full 252-session window.
+    for _ in range(500):
+        specific_state.observe_return_session(cross(0).iloc[:0])
     fits = []
     for position in range(4):
         current = cross(position)
@@ -928,9 +1029,10 @@ def test_factor_risk_windows_and_decay_follow_observed_sessions() -> None:
             current["style"] = np.nan
         else:
             fits.append(specific_state.fit_return_session(current))
+        oracle_state.observe_return_session(current)
         specific_state.observe_return_session(current)
         factor_state.observe_return_session(current)
-    estimate = specific_state.estimate()
+    estimate = oracle_state.estimate()
     ages = np.array([3.0, 2.0, 0.0])
     weights = 0.5 ** (ages / 126.0)
     weights /= weights.sum()
@@ -972,15 +1074,15 @@ def test_future_execution_and_disclosure_facts_do_not_rewrite_past_facts() -> No
             "timestamp": sessions,
             "adj_open": [10.0, 11.0, 12.0, 13.0, 14.0, 15.0],
             "can_enter": True,
+            "filling_flag": 0,
+            "is_trading": True,
         }
     )
-    baseline = add_forward_return_labels(
-        panel, horizons=(1,), sessions=sessions, can_enter_column="can_enter"
-    )
+    baseline = add_forward_return_labels(panel, horizons=(1,), sessions=sessions)
     changed = panel.copy()
     changed.loc[5, "can_enter"] = False
     future_changed = add_forward_return_labels(
-        changed, horizons=(1,), sessions=sessions, can_enter_column="can_enter"
+        changed, horizons=(1,), sessions=sessions
     )
     assert future_changed.loc[0, "forward_return_1d"] == pytest.approx(
         baseline.loc[0, "forward_return_1d"]
@@ -1105,7 +1207,7 @@ def test_enhanced_optimizer_is_deterministic_and_hard_constraint_only() -> None:
     ("adv", "requires_trade", "error"),
     [
         (1e10, True, None),
-        (1e8, True, "optimizer_failed_closed"),
+        (1e8, True, "optimizer_capacity_bounds_infeasible"),
         (np.nan, True, "optimizer_held_risk_unavailable"),
         (0.0, True, "optimizer_held_risk_unavailable"),
         (np.nan, False, None),
@@ -1519,7 +1621,7 @@ def test_label_maturity_preserves_ineligible_observations_for_unfiltered_evaluat
     ).index.tolist() == [0]
 
 
-def test_flag_only_model_rejects_structural_invalidity_but_keeps_ordinary_missing():
+def test_flag_only_model_rejects_all_original_inputs_missing():
     from quant_research_platform.research.models.fitting import (
         _collect_training_frame,
         model_training_read_columns,
@@ -1559,7 +1661,7 @@ def test_flag_only_model_rejects_structural_invalidity_but_keeps_ordinary_missin
         declared_columns=frame.columns,
     )
     training = prepared.training
-    assert training.asset_id.tolist() == ["a", "b"]
+    assert training.asset_id.tolist() == ["a"]
 
 
 def test_market_model_relisting_keeps_proven_market_through_immediate_closure():

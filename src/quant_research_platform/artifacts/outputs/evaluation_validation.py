@@ -662,7 +662,7 @@ def validate_evaluation_artifact_structure(
         }
         observed = {}
         for row in grouped_label_values.itertuples(index=False):
-            if row.n_obs <= 0 or pd.isna(row.mean_label_value):
+            if (row.n_obs == 0) != pd.isna(row.mean_label_value):
                 raise ValueError("evaluation_group_observations_invalid")
             key = (row.timestamp, row.signal, row.label)
             observed[key] = observed.get(key, 0) + int(row.n_obs)

@@ -16,7 +16,7 @@ CSMAR 提供 A 股市场、指数、行业和分析师事实；其财务只作�
 供应商说明书中的同名字段只证明该版字段定义；输入还须绑定实际表标识、原件哈希和
 适用域，不因此承诺任意导出版本、未知字段或历史完整性。股数、市值、价格、成交量/额
 及百分比换算见 [A 股价格、收益与市值真值](a-share.md#55-价格收益与市值真值)。
-未知枚举在对应 owner 明确失败；`index_info` 仅保留 `Idxinfo05` 至 `Idxinfo09` 的
+未知枚举由对应表 owner 按消费语义处理；`corporate_actions.kind` 的保留和诊断见下文字段字典。`index_info` 仅保留 `Idxinfo05` 至 `Idxinfo09` 的
 非空分类代码均通过既有字典的记录，不猜测映射、不把未知代码补为空。
 原生 reader 保留完整记录；interim 规范化 owner 在原有结构、类型与日期校验后筛选，
 通过 manifest 的 `producer_diagnostics.source_row_counts` 披露原始行数、逐列不支持行数、
@@ -186,16 +186,17 @@ PANEL 在真实交易日轴上实施可用日规则。分类词典、历史资�
 原生 PORT 记录实际引用的来源路径或未提供；不存在来源不证明没有回收，也不制造空源产物。
 元数据使用 `a_share_equity_events` schema，保存 `files` 原件 SHA256 和 `events`。
 每个事件必须绑定原证券与上市日期、官方 SSE/SZSE/CNINFO/NEEQ 发布 URL、原件和定位、
-独立的单位/权益衔接原件与定位、公开日、经济生效日及真实观察时刻。
+权益衔接原件与定位、公开日、经济生效日及真实观察时刻。
 日期型公开事实只在次日下界之后首个市场会话确认，且经济生效日必须已到达；
 观察/下载时刻不冒充历史公开日。附件哈希与 URL 只证明来源完整性，具体事实和数量换算
 仍须人工核对原件；未知的公告时间、原股消灭或换股关系不可由字段齐全推定。
 
-支持 `quote`、`cash_recovery`、`cancel`、`conversion` 四种明确事实。
-人民币每原股金额须乘有证据的 `shares_per_old_unit`，从实际股份换成已有复权价格账本单位；
-转换还须提供每原股换得的后继股份及每后继账本单位的实际股数。
-实际证券生命周期、原单位和复权价格坐标必须匹配被消费 PANEL，不能将一种复权基准的单位证据
-用于另一份价格语义。归一金额与数量比例共用规范精确有理数编码，避免中间溢出丢失最终
+支持 `quote`、`cash_recovery`、`cancel`、`conversion`、`share_change` 五种明确事实。
+人民币金额 `amount_per_share` 按当时实际原股计，转换比例
+`successor_shares_per_old_share` 为每原股换得的后继实际股份数。
+账本的 `value_per_old_unit`、`remaining_old_units_per_old_unit` 等字段中的 unit
+均指实际股份，不再换算为复权价格单位，也不接纳旧 `shares_per_old_unit` 证明结构。
+实际证券生命周期和经济日期必须匹配。金额与数量比例共用规范精确有理数编码，避免中间溢出丢失最终
 可表示的金额；原始 PANEL 行情类型保持不变。每个事件有独立身份；同一旧权益在同一
 确认会话的多个事件若缺少可证明顺序则拒绝，不以事件 ID 排序冒充经济先后。
 NEEQ 官方发布域包括 `neeq.com.cn` 与 `neeq.cc`，依据[官方信息披露入口](https://www.neeq.com.cn/disclosure/overview_information.html)
@@ -204,9 +205,10 @@ NEEQ 官方发布域包括 `neeq.com.cn` 与 `neeq.cc`，依据[官方信息披�
 单个事件身份只绑定自身声明及实际引用附件；追加未来无关附件改变整份来源身份，
 不得改变已知历史事件自身的证明身份。窄窗口按事件真实的首个可用市场会话验证顺序，
 不能将窗口前不同会话的事件误作窗口首日同时发生。
-事件的原权益须在其真实确认会话已有退市证明，经济日期不得早于终止日；
-延后才生效的主表状态不能给较早回收补造准入。已合格转换可证明后继权益的衔接，
-但已进入正常 A 股复权行情域的后继权益不能再次消费这一路现金分配，避免与含息收益重复。
+退市回收、注销和跨生命周期转换须有当时真实退市及权益衔接证据，
+延后才生效的主表状态不能给较早回收补造依据。同生命周期 `share_change`
+可表示有正式证据的强制股份变化；不要求先退市。普通 CA/SD 由 corporate_actions
+消费，reference 与其重叠的同一经济事件须合并确认一次，不重复分配。
 同会话不同权益的转换按已证明的因果关系推进；缺根源或循环衔接拒绝，不以代码顺序猜测。
 只有报价不会产生交易许可；现金回收不冒充卖出，注销不产生现金，同码重新上市不构成权益衔接。
 参考事件经原生 reader 进入 `portfolio_sessions`，仍检查实际消费生命周期和单位关系；
@@ -232,7 +234,7 @@ NULL、未采集、损坏、缺行、UNKNOWN、真实0不合并，不从NaN猜�
 
 ## 本地操作与交付
 
-采集入口、计划和 SDK 操作资料整理在 .run/choice/；
+采集入口、计划和 SDK 操作资料保存在本机操作记录中；
 本地供应商说明书、字段参考资料和历史采集缺口清单保存在 `data/reference/`，不属于 raw 数据发现根，且不进入 Git；历史缺口清单不构成数据覆盖证明。
 代码所需的已核实单位、字段口径及页码写入对应现有市场合同；
 CSMAR 股数、市值、价格与成交量/额单位见 [A 股价格、收益与市值真值](a-share.md#55-价格收益与市值真值)。
@@ -262,3 +264,132 @@ reference 可以在一个请求中明确多个 outputs，各表独立发布与�
 产物根可以命名为 data，实际结构及来源声明决定其含义。单独的数据子目录缺少必需结构
 仍不是完整产物。schema inventory 仅诊断旧项目 data/{interim,processed,research} 布局，
 不把该布局当作独立计算的通行条件。
+
+## 字段字典与阶段输入输出
+
+本节是通用字段语义及 schema 的唯一导航，不另列一份会漂移的全仓列清单。
+已批准但未实现的默认与当前代码差距见 [规则状态索引](specifications.md)；以下链接指向实际合同，
+不能把字段已经存在当作整条研究链已经验证发布。
+
+### 通用结构、主键和时钟
+
+- `DataSpec` 的 `data_id`、`frequency`、`grain` 描述数据表含义；`column_roles` 保存有序列及角色，`primary_key` 是真实主键，`partition_columns` 仅为物理布局。`column_units` 显式声明单位，`label_availability_columns` 将每个标签绑定其成熟列。完整定义见 [contracts/data.py](../src/quant_research_platform/contracts/data.py)。
+- `market_id`、`asset_id`、`timestamp` 是平台资产时间键词汇；具体表可能只使用合同声明的子集，不能盲目给所有表添加同一主键。`source_asset_id` 是供应商代码，不能仅凭字符串直接当跨市场/跨生命周期资产身份。角色全集与键校验见 [contracts/columns.py](../src/quant_research_platform/contracts/columns.py)。
+- `timestamp` 必须结合表的经济含义解释：可能是日频会话坐标、事件时间或来源除权日期，不能统一当作信息可用时间。公告、经济生效、观察/下载、本地接收和标签成熟是不同坐标。具体时区和精度以来源/市场合同为准；有时区时刻规范为 UTC，不用运行机器时区猜测无时区字段。
+- `label_available_at` 或合同映射的 `<label>_available_at` 是标签可用于拟合/评分的真实下界。标签 horizon 的单位由 `horizon_unit` 声明，目前为 `market_sessions` 或 `milliseconds`；`lookahead`、`entry_rule`、`exit_rule` 和 `label_timing` 不能由列名猜测。见 [contracts/labels.py](../src/quant_research_platform/contracts/labels.py) 和 [contracts/experiments.py](../src/quant_research_platform/contracts/experiments.py)。
+- A 股日频标签经济开盘事件与 EOD 复权成熟时点分别保存；退出会话 UTC 07:00 是当前现代交易时钟的收盘下界，不能写成开盘即可用。Crypto 本地可见、交易所事件和资金费结算时钟由 [Crypto 合同](crypto.md) 定义。
+- `eligible` 描述所声明研究选择，`can_enter`/`can_exit` 描述相应执行条件；真实观测、缺失伴随列描述数据事实。它们互不替代，不用交易许可来证明价格标签不存在。完整 PANEL/因子/标签列见 [A 股 catalog](../src/quant_research_platform/markets/implementations/a_share/processed/catalog.py)。
+
+### 单位与缺失
+
+价格、数量、市值、金额和收益不能仅以 `float64` 或相同字段名判为同单位。
+A 股 raw 价格为原股价格、数量为真实股数；复权价格及复权账本单位属于另一经济坐标。
+总市值、流通市值、流通股数分别消费，log 变换不改变其来源口径。具体来源倍率见
+[A 股价格、收益与市值真值](a-share.md#55-价格收益与市值真值)。
+Crypto 数量须证明基础资产/合约数/报价金额及乘数；资金费率与已入账资金费金额不同。
+收益以比例表达时 0.01 表示 1%，不得二次百分比换算。
+
+NULL/NaN 只表示该字段没有数值，不能单独区分未采集、源缺失、结构不可计算、损坏、缺行、未知或不适用。
+真实 0 不等于缺失，未知也不等于 False；来源诊断、状态和观测伴随列保存原因。
+标签不可插补；训练期填补的已批准方向见规则索引，不能把现有 `impute_missing` 布尔开关
+当作训练中位数及缺失标志已实现的证明。`feature_`、`feature_missing_`、`feature_observed_`
+的现有输出关系由 [FeatureTransformSpec](../src/quant_research_platform/contracts/features.py) 定义，
+特征支持列不自动成为模型 X，模型列序由拟合合同保存。
+
+### CSMAR equity_changes：报表来源与科目粒度
+
+`FN_FN046` 的同一证券、报告期、报表类型可以有多个来源和科目。
+INTERIM 主键为 `source_asset_id, timestamp, report_type, data_source, subject_code`，
+后两列分别原样映射 `DataSources` 和 `SubjectCode`，按字符串保留前导零。
+不得以旧三列粗键去重，也不得把不同来源、科目合并成一条权益变动。
+报告期不是公告可用时点；这些身份字段本身不证明每股口径或公司行动已经对齐。
+
+### CSMAR corporate_actions：八个规范字段
+
+唯一来源表为 `TRDNEW_Cptl`，已有 source owner 直接产生 INTERIM `corporate_actions`。
+来源映射见 [field_mappings.py](../src/quant_research_platform/sources/csmar/field_mappings.py)，
+类型、保留与诊断见 [interim.py](../src/quant_research_platform/sources/csmar/interim.py) 的
+`CORPORATE_ACTION_COLUMNS` / `_normalize_corporate_actions`。
+
+| 规范字段 | 来源字段 | 含义、类型及边界 |
+| --- | --- | --- |
+| source_asset_id | Stkcd | 来源证券代码字符串；生命周期由消费者另核 |
+| timestamp | Exdistdt | 规范化除权日期；不是公告或到账时间 |
+| kind | Disttyp | 来源事件代码字符串；未知代码保留并计数，不伪造映射 |
+| market_type | Markettype | 可空整数市场代码；不是自动可交易资产证明 |
+| announcement_date | Annodt | 可空日期；未知/不合法保留缺失并诊断，不用下载日代替 |
+| settlement_date | Paydt | 可空支付/结算日期；在适用事件中核其真实经济含义 |
+| amount | Amount | 可空数值，单位依事件 kind：现金每原股金额或每原股新增股份等，不能跨 kind 混用 |
+| subscription_price | Roprc | 可空认购价格；保留来源事实不等于策略执行认购 |
+
+来源层对可空字段的非法值记录诊断并保留未知；除权日期和事件标识仍必须合法。
+该表没有供应商登记日字段，不能捏造。普通 CA/SD 的登记时点按获批规则由自身市场日历推导；
+付款日期缺失时除权日开盘到账是明确研究假设。未知事件是否阻塞由实际持有人权益依赖裁定，
+不是在 source 层删除整段来源。
+
+本轮原股账本直接消费该表；内部事件投影的 `record_at`、`effective_at`、`settlement_at`、
+`available_at`、`cash_per_share`、`additional_shares_per_share`、`entitlement_proved`
+由 [portfolio_sessions.py](../src/quant_research_platform/markets/implementations/a_share/portfolio_sessions.py)
+定义，只是既有 owner 的计算输入，不新建一份公共事件表或准入框架。
+原股账本与旧复权单位账本不可混用；退市后参考权益须按实际原股及生命周期解释。
+
+### 输入选择器：只解释本次明确选择
+
+支持共同数据集选择器的入口接受路径，或含 `path` 的对象。可选字段为 `spec`、`files`、
+`columns`、`years`、`time_window`、`row_filters`，以 [现有 reader](../src/quant_research_platform/storage/datasets/reading.py)
+的 `_dataset_input_options` 和各操作入口为准，不保证所有独立参数都接受此对象。
+
+- `files` 选择成员，`columns` 保持明确列序，`years` 为离散年份集合；同时给年份与窗口取交集。
+- `time_window` 由 [TimeWindow](../src/quant_research_platform/contracts/time.py) 定义；日频结束日期含全天，不能因此改写 Crypto 半开观察区间。
+- `row_filters` 是现有 `==`/`in` 有限物理筛选，不是任意表达式引擎，也不证明样本科学资格。
+- `spec` 为裸 Parquet 补足本操作真实需要的角色、键、单位和标签成熟映射，不能用声明替代来源证据。
+- 选择输出窗口不缩短公式回看、标签端点或完整截面。排除的报价保持未知，不压紧交易会话轴。
+
+### 阶段输入、输出与唯一合同位置
+
+| 独立操作 | 明确输入及主要选择 | 输出与 schema / owner |
+| --- | --- | --- |
+| prepare-source | 指定来源根/原件与表，按 source 合同选择日期 | INTERIM 规范表；[sources/prepare.py](../src/quant_research_platform/sources/prepare.py)，各来源映射及 reader |
+| prepare | 已准备来源、市场、数据集及窗口 | PANEL/FACTOR/LABEL；[contracts/data.py](../src/quant_research_platform/contracts/data.py)、市场 catalog；不是自动补齐缺源 |
+| assemble | 明确基表、因子批次/已有特征、标签、列投影及特征配方 | 可复用研究数据集；[ResearchDatasetSpec](../src/quant_research_platform/contracts/datasets.py)，保留列角色、成熟映射和 join 覆盖 |
+| fit | 数据、列序、目标、拟合窗/截止、算法参数及 seed | 冻结 predictor 与 model.json/trial；[contracts/models.py](../src/quant_research_platform/contracts/models.py)、[production.py](../src/quant_research_platform/research/models/production.py) |
+| predict | 明确已存模型及新特征窗口 | PRED 键、prediction_score、prediction_rank_score；[prediction.py](../src/quant_research_platform/artifacts/outputs/prediction.py)，不附带未来标签、不重新拟合 |
+| score / select | 有序完整候选、验证窗与成熟截止；选择另声明规则和最终拟合窗 | 各自 JSON；[trial_selection.py](../src/quant_research_platform/research/models/trial_selection.py)，不自动最终重训；新批准的默认见状态索引 |
+| explain | 冻结模型、明确样本、方法和合法背景 | 独立解释数值与元数据；[explanations.py](../src/quant_research_platform/artifacts/explanations.py)，绘图无需加载模型 |
+| evaluate | 明确信号、标签、窗口、成熟截止、比较/分层选择 | EVAL 日表和摘要；[contracts/evaluations.py](../src/quant_research_platform/contracts/evaluations.py)、[evaluation.py](../src/quant_research_platform/artifacts/outputs/evaluation.py) |
+| calibrate / backtest | 显式预测、账户/执行/来源、历史校准输入与回测窗口 | 校准产物或 PORT；[contracts/portfolios.py](../src/quant_research_platform/contracts/portfolios.py)、[portfolio_ledger.py](../src/quant_research_platform/artifacts/portfolio_ledger.py) |
+| Crypto calibrate / backtest | 明确 episode、盘口/事件、信号、执行参数、实际依赖资金费 | 独立 episode 及同一经济账本；[crypto_hft.py](../src/quant_research_platform/artifacts/crypto_hft.py)、[Crypto 合同](crypto.md) |
+| statistics-* | 已算模型/因子/组合数值、明确比较集合与 analyses | 统计表及推断状态；[statistics.py](../src/quant_research_platform/artifacts/statistics.py)，未选择分析不要求其专用输入 |
+| plot | 已发布数值、series、明确用途与新图片路径 | PNG/SVG/PDF；[plots.py](../src/quant_research_platform/reports/plots.py)，不补数、不代算正式指标 |
+
+PORT 的实际表列由 `PORTFOLIO_LEDGER_TABLE_COLUMNS` 从合同类型生成，包含 trades、cashflows、
+valuations、diagnostics、rights_adjustments；不在本文手写第二套完整列。
+`quantity`/`locked_quantity` 是对应账户单位数量，`receivable` 是尚未到账应收，
+`cash_amount`/`amount`/`value` 为合同规定币种金额；精确数量编码与普通浮点金额分别处理。
+具体现金、权益、应收和锁定状态的守恒由同一账本合同核验，不以表存在或字段非空代替。
+
+
+### 模型预测描述指标
+
+`model_statistics` 的 `model_losses` 分析同时发布 `model_prediction_metrics.parquet`，
+主键为 `timestamp, family_id`，每行是一家族在一个实际输入日期的描述统计。
+字段/schema 唯一 owner 为 [statistics.py](../src/quant_research_platform/artifacts/statistics.py)。
+
+| 字段 | 单位与定义 |
+| --- | --- |
+| prediction_count / target_count | 有限预测数 / 预测与成熟主目标成对有效数 |
+| mse / baseline_mse | 当日成对域等权平方误差 / 零预测基准平方误差，单位为主目标单位的平方 |
+| oos_r2 / oos_r2_reason | `1−mse/baseline_mse`；零基准误差、无目标或不可表示结果为 NULL 并说明原因 |
+| head_selected_count / head_evaluable_count | 仅由预测确定的头部人数 / 固定头部中原始收益已成熟人数 |
+| head_coverage | 可评价人数除以选中人数；无选中人为 NULL，不以覆盖硬门槛过滤 |
+| pool_evaluable_count | 同日 eligible 研究池中原始收益已成熟人数，不要求该资产有预测 |
+| head_mean_raw_return / pool_mean_raw_return | 固定头部 / 同日研究池的等权原始 horizon 收益，比例单位、未扣成本 |
+| head_excess_raw_return | 以上两均值之差；任一不可评价则 NULL |
+
+`evaluation.head_fraction` 默认 0.2，可显式覆盖；先按 `ceil(N×fraction)` 确定预测阈值，
+边界并列全部入组，再检查目标/收益可用性。`raw_return_label` 可显式指定，默认只在输入存在
+`forward_return_20d` 时使用该列，否则收益指标未定义，不把标准化目标冒充原始收益。
+元数据 `prediction_metrics` 保存解析后的头部比例、原始收益列和聚合口径。
+跨日 MSE 先算每日均方误差再日期等权；跨日 OOS R² 为同一可评价日期域上
+`1−mean(mse)/mean(baseline_mse)`，不平均每日 R²，不按资产行数加权。
+这些重叠 horizon 收益不连乘为日净值。训练均值基准尚无训练域来源证明，当前不提供该选项。

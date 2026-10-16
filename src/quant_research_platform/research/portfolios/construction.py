@@ -9,6 +9,7 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.compute.dataframe.cross_section import _stable_zscore
 from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
 from quant_research_platform.contracts.validation import (
     strict_finite_float,
@@ -38,6 +39,8 @@ def build_simple_target_weights(
     size_cap_column: Literal[
         "total_market_cap", "float_market_cap"
     ] = "total_market_cap",
+    industry_neutrality_limit: float = 0.02,
+    size_neutrality_limit: float = 0.2,
 ) -> pd.Series:
     """Build one target from current eligible signal and capitalization facts."""
 
@@ -124,7 +127,16 @@ def build_simple_target_weights(
         or not np.isclose(result.abs().sum(), 1.0)
     ):
         raise ValueError("target_weights_invalid")
-    return _project_neutral_target(result, context) if context is not None else result
+    return (
+        _project_neutral_target(
+            result,
+            context,
+            industry_limit=industry_neutrality_limit,
+            size_limit=size_neutrality_limit,
+        )
+        if context is not None
+        else result
+    )
 
 
 def _canonical_assets(signal: pd.Series, eligible: pd.Series) -> pd.Index:
@@ -252,6 +264,7 @@ def _neutrality_context(
         float_market_cap, assets, "target_float_market_cap_invalid"
     )
     domain = eligible & capitals.gt(0) & np.isfinite(capitals)
+    benchmark_total = sum(Fraction(float(value)) for value in capitals.loc[domain])
     if neutrality in {"industry", "industry_size"}:
         if not isinstance(industry, pd.Series) or not industry.index.is_unique:
             raise ValueError("target_industry_required")
@@ -263,12 +276,13 @@ def _neutrality_context(
     if capitals.empty:
         raise PortfolioTargetBlocked("target_neutrality_benchmark_empty")
     exact = [Fraction(float(value)) for value in capitals]
-    total = sum(exact)
+    total = benchmark_total
     context = pd.DataFrame(
         {"benchmark_weight": [float(value / total) for value in exact]},
         index=capitals.index,
     )
     if neutrality in {"industry", "industry_size"}:
+        context.attrs["unknown_industry_weight"] = float((total - sum(exact)) / total)
         codes = industry.reindex(context.index)
         for code in sorted(codes.unique()):
             context[f"industry:{code}"] = codes.eq(code).astype(float)
@@ -286,5 +300,9 @@ def _neutrality_context(
         if not (size_capitals.gt(0) & np.isfinite(size_capitals)).all():
             raise PortfolioTargetBlocked("target_neutrality_size_missing")
         size = np.log(size_capitals)
-        context["size"] = _mad_winsorize(size, {0: np.arange(len(size))})
+        context["size"] = _stable_zscore(
+            _mad_winsorize(size, {0: np.arange(len(size))})
+        )
+        if context["size"].isna().any():
+            raise PortfolioTargetBlocked("target_neutrality_size_undefined")
     return context

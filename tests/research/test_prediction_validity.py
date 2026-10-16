@@ -53,11 +53,9 @@ def test_transform_prediction_publication_keeps_real_domain(
         .copy()
     )
     expected = (
-        frame.asset_id.tolist()
-        if algorithm == "equal_weight_rank_ensemble" and input_column == "x"
-        else frame.loc[frame.x.notna(), "asset_id"].tolist()
+        frame.loc[frame.x.notna(), "asset_id"].tolist()
         if input_column == "x"
-        else frame.asset_id.iloc[:3].tolist()
+        else frame.asset_id.iloc[:2].tolist()
     )
     spec = ModelSpec(
         model_id="candidate",

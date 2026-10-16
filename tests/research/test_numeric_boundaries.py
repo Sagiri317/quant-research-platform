@@ -136,6 +136,8 @@ def test_specific_variance_keeps_subnormal_residual_mass():
     state = FactorRiskState(
         style_columns=(),
         config=FactorRiskConfig(
+            factor_window=2,
+            specific_window=2,
             minimum_factor_dates=2,
             minimum_specific_dates=2,
             annualization=1.0,
@@ -291,6 +293,8 @@ def test_unrepresentable_final_wls_residual_fails_before_observation():
     state = FactorRiskState(
         style_columns=(),
         config=FactorRiskConfig(
+            factor_window=1,
+            specific_window=1,
             minimum_cross_section=5,
             minimum_factor_dates=1,
             minimum_specific_dates=1,
@@ -413,6 +417,8 @@ def test_native_rank_one_industry_covariance_reaches_actual_optimizer():
     state = FactorRiskState(
         style_columns=(),
         config=FactorRiskConfig(
+            factor_window=2,
+            specific_window=2,
             minimum_cross_section=15,
             minimum_factor_dates=2,
             minimum_specific_dates=2,

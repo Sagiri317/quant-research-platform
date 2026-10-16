@@ -24,8 +24,8 @@ def statistics_config(
             "hac_lag": 19,
             "bootstrap_block": 20,
             "bootstrap_repetitions": 10_000,
-            "fdr_primary": "BH_5pct",
-            "fdr_robustness": "BY_5pct",
+            "fdr_primary": "BY_5pct",
+            "fdr_robustness": "BH_5pct",
             "group_comparison": {
                 "fdr_method": "BY",
                 "alpha": 0.05,

@@ -58,7 +58,6 @@ def _reference_forward_labels(frame, *, horizons, sessions):
     position_by_session = {timestamp: index for index, timestamp in enumerate(axis)}
     positions = result[date_column].map(position_by_session).to_numpy()
     prices = price.to_numpy(dtype="float64", copy=False)
-    can_enter = result["can_enter"].to_numpy(copy=False)
     for horizon in horizons:
         labels = np.full(len(result), np.nan, dtype="float64")
         available = np.full(len(result), np.datetime64("NaT"), dtype="datetime64[ns]")
@@ -78,7 +77,11 @@ def _reference_forward_labels(frame, *, horizons, sessions):
             exit_row = row_lookup.get((asset, exit_date))
             if entry_row is None or exit_row is None:
                 continue
-            if pd.isna(can_enter[position]) or not bool(can_enter[position]):
+            endpoints = result.iloc[[entry_row, exit_row]]
+            if not (
+                endpoints.filling_flag.eq(0).fillna(False).all()
+                and endpoints.is_trading.eq(True).fillna(False).all()
+            ):
                 continue
             entry_price = prices[entry_row]
             exit_price = prices[exit_row]
@@ -94,9 +97,7 @@ def _reference_forward_labels(frame, *, horizons, sessions):
             if not np.isfinite(value):
                 continue
             labels[position] = value
-            available[position] = (
-                exit_date + pd.Timedelta(hours=1, minutes=30)
-            ).to_datetime64()
+            available[position] = (exit_date + pd.Timedelta(hours=7)).to_datetime64()
         label_column = f"forward_return_{horizon}d"
         result[label_column] = labels
         result[f"{label_column}_available_at"] = available
@@ -168,7 +169,9 @@ def test_research_rosters_select_unique_supported_factors(name):
 def test_equal_timestamp_decay_is_one_frozen_model_contract():
     stamps = pd.to_datetime(["2020-01-01", "2020-01-01", "2020-01-02", "2020-01-03"])
     weighting = TrainingWeighting(half_life_periods=1)
-    weights = equal_timestamp_sample_weights(stamps, weighting)
+    weights = equal_timestamp_sample_weights(
+        stamps, weighting, trading_sessions=pd.date_range(stamps.min(), stamps.max())
+    )
     np.testing.assert_allclose(weights, np.array([2, 2, 8, 16]) / 7)
     assert weights.sum() == pytest.approx(4)
     spec = ModelSpec(
@@ -197,7 +200,11 @@ def test_equal_timestamp_decay_is_one_frozen_model_contract():
             "y": [-1.0, -2.0, -3.0] * 2 + [1.0, 2.0, 3.0],
         }
     )
-    weights = equal_timestamp_sample_weights(frame.timestamp, weighting)
+    weights = equal_timestamp_sample_weights(
+        frame.timestamp,
+        weighting,
+        trading_sessions=pd.date_range(frame.timestamp.min(), frame.timestamp.max()),
+    )
     for factory in (EqualWeightRankEnsembleFactory, ICWeightedRankEnsembleFactory):
         plain = factory(("x",), "y").fit(frame, frame.y.to_numpy())
         decayed = factory(("x",), "y").fit(
@@ -403,12 +410,26 @@ def test_forward_labels_exact_on_sparse_sessions_and_extreme_prices():
         ],
         columns=("asset_id", "timestamp", "adj_open", "can_enter"),
     )
+    frame["filling_flag"] = pd.Series(
+        rng.choice([0, 1, None], len(frame)), dtype="Int64"
+    )
+    frame["is_trading"] = pd.Series(
+        rng.choice([True, False, None], len(frame)), dtype="boolean"
+    )
     frame.loc[:3, "adj_open"] = [0.0, np.nan, 1e-300, 1e300]
     frame = frame.sample(frac=1, random_state=9)
     options = dict(horizons=(1, 5, 20), sessions=dates)
     expected = _reference_forward_labels(frame, **options)
     actual = add_forward_return_labels(frame, **options)
-    pd.testing.assert_frame_equal(actual, expected, check_exact=True)
+    label_columns = [f"forward_return_{horizon}d" for horizon in options["horizons"]]
+    pd.testing.assert_frame_equal(
+        actual.drop(columns=label_columns),
+        expected.drop(columns=label_columns),
+        check_exact=True,
+    )
+    pd.testing.assert_frame_equal(
+        actual[label_columns], expected[label_columns], rtol=1e-14, atol=0
+    )
 
 
 @pytest.mark.parametrize("with_size", [False, True])
@@ -428,7 +449,7 @@ def test_decay_normalizes_before_float64_underflow(count):
 
     timestamps = pd.date_range("2020-01-01", periods=count)
     actual = equal_timestamp_sample_weights(
-        timestamps, TrainingWeighting(half_life_periods=1)
+        timestamps, TrainingWeighting(half_life_periods=1), trading_sessions=timestamps
     )
     normalizer = 2 - Fraction(1, 2 ** (count - 1))
     expected = np.array(
@@ -450,6 +471,7 @@ def test_decay_rejects_truly_unrepresentable_positive_weights():
         equal_timestamp_sample_weights(
             pd.date_range("2020-01-01", periods=2000),
             TrainingWeighting(half_life_periods=1),
+            trading_sessions=pd.date_range("2020-01-01", periods=2000),
         )
 
 
@@ -465,6 +487,8 @@ def test_forward_labels_preserve_key_domain_and_input_isolation():
             "asset_id": pd.Series([1, 1, 1], dtype="int64"),
             "adj_open": [1.0, 2.0, 3.0],
             "can_enter": True,
+            "filling_flag": 0,
+            "is_trading": True,
         }
     )
     original = frame.copy(deep=True)

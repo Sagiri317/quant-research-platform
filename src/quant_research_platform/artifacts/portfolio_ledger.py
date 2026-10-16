@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass, fields
+from fractions import Fraction
 from itertools import groupby
 from pathlib import Path
 
@@ -61,6 +62,10 @@ _EXACT_FIELDS = {
     "quantity_after",
     "target_quantity",
     "mark_price",
+    "locked_quantity",
+    "locked_quantity_before",
+    "locked_quantity_after",
+    "entitlement_quantity",
 }
 _NUMERIC = {
     "notional",
@@ -69,6 +74,9 @@ _NUMERIC = {
     "number",
     "cost_basis",
     "cash_amount",
+    "receivable",
+    "receivable_before",
+    "receivable_after",
 }
 PORTFOLIO_LEDGER_TABLE_COLUMNS = {
     name: ("sequence", *(field.name for field in fields(kind)))
@@ -79,7 +87,7 @@ _SCHEMAS = {
         pa.field(
             column,
             pa.int64()
-            if column in {"sequence", "timestamp_ns"}
+            if column in {"sequence", "timestamp_ns", "entitlement_record_at_ns"}
             else pa.float64()
             if column in _NUMERIC
             else pa.string(),
@@ -361,6 +369,35 @@ class _LedgerValidation:
                     payload=diagnostic.fill_id.encode("utf-8"),
                 ) != order_id.encode("utf-8"):
                     raise ValueError("portfolio_ledger_diagnostic_order_mismatch")
+        for event in batch.rights_adjustments:
+            if event.kind == "recovery":
+                continue
+            identity = event.event_id.rsplit(":", 1)[0].encode("utf-8")
+            payload = "|".join(
+                (
+                    event.asset_id,
+                    event.lifecycle_id,
+                    event.evidence_identity,
+                    str(Fraction(event.entitlement_quantity)),
+                    str(event.entitlement_record_at_ns),
+                )
+            ).encode("utf-8")
+            if event.kind == "registration":
+                if (
+                    self.key_index.add_identity_payloads(
+                        namespace="entitlement_registration",
+                        payloads=((identity, payload),),
+                    )
+                    != 1
+                ):
+                    raise ValueError("portfolio_registration_duplicate")
+            elif (
+                self.key_index.identity_payload_value(
+                    namespace="entitlement_registration", payload=identity
+                )
+                != payload
+            ):
+                raise ValueError("portfolio_registration_entitlement_invalid")
         inserted = self.key_index.add_identity_payloads(
             namespace="rights_adjustments",
             payloads=(

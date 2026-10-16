@@ -33,8 +33,8 @@ def _view(day, opening, closing, *, life="2020-01-01", unproved=False):
             "listing_date": [pd.Timestamp(life)],
             "timestamp": [pd.Timestamp(day)],
             "market_type": pd.Series([1], dtype="Int64"),
-            "adj_open": [opening],
-            "adj_close": [closing],
+            "open": [opening],
+            "close": [closing],
             "is_trading": pd.Series([True], dtype="boolean"),
         }
     )
@@ -43,6 +43,7 @@ def _view(day, opening, closing, *, life="2020-01-01", unproved=False):
         valuation=frame.copy(),
         timestamp=pd.Timestamp(day),
         rights_events=pd.DataFrame(),
+        corporate_events=pd.DataFrame(),
         closed_assets=frozenset(),
         unproved_lifecycle_assets=frozenset({"a"}) if unproved else frozenset(),
         confirmed_delisted_lifecycles=frozenset(),
@@ -55,13 +56,13 @@ def test_ordinary_missing_quote_uses_past_anchor_and_recovers():
     missing = _view("2023-01-02", np.nan, 12.0)
     original = missing.panel.copy(deep=True)
     result = marks.project(missing)
-    assert result.adj_open.iloc[0] == 11.0
-    assert result.adj_close.iloc[0] == 12.0
+    assert result.open.iloc[0] == 11.0
+    assert result.close.iloc[0] == 12.0
     assert result.research_open_mark_kind.iloc[0] == "ordinary_missing_quote"
     assert result.research_open_mark_at.iloc[0] == pd.Timestamp("2023-01-01")
     pd.testing.assert_frame_equal(missing.panel, original)
     recovered = marks.project(_view("2023-01-03", 13.0, 14.0))
-    assert recovered.adj_open.iloc[0] == 13.0
+    assert recovered.open.iloc[0] == 13.0
     assert recovered.research_open_mark_at.isna().all()
 
 
@@ -79,7 +80,7 @@ def test_no_trusted_same_life_anchor_never_uses_future_close(kind):
             unproved=kind == "unproved",
         )
     )
-    assert result.adj_open.isna().all()
+    assert result.open.isna().all()
 
 
 def _account():
@@ -127,7 +128,7 @@ def _account():
 def test_native_publication_readback_amounts_and_lazy_consumption(
     tmp_path, monkeypatch
 ):
-    capital = PortfolioCapital("candidate", 100.0, "CNY", "adjusted_notional")
+    capital = PortfolioCapital("candidate", 100.0, "CNY", "cash_equity")
     batch = _account()
     metadata = {"window": {"start": "2023-01-01", "end": "2023-01-02"}}
     root = artifacts.write_portfolio_ledger_artifact(
@@ -263,8 +264,8 @@ def test_frozen_adv_intersects_the_existing_single_name_bounds(current):
 @pytest.mark.parametrize("held", [False, True])
 def test_unproved_rights_only_block_the_account_that_holds_them(held):
     from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
-    from quant_research_platform.research.portfolios.production import (
-        _apply_rights_events,
+    from quant_research_platform.research.portfolios.accounting import (
+        EquityEntitlements,
     )
 
     event = pd.DataFrame(
@@ -272,9 +273,9 @@ def test_unproved_rights_only_block_the_account_that_holds_them(held):
             dict(
                 asset_id="a",
                 listing_date=pd.Timestamp("2020-01-01"),
+                event_id="unproved-recovery",
                 kind="cash_recovery",
-                unit_basis_proved=False,
-                entitlement_proved=True,
+                entitlement_proved=False,
             )
         ]
     )
@@ -286,10 +287,12 @@ def test_unproved_rights_only_block_the_account_that_holds_them(held):
         with pytest.raises(
             PortfolioTargetBlocked, match="portfolio_held_rights_unproved"
         ):
-            _apply_rights_events(event, units, lives, pd.Timestamp("2023-01-01"))
+            EquityEntitlements().process(
+                pd.DataFrame(), event, units, lives, pd.Timestamp("2023-01-01")
+            )
     else:
-        result, _, cash, adjustments = _apply_rights_events(
-            event, units, lives, pd.Timestamp("2023-01-01")
+        result, _, cash, adjustments = EquityEntitlements().process(
+            pd.DataFrame(), event, units, lives, pd.Timestamp("2023-01-01")
         )
         pd.testing.assert_series_equal(result, units)
         assert cash == 0 and adjustments == ()
@@ -305,14 +308,13 @@ def test_unproved_rights_quote_cannot_create_a_valuation_anchor():
                 asset_id="a",
                 listing_date=pd.Timestamp("2020-01-01"),
                 kind="quote",
-                unit_basis_proved=False,
-                entitlement_proved=True,
+                entitlement_proved=False,
             )
         ]
     )
     result = marks.project(view)
-    assert result.adj_open.isna().all()
-    assert result.adj_close.isna().all()
+    assert result.open.isna().all()
+    assert result.close.isna().all()
 
 
 @pytest.mark.parametrize("consume", ["iterate", "amount_summary"])
@@ -339,7 +341,7 @@ def test_consumed_ledger_rejects_unsupported_research_valuation_policy(
             ),
         ),
     )
-    capital = PortfolioCapital("policy", 100.0, "CNY", "adjusted_notional")
+    capital = PortfolioCapital("policy", 100.0, "CNY", "cash_equity")
     root = artifacts.write_portfolio_ledger_artifact(
         tmp_path / "policy",
         capital=capital,
@@ -449,12 +451,19 @@ def test_explicit_native_fit_prediction_and_backtest_roundtrip(
                 ],
                 "columns": {
                     "dataset": ["signal"],
-                    "panel": ["adj_open", "adj_close", "amount"],
+                    "panel": ["open", "close", "amount"],
                     "calendar": ["calendar_date"],
                     "execution": ["can_enter", "can_exit"],
                     "fees": ["rate"],
                     "market_bars": ["filling_flag"],
                     "stock_master": ["company_status"],
+                    "corporate_actions": [
+                        "kind",
+                        "amount",
+                        "announcement_date",
+                        "settlement_date",
+                        "subscription_price",
+                    ],
                 }[name],
             }
             if name not in {"fees", "stock_master"}:
@@ -503,7 +512,7 @@ def test_explicit_native_fit_prediction_and_backtest_roundtrip(
                 **config["inputs"],
                 "panel": {
                     **config["inputs"]["panel"],
-                    "columns": ["adj_close", "amount"],
+                    "columns": ["close", "amount"],
                 },
             },
         }
@@ -552,7 +561,7 @@ def test_adv_warmup_counts_twenty_own_market_observations_across_union_holiday(
     )
     root = artifacts.write_portfolio_ledger_artifact(
         tmp_path / "ledger",
-        capital=PortfolioCapital("holiday", 100.0, "CNY", "adjusted_notional"),
+        capital=PortfolioCapital("holiday", 100.0, "CNY", "cash_equity"),
         metadata={"window": {"start": str(window.start), "end": str(window.end)}},
         produce=lambda emit: [emit(batch) for batch in batches],
     )
