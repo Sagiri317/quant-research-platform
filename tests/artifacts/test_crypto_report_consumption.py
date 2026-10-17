@@ -8,7 +8,9 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioCapital,
     PortfolioDiagnostic,
 )
-from quant_research_platform.research.portfolios.accounting import PortfolioEconomics
+from quant_research_platform.markets.implementations.crypto.execution import (
+    PortfolioEconomics,
+)
 
 
 @pytest.mark.parametrize("mode", ("continuous", "independent_segments"))

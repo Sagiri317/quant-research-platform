@@ -303,7 +303,7 @@ def test_episode_atomic_publication_cancel_and_no_overwrite(tmp_path):
     from quant_research_platform.artifacts.crypto_hft import (
         write_crypto_episode_artifact,
     )
-    from quant_research_platform.research.portfolios.accounting import (
+    from quant_research_platform.markets.implementations.crypto.execution import (
         PortfolioEconomics,
     )
     from quant_research_platform.storage.errors import OutputAlreadyExistsError

@@ -1521,21 +1521,20 @@ def _label_frame(
             index=frame.index,
         )
         grouped = mid.groupby(segment_groups, sort=False)
+        missing_prefix = np.r_[0, np.cumsum(mid.isna().to_numpy())]
+        runs = segment_groups.to_numpy()
     for horizon in mid_horizons:
         future = grouped.shift(-(horizon // HFT_GRID_MS))
         same_sign = future.lt(0).eq(mid.lt(0))
         values = (future.where(same_sign) - mid.where(same_sign)) / mid
         values.loc[~same_sign] = future.loc[~same_sign] / mid.loc[~same_sign] - 1.0
-        complete = (
-            pd.concat(
-                tuple(
-                    grouped.shift(-step) for step in range(horizon // HFT_GRID_MS + 1)
-                ),
-                axis=1,
+        steps = horizon // HFT_GRID_MS
+        complete = np.zeros(len(mid), dtype=bool)
+        # Include both endpoints and never cross a contiguous segment boundary.
+        if steps < len(mid):
+            complete[:-steps] = (runs[:-steps] == runs[steps:]) & (
+                missing_prefix[steps + 1 :] == missing_prefix[: -steps - 1]
             )
-            .notna()
-            .all(axis=1)
-        )
         values = values.where(complete & np.isfinite(values))
         available = (
             pd.to_datetime(frame["timestamp_ms"], unit="ms")

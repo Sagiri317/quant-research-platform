@@ -18,9 +18,9 @@ from quant_research_platform.contracts.portfolios import (
 )
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.crypto.execution import (
+    PortfolioEconomics,
     _record_execution_result,
 )
-from quant_research_platform.research.portfolios.accounting import PortfolioEconomics
 from quant_research_platform.research.portfolios.diagnostics import crypto_statistics
 
 

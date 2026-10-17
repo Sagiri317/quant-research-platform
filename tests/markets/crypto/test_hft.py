@@ -510,6 +510,55 @@ def test_labels_are_exact_horizon_same_segment_and_keep_zero_distinct_from_nan()
     assert math.isnan(labels[1]["future_mid_return_200ms"])
 
 
+@pytest.mark.parametrize("batch_rows", [1, 7, 250])
+@pytest.mark.parametrize("dtype", ["float64", "Float64"])
+def test_label_complete_paths_include_endpoints_and_contiguous_runs(batch_rows, dtype):
+    segments = ["s1"] * 70 + ["s2"] * 3 + ["s1"] * 80 + ["s3"] * 60
+    frame = pd.DataFrame(
+        {
+            "timestamp_ms": [i * HFT_GRID_MS for i in range(len(segments))],
+            "segment_id": segments,
+            "mid": pd.Series([100.0 + i for i in range(len(segments))], dtype=dtype),
+            "best_bid_qty": 2.0,
+            "observed_taker_sell_volume_100ms": 0.25,
+        }
+    )
+    frame.loc[[0, 12, 80, 130, 212], "mid"] = float("nan")
+    # A legal uncovered gap starts a new run, even when an older ID is reused.
+    frame.loc[73:, "timestamp_ms"] += 1000
+    horizons = (100, 500, 1000, 5000)
+    actual = pd.concat(
+        iter_label_frames(
+            (frame.iloc[i : i + batch_rows] for i in range(0, len(frame), batch_rows)),
+            horizons_ms=horizons,
+        ),
+        ignore_index=True,
+    )
+    runs = frame.segment_id.ne(frame.segment_id.shift()).cumsum()
+    mid = frame.mid.astype("float64")
+    for horizon in horizons:
+        steps = horizon // HFT_GRID_MS
+        for i in range(len(frame)):
+            end = i + steps
+            valid = (
+                end < len(frame)
+                and runs.iloc[i] == runs.iloc[end]
+                and mid.iloc[i : end + 1].notna().all()
+            )
+            for kind in ("return", "direction"):
+                column = f"future_mid_{kind}_{horizon}ms"
+                assert pd.notna(actual.loc[i, column]) == valid
+                assert pd.notna(actual.loc[i, column + "_available_at"]) == valid
+                if valid:
+                    expected = (mid.iloc[end] - mid.iloc[i]) / mid.iloc[i]
+                    assert actual.loc[i, column] == (
+                        expected if kind == "return" else 1.0
+                    )
+                    assert actual.loc[i, column + "_available_at"] == pd.Timestamp(
+                        frame.timestamp_ms.iloc[end], unit="ms"
+                    )
+
+
 def test_maker_bid_sell_pressure_proxy_uses_future_observed_sell_flow() -> None:
     sell_volume = [0.0, 0.5, 0.5, 0.5, 0.5, 0.0, 0.0]
     frame = pd.DataFrame(

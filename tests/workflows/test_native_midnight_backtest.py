@@ -325,7 +325,6 @@ def test_native_midnight_models_reach_frozen_backtests(tmp_path, monkeypatch, ga
                     "archive_paths": archive_paths,
                     "asset_id": asset,
                     "symbol": symbol,
-                    "chronology": chronology,
                     "prediction_window": chronology["test"],
                     "execution_mode": "continuous",
                     "capital": asdict(

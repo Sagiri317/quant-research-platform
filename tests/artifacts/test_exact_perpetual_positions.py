@@ -13,7 +13,9 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioCapital,
     validate_portfolio_transition,
 )
-from quant_research_platform.research.portfolios.accounting import PortfolioEconomics
+from quant_research_platform.markets.implementations.crypto.execution import (
+    PortfolioEconomics,
+)
 
 
 @pytest.mark.parametrize("direction", (-1, 1))

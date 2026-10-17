@@ -1217,7 +1217,7 @@ def test_flat_eof_preserves_historical_fill_diagnostics_and_cash_ledger(
 def test_perpetual_close_sign_is_independent_of_quantity_units(
     tmp_path, scale, direction, closing_units
 ):
-    from quant_research_platform.research.portfolios.accounting import (
+    from quant_research_platform.markets.implementations.crypto.execution import (
         PortfolioEconomics,
     )
 
@@ -1284,7 +1284,7 @@ def test_perpetual_close_sign_is_independent_of_quantity_units(
 
 @pytest.mark.parametrize("direction", [1.0, -1.0])
 def test_tiny_trade_validity_uses_sign_without_multiplication(direction):
-    from quant_research_platform.research.portfolios.accounting import (
+    from quant_research_platform.markets.implementations.crypto.execution import (
         PortfolioEconomics,
     )
 
@@ -1365,7 +1365,7 @@ def test_perpetual_rounded_cost_preserves_exact_pnl(
     from fractions import Fraction
     from math import ulp
 
-    from quant_research_platform.research.portfolios.accounting import (
+    from quant_research_platform.markets.implementations.crypto.execution import (
         PortfolioEconomics,
     )
 

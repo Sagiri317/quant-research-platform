@@ -2,7 +2,7 @@
 
 import hashlib
 import warnings
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 import numpy as np
 import pandas as pd
@@ -17,9 +17,9 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioDiagnostic,
 )
 from quant_research_platform.markets.implementations.crypto.execution import (
+    PortfolioEconomics,
     _record_execution_result,
 )
-from quant_research_platform.research.portfolios.accounting import PortfolioEconomics
 from quant_research_platform.research.portfolios.diagnostics import crypto_statistics
 
 
@@ -438,3 +438,80 @@ def test_funding_only_uncertainty_preserves_known_inventory_extremum(tmp_path):
         terminal = metrics.loc["terminal_nav"]
         assert terminal.status == "UNDEFINED" and np.isnan(terminal.value)
         assert terminal.reason == "portfolio_required_funding_missing"
+
+
+@pytest.mark.parametrize("visible", [None, 0.0, 3.0])
+def test_terminal_unknown_visible_trade_masks_inventory_extremum(tmp_path, visible):
+    from quant_research_platform.markets.implementations.crypto.execution import (
+        simulate_maker,
+    )
+    from tests.helpers.binance_hft import _quote
+    from tests.markets.crypto.test_hft_execution import _maker_config, _state, _trade
+
+    capital = PortfolioCapital("terminal", 1000.0, "USDT", "linear_perpetual")
+    execution = _maker_config()
+    results = []
+
+    def produce(emit):
+        results.append(
+            simulate_maker(
+                [_state(0), _state(100)],
+                [
+                    replace(
+                        _trade(100, price="99.5", quantity="3", maker_buyer=True),
+                        visible_quantity=visible,
+                    )
+                ],
+                [_quote(0)],
+                config=execution,
+                observed_coverage={"s1": (0, 200_000_000)},
+                trade_coverage={"trade-connection-1": (0, 200_000_000)},
+                capital=capital,
+                asset_id="btc_usdt",
+                funding_events=(),
+                funding_coverage=((0, 200_000_000),),
+                decision_windows_ns=((0, 100_000_000),),
+                on_ledger=emit,
+            )
+        )
+
+    ledger = write_portfolio_ledger_artifact(
+        tmp_path / "ledger",
+        capital=capital,
+        metadata={
+            "window": {
+                "start": pd.Timestamp(0).isoformat(),
+                "end": pd.Timestamp(100_000_000).isoformat(),
+            },
+            "sample_role": "exploratory",
+            "execution_mode": "continuous",
+            "execution_style": "maker",
+            "execution": asdict(execution),
+        },
+        produce=produce,
+    )
+    assert results[0]["account_path_status"] == (
+        "PARTIAL" if visible is None else "COMPLETE"
+    )
+    artifact = read_statistics_artifact(
+        crypto_statistics(
+            {
+                "ledger": str(ledger),
+                "output": str(tmp_path / "statistics"),
+                "analyses": ["performance"],
+            }
+        )
+    )
+    with artifact.table("crypto_portfolio_statistics.parquet") as frame:
+        metrics = frame.loc[frame.episode_id.eq("continuous")].set_index("metric_id")
+        for name in ("mean", "variance"):
+            row = metrics.loc[f"oos_inventory_{name}"]
+            assert row.status == "DEFINED" and row.reason == ""
+            assert row.value == 0.0
+        maximum = metrics.loc["oos_inventory_max_abs"]
+        if visible is None:
+            assert maximum.status == "UNDEFINED" and np.isnan(maximum.value)
+            assert maximum.reason == "hft_trade_visible_quantity_unknown"
+        else:
+            assert maximum.status == "DEFINED" and maximum.reason == ""
+            assert maximum.value == (0.0 if visible == 0 else 1.0)

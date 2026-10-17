@@ -814,3 +814,157 @@ def test_calibration_execution_coverage_matches_half_open_quote_lifetime(coverag
             "buy": 1.0,
             "sell": 0.0,
         }
+
+
+@pytest.mark.parametrize("quantity", [1.0, 2.0])
+def test_admissible_history_unknown_quantity_is_local_to_selection(quantity):
+    books = [_state(0), _state(500)]
+    trades = [
+        _trade(100, price="99.5", quantity="3", maker_buyer=True),
+        replace(
+            _trade(200, price="99.5", quantity="3", maker_buyer=True),
+            visible_quantity=None,
+        ),
+    ]
+    samples, events = [], []
+    captured = replay_maker_calibration(
+        books,
+        trades,
+        [
+            {
+                **_quote(0),
+                "proxy_prediction": 1.0,
+                "price_prediction": 0.0,
+                "price_label": 0.0,
+                "label_available_at_ns": 500_000_000,
+            }
+        ],
+        order_quantity=1.0,
+        latency_ms=0,
+        observed_coverage={"s1": (0, 501_000_000)},
+        trade_coverage={"trade-connection-1": (0, 501_000_000)},
+        cutoff_ns=500_000_000,
+        on_sample=lambda **sample: samples.append(sample),
+        on_event=lambda **event: events.append(event),
+    )
+    assert captured["samples"] == {"buy": 1, "sell": 1}
+    buy = next(sample for sample in samples if sample["side"] == "buy")
+    assert buy["filled"] == 1.0 and buy["terminal_reason"] == "filled"
+    assert any(
+        getattr(row["event"], "visible_quantity", 0) is None
+        and buy["event_start"] <= row["event_id"] < buy["event_end"]
+        for row in events
+    )
+    batches = []
+    result = simulate_maker(
+        books,
+        [],
+        [
+            {
+                **_quote(0),
+                "fold_id": "fold",
+                "price_prediction": 0.1,
+                "proxy_prediction": 1.0,
+            }
+        ],
+        config=replace(
+            _maker_config(calibrated=True), order_quantity=quantity, maker_fee_bps=0.0
+        ),
+        observed_coverage={"s1": (0, 501_000_000)},
+        trade_coverage={"trade-connection-1": (0, 501_000_000)},
+        capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
+        funding_forecasts=(FundingForecast(0, 1_000_000_000, ()),),
+        calibrations={"fold": calibration_from_paths([(books, trades)], [0.0])},
+        decision_windows_ns=((0, 500_000_000),),
+        on_ledger=batches.append,
+    )
+    assert result["account_path_status"] == "COMPLETE"
+    assert result["net_pnl"] == 0.0
+    assert result["selection_status"] == ("COMPLETE" if quantity == 1 else "PARTIAL")
+    gains = [
+        d.number
+        for b in batches
+        for d in b.diagnostics
+        if d.name == "maker_buy_expected_net_gain"
+    ]
+    if quantity == 1:
+        assert gains[0] > 0
+    else:
+        assert gains == [None]
+        assert result["created_orders"] == 0
+        assert any(
+            d.name == "maker_buy_selection_reason"
+            and d.text == "hft_trade_visible_quantity_unknown"
+            for b in batches
+            for d in b.diagnostics
+        )
+
+
+@pytest.mark.parametrize("unknown_at", [5, 100])
+def test_unknown_history_keeps_pending_or_active_orders_and_later_choices(unknown_at):
+    known = calibration_from_paths(
+        [([_state(0)], [_trade(100, price="99.5", quantity="4", maker_buyer=True)])],
+        [0.0],
+    )
+    unknown = calibration_from_paths(
+        [
+            (
+                [_state(0)],
+                [
+                    _trade(100, price="99.5", quantity="3", maker_buyer=True),
+                    replace(
+                        _trade(200, price="99.5", quantity="3", maker_buyer=True),
+                        visible_quantity=None,
+                    ),
+                ],
+            )
+        ],
+        [0.0],
+    )
+    batches, fills = [], []
+    result = simulate_maker(
+        [_state(0)],
+        [
+            _trade(stamp, price="99.5", quantity="4", maker_buyer=True)
+            for stamp in (300, 800)
+        ],
+        [
+            {
+                **_quote(stamp),
+                "fold_id": fold,
+                "price_prediction": 0.1,
+                "proxy_prediction": 1.0,
+            }
+            for stamp, fold in ((0, "known"), (unknown_at, "unknown"), (600, "known"))
+        ],
+        config=replace(
+            _maker_config(calibrated=True),
+            order_quantity=2.0,
+            max_position=6.0,
+            latency_ms=10,
+            maker_fee_bps=0.0,
+        ),
+        observed_coverage={"s1": (0, 1_201_000_000)},
+        trade_coverage={"trade-connection-1": (0, 1_201_000_000)},
+        capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
+        funding_forecasts=(FundingForecast(0, 1_201_000_000, ()),),
+        calibrations={"known": known, "unknown": unknown},
+        decision_windows_ns=((0, 1_200_000_000),),
+        on_ledger=capture_fill_rows(fills.append, batches.append),
+    )
+    assert result["selection_status"] == "PARTIAL"
+    assert result["account_path_status"] == "COMPLETE"
+    assert result["unknown_queue_decisions"] == 1
+    assert result["created_orders"] == 2
+    assert [fill["fill_qty"] for fill in fills] == [2.0, 2.0]
+    gains = [
+        d.number
+        for b in batches
+        for d in b.diagnostics
+        if d.name == "maker_buy_expected_net_gain"
+    ]
+    assert gains[0] > 0 and gains[1] is None and gains[2] > 0

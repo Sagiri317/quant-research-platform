@@ -3,7 +3,6 @@
 from collections.abc import Mapping
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import pyarrow as pa
 
@@ -11,7 +10,6 @@ from quant_research_platform.artifacts.outputs.evaluation import (
     write_evaluation_outputs_from_chunks,
 )
 from quant_research_platform.artifacts.outputs.prediction import (
-    prediction_model_metadata,
     read_predictions,
 )
 from quant_research_platform.contracts.columns import _validate_asset_time_key
@@ -39,9 +37,7 @@ from quant_research_platform.research.evaluations.engine import (
 )
 from quant_research_platform.research.features.transforms import (
     feature_observation_columns,
-    model_input_validity_columns,
 )
-from quant_research_platform.research.predictions.outputs import prediction_rows
 from quant_research_platform.storage.atomic import reject_if_exists
 from quant_research_platform.storage.datasets.reading import (
     _dataset_input_options,
@@ -255,28 +251,7 @@ def evaluate(config):
                 declared_stop == stop and closed and not declared_closed
             ):
                 raise ValueError("evaluation_prediction_window_incomplete")
-        model_metadata = prediction_model_metadata(metadata)
-        columns = tuple(
-            dict.fromkeys(
-                (
-                    *columns,
-                    *model_metadata["input_columns"],
-                    *model_input_validity_columns(
-                        tuple(model_metadata["input_columns"]),
-                        model_metadata["model_algorithm"],
-                        declared["column_roles"],
-                    ),
-                    *required_filter_columns(model_metadata["sample_filter_mode"]),
-                )
-            )
-        )
-        keys = pd.MultiIndex.from_frame(frame[["timestamp", "asset_id"]])
-        predictions[column] = (
-            frame,
-            keys,
-            np.zeros(len(frame), dtype=bool),
-            metadata,
-        )
+        predictions[column] = (frame, metadata)
 
     def prepared():
         seen = ExactPrimaryKeyIndex(primary_key=("timestamp", "asset_id"))
@@ -293,31 +268,7 @@ def evaluate(config):
                     )
                 ):
                     raise ValueError("evaluation_input_duplicate_keys")
-                for column, (
-                    prediction,
-                    keys,
-                    matched,
-                    metadata,
-                ) in predictions.items():
-                    expected = prediction_rows(
-                        frame,
-                        prediction_model_metadata(metadata),
-                        window,
-                        declared_columns=declared["column_roles"],
-                    )
-                    if metadata.get("asset_ids") is not None:
-                        expected = expected.loc[
-                            expected.asset_id.isin(metadata["asset_ids"])
-                        ]
-                    required = pd.MultiIndex.from_frame(
-                        expected[["timestamp", "asset_id"]]
-                    )
-                    positions = keys.get_indexer(required)
-                    if (positions < 0).any():
-                        raise ValueError("evaluation_prediction_coverage_missing")
-                    if matched[positions].any():
-                        raise ValueError("evaluation_input_duplicate_keys")
-                    matched[positions] = True
+                for column, (prediction, _metadata) in predictions.items():
                     frame = frame.merge(
                         prediction[
                             ["timestamp", "asset_id", "prediction_score"]
@@ -331,14 +282,14 @@ def evaluate(config):
                     and not ordinary
                     and all(
                         metadata.get("asset_ids") is not None
-                        for _, _, _, metadata in predictions.values()
+                        for _, metadata in predictions.values()
                     )
                 ):
-                    # Scope the numerical evaluation only after every source's
-                    # own expected prediction domain has been checked above.
+                    # Explicit prediction asset scopes constrain prediction-only
+                    # evaluations without requalifying historical model inputs.
                     assets = {
                         asset
-                        for _, _, _, metadata in predictions.values()
+                        for _, metadata in predictions.values()
                         for asset in metadata["asset_ids"]
                     }
                     frame = frame.loc[frame.asset_id.isin(assets)]
@@ -352,8 +303,6 @@ def evaluate(config):
                     )
                     frame.loc[~mature, label] = float("nan")
                 yield frame
-            if any(not matched.all() for _, _, matched, _ in predictions.values()):
-                raise ValueError("evaluation_prediction_coverage_extra")
 
     with build_evaluation_result_from_frames(
         prepared(),

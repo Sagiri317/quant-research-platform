@@ -661,7 +661,7 @@ def backtest_taker(config):
     config = _strict_config(
         config,
         _BACKTEST_KEYS | {"predictions"},
-        {"archive_paths", "input_spec", "chronology", "funding_roots"},
+        {"archive_paths", "input_spec", "funding_roots"},
     )
     window, windows, capital, panel = _backtest_inputs(config)
     execution = TakerConfig(
@@ -1230,7 +1230,7 @@ def backtest_maker(config):
     config = _strict_config(
         config,
         _BACKTEST_KEYS | {"models", "calibration"},
-        {"archive_paths", "input_spec", "chronology", "funding_roots"},
+        {"archive_paths", "input_spec", "funding_roots"},
     )
     window, windows, capital, panel = _backtest_inputs(config)
     execution = MakerConfig(

@@ -386,3 +386,150 @@ def test_failed_family_keeps_planned_inference_members_without_fake_prediction(
     )
     with read_statistics_artifact(root).table("model_losses.parquet") as actual:
         assert set(actual.family_id) == {"working", "failed"}
+
+
+@pytest.mark.parametrize(
+    "analyses", [["rank_ic"], ["fama_macbeth"], ["rank_ic", "fama_macbeth"]]
+)
+@pytest.mark.parametrize("empty_labels", [False, True])
+def test_factor_statistics_complete_batches_preserve_dates_and_masks(
+    tmp_path, monkeypatch, analyses, empty_labels
+):
+    from quant_research_platform.research import statistics_production as production
+    from quant_research_platform.storage.datasets import read_dataset
+
+    _, _, dates = _factor_tables(tmp_path)
+    frame = read_dataset(tmp_path / "input").rename(columns={"factor": "feature_x"})
+    times = pd.date_range("2020-01-02", periods=len(dates), freq="100ms")
+    frame["timestamp"] = frame.timestamp.map(dict(zip(dates, times, strict=True)))
+    frame["forward_return_20d_available_at"] = frame.timestamp
+    frame["feature_observed_x"] = 1.0
+    frame.loc[frame.timestamp.eq(times[2]), "feature_observed_x"] = 0.0
+    frame.loc[frame.timestamp.eq(times[4]), "forward_return_20d"] = np.nan
+    frame.loc[frame.timestamp.eq(times[6]), "eligible"] = False
+    frame.loc[frame.timestamp.eq(times[8]), "forward_return_20d_available_at"] = (
+        pd.Timestamp("2021-01-01")
+    )
+    frame.loc[
+        frame.timestamp.eq(times[1]) & frame.asset_id.eq("0"), "feature_observed_x"
+    ] = 0.0
+    if empty_labels:
+        frame["forward_return_20d"] = np.nan
+    spec = make_demo_research_dataset_spec(
+        data_id="batched_statistics",
+        factor_columns=(),
+        feature_columns=("feature_x", "feature_observed_x"),
+        label_columns=("forward_return_20d", "forward_return_20d_available_at"),
+        filter_columns=("eligible",),
+        context_columns=("total_market_cap",),
+    )
+    source = tmp_path / "batched-input"
+    write_dataset(source, frame.loc[:, list(spec.column_roles)], spec=spec)
+    config = {
+        "dataset": {
+            "path": str(source),
+            "row_filters": [["asset_id", "in", ["0", "1", "2", "3"]]],
+        },
+        "window": {"start": "2020-01-02", "end": "2020-01-02"},
+        "analyses": analyses,
+        "evaluation": {"primary_label": "forward_return_20d", "factors": ["feature_x"]},
+        "statistics": {
+            "hac_lag": 1,
+            "factor_fdr_families": {"family": ["feature_x"]},
+            "fama_macbeth_core_factors": [],
+        },
+    }
+    original = production.iter_dataset_chunks
+    artifacts = []
+    closed = []
+    for batch_rows in (1000, 7):
+
+        def chunks(session, batch_rows=batch_rows):
+            try:
+                yield from original(session, batch_rows=batch_rows)
+            finally:
+                closed.append(batch_rows)
+
+        monkeypatch.setattr(production, "iter_dataset_chunks", chunks)
+        artifacts.append(
+            read_statistics_artifact(
+                production.factor_statistics(
+                    {**config, "output": str(tmp_path / f"result-{batch_rows}")}
+                )
+            )
+        )
+    assert closed == [1000, 7]
+    assert artifacts[0].metadata == artifacts[1].metadata
+    names = (["factor_diagnostics.parquet"] if "rank_ic" in analyses else []) + (
+        ["fama_macbeth.parquet", "fama_macbeth_periods.parquet"]
+        if "fama_macbeth" in analyses
+        else []
+    )
+    for name in names:
+        with artifacts[0].table(name) as left, artifacts[1].table(name) as right:
+            pd.testing.assert_frame_equal(left, right, check_exact=True)
+            if name == "factor_diagnostics.parquet":
+                assert left.input_date_count.eq(12).all()
+                assert left.observation_count.eq(0 if empty_labels else 8).all()
+            if name == "fama_macbeth_periods.parquet":
+                assert left.timestamp.nunique() == (0 if empty_labels else 9)
+                assert left.observation_count.le(4).all()
+                if not empty_labels:
+                    assert (
+                        left.loc[left.timestamp.eq(times[2]), "status"]
+                        .eq("UNDEFINED")
+                        .all()
+                    )
+
+
+def test_factor_statistics_empty_selected_window_is_undefined(tmp_path):
+    from quant_research_platform.research.statistics_production import factor_statistics
+
+    _factor_tables(tmp_path)
+    config = {
+        "dataset": str(tmp_path / "input"),
+        "output": str(tmp_path / "empty-window"),
+        "window": {"start": "2020-02-01", "end": "2020-02-02"},
+        "analyses": ["rank_ic", "fama_macbeth"],
+        "evaluation": {"primary_label": "forward_return_20d", "factors": ["factor"]},
+        "statistics": {
+            "hac_lag": 1,
+            "factor_fdr_families": {"family": ["factor"]},
+            "fama_macbeth_core_factors": [],
+        },
+    }
+    artifact = read_statistics_artifact(factor_statistics(config))
+    metrics = [
+        "mean",
+        "standard_error",
+        "t_statistic",
+        "p_value",
+        "ci_lower",
+        "ci_upper",
+    ]
+    for name, count in (
+        ("factor_diagnostics", "observation_count"),
+        ("fama_macbeth", "period_count"),
+    ):
+        with artifact.table(name + ".parquet") as frame:
+            assert not frame.empty
+            assert frame.input_date_count.eq(0).all()
+            assert frame[count].eq(0).all()
+            assert frame.status.eq("UNDEFINED").all()
+            assert frame.reason.eq("hac_lag_exceeds_observations").all()
+            assert frame[metrics].isna().all().all()
+            if name == "factor_diagnostics":
+                assert frame.defined_hypothesis_count.eq(0).all()
+                assert frame.fdr_adjusted_p_value.isna().all()
+    with artifact.table("fama_macbeth_periods.parquet") as frame:
+        assert frame.empty
+    missing_output = tmp_path / "missing-source-output"
+    with pytest.raises(FileNotFoundError):
+        factor_statistics(
+            {
+                **config,
+                "dataset": str(tmp_path / "absent"),
+                "output": str(missing_output),
+            }
+        )
+    assert not missing_output.exists()

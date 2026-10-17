@@ -329,7 +329,6 @@ def test_final_maker_gate_uses_only_required_fold_but_validates_full_artifact(
         "source": str(tmp_path),
         "asset_id": "btc_usdt",
         "symbol": "BTCUSDT",
-        "chronology": metadata["chronology"],
         "prediction_window": plan["test"],
         "execution_mode": "continuous",
         "capital": {

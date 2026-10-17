@@ -78,6 +78,7 @@ def test_native_labels_declare_distinct_units_and_maturity_columns():
 
     spec = hft_processed_catalog().get(HFT_LABEL_DATA_ID)
     for definition in label_catalog().list():
+        assert definition.label_timing == "decision_time_plus_horizon"
         assert (
             spec.label_availability_columns[definition.output_column]
             == definition.available_at_column

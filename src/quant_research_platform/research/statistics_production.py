@@ -48,7 +48,10 @@ from quant_research_platform.research.statistics import (
     stepm_superior_models,
     time_series_inference_summary,
 )
-from quant_research_platform.runtime.dataframes import iter_complete_session_frames
+from quant_research_platform.runtime.dataframes import (
+    iter_complete_session_frames,
+    iter_complete_time_frames,
+)
 from quant_research_platform.storage.datasets.reading import (
     _dataset_input_options,
     iter_dataset_chunks,
@@ -161,7 +164,7 @@ def build_a_share_factor_statistics_tables(
     ):
         raise ValueError("statistics_required_columns_excluded")
     ranks, periods, input_dates = [], [], []
-    chunks = iter_complete_session_frames(
+    chunks = iter_complete_time_frames(
         read_dataset(
             dataset_path,
             spec=dataset_spec if Path(dataset_path).is_file() else None,
@@ -174,10 +177,10 @@ def build_a_share_factor_statistics_tables(
         timestamp_column="timestamp",
     )
     with closing_iterator(chunks):
-        for session in chunks:
-            input_dates.append(pd.Timestamp(session["timestamp"].iloc[0]))
+        for batch in chunks:
+            input_dates.extend(map(pd.Timestamp, batch["timestamp"].drop_duplicates()))
             mature = legal_training_rows(
-                session,
+                batch,
                 fitting_cutoff=cutoff,
                 availability_column=availability,
                 target_column=primary_label,
@@ -194,14 +197,15 @@ def build_a_share_factor_statistics_tables(
                     ).to_dict("records")
                 )
             if "fama_macbeth" in analyses:
-                periods.extend(
-                    _fama_macbeth_period_records(
-                        mature,
-                        return_column=primary_label,
-                        factors=factors,
-                        core_factors=core,
+                for _, session in mature.groupby("timestamp", sort=False):
+                    periods.extend(
+                        _fama_macbeth_period_records(
+                            session,
+                            return_column=primary_label,
+                            factors=factors,
+                            core_factors=core,
+                        )
                     )
-                )
     tables = {}
     if "rank_ic" in analyses:
         tables["factor_diagnostics"] = _factor_summary(

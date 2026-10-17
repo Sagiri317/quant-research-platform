@@ -419,10 +419,8 @@ def test_crypto_analyses_require_only_selected_policy_and_keep_real_coverage(
     tmp_path, analyses
 ):
     from quant_research_platform.markets.implementations.crypto.execution import (
-        _record_execution_result,
-    )
-    from quant_research_platform.research.portfolios.accounting import (
         PortfolioEconomics,
+        _record_execution_result,
     )
     from quant_research_platform.research.portfolios.diagnostics import (
         crypto_statistics,

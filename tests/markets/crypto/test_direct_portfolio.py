@@ -231,9 +231,8 @@ def _market(monkeypatch):
 
 
 @pytest.mark.parametrize("minimum", (2, 100000))
-@pytest.mark.parametrize("declare_chronology", (True, False))
 def test_explicit_maker_calibration_and_frozen_backtest(
-    tmp_path, monkeypatch, explicit_models, minimum, declare_chronology
+    tmp_path, monkeypatch, explicit_models, minimum
 ):
     inputs, chronology, validation, final = explicit_models
     _market(monkeypatch)
@@ -277,7 +276,6 @@ def test_explicit_maker_calibration_and_frozen_backtest(
         "source": "explicit-source",
         "asset_id": "btc_usdt",
         "symbol": "BTCUSDT",
-        "chronology": chronology,
         "prediction_window": chronology["test"],
         "execution_mode": "continuous",
         "capital": asdict(
@@ -287,8 +285,6 @@ def test_explicit_maker_calibration_and_frozen_backtest(
         "calibration": str(calibration),
         "models": [{"predictions": item["predictions"]} for item in final],
     }
-    if not declare_chronology:
-        backtest.pop("chronology")
     if minimum > 2:
         from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
 
@@ -396,7 +392,6 @@ def test_backtest_uses_actual_fitting_facts_without_model_registration(
             "source": "explicit-source",
             "asset_id": "btc_usdt",
             "symbol": "BTCUSDT",
-            "chronology": chronology,
             "prediction_window": chronology["test"],
             "execution_mode": "continuous",
             "capital": asdict(
@@ -439,10 +434,9 @@ def test_episode_publication_rejects_nat_metadata_before_production(tmp_path, va
 
 
 @pytest.mark.parametrize("mode", ("continuous", "independent_segments"))
-@pytest.mark.parametrize("declare_chronology", (True, False))
 @pytest.mark.parametrize("window_kind", ("test", "dev"))
 def test_explicit_taker_uses_saved_predictions_without_training(
-    tmp_path, monkeypatch, explicit_models, mode, declare_chronology, window_kind
+    tmp_path, monkeypatch, explicit_models, mode, window_kind
 ):
     import quant_research_platform.research.models.fitting as fitting
     from quant_research_platform.artifacts.crypto_hft import (
@@ -468,7 +462,6 @@ def test_explicit_taker_uses_saved_predictions_without_training(
             "source": "explicit-source",
             "asset_id": "btc_usdt",
             "symbol": "BTCUSDT",
-            **({"chronology": chronology} if declare_chronology else {}),
             "prediction_window": window,
             "execution_mode": mode,
             "capital": asdict(
@@ -796,22 +789,8 @@ def test_independent_calibration_rejects_missing_or_wrong_science(
     assert not Path(config["output"]).exists()
 
 
-@pytest.mark.parametrize("declare_chronology", (False, True))
-def test_independent_calibration_cutoff_must_precede_execution(
-    independent_maker, declare_chronology
-):
+def test_independent_calibration_cutoff_must_precede_execution(independent_maker):
     config, backtest = independent_maker
-    if declare_chronology:
-        backtest["chronology"] = {
-            "folds": [
-                {
-                    "fold_id": "dev",
-                    "train": _window(0, 1000),
-                    "validation": backtest["prediction_window"],
-                }
-            ],
-            "test": _window(10000, 11000),
-        }
     config["models"][0]["cutoff"] = backtest["prediction_window"]["start"]
     portfolio.calibrate_maker(config)
     with pytest.raises(ValueError, match="consumer_relationship_invalid"):
@@ -978,16 +957,6 @@ def test_dev_maker_consumes_causal_calibration_with_independent_explicit_windows
         ],
         "test": _window(12000, 13000),
     }
-    backtest["chronology"] = {
-        "folds": [
-            {
-                "fold_id": "dev",
-                "train": _window(0, 1000),
-                "validation": backtest["prediction_window"],
-            }
-        ],
-        "test": _window(10000, 11000),
-    }
     calibration = portfolio.calibrate_maker(config)
     artifact = read_statistics_artifact(
         calibration, validate_tables=portfolio.validate_maker_calibration
@@ -1003,3 +972,27 @@ def test_dev_maker_consumes_causal_calibration_with_independent_explicit_windows
         ]
         == "COMPLETE"
     )
+
+
+@pytest.mark.parametrize("style", ("taker", "maker"))
+def test_backtest_rejects_unused_chronology_in_python_and_cli(tmp_path, style):
+    import json
+
+    from typer.testing import CliRunner
+
+    from quant_research_platform.interfaces.cli.commands import app
+
+    extra = {"predictions"} if style == "taker" else {"models", "calibration"}
+    config = dict.fromkeys(portfolio._BACKTEST_KEYS | extra)
+    config["chronology"] = {"unused": True}
+    operation = getattr(portfolio, f"backtest_{style}")
+    with pytest.raises(ValueError, match="config_fields"):
+        operation(config)
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(config))
+    result = CliRunner().invoke(
+        app, [f"backtest-crypto-{style}", "--config", str(path)]
+    )
+    assert result.exit_code != 0
+    assert isinstance(result.exception, ValueError)
+    assert "config_fields" in str(result.exception)

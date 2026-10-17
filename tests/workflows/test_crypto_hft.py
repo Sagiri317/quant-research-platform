@@ -291,16 +291,6 @@ def test_funding_unknown_is_asset_scoped_and_keeps_old_good(
         "inputs": str(root),
         "panel": str(root),
         "source": "source",
-        "chronology": {
-            "folds": [
-                {
-                    "fold_id": "fold",
-                    "train": _window(0, 2000),
-                    "validation": _window(2100, 3500),
-                }
-            ],
-            "test": _window(8600, 9000),
-        },
         "prediction_window": _window(8600, 9000),
         "execution_mode": "continuous",
         "capital": asdict(

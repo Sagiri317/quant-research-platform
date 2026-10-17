@@ -404,7 +404,7 @@ derivatives_state.json 加入衍生品状态因子；不做块或参数的笛卡
 
 各操作只要求自己消费的输入：拟合声明历史窗口与截止时刻，预测声明实际预测窗，
 校准声明样本窗与成熟截止，回测声明资金、执行假设与执行窗。
-`chronology` 可记录研究计划并补全省略的校准日期；显式操作窗口不受计划的 train/dev/test 名称约束。
+校准的 `chronology` 可补全省略的样本窗与成熟截止；显式操作窗口不受计划的 train/dev/test 名称约束。
 不为适应短录制而偷偷缩窗，不随机打乱事件行，不用排序掩盖同时间戳顺序歧义。
 训练资格由成熟标签和拟合截止时间决定。额外隔离间隔若必要，属于显式实验语义，
 不是第二套通用机械purge规则。特征只消费决策时已知事实，未来盘口/成交和未来派生分类不得回填。
@@ -498,7 +498,7 @@ direction 或压力 proxy 不得被当作收益率使用。
 `execution_mode`、`capital`、`execution` 与新 `output`；可额外给出 `archive_paths`，
 裸 Parquet 输入还需 `input_spec`。`capital` 保存 `candidate_id`、`initial_capital`、
 `valuation_currency`、`valuation_method`；执行资产限定 Binance BTC/ETH，币种为 USDT，
-估值方法为 `linear_perpetual`。`chronology` 可省略；实际执行始终采用显式 `prediction_window`。
+估值方法为 `linear_perpetual`。回测仅接收显式 `prediction_window`，不接收 `chronology`。
 taker 另给 `predictions` 路径；校准 maker 给按价格/proxy 顺序排列的两个
 `{predictions}` 及 `calibration` 路径，
 固定 maker 使用 `models=[]`、`calibration=null`。
@@ -629,7 +629,7 @@ verification区分显式归档尚未独立核对、官方响应已验证、供�
 ### 连续与独立分段执行
 
 直接 backtest 按实际 `prediction_window` 消费持久化预测，要求模型拟合截止早于预测窗。
-显式提供 `chronology` 不限制执行窗，dev 或探索窗口均可直接回测；计划不会自动授予结果 test 身份。
+dev 或探索窗口均可直接回测；显式执行窗口不会自动授予结果 test 身份。
 校准 maker 仍要求全部所选校准截止早于执行开始。下文执行 OOS 指本次声明的样本外执行窗。
 研究窗口由连续 UTC 时点定义，午夜或文件块不是账户重置边界。
 每次 backtest 的 `execution_mode` 选择 `continuous` 或 `independent_segments`；

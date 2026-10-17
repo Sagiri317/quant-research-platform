@@ -207,7 +207,7 @@ def test_perpetual_published_pnl_keeps_small_cost_and_funding(tmp_path, capital_
         FundingEvent,
         PortfolioCapital,
     )
-    from quant_research_platform.research.portfolios.accounting import (
+    from quant_research_platform.markets.implementations.crypto.execution import (
         PortfolioEconomics,
     )
 

@@ -241,22 +241,6 @@ def _native_taker_projection_case(tmp_path, monkeypatch, *, count=300):
             "asset_id": "btc_usdt",
             "symbol": "BTCUSDT",
             "predictions": "explicit-predictions",
-            "chronology": {
-                "folds": [
-                    {
-                        "fold_id": "fold",
-                        "train": {
-                            "start": "2026-08-01T00:00:00",
-                            "end": "2026-08-02T00:00:00",
-                        },
-                        "validation": {
-                            "start": "2026-08-03T00:00:00",
-                            "end": "2026-08-04T00:00:00",
-                        },
-                    }
-                ],
-                "test": {"start": start.isoformat(), "end": end.isoformat()},
-            },
             "prediction_window": {
                 "start": window.start.isoformat(),
                 "end": window.end.isoformat(),
@@ -1282,7 +1266,7 @@ def test_fee_stress_keeps_representable_extreme_change():
 def test_capture_fill_rows_keeps_delayed_identity_without_derived_fees(
     close_price, realized
 ):
-    from quant_research_platform.research.portfolios.accounting import (
+    from quant_research_platform.markets.implementations.crypto.execution import (
         PortfolioEconomics,
     )
 

@@ -8,7 +8,9 @@ import pytest
 
 import quant_research_platform.artifacts.portfolio_ledger as ledger
 from quant_research_platform.contracts.portfolios import PortfolioCapital
-from quant_research_platform.research.portfolios.accounting import PortfolioEconomics
+from quant_research_platform.markets.implementations.crypto.execution import (
+    PortfolioEconomics,
+)
 from quant_research_platform.storage.identity import filesystem_exists
 from tests.artifacts.test_portfolio_ledger_artifact import _file_bytes
 

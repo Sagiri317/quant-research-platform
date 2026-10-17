@@ -703,7 +703,11 @@ def build_crypto_portfolio_statistics_tables(
                 )
                 stop_at = execution.get("account_stop_ns")
                 unknown_extreme = (
-                    partial_reason == "portfolio_pending_execution_unknown"
+                    partial_reason
+                    in {
+                        "portfolio_pending_execution_unknown",
+                        "hft_trade_visible_quantity_unknown",
+                    }
                     and stop_at is not None
                     and observed_start <= stop_at <= observed_end
                     and (any(start <= stop_at <= end for start, end in bounds))

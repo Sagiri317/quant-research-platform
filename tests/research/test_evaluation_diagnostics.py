@@ -1084,23 +1084,61 @@ def test_direct_evaluation_preserves_each_mature_pair_and_late_label_invariance(
         pd.testing.assert_frame_equal(tables[name], actual[name], check_exact=True)
 
 
+@pytest.mark.parametrize("change", ("drop", "null"))
+def test_direct_evaluation_does_not_requalify_saved_predictions(
+    tmp_path, explicit_evaluation, change
+):
+    from quant_research_platform.artifacts.outputs.evaluation import (
+        read_evaluation_outputs,
+    )
+    from quant_research_platform.research.evaluations.runner import evaluate
+    from tests.research.crypto_evaluation_test_support import write_evaluation_input
+
+    frame, _spec, config = explicit_evaluation
+    _, expected = read_evaluation_outputs(evaluate(config))
+    changed = frame.drop(columns="x") if change == "drop" else frame.assign(x=np.nan)
+    inputs = write_evaluation_input(
+        tmp_path / "current-labels",
+        changed,
+        features=() if change == "drop" else ("x",),
+        factors=("spread",),
+        labels=("short", "long"),
+    )
+    _, actual = read_evaluation_outputs(
+        evaluate(
+            {
+                **config,
+                "inputs": str(inputs),
+                "output": str(tmp_path / "current-evaluation"),
+            }
+        )
+    )
+    for name in expected:
+        pd.testing.assert_frame_equal(expected[name], actual[name], check_exact=True)
+
+
 @pytest.mark.parametrize("damage", ("missing", "extra", "unusable_extra"))
-def test_direct_evaluation_checks_prediction_domain_before_mature_intersection(
+def test_direct_evaluation_pairs_actual_prediction_keys_with_current_mature_labels(
     tmp_path,
     explicit_evaluation,
     damage,
 ):
+    from quant_research_platform.artifacts.outputs.evaluation import (
+        read_evaluation_outputs,
+    )
     from quant_research_platform.artifacts.outputs.prediction import (
         read_predictions,
         write_prediction_outputs,
     )
     from quant_research_platform.research.evaluations.runner import evaluate
+    from tests.research.crypto_evaluation_test_support import (
+        assert_pairwise_maturity_and_ic,
+    )
 
-    frame, _spec, config = explicit_evaluation
+    frame, spec, config = explicit_evaluation
     predictions, metadata = read_predictions(Path(config["predictions"]["pred"]))
     if damage == "missing":
-        # This sample's short label is immature, but it is still a required legal
-        # prediction. Intersecting first with observed labels would hide the gap.
+        # A missing saved prediction affects only pairs that actually use its key.
         predictions = predictions.loc[predictions.timestamp.ne(frame.timestamp.iloc[5])]
     else:
         extra = predictions.iloc[[0]].copy()
@@ -1120,9 +1158,18 @@ def test_direct_evaluation_checks_prediction_domain_before_mature_intersection(
             "effective_prediction_end": None,
         },
     )
-    with pytest.raises(ValueError, match="evaluation_prediction_coverage"):
+    _, tables = read_evaluation_outputs(
         evaluate({**config, "predictions": {"pred": str(mutated)}})
-    assert not Path(config["output"]).exists()
+    )
+    work = frame.loc[frame.timestamp.ge(pd.Timestamp(config["window"]["start"]))].merge(
+        predictions[["timestamp", "asset_id", "prediction_score"]].rename(
+            columns={"prediction_score": "pred"}
+        ),
+        on=["timestamp", "asset_id"],
+        how="left",
+        validate="one_to_one",
+    )
+    assert_pairwise_maturity_and_ic(tables["metrics"], work, spec, config["cutoff"])
 
 
 def test_evaluation_collision_never_opens_input_or_overwrites(tmp_path, monkeypatch):
@@ -1484,3 +1531,92 @@ def test_native_evaluation_groups_bind_to_their_actual_metric_pair(tmp_path, dam
         root, tables=("ic_summary", "group_spread_summary")
     )
     assert summaries["ic_summary"].mean_ic.iloc[0] == 1.0
+
+
+@pytest.mark.parametrize(
+    "change", ("missing_labels", "immature", "ineligible", "different_keys")
+)
+def test_direct_evaluation_uses_current_label_domain(
+    tmp_path, explicit_evaluation, change
+):
+    from quant_research_platform.artifacts.outputs.evaluation import (
+        read_evaluation_outputs,
+    )
+    from quant_research_platform.artifacts.outputs.prediction import read_predictions
+    from quant_research_platform.research.evaluations.runner import evaluate
+    from tests.research.crypto_evaluation_test_support import (
+        assert_pairwise_maturity_and_ic,
+        write_evaluation_input,
+    )
+
+    frame, spec, config = explicit_evaluation
+    frame = frame.drop(columns="x")
+    if change == "missing_labels":
+        frame[["short", "long"]] = np.nan
+    elif change == "immature":
+        frame[["short_available_at", "long_available_at"]] = pd.Timestamp(
+            config["cutoff"]
+        ) + pd.Timedelta(days=1)
+    elif change == "ineligible":
+        frame["eligible"] = False
+    else:
+        frame["asset_id"] = "eth_usdt"
+    inputs = write_evaluation_input(
+        tmp_path / "current-domain",
+        frame,
+        factors=("spread",),
+        labels=("short", "long"),
+    )
+    _, tables = read_evaluation_outputs(
+        evaluate(
+            {
+                **config,
+                "inputs": str(inputs),
+                "output": str(tmp_path / "current-domain-eval"),
+            }
+        )
+    )
+    predictions, _ = read_predictions(Path(config["predictions"]["pred"]))
+    work = frame.loc[frame.timestamp.ge(pd.Timestamp(config["window"]["start"]))].merge(
+        predictions[["timestamp", "asset_id", "prediction_score"]].rename(
+            columns={"prediction_score": "pred"}
+        ),
+        on=["timestamp", "asset_id"],
+        how="left",
+        validate="one_to_one",
+    )
+    assert_pairwise_maturity_and_ic(tables["metrics"], work, spec, config["cutoff"])
+    prediction_metrics = tables["metrics"].loc[tables["metrics"].signal.eq("pred")]
+    assert prediction_metrics.n_obs.eq(0).all()
+    assert prediction_metrics.ic.isna().all()
+    assert prediction_metrics.ic_reason.eq("insufficient_observations").all()
+
+
+def test_prediction_only_evaluation_needs_no_factor_or_model_input(
+    tmp_path, explicit_evaluation
+):
+    from quant_research_platform.artifacts.outputs.evaluation import (
+        read_evaluation_outputs,
+    )
+    from quant_research_platform.research.evaluations.runner import evaluate
+    from tests.research.crypto_evaluation_test_support import write_evaluation_input
+
+    frame, _spec, config = explicit_evaluation
+    inputs = write_evaluation_input(
+        tmp_path / "only-labels",
+        frame.drop(columns=["x", "spread"]),
+        labels=("short", "long"),
+    )
+    config = {**config, "inputs": str(inputs)}
+    # A requested factor is still required even alongside persisted predictions.
+    with pytest.raises(ValueError, match="evaluation_signal_role_mismatch"):
+        evaluate(config)
+    config["evaluation"] = {
+        **config["evaluation"],
+        "signals": config["evaluation"]["signals"][:1],
+    }
+    _, tables = read_evaluation_outputs(evaluate(config))
+    assert tables["metrics"].set_index("label").n_obs.to_dict() == {
+        "short": 2,
+        "long": 3,
+    }

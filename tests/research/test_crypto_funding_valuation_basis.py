@@ -18,10 +18,10 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioCapital,
 )
 from quant_research_platform.markets.implementations.crypto.execution import (
+    PortfolioEconomics,
     simulate_maker,
     simulate_taker,
 )
-from quant_research_platform.research.portfolios.accounting import PortfolioEconomics
 from quant_research_platform.research.portfolios.diagnostics import crypto_statistics
 from tests.helpers.binance_hft import _quote
 from tests.markets.crypto.test_hft_execution import (
