@@ -157,19 +157,8 @@ def test_external_archive_units_clocks_and_invalid_rows_reach_publication(
     data_id = ids.HFT_EXTERNAL_DATA_IDS[venue]
     instrument = producer.EXTERNAL_INSTRUMENTS[venue]
     archives = config["auxiliary_sources"][venue]["archives"]
-    source_window = TimeWindow(
-        min(fold["train"]["start"] for fold in config["research_plan"]["folds"]),
-        config["windows"]["development"]["end"],
-    )
-    identity_reader = partial(
-        normalized.source_identity,
-        exchange=instrument["exchange"],
-        archives=archives,
-        time_window=source_window,
-    )
     binding = SimpleNamespace(
         raw_root=layout.raw_source_root("tardis") / instrument["exchange"],
-        source_identity=identity_reader,
         producer=partial(
             producer.produce_normalized_context,
             read_records=normalized.iter_records,
@@ -265,7 +254,6 @@ def test_external_archive_units_clocks_and_invalid_rows_reach_publication(
             for symbol, kinds in manifests.items()
         }
     )
-    assert binding.source_identity(binding.raw_root, data_id) == expected_hash
     frames = []
     for asset in ("btc_usdt", "eth_usdt"):
         frames.extend(
@@ -448,7 +436,6 @@ def test_external_archive_units_clocks_and_invalid_rows_reach_publication(
         for p in output_root.rglob("*")
         if p.is_file()
     } == good
-    assert binding.source_identity(binding.raw_root, data_id) == expected_hash
 
     wrong_scope = {symbol: dict(kinds) for symbol, kinds in archives.items()}
     wrong_scope[symbols[0]]["quotes"] = archives[symbols[1]]["quotes"]

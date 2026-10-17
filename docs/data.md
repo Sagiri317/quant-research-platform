@@ -69,7 +69,7 @@ Raw 响应状态以 `status` 为唯一事实，不再持久化重复布尔状态
 3 为调整后的合并报表，4 为调整后的母公司报表。现有正式消费者只接受 `Type=1/3`。
 CTR 财务报表的 `ReportType` 则按 1、2、3、4 分别表示合并、调整合并、母公司、
 调整母公司，不能将其数字直接用于 CSS。Raw 原样保留请求；已知财务 CSS 指标若带
-`ReportType`，正式 source identity 与 interim 消费明确拒绝，不默认为 `Type=1`，
+`ReportType`，正式来源准备与 interim 消费明确拒绝，不默认为 `Type=1`，
 不增加 CTR 到 CSS 的兼容映射。
 
 `sources/choice/fields.py` 是三张报表共 14 项一般企业指标的唯一字段映射。

@@ -665,18 +665,25 @@ def test_raw_export_discovery_contract_keeps_csv_only(
             tmp_path
         )
     ] == [csv_export]
-    inspection = raw_schemas.inspect_raw_export_file(csv_export)
+    selection = list(raw_exports.dataset_files_with_identity_by_id(tmp_path))
+    expected = _collect_raw_export(csv_export, "trading_calendar")
     sidecar = csv_export.with_suffix(".metadata.json")
     for payload in ("{}", "changed metadata"):
         filesystem_write_text(sidecar, payload, encoding="utf-8")
-        assert raw_schemas.inspect_raw_export_file(csv_export) == inspection
+        assert (
+            list(raw_exports.dataset_files_with_identity_by_id(tmp_path)) == selection
+        )
+        pd.testing.assert_frame_equal(
+            _collect_raw_export(csv_export, "trading_calendar"), expected
+        )
     sidecar.unlink()
     sidecar.mkdir()
-    assert raw_schemas.inspect_raw_export_file(csv_export) == inspection
+    assert list(raw_exports.dataset_files_with_identity_by_id(tmp_path)) == selection
+    pd.testing.assert_frame_equal(
+        _collect_raw_export(csv_export, "trading_calendar"), expected
+    )
     with pytest.raises(ValueError, match="Invalid CSMAR raw filename"):
         raw_schemas.parse_raw_filename(xlsx_export)
-    with pytest.raises(ValueError, match="Cannot infer CSMAR dataset"):
-        raw_schemas.inspect_raw_export_file(txt_description)
 
 
 def test_csmar_preparation_evidence_is_selected_content_only(tmp_path: Path) -> None:
@@ -960,8 +967,10 @@ def test_provider_header_accepts_extra_optional_fields(
         )
         path = tmp_path / f"provider-{width}.csv"
         filesystem_write_text(path, ",".join(columns) + "\n", encoding="utf-8")
-        inspection = raw_schemas.inspect_raw_export_file(path)
-        assert inspection.columns == columns
+        assert tuple(raw_schemas.read_export_header(path)) == columns
+        selected = list(raw_exports.dataset_files_with_identity_by_id(tmp_path))
+        assert all(dataset == "trading_calendar" for dataset, _, _ in selected)
+        assert _collect_raw_export(path, "trading_calendar").empty
 
 
 def test_financial_correction_date_order_is_validated() -> None:
@@ -2061,12 +2070,21 @@ def test_raw_table_identity_ignores_parent_directory_and_rejects_conflict(tmp_pa
         filesystem_mkdir(root)
         path = root / "unknown.csv"
         filesystem_write_text(path, payload, encoding="utf-8")
-        outputs.append(raw_schemas.inspect_raw_export_file(path).dataset)
+        [(dataset, selected_path, _identity)] = list(
+            raw_exports.dataset_files_with_identity_by_id(root)
+        )
+        assert selected_path == path
+        outputs.append(dataset)
+        frame = _collect_raw_export(path, dataset)
+        assert frame.loc[0, "Stkcd"] == "000001"
     assert outputs == ["market_cap", "market_cap"]
     conflict = tmp_path / "TRDNEW_Co.csv"
     filesystem_write_text(conflict, payload, encoding="utf-8")
     with pytest.raises(ValueError, match="table_identity_conflict"):
-        raw_schemas.inspect_raw_export_file(conflict)
+        for dataset, path, _identity in raw_exports.dataset_files_with_identity_by_id(
+            tmp_path
+        ):
+            _collect_raw_export(path, dataset)
 
 
 @pytest.mark.parametrize(

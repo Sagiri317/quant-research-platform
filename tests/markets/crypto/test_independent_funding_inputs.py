@@ -162,7 +162,7 @@ def test_selected_corrupt_funding_never_falls_back(
     config = _config(kind, independent_inputs, models)
     # The original response is part of the native source contract, not a copied CSV.
     (tmp_path / "independent-funding" / "settlements.json").write_text("[]")
-    with pytest.raises(ValueError, match="binance_funding_settlement_source_changed"):
+    with pytest.raises(ValueError, match="binance_funding_settlement_source_invalid"):
         getattr(portfolio, "backtest_" + kind)(config)
     assert not (tmp_path / "ledger").exists()
 

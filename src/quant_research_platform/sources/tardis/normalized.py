@@ -361,31 +361,3 @@ def iter_records(
                     yield row
                 except GeneratorExit:
                     return
-
-
-def source_identity(root, _target_id, *, exchange, archives, time_window=None):
-    """Bind every exact normalized archive by instrument, data type and date."""
-    identities = {}
-    try:
-        for symbol, kinds in archives.items():
-            identities[symbol] = {}
-            for kind, paths in kinds.items():
-                identities[symbol][kind] = []
-                for path, manifest in _selected_archives(root, paths, time_window):
-                    if (
-                        manifest["exchange"] != exchange
-                        or manifest["symbol"] != symbol
-                        or manifest["dataset_type"] != kind
-                    ):
-                        raise ValueError("tardis_normalized_scope_invalid")
-                    digest = manifest.get("sha256")
-                    if not isinstance(digest, str) or len(digest) != 64:
-                        raise ValueError("tardis_normalized_manifest_invalid")
-                    with _verified_file(
-                        path / "data.csv.gz", expected_sha256=manifest["sha256"]
-                    ) as raw:
-                        raw.drain()
-                    identities[symbol][kind].append(canonical_json_hash(manifest))
-    except FileNotFoundError:
-        return None
-    return canonical_json_hash(identities)

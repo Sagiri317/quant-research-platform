@@ -1,6 +1,5 @@
 """Immutable per-symbol funding observations with separate known forecasts."""
 
-import hashlib
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
@@ -28,11 +27,9 @@ from quant_research_platform.sources.binance.validation import (
     strict_positive_float,
 )
 from quant_research_platform.storage.identity import (
-    dataset_file_identity,
     filesystem_is_file,
     open_filesystem_file,
     require_unaliased_path,
-    verified_file_handle,
 )
 from quant_research_platform.storage.manifests import read_manifest
 from quant_research_platform.storage.raw_snapshots import (
@@ -223,7 +220,7 @@ def _manifest(root, symbol):
     ):
         raise PortfolioTargetBlocked("binance_funding_coverage_unproven")
     native = metadata["settlement_source"]
-    events = original_identity = None
+    events = None
     if native is not None:
         if (
             type(native) is not dict
@@ -263,37 +260,27 @@ def _manifest(root, symbol):
             root.parent / "settlements.json",
             error="binance_funding_settlement_source_invalid",
         )
-        original_identity = dataset_file_identity(path)
         with closing_iterator(open_filesystem_file(path, "rb")) as handle:
-            with verified_file_handle(
-                path,
-                handle,
-                expected_identity=original_identity,
-                error="binance_funding_settlement_source_changed",
-            ):
-                raw = handle.read(original_identity.size + 1)
-                if (
-                    len(raw) != native["byte_count"]
-                    or hashlib.sha256(raw).hexdigest() != native["sha256"]
-                ):
-                    raise ValueError("binance_funding_settlement_source_changed")
-                events, proof = _settlement_response(
-                    raw,
-                    source_id=native["source_id"],
-                    symbol=symbol,
-                    start_ms=native["start_ms"],
-                    end_ms=native["end_ms"],
-                    request_limit=native["request_limit"],
-                )
-                if any(native[key] != value for key, value in proof.items()):
-                    raise ValueError("binance_funding_settlement_source_invalid")
-    return manifest, events, original_identity
+            raw = handle.read()
+            events, proof = _settlement_response(
+                raw,
+                source_id=native["source_id"],
+                symbol=symbol,
+                start_ms=native["start_ms"],
+                end_ms=native["end_ms"],
+                request_limit=native["request_limit"],
+            )
+            if any(native[key] != value for key, value in proof.items()):
+                raise ValueError("binance_funding_settlement_source_invalid")
+    return manifest, events
 
 
-def _records(root, manifest, *, settlements):
+def _records(root, manifest, *, settlements, verify_bytes=False):
     previous = {"settlement": -1, "forecast": -1}
     settlement_count = 0
-    rows = iter_csv_snapshot(root, expected_manifest=manifest)
+    rows = iter_csv_snapshot(
+        root, expected_manifest=manifest, verify_bytes=verify_bytes
+    )
     with closing_iterator(rows):
         for kind, timestamp, known_until, rate, mark, cashflows in rows:
             if (
@@ -355,7 +342,7 @@ def read_funding_observations(funding_roots, *, symbol):
     coverage = []
     for value in funding_roots:
         root = Path(value)
-        manifest, settlements, original_identity = _manifest(root, symbol)
+        manifest, settlements = _manifest(root, symbol)
         interval = manifest["metadata"]["coverage"]
         start, end = interval["start_ns"], interval["end_ns"]
         if coverage and start <= coverage[-1][1]:
@@ -367,14 +354,13 @@ def read_funding_observations(funding_roots, *, symbol):
                 canonical_json_hash(manifest),
                 manifest,
                 settlements,
-                original_identity,
             )
         )
         del manifest, interval
     identity = canonical_json_hash({"sources": [item[1] for item in sources]})
 
     def source_forecasts(source, events):
-        root, _expected, manifest, settlements, _original_identity = source
+        root, _expected, manifest, settlements = source
         with closing_iterator(
             _records(root, manifest, settlements=settlements)
         ) as rows:
@@ -445,17 +431,3 @@ def read_funding_observations(funding_roots, *, symbol):
         yield FundingObservations(
             identity, tuple(coverage), tuple(events), source, tuple(qualification)
         )
-
-
-def funding_source_identity(funding_roots, _target_id, *, symbol):
-    try:
-        with read_funding_observations(funding_roots, symbol=symbol) as observations:
-            return observations.identity
-    except (
-        FileNotFoundError,
-        NotADirectoryError,
-        KeyError,
-        TypeError,
-        ValueError,
-    ) as error:
-        raise ValueError("binance_funding_input_invalid") from error

@@ -468,7 +468,8 @@ def iter_factor_frames(
     scalar_definitions = {
         name: dependencies
         for name, dependencies in definitions.items()
-        if name not in copied and name != "relative_spread"
+        if name not in copied
+        and name not in {"relative_spread", "microprice", "microprice_deviation"}
     }
     scalar_columns = {
         column
@@ -544,6 +545,10 @@ def iter_factor_frames(
                 ratio = inputs["book_spread"] / inputs["mid"]
             ratio[~np.isfinite(ratio)] = np.nan
             calculated["relative_spread"] = ratio
+        for name in selected & {"microprice", "microprice_deviation"}:
+            calculated[name] = _microprice_values(
+                inputs, include_mid=name == "microprice"
+            )
         for index in range(len(frame)) if scalar_definitions else ():
             if boundaries[index]:
                 for history in histories.values():
@@ -613,10 +618,7 @@ def iter_factor_frames(
                         volume, depth = dependencies
                         if exact[depth] > 0:
                             result = sums[volume] / exact[depth]
-                elif name.startswith("imbalance_") or name in {
-                    "microprice",
-                    "microprice_deviation",
-                }:
+                elif name.startswith("imbalance_"):
                     bid, ask = values[:2]
                     if bid + ask > 0:
                         result = (bid - ask) / (bid + ask)
@@ -627,10 +629,6 @@ def iter_factor_frames(
                                 if bid10 + ask10 > 0
                                 else np.nan
                             )
-                        elif name in {"microprice", "microprice_deviation"}:
-                            result *= exact["book_spread"] / 2
-                            if name == "microprice":
-                                result += exact["mid"]
                 elif name == "top10_depth_per_spread":
                     result = (values[0] + values[1]) / values[2]
                 elif name == "near_depth_share_1_10":
@@ -659,6 +657,47 @@ def iter_factor_frames(
         )
         active_segment = str(segments[-1])
         previous_time = int(timestamps[-1])
+
+
+def _microprice_values(inputs, *, include_mid):
+    # Extended intermediates cover the exponent range of every binary64 input.
+    bid, ask, spread = (
+        inputs[name].astype(np.longdouble)
+        for name in ("bid_depth_1", "ask_depth_1", "book_spread")
+    )
+    mid = inputs["mid"].astype(np.longdouble) if include_mid else 0
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore", under="ignore"):
+        deviation = (bid - ask) / (bid + ask) * spread / 2
+        result = deviation + mid
+        values = result.astype(float)
+        valid = np.isfinite(bid) & np.isfinite(ask) & np.isfinite(spread)
+        valid &= (bid + ask > 0) & np.isfinite(mid)
+        # Avoid rounding noise becoming a spurious standardized factor signal.
+        # Bound five rounded operations, then certify the binary64 rounding cell.
+        # Extended precision represents adjacent binary64 midpoints exactly.
+        error = 8 * np.finfo(np.longdouble).eps * (np.abs(mid) + np.abs(deviation))
+        rounded = values.astype(np.longdouble)
+        lower = (np.nextafter(values, -np.inf).astype(np.longdouble) + rounded) / 2
+        upper = (np.nextafter(values, np.inf).astype(np.longdouble) + rounded) / 2
+        fallback = valid & (
+            ~np.isfinite(values)
+            | (np.abs(values) == np.finfo(float).max)
+            | (result - error <= lower)
+            | (result + error >= upper)
+        )
+    if np.finfo(np.longdouble).nmant < 63 or np.finfo(np.longdouble).maxexp < 4096:
+        fallback = valid
+    for index in np.flatnonzero(fallback):
+        b, a, s = (Fraction(float(v[index])) for v in (bid, ask, spread))
+        exact = (b - a) / (b + a) * s / 2
+        if include_mid:
+            exact += Fraction(float(mid[index]))
+        try:
+            values[index] = float(exact)
+        except OverflowError:
+            values[index] = np.nan
+    values[~valid | ~np.isfinite(values)] = np.nan
+    return values
 
 
 def _nullable_numeric_column(frame, column, *, signed_mid=False):

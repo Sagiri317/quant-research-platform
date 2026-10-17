@@ -8,8 +8,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, replace
 from functools import partial
-from heapq import merge
-from itertools import chain, islice
+from itertools import chain
 
 import pandas as pd
 
@@ -551,49 +550,86 @@ def _union_panel_frames(
     columns: tuple[str, ...],
     batch_rows: int,
 ) -> Iterator[pd.DataFrame]:
-    """Merge complete time-ordered panels without changing their scalar dtypes."""
-    dtypes = {}
-    timestamp_position = columns.index("timestamp")
-    asset_position = columns.index("asset_id")
+    """Merge sorted panel prefixes while retaining only bounded input batches."""
+    columns = list(columns)
 
-    def rows(frames: Iterable[pd.DataFrame]) -> Iterator[tuple[object, ...]]:
+    def source_frames(frames):
         with closing_iterator(iter(frames)) as active:
             for frame in active:
-                dtypes.update(frame.dtypes)
-                for _yield_value in frame.itertuples(index=False, name=None):
-                    try:
-                        yield _yield_value
-                    except GeneratorExit:
-                        return
+                try:
+                    yield frame
+                except GeneratorExit:
+                    return
 
     with ExitStack() as live:
         streams = [
-            live.enter_context(closing_iterator(rows(frames)))
+            live.enter_context(closing_iterator(source_frames(frames)))
             for frames in frame_streams
         ]
-        merged = merge(
-            *streams, key=lambda row: (row[timestamp_position], row[asset_position])
-        )
-        records = list(islice(merged, batch_rows))
-        if not dtypes:
-            return
+        held = [None] * len(streams)
+        exhausted = [False] * len(streams)
+        empty = None
+        output = []
+        output_rows = 0
+        emitted = False
         while True:
-            frame = pd.DataFrame(
-                {
-                    column: pd.array(
-                        [row[position] for row in records], dtype=dtypes[column]
-                    )
-                    for position, column in enumerate(columns)
-                }
+            for index, stream in enumerate(streams):
+                if held[index] is None and not exhausted[index]:
+                    for frame in stream:
+                        if not frame.empty:
+                            held[index] = frame.loc[:, columns]
+                            break
+                        empty = frame.loc[:, columns]
+                    else:
+                        exhausted[index] = True
+            available = [
+                (frame["timestamp"].iloc[-1], frame["asset_id"].iloc[-1], index)
+                for index, frame in enumerate(held)
+                if frame is not None
+            ]
+            if not available:
+                break
+            timestamp, asset, stream_rank = min(available)
+            ready = []
+            for index, frame in enumerate(held):
+                if frame is None:
+                    continue
+                # Stream rank preserves heap-merge stability even when equal keys
+                # continue into the next batch of an earlier input stream.
+                same_time = frame["timestamp"] == timestamp
+                before = (frame["timestamp"] < timestamp) | (
+                    same_time & (frame["asset_id"] < asset)
+                )
+                if index <= stream_rank:
+                    before |= same_time & (frame["asset_id"] == asset)
+                count = int(before.sum())
+                if count:
+                    ready.append(frame.iloc[:count])
+                    held[index] = frame.iloc[count:] if count < len(frame) else None
+            merged = pd.concat(ready, ignore_index=True).sort_values(
+                ["timestamp", "asset_id"], kind="stable", ignore_index=True
             )
-            records.clear()
+            offset = 0
+            while offset < len(merged):
+                count = min(batch_rows - output_rows, len(merged) - offset)
+                output.append(merged.iloc[offset : offset + count])
+                output_rows += count
+                offset += count
+                if output_rows == batch_rows:
+                    result = pd.concat(output, ignore_index=True)
+                    output.clear()
+                    output_rows = 0
+                    emitted = True
+                    try:
+                        yield result
+                    except GeneratorExit:
+                        return
+            del ready, merged
+        if output or (not emitted and empty is not None):
+            result = pd.concat(output, ignore_index=True) if output else empty
             try:
-                yield frame
+                yield result.reset_index(drop=True)
             except GeneratorExit:
-                return
-            del frame
-            records = list(islice(merged, batch_rows))
-            if not records:
                 return
 
 

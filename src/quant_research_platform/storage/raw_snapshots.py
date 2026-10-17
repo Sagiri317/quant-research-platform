@@ -56,9 +56,9 @@ def encode_raw_cell(value: object) -> str:
     return _CELL_ENCODER.encode(native(value))
 
 
-def decode_raw_cell(text: str) -> object:
+def decode_raw_cell(text: str, *, require_canonical: bool = True) -> object:
     value = _CELL_DECODER.decode(text)
-    if encode_raw_cell(value) != text:
+    if require_canonical and encode_raw_cell(value) != text:
         raise ValueError("raw_csv_cell_not_canonical")
     return value
 
@@ -126,9 +126,9 @@ def write_csv_snapshot(
 
 
 def iter_csv_snapshot(
-    root: Path, *, expected_manifest: dict[str, object]
+    root: Path, *, expected_manifest: dict[str, object], verify_bytes: bool = True
 ) -> Iterator[tuple[object, ...]]:
-    """Validate source bytes during one complete acceptance traversal."""
+    """Decode typed rows, with canonical byte verification for source acceptance."""
     root = require_unaliased_path(root, error="raw_csv_path_invalid")
     if set(path.name for path in filesystem_iterdir(root)) != {
         "response.csv",
@@ -160,21 +160,22 @@ def iter_csv_snapshot(
         handle = open_filesystem_file(path)
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("raw_csv_content_invalid") from exc
-    digest = hashlib.sha256()
+    digest = hashlib.sha256() if verify_bytes else None
     count = 0
     with closing_iterator(handle):
 
         def records() -> Iterator[list[str]]:
             csv.field_size_limit(sys.maxsize)
             while line := handle.readline():
-                if not line.endswith(b"\n"):
+                if verify_bytes and not line.endswith(b"\n"):
                     raise ValueError("raw_csv_record_invalid")
-                digest.update(line)
+                if digest is not None:
+                    digest.update(line)
                 try:
                     values = next(csv.reader([line.decode("utf-8")], strict=True))
                 except (csv.Error, UnicodeError) as exc:
                     raise ValueError("raw_csv_record_invalid") from exc
-                if _record(values) != line:
+                if verify_bytes and _record(values) != line:
                     raise ValueError("raw_csv_record_not_canonical")
                 yield values
 
@@ -187,7 +188,10 @@ def iter_csv_snapshot(
             for row in stream:
                 if len(row) != len(manifest["columns"]):
                     raise ValueError("raw_csv_row_width_invalid")
-                value = tuple(decode_raw_cell(cell) for cell in row)
+                value = tuple(
+                    decode_raw_cell(cell, require_canonical=verify_bytes)
+                    for cell in row
+                )
                 count += 1
                 yield value
 
@@ -197,9 +201,11 @@ def iter_csv_snapshot(
                     yield row
                 except GeneratorExit:
                     return
-        if (
-            count != manifest["row_count"]
-            or digest.hexdigest() != manifest["sha256"]
-            or handle.tell() != manifest["byte_count"]
+        if count != manifest["row_count"] or (
+            digest is not None
+            and (
+                digest.hexdigest() != manifest["sha256"]
+                or handle.tell() != manifest["byte_count"]
+            )
         ):
             raise ValueError("raw_csv_content_invalid")

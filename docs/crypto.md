@@ -553,6 +553,10 @@ Tardis 市场事件消费明确归档集合自身的深度与成交，不以官�
 资金费 symbol 原子目录中的 `settlements.json`，不以自行抽取的记录或上游哈希替代原响应。
 `settlement_source` 绑定供应商、endpoint、symbol、请求窗、HTTP 状态、原字节哈希、实际 limit、
 响应数、窗口内结算数及从响应推导的完成依据；importer 与 reader 复用同一校验责任模块。
+原字节哈希与字节数作为导入来源记录保留；普通读取不以文件快照或字节哈希一致性准入，
+仍解析所选原响应、核对请求窗及完成依据，并逐条核对实际结算与 CSV 投影的时间、费率和标记价格。
+资金费 CSV 普通回读接受等价换行、JSON 空白和数值拼写，保留列头、类型、行数及全部经济语义校验；
+显式导入验收仍核对规范字节、字节数与哈希，其他来源的 CSV 验收行为不变。
 
 [Binance fundingRate](https://developers.binance.com/docs/derivatives/usds-margined-futures/market-data/rest-api/Get-Funding-Rate-History)
 按请求 limit 截断，默认 100、最多 1000；离线导入必须显式提供实际有效 `request_limit`。

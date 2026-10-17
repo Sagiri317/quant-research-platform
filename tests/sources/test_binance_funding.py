@@ -6,7 +6,6 @@ from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
 from quant_research_platform.sources.binance.funding import (
     FUNDING_COLUMNS,
     FUNDING_SCHEMA_ID,
-    funding_source_identity,
     read_funding_observations,
 )
 from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
@@ -47,9 +46,10 @@ def _write(raw, *, rows=(), metadata_changes=None):
 def test_funding_missing_and_explicit_zero_have_distinct_evidence(tmp_path):
     raw = tmp_path / "raw"
     with pytest.raises(PortfolioTargetBlocked, match="binance_funding_input_missing"):
-        funding_source_identity(
-            (raw.parent / "funding" / "BTCUSDT",), "ledger", symbol="BTCUSDT"
-        )
+        with read_funding_observations(
+            (raw.parent / "funding" / "BTCUSDT",), symbol="BTCUSDT"
+        ):
+            pytest.fail("Invalid funding must fail before observations are yielded")
     _write(raw, rows=(("forecast", 0, 100, None, None, []),))
     with read_funding_observations(
         (raw.parent / "funding" / "BTCUSDT",), symbol="BTCUSDT"
@@ -57,25 +57,17 @@ def test_funding_missing_and_explicit_zero_have_distinct_evidence(tmp_path):
         assert source.events == () and source.coverage == ((0, 100),)
         forecasts = tuple(source.forecasts)
         assert len(forecasts) == 1 and forecasts[0].cashflows == ()
-        original = source.identity
-    assert (
-        funding_source_identity(
-            (raw.parent / "funding" / "BTCUSDT",), "ledger", symbol="BTCUSDT"
-        )
-        == original
-    )
     with pytest.raises(PortfolioTargetBlocked, match="binance_funding_input_missing"):
-        funding_source_identity(
-            (raw.parent / "funding" / "ETHUSDT",), "ledger", symbol="ETHUSDT"
-        )
+        with read_funding_observations(
+            (raw.parent / "funding" / "ETHUSDT",), symbol="ETHUSDT"
+        ):
+            pytest.fail("Invalid funding must fail before observations are yielded")
     changed = tmp_path / "changed" / "raw"
     _write(changed, rows=(("forecast", 0, 100, None, None, [[50, -1.0]]),))
-    assert (
-        funding_source_identity(
-            (changed.parent / "funding" / "BTCUSDT",), "ledger", symbol="BTCUSDT"
-        )
-        != original
-    )
+    with read_funding_observations(
+        (changed.parent / "funding" / "BTCUSDT",), symbol="BTCUSDT"
+    ) as source:
+        assert tuple(source.forecasts)[0].cashflows == ((50, -1.0),)
 
 
 @pytest.mark.parametrize(
@@ -91,29 +83,42 @@ def test_funding_unproven_coverage_never_becomes_zero(tmp_path, changes):
     with pytest.raises(
         PortfolioTargetBlocked, match="binance_funding_coverage_unproven"
     ):
-        funding_source_identity(
-            (raw.parent / "funding" / "BTCUSDT",), "ledger", symbol="BTCUSDT"
-        )
+        with read_funding_observations(
+            (raw.parent / "funding" / "BTCUSDT",), symbol="BTCUSDT"
+        ):
+            pytest.fail("Invalid funding must fail before observations are yielded")
 
 
 @pytest.mark.parametrize(
-    "rows",
+    ("rows", "error"),
     (
-        (("settlement", 101, None, 0.001, 100.0, None),),
         (
-            ("settlement", 50, None, 0.001, 100.0, None),
-            ("settlement", 50, None, 0.001, 100.0, None),
+            (("settlement", 101, None, 0.001, 100.0, None),),
+            "binance_funding_settlement_invalid",
         ),
-        (("forecast", 0, 100, None, None, [[101, 1.0]]),),
+        (
+            (
+                ("settlement", 50, None, 0.001, 100.0, None),
+                ("settlement", 50, None, 0.001, 100.0, None),
+            ),
+            "binance_funding_record_order_invalid",
+        ),
+        (
+            (("forecast", 0, 100, None, None, [[101, 1.0]]),),
+            "portfolio_funding_forecast_events_invalid",
+        ),
     ),
 )
-def test_funding_malformed_calendar_rejected_with_resources_released(tmp_path, rows):
+def test_funding_malformed_calendar_rejected_with_resources_released(
+    tmp_path, rows, error
+):
     raw = tmp_path / "raw"
     _write(raw, rows=rows)
-    with pytest.raises(ValueError, match="binance_funding_input_invalid"):
-        funding_source_identity(
-            (raw.parent / "funding" / "BTCUSDT",), "ledger", symbol="BTCUSDT"
-        )
+    with pytest.raises(ValueError, match=f"^{error}$"):
+        with read_funding_observations(
+            (raw.parent / "funding" / "BTCUSDT",), symbol="BTCUSDT"
+        ):
+            pytest.fail("Invalid funding must fail before observations are yielded")
 
 
 def test_funding_consumer_primary_is_preserved(tmp_path):
@@ -130,7 +135,7 @@ def test_funding_consumer_primary_is_preserved(tmp_path):
 
 
 @pytest.mark.parametrize("failure", ("io", "permission", "memory", "interrupt"))
-def test_funding_identity_preserves_fatal_file_failure(tmp_path, monkeypatch, failure):
+def test_funding_reader_preserves_fatal_file_failure(tmp_path, monkeypatch, failure):
     import errno
 
     import quant_research_platform.sources.binance.funding as funding
@@ -153,7 +158,8 @@ def test_funding_identity_preserves_fatal_file_failure(tmp_path, monkeypatch, fa
 
     monkeypatch.setattr(funding, "read_manifest", fail)
     with pytest.raises(type(primary)) as caught:
-        funding_source_identity((root,), "ledger", symbol="BTCUSDT")
+        with read_funding_observations((root,), symbol="BTCUSDT"):
+            pytest.fail("Invalid funding must fail before observations are yielded")
     assert caught.value is primary
 
 
@@ -188,9 +194,6 @@ def test_funding_sources_preserve_gaps_and_ordered_pit_forecasts(tmp_path):
             ((250, -5.0),),
             ((450, -5.0),),
         ]
-        identity = source.identity
-    assert funding_source_identity(roots, "ledger", symbol="BTCUSDT") == identity
-    assert funding_source_identity((roots[1],), "ledger", symbol="BTCUSDT") != identity
 
 
 @pytest.mark.parametrize("second_start", (0, 50, 100))
@@ -288,7 +291,7 @@ def test_funding_numeric_strings_are_normalized_through_persisted_reader(tmp_pat
 
 
 @pytest.mark.parametrize("bad", ([], {}), ids=("array", "object"))
-def test_funding_coverage_status_types_reject_in_reader_and_identity(tmp_path, bad):
+def test_funding_coverage_status_types_reject_in_reader(tmp_path, bad):
     good_raw = tmp_path / "good" / "raw"
     row = ("forecast", 0, 100, None, None, [])
     _write(good_raw, rows=(row,))
@@ -298,8 +301,6 @@ def test_funding_coverage_status_types_reject_in_reader_and_identity(tmp_path, b
         assert source.coverage == ((0, 100),)
         assert source.events == ()
         assert len(tuple(source.forecasts)) == 1
-        identity = source.identity
-    assert funding_source_identity((good,), "ledger", symbol="BTCUSDT") == identity
 
     changed_raw = tmp_path / "changed" / "raw"
     _write(
@@ -312,15 +313,10 @@ def test_funding_coverage_status_types_reject_in_reader_and_identity(tmp_path, b
     with pytest.raises(ValueError, match="^binance_funding_coverage_invalid$"):
         with read_funding_observations((changed,), symbol="BTCUSDT"):
             pytest.fail("Malformed coverage must fail before observations are yielded")
-    with pytest.raises(ValueError, match="^binance_funding_input_invalid$") as raised:
-        funding_source_identity((changed,), "ledger", symbol="BTCUSDT")
-    assert type(raised.value.__cause__) is ValueError
-    assert str(raised.value.__cause__) == "binance_funding_coverage_invalid"
     assert {
         path.name: path.read_bytes() for path in changed.iterdir()
     } == changed_before
     assert {path.name: path.read_bytes() for path in good.iterdir()} == before
-    assert funding_source_identity((good,), "ledger", symbol="BTCUSDT") == identity
 
 
 def test_funding_forecasts_merge_prior_observations_without_reordering_sources(

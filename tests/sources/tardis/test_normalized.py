@@ -79,47 +79,16 @@ def test_normalized_rejects_wrong_schema_and_preserves_existing_output(
         )
 
 
-def test_source_identity_rejects_equal_length_changed_gzip(tmp_path, monkeypatch):
-    from quant_research_platform.sources.tardis.normalized import source_identity
-
-    csv = (
-        b"exchange,symbol,timestamp,local_timestamp,id,side,price,amount\n"
-        b"bybit,BTCUSDT,1785542400000000,1785542400000001,1,buy,100,2\n"
-    )
-    raw = gzip.compress(csv, mtime=0)
-    changed = gzip.compress(csv.replace(b",100,2\n", b",100,3\n"), mtime=0)
-    assert len(raw) == len(changed)
-    monkeypatch.setattr("urllib.request.urlopen", lambda *_a, **_k: Response(raw))
-    root = tmp_path / "archive"
-    download_dataset(
-        root,
-        exchange="bybit",
-        dataset_type="trades",
-        symbol="BTCUSDT",
-        date="2026-08-01",
-    )
-    scope = dict(
-        exchange="bybit",
-        archives={"BTCUSDT": {"trades": [root.name]}},
-        time_window=TimeWindow("2026-08-01", "2026-08-01"),
-    )
-    assert source_identity(tmp_path, "synthetic", **scope) is not None
-    (root / "data.csv.gz").write_bytes(changed)
-    with pytest.raises(ValueError, match="^tardis_raw_identity_changed$"):
-        source_identity(tmp_path, "synthetic", **scope)
-
-
 @pytest.mark.parametrize("phase", ["before", "open_race"])
 def test_declared_normalized_member_missing_is_identity_failure(
     tmp_path, monkeypatch, phase
 ):
     import quant_research_platform.sources.tardis.raw as raw_owner
-    from quant_research_platform.sources.tardis.normalized import source_identity
 
     root = tmp_path / "archive"
-    scope = dict(exchange="bybit", archives={"BTCUSDT": {"trades": [root.name]}})
+    window = TimeWindow("2026-08-01", "2026-08-01")
     with pytest.raises(ValueError, match="^dataset_metadata_file_invalid$"):
-        source_identity(tmp_path, "synthetic", **scope)
+        list(iter_records(tmp_path, archive_paths=(root.name,), time_window=window))
     raw = gzip.compress(
         b"exchange,symbol,timestamp,local_timestamp,id,side,price,amount\n"
         b"bybit,BTCUSDT,1785542400000000,1785542400000001,1,buy,100,2\n",
@@ -133,36 +102,24 @@ def test_declared_normalized_member_missing_is_identity_failure(
         symbol="BTCUSDT",
         date="2026-08-01",
     )
-    assert source_identity(tmp_path, "synthetic", **scope) is not None
-    path = root / "data.csv.gz"
-    window = TimeWindow("2026-08-01", "2026-08-01")
-    if phase == "during":
-        rows = iter_records(tmp_path, archive_paths=(root.name,), time_window=window)
-        next(rows)
-        path.unlink()
-        primary = KeyboardInterrupt("synthetic_consumer_failure")
-        with pytest.raises(KeyboardInterrupt) as caught:
-            rows.throw(primary)
-        assert caught.value is primary
-        assert not getattr(primary, "__notes__", [])
-    elif phase in {"capture_race", "open_race"}:
-        operation = (
-            "dataset_file_identity"
-            if phase == "capture_race"
-            else "open_filesystem_file"
+    assert (
+        len(
+            list(iter_records(tmp_path, archive_paths=(root.name,), time_window=window))
         )
-        original = getattr(raw_owner, operation)
+        == 1
+    )
+    path = root / "data.csv.gz"
+    if phase == "open_race":
+        original = raw_owner.open_filesystem_file
 
         def acquire_member(candidate, *args, **kwargs):
             if candidate == path:
                 path.unlink()
             return original(candidate, *args, **kwargs)
 
-        monkeypatch.setattr(raw_owner, operation, acquire_member)
+        monkeypatch.setattr(raw_owner, "open_filesystem_file", acquire_member)
     else:
         path.unlink()
-    with pytest.raises(ValueError, match="^tardis_raw_identity_changed$"):
-        source_identity(tmp_path, "synthetic", **scope)
     with pytest.raises(ValueError, match="^tardis_raw_identity_changed$"):
         list(iter_records(tmp_path, archive_paths=(root.name,), time_window=window))
 

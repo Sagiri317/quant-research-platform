@@ -752,3 +752,83 @@ def test_cross_asset_source_gaps_age_and_chunk_boundaries():
     assert pd.isna(result.eth_return_100ms.iloc[14])
     assert pd.isna(result.eth_lagged_return_100ms.iloc[15])
     assert result.eth_lagged_return_100ms.iloc[16] == state.loc[15, "return_100ms"]
+
+
+@pytest.mark.parametrize("batch_rows", (1, 3, 16))
+def test_information_union_stably_merges_ns_ties_across_input_batches(batch_rows):
+    from quant_research_platform.markets.implementations.crypto.processed import (
+        producer,
+    )
+
+    frames = [
+        pd.DataFrame(
+            {
+                "timestamp": pd.to_datetime([1, 1, 1, 2, 3], unit="ns"),
+                "asset_id": pd.array(["btc_usdt"] * 5, dtype="string"),
+                "value": pd.array([rank * 10 + i for i in range(5)], dtype="Int64"),
+            }
+        )
+        for rank in range(3)
+    ]
+    frames[1].loc[3, "value"] = pd.NA
+    streams = [
+        [frame.iloc[:0], frame.iloc[:2], frame.iloc[2:3], frame.iloc[3:]]
+        for frame in frames
+    ]
+    actual = list(
+        producer._union_panel_frames(
+            streams, columns=tuple(frames[0]), batch_rows=batch_rows
+        )
+    )
+    expected = pd.concat(frames, ignore_index=True).sort_values(
+        ["timestamp", "asset_id"], kind="stable", ignore_index=True
+    )
+    pd.testing.assert_frame_equal(
+        pd.concat(actual, ignore_index=True), expected, check_exact=True
+    )
+    assert all(len(frame) == batch_rows for frame in actual[:-1])
+
+
+@pytest.mark.parametrize("source_fails", (False, True))
+def test_information_union_preserves_close_failure_and_bounded_read_ahead(source_fails):
+    from quant_research_platform.markets.implementations.crypto.processed import (
+        producer,
+    )
+
+    counts = [0, 0]
+    closed = []
+    primary = ValueError("source_failed")
+
+    def source(rank):
+        try:
+            for batch in range(20):
+                counts[rank] += 1
+                yield pd.DataFrame(
+                    {
+                        "timestamp": pd.to_datetime(
+                            [batch * 2, batch * 2 + 1], unit="ns"
+                        ),
+                        "asset_id": pd.array([str(rank)] * 2, dtype="string"),
+                    }
+                )
+                if source_fails and rank == 0:
+                    raise primary
+        finally:
+            closed.append(rank)
+            if rank == 1:
+                raise RuntimeError("close_failed")
+
+    output = producer._union_panel_frames(
+        [source(0), source(1)], columns=("timestamp", "asset_id"), batch_rows=2
+    )
+    next(output)
+    assert counts == [1, 1]
+    if source_fails:
+        with pytest.raises(ValueError) as caught:
+            list(output)
+        assert caught.value is primary
+        assert any("RuntimeError" in note for note in primary.__notes__)
+    else:
+        with pytest.raises(RuntimeError, match="close_failed"):
+            output.close()
+    assert sorted(closed) == [0, 1]

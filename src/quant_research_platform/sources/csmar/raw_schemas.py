@@ -1,4 +1,4 @@
-"""Internal provider raw-file parsing and export-inspection helpers."""
+"""Internal provider raw-file parsing helpers."""
 
 from __future__ import annotations
 
@@ -32,17 +32,6 @@ class RawFileMetadata:
     export_date: str
     extension: str
     part: str | None = None
-
-
-@dataclass(frozen=True)
-class RawExportInspection:
-    """Header-level inspection result for a raw CSMAR export file."""
-
-    path: Path
-    dataset: str
-    table_code: str
-    columns: tuple[str, ...]
-    missing_required_columns: list[str]
 
 
 FILENAME_RE = re.compile(
@@ -260,50 +249,6 @@ def validate_export_header(record: list[str]) -> list[str]:
     if len(columns) != len(set(columns)):
         raise ValueError("duplicate_csmar_provider_column")
     return columns
-
-
-def inspect_raw_export_file(
-    path: str | Path, *, expected_identity: DatasetFileIdentity | None = None
-) -> RawExportInspection:
-    """Inspect the file name and header without full data reads."""
-
-    export_path = Path(path)
-    export_identity = raw_export_file_identity(export_path)
-    if expected_identity is not None and export_identity != expected_identity:
-        raise ValueError("csmar_raw_export_identity_changed")
-    try:
-        metadata = parse_raw_filename(export_path)
-        dataset = metadata.dataset
-    except ValueError:
-        if export_path.suffix.lower() != ".csv":
-            dataset = infer_dataset_from_native_export(export_path)
-            columns = read_export_header(export_path, expected_identity=export_identity)
-        else:
-            columns = read_export_header(export_path, expected_identity=export_identity)
-            try:
-                dataset = infer_dataset_from_native_export(export_path)
-            except ValueError:
-                dataset = _infer_dataset_from_header(columns)
-    else:
-        columns = read_export_header(export_path, expected_identity=export_identity)
-    header_matches = [
-        name
-        for name in _field_mappings.RAW_TABLE_CONTRACTS
-        if not _field_mappings.missing_raw_column_names(columns, name)
-    ]
-    if header_matches and dataset not in header_matches:
-        raise ValueError("csmar_raw_export_table_identity_conflict")
-    contract = _field_mappings.RAW_TABLE_CONTRACTS[dataset]
-
-    _field_mappings.validate_raw_column_names(columns, dataset)
-    missing = _field_mappings.missing_raw_column_names(columns, dataset)
-    return RawExportInspection(
-        path=export_path,
-        dataset=dataset,
-        table_code=contract.table_code,
-        columns=columns,
-        missing_required_columns=missing,
-    )
 
 
 def raw_export_file_identity(path: Path) -> DatasetFileIdentity:

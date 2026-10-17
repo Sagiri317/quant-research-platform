@@ -19,7 +19,7 @@ from tests.helpers.tardis import _line, _slices
 
 @pytest.mark.parametrize("source_id", ["binance", "xoomar"])
 @pytest.mark.parametrize("slice_count", [1, 144, 289])
-def test_forecast_does_not_use_future_settlement_and_original_is_verified(
+def test_forecast_does_not_use_future_settlement_and_projection_is_verified(
     tmp_path, slice_count, source_id
 ):
     start_ms = pd.Timestamp("2026-09-01T00:00:00Z").value // 1000000
@@ -121,9 +121,15 @@ def test_forecast_does_not_use_future_settlement_and_original_is_verified(
         assert ("xoomar.com" in metadata["endpoint"]) == (source_id == "xoomar")
         preserved = funding_root.parent / "settlements.json"
         assert preserved.read_bytes() == original == response.read_bytes()
+        # Byte count and hash describe the imported bytes, not read admission.
+        preserved.write_text(json.dumps(json.loads(original), indent=2) + "\n")
+        with read_funding_observations(roots, symbol="BTCUSDT") as source:
+            assert source.events[0].rate == 0.1
+            assert source.events[0].mark_price == 200.0
+            assert len(tuple(source.forecasts)) == 1
         preserved.write_bytes(original.replace(b"200", b"201"))
         with pytest.raises(
-            ValueError, match="binance_funding_settlement_source_changed"
+            ValueError, match="binance_funding_settlement_projection_invalid"
         ):
             with read_funding_observations(roots, symbol="BTCUSDT"):
                 pass
@@ -303,7 +309,42 @@ def test_native_funding_scope_decodes_once_and_preserves_primary(
     root = destination / "funding/BTCUSDT/observations"
     original = funding._settlement_response
     decoded = []
+    opened = []
+    reads = []
+    original_open = funding.open_filesystem_file
+    import quant_research_platform.storage.raw_snapshots as snapshots
+
+    csv_open = snapshots.open_filesystem_file
+    csv_paths = []
+
+    def measured_csv_open(path, *args, **kwargs):
+        csv_paths.append(path)
+        return csv_open(path, *args, **kwargs)
+
+    def forbidden_byte_encoding(*args, **kwargs):
+        pytest.fail("ordinary funding reads must not re-encode canonical bytes")
+
+    monkeypatch.setattr(snapshots, "open_filesystem_file", measured_csv_open)
+    monkeypatch.setattr(snapshots, "_record", forbidden_byte_encoding)
+    monkeypatch.setattr(snapshots, "encode_raw_cell", forbidden_byte_encoding)
     primary = MemoryError("consumer primary")
+
+    class MeasuredHandle:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def read(self, size=-1):
+            reads.append(size)
+            return self.handle.read(size)
+
+        def close(self):
+            self.handle.close()
+
+    def measured_open(path, *args, **kwargs):
+        opened.append(path)
+        return MeasuredHandle(original_open(path, *args, **kwargs))
+
+    monkeypatch.setattr(funding, "open_filesystem_file", measured_open)
 
     def decode(*args, **kwargs):
         result = original(*args, **kwargs)
@@ -322,18 +363,13 @@ def test_native_funding_scope_decodes_once_and_preserves_primary(
                 assert next(source.forecasts).cashflows == (
                     (pd.Timestamp("2026-09-01T00:00:10Z").value, -5.0),
                 )
-            if mode in {"source_changed", "primary"}:
+            if mode == "primary":
                 path = root.parent / "settlements.json"
                 path.write_bytes(path.read_bytes() + b" ")
             if mode == "primary":
                 raise primary
 
-    if mode == "source_changed":
-        with pytest.raises(
-            ValueError, match="^binance_funding_settlement_source_changed$"
-        ):
-            consume()
-    elif mode == "primary":
+    if mode == "primary":
         with pytest.raises(MemoryError) as raised:
             consume()
         assert raised.value is primary
@@ -341,6 +377,9 @@ def test_native_funding_scope_decodes_once_and_preserves_primary(
     else:
         consume()
     assert len(decoded) == 1
+    assert opened == [root.parent / "settlements.json"]
+    assert reads == [-1]
+    assert csv_paths == [root / "response.csv"] * 2
 
 
 def test_separate_native_funding_archives_cannot_supply_continuous_months(tmp_path):
@@ -771,3 +810,85 @@ def test_equivalent_utc_funding_retransmission_is_idempotent(
                 source.settlement_qualification[0]["verification"]
                 == "official_response_validated"
             )
+
+
+@pytest.mark.parametrize("representation", ["crlf", "json_spacing", "equal_number"])
+def test_funding_csv_read_accepts_equivalent_bytes_but_audit_remains_strict(
+    tmp_path, representation
+):
+    import csv
+    import io
+
+    from quant_research_platform.storage.manifests import read_manifest
+    from quant_research_platform.storage.raw_snapshots import iter_csv_snapshot
+
+    destination = _publish_funding_archive(tmp_path, "2026-09-01")
+    root = destination / "funding/BTCUSDT/observations"
+    path = root / "response.csv"
+    original = path.read_bytes()
+    with read_funding_observations((root,), symbol="BTCUSDT") as source:
+        expected = (source.events, tuple(source.forecasts))
+    if representation == "crlf":
+        replacement = original.replace(b"\n", b"\r\n")
+    else:
+        rows = list(csv.reader(io.StringIO(original.decode())))
+        if representation == "json_spacing":
+            rows[-1][-1] = json.dumps(json.loads(rows[-1][-1]), separators=(", ", ": "))
+        else:
+            assert rows[1][4] == "200.0"
+            rows[1][4] = "200"
+        buffer = io.StringIO(newline="")
+        csv.writer(buffer, lineterminator="\n").writerows(rows)
+        replacement = buffer.getvalue().encode()
+    assert replacement != original
+    path.write_bytes(replacement)
+    with read_funding_observations((root,), symbol="BTCUSDT") as source:
+        assert (source.events, tuple(source.forecasts)) == expected
+    with pytest.raises(
+        ValueError, match="raw_csv_(record|cell)_not_canonical|raw_csv_content_invalid"
+    ):
+        list(
+            iter_csv_snapshot(
+                root, expected_manifest=read_manifest(root / "response.metadata.json")
+            )
+        )
+
+
+@pytest.mark.parametrize("change", ["rate", "omit_forecast"])
+def test_funding_csv_read_keeps_projection_and_row_count_checks(tmp_path, change):
+    destination = _publish_funding_archive(tmp_path, "2026-09-01")
+    root = destination / "funding/BTCUSDT/observations"
+    path = root / "response.csv"
+    original = path.read_bytes()
+    if change == "rate":
+        replacement = original.replace(b",0.1,200.0,", b",0.2,200.0,")
+        reason = "binance_funding_settlement_projection_invalid"
+    else:
+        replacement = b"".join(original.splitlines(keepends=True)[:-1])
+        reason = "raw_csv_content_invalid"
+    assert replacement != original
+    path.write_bytes(replacement)
+    with pytest.raises(ValueError, match=reason):
+        with read_funding_observations((root,), symbol="BTCUSDT"):
+            pytest.fail("changed settlement or omitted forecast cannot be accepted")
+
+
+def test_funding_import_still_checks_projected_csv_bytes(tmp_path, monkeypatch):
+    import quant_research_platform.sources.tardis.funding as importer
+
+    original_write = importer.write_csv_snapshot
+
+    def write_with_reformatted_projection(root, *, validate, **kwargs):
+        def changed_validate(staging):
+            path = staging / "response.csv"
+            path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+            validate(staging)
+
+        return original_write(root, validate=changed_validate, **kwargs)
+
+    monkeypatch.setattr(
+        importer, "write_csv_snapshot", write_with_reformatted_projection
+    )
+    with pytest.raises(ValueError, match="raw_csv_record_not_canonical"):
+        _publish_funding_archive(tmp_path, "2026-09-01")
+    assert not (tmp_path / "archive-2026-09-01/funding/BTCUSDT").exists()
