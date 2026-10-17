@@ -193,16 +193,14 @@ def _selected_capitals(
         raise ValueError("target_float_market_cap_required")
     if not isinstance(values, pd.Series) or not values.index.is_unique:
         raise ValueError("target_float_market_cap_invalid")
-    capitals = strict_real_numeric_series(
-        values.reindex(assets), error="target_float_market_cap_invalid"
-    )
-    selected_values = capitals.reindex(selected)
-    if (
-        np.isinf(selected_values.to_numpy(dtype="float64")).any()
-        or selected_values.le(0.0).any()
-    ):
-        raise ValueError("target_float_market_cap_invalid")
-    if selected_values.isna().any():
+    try:
+        capitals = strict_real_numeric_series(
+            values.reindex(selected), error="target_float_market_cap_invalid"
+        )
+    except ValueError as exc:
+        raise PortfolioTargetBlocked("target_float_market_cap_missing") from exc
+    capitals = capitals.where(np.isfinite(capitals) & capitals.gt(0))
+    if capitals.reindex(selected).isna().any():
         raise PortfolioTargetBlocked("target_float_market_cap_missing")
     return capitals
 

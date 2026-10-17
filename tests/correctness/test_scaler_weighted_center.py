@@ -58,8 +58,10 @@ def test_tiny_weight_preserves_representable_center_and_reloaded_coordinates(
     np.testing.assert_allclose(full.x, expected, rtol=2e-15, atol=0)
     assert full.x.iloc[x.index(0.0)] != 0
     payload = restored.to_payload()
+    assert payload["scaling"] is True
     assert set(payload) == {
         "columns",
+        "scaling",
         "weighted_mean_origin",
         "weighted_mean_offset",
         "weighted_population_scale",

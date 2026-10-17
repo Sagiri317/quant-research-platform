@@ -362,6 +362,7 @@ def _frames(dates: pd.DatetimeIndex | None = None) -> dict[str, pd.DataFrame]:
             "timestamp": first.to_numpy(),
             "listing_date": first.to_numpy(),
             "delisting_date": pd.NaT,
+            "delisting_date_unresolved": False,
             "company_status": "active",
         }
     )

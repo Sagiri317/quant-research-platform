@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pandas as pd
 
-from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
@@ -253,9 +252,6 @@ def _iter_csv_records(
             for index, column in enumerate(physical_header)
             if column in selected_columns
         ]
-        index_code_position = (
-            physical_header.index("Indexcd") if dataset == "index_info" else None
-        )
         header = [physical_header[index] for index in selected_positions]
         del physical_header
         del header_record
@@ -266,10 +262,6 @@ def _iter_csv_records(
             except StopIteration:
                 break
             if len(record) != physical_width:
-                raise ValueError("malformed_csmar_csv_row")
-            if index_code_position is not None and not INDEX_INFO_CODE_RE.fullmatch(
-                record[index_code_position]
-            ):
                 raise ValueError("malformed_csmar_csv_row")
             row = [record[position] for position in selected_positions]
             del record
@@ -289,61 +281,10 @@ def _raw_frame(
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> pd.DataFrame:
-    from .field_mappings import COLUMN_ALIASES, COLUMN_MAPPINGS
-
     frame = pd.DataFrame(rows, columns=header)
     frame.replace("", pd.NA, inplace=True)
-    date_column = {
-        "market_bars_1d": "Trddt",
-        "adjustment": "TradingDate",
-        "market_cap": "Shrchgdt",
-    }.get(dataset)
-    if date_column is not None and (start_date is not None or end_date is not None):
-        date_column = next(
-            (
-                column
-                for column in (
-                    date_column,
-                    *COLUMN_ALIASES.get(dataset, {}).get(date_column, ()),
-                )
-                if column in frame
-            ),
-            date_column,
-        )
-        if date_column not in frame:
-            missing = missing_raw_column_names(tuple(header), dataset)
-            raise ValueError(
-                f"{dataset} raw export is missing CSMAR columns: {missing}"
-            )
-        timestamps = strict_timestamp_series(
-            frame[date_column], error=f"invalid_{dataset}_source_timestamp"
-        )
-        mask = pd.Series(True, index=frame.index)
-        if start_date is not None and dataset != "market_cap":
-            mask &= timestamps >= pd.Timestamp(start_date)
-        if end_date is not None:
-            mask &= timestamps <= pd.Timestamp(end_date)
-        frame = frame.loc[mask].copy()
-    consumed = set(COLUMN_MAPPINGS[dataset])
-    consumed.update(
-        alias
-        for aliases in COLUMN_ALIASES.get(dataset, {}).values()
-        for alias in aliases
-    )
-    for column in frame.columns:
-        if (
-            dataset == "corporate_actions"
-            or column not in consumed
-            or column in STRING_CODE_DTYPES
-            or column in INDEX_INFO_SOURCE_CODE_COLUMNS
-        ):
-            frame[column] = frame[column].astype("string")
-            continue
-        try:
-            numeric = pd.to_numeric(frame[column], errors="raise").astype("float64")
-        except (TypeError, ValueError):
-            raise ValueError("invalid_csmar_numeric_value") from None
-        frame[column] = numeric
+    # Raw IO owns readable structure, never business numeric interpretation.
+    frame = frame.astype("string")
     return frame
 
 

@@ -431,6 +431,15 @@ def derive_execution_mask(panel: pd.DataFrame) -> pd.DataFrame:
     same_lifecycle = result["listing_date"].notna() & result["listing_date"].eq(
         grouped["listing_date"].shift(-EXECUTION_LOOKAHEAD_SESSIONS)
     )
+    if "delisting_date_unresolved" in result:
+        result["delisting_date_unresolved"] = strict_bool_series(
+            result["delisting_date_unresolved"],
+            error="execution_lifecycle_status_invalid",
+            allow_null=True,
+        ).fillna(True)
+        same_lifecycle &= ~result["delisting_date_unresolved"] & ~result.groupby(
+            "asset_id", sort=False
+        )["delisting_date_unresolved"].shift(-EXECUTION_LOOKAHEAD_SESSIONS).fillna(True)
     if "market_type" in result:
         same_lifecycle &= (
             result["market_type"].notna()

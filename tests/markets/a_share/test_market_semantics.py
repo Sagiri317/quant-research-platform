@@ -417,7 +417,7 @@ def test_no_limit_history_overrides_historical_limit_status() -> None:
     assert mask.loc[mask["timestamp"].eq(sessions[0]), "can_enter"].iloc[0]
 
 
-def test_missing_listing_lifecycle_does_not_enter_the_panel() -> None:
+def test_missing_listing_lifecycle_retains_prices_without_eligibility() -> None:
     sessions = pd.bdate_range("2024-01-01", periods=2)
     bars = pd.DataFrame(
         {
@@ -464,7 +464,11 @@ def test_missing_listing_lifecycle_does_not_enter_the_panel() -> None:
         ),
     )
 
-    assert result.empty
+    assert result.close.tolist() == [10.0, 10.0]
+    assert result.listing_date.isna().all()
+    assert result.delisting_date_unresolved.all()
+    assert result.has_252_trading_sessions.isna().all()
+    assert derive_execution_mask(result)[["can_enter", "can_exit"]].isna().all().all()
 
 
 def test_industry_history_uses_effective_standard_and_set_hierarchy(tmp_path) -> None:
@@ -1040,7 +1044,7 @@ def test_special_treatment_pit_and_late_older_events_persist(tmp_path, reverse):
     assert str(restored["is_st"].dtype) == "boolean"
 
 
-def test_special_treatment_equal_effective_conflict_is_explicit():
+def test_special_treatment_equal_effective_conflict_is_local_to_unknown_field():
     from quant_research_platform.sources.csmar.interim import normalize_raw_frame
 
     history = normalize_raw_frame(
@@ -1063,8 +1067,13 @@ def test_special_treatment_equal_effective_conflict_is_explicit():
     )
     assert _apply_special_treatment(panel, history)["is_st"].tolist() == [True]
     panel["timestamp"] = pd.to_datetime(["2020-01-02"]).as_unit("ns")
-    with pytest.raises(ValueError, match="special_treatment_effective_state_ambiguous"):
-        _apply_special_treatment(panel, history)
+    actual = _apply_special_treatment(panel, history)
+    assert not actual.is_st.iloc[0]  # independent current-day normal status
+    assert not actual.is_pt.iloc[0]  # agreeing event fact
+    panel["trading_status_code"] = pd.Series(pd.NA, index=panel.index, dtype="Int64")
+    actual = _apply_special_treatment(panel, history)
+    assert pd.isna(actual.is_st.iloc[0])
+    assert not actual.is_pt.iloc[0]
 
 
 @pytest.mark.parametrize("reverse", [False, True])
@@ -1210,15 +1219,45 @@ def test_public_snapshots_preserve_unknown_barriers_and_actual_publication():
     conflicting = snapshots.iloc[[1]].assign(
         industry_category_code="B", industry_major_code=""
     )
-    with pytest.raises(ValueError, match="industry_history_conflict"):
-        panels._asof_industry(
-            panel,
-            **panels._prepare_industry_inputs(
-                history,
-                industry_snapshots=pd.concat([snapshots, conflicting]),
-                **options,
-            ),
-        )
+    industry_columns = [
+        "industry_standard_id",
+        "industry_level1_code",
+        "industry_level1_name",
+        "is_nonfinancial_industry",
+    ]
+    mixed_panel = pd.concat(
+        [panel.assign(close=10.0), panel.assign(asset_id="000002", close=20.0)],
+        ignore_index=True,
+    )
+    mixed_options = {
+        **options,
+        "industry_changes": pd.concat(
+            [changes, changes.iloc[[0]].assign(source_asset_id="000002")],
+            ignore_index=True,
+        ),
+    }
+    mixed_history = pd.concat(
+        [history, history.iloc[[0]].assign(source_asset_id="000002")],
+        ignore_index=True,
+    )
+    conflicted = panels._asof_industry(
+        mixed_panel,
+        **panels._prepare_industry_inputs(
+            mixed_history,
+            industry_snapshots=pd.concat([snapshots, conflicting]),
+            **mixed_options,
+        ),
+    )
+    affected = conflicted.query("asset_id == '000001'").reset_index(drop=True)
+    pd.testing.assert_frame_equal(
+        affected.iloc[:4].drop(columns="close"), result.iloc[:4]
+    )
+    assert affected.iloc[[4]][industry_columns].isna().all().all()
+    assert (
+        conflicted.query("asset_id == '000002'").industry_level1_code.tolist()
+        == ["A"] * 5
+    )
+    pd.testing.assert_series_equal(conflicted.close, mixed_panel.close)
 
     duplicate = snapshots.iloc[[1]].assign(timestamp=pd.Timestamp("2023-01-11"))
     repeated = panels._asof_industry(
@@ -1236,28 +1275,33 @@ def test_public_snapshots_preserve_unknown_barriers_and_actual_publication():
         industry_code="C02", industry_name="other leaf"
     )
     same_parent = snapshots.iloc[[1]].assign(industry_code="02")
-    with pytest.raises(ValueError, match="industry_history_conflict"):
-        panels._asof_industry(
-            panel,
-            **panels._prepare_industry_inputs(
-                history,
-                industry_snapshots=pd.concat(
-                    [snapshots, same_parent], ignore_index=True
+    same_parent_conflict = panels._asof_industry(
+        mixed_panel,
+        **panels._prepare_industry_inputs(
+            mixed_history,
+            industry_snapshots=pd.concat([snapshots, same_parent], ignore_index=True),
+            **{
+                **mixed_options,
+                "industry_sets": pd.concat(
+                    [dictionary, same_parent_leaf], ignore_index=True
                 ),
-                **{
-                    **options,
-                    "industry_sets": pd.concat(
-                        [dictionary, same_parent_leaf], ignore_index=True
-                    ),
-                },
-            ),
-        )
+            },
+        ),
+    )
+    affected = same_parent_conflict.query("asset_id == '000001'").reset_index(drop=True)
+    pd.testing.assert_frame_equal(
+        affected.iloc[:4].drop(columns="close"), result.iloc[:4]
+    )
+    assert affected.iloc[[4]][industry_columns].isna().all().all()
+    assert (
+        same_parent_conflict.query("asset_id == '000002'").industry_level1_code.tolist()
+        == ["A"] * 5
+    )
+    pd.testing.assert_series_equal(same_parent_conflict.close, mixed_panel.close)
 
 
 @pytest.mark.parametrize("damage", ("missing", "cycle", "conflict"))
-def test_industry_mapping_gap_preserves_panel_but_rejects_structural_damage(
-    tmp_path, damage
-):
+def test_industry_mapping_gap_preserves_panel_with_local_unknowns(tmp_path, damage):
     from quant_research_platform.markets.implementations.a_share.processed import (
         producer,
     )
@@ -1284,6 +1328,32 @@ def test_industry_mapping_gap_preserves_panel_but_rejects_structural_damage(
         source["industry_classification_sets"] = pd.concat(
             [dictionary, dictionary.assign(industry_name="conflict")], ignore_index=True
         )
+    if damage != "missing":
+        source["industry_classification_sets"] = pd.concat(
+            [
+                source["industry_classification_sets"],
+                dictionary.assign(
+                    industry_code="J",
+                    industry_name="finance",
+                    industry_level="1",
+                    parent_industry_code="",
+                ),
+                dictionary.assign(
+                    industry_code="J66",
+                    industry_name="banking",
+                    industry_level="2",
+                    parent_industry_code="J",
+                ),
+            ],
+            ignore_index=True,
+        )
+        history = source["industry_classification"]
+        history.loc[
+            history.source_asset_id.ne("000001"),
+            ["industry_level1_code", "industry_level1_name"],
+        ] = ["J66", "banking"]
+        changes = source["stock_info_changes"]
+        changes.loc[changes.source_asset_id.ne("000001"), "value_after"] = "banking"
     spec = scientific_catalogs().processed.get("market_panel_1d")
 
     def compute():
@@ -1300,38 +1370,56 @@ def test_industry_mapping_gap_preserves_panel_but_rejects_structural_damage(
             trading_sessions=dates,
         )
 
-    if damage != "missing":
-        error = (
-            "industry_hierarchy_cycle"
-            if damage == "cycle"
-            else "industry_dictionary_key_duplicate"
-        )
-        with pytest.raises(ValueError, match=error):
-            compute()
-    else:
-        frame = compute()
-        from tests.helpers.paths import StorageLayout
+    frame = compute()
+    from tests.helpers.paths import StorageLayout
 
-        root = StorageLayout(tmp_path).processed_data_root(
-            spec.market_id, spec.kind, spec.data_id
-        )
-        write_dataset(root, frame, spec=spec)
-        restored = read_dataset(root)
-        assert len(restored) == 9
-        assert (
-            restored[
-                [
-                    "industry_standard_id",
-                    "industry_level1_code",
-                    "industry_level1_name",
-                    "is_nonfinancial_industry",
-                ]
+    root = StorageLayout(tmp_path).processed_data_root(
+        spec.market_id, spec.kind, spec.data_id
+    )
+    write_dataset(root, frame, spec=spec)
+    restored = read_dataset(root)
+    assert len(restored) == 9
+    affected = (
+        restored if damage == "missing" else restored.query("asset_id == '000001'")
+    )
+    assert (
+        affected[
+            [
+                "industry_standard_id",
+                "industry_level1_code",
+                "industry_level1_name",
+                "is_nonfinancial_industry",
             ]
-            .isna()
-            .all()
-            .all()
+        ]
+        .isna()
+        .all()
+        .all()
+    )
+    if damage != "missing":
+        assert (
+            restored.query("asset_id != '000001'").industry_level1_code.tolist()
+            == ["J"] * 6
         )
-        assert restored.close.notna().all()
+    price_columns = [
+        "open",
+        "high",
+        "low",
+        "close",
+        "adj_open",
+        "adj_close",
+        "volume",
+        "amount",
+    ]
+    pd.testing.assert_frame_equal(
+        restored.set_index(["asset_id", "timestamp"])[price_columns]
+        .sort_index()
+        .astype("float64"),
+        source["market_bars_1d"]
+        .set_index(["source_asset_id", "timestamp"])[price_columns]
+        .sort_index()
+        .rename_axis(["asset_id", "timestamp"]),
+        check_index_type=False,
+    )
 
 
 def test_public_suspension_placeholders_keep_fixed_horizon_returns(tmp_path):
@@ -1780,9 +1868,32 @@ def test_industry_frontier_discards_superseded_cross_standard_conflicts(
             "abandon_date": pd.Series([pd.NaT, pd.NaT], dtype="datetime64[ns]"),
         }
     )
-    actual = _asof_industry(
-        panel, history, industry_sets=None, industry_versions=versions
-    )
+    industry_columns = [
+        "industry_standard_id",
+        "industry_level1_code",
+        "industry_level1_name",
+        "is_nonfinancial_industry",
+    ]
+
+    def compute(consumed, facts):
+        mixed_panel = pd.concat(
+            [consumed.assign(close=10.0), consumed.assign(asset_id="b", close=20.0)],
+            ignore_index=True,
+        )
+        neighbor = history.iloc[[0]].assign(
+            asset_id="b", timestamp=pd.Timestamp("2023-01-01")
+        )
+        mixed_history = pd.concat([facts, neighbor], ignore_index=True)
+        result = _asof_industry(
+            mixed_panel, mixed_history, industry_sets=None, industry_versions=versions
+        )
+        assert result.query("asset_id == 'b'").industry_level1_code.tolist() == [
+            "A"
+        ] * len(consumed)
+        pd.testing.assert_series_equal(result.close, mixed_panel.close)
+        return result.query("asset_id == 'a'").reset_index(drop=True)
+
+    actual = compute(panel, history)
     assert actual["industry_level1_code"].tolist() == ["C"]
     if newer_available == "2023-01-11":
         # Actual computation history cannot borrow the next day's resolution.
@@ -1791,36 +1902,31 @@ def test_industry_frontier_discards_superseded_cross_standard_conflicts(
             ignore_index=True,
         )
         for consumed in (with_history, with_history.iloc[:1]):
-            with pytest.raises(ValueError, match="industry_history_standard_conflict"):
-                _asof_industry(
-                    consumed, history, industry_sets=None, industry_versions=versions
-                )
+            historical = compute(consumed, history)
+            assert historical.iloc[[0]][industry_columns].isna().all().all()
+            if len(consumed) == 2:
+                assert historical.iloc[1].industry_level1_code == "C"
         future = history.copy()
         future.loc[2, "timestamp"] = pd.Timestamp("2023-01-13")
-        with pytest.raises(ValueError, match="industry_history_standard_conflict"):
-            _asof_industry(
-                panel, future, industry_sets=None, industry_versions=versions
-            )
+        assert compute(panel, future)[industry_columns].isna().all().all()
     # A current, unresolved cross-standard frontier remains contradictory.
-    with pytest.raises(ValueError, match="industry_history_standard_conflict"):
-        _asof_industry(
-            panel, history.iloc[:2], industry_sets=None, industry_versions=versions
-        )
-    # Newer information does not repair contradictory same-standard historical facts.
+    assert compute(panel, history.iloc[:2])[industry_columns].isna().all().all()
+    # A newer frontier restores current knowledge without repairing past conflicts.
     contradictory = pd.concat(
         [history, history.iloc[[0]].assign(_industry_classification_code="D")],
         ignore_index=True,
     )
-    with pytest.raises(ValueError, match="industry_history_conflict"):
-        _asof_industry(
-            panel, contradictory, industry_sets=None, industry_versions=versions
-        )
+    assert compute(panel, contradictory).industry_level1_code.tolist() == ["C"]
+    historical = compute(
+        panel.assign(timestamp=pd.Timestamp("2023-01-10")), contradictory
+    )
+    assert historical.industry_level1_code.fillna("unknown").tolist() == [
+        "unknown" if newer_available == "2023-01-11" else "C"
+    ]
     # An unknown latest effective state still blocks older proven classifications.
     history.loc[2, "_industry_known"] = False
-    unknown = _asof_industry(
-        panel, history, industry_sets=None, industry_versions=versions
-    )
-    assert unknown["industry_level1_code"].isna().all()
+    unknown = compute(panel, history)
+    assert unknown[industry_columns].isna().all().all()
 
 
 def test_native_forward_returns_declare_units_and_actual_maturity_columns():

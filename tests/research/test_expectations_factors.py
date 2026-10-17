@@ -591,7 +591,7 @@ def test_explicit_freshness_controls_native_source_history_and_values(
         )
 
 
-@pytest.mark.parametrize("failure", ("source", "schema", "parameter"))
+@pytest.mark.parametrize("failure", ("schema", "parameter"))
 def test_expectation_preparation_and_query_reject_invalid_boundaries(failure):
     records = pd.DataFrame(
         {
@@ -613,7 +613,6 @@ def test_expectation_preparation_and_query_reject_invalid_boundaries(failure):
         records["institution_id"] = "valid"
         observations = observations.drop(columns="close")
     expected = {
-        "source": "expectations_institution_id_invalid",
         "schema": "expectations_input_columns_invalid",
         "parameter": "expectations_freshness_invalid",
     }[failure]
@@ -926,3 +925,327 @@ def test_unrepresentable_expectation_yield_preserves_other_values_and_rows(tmp_p
     )
     write_dataset(tmp_path / "factors", actual, spec=spec)
     pd.testing.assert_frame_equal(read_dataset(tmp_path / "factors"), actual)
+
+
+def _locality_forecasts():
+    return pd.DataFrame(
+        [
+            dict(
+                asset_id=asset,
+                declare_date=pd.Timestamp("2025-01-02"),
+                forecast_end_date=pd.Timestamp(f"{year}-12-31"),
+                institution_id=institution,
+                report_id=f"{asset}-{year}-{institution}",
+                forecast_eps=eps * multiple,
+                forecast_pe="unused-invalid-pe",
+            )
+            for asset, multiple in (("a", 1.0), ("b", 10.0))
+            for year in (2025, 2026)
+            for institution, eps in zip(("A", "B", "C"), (1.0, 2.0, 3.0), strict=True)
+        ]
+    )
+
+
+def test_unselected_forecast_scope_and_optional_pe_do_not_block_query():
+    records = _locality_forecasts()
+    sessions = pd.bdate_range("2025-01-02", "2025-01-10")
+    observations = pd.DataFrame({"asset_id": "a", "timestamp": sessions, "close": 10.0})
+    expected = _prepare_expectations(records, trading_sessions=sessions)(observations)
+    extras = pd.DataFrame(
+        [
+            dict(
+                asset_id="unobserved",
+                declare_date="1990-01-01",
+                forecast_end_date="1990-12-31",
+                institution_id="",
+                forecast_eps="invalid",
+            ),
+            dict(
+                asset_id="a",
+                declare_date="2025-01-02",
+                forecast_end_date="2025-09-30",
+                institution_id="",
+                forecast_eps="invalid",
+            ),
+            dict(
+                asset_id="a",
+                declare_date="2026-01-02",
+                forecast_end_date="2026-12-31",
+                institution_id="",
+                forecast_eps=float("inf"),
+            ),
+            dict(
+                asset_id="unobserved",
+                declare_date="2025-01-02",
+                forecast_end_date="2025-12-31",
+                institution_id="A",
+                forecast_eps="invalid",
+            ),
+            dict(
+                asset_id="a",
+                declare_date="invalid",
+                forecast_end_date="2025-12-31",
+                institution_id="A",
+                forecast_eps=999,
+            ),
+        ]
+    )
+    actual = _prepare_expectations(
+        pd.concat([records, extras], ignore_index=True), trading_sessions=sessions
+    )(observations)
+    pd.testing.assert_frame_equal(actual, expected, check_exact=True)
+
+
+@pytest.mark.parametrize("unknown", [None, np.nan, "invalid", float("inf")])
+def test_latest_unknown_eps_blocks_only_its_institution_without_stale_resurrection(
+    unknown,
+):
+    records = _locality_forecasts()
+    first = records.iloc[0].to_dict()
+    updates = pd.DataFrame(
+        [
+            {
+                **first,
+                "declare_date": pd.Timestamp("2025-01-06"),
+                "forecast_eps": unknown,
+            },
+            {**first, "declare_date": pd.Timestamp("2025-01-08"), "forecast_eps": 5.0},
+        ]
+    )
+    records = pd.concat([records, updates], ignore_index=True)
+    before = records.copy(deep=True)
+    sessions = pd.bdate_range("2025-01-02", "2025-01-10")
+    observations = pd.DataFrame(
+        [(asset, stamp, 10.0) for stamp in sessions for asset in ("a", "b")],
+        columns=["asset_id", "timestamp", "close"],
+    )
+    actual = _prepare_expectations(records, trading_sessions=sessions)(
+        observations
+    ).set_index(["asset_id", "timestamp"])
+    assert actual.loc[("a", "2025-01-06"), "forward_earnings_yield_fy1"] == 0.2
+    for day in ("2025-01-07", "2025-01-08"):
+        assert pd.isna(actual.loc[("a", day), "forward_earnings_yield_fy1"])
+        assert pd.isna(actual.loc[("a", day), "log_analyst_coverage"])
+        assert actual.loc[("a", day), "forward_earnings_yield_fy2"] == 0.2
+        assert actual.loc[("b", day), "forward_earnings_yield_fy1"] == 2.0
+    assert actual.loc[("a", "2025-01-09"), "forward_earnings_yield_fy1"] == 0.3
+    pd.testing.assert_frame_equal(records, before, check_exact=True)
+
+
+def test_unknown_eps_period_does_not_promote_fy2_into_fy1():
+    records = _locality_forecasts()
+    records.loc[records.forecast_end_date.dt.year.eq(2025), "forecast_eps"] = np.nan
+    sessions = pd.bdate_range("2025-01-02", periods=2)
+    actual = _prepare_expectations(records, trading_sessions=sessions)(
+        pd.DataFrame({"asset_id": ["a"], "timestamp": sessions[-1:], "close": 10.0})
+    )
+    assert pd.isna(actual.forward_earnings_yield_fy1.iloc[0])
+    assert pd.isna(actual.log_analyst_coverage.iloc[0])
+    assert actual.forward_earnings_yield_fy2.iloc[0] == 0.2
+
+
+@pytest.mark.parametrize("period", (2025, 2026))
+def test_keyed_unknown_institution_blocks_only_its_period_until_report_is_resolved(
+    period,
+):
+    records = _locality_forecasts()
+    first = (
+        records.loc[
+            records.asset_id.eq("a") & records.forecast_end_date.dt.year.eq(period)
+        ]
+        .iloc[0]
+        .to_dict()
+    )
+    records = pd.concat(
+        [
+            records,
+            pd.DataFrame(
+                [
+                    {
+                        **first,
+                        "declare_date": pd.Timestamp("2025-01-06"),
+                        "institution_id": pd.NA,
+                    },
+                    {
+                        **first,
+                        "declare_date": pd.Timestamp("2025-01-08"),
+                        "forecast_eps": 5.0,
+                    },
+                ]
+            ),
+        ],
+        ignore_index=True,
+    )
+    sessions = pd.bdate_range("2025-01-02", "2025-01-10")
+    observations = pd.DataFrame(
+        [(asset, stamp, 10.0) for stamp in sessions for asset in ("a", "b")],
+        columns=["asset_id", "timestamp", "close"],
+    )
+    actual = _prepare_expectations(records, trading_sessions=sessions)(
+        observations
+    ).set_index(["asset_id", "timestamp"])
+    target = (
+        "forward_earnings_yield_fy1" if period == 2025 else "forward_earnings_yield_fy2"
+    )
+    other = (
+        "forward_earnings_yield_fy2" if period == 2025 else "forward_earnings_yield_fy1"
+    )
+    assert actual.loc[("a", "2025-01-06"), target] == 0.2
+    for day in ("2025-01-07", "2025-01-08"):
+        assert pd.isna(actual.loc[("a", day), target])
+        assert actual.loc[("a", day), other] == 0.2
+        assert actual.loc[("b", day), target] == 2.0
+    assert actual.loc[("a", "2025-01-09"), target] == 0.3
+
+
+@pytest.mark.parametrize("institution", [None, "", " ", 123])
+def test_unlocatable_institution_without_report_identity_never_counts(institution):
+    records = _locality_forecasts().drop(columns="report_id")
+    extra = {
+        **records.iloc[0].to_dict(),
+        "institution_id": institution,
+        "forecast_eps": 999,
+    }
+    sessions = pd.bdate_range("2025-01-02", periods=2)
+    observations = pd.DataFrame(
+        {"asset_id": ["a"], "timestamp": sessions[-1:], "close": 10.0}
+    )
+    expected = _prepare_expectations(records, trading_sessions=sessions)(observations)
+    actual = _prepare_expectations(
+        pd.concat([records, pd.DataFrame([extra])], ignore_index=True),
+        trading_sessions=sessions,
+    )(observations)
+    pd.testing.assert_frame_equal(actual, expected, check_exact=True)
+
+
+@pytest.mark.parametrize("close", ["invalid", float("inf"), True])
+def test_invalid_observation_price_is_local_to_price_dependent_factors(close):
+    records = _locality_forecasts()
+    sessions = pd.bdate_range("2025-01-02", periods=3)
+    observations = pd.DataFrame(
+        {"asset_id": ["a", "a"], "timestamp": sessions[1:], "close": [close, 10.0]}
+    )
+    actual = _prepare_expectations(records, trading_sessions=sessions)(observations)
+    assert pd.isna(actual.forward_earnings_yield_fy1.iloc[0])
+    assert actual.forward_earnings_yield_fy1.iloc[1] == 0.2
+    assert actual.forecast_dispersion_fy1.tolist() == [1.0, 1.0]
+    np.testing.assert_allclose(actual.log_analyst_coverage, np.log(3.0))
+
+
+def test_same_day_unknown_eps_report_does_not_create_a_known_institutional_median():
+    records = _locality_forecasts()
+    first = records.iloc[0].to_dict()
+    records = pd.concat(
+        [
+            records,
+            pd.DataFrame(
+                [
+                    {
+                        **first,
+                        "declare_date": pd.Timestamp("2025-01-06"),
+                        "report_id": "known-new",
+                        "forecast_eps": 9.0,
+                    },
+                    {
+                        **first,
+                        "declare_date": pd.Timestamp("2025-01-06"),
+                        "report_id": "unknown-new",
+                        "forecast_eps": np.nan,
+                    },
+                ]
+            ),
+        ],
+        ignore_index=True,
+    )
+    sessions = pd.bdate_range("2025-01-02", "2025-01-08")
+    actual = _prepare_expectations(records, trading_sessions=sessions)(
+        pd.DataFrame({"asset_id": "a", "timestamp": sessions, "close": 10.0})
+    ).set_index("timestamp")
+    assert actual.loc["2025-01-06", "forward_earnings_yield_fy1"] == 0.2
+    assert pd.isna(actual.loc["2025-01-07", "forward_earnings_yield_fy1"])
+    assert actual.loc["2025-01-07", "forward_earnings_yield_fy2"] == 0.2
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_persisted_csmar_institution_unknown_is_a_local_expectations_barrier(
+    tmp_path, missing
+):
+    from quant_research_platform.sources.csmar.interim import materialize_interim_data
+    from quant_research_platform.storage.datasets import read_dataset
+    from tests.helpers.a_share_raw import _write_csmar
+
+    rows = [
+        dict(
+            Stkcd=asset,
+            ReportID=f"{asset}-{institution}",
+            AnanmID="author",
+            DeclareDate="2025-01-02",
+            Fenddt="2025-12-31",
+            InstitutionID=institution,
+            Feps=eps * multiple,
+            Fpe="invalid-unused-pe",
+        )
+        for asset, multiple in (("000001", 1.0), ("000002", 10.0))
+        for institution, eps in zip(("A", "B", "C"), (1.0, 2.0, 3.0), strict=True)
+    ]
+    first = rows[0]
+    rows += [
+        {**first, "DeclareDate": "2025-01-06"},
+        {**first, "DeclareDate": "2025-01-06", "InstitutionID": "disputed"},
+        {**first, "DeclareDate": "2025-01-08", "Feps": 5.0},
+    ]
+    if missing:
+        rows = [row for row in rows if row["DeclareDate"] != "2025-01-06"]
+        rows.append({**first, "DeclareDate": "2025-01-06", "InstitutionID": ""})
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    _write_csmar(raw, "analyst_forecast", rows)
+    path = next(raw.glob("*.csv"))
+    before = path.read_bytes()
+    output = tmp_path / "analyst"
+    materialize_interim_data(
+        raw_root=raw,
+        data_ids=("analyst_forecast",),
+        output_roots={"analyst_forecast": output},
+        chunksize=1,
+    )
+    source = read_dataset(output).rename(columns={"source_asset_id": "asset_id"})
+    assert source.forecast_pe.isna().all()
+    assert (
+        source.loc[source.declare_date.eq(pd.Timestamp("2025-01-06")), "institution_id"]
+        .isna()
+        .all()
+    )
+    sessions = pd.bdate_range("2025-01-02", "2025-01-10")
+    observations = pd.DataFrame(
+        [(asset, stamp, 10.0) for stamp in sessions for asset in ("000001", "000002")],
+        columns=["asset_id", "timestamp", "close"],
+    )
+    actual = _prepare_expectations(source, trading_sessions=sessions)(
+        observations
+    ).set_index(["asset_id", "timestamp"])
+    assert actual.loc[("000001", "2025-01-06"), "forward_earnings_yield_fy1"] == 0.2
+    assert pd.isna(actual.loc[("000001", "2025-01-07"), "forward_earnings_yield_fy1"])
+    assert actual.loc[("000002", "2025-01-07"), "forward_earnings_yield_fy1"] == 2.0
+    assert actual.loc[("000001", "2025-01-09"), "forward_earnings_yield_fy1"] == 0.3
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        pd.Series(pd.to_datetime(["2025-01-01"])),
+        pd.Series(pd.to_timedelta([1], unit="D")),
+        pd.Series([pd.Timestamp("2025-01-01"), 2.0], dtype=object),
+        pd.Series([pd.Timedelta(days=1), 2.0], dtype=object),
+    ],
+)
+def test_datetime_values_cannot_be_numeric_forecasts(values):
+    from quant_research_platform.research.factors.expectations.calculations import (
+        _local_finite_numeric,
+    )
+
+    result = _local_finite_numeric(values)
+    assert pd.isna(result.iloc[0])
+    if len(result) > 1:
+        assert result.iloc[1] == 2.0

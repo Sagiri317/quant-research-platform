@@ -151,8 +151,6 @@ def test_analyst_raw_reports_persist_and_feed_institution_consensus(
 ):
     import json
 
-    import numpy as np
-
     from quant_research_platform.contracts.columns import ColumnRole
     from quant_research_platform.markets.implementations.a_share.processed import (
         producer,
@@ -189,9 +187,9 @@ def test_analyst_raw_reports_persist_and_feed_institution_consensus(
         "raw_rows": 8,
         "missing_declare_date_rows": 2,
         "missing_institution_id_rows": 2,
-        "excluded_missing_required_rows": 3,
-        "retained_before_date_filter_rows": 5,
-        "retained_after_date_filter_rows": 5,
+        "excluded_missing_required_rows": 2,
+        "retained_before_date_filter_rows": 6,
+        "retained_after_date_filter_rows": 6,
         "excluded_date_range_rows": 0,
     }
     spec = interim.interim_catalog().get("analyst_forecast")
@@ -203,7 +201,8 @@ def test_analyst_raw_reports_persist_and_feed_institution_consensus(
     )
     assert spec.column_roles["forecast_end_date"] is ColumnRole.KEY
     assert spec.column_roles["timestamp"] is ColumnRole.TIMESTAMP
-    assert len(saved) == 5
+    assert len(saved) == 6
+    assert saved.institution_id.isna().sum() == 1
     assert saved.report_id.str.startswith("900719925474099").sum() == 3
     assert saved.loc[saved.institution_id.eq("A"), "analyst_ids"].tolist() == [
         "001,002",
@@ -245,9 +244,18 @@ def test_analyst_raw_reports_persist_and_feed_institution_consensus(
     persisted = read_dataset(processed_root)
     pd.testing.assert_frame_equal(persisted, actual, check_exact=True)
     assert persisted.iloc[0, 3:].isna().all()
-    assert persisted.loc[1, "forward_earnings_yield_fy1"] == 1.3
-    assert persisted.loc[1, "forecast_dispersion_fy1"] == 1.0
-    assert persisted.loc[1, "log_analyst_coverage"] == pytest.approx(np.log(3))
+    assert (
+        persisted.loc[
+            1,
+            [
+                "forward_earnings_yield_fy1",
+                "forecast_dispersion_fy1",
+                "log_analyst_coverage",
+            ],
+        ]
+        .isna()
+        .all()
+    )
     assert persisted.forward_earnings_yield_fy2.isna().all()
     assert Path(native_filesystem_path(raw_path)).read_bytes() == original
 
@@ -265,7 +273,7 @@ def test_analyst_all_excluded_persists_zero_rows_and_counts(tmp_path):
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
     filesystem_mkdir(raw, parents=True)
-    _write_csmar(raw, "analyst_forecast", _analyst_rows()[5:])
+    _write_csmar(raw, "analyst_forecast", [_analyst_rows()[5], _analyst_rows()[7]])
     result = interim.materialize_interim_data(
         output_roots={
             key: layout.interim_data_root("csmar", key) for key in ("analyst_forecast",)
@@ -283,7 +291,7 @@ def test_analyst_all_excluded_persists_zero_rows_and_counts(tmp_path):
         )
     )
     counts = manifest["producer_diagnostics"]["source_row_counts"]
-    assert counts["raw_rows"] == counts["excluded_missing_required_rows"] == 3
+    assert counts["raw_rows"] == counts["excluded_missing_required_rows"] == 2
     assert counts["retained_after_date_filter_rows"] == 0
     sessions = pd.bdate_range("2025-01-03", periods=2).as_unit("ns")
     from types import SimpleNamespace
@@ -351,8 +359,19 @@ def test_analyst_all_excluded_persists_zero_rows_and_counts(tmp_path):
 def test_calendar_direct_boolean_is_not_an_integer(column):
     row = {"Markettype": "4", "Clddt": "2025-01-03", "Daywk": "5", "State": "O"}
     row[column] = True
-    with pytest.raises(ValueError, match="invalid_trading_calendar"):
-        interim.normalize_raw_frame(pd.DataFrame([row]), "trading_calendar")
+    result = interim.normalize_raw_frame(pd.DataFrame([row]), "trading_calendar")
+    counts = result.attrs["source_row_counts"]
+    target = "source_market_type" if column == "Markettype" else "source_day_of_week"
+    assert counts[f"invalid_{target}_rows"] == 1
+    if column == "Markettype":
+        assert result.empty
+        assert counts["excluded_missing_required_rows"] == 1
+    else:
+        assert result.source_day_of_week.isna().all()
+        assert result.is_trading_day.tolist() == [True]
+        assert result.timestamp.tolist() == [pd.Timestamp("2025-01-03")]
+    assert str(result.timestamp.dtype) == "datetime64[ns]"
+    assert str(result.source_day_of_week.dtype) == "Int64"
 
 
 @pytest.mark.parametrize(
@@ -364,34 +383,50 @@ def test_calendar_direct_boolean_is_not_an_integer(column):
         ("Feps", "infinite"),
     ),
 )
-def test_invalid_analyst_raw_does_not_publish_candidate(tmp_path, column, value):
+@pytest.mark.parametrize("chunksize", (1, 100))
+@pytest.mark.parametrize("all_bad", (False, True))
+def test_invalid_analyst_facts_are_local_to_required_rows_or_optional_cells(
+    tmp_path, column, value, chunksize, all_bad
+):
+    from quant_research_platform.storage.datasets import read_dataset
+    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
     from tests.helpers.a_share_raw import _write_csmar
-    from tests.helpers.paths import StorageLayout
 
-    layout = StorageLayout(tmp_path)
-    raw = layout.raw_source_root("csmar")
-    filesystem_mkdir(raw, parents=True)
-    rows = _analyst_rows()[:1]
-    rows[0][column] = value
-    rows[0]["InstitutionID"] = ""
+    raw = tmp_path / "raw"
+    filesystem_mkdir(raw)
+    row = {**_analyst_rows()[0], column: value}
+    rows = [row] if all_bad else [row, {**_analyst_rows()[0], "Stkcd": "000002"}]
     _write_csmar(raw, "analyst_forecast", rows)
-    with pytest.raises(ValueError, match="invalid_"):
-        interim.materialize_interim_data(
-            output_roots={
-                key: StorageLayout(tmp_path / "candidate").interim_data_root(
-                    "csmar", key
-                )
-                for key in ("analyst_forecast",)
-            },
-            raw_root=raw,
-            data_ids=("analyst_forecast",),
-        )
-    assert not filesystem_exists(
-        StorageLayout(tmp_path / "candidate").interim_data_root(
-            "csmar", "analyst_forecast"
-        )
+    original = _file_bytes(raw)
+    candidate = tmp_path / "candidate"
+    interim.materialize_interim_data(
+        output_roots={"analyst_forecast": candidate},
+        raw_root=raw,
+        data_ids=("analyst_forecast",),
+        chunksize=chunksize,
     )
-    assert not tuple(filesystem_glob(tmp_path / "candidate", "**/.a-*"))
+    saved = read_dataset(candidate).sort_values("source_asset_id")
+    optional = column == "Feps"
+    assert len(saved) == (len(rows) if optional else len(rows) - 1)
+    assert str(saved.timestamp.dtype) == "datetime64[ns]"
+    assert str(saved.forecast_end_date.dtype) == "datetime64[ns]"
+    assert pd.api.types.is_float_dtype(saved.forecast_eps.dtype)
+    if optional:
+        assert pd.isna(saved.forecast_eps.iloc[0])
+        assert saved.forecast_pe.iloc[0] == 10
+    if not all_bad:
+        good = saved.loc[saved.source_asset_id.eq("000002")].iloc[0]
+        assert good.forecast_eps == 18
+        assert good.report_id == "9007199254740993"
+    counts = read_dataset_manifest_evidence(candidate)["producer_diagnostics"][
+        "source_row_counts"
+    ]
+    assert counts["raw_rows"] == len(rows)
+    assert counts["retained_after_date_filter_rows"] == len(saved)
+    assert counts.get("excluded_missing_required_rows", 0) == (0 if optional else 1)
+    if optional:
+        assert counts["invalid_forecast_eps_rows"] == 1
+    assert _file_bytes(raw) == original
 
 
 @pytest.mark.parametrize(
@@ -404,33 +439,49 @@ def test_invalid_analyst_raw_does_not_publish_candidate(tmp_path, column, value)
         ("Markettype", "True"),
     ),
 )
-def test_calendar_raw_rejects_nonintegers_without_publication(tmp_path, column, value):
+@pytest.mark.parametrize("chunksize", (1, 100))
+def test_calendar_raw_invalid_codes_preserve_independent_dates_and_states(
+    tmp_path, column, value, chunksize
+):
+    from quant_research_platform.storage.datasets import read_dataset
+    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
     from tests.helpers.a_share_raw import _write_csmar
-    from tests.helpers.paths import StorageLayout
 
-    layout = StorageLayout(tmp_path)
-    raw = layout.raw_source_root("csmar")
-    filesystem_mkdir(raw, parents=True)
-    row = {"Markettype": "4", "Clddt": "2025-01-03", "Daywk": "5", "State": "O"}
-    row[column] = value
-    _write_csmar(raw, "trading_calendar", [row])
-    with pytest.raises(ValueError, match="invalid_"):
-        interim.materialize_interim_data(
-            output_roots={
-                key: StorageLayout(tmp_path / "candidate").interim_data_root(
-                    "csmar", key
-                )
-                for key in ("trading_calendar",)
-            },
-            raw_root=raw,
-            data_ids=("trading_calendar",),
-        )
-    assert not filesystem_exists(
-        StorageLayout(tmp_path / "candidate").interim_data_root(
-            "csmar", "trading_calendar"
-        )
+    raw = tmp_path / "raw"
+    filesystem_mkdir(raw)
+    valid = {"Markettype": "4", "Clddt": "2025-01-06", "Daywk": "1", "State": "C"}
+    bad = {**valid, "Clddt": "2025-01-03", "State": "O", column: value}
+    _write_csmar(raw, "trading_calendar", [bad, valid])
+    original = _file_bytes(raw)
+    candidate = tmp_path / "candidate"
+    interim.materialize_interim_data(
+        output_roots={"trading_calendar": candidate},
+        raw_root=raw,
+        data_ids=("trading_calendar",),
+        chunksize=chunksize,
     )
-    assert not tuple(filesystem_glob(tmp_path / "candidate", "**/.a-*"))
+    saved = read_dataset(candidate).sort_values("timestamp")
+    assert saved.iloc[-1].timestamp == pd.Timestamp("2025-01-06")
+    assert saved.iloc[-1].source_day_of_week == 1
+    assert not saved.iloc[-1].is_trading_day
+    if column == "Daywk":
+        assert len(saved) == 2
+        assert pd.isna(saved.iloc[0].source_day_of_week)
+        assert saved.iloc[0].is_trading_day
+    else:
+        assert len(saved) == 1
+    counts = read_dataset_manifest_evidence(candidate)["producer_diagnostics"][
+        "source_row_counts"
+    ]
+    assert counts["raw_rows"] == 2
+    assert counts["retained_after_date_filter_rows"] == len(saved)
+    assert counts.get("excluded_missing_required_rows", 0) == (column == "Markettype")
+    if value:
+        target = (
+            "source_market_type" if column == "Markettype" else "source_day_of_week"
+        )
+        assert counts[f"invalid_{target}_rows"] == 1
+    assert _file_bytes(raw) == original
 
 
 def test_calendar_raw_preserves_integer_codes(tmp_path):
@@ -503,13 +554,11 @@ def test_after_hours_nulls_follow_known_historical_applicability(
         Ahshrtrd_D=after,
         Ahvaltrd_D=after,
     )
-    if not accepted:
-        with pytest.raises(
-            ValueError, match="invalid_csmar_(after_hours|filling_flag)"
-        ):
-            interim.normalize_raw_frame(pd.DataFrame([row]), "market_bars_1d")
-    else:
-        result = interim.normalize_raw_frame(pd.DataFrame([row]), "market_bars_1d")
+    result = interim.normalize_raw_frame(pd.DataFrame([row]), "market_bars_1d")
+    assert len(result) == 1
+    assert result.close.iloc[0] == 1.0
+    assert result.timestamp.iloc[0] == pd.Timestamp(day)
+    if accepted:
         expected = 0.0 if after is None else after
         assert (
             result.after_hours_volume.iloc[0]
@@ -517,16 +566,25 @@ def test_after_hours_nulls_follow_known_historical_applicability(
             == expected
         )
         assert result.volume.iloc[0] == result.amount.iloc[0] == 1.0 + expected
+    else:
+        assert (
+            result[["after_hours_volume", "after_hours_amount", "volume", "amount"]]
+            .isna()
+            .all()
+            .all()
+        )
+    if filling == 3:
+        assert pd.isna(result.filling_flag.iloc[0])
 
 
-def test_after_hours_materialization_preserves_totals_and_old_good(tmp_path) -> None:
-    from quant_research_platform.storage.datasets.reading import read_dataset
+def test_after_hours_materialization_preserves_known_totals_and_local_unknowns(
+    tmp_path,
+) -> None:
+    from quant_research_platform.storage.datasets import read_dataset
     from tests.helpers.a_share_raw import _write_csmar
-    from tests.helpers.paths import StorageLayout
 
-    layout = StorageLayout(tmp_path)
-    raw = layout.raw_source_root("csmar")
-    filesystem_mkdir(raw, parents=True)
+    raw = tmp_path / "raw"
+    filesystem_mkdir(raw)
     row = dict.fromkeys(
         raw_exports.RAW_TABLE_CONTRACTS["market_bars_1d"].required_columns, 1.0
     )
@@ -539,37 +597,65 @@ def test_after_hours_materialization_preserves_totals_and_old_good(tmp_path) -> 
         Ahvaltrd_D=3.0,
     )
     _write_csmar(raw, "market_bars_1d", [row])
-    result = interim.materialize_interim_data(
-        output_roots={
-            key: layout.interim_data_root("csmar", key) for key in ("market_bars_1d",)
-        },
-        raw_root=layout.raw_source_root("csmar"),
+    original_root = tmp_path / "original"
+    interim.materialize_interim_data(
+        output_roots={"market_bars_1d": original_root},
+        raw_root=raw,
         data_ids=("market_bars_1d",),
     )
-    root = result.artifact_roots["market_bars_1d"]
-    loaded = read_dataset(root)
+    loaded = read_dataset(original_root)
     assert loaded.volume.iloc[0] == 3.0 and loaded.amount.iloc[0] == 4.0
-    before = _file_bytes(root)
-    row["Ahvaltrd_D"] = None
-    _write_csmar(raw, "market_bars_1d", [row])
-    with pytest.raises(ValueError, match="invalid_csmar_after_hours_amount_missing"):
-        interim.materialize_interim_data(
-            output_roots={
-                key: StorageLayout(tmp_path / "candidate").interim_data_root(
-                    "csmar", key
-                )
-                for key in ("market_bars_1d",)
-            },
-            raw_root=raw,
-            data_ids=("market_bars_1d",),
-        )
-    assert _file_bytes(root) == before
-    assert not filesystem_exists(
-        StorageLayout(tmp_path / "candidate").interim_data_root(
-            "csmar", "market_bars_1d"
-        )
+    before = _file_bytes(original_root)
+    _write_csmar(
+        raw, "market_bars_1d", [{**row, "Ahvaltrd_D": None}, {**row, "Stkcd": "000002"}]
     )
-    assert not tuple(filesystem_glob(tmp_path / "candidate", "**/.a-*"))
+    raw_before = _file_bytes(raw)
+    candidate = tmp_path / "candidate"
+    interim.materialize_interim_data(
+        output_roots={"market_bars_1d": candidate},
+        raw_root=raw,
+        data_ids=("market_bars_1d",),
+        chunksize=1,
+    )
+    saved = read_dataset(candidate).set_index("source_asset_id")
+    assert len(saved) == 2
+    assert saved.loc["000001", "volume"] == 3.0
+    assert pd.isna(saved.loc["000001", "after_hours_amount"])
+    assert pd.isna(saved.loc["000001", "amount"])
+    assert saved.loc["000001", "close"] == 1.0
+    assert saved.loc["000002", "volume"] == 3.0
+    assert saved.loc["000002", "amount"] == 4.0
+    assert _file_bytes(original_root) == before
+    assert _file_bytes(raw) == raw_before
+
+
+@pytest.mark.parametrize("bad", ["invalid", float("inf"), -float("inf")])
+@pytest.mark.parametrize(
+    "column,target", [("Ahshrtrd_D", "volume"), ("Ahvaltrd_D", "amount")]
+)
+def test_invalid_after_hours_facts_are_not_historical_structural_zero(
+    bad, column, target
+):
+    row = dict.fromkeys(
+        raw_exports.RAW_TABLE_CONTRACTS["market_bars_1d"].required_columns, 1.0
+    )
+    row.update(
+        Stkcd="000001",
+        Trddt="2019-01-02",
+        Markettype=1,
+        Filling=0,
+        Ahshrtrd_D=None,
+        Ahvaltrd_D=None,
+    )
+    row[column] = bad
+    result = interim.normalize_raw_frame(pd.DataFrame([row]), "market_bars_1d")
+    assert pd.isna(result[target].iloc[0])
+    assert pd.isna(result[f"after_hours_{target}"].iloc[0])
+    other = "amount" if target == "volume" else "volume"
+    assert result[other].iloc[0] == 1.0
+    assert result[f"after_hours_{other}"].iloc[0] == 0.0
+    assert result.close.iloc[0] == 1.0
+    assert result.attrs["source_row_counts"][f"invalid_after_hours_{target}_rows"] == 1
 
 
 def _collect_raw_export(
@@ -934,36 +1020,44 @@ def test_financial_raw_decoder_preserves_text_and_normalizes_values(
     "dataset",
     ("financial_balance", "financial_income", "financial_cashflow"),
 )
-def test_financial_raw_decoder_rejects_invalid_numeric_fact(
-    tmp_path: Path,
-    dataset: str,
+def test_financial_raw_retains_invalid_numeric_fact_and_interim_localizes_it(
+    tmp_path: Path, dataset: str
 ) -> None:
+    from quant_research_platform.sources.csmar.field_mappings import COLUMN_MAPPINGS
+
     path = tmp_path / f"{dataset}.csv"
     columns = raw_exports.RAW_TABLE_CONTRACTS[dataset].required_columns
     numeric_column = next(
         column
         for column in columns
         if column
-        not in {
-            "Stkcd",
-            "ShortName",
-            "IfCorrect",
-            "DeclareDate",
-            "Accper",
-            "Typrep",
-        }
+        not in {"Stkcd", "ShortName", "IfCorrect", "DeclareDate", "Accper", "Typrep"}
     )
-    row = _financial_fixture_row(
-        columns,
-        invalid_numeric_column=numeric_column,
-    )
+    bad = _financial_fixture_row(columns, invalid_numeric_column=numeric_column)
+    good = _financial_fixture_row(columns)
+    good[columns.index("Stkcd")] = "000002"
     with open_filesystem_file(path, "w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, lineterminator="\n")
         writer.writerow(columns)
-        writer.writerow(row)
-
-    with pytest.raises(ValueError, match="invalid_csmar_numeric_value"):
-        _collect_raw_export(path, dataset, chunksize=1)
+        writer.writerows([bad, good])
+    before = Path(native_filesystem_path(path)).read_bytes()
+    decoded = _collect_raw_export(path, dataset, chunksize=1)
+    assert decoded[numeric_column].tolist() == ["bad", "1"]
+    normalized = interim.normalize_raw_frame(decoded, dataset).set_index(
+        "source_asset_id"
+    )
+    target = COLUMN_MAPPINGS[dataset][numeric_column]
+    assert pd.isna(normalized.loc["000001", target])
+    assert normalized.loc["000002", target] == 1.0
+    for column in (
+        set(interim.FINANCIAL_COLUMNS_BY_DATA_ID[dataset])
+        - set(interim.FINANCIAL_BASE_COLUMNS)
+        - {target}
+    ):
+        assert normalized[column].tolist() == [1.0, 1.0]
+    assert normalized.version_identity.tolist() == ["original", "original"]
+    assert normalized.attrs["source_row_counts"][f"invalid_{target}_rows"] == 1
+    assert Path(native_filesystem_path(path)).read_bytes() == before
 
 
 def test_provider_header_accepts_extra_optional_fields(
@@ -983,20 +1077,23 @@ def test_provider_header_accepts_extra_optional_fields(
         assert _collect_raw_export(path, "trading_calendar").empty
 
 
-def test_financial_correction_date_order_is_validated() -> None:
+def test_financial_correction_date_order_is_validated_locally() -> None:
     result = interim._parse_financial_correction_date(
-        pd.Series(["2020-02-01,2020-01-02", "2020-01-03", ""])
-    )
-
-    assert result.tolist() == [
-        pd.Timestamp("2020-02-01"),
-        pd.Timestamp("2020-01-03"),
-        pd.NaT,
-    ]
-    with pytest.raises(ValueError, match="invalid_financial_correction_date"):
-        interim._parse_financial_correction_date(
-            pd.Series(["2020-01-01,2020-02-01,2020-01-15"])
+        pd.Series(
+            [
+                "2020-02-01,2020-01-02",
+                "2020-01-03",
+                "",
+                "2020-01-01,2020-02-01,2020-01-15",
+                "2020-01-01,2020-01-01",
+                "invalid-date",
+            ]
         )
+    )
+    assert result.iloc[0] == pd.Timestamp("2020-02-01")
+    assert result.iloc[1] == pd.Timestamp("2020-01-03")
+    assert result.iloc[2:].isna().all()
+    assert str(result.dtype) == "datetime64[ns]"
 
 
 def test_csmar_identity_rejects_requested_bad_schema(
@@ -1025,7 +1122,7 @@ def test_analyst_fixed_projection_is_independent_of_empty_chunk_order(
     raw = layout.raw_source_root("csmar")
     filesystem_mkdir(raw, parents=True)
     valid = _analyst_rows()[0]
-    invalid = {**valid, "ReportID": "discarded", "InstitutionID": ""}
+    invalid = {**valid, "ReportID": "discarded", "DeclareDate": ""}
     rows = (
         [invalid, valid]
         if order == "first_empty"
@@ -1429,17 +1526,28 @@ def test_index_info_rejects_unrepaired_records(tmp_path: Path, tail) -> None:
 
 
 @pytest.mark.parametrize("reordered", [False, True])
-def test_index_info_validates_code_by_named_column(tmp_path, reordered):
+def test_index_info_interim_localizes_bad_named_code_and_raw_preserves_it(
+    tmp_path, reordered
+):
     fields = ["Indexcd", "Idxinfo01", "Idxinfo11", "Idxinfo02"]
-    row = ["invalid code", "000300", "2014-01-02", "2013-12-31"]
+    bad = ["invalid code", "000300", "2014-01-02", "2013-12-31"]
+    good = ["000905", "independent index", "2014-01-02", "2013-12-31"]
     positions = [1, 0, 2, 3] if reordered else list(range(4))
     path = tmp_path / "index.csv"
     with open_filesystem_file(path, "w", encoding="utf-8", newline="") as stream:
         writer = csv.writer(stream)
         writer.writerow([fields[i] for i in positions])
-        writer.writerow([row[i] for i in positions])
-    with pytest.raises(ValueError, match="^malformed_csmar_csv_row$"):
-        _collect_raw_export(path, "index_info")
+        writer.writerows([[row[i] for i in positions] for row in [bad, good]])
+    before = Path(native_filesystem_path(path)).read_bytes()
+    raw = _collect_raw_export(path, "index_info")
+    assert raw.Indexcd.tolist() == ["invalid code", "000905"]
+    assert raw.Idxinfo01.tolist() == ["000300", "independent index"]
+    normalized = interim.normalize_raw_frame(raw, "index_info")
+    assert normalized.source_asset_id.tolist() == ["000905"]
+    assert normalized.index_name.tolist() == ["independent index"]
+    assert normalized.timestamp.tolist() == [pd.Timestamp("2014-01-02")]
+    assert normalized.attrs["source_row_counts"]["excluded_missing_required_rows"] == 1
+    assert Path(native_filesystem_path(path)).read_bytes() == before
 
 
 def test_index_info_parser_streams_bounded_chunks_without_a_full_frame_surface(
@@ -1667,34 +1775,63 @@ def test_csmar_exact_duplicates_and_unordered_chunks_persist_identical_content(
 
 
 @pytest.mark.parametrize("chunksize", (1, 2))
-def test_csmar_conflicting_duplicate_keeps_prior_published_dataset(tmp_path, chunksize):
+@pytest.mark.parametrize(
+    "raw_column,value,column",
+    [("Feps", 999, "forecast_eps"), ("InstitutionID", "disputed", "institution_id")],
+)
+def test_analyst_same_key_conflict_preserves_independent_reports_and_prior_dataset(
+    tmp_path, chunksize, raw_column, value, column
+):
+    from quant_research_platform.storage.datasets import read_dataset
+    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
     from tests.helpers.a_share_raw import _write_csmar
-    from tests.helpers.paths import StorageLayout
 
-    layout = StorageLayout(tmp_path)
-    raw = layout.raw_source_root("csmar")
-    filesystem_mkdir(raw, parents=True)
+    raw = tmp_path / "raw"
+    filesystem_mkdir(raw)
     first = _analyst_rows()[0]
     _write_csmar(raw, "analyst_forecast", [first])
-    original = interim.materialize_interim_data(
-        output_roots={
-            key: layout.interim_data_root("csmar", key) for key in ("analyst_forecast",)
-        },
-        raw_root=layout.raw_source_root("csmar"),
+    original = tmp_path / "original"
+    interim.materialize_interim_data(
+        output_roots={"analyst_forecast": original},
+        raw_root=raw,
         data_ids=("analyst_forecast",),
-    ).artifact_roots["analyst_forecast"]
+    )
     old_good = _file_bytes(original)
-    _write_csmar(raw, "analyst_forecast", [first, {**first, "Feps": 999}])
-    candidate = tmp_path / "new-candidate"
-    with pytest.raises(ValueError, match="conflicting_csmar_primary_key_duplicates"):
-        interim.materialize_interim_data(
-            output_roots={"analyst_forecast": candidate},
-            raw_root=raw,
-            data_ids=("analyst_forecast",),
-            chunksize=chunksize,
-        )
-    assert not filesystem_exists(candidate)
+    neighbor = {
+        **first,
+        "ReportID": "independent-report",
+        "InstitutionID": "B",
+        "Feps": 12,
+    }
+    _write_csmar(
+        raw, "analyst_forecast", [first, {**first, raw_column: value}, neighbor]
+    )
+    raw_before = _file_bytes(raw)
+    candidate = tmp_path / "candidate"
+    interim.materialize_interim_data(
+        output_roots={"analyst_forecast": candidate},
+        raw_root=raw,
+        data_ids=("analyst_forecast",),
+        chunksize=chunksize,
+    )
+    saved = read_dataset(candidate).set_index("report_id")
+    assert len(saved) == 2
+    assert pd.isna(saved.loc[first["ReportID"], column])
+    assert saved.loc[first["ReportID"], "forecast_pe"] == 10
+    if column == "forecast_eps":
+        assert saved.loc[first["ReportID"], "institution_id"] == "A"
+    else:
+        assert saved.loc[first["ReportID"], "forecast_eps"] == 18
+    assert saved.loc["independent-report", "forecast_eps"] == 12
+    assert saved.loc["independent-report", "institution_id"] == "B"
+    assert "version_identity" not in saved
+    counts = read_dataset_manifest_evidence(candidate)["producer_diagnostics"][
+        "source_row_counts"
+    ]
+    assert counts[f"conflicting_{column}_rows"] == 2
+    assert counts["raw_rows"] == 3
     assert _file_bytes(original) == old_good
+    assert _file_bytes(raw) == raw_before
 
 
 @pytest.mark.parametrize("primary_type", (MemoryError, OSError, KeyboardInterrupt))
@@ -1750,19 +1887,121 @@ def test_special_treatment_destination_state(code, st, pt):
 
 
 @pytest.mark.parametrize("code", ["A", "B", "ZZ", "ABA", "ab"])
-def test_special_treatment_rejects_non_provider_transition(code):
-    with pytest.raises(ValueError, match="invalid_special_treatment_change_type"):
-        interim.normalize_raw_frame(
-            pd.DataFrame(
+@pytest.mark.parametrize("chunksize", (1, 100))
+def test_special_treatment_unknown_transition_keeps_event_and_valid_neighbor(
+    tmp_path, code, chunksize
+):
+    from quant_research_platform.storage.datasets import read_dataset
+    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from tests.helpers.a_share_raw import _write_csmar
+
+    raw = tmp_path / "raw"
+    filesystem_mkdir(raw)
+    row = {
+        "Symbol": "000001",
+        "Chgtype": code,
+        "Annoudt": "2020-01-02",
+        "Execudt": "2020-01-01",
+    }
+    _write_csmar(
+        raw,
+        "special_treatment_changes",
+        [row, {**row, "Symbol": "000002", "Chgtype": "AB"}],
+    )
+    before = _file_bytes(raw)
+    output = tmp_path / "interim"
+    interim.materialize_interim_data(
+        raw_root=raw,
+        data_ids=("special_treatment_changes",),
+        output_roots={"special_treatment_changes": output},
+        chunksize=chunksize,
+    )
+    saved = read_dataset(output).set_index("source_asset_id")
+    assert len(saved) == 2
+    assert saved.loc["000001", "change_type"] == code
+    assert saved.loc["000001", ["is_st", "is_pt"]].isna().all()
+    assert saved.loc["000001", "timestamp"] == pd.Timestamp("2020-01-01")
+    assert saved.loc["000001", "announcement_date"] == pd.Timestamp("2020-01-02")
+    assert bool(saved.loc["000002", "is_st"])
+    assert not bool(saved.loc["000002", "is_pt"])
+    assert str(saved.is_st.dtype) == str(saved.is_pt.dtype) == "boolean"
+    counts = read_dataset_manifest_evidence(output)["producer_diagnostics"][
+        "source_row_counts"
+    ]
+    assert counts["unsupported_transition_rows"] == 1
+    assert counts["raw_rows"] == counts["retained_after_date_filter_rows"] == 2
+    assert _file_bytes(raw) == before
+
+
+@pytest.mark.parametrize("code", ["", " ", None])
+@pytest.mark.parametrize("all_bad", [False, True])
+def test_special_treatment_blank_event_key_is_local_and_typed(tmp_path, code, all_bad):
+    from quant_research_platform.storage.datasets import read_dataset
+    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from tests.helpers.a_share_raw import _write_csmar
+
+    raw = tmp_path / "raw"
+    filesystem_mkdir(raw)
+    row = {
+        "Symbol": "000001",
+        "Chgtype": code,
+        "Annoudt": "2020-01-02",
+        "Execudt": "2020-01-01",
+    }
+    rows = [row] if all_bad else [row, {**row, "Symbol": "000002", "Chgtype": "AB"}]
+    _write_csmar(raw, "special_treatment_changes", rows)
+    before = _file_bytes(raw)
+    output = tmp_path / "interim"
+    interim.materialize_interim_data(
+        raw_root=raw,
+        data_ids=("special_treatment_changes",),
+        output_roots={"special_treatment_changes": output},
+        chunksize=1,
+    )
+    saved = read_dataset(output)
+    assert saved.source_asset_id.tolist() == ([] if all_bad else ["000002"])
+    assert str(saved.timestamp.dtype) == "datetime64[ns]"
+    assert str(saved.is_st.dtype) == str(saved.is_pt.dtype) == "boolean"
+    counts = read_dataset_manifest_evidence(output)["producer_diagnostics"][
+        "source_row_counts"
+    ]
+    assert counts["raw_rows"] == len(rows)
+    assert counts["excluded_missing_required_rows"] == 1
+    assert counts["retained_after_date_filter_rows"] == len(rows) - 1
+    assert _file_bytes(raw) == before
+
+
+@pytest.mark.parametrize("announcement", ["invalid", "9999-12-31", "", None])
+def test_special_treatment_unknown_announcement_never_fabricates_visibility(
+    announcement,
+):
+    result = interim.normalize_raw_frame(
+        pd.DataFrame(
+            [
                 {
-                    "Symbol": ["000001"],
-                    "Chgtype": [code],
-                    "Annoudt": ["2020-01-02"],
-                    "Execudt": ["2020-01-01"],
-                }
-            ),
-            "special_treatment_changes",
-        )
+                    "Symbol": "000001",
+                    "Chgtype": "AB",
+                    "Annoudt": announcement,
+                    "Execudt": "2020-01-01",
+                },
+                {
+                    "Symbol": "000002",
+                    "Chgtype": "BA",
+                    "Annoudt": "2020-01-02",
+                    "Execudt": "2020-01-01",
+                },
+            ]
+        ),
+        "special_treatment_changes",
+    ).set_index("source_asset_id")
+    assert len(result) == 2
+    assert pd.isna(result.loc["000001", "announcement_date"])
+    assert result.timestamp.eq(pd.Timestamp("2020-01-01")).all()
+    assert result.loc["000002", "announcement_date"] == pd.Timestamp("2020-01-02")
+    assert bool(result.loc["000001", "is_st"])
+    assert not bool(result.loc["000002", "is_st"])
+    if announcement:
+        assert result.attrs["source_row_counts"]["invalid_announcement_date_rows"] == 1
 
 
 @pytest.mark.parametrize("chunksize,bad_numeric", ((1, False), (8, False), (1, True)))
@@ -1795,41 +2034,40 @@ def test_index_membership_raw_text_survives_public_materialization(
     _write_csmar(raw, "index_membership", rows)
     path = next(filesystem_glob(raw, "*.csv"))
     original = Path(native_filesystem_path(path)).read_bytes()
+    result = interim.materialize_interim_data(
+        output_roots={
+            key: layout.interim_data_root("csmar", key) for key in ("index_membership",)
+        },
+        raw_root=raw,
+        data_ids=("index_membership",),
+        chunksize=chunksize,
+    )
+    frame = read_dataset(result.artifact_roots["index_membership"])
+    frame = frame.sort_values("constituent_stock_code")
+    assert frame.constituent_stock_code.tolist() == ["000001", "000002"]
+    assert frame.constituent_asset_id.nunique() == 2
+    assert frame.constituent_name.tolist() == ["示例甲", "示例乙"]
+    assert frame.market_code.tolist() == ["SZSE", "SZSE"]
+    assert frame.effective_date.dt.strftime("%Y-%m-%d").tolist() == [
+        "2020-01-06",
+        "2020-01-07",
+    ]
+    assert frame.announcement_date.dt.strftime("%Y-%m-%d").tolist() == [
+        "2020-01-03",
+        "2020-01-04",
+    ]
     if bad_numeric:
-        with pytest.raises(ValueError, match="invalid_csmar_numeric_value"):
-            interim.materialize_interim_data(
-                output_roots={
-                    key: layout.interim_data_root("csmar", key)
-                    for key in ("index_membership",)
-                },
-                raw_root=raw,
-                data_ids=("index_membership",),
-                chunksize=chunksize,
-            )
-    else:
-        result = interim.materialize_interim_data(
-            output_roots={
-                key: layout.interim_data_root("csmar", key)
-                for key in ("index_membership",)
-            },
-            raw_root=raw,
-            data_ids=("index_membership",),
-            chunksize=chunksize,
+        assert frame.change_type.isna().all()
+        from quant_research_platform.storage.manifests import (
+            read_dataset_manifest_evidence,
         )
-        frame = read_dataset(result.artifact_roots["index_membership"])
-        frame = frame.sort_values("constituent_stock_code")
-        assert frame.constituent_stock_code.tolist() == ["000001", "000002"]
-        assert frame.constituent_asset_id.nunique() == 2
-        assert frame.constituent_name.tolist() == ["示例甲", "示例乙"]
-        assert frame.market_code.tolist() == ["SZSE", "SZSE"]
-        assert frame.effective_date.dt.strftime("%Y-%m-%d").tolist() == [
-            "2020-01-06",
-            "2020-01-07",
-        ]
-        assert frame.announcement_date.dt.strftime("%Y-%m-%d").tolist() == [
-            "2020-01-03",
-            "2020-01-04",
-        ]
+
+        counts = read_dataset_manifest_evidence(
+            result.artifact_roots["index_membership"]
+        )["producer_diagnostics"]["source_row_counts"]
+        assert counts["invalid_change_type_rows"] == 2
+    else:
+        assert frame.change_type.tolist() == [1.0, 1.0]
     assert Path(native_filesystem_path(path)).read_bytes() == original
 
 
@@ -2163,30 +2401,25 @@ def test_raw_table_identity_ignores_parent_directory_and_rejects_conflict(tmp_pa
         ("invalid_stock_info_change_date", "announcement_date"),
     ],
 )
-def test_controlled_csmar_date_reason_survives_workflow_sanitizer(code, column):
-
-    with pytest.raises(ValueError) as raised:
-        interim._parse_optional_csmar_date(
-            pd.Series(["invalid-date"]), column, error_code=code
-        )
-    assert str(raised.value) == f"{code}:{column}"
-    valid = interim._parse_optional_csmar_date(
-        pd.Series(["", " ", None, "2020-01-01"]), column, error_code=code
+def test_optional_csmar_dates_keep_invalid_cells_unknown_without_losing_neighbors(
+    code, column
+):
+    result = interim._parse_optional_csmar_date(
+        pd.Series(["invalid-date", "9999-12-31", "", " ", None, "2020-01-01"]),
+        column,
+        error_code=code,
     )
-    assert valid.isna().tolist() == [True, True, True, False]
-    assert str(valid.dtype) == "datetime64[ns]"
+    assert result.isna().tolist() == [True, True, True, True, True, False]
+    assert result.iloc[-1] == pd.Timestamp("2020-01-01")
+    assert str(result.dtype) == "datetime64[ns]"
 
 
-def test_controlled_csmar_numeric_reasons_survive_workflow_sanitizer():
+@pytest.mark.parametrize("bad", ["invalid-number", float("inf"), -float("inf")])
+def test_optional_csmar_numeric_cells_are_local_and_diagnosed(bad):
     from quant_research_platform.sources.csmar.field_mappings import COLUMN_MAPPINGS
 
     datasets = [
-        (
-            "analyst_forecast",
-            _analyst_rows()[0],
-            ("forecast_eps", "forecast_pe"),
-            "invalid_analyst_value",
-        )
+        ("analyst_forecast", _analyst_rows()[0], ("forecast_eps", "forecast_pe"))
     ]
     for data_id, columns in interim.FINANCIAL_COLUMNS_BY_DATA_ID.items():
         numeric = [c for c in columns if c not in interim.FINANCIAL_BASE_COLUMNS]
@@ -2200,19 +2433,26 @@ def test_controlled_csmar_numeric_reasons_survive_workflow_sanitizer():
             "Typrep": "A",
             **{inverse[column]: 2.5 for column in numeric},
         }
-        datasets.append((data_id, row, numeric, "invalid_financial_value"))
+        datasets.append((data_id, row, numeric))
     checked = 0
-    for data_id, row, columns, code in datasets:
+    for data_id, row, columns in datasets:
         inverse = {value: key for key, value in COLUMN_MAPPINGS[data_id].items()}
         valid = interim.normalize_raw_frame(pd.DataFrame([row]), data_id)
         for column in columns:
             assert float(valid.loc[0, column]) == float(row[inverse[column]])
             assert pd.api.types.is_float_dtype(valid[column].dtype)
-            with pytest.raises(ValueError) as raised:
-                interim.normalize_raw_frame(
-                    pd.DataFrame([{**row, inverse[column]: "invalid-number"}]), data_id
-                )
-            assert str(raised.value) == f"{code}:{column}"
+            result = interim.normalize_raw_frame(
+                pd.DataFrame(
+                    [{**row, inverse[column]: bad}, {**row, "Stkcd": "000002"}]
+                ),
+                data_id,
+            ).set_index("source_asset_id")
+            assert len(result) == 2
+            assert pd.isna(result.loc["000001", column])
+            assert result.loc["000002", column] == valid.loc[0, column]
+            for other in set(columns) - {column}:
+                assert result[other].tolist() == [valid.loc[0, other]] * 2
+            assert result.attrs["source_row_counts"][f"invalid_{column}_rows"] == 1
             checked += 1
     assert checked == 16
 
@@ -2355,13 +2595,26 @@ def test_index_source_null_numeric_values_persist_without_claiming_complete_weig
     ]
     + [("index_weights", "Weight", -1.0, "invalid_index_weight")],
 )
-def test_nullable_index_source_numeric_values_still_reject_invalid_facts(
+def test_nullable_index_source_invalid_numeric_values_stay_local(
     data_id, raw_column, bad_value, reason
 ):
     rows = _nullable_index_numeric_rows(data_id)
     rows[0][raw_column] = bad_value
-    with pytest.raises(ValueError, match=reason):
-        interim.normalize_raw_frame(pd.DataFrame(rows), data_id)
+    result = interim.normalize_raw_frame(pd.DataFrame(rows), data_id)
+    target = "weight" if data_id == "index_weights" else "period_return"
+    assert len(result) == len(rows)
+    assert pd.isna(result[target].iloc[0])
+    expected = [0.25, 0.25, 0.5] if target == "weight" else [-0.025, 0.0, 0.025]
+    assert result[target].iloc[1:].tolist() == expected
+    assert str(result[target].dtype) == "float64"
+    diagnostic = (
+        "weight"
+        if bad_value == -1.0
+        else "weight_pct"
+        if target == "weight"
+        else "return_1d_pct"
+    )
+    assert result.attrs["source_row_counts"][f"invalid_{diagnostic}_rows"] == 1
 
 
 @pytest.mark.parametrize(
@@ -2542,7 +2795,7 @@ def test_cr_only_physical_fragments_preserve_interim_rows(
     for column in ("timestamp", "declare_date", "forecast_end_date"):
         expected[column] = expected[column].astype("datetime64[ns]")
     for column in ("forecast_eps", "forecast_pe"):
-        expected[column] = expected[column].astype("Float64")
+        expected[column] = expected[column].astype("float64")
     keys = ["source_asset_id", "timestamp", "report_id", "forecast_end_date"]
     expected = expected.sort_values(keys).reset_index(drop=True)
     assert raw_schemas.read_export_header(path) == tuple(header.decode().split(","))
@@ -2714,7 +2967,7 @@ def test_index_info_projects_extra_text_and_persists_optional_columns(
         column = COLUMN_MAPPINGS["index_info"][omitted]
         assert saved[column].isna().all()
         assert str(saved[column].dtype) == (
-            "Float64" if column == "base_point" else "string"
+            "float64" if column == "base_point" else "string"
         )
     assert path.read_bytes() == original
 
@@ -2780,10 +3033,12 @@ def test_complete_chain_index_info_fixture_has_native_price_and_return_identitie
         ("market_cap", "Shrchgdt", "Nshrttl"),
     ],
 )
-def test_source_window_precedes_value_validation(
+def test_interim_owns_source_window_and_raw_preserves_all_business_values(
     tmp_path, chunksize, data_id, date_column, value_column
 ):
-    from quant_research_platform.storage.datasets.reading import read_dataset
+    from quant_research_platform.sources.csmar.field_mappings import COLUMN_MAPPINGS
+    from quant_research_platform.storage.datasets import read_dataset
+    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
     from tests.helpers.a_share_raw import _write_csmar
 
     raw = tmp_path / "raw"
@@ -2810,24 +3065,59 @@ def test_source_window_precedes_value_validation(
         future.update(Ahshrtrd_D="", Ahvaltrd_D="")
     _write_csmar(raw, data_id, [row, future])
     original = _file_bytes(raw)
+    path = next(filesystem_glob(raw, "*.csv"))
+    decoded = pd.concat(
+        raw_exports.iter_private_export_chunks(
+            path,
+            dataset=data_id,
+            chunksize=chunksize,
+            start_date=arguments["start_date"],
+            end_date=arguments["end_date"],
+        ),
+        ignore_index=True,
+    )
+    assert len(decoded) == 2
+    assert decoded[date_column].tolist() == ["2020-01-02", "2026-01-02"]
+    assert decoded[value_column].iloc[1] == "invalid-later-value"
     selected = tmp_path / "selected"
     interim.materialize_interim_data(**arguments, output_roots={data_id: selected})
     pd.testing.assert_frame_equal(
         read_dataset(selected), read_dataset(baseline), check_exact=True
     )
+    counts = read_dataset_manifest_evidence(selected)["producer_diagnostics"][
+        "source_row_counts"
+    ]
+    assert counts["raw_rows"] == 2
+    assert counts["excluded_date_range_rows"] == 1
+    assert counts["retained_after_date_filter_rows"] == 1
+    expanded = tmp_path / "expanded"
+    interim.materialize_interim_data(
+        **{**arguments, "end_date": "2026-12-31"}, output_roots={data_id: expanded}
+    )
+    saved = read_dataset(expanded).sort_values("timestamp").reset_index(drop=True)
+    target = COLUMN_MAPPINGS[data_id][value_column]
+    assert len(saved) == 2
+    assert saved.loc[0, target] == 1.0
+    assert pd.isna(saved.loc[1, target])
+    assert saved.loc[1, "timestamp"] == pd.Timestamp("2026-01-02")
+    if data_id == "market_bars_1d":
+        assert saved.loc[1, "open"] == 1.0
+        assert pd.isna(saved.loc[1, "adj_open"])
     assert _file_bytes(raw) == original
-    with pytest.raises(ValueError, match="invalid_csmar_numeric_value"):
-        interim.materialize_interim_data(
-            **{**arguments, "end_date": "2026-12-31"},
-            output_roots={data_id: tmp_path / "invalid"},
-        )
     _write_csmar(raw, data_id, [row, {**future, date_column: "unknown-date"}])
-    with pytest.raises(ValueError, match=f"invalid_{data_id}_source_timestamp"):
-        interim.materialize_interim_data(
-            **arguments, output_roots={data_id: tmp_path / "unknown"}
-        )
-    assert not (tmp_path / "invalid").exists()
-    assert not (tmp_path / "unknown").exists()
+    unknown_before = _file_bytes(raw)
+    unknown = tmp_path / "unknown"
+    interim.materialize_interim_data(**arguments, output_roots={data_id: unknown})
+    pd.testing.assert_frame_equal(
+        read_dataset(unknown), read_dataset(baseline), check_exact=True
+    )
+    counts = read_dataset_manifest_evidence(unknown)["producer_diagnostics"][
+        "source_row_counts"
+    ]
+    assert counts["raw_rows"] == 2
+    assert counts["excluded_missing_required_rows"] == 1
+    assert counts["retained_after_date_filter_rows"] == 1
+    assert _file_bytes(raw) == unknown_before
 
 
 def test_multi_target_diagnostics_do_not_inherit_previous_table_counts(tmp_path):
@@ -2854,7 +3144,15 @@ def test_multi_target_diagnostics_do_not_inherit_previous_table_counts(tmp_path)
         "producer_diagnostics"
     ]
     assert analyst["source_row_counts"]["raw_rows"] == len(_analyst_rows())
-    assert calendar == {"exact_duplicate_count": 0, "caller_fact": "preserved"}
+    assert calendar["exact_duplicate_count"] == 0
+    assert calendar["caller_fact"] == "preserved"
+    assert calendar["source_row_counts"] == {
+        "raw_rows": 1,
+        "retained_before_date_filter_rows": 1,
+        "retained_after_date_filter_rows": 1,
+        "excluded_date_range_rows": 0,
+    }
+    assert "missing_institution_id_rows" not in calendar["source_row_counts"]
     assert metadata == {"producer_diagnostics": {"caller_fact": "preserved"}}
 
 
@@ -2975,3 +3273,155 @@ def test_index_date_vectorized_valid_values_match_existing_owner(dates):
     )
     pd.testing.assert_series_equal(normalized.start_date, expected, check_names=False)
     assert normalized.attrs["source_row_counts"]["invalid_start_date_rows"] == 0
+
+
+@pytest.mark.parametrize(
+    "data_id", ("financial_balance", "financial_income", "financial_cashflow")
+)
+@pytest.mark.parametrize(
+    "correction_dates",
+    ("invalid-date", "2020-01-01,2020-02-01,2020-01-15", "2020-01-01,2020-01-01"),
+)
+def test_invalid_financial_correction_chronology_never_becomes_original_version(
+    data_id, correction_dates
+):
+    columns = raw_exports.RAW_TABLE_CONTRACTS[data_id].required_columns
+    original = dict(zip(columns, _financial_fixture_row(columns), strict=True))
+    bad = {**original, "IfCorrect": "1", "DeclareDate": correction_dates}
+    good = {**original, "Stkcd": "000002"}
+    normalized = interim.normalize_raw_frame(pd.DataFrame([bad, good]), data_id)
+    assert normalized.source_asset_id.tolist() == ["000002"]
+    assert normalized.version_identity.tolist() == ["original"]
+    assert normalized.is_corrected.tolist() == [False]
+    assert normalized.correction_disclosure_date.isna().all()
+    assert normalized.report_period.tolist() == [pd.Timestamp("2020-01-02")]
+    counts = normalized.attrs["source_row_counts"]
+    assert counts["raw_rows"] == 2
+    assert counts["excluded_missing_required_rows"] == 1
+    assert counts["retained_before_date_filter_rows"] == 1
+
+
+@pytest.mark.parametrize("chunksize", (1, 100))
+@pytest.mark.parametrize("bad_delisting_date", ("invalid-date", "9999-12-31"))
+def test_stock_master_unresolved_delisting_keeps_later_status_and_neighbors(
+    tmp_path, chunksize, bad_delisting_date
+):
+    from quant_research_platform.storage.datasets import read_dataset
+    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from tests.helpers.a_share_raw import _write_csmar
+
+    raw = tmp_path / "raw"
+    filesystem_mkdir(raw)
+    first = {
+        "Stkcd": "000001",
+        "Stknme": "first status",
+        "Listdt": "2010-01-04",
+        "DelistedDate": "",
+        "Markettype": 4,
+        "Nnindcd": "C",
+        "Nnindnme": "industry",
+        "Statco": "normal",
+        "Statdt": "2020-01-02",
+    }
+    later = {
+        **first,
+        "Stknme": "later status",
+        "Statdt": "2020-01-06",
+        "DelistedDate": bad_delisting_date,
+    }
+    neighbor = {**first, "Stkcd": "000002", "Statdt": "2020-01-06"}
+    known_end = {**neighbor, "Stkcd": "000003", "DelistedDate": "2020-02-03"}
+    _write_csmar(raw, "stock_master", [later, neighbor, first, known_end])
+    before = _file_bytes(raw)
+    decoded = _collect_raw_export(next(filesystem_glob(raw, "*.csv")), "stock_master")
+    assert decoded.DelistedDate.iloc[0] == bad_delisting_date
+    assert len(decoded) == 4
+    output = tmp_path / "interim"
+    interim.materialize_interim_data(
+        raw_root=raw,
+        data_ids=("stock_master",),
+        output_roots={"stock_master": output},
+        chunksize=chunksize,
+    )
+    saved = read_dataset(output)
+    history = saved.loc[saved.source_asset_id.eq("000001")].sort_values("timestamp")
+    assert history.timestamp.tolist() == [
+        pd.Timestamp("2020-01-02"),
+        pd.Timestamp("2020-01-06"),
+    ]
+    assert history.stock_name.tolist() == ["first status", "later status"]
+    assert history.delisting_date.isna().all()
+    assert history.delisting_date_unresolved.tolist() == [False, True]
+    assert history.listing_date.eq(pd.Timestamp("2010-01-04")).all()
+    neighbors = saved.loc[saved.source_asset_id.ne("000001")].set_index(
+        "source_asset_id"
+    )
+    assert pd.isna(neighbors.loc["000002", "delisting_date"])
+    assert neighbors.loc["000003", "delisting_date"] == pd.Timestamp("2020-02-03")
+    assert not neighbors.delisting_date_unresolved.any()
+    assert pd.api.types.is_bool_dtype(saved.delisting_date_unresolved.dtype)
+    assert not saved.delisting_date_unresolved.isna().any()
+    assert not saved.duplicated(["source_asset_id", "timestamp"]).any()
+    counts = read_dataset_manifest_evidence(output)["producer_diagnostics"][
+        "source_row_counts"
+    ]
+    assert counts["invalid_delisting_date_rows"] == 1
+    assert counts["raw_rows"] == counts["retained_after_date_filter_rows"] == 4
+    assert counts["excluded_missing_timestamp_rows"] == 0
+    assert _file_bytes(raw) == before
+
+
+@pytest.mark.parametrize("chunksize", (1, 100))
+@pytest.mark.parametrize("listing_date", ("invalid-date", "9999-12-31", "", None))
+def test_stock_master_unknown_listing_date_keeps_status_time_without_fabrication(
+    tmp_path, chunksize, listing_date
+):
+    from quant_research_platform.storage.datasets import read_dataset
+    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from tests.helpers.a_share_raw import _write_csmar
+
+    raw = tmp_path / "raw"
+    filesystem_mkdir(raw)
+    first = {
+        "Stkcd": "000001",
+        "Stknme": "stock",
+        "Listdt": "2010-01-04",
+        "DelistedDate": "",
+        "Markettype": 4,
+        "Nnindcd": "C",
+        "Nnindnme": "industry",
+        "Statco": "normal",
+        "Statdt": "2020-01-02",
+    }
+    later = {**first, "Listdt": listing_date, "Statdt": "2020-01-06"}
+    neighbor = {**first, "Stkcd": "000002", "Statdt": "2020-01-06"}
+    _write_csmar(raw, "stock_master", [first, later, neighbor])
+    before = _file_bytes(raw)
+    output = tmp_path / "interim"
+    interim.materialize_interim_data(
+        raw_root=raw,
+        data_ids=("stock_master",),
+        output_roots={"stock_master": output},
+        chunksize=chunksize,
+    )
+    saved = read_dataset(output)
+    history = saved.loc[saved.source_asset_id.eq("000001")].sort_values("timestamp")
+    assert len(history) == 2
+    assert history.listing_date.iloc[0] == pd.Timestamp("2010-01-04")
+    assert pd.isna(history.listing_date.iloc[1])
+    assert (
+        history.timestamp.iloc[1]
+        == history.status_change_date.iloc[1]
+        == pd.Timestamp("2020-01-06")
+    )
+    assert saved.loc[saved.source_asset_id.eq("000002"), "listing_date"].tolist() == [
+        pd.Timestamp("2010-01-04")
+    ]
+    assert not saved.delisting_date_unresolved.any()
+    counts = read_dataset_manifest_evidence(output)["producer_diagnostics"][
+        "source_row_counts"
+    ]
+    assert counts["raw_rows"] == counts["retained_after_date_filter_rows"] == 3
+    assert counts["excluded_missing_timestamp_rows"] == 0
+    assert counts.get("invalid_listing_date_rows", 0) == (1 if listing_date else 0)
+    assert _file_bytes(raw) == before

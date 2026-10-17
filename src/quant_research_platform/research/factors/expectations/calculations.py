@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.validation import (
-    strict_finite_numeric_series,
+    strict_real_numeric_series,
     strict_string_series,
     strict_timestamp_series,
 )
@@ -57,39 +57,73 @@ def _prepare_expectations(
         raise ValueError("expectations_trading_sessions_invalid")
 
     forecast = records.loc[:, list(required_records)].copy()
-    forecast["asset_id"] = strict_string_series(
-        forecast["asset_id"], error="expectations_asset_id_invalid"
+    forecast["report_id"] = records.get(
+        "report_id", pd.Series(pd.NA, index=records.index)
     )
-    forecast["institution_id"] = strict_string_series(
-        forecast["institution_id"], error="expectations_institution_id_invalid"
-    )
+    # Locate the annual, potentially visible source rows before interpreting
+    # optional values. Unlocatable records cannot supply an institutional event.
     for column in ("declare_date", "forecast_end_date"):
         forecast[column] = strict_timestamp_series(
-            forecast[column], error="expectations_date_invalid"
+            forecast[column],
+            error="invalid_forecast_date",
+            allow_null=True,
+            errors="coerce",
         ).dt.normalize()
-    forecast["forecast_eps"] = strict_finite_numeric_series(
-        forecast["forecast_eps"], error="expectations_eps_invalid", allow_null=True
-    )
     forecast = forecast.loc[
-        forecast["forecast_eps"].notna()
-        & forecast["forecast_end_date"].dt.month.eq(12)
+        forecast["forecast_end_date"].dt.month.eq(12)
         & forecast["forecast_end_date"].dt.day.eq(31)
+        & forecast["forecast_end_date"].ge(sessions[0])
+        & forecast["declare_date"].ge(sessions[0] - pd.Timedelta(days=freshness_days))
+        & forecast["declare_date"].lt(sessions[-1])
     ].copy()
+    for column in ("asset_id", "institution_id", "report_id"):
+        values = forecast[column]
+        usable = values.map(
+            lambda value: isinstance(value, str) and bool(value.strip())
+        ).astype(bool)
+        forecast[column] = values.where(usable).astype("string").str.strip()
+    forecast = forecast.loc[
+        forecast["asset_id"].notna()
+        & (forecast["institution_id"].notna() | forecast["report_id"].notna())
+    ].copy()
+    # An identified later report with unknown EPS must replace its predecessor.
+    # Dropping it here would resurrect an older institutional forecast.
+    forecast["forecast_eps"] = _local_finite_numeric(forecast["forecast_eps"])
     forecast["available_at"] = forecast["declare_date"].map(
         lambda value: _next_session(sessions, value)
     )
     forecast = forecast.dropna(subset=["available_at"])
-    forecast = forecast.groupby(
-        [
-            "asset_id",
-            "forecast_end_date",
-            "institution_id",
-            "declare_date",
-            "available_at",
-        ],
-        as_index=False,
-        sort=False,
-    )["forecast_eps"].agg(_finite_median)
+    # A report whose institution is disputed cannot be counted as an additional
+    # institution, nor can it disappear and revive an old consensus.
+    unresolved = forecast.loc[forecast["institution_id"].isna()].copy()
+    forecast = (
+        forecast.loc[forecast["institution_id"].notna()]
+        .groupby(
+            [
+                "asset_id",
+                "forecast_end_date",
+                "institution_id",
+                "declare_date",
+                "available_at",
+            ],
+            as_index=False,
+            sort=False,
+        )
+        .agg(
+            forecast_eps=("forecast_eps", _finite_median),
+            report_ids=(
+                "report_id",
+                lambda values: tuple(sorted(set(values.dropna()))),
+            ),
+        )
+    )
+    if not unresolved.empty:
+        unresolved["forecast_eps"] = np.nan
+        unresolved["report_ids"] = unresolved["report_id"].map(lambda value: (value,))
+        forecast = pd.concat(
+            [forecast, unresolved.loc[:, forecast.columns].drop_duplicates()],
+            ignore_index=True,
+        )
     forecast = forecast.sort_values(
         ["asset_id", "available_at", "declare_date"], kind="mergesort"
     )
@@ -129,13 +163,7 @@ def _expectations_for_observations(
     output["timestamp"] = strict_timestamp_series(
         output["timestamp"], error="expectations_timestamp_invalid"
     ).dt.normalize()
-    output["close"] = (
-        strict_finite_numeric_series(
-            output["close"], error="expectations_close_invalid", allow_null=True
-        )
-        if needs_price
-        else np.nan
-    )
+    output["close"] = _local_finite_numeric(output["close"]) if needs_price else np.nan
     if output.duplicated(["asset_id", "timestamp"]).any():
         raise ValueError("expectations_observation_key_duplicate")
     rows: list[dict[str, object] | None] = [None] * len(output)
@@ -161,7 +189,20 @@ def _expectations_for_observations(
         for position in positions:
             timestamp = observation_times[position]
             while event is not None and event.available_at <= timestamp:
-                active[(event.forecast_end_date, event.institution_id)] = event
+                if len(event.report_ids):
+                    # A later observation of this actual provider report replaces
+                    # its previous known or unresolved institutional attribution.
+                    for key, prior in tuple(active.items()):
+                        if prior.forecast_end_date == event.forecast_end_date and set(
+                            prior.report_ids
+                        ).intersection(event.report_ids):
+                            del active[key]
+                key = (
+                    (event.forecast_end_date, None, event.report_ids[0])
+                    if pd.isna(event.institution_id)
+                    else (event.forecast_end_date, event.institution_id)
+                )
+                active[key] = event
                 event = next(events, None)
             oldest = timestamp - pd.Timedelta(days=freshness_days)
             active = {
@@ -207,7 +248,12 @@ def _features_for_observation(
     selected = [by_period[end_dates[0]]]
     if len(end_dates) > 1 and end_dates[1].year == end_dates[0].year + 1:
         selected.append(by_period[end_dates[1]])
-    eps_values = [event.forecast_eps for event in selected[0]]
+    fy1_events = (
+        []
+        if any(pd.isna(event.institution_id) for event in selected[0])
+        else [event for event in selected[0] if pd.notna(event.forecast_eps)]
+    )
+    eps_values = [event.forecast_eps for event in fy1_events]
     if len(eps_values) >= minimum_institutions:
         if any(
             column in selected_columns
@@ -243,18 +289,26 @@ def _features_for_observation(
             base["log_analyst_coverage"] = float(np.log(len(eps_values)))
         if "median_forecast_age_days_fy1" in selected_columns:
             base["median_forecast_age_days_fy1"] = float(
-                median((timestamp - event.declare_date).days for event in selected[0])
+                median((timestamp - event.declare_date).days for event in fy1_events)
             )
         if "newly_updated_institution_fraction_fy1" in selected_columns:
             base["newly_updated_institution_fraction_fy1"] = sum(
-                event.available_at == timestamp for event in selected[0]
-            ) / len(selected[0])
+                event.available_at == timestamp for event in fy1_events
+            ) / len(fy1_events)
     if (
         "forward_earnings_yield_fy2" in selected_columns
         and len(selected) > 1
         and valid_price
     ):
-        fy2 = [event.forecast_eps for event in selected[1]]
+        fy2 = (
+            []
+            if any(pd.isna(event.institution_id) for event in selected[1])
+            else [
+                event.forecast_eps
+                for event in selected[1]
+                if pd.notna(event.forecast_eps)
+            ]
+        )
         if len(fy2) >= minimum_institutions:
             base["forward_earnings_yield_fy2"] = _finite_float(
                 _finite_median(fy2) / Fraction(float(close))
@@ -270,7 +324,18 @@ def _finite_float(value):
         return np.nan
 
 
-def _finite_median(values) -> Fraction:
+def _local_finite_numeric(values):
+    numeric = strict_real_numeric_series(
+        values, error="expectations_numeric_invalid", errors="coerce"
+    )
+    return numeric.where(np.isfinite(numeric))
+
+
+def _finite_median(values) -> Fraction | float:
+    # Unknown reports on the same institutional declaration day make its median
+    # unavailable; later known declarations can resolve that local barrier.
+    if any(pd.isna(value) for value in values):
+        return np.nan
     # Exact dyadic values preserve even centers without overflow or underflow.
     return median(Fraction(value) for value in values)
 

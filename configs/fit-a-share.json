@@ -24,6 +24,7 @@
     "hyperparameters": {},
     "random_seed": 42,
     "max_train_rows": null,
+    "training_scaling": true,
     "target_column": "model_target"
   },
   "fit_windows": [

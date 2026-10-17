@@ -130,29 +130,25 @@ def iter_csv_snapshot(
 ) -> Iterator[tuple[object, ...]]:
     """Decode typed rows, with canonical byte verification for source acceptance."""
     root = require_unaliased_path(root, error="raw_csv_path_invalid")
-    if set(path.name for path in filesystem_iterdir(root)) != {
+    if verify_bytes and set(path.name for path in filesystem_iterdir(root)) != {
         "response.csv",
         "response.metadata.json",
     }:
         raise ValueError("raw_csv_members_invalid")
     manifest = expected_manifest
+    required = {"schema_id", "encoding", "columns", "row_count", "metadata"}
     if (
-        set(manifest)
-        != {
-            "schema_id",
-            "encoding",
-            "columns",
-            "row_count",
-            "byte_count",
-            "sha256",
-            "metadata",
-        }
+        not required.issubset(manifest)
         or manifest["schema_id"] != SCHEMA_ID
         or manifest["encoding"] != "utf-8-json-cells"
-        or (type(manifest["byte_count"]) is not int)
-        or (manifest["byte_count"] < 0)
-        or (type(manifest["row_count"]) is not int)
-        or (manifest["row_count"] < 0)
+        or type(manifest["row_count"]) is not int
+        or manifest["row_count"] < 0
+        or verify_bytes
+        and (
+            set(manifest) != required | {"byte_count", "sha256"}
+            or type(manifest.get("byte_count")) is not int
+            or manifest["byte_count"] < 0
+        )
     ):
         raise ValueError("raw_csv_metadata_invalid")
     path = root / "response.csv"

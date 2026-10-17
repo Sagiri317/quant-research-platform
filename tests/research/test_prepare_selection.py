@@ -370,6 +370,27 @@ def test_panel_warmup_keeps_suspension_state_without_consuming_old_industry_conf
             "value_after": ["A leaf", "B leaf", "C leaf"],
         }
     )
+    for asset in ("000002", "000003"):
+        frames["industry_classification"] = pd.concat(
+            [
+                frames["industry_classification"],
+                frames["industry_classification"]
+                .iloc[[0]]
+                .assign(source_asset_id=asset),
+            ],
+            ignore_index=True,
+        )
+        frames["stock_info_changes"] = pd.concat(
+            [
+                frames["stock_info_changes"],
+                frames["stock_info_changes"]
+                .iloc[[0]]
+                .assign(
+                    source_asset_id=asset, announcement_date=pd.Timestamp("2023-01-08")
+                ),
+            ],
+            ignore_index=True,
+        )
     frames["industry_classification_versions"] = pd.DataFrame(
         {
             "industry_standard_id": ["CSRC2012", "CAPCO"],
@@ -377,6 +398,7 @@ def test_panel_warmup_keeps_suspension_state_without_consuming_old_industry_conf
             "timestamp": pd.to_datetime(["2012-10-26", "2023-01-01"]),
             "implement_date": pd.to_datetime(["2012-10-26", "2023-01-01"]),
             "abandon_date": pd.Series([pd.NaT, pd.NaT], dtype="datetime64[ns]"),
+            "abandon_date_unresolved": False,
             "institution_name": ["CSRC", "CAPCO"],
         }
     )
@@ -417,10 +439,40 @@ def test_panel_warmup_keeps_suspension_state_without_consuming_old_industry_conf
     assert result.listing_date.tolist() == [frames["stock_master"].listing_date.iloc[0]]
     # The prelisting market membership is unproved in this fixture.
     assert result.listing_age_trading_days.isna().all()
-    with pytest.raises(ValueError, match="industry_history_standard_conflict"):
+    historical = read_dataset(
         _prepare(
             tmp_path / "historical", "market_panel_1d", inputs, dates[0], dates[-1]
         )
+    )
+    affected = historical.query("asset_id == '000001'")
+    industry_columns = [
+        "industry_standard_id",
+        "industry_level1_code",
+        "industry_level1_name",
+        "is_nonfinancial_industry",
+    ]
+    assert affected.iloc[:2][industry_columns].isna().all().all()
+    assert affected.iloc[2:].industry_level1_code.tolist() == ["C", "C"]
+    assert (
+        historical.query("asset_id != '000001'").industry_level1_code.tolist()
+        == ["A"] * 8
+    )
+    without_industry = {
+        name: path for name, path in inputs.items() if "industry" not in name
+    }
+    price_only = read_dataset(
+        _prepare(
+            tmp_path / "price-only",
+            "market_panel_1d",
+            without_industry,
+            dates[0],
+            dates[-1],
+        )
+    )
+    pd.testing.assert_frame_equal(
+        historical.drop(columns=industry_columns),
+        price_only.drop(columns=industry_columns),
+    )
 
 
 @pytest.mark.parametrize("freshness", [0, -1, 30.0, True, "30"])

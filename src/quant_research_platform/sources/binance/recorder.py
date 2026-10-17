@@ -835,6 +835,7 @@ class _StreamReader(threading.Thread):
                         self.stream.data_kind,
                         self.stream.symbol,
                         parse_qrp_json_object(raw),
+                        validate_values=False,
                     )
                 except (UnicodeError, ValueError):
                     self.stats.invalid()
@@ -1097,10 +1098,14 @@ def _validate_snapshot(payload: object, *, market_type: str) -> dict[str, Any]:
                 error="binance_recorder_snapshot_time_invalid",
             )
     validate_depth_update_levels(
-        payload.get("bids"), error="binance_recorder_snapshot_bids_invalid"
+        payload.get("bids"),
+        error="binance_recorder_snapshot_bids_invalid",
+        validate_values=False,
     )
     validate_depth_update_levels(
-        payload.get("asks"), error="binance_recorder_snapshot_asks_invalid"
+        payload.get("asks"),
+        error="binance_recorder_snapshot_asks_invalid",
+        validate_values=False,
     )
     return payload
 

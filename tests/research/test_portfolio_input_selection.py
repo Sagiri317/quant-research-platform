@@ -218,6 +218,7 @@ def test_calibration_selection_preserves_duplicate_observations(
     expected = production.calibrate_expected_alpha(
         observations.loc[observations.include],
         scheduled_intervals=intervals.iloc[:6],
+        trading_sessions=days,
         as_of=pd.Timestamp("2023-02-01"),
     )
     assert expected.status == "DEFINED"

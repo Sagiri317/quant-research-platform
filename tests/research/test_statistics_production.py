@@ -1,4 +1,3 @@
-from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -132,7 +131,7 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
         selection["cutoff"] = str(cutoff)
     metadata = {
         **statistics_production._model_target_metadata(
-            config, spec, TimeWindow(dates[0], cutoff), model["selections"]
+            config, spec, TimeWindow(dates[0], cutoff)
         ),
         "selection_cutoffs": [str(cutoff)],
         "sample_role": "validation",
@@ -154,7 +153,7 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
         time_window=TimeWindow(dates[0], cutoff),
         prediction_id="prediction",
         prediction_lookup=Lookup(),
-        global_statistics=None,
+        global_prediction_lookup=None,
         **model,
     )
     statistics_tables.update(
@@ -260,7 +259,8 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
         time_window=TimeWindow(dates[0], cutoff),
         prediction_id="quarterly_prediction",
         prediction_lookup=Lookup(),
-        global_statistics=artifact,
+        global_prediction_lookup=Lookup(),
+        global_inference_blocker="selection_reuses_evaluation_window",
         **model,
     )
     paired_tables.update(
@@ -271,7 +271,6 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
             time_window=TimeWindow(dates[0], cutoff),
         )
     )
-    quarterly_losses = paired_tables["model_losses"].copy()
     factor_paired_root = write_statistics_artifact(
         (layout.project_root / "pv_all_quarterly_statistics").with_name(
             (layout.project_root / "pv_all_quarterly_statistics").name + "_factor"
@@ -376,7 +375,8 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
             time_window=TimeWindow(dates[0], cutoff),
             prediction_id="quarterly_prediction",
             prediction_lookup=Lookup(),
-            global_statistics=artifact,
+            global_prediction_lookup=Lookup(),
+            global_inference_blocker="selection_reuses_evaluation_window",
             **model,
         )
         robustness_tables.update(
@@ -445,69 +445,6 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
         with robust_artifact.table("model_reality_checks.parquet") as table:
             assert table.value.isna().all()
             assert table.reason.eq("training_weighting_robustness_excluded").all()
-        for mutation in ("key", "count", "asset_identity", "family"):
-            malformed = {name: table.copy() for name, table in global_tables.items()}
-            losses_table = malformed["model_losses"]
-            if mutation == "key":
-                losses_table.loc[0, "timestamp"] += pd.Timedelta(nanoseconds=1)
-            elif mutation == "count":
-                losses_table.loc[0, "observation_count"] += 1
-            elif mutation == "family":
-                malformed["model_losses"] = losses_table.loc[
-                    losses_table.family_id.ne(families[-1])
-                ].copy()
-            else:
-                losses_table.loc[0, "asset_coverage_id"] = canonical_json_hash(
-                    sorted([*assets[:-1], "different_asset"])
-                )
-            mutated_metadata = metadata
-            factor_mutated_metadata = factor_metadata
-            factor_mutated_root = write_statistics_artifact(
-                (tmp_path / f"coverage_{mutation}").with_name(
-                    (tmp_path / f"coverage_{mutation}").name + "_factor"
-                ),
-                metadata=factor_mutated_metadata,
-                tables={
-                    key: value
-                    for key, value in malformed.items()
-                    if key + ".parquet" in STATISTICS_TABLE_GROUPS["factor"]
-                },
-                table_group="factor",
-            )
-            mutated_root = write_statistics_artifact(
-                tmp_path / f"coverage_{mutation}",
-                metadata=mutated_metadata,
-                tables={
-                    key: value
-                    for key, value in malformed.items()
-                    if key + ".parquet" in STATISTICS_TABLE_GROUPS["research"]
-                },
-            )
-            mutated_artifact = read_statistics_artifact(mutated_root)
-            read_statistics_artifact(factor_mutated_root)
-            with pytest.raises(
-                ValueError,
-                match="model_group_comparison_family_incomplete"
-                if mutation == "family"
-                else "model_group_comparison_coverage_invalid",
-            ):
-                statistics_production._paired_group_rankic(
-                    quarterly_losses.loc[
-                        quarterly_losses.family_id.ne(families[-1])
-                    ].copy()
-                    if mutation == "family"
-                    else quarterly_losses,
-                    global_statistics=mutated_artifact,
-                    selection_group="quarterly",
-                    family_ids=families,
-                    config=quarterly_config,
-                    target_metadata=statistics_production._model_target_metadata(
-                        quarterly_config,
-                        spec,
-                        TimeWindow(dates[0], cutoff),
-                        model["selections"],
-                    ),
-                )
 
 
 def test_robustness_joint_exclusion_preserves_individual_hac(monkeypatch):
@@ -703,7 +640,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
             time_window=TimeWindow(dates[0], cutoff),
             prediction_id="prediction",
             prediction_lookup=_PredictionLookup(),
-            global_statistics=None,
+            global_prediction_lookup=None,
             **model,
         )
         statistics_tables.update(
@@ -1094,16 +1031,6 @@ def test_model_inference_uses_selection_information_before_calling_backends(
 @pytest.mark.parametrize("has_observations", (False, True))
 def test_paired_model_rankic_consumes_explicit_comparison_config(has_observations):
     comparison_config = statistics_config()
-    target_metadata = {
-        "selection_group": "quarterly",
-        "coverage_basis": "model_prediction_domain",
-        "sample_role": "validation",
-        "window": {"start": "2023-01-03", "end": "2023-01-03"},
-        "evaluation": {"primary_label": "label"},
-        "evaluation_axis": "cross_sectional",
-        "column_roles": {"label": "label"},
-        "column_units": {},
-    }
     families = ("baseline", "challenger")
     columns = (
         "timestamp",
@@ -1132,21 +1059,11 @@ def test_paired_model_rankic_consumes_explicit_comparison_config(has_observation
         columns=columns,
     )
 
-    class GlobalStatistics:
-        metadata = {**target_metadata, "selection_group": "global"}
-
-        @contextmanager
-        def table(self, member):
-            assert member == "model_losses.parquet"
-            yield losses
-
     paired = statistics_production._paired_group_rankic(
-        losses,
-        global_statistics=GlobalStatistics(),
+        losses.assign(**{"global": -losses.loss, "quarterly": -losses.loss}),
         selection_group="quarterly",
         family_ids=families,
         config=comparison_config,
-        target_metadata=target_metadata,
     )
     assert set(paired.family_id) == set(families)
     assert paired.observation_count.eq(int(has_observations)).all()
@@ -1270,7 +1187,6 @@ def test_model_family_names_preserve_factor_statistics_and_native_names(
                 config,
                 spec,
                 TimeWindow(dates[0], cutoff),
-                {"fixture": selection_payload},
             ),
             "sample_role": access,
             "window": {"start": str(dates[0]), "end": str(cutoff)},
@@ -1283,7 +1199,7 @@ def test_model_family_names_preserve_factor_statistics_and_native_names(
             time_window=TimeWindow(dates[0], cutoff),
             prediction_id="selected_prediction",
             prediction_lookup=Lookup(),
-            global_statistics=None,
+            global_prediction_lookup=None,
             **model_statistics_inputs(
                 spec,
                 config,
@@ -1361,12 +1277,12 @@ def test_model_family_names_preserve_factor_statistics_and_native_names(
         quarterly_losses = losses.copy()
         quarterly_losses["loss"] *= np.repeat([0.7, 0.8, 0.9], len(families))
         paired = statistics_production._paired_group_rankic(
-            quarterly_losses,
-            global_statistics=artifact,
+            quarterly_losses.assign(
+                **{"global": -losses.loss, "quarterly": -quarterly_losses.loss}
+            ),
             selection_group="quarterly",
             family_ids=families,
             config={**config, "selection_group": "quarterly"},
-            target_metadata={**metadata, "selection_group": "quarterly"},
         )
         assert paired.family_id.tolist() == list(families)
         assert paired.observation_count.eq(len(dates)).all()
@@ -1475,11 +1391,19 @@ def test_factor_fmb_weightings_match_independent_weighted_normal_equations():
                 expected[row.coefficient_id], rel=1e-13, abs=1e-14
             )
     assert records.loc[records.coefficient_id.eq("x"), "value"].nunique() == 2
-    frame.loc[0, "total_market_cap"] = 0.0
-    with pytest.raises(ValueError, match="fama_macbeth_weights_invalid"):
-        statistics_production._fama_macbeth_period_records(
-            frame, return_column="y", factors=("x",), core_factors=()
+    for invalid_cap in (0.0, -1.0, np.inf, "vendor-invalid"):
+        changed = frame.copy()
+        changed["total_market_cap"] = changed.total_market_cap.astype(object)
+        changed.loc[0, "total_market_cap"] = invalid_cap
+        actual = pd.DataFrame(
+            statistics_production._fama_macbeth_period_records(
+                changed, return_column="y", factors=("x",), core_factors=()
+            )
         )
+        equal = actual.regression_id.str.startswith("equal:")
+        pd.testing.assert_frame_equal(actual.loc[equal], records.loc[equal])
+        assert actual.loc[~equal, "status"].eq("DEFINED").all()
+        assert actual.loc[~equal, "observation_count"].eq(len(frame.dropna()) - 1).all()
 
 
 @pytest.mark.parametrize(
@@ -1820,7 +1744,7 @@ def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_pat
                 config=config,
                 time_window=window,
                 prediction_lookup=lookup,
-                global_statistics=None,
+                global_prediction_lookup=None,
             )
             assert lookup.coverage_counts() == (0, 0)
         finally:
@@ -1908,3 +1832,70 @@ def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_pat
     assert targets == ["forward_return_5d", "forward_return_20d"]
     assert len(mature_dates[5]) == 39 and len(mature_dates[20]) == 24
     assert len(mature_dates[5].difference(mature_dates[20])) == 15
+
+
+@pytest.mark.parametrize(
+    "invalid_cap",
+    [True, np.bool_(True), 10**400, 1 + 2j, [1.0], "vendor-invalid", np.inf],
+    ids=["bool", "numpy-bool", "oversized-int", "complex", "list", "text", "infinity"],
+)
+@pytest.mark.parametrize("asset_count", [3, 6])
+def test_fmb_invalid_real_weights_only_remove_weighted_observations(
+    invalid_cap, asset_count
+):
+    from quant_research_platform.research.statistics import fama_macbeth_period
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.Timestamp("2020-01-02"),
+            "asset_id": list("abcdef")[:asset_count],
+            "x": np.arange(asset_count, dtype=float),
+            "y": [0.0, 1.0, 3.0, 2.0, 6.0, 9.0][:asset_count],
+            "total_market_cap": pd.Series([1.0] * asset_count, dtype=object),
+        }
+    )
+    baseline = pd.DataFrame(
+        statistics_production._fama_macbeth_period_records(
+            frame, return_column="y", factors=("x",), core_factors=()
+        )
+    )
+    frame.at[0, "total_market_cap"] = invalid_cap
+    actual = pd.DataFrame(
+        statistics_production._fama_macbeth_period_records(
+            frame, return_column="y", factors=("x",), core_factors=()
+        )
+    )
+    equal = actual.regression_id.str.startswith("equal:")
+    pd.testing.assert_frame_equal(
+        actual.loc[equal].fillna(""), baseline.loc[equal].fillna(""), check_dtype=False
+    )
+    weighted = actual.loc[~equal]
+    assert weighted.observation_count.eq(asset_count - 1).all()
+    if asset_count == 3:
+        assert weighted.status.eq("UNDEFINED").all()
+        assert weighted.reason.eq("insufficient_complete_cross_section").all()
+        with pytest.raises(ValueError, match="fama_macbeth_period_insufficient"):
+            fama_macbeth_period(
+                frame,
+                return_column="y",
+                factor_columns=("x",),
+                weight_column="total_market_cap",
+            )
+    else:
+        assert weighted.status.eq("DEFINED").all()
+        expected = fama_macbeth_period(
+            frame.iloc[1:],
+            return_column="y",
+            factor_columns=("x",),
+            weight_column="total_market_cap",
+        )
+        result = fama_macbeth_period(
+            frame,
+            return_column="y",
+            factor_columns=("x",),
+            weight_column="total_market_cap",
+        )
+        pd.testing.assert_series_equal(result.coefficients, expected.coefficients)
+        assert result.observation_count == expected.observation_count
+        assert result.white_p_value == expected.white_p_value
+        assert result.white_reason == expected.white_reason

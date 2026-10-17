@@ -1397,3 +1397,45 @@ def test_ordered_prediction_context_yields_incrementally_and_skips_immature_head
             assert first["timestamp_ms"] == 8600
             assert len(fetched) == 1
     assert closed == [True]
+
+
+@pytest.mark.parametrize("visible_quantity", [0.0, 2.0])
+def test_native_calibration_roundtrips_unknown_trade_price(
+    monkeypatch, independent_maker, visible_quantity
+):
+    config, _backtest = independent_maker
+    trade = replace(
+        _trade(2150, price="99.5", quantity="2", maker_buyer=True),
+        price_index=None,
+        visible_quantity=visible_quantity,
+    )
+    monkeypatch.setattr(
+        portfolio, "iter_agg_trades", lambda *_args, **_kwargs: iter((trade,))
+    )
+    output = portfolio.calibrate_maker(config)
+    artifact = read_statistics_artifact(
+        output, validate_tables=portfolio.validate_maker_calibration
+    )
+    with artifact.table("crypto_maker_events.parquet") as frame:
+        trades = frame.loc[frame.event_kind.eq("trade")]
+        assert len(trades) == 1 and trades.price_index.isna().all()
+        assert trades.quantity.tolist() == [visible_quantity]
+        damaged = frame.copy()
+        damaged.loc[damaged.event_kind.eq("book"), "price_index"] = pd.NA
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            portfolio,
+            "_calibration_rows",
+            lambda *a, **k: iter(damaged.itertuples(index=False)),
+        )
+        with pytest.raises(ValueError, match="crypto_calibration_event_invalid"):
+            list(portfolio._calibration_headers(artifact, "observed", 2_700_000_000))
+    events = list(portfolio._calibration_events(artifact, "observed"))
+    assert next(event for event in events if event.kind == "trade").price_index is None
+    with artifact.table("crypto_maker_calibration.parquet") as frame:
+        assert frame.sample_count.gt(0).all()
+        assert (
+            frame.excluded_decisions.gt(0).all()
+            if visible_quantity
+            else frame.excluded_decisions.eq(0).all()
+        )

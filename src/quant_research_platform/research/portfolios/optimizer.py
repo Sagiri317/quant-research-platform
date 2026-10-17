@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from fractions import Fraction
 
 import numpy as np
 import pandas as pd
@@ -496,27 +495,16 @@ def _risk_variances(active, exposure, covariance, specific) -> tuple[float, floa
     if not np.isfinite((factor, residual, factor + residual)).all():
         raise ValueError("optimizer_risk_nonfinite")
     if factor < 0:
-        # Distinguish dot-product roundoff from a genuinely negative admitted form.
-        exact_active = [
-            sum(
-                Fraction(float(a)) * Fraction(float(x))
-                for a, x in zip(active, column, strict=True)
-            )
-            for column in exposure.T
-        ]
-        exact = sum(
-            left * Fraction(float(value)) * right
-            for left, row in zip(exact_active, covariance, strict=True)
-            for value, right in zip(row, exact_active, strict=True)
+        # Rounded covariance entries and BLAS reductions both contribute error.
+        # Bound it in variance units; an admitted but materially indefinite
+        # covariance (including a negative scalar variance) still fails here.
+        magnitude = float(
+            np.abs(factor_active) @ np.abs(covariance) @ np.abs(factor_active)
         )
-        if exact < 0:
+        roundoff = 8 * len(factor_active) * np.finfo(float).eps * magnitude
+        if not np.isfinite(roundoff) or factor < -roundoff:
             raise ValueError("optimizer_risk_negative")
-        try:
-            factor = float(exact)
-        except OverflowError:
-            raise ValueError("optimizer_risk_nonfinite") from None
-        if not np.isfinite(factor + residual):
-            raise ValueError("optimizer_risk_nonfinite")
+        factor = 0.0
     return factor, residual
 
 

@@ -133,6 +133,7 @@ def test_enhanced_decision_preprocesses_before_joint_style_selection():
             current_cross=frame,
             calibration_rows=[],
             calibration_intervals=scheduled,
+            trading_sessions=pd.DatetimeIndex([pd.Timestamp("2024-01-02")]),
             as_of=pd.Timestamp("2024-01-02"),
             risk_style_columns=("a", "b"),
         ).exposures.set_index("asset_id")

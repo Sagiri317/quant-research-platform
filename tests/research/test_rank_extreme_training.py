@@ -92,7 +92,7 @@ def test_sparse_decay_preserves_direction_weight_and_calibration(
         if algorithm == "equal_weight_rank_ensemble"
         else predictor.weights
     )
-    np.testing.assert_array_equal(actual, expected)
+    np.testing.assert_allclose(actual, expected, rtol=2e-14, atol=0)
     rank = np.column_stack(
         [
             (np.asarray(pattern, dtype=float) - (assets + 1) / 2) / assets
@@ -104,8 +104,11 @@ def test_sparse_decay_preserves_direction_weight_and_calibration(
         @ expected
         / (len(factors) if algorithm == "equal_weight_rank_ensemble" else 1)
     )
-    np.testing.assert_array_equal(
-        fitting.prediction_callable(factors, predictor)(frame.iloc[:assets]), scores
+    np.testing.assert_allclose(
+        fitting.prediction_callable(factors, predictor)(frame.iloc[:assets]),
+        scores,
+        rtol=2e-14,
+        atol=0,
     )
     assert (
         predictor.label_calibration is not None

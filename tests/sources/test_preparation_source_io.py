@@ -266,8 +266,7 @@ def test_source_close_failure_prevents_publication_and_preserves_old_good(
     } == saved
 
 
-@pytest.mark.parametrize("field", ["RequestID", "after_cutoff_count"])
-def test_choice_materialization_rejects_boolean_numeric_source_facts(tmp_path, field):
+def test_choice_materialization_rejects_boolean_request_id(tmp_path):
     import json
 
     layout = StorageLayout(tmp_path)
@@ -275,18 +274,52 @@ def test_choice_materialization_rejects_boolean_numeric_source_facts(tmp_path, f
         source, _ = _disclosure(session, layout)
     sidecar = source / "response.metadata.json"
     manifest = json.loads(sidecar.read_bytes())
-    facts = manifest["metadata"]["response" if field == "RequestID" else "scope"]
-    assert facts[field] == 0
-    facts[field] = False
+    facts = manifest["metadata"]["response"]
+    assert facts["RequestID"] == 0
+    facts["RequestID"] = False
     sidecar.write_text(json.dumps(manifest))
     output = tmp_path / "invalid"
-    with pytest.raises(ValueError, match="choice_(response_type|saved_scope)_invalid"):
+    with pytest.raises(ValueError, match="choice_response_type_invalid"):
         choice.materialize_interim_data(
             raw_root=layout.raw_source_root("choice"),
             output_roots={"financial_first_disclosure": output},
             data_ids=("financial_first_disclosure",),
         )
     assert not output.exists()
+
+
+@pytest.mark.parametrize("diagnostic", [False, "invalid", None])
+def test_choice_scope_diagnostic_does_not_change_materialized_facts(
+    tmp_path, diagnostic
+):
+    import json
+
+    layout = StorageLayout(tmp_path)
+    with choice_session(SDK(response())) as session:
+        source, _ = _disclosure(session, layout)
+    data_id = "financial_first_disclosure"
+
+    def materialize(name):
+        result = choice.materialize_interim_data(
+            raw_root=layout.raw_source_root("choice"),
+            output_roots={data_id: tmp_path / name},
+            data_ids=(data_id,),
+        )
+        return read_dataset(result.artifact_roots[data_id])
+
+    expected = materialize("baseline")
+    assert not expected.empty
+    sidecar = source / "response.metadata.json"
+    manifest = json.loads(sidecar.read_bytes())
+    manifest["metadata"]["scope"]["after_cutoff_count"] = diagnostic
+    sidecar.write_text(json.dumps(manifest))
+    raw_before = {
+        p.relative_to(source): p.read_bytes() for p in source.rglob("*") if p.is_file()
+    }
+    pd.testing.assert_frame_equal(materialize("changed_diagnostic"), expected)
+    assert raw_before == {
+        p.relative_to(source): p.read_bytes() for p in source.rglob("*") if p.is_file()
+    }
 
 
 def test_funding_consumption_rejects_boolean_coverage_time(tmp_path):

@@ -514,7 +514,7 @@ def test_equity_events_require_terminated_origin_at_actual_recognition(tmp_path,
     assert not events.entitlement_proved.all()
 
 
-@pytest.mark.parametrize("active_successor", [False, True])
+@pytest.mark.parametrize("active_successor", [False, True, "unresolved", "null_flag"])
 def test_proved_conversion_qualifies_external_successor_but_not_active_distribution(
     tmp_path, active_successor
 ):
@@ -545,6 +545,11 @@ def test_proved_conversion_qualifies_external_successor_but_not_active_distribut
             timestamp=pd.Timestamp("2023-01-03"),
             listing_date=pd.Timestamp("2023-01-03"),
             delisting_date=pd.NaT,
+            delisting_date_unresolved=(
+                pd.NA
+                if active_successor == "null_flag"
+                else active_successor == "unresolved"
+            ),
         )
         root = roots["stock_master"].parent / ("e" * 64)
         write_dataset(
@@ -564,7 +569,8 @@ def test_proved_conversion_qualifies_external_successor_but_not_active_distribut
     )
     if active_successor:
         events = pd.concat(view.rights_events for view in source)
-        assert not events.entitlement_proved.all()
+        assert events.set_index("event_id").loc["z-conversion", "entitlement_proved"]
+        assert not events.set_index("event_id").loc["a-successor", "entitlement_proved"]
     else:
         events = pd.concat(view.rights_events for view in source)
         assert events.event_id.tolist() == ["z-conversion", "a-successor"]

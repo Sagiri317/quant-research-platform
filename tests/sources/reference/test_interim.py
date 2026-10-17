@@ -340,7 +340,7 @@ def test_industry_snapshot_range_uses_publication_not_observation(tmp_path):
         "missing_member",
         "bad_hash",
         "traversal",
-        "duplicate_asset",
+        "non_mapping_record",
         "publication_before_observation",
     ],
 )
@@ -361,13 +361,13 @@ def test_industry_reference_boundary_rejects_unproved_source(tmp_path, failure):
         metadata["files"]["../snapshot.pdf"] = metadata["files"].pop("snapshot.pdf")
     elif failure == "publication_before_observation":
         metadata["snapshots"][0]["publication_date"] = "2019-12-01"
-    else:
+    elif failure == "non_mapping_record":
         candidate = json.loads(
             Path(native_filesystem_path(root / "snapshot.json")).read_text(
                 encoding="utf-8"
             )
         )
-        candidate["records"].append(candidate["records"][0])
+        candidate["records"].append(42)
         filesystem_write_text(
             root / "snapshot.json", json.dumps(candidate), encoding="utf-8"
         )
@@ -523,31 +523,208 @@ def test_fee_csv_decoder_preserves_quoted_multiline_fields(tmp_path):
 
 
 @pytest.mark.parametrize("publication", ("2025-01-01", "9999-12-31"))
-def test_industry_future_bad_row_precedes_date_projection(tmp_path, publication):
+def test_industry_future_bad_row_does_not_change_selected_history(
+    tmp_path, publication
+):
+    import pandas as pd
+
     from tests.helpers.a_share_raw import write_industry_reference_fixture
 
-    row = {
-        "code": "invalid",
-        "name": "synthetic issuer",
-        "category": "A",
-        "major": "",
-        "industry": "01",
-        "source_locator": "page:1",
-    }
+    data_id = interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
+    expected_root = tmp_path / "expected"
     root = write_industry_reference_fixture(
-        tmp_path / "raw",
-        observations=(("future", "CSRC2012", "2020-01-01", publication, [row]),),
+        tmp_path / "raw", observations=_industry_observations()
     )
-    with pytest.raises(ValueError, match="^industry_snapshot_row_invalid$"):
+    interim.materialize_interim_data(
+        output_roots={data_id: expected_root},
+        raw_root=root.parent,
+        data_ids=(data_id,),
+        end_date="2020-12-31",
+    )
+    write_industry_reference_fixture(
+        tmp_path / "raw",
+        observations=_industry_observations()
+        + (("future", "CSRC2012", "2020-01-01", publication, [{"code": "invalid"}]),),
+    )
+    raw_before = _file_bytes(root)
+    actual_root = tmp_path / "actual"
+    interim.materialize_interim_data(
+        output_roots={data_id: actual_root},
+        raw_root=root.parent,
+        data_ids=(data_id,),
+        end_date="2020-12-31",
+    )
+    pd.testing.assert_frame_equal(
+        read_dataset(actual_root), read_dataset(expected_root)
+    )
+    assert _file_bytes(root) == raw_before
+
+
+@pytest.mark.parametrize("optional", ["name", "source_locator"])
+@pytest.mark.parametrize("value", [None, "", "omitted", 42, ["page:1"], {"page": 1}])
+def test_industry_optional_metadata_does_not_gate_classification(
+    tmp_path, optional, value
+):
+    from tests.helpers.a_share_raw import write_industry_reference_fixture
+
+    observations = _industry_observations()
+    row = observations[0][4][0]
+    if value == "omitted":
+        del row[optional]
+    else:
+        row[optional] = value
+    root = write_industry_reference_fixture(tmp_path / "raw", observations=observations)
+    before = _file_bytes(root)
+    data_id = interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
+    output = tmp_path / "industry"
+    interim.materialize_interim_data(
+        raw_root=root.parent, output_roots={data_id: output}, data_ids=(data_id,)
+    )
+    frame = read_dataset(output)
+    assert frame.source_asset_id.tolist() == ["000001"]
+    assert frame.industry_category_code.tolist() == ["A"]
+    assert frame.industry_code.tolist() == ["01"]
+    if value is None or not isinstance(value, str) or value == "omitted":
+        column = "company_name" if optional == "name" else "source_locator"
+        assert frame[column].isna().all()
+    assert _file_bytes(root) == before
+
+
+def test_industry_invalid_asset_and_industry_cells_are_local(tmp_path):
+    from tests.helpers.a_share_raw import write_industry_reference_fixture
+
+    observations = _industry_observations()
+    good = observations[0][4][0]
+    observations[0][4].extend(
+        [
+            {**good, "code": "not-an-asset"},
+            {key: value for key, value in good.items() if key != "code"},
+            {**good, "code": "000002", "industry": "invalid"},
+            {**good, "code": "000003", "category": "J", "industry": "66"},
+        ]
+    )
+    root = write_industry_reference_fixture(tmp_path / "raw", observations=observations)
+    before = _file_bytes(root)
+    data_id = interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
+    output = tmp_path / "industry"
+    interim.materialize_interim_data(
+        raw_root=root.parent, output_roots={data_id: output}, data_ids=(data_id,)
+    )
+    frame = read_dataset(output).set_index("source_asset_id")
+    assert set(frame.index) == {"000001", "000002", "000003"}
+    assert frame.loc["000001", "industry_code"] == "01"
+    assert frame.loc["000003", "industry_code"] == "66"
+    assert (
+        frame.loc[
+            "000002", ["industry_category_code", "industry_major_code", "industry_code"]
+        ]
+        .isna()
+        .all()
+    )
+    assert frame.loc["000002", "company_name"] == "synthetic issuer"
+    diagnostics = read_dataset_manifest_evidence(output)["producer_diagnostics"]
+    assert diagnostics["source_row_counts"] == {
+        "excluded_missing_required_rows": 2,
+        "invalid_industry_rows": 1,
+    }
+    assert _file_bytes(root) == before
+
+
+@pytest.mark.parametrize("conflict", [None, "name", "industry"])
+def test_industry_duplicate_reference_facts_coalesce_by_field(tmp_path, conflict):
+    from tests.helpers.a_share_raw import write_industry_reference_fixture
+
+    observations = _industry_observations()
+    row = observations[0][4][0]
+    duplicate = dict(row)
+    if conflict is not None:
+        duplicate[conflict] = "02" if conflict == "industry" else "other issuer label"
+    observations[0][4].extend([duplicate, {**row, "code": "000002"}])
+    root = write_industry_reference_fixture(tmp_path / "raw", observations=observations)
+    before = _file_bytes(root)
+    data_id = interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
+    output = tmp_path / "industry"
+    interim.materialize_interim_data(
+        raw_root=root.parent, output_roots={data_id: output}, data_ids=(data_id,)
+    )
+    frame = read_dataset(output).set_index("source_asset_id")
+    assert len(frame) == 2
+    assert frame.loc["000002", "industry_code"] == "01"
+    assert frame.loc["000001", "industry_category_code"] == "A"
+    if conflict == "industry":
+        assert frame.loc[["000001"], "industry_code"].isna().all()
+    else:
+        assert frame.loc["000001", "industry_code"] == "01"
+    if conflict == "name":
+        assert frame.loc[["000001"], "company_name"].isna().all()
+    assert _file_bytes(root) == before
+
+
+@pytest.mark.parametrize("reason", ["outside_window", "invalid_asset"])
+def test_industry_no_selected_records_publishes_typed_empty_reference(tmp_path, reason):
+    from tests.helpers.a_share_raw import write_industry_reference_fixture
+
+    observations = _industry_observations()
+    if reason == "invalid_asset":
+        observations[0][4][0]["code"] = "invalid"
+    root = write_industry_reference_fixture(tmp_path / "raw", observations=observations)
+    before = _file_bytes(root)
+    data_id = interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
+    output = tmp_path / "industry"
+    interim.materialize_interim_data(
+        raw_root=root.parent,
+        output_roots={data_id: output},
+        data_ids=(data_id,),
+        end_date="2020-01-03" if reason == "outside_window" else "2020-12-31",
+    )
+    frame = read_dataset(output)
+    assert frame.empty
+    assert tuple(frame.columns) == interim._INDUSTRY_COLUMNS
+    for column in frame:
+        expected = (
+            "datetime64[ns]"
+            if column in {"timestamp", "observation_date", "publication_date"}
+            else "string"
+        )
+        assert str(frame[column].dtype) == expected
+    assert _file_bytes(root) == before
+
+
+def test_industry_unreadable_future_json_remains_a_source_boundary(tmp_path):
+    from tests.helpers.a_share_raw import write_industry_reference_fixture
+
+    observations = _industry_observations() + (
+        ("future", "CSRC2012", "2025-01-01", "2025-01-02", [{"code": "invalid"}]),
+    )
+    root = write_industry_reference_fixture(tmp_path / "raw", observations=observations)
+    data_id = interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
+    output = tmp_path / "industry"
+    interim.materialize_interim_data(
+        raw_root=root.parent,
+        output_roots={data_id: output},
+        data_ids=(data_id,),
+        end_date="2020-12-31",
+    )
+    before = _file_bytes(output)
+    malformed = b'{"records": ['
+    filesystem_write_bytes(root / "future.json", malformed)
+    metadata = json.loads(
+        Path(native_filesystem_path(root / "metadata.json")).read_text(encoding="utf-8")
+    )
+    metadata["files"]["future.json"] = hashlib.sha256(malformed).hexdigest()
+    filesystem_write_text(
+        root / "metadata.json", json.dumps(metadata), encoding="utf-8"
+    )
+    raw_before = _file_bytes(root)
+    with pytest.raises(ValueError):
         interim.materialize_interim_data(
-            output_roots={
-                key: StorageLayout(tmp_path).interim_data_root("reference", key)
-                for key in (interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID,)
-            },
             raw_root=root.parent,
-            data_ids=(interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID,),
+            output_roots={data_id: output},
+            data_ids=(data_id,),
             end_date="2020-12-31",
         )
+    assert _file_bytes(output) == before
+    assert _file_bytes(root) == raw_before
 
 
 @pytest.mark.parametrize("terminator", ("\n", "\r\n", "\r", "mixed"))

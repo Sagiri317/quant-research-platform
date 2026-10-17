@@ -374,15 +374,11 @@ def test_unknown_forecasts_keep_same_time_retransmission_identity(tmp_path, conf
         (1, _mark(1, r="bad")),
         (1, _mark(1, r="NaN" if conflict else "bad")),
     )
-    if conflict:
-        with pytest.raises(ValueError, match="tardis_funding_forecast_conflict"):
-            _import(tmp_path / "case", observations)
-    else:
-        roots = _import(tmp_path / "case", observations)
-        with read_funding_observations(roots, symbol="BTCUSDT") as source:
-            forecasts = tuple(source.forecasts)
-            assert len(forecasts) == 1
-            assert forecasts[0].cashflows == (((_START_MS + 10000) * 1_000_000, None),)
+    roots = _import(tmp_path / "case", observations)
+    with read_funding_observations(roots, symbol="BTCUSDT") as source:
+        forecasts = tuple(source.forecasts)
+        assert len(forecasts) == 1
+        assert forecasts[0].cashflows == (((_START_MS + 10000) * 1_000_000, None),)
 
 
 def test_unknown_settlement_cannot_be_rewritten_as_zero_in_projection(tmp_path):

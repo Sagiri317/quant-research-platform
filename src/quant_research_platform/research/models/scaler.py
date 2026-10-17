@@ -24,6 +24,7 @@ class ModelMatrixScaler:
     input_columns: tuple[str, ...] = ()
     medians: tuple[float, ...] = ()
     native_missing: bool = False
+    scaling: bool = True
 
     @property
     def mean_(self) -> tuple[float, ...]:
@@ -39,7 +40,14 @@ class ModelMatrixScaler:
         *,
         sample_weight: object | None = None,
         missing: str | None = None,
+        scaling: bool | None = None,
     ) -> ModelMatrixScaler:
+        if missing not in {None, "native", "impute"}:
+            raise ValueError("model_missing_strategy_invalid")
+        if scaling is None:
+            scaling = missing != "native"
+        if type(scaling) is not bool:
+            raise ValueError("model_training_scaling_invalid")
         columns = tuple(str(column) for column in frame.columns)
         input_columns, medians = (), ()
         if frame.empty or not columns or frame.columns.has_duplicates:
@@ -56,12 +64,29 @@ class ModelMatrixScaler:
                 ]
             )
             if missing == "native":
+                origins = [0.0] * len(columns)
+                offsets = [Fraction()] * len(columns)
+                scales = [1.0] * len(columns)
+                weights = _weights(sample_weight, len(frame))
+                if scaling:
+                    for index, column in enumerate(columns):
+                        observed = ~np.isnan(values[:, index])
+                        # An all-missing native column has no fitted moments.
+                        if observed.any():
+                            fitted = cls.fit(
+                                frame.loc[observed, [column]],
+                                sample_weight=weights[observed],
+                            )
+                            origins[index] = fitted.origin_[0]
+                            offsets[index] = fitted.offset_[0]
+                            scales[index] = fitted.scale_[0]
                 return cls(
                     columns,
-                    (0.0,) * len(columns),
-                    (Fraction(),) * len(columns),
-                    (1.0,) * len(columns),
+                    tuple(origins),
+                    tuple(offsets),
+                    tuple(scales),
                     native_missing=True,
+                    scaling=scaling,
                 )
             if np.isnan(values).all(axis=0).any():
                 raise ValueError("model_training_feature_all_missing")
@@ -91,6 +116,16 @@ class ModelMatrixScaler:
             columns = tuple(expanded.columns)
         values = _finite_matrix(frame, columns)
         weights = _weights(sample_weight, len(values))
+        if not scaling:
+            return cls(
+                columns,
+                (0.0,) * len(columns),
+                (Fraction(),) * len(columns),
+                (1.0,) * len(columns),
+                input_columns=input_columns,
+                medians=medians,
+                scaling=False,
+            )
         original_weights = weights
         anchor = values[int(np.argmax(weights))]
         root_weights = np.sqrt(weights)
@@ -184,7 +219,7 @@ class ModelMatrixScaler:
     def transform(self, frame: pd.DataFrame) -> pd.DataFrame:
         frame = self.input_matrix(frame)
         if self.native_missing:
-            return pd.DataFrame(
+            frame = pd.DataFrame(
                 {
                     column: strict_finite_numeric_series(
                         frame[column],
@@ -195,15 +230,21 @@ class ModelMatrixScaler:
                 },
                 index=frame.index,
             ).astype("float64")
+            if not self.scaling:
+                return frame
         if tuple(str(column) for column in frame.columns) != self.columns:
             raise ValueError("model_scaler_columns_mismatch")
-        values = _finite_matrix(frame, self.columns)
+        values = (
+            frame.to_numpy(dtype="float64")
+            if self.native_missing
+            else _finite_matrix(frame, self.columns)
+        )
         origin = np.asarray(self.origin_)
         offset = np.array([float(value) for value in self.offset_])
         scale = np.asarray(self.scale_)
         with np.errstate(over="ignore"):
             differences = (values - origin) - offset
-            overflow = ~np.isfinite(differences)
+            overflow = ~np.isfinite(differences) & ~np.isnan(values)
             differences /= scale
         if overflow.any():
             rows, columns = np.nonzero(overflow)
@@ -224,7 +265,9 @@ class ModelMatrixScaler:
                 correction = np.inf if residual > 0 else -np.inf
             with np.errstate(over="ignore", invalid="ignore"):
                 differences[:, column] -= correction
-            for row in np.flatnonzero(~np.isfinite(differences[:, column])):
+            for row in np.flatnonzero(
+                ~np.isfinite(differences[:, column]) & ~np.isnan(values[:, column])
+            ):
                 standardized = (
                     Fraction(float(values[row, column]))
                     - Fraction(self.origin_[column])
@@ -248,6 +291,7 @@ class ModelMatrixScaler:
             ),
             **({"native_missing": True} if self.native_missing else {}),
             "columns": list(self.columns),
+            "scaling": self.scaling,
             "weighted_mean_origin": list(self.origin_),
             "weighted_mean_offset": [
                 [value.numerator, value.denominator] for value in self.offset_

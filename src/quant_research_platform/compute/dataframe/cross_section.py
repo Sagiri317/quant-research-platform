@@ -203,14 +203,7 @@ def _pearson_correlation_result(
     left_values: np.ndarray,
     right_values: np.ndarray,
 ) -> tuple[float | None, str | None]:
-    if len(left_values) < 2:
-        return None, "insufficient_observations"
-    if not np.isfinite(left_values).all() or not np.isfinite(right_values).all():
-        return None, "nonfinite_result"
-    moments = _CorrelationMoments()
-    for left, right in zip(left_values, right_values, strict=True):
-        moments.update(float(left), float(right))
-    return moments.result()
+    return _batch_pearson_correlation_result(left_values, right_values)
 
 
 def _pearson_correlation_from_moments(
@@ -412,11 +405,22 @@ def _batch_pearson_correlation_result(left_values, right_values):
     right = _scaled_centered_values(right)
     if left is None or right is None:
         return None, "zero_variance"
+    covariance = float(np.dot(left, right))
+    # Near cancellation, the sign and tiny nonzero result can matter. Retain
+    # exact streaming moments there, rather than rounding the correlation to 0.
+    bound = (
+        8 * len(left) * np.finfo(float).eps * float(np.dot(np.abs(left), np.abs(right)))
+    )
+    if abs(covariance) <= bound:
+        moments = _CorrelationMoments()
+        for x, y in zip(left_values, right_values, strict=True):
+            moments.update(float(x), float(y))
+        return moments.result()
     value, reason = _pearson_correlation_from_moments(
         count=len(left),
         left_m2=float(np.dot(left, left)),
         right_m2=float(np.dot(right, right)),
-        covariance=float(np.dot(left, right)),
+        covariance=covariance,
     )
     return (
         (float(np.clip(value, -1.0, 1.0)), reason)

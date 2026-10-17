@@ -987,6 +987,7 @@ def test_unidentified_alpha_survives_publication_and_blocks_freezing(
                 "holding_return": np.arange(observed_dates * 10) / 10000,
             }
         ),
+        trading_sessions=sessions,
         as_of=sessions[-1],
         scheduled_intervals=intervals,
     )
@@ -1049,7 +1050,7 @@ def test_degenerate_alpha_diagnostics_survive_ledger_and_freeze(
         _ALPHA_DIAGNOSTICS,
     )
 
-    dates = pd.date_range("2019-01-01", periods=6, freq="MS")
+    dates = pd.date_range("2019-07-01", periods=6, freq="MS")
     inputs = pd.DataFrame(
         {"timestamp": dates.repeat(2), "prediction_rank_score": [-0.5, 0.5] * 6}
     )
@@ -1064,7 +1065,10 @@ def test_degenerate_alpha_diagnostics_survive_ledger_and_freeze(
         }
     )
     calibration = calibrate_expected_alpha(
-        inputs, as_of=pd.Timestamp("2019-12-31"), scheduled_intervals=intervals
+        inputs,
+        trading_sessions=pd.date_range("2019-01-01", "2019-12-31"),
+        as_of=pd.Timestamp("2019-12-31"),
+        scheduled_intervals=intervals,
     )
     assert calibration.status == "DEFINED"
     assert calibration.slope == pytest.approx(slope / alpha_scale, rel=1e-12, abs=0)

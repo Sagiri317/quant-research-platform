@@ -117,8 +117,26 @@ def strict_timestamp_series(
     *,
     error: str,
     allow_null: bool = False,
+    errors: str = "raise",
 ) -> pd.Series:
     series = pd.Series(values, copy=True)
+    if errors not in {"raise", "coerce"}:
+        raise ValueError("invalid_timestamp_errors")
+    if errors == "coerce":
+        if pd.api.types.is_numeric_dtype(
+            series.dtype
+        ) or pd.api.types.is_timedelta64_dtype(series.dtype):
+            return pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
+        if not pd.api.types.is_datetime64_any_dtype(series.dtype):
+            series = series.where(
+                series.map(_is_supported_timestamp_scalar).astype(bool)
+            )
+        parsed = pd.to_datetime(series, errors="coerce", format="mixed", utc=True)
+        parsed = parsed.mask(
+            (parsed < pd.Timestamp.min.tz_localize("UTC"))
+            | (parsed > pd.Timestamp.max.tz_localize("UTC"))
+        )
+        return parsed.dt.tz_localize(None).astype("datetime64[ns]")
     null_mask = _null_mask(series)
     if bool(null_mask.any()) and not allow_null:
         raise ValueError(error)
@@ -303,27 +321,50 @@ def strict_integer_series(
     return pd.Series(output, index=series.index, name=series.name, dtype=dtype)
 
 
-def strict_real_numeric_series(values: pd.Series, *, error: str) -> pd.Series:
-    """Parse real observations, retaining missing and infinite values for the caller."""
+def strict_real_numeric_series(
+    values: pd.Series, *, error: str, errors: str = "raise"
+) -> pd.Series:
+    """Parse real observations; optionally retain malformed cells as unavailable."""
+    if errors not in {"raise", "coerce"}:
+        raise ValueError(error)
     series = pd.Series(values, copy=True)
     if (
         pd.api.types.is_bool_dtype(series.dtype)
         or pd.api.types.is_complex_dtype(series.dtype)
         or series.dtype.kind in "mM"
     ):
+        if errors == "coerce":
+            return pd.Series(
+                np.nan, index=series.index, name=series.name, dtype="float64"
+            )
         raise ValueError(error)
     null_mask = _null_mask(series)
-    if not pd.api.types.is_numeric_dtype(series.dtype):
-        for value, is_null in zip(series, null_mask, strict=True):
-            if isinstance(value, (bool, np.bool_, complex, np.complexfloating)) or (
-                not is_null and not _is_hashable(value)
-            ):
+    if not pd.api.types.is_numeric_dtype(series.dtype) and not isinstance(
+        series.dtype, pd.StringDtype
+    ):
+        invalid = pd.Series(
+            [
+                isinstance(value, (bool, np.bool_, complex, np.complexfloating))
+                or (not is_null and not _is_hashable(value))
+                or (
+                    errors == "coerce"
+                    and isinstance(value, int)
+                    and abs(value) > float(np.finfo("float64").max)
+                )
+                for value, is_null in zip(series, null_mask, strict=True)
+            ],
+            index=series.index,
+            dtype="bool",
+        )
+        if invalid.any():
+            if errors == "raise":
                 raise ValueError(error)
+            series = series.mask(invalid)
     try:
         numeric = pd.to_numeric(series, errors="coerce")
     except OverflowError as exc:
         raise ValueError(error) from exc
-    if (numeric.isna() & ~null_mask).any():
+    if errors == "raise" and (numeric.isna() & ~null_mask).any():
         raise ValueError(error)
     return numeric.astype("float64")
 

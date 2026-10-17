@@ -784,7 +784,7 @@ class StatisticsArtifact:
         with _opened_parquet(self.root / member) as (parquet, _handle):
             if parquet.schema_arrow != _ARROW_SCHEMAS[member]:
                 raise ValueError("statistics_table_schema_invalid")
-            frame = parquet.read().to_pandas()
+            frame = parquet.read().to_pandas(integer_object_nulls=True)
         yield _validated_frame(frame, member=member, metadata=self.metadata)
 
 
@@ -1011,6 +1011,9 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
                 member in {"prediction_diagnostics.parquet", "model_comparison.parquet"}
                 and column
                 in {"bootstrap_block_size", "bootstrap_repetitions", "bootstrap_seed"}
+                or member == "crypto_maker_events.parquet"
+                and column == "price_index"
+                and result[column].isna().any()
             ),
         )
         if values.lt(0).any():
@@ -1239,7 +1242,16 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
             or result.sample_role.isna().any()
             or result.sample_role.str.strip().eq("").any()
             or (result.sample_role.nunique() > 1)
-            or (bootstrap_defined & ~defined).any()
+            or (
+                bootstrap_defined
+                & result.observation_count.le(result.bootstrap_block_size)
+            ).any()
+            or result.loc[
+                bootstrap_defined, ["global_mean", "quarterly_mean", "mean_difference"]
+            ]
+            .isna()
+            .any()
+            .any()
             or result.loc[defined, list(measurements)].isna().any().any()
             or result.loc[defined, ["global_mean", "quarterly_mean", "mean_difference"]]
             .isna()
@@ -1269,9 +1281,12 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
             or (not result.fdr_adjusted_p_value.dropna().between(0, 1).all())
         ):
             raise ValueError("statistics_group_comparison_invalid")
-        if (
-            member == "model_group_comparison.parquet"
-            and result.observation_count.gt(result.calendar_count).any()
+        if member == "model_group_comparison.parquet" and (
+            result.observation_count.gt(result.calendar_count).any()
+            or (
+                (defined | bootstrap_defined)
+                & result.observation_count.ne(result.calendar_count)
+            ).any()
         ):
             raise ValueError("statistics_group_comparison_count_invalid")
         if (

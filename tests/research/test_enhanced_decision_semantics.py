@@ -74,6 +74,7 @@ def enhanced_config(tmp_path_factory):
                 market_type=1 if asset.startswith("a") else 4,
                 announcement_date=pd.Timestamp("2022-12-20"),
                 settlement_date=pd.Timestamp("2023-01-06"),
+                settlement_date_unresolved=False,
                 amount=1.0,
             )
             for asset in sorted(panel.asset_id.unique())
@@ -698,7 +699,7 @@ def test_missing_float_cap_blocks_only_dependent_target_and_keeps_exit(construct
 
 
 @pytest.mark.parametrize("invalid", [-1.0, 0.0, np.inf])
-def test_invalid_float_cap_remains_input_failure(invalid):
+def test_invalid_float_cap_blocks_only_dependent_target(invalid):
     args = _decision_inputs()
     args["enhanced_decision"] = None
     args["candidate"] = replace(
@@ -709,8 +710,10 @@ def test_invalid_float_cap_remains_input_failure(invalid):
         risk_style_columns=(),
     )
     args["dataset"].loc[args["dataset"].asset_id.eq("a"), "float_market_cap"] = invalid
-    with pytest.raises(ValueError, match="target_float_market_cap_invalid"):
-        production._build_session(**args)
+    args["dataset"].loc[args["dataset"].asset_id.eq("b"), "eligible"] = False
+    account, _, _, _, ledger = production._build_session(**args)
+    assert ledger.executed_delta_notional.tolist() == [0.0, -50.0]
+    assert account.post_trade_cash == 50.0
 
 
 @pytest.mark.parametrize("holdings", [(0.0, 0.0), (0.5, 0.5)])

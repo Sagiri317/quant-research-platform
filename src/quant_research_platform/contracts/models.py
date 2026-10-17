@@ -215,6 +215,7 @@ class ModelSpec:
     hyperparameters: Mapping[str, object] = field(default_factory=dict)
     random_seed: int = DEFAULT_ROOT_SEED
     max_train_rows: int | None = None
+    training_scaling: bool | None = None
     training_weighting: TrainingWeighting = field(default_factory=TrainingWeighting)
 
     def __post_init__(self) -> None:
@@ -228,6 +229,22 @@ class ModelSpec:
         _validate_non_empty_string(self.model_id, "model_id_required")
         _validate_non_empty_string(self.model_algorithm, "model_algorithm_required")
         _model_algorithm_facts(self.model_algorithm)
+        scaling = self.training_scaling
+        if scaling is None:
+            scaling = self.model_algorithm in {
+                "linear_regression",
+                "ridge_regression",
+                "lasso_regression",
+                "huber_regression",
+            }
+        if type(scaling) is not bool:
+            raise ValueError("model_training_scaling_invalid")
+        if scaling and self.model_algorithm in {
+            "equal_weight_rank_ensemble",
+            "ic_weighted_rank_ensemble",
+        }:
+            raise ValueError("rank_model_training_scaling_not_supported")
+        object.__setattr__(self, "training_scaling", scaling)
         if hyperparameters and self.model_algorithm in {
             "linear_regression",
             "equal_weight_rank_ensemble",
@@ -317,6 +334,7 @@ def validate_model_metadata_core(
         "filter_columns_used",
         "filter_definition",
         "training_weighting",
+        "training_scaling",
         "scaler",
     }
     _validate_non_empty_string(
@@ -432,6 +450,7 @@ def validate_model_metadata_core(
             random_seed=metadata["random_seed"],
             max_train_rows=metadata["max_train_rows"],
             training_weighting=metadata["training_weighting"],
+            training_scaling=metadata["training_scaling"],
         )
     except (TypeError, ValueError) as exc:
         raise ValueError("invalid_model_metadata") from exc
@@ -448,6 +467,8 @@ def validate_model_metadata_core(
     train_end = pd.Timestamp(metadata["train_end"])
     if train_start > train_end:
         raise ValueError("invalid_model_metadata")
+    if type(metadata["training_scaling"]) is not bool:
+        raise ValueError("invalid_model_metadata")
     scaler = metadata["scaler"]
     if scaler is not None:
         if (
@@ -455,10 +476,13 @@ def validate_model_metadata_core(
             or set(scaler) - {"input_columns", "medians", "native_missing"}
             != {
                 "columns",
+                "scaling",
                 "weighted_mean_origin",
                 "weighted_mean_offset",
                 "weighted_population_scale",
             }
+            or type(scaler.get("scaling")) is not bool
+            or scaler["scaling"] != metadata["training_scaling"]
             or ("medians" in scaler) != ("input_columns" in scaler)
             or (
                 "native_missing" in scaler
@@ -513,6 +537,12 @@ def validate_model_metadata_core(
                 or gcd(*ratio) != 1
                 for ratio in scaler["weighted_mean_offset"]
             )
+        ):
+            raise ValueError("invalid_model_metadata")
+        if not scaler["scaling"] and (
+            any(value != 0 for value in scaler["weighted_mean_origin"])
+            or any(value != [0, 1] for value in scaler["weighted_mean_offset"])
+            or any(value != 1 for value in scaler["weighted_population_scale"])
         ):
             raise ValueError("invalid_model_metadata")
         try:
@@ -747,6 +777,7 @@ def model_spec_payload(spec: object) -> dict[str, object]:
         "random_seed": spec.random_seed,
         "max_train_rows": spec.max_train_rows,
         "training_weighting": spec.training_weighting.payload(),
+        "training_scaling": spec.training_scaling,
     }
 
 
@@ -881,6 +912,7 @@ def validate_model_facts(facts, metadata=None, *, expected=None):
             "sample_filter_mode",
             "random_seed",
             "max_train_rows",
+            "training_scaling",
         ):
             if getattr(spec, key) != metadata[key]:
                 raise ValueError("model_facts_metadata_mismatch")

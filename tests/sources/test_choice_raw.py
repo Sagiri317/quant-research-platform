@@ -211,8 +211,12 @@ def test_corrupt_completed_response_refuses_reuse_without_overwriting(
                 request,
             )
         with pytest.raises(ValueError):
-            read_choice_response(root, request)
-            pytest.fail("corrupt raw became visible")
+            read_choice_response(root, request, verify_bytes=True)
+            pytest.fail("corrupt raw passed explicit byte auditing")
+        if corruption in {"value", "scope"}:
+            assert read_choice_response(root, request)["Data"]["0"] == [
+                13 if corruption == "value" else 12
+            ]
         assert sdk.calls == 1
         assert before == _immediate_file_bytes(root)
 
@@ -428,3 +432,30 @@ def test_documented_index_weight_request_preserves_index_and_date(tmp_path):
                 "IndexCode=000905.SH,EndDate=2026-01-01",
             ),
         ).payload()
+
+
+@pytest.mark.parametrize(
+    "diagnostic",
+    ["sha256", "byte_count", "scope", "collected_at", "status", "extra_file"],
+)
+def test_ordinary_choice_read_does_not_require_diagnostic_admission(
+    tmp_path, diagnostic
+):
+    sdk = SDK(_response(Indicators=["QKMZ"], Data={"0": [12]}))
+    request = _request()
+    with choice_session(sdk) as session:
+        root = session.fetch(tmp_path / "response", request)
+    sidecar = root / "response.metadata.json"
+    manifest = json.loads(Path(native_filesystem_path(sidecar)).read_text())
+    if diagnostic in {"sha256", "byte_count"}:
+        manifest.pop(diagnostic)
+    elif diagnostic == "extra_file":
+        filesystem_write_text(
+            root / "README.txt", "diagnostic context", encoding="utf-8"
+        )
+    else:
+        manifest["metadata"].pop(diagnostic)
+    filesystem_write_text(sidecar, json.dumps(manifest), encoding="utf-8")
+    assert read_choice_response(root, request)["Data"]["0"] == [12]
+    with pytest.raises((ValueError, KeyError)):
+        read_choice_response(root, request, verify_bytes=True)

@@ -271,6 +271,8 @@ def produce_a_share_processed_data(
             )
             if "delisting_date" in session.arrow_schema.names:
                 axis_columns += ("delisting_date",)
+            if "delisting_date_unresolved" in session.arrow_schema.names:
+                axis_columns += ("delisting_date_unresolved",)
             panel_axis = open_dataset_session(**axis_options, columns=axis_columns)
         if spec.kind is ProcessedDataKind.LABEL or spec.data_id == "execution_mask":
             # Actual supplied PANEL sessions own the future execution/label clock.
@@ -687,6 +689,8 @@ def _calendar_panel_axis(panel, calendar, *, time_window=None, lookback=0, looka
         drop=True
     )
     unknown = panel[["listing_date", "market_type"]].isna().any(axis=1)
+    if "delisting_date_unresolved" in panel:
+        unknown |= panel["delisting_date_unresolved"].astype("boolean").fillna(True)
     previous_unknown = unknown.groupby(panel.asset_id).shift(fill_value=False)
     panel["_calendar_segment"] = (
         (unknown | previous_unknown).groupby(panel.asset_id).cumsum()
@@ -721,6 +725,11 @@ def _calendar_panel_axis(panel, calendar, *, time_window=None, lookback=0, looka
             # Knowledge follows the explicit listing identity, while unknown
             # membership independently breaks numerical window continuity.
             listing = asset_rows.listing_date
+            if "delisting_date_unresolved" in asset_rows:
+                unresolved_end = asset_rows.delisting_date_unresolved.astype(
+                    "boolean"
+                ).fillna(True)
+                listing = [listing, unresolved_end.cumsum()]
             exit_date = asset_rows.delisting_date.groupby(listing, sort=False).ffill()
             exit_changed = exit_date.notna() & exit_date.ne(
                 exit_date.groupby(listing, sort=False).shift()

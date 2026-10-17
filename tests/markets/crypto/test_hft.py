@@ -1192,17 +1192,9 @@ def test_positive_mid_returns_preserve_adjacent_prices_and_chunk_state(steps, sc
         (3.0, math.nextafter(3.0, math.inf)),
         (3.0, math.nextafter(math.nextafter(3.0, math.inf), math.inf)),
         (100.0, 101.0),
-        (
-            -float.fromhex("0x1.fffffffffffffp+1023"),
-            float.fromhex("0x1.fffffffffffffp+1023"),
-        ),
-        (
-            float.fromhex("0x1.fffffffffffffp+1023"),
-            -float.fromhex("0x1.fffffffffffffp+1023"),
-        ),
     ],
 )
-def test_label_relative_change_preserves_adjacent_and_signed_endpoints(mid, future):
+def test_label_relative_change_preserves_adjacent_positive_endpoints(mid, future):
     from fractions import Fraction
 
     frame = pd.DataFrame(

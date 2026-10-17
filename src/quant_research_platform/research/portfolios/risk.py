@@ -802,6 +802,22 @@ class FactorRiskState:
 def _covariance_is_psd(covariance: np.ndarray) -> bool:
     """Test the lower triangle against the existing absolute PSD bound."""
 
+    # Most matrices are far from the admission boundary. LAPACK's symmetric
+    # eigensolver resolves those within a norm-scaled backward-error bound.
+    symmetric = np.tril(covariance) + np.tril(covariance, -1).T
+    with np.errstate(over="ignore", invalid="ignore"):
+        error = (
+            8
+            * len(covariance)
+            * np.finfo(float).eps
+            * np.linalg.norm(symmetric, ord=np.inf)
+        )
+    if np.isfinite(error):
+        minimum = np.linalg.eigvalsh(symmetric)[0]
+        if minimum > -1e-12 + error:
+            return True
+        if minimum < -1e-12 - error:
+            return False
     coordinates, _scale = _integer_coordinates([*covariance.flat, 1e-12])
     matrix = np.asarray(coordinates[:-1], dtype=object).reshape(covariance.shape)
     upper = np.triu_indices(len(matrix), 1)
@@ -858,6 +874,44 @@ def _ewma_covariance(
     columns: tuple[str, ...],
 ) -> pd.DataFrame:
     weights = _ewma_weights(ages, half_life)
+    if weights.dtype != object:
+        # Center before the weighted Gram product. Only exceptional range or
+        # cancellation needs the existing exact accumulation below.
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            centered = values - np.average(values, axis=0, weights=weights)
+            weighted = centered * np.sqrt(weights[:, None])
+            gram = weighted.T @ weighted
+            cancellation = np.abs(gram) <= 8 * len(values) * np.finfo(float).eps * (
+                np.abs(weighted).T @ np.abs(weighted)
+            )
+            covariance = gram * annualization_factor
+            covariance *= 1 - diagonal_shrinkage
+            np.fill_diagonal(covariance, np.diag(gram) * annualization_factor)
+            scale = np.max(np.abs(values), axis=0)
+            spread = np.max(np.abs(centered), axis=0)
+            small = np.abs(weighted[(weighted != 0)])
+            safe_range = (
+                not len(small) or small.min() >= np.sqrt(np.finfo(float).tiny)
+            ) and np.all(
+                np.abs(
+                    np.diag(covariance)
+                    if diagonal_shrinkage == 1
+                    else covariance[gram != 0]
+                )
+                >= np.finfo(float).tiny
+            )
+            conditioned = np.all(
+                (scale == 0) | (spread > np.sqrt(np.finfo(float).eps) * scale)
+            )
+        if (
+            safe_range
+            and conditioned
+            and not cancellation.any()
+            and np.isfinite(covariance).all()
+        ):
+            if not _covariance_is_psd(covariance):
+                raise ValueError("factor_risk_covariance_not_psd")
+            return pd.DataFrame(covariance, index=columns, columns=columns)
     coordinates, scale = _integer_coordinates(values.flat)
     coordinates = np.asarray(coordinates, dtype=object).reshape(values.shape)
     ratios = [weight.as_integer_ratio() for weight in weights]

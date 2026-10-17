@@ -199,7 +199,7 @@ def materialize_interim_data(
                 frame = frame.loc[frame["timestamp"].le(pd.Timestamp(end_date))].copy()
             spec = _equity_events_spec()
         elif data_id == A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID:
-            frame = _industry_frame(source_metadata, members)
+            frame = _industry_frame(source_metadata, members, end_date=end_date)
             if end_date is not None:
                 frame = frame.loc[frame["timestamp"].le(pd.Timestamp(end_date))].copy()
             spec = _industry_snapshots_spec()
@@ -214,6 +214,9 @@ def materialize_interim_data(
             spec=spec,
             metadata={
                 **(metadata or {}),
+                "producer_diagnostics": {
+                    "source_row_counts": frame.attrs.get("source_row_counts", {})
+                },
                 "source_evidence": {
                     "source_id": str(SOURCE_ID),
                     "content_hash": identity,
@@ -377,9 +380,17 @@ def _industry_source(reference_root):
     return metadata, members, source_identity
 
 
-def _industry_frame(metadata, members):
+def _industry_frame(metadata, members, *, end_date=None):
     rows = []
+    counts = {"excluded_missing_required_rows": 0, "invalid_industry_rows": 0}
     for snapshot in metadata["snapshots"]:
+        dates = (
+            pd.Timestamp(snapshot["publication_date"]) + pd.Timedelta(days=1),
+            pd.Timestamp(snapshot["observation_date"]),
+            pd.Timestamp(snapshot["publication_date"]),
+        )
+        if end_date is not None and dates[0] > pd.Timestamp(end_date):
+            continue
         candidate = members[snapshot["candidate_file"]]
         if (
             set(candidate) != {"source", "source_sha256", "records"}
@@ -390,58 +401,32 @@ def _industry_frame(metadata, members):
             or not candidate["records"]
         ):
             raise ValueError("industry_snapshot_candidate_invalid")
-        seen = set()
         for row in candidate["records"]:
-            if type(row) is not dict or set(row) != {
-                "code",
-                "name",
-                "category",
-                "major",
-                "industry",
-                "source_locator",
-            }:
+            if type(row) is not dict:
                 raise ValueError("industry_snapshot_row_invalid")
-            if any(
-                type(row[key]) is not str
-                for key in (
-                    "code",
-                    "name",
-                    "category",
-                    "major",
-                    "industry",
-                    "source_locator",
+            code = row.get("code")
+            if type(code) is not str or re.fullmatch(r"\d{6}", code) is None:
+                counts["excluded_missing_required_rows"] += 1
+                continue
+            category, major, industry = (
+                row.get(key) for key in ("category", "major", "industry")
+            )
+            valid = (
+                type(category) is str
+                and re.fullmatch(r"[A-S]", category) is not None
+                and type(industry) is str
+                and re.fullmatch(r"\d{2}", industry) is not None
+                and type(major) is str
+            )
+            if valid:
+                valid = (
+                    re.fullmatch(r"C[A-Z]", major) is not None
+                    if snapshot["industry_standard_id"] == "CAPCO" and category == "C"
+                    else major == ""
                 )
-            ):
-                raise ValueError("industry_snapshot_row_invalid")
-            code, category, major = row["code"], row["category"], row["major"]
-            if (
-                re.fullmatch(r"\d{6}", code) is None
-                or code in seen
-                or not row["name"].strip()
-                or re.fullmatch(r"[A-S]", category) is None
-                or re.fullmatch(r"\d{2}", row["industry"]) is None
-                or re.fullmatch(
-                    r"(?:page:[1-9]\d*|table:[1-9]\d*;row:[1-9]\d*)",
-                    row["source_locator"],
-                )
-                is None
-            ):
-                raise ValueError("industry_snapshot_row_invalid")
-            if (
-                snapshot["industry_standard_id"] == "CAPCO"
-                and category == "C"
-                and re.fullmatch(r"C[A-Z]", major) is None
-                or (snapshot["industry_standard_id"] != "CAPCO" or category != "C")
-                and major != ""
-            ):
-                raise ValueError("industry_snapshot_major_invalid")
-            seen.add(code)
-            if len(seen) == 1:
-                dates = (
-                    pd.Timestamp(snapshot["publication_date"]) + pd.Timedelta(days=1),
-                    pd.Timestamp(snapshot["observation_date"]),
-                    pd.Timestamp(snapshot["publication_date"]),
-                )
+            if not valid:
+                counts["invalid_industry_rows"] += 1
+                category = major = industry = None
             rows.append(
                 (
                     code,
@@ -449,14 +434,29 @@ def _industry_frame(metadata, members):
                     snapshot["industry_standard_id"],
                     category,
                     major,
-                    row["industry"],
-                    row["name"],
+                    industry,
+                    row.get("name") if isinstance(row.get("name"), str) else None,
                     snapshot["snapshot_id"],
-                    row["source_locator"],
+                    row.get("source_locator")
+                    if isinstance(row.get("source_locator"), str)
+                    else None,
                 )
             )
         del candidate
     frame = pd.DataFrame(rows, columns=_INDUSTRY_COLUMNS)
+    key = ["source_asset_id", "timestamp", "snapshot_id"]
+    frame = frame.drop_duplicates()
+    conflicting = frame.duplicated(key, keep=False)
+    if conflicting.any():
+        for column in set(_INDUSTRY_COLUMNS).difference(key):
+            different = frame.groupby(key, dropna=False)[column].transform(
+                lambda values: values.nunique(dropna=False) > 1
+            )
+            frame.loc[conflicting & different, column] = None
+        frame = frame.drop_duplicates(key)
+    for column in ("timestamp", "observation_date", "publication_date"):
+        frame[column] = pd.to_datetime(frame[column]).astype("datetime64[ns]")
+    frame.attrs["source_row_counts"] = counts
     for column in _INDUSTRY_COLUMNS:
         if column not in {
             "timestamp",

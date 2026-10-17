@@ -148,7 +148,8 @@ def test_weighted_scaler_finite_population_bound(half_life):
     np.testing.assert_allclose(scaler.transform(frame).x, [-1, 1, -1, 1], rtol=1e-15)
 
 
-def test_standardized_residual_keeps_subnormal_half_units():
+@pytest.mark.parametrize("index_start", [None, 0, 1000])
+def test_standardized_residual_keeps_subnormal_half_units(index_start):
     from quant_research_platform.research.features.transforms import (
         _industry_size_residuals,
     )
@@ -157,6 +158,10 @@ def test_standardized_residual_keeps_subnormal_half_units():
     target = pd.Series(np.tile([0.0, tiny], 50))
     industries = pd.Series(["industry"] * 100)
     sizes = pd.Series(np.repeat(np.arange(50, dtype=float), 2))
+    if index_start is None:
+        target, sizes = target.to_numpy(), sizes.to_numpy()
+    else:
+        target.index = sizes.index = pd.RangeIndex(index_start, index_start + 100)
     actual = _industry_size_residuals(target, industries, sizes, rescale=True)
     np.testing.assert_array_equal(actual, np.tile([-1.0, 1.0], 50))
     raw = _industry_size_residuals(target, industries, sizes, rescale=False)
@@ -499,15 +504,12 @@ def test_test_set_keeps_rankic_by_and_explicit_exploratory_exclusion():
 
     def compare(value):
         return _paired_group_rankic(
-            quarterly,
-            global_statistics=GlobalStatistics(),
+            quarterly.assign(
+                **{"global": -global_losses.loss, "quarterly": -quarterly.loss}
+            ),
             selection_group="quarterly",
             family_ids=families,
             config=value,
-            target_metadata={
-                **GlobalStatistics.metadata,
-                "selection_group": "quarterly",
-            },
         )
 
     ordinary = compare(manifest)

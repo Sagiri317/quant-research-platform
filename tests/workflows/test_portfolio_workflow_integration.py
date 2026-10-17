@@ -130,7 +130,7 @@ def native_comparison(tmp_path_factory):
     )
 
 
-def _statistics_request(case, output, *, group, end, global_statistics=None):
+def _statistics_request(case, output, *, group, end, global_predictions=None):
     window = {"start": "2019-01-02", "end": end}
     config = statistics_config(factors=(case.factor,), selection_group=group)
     config["evaluation"] = {"primary_label": config["evaluation"]["primary_label"]}
@@ -159,8 +159,10 @@ def _statistics_request(case, output, *, group, end, global_statistics=None):
             }
         ],
     )
-    if global_statistics is not None:
-        config["global_statistics"] = str(global_statistics)
+    if group == "quarterly":
+        config["global_predictions"] = global_predictions or [
+            str(case.predictions["global", model]) for model in case.models
+        ]
     return config
 
 
@@ -186,11 +188,16 @@ def test_native_statistics_short_and_zero_maturity_windows(
     native_comparison, tmp_path, end, zero
 ):
     case = native_comparison
-    previous = None
     for group in ("global", "quarterly"):
         output = model_statistics(
             _statistics_request(
-                case, tmp_path / group, group=group, end=end, global_statistics=previous
+                case,
+                tmp_path / group,
+                group=group,
+                end=end,
+                global_predictions=[
+                    str(case.predictions["global", model]) for model in case.models
+                ],
             )
         )
         artifact = read_statistics_artifact(output)
@@ -223,7 +230,6 @@ def test_native_statistics_short_and_zero_maturity_windows(
                     assert paired.bootstrap_reason.eq("no_common_observations").all()
                 else:
                     assert paired.observation_count.between(1, 19).all()
-        previous = output
 
 
 def test_native_prediction_missing_family_is_rejected(native_comparison, tmp_path):

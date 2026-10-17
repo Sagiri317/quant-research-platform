@@ -21,11 +21,8 @@ from quant_research_platform.contracts.data import (
     DataGrain,
     InterimDataSpec,
 )
-from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
 from quant_research_platform.contracts.validation import (
-    strict_string_series,
     strict_timestamp_series,
-    validate_financial_disclosure_chronology,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.sources.choice.fields import (
@@ -46,6 +43,7 @@ from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
     filesystem_scandir,
+    open_filesystem_file,
     require_unaliased_path,
 )
 from quant_research_platform.storage.manifests import read_qrp_json_file
@@ -107,18 +105,30 @@ def normalize_first_disclosure_frame(frame: pd.DataFrame) -> pd.DataFrame:
     if tuple(frame.columns) != FIRST_DISCLOSURE_COLUMNS:
         raise ValueError("choice_first_disclosure_header_not_canonical")
     result = frame.loc[:, FIRST_DISCLOSURE_COLUMNS].copy()
-    result["asset_id"] = strict_string_series(
-        result["asset_id"], error="invalid_choice_asset_id"
+    result["asset_id"] = (
+        result["asset_id"]
+        .where(result["asset_id"].map(lambda value: isinstance(value, str)))
+        .astype("string")
+        .str.strip()
+        .replace("", pd.NA)
     )
     for column in ("report_period", "first_disclosure_date"):
         result[column] = strict_timestamp_series(
-            result[column], error="invalid_choice_disclosure_date"
+            result[column],
+            error="invalid_disclosure_date",
+            allow_null=True,
+            errors="coerce",
         ).dt.normalize()
-    validate_financial_disclosure_chronology(
-        result["report_period"], result["first_disclosure_date"]
+    valid = result.notna().all(axis=1) & result["first_disclosure_date"].ge(
+        result["report_period"]
     )
-    if result.duplicated(["asset_id", "report_period"], keep=False).any():
-        raise ValueError("duplicate_choice_first_disclosure_key")
+    result = result.loc[valid].drop_duplicates()
+    conflicts = result.duplicated(["asset_id", "report_period"], keep=False)
+    result.attrs["source_row_counts"] = {
+        "excluded_invalid_disclosure_rows": int((~valid).sum()),
+        "excluded_conflicting_disclosure_rows": int(conflicts.sum()),
+    }
+    result = result.loc[~conflicts]
     return result.sort_values(
         list(FIRST_DISCLOSURE_COLUMNS), kind="mergesort"
     ).reset_index(drop=True)
@@ -202,19 +212,30 @@ def _identity_payload_row(index, namespace, key, value):
             else previous == value
         )
         if not equal:
-            error = ValueError(f"choice_{namespace}_conflict")
-            if namespace in {"snapshot", "disclosure_field"}:
-                identities = sorted(
-                    (previous["request_identity"], value["request_identity"])
-                )
-                error.add_note(f"request_identities={identities}")
-            raise error
+            # Preserve the coordinate but never choose one competing fact.
+            index.add_identity_payload_rows(
+                rows=(("conflict:" + namespace, key, b"true"),)
+            )
     return namespace, key, payload
 
 
 def _get(index, namespace, key):
     payload = index.identity_payload_value(namespace=namespace, payload=_encode(key))
-    return None if payload is None else json.loads(payload)
+    if payload is None:
+        return None
+    value = json.loads(payload)
+    if (
+        index.identity_payload_value(
+            namespace="conflict:" + namespace, payload=_encode(key)
+        )
+        is not None
+    ):
+        return (
+            {**value, "values": None, "conflicted": True}
+            if namespace == "snapshot"
+            else None
+        )
+    return value
 
 
 def _dates(value: object) -> tuple[date, ...]:
@@ -244,12 +265,13 @@ def _values(cells):
         if value is not None and (
             type(value) not in (int, float) or not math.isfinite(value)
         ):
-            raise ValueError("choice_financial_value_invalid")
+            value = None
         result.append(None if value is None else float(value))
     return result
 
 
-def _raw_index(raw_root, data_ids, start, end):
+def _raw_index(raw_root, data_ids, start, end, diagnostics=None):
+    diagnostics = {} if diagnostics is None else diagnostics
     indicators = {
         field for data_id in data_ids for field in FINANCIAL_FIELDS.get(data_id, {})
     }
@@ -288,6 +310,8 @@ def _raw_index(raw_root, data_ids, start, end):
                     or snapshot
                     and fields.intersection(FINANCIAL_FIELDS.get(data_id, {}))
                 }
+                with open_filesystem_file(root / "response.csv") as handle:
+                    source_hash = hashlib.file_digest(handle, "sha256").hexdigest()
                 for data_id in targets:
                     hashes[data_id].extend(
                         (
@@ -295,7 +319,7 @@ def _raw_index(raw_root, data_ids, start, end):
                                 f"css/{root.name}/response.metadata.json",
                                 hashlib.sha256(raw_metadata).hexdigest(),
                             ),
-                            (f"css/{root.name}/response.csv", manifest["sha256"]),
+                            (f"css/{root.name}/response.csv", source_hash),
                         )
                     )
                 if not response["Data"]:
@@ -304,7 +328,10 @@ def _raw_index(raw_root, data_ids, start, end):
                     raise ValueError("choice_financial_snapshot_dates_invalid")
                 for code, cells in response["Data"].items():
                     if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", code):
-                        raise ValueError("invalid_choice_asset_id")
+                        diagnostics["excluded_invalid_asset_rows"] = (
+                            diagnostics.get("excluded_invalid_asset_rows", 0) + 1
+                        )
+                        continue
                     values = dict(zip(response["Indicators"], cells, strict=True))
                     pair = [code, period]
                     coordinate = [
@@ -313,6 +340,20 @@ def _raw_index(raw_root, data_ids, start, end):
                         options.get("type", "1"),
                     ]
                     if disclosure:
+                        try:
+                            parsed_dates = {
+                                field: _dates(values[field])
+                                for field in _DISCLOSURE_INDICATORS.intersection(values)
+                            }
+                        except ValueError:
+                            index.add_identity_payload_rows(
+                                rows=(("unresolved_report", _encode(pair), b"true"),)
+                            )
+                            diagnostics["excluded_invalid_disclosure_rows"] = (
+                                diagnostics.get("excluded_invalid_disclosure_rows", 0)
+                                + 1
+                            )
+                            continue
                         for field in _DISCLOSURE_INDICATORS.intersection(values):
                             yield _identity_payload_row(
                                 index,
@@ -320,7 +361,7 @@ def _raw_index(raw_root, data_ids, start, end):
                                 [*coordinate, field],
                                 {
                                     "values": [
-                                        day.isoformat() for day in _dates(values[field])
+                                        day.isoformat() for day in parsed_dates[field]
                                     ],
                                     "request_identity": root.name,
                                 },
@@ -334,7 +375,7 @@ def _raw_index(raw_root, data_ids, start, end):
                         if "STMTACTDATE" in values:
                             first = [
                                 day
-                                for day in _dates(values["STMTACTDATE"])
+                                for day in parsed_dates["STMTACTDATE"]
                                 if day <= request.cutoff
                             ]
                             if first:
@@ -345,7 +386,7 @@ def _raw_index(raw_root, data_ids, start, end):
                                     [*pair, first[0].isoformat()],
                                 )
                         if "ITEMVALUECHANGEDATE" in values:
-                            for event in _dates(values["ITEMVALUECHANGEDATE"]):
+                            for event in parsed_dates["ITEMVALUECHANGEDATE"]:
                                 if event <= request.cutoff:
                                     yield _identity_payload_row(
                                         index,
@@ -355,6 +396,14 @@ def _raw_index(raw_root, data_ids, start, end):
                                     )
                     if snapshot:
                         for field in indicators.intersection(values):
+                            value = values[field]
+                            if value is not None and (
+                                type(value) not in (int, float)
+                                or not math.isfinite(value)
+                            ):
+                                diagnostics[f"invalid_{field}_cells"] = (
+                                    diagnostics.get(f"invalid_{field}_cells", 0) + 1
+                                )
                             yield _identity_payload_row(
                                 index,
                                 "snapshot",
@@ -372,6 +421,10 @@ def _raw_index(raw_root, data_ids, start, end):
     with closing_iterator(rows()) as input_rows:
         for row in input_rows:
             index.add_identity_payload_rows(rows=(row,))
+    for namespace in ("snapshot", "disclosure", "disclosure_field"):
+        conflicts = index.identity_payload_count(namespace="conflict:" + namespace)
+        if conflicts:
+            diagnostics[f"conflicting_{namespace}_coordinates"] = conflicts
     identities = {}
     for data_id, members in hashes.items():
         digest = hashlib.sha256()
@@ -389,113 +442,84 @@ def _snapshot(index, pair, day, branch, indicators):
     fields = [_get(index, "snapshot", [*coordinate, field]) for field in indicators]
     if all(value is None for value in fields):
         return None
-    missing = [
-        field for field, value in zip(indicators, fields, strict=True) if value is None
-    ]
-    if missing:
-        error = PortfolioTargetBlocked("choice_financial_snapshot_field_missing")
-        error.add_note(
-            f"fields={missing}; report_period={pair[1]}; EndDate={day}; type={branch}"
-        )
-        raise error
     return {
-        "values": [value["values"] for value in fields],
-        "request_identities": sorted({value["request_identity"] for value in fields}),
+        "values": [None if value is None else value["values"] for value in fields],
+        "conflicted": [
+            value is not None and value.get("conflicted", False) for value in fields
+        ],
+        "request_identities": sorted(
+            {value["request_identity"] for value in fields if value is not None}
+        ),
     }
 
 
 def _report_versions(index, pair, first, end, indicators):
     initial = _snapshot(index, pair, first, "1", indicators)
-    if initial is None:
-        raise PortfolioTargetBlocked("choice_first_disclosure_snapshot_missing")
-    current = initial["values"].copy()
-    initial_adjusted = _snapshot(index, pair, first, "3", indicators)
-    if initial_adjusted is not None:
-        for position, value in enumerate(initial_adjusted["values"]):
-            if value is None:
-                continue
-            if current[position] is not None and current[position] != value:
-                error = ValueError("choice_financial_version_values_conflict")
-                error.add_note(f"public_date={first}; field={indicators[position]}")
-                identities = sorted(
-                    {
-                        *initial["request_identities"],
-                        *initial_adjusted["request_identities"],
-                    }
+    current = [None] * len(indicators) if initial is None else initial["values"].copy()
+    adjusted = _snapshot(index, pair, first, "3", indicators)
+    if initial is not None and adjusted is not None:
+        for position, value in enumerate(adjusted["values"]):
+            if initial["conflicted"][position] or adjusted["conflicted"][position]:
+                current[position] = None
+            elif value is not None:
+                current[position] = (
+                    value if current[position] in (None, value) else None
                 )
-                error.add_note(f"request_identities={identities}")
-                raise error
-            current[position] = value
     yield first, False, current.copy()
-    branches = {"1": initial, "3": initial_adjusted}
+    branches = {"1": initial, "3": adjusted}
     events = index.identity_payload_values(namespace=f"events:{pair[0]}:{pair[1]}")
     with closing_iterator(events):
         for payload in events:
             event = date.fromisoformat(json.loads(payload))
-            if event == first or (end is not None and event > end):
+            if event <= first or (end is not None and event > end):
                 continue
-            changed: dict[int, set[float | None]] = {}
-            requests = []
+            changed = {}
             for branch in ("1", "3"):
                 after = _snapshot(index, pair, event, branch, indicators)
-                if after is None:
-                    raise PortfolioTargetBlocked("choice_revision_snapshot_missing")
                 before = _snapshot(
                     index, pair, event - timedelta(days=1), branch, indicators
                 )
-                if (
-                    before is not None
-                    and branches[branch] is not None
-                    and before["values"] != branches[branch]["values"]
-                ):
-                    raise PortfolioTargetBlocked(
-                        "choice_revision_predecessor_conflicts_with_history"
-                    )
+                previous = branches[branch]
                 if before is None:
-                    before = branches[branch]
-                if before is None:
-                    error = PortfolioTargetBlocked(
-                        "choice_revision_predecessor_missing"
-                    )
-                    error.add_note(
-                        f"report_period={pair[1]}; public_date={event}; type={branch}"
-                    )
-                    raise error
-                requests.extend(
-                    (*before["request_identities"], *after["request_identities"])
-                )
-                for position, value in enumerate(after["values"]):
-                    prior = before["values"][position]
-                    if value != prior:
+                    before = previous
+                for position in range(len(indicators)):
+                    if after is None or before is None:
+                        changed.setdefault(position, set()).add(None)
+                        continue
+                    prior, value = before["values"][position], after["values"][position]
+                    if after["conflicted"][position] or before["conflicted"][position]:
+                        changed.setdefault(position, set()).add(None)
+                    elif previous is not None and prior != previous["values"][position]:
+                        changed.setdefault(position, set()).add(None)
+                    elif value != prior:
                         changed.setdefault(position, set()).add(value)
                 branches[branch] = after
             revised = False
             for position, values in changed.items():
-                if len(values) != 1:
-                    error = ValueError("choice_financial_version_values_conflict")
-                    error.add_note(
-                        f"report_period={pair[1]}; public_date={event}; "
-                        f"field={indicators[position]}"
-                    )
-                    error.add_note(f"request_identities={sorted(set(requests))}")
-                    raise error
-                value = next(iter(values))
+                value = next(iter(values)) if len(values) == 1 else None
                 revised |= value != current[position]
                 current[position] = value
             if revised:
-                _yield_value = event, True, current.copy()
-                try:
-                    yield _yield_value
-                except GeneratorExit:
-                    return
+                yield event, True, current.copy()
 
 
-def _rows(index, data_id, end) -> Iterator[tuple[object, ...]]:
+def _rows(index, data_id, end, diagnostics=None) -> Iterator[tuple[object, ...]]:
+    diagnostics = {} if diagnostics is None else diagnostics
     reports = index.identity_payload_values(namespace=f"report:{data_id}")
     with closing_iterator(reports):
         for payload in reports:
             row = json.loads(payload)
             pair = row[:2]
+            if (
+                index.identity_payload_value(
+                    namespace="unresolved_report", payload=_encode(pair)
+                )
+                is not None
+            ):
+                diagnostics["excluded_unresolved_report_rows"] = (
+                    diagnostics.get("excluded_unresolved_report_rows", 0) + 1
+                )
+                continue
             disclosure = _get(index, "disclosure", pair)
             first = (
                 date.fromisoformat(disclosure[2]) if disclosure is not None else None
@@ -505,22 +529,20 @@ def _rows(index, data_id, end) -> Iterator[tuple[object, ...]]:
             coordinates = index.identity_payload_values(
                 namespace=f"disclosure_coordinates:{pair[0]}:{pair[1]}"
             )
+            complete = True
             with closing_iterator(coordinates):
                 for payload in coordinates:
                     coordinate = json.loads(payload)
-                    for field in sorted(_DISCLOSURE_INDICATORS):
-                        value = _get(index, "disclosure_field", [*coordinate, field])
-                        if value is None:
-                            error = PortfolioTargetBlocked(
-                                "choice_disclosure_field_missing"
-                            )
-                            error.add_note(
-                                f"field={field}; report_period={pair[1]}; "
-                                f"EndDate={coordinate[2]}; type={coordinate[3]}"
-                            )
-                            raise error
-            if first is None:
-                raise PortfolioTargetBlocked("choice_first_disclosure_missing")
+                    complete &= all(
+                        _get(index, "disclosure_field", [*coordinate, field])
+                        is not None
+                        for field in _DISCLOSURE_INDICATORS
+                    )
+            if first is None or not complete:
+                diagnostics["excluded_unresolved_disclosure_rows"] = (
+                    diagnostics.get("excluded_unresolved_disclosure_rows", 0) + 1
+                )
+                continue
             with closing_iterator(
                 index.identity_payload_values(namespace=f"events:{pair[0]}:{pair[1]}")
             ) as events:
@@ -529,14 +551,10 @@ def _rows(index, data_id, end) -> Iterator[tuple[object, ...]]:
                 earliest is not None
                 and date.fromisoformat(json.loads(earliest)) < first
             ):
-                error = PortfolioTargetBlocked(
-                    "choice_disclosure_chronology_unresolved"
+                diagnostics["excluded_invalid_chronology_rows"] = (
+                    diagnostics.get("excluded_invalid_chronology_rows", 0) + 1
                 )
-                error.add_note(
-                    f"report_period={pair[1]}; first={first}; "
-                    f"event={json.loads(earliest)}"
-                )
-                raise error
+                continue
             if data_id == FIRST_DISCLOSURE_DATA_ID:
                 _yield_value = (pair[0][:6], pair[1], first.isoformat())
                 try:
@@ -567,9 +585,10 @@ def _frames(rows, spec):
     columns = spec.required_columns
     count = 8192
     frame = pending = None
+    emitted = False
     while True:
         pending = list(islice(rows, count))
-        if not pending:
+        if not pending and emitted:
             return
         frame = pd.DataFrame.from_records(pending, columns=columns)
         pending = None
@@ -593,6 +612,7 @@ def _frames(rows, spec):
             for name in FINANCIAL_FIELDS[spec.data_id].values():
                 frame[name] = frame[name].astype("float64")
         yield frame
+        emitted = True
         frame = None
 
 
@@ -619,9 +639,14 @@ def materialize_interim_data(
     if start is not None and end is not None and start > end:
         raise ValueError("choice_interim_window_invalid")
     written, skipped = {}, []
-    index, identities = _raw_index(root, data_ids, start, end)
+    source_counts = {}
+    index, identities = _raw_index(root, data_ids, start, end, source_counts)
     for spec in specs:
-        rows = _rows(index, spec.data_id, end)
+        if identities[spec.data_id] is None:
+            skipped.append(spec.data_id)
+            continue
+        counts = dict(source_counts)
+        rows = _rows(index, spec.data_id, end, counts)
         frames = _frames(rows, spec)
         target = Path(output_roots[spec.data_id])
         with closing_iterator(rows), closing_iterator(frames):
@@ -632,6 +657,7 @@ def materialize_interim_data(
                     spec=spec,
                     metadata={
                         **(metadata or {}),
+                        "producer_diagnostics": {"source_row_counts": counts},
                         "source_evidence": {
                             "source_id": str(SOURCE_ID),
                             "content_hash": identities[spec.data_id],

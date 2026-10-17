@@ -245,7 +245,9 @@ def test_source_models_reach_paired_native_test_statistics(source_chain, tmp_pat
             ],
         )
         if previous is not None:
-            config["global_statistics"] = str(previous)
+            config["global_predictions"] = [
+                str(case.test_predictions["global", model]) for model in case.models
+            ]
         previous = model_statistics(config)
         saved = read_statistics_artifact(previous)
         with saved.table("prediction_diagnostics.parquet") as diagnostics:

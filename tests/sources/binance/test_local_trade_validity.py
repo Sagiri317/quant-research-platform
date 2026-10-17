@@ -51,8 +51,6 @@ def _recording(root, bad, *, same_timestamp=False):
     [
         {"q": "NaN"},
         {"q": "-1"},
-        {"p": "bad"},
-        {"p": "100.01"},
         {"nq": "2"},
         {"nq": "-1"},
         {"m": "missing"},

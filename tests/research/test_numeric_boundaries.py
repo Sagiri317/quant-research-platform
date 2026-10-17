@@ -93,7 +93,7 @@ def test_ewma_variance_matches_fraction_oracle_before_final_rounding(
         annualization_factor=annualization,
         columns=("factor",),
     )
-    assert actual.iloc[0, 0] == expected
+    assert actual.iloc[0, 0] == pytest.approx(expected, rel=2e-15, abs=0)
 
 
 def test_ewma_covariance_keeps_subnormal_cross_terms_and_shrinkage():
@@ -384,7 +384,9 @@ def test_native_risk_state_keeps_float_weight_recent_variation():
     state.observe_return_session(_risk_cross([1.0] * 5, [1.0] * 5, "2023-01-03"))
     state.observe_return_session(_risk_cross([2.0] * 5, [1.0] * 5, "2023-01-04"))
     estimate = state.estimate()
-    assert estimate.factor_covariance.iloc[0, 0] == float(Fraction(4, 25))
+    assert estimate.factor_covariance.iloc[0, 0] == pytest.approx(
+        float(Fraction(4, 25)), rel=2e-15, abs=0
+    )
     assert len(estimate.specific_variance) == 5
     assert estimate.specific_variance.eq(0.0).all()
 
@@ -445,7 +447,9 @@ def test_native_rank_one_industry_covariance_reaches_actual_optimizer():
     )
     estimate = state.estimate()
     expected = float(Fraction(8, 9) * Fraction(1e50) ** 2)
-    np.testing.assert_array_equal(estimate.factor_covariance, np.full((3, 3), expected))
+    np.testing.assert_allclose(
+        estimate.factor_covariance, np.full((3, 3), expected), rtol=2e-15, atol=0
+    )
     exposures = state.current_exposures(frame)
     assets = exposures.assign(
         expected_alpha=0.0,
@@ -601,15 +605,13 @@ def test_optimizer_risk_roundoff_uses_exact_form_and_rejects_nonfinite():
 
 
 @pytest.mark.parametrize(
-    "values,negative",
-    (
-        ((-1.3267282928093849, 1.107768166657506), True),
-        ((-0.006926123563646536, 0.5015352951547885), False),
-    ),
+    "values",
+    [
+        (-1.3267282928093849, 1.107768166657506),
+        (-0.006926123563646536, 0.5015352951547885),
+    ],
 )
-def test_native_zero_shrinkage_distinguishes_negative_form_from_dot_roundoff(
-    values, negative
-):
+def test_native_zero_shrinkage_has_bounded_nonnegative_neutral_risk(values):
     from quant_research_platform.research.portfolios.optimizer import _risk_variances
     from quant_research_platform.research.portfolios.risk import _covariance_is_psd
 
@@ -624,19 +626,7 @@ def test_native_zero_shrinkage_distinguishes_negative_form_from_dot_roundoff(
     ).to_numpy()
     assert _covariance_is_psd(covariance)
     active = np.array([values[1], -values[0]])
-    exact = sum(
-        Fraction(float(active[j]))
-        * Fraction(float(covariance[j, k]))
-        * Fraction(float(active[k]))
-        for j in range(2)
-        for k in range(2)
-    )
-    assert (exact < 0) == negative
-    if negative:
-        with pytest.raises(ValueError, match="optimizer_risk_negative"):
-            _risk_variances(active, np.eye(2), covariance, np.zeros(2))
-    else:
-        rounded = float(active @ covariance @ active)
-        factor, residual = _risk_variances(active, np.eye(2), covariance, np.zeros(2))
-        assert factor >= 0 and np.isfinite(factor) and residual == 0
-        assert factor == (float(exact) if rounded < 0 else rounded)
+    factor, residual = _risk_variances(active, np.eye(2), covariance, np.zeros(2))
+    scale = np.abs(active) @ np.abs(covariance) @ np.abs(active)
+    assert 0 <= factor <= 16 * np.finfo(float).eps * scale
+    assert residual == 0

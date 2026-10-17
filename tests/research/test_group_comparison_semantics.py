@@ -1,4 +1,4 @@
-"""Paired statistics bind actual group and consumed scientific target facts."""
+"""G/Q comparisons reevaluate explicit predictions on one chosen target stream."""
 
 from copy import deepcopy
 from dataclasses import replace
@@ -11,7 +11,6 @@ from quant_research_platform.artifacts.statistics import (
     read_statistics_artifact,
     write_statistics_artifact,
 )
-from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.portfolios import PortfolioCandidateSpec
 from quant_research_platform.research import statistics_production
 from quant_research_platform.research.portfolios.diagnostics import portfolio_statistics
@@ -21,9 +20,7 @@ from quant_research_platform.research.statistics_production import (
 )
 from quant_research_platform.storage.datasets import write_dataset
 from tests.research.test_optional_statistics import _cash_ledger
-from tests.workflows.test_portfolio_workflow_integration import (
-    _statistics_request,
-)
+from tests.workflows.test_portfolio_workflow_integration import _statistics_request
 from tests.workflows.test_portfolio_workflow_integration import (
     native_comparison as native_comparison,
 )
@@ -35,15 +32,10 @@ def paired_sources(native_comparison, tmp_path_factory):
     root = tmp_path_factory.mktemp("paired-targets")
     configs, paths = {}, {}
     for group in ("global", "quarterly"):
-        config = _statistics_request(
-            case,
-            root / group,
-            group=group,
-            end="2019-02-15",
-            global_statistics=paths.get("global"),
+        configs[group] = _statistics_request(
+            case, root / group, group=group, end="2019-02-15"
         )
-        configs[group] = config
-        paths[group] = model_statistics(config)
+        paths[group] = model_statistics(configs[group])
     return case, configs, paths
 
 
@@ -52,36 +44,15 @@ def _losses(path):
         return frame.copy()
 
 
-def test_native_same_models_predictions_and_unknown_units_remain_legal(paired_sources):
-    _case, configs, paths = paired_sources
-    assert (
-        configs["global"]["periods"][0]["predictions"]
-        == configs["quarterly"]["periods"][0]["predictions"]
-    )
-    global_losses, quarterly_losses = (
-        _losses(paths[group]) for group in ("global", "quarterly")
-    )
-    pd.testing.assert_series_equal(
-        global_losses.asset_coverage_id, quarterly_losses.asset_coverage_id
-    )
-    metadata = read_statistics_artifact(paths["global"]).metadata
-    assert metadata["column_units"] == {}
-    assert metadata["evaluation_axis"] == "cross_sectional"
-    assert metadata["column_roles"]["forward_return_20d"] == "label"
-    assert metadata["evaluation"]["label_availability_columns"] == {
-        "forward_return_20d": "forward_return_20d_available_at"
-    }
-    assert pd.Timestamp(metadata["label_cutoff"]) == pd.Timestamp(
-        "2019-02-15 23:59:59.999999999"
-    )
-    undefined = global_losses.loc[global_losses.status.eq("UNDEFINED")]
-    assert not undefined.empty
-    assert undefined.asset_coverage_id.eq(canonical_json_hash([])).all()
-    with read_statistics_artifact(paths["quarterly"]).table(
-        "model_group_comparison.parquet"
-    ) as rows:
+def test_native_common_target_records_its_actual_owner(paired_sources):
+    _case, _configs, paths = paired_sources
+    artifact = read_statistics_artifact(paths["quarterly"])
+    assert artifact.metadata["group_comparison_target"] == "explicit_current_evaluation"
+    assert "global_statistics" not in artifact.metadata
+    with artifact.table("model_group_comparison.parquet") as rows:
         assert len(rows) == 2
         assert rows.mean_difference.eq(0).all()
+    assert not _losses(paths["global"]).empty
 
 
 def test_native_comparison_reuses_the_single_dataset_scan(
@@ -100,108 +71,45 @@ def test_native_comparison_reuses_the_single_dataset_scan(
     assert len(scans) == 1
 
 
-@pytest.mark.parametrize("source", ["quarterly", "direct"])
-def test_native_global_slot_requires_actual_global_selection(
-    paired_sources, tmp_path, source
-):
-    case, configs, paths = paired_sources
-    left = paths["quarterly"]
-    if source == "direct":
-        direct = deepcopy(configs["global"])
-        direct["family_ids"] = list(case.models)
-        direct["periods"][0].pop("selection")
-        direct["output"] = str(tmp_path / "direct")
-        left = model_statistics(direct)
-    config = {
-        **configs["quarterly"],
-        "global_statistics": str(left),
-        "output": str(tmp_path / "rejected"),
-    }
-    with pytest.raises(
-        ValueError, match="model_group_comparison_target_metadata_invalid"
-    ):
-        model_statistics(config)
-    assert not (tmp_path / "rejected").exists()
-
-
-@pytest.mark.parametrize("mutation", ["primary_label", "values", "maturity"])
-def test_native_declared_target_and_key_domain_control_comparison(
-    paired_sources, tmp_path, mutation
-):
-    case, configs, paths = paired_sources
-    frame, spec = case.frame.copy(), case.spec
-    config = deepcopy(configs["global"])
-    if mutation == "primary_label":
-        frame["inverse_label"] = -frame.forward_return_20d
-        frame["inverse_label_available_at"] = frame.forward_return_20d_available_at
-        spec = replace(
-            spec,
-            label_columns=(*spec.label_columns, "inverse_label"),
-            context_columns=(*spec.context_columns, "inverse_label_available_at"),
-            column_roles={
-                **spec.column_roles,
-                "inverse_label": "label",
-                "inverse_label_available_at": "context",
-            },
-            label_availability_columns={"inverse_label": "inverse_label_available_at"},
-        )
-        config["evaluation"]["primary_label"] = "inverse_label"
-    elif mutation == "values":
-        frame["forward_return_20d"] *= -1
-    else:
-        frame.loc[
-            frame.timestamp.eq(pd.Timestamp("2019-01-02")) & frame.asset_id.eq("a0"),
-            "forward_return_20d_available_at",
-        ] = pd.Timestamp("2020-01-01")
-    write_dataset(tmp_path / "different-target", frame, spec=spec)
-    config.update(
-        dataset=str(tmp_path / "different-target"), output=str(tmp_path / "left")
-    )
-    left = model_statistics(config)
-    right = {
-        **configs["quarterly"],
-        "global_statistics": str(left),
-        "output": str(tmp_path / "rejected"),
-    }
-    if mutation == "values":
-        compared = model_statistics(right)
-        with read_statistics_artifact(compared).table(
-            "model_group_comparison.parquet"
-        ) as result:
-            assert result.observation_count.gt(0).all()
-            assert result.mean_difference.ne(0).any()
-    else:
-        with pytest.raises(
-            ValueError,
-            match="model_group_comparison_(target_metadata|coverage)_invalid",
-        ):
-            model_statistics(right)
-        assert not (tmp_path / "rejected").exists()
-
-
 @pytest.mark.parametrize(
     "variation",
     [
+        "values",
+        "maturity",
+        "primary_label",
         "unconsumed_factor",
         "maturity_names_and_cutoff",
         "unknown_to_known_unit",
         "future_values",
+        "signed_zero",
+        "one_ulp",
     ],
 )
-def test_native_equal_consumed_targets_do_not_bind_unrelated_inputs(
+def test_native_both_predictions_use_the_explicit_current_target(
     paired_sources, tmp_path, variation
 ):
     case, configs, paths = paired_sources
-    frame = case.frame.copy()
-    spec = replace(case.spec, data_id="other_explicit_dataset")
+    frame, spec = case.frame.copy(), case.spec
     config = deepcopy(configs["quarterly"])
-    if variation == "unconsumed_factor":
-        frame["unused_factor"] = np.arange(len(frame), dtype=float)
+    if variation == "values":
+        frame["forward_return_20d"] *= -1
+    elif variation == "maturity":
+        frame.loc[frame.asset_id.eq("a0"), "forward_return_20d_available_at"] = (
+            pd.Timestamp("2021-01-01")
+        )
+    elif variation == "primary_label":
+        frame["inverse_label"] = -frame.forward_return_20d
         spec = replace(
             spec,
-            factor_columns=(*spec.factor_columns, "unused_factor"),
-            column_roles={**spec.column_roles, "unused_factor": "factor"},
+            label_columns=(*spec.label_columns, "inverse_label"),
+            column_roles={**spec.column_roles, "inverse_label": "label"},
+            label_availability_columns={
+                "inverse_label": "forward_return_20d_available_at"
+            },
         )
+        config["evaluation"]["primary_label"] = "inverse_label"
+    elif variation == "unconsumed_factor":
+        frame[case.factor] = np.nan
     elif variation == "maturity_names_and_cutoff":
         frame["actual_maturity"] = frame.forward_return_20d_available_at
         spec = replace(
@@ -213,149 +121,94 @@ def test_native_equal_consumed_targets_do_not_bind_unrelated_inputs(
         config["label_cutoff"] = "2019-02-16"
     elif variation == "unknown_to_known_unit":
         spec = replace(spec, column_units={"forward_return_20d": "decimal_return"})
-    else:
+    elif variation == "future_values":
         frame.loc[
             frame.forward_return_20d_available_at.gt(pd.Timestamp("2019-02-15")),
             "forward_return_20d",
         ] *= -9
-    write_dataset(tmp_path / "different-input", frame, spec=spec)
+    else:
+        frame.loc[frame.asset_id.eq("a0"), "forward_return_20d"] = (
+            -0.0 if variation == "signed_zero" else np.nextafter(0.1, 1.0)
+        )
+    write_dataset(tmp_path / "chosen-target", frame, spec=spec)
     config.update(
-        dataset=str(tmp_path / "different-input"), output=str(tmp_path / "right")
+        dataset=str(tmp_path / "chosen-target"), output=str(tmp_path / "right")
     )
+    original_losses = _losses(paths["global"])
     actual = model_statistics(config)
-    pd.testing.assert_series_equal(
-        _losses(actual).asset_coverage_id, _losses(paths["global"]).asset_coverage_id
-    )
     with read_statistics_artifact(actual).table(
         "model_group_comparison.parquet"
     ) as rows:
+        assert rows.observation_count.gt(0).all()
         assert rows.mean_difference.eq(0).all()
+    # The prior independent statistic is neither an input nor rewritten.
+    pd.testing.assert_frame_equal(_losses(paths["global"]), original_losses)
+    assert not _losses(actual).empty
 
 
-def test_native_explicit_unit_conflict_rejects_pair(paired_sources, tmp_path):
-    case, configs, _paths = paired_sources
-    left = None
-    for group, unit in (("global", "decimal_return"), ("quarterly", "basis_points")):
-        dataset = tmp_path / f"{group}-input"
-        write_dataset(
-            dataset,
-            case.frame,
-            spec=replace(case.spec, column_units={"forward_return_20d": unit}),
-        )
-        config = {
-            **configs[group],
-            "dataset": str(dataset),
-            "output": str(tmp_path / group),
-        }
-        if group == "global":
-            left = model_statistics(config)
-        else:
-            config["global_statistics"] = str(left)
-            with pytest.raises(
-                ValueError, match="model_group_comparison_target_metadata_invalid"
-            ):
-                model_statistics(config)
-
-
-@pytest.mark.parametrize("variation", ["signed_zero", "one_ulp"])
-def test_native_comparison_accepts_recomputed_float_targets(
-    paired_sources, tmp_path, variation
+def test_native_reference_missing_family_only_undefines_its_pair(
+    paired_sources, tmp_path
 ):
-    case, configs, _paths = paired_sources
-    left_frame = case.frame.copy()
-    changed = left_frame.timestamp.eq(
-        pd.Timestamp("2019-01-02")
-    ) & left_frame.asset_id.eq("a0")
-    left_frame.loc[changed, "forward_return_20d"] = (
-        0.0 if variation == "signed_zero" else 0.1
-    )
-    right_frame = left_frame.copy()
-    right_frame.loc[changed, "forward_return_20d"] = (
-        -0.0 if variation == "signed_zero" else np.nextafter(0.1, 1.0)
-    )
-    left = None
-    for group, frame in (("global", left_frame), ("quarterly", right_frame)):
-        dataset = tmp_path / f"{group}-input"
-        write_dataset(dataset, frame, spec=case.spec)
-        config = {
-            **configs[group],
-            "dataset": str(dataset),
-            "output": str(tmp_path / group),
+    case, configs, paths = paired_sources
+    config = deepcopy(configs["quarterly"])
+    config["global_predictions"] = config["global_predictions"][:1]
+    config["output"] = str(tmp_path / "partial-reference")
+    actual = model_statistics(config)
+    pd.testing.assert_frame_equal(_losses(actual), _losses(paths["quarterly"]))
+    with read_statistics_artifact(actual).table(
+        "model_group_comparison.parquet"
+    ) as rows:
+        assert len(rows) == len(case.models)
+        assert sorted(rows.observation_count.gt(0)) == [False, True]
+        absent = rows.loc[rows.observation_count.eq(0)]
+        assert absent.reason.eq("no_common_observations").all()
+        assert absent.bootstrap_reason.eq("no_common_observations").all()
+
+
+def test_native_reference_prediction_keys_must_be_unique(paired_sources, tmp_path):
+    _case, configs, _paths = paired_sources
+    config = deepcopy(configs["quarterly"])
+    config["global_predictions"] *= 2
+    config["output"] = str(tmp_path / "duplicate")
+    with pytest.raises(ValueError, match="duplicate"):
+        model_statistics(config)
+
+
+@pytest.mark.parametrize("hac_lag,block", [(20, 1), (0, 4)])
+def test_model_paired_inference_methods_are_independent(hac_lag, block):
+    values = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=4),
+            "family_id": "one",
+            "global": [0.1, 0.2, 0.3, 0.4],
+            "quarterly": [0.3, 0.1, 0.5, 0.2],
         }
-        if group == "global":
-            left = model_statistics(config)
-        else:
-            config["global_statistics"] = str(left)
-            right = model_statistics(config)
-            pd.testing.assert_series_equal(
-                _losses(left).asset_coverage_id, _losses(right).asset_coverage_id
-            )
-            assert "target_domain_id" not in _losses(right)
-            with read_statistics_artifact(right).table(
-                "model_group_comparison.parquet"
-            ) as result:
-                assert result.observation_count.gt(0).all()
-
-
-@pytest.mark.parametrize(
-    "mutation",
-    [
-        "selection_group",
-        "coverage_basis",
-        "primary_label",
-        "label_role",
-        "evaluation_axis",
-        "sample_role",
-        "window",
-        "unit",
-    ],
-)
-def test_empty_native_losses_cannot_bypass_target_metadata(
-    paired_sources, tmp_path, mutation
-):
-    _case, configs, paths = paired_sources
-    original = read_statistics_artifact(paths["global"])
-    metadata = deepcopy(dict(original.metadata))
-    target = deepcopy(dict(read_statistics_artifact(paths["quarterly"]).metadata))
-    if mutation == "primary_label":
-        metadata["evaluation"]["primary_label"] = "inverse_label"
-    elif mutation == "label_role":
-        metadata["column_roles"]["forward_return_20d"] = "factor"
-    elif mutation == "window":
-        metadata["window"]["start"] = "2019-01-01"
-    elif mutation == "unit":
-        metadata["column_units"]["forward_return_20d"] = "basis_points"
-        target["column_units"]["forward_return_20d"] = "decimal_return"
-    else:
-        metadata[mutation] = {
-            "selection_group": "quarterly",
-            "coverage_basis": "persisted_prediction_keys",
-            "evaluation_axis": "time_series",
-            "sample_role": "test",
-        }[mutation]
-    tables = {}
-    for member in original._members:
-        with original.table(member) as table:
-            tables[member.removesuffix(".parquet")] = table.copy()
-            if "sample_role" in table:
-                tables[member.removesuffix(".parquet")]["sample_role"] = metadata[
-                    "sample_role"
-                ]
-    tables["model_losses"] = tables["model_losses"].iloc[:0].copy()
-    left = write_statistics_artifact(
-        tmp_path / "empty", metadata=metadata, tables=tables
     )
-    with pytest.raises(
-        ValueError, match="model_group_comparison_target_metadata_invalid"
-    ):
-        _paired_group_rankic(
-            tables["model_losses"],
-            global_statistics=read_statistics_artifact(left),
-            selection_group="quarterly",
-            family_ids=("linear_regression", "equal_weight_rank_ensemble"),
-            config=configs["quarterly"],
-            target_metadata=target,
-        )
+    config = {
+        "sample_role": "exploratory",
+        "statistics": {
+            "hac_lag": hac_lag,
+            "bootstrap_block": block,
+            "bootstrap_repetitions": 99,
+            "group_comparison": {
+                "fdr_method": "BY",
+                "alpha": 0.05,
+                "seed": 42,
+                "confidence": 0.95,
+            },
+        },
+    }
+    row = _paired_group_rankic(
+        values, selection_group="quarterly", family_ids=("one",), config=config
+    ).iloc[0]
+    assert row.status == ("UNDEFINED" if hac_lag == 20 else "DEFINED")
+    assert row.bootstrap_status == ("DEFINED" if block == 1 else "UNDEFINED")
+    values.loc[1, "global"] = np.nan
+    missing = _paired_group_rankic(
+        values, selection_group="quarterly", family_ids=("one",), config=config
+    ).iloc[0]
+    assert missing.status == missing.bootstrap_status == "UNDEFINED"
+    assert missing.reason == missing.bootstrap_reason == "incomplete_session_clock"
 
 
 def _portfolio_pair(tmp_path, *, change=None, base_changes=None):
@@ -475,9 +328,7 @@ def test_native_paired_size_basis_matches_only_when_consumed(tmp_path, neutralit
 @pytest.mark.parametrize("confidence", [0.90, 0.95, 0.99])
 @pytest.mark.parametrize("kind", ["model", "portfolio"])
 def test_paired_confidence_is_used_by_hac_and_persisted(tmp_path, confidence, kind):
-    from contextlib import nullcontext
     from statistics import NormalDist
-    from types import SimpleNamespace
 
     from quant_research_platform.research.portfolios.diagnostics import (
         _group_portfolio_comparison,
@@ -523,14 +374,10 @@ def test_paired_confidence_is_used_by_hac_and_persisted(tmp_path, confidence, ki
             }
         )
         result = _paired_group_rankic(
-            left.assign(loss=-values),
-            global_statistics=SimpleNamespace(
-                metadata=metadata, table=lambda member: nullcontext(left)
-            ),
+            left.assign(**{"global": 0.0, "quarterly": values}),
             selection_group="quarterly",
             family_ids=("one",),
             config=config,
-            target_metadata={**metadata, "selection_group": "quarterly"},
         )
     else:
         declaration.update(portfolio_ids=["one"], primary_portfolio_id="one")
@@ -590,3 +437,296 @@ def test_undefined_cash_comparison_still_rejects_invalid_configuration(
     ):
         portfolio_statistics(config)
     assert not (tmp_path / "statistics").exists()
+
+
+@pytest.mark.parametrize(
+    "hac_lag,block,status,bootstrap_status",
+    [(20, 1, "UNDEFINED", "DEFINED"), (0, 4, "DEFINED", "UNDEFINED")],
+)
+def test_portfolio_group_inference_methods_have_independent_preconditions(
+    hac_lag, block, status, bootstrap_status
+):
+    from quant_research_platform.research.portfolios.diagnostics import (
+        _group_portfolio_comparison,
+    )
+    from quant_research_platform.research.statistics import stationary_bootstrap_mean_ci
+
+    index = pd.MultiIndex.from_arrays(
+        [
+            pd.date_range("2024-01-01", periods=4),
+            pd.date_range("2024-01-02", periods=4),
+        ],
+        names=["entry_at", "end_at"],
+    )
+    matrix = pd.DataFrame(
+        {
+            "global_p": [0.001, 0.002, 0.003, 0.004],
+            "quarterly_p": [0.003, 0.001, 0.005, 0.002],
+        },
+        index=index,
+    )
+    config = {
+        "sample_role": "exploratory",
+        "statistics": {
+            "hac_lag": hac_lag,
+            "bootstrap_block": block,
+            "bootstrap_repetitions": 99,
+            "group_comparison": {
+                "portfolio_ids": ["p"],
+                "primary_portfolio_id": "p",
+                "fdr_method": "BY",
+                "alpha": 0.05,
+                "seed": 42,
+                "confidence": 0.95,
+            },
+        },
+    }
+    row = _group_portfolio_comparison(matrix, config).iloc[0]
+    assert row.status == status
+    assert row.bootstrap_status == bootstrap_status
+    if bootstrap_status == "DEFINED":
+        expected = stationary_bootstrap_mean_ci(
+            matrix.quarterly_p - matrix.global_p,
+            block_size=block,
+            repetitions=99,
+            seed=42,
+            confidence=0.95,
+        )
+        assert row.bootstrap_lower == pytest.approx(expected.lower)
+        assert row.bootstrap_upper == pytest.approx(expected.upper)
+        assert row.reason == "hac_lag_exceeds_observations"
+    else:
+        assert row.bootstrap_reason == "bootstrap_block_exceeds_observations"
+
+
+@pytest.mark.parametrize("split", [False, True])
+def test_native_reference_scores_are_recomputed_on_common_label_keys(
+    paired_sources, tmp_path, split
+):
+    from quant_research_platform.artifacts.outputs.prediction import (
+        read_predictions,
+        write_prediction_outputs,
+    )
+
+    case, configs, _paths = paired_sources
+    config = deepcopy(configs["quarterly"])
+    references = []
+    expected = {}
+    for family, path in zip(case.models, config["global_predictions"], strict=True):
+        frame, metadata = read_predictions(path)
+        metadata = {
+            key: value
+            for key, value in metadata.items()
+            if key not in {"prediction_rows", "effective_prediction_end"}
+        }
+        original = frame.copy()
+        frame["prediction_score"] *= -1
+        frame["prediction_rank_score"] *= -1
+        # The shared inference must use the intersection, not each side's own IC.
+        frame = frame.loc[frame.asset_id.ne("a0")].copy()
+        partitions = [frame]
+        if split:
+            midpoint = sorted(frame.timestamp.unique())[
+                len(frame.timestamp.unique()) // 2
+            ]
+            partitions = [
+                frame.loc[frame.timestamp.lt(midpoint)],
+                frame.loc[frame.timestamp.ge(midpoint)],
+            ]
+        for index, partition in enumerate(partitions):
+            reference = write_prediction_outputs(
+                output_path=tmp_path / f"{family}-{index}",
+                output_chunks=[partition],
+                metadata=metadata,
+            )
+            references.append(str(reference))
+        eligible = case.frame.loc[
+            case.frame.forward_return_20d_available_at.le(
+                pd.Timestamp("2019-02-15 23:59:59.999999999")
+            )
+        ]
+        joined = frame.merge(
+            original, on=["timestamp", "asset_id"], suffixes=("_g", "_q")
+        ).merge(eligible, on=["timestamp", "asset_id"])
+        differences = [
+            group.prediction_score_q.corr(group.forward_return_20d, method="spearman")
+            - group.prediction_score_g.corr(group.forward_return_20d, method="spearman")
+            for _, group in joined.groupby("timestamp")
+        ]
+        expected[family] = float(np.mean(differences))
+    config.update(global_predictions=references, output=str(tmp_path / "paired"))
+    artifact = read_statistics_artifact(model_statistics(config))
+    with artifact.table("model_group_comparison.parquet") as rows:
+        for row in rows.itertuples():
+            assert row.mean_difference == pytest.approx(expected[row.family_id])
+            assert row.mean_difference > 1.5
+
+
+def test_unknown_reference_chronology_only_blocks_its_family():
+    dates = pd.date_range("2024-01-01", periods=4)
+    values = pd.DataFrame(
+        {
+            "timestamp": np.tile(dates, 2),
+            "family_id": np.repeat(["known", "unknown"], 4),
+            "global": 0.0,
+            "quarterly": [0.1, 0.2, -0.1, 0.3] * 2,
+        }
+    )
+    config = {
+        "sample_role": "test",
+        "statistics": {
+            "hac_lag": 0,
+            "bootstrap_block": 1,
+            "bootstrap_repetitions": 20,
+            "group_comparison": {
+                "fdr_method": "BY",
+                "alpha": 0.05,
+                "seed": 42,
+                "confidence": 0.95,
+            },
+        },
+    }
+    result = _paired_group_rankic(
+        values,
+        selection_group="quarterly",
+        family_ids=("known", "unknown"),
+        config=config,
+        inference_blocker={"unknown": "selection_chronology_not_established"},
+    ).set_index("family_id")
+    assert (
+        result.loc["known", "status"]
+        == result.loc["known", "bootstrap_status"]
+        == "DEFINED"
+    )
+    assert (
+        result.loc["unknown", "status"]
+        == result.loc["unknown", "bootstrap_status"]
+        == "UNDEFINED"
+    )
+    assert result.loc["unknown", "reason"] == "selection_chronology_not_established"
+    assert result.mean_difference.tolist() == pytest.approx([0.125, 0.125])
+    assert result.fdr_family_size.eq(2).all()
+
+
+def test_direct_and_selection_bearing_pairs_share_prediction_consumption(
+    paired_sources, tmp_path
+):
+    case, configs, paths = paired_sources
+    config = deepcopy(configs["quarterly"])
+    config["family_ids"] = list(case.models)
+    config["periods"][0].pop("selection")
+    config["output"] = str(tmp_path / "direct")
+    actual = model_statistics(config)
+    for member in ("model_losses.parquet", "model_group_comparison.parquet"):
+        with (
+            read_statistics_artifact(paths["quarterly"]).table(member) as expected,
+            read_statistics_artifact(actual).table(member) as observed,
+        ):
+            pd.testing.assert_frame_equal(observed, expected)
+
+
+@pytest.mark.parametrize("unknown_side", ["current", "reference"])
+def test_native_unknown_chronology_is_local_on_either_side(
+    paired_sources, tmp_path, unknown_side
+):
+    from quant_research_platform.artifacts.outputs.prediction import (
+        read_predictions,
+        write_prediction_outputs,
+    )
+
+    case, configs, paths = paired_sources
+    config = deepcopy(configs["quarterly"])
+    families = list(case.models)
+    groups = {}
+    for side in ("current", "reference"):
+        groups[side] = []
+        for family in families:
+            frame, metadata = read_predictions(case.predictions["global", family])
+            metadata = deepcopy(metadata)
+            if side != unknown_side or family != families[0]:
+                metadata["model_facts"]["selection_cutoff"] = "2018-10-30"
+            if side == "reference":
+                sign = frame.timestamp.dt.day.mod(2).mul(2).sub(1)
+                frame["prediction_score"] *= sign
+                frame["prediction_rank_score"] *= sign
+            path = write_prediction_outputs(
+                output_path=tmp_path / f"{side}-{family}",
+                output_chunks=[frame],
+                metadata=metadata,
+            )
+            groups[side].append(str(path))
+    config["periods"][0].pop("selection")
+    config["periods"][0]["predictions"] = groups["current"]
+    config.update(
+        global_predictions=groups["reference"],
+        family_ids=families,
+        label_cutoff="2019-04-01",
+        analyses=["model_losses"],
+        output=str(tmp_path / "paired"),
+    )
+    config["statistics"].update(hac_lag=0, bootstrap_block=1)
+    actual = read_statistics_artifact(model_statistics(config))
+    with actual.table("model_group_comparison.parquet") as rows:
+        rows = rows.set_index("family_id")
+        assert (
+            rows.loc[families[0], "status"]
+            == rows.loc[families[0], "bootstrap_status"]
+            == "UNDEFINED"
+        )
+        assert (
+            rows.loc[families[0], "reason"]
+            == rows.loc[families[0], "bootstrap_reason"]
+            == "selection_chronology_not_established"
+        )
+        assert (
+            rows.loc[families[1], "status"]
+            == rows.loc[families[1], "bootstrap_status"]
+            == "DEFINED"
+        )
+        assert rows.mean_difference.notna().all()
+        assert rows.fdr_family_size.eq(2).all()
+    with actual.table("model_losses.parquet") as losses:
+        assert losses.status.eq("DEFINED").all()
+
+
+@pytest.mark.parametrize("method", ["hac", "bootstrap"])
+def test_model_pair_writer_rejects_incomplete_clock_for_either_method(tmp_path, method):
+    config = {
+        "sample_role": "test",
+        "statistics": {
+            "hac_lag": 20 if method == "bootstrap" else 0,
+            "bootstrap_block": 1 if method == "bootstrap" else 4,
+            "bootstrap_repetitions": 20,
+            "group_comparison": {
+                "fdr_method": "BY",
+                "alpha": 0.05,
+                "seed": 42,
+                "confidence": 0.95,
+            },
+        },
+    }
+    values = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=4),
+            "family_id": "one",
+            "global": 0.0,
+            "quarterly": [0.1, 0.2, -0.1, 0.3],
+        }
+    )
+    rows = _paired_group_rankic(
+        values, selection_group="quarterly", family_ids=("one",), config=config
+    )
+    assert (
+        rows.iloc[0]["bootstrap_status" if method == "bootstrap" else "status"]
+        == "DEFINED"
+    )
+    rows["calendar_count"] = 5
+    with pytest.raises(ValueError, match="statistics_group_comparison_count_invalid"):
+        write_statistics_artifact(
+            tmp_path / "invalid",
+            metadata={
+                "sample_role": "test",
+                "window": {"start": "2024-01-01", "end": "2024-01-05"},
+            },
+            tables={"model_group_comparison": rows},
+        )

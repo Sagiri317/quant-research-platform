@@ -2382,10 +2382,9 @@ def _group_portfolio_comparison(matrix, config):
                 "fdr_adjusted_p_value",
             ):
                 row[key] = estimate[key]
-            if (
-                estimate["status"] == "DEFINED"
-                and len(values) > statistics["bootstrap_block"]
-            ):
+            if not np.isfinite(values).all():
+                row["bootstrap_reason"] = "incomplete_session_clock"
+            elif len(values) > statistics["bootstrap_block"]:
                 interval = stationary_bootstrap_mean_ci(
                     values,
                     block_size=statistics["bootstrap_block"],
@@ -2400,11 +2399,7 @@ def _group_portfolio_comparison(matrix, config):
                     bootstrap_reason=None,
                 )
             else:
-                row["bootstrap_reason"] = (
-                    estimate["reason"]
-                    if estimate["status"] != "DEFINED"
-                    else "bootstrap_block_exceeds_observations"
-                )
+                row["bootstrap_reason"] = "bootstrap_block_exceeds_observations"
         for group in ("global", "quarterly"):
             column = f"{group}_terminal_wealth"
             row[f"{column}_reason"] = (

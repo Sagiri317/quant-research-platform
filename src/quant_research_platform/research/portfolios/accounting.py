@@ -626,6 +626,24 @@ def alpha_calibration_intervals(
     )
 
 
+def alpha_calibration_start(sessions: pd.DatetimeIndex, *, as_of) -> pd.Timestamp:
+    """Start of the 252-session decision window on the complete market clock."""
+    axis = pd.DatetimeIndex(sessions)
+    cutoff = pd.Timestamp(as_of).normalize()
+    if (
+        axis.empty
+        or axis.hasnans
+        or not axis.is_unique
+        or not axis.is_monotonic_increasing
+        or pd.isna(cutoff)
+    ):
+        raise ValueError("alpha_calibration_calendar_invalid")
+    end = axis.searchsorted(cutoff, side="right")
+    if not end:
+        raise ValueError("alpha_calibration_calendar_invalid")
+    return axis[max(0, end - 252)]
+
+
 def calibrate_expected_alpha(
     frame: pd.DataFrame,
     *,
@@ -633,6 +651,7 @@ def calibrate_expected_alpha(
     return_column: str = "holding_return",
     as_of: pd.Timestamp,
     scheduled_intervals: pd.DataFrame,
+    trading_sessions: pd.DatetimeIndex,
     minimum_coverage: float = 0.8,
     minimum_valid_dates: int = 6,
 ) -> AlphaCalibration:
@@ -669,7 +688,9 @@ def calibrate_expected_alpha(
         raise ValueError("alpha_calibration_schedule_invalid")
     scheduled = pd.DatetimeIndex(
         intervals.loc[
-            intervals.timestamp.ge(cutoff - pd.DateOffset(months=12))
+            intervals.timestamp.ge(
+                alpha_calibration_start(trading_sessions, as_of=cutoff)
+            )
             & intervals.available_at.le(cutoff),
             "timestamp",
         ]

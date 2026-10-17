@@ -23,13 +23,14 @@ from quant_research_platform.contracts.data import (
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.validation import (
-    strict_finite_numeric_series,
     strict_integer_series,
+    strict_real_numeric_series,
     strict_string_series,
     strict_timestamp_series,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.sources.csmar.field_mappings import (
+    COLUMN_MAPPINGS,
     map_columns,
     normalize_provider_stock_code_series,
 )
@@ -38,6 +39,7 @@ from quant_research_platform.sources.csmar.ids import SOURCE_ID, market_bars_dat
 from quant_research_platform.sources.csmar.raw_exports import (
     INDEX_INFO_SOURCE_CODE_COLUMNS,
     INDEX_INFO_SOURCE_CODE_ENUMS,
+    STRING_CODE_DTYPES,
     dataset_files_with_identity_by_id,
     iter_private_export_chunks,
 )
@@ -108,6 +110,7 @@ STOCK_MASTER_INTERIM_COLUMNS: tuple[str, ...] = (
     "stock_name",
     "listing_date",
     "delisting_date",
+    "delisting_date_unresolved",
     "company_status",
     "industry_level1_code",
     "industry_level1_name",
@@ -244,6 +247,7 @@ INDUSTRY_CLASSIFICATION_VERSIONS_COLUMNS = (
     "timestamp",
     "implement_date",
     "abandon_date",
+    "abandon_date_unresolved",
     "institution_name",
 )
 LISTING_STATUS_CHANGE_COLUMNS = (
@@ -287,6 +291,7 @@ CORPORATE_ACTION_COLUMNS = (
     "market_type",
     "announcement_date",
     "settlement_date",
+    "settlement_date_unresolved",
     "amount",
     "subscription_price",
 )
@@ -359,6 +364,172 @@ def normalize_raw_frame(
     data_id: str,
 ) -> pd.DataFrame:
     mapped = map_columns(frame, data_id)
+    counts = {"raw_rows": len(mapped)}
+    # Numeric interpretation belongs here once. Invalid optional facts remain
+    # unavailable; they do not erase independent observations or measures.
+    if data_id != "corporate_actions":
+        for source, column in COLUMN_MAPPINGS[data_id].items():
+            if (
+                source in STRING_CODE_DTYPES
+                or source in INDEX_INFO_SOURCE_CODE_COLUMNS
+                or column not in mapped
+            ):
+                continue
+            values = mapped[column].replace(r"^\s*$", pd.NA, regex=True)
+            numeric = strict_real_numeric_series(
+                values, error="invalid_source_numeric", errors="coerce"
+            )
+            valid = np.isfinite(numeric)
+            if column in {
+                "market_type",
+                "filling_flag",
+                "source_market_type",
+                "source_day_of_week",
+                "security_type",
+            }:
+                valid &= (
+                    numeric.eq(np.floor(numeric))
+                    & numeric.ge(-(2**63))
+                    & numeric.lt(2**63)
+                )
+            invalid_count = int((values.notna() & ~valid).sum())
+            if invalid_count:
+                counts[f"invalid_{column}_rows"] = invalid_count
+            mapped[column] = numeric.where(valid)
+            if data_id == MARKET_BARS_DATA_ID and column in {
+                "after_hours_volume",
+                "after_hours_amount",
+            }:
+                mapped[f"_invalid_{column}"] = values.notna() & ~valid
+    valid_rows = pd.Series(True, index=mapped.index)
+    if "stock_code" in mapped:
+        text = mapped["stock_code"].astype("string").str.strip()
+        valid_rows &= text.str.fullmatch(r"[0-9]{1,6}(?:\.0)?").fillna(False)
+    if "index_code" in mapped:
+        valid_rows &= (
+            mapped["index_code"]
+            .astype("string")
+            .str.fullmatch(r"[0-9A-Za-z_.-]{1,32}")
+            .fillna(False)
+        )
+    identity_columns = {
+        "industry_classification": ("industry_standard_id",),
+        "industry_classification_sets": ("industry_standard_id", "industry_code"),
+        "industry_classification_versions": ("industry_standard_id",),
+        "equity_changes": ("report_type", "data_source", "subject_code"),
+        "financial_balance": ("report_type",),
+        "financial_income": ("report_type",),
+        "financial_cashflow": ("report_type",),
+        "index_membership": ("constituent_stock_code",),
+        "index_weights": ("constituent_stock_code",),
+    }.get(data_id, ())
+    for column in identity_columns:
+        valid_rows &= mapped[column].astype("string").str.strip().ne("").fillna(False)
+    for column in (
+        "listing_date",
+        "delisting_date",
+        "status_change_date",
+        "announcement_date",
+        "abandon_date",
+        "declare_date",
+    ):
+        if column not in mapped or data_id == "corporate_actions":
+            continue
+        values = mapped[column]
+        parsed = _parse_optional_csmar_date(
+            values, column, error_code="invalid_source_date"
+        )
+        invalid = (
+            values.notna() & values.astype("string").str.strip().ne("") & parsed.isna()
+        )
+        if invalid.any():
+            counts[f"invalid_{column}_rows"] = int(invalid.sum())
+        mapped[column] = parsed
+        if data_id == "industry_classification_versions" and column == "abandon_date":
+            mapped["abandon_date_unresolved"] = invalid
+        if data_id == "stock_master" and column == "delisting_date":
+            mapped["delisting_date_unresolved"] = invalid
+        if data_id == "stock_master" and column == "status_change_date":
+            mapped["_invalid_status_change_date"] = invalid
+    date_column = {
+        "market_bars_1d": "trade_date",
+        "adjustment": "trade_date",
+        "market_cap": "share_change_date",
+        "index_market": "trade_date",
+        "trading_calendar": "calendar_date",
+        "corporate_actions": "timestamp",
+        "financial_balance": "report_period",
+        "financial_income": "report_period",
+        "financial_cashflow": "report_period",
+        "industry_classification": "implement_date",
+        "industry_classification_versions": "implement_date",
+        "industry_classification_annual": "effective_date",
+        "listing_status_changes": "effective_date",
+        "stock_info_changes": "effective_date",
+        "stock_info_annual": "effective_date",
+        "trading_no_limit": "trade_date",
+        "special_treatment_changes": "effective_date",
+        "equity_changes": "report_period",
+        "analyst_forecast": "forecast_end_date",
+        "index_weights": "effective_date",
+        "index_membership": "effective_date",
+    }.get(data_id)
+    if date_column is not None:
+        mapped[date_column] = _parse_optional_csmar_date(
+            mapped[date_column], date_column, error_code="invalid_source_date"
+        )
+        valid_rows &= mapped[date_column].notna()
+    if data_id == "trading_calendar":
+        valid_rows &= mapped["source_market_type"].notna()
+        valid_rows &= (
+            mapped["source_state"]
+            .astype("string")
+            .str.strip()
+            .str.upper()
+            .isin(("O", "C"))
+        )
+    if data_id == "special_treatment_changes":
+        valid_rows &= (
+            mapped["change_type"].astype("string").str.strip().ne("").fillna(False)
+        )
+    if data_id == "analyst_forecast":
+        valid_rows &= (
+            mapped["report_id"].astype("string").str.strip().ne("").fillna(False)
+        )
+    if data_id == "corporate_actions":
+        valid_rows &= mapped["kind"].astype("string").str.strip().ne("").fillna(False)
+    excluded = int((~valid_rows).sum())
+    if excluded:
+        counts["excluded_missing_required_rows"] = excluded
+    mapped = mapped.loc[valid_rows].copy()
+    result = _normalize_mapped_frame(mapped, data_id, frame.loc[valid_rows])
+    # Derived arithmetic can overflow despite finite inputs. Keep only the
+    # affected derived cell unavailable, without invalidating its neighbors.
+    for column in result.select_dtypes(include="number"):
+        invalid = result[column].notna() & ~np.isfinite(result[column])
+        if invalid.any():
+            counts[f"invalid_{column}_rows"] = counts.get(
+                f"invalid_{column}_rows", 0
+            ) + int(invalid.sum())
+            result.loc[invalid, column] = np.nan
+    if result.empty:
+        for column in result.select_dtypes(include="object"):
+            result[column] = result[column].astype(pd.ArrowDtype(pa.string()))
+    previous = result.attrs.get("source_row_counts", {})
+    counts.update(previous)
+    counts["raw_rows"] = len(frame)
+    if excluded:
+        counts["excluded_missing_required_rows"] = (
+            previous.get("excluded_missing_required_rows", 0) + excluded
+        )
+    counts["retained_before_date_filter_rows"] = len(result)
+    result.attrs["source_row_counts"] = counts
+    return result
+
+
+def _normalize_mapped_frame(
+    mapped: pd.DataFrame, data_id: str, frame: pd.DataFrame
+) -> pd.DataFrame:
     if "stock_code" in mapped.columns:
         mapped["stock_code"] = normalize_provider_stock_code_series(
             mapped["stock_code"]
@@ -402,7 +573,9 @@ def normalize_raw_frame(
         ]
         for column in ("effective_date", "announcement_date"):
             result[column] = strict_timestamp_series(
-                result[column], error=f"invalid_index_membership_{column}"
+                result[column],
+                error=f"invalid_index_membership_{column}",
+                allow_null=column == "announcement_date",
             ).dt.normalize()
         result["timestamp"] = result["effective_date"]
         result["source_asset_id"] = result["index_code"]
@@ -418,14 +591,10 @@ def normalize_raw_frame(
         result["effective_date"] = strict_timestamp_series(
             result["effective_date"], error="invalid_index_weight_date"
         ).dt.normalize()
-        result["weight"] = (
-            strict_finite_numeric_series(
-                result["weight_pct"], error="invalid_index_weight", allow_null=True
-            ).astype("float64")
-            / 100.0
-        )
-        if bool((result["weight"] < 0.0).any()):
-            raise ValueError("invalid_index_weight")
+        result["weight"] = result["weight_pct"].astype("float64") / 100.0
+        negative = result["weight"].lt(0.0)
+        result.attrs["source_row_counts"] = {"invalid_weight_rows": int(negative.sum())}
+        result.loc[negative, "weight"] = np.nan
         result["timestamp"] = result["effective_date"]
         result["source_asset_id"] = result["index_code"]
         result.sort_values(
@@ -441,16 +610,13 @@ def normalize_raw_frame(
             result["correction_disclosure_date"]
         )
         result["is_corrected"] = _parse_correction_flag(result["is_corrected"])
-        if bool(
-            (result["is_corrected"] & result["correction_disclosure_date"].isna()).any()
-        ):
-            raise ValueError("financial_correction_disclosure_missing")
-        if bool(
-            (
-                ~result["is_corrected"] & result["correction_disclosure_date"].notna()
-            ).any()
-        ):
-            raise ValueError("invalid_financial_correction_date")
+        usable = result["is_corrected"].notna() & (
+            result["is_corrected"].eq(result["correction_disclosure_date"].notna())
+        )
+        excluded = int((~usable).sum())
+        result = result.loc[usable].copy()
+        result["is_corrected"] = result["is_corrected"].astype(bool)
+        result.attrs["source_row_counts"] = {"excluded_missing_required_rows": excluded}
         result["report_type"] = strict_string_series(
             result["report_type"], error="invalid_financial_report_type"
         )
@@ -462,11 +628,7 @@ def normalize_raw_frame(
         for column in set(FINANCIAL_COLUMNS_BY_DATA_ID[data_id]).difference(
             FINANCIAL_BASE_COLUMNS
         ):
-            result[column] = strict_finite_numeric_series(
-                result[column],
-                error=f"invalid_financial_value:{column}",
-                allow_null=True,
-            )
+            result[column] = result[column]
         result["timestamp"] = result["report_period"]
         result["source_asset_id"] = result["stock_code"]
         result.sort_values(
@@ -481,28 +643,15 @@ def normalize_raw_frame(
         return result.reset_index(drop=True)
     if data_id == MARKET_BARS_DATA_ID:
         result = mapped
-        result["limit_status"] = strict_finite_numeric_series(
-            result["limit_status"], error="invalid_csmar_limit_status", allow_null=True
-        )
         result["trade_date"] = strict_timestamp_series(
             result["trade_date"],
             error="invalid_csmar_trade_date",
         )
         result["timestamp"] = result["trade_date"]
         result["source_asset_id"] = result["stock_code"]
-        result["period_return"] = strict_finite_numeric_series(
-            result["return_with_dividend"],
-            error="invalid_csmar_period_return",
-            allow_null=True,
-        )
-        result["adj_close"] = strict_finite_numeric_series(
-            result["comparable_close_with_dividend"],
-            error="invalid_csmar_adj_close",
-            allow_null=True,
-        )
-        close = strict_finite_numeric_series(
-            result["close"], error="invalid_csmar_close", allow_null=True
-        )
+        result["period_return"] = result["return_with_dividend"]
+        result["adj_close"] = result["comparable_close_with_dividend"]
+        close = result["close"]
         # Keep the adjustment ratio bounded before restoring the price exponent.
         opening, opening_exponent = np.frexp(
             result["open"].to_numpy(dtype="float64", na_value=np.nan)
@@ -518,13 +667,13 @@ def normalize_raw_frame(
         result["float_market_cap"] = result["float_market_cap_thousand"] * 1000.0
         result["total_market_cap"] = result["total_market_cap_thousand"] * 1000.0
         market_type = strict_integer_series(
-            result["market_type"], error="invalid_csmar_market_type"
+            result["market_type"], error="invalid_csmar_market_type", allow_null=True
         )
         filling = strict_integer_series(
-            result["filling_flag"], error="invalid_csmar_filling_flag"
+            result["filling_flag"], error="invalid_csmar_filling_flag", allow_null=True
         )
-        if not filling.isin((0, 1, 2)).all():
-            raise ValueError("invalid_csmar_filling_flag")
+        filling = filling.where(filling.isin((0, 1, 2)))
+        result["filling_flag"] = filling
         dates = result["trade_date"].dt.normalize()
         active_board = (market_type.eq(32) & dates.ge(pd.Timestamp("2019-07-22"))) | (
             market_type.eq(16) & dates.ge(pd.Timestamp("2020-08-24"))
@@ -535,24 +684,15 @@ def normalize_raw_frame(
             & (~active_board | filling.isin((1, 2)))
         )
         for column in ("after_hours_volume", "after_hours_amount"):
-            values = strict_finite_numeric_series(
-                result[column], error=f"invalid_csmar_{column}", allow_null=True
+            values = result[column]
+            result[column] = values.mask(
+                values.isna()
+                & not_applicable.fillna(False)
+                & ~result.pop(f"_invalid_{column}"),
+                0.0,
             )
-            if (values.isna() & ~not_applicable).any():
-                raise ValueError(f"invalid_csmar_{column}_missing")
-            result[column] = values.fillna(0.0)
-        result["volume"] = (
-            strict_finite_numeric_series(
-                result["volume"], error="invalid_csmar_volume", allow_null=True
-            )
-            + result["after_hours_volume"]
-        )
-        result["amount"] = (
-            strict_finite_numeric_series(
-                result["amount"], error="invalid_csmar_amount", allow_null=True
-            )
-            + result["after_hours_amount"]
-        )
+        result["volume"] = result["volume"] + result["after_hours_volume"]
+        result["amount"] = result["amount"] + result["after_hours_amount"]
         result["turnover"] = pd.Series(
             float("nan"), index=result.index, dtype="float64"
         )
@@ -592,10 +732,12 @@ def normalize_raw_frame(
                     error_code="invalid_stock_master_date",
                 )
         result["timestamp"] = result["status_change_date"].fillna(
-            result["listing_date"]
+            result["listing_date"].where(~result.pop("_invalid_status_change_date"))
         )
-        if result["timestamp"].isna().any():
-            raise ValueError("missing_stock_master_effective_timestamp")
+        result.attrs["source_row_counts"] = {
+            "excluded_missing_timestamp_rows": int(result["timestamp"].isna().sum())
+        }
+        result = result.loc[result["timestamp"].notna()].copy()
         result["source_asset_id"] = result["stock_code"]
         result.sort_values(["source_asset_id", "timestamp"], inplace=True)
         result.reset_index(drop=True, inplace=True)
@@ -617,11 +759,7 @@ def normalize_raw_frame(
             result["index_class"] = result["index_category"]
         if "base_point" in result.columns:
             base_point_text = result["base_point"].astype("string").str.strip()
-            base_point = strict_finite_numeric_series(
-                result["base_point"].mask(base_point_text.eq("")),
-                error="invalid_index_info_base_point",
-                allow_null=True,
-            )
+            base_point = result["base_point"].mask(base_point_text.eq(""))
             result["base_point"] = base_point.mask(base_point.eq(-9666))
         counts = {"raw_rows": len(frame)}
         for column in ("base_date", "start_date"):
@@ -667,18 +805,10 @@ def normalize_raw_frame(
         return result
     if data_id == "index_market":
         result = mapped
-        result["open"] = strict_finite_numeric_series(
-            result["open"], error="invalid_index_open", allow_null=True
-        )
         result["trade_date"] = strict_timestamp_series(
             result["trade_date"], error="invalid_index_return_date"
         ).dt.normalize()
-        result["period_return"] = (
-            strict_finite_numeric_series(
-                result["return_1d_pct"], error="invalid_index_return", allow_null=True
-            ).astype("float64")
-            / 100.0
-        )
+        result["period_return"] = result["return_1d_pct"].astype("float64") / 100.0
         result["timestamp"] = result["trade_date"]
         result["source_asset_id"] = result["index_code"]
         result.sort_values(["source_asset_id", "timestamp"], inplace=True)
@@ -714,8 +844,7 @@ def normalize_raw_frame(
                 result[column],
                 error="invalid_industry_dictionary_value",
                 allow_empty=column == "parent_industry_code",
-                allow_null=column
-                not in {"industry_code", "industry_standard_id", "industry_level"},
+                allow_null=column not in {"industry_code", "industry_standard_id"},
             ).astype("string")
         result = result.loc[:, INDUSTRY_CLASSIFICATION_SETS_COLUMNS]
         return result.reset_index(drop=True)
@@ -772,16 +901,10 @@ def normalize_raw_frame(
                 allow_null=True,
                 strip=column != "analyst_ids",
             ).astype("string")
-        for column in ("forecast_eps", "forecast_pe"):
-            result[column] = strict_finite_numeric_series(
-                result[column],
-                error=f"invalid_analyst_value:{column}",
-                allow_null=True,
-            )
         result["timestamp"] = result["declare_date"]
         missing_date = result["declare_date"].isna()
         missing_institution = result["institution_id"].isna()
-        excluded = missing_date | missing_institution
+        excluded = missing_date
         counts = {
             "raw_rows": len(result),
             "missing_declare_date_rows": int(missing_date.sum()),
@@ -822,12 +945,21 @@ def _normalize_corporate_actions(mapped: pd.DataFrame) -> pd.DataFrame:
     # Optional facts can be unknown without erasing an otherwise identified event.
     for column in ("announcement_date", "settlement_date"):
         values = result[column].replace(r"^\s*$", pd.NA, regex=True)
-        dates = pd.to_datetime(values, errors="coerce", format="%Y-%m-%d")
+        dates = strict_timestamp_series(
+            values,
+            error="invalid_corporate_action_date",
+            allow_null=True,
+            errors="coerce",
+        )
         counts[f"invalid_{column}_rows"] = int((values.notna() & dates.isna()).sum())
         result[column] = dates.astype("datetime64[ns]").dt.normalize()
+        if column == "settlement_date":
+            result["settlement_date_unresolved"] = values.notna() & dates.isna()
     for column in ("amount", "subscription_price", "market_type"):
         values = result[column].replace(r"^\s*$", pd.NA, regex=True)
-        numeric = pd.to_numeric(values, errors="coerce").astype("float64")
+        numeric = strict_real_numeric_series(
+            values, error="invalid_source_numeric", errors="coerce"
+        )
         valid = np.isfinite(numeric)
         if column == "market_type":
             valid &= (
@@ -905,7 +1037,9 @@ def _normalize_state_change_frame(frame: pd.DataFrame, data_id: str) -> pd.DataF
         )
     if data_id == "special_treatment_changes":
         result["announcement_date"] = strict_timestamp_series(
-            result["announcement_date"], error="invalid_special_treatment_date"
+            result["announcement_date"],
+            error="invalid_special_treatment_date",
+            allow_null=True,
         ).dt.normalize()
         result["effective_date"] = strict_timestamp_series(
             result["effective_date"], error="invalid_special_treatment_date"
@@ -914,10 +1048,12 @@ def _normalize_state_change_frame(frame: pd.DataFrame, data_id: str) -> pd.DataF
         result["change_type"] = strict_string_series(
             result["change_type"], error="invalid_special_treatment_change_type"
         )
-        if not result["change_type"].str.fullmatch(r"[ABCDSTX]{2}").all():
-            raise ValueError("invalid_special_treatment_change_type")
+        supported = result["change_type"].str.fullmatch(r"[ABCDSTX]{2}")
+        result.attrs["source_row_counts"] = {
+            "unsupported_transition_rows": int((~supported).sum())
+        }
         destination = result["change_type"].str[1]
-        known = destination.isin(("A", "B", "C", "D"))
+        known = supported & destination.isin(("A", "B", "C", "D"))
         result["is_st"] = destination.isin(("B", "D")).astype("boolean").where(known)
         result["is_pt"] = destination.eq("C").astype("boolean").where(known)
         return (
@@ -949,12 +1085,8 @@ def _parse_optional_csmar_date(
     *,
     error_code: str,
 ) -> pd.Series:
-    text = series.copy()
-    blank = text.map(lambda value: isinstance(value, str) and not value.strip())
     return strict_timestamp_series(
-        text.mask(blank),
-        error=f"{error_code}:{column}",
-        allow_null=True,
+        series, error=error_code, allow_null=True, errors="coerce"
     )
 
 
@@ -967,24 +1099,25 @@ def _parse_financial_correction_date(series: pd.Series) -> pd.Series:
             latest.append(pd.NaT)
             continue
         tokens = [token.strip() for token in str(value).split(",")]
-        if any(not token for token in tokens):
-            raise ValueError("invalid_financial_correction_date")
-        parsed = strict_timestamp_series(
-            pd.Series(tokens), error="invalid_financial_correction_date"
-        ).dt.normalize()
-        if bool(parsed.duplicated().any()) or not (
-            parsed.is_monotonic_increasing or parsed.is_monotonic_decreasing
+        parsed = _parse_optional_csmar_date(
+            pd.Series(tokens),
+            "correction_disclosure_date",
+            error_code="invalid_financial_correction_date",
+        )
+        if (
+            parsed.isna().any()
+            or bool(parsed.duplicated().any())
+            or not (parsed.is_monotonic_increasing or parsed.is_monotonic_decreasing)
         ):
-            raise ValueError("invalid_financial_correction_date")
+            latest.append(pd.NaT)
+            continue
         latest.append(parsed.max())
     return pd.Series(latest, index=series.index, dtype="datetime64[ns]")
 
 
 def _parse_correction_flag(series: pd.Series) -> pd.Series:
-    numeric = pd.to_numeric(series, errors="raise")
-    if not numeric.isin((0, 1)).all():
-        raise ValueError("invalid_financial_correction_flag")
-    return numeric.astype(bool)
+    numeric = pd.to_numeric(series, errors="coerce")
+    return numeric.where(numeric.isin((0, 1))).astype("boolean")
 
 
 def materialize_interim_data(
@@ -1022,10 +1155,8 @@ def materialize_interim_data(
             diagnostics = dict(target_metadata.get("producer_diagnostics", {}))
             diagnostics["exact_duplicate_count"] = 0
             target_metadata["producer_diagnostics"] = diagnostics
-            source_row_counts = None
-            if data_id in {"analyst_forecast", "index_info", "corporate_actions"}:
-                source_row_counts = {}
-                diagnostics["source_row_counts"] = source_row_counts
+            source_row_counts = {}
+            diagnostics["source_row_counts"] = source_row_counts
             frames = _iter_normalized_interim_frames(
                 data_id=data_id,
                 input_files=input_files,
@@ -1079,6 +1210,24 @@ def _iter_normalized_interim_frames(
     exact_duplicate_count = 0
     content_hashes = []
     empty_index_frame = None
+    emitted_rows = 0
+    # Event/reference facts must be reconciled before emission: a later file or
+    # chunk can make one earlier cell unknown without erasing its event key.
+    coalesce = data_id in {
+        "stock_master",
+        "corporate_actions",
+        "financial_balance",
+        "financial_income",
+        "financial_cashflow",
+        "industry_classification",
+        "industry_classification_annual",
+        "industry_classification_sets",
+        "industry_classification_versions",
+        "market_cap",
+        "equity_changes",
+        "analyst_forecast",
+    }
+    pending = []
     for input_file, expected_identity in input_files:
         parent = require_unaliased_path(
             input_file.parent, error="csmar_interim_source_parent_invalid"
@@ -1105,6 +1254,24 @@ def _iter_normalized_interim_frames(
                     chunk,
                     data_id=data_id,
                 )
+                if data_id in {MARKET_BARS_DATA_ID, "adjustment", "market_cap"}:
+                    mask = pd.Series(True, index=pruned.index)
+                    if start_date is not None and data_id != "market_cap":
+                        mask &= pruned["timestamp"].ge(pd.Timestamp(start_date))
+                    if end_date is not None:
+                        mask &= pruned["timestamp"].le(pd.Timestamp(end_date))
+                    if counts is not None:
+                        counts["excluded_date_range_rows"] = int((~mask).sum())
+                        counts["retained_after_date_filter_rows"] = int(mask.sum())
+                    pruned = pruned.loc[mask].copy()
+                if coalesce:
+                    pending.append(pruned)
+                    if counts is not None:
+                        for key, count in counts.items():
+                            source_row_counts[key] = (
+                                source_row_counts.get(key, 0) + count
+                            )
+                    continue
                 skip_duplicate = False
                 if not pruned.empty:
                     table = pa.Table.from_pandas(pruned, preserve_index=False)
@@ -1141,21 +1308,73 @@ def _iter_normalized_interim_frames(
                 if counts is not None:
                     for key, count in counts.items():
                         source_row_counts[key] = source_row_counts.get(key, 0) + count
-                if data_id == "index_info" and pruned.empty:
+                if pruned.empty:
                     empty_index_frame = pruned
                     continue
                 if skip_duplicate:
                     continue
+                emitted_rows += len(pruned)
                 try:
                     yield pruned
                 except GeneratorExit:
                     return
         if len(content_hashes) != completed_before + 1:
             raise ValueError("csmar_raw_export_incomplete_read")
-    if (
-        empty_index_frame is not None
-        and source_row_counts["retained_before_date_filter_rows"] == 0
-    ):
+    if pending:
+        combined = pd.concat(pending, ignore_index=True)
+        exact_duplicates = int(combined.duplicated().sum())
+        combined = combined.drop_duplicates()
+        duplicate = combined.duplicated(list(primary_key), keep=False)
+        if duplicate.any():
+            if data_id == "stock_master":
+                combined["delisting_date_unresolved"] = combined.groupby(
+                    list(primary_key), dropna=False
+                )["delisting_date_unresolved"].transform("any")
+            if data_id == "industry_classification_versions":
+                combined["abandon_date_unresolved"] = combined.groupby(
+                    list(primary_key), dropna=False
+                )["abandon_date_unresolved"].transform("any")
+            if data_id == "corporate_actions":
+                combined["settlement_date_unresolved"] = combined.groupby(
+                    list(primary_key), dropna=False
+                )["settlement_date_unresolved"].transform("any")
+            for column in combined.columns.difference(primary_key):
+                distinct = (
+                    combined.loc[duplicate]
+                    .groupby(list(primary_key), dropna=False, sort=False)[column]
+                    .transform(lambda values: values.nunique(dropna=False))
+                )
+                conflict = distinct.gt(1).reindex(combined.index, fill_value=False)
+                if conflict.any():
+                    source_row_counts[f"conflicting_{column}_rows"] = int(
+                        conflict.sum()
+                    )
+                    if (
+                        data_id == "industry_classification_versions"
+                        and column == "abandon_date"
+                    ):
+                        earliest = combined.groupby(list(primary_key), dropna=False)[
+                            column
+                        ].transform("min")
+                        combined.loc[conflict, column] = earliest.loc[conflict].where(
+                            ~combined.loc[conflict, "abandon_date_unresolved"]
+                        )
+                        combined.loc[conflict, "abandon_date_unresolved"] = True
+                        continue
+                    if data_id == "stock_master" and column == "delisting_date":
+                        combined.loc[conflict, "delisting_date_unresolved"] = True
+                    if data_id == "corporate_actions" and column == "settlement_date":
+                        combined.loc[conflict, "settlement_date_unresolved"] = True
+                    if combined[column].dtype == bool:
+                        combined[column] = combined[column].astype("boolean")
+                    combined.loc[conflict, column] = pd.NA
+            # All retained cells agree now; no source observation is preferred.
+            combined = combined.drop_duplicates(list(primary_key))
+        if producer_diagnostics is not None:
+            producer_diagnostics["exact_duplicate_count"] = exact_duplicates
+        for start in range(0, max(1, len(combined)), chunksize):
+            yield combined.iloc[start : start + chunksize].reset_index(drop=True)
+    if empty_index_frame is not None and emitted_rows == 0:
         yield empty_index_frame
     if source_evidence is not None:
         digest = hashlib.sha256()
@@ -1264,9 +1483,9 @@ def _normalize_trading_calendar_frame(frame: pd.DataFrame) -> pd.DataFrame:
         result["source_market_type"],
         error="invalid_trading_calendar_market_type",
     )
-    result["source_day_of_week"] = strict_integer_series(
-        result["source_day_of_week"],
-        error="invalid_trading_calendar_day_of_week",
+    weekday = result["source_day_of_week"]
+    result["source_day_of_week"] = weekday.where(weekday.isin(range(1, 8))).astype(
+        "Int64"
     )
     result["source_state"] = result["source_state"].astype("string").str.strip()
     result["source_state"] = result["source_state"].str.upper()

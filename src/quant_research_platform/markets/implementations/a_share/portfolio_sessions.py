@@ -17,7 +17,10 @@ from quant_research_platform.contracts.portfolios import (
     _portfolio_session_frame,
 )
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.contracts.validation import decode_exact_numeric
+from quant_research_platform.contracts.validation import (
+    decode_exact_numeric,
+    strict_real_numeric_series,
+)
 from quant_research_platform.markets.implementations.a_share.calendar import (
     CURRENT_MARKET_TYPES,
     market_type_calendar_state,
@@ -124,12 +127,12 @@ def _portfolio_session_evidence(
         _, _, _, asset_sessions, _, _raw_axis = _processed_axis(
             panel, panel_source=False, include_asset_sessions=True
         )
+    stock_source = open_dataset_session(**_dataset_input_options(stock_master_root))
+    stock_columns = _STOCK_FACT_COLUMNS
+    if "delisting_date_unresolved" in stock_source.spec["column_roles"]:
+        stock_columns = (*stock_columns, "delisting_date_unresolved")
     stocks = panels._canonical_stock_master(
-        materialize_dataset_session(
-            open_dataset_session(
-                **_dataset_input_options(stock_master_root)
-            ).projected_view(_STOCK_FACT_COLUMNS)
-        )
+        materialize_dataset_session(stock_source.projected_view(stock_columns))
     )
     _, _, membership, _, _, raw_axis = _processed_axis(
         bars, panel_source=True, calendar=calendar, stock_master=stocks
@@ -196,19 +199,21 @@ def iter_portfolio_sessions(
     rights["entitlement_proved"] = True
     pending_rights = rights
     rights_lineage = {}
-    corporate = (
-        _corporate_action_events(
+    corporate = pd.DataFrame(columns=_CORPORATE_EVENT_COLUMNS)
+    if corporate_actions_root is not None:
+        corporate_source = open_dataset_session(
+            **_dataset_input_options(corporate_actions_root)
+        ).filtered_view(time_window)
+        corporate_columns = _CORPORATE_SOURCE_COLUMNS
+        if "settlement_date_unresolved" in corporate_source.spec["column_roles"]:
+            corporate_columns = (*corporate_columns, "settlement_date_unresolved")
+        corporate = _corporate_action_events(
             materialize_dataset_session(
-                open_dataset_session(**_dataset_input_options(corporate_actions_root))
-                .filtered_view(time_window)
-                .projected_view(_CORPORATE_SOURCE_COLUMNS)
+                corporate_source.projected_view(corporate_columns)
             ),
             stocks,
             calendar,
         )
-        if corporate_actions_root is not None
-        else pd.DataFrame(columns=_CORPORATE_EVENT_COLUMNS)
-    )
     sessions = unified_trading_sessions(calendar)
     starts = corporate.record_at.fillna(corporate.effective_at)
     ends = corporate[["effective_at", "settlement_at", "available_at"]].max(axis=1)
@@ -322,7 +327,15 @@ def iter_portfolio_sessions(
                 indexed = raw.set_index("asset_id", drop=False)
                 if set(indexed.index.astype(str)) & closed:
                     raise ValueError("portfolio_market_panel_calendar_conflict")
-                prices = indexed.loc[:, list(mark_price_columns)]
+                prices = (
+                    indexed.loc[:, list(mark_price_columns)]
+                    .apply(
+                        strict_real_numeric_series,
+                        error="portfolio_return_invalid",
+                        errors="coerce",
+                    )
+                    .astype("float64")
+                )
                 valid = np.isfinite(prices).all(axis=1) & prices.gt(0).all(axis=1)
                 flags = day_bars.filling_flag.reindex(indexed.index)
                 known = flags.isin((0, 1)) & ~indexed.index.isin(unknown_membership)
@@ -377,7 +390,24 @@ def iter_portfolio_sessions(
                 | last.index.isin(blocked)
                 | ~last.index.isin(raw.asset_id)
             ]
-            unproved_lifecycle = frozenset()
+            # Actual status rows, not synthetic listing-date seeds, own whether
+            # a currently observed or carried holding has a proven lifecycle.
+            known_lives = stocks.loc[stocks.stock_effective_date.le(timestamp)]
+            known_lives = known_lives.drop_duplicates(
+                ["asset_id", "listing_date"], keep="last"
+            )
+            current_lives = known_lives.drop_duplicates("asset_id", keep="last")
+            unresolved = current_lives.get(
+                "delisting_date_unresolved", pd.Series(False, index=current_lives.index)
+            ).fillna(True)
+            unproved_lifecycle = frozenset(
+                current_lives.loc[
+                    unresolved
+                    | current_lives.listing_date.isna()
+                    | current_lives.delisting_date.isna(),
+                    "asset_id",
+                ].astype(str)
+            )
             carried = last.loc[last.index.isin(closed)].copy()
             if not life_marks.empty:
                 facts = panels._asof_join_stock_master(
@@ -392,7 +422,8 @@ def iter_portfolio_sessions(
                 same_life = facts.listing_date.notna() & facts.listing_date.eq(
                     life_marks.listing_date
                 )
-                unproved_lifecycle = frozenset(same_life.index[~same_life].astype(str))
+                same_life &= ~same_life.index.isin(unproved_lifecycle)
+                unproved_lifecycle |= frozenset(same_life.index[~same_life].astype(str))
                 alive = (
                     same_life
                     & facts.listing_date.le(timestamp)
@@ -429,10 +460,6 @@ def iter_portfolio_sessions(
             # Use actual as-of source rows, not the synthetic life-start rows used
             # to construct the historical panel. A later status must not become
             # early delisting knowledge or link a reused code to old equity.
-            known_lives = stocks.loc[stocks.stock_effective_date.le(timestamp)]
-            known_lives = known_lives.drop_duplicates(
-                ["asset_id", "listing_date"], keep="last"
-            )
             terminated = known_lives.loc[known_lives.delisting_date.le(timestamp)]
             confirmed_delisted_lifecycles = frozenset(
                 (str(asset), pd.Timestamp(listing))
@@ -524,17 +551,31 @@ def _qualify_equity_events(events, recognition, stocks, lineage):
                 identity = (event.asset_id, event.listing_date)
                 terminated = False
                 active = False
+                lifecycle_unknown = False
                 if identity in facts.index:
                     fact = facts.loc[identity]
+                    unresolved_end = fact.get("delisting_date_unresolved", False)
+                    lifecycle_unknown = (
+                        pd.isna(unresolved_end)
+                        or bool(unresolved_end)
+                        or pd.isna(fact.delisting_date)
+                    )
                     terminated = (
-                        fact.delisting_date <= recognized
+                        not lifecycle_unknown
+                        and fact.delisting_date <= recognized
                         and event.effective_at >= fact.delisting_date
                     )
-                    active = identity[1] <= recognized < fact.delisting_date
+                    active = (
+                        not lifecycle_unknown
+                        and identity[1] <= recognized < fact.delisting_date
+                    )
                 linked = (
                     identity in lineage
                     and event.effective_at >= lineage[identity][0]
                     and not active
+                    # External successor lineage is evidence only when no local
+                    # status contradicts it or leaves the required life unknown.
+                    and not lifecycle_unknown
                 )
                 holder_transition = event.kind == "share_change" and active
                 if not (terminated or linked or holder_transition):
@@ -595,18 +636,28 @@ def _corporate_action_events(source, stocks, calendar):
             else effective
         )
         settlement = event.settlement_date
+        settlement_unresolved = getattr(event, "settlement_date_unresolved", False)
+        settlement_unresolved = pd.isna(settlement_unresolved) or bool(
+            settlement_unresolved
+        )
         amount = event.amount
         finite = pd.notna(amount) and np.isfinite(amount)
         kind = {"CA": "cash_dividend", "SD": "stock_distribution"}.get(
             event.kind, "unproved"
         )
-        proved = calendar_proved and pd.notna(published) and finite and amount >= 0
+        proved = (
+            calendar_proved
+            and pd.notna(published)
+            and finite
+            and amount >= 0
+            and not settlement_unresolved
+        )
         cash, shares = None, None
         if event.kind == "CA":
             cash = Fraction(amount) if finite else None
-            if pd.isna(settlement):
+            if pd.isna(settlement) and not settlement_unresolved:
                 settlement = effective
-            proved &= settlement >= effective
+            proved &= pd.notna(settlement) and settlement >= effective
         elif event.kind == "SD":
             shares = Fraction(amount) if finite and amount >= 0 else None
             # Sentinel/pre-ex dates do not prove a tradable-share release.

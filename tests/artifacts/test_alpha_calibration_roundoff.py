@@ -116,7 +116,10 @@ def test_rank_and_open_return_roundoff_survives_final_json_and_freeze(
         }
     )
     calibration = calibrate_expected_alpha(
-        inputs, as_of=pd.Timestamp("2023-12-31"), scheduled_intervals=intervals
+        inputs,
+        trading_sessions=pd.bdate_range("2023-07-01", "2023-12-31"),
+        as_of=pd.Timestamp("2023-12-31"),
+        scheduled_intervals=intervals,
     )
     actual = inputs.holding_return.to_numpy()
     fitted = (

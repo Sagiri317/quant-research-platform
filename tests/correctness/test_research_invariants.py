@@ -464,6 +464,7 @@ def test_alpha_calibration_is_schedule_matched_and_non_flipping() -> None:
     intervals = alpha_calibration_intervals(calendar, "daily")
     calibrated = calibrate_expected_alpha(
         frame,
+        trading_sessions=calendar,
         as_of=calendar[-1],
         scheduled_intervals=intervals,
         minimum_valid_dates=6,
@@ -478,6 +479,7 @@ def test_alpha_calibration_is_schedule_matched_and_non_flipping() -> None:
     assert calibrated.inference_reason == "alpha_calibration_zero_standard_error"
     inverse = calibrate_expected_alpha(
         frame.assign(holding_return=-frame["holding_return"]),
+        trading_sessions=calendar,
         as_of=calendar[-1],
         scheduled_intervals=intervals,
         minimum_valid_dates=6,
@@ -525,6 +527,7 @@ def test_calibration_weighted_cluster_reference_and_unit_scaling(
             prediction_rank_score=frame.prediction_rank_score * alpha_scale,
             holding_return=frame.holding_return * return_scale,
         ),
+        trading_sessions=sessions,
         as_of=sessions[-1],
         scheduled_intervals=intervals,
     )
@@ -566,13 +569,17 @@ def test_alpha_calibration_missing_and_stale_date_coverage():
     )
     missing = calibrate_expected_alpha(
         frame.loc[frame.timestamp.ne(dates.iloc[1])],
+        trading_sessions=sessions,
         as_of=sessions[-1],
         scheduled_intervals=intervals,
     )
     assert missing.scheduled_rebalance_dates == 6 and missing.valid_rebalance_dates == 5
     assert missing.coverage == pytest.approx(5 / 6) and missing.benchmark_only
     stale = calibrate_expected_alpha(
-        frame, as_of=pd.Timestamp("2024-03-01"), scheduled_intervals=intervals
+        frame,
+        trading_sessions=pd.bdate_range("2023-01-02", "2024-03-01"),
+        as_of=pd.Timestamp("2024-03-01"),
+        scheduled_intervals=intervals,
     )
     assert stale.valid_rebalance_dates == 0 and stale.scheduled_rebalance_dates == 0
     assert stale.benchmark_only
@@ -600,12 +607,14 @@ def test_calibration_intervals_use_adjacent_execution_opens_across_holidays():
     )
     before = calibrate_expected_alpha(
         frame,
+        trading_sessions=sessions,
         as_of=pd.Timestamp("2024-01-15"),
         scheduled_intervals=weekly,
         minimum_valid_dates=1,
     )
     after = calibrate_expected_alpha(
         frame,
+        trading_sessions=sessions,
         as_of=pd.Timestamp("2024-01-16"),
         scheduled_intervals=weekly,
         minimum_valid_dates=1,
@@ -804,12 +813,9 @@ def test_canonical_listing_null_does_not_invalidate_complete_market_history(
         ("period_return", np.inf),
         ("period_return", True),
         ("period_return", "invalid"),
-        ("float_market_cap", np.inf),
-        ("float_market_cap", 0.0),
-        ("float_market_cap", -1.0),
     ),
 )
-def test_ineligible_market_risk_still_rejects_invalid_nonnull_inputs(column, value):
+def test_market_risk_rejects_invalid_consumed_returns(column, value):
     panel = pd.DataFrame(
         {
             "listing_date": pd.Timestamp("2000-01-01"),
@@ -1415,7 +1421,10 @@ def test_alpha_unidentified_statistics_are_not_defined_zero(constant, observed_d
     design = np.column_stack([np.ones(len(frame)), frame.prediction_rank_score])
     assert np.linalg.matrix_rank(design) == 1
     result = calibrate_expected_alpha(
-        frame, as_of=sessions[-1], scheduled_intervals=intervals
+        frame,
+        trading_sessions=sessions,
+        as_of=sessions[-1],
+        scheduled_intervals=intervals,
     )
     assert result.status == "UNDEFINED"
     assert result.undefined_reason == (
@@ -1484,7 +1493,10 @@ def test_alpha_cluster_variance_preserves_zero_and_binary64_signal(
         }
     )
     result = calibrate_expected_alpha(
-        frame, as_of=pd.Timestamp("2024-07-01"), scheduled_intervals=intervals
+        frame,
+        trading_sessions=pd.date_range("2024-01-01", "2024-07-01"),
+        as_of=pd.Timestamp("2024-07-01"),
+        scheduled_intervals=intervals,
     )
     assert result.status == "DEFINED" and not result.benchmark_only
     assert result.slope == pytest.approx(0.25 / scale, rel=1e-12, abs=0)
@@ -1538,7 +1550,10 @@ def test_alpha_calibration_rejects_nonzero_unrepresentable_coefficients(quantity
         ValueError, match=f"^alpha_calibration_{quantity}_unrepresentable$"
     ):
         calibrate_expected_alpha(
-            frame, as_of=pd.Timestamp("2024-07-01"), scheduled_intervals=intervals
+            frame,
+            trading_sessions=pd.date_range("2024-01-01", "2024-07-01"),
+            as_of=pd.Timestamp("2024-07-01"),
+            scheduled_intervals=intervals,
         )
 
 

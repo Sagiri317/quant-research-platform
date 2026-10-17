@@ -129,7 +129,6 @@ def test_archive_duration_and_source_identity_are_not_limited_to_one_day(
 def test_download_crosses_midnight_using_native_calendar_addresses(
     tmp_path, monkeypatch
 ):
-    import io
     from urllib.parse import parse_qs, urlparse
 
     from quant_research_platform.sources.tardis.raw import download_slices
@@ -288,8 +287,9 @@ def test_depth_repeats_preserve_high_water_and_raw_observation_boundaries():
     trade = {"stream": "btcusdt@aggTrade", "data": {"a": 1}}
     tracker.observe(0, 8, "2026-07-01T00:00:08Z", trade)
     trade["data"]["q"] = "2"
-    with pytest.raises(ValueError, match="sequence_non_monotonic"):
-        tracker.observe(0, 9, "2026-07-01T00:00:09Z", trade)
+    identity, closed, gap = tracker.observe(0, 9, "2026-07-01T00:00:09Z", trade)
+    assert identity is None and gap["reason"] == "native_sequence_non_monotonic"
+    assert tracker.previous["btcusdt", "agg_trades"][0] == 1
 
 
 def test_native_trade_history_preserves_exact_identities():
@@ -312,17 +312,22 @@ def test_native_trade_history_preserves_exact_identities():
     assert observe("future", "SYNTHETIC", {"a": count}) == (True, count - 1)
 
 
-def test_trade_order_failure_retains_safe_source_coordinates(tmp_path):
+def test_trade_order_anomaly_preserves_raw_and_closes_only_trade_coverage(tmp_path):
+    import gzip
+
+    from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
+    from quant_research_platform.sources.binance.replay import iter_agg_trades
+    from quant_research_platform.sources.market import open_market_source
     from tests.helpers.tardis import _line
 
-    def trade(identifier):
+    def trade(second, identifier):
         return _line(
-            1,
+            second,
             "aggTrade",
             {
                 "e": "aggTrade",
-                "E": 1788220801000,
-                "T": 1788220801000,
+                "E": 1788220800000 + second * 1000,
+                "T": 1788220800000 + second * 1000,
                 "s": "BTCUSDT",
                 "st": 1,
                 "a": identifier,
@@ -335,27 +340,54 @@ def test_trade_order_failure_retains_safe_source_coordinates(tmp_path):
             },
         )
 
-    with pytest.raises(
-        ValueError, match="binance_native_sequence_non_monotonic"
-    ) as caught:
-        import_slices(
-            tmp_path / "published",
-            date="2026-09-01",
-            slices=_slices(tmp_path / "native", trade(10) + trade(9), count=1),
+    from tests.sources.tardis.test_replay import _delta
+
+    native = (
+        _line(
+            0,
+            "depthSnapshot",
+            {
+                "lastUpdateId": 100,
+                "bids": [[str(100 - i), "2"] for i in range(12)],
+                "asks": [[str(101 + i), "2"] for i in range(12)],
+            },
         )
-    note = " ".join(caught.value.__notes__)
-    assert all(
-        value in note
-        for value in (
-            "channel=aggTrade",
-            "slice_offset=0",
-            "line=2",
-            "previous_id=10",
-            "current_id=9",
-        )
+        + _delta(1, 100, 101, 99)
+        + trade(1, 10)
+        + trade(2, 9)
+        + _delta(2, 102, 102, 101)
+        + trade(3, 11)
+        + _delta(3, 103, 103, 102)
     )
-    assert "payload" not in note and "price" not in note
-    assert not (tmp_path / "published").exists()
+    slices = _slices(tmp_path / "native", native, count=1)
+    root = tmp_path / "published"
+    manifest = import_slices(root, date="2026-09-01", slices=slices)
+    assert (root / manifest["files"][0]["path"]).read_bytes() == slices[0].read_bytes()
+    with gzip.open(root / manifest["gaps"]["path"], "rt") as stream:
+        gaps = [json.loads(line) for line in stream]
+    assert len(gaps) == 1
+    assert gaps[0]["reason"] == "native_sequence_non_monotonic"
+    assert gaps[0]["previous_id"] == 10 and gaps[0]["current_id"] == 9
+    assert "payload" not in gaps[0] and "price" not in gaps[0]
+    with open_market_source(root) as source:
+        events = list(iter_agg_trades(source, FUTURES_MARKET_TYPE, symbol="BTCUSDT"))
+        from quant_research_platform.contracts.order_book import BookState
+        from quant_research_platform.sources.binance.replay import (
+            iter_reconstructed_depth,
+        )
+
+        books = list(
+            iter_reconstructed_depth(source, FUTURES_MARKET_TYPE, symbol="BTCUSDT")
+        )
+        assert len([book for book in books if isinstance(book, BookState)]) == 3
+        assert len(events) == 2
+        assert events[0].observation_id != events[1].observation_id
+        coverage = source.observation_coverage(
+            market_type=FUTURES_MARKET_TYPE, data_kind="agg_trades", symbol="BTCUSDT"
+        )
+        origin = 1788220800000000000
+        assert coverage.covering(origin + 2000000000, origin + 2000000000) == ()
+        assert len(coverage.covering(origin + 3000000000, origin + 3000000000)) == 1
 
 
 @pytest.mark.parametrize("body_fails", [False, True])

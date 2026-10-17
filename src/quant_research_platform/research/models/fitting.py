@@ -72,6 +72,7 @@ class PreparedTraining:
     rank_inputs: bool
     native_missing: bool = False
     trading_sessions: object = None
+    training_scaling: bool = True
 
     @cached_property
     def preprocessing(self):
@@ -88,6 +89,7 @@ class PreparedTraining:
             matrix,
             sample_weight=weights,
             missing="native" if self.native_missing else "impute",
+            scaling=self.training_scaling,
         )
         return weights, scaler, scaler.transform(matrix)
 
@@ -120,6 +122,7 @@ def validate_model_state(predictor: object, metadata: dict[str, object]) -> None
         random_seed=metadata["random_seed"],
         max_train_rows=metadata["max_train_rows"],
         training_weighting=metadata["training_weighting"],
+        training_scaling=metadata["training_scaling"],
     )
     if spec.model_algorithm == "linear_regression":
         if type(predictor) is not LinearScaledPredictor:
@@ -204,6 +207,7 @@ def validate_model_state(predictor: object, metadata: dict[str, object]) -> None
         if (
             type(predictor.scaler) is not ModelMatrixScaler
             or any(type(value) is not Fraction for value in predictor.scaler.offset_)
+            or predictor.scaler.scaling != spec.training_scaling
             or predictor.scaler.to_payload() != metadata["scaler"]
         ):
             raise ValueError("model_state_metadata_mismatch")
@@ -316,6 +320,7 @@ def model_metadata(
         "max_train_rows": spec.max_train_rows,
         "dependency_status": estimators.require_model_dependency(spec.model_algorithm),
         "training_weighting": spec.training_weighting.payload(),
+        "training_scaling": spec.training_scaling,
         "scaler": None if scaler is None else scaler.to_payload(),
     }
     if feature_importance is not None:
@@ -574,6 +579,7 @@ def _collect_training_frame(
         in {"equal_weight_rank_ensemble", "ic_weighted_rank_ensemble"},
         _native_missing(spec),
         sessions,
+        spec.training_scaling,
     )
 
 

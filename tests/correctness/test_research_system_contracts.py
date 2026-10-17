@@ -433,14 +433,23 @@ def test_forward_labels_exact_on_sparse_sessions_and_extreme_prices():
 
 
 @pytest.mark.parametrize("with_size", [False, True])
-def test_neutralization_is_bit_exact_for_dyadic_inputs(with_size):
+def test_neutralization_matches_independent_dyadic_oracle(with_size):
     rng = np.random.default_rng(27)
     target = np.ldexp(rng.normal(size=700), rng.integers(-100, 100, size=700))
     industry = pd.Series(np.arange(700) % 7)
     sizes = rng.normal(size=700) if with_size else None
     expected = _reference_residuals(target, industry, sizes)
     actual = _industry_size_residuals(target, industry, sizes, rescale=False)
-    np.testing.assert_array_equal(actual, expected)
+    # Error is measured in target units, including cancellation around zero.
+    np.testing.assert_allclose(
+        actual, expected, rtol=2e-14, atol=2e-14 * np.max(np.abs(target))
+    )
+    for group in industry.unique():
+        assert abs(actual[industry == group].mean()) <= 2e-14 * np.max(np.abs(target))
+    if with_size:
+        assert abs(np.dot(actual, sizes)) <= 2e-14 * np.linalg.norm(
+            target
+        ) * np.linalg.norm(sizes)
 
 
 @pytest.mark.parametrize("count", [32, 1080])

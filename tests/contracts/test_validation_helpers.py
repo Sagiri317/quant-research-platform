@@ -6,10 +6,26 @@ from datetime import timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 import pytest
 
 import quant_research_platform.contracts.validation as validation
+
+
+@pytest.mark.parametrize("storage", ["python", "pyarrow"])
+def test_real_numeric_string_dtype_uses_vectorized_parsing(monkeypatch, storage):
+    def unexpected_scalar_check(_value):
+        raise AssertionError("StringDtype cannot contain non-string objects")
+
+    monkeypatch.setattr(validation, "_is_hashable", unexpected_scalar_check)
+    values = pd.Series(["1.5", "bad", None, "inf"], dtype=pd.StringDtype(storage))
+    result = validation.strict_real_numeric_series(
+        values, error="numeric_invalid", errors="coerce"
+    )
+    pd.testing.assert_series_equal(result, pd.Series([1.5, np.nan, np.nan, np.inf]))
+    with pytest.raises(ValueError, match="numeric_invalid"):
+        validation.strict_real_numeric_series(values, error="numeric_invalid")
 
 
 @pytest.mark.parametrize(
@@ -377,3 +393,52 @@ def test_strict_timestamp_series_uses_vectorized_parse_for_large_string_input(
     assert len(calls) == 1
     assert isinstance(calls[0], pd.Series)
     assert result.dtype == "datetime64[ns]"
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        True,
+        np.bool_(False),
+        1 + 2j,
+        "bad",
+        10**4000,
+        [1, 2],
+        pd.Timestamp("2024-01-01"),
+        pd.Timedelta(days=1),
+    ],
+)
+def test_real_numeric_unavailable_cells_preserve_strict_default(invalid):
+    from quant_research_platform.contracts.validation import strict_real_numeric_series
+
+    values = pd.Series([2.5, invalid, None, "3.5", np.inf], dtype=object)
+    with pytest.raises(ValueError, match="numeric_invalid"):
+        strict_real_numeric_series(values, error="numeric_invalid")
+    result = strict_real_numeric_series(
+        values, error="numeric_invalid", errors="coerce"
+    )
+    assert result.iloc[0] == 2.5
+    assert result.iloc[1:3].isna().all()
+    assert result.iloc[3] == 3.5
+    assert result.iloc[4] == np.inf
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        pd.Series([True, False]),
+        pd.Series([1 + 2j, 3 + 0j]),
+        pd.Series(pd.to_datetime(["2024-01-01", None])),
+        pd.Series(pd.to_timedelta([1, 2], unit="D")),
+    ],
+)
+def test_real_numeric_coercion_does_not_convert_nonreal_dtypes(values):
+    from quant_research_platform.contracts.validation import strict_real_numeric_series
+
+    with pytest.raises(ValueError, match="numeric_invalid"):
+        strict_real_numeric_series(values, error="numeric_invalid")
+    assert (
+        strict_real_numeric_series(values, error="numeric_invalid", errors="coerce")
+        .isna()
+        .all()
+    )

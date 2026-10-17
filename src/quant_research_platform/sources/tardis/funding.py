@@ -155,7 +155,7 @@ def import_funding_history(
                 channels=tuple(archive.manifest["requested_channels"]),
             )
             with closing_iterator(records):
-                value = mark = forecast = None
+                value = mark = None
                 for _number, timestamp, value in records:
                     if value is None or value["stream"].split("@")[:2] != [
                         symbol.lower(),
@@ -177,43 +177,47 @@ def import_funding_history(
                     price = _nullable_funding_value(
                         mark.get("p"), strict_positive_float
                     )
-                    projection = tuple(
-                        (parsed, mark.get(field) if parsed is None else None)
-                        for field, parsed in (("T", until), ("r", rate), ("p", price))
-                    )
+                    projection = (until, rate, price)
                     if observed < previous_observed:
                         raise ValueError("tardis_funding_forecast_order_invalid")
                     if observed == previous_observed:
-                        if projection != previous_projection:
-                            raise ValueError("tardis_funding_forecast_conflict")
-                        continue
-                    previous_observed, previous_projection = observed, projection
-                    if until is None or until <= observed:
-                        forecast = FundingForecast(observed, observed, ())
-                    else:
-                        amount = (
-                            0.0
-                            if rate == 0.0 and price is None
-                            else None
-                            if rate is None or price is None
-                            else _nullable_funding_value(
-                                -rate * price, strict_finite_float
+                        # Equal-time observations have no causal winner. Each
+                        # disagreeing fact becomes unknown, independently.
+                        previous_projection = tuple(
+                            old if old == new else None
+                            for old, new in zip(
+                                previous_projection, projection, strict=True
                             )
                         )
-                        forecast = FundingForecast(observed, until, ((until, amount),))
-                    _yield_value = (
-                        "forecast",
-                        observed,
-                        forecast.known_until_ns,
-                        None,
-                        None,
-                        [list(item) for item in forecast.cashflows],
-                    )
-                    try:
-                        yield _yield_value
-                    except GeneratorExit:
-                        return
-                    value = mark = forecast = None
+                        continue
+                    if previous_projection is not None:
+                        yield forecast_row(previous_observed, previous_projection)
+                    previous_observed, previous_projection = observed, projection
+                    value = mark = None
+        if previous_projection is not None:
+            yield forecast_row(previous_observed, previous_projection)
+
+    def forecast_row(observed, projection):
+        until, rate, price = projection
+        if until is None or until <= observed:
+            forecast = FundingForecast(observed, observed, ())
+        else:
+            amount = (
+                0.0
+                if rate == 0.0 and price is None
+                else None
+                if rate is None or price is None
+                else _nullable_funding_value(-rate * price, strict_finite_float)
+            )
+            forecast = FundingForecast(observed, until, ((until, amount),))
+        return (
+            "forecast",
+            observed,
+            forecast.known_until_ns,
+            None,
+            None,
+            [list(item) for item in forecast.cashflows],
+        )
 
     def validate(root):
         checked, settlements = _manifest(root, symbol)

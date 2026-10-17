@@ -341,7 +341,7 @@ def test_paired_group_requires_its_bootstrap_inputs_before_reading(tmp_path):
                     },
                 },
                 "periods": [],
-                "global_statistics": "missing",
+                "global_predictions": ["missing"],
                 "selection_group": "quarterly",
             }
         )

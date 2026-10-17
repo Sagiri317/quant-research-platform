@@ -188,11 +188,9 @@ def test_required_missing_return_poisoning_survives_market_closure():
 @pytest.mark.parametrize(
     "column,value,error",
     (
-        ("float_market_cap", np.inf, "numeric"),
         ("period_return", np.inf, "numeric"),
         ("period_return", True, "numeric"),
         ("period_return", "invalid", "numeric"),
-        ("float_market_cap", 0.0, "key"),
         ("eligible", None, "eligibility"),
     ),
 )

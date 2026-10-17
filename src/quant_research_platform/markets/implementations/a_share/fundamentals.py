@@ -13,9 +13,9 @@ from quant_research_platform.contracts.validation import (
     finite_exact_float,
     strict_bool_series,
     strict_finite_numeric_series,
+    strict_real_numeric_series,
     strict_string_series,
     strict_timestamp_series,
-    validate_financial_disclosure_chronology,
 )
 
 FINANCIAL_VALUE_COLUMNS = {
@@ -65,18 +65,25 @@ def financial_events_from_interim(
     if tuple(disclosures.columns) != DISCLOSURE_COLUMNS:
         raise ValueError("financial_disclosure_schema_invalid")
     disclosure = disclosures.loc[:, DISCLOSURE_COLUMNS].copy()
-    disclosure["asset_id"] = strict_string_series(
-        disclosure["asset_id"], error="financial_disclosure_asset_invalid"
+    counts = {}
+    disclosure["asset_id"] = (
+        disclosure["asset_id"].astype("string").str.strip().replace("", pd.NA)
     )
     for column in DISCLOSURE_COLUMNS[1:]:
         disclosure[column] = strict_timestamp_series(
-            disclosure[column], error="financial_disclosure_date_invalid"
+            disclosure[column],
+            error="financial_disclosure_date_invalid",
+            allow_null=True,
+            errors="coerce",
         ).dt.normalize()
-    validate_financial_disclosure_chronology(
-        disclosure["report_period"], disclosure["first_disclosure_date"]
+    valid = disclosure.notna().all(axis=1) & disclosure["first_disclosure_date"].ge(
+        disclosure["report_period"]
     )
-    if disclosure.duplicated(["asset_id", "report_period"], keep=False).any():
-        raise ValueError("financial_disclosure_key_duplicate")
+    counts["excluded_invalid_disclosure_rows"] = int((~valid).sum())
+    disclosure = disclosure.loc[valid].drop_duplicates()
+    conflicts = disclosure.duplicated(["asset_id", "report_period"], keep=False)
+    counts["excluded_conflicting_disclosure_rows"] = int(conflicts.sum())
+    disclosure = disclosure.loc[~conflicts]
     sessions = pd.DatetimeIndex(trading_sessions).normalize().drop_duplicates()
     if sessions.empty or not sessions.is_monotonic_increasing:
         raise ValueError("financial_sessions_invalid")
@@ -96,72 +103,80 @@ def financial_events_from_interim(
         }
         if not required.issubset(frame.columns):
             raise ValueError("financial_interim_schema_invalid")
-        frame["asset_id"] = strict_string_series(
-            frame["source_asset_id"], error="financial_asset_invalid"
+        # Only consolidated reports are consumed by these metrics.
+        frame = frame.loc[frame["report_type"].eq("A")].copy()
+        frame["asset_id"] = (
+            frame["source_asset_id"].astype("string").str.strip().replace("", pd.NA)
         )
         frame["report_period"] = strict_timestamp_series(
-            frame["report_period"], error="financial_report_period_invalid"
+            frame["report_period"],
+            error="financial_report_period_invalid",
+            allow_null=True,
+            errors="coerce",
         ).dt.normalize()
-        frame["report_type"] = strict_string_series(
-            frame["report_type"], error="financial_report_type_invalid"
-        )
-        frame["is_corrected"] = strict_bool_series(
-            frame["is_corrected"], error="financial_correction_flag_invalid"
-        )
         frame["correction_disclosure_date"] = strict_timestamp_series(
             frame["correction_disclosure_date"],
             error="financial_correction_date_invalid",
             allow_null=True,
+            errors="coerce",
         ).dt.normalize()
-        if bool(
-            (frame["is_corrected"] & frame["correction_disclosure_date"].isna()).any()
-        ):
-            raise ValueError("financial_correction_disclosure_missing")
-        frame["version_identity"] = strict_string_series(
-            frame["version_identity"], error="financial_version_identity_invalid"
+        flags = (
+            frame["is_corrected"]
+            .map(lambda value: value if isinstance(value, (bool, np.bool_)) else pd.NA)
+            .astype("boolean")
         )
+        valid = (
+            frame["asset_id"].notna() & frame["report_period"].notna() & flags.notna()
+        )
+        valid &= flags.eq(frame["correction_disclosure_date"].notna()).fillna(False)
         expected_versions = pd.Series("original", index=frame.index, dtype="string")
-        corrected = frame["is_corrected"]
+        corrected = flags.fillna(False)
         expected_versions.loc[corrected] = "correction@" + frame.loc[
             corrected, "correction_disclosure_date"
         ].dt.strftime("%Y-%m-%d").astype("string")
-        if bool(frame["version_identity"].ne(expected_versions).any()):
-            raise ValueError("financial_version_identity_invalid")
+        valid &= frame["version_identity"].eq(expected_versions).fillna(False)
+        counts["excluded_invalid_version_rows"] = counts.get(
+            "excluded_invalid_version_rows", 0
+        ) + int((~valid).sum())
+        frame = frame.loc[valid].copy()
+        frame["is_corrected"] = flags.loc[valid].astype(bool)
         for column in value_columns:
-            frame[column] = strict_finite_numeric_series(
-                frame[column],
-                error=f"financial_value_invalid: {column}",
-                allow_null=True,
+            values = strict_real_numeric_series(
+                frame[column], error="invalid_financial_value", errors="coerce"
             )
+            frame[column] = values.where(np.isfinite(values))
         version_key = [
             "asset_id",
             "report_period",
             "report_type",
             "version_identity",
         ]
-        if bool(frame.duplicated(version_key, keep=False).any()):
-            raise ValueError("financial_version_key_duplicate")
-        frame = frame.loc[frame["report_type"].eq("A")]
+        frame = frame.drop_duplicates()
+        duplicate = frame.duplicated(version_key, keep=False)
+        if duplicate.any():
+            for column in value_columns:
+                conflict = (
+                    frame.loc[duplicate]
+                    .groupby(version_key)[column]
+                    .transform(lambda values: values.nunique(dropna=False))
+                    .gt(1)
+                )
+                frame.loc[conflict.index[conflict], column] = np.nan
+            frame = frame.drop_duplicates(version_key)
         frame = frame.merge(
             disclosure,
             on=("asset_id", "report_period"),
             how="left",
             validate="many_to_one",
         )
-        if bool(frame["first_disclosure_date"].isna().any()):
-            raise ValueError("financial_first_disclosure_missing")
-        invalid_original_correction_date = frame.loc[
-            ~frame["is_corrected"], "correction_disclosure_date"
-        ].notna()
-        if bool(invalid_original_correction_date.any()):
-            raise ValueError("financial_correction_date_invalid")
-        if bool(
-            (
-                frame.loc[frame["is_corrected"], "correction_disclosure_date"]
-                <= frame.loc[frame["is_corrected"], "first_disclosure_date"]
-            ).any()
-        ):
-            raise ValueError("financial_correction_before_first_disclosure")
+        valid = frame["first_disclosure_date"].notna() & (
+            ~frame["is_corrected"]
+            | frame["correction_disclosure_date"].gt(frame["first_disclosure_date"])
+        )
+        counts["excluded_unlocated_disclosure_rows"] = counts.get(
+            "excluded_unlocated_disclosure_rows", 0
+        ) + int((~valid).sum())
+        frame = frame.loc[valid].copy()
         frame["disclosure_date"] = frame["first_disclosure_date"].where(
             ~frame["is_corrected"], frame["correction_disclosure_date"]
         )
@@ -191,18 +206,21 @@ def financial_events_from_interim(
         )
         records.append(melted)
     if not records:
-        return pd.DataFrame(
-            columns=[
-                "asset_id",
-                "report_period",
-                "available_at",
-                "is_corrected",
-                "version_identity",
-                "metric_id",
-                "value",
-            ]
+        result = pd.DataFrame(
+            {
+                "asset_id": pd.Series(dtype="string"),
+                "report_period": pd.Series(dtype="datetime64[ns]"),
+                "available_at": pd.Series(dtype="datetime64[ns]"),
+                "is_corrected": pd.Series(dtype=bool),
+                "version_identity": pd.Series(dtype="string"),
+                "metric_id": pd.Series(dtype="string"),
+                "value": pd.Series(dtype="float64"),
+            }
         )
+        result.attrs["source_row_counts"] = counts
+        return result
     result = pd.concat(records, ignore_index=True)
+    result.attrs["source_row_counts"] = counts
     key = [
         "asset_id",
         "metric_id",
@@ -383,9 +401,10 @@ def _prepare_pit_fundamentals(events):
         right[column] = strict_timestamp_series(
             right[column], error="pit_event_date_invalid"
         ).dt.normalize()
-    right["value"] = strict_finite_numeric_series(
-        right["value"], error="pit_value_invalid", allow_null=True
+    values = strict_real_numeric_series(
+        right["value"], error="invalid_pit_value", errors="coerce"
     )
+    right["value"] = values.where(np.isfinite(values))
     right["version_identity"] = strict_string_series(
         right["version_identity"], error="pit_version_identity_invalid"
     )

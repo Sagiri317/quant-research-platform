@@ -2007,3 +2007,54 @@ def test_maker_source_context_requires_unique_observable_coverage(missing):
     )
     assert result["created_orders"] == 0
     assert result["undefined_decisions"] == 1
+
+
+@pytest.mark.parametrize("visible_quantity", [0.0, 3.0])
+@pytest.mark.parametrize(
+    "quote_active,maker_buyer", [(False, True), (True, False), (True, True)]
+)
+def test_maker_unknown_trade_price_blocks_only_dependent_order(
+    quote_active, maker_buyer, visible_quantity
+):
+    result = simulate_maker(
+        [_state(0), _state(200)],
+        [
+            replace(
+                _trade(100, price="99.5", quantity="3", maker_buyer=maker_buyer),
+                price_index=None,
+                visible_quantity=visible_quantity,
+            )
+        ],
+        [_quote(0, book_segment_id="s1")] if quote_active else [],
+        config=replace(_maker_config(), inventory_target=2.0, inventory_skew=1.0),
+        observed_coverage={"s1": _coverage(0, 201)},
+        trade_coverage={"trade-connection-1": _coverage(0, 201)},
+        capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
+        decision_windows_ns=((0, 200_000_000),),
+        on_ledger=lambda batch: None,
+    )
+    if quote_active and maker_buyer and visible_quantity:
+        assert result["account_path_status"] == "PARTIAL"
+        assert result["account_stop_reason"] == "hft_trade_price_unknown"
+        assert result["net_pnl"] is None
+    else:
+        assert result["account_path_status"] == "COMPLETE"
+        assert result["net_pnl"] == 0.0
+
+
+def test_known_zero_visible_trade_needs_no_price():
+    from types import SimpleNamespace
+
+    from quant_research_platform.markets.implementations.crypto.execution import (
+        _maker_trade_fill,
+    )
+
+    trade = replace(
+        _trade(100, price="99.5", quantity="3", maker_buyer=True),
+        price_index=None,
+        visible_quantity=0.0,
+    )
+    order = SimpleNamespace(trade_observation_id=trade.observation_id, side="buy")
+    assert _maker_trade_fill(order, trade) == (0.0, "zero_visible_trade_quantity")

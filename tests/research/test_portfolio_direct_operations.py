@@ -515,9 +515,10 @@ def test_explicit_native_fit_prediction_and_backtest_roundtrip(
         assert scans
         assert all("float_market_cap" not in columns for columns in scans)
         assert all(
-            {"timestamp", "asset_id", "eligible", "signal"} <= set(columns)
+            {"timestamp", "asset_id", "eligible"} <= set(columns)
+            and "signal" not in columns
             for columns in scans
-        )
+        ), scans
         excluded = {
             **config,
             "output": str(tmp_path / "excluded-price-ledger"),

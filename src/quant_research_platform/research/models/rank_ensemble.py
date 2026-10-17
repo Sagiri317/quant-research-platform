@@ -135,6 +135,32 @@ def _label_calibration(scores, labels, sample_weight) -> tuple[float, float]:
 
     weights = _weights(sample_weight, len(scores))
     labels = np.asarray(labels, dtype="float64")
+    scores = np.asarray(scores, dtype="float64")
+    # Centered weighted reductions handle ordinary training arrays in BLAS.
+    # Preserve exact accumulation for cancellation and unrepresentable products.
+    with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
+        mass = weights / weights.max()
+        mass /= mass.sum()
+        xbar, ybar = np.dot(mass, scores), np.dot(mass, labels)
+        x, y = scores - xbar, labels - ybar
+        variance = np.dot(mass * x, x)
+        covariance = np.dot(mass * x, y)
+        slope = covariance / variance
+        intercept = ybar - slope * xbar
+        bound = 16 * len(scores) * np.finfo(float).eps
+        safe = (
+            np.isfinite((variance, covariance, slope, intercept)).all()
+            and variance >= np.finfo(float).tiny
+            and abs(covariance) >= np.finfo(float).tiny
+            and np.max(np.abs(x))
+            > np.sqrt(np.finfo(float).eps) * np.max(np.abs(scores))
+            and np.max(np.abs(y))
+            > np.sqrt(np.finfo(float).eps) * np.max(np.abs(labels))
+            and abs(covariance) > bound * np.dot(mass * np.abs(x), np.abs(y))
+            and np.all(mass > 0)
+        )
+    if safe:
+        return float(intercept), float(slope)
     columns = []
     units = []
     for values in (scores, labels, weights):

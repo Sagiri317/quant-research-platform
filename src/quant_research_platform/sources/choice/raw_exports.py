@@ -218,7 +218,13 @@ class ChoiceRawSession:
                 rows=observed_rows(),
                 metadata=metadata,
                 validate=lambda staging: deque(
-                    _validated_rows(staging, request, metadata, require_complete=False),
+                    _validated_rows(
+                        staging,
+                        request,
+                        metadata,
+                        require_complete=False,
+                        verify_bytes=True,
+                    ),
                     maxlen=0,
                 ),
             )
@@ -231,9 +237,9 @@ class ChoiceRawSession:
 
 
 def read_choice_response(
-    root: Path, request: ChoiceRequest, *, manifest=None
+    root: Path, request: ChoiceRequest, *, manifest=None, verify_bytes: bool = False
 ) -> dict[str, object]:
-    """Restore a fully verified SDK response."""
+    """Restore typed provider observations; byte auditing is explicit and optional."""
     request.payload()
     metadata = response = header = {}
     data = [] if request.endpoint == "sector" else {}
@@ -242,7 +248,9 @@ def read_choice_response(
         manifest = read_qrp_json_file(root / "response.metadata.json")[1]
     metadata = manifest["metadata"]
     with closing_iterator(
-        _validated_rows(root, request, metadata, manifest=manifest)
+        _validated_rows(
+            root, request, metadata, manifest=manifest, verify_bytes=verify_bytes
+        )
     ) as rows:
         for count, row in enumerate(rows):
             header = metadata["response"]
@@ -389,17 +397,15 @@ def _validated_rows(
     *,
     require_complete: bool = True,
     manifest=None,
+    verify_bytes: bool = False,
 ) -> Iterator[tuple[object, ...]]:
-    if type(metadata) is not dict or set(metadata) != {
-        "request",
-        "response",
-        "collected_at",
-        "status",
-        "scope",
-        "units",
-        "types",
-        "data_container",
-    }:
+    required = {"request", "response", "data_container", "units", "types"}
+    diagnostics = {"collected_at", "status", "scope"}
+    if (
+        type(metadata) is not dict
+        or not required.issubset(metadata)
+        or (verify_bytes and set(metadata) != required | diagnostics)
+    ):
         raise ValueError("choice_saved_metadata_invalid")
     if metadata.get("request") != request.payload():
         raise ValueError("choice_saved_request_mismatch")
@@ -411,7 +417,10 @@ def _validated_rows(
         else "dict"
     ):
         raise ValueError("choice_saved_container_invalid")
-    if datetime.fromisoformat(metadata["collected_at"]).utcoffset() is None:
+    if (
+        verify_bytes
+        and datetime.fromisoformat(metadata["collected_at"]).utcoffset() is None
+    ):
         raise ValueError("choice_saved_collection_time_invalid")
     if (
         metadata["units"] != "provider_native_no_conversion"
@@ -432,7 +441,9 @@ def _validated_rows(
         raise ValueError("choice_saved_shape_invalid")
     scope = _empty_scope()
     count = 0
-    with closing_iterator(iter_csv_snapshot(root, expected_manifest=manifest)) as rows:
+    with closing_iterator(
+        iter_csv_snapshot(root, expected_manifest=manifest, verify_bytes=verify_bytes)
+    ) as rows:
         for row in rows:
             if len(row) != len(response["Indicators"]) + 2 or type(row[0]) is not str:
                 raise ValueError("choice_saved_shape_invalid")
@@ -457,11 +468,17 @@ def _validated_rows(
         response["Dates"]
     ):
         raise ValueError("choice_saved_shape_invalid")
-    if metadata["scope"] != scope or any(
-        type(metadata["scope"][key]) is not type(value) for key, value in scope.items()
+    if verify_bytes and (
+        metadata["scope"] != scope
+        or any(
+            type(metadata["scope"].get(key)) is not type(value)
+            for key, value in scope.items()
+        )
     ):
         raise ValueError("choice_saved_scope_invalid")
-    if metadata["status"] != ("COMPLETE" if response["ErrorCode"] == 0 else "FAILED"):
+    if verify_bytes and metadata["status"] != (
+        "COMPLETE" if response["ErrorCode"] == 0 else "FAILED"
+    ):
         raise ValueError("choice_saved_status_invalid")
     if require_complete and response["ErrorCode"] != 0:
         raise RuntimeError(f"choice_query_failed:{response['ErrorCode']}")

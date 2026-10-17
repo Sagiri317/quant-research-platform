@@ -623,21 +623,22 @@ def test_trade_resends_preserve_raw_bytes_and_count_each_identity_once(
         symbols=("btcusdt",),
         channels=("depth", "depthSnapshot", "aggTrade"),
     )
-    if resend != "duplicate":
-        with pytest.raises(ValueError, match="sequence_non_monotonic"):
-            import_slices(published, **kwargs)
-        assert not published.exists()
-        return
     manifest = import_slices(published, **kwargs)
     assert (published / manifest["files"][0]["path"]).read_bytes() == slices[
         0
     ].read_bytes()
-    assert manifest["gaps"]["record_count"] == 0
+    assert manifest["gaps"]["record_count"] == int(resend != "duplicate")
     market = SPOT_MARKET_TYPE if exchange == "binance" else FUTURES_MARKET_TYPE
     with open_market_source(published) as source:
         trades = list(iter_agg_trades(source, market, symbol="BTCUSDT"))
         assert [item.source_sequence for item in trades] == [2, 3, 5]
         assert sum(item.quantity for item in trades) == 9
+        coverage = source.observation_coverage(
+            market_type=market, data_kind="agg_trades", symbol="BTCUSDT"
+        )
+        if resend != "duplicate":
+            assert trades[-1].observation_id != trades[0].observation_id
+            assert coverage.covering(1788220803000000000, 1788220803000000000) == ()
         assert [item.event_time_ms for item in trades] == [
             1788220801000,
             1788220802000,
@@ -1690,7 +1691,7 @@ def test_late_snapshot_prefix_excludes_previous_observation(tmp_path):
     "bad,invalid",
     [
         ({"q": "0"}, True),
-        ({"p": "NaN"}, True),
+        ({"p": "NaN"}, False),
         ({"nq": "-1"}, True),
         ({"nq": "3"}, True),
         ({"m": None}, True),
@@ -1774,7 +1775,11 @@ def test_identifiable_native_trade_values_preserve_independent_facts(
         assert (trades[0].observation_id != trades[-1].observation_id) == invalid
         if not invalid:
             assert trades[1].quantity == 2.0
-            assert trades[1].visible_quantity == (0.0 if bad["nq"] == "0" else None)
+            if "p" in bad:
+                assert trades[1].price_index is None
+                assert trades[1].visible_quantity == 2.0
+            else:
+                assert trades[1].visible_quantity == (0.0 if bad["nq"] == "0" else None)
         coverage = source.observation_coverage(
             market_type=FUTURES_MARKET_TYPE, data_kind="agg_trades", symbol="BTCUSDT"
         )

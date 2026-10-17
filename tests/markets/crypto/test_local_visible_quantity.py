@@ -59,14 +59,21 @@ def test_public_panel_keeps_total_quantity_when_only_visible_quantity_is_unknown
     "bad",
     [{"q": "0"}, {"q": "NaN"}, {"p": "bad"}, {"p": "100.01"}, {"m": None}],
 )
-def test_missing_visible_quantity_does_not_rescue_invalid_independent_fact(
-    tmp_path, bad
-):
+def test_missing_visible_quantity_preserves_only_independent_known_facts(tmp_path, bad):
     raw = tmp_path / "raw"
     _recording(raw, {"nq": "missing", **bad})
     with open_market_source(raw) as source:
         events = list(iter_agg_trades(source, FUTURES_MARKET_TYPE, symbol="BTCUSDT"))
-    assert isinstance(events[3], TradeBoundary)
+    if "p" not in bad:
+        assert isinstance(events[3], TradeBoundary)
+    else:
+        # Unknown price and visible liquidity do not erase known total base flow.
+        assert all(isinstance(event, TradeEvent) for event in events)
+        assert events[3].price_index is None
+        assert events[3].visible_quantity is None
+        assert events[3].quantity == 0.1
+        assert events[3].buyer_is_maker is False
+        assert len({event.observation_id for event in events}) == 1
 
 
 def test_missing_visible_quantity_does_not_rescue_unlocatable_clock(tmp_path):

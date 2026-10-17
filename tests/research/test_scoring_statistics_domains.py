@@ -50,7 +50,7 @@ def _source(root, frame, declared, *, bare):
 
 @pytest.mark.parametrize("bare", [False, True])
 @pytest.mark.parametrize("partial_labels", [False, True])
-def test_exact_scoring_domain_and_strict_statistics_coverage(
+def test_exact_scoring_domain_and_persisted_statistics_coverage(
     tmp_path, bare, partial_labels
 ):
     stamps = pd.date_range("2020-01-01", periods=6).repeat(3)
@@ -159,9 +159,11 @@ def test_exact_scoring_domain_and_strict_statistics_coverage(
         "periods": [{**statistics["periods"][0], "selection": str(chosen)}],
     }
     selected.pop("family_ids")
+    baseline_losses = []
     for config in (statistics, selected):
         artifact = read_statistics_artifact(model_statistics(config))
         with artifact.table("model_losses.parquet") as losses:
+            baseline_losses.append(losses.copy())
             assert losses.observation_count.tolist() == expected_counts
             assert losses.loss.iloc[0] == pytest.approx(-1.0)
             if partial_labels:
@@ -229,13 +231,94 @@ def test_exact_scoring_domain_and_strict_statistics_coverage(
         "mature_label_rows_without_prediction": 0,
         "prediction_rows_without_label": 0,
     }
-    with pytest.raises(ValueError, match="missing_required_prediction_keys"):
-        model_statistics(
-            {
-                **selected,
-                "periods": [
-                    {**selected["periods"][0], "predictions": [str(incomplete)]}
-                ],
-                "output": str(tmp_path / "incomplete-statistics"),
-            }
+    # Selected and direct statistics consume actual saved keys. Historical X
+    # coverage cannot require predictions for an ineligible asset.
+    for index, config in enumerate((statistics, selected)):
+        artifact = read_statistics_artifact(
+            model_statistics(
+                {
+                    **config,
+                    "periods": [
+                        {**config["periods"][0], "predictions": [str(incomplete)]}
+                    ],
+                    "output": str(tmp_path / f"incomplete-statistics-{index}"),
+                }
+            )
         )
+        with artifact.table("model_losses.parquet") as losses:
+            pd.testing.assert_frame_equal(losses, baseline_losses[index])
+            assert losses.timestamp.tolist() == list(
+                pd.date_range("2020-01-04", periods=3)
+            )
+
+    # Give both actual PRED inputs explicit pre-evaluation chronology. Pairing
+    # uses the same current labels and real common keys, preserving the context
+    # clock even when one whole prediction session is absent.
+    paired_metadata = {
+        **metadata,
+        "model_facts": {**metadata["model_facts"], "selection_cutoff": "2020-01-03"},
+        "prediction_rows": None,
+        "effective_prediction_end": None,
+    }
+    reference = write_prediction_outputs(
+        output_path=tmp_path / "reference-predictions",
+        output_chunks=[rows],
+        metadata=paired_metadata,
+    )
+    for missing_session in (False, True):
+        current_rows = rows.loc[~rows.asset_id.eq("c")]
+        if missing_session:
+            current_rows = current_rows.loc[
+                ~current_rows.timestamp.eq(pd.Timestamp("2020-01-05"))
+            ]
+        current = write_prediction_outputs(
+            output_path=tmp_path / f"paired-predictions-{missing_session}",
+            output_chunks=[current_rows],
+            metadata=paired_metadata,
+        )
+        artifact = read_statistics_artifact(
+            model_statistics(
+                {
+                    **statistics,
+                    "selection_group": "quarterly",
+                    "global_predictions": [str(reference)],
+                    "analyses": ["model_losses"],
+                    "statistics": {
+                        **statistics["statistics"],
+                        "group_comparison": {
+                            "fdr_method": "BY",
+                            "alpha": 0.05,
+                            "confidence": 0.95,
+                            "seed": 1,
+                        },
+                    },
+                    "periods": [
+                        {**statistics["periods"][0], "predictions": [str(current)]}
+                    ],
+                    "output": str(tmp_path / f"paired-statistics-{missing_session}"),
+                }
+            )
+        )
+        with artifact.table("model_losses.parquet") as losses:
+            counts = expected_counts.copy()
+            if missing_session:
+                counts[1] = 0
+            assert losses.observation_count.tolist() == counts
+            assert len(losses) == 3
+            assert losses.loss.iloc[0] == pytest.approx(-1.0)
+        with artifact.table("model_group_comparison.parquet") as comparisons:
+            row = comparisons.iloc[0]
+            assert row.calendar_count == 3
+            assert row.observation_count == (
+                1 if partial_labels else 2 if missing_session else 3
+            )
+            assert row.fdr_family_size == 1
+            assert row.global_mean == pytest.approx(1.0)
+            assert row.quarterly_mean == pytest.approx(1.0)
+            assert row.mean_difference == pytest.approx(0.0)
+            if partial_labels or missing_session:
+                assert row.status == row.bootstrap_status == "UNDEFINED"
+                assert row.bootstrap_reason == "incomplete_session_clock"
+            else:
+                assert row.bootstrap_status == "DEFINED"
+                assert row.bootstrap_lower == row.bootstrap_upper == 0.0

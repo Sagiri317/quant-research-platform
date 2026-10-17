@@ -216,6 +216,51 @@ def _mad_winsorize(
 
 
 def _neutralization_design(industries, sizes):
+    """Cache grouped centered size coordinates for a shared valid domain."""
+    codes, groups = pd.factorize(industries, sort=False)
+    counts = np.bincount(codes, minlength=len(groups))
+    first = np.unique(codes, return_index=True)[1]
+    centered = None
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        if sizes is not None:
+            sizes = np.asarray(sizes, dtype="float64")
+            centered = sizes - sizes[first[codes]]
+            centered -= (np.bincount(codes, weights=centered) / counts)[codes]
+    return codes, counts, first, centered
+
+
+def _industry_size_residuals(target, industries, sizes, *, rescale, design=None):
+    """Grouped centered OLS, retaining exact residuals for severe cancellation."""
+    target = np.asarray(target, dtype="float64")
+    codes, counts, first, x = (
+        _neutralization_design(industries, sizes) if design is None else design
+    )
+    with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
+        y = target - target[first[codes]]
+        y -= (np.bincount(codes, weights=y) / counts)[codes]
+        residual = y
+        valid = np.isfinite(y).all() and np.max(np.abs(y)) >= np.finfo(float).tiny
+        if x is not None:
+            xx = np.dot(x, x)
+            valid = valid and np.isfinite(xx) and xx >= np.finfo(float).tiny
+            residual = y - x * (np.dot(x, y) / xx)
+        magnitude = np.max(np.abs(residual))
+        # Rescaling almost perfectly explained targets can amplify roundoff
+        # into a fabricated factor. Resolve that domain with the exact owner.
+        valid = (
+            valid
+            and np.isfinite(residual).all()
+            and (
+                magnitude
+                > 8 * counts.max() * np.finfo(float).eps * np.max(np.abs(target))
+            )
+        )
+        if valid:
+            return residual / magnitude if rescale else residual
+    return _exact_industry_size_residuals(target, industries, sizes, rescale=rescale)
+
+
+def _exact_neutralization_design(industries, sizes):
     """Prepare exact design moments once for targets with the same valid domain."""
     counts = industries.value_counts(sort=False)
     x_values = (
@@ -235,11 +280,9 @@ def _neutralization_design(industries, sizes):
     return counts, x_values, sums, xx
 
 
-def _industry_size_residuals(target, industries, sizes, *, rescale, design=None):
+def _exact_industry_size_residuals(target, industries, sizes, *, rescale):
     """Project binary64 inputs exactly onto industry intercepts and one size slope."""
-    counts, x_values, x_sums, xx = (
-        _neutralization_design(industries, sizes) if design is None else design
-    )
+    counts, x_values, x_sums, xx = _exact_neutralization_design(industries, sizes)
     y_values, y_scale = _integer_coordinates(target)
     sums = {group: [0, 0] for group in counts.index}
     for group, y, x in zip(industries, y_values, x_values, strict=True):

@@ -36,6 +36,7 @@ def prepare(tmp_path, rows, chunksize=1):
         writer = csv.DictWriter(handle, fieldnames=HEADER)
         writer.writeheader()
         writer.writerows(rows)
+    original = path.read_bytes()
     output = tmp_path / "interim"
     prepare_source(
         {
@@ -45,6 +46,7 @@ def prepare(tmp_path, rows, chunksize=1):
             "chunksize": chunksize,
         }
     )
+    assert path.read_bytes() == original
     return output
 
 
@@ -93,6 +95,7 @@ def test_optional_bad_values_are_unknown_and_counted_not_dropped(tmp_path):
         .isna()
         .all()
     )
+    assert frame.settlement_date_unresolved.tolist() == [True, False]
     assert frame.loc[1, "amount"] == -0.25
     assert frame.loc[1, "settlement_date"] == pd.Timestamp("1990-01-01")
     metadata = read_dataset_manifest_evidence(output)
@@ -116,15 +119,81 @@ def test_pre_ex_dates_and_source_amount_units_remain_facts():
     "changes",
     [{"Exdistdt": "bad"}, {"Stkcd": "bad"}, {"Disttyp": ""}],
 )
-def test_invalid_event_key_fails_explicitly(tmp_path, changes):
-    with pytest.raises(ValueError):
-        prepare(tmp_path, [row(**changes)])
-    assert not (tmp_path / "interim").exists()
+def test_invalid_event_key_excludes_only_unlocatable_row(tmp_path, changes):
+    output = prepare(tmp_path, [row(**changes), row(Stkcd="2", Amount="0.75")])
+    frame = read_dataset(output)
+    assert frame.source_asset_id.tolist() == ["000002"]
+    assert frame.amount.tolist() == [0.75]
+    counts = read_dataset_manifest_evidence(output)["producer_diagnostics"][
+        "source_row_counts"
+    ]
+    assert counts["raw_rows"] == 2
+    assert counts["excluded_missing_required_rows"] == 1
+    assert counts["retained_after_date_filter_rows"] == 1
 
 
-def test_conflicting_event_key_fails_explicitly(tmp_path):
-    with pytest.raises(ValueError, match="conflicting_csmar_primary_key_duplicates"):
-        prepare(tmp_path, [row(), row(Amount="0.5")])
+@pytest.mark.parametrize(
+    "changes", [{"Exdistdt": "bad"}, {"Stkcd": "bad"}, {"Disttyp": ""}]
+)
+def test_all_unlocatable_events_publish_typed_empty(tmp_path, changes):
+    output = prepare(tmp_path, [row(**changes)])
+    frame = read_dataset(output)
+    assert frame.empty
+    assert str(frame.timestamp.dtype) == "datetime64[ns]"
+    assert str(frame.market_type.dtype) == "Int64"
+    assert str(frame.amount.dtype) == "float64"
+    assert str(frame.settlement_date_unresolved.dtype) == "bool"
+    counts = read_dataset_manifest_evidence(output)["producer_diagnostics"][
+        "source_row_counts"
+    ]
+    assert counts["excluded_missing_required_rows"] == 1
+    assert counts["retained_after_date_filter_rows"] == 0
+
+
+@pytest.mark.parametrize("chunksize", (1, 100))
+def test_conflicting_event_amount_keeps_key_and_independent_facts(tmp_path, chunksize):
+    output = prepare(
+        tmp_path, [row(), row(Amount="0.5"), row(Stkcd="2", Amount="0.75")], chunksize
+    )
+    frame = read_dataset(output).set_index("source_asset_id")
+    assert len(frame) == 2
+    assert pd.isna(frame.loc["000001", "amount"])
+    assert frame.loc["000001", "timestamp"] == pd.Timestamp("2024-06-03")
+    assert frame.loc["000001", "kind"] == "CA"
+    assert frame.loc["000001", "settlement_date"] == pd.Timestamp("2024-06-05")
+    assert not frame.loc["000001", "settlement_date_unresolved"]
+    assert frame.loc["000002", "amount"] == 0.75
+    assert "version_identity" not in frame
+    counts = read_dataset_manifest_evidence(output)["producer_diagnostics"][
+        "source_row_counts"
+    ]
+    assert counts["conflicting_amount_rows"] == 2
+    assert counts["raw_rows"] == 3
+
+
+@pytest.mark.parametrize("payments", [("bad", ""), ("2024-06-05", "2024-06-06")])
+@pytest.mark.parametrize("chunksize", (1, 100))
+def test_unresolved_provided_payment_date_never_becomes_genuine_blank(
+    tmp_path, payments, chunksize
+):
+    output = prepare(
+        tmp_path,
+        [row(Paydt=value) for value in payments] + [row(Stkcd="2", Paydt="")],
+        chunksize,
+    )
+    frame = read_dataset(output).set_index("source_asset_id")
+    assert len(frame) == 2
+    assert frame.settlement_date.isna().all()
+    assert bool(frame.loc["000001", "settlement_date_unresolved"])
+    assert not bool(frame.loc["000002", "settlement_date_unresolved"])
+    assert frame.amount.tolist() == [0.25, 0.25]
+    counts = read_dataset_manifest_evidence(output)["producer_diagnostics"][
+        "source_row_counts"
+    ]
+    if "bad" in payments:
+        assert counts["invalid_settlement_date_rows"] == 1
+    else:
+        assert counts["conflicting_settlement_date_rows"] == 2
 
 
 def test_empty_source_has_stable_nullable_schema(tmp_path):

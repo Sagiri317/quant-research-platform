@@ -58,7 +58,7 @@ def test_no_selected_family_retains_undefined_statistics(tmp_path):
         },
         time_window=window,
         prediction_lookup=SimpleNamespace(coverage_counts=lambda: (0, 0)),
-        global_statistics=None,
+        global_prediction_lookup=None,
     )
     assert tables["prediction_diagnostics"].status.eq("UNDEFINED").all()
     assert tables["model_losses"].status.eq("UNDEFINED").all()

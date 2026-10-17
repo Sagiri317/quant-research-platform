@@ -147,6 +147,8 @@ def write_market_evidence(root, panel, *, bars=None, stocks=None):
                 "company_status": "active",
             }
         )
+    if "delisting_date_unresolved" not in stocks:
+        stocks = stocks.assign(delisting_date_unresolved=False)
     roots = {}
     corporate_spec = interim_catalog().get("corporate_actions")
     empty_actions = pd.DataFrame(

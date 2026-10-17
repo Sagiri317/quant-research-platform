@@ -368,7 +368,7 @@ def test_failed_family_keeps_planned_inference_members_without_fake_prediction(
         time_window=window,
         prediction_id="predictions",
         prediction_lookup=Lookup(),
-        global_statistics=None,
+        global_prediction_lookup=None,
         **inputs,
     )
     lost = tables["model_losses"].loc[lambda frame: frame.family_id.eq("failed")]
@@ -533,3 +533,108 @@ def test_factor_statistics_empty_selected_window_is_undefined(tmp_path):
             }
         )
     assert not missing_output.exists()
+
+
+@pytest.mark.parametrize("historical_x", ["excluded", "missing", "changed"])
+def test_selected_statistics_consumes_saved_predictions_without_historical_x(
+    tmp_path, historical_x
+):
+    from quant_research_platform.research.statistics_production import (
+        build_a_share_statistics_tables,
+    )
+    from quant_research_platform.storage.datasets.reading import open_dataset_session
+    from tests.helpers.statistics_artifacts import (
+        model_statistics_inputs,
+        statistics_config,
+    )
+
+    _, _, dates = _factor_tables(tmp_path)
+    session = open_dataset_session(tmp_path / "input")
+    spec = make_demo_research_dataset_spec(
+        data_id="direct_factor",
+        factor_columns=("factor",),
+        label_columns=("forward_return_20d", "forward_return_20d_available_at"),
+        filter_columns=("eligible",),
+        context_columns=("total_market_cap",),
+    )
+    # The persisted lookup is unchanged across historical feature mutations.
+    if historical_x != "excluded":
+        from quant_research_platform.storage.datasets import read_dataset
+
+        frame = read_dataset(tmp_path / "input")
+        frame["factor"] = np.nan if historical_x == "missing" else -1e9
+        write_dataset(tmp_path / "changed", frame, spec=spec)
+        session = open_dataset_session(tmp_path / "changed")
+    session = session.projected_view(
+        tuple(c for c in spec.column_roles if c != "factor")
+    )
+    config = statistics_config(factors=["factor"])
+    config["analyses"] = ["model_losses"]
+    config["statistics"].pop("group_comparison")
+    window = TimeWindow(dates[0].date(), dates[-1].date())
+    inputs = model_statistics_inputs(spec, config, window, families=("working",))
+
+    class Lookup:
+        def values_for_frame(self, keys, *, mark_matched):
+            return keys.asset_id.astype(float).to_numpy(), np.ones(
+                len(keys), dtype=bool
+            )
+
+        def coverage_counts(self):
+            return (0, 0)
+
+    tables = build_a_share_statistics_tables(
+        dataset_path=tmp_path / "input",
+        dataset_session=session,
+        dataset_spec=spec,
+        config=config,
+        time_window=window,
+        prediction_id="saved",
+        prediction_lookup=Lookup(),
+        global_prediction_lookup=None,
+        **inputs,
+    )
+    assert len(tables["model_losses"]) == len(dates)
+    assert tables["model_losses"].status.iloc[:-1].eq("DEFINED").all()
+    assert tables["model_losses"].status.iloc[-1] == "UNDEFINED"
+
+
+@pytest.mark.parametrize("invalid_cap", [0.0, -1.0])
+def test_public_factor_statistics_preserves_equal_weight_with_bad_cap(
+    tmp_path, invalid_cap
+):
+    from quant_research_platform.research.statistics_production import factor_statistics
+    from quant_research_platform.storage.datasets import read_dataset
+
+    tables, metadata, _ = _factor_tables(tmp_path)
+    frame = read_dataset(tmp_path / "input")
+    frame.loc[frame.asset_id.eq("0"), "total_market_cap"] = invalid_cap
+    spec = make_demo_research_dataset_spec(
+        data_id="direct_factor",
+        factor_columns=("factor",),
+        label_columns=("forward_return_20d", "forward_return_20d_available_at"),
+        filter_columns=("eligible",),
+        context_columns=("total_market_cap",),
+    )
+    write_dataset(tmp_path / "bad-cap", frame, spec=spec)
+    path = factor_statistics(
+        {
+            "dataset": str(tmp_path / "bad-cap"),
+            "output": str(tmp_path / "statistics"),
+            **metadata,
+            "analyses": ["fama_macbeth"],
+            "evaluation": {
+                "primary_label": "forward_return_20d",
+                "factors": ["factor"],
+            },
+            "statistics": {"fama_macbeth_core_factors": [], "hac_lag": 1},
+        }
+    )
+    with read_statistics_artifact(path).table("fama_macbeth_periods.parquet") as actual:
+        equal = actual.regression_id.str.startswith("equal:")
+        expected = tables["fama_macbeth_periods"].loc[equal].copy()
+        expected["reason"] = expected.reason.fillna("").astype(str)
+        expected["white_reason"] = expected.white_reason.fillna("").astype(str)
+        pd.testing.assert_frame_equal(actual.loc[equal], expected)
+        assert actual.loc[~equal, "status"].eq("DEFINED").all()
+        assert actual.loc[~equal, "observation_count"].eq(4).all()

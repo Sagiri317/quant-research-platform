@@ -222,6 +222,7 @@ def test_a_share_assembler_persists_only_eligible_sample_truth(
         "is_pt": False,
         "listing_date": pd.Timestamp("2020-01-01"),
         "delisting_date": pd.NaT,
+        "delisting_date_unresolved": False,
         "listing_age_trading_days": 252,
         "has_252_trading_sessions": True,
         "industry_standard_id": "CSRC2012",
@@ -584,8 +585,13 @@ def test_native_neutralization_zscore_publishes_representable_extreme_cross_sect
             size_column="log_total_market_cap",
             rescale=False,
         )
-        np.testing.assert_array_equal(
-            actual_raw.earnings_yield, [float(v) for v in residual]
+        expected_raw = np.asarray([float(v) for v in residual])
+        # Compare in residual units, not the possibly enormous input level.
+        np.testing.assert_allclose(
+            actual_raw.earnings_yield,
+            expected_raw,
+            rtol=2e-14,
+            atol=8 * np.finfo(float).eps * np.max(np.abs(expected_raw)),
         )
 
     recipe = (FeatureTransformSpec("a_share_canonical", ("earnings_yield",)),)

@@ -97,6 +97,7 @@ def test_enhanced_decision_requires_history_for_current_industry_domain() -> Non
             current_cross=cross,
             calibration_rows=[],
             calibration_intervals=scheduled,
+            trading_sessions=pd.DatetimeIndex([pd.Timestamp("2020-01-07")]),
             as_of=pd.Timestamp("2020-01-07"),
             risk_style_columns=("style",),
         )
@@ -134,7 +135,7 @@ class _PredictionLookup:
                 )
             )
         values = frame["asset_id"].map({"a": 0.0, "b": 1.0}).to_numpy()
-        found = bytearray([0 if self.missing else 1] * len(values))
+        found = bytearray(not self.missing and pd.notna(value) for value in values)
 
         def result():
             return (values, found)
@@ -508,15 +509,6 @@ def _build_producer(
             or TimeWindow("2022-12-01", "2023-01-10"),
             prediction_window=prediction_window,
             prediction_lookup=prediction_lookup or _PredictionLookup(),
-            prediction_domains=(
-                (
-                    prediction_window
-                    or formal_dataset_window
-                    or TimeWindow("2022-12-01", "2023-01-10"),
-                    model_inputs,
-                    model_algorithm,
-                ),
-            ),
             frozen_calibration=frozen_calibration,
             assumptions=assumptions,
             risk_config=risk_config,
@@ -1375,11 +1367,11 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
         calibrations = {}
 
         def bounded_calibrate(frame, **kwargs):
-            assert (
-                kwargs["scheduled_intervals"]
-                .timestamp.ge(pd.Timestamp("2022-12-01"))
-                .all()
+            # Shortening saved-score history must not shrink the planned clock.
+            assert kwargs["scheduled_intervals"].timestamp.min() == pd.Timestamp(
+                "2022-11-18"
             )
+            assert frame.timestamp.ge(pd.Timestamp("2022-12-01")).all()
             calibrated = original_calibrate(frame, **kwargs)
             calibrations[pd.Timestamp(kwargs["as_of"])] = calibrated
             return calibrated
@@ -1400,11 +1392,11 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
         list(short)
         decision_calibration = calibrations[pd.Timestamp("2023-01-06")]
         final_calibration = calibrations[pd.Timestamp(output_window.end)]
-        assert decision_calibration.scheduled_rebalance_dates == 4
-        assert decision_calibration.coverage == 1.0
+        assert decision_calibration.scheduled_rebalance_dates == 6
+        assert decision_calibration.coverage == pytest.approx(4 / 6)
         assert decision_calibration.benchmark_only
-        assert final_calibration.scheduled_rebalance_dates == 5
-        assert final_calibration.coverage == 1.0
+        assert final_calibration.scheduled_rebalance_dates == 7
+        assert final_calibration.coverage == pytest.approx(5 / 7)
         assert final_calibration.benchmark_only
         assert min((timestamp for timestamp, _asset in lookup.matched)) >= pd.Timestamp(
             "2022-12-01"
@@ -1844,13 +1836,14 @@ def test_missing_open_cannot_borrow_its_future_close():
 
 
 @pytest.mark.parametrize("invalid", (0.0, -1.0, np.inf, -np.inf))
-def test_research_marks_reject_invalid_raw_price_before_projection(invalid):
+def test_research_marks_treat_invalid_raw_price_as_unavailable(invalid):
     marks = production._ResearchValuationMarks()
     marks.project(_mark_view("2023-01-04", 10.0, 11.0))
     view = _mark_view("2023-01-05", invalid, np.nan)
     view.valuation.loc[:, ["open", "close"]] = np.nan
-    with pytest.raises(ValueError, match="portfolio_return_invalid"):
-        marks.project(view)
+    result = marks.project(view)
+    assert result.open.iloc[0] == 11.0
+    assert result.research_open_mark_kind.iloc[0] == "ordinary_missing_quote"
 
 
 def test_multiple_unquoted_sessions_native_roundtrip_and_absolute_nav_stresses(
@@ -2309,6 +2302,7 @@ def test_enhanced_risk_fits_styles_on_eligible_and_retains_ineligible_asset_axis
             current_cross=frame,
             calibration_rows=[],
             calibration_intervals=scheduled,
+            trading_sessions=pd.DatetimeIndex([pd.Timestamp("2020-01-08")]),
             as_of=pd.Timestamp("2020-01-08"),
             risk_style_columns=RISK_STYLE_COLUMNS,
         ).exposures.set_index("asset_id")
@@ -2408,7 +2402,7 @@ def test_risk_cross_uses_all_a_facts_and_persisted_styles():
 
 
 @pytest.mark.parametrize("can_exit", [True, False, None])
-def test_feature_missing_held_asset_preserves_holdings_without_trading(
+def test_feature_missing_held_asset_keeps_saved_prediction(
     tmp_path, monkeypatch, can_exit
 ):
     frames, fee_frame, output_window = _inputs()
@@ -2440,8 +2434,8 @@ def test_feature_missing_held_asset_preserves_holdings_without_trading(
     held = output.loc[output.asset_id.eq("b")]
     assert held.iloc[0].end_notional > 0.0
     later = held.loc[held.decision_timestamp.ge(second)]
-    assert later.prediction_rank_score.isna().all()
-    assert all((asset != "b" for date, asset in lookup.matched if date >= second))
+    assert later.prediction_rank_score.eq(1.0).all()
+    assert any(asset == "b" for date, asset in lookup.matched if date >= second)
     assert later.post_trade_notional.gt(0.0).all()
     assert later.executed_delta_notional.eq(0.0).all()
     assert later.target_notional.gt(0.0).all()
@@ -2617,6 +2611,8 @@ def test_final_alpha_includes_last_mature_session_and_persists_without_fake_trad
         output_window=window,
         candidate=candidate,
         final_calibrations=final,
+        input_window=TimeWindow("2022-11-14", "2023-01-10"),
+        prediction_window=TimeWindow("2022-11-14", "2023-01-10"),
     )
     batches = list(chunks)
     assert len(final) == 1
@@ -2830,6 +2826,7 @@ def test_enhanced_risk_scaler_uses_complete_known_industry_domain(extra_style):
             current_cross=frame,
             calibration_rows=[],
             calibration_intervals=pd.DataFrame(),
+            trading_sessions=pd.DatetimeIndex([pd.Timestamp("2020-01-03")]),
             as_of=pd.Timestamp("2020-01-03"),
             risk_style_columns=("style",),
             frozen_calibration=calibration,
@@ -2868,7 +2865,7 @@ def test_enhanced_risk_scaler_uses_complete_known_industry_domain(extra_style):
 
 
 @pytest.mark.parametrize("invalid", (-1.0, float("inf"), -float("inf")))
-def test_amount_history_rejects_invalid_present_amounts(invalid):
+def test_amount_history_records_invalid_amounts_as_unknown(invalid):
     panel = pd.DataFrame(
         {
             "listing_date": pd.Timestamp("2000-01-01"),
@@ -2876,8 +2873,9 @@ def test_amount_history_rejects_invalid_present_amounts(invalid):
             "amount": [invalid],
         }
     )
-    with pytest.raises(ValueError, match="portfolio_amount_invalid"):
-        production._update_amount_history(panel, {}, frozenset(), frozenset())
+    history = {}
+    production._update_amount_history(panel, history, frozenset(), frozenset())
+    assert np.isnan(history[("unrelated", pd.Timestamp("2000-01-01"))][0])
 
 
 def test_amount_history_keeps_unknown_session_until_it_leaves_adv_window():
@@ -3013,7 +3011,7 @@ def test_half_step_rebalance_uses_existing_ledger_and_preserves_residual_cash(
     "construction",
     ("quantile_equal_weight", "quantile_float_cap", "quantile_equal_weight_half_step"),
 )
-@pytest.mark.parametrize("empty_reason", ("ineligible", "structural"))
+@pytest.mark.parametrize("empty_reason", ("ineligible", "missing_prediction"))
 @pytest.mark.parametrize("state", ("cash", "sellable", "blocked", "closed", "unknown"))
 def test_empty_selection_executes_zero_target_without_bypassing_market_facts(
     construction, empty_reason, state
@@ -3021,11 +3019,11 @@ def test_empty_selection_executes_zero_target_without_bypassing_market_facts(
     frames, fee_frame, _ = _inputs()
     stamp, entry, end = pd.to_datetime(["2023-01-03", "2023-01-04", "2023-01-05"])
     dataset = frames["dataset"].loc[frames["dataset"].timestamp.eq(stamp)].copy()
-    dataset["feature_x"] = np.nan if empty_reason == "structural" else 1.0
+    dataset["feature_x"] = np.nan if empty_reason == "missing_prediction" else 1.0
     dataset["eligible"] = empty_reason != "ineligible"
     lookup = _PredictionLookup(missing=True)
-    alpha = production._prediction_alpha(dataset, lookup, ("feature_x",))
-    assert lookup.matched == []
+    alpha = production._prediction_alpha(dataset, lookup)
+    assert len(lookup.matched) == len(dataset)
     candidate = PortfolioCandidateSpec(
         selection_group="global",
         prediction_selector="champion",
@@ -3091,7 +3089,7 @@ def test_empty_selection_executes_zero_target_without_bypassing_market_facts(
     ).close.reindex(kwargs["holdings"].index)
     account, _adv, _optimization, _delta, snapshot = production._build_session(**kwargs)
     ledger = account.asset_ledger
-    if empty_reason == "structural":
+    if empty_reason == "missing_prediction":
         assert ledger.executed_delta_notional.eq(0.0).all()
         assert ledger[list(PORTFOLIO_LEDGER_COST_COLUMNS)].to_numpy().sum() == 0.0
         assert account.post_trade_cash == (100.0 if state == "cash" else 50.0)
@@ -3142,7 +3140,7 @@ def test_nonempty_selection_still_requires_valid_predictions(problem):
         ValueError,
         match="portfolio_prediction_values_invalid",
     ):
-        production._prediction_alpha(frame, Lookup(), ("x",))
+        production._prediction_alpha(frame, Lookup())
 
 
 @pytest.mark.parametrize(
@@ -3419,6 +3417,7 @@ def test_unheld_scoring_asset_calibration_binds_signal_entry_and_completion(
             values, found = super().values_for_frame(frame, mark_matched=mark_matched)
             values = values.copy()
             values[frame.asset_id.eq("c").to_numpy()] = 2.0
+            found = bytearray(bool(np.isfinite(value)) for value in values)
             return values, found
 
     completed = {}

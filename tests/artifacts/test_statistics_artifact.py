@@ -314,6 +314,9 @@ def test_group_comparison_integral_counts_round_trip(tmp_path, tables, metadata,
     tables["model_group_comparison"]["observation_count"] = pd.Series(
         [count], dtype=object
     )
+    tables["model_group_comparison"]["calendar_count"] = pd.Series(
+        [count], dtype=object
+    )
     root = statistics.write_statistics_artifact(
         tmp_path / "valid",
         metadata=metadata,
@@ -323,7 +326,7 @@ def test_group_comparison_integral_counts_round_trip(tmp_path, tables, metadata,
     artifact = statistics.read_statistics_artifact(root)
     with artifact.table("model_group_comparison.parquet") as frame:
         assert frame.observation_count.tolist() == [count]
-        assert frame.calendar_count.tolist() == [64]
+        assert frame.calendar_count.tolist() == [count]
 
 
 @pytest.mark.parametrize(
@@ -893,7 +896,6 @@ def test_paired_rankic_and_champion_diagnostics_reach_native_artifacts(
         },
     }
     expected = {}
-    global_artifact = None
     for group in ("global", "quarterly"):
         bound = {
             **metadata,
@@ -925,21 +927,25 @@ def test_paired_rankic_and_champion_diagnostics_reach_native_artifacts(
         )
         if group == "quarterly":
             selected["model_group_comparison"] = production._paired_group_rankic(
-                losses[group],
-                global_statistics=global_artifact,
+                losses[group].assign(
+                    **{
+                        "global": -losses["global"].loss,
+                        "quarterly": -losses[group].loss,
+                    }
+                ),
+                inference_blocker="selection_reuses_evaluation_window"
+                if access == "validation"
+                else None,
                 selection_group=group,
                 family_ids=("family",),
                 config=config,
-                target_metadata=bound,
             )
         logical = tmp_path / group
         root = statistics.write_statistics_artifact(
             logical, metadata=bound, tables=selected
         )
         artifact = statistics.read_statistics_artifact(root)
-        if group == "global":
-            global_artifact = artifact
-        else:
+        if group == "quarterly":
             with artifact.table("model_group_comparison.parquet") as paired:
                 row = paired.iloc[0]
                 assert row.observation_count == 4 and row.calendar_count == 5
@@ -1265,12 +1271,10 @@ def test_paired_group_fdr_methods_reach_native_artifact(
         },
     }
     produced = _paired_group_rankic(
-        right,
-        global_statistics=GlobalStatistics(),
+        right.assign(**{"global": -left.loss, "quarterly": -right.loss}),
         selection_group="quarterly",
         family_ids=("family",),
         config=config,
-        target_metadata={**bound, "selection_group": "quarterly"},
     )
     assert produced.status.eq("DEFINED").all()
     assert produced.fdr_adjusted_p_value.notna().all()

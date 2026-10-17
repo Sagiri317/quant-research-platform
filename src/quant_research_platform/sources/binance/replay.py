@@ -1685,11 +1685,6 @@ def iter_agg_trades(
                 quantity = strict_positive_float(
                     payload.get("q"), error="binance_replay_trade_quantity_invalid"
                 )
-                price_index = price_to_index(
-                    payload.get("p"),
-                    record["price_unit"],
-                    error="binance_replay_trade_price_invalid",
-                )
                 visible_quantity = _visible_trade_quantity(
                     market_type,
                     payload,
@@ -1729,6 +1724,15 @@ def iter_agg_trades(
                 except GeneratorExit:
                     return
                 continue
+            # Execution price does not determine independently known base flow.
+            try:
+                price_index = price_to_index(
+                    payload.get("p"),
+                    record["price_unit"],
+                    error="binance_replay_trade_price_invalid",
+                )
+            except ValueError:
+                price_index = None
             trade = TradeEvent(
                 source_sequence=record["source_sequence"],
                 event_time_ms=event_time,

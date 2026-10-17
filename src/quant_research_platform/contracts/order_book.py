@@ -71,7 +71,7 @@ class TradeEvent:
     observation_id: str
     market_type: str
     price_unit: str
-    price_index: int
+    price_index: int | None
     quantity: float
     visible_quantity: float | None
     buyer_is_maker: bool

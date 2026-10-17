@@ -43,12 +43,11 @@ from quant_research_platform.contracts.time import (
 )
 from quant_research_platform.contracts.validation import (
     strict_finite_float,
+    strict_real_numeric_series,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.features.transforms import (
     _industry_group_codes,
-    model_input_validity_columns,
-    model_observed_input_mask,
 )
 from quant_research_platform.research.filtering import (
     A_SHARE_ELIGIBILITY_FACTS,
@@ -60,6 +59,7 @@ from quant_research_platform.research.portfolios.accounting import (
     ExecutionAccounting,
     adjust_carried_share_mark,
     alpha_calibration_intervals,
+    alpha_calibration_start,
     alpha_interval_semantics,
     calibrate_expected_alpha,
     execute_continuous_target,
@@ -217,12 +217,19 @@ class _ResearchValuationMarks:
                 self.cancelled_lifecycles.add(identity)
                 settled_lifecycles.append(identity)
                 self.rights_quotes.pop(identity, None)
-        observed = view.panel.set_index("asset_id")
+        observed = view.panel.set_index("asset_id").copy()
         current = view.valuation.set_index("asset_id").copy()
         for frame in (observed, current):
-            values = frame[["open", "close"]].astype("float64")
-            if ((~np.isfinite(values) | values.le(0)) & values.notna()).any(axis=None):
-                raise ValueError("portfolio_return_invalid")
+            values = (
+                frame[["open", "close"]]
+                .apply(
+                    strict_real_numeric_series,
+                    error="portfolio_return_invalid",
+                    errors="coerce",
+                )
+                .astype("float64")
+            )
+            frame[["open", "close"]] = values.where(np.isfinite(values) & values.gt(0))
         if self.rights_quotes:
             current = current.astype({"open": "object", "close": "object"})
         for asset, listing in (*self.rights_quotes, *settled_lifecycles):
@@ -269,6 +276,7 @@ class _ResearchValuationMarks:
                 for asset, listing in current.listing_date.items()
             ],
             index=assets,
+            dtype=bool,
         )
         same_life &= ~unproved_rights
         current.loc[unproved_rights, ["open", "close"]] = np.nan
@@ -320,6 +328,7 @@ class _ResearchValuationMarks:
                     for asset, listing in current.listing_date.items()
                 ],
                 index=assets,
+                dtype=bool,
             )
             cancelled = pd.Series(
                 [
@@ -327,6 +336,7 @@ class _ResearchValuationMarks:
                     for asset, listing in current.listing_date.items()
                 ],
                 index=assets,
+                dtype=bool,
             )
             zero = (
                 (delisted & ~assets.isin(known.index)) | cancelled
@@ -494,7 +504,6 @@ def backtest_a_share(
     frozen_calibration: AlphaCalibration | None = None,
     on_final_calibration=None,
     prediction_lookup: object,
-    prediction_domains: tuple[tuple[TimeWindow, tuple[str, ...], str], ...],
     assumptions: ExecutionAssumptions,
 ) -> Iterator[PortfolioLedgerBatch]:
     """Build formal candidate sessions from bounded, exact-date reads."""
@@ -525,6 +534,7 @@ def backtest_a_share(
     except (TypeError, ValueError) as exc:
         raise ValueError("portfolio_trading_calendar_invalid") from exc
     sessions = sessions.normalize().drop_duplicates().sort_values()
+    trading_sessions = sessions
     session_start = pd.Timestamp(input_window.start).normalize()
     session_end = min(
         pd.Timestamp(input_window.end).normalize(),
@@ -546,7 +556,7 @@ def backtest_a_share(
     prediction_window = prediction_window or TimeWindow(
         max(
             pd.Timestamp(formal_dataset_window.start),
-            output_start - pd.DateOffset(months=12),
+            alpha_calibration_start(trading_sessions, as_of=output_start),
         ).date(),
         pd.Timestamp(output_window.end).date(),
     )
@@ -554,35 +564,6 @@ def backtest_a_share(
     dataset_options["columns"] = ("timestamp", "asset_id")
     dataset_session = open_dataset_session(**dataset_options)
     declared_columns = dataset_session.spec["column_roles"]
-    domains = tuple(
-        (
-            window,
-            columns,
-            tuple(
-                dict.fromkeys(
-                    (
-                        *columns,
-                        *model_input_validity_columns(
-                            columns, algorithm, declared_columns
-                        ),
-                    )
-                )
-            ),
-        )
-        for window, columns, algorithm in prediction_domains
-    )
-
-    def validity_at(timestamp):
-        matches = [
-            columns
-            for window, columns, _ in domains
-            if pd.Timestamp(window.start) <= timestamp
-            and (window.end is None or timestamp <= pd.Timestamp(window.end))
-        ]
-        if len(matches) != 1:
-            raise ValueError("portfolio_prediction_domain_coverage_invalid")
-        return matches[0]
-
     dataset_business_columns = (
         ("float_market_cap",)
         if candidate.construction == "quantile_float_cap"
@@ -596,19 +577,8 @@ def backtest_a_share(
         dataset_business_columns = tuple(
             dict.fromkeys((*dataset_business_columns, candidate.size_cap_column))
         )
-    dataset_columns = tuple(
-        dict.fromkeys(
-            (
-                *_DATASET_COLUMNS,
-                *dataset_business_columns,
-                *(column for _, _, columns in domains for column in columns),
-            )
-        )
-    )
+    dataset_columns = (*_DATASET_COLUMNS, *dataset_business_columns)
     alpha_start = max(session_start, pd.Timestamp(prediction_window.start))
-    calibration_intervals = calibration_intervals.loc[
-        calibration_intervals.timestamp.ge(alpha_start)
-    ].copy()
     fee_root = inputs["fees"]
     fee_identity = str(_dataset_input_options(fee_root)["dataset_root"])
     fee_frame = _read_materialized(fee_root, _FEE_COLUMNS, business_columns=("rate",))
@@ -788,14 +758,17 @@ def backtest_a_share(
                         (current_cross, carried), ignore_index=True
                     )
                 previous_risk_cross = current_cross.copy(deep=True)
-                if calibration_rows and calibration_rows[0][
-                    "timestamp"
-                ] < decision_timestamp - pd.DateOffset(months=12):
+                calibration_start = alpha_calibration_start(
+                    trading_sessions, as_of=decision_timestamp
+                )
+                if (
+                    calibration_rows
+                    and calibration_rows[0]["timestamp"] < calibration_start
+                ):
                     calibration_rows[:] = [
                         row
                         for row in calibration_rows
-                        if row["timestamp"]
-                        >= decision_timestamp - pd.DateOffset(months=12)
+                        if row["timestamp"] >= calibration_start
                     ]
                 if (
                     pending_calibration is not None
@@ -839,8 +812,6 @@ def backtest_a_share(
                     alpha = _prediction_alpha(
                         dataset,
                         prediction_lookup,
-                        validity_at(decision_timestamp),
-                        declared_columns=declared_columns,
                     )
                     has_next_session = position + 1 < len(sessions)
                     if (
@@ -893,8 +864,6 @@ def backtest_a_share(
                 alpha = _prediction_alpha(
                     dataset,
                     prediction_lookup,
-                    validity_at(decision_timestamp),
-                    declared_columns=declared_columns,
                 )
             if decision_timestamp not in output_intervals.index:
                 continue
@@ -965,6 +934,7 @@ def backtest_a_share(
                         current_cross=current_cross,
                         calibration_rows=calibration_rows,
                         calibration_intervals=calibration_intervals,
+                        trading_sessions=trading_sessions,
                         as_of=decision_timestamp,
                         risk_style_columns=risk_style_columns,
                         frozen_calibration=frozen_calibration,
@@ -1151,6 +1121,7 @@ def backtest_a_share(
                     calibration_rows,
                     calibration_intervals,
                     as_of=pd.Timestamp(output_window.end),
+                    trading_sessions=trading_sessions,
                 )
             on_final_calibration(
                 {
@@ -1420,13 +1391,14 @@ def _benchmark_weights(
     )
 
 
-def _calibration_fact(rows, intervals, *, as_of):
+def _calibration_fact(rows, intervals, *, as_of, trading_sessions):
     return calibrate_expected_alpha(
         pd.DataFrame(
             rows, columns=["timestamp", "prediction_rank_score", "holding_return"]
         ),
         as_of=as_of,
         scheduled_intervals=intervals,
+        trading_sessions=trading_sessions,
     )
 
 
@@ -1438,6 +1410,7 @@ def _enhanced_decision(
     current_cross: pd.DataFrame,
     calibration_rows: list[dict[str, object]],
     calibration_intervals: pd.DataFrame,
+    trading_sessions: pd.DatetimeIndex,
     as_of: pd.Timestamp,
     risk_style_columns: tuple[str, ...],
     frozen_calibration: AlphaCalibration | None = None,
@@ -1446,6 +1419,7 @@ def _enhanced_decision(
         calibration_rows,
         calibration_intervals,
         as_of=as_of,
+        trading_sessions=trading_sessions,
     )
     expected = pd.Series(np.nan, index=alpha.index, dtype="float64")
     if not calibration.benchmark_only:
@@ -2311,18 +2285,12 @@ def _build_session(
 def _prediction_alpha(
     dataset: pd.DataFrame,
     prediction_lookup: object,
-    input_columns: tuple[str, ...],
-    *,
-    declared_columns=None,
 ) -> pd.Series:
     dataset = dataset.set_index("asset_id", drop=False)
     eligible = _bool_series(dataset["eligible"], "portfolio_eligibility_invalid")
-    prediction_eligible = eligible & model_observed_input_mask(
-        dataset,
-        input_columns,
-        dataset.columns if declared_columns is None else declared_columns,
-    )
-    required_rows = dataset.loc[prediction_eligible, ["timestamp", "asset_id"]]
+    # Match supplied keys against context even when current eligibility forbids
+    # trading. The persisted PRED owns its score domain; historical X is irrelevant.
+    required_rows = dataset.loc[:, ["timestamp", "asset_id"]]
     alpha = pd.Series(np.nan, index=dataset.index, dtype="float64")
     if required_rows.empty:
         return alpha
@@ -2335,7 +2303,7 @@ def _prediction_alpha(
     if not np.isfinite(supplied_values).all():
         raise ValueError("portfolio_prediction_values_invalid")
     alpha.loc[required_rows.loc[supplied, "asset_id"]] = supplied_values
-    return alpha
+    return alpha.where(eligible)
 
 
 def _bool_series(values: pd.Series, error: str) -> pd.Series:
@@ -2373,9 +2341,10 @@ def _update_amount_history(
     current = dict(
         zip(panel["asset_id"].astype(str), panel["listing_date"], strict=True)
     )
-    amounts = pd.to_numeric(panel["amount"], errors="raise").astype("float64")
-    if not np.isfinite(amounts.dropna().to_numpy()).all() or amounts.lt(0).any():
-        raise ValueError("portfolio_amount_invalid")
+    amounts = strict_real_numeric_series(
+        panel["amount"], error="portfolio_amount_invalid", errors="coerce"
+    )
+    amounts = amounts.where(np.isfinite(amounts) & amounts.ge(0))
     for key in tuple(history):
         asset, listing = key
         if asset in unknown_market_assets or (
@@ -2905,7 +2874,6 @@ def backtest(config: Mapping) -> Path:
     config = qrp_json_mapping_snapshot(config)
     from quant_research_platform.artifacts.outputs.prediction import (
         _PredictionLookup,
-        prediction_model_metadata,
         read_predictions,
     )
     from quant_research_platform.artifacts.portfolio_ledger import (
@@ -3003,12 +2971,11 @@ def backtest(config: Mapping) -> Path:
             raise ValueError("portfolio_prediction_input_invalid")
         frame, metadata = read_predictions(Path(item["path"]))
         facts = metadata["model_facts"]
-        model_metadata = prediction_model_metadata(metadata)
         window = TimeWindow(**item["window"])
         if any(
             pd.Timestamp(window.start) <= pd.Timestamp(old.end)
             and pd.Timestamp(old.start) <= pd.Timestamp(window.end)
-            for old, _, _ in domains
+            for old in domains
         ):
             raise ValueError("portfolio_prediction_domains_overlap")
         if (
@@ -3036,13 +3003,7 @@ def backtest(config: Mapping) -> Path:
         if chosen.empty:
             raise ValueError("portfolio_prediction_domain_empty")
         frames.append(chosen)
-        domains.append(
-            (
-                window,
-                tuple(model_metadata["input_columns"]),
-                model_metadata["model_algorithm"],
-            )
-        )
+        domains.append(window)
     frame = pd.concat(frames, ignore_index=True)
     if frame.duplicated(["timestamp", "asset_id"]).any():
         raise ValueError("portfolio_prediction_keys_invalid")
@@ -3086,7 +3047,6 @@ def backtest(config: Mapping) -> Path:
                 candidate=candidate,
                 inputs=inputs,
                 **windows,
-                prediction_domains=tuple(domains),
                 prediction_lookup=lookup,
                 assumptions=assumptions,
                 risk_config=risk_config,
@@ -3198,8 +3158,9 @@ def calibrate(config: Mapping) -> Path:
 
     semantics = alpha_interval_semantics(config["rebalance_schedule"])
     calendar = _read_materialized(config["calendar"], _CALENDAR_COLUMNS)
+    trading_sessions = unified_trading_sessions(calendar)
     expected = alpha_calibration_intervals(
-        unified_trading_sessions(calendar), config["rebalance_schedule"]
+        trading_sessions, config["rebalance_schedule"]
     )
     supplied = frames["scheduled_intervals"].apply(pd.to_datetime, errors="raise")
     if supplied.timestamp.duplicated().any():
@@ -3215,6 +3176,7 @@ def calibrate(config: Mapping) -> Path:
     result = calibrate_expected_alpha(
         observations,
         scheduled_intervals=expected,
+        trading_sessions=trading_sessions,
         as_of=pd.Timestamp(config["cutoff"]),
     )
     return atomic_write_json(

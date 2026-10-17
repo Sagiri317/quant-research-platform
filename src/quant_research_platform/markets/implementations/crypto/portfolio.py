@@ -879,7 +879,7 @@ def _produce_maker_calibration(*, on_table, config, model_evidence):
     def empty(columns):
         return {
             column: []
-            if column in strings
+            if column in strings or column == "price_index"
             else array("q" if column in integers else "d")
             for column in columns
         }
@@ -903,7 +903,13 @@ def _produce_maker_calibration(*, on_table, config, model_evidence):
                     "event_at",
                 }:
                     value = value.view("datetime64[ns]")
-            arrays[column] = value
+            arrays[column] = (
+                pd.array(value, dtype="Int64")
+                if column == "price_index" and any(item is None for item in value)
+                else np.asarray(value, dtype=np.int64)
+                if column == "price_index"
+                else value
+            )
         return pd.DataFrame(arrays, columns=columns, copy=False)
 
     def flush(name):
@@ -1509,7 +1515,9 @@ def _calibration_events(artifact, fold_id):
                     event_at=first.event_at.value,
                     segment_id=first.context_id,
                     observation_id=first.context_id,
-                    price_index=int(first.price_index),
+                    price_index=None
+                    if pd.isna(first.price_index)
+                    else int(first.price_index),
                     visible_quantity=None
                     if pd.isna(first.quantity)
                     else float(first.quantity),
@@ -1551,6 +1559,8 @@ def _calibration_headers(artifact, fold_id, cutoff):
                     != (first.event_at, first.event_kind, first.context_id)
                     or not isfinite(row.quantity)
                     and not (row.event_kind == "trade" and pd.isna(row.quantity))
+                    or pd.isna(row.price_index)
+                    and row.event_kind != "trade"
                     or row.quantity < 0
                     or row.known_price_bound < 0
                 ):
@@ -1590,7 +1600,7 @@ def _calibration_headers(artifact, fold_id, cutoff):
                         row_count != 1
                         or row.side not in counts
                         or not row.context_id
-                        or row.price_index <= 0
+                        or (not pd.isna(row.price_index) and row.price_index <= 0)
                         or row.level_index != 0
                         or row.known_price_bound != 0
                     ):

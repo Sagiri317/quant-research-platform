@@ -150,6 +150,7 @@ def compute_market_panel(
         market_history,
         observed_market_sessions=observed_market_sessions,
     )
+    facts.loc[dense["delisting_date_unresolved"].fillna(True), :] = pd.NA
     dense[facts.columns] = facts
     return dense.sort_values(
         ["timestamp", "market_id", "asset_id"], kind="mergesort"
@@ -264,12 +265,18 @@ def _canonical_stock_master(frame: pd.DataFrame) -> pd.DataFrame:
                 result[column], error="invalid_stock_master_date", allow_null=True
             ).dt.normalize()
     result["listing_date"] = strict_timestamp_series(
-        result["listing_date"], error="invalid_stock_master_date"
+        result["listing_date"], error="invalid_stock_master_date", allow_null=True
     ).dt.normalize()
     if "delisting_date" not in result:
         result["delisting_date"] = pd.NaT
-    result["delisting_date"] = result["delisting_date"].fillna(
-        pd.Timestamp.max.normalize()
+    result["delisting_date_unresolved"] = (
+        result.get("delisting_date_unresolved", pd.Series(False, index=result.index))
+        .astype("boolean")
+        .fillna(True)
+    )
+    result["delisting_date"] = result["delisting_date"].where(
+        result["delisting_date"].notna() | result["delisting_date_unresolved"],
+        pd.Timestamp.max.normalize(),
     )
     for column in (
         "stock_name",
@@ -361,13 +368,14 @@ def _dense_lifecycle_panel(
     market_groups = market_history.groupby("asset_id", sort=False).indices
     for asset_id in assets:
         stock = stocks.iloc[stock_groups.get(asset_id, [])]
-        if stock.empty:
-            continue
-        dates = sessions[sessions >= stock["listing_date"].min()]
+        first_listing = stock["listing_date"].min()
+        dates = (
+            sessions if pd.isna(first_listing) else sessions[sessions >= first_listing]
+        )
         if dates.empty:
             continue
         base = pd.DataFrame({"asset_id": asset_id, "timestamp": dates})
-        raw = bars.iloc[bar_groups.get(asset_id, [])]
+        raw = bars.iloc[bar_groups.get(asset_id, [])].assign(_source_bar_observed=True)
         base = base.merge(
             raw.drop(
                 columns=[
@@ -387,7 +395,7 @@ def _dense_lifecycle_panel(
         positions = membership.timestamp.searchsorted(dates, side="right") - 1
         base["market_type"] = pd.Series(pd.NA, index=base.index, dtype="Int64")
         known = positions >= 0
-        known[known] &= (
+        known[known] &= base.loc[known, "listing_date"].isna().to_numpy() | (
             membership.timestamp.iloc[positions[known]].to_numpy()
             >= base.loc[known, "listing_date"].to_numpy()
         )
@@ -402,10 +410,22 @@ def _dense_lifecycle_panel(
     result["market_id"] = str(MARKET_ID)
     result["session_date"] = result["timestamp"]
     result["available_at"] = result["timestamp"]
-    return result.loc[
-        result["timestamp"].ge(result["listing_date"])
-        & result["timestamp"].le(result["delisting_date"])
-    ].copy()
+    lifecycle_known = ~result["delisting_date_unresolved"].fillna(True)
+    observed = result["_source_bar_observed"].eq(True)
+    return (
+        result.loc[
+            (
+                result["timestamp"].ge(result["listing_date"])
+                | (result["listing_date"].isna() & observed)
+            )
+            & (
+                (lifecycle_known & result["timestamp"].le(result["delisting_date"]))
+                | (~lifecycle_known & observed)
+            )
+        ]
+        .drop(columns="_source_bar_observed")
+        .copy()
+    )
 
 
 def _asof_join_stock_master(panel: pd.DataFrame, stocks: pd.DataFrame) -> pd.DataFrame:
@@ -414,6 +434,7 @@ def _asof_join_stock_master(panel: pd.DataFrame, stocks: pd.DataFrame) -> pd.Dat
         "stock_name",
         "listing_date",
         "delisting_date",
+        "delisting_date_unresolved",
         "company_status",
     )
     stock_groups = stocks.groupby("asset_id", sort=False).indices
@@ -434,11 +455,19 @@ def _asof_join_stock_master(panel: pd.DataFrame, stocks: pd.DataFrame) -> pd.Dat
                     }
                     else pd.NaT
                 )
+            current["delisting_date_unresolved"] = True
         else:
             # Listing is a life fact; a later status cannot erase or backfill it.
-            lives = right.drop_duplicates("listing_date", keep="last").loc[
-                :, ["asset_id", "listing_date", "delisting_date"]
+            lives = right.drop_duplicates("listing_date", keep="first").loc[
+                :,
+                [
+                    "asset_id",
+                    "listing_date",
+                    "delisting_date",
+                    "delisting_date_unresolved",
+                ],
             ]
+            lives = lives.loc[lives["listing_date"].notna()].copy()
             lives["stock_effective_date"] = lives["listing_date"]
             lives = lives.loc[
                 ~lives["stock_effective_date"].isin(right["stock_effective_date"])
@@ -459,9 +488,7 @@ def _asof_join_stock_master(panel: pd.DataFrame, stocks: pd.DataFrame) -> pd.Dat
             for column in columns:
                 joined = f"{column}_stock_master"
                 if joined in current:
-                    current[column] = current[joined].combine_first(
-                        current.get(column, pd.Series(pd.NA, index=current.index))
-                    )
+                    current[column] = current[joined]
                     current.drop(columns=joined, inplace=True)
         output.append(current)
     result = pd.concat(output, ignore_index=True)
@@ -590,7 +617,7 @@ def _prepare_industry_inputs(
         history["timestamp"], error="invalid_industry_timestamp"
     ).dt.normalize()
     history["industry_level1_code"] = strict_string_series(
-        history["industry_level1_code"], error="invalid_industry_code"
+        history["industry_level1_code"], error="invalid_industry_code", allow_null=True
     )
     history["_industry_classification_code"] = history["industry_level1_code"]
     history["industry_level1_name"] = strict_string_series(
@@ -606,10 +633,9 @@ def _prepare_industry_inputs(
             history["industry_standard_id"], history["timestamp"], industry_versions
         )
     ].copy()
-    if history.duplicated(
-        ["asset_id", "timestamp", "industry_standard_id"], keep=False
-    ).any():
-        raise ValueError("industry_history_key_duplicate")
+    # Preserve competing classifications until the consumed as-of frontier can
+    # mark only that asset's industry state unknown.
+    history = history.drop_duplicates()
     change_standards = {
         f"{provider}行业代码": standard
         for provider, standard in INDUSTRY_STANDARD_BY_PROVIDER_ID.items()
@@ -643,11 +669,13 @@ def _prepare_industry_inputs(
         changes,
         on=["asset_id", "industry_standard_id", "timestamp"],
         how="left",
-        validate="one_to_one",
+        validate="many_to_one",
     )
-    history["_industry_known"] = history["announcement_date"].notna() & (
-        history["value_after"] == history["industry_level1_name"]
-    )
+    history["_industry_known"] = (
+        history["announcement_date"].notna()
+        & history["industry_level1_code"].notna()
+        & (history["value_after"] == history["industry_level1_name"])
+    ).fillna(False)
     history["_industry_event_timestamp"] = history["timestamp"]
     # Date-only announcements become usable after their calendar date.
     publication = (history["announcement_date"] + pd.Timedelta(days=1)).where(
@@ -704,8 +732,31 @@ def _asof_industry(
         return panel
     known = history.loc[history["_industry_known"]]
     event_key = ["asset_id", "_industry_event_timestamp", "industry_standard_id"]
-    if known.groupby(event_key)["_industry_classification_code"].nunique().gt(1).any():
-        raise ValueError("industry_history_conflict")
+    first_observations = known.sort_values(
+        "timestamp", kind="mergesort"
+    ).drop_duplicates([*event_key, "_industry_classification_code"])
+    competing = first_observations.groupby(event_key, sort=False).cumcount().gt(0)
+    conflicts = first_observations.loc[competing].groupby(event_key)["timestamp"].min()
+    conflict_at = pd.Series(
+        conflicts.reindex(pd.MultiIndex.from_frame(history[event_key])).to_numpy(),
+        index=history.index,
+    )
+    history["_industry_value_conflict"] = history["timestamp"].ge(conflict_at)
+    state_key = ["asset_id", "_industry_event_timestamp"]
+    first_standards = known.sort_values("timestamp", kind="mergesort").drop_duplicates(
+        [*state_key, "industry_standard_id"]
+    )
+    competing_standards = (
+        first_standards.groupby(state_key, sort=False).cumcount().gt(0)
+    )
+    standards_at = (
+        first_standards.loc[competing_standards].groupby(state_key)["timestamp"].min()
+    )
+    standard_conflict_at = pd.Series(
+        standards_at.reindex(pd.MultiIndex.from_frame(history[state_key])).to_numpy(),
+        index=history.index,
+    )
+    history["_industry_value_conflict"] |= history["timestamp"].ge(standard_conflict_at)
     # Unknown publication blocks unproved coverage from its effective date.
     # A late older event cannot replace a newer state or cross that barrier.
     history = history.sort_values(
@@ -730,6 +781,9 @@ def _asof_industry(
         .transform("nunique")
         .gt(1)
     )
+    history["_industry_standard_conflict"] |= history.groupby(
+        ["asset_id", "timestamp"], sort=False
+    )["_industry_value_conflict"].transform("any")
     history = history.drop_duplicates(["asset_id", "timestamp"], keep="last")
     right = history.loc[
         :,
@@ -756,9 +810,9 @@ def _asof_industry(
     )
     # Only a frontier consumed by this panel can block its output. Historical
     # computation rows are included in the panel and cannot use a future repair.
-    if current["_industry_standard_conflict"].fillna(False).any():
-        raise ValueError("industry_history_standard_conflict")
-    valid_standard = current["_industry_known"].fillna(False)
+    valid_standard = current["_industry_known"].fillna(False) & ~current[
+        "_industry_standard_conflict"
+    ].fillna(False)
     valid_standard &= _industry_version_active_mask(
         current["industry_standard_id_industry"],
         current["timestamp"],
@@ -840,7 +894,7 @@ def _snapshot_industry_history(
     for row in result.itertuples(index=False):
         category = (row.industry_standard_id, row.industry_category_code)
         leaf = (row.industry_standard_id, row.industry_level1_code)
-        major = row.industry_major_code
+        major = "" if pd.isna(row.industry_major_code) else row.industry_major_code
         category_entry = lookup.get(category)
         leaf_entry = lookup.get(leaf)
         valid = (
@@ -906,20 +960,45 @@ def _canonical_industry_versions(
     if not required.issubset(versions.columns):
         raise ValueError("industry_versions_columns_invalid")
     right = versions.loc[:, list(required)].copy()
+    right["abandon_date_unresolved"] = (
+        versions.get("abandon_date_unresolved", pd.Series(False, index=versions.index))
+        .astype("boolean")
+        .fillna(True)
+    )
     right["industry_standard_id"] = _canonical_industry_standard(
         right["industry_standard_id"]
     )
     right = right.loc[right["industry_standard_id"].isin(standards)].copy()
-    if right.empty:
-        return right
     right["implement_date"] = strict_timestamp_series(
-        right["implement_date"], error="invalid_industry_version_date"
+        right["implement_date"],
+        error="industry_version_date_invalid",
+        allow_null=True,
+        errors="coerce",
     ).dt.normalize()
-    right["abandon_date"] = strict_timestamp_series(
-        right["abandon_date"], error="invalid_industry_version_date", allow_null=True
+    values = right["abandon_date"]
+    parsed = strict_timestamp_series(
+        values, error="industry_version_date_invalid", allow_null=True, errors="coerce"
     ).dt.normalize()
-    if right.duplicated(["industry_standard_id", "implement_date"], keep=False).any():
-        raise ValueError("industry_version_key_duplicate")
+    right["abandon_date_unresolved"] |= (
+        values.notna() & values.astype("string").str.strip().ne("") & parsed.isna()
+    )
+    right["abandon_date"] = parsed
+    right = right.loc[right["implement_date"].notna()].drop_duplicates()
+    key = ["industry_standard_id", "implement_date"]
+    duplicate = right.duplicated(key, keep=False)
+    if duplicate.any():
+        unknown = right.groupby(key)["abandon_date_unresolved"].transform("any")
+        different = (
+            right.groupby(key)["abandon_date"]
+            .transform(lambda values: values.nunique(dropna=False))
+            .gt(1)
+        )
+        earliest = right.groupby(key)["abandon_date"].transform("min")
+        right.loc[duplicate, "abandon_date"] = earliest.loc[duplicate].where(
+            ~unknown.loc[duplicate]
+        )
+        right["abandon_date_unresolved"] = unknown | different
+        right = right.drop_duplicates(key)
     return right
 
 
@@ -943,10 +1022,21 @@ def _industry_version_active_mask(
     observation_count = np.zeros(size, dtype=np.intp)
     event_count = np.zeros(size, dtype=np.intp)
     same_version = np.zeros(size, dtype=bool)
+    unresolved = np.zeros(size, dtype=bool)
     for version in right.itertuples(index=False):
         selected = canonical_standards.eq(version.industry_standard_id).to_numpy(
             dtype=bool, na_value=False
         )
+        if version.abandon_date_unresolved:
+            uncertain_from = (
+                version.implement_date
+                if pd.isna(version.abandon_date)
+                else version.abandon_date
+            )
+            unresolved |= selected & (
+                timestamps.ge(uncertain_from).to_numpy(dtype=bool, na_value=False)
+                | event_values.ge(uncertain_from).to_numpy(dtype=bool, na_value=False)
+            )
         observed = selected & timestamps.ge(version.implement_date).to_numpy(
             dtype=bool, na_value=False
         )
@@ -968,7 +1058,7 @@ def _industry_version_active_mask(
         event_count += event
         same_version |= observed & event
     return pd.Series(
-        (observation_count == 1) & (event_count == 1) & same_version,
+        (observation_count == 1) & (event_count == 1) & same_version & ~unresolved,
         index=standards.index,
         dtype=bool,
     )
@@ -998,9 +1088,14 @@ def _industry_dictionary(sets: pd.DataFrame):
     key = ["industry_standard_id", "industry_code"]
     if dictionary.duplicated(key, keep=False).any():
         duplicate = dictionary.loc[dictionary.duplicated(key, keep=False)]
-        if duplicate.drop_duplicates().duplicated(key, keep=False).any():
-            raise ValueError("industry_dictionary_key_duplicate")
-        dictionary = dictionary.drop_duplicates(key, keep="first")
+        conflicting = duplicate.drop_duplicates().duplicated(key, keep=False)
+        unavailable = pd.MultiIndex.from_frame(
+            duplicate.drop_duplicates().loc[conflicting, key]
+        )
+        dictionary = dictionary.loc[
+            ~pd.MultiIndex.from_frame(dictionary[key]).isin(unavailable)
+        ]
+        dictionary = dictionary.drop_duplicates()
     return {
         (row.industry_standard_id, row.industry_code): row
         for row in dictionary.itertuples(index=False)
@@ -1022,7 +1117,9 @@ def _resolve_industry_hierarchy(
         seen: set[str] = set()
         while True:
             if code in seen:
-                raise ValueError("industry_hierarchy_cycle")
+                resolved_codes.append(None)
+                resolved_names.append(None)
+                break
             seen.add(code)
             entry = lookup.get((standard, code))
             if entry is None:
@@ -1037,7 +1134,9 @@ def _resolve_industry_hierarchy(
                 break
             parent = entry.parent_industry_code
             if pd.isna(parent) or not str(parent).strip():
-                raise ValueError("industry_hierarchy_parent_missing")
+                resolved_codes.append(None)
+                resolved_names.append(None)
+                break
             code = str(parent).strip()
     result["industry_level1_code"] = pd.Series(
         resolved_codes, index=result.index, dtype="string"
@@ -1099,17 +1198,30 @@ def _apply_special_treatment(
     right = history.loc[
         :, ["asset_id", "announcement_date", "effective_date", "is_st", "is_pt"]
     ].copy()
+    right = right.loc[
+        right["announcement_date"].notna() & right["effective_date"].notna()
+    ].copy()
     right["timestamp"] = right[["announcement_date", "effective_date"]].max(axis=1)
     right = right.loc[right["timestamp"] <= result["timestamp"].max()]
-    # Equal-effective events cannot assign conflicting states without a source order.
-    conflicts = right.groupby(["asset_id", "effective_date"])[
-        ["is_st", "is_pt"]
-    ].nunique(dropna=False)
-    if conflicts.gt(1).any().any():
-        raise ValueError("special_treatment_effective_state_ambiguous")
     right = right.sort_values(
         ["timestamp", "effective_date", "asset_id"], kind="mergesort"
-    ).drop_duplicates(["asset_id", "effective_date"], keep="first")
+    )
+    # Disagreement becomes unknown only when both facts are known. The earlier
+    # prefix and any agreeing state field remain usable; no source row wins.
+    event_key = [right["asset_id"], right["effective_date"]]
+    for column in ("is_st", "is_pt"):
+        state = right[column].astype("boolean").astype("Int8").fillna(-1)
+        first = state.groupby(event_key, sort=False).transform("first")
+        conflict_at = (
+            right["timestamp"]
+            .where(state.ne(first))
+            .groupby(event_key, sort=False)
+            .transform("min")
+        )
+        right[column] = right[column].where(
+            conflict_at.isna() | right["timestamp"].lt(conflict_at)
+        )
+    right = right.drop_duplicates()
     # A late announcement of an older effective event must not replace newer facts.
     latest_effective = right.groupby("asset_id", sort=False)["effective_date"].cummax()
     right = right.loc[right["effective_date"].eq(latest_effective)]

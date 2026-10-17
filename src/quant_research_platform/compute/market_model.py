@@ -96,6 +96,16 @@ class MarketModelRiskState:
             if name in panel
         ]
         frame = panel.loc[:, list(required) + optional].copy()
+        # A bad cap is unavailable only to consumers of that asset's weight.
+        raw_caps = frame["float_market_cap"]
+        caps = pd.to_numeric(raw_caps, errors="coerce")
+        if not pd.api.types.is_numeric_dtype(raw_caps) or pd.api.types.is_bool_dtype(
+            raw_caps
+        ):
+            caps = caps.mask(
+                raw_caps.map(lambda value: isinstance(value, (bool, np.bool_)))
+            )
+        frame["float_market_cap"] = caps.where(np.isfinite(caps) & caps.gt(0))
         unknown_quote = pd.Series(False, index=frame.index)
         for name in ("period_return", "float_market_cap"):
             if name in frame:
@@ -147,10 +157,7 @@ class MarketModelRiskState:
                 error="market_model_risk_numeric_invalid",
                 allow_null=True,
             ).astype("float64")
-        if (
-            frame["asset_id"].duplicated().any()
-            or frame["float_market_cap"].le(0.0).any()
-        ):
+        if frame["asset_id"].duplicated().any():
             raise ValueError("market_model_risk_key_invalid")
         if open_market_types is not None:
             known = frame["market_type"].notna()

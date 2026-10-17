@@ -622,12 +622,16 @@ def fama_macbeth_period(
     )
     if timestamps.nunique() != 1 or assets.duplicated().any():
         raise ValueError("fama_macbeth_primary_key_duplicate")
-    columns = [return_column, *factor_columns]
-    if weight_column is not None:
-        columns.append(weight_column)
     numeric = (
-        frame.loc[:, columns].apply(pd.to_numeric, errors="raise").astype("float64")
+        frame.loc[:, [return_column, *factor_columns]]
+        .apply(pd.to_numeric, errors="raise")
+        .astype("float64")
     )
+    if weight_column is not None:
+        weights = strict_real_numeric_series(
+            frame[weight_column], error="fama_macbeth_weights_invalid", errors="coerce"
+        )
+        numeric[weight_column] = weights.where(np.isfinite(weights) & weights.gt(0))
     complete = numeric.notna().all(axis=1)
     numeric = numeric.loc[complete]
     y = numeric[return_column]
@@ -653,8 +657,6 @@ def fama_macbeth_period(
     if np.linalg.matrix_rank(x.to_numpy(dtype="float64")) != x.shape[1]:
         raise ValueError("fama_macbeth_period_insufficient")
     weights = None if weight_column is None else numeric[weight_column]
-    if weights is not None and bool((weights <= 0.0).any()):
-        raise ValueError("fama_macbeth_weights_invalid")
     white_residuals = None
     try:
         if len(factor_columns) == 1:

@@ -299,7 +299,7 @@ def _identity_output(result):
     return True
 
 
-def _output(result, frame, output_space):
+def _output(result, frame, output_space, *, intervention=False):
     predictor = result.prediction_model
     raw = prediction_callable(tuple(result.metadata["input_columns"]), predictor)(frame)
     if output_space == "calibrated_label":
@@ -322,12 +322,19 @@ def _output(result, frame, output_space):
         explained = raw
     else:
         raise ValueError("explanation_output_space_invalid")
-    if (
-        np.shape(raw) != (len(frame),)
-        or np.shape(explained) != (len(frame),)
-        or not np.isfinite(raw).all()
-        or not np.isfinite(explained).all()
-    ):
+    if np.shape(raw) != (len(frame),) or np.shape(explained) != (len(frame),):
+        raise ValueError("explanation_prediction_nonfinite")
+    valid = np.ones(len(frame), dtype=bool)
+    if intervention:
+        missing = (
+            frame.loc[:, result.metadata["input_columns"]].isna().all(axis=1).to_numpy()
+        )
+        if not np.isnan(raw[missing]).all():
+            raise ValueError("explanation_prediction_nonfinite")
+        explained = np.asarray(explained, dtype="float64").copy()
+        explained[missing] = np.nan
+        valid = ~missing
+    if not np.isfinite(raw[valid]).all() or not np.isfinite(explained[valid]).all():
         raise ValueError("explanation_prediction_nonfinite")
     return raw, np.asarray(explained, dtype="float64")
 
@@ -403,7 +410,11 @@ def _attributions(result, context, indices, method, background, output_space):
                         except OverflowError:
                             contributions[row, column] = np.nan
                 base = np.full(len(matrix), intercept)
-                method_facts["baseline"] = "training_scaled_zero"
+                method_facts["baseline"] = (
+                    "training_scaled_zero"
+                    if predictor.scaler.scaling
+                    else "unscaled_input_zero"
+                )
             else:
                 import shap
 
@@ -545,7 +556,16 @@ def _native_importance(result, facts):
     if algorithm in LINEAR_EXPLANATION_ALGORITHMS:
         coefficients, _ = _linear_parameters(predictor)
         kind, unit = "absolute_standardized_coefficient", facts["label_unit"]
-        if predictor.scaler.medians:
+        if not predictor.scaler.scaling:
+            kind = "absolute_raw_input_coefficient_excluding_missing_indicator"
+            signed = dict(
+                zip(
+                    result.metadata["input_columns"],
+                    coefficients[: len(result.metadata["input_columns"])],
+                    strict=True,
+                )
+            )
+        elif predictor.scaler.medians:
             # Value and missingness are distinct standardized coordinates. Their
             # absolute magnitudes can be grouped, but their signs cannot describe
             # one feature-effect direction (unlike realized row contributions).
@@ -581,7 +601,14 @@ def _native_importance(result, facts):
                 "value": values.get(column),
                 "signed_value": signed.get(column),
                 "kind": kind,
-                "unit": unit,
+                "unit": (
+                    unit
+                    + "/"
+                    + facts["input_units"].get(column, "unspecified_input_unit")
+                    if algorithm in LINEAR_EXPLANATION_ALGORITHMS
+                    and not predictor.scaler.scaling
+                    else unit
+                ),
                 "status": "DEFINED" if column in values else "NOT_APPLICABLE",
                 "reason": "" if column in values else "excluded_at_fit",
             }
@@ -799,7 +826,9 @@ def _permutation(
             scores = values[positions]
             metrics = {}
             for metric in config["metrics"]:
-                if metric == "mse" and loss_reason is not None:
+                if not np.isfinite(scores).all():
+                    metrics[metric] = None
+                elif metric == "mse" and loss_reason is not None:
                     metrics[metric] = None
                 elif metric == "mse":
                     accumulator = _MeanSquaredError()
@@ -819,6 +848,7 @@ def _permutation(
     # Keep full prediction context for every intervention, but retain only
     # per-period statistics. The common defined domain is reconciled below.
     measured = [("baseline", 0, score_periods(_output(result, frame, output_space)[1]))]
+    undefined_interventions = []
     for name, columns in config["groups"].items():
         for repeat in range(config["repeats"]):
             shuffled = frame.copy()
@@ -845,13 +875,21 @@ def _permutation(
                         [blocks[i] for i in rng.permutation(len(blocks))]
                     )
                 shuffled.loc[segment, columns] = frame.loc[order, columns].to_numpy()
-            measured.append(
-                (
-                    name,
-                    repeat,
-                    score_periods(_output(result, shuffled, output_space)[1]),
-                )
-            )
+            outputs = _output(result, shuffled, output_space, intervention=True)[1]
+            for timestamp, positions in periods:
+                missing_count = int(np.isnan(outputs[positions]).sum())
+                if missing_count:
+                    undefined_interventions.append(
+                        {
+                            "group": name,
+                            "repeat": repeat,
+                            "period": str(timestamp),
+                            "reason": "all_model_inputs_missing",
+                            "row_count": missing_count,
+                        }
+                    )
+            measured.append((name, repeat, score_periods(outputs)))
+            del outputs
     rows = []
     common_periods = {}
     for metric in config["metrics"]:
@@ -939,6 +977,7 @@ def _permutation(
             "std_definition": "permutation_population_sd_not_confidence_interval",
             "scoring_keys": _sample_keys(frame.loc[selected]),
             "common_metric_periods": common_periods,
+            "undefined_interventions": undefined_interventions,
         },
     )
 

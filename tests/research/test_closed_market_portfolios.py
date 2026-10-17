@@ -329,13 +329,6 @@ def _ledger(layout, roots):
         input_window=TimeWindow("2022-12-01", "2023-01-06"),
         formal_dataset_window=TimeWindow("2022-12-01", "2023-01-06"),
         prediction_lookup=Predictions(),
-        prediction_domains=(
-            (
-                TimeWindow("2022-12-30", "2023-01-06"),
-                ("signal",),
-                "equal_weight_rank_ensemble",
-            ),
-        ),
         assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,)),
     )
 
@@ -840,3 +833,36 @@ def test_native_ledger_rejects_terminal_relisting_and_preserves_published_artifa
         if p.is_file()
     }
     assert list(read_portfolio_ledger_artifact(root).iter_chunks()) == good
+
+
+def test_empty_research_valuation_keeps_boolean_lifecycle_masks():
+    frame = pd.DataFrame(
+        {
+            column: pd.Series(dtype=dtype)
+            for column, dtype in {
+                "asset_id": "string",
+                "listing_date": "datetime64[ns]",
+                "timestamp": "datetime64[ns]",
+                "market_type": "Int64",
+                "open": "float64",
+                "close": "float64",
+                "is_trading": "boolean",
+            }.items()
+        }
+    )
+    view = market_sessions._PortfolioSession(
+        timestamp=pd.Timestamp("2023-01-03"),
+        panel=frame.copy(),
+        valuation=frame.copy(),
+        closed_assets=frozenset(),
+        execution=pd.DataFrame(),
+        unproved_lifecycle_assets=frozenset(),
+        confirmed_delisted_lifecycles=frozenset(),
+        unknown_market_assets=frozenset(),
+        rights_events=pd.DataFrame(),
+    )
+    marks = production._ResearchValuationMarks()
+    actual = marks.project(view)
+    assert actual.empty
+    assert {"asset_id", "open", "close"}.issubset(actual.columns)
+    assert marks.last.empty

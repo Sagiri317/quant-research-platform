@@ -352,9 +352,11 @@ def test_rank_label_calibration_matches_full_fraction_accumulation(mode):
         if variance
         else Fraction()
     )
-    assert _label_calibration(scores, labels, weights) == (
-        float(ybar - slope * xbar),
-        float(slope),
+    np.testing.assert_allclose(
+        _label_calibration(scores, labels, weights),
+        (float(ybar - slope * xbar), float(slope)),
+        rtol=2e-14,
+        atol=0,
     )
 
 

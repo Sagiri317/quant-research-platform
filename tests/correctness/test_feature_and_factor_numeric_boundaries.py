@@ -77,8 +77,10 @@ def test_scaler_preserves_split_center_across_chunks_and_pickle(weights):
     )
     pd.testing.assert_frame_equal(chunks, scaler.transform(frame))
     assert restored.to_payload() == scaler.to_payload()
+    assert restored.to_payload()["scaling"] is True
     assert set(restored.to_payload()) == {
         "columns",
+        "scaling",
         "weighted_mean_origin",
         "weighted_mean_offset",
         "weighted_population_scale",

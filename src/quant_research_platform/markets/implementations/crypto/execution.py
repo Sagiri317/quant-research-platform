@@ -1573,6 +1573,10 @@ def _maker_trade_fill(order, trade):
     same_direction = (order.side == "buy") == trade.buyer_is_maker
     if not same_direction:
         return 0.0, "opposite_trade_direction"
+    if trade.visible_quantity == 0:
+        return 0.0, "zero_visible_trade_quantity"
+    if trade.price_index is None:
+        raise PortfolioTargetBlocked("hft_trade_price_unknown")
     through = (order.side == "buy" and trade.price_index < order.price_index) or (
         order.side == "sell" and trade.price_index > order.price_index
     )
@@ -1580,8 +1584,6 @@ def _maker_trade_fill(order, trade):
         return 0.0, "different_trade_price"
     if trade.visible_quantity is None:
         raise PortfolioTargetBlocked("hft_trade_visible_quantity_unknown")
-    if trade.visible_quantity <= 0:
-        return 0.0, "zero_visible_trade_quantity"
     if through:
         order.queue_ahead = Fraction()
         return order.remaining, "trade_through"
@@ -1831,7 +1833,9 @@ class MakerCalibration:
                                 event
                                 if history_scale == 1
                                 else SimpleNamespace(
-                                    price_index=event.price_index * history_scale,
+                                    price_index=None
+                                    if event.price_index is None
+                                    else event.price_index * history_scale,
                                     visible_quantity=event.visible_quantity,
                                     observation_id=event.observation_id,
                                     buyer_is_maker=event.buyer_is_maker,

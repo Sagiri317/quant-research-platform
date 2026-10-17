@@ -143,6 +143,7 @@ def test_native_interim_events_follow_record_to_payment_span_and_skip_old_claims
             "market_type": pd.Series([1, 1], dtype="Int64"),
             "announcement_date": pd.to_datetime(["2022-12-30", "2022-12-20"]),
             "settlement_date": pd.to_datetime(["2023-01-06", None]),
+            "settlement_date_unresolved": False,
             "amount": [0.5, 0.4],
             "subscription_price": [float("nan"), float("nan")],
         }
@@ -212,6 +213,7 @@ def test_proved_holder_transition_replaces_unproved_aggregate_without_early_bloc
             "market_type": pd.Series([1], dtype="Int64"),
             "announcement_date": pd.to_datetime(["2023-01-02"]),
             "settlement_date": pd.to_datetime(["2023-01-04"]),
+            "settlement_date_unresolved": False,
             "amount": [-0.8],
             "subscription_price": [float("nan")],
         }

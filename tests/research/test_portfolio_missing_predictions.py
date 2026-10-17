@@ -24,7 +24,7 @@ class _Forecasts:
 
     def values_for_frame(self, frame, *, mark_matched):
         return (
-            frame.asset_id.map({"a": 0.0, "b": 1.0}).to_numpy(),
+            frame.asset_id.map({"a": 0.0, "b": 1.0, "c": 2.0}).to_numpy(),
             bytearray(
                 not self.missing(row.timestamp, row.asset_id)
                 for row in frame.itertuples()
@@ -328,7 +328,7 @@ def test_neutrality_diagnostics_use_stock_leg_and_disclose_unknown_reference(
 
 
 @pytest.mark.parametrize("technical_fill", [False, True])
-def test_prediction_domain_accepts_partial_original_inputs_not_all_missing(
+def test_prediction_domain_ignores_original_input_missingness(
     technical_fill,
 ):
     frame = pd.DataFrame(
@@ -349,8 +349,6 @@ def test_prediction_domain_accepts_partial_original_inputs_not_all_missing(
     result = production._prediction_alpha(
         frame,
         _Forecasts(lambda *_: False),
-        ("feature_x", "feature_y"),
-        declared_columns=frame.columns,
     )
     assert result.loc[["a", "b"]].tolist() == [0.0, 1.0]
-    assert pd.isna(result.loc["c"])
+    assert result.loc["c"] == 2.0

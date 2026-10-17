@@ -162,7 +162,6 @@ def _nullable_state_value(payload, field, validate):
 def _valid_trade_values(exchange, native, observed_ns):
     try:
         strict_boolean(native.get("m"), error="tardis_trade_value_invalid")
-        strict_positive_float(native.get("p"), error="tardis_trade_value_invalid")
         _visible_trade_quantity(
             FUTURES_MARKET_TYPE if exchange == EXCHANGE else SPOT_MARKET_TYPE,
             native,
@@ -381,12 +380,26 @@ class _ObservedStreams:
                         native,
                     )
                 except ValueError as error:
-                    error.add_note(
-                        f"channel={channel}; slice_offset={offset}; line={number}; "
-                        f"previous_id={None if previous is None else previous[0]}; "
-                        f"current_id={current}"
+                    if str(error) != "binance_native_sequence_non_monotonic":
+                        raise
+                    observed = strict_iso_timestamp(
+                        timestamp, error="tardis_observed_time_invalid"
+                    ).value
+                    if key in self.active:
+                        interval = self.active.pop(key)
+                        interval["end_ns"] = observed
+                        if interval["start_ns"] < observed:
+                            closed.append(interval)
+                    return (
+                        None,
+                        closed,
+                        {
+                            "reason": "native_sequence_non_monotonic",
+                            "stream": value["stream"],
+                            "previous_id": None if previous is None else previous[0],
+                            "current_id": current,
+                        },
                     )
-                    raise
                 if not accepted:
                     return None, closed, None
             if previous is not None:

@@ -700,7 +700,7 @@ def _microprice_values(inputs, *, include_mid):
     return values
 
 
-def _nullable_numeric_column(frame, column, *, signed_mid=False):
+def _nullable_numeric_column(frame, column):
     """Localize identifiable non-finite/domain-invalid observations to their cell."""
     if column not in frame:
         return np.full(len(frame), np.nan)
@@ -711,9 +711,7 @@ def _nullable_numeric_column(frame, column, *, signed_mid=False):
     valid &= ~frame[column].map(
         lambda value: isinstance(value, (bool, np.bool_))
     ).to_numpy(dtype=bool)
-    if column == "mid" and signed_mid:
-        valid &= values != 0
-    elif column in {"mid", "book_spread", "best_bid_qty"}:
+    if column in {"mid", "book_spread", "best_bid_qty"}:
         valid &= values > 0
     elif column.startswith(("bid_depth_", "ask_depth_", "observed_taker_")):
         valid &= values >= 0
@@ -1556,7 +1554,7 @@ def _label_frame(
     )
     if mid_horizons:
         mid = pd.Series(
-            _nullable_numeric_column(frame, "mid", signed_mid=True),
+            _nullable_numeric_column(frame, "mid"),
             index=frame.index,
         )
         grouped = mid.groupby(segment_groups, sort=False)
@@ -1564,9 +1562,7 @@ def _label_frame(
         runs = segment_groups.to_numpy()
     for horizon in mid_horizons:
         future = grouped.shift(-(horizon // HFT_GRID_MS))
-        same_sign = future.lt(0).eq(mid.lt(0))
-        values = (future.where(same_sign) - mid.where(same_sign)) / mid
-        values.loc[~same_sign] = future.loc[~same_sign] / mid.loc[~same_sign] - 1.0
+        values = (future - mid) / mid
         steps = horizon // HFT_GRID_MS
         complete = np.zeros(len(mid), dtype=bool)
         # Include both endpoints and never cross a contiguous segment boundary.

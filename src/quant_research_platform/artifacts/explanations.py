@@ -262,7 +262,10 @@ def _validate(metadata, tables, *, partial=False):
         tolerance = facts.get("additivity_relative_tolerance")
         if (
             facts.get("method") != method
-            or facts.get("baseline") != baseline
+            or facts.get("baseline")
+            not in (
+                (baseline, "unscaled_input_zero") if method == "affine" else (baseline,)
+            )
             or type(facts.get("implementation")) is not str
             or not facts["implementation"]
             or not isinstance(facts.get("background"), dict)

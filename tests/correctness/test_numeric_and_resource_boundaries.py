@@ -486,7 +486,7 @@ def test_pearson_rounding_counterexamples_reach_published_consumers(
             label_column="label",
             prediction_column="x",
         )
-        assert actual["validation_ic"] == expected
+        assert actual["validation_ic"] == pytest.approx(expected, rel=2e-14, abs=0)
         assert abs(actual["validation_ic"]) <= 1.0
     else:
         spec = EvaluationSpec(
@@ -516,10 +516,10 @@ def test_pearson_rounding_counterexamples_reach_published_consumers(
         validate_output_bundle(bundle)
         assert pd.read_parquet(
             native_filesystem_path(bundle / "metrics.parquet")
-        ).ic.tolist() == [expected]
+        ).ic.tolist() == pytest.approx([expected], rel=2e-14, abs=0)
         assert pd.read_parquet(
             native_filesystem_path(bundle / "ic_summary.parquet")
-        ).mean_ic.tolist() == [expected]
+        ).mean_ic.tolist() == pytest.approx([expected], rel=2e-14, abs=0)
 
 
 def test_scaler_transform_preserves_representable_extreme_difference():

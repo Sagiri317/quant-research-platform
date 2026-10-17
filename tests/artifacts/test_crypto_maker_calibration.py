@@ -1109,3 +1109,33 @@ def test_maker_validator_rejects_compound_damage_without_error_priority(
     assert {
         path.name: path.read_bytes() for path in root.iterdir() if path.is_file()
     } == before
+
+
+def test_nullable_trade_price_full_table_and_batches_preserve_exact_integer(tmp_path):
+    member = "crypto_maker_events.parquet"
+    exact_price = 2**53 + 1
+    rows = [
+        dict(
+            fold_id="f",
+            event_id=index,
+            event_at=pd.Timestamp(index),
+            event_kind="trade",
+            context_id="t",
+            side="buy",
+            level_index=0,
+            price_index=price,
+            quantity=1.0,
+            known_price_bound=0,
+        )
+        for index, price in enumerate((exact_price, None))
+    ]
+    table = pa.Table.from_pylist(rows, schema=statistics._ARROW_SCHEMAS[member])
+    pq.write_table(table, tmp_path / member)
+    artifact = statistics.StatisticsArtifact(
+        {}, tmp_path, "crypto_maker_calibration", (member,)
+    )
+    with artifact.table(member) as frame:
+        assert frame.price_index.iloc[0] == exact_price
+        assert pd.isna(frame.price_index.iloc[1])
+        streamed = pd.concat(artifact._batches(member), ignore_index=True)
+        pd.testing.assert_frame_equal(frame, streamed, check_exact=True)

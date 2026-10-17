@@ -108,10 +108,9 @@ def test_frozen_label_scale_matches_selection_and_statistics(tmp_path, algorithm
     after, _ = read_predictions(prediction)
     pd.testing.assert_frame_equal(before, after)
     if "rank_ensemble" in algorithm:
-        assert metadata["model_metadata"]["rank_parameters"]["label_calibration"] == [
-            0.1,
-            0.2,
-        ]
+        assert metadata["model_metadata"]["rank_parameters"][
+            "label_calibration"
+        ] == pytest.approx([0.1, 0.2], rel=2e-14, abs=0)
         assert before.prediction_score.iloc[:4].tolist() == [
             -0.375,
             -0.125,

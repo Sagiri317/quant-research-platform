@@ -1270,7 +1270,8 @@ def test_invalid_payload_coverage_stops_at_captured_receive_clock(
         def close(self):
             pass
 
-    def invalid(*args):
+    def invalid(*args, validate_values):
+        assert validate_values is False
         phase["value"] = "detect"
         raise ValueError("synthetic_invalid_payload")
 

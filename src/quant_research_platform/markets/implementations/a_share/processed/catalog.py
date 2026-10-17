@@ -72,6 +72,7 @@ PANEL_COLUMNS = (
     "is_pt",
     "listing_date",
     "delisting_date",
+    "delisting_date_unresolved",
     "listing_age_trading_days",
     "has_252_trading_sessions",
     "industry_standard_id",

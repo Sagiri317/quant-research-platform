@@ -787,10 +787,6 @@ def test_equivalent_utc_funding_retransmission_is_idempotent(
                 end_ms=start + 599999,
             )
 
-        if conflict:
-            with pytest.raises(ValueError, match="tardis_funding_forecast_conflict"):
-                publish()
-            return
         publish()
         roots = day.funding_roots(
             "BTCUSDT",
@@ -805,7 +801,11 @@ def test_equivalent_utc_funding_retransmission_is_idempotent(
                 assert forecasts[0].known_until_ns == forecasts[0].available_at_ns
                 assert forecasts[0].cashflows == ()
             else:
-                assert forecasts[0].cashflows == (((start + 10000) * 1_000_000, -5.0),)
+                assert forecasts[0].cashflows == (
+                    ((start + 10000) * 1_000_000, None if conflict else -5.0),
+                )
+            assert source.events[0].rate == 0.1
+            assert source.events[0].mark_price == 200.0
             assert (
                 source.settlement_qualification[0]["verification"]
                 == "official_response_validated"
