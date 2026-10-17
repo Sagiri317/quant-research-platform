@@ -438,6 +438,10 @@ walk-forward 每折分别声明拟合窗口、拟合截止、预测窗口和标�
 模型不预先登记测试窗口；消费时只核实际选择截止、拟合事实和必要校准。重新拟合可以使用新声明且截至
 拟合时刻合法的历史；离散窗口不以包络填平。已查看的测试结果不能再宣称为未参与选型的证据。
 预测使用模型；后续评估、回测和统计直接消费自包含 PRED，不重新打开模型或 trial 文件。
+回测按请求资产、时间窗和实际 PRED 键匹配当前执行 context，不重读历史 X，也不按当前
+`sample_filter_mode` 重建预测资格；当前输入多出的键不要求补预测。所选 PRED 键仍必须有
+对应的当前 context 行，缺失报 `misaligned_persisted_prediction_keys`；校准仍核当前标签的资格与成熟。
+PRED 读取在同次打开中用 Parquet footer 核总行数，包括时间子窗读取；不另做准入哈希扫描。
 缺新数据只阻塞真实依赖该数据的操作。
 
 ### 数值缩放与排名模型标定
@@ -468,9 +472,9 @@ baseline.json 的价格分支在同一个 500 ms 收益目标上比较线性回�
 maker 的价格与压力模型角色由配置中的模型 ID 指定，不按算法名称或固定 ID 识别。
 直接 backtest 的空模型列表配合 `calibration=null` 表示未校准 maker；否则必须同时指定已选模型，并分别使用
 500ms mid return 与 500ms observed sell-pressure proxy 标签。
-该资产必须同时在模型的训练/验证与 OOS 预测范围内。
 maker 的 `models` 显式提供价格和 proxy 各自的自包含 PRED 路径，按实际所消费的目标与
-覆盖校验；后续不重开模型或 trial。
+覆盖校验；价格/proxy 按实际 `(timestamp, asset_id)` 键交集配对，同键的 fold 和执行 context
+仍须一致；各自未配对的尾段也完成所选键的 context 覆盖校验。后续不重开模型或 trial。
 
 模型预测期限由实际 `target_column` 对应的 executable label 决定；
 taker 只接受 future-mid-return 模型，从同一标签 owner 取得持有/预测期限；

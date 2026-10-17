@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 import stat
 from collections.abc import Iterable, Iterator
-from itertools import islice
 from pathlib import Path
 
 import pandas as pd
@@ -119,32 +118,6 @@ INDEX_INFO_SOURCE_CODE_COLUMNS = (
 )
 
 
-def _append_continuation_fields(
-    continuations: list[str],
-    fields: Iterable[str],
-    *,
-    field_count: int,
-    suffix_count: int = 0,
-    include_empty: bool = True,
-) -> list[str]:
-    values = list(fields)
-    prefix_count = field_count - suffix_count
-    if prefix_count < 0:
-        raise ValueError("malformed_csmar_csv_row")
-    prefix = ",".join(values[:prefix_count])
-    if prefix or include_empty:
-        continuations.append(prefix)
-    return values[prefix_count:]
-
-
-def _join_continuations(current: str, continuations: list[str]) -> str:
-    parts = [current] if current else []
-    for value in continuations:
-        if parts or value:
-            parts.append(value)
-    return "\n".join(parts)
-
-
 def _iter_raw_export_paths(root: Path) -> Iterator[Path]:
     root = require_unaliased_path(Path(root), error="csmar_raw_export_identity_changed")
     metadata = filesystem_stat(root, follow_symlinks=False)
@@ -182,224 +155,6 @@ def _iter_raw_export_paths(root: Path) -> Iterator[Path]:
             yield path
 
 
-def iter_index_info_rows(
-    export_path: Path,
-    *,
-    expected_identity: DatasetFileIdentity | None,
-    content_hashes: list[str] | None = None,
-) -> Iterator[tuple[list[str], list[str] | None]]:
-    rows = iter(
-        _iter_csv_records(
-            export_path,
-            dataset="index_info",
-            require_exact_width=False,
-            expected_identity=expected_identity,
-            content_hashes=content_hashes,
-        )
-    )
-    continuations: list[str] = []
-    with closing_iterator(rows):
-        pending_row: list[str] | None = None
-        pending_start: int | None = None
-        complete_row: list[str] | None = None
-        row_number = 1
-        header: list[str] | None = None
-        while True:
-            try:
-                header, record = next(rows)
-            except StopIteration:
-                break
-            if record is None:
-                yield header, None
-                continue
-            row_number += 1
-            if header != [
-                "Indexcd",
-                "Idxinfo01",
-                "Idxinfo11",
-                "Idxinfo02",
-                "Idxinfo03",
-                "Idxinfo04",
-                "Idxinfo05",
-                "Idxinfo06",
-                "Idxinfo07",
-                "Idxinfo08",
-                "Idxinfo09",
-                "Idxinfo10",
-            ]:
-                if (
-                    len(record) != len(header)
-                    or "Indexcd" not in header
-                    or not INDEX_INFO_CODE_RE.fullmatch(record[header.index("Indexcd")])
-                ):
-                    raise ValueError(f"malformed_csmar_csv_row: {row_number}")
-                yield header, record
-                continue
-            if pending_row is not None:
-                if _record_starts_index_info(record):
-                    raise ValueError(f"malformed_csmar_csv_row: {pending_start}")
-                remaining_columns = len(header) - len(pending_row)
-                completes_row = (
-                    len(pending_row) <= 6 and len(record) >= remaining_columns
-                )
-                suffix = _append_continuation_fields(
-                    continuations,
-                    iter(record),
-                    field_count=len(record),
-                    suffix_count=remaining_columns if completes_row else 0,
-                    include_empty=False,
-                )
-                if completes_row:
-                    pending_row[-1] = _join_continuations(
-                        pending_row[-1], continuations
-                    )
-                    pending_row.extend(suffix)
-                    complete_row = _normalize_index_info_row(
-                        pending_row, len(header), pending_start
-                    )
-                    continuations.clear()
-                    pending_row = None
-                    pending_start = None
-                del record, suffix
-                continue
-            if len(record) > len(header):
-                if _record_starts_index_info(record):
-                    row = _normalize_index_info_record(
-                        record, row_number, continuation_spool=continuations
-                    )
-                elif complete_row is not None:
-                    _append_continuation_fields(
-                        continuations, iter(record), field_count=len(record)
-                    )
-                    del record
-                    continue
-                else:
-                    raise ValueError(f"malformed_csmar_csv_row: {row_number}")
-            else:
-                row = record
-            if len(row) < len(header):
-                if _record_starts_index_info(row):
-                    if complete_row is not None:
-                        if continuations:
-                            complete_row[-1] = _join_continuations(
-                                complete_row[-1], continuations
-                            )
-                        _yield_value = (header, complete_row)
-                        try:
-                            yield _yield_value
-                        except GeneratorExit:
-                            return
-                        complete_row = None
-                    pending_row = row
-                    pending_start = row_number
-                    continuations.clear()
-                    complete_row = None
-                    del row
-                    continue
-                if complete_row is not None:
-                    _append_continuation_fields(
-                        continuations, row, field_count=len(row)
-                    )
-                    del row
-                    continue
-                raise ValueError(f"malformed_csmar_csv_row: {row_number}")
-            if complete_row is not None:
-                if continuations:
-                    complete_row[-1] = _join_continuations(
-                        complete_row[-1], continuations
-                    )
-                _yield_value = (header, complete_row)
-                try:
-                    yield _yield_value
-                except GeneratorExit:
-                    return
-                complete_row = None
-            complete_row = _normalize_index_info_row(row, len(header), row_number)
-            del row
-            continuations.clear()
-            del record
-        if pending_row is not None:
-            raise ValueError(f"malformed_csmar_csv_row: {pending_start}")
-        if complete_row is not None:
-            if continuations:
-                complete_row[-1] = _join_continuations(complete_row[-1], continuations)
-            _yield_value = (header, complete_row)
-            try:
-                yield _yield_value
-            except GeneratorExit:
-                return
-            complete_row = None
-
-
-def _normalize_index_info_row(
-    row: list[str], column_count: int, row_number: int | None
-) -> list[str]:
-    if len(row) != column_count or not _record_starts_index_info(row):
-        raise ValueError(f"malformed_csmar_csv_row: {row_number}")
-    return row
-
-
-def _record_starts_index_info(record: list[str]) -> bool:
-    first = next(iter(record), "")
-    return bool(INDEX_INFO_CODE_RE.fullmatch(first))
-
-
-def _normalize_index_info_record(
-    record: list[str], row_number: int | None, *, continuation_spool: list[str]
-) -> list[str]:
-    """Normalize an over-width index record while preserving text continuations."""
-    window: list[str] = []
-    candidate_start: int | None = None
-    for position, value in enumerate(iter(record)):
-        window.append(value)
-        if len(window) > 5:
-            del window[0]
-        start = position - 4
-        if start < 6 or len(window) != 5 or start + 5 >= len(record):
-            continue
-        if all(
-            (
-                _looks_like_source_category_code(item, allowed_values)
-                for item, allowed_values in zip(
-                    window, INDEX_INFO_SOURCE_CODE_ENUMS, strict=True
-                )
-            )
-        ):
-            if candidate_start is not None:
-                raise ValueError(f"malformed_csmar_csv_row: {row_number}")
-            candidate_start = start
-    if candidate_start is None or candidate_start + 5 >= len(record):
-        raise ValueError(f"malformed_csmar_csv_row: {row_number}")
-    del window, value
-    fixed = list(islice(iter(record), 5))
-    codes = list(islice(iter(record), candidate_start, candidate_start + 5))
-    continuation_spool.clear()
-    sample_field_count = candidate_start - 5
-    _append_continuation_fields(
-        continuation_spool,
-        islice(iter(record), 5, candidate_start),
-        field_count=sample_field_count,
-    )
-    sample = _join_continuations("", continuation_spool)
-    continuation_spool.clear()
-    formula_field_count = len(record) - candidate_start - 5
-    _append_continuation_fields(
-        continuation_spool,
-        islice(iter(record), candidate_start + 5, None),
-        field_count=formula_field_count,
-    )
-    formula = _join_continuations("", continuation_spool)
-    continuation_spool.clear()
-    return [*fixed, sample, *codes, formula]
-
-
-def _looks_like_source_category_code(
-    value: str, allowed_values: frozenset[str]
-) -> bool:
-    stripped = value.strip()
-    return stripped == "" or stripped in allowed_values
-
-
 def iter_private_export_chunks(
     path: str | Path,
     *,
@@ -415,20 +170,11 @@ def iter_private_export_chunks(
     if type(chunksize) is not int or chunksize <= 0:
         raise ValueError("invalid_csmar_chunksize")
     export_path = Path(path)
-    rows = (
-        iter_index_info_rows(
-            export_path,
-            expected_identity=expected_identity,
-            content_hashes=content_hashes,
-        )
-        if dataset == "index_info"
-        else _iter_csv_records(
-            export_path,
-            dataset=dataset,
-            require_exact_width=True,
-            expected_identity=expected_identity,
-            content_hashes=content_hashes,
-        )
+    rows = _iter_csv_records(
+        export_path,
+        dataset=dataset,
+        expected_identity=expected_identity,
+        content_hashes=content_hashes,
     )
     emitted = False
     with closing_iterator(rows):
@@ -448,17 +194,6 @@ def iter_private_export_chunks(
                         raise ValueError("malformed_csmar_csv_row")
                     yield _raw_frame([], header, dataset=dataset)
                 return
-            if dataset == "index_info":
-                from .field_mappings import COLUMN_MAPPINGS, validate_raw_column_names
-
-                validate_raw_column_names(tuple(header), dataset)
-                positions = [
-                    i
-                    for i, name in enumerate(header)
-                    if name in COLUMN_MAPPINGS[dataset]
-                ]
-                header = [header[i] for i in positions]
-                pending = [[row[i] for i in positions] for row in pending]
             emitted = True
             frame = _raw_frame(
                 pending,
@@ -476,8 +211,7 @@ def iter_private_export_chunks(
 def _iter_csv_records(
     path: Path,
     *,
-    require_exact_width: bool,
-    dataset: str | None = None,
+    dataset: str,
     expected_identity: DatasetFileIdentity | None = None,
     content_hashes: list[str] | None = None,
 ) -> Iterator[tuple[list[str], list[str] | None]]:
@@ -493,40 +227,37 @@ def _iter_csv_records(
             return
         physical_header = validate_export_header(header_record)
         physical_width = len(physical_header)
-        selected_positions: frozenset[int] | None = None
-        header = physical_header
-        if dataset is not None:
-            from quant_research_platform.sources.csmar.field_mappings import (
-                COLUMN_ALIASES,
-                COLUMN_MAPPINGS,
-                validate_raw_column_names,
-            )
+        from .field_mappings import (
+            COLUMN_ALIASES,
+            COLUMN_MAPPINGS,
+            validate_raw_column_names,
+        )
 
-            matches = [
-                name
-                for name in RAW_TABLE_CONTRACTS
-                if not missing_raw_column_names(tuple(physical_header), name)
-            ]
-            if matches and dataset not in matches:
-                raise ValueError("csmar_raw_export_table_identity_conflict")
-            validate_raw_column_names(tuple(physical_header), dataset)
-        if require_exact_width and dataset is not None:
-            selected_columns = set(COLUMN_MAPPINGS[dataset])
-            selected_columns.update(RAW_TABLE_CONTRACTS[dataset].required_columns)
-            selected_columns.update(
-                alias
-                for aliases in COLUMN_ALIASES.get(dataset, {}).values()
-                for alias in aliases
-            )
-            selected_positions = frozenset(
-                (
-                    index
-                    for index, column in enumerate(physical_header)
-                    if column in selected_columns
-                )
-            )
-            header = [physical_header[index] for index in sorted(selected_positions)]
-            del physical_header
+        matches = [
+            name
+            for name in RAW_TABLE_CONTRACTS
+            if not missing_raw_column_names(tuple(physical_header), name)
+        ]
+        if matches and dataset not in matches:
+            raise ValueError("csmar_raw_export_table_identity_conflict")
+        validate_raw_column_names(tuple(physical_header), dataset)
+        selected_columns = set(COLUMN_MAPPINGS[dataset])
+        selected_columns.update(RAW_TABLE_CONTRACTS[dataset].required_columns)
+        selected_columns.update(
+            alias
+            for aliases in COLUMN_ALIASES.get(dataset, {}).values()
+            for alias in aliases
+        )
+        selected_positions = [
+            index
+            for index, column in enumerate(physical_header)
+            if column in selected_columns
+        ]
+        index_code_position = (
+            physical_header.index("Indexcd") if dataset == "index_info" else None
+        )
+        header = [physical_header[index] for index in selected_positions]
+        del physical_header
         del header_record
         yield header, None
         while True:
@@ -534,24 +265,20 @@ def _iter_csv_records(
                 record = next(rows)
             except StopIteration:
                 break
-            row: list[str] = record
-            if require_exact_width:
-                if len(record) != physical_width:
-                    raise ValueError("malformed_csmar_csv_row")
-                row = [
-                    value
-                    for position, value in enumerate(record)
-                    if position in selected_positions
-                ]
-                del record
+            if len(record) != physical_width:
+                raise ValueError("malformed_csmar_csv_row")
+            if index_code_position is not None and not INDEX_INFO_CODE_RE.fullmatch(
+                record[index_code_position]
+            ):
+                raise ValueError("malformed_csmar_csv_row")
+            row = [record[position] for position in selected_positions]
+            del record
             _yield_value = (header, row)
             try:
                 yield _yield_value
             except GeneratorExit:
                 return
             del row
-            if not require_exact_width:
-                del record
 
 
 def _raw_frame(

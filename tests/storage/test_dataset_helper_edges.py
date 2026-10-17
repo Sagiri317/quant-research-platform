@@ -513,10 +513,13 @@ def _nested_float_zero_array(case: str) -> pa.Array:
         "recursive",
     ),
 )
-def test_nested_float_primary_key_zero_keeps_bit_identity(case: str) -> None:
-    table = pa.Table.from_arrays([_nested_float_zero_array(case)], names=("key",))
+def test_nested_float_zero_unifies_key_identity_but_preserves_payload(
+    case: str,
+) -> None:
+    zeros = _nested_float_zero_array(case)
+    table = pa.Table.from_arrays([zeros], names=("key",))
     index = ExactPrimaryKeyIndex(primary_key=("key",))
-    assert index.add_table(table, namespace="writer") == 0
+    assert index.add_table(table, namespace="writer") == 1
     index.add_comparison_table(table.slice(0, 1), namespace="left", value_columns=())
     assert index._compare_table(
         table.slice(1, 1),
@@ -526,7 +529,22 @@ def test_nested_float_primary_key_zero_keeps_bit_identity(case: str) -> None:
     ) == (0, 0)
     assert index.difference_counts(
         expected_namespace="left", actual_namespace="right"
-    ) == (1, 1)
+    ) == (0, 0)
+
+    # The same nested values retain exact signed-zero bits outside the key.
+    payloads = table.append_column("value", zeros)
+    index.add_comparison_table(
+        payloads.slice(0, 1), namespace="payload-left", value_columns=("value",)
+    )
+    assert index._compare_table(
+        payloads.slice(1, 1),
+        expected_namespace="payload-left",
+        actual_namespace="payload-right",
+        value_columns=("value",),
+    ) == (0, 1)
+    assert index.difference_counts(
+        expected_namespace="payload-left", actual_namespace="payload-right"
+    ) == (0, 0)
 
 
 @pytest.mark.parametrize("nonfinite", (float("nan"), float("inf")))

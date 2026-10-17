@@ -7,7 +7,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.artifacts.outputs.prediction import read_predictions
+from quant_research_platform.artifacts.outputs.prediction import (
+    read_predictions,
+    write_prediction_outputs,
+)
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.research.models.production import fit
 from quant_research_platform.research.models.trial_selection import (
@@ -124,14 +127,32 @@ def test_candidate_domains_survive_new_common_comparison(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "mutation", ["missing", "duplicate", "wrong_key", "inf", "nat_metadata"]
+    "mutation",
+    ["missing", "truncated", "duplicate", "wrong_key", "inf", "nat_metadata"],
 )
 def test_scoring_reports_missing_keys_and_rejects_invalid_rows(tmp_path, mutation):
     _cases, config = candidates(tmp_path, algorithms=("linear_regression",))
     root = Path(config["predictions"][0])
     frame = pd.read_parquet(root / "prediction.parquet")
-    if mutation == "missing":
+    if mutation in {"missing", "truncated"}:
         frame = frame.iloc[:-1]
+        if mutation == "missing":
+            # A smaller valid forecast domain is scientific missingness, not
+            # damage to an artifact that still declares the original row count.
+            metadata = json.loads((root / "manifest.json").read_text())["metadata"]
+            metadata.pop("prediction_rows")
+            metadata.pop("effective_prediction_end")
+            root = write_prediction_outputs(
+                output_path=tmp_path / "partial-predictions",
+                output_chunks=[frame],
+                metadata=metadata,
+            )
+            config["predictions"] = [str(root)]
+            saved, saved_metadata = read_predictions(root)
+            assert len(saved) == saved_metadata["prediction_rows"] == 5
+            assert pd.Timestamp(saved_metadata["effective_prediction_end"]) == (
+                saved.timestamp.max()
+            )
     elif mutation == "duplicate":
         frame = pd.concat([frame, frame.iloc[:1]], ignore_index=True)
     elif mutation == "wrong_key":
@@ -143,13 +164,17 @@ def test_scoring_reports_missing_keys_and_rejects_invalid_rows(tmp_path, mutatio
         payload = json.loads(path.read_text())
         payload["metadata"]["effective_prediction_end"] = "NaT"
         path.write_text(json.dumps(payload))
-    frame.to_parquet(root / "prediction.parquet", index=False)
+    if mutation != "missing":
+        frame.to_parquet(root / "prediction.parquet", index=False)
     if mutation in {"missing", "wrong_key"}:
         result = json.loads(score(config).read_text())
         coverage = result["candidates"][0]["coverage"]
         assert coverage["paired_prediction_rows"] == 5
         assert coverage["mature_label_rows_without_prediction"] == 4
         assert coverage["prediction_rows_without_label"] == int(mutation == "wrong_key")
+    elif mutation == "truncated":
+        with pytest.raises(ValueError, match="^prediction_metadata_inconsistent$"):
+            score(config)
     else:
         with pytest.raises(ValueError):
             score(config)

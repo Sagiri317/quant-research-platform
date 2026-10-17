@@ -623,19 +623,25 @@ def normalize_raw_frame(
                 allow_null=True,
             )
             result["base_point"] = base_point.mask(base_point.eq(-9666))
-        for column in ("base_date", "start_date"):
-            if column in result.columns:
-                result[column] = _parse_optional_csmar_date(
-                    result[column],
-                    column,
-                    error_code="invalid_index_info_date",
-                )
-        result["timestamp"] = result["start_date"].combine_first(result["base_date"])
-        if result["timestamp"].isna().any():
-            raise ValueError("missing_index_info_effective_timestamp")
-        result["source_asset_id"] = result["index_code"]
-        excluded = pd.Series(False, index=frame.index)
         counts = {"raw_rows": len(frame)}
+        for column in ("base_date", "start_date"):
+            values = result[column].astype("string").str.strip()
+            parsed = pd.to_datetime(values, format="mixed", errors="coerce", utc=True)
+            # CSV dates outside the existing nanosecond domain stay unknown.
+            parsed = (
+                parsed.mask(
+                    (parsed < pd.Timestamp.min.tz_localize("UTC"))
+                    | (parsed > pd.Timestamp.max.tz_localize("UTC"))
+                )
+                .dt.tz_localize(None)
+                .astype("datetime64[ns]")
+            )
+            nonempty = values.notna() & values.ne("")
+            counts[f"invalid_{column}_rows"] = int((nonempty & parsed.isna()).sum())
+            result[column] = parsed
+        result["timestamp"] = result["start_date"].combine_first(result["base_date"])
+        result["source_asset_id"] = result["index_code"]
+        affected = pd.Series(False, index=frame.index)
         for column, allowed_values in zip(
             INDEX_INFO_SOURCE_CODE_COLUMNS, INDEX_INFO_SOURCE_CODE_ENUMS, strict=True
         ):
@@ -646,10 +652,15 @@ def normalize_raw_frame(
                     values.notna() & values.ne("") & ~values.isin(allowed_values)
                 )
             counts[f"unsupported_{column}_rows"] = int(unsupported.sum())
-            excluded |= unsupported
-        counts["excluded_unsupported_source_code_rows"] = int(excluded.sum())
-        counts["retained_before_date_filter_rows"] = int((~excluded).sum())
-        result = result.loc[~excluded].copy()
+            affected |= unsupported
+        counts["unsupported_source_code_rows"] = int(affected.sum())
+        missing_timestamp = result["timestamp"].isna()
+        counts["excluded_missing_timestamp_rows"] = int(missing_timestamp.sum())
+        result = result.loc[~missing_timestamp].copy()
+        if result.empty:
+            for column in result.select_dtypes(include="object"):
+                result[column] = result[column].astype(pd.ArrowDtype(pa.string()))
+        counts["retained_before_date_filter_rows"] = len(result)
         result.sort_values(["source_asset_id", "timestamp"], inplace=True)
         result.reset_index(drop=True, inplace=True)
         result.attrs["source_row_counts"] = counts
@@ -1067,6 +1078,7 @@ def _iter_normalized_interim_frames(
         source_row_counts = {}
     exact_duplicate_count = 0
     content_hashes = []
+    empty_index_frame = None
     for input_file, expected_identity in input_files:
         parent = require_unaliased_path(
             input_file.parent, error="csmar_interim_source_parent_invalid"
@@ -1129,6 +1141,9 @@ def _iter_normalized_interim_frames(
                 if counts is not None:
                     for key, count in counts.items():
                         source_row_counts[key] = source_row_counts.get(key, 0) + count
+                if data_id == "index_info" and pruned.empty:
+                    empty_index_frame = pruned
+                    continue
                 if skip_duplicate:
                     continue
                 try:
@@ -1138,16 +1153,10 @@ def _iter_normalized_interim_frames(
         if len(content_hashes) != completed_before + 1:
             raise ValueError("csmar_raw_export_incomplete_read")
     if (
-        data_id == "index_info"
-        and source_row_counts
-        and source_row_counts["raw_rows"] > 0
+        empty_index_frame is not None
         and source_row_counts["retained_before_date_filter_rows"] == 0
     ):
-        count = source_row_counts["raw_rows"]
-        raise ValueError(
-            f"no_supported_csmar_index_info_rows:raw_{count}:"
-            f"excluded_{count}:retained_0"
-        )
+        yield empty_index_frame
     if source_evidence is not None:
         digest = hashlib.sha256()
         for member_hash in sorted(content_hashes):

@@ -937,3 +937,81 @@ def test_background_seed_default_matches_explicit_and_rejects_null(tmp_path):
     config["background"]["root_seed"] = None
     with pytest.raises(ValueError, match="explanation_seed_invalid"):
         explain(config)
+
+
+def test_imputed_native_importance_has_no_grouped_direction(tmp_path, monkeypatch):
+    import quant_research_platform.research.models.explanations as owner
+    from quant_research_platform.research.models.scaler import (
+        LinearScaledPredictor,
+        ModelMatrixScaler,
+    )
+
+    case, frame, config = _case(tmp_path)
+    training = pd.DataFrame({"x": [0.0, 1.0, np.nan, 3.0], "y": [0.0, 1.0, 2.0, 3.0]})
+    scaler = ModelMatrixScaler.fit(training, missing="impute")
+    predictor = LinearScaledPredictor((0.0, 1.0, 0.0, -2.0, 0.0), scaler)
+    case.result.prediction_model = predictor
+    case.result.metadata["feature_importance"] = {"x": 3.0, "y": 0.0}
+    monkeypatch.setattr(owner, "load_model", lambda path: (case.result, case.facts))
+    probe = pd.DataFrame(
+        {
+            "x": [scaler.medians[0], scaler.medians[0] + 1.0, np.nan],
+            "y": [1.0, 1.0, 1.0],
+        }
+    )
+    scores = predictor.predict(probe)
+    assert scores[1] - scores[0] == pytest.approx(1.0 / scaler.scale_[0])
+    assert scores[2] - scores[0] == pytest.approx(-2.0 / scaler.scale_[2])
+    frame.loc[frame.asset_id.eq("a"), "x"] = np.nan
+    frame.to_parquet(config["inputs"], index=False)
+    _, tables = read_explanation(explain(config))
+    native = tables["native_importance"].set_index("feature")
+    assert native.loc["x", "value"] == 3.0
+    assert native.signed_value.isna().all()
+    assert native.kind.eq(
+        "sum_absolute_standardized_coefficients_with_missing_indicator"
+    ).all()
+    assert native.status.eq("DEFINED").all()
+    predictions = tables["predictions"]
+    contributions = (
+        tables["contributions"].groupby(["timestamp", "asset_id"]).contribution.sum()
+    )
+    ordered = predictions.set_index(["timestamp", "asset_id"])
+    np.testing.assert_allclose(
+        ordered.base_value + contributions, ordered.explained_output
+    )
+    selected = predictions[["timestamp", "asset_id"]].merge(
+        frame, validate="one_to_one"
+    )
+    np.testing.assert_allclose(
+        predictions.prediction_score, predictor.predict(selected[["x", "y"]])
+    )
+
+
+@pytest.mark.parametrize("repeats", [2, 7])
+def test_permutation_releases_predictions_before_next_intervention(
+    tmp_path, monkeypatch, repeats
+):
+    import weakref
+
+    import quant_research_platform.research.models.explanations as owner
+
+    _, _, config = _case(tmp_path)
+    _permutation(config)
+    config["permutation"].update(groups={"x": ["x"], "y": ["y"]}, repeats=repeats)
+    original = owner._output
+    references = []
+
+    def tracked(*args, **kwargs):
+        assert not any(reference() is not None for reference in references), (
+            "retained prediction vector"
+        )
+        raw, values = original(*args, **kwargs)
+        references.append(weakref.ref(values))
+        return raw, values
+
+    monkeypatch.setattr(owner, "_output", tracked)
+    _, tables = read_explanation(explain(config))
+    assert len(references) == 1 + 2 * repeats
+    assert not any(reference() is not None for reference in references)
+    assert tables["permutation_repeats"].status.eq("DEFINED").all()

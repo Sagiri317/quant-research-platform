@@ -898,7 +898,8 @@ def test_taker_long_stream_returns_counts_without_dataframe_results() -> None:
     )
     assert diagnostics["fill_events"] == 0
     assert diagnostics["equity_rows"] == 20000
-    assert not any("dataframe" in key.lower() for key in diagnostics)
+    # This is a long-stream count/result-shape smoke test, not a memory bound.
+    assert not any(isinstance(value, pd.DataFrame) for value in diagnostics.values())
 
 
 def test_taker_freezes_orders_across_overlapping_latency_and_future_book_changes():

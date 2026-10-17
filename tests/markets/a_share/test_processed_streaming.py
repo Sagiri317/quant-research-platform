@@ -159,13 +159,9 @@ def test_local_panel_window_keeps_public_industry_history_and_unknown_barrier(tm
         "unknown",
         "C",
     ]
-    assert asset["is_nonfinancial_industry"].fillna(False).tolist() == [
-        True,
-        False,
-        False,
-        False,
-        True,
-    ]
+    nonfinancial = asset.set_index("timestamp")["is_nonfinancial_industry"]
+    assert nonfinancial.loc[dates[1:4]].isna().all()
+    assert nonfinancial.loc[dates[[0, 4]]].tolist() == [True, True]
 
 
 def test_panel_window_preserves_listing_age_history_and_eligibility(tmp_path):

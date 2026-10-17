@@ -81,7 +81,9 @@ def _inputs(root, stamps, *, assets=None, x=None, eligible=None):
     return frame
 
 
-def test_hft_prediction_alignment_requires_usable_rows_and_rejects_extras(tmp_path):
+def test_hft_prediction_alignment_consumes_saved_keys_and_requires_context(
+    tmp_path, monkeypatch
+):
     root = tmp_path / "inputs"
     frame = _inputs(
         root,
@@ -115,17 +117,33 @@ def test_hft_prediction_alignment_requires_usable_rows_and_rejects_extras(tmp_pa
             )
         )
 
-    with pytest.raises(ValueError, match="missing_required_prediction_keys"):
-        rows(prediction.iloc[:0])
+    assert rows(prediction.iloc[:0]) == []
     assert [row["prediction_score"] for row in rows(prediction)] == [0.5]
-    # Neither an unusable NaN feature nor an ineligible row enters the expected
-    # domain. An extra prediction for either is a real scientific mismatch.
+    # Current feature NaNs and eligibility do not re-admit saved forecasts;
+    # context rows without a saved forecast do not require a new prediction.
     for index in (1, 2):
         extra = frame.loc[[index], ["timestamp", "asset_id"]].assign(
             prediction_score=0.7
         )
-        with pytest.raises(ValueError, match="misaligned_persisted_prediction_keys"):
-            rows(pd.concat((prediction, extra), ignore_index=True))
+        result = rows(pd.concat((extra, prediction), ignore_index=True))
+        assert [row["timestamp_ms"] for row in result] == [100, (index + 1) * 100]
+        assert [row["prediction_score"] for row in result] == [0.5, 0.7]
+        assert all(row["book_segment_id"] == "s1" for row in result)
+
+    missing_context = prediction.assign(timestamp=pd.Timestamp(250, unit="ms"))
+    with pytest.raises(ValueError, match="^misaligned_persisted_prediction_keys$"):
+        rows(missing_context)
+
+    chunks = portfolio.iter_dataset_chunks
+
+    def duplicate_context(session):
+        for chunk in chunks(session):
+            yield chunk
+            yield chunk.iloc[:1]
+
+    monkeypatch.setattr(portfolio, "iter_dataset_chunks", duplicate_context)
+    with pytest.raises(ValueError, match="^duplicate_prediction_input_keys$"):
+        rows(prediction)
 
 
 def test_crypto_chronology_preserves_multi_day_noncalendar_boundaries():

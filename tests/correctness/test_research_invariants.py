@@ -313,6 +313,14 @@ def test_supervised_fit_uses_only_mature_training_rows_and_scaler() -> None:
     )
     assert changed.metadata == fitted.metadata
     assert changed.prediction_model.scaler == fitted.prediction_model.scaler
+    # Probe only lawful inputs; poisoned rows must not affect the fitted function.
+    probe = pd.DataFrame({"feature": [1.0, 1.5, 2.0]})
+    np.testing.assert_allclose(
+        changed.prediction_model.predict(probe),
+        fitted.prediction_model.predict(probe),
+        rtol=1e-12,
+        atol=1e-14,
+    )
 
 
 @pytest.mark.parametrize(
@@ -1081,13 +1089,16 @@ def test_future_execution_and_disclosure_facts_do_not_rewrite_past_facts() -> No
     )
     baseline = add_forward_return_labels(panel, horizons=(1,), sessions=sessions)
     changed = panel.copy()
-    changed.loc[5, "can_enter"] = False
+    # The first label exits at sessions[2]; later prices cannot rewrite it.
+    changed.loc[3:, "adj_open"] = [1300.0, 0.14, 15000.0]
     future_changed = add_forward_return_labels(
         changed, horizons=(1,), sessions=sessions
     )
-    assert future_changed.loc[0, "forward_return_1d"] == pytest.approx(
-        baseline.loc[0, "forward_return_1d"]
-    )
+    for labels in (baseline, future_changed):
+        assert labels.loc[0, "forward_return_1d"] == pytest.approx(12.0 / 11.0 - 1.0)
+        assert labels.loc[0, "forward_return_1d_available_at"] == (
+            sessions[2] + pd.Timedelta(hours=7)
+        )
 
     observations = pd.DataFrame({"asset_id": ["asset"], "timestamp": [sessions[1]]})
     events = pd.DataFrame(

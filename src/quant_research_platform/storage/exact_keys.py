@@ -298,7 +298,7 @@ class ExactPrimaryKeyIndex:
                     payload,
                     column[row_index],
                     field.type,
-                    normalize_float_zero=pa.types.is_floating(field.type),
+                    normalize_float_zero=True,
                 )
             yield (namespace, payload, None)
 
@@ -318,7 +318,7 @@ class ExactPrimaryKeyIndex:
                     key_payload,
                     column[row_index],
                     field.type,
-                    normalize_float_zero=pa.types.is_floating(field.type),
+                    normalize_float_zero=True,
                 )
             value_payload = bytearray()
             for column, field in zip(value_arrays, value_fields, strict=True):
@@ -364,6 +364,7 @@ def _append_arrow_scalar_payload(
             data_type.value_type,
             allow_null=allow_null,
             allow_nonfinite=allow_nonfinite,
+            normalize_float_zero=normalize_float_zero,
         )
     elif pa.types.is_timestamp(data_type):
         sink.extend(struct.pack(">q", int(value.value)))
@@ -413,6 +414,7 @@ def _append_arrow_scalar_payload(
                 data_type.value_type,
                 allow_null=allow_null,
                 allow_nonfinite=allow_nonfinite,
+                normalize_float_zero=normalize_float_zero,
             )
     elif pa.types.is_fixed_size_list(data_type):
         for item in value.values:
@@ -422,6 +424,7 @@ def _append_arrow_scalar_payload(
                 data_type.value_type,
                 allow_null=allow_null,
                 allow_nonfinite=allow_nonfinite,
+                normalize_float_zero=normalize_float_zero,
             )
     elif pa.types.is_struct(data_type):
         for field in data_type:
@@ -433,6 +436,7 @@ def _append_arrow_scalar_payload(
                 field.type,
                 allow_null=allow_null,
                 allow_nonfinite=allow_nonfinite,
+                normalize_float_zero=normalize_float_zero,
             )
             _finish_frame(sink, field_length_offset, field_payload_start)
     elif pa.types.is_map(data_type):
@@ -440,7 +444,11 @@ def _append_arrow_scalar_payload(
         for entry in value.values:
             key, item = (bytearray(), bytearray())
             _append_arrow_scalar_payload(
-                key, entry["key"], data_type.key_type, allow_nonfinite=allow_nonfinite
+                key,
+                entry["key"],
+                data_type.key_type,
+                allow_nonfinite=allow_nonfinite,
+                normalize_float_zero=normalize_float_zero,
             )
             _append_arrow_scalar_payload(
                 item,
@@ -448,6 +456,7 @@ def _append_arrow_scalar_payload(
                 data_type.item_type,
                 allow_null=allow_null,
                 allow_nonfinite=allow_nonfinite,
+                normalize_float_zero=normalize_float_zero,
             )
             entries.append((key, item))
         for key, item in sorted(entries):

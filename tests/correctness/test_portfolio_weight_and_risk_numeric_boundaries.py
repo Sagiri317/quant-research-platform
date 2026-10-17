@@ -219,13 +219,58 @@ def test_weighted_style_and_residuals_match_independent_full_normal_system(
         fitted = FactorRiskState(style_columns=styles).fit_return_session(current)
         assert fitted is not None
         coefficients, residuals = _full_wls_fraction_oracle(fitted.exposures, current)
-        np.testing.assert_array_equal(fitted.factor_returns, coefficients)
-        np.testing.assert_array_equal(fitted.residuals, residuals)
+        if magnitude > 1:
+            # Preserve the extreme cancellation and nonzero-survival regression.
+            coefficient_atol = residual_atol = 0.0
+        else:
+            aligned = current.set_index("asset_id").reindex(fitted.exposures.index)
+            design = fitted.exposures.to_numpy()
+            root_weights = aligned.total_market_cap.to_numpy() ** 0.25
+            weighted_design = design * root_weights[:, None]
+            weighted_response = aligned.asset_return.to_numpy() * root_weights
+            singular_values = np.linalg.svd(weighted_design, compute_uv=False)
+            condition = singular_values[0] / singular_values[-1]
+            # A small multiple of n*eps, scaled by conditioning and response
+            # units, allows independent reductions without hiding bad fits.
+            roundoff = 32 * len(current) * np.finfo(float).eps
+            coefficient_atol = (
+                roundoff
+                * condition
+                * np.linalg.norm(weighted_response)
+                / singular_values[-1]
+            )
+            residual_atol = coefficient_atol * np.abs(design).sum(axis=1).max()
+            residual_atol += roundoff * np.abs(aligned.asset_return).max()
+        np.testing.assert_allclose(
+            fitted.factor_returns, coefficients, rtol=0, atol=coefficient_atol
+        )
+        np.testing.assert_allclose(
+            fitted.residuals, residuals, rtol=0, atol=residual_atol
+        )
         assert fitted.factor_returns["style"] != 0
-        results.append((fitted.factor_returns, fitted.residuals.sort_index()))
-    for coefficients, residuals in results[1:]:
-        pd.testing.assert_series_equal(coefficients, results[0][0], check_exact=True)
-        pd.testing.assert_series_equal(residuals, results[0][1], check_exact=True)
+        results.append(
+            (
+                fitted.factor_returns,
+                fitted.residuals.sort_index(),
+                coefficient_atol,
+                residual_atol,
+            )
+        )
+    for coefficients, residuals, coefficient_atol, residual_atol in results[1:]:
+        pd.testing.assert_series_equal(
+            coefficients,
+            results[0][0],
+            check_exact=magnitude > 1,
+            rtol=0,
+            atol=coefficient_atol + results[0][2],
+        )
+        pd.testing.assert_series_equal(
+            residuals,
+            results[0][1],
+            check_exact=magnitude > 1,
+            rtol=0,
+            atol=residual_atol + results[0][3],
+        )
     pd.testing.assert_frame_equal(frame, original, check_exact=True)
 
 

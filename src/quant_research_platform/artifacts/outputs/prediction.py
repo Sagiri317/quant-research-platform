@@ -188,12 +188,20 @@ def _iter_prediction_member(path, metadata, *, columns=None, time_window=None):
     filters = parquet_filters_for_time_window(
         timestamp_column="timestamp", time_window=time_window
     )
+
+    def validate_member_metadata(member):
+        if member.row_count != metadata["prediction_rows"]:
+            raise ValueError("prediction_metadata_inconsistent")
+
     count = 0
     maximum = None
     keys = ExactPrimaryKeyIndex(primary_key=("timestamp", "asset_id"))
     with closing_iterator(
         iter_dataset_part_batches(
-            Path(path) / "prediction.parquet", columns=physical, parquet_filters=filters
+            Path(path) / "prediction.parquet",
+            columns=physical,
+            parquet_filters=filters,
+            metadata_observer=validate_member_metadata,
         )
     ) as batches:
         for batch in batches:

@@ -882,6 +882,15 @@ def test_csmar_materialization_replays_each_dataset_from_one_inventory(
             data_ids=(data_id,),
         )
         expected[data_id] = read_dataset(result.artifact_roots[data_id])
+    inventory_calls = 0
+    original_inventory = interim.dataset_files_with_identity_by_id
+
+    def counted_inventory(*args, **kwargs):
+        nonlocal inventory_calls
+        inventory_calls += 1
+        return original_inventory(*args, **kwargs)
+
+    monkeypatch.setattr(interim, "dataset_files_with_identity_by_id", counted_inventory)
     result = interim.materialize_interim_data(
         output_roots={
             key: combined.interim_data_root("csmar", key) for key in data_ids
@@ -889,6 +898,7 @@ def test_csmar_materialization_replays_each_dataset_from_one_inventory(
         raw_root=raw,
         data_ids=data_ids,
     )
+    assert inventory_calls == 1
     assert set(result.artifact_roots) == set(data_ids)
     for data_id in data_ids:
         actual = read_dataset(result.artifact_roots[data_id])
@@ -1080,20 +1090,74 @@ def test_index_info_named_header_reordering_preserves_complete_row(tmp_path):
     pd.testing.assert_frame_equal(*frames)
 
 
-def test_dirty_index_info_csv_preserves_semantics(tmp_path: Path) -> None:
-    index_path = tmp_path / "index_info_dirty.csv"
-    filesystem_write_text(
-        index_path,
-        "Indexcd,Idxinfo01,Idxinfo11,Idxinfo02,Idxinfo03,Idxinfo04,"
-        "Idxinfo05,Idxinfo06,Idxinfo07,Idxinfo08,Idxinfo09,Idxinfo10\n"
-        "000985,benchmark,2014-01-02,2013-12-31,-9666,all shares,"
-        '1,2,3,4,5,"formula, English comma, 中文标点"\n'
-        "000300,large,2014-01-03,2013-12-31,1000,blue chips,"
-        ',4,7,5,9,"formula with embedded line\nbreak and ""quotes"""\n'
-        "000905,mid,2014-01-06,2013-12-31,500,text continues\n"
-        "over physical line,1,2,3,4,5,formula after merge\n",
-        encoding="utf-8",
-    )
+def test_quoted_index_info_csv_preserves_semantics(tmp_path: Path) -> None:
+    index_path = tmp_path / "index_info_quoted.csv"
+    with open_filesystem_file(
+        index_path, "w", encoding="utf-8-sig", newline=""
+    ) as stream:
+        writer = csv.writer(stream)
+        writer.writerow(
+            [
+                "Indexcd",
+                "Idxinfo01",
+                "Idxinfo11",
+                "Idxinfo02",
+                "Idxinfo03",
+                "Idxinfo04",
+                "Idxinfo05",
+                "Idxinfo06",
+                "Idxinfo07",
+                "Idxinfo08",
+                "Idxinfo09",
+                "Idxinfo10",
+            ]
+        )
+        writer.writerows(
+            [
+                [
+                    "000985",
+                    "benchmark",
+                    "2014-01-02",
+                    "2013-12-31",
+                    "-9666",
+                    "all shares",
+                    "1",
+                    "2",
+                    "3",
+                    "4",
+                    "5",
+                    "formula, English comma, 中文标点",
+                ],
+                [
+                    "000300",
+                    "large",
+                    "2014-01-03",
+                    "2013-12-31",
+                    "1000",
+                    "blue chips",
+                    "",
+                    "4",
+                    "7",
+                    "5",
+                    "9",
+                    'formula with embedded line\nbreak and "quotes"',
+                ],
+                [
+                    "000905",
+                    "mid",
+                    "2014-01-06",
+                    "2013-12-31",
+                    "500",
+                    "text continues\nover physical line",
+                    "1",
+                    "2",
+                    "3",
+                    "4",
+                    "5",
+                    "formula after merge",
+                ],
+            ]
+        )
 
     raw = _collect_raw_export(index_path, "index_info")
     normalized = interim.normalize_raw_frame(raw, "index_info")
@@ -1112,6 +1176,9 @@ def test_dirty_index_info_csv_preserves_semantics(tmp_path: Path) -> None:
         "000300",
         "calculation_formula",
     ].replace("\r\n", "\n")
+    assert (
+        by_asset.loc["000905", "sample_scope"] == "text continues\nover physical line"
+    )
     assert by_asset.loc["000905", "calculation_formula"] == "formula after merge"
 
 
@@ -1127,7 +1194,7 @@ def test_dirty_index_info_csv_preserves_semantics(tmp_path: Path) -> None:
 )
 @pytest.mark.parametrize("chunksize", (1, 100))
 @pytest.mark.parametrize("all_unsupported", (False, True))
-def test_index_info_retains_supported_rows_and_discloses_exclusions(
+def test_index_info_preserves_optional_source_codes_and_discloses_unknowns(
     tmp_path, column, maximum, chunksize, all_unsupported
 ):
     import json
@@ -1179,25 +1246,6 @@ def test_index_info_retains_supported_rows_and_discloses_exclusions(
     assert len(_collect_raw_export(raw_path, "index_info", chunksize=chunksize)) == len(
         rows
     )
-    if all_unsupported:
-        with pytest.raises(
-            ValueError,
-            match="^no_supported_csmar_index_info_rows:raw_4:excluded_4:retained_0$",
-        ) as failure:
-            interim.materialize_interim_data(
-                output_roots={
-                    key: layout.interim_data_root("csmar", key)
-                    for key in ("index_info",)
-                },
-                raw_root=layout.raw_source_root("csmar"),
-                data_ids=("index_info",),
-                chunksize=chunksize,
-            )
-        assert str(failure.value).startswith("no_supported_csmar_index_info_rows:")
-        assert not filesystem_exists(layout.interim_data_root("csmar", "index_info"))
-        assert not tuple(filesystem_glob(tmp_path, "**/.a-*"))
-        assert Path(native_filesystem_path(raw_path)).read_bytes() == original
-        return
     result = interim.materialize_interim_data(
         output_roots={
             key: layout.interim_data_root("csmar", key) for key in ("index_info",)
@@ -1210,14 +1258,21 @@ def test_index_info_retains_supported_rows_and_discloses_exclusions(
     root = result.artifact_roots["index_info"]
     saved = read_dataset(root)
     assert tuple(saved.columns) == interim.INDEX_INFO_INTERIM_COLUMNS
-    assert set(saved.source_asset_id) == {item["Indexcd"] for item in supported}
-    assert len(saved) == len(supported)
+    assert set(saved.source_asset_id) == {item["Indexcd"] for item in rows}
+    assert len(saved) == len({item["Indexcd"] for item in rows})
+    from quant_research_platform.sources.csmar.field_mappings import COLUMN_MAPPINGS
+
+    by_asset = saved.set_index("source_asset_id")
+    for item in unsupported:
+        for source_column in raw_exports.INDEX_INFO_SOURCE_CODE_COLUMNS:
+            output_column = COLUMN_MAPPINGS["index_info"][source_column]
+            assert by_asset.loc[item["Indexcd"], output_column] == item[source_column]
     manifest = json.loads(
         Path(native_filesystem_path(root / "_manifest/manifest.json")).read_text(
             encoding="utf-8"
         )
     )
-    retained = len(supported) + 1
+    retained = len(rows)
     assert manifest["producer_diagnostics"]["source_row_counts"] == {
         "raw_rows": len(rows),
         **{
@@ -1226,19 +1281,21 @@ def test_index_info_retains_supported_rows_and_discloses_exclusions(
             else int(name == other_column)
             for name in raw_exports.INDEX_INFO_SOURCE_CODE_COLUMNS
         },
-        "excluded_unsupported_source_code_rows": 4,
+        "unsupported_source_code_rows": 4,
+        "invalid_base_date_rows": 0,
+        "invalid_start_date_rows": 0,
+        "excluded_missing_timestamp_rows": 0,
         "retained_before_date_filter_rows": retained,
         "retained_after_date_filter_rows": retained,
         "excluded_date_range_rows": 0,
     }
-    assert manifest["producer_diagnostics"]["exact_duplicate_count"] == 1
+    assert manifest["producer_diagnostics"]["exact_duplicate_count"] == int(
+        not all_unsupported
+    )
     assert Path(native_filesystem_path(raw_path)).read_bytes() == original
 
 
-@pytest.mark.parametrize("malformed", (False, True))
-def test_index_info_qualification_keeps_atomic_failure_and_old_good(
-    tmp_path, malformed
-):
+def test_index_info_structure_failure_keeps_atomic_failure_and_old_good(tmp_path):
     from quant_research_platform.storage.datasets.reading import read_dataset
     from tests.helpers.a_share_raw import _write_csmar
     from tests.helpers.paths import StorageLayout
@@ -1272,15 +1329,11 @@ def test_index_info_qualification_keeps_atomic_failure_and_old_good(
         ],
         extra_columns=("Idxinfo05",),
     )
-    if malformed:
-        raw_path = next(filesystem_glob(raw, "*.csv"))
-        with raw_path.open("a", encoding="utf-8") as stream:
-            stream.write("broken,row\n")
+    raw_path = next(filesystem_glob(raw, "*.csv"))
+    with raw_path.open("a", encoding="utf-8") as stream:
+        stream.write("broken,row\n")
     candidate = StorageLayout(tmp_path / "candidate")
-    error = (
-        "malformed_csmar_csv_row" if malformed else "invalid_index_info_date:start_date"
-    )
-    with pytest.raises(ValueError, match=error):
+    with pytest.raises(ValueError, match="malformed_csmar_csv_row"):
         interim.materialize_interim_data(
             output_roots={
                 key: candidate.interim_data_root("csmar", key)
@@ -1288,7 +1341,7 @@ def test_index_info_qualification_keeps_atomic_failure_and_old_good(
             },
             raw_root=raw,
             data_ids=("index_info",),
-            chunksize=100 if malformed else 1,
+            chunksize=100,
         )
     assert _file_bytes(root) == before
     assert len(read_dataset(root)) == 1
@@ -1296,10 +1349,8 @@ def test_index_info_qualification_keeps_atomic_failure_and_old_good(
     assert not tuple(filesystem_glob(tmp_path / "candidate", "**/.a-*"))
 
 
-@pytest.mark.parametrize("excluded_code", ("000905", "000852"))
-def test_index_info_excluded_required_benchmark_remains_blocked(
-    tmp_path, excluded_code
-):
+@pytest.mark.parametrize("unknown_code", ("000905", "000852"))
+def test_index_info_benchmark_ignores_optional_unknown_codes(tmp_path, unknown_code):
     from quant_research_platform.markets.implementations.a_share.benchmark import (
         iter_benchmark_weight_snapshots,
     )
@@ -1319,7 +1370,7 @@ def test_index_info_excluded_required_benchmark_remains_blocked(
             Idxinfo01=name,
             Idxinfo11="2014-01-02",
             Idxinfo02="2013-12-31",
-            Idxinfo05="5" if code == excluded_code else "1",
+            Idxinfo05="5;3" if code == unknown_code else "1",
         )
         for code, (_, name) in FORMAL_BENCHMARKS.items()
     ]
@@ -1333,7 +1384,7 @@ def test_index_info_excluded_required_benchmark_remains_blocked(
         chunksize=1,
     )
     saved = read_dataset(result.artifact_roots["index_info"])
-    assert set(saved.source_asset_id) == set(FORMAL_BENCHMARKS) - {excluded_code}
+    assert set(saved.source_asset_id) == set(FORMAL_BENCHMARKS)
     for code in FORMAL_BENCHMARKS:
         weights = pd.DataFrame(
             dict(
@@ -1343,27 +1394,29 @@ def test_index_info_excluded_required_benchmark_remains_blocked(
                 weight=[1.0],
             )
         )
-        if code == excluded_code:
-            with pytest.raises(
-                ValueError, match="^a_share_benchmark_index_identity_invalid$"
-            ):
-                list(iter_benchmark_weight_snapshots(saved, [weights]))
-        else:
-            actual = pd.concat(iter_benchmark_weight_snapshots(saved, [weights]))
-            assert set(actual.benchmark_id) == {FORMAL_BENCHMARKS[code][0]}
+        actual = pd.concat(iter_benchmark_weight_snapshots(saved, [weights]))
+        assert set(actual.benchmark_id) == {FORMAL_BENCHMARKS[code][0]}
+        wrong_identity = saved.copy()
+        wrong_identity.loc[wrong_identity.source_asset_id.eq(code), "index_name"] = (
+            "wrong"
+        )
+        with pytest.raises(
+            ValueError, match="^a_share_benchmark_index_identity_invalid$"
+        ):
+            list(iter_benchmark_weight_snapshots(wrong_identity, [weights]))
 
 
 @pytest.mark.parametrize(
-    "tail,expected",
+    "tail",
     [
-        ("scope,extra,1,2,3,4,5,formula,tail", ("scope,extra", "formula,tail")),
-        ("scope,1,2,3,4,5,ambiguous,1,2,3,4,5,tail", None),
+        "scope,extra,1,2,3,4,5,formula,tail",
+        "scope,1,2,3,4,5,ambiguous,1,2,3,4,5,tail",
+        "text continues\nover physical line,1,2,3,4,5,formula",
+        'scope,1,2,3,4,5,"unterminated',
     ],
 )
-def test_index_info_long_row_requires_one_unambiguous_field_split(
-    tmp_path: Path, tail, expected
-) -> None:
-    index_path = tmp_path / "index_info_long.csv"
+def test_index_info_rejects_unrepaired_records(tmp_path: Path, tail) -> None:
+    index_path = tmp_path / "index_info_malformed.csv"
     filesystem_write_text(
         index_path,
         "Indexcd,Idxinfo01,Idxinfo11,Idxinfo02,Idxinfo03,Idxinfo04,"
@@ -1371,13 +1424,22 @@ def test_index_info_long_row_requires_one_unambiguous_field_split(
         "000985,benchmark,2014-01-02,2013-12-31,1000," + tail + "\n",
         encoding="utf-8",
     )
-    if expected is None:
-        with pytest.raises(ValueError, match="malformed_csmar_csv_row"):
-            _collect_raw_export(index_path, "index_info")
-    else:
-        actual = _collect_raw_export(index_path, "index_info")
-        assert len(actual) == 1
-        assert (actual.iloc[0]["Idxinfo04"], actual.iloc[0]["Idxinfo10"]) == expected
+    with pytest.raises(ValueError, match="^malformed_csmar_csv_row$"):
+        _collect_raw_export(index_path, "index_info")
+
+
+@pytest.mark.parametrize("reordered", [False, True])
+def test_index_info_validates_code_by_named_column(tmp_path, reordered):
+    fields = ["Indexcd", "Idxinfo01", "Idxinfo11", "Idxinfo02"]
+    row = ["invalid code", "000300", "2014-01-02", "2013-12-31"]
+    positions = [1, 0, 2, 3] if reordered else list(range(4))
+    path = tmp_path / "index.csv"
+    with open_filesystem_file(path, "w", encoding="utf-8", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow([fields[i] for i in positions])
+        writer.writerow([row[i] for i in positions])
+    with pytest.raises(ValueError, match="^malformed_csmar_csv_row$"):
+        _collect_raw_export(path, "index_info")
 
 
 def test_index_info_parser_streams_bounded_chunks_without_a_full_frame_surface(
@@ -2155,7 +2217,7 @@ def test_controlled_csmar_numeric_reasons_survive_workflow_sanitizer():
     assert checked == 16
 
 
-def test_csmar_date_reason_survives_research_run_record_and_report(tmp_path):
+def test_index_date_error_is_diagnosed_without_blocking_valid_base_date(tmp_path):
 
     from quant_research_platform.sources.csmar.field_mappings import COLUMN_MAPPINGS
     from tests.helpers.a_share_raw import _write_csmar
@@ -2176,12 +2238,17 @@ def test_csmar_date_reason_survives_research_run_record_and_report(tmp_path):
             }
         ],
     )
-    with pytest.raises(ValueError, match="invalid_index_info_date:start_date"):
-        interim.materialize_interim_data(
-            raw_root=raw,
-            output_roots={"index_info": tmp_path / "index-info"},
-            data_ids=("index_info",),
-        )
+    from quant_research_platform.storage.datasets.reading import read_dataset
+
+    result = interim.materialize_interim_data(
+        raw_root=raw,
+        output_roots={"index_info": tmp_path / "index-info"},
+        data_ids=("index_info",),
+    )
+    saved = read_dataset(result.artifact_roots["index_info"])
+    assert len(saved) == 1
+    assert saved["timestamp"].iloc[0] == pd.Timestamp("2020-01-01")
+    assert pd.isna(saved["start_date"].iloc[0])
 
 
 def _nullable_index_numeric_rows(data_id):
@@ -2789,3 +2856,122 @@ def test_multi_target_diagnostics_do_not_inherit_previous_table_counts(tmp_path)
     assert analyst["source_row_counts"]["raw_rows"] == len(_analyst_rows())
     assert calendar == {"exact_duplicate_count": 0, "caller_fact": "preserved"}
     assert metadata == {"producer_diagnostics": {"caller_fact": "preserved"}}
+
+
+@pytest.mark.parametrize("chunksize", (1, 100))
+@pytest.mark.parametrize("all_undated", (False, True))
+def test_index_info_unusable_dates_are_local_to_timed_rows(
+    tmp_path, chunksize, all_undated
+):
+    import json
+
+    from quant_research_platform.markets.implementations.a_share.benchmark import (
+        iter_benchmark_weight_snapshots,
+    )
+    from quant_research_platform.sources.csmar.ids import SOURCE_ID
+    from quant_research_platform.storage.datasets.reading import read_dataset
+    from tests.helpers.a_share_raw import _write_csmar
+    from tests.helpers.paths import StorageLayout
+
+    layout = StorageLayout(tmp_path)
+    raw_root = layout.raw_source_root(SOURCE_ID)
+    filesystem_mkdir(raw_root, parents=True)
+    valid = dict(
+        Indexcd="000905",
+        Idxinfo01="中证小盘500指数",
+        Idxinfo11="2014-01-02",
+        Idxinfo02="2013-12-31",
+        Idxinfo04="source replacement \ufffd retained",
+    )
+    undated = [
+        dict(valid, Indexcd="000852", Idxinfo11="9999-12-31", Idxinfo02=""),
+        dict(valid, Indexcd="000853", Idxinfo11="invalid-date", Idxinfo02="bad-date"),
+        dict(valid, Indexcd="000854", Idxinfo11="", Idxinfo02=""),
+    ]
+    rows = (
+        undated
+        if all_undated
+        else [
+            valid,
+            dict(valid, Indexcd="000906", Idxinfo11="9999-12-31"),
+            dict(valid, Indexcd="000907", Idxinfo11="invalid-date"),
+            dict(valid, Indexcd="000908", Idxinfo02="bad-date"),
+            *undated,
+        ]
+    )
+    _write_csmar(raw_root, "index_info", rows, extra_columns=("Idxinfo04",))
+    raw_path = next(filesystem_glob(raw_root, "*.csv"))
+    before = Path(native_filesystem_path(raw_path)).read_bytes()
+    result = interim.materialize_interim_data(
+        output_roots={"index_info": layout.interim_data_root(SOURCE_ID, "index_info")},
+        raw_root=raw_root,
+        data_ids=("index_info",),
+        chunksize=chunksize,
+    )
+    assert not result.skipped
+    root = result.artifact_roots["index_info"]
+    saved = read_dataset(root)
+    assert len(saved) == (0 if all_undated else 4)
+    assert not saved[["source_asset_id", "timestamp"]].isna().any().any()
+    if not all_undated:
+        by_code = saved.set_index("source_asset_id")
+        assert by_code.loc["000905", "timestamp"] == pd.Timestamp("2014-01-02")
+        assert by_code.loc["000905", "base_date"] == pd.Timestamp("2013-12-31")
+        for code in ("000906", "000907"):
+            assert pd.isna(by_code.loc[code, "start_date"])
+            assert by_code.loc[code, "timestamp"] == pd.Timestamp("2013-12-31")
+        assert pd.isna(by_code.loc["000908", "base_date"])
+        assert by_code.loc["000908", "timestamp"] == pd.Timestamp("2014-01-02")
+        assert saved.sample_scope.eq(valid["Idxinfo04"]).all()
+    manifest = json.loads(
+        Path(native_filesystem_path(root / "_manifest/manifest.json")).read_text()
+    )
+    counts = manifest["producer_diagnostics"]["source_row_counts"]
+    assert counts["raw_rows"] == len(rows)
+    assert counts["invalid_start_date_rows"] == (2 if all_undated else 4)
+    assert counts["invalid_base_date_rows"] == (1 if all_undated else 2)
+    assert counts["excluded_missing_timestamp_rows"] == 3
+    assert counts["retained_before_date_filter_rows"] == len(saved)
+    assert counts["retained_after_date_filter_rows"] == len(saved)
+    assert counts["excluded_date_range_rows"] == 0
+    assert Path(native_filesystem_path(raw_path)).read_bytes() == before
+    weights = pd.DataFrame(
+        dict(
+            source_asset_id=["000905"],
+            constituent_asset_id=["000001"],
+            effective_date=["2020-01-02"],
+            weight=[1.0],
+        )
+    )
+    if all_undated:
+        with pytest.raises(
+            ValueError, match="a_share_benchmark_index_identity_invalid"
+        ):
+            list(iter_benchmark_weight_snapshots(saved, [weights]))
+    else:
+        assert len(pd.concat(iter_benchmark_weight_snapshots(saved, [weights]))) == 1
+
+
+@pytest.mark.parametrize(
+    "dates",
+    (
+        ("2020-01-02", "2020/01/03", "20200104", "", None),
+        ("2020-01-02T08:00:00+08:00", "2020-01-03T00:00:00Z", "", None),
+    ),
+)
+def test_index_date_vectorized_valid_values_match_existing_owner(dates):
+    values = pd.Series(dates, dtype="string")
+    frame = pd.DataFrame(
+        {
+            "Indexcd": [f"{i:06d}" for i in range(len(values))],
+            "Idxinfo01": "benchmark",
+            "Idxinfo11": values,
+            "Idxinfo02": "2013-12-31",
+        }
+    )
+    normalized = interim.normalize_raw_frame(frame, "index_info")
+    expected = interim._parse_optional_csmar_date(
+        values, "start_date", error_code="invalid_index_info_date"
+    )
+    pd.testing.assert_series_equal(normalized.start_date, expected, check_names=False)
+    assert normalized.attrs["source_row_counts"]["invalid_start_date_rows"] == 0

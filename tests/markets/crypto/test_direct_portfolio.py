@@ -36,7 +36,7 @@ def _window(start, end):
     }
 
 
-def _inputs(tmp_path, *, ineligible_at=None):
+def _inputs(tmp_path, *, ineligible_at=None, distinct_domains=False):
     stamps = [*range(0, 1100, 100), 2100, 2200, 8600, 8800, 9000]
     times = pd.to_datetime(stamps, unit="ms")
     price, proxy = "future_mid_return_500ms", "maker_bid_sell_pressure_proxy_500ms"
@@ -53,6 +53,10 @@ def _inputs(tmp_path, *, ineligible_at=None):
             "segment_id": "segment",
         }
     )
+    if distinct_domains:
+        frame["y"] = frame["x"]
+        frame.loc[frame.timestamp.eq(pd.Timestamp(8600, unit="ms")), "x"] = np.nan
+        frame.loc[frame.timestamp.eq(pd.Timestamp(9000, unit="ms")), "y"] = np.nan
     if ineligible_at is not None:
         frame.loc[
             frame.timestamp.eq(pd.Timestamp(ineligible_at, unit="ms")), "eligible"
@@ -61,6 +65,8 @@ def _inputs(tmp_path, *, ineligible_at=None):
         frame[target + "_available_at"] = times + pd.Timedelta(milliseconds=500)
     roles = {name: "context" for name in frame.columns}
     roles.update(timestamp="timestamp", asset_id="key", x="feature", eligible="mask")
+    if distinct_domains:
+        roles["y"] = "feature"
     roles.update({price: "label", proxy: "label"})
     inputs = tmp_path / "inputs"
     write_dataset(
@@ -303,7 +309,7 @@ def test_explicit_maker_calibration_and_frozen_backtest(
 
 @pytest.mark.parametrize("mutation", ("missing", "extra", "rank_units"))
 def test_prediction_consumer_preserves_full_expected_domain(
-    tmp_path, explicit_models, mutation
+    tmp_path, monkeypatch, explicit_models, mutation
 ):
     inputs, chronology, _validation, final = explicit_models
     window = TimeWindow(**chronology["test"])
@@ -322,10 +328,17 @@ def test_prediction_consumer_preserves_full_expected_domain(
     )
     assert [row["timestamp_ms"] for row in rows] == [8600, 8800, 9000]
     if mutation == "missing":
-        predictions = predictions.iloc[1:]
+        chunks = portfolio.iter_dataset_chunks
+
+        def without_context(session):
+            with portfolio.closing_iterator(chunks(session)) as source:
+                for frame in source:
+                    yield frame.loc[frame.timestamp.ne(pd.Timestamp(8600, unit="ms"))]
+
+        monkeypatch.setattr(portfolio, "iter_dataset_chunks", without_context)
     elif mutation == "extra":
         extra = predictions.iloc[[0]].copy()
-        extra.asset_id = "eth_usdt"
+        extra.timestamp = pd.Timestamp(8700, unit="ms")
         predictions = pd.concat([predictions, extra], ignore_index=True)
     else:
         metadata["model_algorithm"] = "equal_weight_rank_ensemble"
@@ -515,8 +528,14 @@ def test_prediction_facts_are_self_contained_after_model_files_move(explicit_mod
     assert [row["timestamp_ms"] for row in rows] == [8600, 8800, 9000]
 
 
-def _independent_maker_case(tmp_path, monkeypatch, *, unfiltered=False):
-    inputs = _inputs(tmp_path, ineligible_at=2200 if unfiltered else None)
+def _independent_maker_case(
+    tmp_path, monkeypatch, *, unfiltered=False, distinct_domains=False
+):
+    inputs = _inputs(
+        tmp_path,
+        ineligible_at=2200 if unfiltered else None,
+        distinct_domains=distinct_domains,
+    )
     _market(monkeypatch)
     observed_window = _window(2100, 2200)
     execution_window = _window(8600, 9000)
@@ -540,7 +559,9 @@ def _independent_maker_case(tmp_path, monkeypatch, *, unfiltered=False):
                 "model": {
                     "model_id": role,
                     "model_algorithm": "linear_regression",
-                    "input_feature_columns": ["x"],
+                    "input_feature_columns": [
+                        "y" if distinct_domains and role == "proxy" else "x"
+                    ],
                     "target_column": target,
                     "random_seed": 17,
                     "sample_filter_mode": "unfiltered" if unfiltered else "eligible",
@@ -996,3 +1017,383 @@ def test_backtest_rejects_unused_chronology_in_python_and_cli(tmp_path, style):
     assert result.exit_code != 0
     assert isinstance(result.exception, ValueError)
     assert "config_fields" in str(result.exception)
+
+
+@pytest.mark.parametrize(
+    "damage",
+    (
+        None,
+        "missing_tail",
+        "extra_tail",
+        "missing_context_tail",
+        "shared_context",
+        "consumer_error",
+    ),
+)
+def test_maker_intersects_independent_domains_and_validates_unused_tails(
+    tmp_path, monkeypatch, damage
+):
+    config, backtest = _independent_maker_case(
+        tmp_path, monkeypatch, distinct_domains=True
+    )
+    portfolio.calibrate_maker(config)
+    if damage in {"missing_tail", "extra_tail"}:
+        member = Path(backtest["models"][0]["predictions"]) / "prediction.parquet"
+        rows = pd.read_parquet(member)
+        if damage == "missing_tail":
+            rows = rows.loc[rows.timestamp.ne(pd.Timestamp(9000, unit="ms"))]
+        else:
+            extra = rows.iloc[[-1]].assign(timestamp=pd.Timestamp(8900, unit="ms"))
+            rows = pd.concat([rows, extra], ignore_index=True).sort_values("timestamp")
+        rows.to_parquet(member, index=False, write_statistics=["timestamp"])
+    if damage == "missing_context_tail":
+        chunks = portfolio.iter_dataset_chunks
+
+        def without_tail(session):
+            with portfolio.closing_iterator(chunks(session)) as source:
+                for frame in source:
+                    yield frame.loc[frame.timestamp.ne(pd.Timestamp(9000, unit="ms"))]
+
+        monkeypatch.setattr(portfolio, "iter_dataset_chunks", without_tail)
+    closed = []
+    prediction_rows = portfolio._prediction_rows
+
+    def tracked_rows(**kwargs):
+        role = kwargs["evidence"][1]["model"]["model_id"]
+        try:
+            with portfolio.closing_iterator(prediction_rows(**kwargs)) as rows:
+                for row in rows:
+                    if (
+                        damage == "shared_context"
+                        and role == "proxy"
+                        and row["timestamp_ms"] == 8800
+                    ):
+                        row = {**row, "book_segment_id": "other-book"}
+                    yield row
+        finally:
+            closed.append(role)
+
+    monkeypatch.setattr(portfolio, "_prediction_rows", tracked_rows)
+    observed = []
+    execute = portfolio._execute_portfolio
+
+    def capture(**kwargs):
+        decisions = kwargs["decisions"]
+        if damage == "consumer_error":
+            with portfolio.closing_iterator(decisions):
+                next(decisions)
+                raise ValueError("synthetic_consumer_failure")
+
+        def recording():
+            with portfolio.closing_iterator(decisions):
+                for row in decisions:
+                    observed.append(row["timestamp_ms"])
+                    yield row
+
+        return execute(**{**kwargs, "decisions": recording()})
+
+    monkeypatch.setattr(portfolio, "_execute_portfolio", capture)
+    if damage:
+        reason = {
+            "missing_tail": "prediction_metadata_inconsistent",
+            "extra_tail": "prediction_metadata_inconsistent",
+            "missing_context_tail": "misaligned_persisted_prediction_keys",
+            "shared_context": "maker_prediction_keys_misaligned",
+            "consumer_error": "synthetic_consumer_failure",
+        }[damage]
+        with pytest.raises(ValueError, match=reason):
+            portfolio.backtest_maker(backtest)
+        assert not Path(backtest["output"]).exists()
+    else:
+        saved = read_portfolio_ledger_artifact(portfolio.backtest_maker(backtest))
+        assert observed == [8800]
+        assert (
+            summarize_crypto_ledger(saved, saved.iter_chunks())["execution"][
+                "selection_status"
+            ]
+            == "COMPLETE"
+        )
+    # Corrupt artifact cardinality fails before opening the context streams.
+    assert sorted(closed) == (
+        [] if damage in {"missing_tail", "extra_tail"} else ["price", "proxy"]
+    )
+
+
+@pytest.mark.parametrize("change", ("excluded", "removed", "missingness"))
+def test_saved_predictions_do_not_requalify_historical_model_features(
+    tmp_path, monkeypatch, change
+):
+    config, backtest = _independent_maker_case(tmp_path, monkeypatch)
+    if change == "excluded":
+        session = portfolio.open_dataset_session(Path(backtest["inputs"]["path"]))
+        # Keep current labels, eligibility and execution context, omit historical x.
+        backtest["inputs"]["columns"] = [
+            name for name in session.logical_columns if name != "x"
+        ]
+    else:
+        session = portfolio.open_dataset_session(Path(backtest["inputs"]["path"]))
+        with portfolio.closing_iterator(
+            portfolio.iter_dataset_chunks(session)
+        ) as chunks:
+            frame = pd.concat(chunks, ignore_index=True)
+        roles = dict(session.spec["column_roles"])
+        if change == "removed":
+            frame = frame.drop(columns="x")
+            roles.pop("x")
+        else:
+            frame["x"] = np.nan
+        current = tmp_path / "current-inputs"
+        write_dataset(
+            current,
+            frame,
+            spec=DataSpec(
+                data_id="current_context",
+                frequency="tick",
+                grain="asset_timestamp",
+                column_roles=roles,
+                primary_key=("timestamp", "asset_id"),
+                partition_columns=("year",),
+            ),
+        )
+        backtest["inputs"]["path"] = str(current)
+    portfolio.calibrate_maker(config)
+    saved = read_portfolio_ledger_artifact(portfolio.backtest_maker(backtest))
+    assert (
+        summarize_crypto_ledger(saved, saved.iter_chunks())["execution"][
+            "selection_status"
+        ]
+        == "COMPLETE"
+    )
+
+
+def test_selected_asset_does_not_require_other_prediction_assets_context(
+    tmp_path, monkeypatch
+):
+    from quant_research_platform.artifacts.outputs.prediction import (
+        write_prediction_outputs,
+    )
+
+    config, backtest = _independent_maker_case(tmp_path, monkeypatch)
+    references = [
+        (config["models"][0], name)
+        for name in ("price_predictions", "proxy_predictions")
+    ]
+    references += [(item, "predictions") for item in backtest["models"]]
+    for index, (item, field) in enumerate(references):
+        rows, metadata = portfolio.read_predictions(Path(item[field]))
+        rows = pd.concat(
+            [rows, rows.assign(asset_id="eth_usdt")], ignore_index=True
+        ).sort_values(["timestamp", "asset_id"])
+        metadata["prediction_rows"] = len(rows)
+        if "asset_ids" in metadata:
+            metadata["asset_ids"] = ["btc_usdt", "eth_usdt"]
+        item[field] = str(
+            write_prediction_outputs(
+                output_path=tmp_path / f"multi-{index}",
+                output_chunks=[rows],
+                metadata=metadata,
+            )
+        )
+    portfolio.calibrate_maker(config)
+    saved = read_portfolio_ledger_artifact(portfolio.backtest_maker(backtest))
+    assert (
+        summarize_crypto_ledger(saved, saved.iter_chunks())["execution"][
+            "selection_status"
+        ]
+        == "COMPLETE"
+    )
+
+
+@pytest.mark.parametrize("eligible", (False, True))
+@pytest.mark.parametrize("distinct_domains", (False, True))
+def test_saved_execution_scores_ignore_changed_current_sample_filter(
+    tmp_path, monkeypatch, eligible, distinct_domains
+):
+    config, backtest = _independent_maker_case(
+        tmp_path, monkeypatch, distinct_domains=distinct_domains
+    )
+    portfolio.calibrate_maker(config)
+    session = portfolio.open_dataset_session(Path(backtest["inputs"]["path"]))
+    with portfolio.closing_iterator(portfolio.iter_dataset_chunks(session)) as chunks:
+        frame = pd.concat(chunks, ignore_index=True)
+    frame["eligible"] = eligible
+    frame["x"] = frame["x"].fillna(0.0)
+    if "y" in frame:
+        frame["y"] = frame["y"].fillna(0.0)
+    current = tmp_path / "changed-admission"
+    write_dataset(
+        current,
+        frame,
+        spec=DataSpec(
+            data_id="current_context",
+            frequency="tick",
+            grain="asset_timestamp",
+            column_roles=session.spec["column_roles"],
+            primary_key=("timestamp", "asset_id"),
+            partition_columns=("year",),
+        ),
+    )
+    backtest["inputs"] = {**backtest["inputs"], "path": str(current)}
+    observed = []
+    rows = portfolio._prediction_rows
+
+    def record(**kwargs):
+        with portfolio.closing_iterator(rows(**kwargs)) as source:
+            for row in source:
+                observed.append(row["timestamp_ms"])
+                yield row
+
+    monkeypatch.setattr(portfolio, "_prediction_rows", record)
+    saved = read_portfolio_ledger_artifact(portfolio.backtest_maker(backtest))
+    assert sorted(observed) == (
+        [8600, 8800, 8800, 9000]
+        if distinct_domains
+        else [8600, 8600, 8800, 8800, 9000, 9000]
+    )
+    assert (
+        summarize_crypto_ledger(saved, saved.iter_chunks())["execution"][
+            "selection_status"
+        ]
+        == "COMPLETE"
+    )
+
+
+@pytest.mark.parametrize("distinct_domains", (False, True))
+@pytest.mark.parametrize("order", ("reverse", "interleaved"))
+def test_native_unordered_context_and_predictions_emit_chronological_decisions(
+    tmp_path, monkeypatch, distinct_domains, order
+):
+    config, backtest = _independent_maker_case(
+        tmp_path, monkeypatch, distinct_domains=distinct_domains
+    )
+    session = portfolio.open_dataset_session(Path(backtest["inputs"]["path"]))
+    with portfolio.closing_iterator(portfolio.iter_dataset_chunks(session)) as chunks:
+        frame = pd.concat(chunks, ignore_index=True)
+    frame = (
+        frame.iloc[::-1]
+        if order == "reverse"
+        else pd.concat([frame.iloc[1::2], frame.iloc[::2]])
+    )
+    current = tmp_path / "unordered-context"
+    write_dataset(
+        current,
+        (frame.iloc[[i]] for i in range(len(frame))),
+        spec=DataSpec(
+            data_id="unordered_context",
+            frequency="tick",
+            grain="asset_timestamp",
+            column_roles=session.spec["column_roles"],
+            primary_key=("timestamp", "asset_id"),
+            partition_columns=("year",),
+        ),
+    )
+    backtest["inputs"]["path"] = str(current)
+    paths = [
+        config["models"][0][field]
+        for field in ("price_predictions", "proxy_predictions")
+    ]
+    paths += [item["predictions"] for item in backtest["models"]]
+    for path in paths:
+        member = Path(path) / "prediction.parquet"
+        rows = pd.read_parquet(member).iloc[::-1]
+        rows.to_parquet(
+            member, index=False, row_group_size=1, write_statistics=["timestamp"]
+        )
+    output = portfolio.calibrate_maker(config)
+    with read_statistics_artifact(
+        output, validate_tables=portfolio.validate_maker_calibration
+    ).table("crypto_maker_calibration.parquet") as calibration:
+        assert calibration.sample_count.tolist() == [2, 2]
+    execute = portfolio._execute_portfolio
+    observed = []
+
+    def capture(**kwargs):
+        def recording():
+            with portfolio.closing_iterator(kwargs["decisions"]) as rows:
+                for row in rows:
+                    observed.append(row["timestamp_ms"])
+                    yield row
+
+        return execute(**{**kwargs, "decisions": recording()})
+
+    monkeypatch.setattr(portfolio, "_execute_portfolio", capture)
+    saved = read_portfolio_ledger_artifact(portfolio.backtest_maker(backtest))
+    assert observed == ([8800] if distinct_domains else [8600, 8800, 9000])
+    assert (
+        summarize_crypto_ledger(saved, saved.iter_chunks())["execution"][
+            "selection_status"
+        ]
+        == "COMPLETE"
+    )
+
+
+@pytest.mark.parametrize("immature_first", (False, True))
+def test_ordered_prediction_context_yields_incrementally_and_skips_immature_head(
+    tmp_path, monkeypatch, immature_first
+):
+    config, backtest = _independent_maker_case(tmp_path, monkeypatch)
+    session = portfolio.open_dataset_session(Path(backtest["inputs"]["path"]))
+    with portfolio.closing_iterator(portfolio.iter_dataset_chunks(session)) as chunks:
+        frame = pd.concat(chunks, ignore_index=True).sort_values("timestamp")
+    if immature_first:
+        frame.loc[
+            frame.timestamp.eq(pd.Timestamp(2100, unit="ms")),
+            "future_mid_return_500ms_available_at",
+        ] = pd.Timestamp(2800, unit="ms")
+    current = tmp_path / "ordered-context"
+    write_dataset(
+        current,
+        (frame.iloc[[i]] for i in range(len(frame))),
+        spec=DataSpec(
+            data_id="ordered_context",
+            frequency="tick",
+            grain="asset_timestamp",
+            column_roles=session.spec["column_roles"],
+            primary_key=("timestamp", "asset_id"),
+            partition_columns=("year",),
+        ),
+    )
+    item = config["models"][0]
+    window = TimeWindow(
+        **(item["window"] if immature_first else backtest["prediction_window"])
+    )
+    path = (
+        item["price_predictions"]
+        if immature_first
+        else backtest["models"][0]["predictions"]
+    )
+    evidence = portfolio._prediction_evidence(path, window=window)
+    chunks = portfolio.iter_dataset_chunks
+    fetched = []
+    closed = []
+
+    def observe(session):
+        try:
+            with portfolio.closing_iterator(chunks(session)) as source:
+                for frame in source:
+                    fetched.append(frame.timestamp.tolist())
+                    yield frame
+        finally:
+            closed.append(True)
+
+    monkeypatch.setattr(portfolio, "iter_dataset_chunks", observe)
+    with portfolio.closing_iterator(
+        portfolio._prediction_rows(
+            inputs=current,
+            evidence=evidence,
+            window=window,
+            fold_id="f",
+            asset_id="btc_usdt",
+            sample_role="validation" if immature_first else "test",
+            label_cutoff=pd.Timestamp(2700, unit="ms"),
+        )
+    ) as rows:
+        first = next(rows)
+        if immature_first:
+            assert first.timestamp == pd.Timestamp(2200, unit="ms")
+            assert len(fetched) == 2
+            assert list(rows) == []
+        else:
+            assert first["timestamp_ms"] == 8600
+            assert len(fetched) == 1
+    assert closed == [True]

@@ -171,8 +171,8 @@ def _snapshot(
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "lastUpdateId": last_update_id,
-        "bids": bids or [["100.0", "2"], ["99.0", "3"]],
-        "asks": asks or [["101.0", "2"], ["102.0", "3"]],
+        "bids": [["100.0", "2"], ["99.0", "3"]] if bids is None else bids,
+        "asks": [["101.0", "2"], ["102.0", "3"]] if asks is None else asks,
     }
     if market_type == FUTURES_MARKET_TYPE:
         payload.update({"E": 90, "T": 89})
@@ -182,6 +182,17 @@ def _snapshot(
         segment_id=segment_id,
         connection_id=connection_id or f"connection-{segment_id}",
     )
+
+
+def test_snapshot_helper_preserves_explicit_empty_sides() -> None:
+    kwargs = dict(market_type=FUTURES_MARKET_TYPE, segment_id="s1", last_update_id=100)
+    defaults = _snapshot(1, **kwargs)["payload"]
+    assert defaults["bids"] and defaults["asks"]
+    for side in ("bids", "asks"):
+        payload = _snapshot(1, **kwargs, **{side: []})["payload"]
+        assert payload[side] == []
+        other = "asks" if side == "bids" else "bids"
+        assert payload[other] == defaults[other]
 
 
 def _futures_delta(

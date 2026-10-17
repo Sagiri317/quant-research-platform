@@ -1609,8 +1609,22 @@ def _portfolio_statistics_tables(
                             fitted=None,
                             reason="research_estimated_valuation",
                         )
+                    # Validated registration records only snapshot entitlement:
+                    # shares, cash, locked shares and receivables are unchanged.
+                    if any(
+                        adjustment.kind != "registration"
+                        for adjustment in batch.rights_adjustments
+                    ):
+                        holding_input = replace(
+                            holding_input,
+                            fitted=None,
+                            reason="corporate_action_adjustment",
+                        )
                     if (
-                        batch.rights_adjustments
+                        any(
+                            adjustment.kind == "recovery"
+                            for adjustment in batch.rights_adjustments
+                        )
                         or ((after == 0) & (endpoint > 0)).any()
                     ):
                         holding_input = replace(

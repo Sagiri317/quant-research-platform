@@ -586,6 +586,8 @@ def test_undefined_model_inference_rejects_inferential_values_and_false_means(
     frame = tables[name]
     frame.loc[0, "status"] = "UNDEFINED"
     frame.loc[0, "reason"] = "global_validation_selection_reuses_validation"
+    frame.loc[0, "bootstrap_status"] = "UNDEFINED"
+    frame.loc[0, "bootstrap_reason"] = "global_validation_selection_reuses_validation"
     frame.loc[
         0,
         [
@@ -598,13 +600,27 @@ def test_undefined_model_inference_rejects_inferential_values_and_false_means(
             "bootstrap_upper",
         ],
     ] = float("nan")
+    root = statistics.write_statistics_artifact(
+        tmp_path / "valid_baseline", metadata=metadata, tables=tables
+    )
+    with statistics.read_statistics_artifact(root).table(f"{name}.parquet") as restored:
+        assert restored.loc[0, "mean"] == frame.loc[0, "mean"]
+        assert restored.loc[0, "bootstrap_status"] == "UNDEFINED"
     if corruption == "p_value":
         frame.loc[0, "p_value"] = 0.01
     elif corruption == "mean_missing":
         frame.loc[0, "mean"] = float("nan")
     else:
         frame.loc[0, "observation_count"] = 0
-    _assert_rejected_at_write_and_read(tmp_path, tables, metadata, f"{name}.parquet")
+    _assert_rejected_at_write_and_read(
+        tmp_path,
+        tables,
+        metadata,
+        f"{name}.parquet",
+        error="^statistics_table_status_value_invalid$"
+        if corruption == "p_value"
+        else "^statistics_table_descriptive_mean_count_invalid$",
+    )
 
 
 @pytest.mark.parametrize(
@@ -618,7 +634,7 @@ def test_undefined_model_inference_rejects_inferential_values_and_false_means(
         "sample_role",
     ),
 )
-@pytest.mark.parametrize("fdr_method", ("BY", "NOT_APPLICABLE"))
+@pytest.mark.parametrize("fdr_method", ("BH", "BY", "NOT_APPLICABLE"))
 def test_defined_group_comparison_requires_descriptive_facts(
     tmp_path, tables, metadata, corruption, fdr_method
 ):
@@ -1193,3 +1209,89 @@ def test_prediction_loss_reasons_are_validated_on_write_and_read(
         "model_prediction_metrics.parquet",
         error="statistics_prediction_metrics_invalid",
     )
+
+
+@pytest.mark.parametrize("method", ("BH", "BY"))
+def test_paired_group_fdr_methods_reach_native_artifact(
+    tmp_path, tables, metadata, method
+):
+    from contextlib import contextmanager
+
+    from quant_research_platform.research.statistics_production import (
+        _paired_group_rankic,
+    )
+
+    metadata = _test_statistics_metadata(metadata, tables)
+    bound = {
+        **metadata,
+        "selection_group": "global",
+        "coverage_basis": "model_prediction_domain",
+        "evaluation_axis": "cross_sectional",
+        "column_roles": {"label": "label"},
+        "column_units": {"label": "decimal_return"},
+        "evaluation": {"primary_label": "label"},
+        "selection_cutoffs": ["2022-12-31"],
+    }
+    left = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2023-01-02", periods=8),
+            "family_id": "family",
+            "loss": [0.1, 0.2, -0.1, 0.3, 0.1, -0.2, 0.05, 0.1],
+            "status": "DEFINED",
+            "asset_coverage_id": "a" * 64,
+            "observation_count": 3,
+            "sample_role": "test",
+        }
+    )
+    right = left.copy()
+    right["loss"] += [0.1, 0.05, 0.07, -0.03, 0.1, 0.02, -0.01, 0.09]
+
+    class GlobalStatistics:
+        metadata = bound
+
+        @contextmanager
+        def table(self, name):
+            assert name == "model_losses.parquet"
+            yield left
+
+    policy = {"fdr_method": method, "alpha": 0.05, "seed": 42, "confidence": 0.95}
+    config = {
+        "sample_role": "test",
+        "statistics": {
+            "hac_lag": 0,
+            "bootstrap_block": 2,
+            "bootstrap_repetitions": 32,
+            "group_comparison": policy,
+        },
+    }
+    produced = _paired_group_rankic(
+        right,
+        global_statistics=GlobalStatistics(),
+        selection_group="quarterly",
+        family_ids=("family",),
+        config=config,
+        target_metadata={**bound, "selection_group": "quarterly"},
+    )
+    assert produced.status.eq("DEFINED").all()
+    assert produced.fdr_adjusted_p_value.notna().all()
+    tables["model_group_comparison"] = produced
+    metadata = {
+        **metadata,
+        "statistics": {**metadata["statistics"], "group_comparison": policy},
+    }
+    root = statistics.write_statistics_artifact(
+        tmp_path / "paired", metadata=metadata, tables=tables
+    )
+    artifact = statistics.read_statistics_artifact(root)
+    assert artifact.metadata["statistics"]["group_comparison"] == policy
+    with artifact.table("model_group_comparison.parquet") as restored:
+        assert restored.fdr_method.tolist() == [method]
+        pd.testing.assert_frame_equal(
+            restored,
+            produced.assign(
+                reason=produced.reason.fillna(""),
+                bootstrap_reason=produced.bootstrap_reason.fillna(""),
+            ),
+            check_dtype=False,
+            check_exact=True,
+        )

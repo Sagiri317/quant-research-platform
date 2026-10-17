@@ -1223,7 +1223,7 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
         )
         defined = result.status.eq("DEFINED")
         bootstrap_defined = result.bootstrap_status.eq("DEFINED")
-        fdr_defined = defined & result.fdr_method.eq("BY")
+        fdr_defined = defined & result.fdr_method.isin(("BH", "BY"))
         measurements = (
             "standard_error",
             "t_statistic",
@@ -1256,7 +1256,7 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
             .str.strip()
             .eq("")
             .any()
-            or (not result.fdr_method.isin(("BY", "NOT_APPLICABLE")).all())
+            or (not result.fdr_method.isin(("BH", "BY", "NOT_APPLICABLE")).all())
             or result.loc[fdr_defined, "fdr_adjusted_p_value"].isna().any()
             or result.loc[~fdr_defined, "fdr_adjusted_p_value"].notna().any()
             or (not result.fdr_alpha.between(0, 1, inclusive="neither").all())

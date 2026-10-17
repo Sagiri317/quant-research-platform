@@ -486,7 +486,9 @@ def test_return_correlations_preserve_units_and_persist(scale, kind, tmp_path):
     )
     result = calculate_factors_for_panel(panel, definitions=definitions)
     assert result[name].iloc[:19].isna().all()
-    assert result[name].iloc[-1] == expected
+    # Dimensionless, well-conditioned 20-point correlation; allow rounding in
+    # the independent floating reduction while retaining the Decimal oracle.
+    assert result[name].iloc[-1] == pytest.approx(expected, rel=1e-13, abs=0)
     path = tmp_path / "correlation.parquet"
     result.to_parquet(path, index=False)
     pd.testing.assert_frame_equal(pd.read_parquet(path), result, check_exact=True)
@@ -1291,7 +1293,8 @@ def test_coefficient_of_variation_keeps_exact_center_and_ratio(
         }
     )
     result = calculate_price_volume_factors(frame, factor_columns=(factor,))
-    assert result[factor].iloc[-1] == pytest.approx(expected, rel=1e-12, abs=0)
+    prewrite_value = result[factor].iloc[-1]
+    assert prewrite_value == pytest.approx(expected, rel=1e-12, abs=0)
     result.insert(0, "market_id", "a_share")
     base = scientific_catalogs().processed.get("price_volume_facts")
     spec = replace(
@@ -1306,7 +1309,7 @@ def test_coefficient_of_variation_keeps_exact_center_and_ratio(
         spec.market_id, spec.kind, spec.data_id
     )
     write_dataset(root, result, spec=spec)
-    assert read_dataset(root)[factor].iloc[-1] == expected
+    assert read_dataset(root)[factor].iloc[-1] == prewrite_value
 
 
 def test_path_factors_complete_windows_zero_path_and_future_isolation():

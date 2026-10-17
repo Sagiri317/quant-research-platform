@@ -20,16 +20,13 @@ from quant_research_platform.artifacts.outputs.prediction import (
     read_predictions,
 )
 from quant_research_platform.artifacts.statistics import STATISTICS_TABLE_COLUMNS
+from quant_research_platform.contracts.columns import _validate_asset_time_key
 from quant_research_platform.contracts.experiments import (
     legal_training_mask,
     training_availability_columns,
 )
-from quant_research_platform.contracts.filtering import required_filter_columns
+from quant_research_platform.contracts.ids import validate_input_market
 from quant_research_platform.contracts.json_codec import _strict_config
-from quant_research_platform.contracts.models import (
-    _model_spec,
-    validate_model_input_roles,
-)
 from quant_research_platform.contracts.order_book import (
     BookBoundary,
     TradeEvent,
@@ -58,10 +55,6 @@ from quant_research_platform.markets.implementations.crypto.ids import (
     canonical_crypto_asset_id,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.research.features.transforms import (
-    model_input_validity_columns,
-)
-from quant_research_platform.research.predictions.outputs import prediction_rows
 from quant_research_platform.research.protocols.crypto_hft import (
     HFT_EXECUTION_ASSET_IDS,
     HFT_EXECUTION_CONTEXT_COLUMNS,
@@ -177,6 +170,9 @@ def _prediction_rows(
     assets = facts.get("prediction_asset_ids")
     if assets is not None and asset_id not in assets:
         raise ValueError("crypto_prediction_asset_outside_scope")
+    predictions = predictions.loc[predictions.asset_id.eq(asset_id)].sort_values(
+        ["timestamp", "asset_id"], kind="stable"
+    )
     calibration = metadata.get("rank_parameters", {}).get("label_calibration")
     is_rank = metadata["model_algorithm"] in {
         "equal_weight_rank_ensemble",
@@ -201,13 +197,6 @@ def _prediction_rows(
             (
                 "timestamp",
                 "asset_id",
-                *metadata["input_columns"],
-                *model_input_validity_columns(
-                    tuple(metadata["input_columns"]),
-                    metadata["model_algorithm"],
-                    session.spec["column_roles"],
-                ),
-                *required_filter_columns(metadata["sample_filter_mode"]),
                 *HFT_EXECUTION_CONTEXT_COLUMNS,
                 *(
                     (target, availability, "eligible")
@@ -219,23 +208,23 @@ def _prediction_rows(
     )
     keys = pd.MultiIndex.from_frame(predictions[["timestamp", "asset_id"]])
     matched = np.zeros(len(predictions), dtype=bool)
+    pending = {}
+    next_position = 0
     scores = predictions.prediction_score.to_numpy()
-    business_columns = {
-        *metadata["input_columns"],
-        *((target,) if sample_role == "validation" else ()),
-    }
-    if options.get("columns") is not None and business_columns - set(
-        options["columns"]
+    if (
+        sample_role == "validation"
+        and options.get("columns") is not None
+        and target not in options["columns"]
     ):
         raise ValueError("crypto_prediction_required_columns_excluded")
     session = session.projected_view(columns)
-    model_spec = _model_spec(facts["model"])
-    validate_model_input_roles(
-        session.spec,
-        model_spec,
-        market_id="crypto",
-        include_target=sample_role == "validation",
-    )
+    validate_input_market(session.spec, "crypto")
+    _validate_asset_time_key(session.spec["primary_key"], session.spec["column_roles"])
+    if (
+        sample_role == "validation"
+        and session.spec["column_roles"].get(target) != "label"
+    ):
+        raise ValueError("model_target_role_mismatch")
     if sample_role == "validation":
         declared_unit = session.spec.get("column_units", {}).get(target)
         if declared_unit is not None and declared_unit != facts["label_unit"]:
@@ -243,20 +232,19 @@ def _prediction_rows(
     chunks = iter_dataset_chunks(session)
     with closing_iterator(chunks):
         for frame in chunks:
-            required = prediction_rows(
-                frame, metadata, window, declared_columns=session.spec["column_roles"]
-            )
-            if assets is not None:
-                required = required.loc[required.asset_id.isin(assets)]
-            required_keys = pd.MultiIndex.from_frame(
-                required[["timestamp", "asset_id"]]
-            )
-            positions = keys.get_indexer(required_keys)
-            if (positions < 0).any():
-                raise ValueError("missing_required_prediction_keys")
+            # Saved predictions own their decision domain. Current inputs supply
+            # market context and mature calibration outcomes, not model admission.
+            frame_keys = pd.MultiIndex.from_frame(frame[["timestamp", "asset_id"]])
+            positions = keys.get_indexer(frame_keys)
+            found = positions >= 0
+            required = frame.loc[found]
+            positions = positions[found]
             if matched[positions].any():
                 raise ValueError("duplicate_prediction_input_keys")
             matched[positions] = True
+            # Context members need not be chronological. Buffer only selected keys
+            # until the next saved decision is available; ordered inputs stream.
+            pending.update((int(position), None) for position in positions)
             required = required.assign(
                 prediction_score=scores[positions], fold_id=fold_id
             )
@@ -267,27 +255,33 @@ def _prediction_rows(
                     availability_column=availability,
                     target_column=target,
                 )
+                positions = positions[mature.to_numpy()]
                 required = required.loc[mature].assign(
                     label=lambda data: data[target],
                     label_available_at=lambda data: pd.to_datetime(data[availability]),
                 )
-            for row in required.itertuples(index=False):
-                if row.asset_id == asset_id:
-                    score = _score_in_label_units(row.prediction_score, calibration)
-                    if sample_role == "validation":
-                        yield row._replace(prediction_score=score)
-                    else:
-                        yield {
-                            "timestamp_ms": pd.Timestamp(row.timestamp).value
-                            // 1_000_000,
-                            "asset_id": asset_id,
-                            "fold_id": fold_id,
-                            **{
-                                name: getattr(row, name)
-                                for name in HFT_EXECUTION_CONTEXT_COLUMNS
-                            },
-                            "prediction_score": score,
-                        }
+            for position, row in zip(
+                positions, required.itertuples(index=False), strict=True
+            ):
+                score = _score_in_label_units(row.prediction_score, calibration)
+                if sample_role == "validation":
+                    pending[int(position)] = row._replace(prediction_score=score)
+                else:
+                    pending[int(position)] = {
+                        "timestamp_ms": pd.Timestamp(row.timestamp).value // 1_000_000,
+                        "asset_id": asset_id,
+                        "fold_id": fold_id,
+                        **{
+                            name: getattr(row, name)
+                            for name in HFT_EXECUTION_CONTEXT_COLUMNS
+                        },
+                        "prediction_score": score,
+                    }
+            while next_position in pending:
+                row = pending.pop(next_position)
+                next_position += 1
+                if row is not None:
+                    yield row
     if not matched.all():
         raise ValueError("misaligned_persisted_prediction_keys")
 
@@ -1308,36 +1302,43 @@ def backtest_maker(config):
                 for evidence in model_evidence
             ]
             with closing_iterator(streams[0]), closing_iterator(streams[1]):
-                for price, proxy in zip_longest(*streams):
-                    if (
-                        price is None
-                        or proxy is None
-                        or any(
-                            price[key] != proxy[key]
-                            for key in ("timestamp_ms", "fold_id")
-                        )
-                    ):
+                price, proxy = (next(stream, None) for stream in streams)
+                while price is not None and proxy is not None:
+                    price_key = (price["timestamp_ms"], price["asset_id"])
+                    proxy_key = (proxy["timestamp_ms"], proxy["asset_id"])
+                    if price_key < proxy_key:
+                        price = next(streams[0], None)
+                        continue
+                    if proxy_key < price_key:
+                        proxy = next(streams[1], None)
+                        continue
+                    if price["fold_id"] != proxy["fold_id"]:
                         raise ValueError("maker_prediction_keys_misaligned")
-                    if not all(
+                    if all(
                         isinstance(row[key], str) and row[key]
                         for row in (price, proxy)
                         for key in HFT_EXECUTION_CONTEXT_COLUMNS
                     ):
-                        continue
-                    if any(
-                        price[key] != proxy[key]
-                        for key in HFT_EXECUTION_CONTEXT_COLUMNS
-                    ):
-                        raise ValueError("maker_prediction_keys_misaligned")
-                    yield {
-                        **{
-                            key: value
-                            for key, value in price.items()
-                            if key not in {"prediction_score", "segment_id"}
-                        },
-                        "price_prediction": price["prediction_score"],
-                        "proxy_prediction": proxy["prediction_score"],
-                    }
+                        if any(
+                            price[key] != proxy[key]
+                            for key in HFT_EXECUTION_CONTEXT_COLUMNS
+                        ):
+                            raise ValueError("maker_prediction_keys_misaligned")
+                        yield {
+                            **{
+                                key: value
+                                for key, value in price.items()
+                                if key not in {"prediction_score", "segment_id"}
+                            },
+                            "price_prediction": price["prediction_score"],
+                            "proxy_prediction": proxy["prediction_score"],
+                        }
+                    price, proxy = (next(stream, None) for stream in streams)
+                # Independent feature eligibility can leave unmatched tails. Exhaust
+                # both owners so their required persisted-key checks still run.
+                for stream in streams:
+                    for _row in stream:
+                        pass
         else:
             options = _dataset_input_options(config["inputs"])
             if config.get("input_spec") is not None:

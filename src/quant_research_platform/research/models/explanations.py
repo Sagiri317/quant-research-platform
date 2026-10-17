@@ -544,11 +544,16 @@ def _native_importance(result, facts):
     unit = "dimensionless"
     if algorithm in LINEAR_EXPLANATION_ALGORITHMS:
         coefficients, _ = _linear_parameters(predictor)
-        if predictor.scaler.medians:
-            count = len(result.metadata["input_columns"])
-            coefficients = coefficients[:count] + coefficients[count:]
-        signed = dict(zip(result.metadata["input_columns"], coefficients, strict=True))
         kind, unit = "absolute_standardized_coefficient", facts["label_unit"]
+        if predictor.scaler.medians:
+            # Value and missingness are distinct standardized coordinates. Their
+            # absolute magnitudes can be grouped, but their signs cannot describe
+            # one feature-effect direction (unlike realized row contributions).
+            kind = "sum_absolute_standardized_coefficients_with_missing_indicator"
+        else:
+            signed = dict(
+                zip(result.metadata["input_columns"], coefficients, strict=True)
+            )
     elif isinstance(predictor, (RankEnsemblePredictor, ICWeightedRankEnsemble)):
         weights = (
             np.asarray(predictor.directions) / len(predictor.columns)
@@ -774,8 +779,46 @@ def _permutation(
     if not selected.any():
         raise ValueError("explanation_mature_labels_empty")
     segments = _permutation_segments(frame, config)
-    baseline = _output(result, frame, output_space)[1]
-    predictions = [("baseline", 0, baseline)]
+    temporal = config["axis"] == "temporal_blocks"
+    eligible = frame.loc[selected].copy()
+    periods = (
+        [("all", eligible.index.to_numpy())]
+        if temporal
+        else list(eligible.groupby("timestamp", sort=True).indices.items())
+    )
+    if not temporal:
+        periods = [
+            (timestamp, eligible.index.to_numpy()[positions])
+            for timestamp, positions in periods
+        ]
+
+    def score_periods(values):
+        per_period = {}
+        for timestamp, positions in periods:
+            labels = frame.loc[positions, target].to_numpy(dtype="float64")
+            scores = values[positions]
+            metrics = {}
+            for metric in config["metrics"]:
+                if metric == "mse" and loss_reason is not None:
+                    metrics[metric] = None
+                elif metric == "mse":
+                    accumulator = _MeanSquaredError()
+                    for score, label in zip(scores, labels, strict=True):
+                        accumulator.add(score, label)
+                    metrics[metric] = accumulator
+                else:
+                    left, right = (
+                        (_average_ranks(scores), _average_ranks(labels))
+                        if metric == "rankic"
+                        else (scores, labels)
+                    )
+                    metrics[metric] = _pearson_correlation_result(left, right)[0]
+            per_period[str(timestamp)] = (metrics, len(positions))
+        return per_period
+
+    # Keep full prediction context for every intervention, but retain only
+    # per-period statistics. The common defined domain is reconciled below.
+    measured = [("baseline", 0, score_periods(_output(result, frame, output_space)[1]))]
     for name, columns in config["groups"].items():
         for repeat in range(config["repeats"]):
             shuffled = frame.copy()
@@ -802,45 +845,13 @@ def _permutation(
                         [blocks[i] for i in rng.permutation(len(blocks))]
                     )
                 shuffled.loc[segment, columns] = frame.loc[order, columns].to_numpy()
-            predictions.append(
-                (name, repeat, _output(result, shuffled, output_space)[1])
+            measured.append(
+                (
+                    name,
+                    repeat,
+                    score_periods(_output(result, shuffled, output_space)[1]),
+                )
             )
-    temporal = config["axis"] == "temporal_blocks"
-    eligible = frame.loc[selected].copy()
-    periods = (
-        [("all", eligible.index.to_numpy())]
-        if temporal
-        else list(eligible.groupby("timestamp", sort=True).indices.items())
-    )
-    if not temporal:
-        periods = [
-            (timestamp, eligible.index.to_numpy()[positions])
-            for timestamp, positions in periods
-        ]
-    measured = []
-    for name, repeat, values in predictions:
-        per_period = {}
-        for timestamp, positions in periods:
-            labels = frame.loc[positions, target].to_numpy(dtype="float64")
-            scores = values[positions]
-            metrics = {}
-            for metric in config["metrics"]:
-                if metric == "mse" and loss_reason is not None:
-                    metrics[metric] = None
-                elif metric == "mse":
-                    accumulator = _MeanSquaredError()
-                    for score, label in zip(scores, labels, strict=True):
-                        accumulator.add(score, label)
-                    metrics[metric] = accumulator
-                else:
-                    left, right = (
-                        (_average_ranks(scores), _average_ranks(labels))
-                        if metric == "rankic"
-                        else (scores, labels)
-                    )
-                    metrics[metric] = _pearson_correlation_result(left, right)[0]
-            per_period[str(timestamp)] = (metrics, len(positions))
-        measured.append((name, repeat, per_period))
     rows = []
     common_periods = {}
     for metric in config["metrics"]:

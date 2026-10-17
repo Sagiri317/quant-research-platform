@@ -1574,3 +1574,180 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
     assert {name: tree_hash(root) for name, root in roots.items()} == input_hashes
     for name, frame in frames.items():
         pd.testing.assert_frame_equal(frame, originals[name], check_exact=True)
+
+
+@pytest.mark.parametrize(
+    "kind", ("registration", "dividend", "stock_distribution", "zero_recovery")
+)
+def test_registration_bookkeeping_preserves_holding_attribution(tmp_path, kind):
+    from dataclasses import replace
+    from fractions import Fraction
+
+    from quant_research_platform.artifacts.portfolio_ledger import (
+        read_portfolio_ledger_artifact,
+        write_portfolio_ledger_artifact,
+    )
+    from quant_research_platform.contracts.portfolios import (
+        PortfolioCandidateSpec,
+        PortfolioCapital,
+        PortfolioDiagnostic,
+        PortfolioLedgerBatch,
+        PortfolioValuation,
+    )
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.research.portfolios.accounting import (
+        EquityEntitlements,
+    )
+    from quant_research_platform.research.portfolios.diagnostics import (
+        _portfolio_statistics_tables,
+    )
+    from quant_research_platform.research.portfolios.risk import (
+        FactorReturnFit,
+        HoldingFactorInputs,
+    )
+
+    dates = pd.date_range("2024-01-01", periods=3)
+    events = pd.DataFrame(
+        [
+            dict(
+                event_id="cash",
+                asset_id="a",
+                listing_date=pd.Timestamp("2000-01-01"),
+                kind="stock_distribution"
+                if kind == "stock_distribution"
+                else "cash_dividend",
+                record_at=dates[2] if kind == "registration" else dates[1],
+                effective_at=pd.Timestamp("2024-01-05")
+                if kind == "registration"
+                else dates[2],
+                settlement_at=pd.Timestamp("2024-01-05"),
+                available_at=dates[0],
+                cash_per_share=1.0,
+                additional_shares_per_share=0.5
+                if kind == "stock_distribution"
+                else 0.0,
+                evidence_identity="a" * 64,
+                entitlement_proved=True,
+            )
+        ]
+    )
+    entitlements = EquityEntitlements()
+    units = pd.Series({"a": Fraction(100)}, dtype=object)
+    lives = pd.Series({"a": pd.Timestamp("2000-01-01")})
+    registration = entitlements.register(
+        events,
+        units,
+        lives,
+        dates[2] if kind == "registration" else dates[1],
+        phase="end" if kind == "registration" else "after",
+    )
+    if kind in {"dividend", "stock_distribution"}:
+        _units, _lives, _cash, effective = entitlements.process(
+            events, pd.DataFrame(), units, lives, dates[2], phase="end"
+        )
+        registration += effective
+    if kind == "zero_recovery":
+        registration = ()
+    vals = tuple(
+        v
+        for phase, at, price in [
+            ("before", dates[1], 0.0 if kind == "zero_recovery" else 10.0),
+            ("after", dates[1], 0.0 if kind == "zero_recovery" else 10.0),
+            ("end", dates[2], 1.0 if kind == "zero_recovery" else 11.0),
+        ]
+        for v in (
+            PortfolioValuation(
+                at.value,
+                "a",
+                phase,
+                Fraction(
+                    150 if kind == "stock_distribution" and phase == "end" else 100
+                ),
+                (150 if kind == "stock_distribution" and phase == "end" else 100)
+                * price
+                + (100 if kind == "dividend" and phase == "end" else 0),
+                price,
+                lifecycle_id="2000-01-01",
+                receivable=100 if kind == "dividend" and phase == "end" else 0,
+                locked_quantity=Fraction(50)
+                if kind == "stock_distribution" and phase == "end"
+                else Fraction(),
+            ),
+            PortfolioValuation(
+                at.value,
+                "__cash__",
+                phase,
+                1000.0 if kind == "zero_recovery" else 0.0,
+                1000.0 if kind == "zero_recovery" else 0.0,
+            ),
+        )
+    )
+    diags = tuple(
+        PortfolioDiagnostic(asset, None, name, number=n)
+        for asset, target in [
+            ("a", 0.0 if kind == "zero_recovery" else 1000.0),
+            ("__cash__", 1000.0 if kind == "zero_recovery" else 0.0),
+        ]
+        for name, n in [("target_notional", target), ("decision_delta_weight", 0.0)]
+    )
+    diags += (
+        PortfolioDiagnostic("__cash__", None, "decision_reason", text="simple_rule"),
+    )
+    batch = PortfolioLedgerBatch(0, (), (), vals, diags, registration)
+    fit = FactorReturnFit(
+        pd.DataFrame({"style": [1.0]}, index=["a"]),
+        pd.Series({"style": 0.1}),
+        pd.Series({"a": 0.0}),
+        pd.Series({"a": 0.1}),
+    )
+    inputs = HoldingFactorInputs(
+        *dates, fit, pd.Series({"a": 10.0}), pd.Series({"a": 10.0}), pd.DataFrame()
+    )
+    candidate = PortfolioCandidateSpec(
+        "proof", "global", "quantile_equal_weight", "explicit", "daily", 0.2, None
+    )
+    results = []
+    cases = (
+        (replace(batch, rights_adjustments=()), batch)
+        if kind == "registration"
+        else (batch,)
+    )
+    for index, b in enumerate(cases):
+        root = write_portfolio_ledger_artifact(
+            tmp_path / str(index),
+            capital=PortfolioCapital("proof", 1000.0, "CNY", "cash_equity"),
+            metadata={
+                "window": {"start": dates[0].isoformat(), "end": dates[-1].isoformat()}
+            },
+            produce=lambda emit, b=b: emit(b),
+        )
+        ledger = read_portfolio_ledger_artifact(root)
+        tables = _portfolio_statistics_tables(
+            ledgers={"proof": ledger},
+            candidates=(candidate,),
+            config={"analyses": ["attribution"], "sample_role": "exploratory"},
+            time_window=TimeWindow(dates[0], dates[-1]),
+            benchmark_opens=pd.DataFrame(),
+            calendar=dates,
+            unified_trading_sessions=lambda x: x,
+            holding_inputs={(): [inputs]},
+        )
+        results.append(tables)
+    if kind != "registration":
+        style = (
+            results[0]["portfolio_attribution"].set_index("component_id").loc["style"]
+        )
+        assert pd.isna(style["value"])
+        assert style["status"] == "UNDEFINED"
+        assert style["reason"] == (
+            "zero_valuation_recovery"
+            if kind == "zero_recovery"
+            else "corporate_action_adjustment"
+        )
+        return
+    for table in ("portfolio_attribution", "portfolio_exposures"):
+        pd.testing.assert_frame_equal(results[0][table], results[1][table])
+    style = results[1]["portfolio_attribution"].set_index("component_id").loc["style"]
+    assert style["value"] == pytest.approx(0.1)
+    assert style["status"] == "DEFINED"
+    assert not results[1]["portfolio_exposures"].empty

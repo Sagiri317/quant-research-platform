@@ -246,3 +246,86 @@ def test_prediction_writer_statistics_prune_actual_decoding(tmp_path, monkeypatc
     decoded.clear()
     pd.testing.assert_frame_equal(read_predictions(root)[0], frame)
     assert decoded == [0, 1, 2]
+
+
+@pytest.mark.parametrize("damage", ("missing", "extra", "end", "no_statistics"))
+def test_filtered_predictions_check_footer_without_scanning_other_periods(
+    tmp_path, monkeypatch, damage
+):
+    from contextlib import contextmanager
+
+    import pyarrow.parquet as pq
+
+    from quant_research_platform.storage import parquet as storage_parquet
+
+    frame = pd.concat(
+        [make_price_volume_prediction_output_frame()] * 3, ignore_index=True
+    )
+    frame["timestamp"] = pd.to_datetime(["2014-01-03", "2014-02-03", "2014-03-03"])
+    metadata = frame.attrs["prediction_metadata"]
+    metadata.update(
+        prediction_window={"start": "2014-01-03", "end": "2014-03-03"},
+        prediction_rows=3,
+        effective_prediction_end=frame.timestamp.max().isoformat(),
+    )
+    root = write_prediction_outputs(
+        output_path=tmp_path / "prediction",
+        output_chunks=[frame.iloc[[i]] for i in range(3)],
+        metadata=metadata,
+    )
+    changed = frame.copy()
+    if damage == "missing":
+        changed = changed.iloc[:2]
+    elif damage == "extra":
+        changed = pd.concat(
+            [changed, changed.iloc[[-1]].assign(timestamp=pd.Timestamp("2014-03-02"))],
+            ignore_index=True,
+        )
+    elif damage == "end":
+        changed.loc[2, "timestamp"] = pd.Timestamp("2014-03-02")
+    changed.to_parquet(
+        root / "prediction.parquet",
+        index=False,
+        row_group_size=1,
+        write_statistics=False if damage == "no_statistics" else ["timestamp"],
+    )
+    opens = []
+    opened = storage_parquet._opened_parquet
+
+    @contextmanager
+    def observed_open(path):
+        opens.append(path)
+        with opened(path) as source:
+            yield source
+
+    monkeypatch.setattr(storage_parquet, "_opened_parquet", observed_open)
+    decoded = []
+    original = pq.ParquetFile.iter_batches
+
+    def observed(self, *args, **kwargs):
+        decoded.append((kwargs["row_groups"], kwargs["columns"]))
+        yield from original(self, *args, **kwargs)
+
+    monkeypatch.setattr(pq.ParquetFile, "iter_batches", observed)
+    window = TimeWindow("2014-02-03", "2014-02-03")
+    if damage in {"no_statistics", "end"}:
+        result, _ = read_predictions(
+            root, columns=("prediction_score",), time_window=window
+        )
+        assert (
+            result.prediction_score.tolist()
+            == frame.iloc[[1]].prediction_score.tolist()
+        )
+        assert all(
+            columns == ["timestamp", "asset_id", "prediction_score"]
+            for _, columns in decoded
+        )
+    else:
+        with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
+            read_predictions(root, columns=("prediction_score",), time_window=window)
+        assert decoded == []
+    assert len(opens) == 1
+    if damage == "end":
+        assert [groups for groups, _columns in decoded] == [[1]]
+        with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
+            read_predictions(root)

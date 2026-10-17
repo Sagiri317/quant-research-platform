@@ -267,25 +267,28 @@ def optimize_portfolio(
         )
         return cost / nav, gradient
 
-    def net_risk(point):
+    def net_risk(point, *, derivative=False):
         weights = point[:count]
         cost, gradient = actual_cost(weights)
         active = weights - benchmark + (benchmark - cash_direction) * cost
-        factor_active = active @ exposure
         variance = sum(_risk_variances(active, exposure, covariance, specific))
+        if not derivative:
+            return config.tracking_error_limit**2 * (1.0 - cost) ** 2 - variance
+        factor_active = active @ exposure
         variance_gradient = (
             exposure @ (covariance @ factor_active + covariance.T @ factor_active)
             + 2.0 * specific * active
         )
-        active_jacobian = identity + np.outer(benchmark - cash_direction, gradient)
-        return (
-            config.tracking_error_limit**2 * (1.0 - cost) ** 2 - variance,
-            np.r_[
-                -2.0 * config.tracking_error_limit**2 * (1.0 - cost) * gradient
-                - variance_gradient @ active_jacobian,
-                np.zeros(count),
-            ],
+        # Apply the rank-one chain rule without materializing an N-by-N matrix.
+        risk_gradient = (
+            variance_gradient
+            + (variance_gradient @ (benchmark - cash_direction)) * gradient
         )
+        return np.r_[
+            -2.0 * config.tracking_error_limit**2 * (1.0 - cost) * gradient
+            - risk_gradient,
+            np.zeros(count),
+        ]
 
     def net_name_bands(point):
         weights = point[:count]
@@ -345,8 +348,8 @@ def optimize_portfolio(
         },
         {
             "type": "ineq",
-            "fun": lambda point: net_risk(point)[0],
-            "jac": lambda point: net_risk(point)[1],
+            "fun": net_risk,
+            "jac": lambda point: net_risk(point, derivative=True),
         },
         {
             "type": "ineq",

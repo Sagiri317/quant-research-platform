@@ -323,3 +323,79 @@ def test_write_dataset_rejects_duplicate_across_chunks_and_cleans_stage(
         )
     assert not filesystem_exists(root)
     assert not list(filesystem_glob(root.parent, ".a-*"))
+
+
+@pytest.mark.parametrize(
+    "data_type,negative,positive",
+    [
+        (pa.float64(), -0.0, 0.0),
+        (pa.float32(), -0.0, 0.0),
+        (pa.dictionary(pa.int8(), pa.float64()), -0.0, 0.0),
+        (pa.list_(pa.float64()), [-0.0], [0.0]),
+        (pa.large_list(pa.float64()), [-0.0], [0.0]),
+        (pa.list_(pa.float64(), 1), [-0.0], [0.0]),
+        (
+            pa.struct([("items", pa.list_(pa.float64()))]),
+            {"items": [-0.0]},
+            {"items": [0.0]},
+        ),
+        (pa.map_(pa.float64(), pa.float64()), [(-0.0, -0.0)], [(0.0, 0.0)]),
+    ],
+)
+def test_nested_signed_zero_key_identity_preserves_exact_value_payloads(
+    data_type, negative, positive
+):
+    module = importlib.import_module("quant_research_platform.storage.exact_keys")
+    left = pa.table(
+        {
+            "key": pa.array([negative], type=data_type),
+            "value": pa.array([negative], type=data_type),
+        }
+    )
+    right = pa.table(
+        {
+            "key": pa.array([positive], type=data_type),
+            "value": pa.array([negative], type=data_type),
+        }
+    )
+    original = left.to_batches()[0].serialize().to_pybytes()
+    index = module.ExactPrimaryKeyIndex(primary_key=("key",))
+    assert index.add_table(left) == 0
+    assert index.add_table(right) == 1
+    assert index.classify_comparison_table(
+        left, namespace="values", value_columns=("value",)
+    ) == ([0], 0)
+    assert index.classify_comparison_table(
+        right, namespace="values", value_columns=("value",)
+    ) == ([], 1)
+    changed = right.set_column(1, "value", pa.array([positive], type=data_type))
+    with pytest.raises(ValueError, match="^conflicting_exact_primary_key_payload$"):
+        index.classify_comparison_table(
+            changed, namespace="values", value_columns=("value",)
+        )
+    assert left.to_batches()[0].serialize().to_pybytes() == original
+
+
+@pytest.mark.parametrize("split", (False, True))
+def test_nested_signed_zero_keys_reject_publication_without_changing_values(
+    tmp_path, split
+):
+    frame = make_default_dataset_frame().iloc[:2].copy().reset_index(drop=True)
+    frame["asset_id"] = [[-0.0], [0.0]]
+    frame["timestamp"] = frame.timestamp.iloc[0]
+    root = make_dataset_artifact_root(tmp_path, "nested_zero")
+    with pytest.raises(ValueError, match="^duplicate_dataset_primary_key$"):
+        write_dataset(
+            root,
+            (frame.iloc[:1], frame.iloc[1:]) if split else frame,
+            spec=make_processed_dataset_spec("nested_zero"),
+        )
+    assert not filesystem_exists(root)
+    frame.loc[1, "timestamp"] += pd.Timedelta(days=1)
+    frame["value"] = [-0.0, 0.0]
+    write_dataset(root, frame, spec=make_processed_dataset_spec("nested_zero"))
+    restored = read_dataset(root).sort_values("timestamp")
+    for actual, expected in zip(restored.asset_id, frame.asset_id, strict=True):
+        assert struct.pack(">d", actual[0]) == struct.pack(">d", expected[0])
+    for actual, expected in zip(restored.value, frame.value, strict=True):
+        assert struct.pack(">d", actual) == struct.pack(">d", expected)

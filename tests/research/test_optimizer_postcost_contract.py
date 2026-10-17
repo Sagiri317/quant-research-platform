@@ -159,6 +159,29 @@ def _capture_fee_constraints(monkeypatch):
     return captured, assets
 
 
+def _fee_constraints(captured, point):
+    """Identify economic constraints by dimension and cash sensitivity, not order."""
+    count = len(point) // 2
+    result = {}
+    for constraint in captured["constraints"]:
+        if constraint["type"] != "ineq":
+            continue
+        value = np.asarray(constraint["fun"](point))
+        jacobian = np.asarray(constraint["jac"](point))
+        if value.shape == (2 * (count - 1),):
+            name = "name"
+        elif value.ndim == 0 and jacobian[count - 1] == 1.0:
+            name = "cash"
+        elif value.ndim == 0 and np.any(jacobian[:count]):
+            name = "risk"
+        else:
+            continue
+        assert name not in result
+        result[name] = constraint
+    assert set(result) == {"name", "cash", "risk"}
+    return result
+
+
 @pytest.mark.parametrize("unchanged", [False, True])
 def test_actual_fee_constraint_jacobians_include_central_zero_trade_subgradient(
     monkeypatch, unchanged
@@ -193,15 +216,15 @@ def test_fee_feasibility_ignores_inflated_objective_epigraph(monkeypatch):
     fee = 0.01 * 0.04 + 0.03 * 0.03 + 0.02 * (0.04**2 + 0.03**2)
     # Objective auxiliaries can be slack, but risk/name/cash feasibility cannot
     # claim their fictitious round-trip fees as an economic NAV reduction.
-    for position in (1, 6, 7):
-        constraint = captured["constraints"][position]
+    constraints = _fee_constraints(captured, exact)
+    for constraint in constraints.values():
         assert constraint["fun"](exact) == pytest.approx(
             constraint["fun"](inflated), abs=1e-15
         )
         assert constraint["jac"](exact) == pytest.approx(
             constraint["jac"](inflated), abs=1e-15
         )
-    assert captured["constraints"][7]["fun"](exact) == pytest.approx(weights[-1] - fee)
+    assert constraints["cash"]["fun"](exact) == pytest.approx(weights[-1] - fee)
     value, gradient = captured["objective"](exact)
     benchmark = assets.benchmark_weight.to_numpy()
     assert value == pytest.approx(
@@ -213,11 +236,11 @@ def test_fee_feasibility_ignores_inflated_objective_epigraph(monkeypatch):
     variance_numerator = 0.04 * (
         -active_numerator[0] + 2.0 * active_numerator[1]
     ) ** 2 + 0.01 * (active_numerator[0] ** 2 + active_numerator[1] ** 2)
-    assert captured["constraints"][1]["fun"](exact) == pytest.approx(
+    assert constraints["risk"]["fun"](exact) == pytest.approx(
         (1.0 - fee) ** 2 - variance_numerator
     )
     # With benchmark .5 and name allowance 1, the admitted net stock band is [0,1].
-    assert captured["constraints"][6]["fun"](exact) == pytest.approx(
+    assert constraints["name"]["fun"](exact) == pytest.approx(
         [weights[0], weights[1], 1.0 - fee - weights[0], 1.0 - fee - weights[1]]
     )
 
@@ -439,3 +462,30 @@ def test_hypothetical_fee_domain_error_is_not_replaced_with_a_cash_bound():
 
     with pytest.raises(ValueError, match="^cost_owner_domain_error$"):
         _solve(_assets([0.5, 0.5, 0.0]), cost=cost)
+
+
+@pytest.mark.parametrize("weights", [[0.34, 0.27, 0.39], [0.2, 0.4, 0.4]])
+def test_net_risk_gradient_matches_dense_chain_rule(monkeypatch, weights):
+    captured, assets = _capture_fee_constraints(monkeypatch)
+    weights = np.asarray(weights)
+    delta = weights - assets.current_weight.to_numpy()
+    point = np.r_[weights, abs(delta)]
+    constraint = _fee_constraints(captured, point)["risk"]
+    buy, sell = np.maximum(delta[:2], 0.0), np.maximum(-delta[:2], 0.0)
+    fee = 0.01 * buy.sum() + 0.03 * sell.sum() + 0.02 * (buy**2 + sell**2).sum()
+    fee_gradient = np.r_[
+        np.where(delta[:2] > 0, 0.01 + 0.04 * buy, -0.03 - 0.04 * sell), 0.0
+    ]
+    benchmark = assets.benchmark_weight.to_numpy()
+    cash_direction = np.array([0.0, 0.0, 1.0])
+    active = weights - benchmark + (benchmark - cash_direction) * fee
+    exposure = assets["style"].to_numpy()
+    variance_gradient = (
+        0.08 * exposure * (active @ exposure)
+        + 2 * assets.specific_variance.to_numpy() * active
+    )
+    dense = np.eye(3) + np.outer(benchmark - cash_direction, fee_gradient)
+    expected = -2 * (1 - fee) * fee_gradient - variance_gradient @ dense
+    np.testing.assert_allclose(
+        constraint["jac"](point), np.r_[expected, np.zeros(3)], rtol=2e-14, atol=1e-16
+    )
