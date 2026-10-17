@@ -419,6 +419,8 @@ def normalize_raw_frame(
         "industry_classification": ("industry_standard_id",),
         "industry_classification_sets": ("industry_standard_id", "industry_code"),
         "industry_classification_versions": ("industry_standard_id",),
+        "listing_status_changes": ("changed_item",),
+        "stock_info_changes": ("changed_item",),
         "equity_changes": ("report_type", "data_source", "subject_code"),
         "financial_balance": ("report_type",),
         "financial_income": ("report_type",),

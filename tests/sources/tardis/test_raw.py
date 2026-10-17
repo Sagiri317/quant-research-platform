@@ -582,9 +582,20 @@ def test_native_member_is_required_only_when_consumed(
         with open_market_source(root) as source:
             if member_kind == "files":
                 with pytest.raises(ValueError, match="tardis_raw_identity_changed"):
-                    next(source.archives[0]._iter_canonical_records())
+                    next(
+                        source.archives[0]._iter_canonical_records(
+                            "BTCUSDT", "depth", None
+                        )
+                    )
             else:
-                assert list(source.archives[0]._iter_canonical_records()) == []
+                assert (
+                    list(
+                        source.archives[0]._iter_canonical_records(
+                            "BTCUSDT", "depth", None
+                        )
+                    )
+                    == []
+                )
 
 
 def test_native_manifest_is_read_once_without_reproving_selection(
@@ -605,7 +616,10 @@ def test_native_manifest_is_read_once_without_reproving_selection(
 
     monkeypatch.setattr(replay, "read_qrp_json_file", read)
     with replay.open_tardis_archive(root) as source:
-        assert list(source.archives[0]._iter_canonical_records()) == []
+        assert (
+            list(source.archives[0]._iter_canonical_records("BTCUSDT", "depth", None))
+            == []
+        )
     assert calls == [root / "manifest.json"]
 
 
@@ -793,7 +807,7 @@ def test_archive_hashes_native_member_during_decode_only(tmp_path, monkeypatch):
     monkeypatch.setattr(raw, "open_filesystem_file", open_counted)
     monkeypatch.setattr(binance_replay, "open_filesystem_file", open_counted)
     with open_tardis_archive(root) as archive:
-        list(archive.archives[0]._iter_canonical_records())
+        list(archive.archives[0]._iter_canonical_records("BTCUSDT", "depth", None))
     assert counts == {"opens": 1, "bytes": manifest["files"][0]["compressed_bytes"]}
 
 

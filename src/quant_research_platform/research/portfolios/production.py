@@ -2887,9 +2887,12 @@ def _validate_windows(
 def backtest(config: Mapping) -> Path:
     """Publish an A-share account from explicit JSON market and prediction inputs."""
     config = qrp_json_mapping_snapshot(config)
+    from quant_research_platform.artifacts.outputs.manifest import (
+        validate_output_bundle,
+    )
     from quant_research_platform.artifacts.outputs.prediction import (
+        _iter_prediction_member,
         _PredictionLookup,
-        read_predictions,
     )
     from quant_research_platform.artifacts.portfolio_ledger import (
         write_portfolio_ledger_artifact,
@@ -2978,13 +2981,18 @@ def backtest(config: Mapping) -> Path:
             "prediction_window",
         )
     }
-    domains, frames = [], []
+    domains = []
+    index = ExactPrimaryKeyIndex(primary_key=("timestamp", "asset_id"))
+    prediction_rows = 0
     if not isinstance(config["predictions"], list) or not config["predictions"]:
         raise ValueError("portfolio_prediction_inputs_required")
     for item in config["predictions"]:
         if not isinstance(item, dict) or set(item) != {"path", "window"}:
             raise ValueError("portfolio_prediction_input_invalid")
-        frame, metadata = read_predictions(Path(item["path"]))
+        path = Path(item["path"])
+        metadata = validate_output_bundle(
+            path, expected_definition_id="prediction_outputs"
+        )[0]["metadata"]
         facts = metadata["model_facts"]
         window = TimeWindow(**item["window"])
         if any(
@@ -3010,33 +3018,40 @@ def backtest(config: Mapping) -> Path:
                 window.start
             ):
                 raise ValueError("portfolio_prediction_not_causal")
-        chosen = frame.loc[
-            frame.timestamp.between(
-                pd.Timestamp(window.start), pd.Timestamp(window.end)
+        domain_rows = 0
+        with closing_iterator(
+            _iter_prediction_member(
+                path,
+                metadata,
+                columns=("timestamp", "asset_id", "prediction_rank_score"),
+                time_window=window,
             )
-        ].copy()
-        if chosen.empty:
+        ) as batches:
+            for frame in batches:
+                chosen = frame.loc[
+                    frame.timestamp.between(
+                        pd.Timestamp(window.start), pd.Timestamp(window.end)
+                    )
+                ]
+                if index.add_float_value_table(
+                    pa.Table.from_pandas(chosen, preserve_index=False),
+                    namespace="prediction",
+                    value_column="prediction_rank_score",
+                    retain_values=True,
+                ):
+                    raise ValueError("portfolio_prediction_keys_invalid")
+                domain_rows += len(chosen)
+                del chosen, frame
+        if domain_rows == 0:
             raise ValueError("portfolio_prediction_domain_empty")
-        frames.append(chosen)
+        prediction_rows += domain_rows
         domains.append(window)
-    frame = pd.concat(frames, ignore_index=True)
-    del frames, chosen
-    if frame.duplicated(["timestamp", "asset_id"]).any():
-        raise ValueError("portfolio_prediction_keys_invalid")
-    index = ExactPrimaryKeyIndex(primary_key=("timestamp", "asset_id"))
-    index.add_float_value_table(
-        pa.Table.from_pandas(frame, preserve_index=False),
-        namespace="prediction",
-        value_column="prediction_rank_score",
-        retain_values=True,
-    )
     lookup = _PredictionLookup(
         index=index,
         primary_key=("timestamp", "asset_id"),
         prediction_column="prediction_rank_score",
     )
-    lookup.row_count = len(frame)
-    del frame
+    lookup.row_count = prediction_rows
     frozen = None
     if "calibration" in config:
         payload = read_qrp_json_file(Path(config["calibration"]))[1]

@@ -817,13 +817,16 @@ def test_calibration_execution_coverage_matches_half_open_quote_lifetime(coverag
 
 
 @pytest.mark.parametrize("quantity", [1.0, 2.0])
-def test_admissible_history_unknown_quantity_is_local_to_selection(quantity):
+@pytest.mark.parametrize("missing_field", ["visible_quantity", "price_index"])
+def test_admissible_history_missing_trade_fact_is_local_to_selection(
+    quantity, missing_field
+):
     books = [_state(0), _state(500)]
     trades = [
         _trade(100, price="99.5", quantity="3", maker_buyer=True),
         replace(
             _trade(200, price="99.5", quantity="3", maker_buyer=True),
-            visible_quantity=None,
+            **{missing_field: None},
         ),
     ]
     samples, events = [], []
@@ -851,7 +854,7 @@ def test_admissible_history_unknown_quantity_is_local_to_selection(quantity):
     buy = next(sample for sample in samples if sample["side"] == "buy")
     assert buy["filled"] == 1.0 and buy["terminal_reason"] == "filled"
     assert any(
-        getattr(row["event"], "visible_quantity", 0) is None
+        getattr(row["event"], missing_field, 0) is None
         and buy["event_start"] <= row["event_id"] < buy["event_end"]
         for row in events
     )
@@ -896,14 +899,22 @@ def test_admissible_history_unknown_quantity_is_local_to_selection(quantity):
         assert result["created_orders"] == 0
         assert any(
             d.name == "maker_buy_selection_reason"
-            and d.text == "hft_trade_visible_quantity_unknown"
+            and d.text
+            == (
+                "hft_trade_price_unknown"
+                if missing_field == "price_index"
+                else "hft_trade_visible_quantity_unknown"
+            )
             for b in batches
             for d in b.diagnostics
         )
 
 
 @pytest.mark.parametrize("unknown_at", [5, 100])
-def test_unknown_history_keeps_pending_or_active_orders_and_later_choices(unknown_at):
+@pytest.mark.parametrize("missing_field", ["visible_quantity", "price_index"])
+def test_unknown_history_keeps_pending_or_active_orders_and_later_choices(
+    unknown_at, missing_field
+):
     known = calibration_from_paths(
         [([_state(0)], [_trade(100, price="99.5", quantity="4", maker_buyer=True)])],
         [0.0],
@@ -916,7 +927,7 @@ def test_unknown_history_keeps_pending_or_active_orders_and_later_choices(unknow
                     _trade(100, price="99.5", quantity="3", maker_buyer=True),
                     replace(
                         _trade(200, price="99.5", quantity="3", maker_buyer=True),
-                        visible_quantity=None,
+                        **{missing_field: None},
                     ),
                 ],
             )
@@ -968,3 +979,68 @@ def test_unknown_history_keeps_pending_or_active_orders_and_later_choices(unknow
         if d.name == "maker_buy_expected_net_gain"
     ]
     assert gains[0] > 0 and gains[1] is None and gains[2] > 0
+
+
+@pytest.mark.parametrize("mode", ["replacement", "keep", "pending"])
+def test_history_stops_only_after_orders_and_commands_are_exhausted(mode):
+    from fractions import Fraction
+
+    state = _state(0, bid_levels=((995, 1.0), (990, 3.0)))
+    model = calibration_from_paths(
+        [
+            (
+                [state],
+                [
+                    _trade(stamp, price="99.5", quantity="2", maker_buyer=True)
+                    for stamp in (10, 30, 40, 50, 60)
+                ],
+            )
+        ],
+        [0.0],
+    )
+    sample = next(model.samples("buy"))
+    order = _maker_new_order(0, "buy", 1.0, state, _quote(0, book_segment_id="s1"), 0)
+    visited = []
+    closed = []
+
+    def events():
+        try:
+            for event in model.events(sample["event_start"], sample["event_end"]):
+                visited.append(event.event_at)
+                yield event
+        finally:
+            closed.append(True)
+
+    response = model._response(
+        sample,
+        state=state,
+        decision_ns=0,
+        new_order=order,
+        active_order=None if mode == "replacement" else order,
+        commands=(
+            ((20_000_000, "buy", replace(order, effective_at_ns=20_000_000)),)
+            if mode == "pending"
+            else ()
+        ),
+        lifetime_ns=500_000_000,
+        replace_quantity=Fraction(1) if mode == "replacement" else None,
+        history_scale=1,
+        events=events(),
+    )
+    fills = []
+    while True:
+        try:
+            fills.append(next(response))
+        except StopIteration as stopped:
+            assert stopped.value == ("filled" if mode == "replacement" else "expired")
+            break
+    assert fills == [
+        (stamp, Fraction(1), 99.5, mode == "replacement")
+        for stamp in ((10_000_000, 30_000_000) if mode == "pending" else (10_000_000,))
+    ]
+    assert visited == (
+        [10_000_000, 30_000_000, 40_000_000]
+        if mode == "pending"
+        else [10_000_000, 30_000_000]
+    )
+    assert closed == [True]

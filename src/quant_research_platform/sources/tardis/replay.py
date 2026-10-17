@@ -224,15 +224,15 @@ class TardisArchive:
     _coverage_index: ObservationCoverageIndex
     _sequence_offset: int = 0
 
-    def _iter_canonical_records(self):
-        """Decode and validate native continuity once for this archive session."""
+    def _iter_canonical_records(self, requested_symbol, data_kind, end_ns):
+        """Validate native rows while tracking only this consumer's continuity."""
         market_type = (
             FUTURES_MARKET_TYPE
             if self.manifest["exchange"] == EXCHANGE
             else SPOT_MARKET_TYPE
         )
         prefix = 0
-        observe_trade = native_trade_identities()
+        observe_trade = native_trade_identities() if data_kind == "agg_trades" else None
         tracker = _ObservedStreams(
             self.manifest["exchange"], observe_trade=observe_trade
         )
@@ -250,18 +250,26 @@ class TardisArchive:
                 )
             ) as records:
                 for number, timestamp, value in records:
-                    identity, closed, _gap = tracker.observe(
-                        member["offset_minutes"], number, timestamp, value
-                    )
-                    for interval in closed:
-                        self._check_interval(interval)
                     if value is None:
+                        _identity, closed, _gap = tracker.observe(
+                            member["offset_minutes"], number, timestamp, value
+                        )
+                        for interval in closed:
+                            self._check_interval(interval)
                         continue
+                    if (
+                        end_ns is not None
+                        and strict_iso_timestamp(
+                            timestamp, error="tardis_observed_time_invalid"
+                        ).value
+                        > end_ns
+                    ):
+                        return
                     if tracker.epoch != state_epoch:
                         state_epoch = tracker.epoch
-                        for affected in self.manifest["symbols"]:
+                        if data_kind == "state":
                             _yield_value = (
-                                (affected.upper(), "state"),
+                                (requested_symbol, "state"),
                                 {
                                     "receive_time": timestamp,
                                     "channel": None,
@@ -275,6 +283,20 @@ class TardisArchive:
                                 return
                     raw_symbol, channel, *_ = value["stream"].split("@")
                     symbol = raw_symbol.upper()
+                    kind = (
+                        "state"
+                        if channel in STATE_CHANNELS
+                        else "agg_trades"
+                        if channel == "aggTrade"
+                        else "depth"
+                    )
+                    if (symbol, kind) != (requested_symbol, data_kind):
+                        continue
+                    identity, closed, _gap = tracker.observe(
+                        member["offset_minutes"], number, timestamp, value
+                    )
+                    for interval in closed:
+                        self._check_interval(interval)
                     if channel in STATE_CHANNELS:
                         _yield_value = (
                             (symbol, "state"),
@@ -345,16 +367,10 @@ class TardisArchive:
     def _stream_records(self, symbol, data_kind, end_ns):
         """Give each active consumer a streaming decoder, with no replay cache."""
         requested = symbol, data_kind
-        with closing_iterator(self._iter_canonical_records()) as records:
+        with closing_iterator(
+            self._iter_canonical_records(symbol, data_kind, end_ns)
+        ) as records:
             for key, record in records:
-                if (
-                    end_ns is not None
-                    and strict_iso_timestamp(
-                        record["receive_time"], error="tardis_observed_time_invalid"
-                    ).value
-                    > end_ns
-                ):
-                    return
                 if key == requested:
                     yield record
 

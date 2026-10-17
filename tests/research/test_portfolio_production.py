@@ -3236,17 +3236,23 @@ def test_holding_projection_does_not_change_fit_or_specific_risk_history(styles)
     state = FactorRiskState(style_columns=styles)
     expected = state.fit_return_session(cross)
     state.observe_return_session(cross)
-    for extreme in (-1e100, 1e100):
+    for extreme, capitalization in ((-1e100, 1e100), (1e100, 1e100), (0.5, np.nan)):
         held = cross.iloc[[0]].assign(
             asset_id="held_st",
             eligible=False,
             asset_return=0.07,
-            total_market_cap=abs(extreme),
-            float_market_cap=abs(extreme),
+            total_market_cap=capitalization,
+            float_market_cap=capitalization,
             **dict.fromkeys(styles, extreme),
         )
         extended = pd.concat((cross, held), ignore_index=True)
         changed = FactorRiskState(style_columns=styles)
+        assert (
+            "held_st"
+            in changed.prepare_exposures(
+                extended, include_ineligible=True
+            ).asset_id.tolist()
+        )
         actual = changed.fit_return_session(
             extended, require_complete=True, project_ineligible=True
         )

@@ -115,3 +115,99 @@ def _research_frame() -> pd.DataFrame:
             "context_1": ["x", "y"],
         }
     )
+
+
+@pytest.mark.parametrize(
+    "primary_key",
+    (
+        ("timestamp", "asset_id"),
+        ("asset_id", "timestamp"),
+        ("timestamp", "asset_id", "venue"),
+    ),
+)
+@pytest.mark.parametrize("duplicate", (False, True))
+def test_evaluation_key_validation_has_one_owner_per_invariant(
+    tmp_path, monkeypatch, primary_key, duplicate
+):
+    from quant_research_platform.research.evaluations import runner
+    from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
+
+    dates = pd.date_range("2024-01-01", periods=4, freq="s")
+    frame = pd.DataFrame(
+        dict(
+            timestamp=dates,
+            asset_id="btc_usdt",
+            x=[1.0, 2.0, 3.0, 4.0],
+            y=[2.0, 4.0, 6.0, 8.0],
+            available=dates,
+            eligible=True,
+            venue="a",
+        )
+    )
+    if duplicate:
+        extra = frame.iloc[[0]].assign(venue="b")
+        frame = pd.concat([frame.iloc[:1], extra, frame.iloc[1:]], ignore_index=True)
+    source = tmp_path / "input.parquet"
+    frame.to_parquet(source, index=False)
+    spec = dict(
+        data_id="proof",
+        frequency="tick",
+        grain="asset_timestamp",
+        column_roles={
+            "timestamp": "timestamp",
+            "asset_id": "key",
+            "x": "factor",
+            "y": "label",
+            "available": "context",
+            "eligible": "mask",
+            "venue": "key",
+        },
+        primary_key=primary_key,
+        partition_columns=(),
+    )
+    indexes = []
+    original_add = ExactPrimaryKeyIndex.add_table
+
+    def observed_add(self, table, **kwargs):
+        if {"timestamp", "asset_id"} <= set(table.column_names) and not any(
+            index is self for index in indexes
+        ):
+            indexes.append(self)
+        return original_add(self, table, **kwargs)
+
+    monkeypatch.setattr(ExactPrimaryKeyIndex, "add_table", observed_add)
+    original_chunks = runner.iter_dataset_chunks
+    monkeypatch.setattr(
+        runner,
+        "iter_dataset_chunks",
+        lambda session: original_chunks(session, batch_rows=1),
+    )
+    config = dict(
+        inputs=str(source),
+        input_spec=spec,
+        output=str(tmp_path / "evaluation"),
+        window={"start": dates[0].isoformat(), "end": dates[-1].isoformat()},
+        cutoff="2024-01-02",
+        evaluation=dict(
+            evaluation_id="proof",
+            market_id="crypto",
+            research_dataset_id="proof",
+            signals=[dict(signal_id="x", source_kind="factor", source_column="x")],
+            label_columns=["y"],
+            label_availability_columns={"y": "available"},
+            evaluation_axis="single_asset_time_series",
+            n_groups=2,
+        ),
+    )
+    if duplicate:
+        error = (
+            "evaluation_input_duplicate_keys"
+            if len(primary_key) > 2
+            else "duplicate_dataset_primary_key"
+        )
+        with pytest.raises(ValueError, match=error):
+            runner.evaluate(config)
+    else:
+        assert runner.evaluate(config).is_dir()
+    # Projection omits venue: the wider-key case has only the narrower owner.
+    assert len(indexes) == 1

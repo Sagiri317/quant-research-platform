@@ -254,14 +254,20 @@ def evaluate(config):
         predictions[column] = (frame, metadata)
 
     def prepared():
-        seen = ExactPrimaryKeyIndex(primary_key=("timestamp", "asset_id"))
+        # The reader owns the declared PK; only a wider PK needs this
+        # additional, narrower evaluation-key invariant.
+        seen = (
+            ExactPrimaryKeyIndex(primary_key=("timestamp", "asset_id"))
+            if set(declared["primary_key"]) != {"timestamp", "asset_id"}
+            else None
+        )
         # Acquire the input in its consuming generator. A rejected destination or
         # failed initialization cannot leave an unstarted input session open.
         with closing_iterator(
             iter_dataset_chunks(session.filtered_view(window).projected_view(columns))
         ) as source:
             for frame in source:
-                if seen.add_table(
+                if seen is not None and seen.add_table(
                     pa.Table.from_pandas(
                         frame.loc[:, ["timestamp", "asset_id"]],
                         preserve_index=False,

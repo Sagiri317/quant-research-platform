@@ -480,7 +480,9 @@ def _collect_training_frame(
                 availability_columns[0],
             ]
             usable = filtered.loc[:, selected_columns].copy()
+            del chunk, filtered
             if usable.empty:
+                del usable
                 continue
             blocks = (
                 (usable,)
@@ -493,6 +495,7 @@ def _collect_training_frame(
                 if spec.max_train_rows is not None:
                     while retained_rows > spec.max_train_rows and len(retained) > 1:
                         retained_rows -= len(retained.popleft())
+            del usable, blocks, block
     training = (
         retained[0]
         if len(retained) == 1
@@ -500,6 +503,7 @@ def _collect_training_frame(
         if retained
         else pd.DataFrame()
     )
+    retained.clear()
     training = _apply_training_controls(training, spec)
     train_start = train_end = None
     if not training.empty:
@@ -688,7 +692,7 @@ def _apply_training_controls(frame: pd.DataFrame, spec: ModelSpec) -> pd.DataFra
     """Apply only the generic, explicitly requested row cap."""
     if frame.empty:
         return frame
-    result = frame.copy()
+    result = frame.copy(deep=False)
     result["timestamp"] = strict_timestamp_series(
         result["timestamp"], error="invalid_model_training_timestamp"
     )
@@ -696,7 +700,8 @@ def _apply_training_controls(frame: pd.DataFrame, spec: ModelSpec) -> pd.DataFra
         counts = result.groupby("timestamp", sort=True).size()
         retained = counts.iloc[::-1].cumsum() <= spec.max_train_rows
         result = result.loc[result.timestamp.isin(retained.index[retained])]
-    return result.reset_index(drop=True)
+    result.index = pd.RangeIndex(len(result))
+    return result
 
 
 def _native_missing(spec):

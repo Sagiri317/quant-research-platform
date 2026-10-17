@@ -419,6 +419,13 @@ def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
 
     monkeypatch.setattr(portfolio, "_prediction_rows", prediction_rows)
     monkeypatch.setattr(
+        portfolio,
+        "_prediction_evidence",
+        lambda path, **kwargs: dict(
+            zip(("price", "proxy"), MAKER_MODEL_IDS, strict=True)
+        )[path],
+    )
+    monkeypatch.setattr(
         portfolio, "open_market_source", lambda *_, **_kwargs: nullcontext(run)
     )
 
@@ -485,9 +492,6 @@ def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
             portfolio._produce_maker_calibration(
                 on_table=append,
                 config=config,
-                model_evidence={
-                    "fold_1": {"price": MAKER_MODEL_IDS[0], "proxy": MAKER_MODEL_IDS[1]}
-                },
             )
 
         logical = tmp_path / f"batch_{batch_rows}"
@@ -734,6 +738,13 @@ def test_maker_calibration_streams_many_events_without_full_table_reads(
 
     monkeypatch.setattr(portfolio, "_prediction_rows", prediction_rows)
     monkeypatch.setattr(
+        portfolio,
+        "_prediction_evidence",
+        lambda path, **kwargs: dict(
+            zip(("price", "proxy"), MAKER_MODEL_IDS, strict=True)
+        )[path],
+    )
+    monkeypatch.setattr(
         portfolio, "open_market_source", lambda *_, **_kwargs: nullcontext(run)
     )
 
@@ -774,9 +785,6 @@ def test_maker_calibration_streams_many_events_without_full_table_reads(
         portfolio._produce_maker_calibration(
             on_table=append,
             config=config,
-            model_evidence={
-                "fold_1": {"price": MAKER_MODEL_IDS[0], "proxy": MAKER_MODEL_IDS[1]}
-            },
         )
 
     root = statistics.write_statistics_artifact(

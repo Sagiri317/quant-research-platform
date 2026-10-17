@@ -10,6 +10,7 @@ from quant_research_platform.contracts.models import ModelSpec, model_spec_paylo
 from quant_research_platform.research.models import estimators
 from quant_research_platform.research.models.explanations import _native_importance
 from quant_research_platform.research.models.fitting import _collect_training_frame
+from quant_research_platform.research.models.scaler import ModelMatrixScaler
 from tests.research.direct_model_test_support import fit_frame
 
 ALGORITHMS = (
@@ -31,7 +32,7 @@ def _frame():
         dict(
             timestamp=dates,
             asset_id=list("abcab"),
-            x=[10.0, 20.0, np.nan, 30.0, 50.0],
+            x=[10.0, 20.0, np.nan, 31.0, 50.0],
             z=[2.0, np.nan, 6.0, 8.0, 12.0],
             label=[1.0, 2.0, 1.5, 3.0, 5.0],
             eligible=True,
@@ -67,7 +68,7 @@ def _spec(algorithm, choice=None):
 
 
 def _expected(data, native, scaling):
-    matrix = data[["x", "z"]].copy()
+    matrix = data[["x", "z"]].astype("float64")
     weights = np.array([1 / 3] * 3 + [1 / 2] * 2)
     if not native:
         matrix = matrix.fillna(matrix.median())
@@ -90,7 +91,8 @@ def test_actual_estimator_inputs_and_native_roundtrip(
     tmp_path, monkeypatch, algorithm, choice
 ):
     spec = _spec(algorithm, choice)
-    data = _frame()
+    data = _frame().astype({"x": "Int64", "z": "Float64"})
+    original_data = data.copy(deep=True)
     expected_scaling = algorithm in ALGORITHMS[:4] if choice is None else choice
     native = algorithm in {
         "decision_tree_regressor",
@@ -138,14 +140,20 @@ def test_actual_estimator_inputs_and_native_roundtrip(
         atol=2e-13,
         equal_nan=True,
     )
+    pd.testing.assert_frame_equal(data, original_data, check_exact=True)
+    if not native:
+        assert scaler.medians == (25.5, 7.0)
+        assert scaler.columns == ("x", "z", "x__missing", "z__missing")
     frozen = scaler.to_payload()
     future = data[["x", "z"]].copy()
     future.loc[0] = [np.nan, np.nan]
     future.loc[1] = [10000.0, np.nan]
+    original_future = future.copy(deep=True)
     prediction = case.result.prediction_model.predict(future)
     assert np.isnan(prediction[0])
     assert np.isfinite(prediction[1:]).all()
     assert scaler.to_payload() == frozen
+    pd.testing.assert_frame_equal(future, original_future, check_exact=True)
 
 
 def test_scaling_independent_of_missingness_and_all_missing_columns():
@@ -286,3 +294,17 @@ def test_cli_json_uses_same_resolved_scaling(tmp_path, algorithm, choice):
         rtol=1e-13,
         atol=1e-13,
     )
+
+
+@pytest.mark.parametrize(
+    "value", [True, 1 + 2j, np.inf, "invalid", pd.Timestamp("2024-01-01")]
+)
+@pytest.mark.parametrize("stage", ["fit", "transform"])
+def test_imputation_preserves_strict_numeric_validation(value, stage):
+    valid = pd.DataFrame({"x": pd.array([1, None, 2], dtype="Int64")})
+    invalid = pd.DataFrame({"x": pd.Series([1, None, value], dtype=object)})
+    with pytest.raises(ValueError, match="invalid_model_scaler_column"):
+        if stage == "fit":
+            ModelMatrixScaler.fit(invalid, missing="impute")
+        else:
+            ModelMatrixScaler.fit(valid, missing="impute").transform(invalid)

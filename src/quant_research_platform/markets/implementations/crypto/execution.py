@@ -1771,7 +1771,8 @@ class MakerCalibration:
         )
         with closing_iterator(events) as events:
             event = next(events, None)
-            while event is not None or pending:
+            # Once no order or command remains, later history cannot add fills.
+            while (event is not None or pending) and (active or pending):
                 event_time = event.event_at if event is not None else None
                 command_time = pending[0][0] if pending else None
                 stamp = _maker_next_time(event_time, command_time)
@@ -2995,6 +2996,7 @@ def simulate_maker(
                                 "activation_queue_depth_unknown",
                                 "activation_coverage_missing",
                                 "hft_trade_visible_quantity_unknown",
+                                "hft_trade_price_unknown",
                             }:
                                 raise
                             unknown_queue_reason = str(error)

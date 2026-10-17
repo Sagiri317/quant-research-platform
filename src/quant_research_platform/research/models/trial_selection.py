@@ -590,6 +590,7 @@ def score(config):
                     ) as label_chunks:
                         label_parts.extend(label_chunks)
                 labels = pd.concat(label_parts, ignore_index=True)
+                del label_parts
                 labels["timestamp"] = strict_timestamp_series(
                     labels.timestamp, error="invalid_scoring_timestamp"
                 )
@@ -607,7 +608,7 @@ def score(config):
                         availability_column=availability,
                         target_column=label,
                     )
-                ]
+                ].set_index(["timestamp", "asset_id"])[target]
             if first_facts is not None:
                 validate_model_facts(facts, expected=first_facts)
             else:
@@ -616,12 +617,9 @@ def score(config):
                 predictions.loc[:, ["timestamp", "asset_id"]]
             )
             missing_label_rows += len(actual_keys.difference(supplied_label_keys))
-            joined = predictions.merge(
-                labels,
-                on=["timestamp", "asset_id"],
-                how="inner",
-                validate="one_to_one",
-            )
+            predictions = predictions.set_index(["timestamp", "asset_id"])
+            joined = predictions.loc[predictions.index.isin(labels.index)]
+            del predictions, actual_keys
             calibration = model_metadata.get("rank_parameters", {}).get(
                 "label_calibration"
             )
@@ -640,9 +638,8 @@ def score(config):
             )
             pieces.append(joined)
             training_windows.extend(facts["fit_windows"])
-        candidate_frame = pd.concat(pieces, ignore_index=True).set_index(
-            ["timestamp", "asset_id"]
-        )
+        candidate_frame = pd.concat(pieces)
+        del pieces, joined
         if not candidate_frame.index.is_unique:
             raise ValueError("candidate_validation_keys_duplicate")
         common = (
@@ -679,6 +676,7 @@ def score(config):
                 },
             }
         )
+        del candidate_frame
     validate_input_market(declared, market)
     if market == "a_share":
         from quant_research_platform.research.protocols.a_share import (
@@ -688,7 +686,9 @@ def score(config):
         validate_model_selection([_model_spec(item["model"]) for item in candidates])
     common_rows = 0 if common is None else len(common)
     rows = []
-    for candidate, frame in zip(candidates, frames, strict=True):
+    for index, candidate in enumerate(candidates):
+        frame = frames[index]
+        frames[index] = None
         if frame is None or not common_rows:
             from quant_research_platform.contracts.models import (
                 _MODEL_SELECTION_TRIAL_METRIC_KEYS,
@@ -706,10 +706,10 @@ def score(config):
                     metrics[f"validation_{suffix}"] = "no_valid_observations"
             rows.append(metrics)
             continue
-        comparable = (
-            frame.loc[common]
-            .reset_index()
-            .sort_values(["timestamp", "asset_id"], kind="stable")
+        comparable = frame.loc[common]
+        comparable[target] = labels.reindex(comparable.index)
+        comparable = comparable.reset_index().sort_values(
+            ["timestamp", "asset_id"], kind="stable"
         )
         metrics = evaluate_model_trial_metrics_from_chunks(
             [comparable],
@@ -720,6 +720,7 @@ def score(config):
             label_prediction_column="prediction_label_value",
         )
         rows.append(_json_metrics(metrics))
+        del comparable
     payload = {
         "candidate_ids": ids,
         "candidates": candidates,

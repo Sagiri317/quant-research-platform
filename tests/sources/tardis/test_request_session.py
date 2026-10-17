@@ -209,3 +209,122 @@ def test_decoder_failure_does_not_contaminate_an_independent_read(archive, monke
         with pytest.raises(ValueError, match="first_computation_decode_failure"):
             list(_records(source))
         assert len(list(_records(source))) == 3
+
+
+@pytest.mark.parametrize("kind", ["depth", "state", "agg_trades"])
+def test_cursor_tracks_only_requested_stream_and_keeps_global_disconnect(
+    tmp_path, monkeypatch, kind
+):
+    from tests.helpers.tardis import _snapshot
+
+    def trade(second, identifier):
+        return _line(
+            second,
+            "aggTrade",
+            {
+                "e": "aggTrade",
+                "E": 1788220800000 + second * 1000,
+                "T": 1788220800000 + second * 1000,
+                "s": "BTCUSDT",
+                "st": 1,
+                "a": identifier,
+                "f": identifier,
+                "l": identifier,
+                "p": "100",
+                "q": "1",
+                "nq": "1",
+                "m": False,
+            },
+        )
+
+    def other(row):
+        return row.replace(b"btcusdt", b"ethusdt").replace(b"BTCUSDT", b"ETHUSDT")
+
+    state = {"symbol": "BTCUSDT", "openInterest": "2", "time": 1788220803000}
+    native = b"".join(trade(1, i) + other(trade(1, i)) for i in range(20))
+    native += (
+        _snapshot("2026-09-01T00:00:02.000000Z")
+        + _line(3, "openInterest", state)
+        + b"\n"
+        + other(trade(4, 20))
+        + _line(5, "openInterest", dict(state, time=1788220805000))
+    )
+    root = tmp_path / "published"
+    import_slices(
+        root,
+        date="2026-09-01",
+        slices=_slices(tmp_path / "native", native),
+        channels=("depth", "depthSnapshot", "aggTrade", "openInterest"),
+    )
+    factory = replay.native_trade_identities
+    histories = []
+
+    def tracked():
+        observed = factory()
+        history = []
+        histories.append(history)
+
+        def observe(market, symbol, payload):
+            history.append((symbol, payload["a"]))
+            return observed(market, symbol, payload)
+
+        return observe
+
+    monkeypatch.setattr(replay, "native_trade_identities", tracked)
+    with open_market_source(root) as source:
+        if kind == "state":
+            records = list(
+                source.iter_state_observations(
+                    symbol="BTCUSDT", channels=("openInterest",)
+                )
+            )
+            assert [(r[0], r[1], r[3]) for r in records] == [
+                (1788220803000000000, "openInterest", 0),
+                (1788220804000000000, None, 1),
+                (1788220805000000000, "openInterest", 1),
+            ]
+        else:
+            records = list(
+                source.iter_market_records(
+                    symbol="BTCUSDT",
+                    market_type=FUTURES_MARKET_TYPE,
+                    data_kinds=("depth_snapshot", "depth")
+                    if kind == "depth"
+                    else ("agg_trades",),
+                )
+            )
+            assert [r["source_sequence"] for r in records] == (
+                [41] if kind == "depth" else list(range(1, 41, 2))
+            )
+        assert histories == (
+            [[("BTCUSDT", i) for i in range(20)]] if kind == "agg_trades" else []
+        )
+
+
+def test_cutoff_on_unrequested_stream_does_not_decode_later_error(tmp_path):
+    import gzip
+
+    from tests.helpers.tardis import _snapshot
+
+    native = _snapshot("2026-09-01T00:00:00.000000Z") + _delta(1, 99, 101, 98).replace(
+        b"btcusdt", b"ethusdt"
+    ).replace(b"BTCUSDT", b"ETHUSDT")
+    root = tmp_path / "published"
+    manifest = import_slices(
+        root, date="2026-09-01", slices=_slices(tmp_path / "native", native)
+    )
+    (root / manifest["files"][0]["path"]).write_bytes(
+        gzip.compress(native + b"invalid later row\n")
+    )
+    with open_market_source(root) as source:
+        result = list(
+            source.iter_market_records(
+                symbol="BTCUSDT",
+                market_type=FUTURES_MARKET_TYPE,
+                data_kinds=("depth_snapshot", "depth"),
+                end_ns=1788220800000000000,
+            )
+        )
+        assert [r["source_sequence"] for r in result] == [1]
+        with pytest.raises(ValueError, match="tardis_observed_time_invalid"):
+            list(_records(source))

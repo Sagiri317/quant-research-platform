@@ -73,7 +73,18 @@ def test_ordinary_read_does_not_require_unused_byte_certificate(
             assert len(list(opened.iter_records())) == 1
     elif source == "tardis":
         with open_tardis_archive(root) as opened:
-            assert len(list(opened.archives[0]._iter_canonical_records())) == 1
+            assert (
+                len(
+                    list(
+                        opened.iter_market_records(
+                            symbol="BTCUSDT",
+                            market_type=FUTURES_MARKET_TYPE,
+                            data_kinds=("depth_snapshot", "depth"),
+                        )
+                    )
+                )
+                == 1
+            )
     else:
         assert (
             len(
@@ -125,11 +136,16 @@ def test_tardis_prefix_ignores_missing_later_member_and_unused_gaps(tmp_path):
     (root / manifest["files"][1]["path"]).unlink()
     (root / manifest["gaps"]["path"]).unlink()
     with open_tardis_archive(root) as opened:
-        records = opened.archives[0]._iter_canonical_records()
-        assert next(records)[1]["payload"]["lastUpdateId"] == 100
+        scope = dict(
+            symbol="BTCUSDT",
+            market_type=FUTURES_MARKET_TYPE,
+            data_kinds=("depth_snapshot", "depth"),
+        )
+        records = opened.iter_market_records(**scope)
+        assert next(records)["payload"]["lastUpdateId"] == 100
         records.close()
         with pytest.raises(ValueError, match="tardis_raw_identity_changed"):
-            list(opened.archives[0]._iter_canonical_records())
+            list(opened.iter_market_records(**scope))
 
 
 def test_binance_prefix_close_adds_no_reads_and_consumed_tail_still_fails(

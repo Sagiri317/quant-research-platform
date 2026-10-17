@@ -5,6 +5,7 @@ from dataclasses import asdict, replace
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
+from weakref import ref
 
 import numpy as np
 import pandas as pd
@@ -986,6 +987,68 @@ def test_calibration_closes_support_columns_and_ignores_descriptive_prediction_r
     )
     with artifact.table("crypto_maker_calibration.parquet") as frame:
         assert frame.sample_count.tolist() == [2, 2]
+
+
+def test_calibration_loads_and_releases_one_fold_at_a_time(
+    monkeypatch, independent_maker
+):
+    config, _ = independent_maker
+    baseline = read_statistics_artifact(
+        portfolio.calibrate_maker(config),
+        validate_tables=portfolio.validate_maker_calibration,
+    )
+    config["output"] += "-multiple-folds"
+    config["models"] = [
+        {**config["models"][0], "fold_id": fold}
+        for fold in ("first", "second", "third")
+    ]
+    read = portfolio.read_predictions
+    replay = portfolio.replay_maker_calibration
+    frames = []
+    completed = 0
+
+    def tracked_read(path, **kwargs):
+        # No future fold is decoded before the current fold has finished, and
+        # completed folds no longer own even their original prediction frames.
+        assert len(frames) // 2 == completed
+        assert all(frame() is None for frame in frames[: completed * 2])
+        rows, metadata = read(path, **kwargs)
+        frames.append(ref(rows))
+        return rows, metadata
+
+    def tracked_replay(*args, **kwargs):
+        nonlocal completed
+        assert len(frames) == (completed + 1) * 2
+        result = replay(*args, **kwargs)
+        assert all(frame() is None for frame in frames)
+        completed += 1
+        return result
+
+    monkeypatch.setattr(portfolio, "read_predictions", tracked_read)
+    monkeypatch.setattr(portfolio, "replay_maker_calibration", tracked_replay)
+    output = portfolio.calibrate_maker(config)
+    assert completed == 3
+    assert len(frames) == 6
+    artifact = read_statistics_artifact(
+        output, validate_tables=portfolio.validate_maker_calibration
+    )
+    assert artifact.metadata["model_ids"] == dict.fromkeys(
+        ("first", "second", "third"), ["price", "proxy"]
+    )
+    for table in (
+        "crypto_maker_calibration.parquet",
+        "crypto_maker_samples.parquet",
+        "crypto_maker_events.parquet",
+    ):
+        with baseline.table(table) as expected, artifact.table(table) as actual:
+            for fold in ("first", "second", "third"):
+                pd.testing.assert_frame_equal(
+                    actual.loc[actual.fold_id.eq(fold)]
+                    .drop(columns="fold_id")
+                    .reset_index(drop=True),
+                    expected.drop(columns="fold_id"),
+                    check_exact=True,
+                )
 
 
 def test_dev_maker_consumes_causal_calibration_with_independent_explicit_windows(

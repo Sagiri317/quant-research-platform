@@ -410,7 +410,11 @@ def test_tardis_source_preserves_shared_owner_io_failure(
         with pytest.raises(OSError) as caught:
             with open_market_source(root) as source:
                 if boundary == "member_open":
-                    list(source.archives[0]._iter_canonical_records())
+                    list(
+                        source.archives[0]._iter_canonical_records(
+                            "BTCUSDT", "depth", None
+                        )
+                    )
     assert caught.value is primary
 
 
@@ -869,7 +873,7 @@ def test_unrequested_streams_and_consumed_history_have_no_spool(tmp_path, monkey
 
     import quant_research_platform.sources.tardis.replay as replay
 
-    def records(self):
+    def records(self, requested_symbol, data_kind, end_ns):
         for number in range(5000):
             yield ("ETHUSDT", "depth"), {"payload": "x" * 4096 + str(number)}
             yield ("BTCUSDT", "agg_trades"), {"payload": "x" * 4096 + str(number)}

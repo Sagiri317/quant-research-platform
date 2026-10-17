@@ -360,16 +360,18 @@ class FactorRiskState:
             frame[column] = strict_real_numeric_series(
                 frame[column], error="factor_risk_numeric_invalid"
             )
-        return (
-            frame.dropna(subset=list(required.difference(self.style_columns)))
-            .loc[
-                lambda item: (
-                    item[self.config.weight_column].gt(0)
-                    & item.industry_level1_code.astype(str).ne("")
-                )
-            ]
-            .copy()
+        frame = frame.dropna(
+            subset=list(
+                required - set(self.style_columns) - {self.config.weight_column}
+            )
         )
+        weighted = frame[self.config.weight_column].gt(0)
+        if include_ineligible and "eligible" in frame:
+            # Projection uses fitted coefficients, not the holding's fit weight.
+            weighted |= ~frame.eligible
+        return frame.loc[
+            weighted & frame.industry_level1_code.astype(str).ne("")
+        ].copy()
 
     def fit_return_session(
         self,

@@ -578,3 +578,102 @@ def test_scoring_uses_saved_training_domain_without_reopening_training_data(tmp_
     assert case.result.metadata["training_asset_ids"] == ["a", "b", "c"]
     Path(case.config["inputs"]).unlink()
     assert json.loads(score(config).read_text())["common_rows"] == 6
+
+
+def test_score_retains_only_predictions_and_matches_full_join(tmp_path, monkeypatch):
+    import weakref
+
+    from quant_research_platform.artifacts.outputs import prediction as artifact
+    from quant_research_platform.contracts.experiments import legal_training_mask
+    from quant_research_platform.research.models import trial_selection
+    from quant_research_platform.research.models.rank_ensemble import _label_predictions
+
+    _cases, config = candidates(tmp_path)
+    labels = pd.read_parquet(config["labels"])
+    labels.loc[
+        labels.timestamp.eq("2020-01-04") & labels.asset_id.eq("b"), "eligible"
+    ] = False
+    labels.loc[
+        labels.timestamp.eq("2020-01-05") & labels.asset_id.eq("c"),
+        "label_available_at",
+    ] = pd.Timestamp("2020-01-07")
+    labels.to_parquet(config["labels"], index=False)
+    mature = labels.loc[
+        legal_training_mask(
+            labels,
+            fitting_cutoff=pd.Timestamp(config["cutoff"]),
+            availability_column="label_available_at",
+            target_column="label",
+        )
+    ]
+    expected = []
+    for path in config["predictions"]:
+        predictions, metadata = read_predictions(path)
+        joined = predictions.merge(
+            mature, on=["timestamp", "asset_id"], validate="one_to_one"
+        )
+        calibration = (
+            artifact.prediction_model_metadata(metadata)
+            .get("rank_parameters", {})
+            .get("label_calibration")
+        )
+        joined["prediction_label_value"] = _label_predictions(
+            joined.prediction_score, calibration
+        )
+        expected.append(
+            trial_selection.evaluate_model_trial_metrics_from_chunks(
+                [joined],
+                model_id=metadata["model_id"],
+                label_column="label",
+                prediction_column="prediction_score",
+                label_prediction_column="prediction_label_value",
+            )
+        )
+
+    retained = []
+    original_concat = pd.concat
+
+    def observe_concat(objects, *args, **kwargs):
+        result = original_concat(objects, *args, **kwargs)
+        if "prediction_label_value" in result:
+            assert list(result.columns) == [
+                "prediction_score",
+                "prediction_label_value",
+            ]
+            retained.append(weakref.ref(result))
+        return result
+
+    reads = []
+    original_read = artifact.read_predictions
+
+    def observe_read(path, **kwargs):
+        reads.append(path)
+        return original_read(path, **kwargs)
+
+    original_evaluate = trial_selection.evaluate_model_trial_metrics_from_chunks
+    scored_count = 0
+
+    def observe_evaluate(chunks, **kwargs):
+        nonlocal scored_count
+        assert all(reference() is None for reference in retained[:scored_count])
+        assert set(chunks[0]) == {
+            "timestamp",
+            "asset_id",
+            "prediction_score",
+            "prediction_label_value",
+            "label",
+        }
+        scored_count += 1
+        return original_evaluate(chunks, **kwargs)
+
+    monkeypatch.setattr(pd, "concat", observe_concat)
+    monkeypatch.setattr(artifact, "read_predictions", observe_read)
+    monkeypatch.setattr(
+        trial_selection, "evaluate_model_trial_metrics_from_chunks", observe_evaluate
+    )
+    scored = json.loads(score(config).read_text())
+    assert scored["metrics"] == expected
+    assert scored["common_rows"] == 4
+    assert len(reads) == len(config["predictions"])
+    assert len(retained) == len(config["candidate_ids"])
+    assert all(reference() is None for reference in retained)

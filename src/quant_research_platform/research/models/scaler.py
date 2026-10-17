@@ -109,7 +109,9 @@ class ModelMatrixScaler:
             medians = tuple(medians)
             if set(columns) & {f"{column}__missing" for column in columns}:
                 raise ValueError("model_missing_indicator_name_collision")
-            expanded = frame.fillna(dict(zip(columns, medians, strict=True)))
+            expanded = pd.DataFrame(values, index=frame.index, columns=columns).fillna(
+                dict(zip(columns, medians, strict=True))
+            )
             for column in columns:
                 expanded[f"{column}__missing"] = frame[column].isna().astype(float)
             input_columns = columns
@@ -219,7 +221,17 @@ class ModelMatrixScaler:
             raise ValueError("model_scaler_columns_mismatch")
         if not self.medians:
             return frame
-        result = frame.fillna(dict(zip(self.input_columns, self.medians, strict=True)))
+        result = pd.DataFrame(
+            {
+                column: strict_finite_numeric_series(
+                    frame[column],
+                    error=f"invalid_model_scaler_column: {column}",
+                    allow_null=True,
+                ).to_numpy(dtype="float64")
+                for column in self.input_columns
+            },
+            index=frame.index,
+        ).fillna(dict(zip(self.input_columns, self.medians, strict=True)))
         for column in self.input_columns:
             result[f"{column}__missing"] = frame[column].isna().astype(float)
         return result

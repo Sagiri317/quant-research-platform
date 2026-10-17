@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.artifacts.outputs.manifest import validate_output_bundle
 from quant_research_platform.artifacts.outputs.prediction import (
     prediction_model_metadata,
     read_predictions,
@@ -128,6 +129,10 @@ def _prediction_evidence(
         columns=("timestamp", "asset_id", "prediction_score"),
         time_window=window,
     )
+    return (*_prediction_metadata(metadata, window=window), predictions)
+
+
+def _prediction_metadata(metadata, *, window):
     facts = metadata["model_facts"]
     if facts["market_id"] != "crypto":
         raise ValueError("crypto_prediction_market_invalid")
@@ -153,7 +158,6 @@ def _prediction_evidence(
     return (
         prediction_model_metadata(metadata),
         {**facts, "prediction_asset_ids": metadata.get("asset_ids")},
-        predictions,
     )
 
 
@@ -237,6 +241,8 @@ def _prediction_rows(
     label_cutoff=None,
 ):
     metadata, facts, predictions = evidence
+    # Release the original frame once the selected, sorted decisions replace it.
+    del evidence
     assets = facts.get("prediction_asset_ids")
     if assets is not None and asset_id not in assets:
         raise ValueError("crypto_prediction_asset_outside_scope")
@@ -897,7 +903,7 @@ def _calibration_windows(config):
     return windows
 
 
-def _produce_maker_calibration(*, on_table, config, model_evidence):
+def _produce_maker_calibration(*, on_table, config):
     reference = config["reference"]
     panel = read_dataset_manifest_evidence(Path(config["panel"]))
     windows = _calibration_windows(config)
@@ -1141,7 +1147,9 @@ def _produce_maker_calibration(*, on_table, config, model_evidence):
                         _prediction_rows(
                             inputs=model_inputs["inputs"],
                             input_spec=model_inputs.get("input_spec"),
-                            evidence=model_evidence[fold_id][role],
+                            evidence=_prediction_evidence(
+                                model_inputs[f"{role}_predictions"], window=window
+                            ),
                             window=window,
                             label_cutoff=cutoff_at,
                             fold_id=fold_id,
@@ -1220,7 +1228,6 @@ def calibrate_maker(config):
     ):
         raise ValueError("crypto_calibration_minimum_invalid")
     model_ids = {}
-    model_evidence = {}
     for item in config["models"]:
         fold_id = item["fold_id"]
         window, _cutoff = windows[fold_id]
@@ -1235,17 +1242,16 @@ def calibrate_maker(config):
             {"input_spec", "window", "cutoff"},
         )
         model_ids[fold_id] = []
-        model_evidence[fold_id] = {}
         for role, target in (
             ("price", "future_mid_return_500ms"),
             ("proxy", "maker_bid_sell_pressure_proxy_500ms"),
         ):
-            evidence = _prediction_evidence(
-                item[f"{role}_predictions"],
-                window=window,
+            # Validate all recipes up front; decode rows only for the replayed fold.
+            manifest, _members = validate_output_bundle(
+                Path(item[f"{role}_predictions"]),
+                expected_definition_id="prediction_outputs",
             )
-            model_evidence[fold_id][role] = evidence
-            _metadata, facts, _predictions = evidence
+            _metadata, facts = _prediction_metadata(manifest["metadata"], window=window)
             if facts["model"]["target_column"] != target:
                 raise ValueError("crypto_maker_prediction_target_invalid")
             model_ids[fold_id].append(facts["model"]["model_id"])
@@ -1277,9 +1283,7 @@ def calibrate_maker(config):
         Path(config["output"]),
         metadata=metadata,
         table_group="crypto_maker_calibration",
-        tables=partial(
-            _produce_maker_calibration, config=config, model_evidence=model_evidence
-        ),
+        tables=partial(_produce_maker_calibration, config=config),
         validate_tables=validate_maker_calibration,
     )
 

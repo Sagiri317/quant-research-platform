@@ -93,16 +93,29 @@ def test_optional_weekday_does_not_erase_session(tmp_path, weekday):
 
 
 @pytest.mark.parametrize("all_invalid", [False, True])
-def test_unlocatable_bars_only_exclude_their_rows_with_typed_empty(
-    tmp_path, all_invalid
-):
-    rows = [_bar(Stkcd="bad"), _bar(Trddt="9999-12-31")]
+@pytest.mark.parametrize(
+    "dataset", ["market_bars_1d", "listing_status_changes", "stock_info_changes"]
+)
+def test_unlocatable_rows_are_excluded_with_typed_empty(tmp_path, all_invalid, dataset):
+    if dataset == "market_bars_1d":
+        rows = [_bar(Stkcd="bad"), _bar(Trddt="9999-12-31")]
+        valid = _bar(Stkcd="000003")
+    else:
+        valid = dict.fromkeys(RAW_TABLE_CONTRACTS[dataset].required_columns, "1")
+        valid.update(Symbol="000003", ChangedItem="industry")
+        for column in valid:
+            if "Date" in column:
+                valid[column] = "2020-01-02"
+        rows = [valid | {"ChangedItem": ""}, valid | {"ChangedItem": "  "}]
     if not all_invalid:
-        rows.append(_bar(Stkcd="000003"))
-    frame, metadata, _ = _materialize(tmp_path, "market_bars_1d", rows)
+        rows.append(valid)
+    frame, metadata, _ = _materialize(tmp_path, dataset, rows)
     assert frame.source_asset_id.tolist() == ([] if all_invalid else ["000003"])
     assert str(frame.timestamp.dtype) == "datetime64[ns]"
-    assert str(frame.close.dtype) == "float64"
+    if dataset == "market_bars_1d":
+        assert str(frame.close.dtype) == "float64"
+    else:
+        assert frame.changed_item.tolist() == ([] if all_invalid else ["industry"])
     assert (
         metadata["producer_diagnostics"]["source_row_counts"][
             "excluded_missing_required_rows"

@@ -498,8 +498,33 @@ def test_explicit_native_fit_prediction_and_backtest_roundtrip(
             yield from original(path, **kwargs)
 
         monkeypatch.setattr(reading, "iter_dataset_part_batches", scan)
+    from quant_research_platform.artifacts.outputs import prediction as prediction_io
+
+    prediction_reads = []
+    original_predictions = prediction_io._iter_prediction_member
+
+    def selected_predictions(path, metadata, **kwargs):
+        assert kwargs["columns"] == ("timestamp", "asset_id", "prediction_rank_score")
+        selected_window = kwargs["time_window"]
+        prediction_reads.append(selected_window)
+        for frame in original_predictions(path, metadata, **kwargs):
+            assert frame.timestamp.between(
+                pd.Timestamp(selected_window.start), pd.Timestamp(selected_window.end)
+            ).all()
+            yield frame
+
+    monkeypatch.setattr(prediction_io, "_iter_prediction_member", selected_predictions)
+    if selected_inputs:
+        config["predictions"] = [
+            {"path": str(predicted), "window": selected_window}
+            for selected_window in (
+                {"start": "2023-01-02", "end": "2023-01-03"},
+                {"start": "2023-01-04", "end": "2023-01-06"},
+            )
+        ]
     fitted.root.rename(fitted.root.with_name("model_not_needed_by_backtest"))
     root = backtest(config)
+    assert len(prediction_reads) == len(config["predictions"])
     ledger = artifacts.read_portfolio_ledger_artifact(root)
     batches = list(ledger.iter_chunks())
     assert batches and any(batch.trades for batch in batches)
