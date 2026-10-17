@@ -1242,6 +1242,20 @@ class DepthReconstructor:
             asks=tuple(
                 (price, self._asks[price]) for price in islice(self._ask_prices, limit)
             ),
+            known_bid_floor_tick=(
+                self._known_bid_floor_tick
+                if limit is None or limit >= len(self._bid_prices)
+                else self._bid_prices[-limit]
+                if limit
+                else None
+            ),
+            known_ask_ceiling_tick=(
+                self._known_ask_ceiling_tick
+                if limit is None or limit >= len(self._ask_prices)
+                else self._ask_prices[limit - 1]
+                if limit
+                else None
+            ),
         )
         if self.connection_close_ns is not None:
             previous = self.stats.coverage_segments.get(segment_id)

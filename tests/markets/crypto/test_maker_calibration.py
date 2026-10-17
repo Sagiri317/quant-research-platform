@@ -359,7 +359,15 @@ def test_delayed_post_only_rejection_preserves_decision_quantity_and_zero_sample
     for crossing in (False, True):
         books = [
             _state(0),
-            _state(5, bid_index=980, ask_index=990) if crossing else _state(5),
+            # This complete synthetic update deletes the old asks, including
+            # 1005/1010, while adding 990/995. Retain the prior known ceiling
+            # so the opposite sell quote has known zero queue, not missing depth.
+            replace(
+                _state(5, bid_index=980, ask_index=990),
+                known_ask_ceiling_tick=_state(0).asks[-1][0],
+            )
+            if crossing
+            else _state(5),
             _state(30),
             _state(500, bid_index=998, ask_index=1008),
         ]

@@ -24,6 +24,11 @@ class BookState:
     bids: tuple[tuple[int, float], ...]
     asks: tuple[tuple[int, float], ...]
 
+    # Bounds certify absence as zero only inside the emitted side's known range.
+    # Producers that omit them certify no more than their visible levels.
+    known_bid_floor_tick: int | None = None
+    known_ask_ceiling_tick: int | None = None
+
     @property
     def observed_time_ms(self) -> int:
         return self.observed_time_ns // 1_000_000

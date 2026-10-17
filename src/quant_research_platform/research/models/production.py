@@ -20,7 +20,6 @@ from quant_research_platform.contracts.models import (
     validate_model_input_roles,
 )
 from quant_research_platform.contracts.time import (
-    TimeWindow,
     _window_payload,
     time_value_isoformat,
 )
@@ -256,11 +255,6 @@ def fit(config: Mapping) -> Path:
         )
         if spec.training_weighting.half_life_periods is not None:
             columns = (*columns, "market_type")
-        frames = iter_dataset_chunks(
-            session.filtered_view(
-                TimeWindow(windows[0].start, windows[-1].end)
-            ).projected_view(columns)
-        )
         assets = config.get("asset_ids")
         if assets is not None and (
             type(assets) is not list
@@ -275,21 +269,34 @@ def fit(config: Mapping) -> Path:
 
             from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 
-            keys = ExactPrimaryKeyIndex(primary_key=("timestamp", "asset_id"))
-            with closing_iterator(iter(frames)) as source:
-                for frame in source:
-                    if assets is not None:
-                        frame = frame.loc[frame.asset_id.isin(assets)]
-                    if frame.loc[:, ["timestamp", "asset_id"]].isna().any(
-                        axis=None
-                    ) or keys.add_table(
-                        pa.Table.from_pandas(
-                            frame.loc[:, ["timestamp", "asset_id"]],
-                            preserve_index=False,
-                        )
-                    ):
-                        raise ValueError("model_training_keys_invalid")
-                    yield frame
+            # The reader owns exact dataset keys. A wider declared key does not
+            # establish uniqueness on the model's narrower time/asset axis.
+            keys = (
+                None
+                if set(declared["primary_key"]) == {"timestamp", "asset_id"}
+                else ExactPrimaryKeyIndex(primary_key=("timestamp", "asset_id"))
+            )
+            for window in windows:
+                frames = iter_dataset_chunks(
+                    session.filtered_view(window).projected_view(columns)
+                )
+                with closing_iterator(iter(frames)) as source:
+                    for frame in source:
+                        if assets is not None:
+                            frame = frame.loc[frame.asset_id.isin(assets)]
+                        if keys is not None and (
+                            frame.loc[:, ["timestamp", "asset_id"]]
+                            .isna()
+                            .any(axis=None)
+                            or keys.add_table(
+                                pa.Table.from_pandas(
+                                    frame.loc[:, ["timestamp", "asset_id"]],
+                                    preserve_index=False,
+                                )
+                            )
+                        ):
+                            raise ValueError("model_training_keys_invalid")
+                        yield frame
 
         calendar = None
         if spec.training_weighting.half_life_periods is not None:

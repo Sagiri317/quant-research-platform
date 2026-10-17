@@ -73,6 +73,22 @@ def calibration_inputs(paths, errors):
                     for row in rows
                     if row["side"] == "sell"
                 ),
+                known_bid_floor_tick=next(
+                    (
+                        row["known_price_bound"] or None
+                        for row in rows
+                        if row["side"] == "buy"
+                    ),
+                    None,
+                ),
+                known_ask_ceiling_tick=next(
+                    (
+                        row["known_price_bound"] or None
+                        for row in rows
+                        if row["side"] == "sell"
+                    ),
+                    None,
+                ),
             )
 
     return (sample_rows, events)
@@ -87,19 +103,29 @@ def maker_event_rows(event_id, event, *, offset=0):
                 0,
                 event.price_index,
                 event.visible_quantity,
+                0,
             ),
         )
     elif isinstance(event, BookBoundary):
         kind, context = ("boundary", event.segment_id)
-        levels = (("", 0, 0, 0.0),)
+        levels = (("", 0, 0, 0.0, 0),)
     else:
         kind, context = ("book", event.segment_id)
         levels = (
-            (side, index, tick, quantity)
-            for side, rows in (("buy", event.bids), ("sell", event.asks))
+            (
+                side,
+                index,
+                tick,
+                quantity,
+                rows[-1][0] if bound is None else bound,
+            )
+            for side, rows, bound in (
+                ("buy", event.bids, getattr(event, "known_bid_floor_tick", None)),
+                ("sell", event.asks, getattr(event, "known_ask_ceiling_tick", None)),
+            )
             for index, (tick, quantity) in enumerate(rows)
         )
-    for side, level, tick, quantity in levels:
+    for side, level, tick, quantity, bound in levels:
         yield {
             "event_id": event_id,
             "event_at": offset + event.observed_time_ns,
@@ -109,4 +135,5 @@ def maker_event_rows(event_id, event, *, offset=0):
             "level_index": level,
             "price_index": tick,
             "quantity": quantity,
+            "known_price_bound": bound,
         }

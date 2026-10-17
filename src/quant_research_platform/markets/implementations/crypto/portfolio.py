@@ -866,6 +866,7 @@ def _produce_maker_calibration(*, on_table, config, model_evidence):
         "event_at",
         "level_index",
         "price_index",
+        "known_price_bound",
     }
     strings = {
         "fold_id",
@@ -1010,20 +1011,35 @@ def _produce_maker_calibration(*, on_table, config, model_evidence):
                             np.nan
                             if event.visible_quantity is None
                             else event.visible_quantity,
+                            0,
                         ),
                     )
                     count = 1
                 elif isinstance(event, BookBoundary):
                     kind, context = "boundary", event.segment_id
-                    rows = (("", 0, 0, 0.0),)
+                    rows = (("", 0, 0, 0.0, 0),)
                     count = 1
                 else:
                     kind, context = "book", event.segment_id
                     rows = (
-                        (side, index, tick, quantity)
-                        for side, levels in (
-                            ("buy", event.bids),
-                            ("sell", event.asks),
+                        (
+                            side,
+                            index,
+                            tick,
+                            quantity,
+                            levels[-1][0] if bound is None else bound,
+                        )
+                        for side, levels, bound in (
+                            (
+                                "buy",
+                                event.bids,
+                                getattr(event, "known_bid_floor_tick", None),
+                            ),
+                            (
+                                "sell",
+                                event.asks,
+                                getattr(event, "known_ask_ceiling_tick", None),
+                            ),
                         )
                         for index, (tick, quantity) in enumerate(levels)
                     )
@@ -1041,8 +1057,9 @@ def _produce_maker_calibration(*, on_table, config, model_evidence):
                             level,
                             tick,
                             quantity,
+                            bound,
                         )
-                        for side, level, tick, quantity in rows
+                        for side, level, tick, quantity, bound in rows
                     ),
                     count,
                 )
@@ -1464,10 +1481,12 @@ def _calibration_events(artifact, fold_id):
             first = next(group)
             if first.event_kind == "book":
                 bids, asks = [], []
+                bounds = {}
                 for row in chain((first,), group):
                     (bids if row.side == "buy" else asks).append(
                         (int(row.price_index), float(row.quantity))
                     )
+                    bounds[row.side] = int(row.known_price_bound) or None
                 _yield_value = SimpleNamespace(
                     kind="book",
                     event_id=event_id,
@@ -1475,6 +1494,8 @@ def _calibration_events(artifact, fold_id):
                     segment_id=first.context_id,
                     bids=tuple(bids),
                     asks=tuple(asks),
+                    known_bid_floor_tick=bounds["buy"],
+                    known_ask_ceiling_tick=bounds["sell"],
                 )
                 try:
                     yield _yield_value
@@ -1520,7 +1541,7 @@ def _calibration_headers(artifact, fold_id, cutoff):
             expected += 1
             previous_time = stamp
             counts = {"buy": 0, "sell": 0}
-            best, last = {}, {}
+            best, last, bounds = {}, {}, {}
             row_count = 0
             for row in chain((first,), group):
                 row_count += 1
@@ -1530,6 +1551,7 @@ def _calibration_headers(artifact, fold_id, cutoff):
                     or not isfinite(row.quantity)
                     and not (row.event_kind == "trade" and pd.isna(row.quantity))
                     or row.quantity < 0
+                    or row.known_price_bound < 0
                 ):
                     raise ValueError("crypto_calibration_event_invalid")
                 if row.event_kind == "book":
@@ -1542,7 +1564,15 @@ def _calibration_headers(artifact, fold_id, cutoff):
                         raise ValueError("crypto_calibration_event_invalid")
                     if row.level_index != counts[row.side]:
                         raise ValueError("crypto_calibration_book_invalid")
+                    if row.known_price_bound and (
+                        row.known_price_bound > row.price_index
+                        if row.side == "buy"
+                        else row.known_price_bound < row.price_index
+                    ):
+                        raise ValueError("crypto_calibration_book_invalid")
                     if counts[row.side]:
+                        if row.known_price_bound != bounds[row.side]:
+                            raise ValueError("crypto_calibration_book_invalid")
                         if (
                             row.price_index >= last[row.side]
                             if row.side == "buy"
@@ -1551,6 +1581,7 @@ def _calibration_headers(artifact, fold_id, cutoff):
                             raise ValueError("crypto_calibration_book_invalid")
                     else:
                         best[row.side] = row.price_index
+                        bounds[row.side] = row.known_price_bound
                     last[row.side] = row.price_index
                     counts[row.side] += 1
                 elif row.event_kind == "trade":
@@ -1560,6 +1591,7 @@ def _calibration_headers(artifact, fold_id, cutoff):
                         or not row.context_id
                         or row.price_index <= 0
                         or row.level_index != 0
+                        or row.known_price_bound != 0
                     ):
                         raise ValueError("crypto_calibration_event_invalid")
                 elif row.event_kind == "boundary":
@@ -1569,6 +1601,7 @@ def _calibration_headers(artifact, fold_id, cutoff):
                         or row.price_index != 0
                         or row.quantity != 0
                         or row.level_index != 0
+                        or row.known_price_bound != 0
                     ):
                         raise ValueError("crypto_calibration_event_invalid")
                 else:

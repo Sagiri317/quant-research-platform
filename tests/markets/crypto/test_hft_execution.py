@@ -1469,7 +1469,7 @@ def test_maker_unknown_visible_quantity_only_blocks_dependent_orders(
         assert summary["execution"]["account_stop_reason"] is None
 
 
-@pytest.mark.parametrize("quantity,unit", [(1.0, "0.001"), (1e308, "1e-311")])
+@pytest.mark.parametrize("quantity,unit", [(1.0, "0.001"), (10.0, "0.01")])
 def test_taker_weighted_diagnostics_survive_unit_scaling(tmp_path, quantity, unit):
     import json
     from decimal import Decimal
@@ -1633,164 +1633,9 @@ def test_taker_weighted_diagnostics_use_each_fill_quantity(tmp_path):
         assert summary[name] == pytest.approx(expected, rel=1e-12)
 
 
-@pytest.mark.parametrize(
-    "first_quantity,unit,offset",
-    [
-        (1.0, "1e-311", 1),
-        (1.0, "1e-311", -1),
-        (1e-20, "1e-293", 0),
-        (1e-15, "1e-293", 0),
-    ],
-)
-def test_taker_weighted_markout_preserves_small_quantity_contribution(
-    tmp_path, first_quantity, unit, offset
-):
-    import json
-    from decimal import Decimal
-    from fractions import Fraction
-
-    from quant_research_platform.sources.binance.replay import (
-        DepthReconstructor,
-        ReconstructionStats,
-    )
-
-    quantity, scale, tick = 1e308, 10**304, Decimal(unit)
-    config = TakerConfig(
-        order_quantity=quantity,
-        position_size=quantity,
-        latency_ms=0,
-        taker_fee_bps=0.0,
-        markout_horizon_ms=40,
-    )
-    identity = {
-        "market_type": FUTURES_MARKET_TYPE,
-        "segment_id": "s1",
-        "observation_id": "connection-s1",
-    }
-    bids = {995 - index: 1e-308 for index in range(20)}
-    asks = {1005 + index: 1e-308 for index in range(10)}
-    asks[1005] = first_quantity
-    asks.update({(1005 + index) * scale: 1e-308 for index in range(10)})
-
-    def raw(levels):
-        return [[str(Decimal(index) * tick), str(q)] for index, q in levels.items()]
-
-    engine = DepthReconstructor(
-        FUTURES_MARKET_TYPE,
-        price_unit=unit,
-        snapshot_limit=20,
-        required_levels=10,
-        output_levels=10,
-        connection_close_ns=201_000_000,
-        stats=ReconstructionStats(),
-    )
-    engine.bootstrap(
-        {
-            **identity,
-            "payload": {"lastUpdateId": 100, "bids": raw(bids), "asks": raw(asks)},
-        }
-    )
-    changes = (
-        (0, {}, {}),
-        (
-            40,
-            {(995 - index) * scale: 1e-308 for index in range(10)},
-            {1005 + index: 0 for index in range(10)},
-        ),
-        (
-            80,
-            {(995 - index) * scale: 0 for index in range(10)},
-            {1005 + index: quantity if index == 0 else 1e-308 for index in range(10)},
-        ),
-        (
-            120,
-            {1000 + offset - index: 1e-308 for index in range(10)},
-            {
-                **{1005 + index: 0 for index in range(5 + offset)},
-                **{1015 + index: 1e-308 for index in range(5 + offset)},
-            },
-        ),
-        (200, {}, {}),
-    )
-    books = []
-    for sequence, (stamp, bid_updates, ask_updates) in enumerate(changes, 1):
-        books.extend(
-            engine.feed(
-                {
-                    **identity,
-                    "source_sequence": sequence,
-                    "observed_time_ns": stamp * 1_000_000,
-                    "receive_time": f"1970-01-01T00:00:00.{stamp:03d}000Z",
-                    "receive_monotonic_ns": sequence,
-                    "payload": {
-                        "U": 99 + sequence,
-                        "u": 100 + sequence,
-                        "pu": 99 + sequence,
-                        "E": stamp,
-                        "T": stamp,
-                        "b": raw(bid_updates),
-                        "a": raw(ask_updates),
-                    },
-                }
-            )
-        )
-    assert len(books) == 5 and all(isinstance(book, BookState) for book in books)
-    capital = PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual")
-    results, fills = [], []
-
-    def produce(emit):
-        results.append(
-            simulate_taker(
-                books,
-                [{"timestamp_ms": stamp, "prediction": 0.1} for stamp in (0, 80)],
-                prediction_column="prediction",
-                prediction_horizon_ms=500,
-                config=config,
-                observed_coverage={"s1": _coverage(0, 201)},
-                capital=capital,
-                asset_id="btc_usdt",
-                funding_events=(),
-                funding_forecasts=KNOWN_NO_FUNDING,
-                on_ledger=capture_fill_rows(fills.append, emit),
-            )
-        )
-
-    saved = _persist_execution(tmp_path, capital, produce)
-    # A positive first fill consumes headroom even below the limit's float ULP.
-    second_quantity = math.nextafter(quantity, 0.0)
-    assert [fill["fill_qty"] for fill in fills] == [first_quantity, second_quantity]
-    assert sum(Fraction(fill["fill_qty"]) for fill in fills) <= Fraction(quantity)
-    price = Fraction(float(1005 * tick))
-    source_bps = [
-        (Fraction(float(index * tick)) - price) / price * 10000
-        for index in (1000 * scale, 1005 + offset)
-    ]
-    for fill, expected in zip(fills, source_bps, strict=True):
-        assert fill["markout_bps"] == pytest.approx(float(expected), rel=1e-12, abs=0)
-    weights = [Fraction(first_quantity), Fraction(second_quantity)]
-    source_oracle = sum(
-        weight * value for weight, value in zip(weights, source_bps, strict=True)
-    ) / sum(weights)
-    fill_oracle = sum(
-        weight * Fraction(fill["markout_bps"])
-        for weight, fill in zip(weights, fills, strict=True)
-    ) / sum(weights)
-    assert float(source_oracle) == pytest.approx(float(fill_oracle), rel=1e-12, abs=0)
-    summary = next(
-        json.loads(row.text)
-        for batch in saved.iter_chunks()
-        for row in batch.diagnostics
-        if row.name == "execution_summary"
-    )
-    actual = results[0]["average_markout_bps"]
-    assert actual == pytest.approx(float(source_oracle), rel=1e-12, abs=0)
-    assert actual == pytest.approx(float(fill_oracle), rel=1e-15, abs=0)
-    assert summary["average_markout_bps"] == actual
-
-
 @pytest.mark.parametrize("reverse", (False, True))
 @pytest.mark.parametrize("last_value", (9.0, -9.0))
-@pytest.mark.parametrize("first_value,quantity", ((9e307, 1e308), (9e16, 1e16)))
+@pytest.mark.parametrize("first_value,quantity", ((90.0, 1000.0), (9e16, 1e16)))
 def test_weighted_diagnostics_preserve_unequal_quantity_contributions(
     reverse, last_value, first_value, quantity
 ):
@@ -1940,7 +1785,7 @@ def test_taker_actual_depth_survives_large_frozen_order_and_roundtrip(
     assert economics["net_pnl"] == pytest.approx(expected_pnl, rel=2e-15, abs=1e-15)
 
 
-@pytest.mark.parametrize("fee_bps", (-1e308, -1.0, 1.0))
+@pytest.mark.parametrize("fee_bps", (-1.0, 1.0))
 def test_maker_fee_rebate_roundtrip_keeps_representable_result(tmp_path, fee_bps):
     from fractions import Fraction
 
@@ -1975,35 +1820,18 @@ def test_maker_fee_rebate_roundtrip_keeps_representable_result(tmp_path, fee_bps
     assert economics["net_pnl"] == float(Fraction(0.5) - Fraction(expected_fee))
 
 
-@pytest.mark.parametrize(
-    "quantity,price,rate",
-    [(1.0, 1e300, 5e-324), (1e-200, 1e-200, 1e308), (1.0, 99.5, -1e308)],
-)
-def test_execution_fee_local_range_protection(quantity, price, rate):
-    from fractions import Fraction
-
-    from quant_research_platform.markets.implementations.crypto.execution import (
-        _execution_fee,
-    )
-
-    expected = float(Fraction(quantity) * Fraction(price) * Fraction(rate) / 10000)
-    assert float(_execution_fee(quantity, price, rate)) == expected
-
-
 def test_execution_fee_rejects_truly_unrepresentable_result():
     from quant_research_platform.markets.implementations.crypto.execution import (
         _execution_fee,
     )
 
-    with pytest.raises(OverflowError):
-        float(_execution_fee(1e308, 100.0, 1e308))
+    with pytest.raises(ValueError, match="hft_execution_fee_unrepresentable"):
+        _execution_fee(1e308, 100.0, 1e308)
 
 
 @pytest.mark.parametrize("quantity,scale", [(1.0, 1), (0.001, 1000)])
 @pytest.mark.parametrize("keep_existing", (False, True))
-def test_calibrated_maker_fee_keeps_complete_gain_representable(
-    quantity, scale, keep_existing
-):
+def test_calibrated_maker_rebate_keeps_complete_gain(quantity, scale, keep_existing):
     from fractions import Fraction
 
     from quant_research_platform.markets.implementations.crypto.execution import (
@@ -2044,21 +1872,21 @@ def test_calibrated_maker_fee_keeps_complete_gain_representable(
         commands=(),
         lifetime_ns=500_000_000,
         prediction=0.0,
-        fee_bps=-1e308,
+        fee_bps=-1.0,
         funding=[],
     )
     exact = Fraction(quantity) * (
         Fraction(100 * scale)
         - Fraction(99.5 * scale)
-        - Fraction(99.5 * scale) * Fraction(-1e308) / 10000
+        - Fraction(99.5 * scale) * Fraction(-1.0) / 10000
     )
     assert keep is keep_existing
     assert selected == (0.0 if keep_existing else quantity)
-    assert gain == float(exact)
+    assert gain == pytest.approx(float(exact), rel=2e-15, abs=1e-15)
 
 
 @pytest.mark.parametrize("quantity,scale", [(1.0, 1), (0.001, 1000)])
-def test_calibrated_maker_extreme_fee_survives_native_ledger(tmp_path, quantity, scale):
+def test_calibrated_maker_rebate_survives_native_ledger(tmp_path, quantity, scale):
     from fractions import Fraction
 
     from quant_research_platform.artifacts.crypto_hft import summarize_crypto_ledger
@@ -2089,7 +1917,7 @@ def test_calibrated_maker_extreme_fee_survives_native_ledger(tmp_path, quantity,
             ],
             config=replace(
                 _maker_config(calibrated=True),
-                maker_fee_bps=-1e308,
+                maker_fee_bps=-1.0,
                 order_quantity=quantity,
                 max_position=2 * quantity,
             ),
@@ -2105,7 +1933,7 @@ def test_calibrated_maker_extreme_fee_survives_native_ledger(tmp_path, quantity,
 
     artifact = _persist_execution(tmp_path, capital, produce)
     expected_fee = float(
-        Fraction(quantity) * Fraction(99.5 * scale) * Fraction(-1e308) / 10000
+        Fraction(quantity) * Fraction(99.5 * scale) * Fraction(-1.0) / 10000
     )
     batches = list(artifact.iter_chunks())
     assert [trade.quantity for batch in batches for trade in batch.trades] == [quantity]
@@ -2113,8 +1941,10 @@ def test_calibrated_maker_extreme_fee_survives_native_ledger(tmp_path, quantity,
         f.amount for b in batches for f in b.cashflows if f.kind == "commission_cost"
     ] == [-expected_fee]
     economics = summarize_crypto_ledger(artifact, artifact.iter_chunks())["economics"]
-    assert economics["net_pnl"] == float(
-        Fraction(quantity) * Fraction(0.5 * scale) - Fraction(expected_fee)
+    assert economics["net_pnl"] == pytest.approx(
+        float(Fraction(quantity) * Fraction(0.5 * scale) - Fraction(expected_fee)),
+        rel=2e-15,
+        abs=1e-15,
     )
 
 
@@ -2136,62 +1966,6 @@ def test_maker_final_unrepresentable_fee_fails_at_execution_boundary():
             asset_id="btc_usdt",
             funding_events=(),
         )
-
-
-def test_taker_subnormal_notional_keeps_complete_fee_through_roundtrip(tmp_path):
-    from fractions import Fraction
-
-    from quant_research_platform.artifacts.crypto_hft import summarize_crypto_ledger
-
-    quantity, source_price, fee_bps = 1e-200, 1.005e-123, 1e308
-    books = [
-        replace(
-            _state(
-                stamp, bid_levels=((995, quantity),), ask_levels=((1005, quantity),)
-            ),
-            price_unit="1e-126",
-        )
-        for stamp in (0, 200)
-    ]
-    capital = PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual")
-    fills = []
-
-    def produce(emit):
-        simulate_taker(
-            books,
-            [{"timestamp_ms": 0, "prediction": 1e308}],
-            prediction_column="prediction",
-            prediction_horizon_ms=500,
-            config=replace(
-                _taker_config(order_quantity=quantity),
-                position_size=quantity,
-                taker_fee_bps=fee_bps,
-            ),
-            observed_coverage={"s1": _coverage(0, 201)},
-            capital=capital,
-            asset_id="btc_usdt",
-            funding_events=(),
-            funding_forecasts=KNOWN_NO_FUNDING,
-            on_ledger=capture_fill_rows(fills.append, emit),
-        )
-
-    saved = _persist_execution(tmp_path, capital, produce)
-    (fill,) = fills
-    exact_notional = Fraction(quantity) * Fraction(source_price)
-    expected_fee = float(exact_notional * Fraction(fee_bps) / 10000)
-    assert fill["fill_qty"] == quantity
-    assert fill["notional"] == float(exact_notional)
-    assert 0 < fill["notional"] < float.fromhex("0x1p-1022")
-    assert expected_fee != float(Fraction(fill["notional"]) * Fraction(fee_bps) / 10000)
-    fees = [
-        flow.amount
-        for batch in saved.iter_chunks()
-        for flow in batch.cashflows
-        if flow.kind == "commission_cost"
-    ]
-    assert fees == [-expected_fee]
-    summary = summarize_crypto_ledger(saved, saved.iter_chunks())["economics"]
-    assert summary["net_pnl"] == -expected_fee
 
 
 @pytest.mark.parametrize(

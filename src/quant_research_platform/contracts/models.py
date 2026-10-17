@@ -31,6 +31,7 @@ from quant_research_platform.contracts.json_codec import (
 )
 from quant_research_platform.contracts.time import (
     TimeWindow,
+    time_window_timestamp_interval,
 )
 from quant_research_platform.contracts.validation import (
     _validate_column_tuple,
@@ -771,12 +772,13 @@ def _fit_windows(values, cutoff):
     for window in windows:
         if not isinstance(window, TimeWindow) or window.end is None:
             raise ValueError("finite_fit_window_required")
-        start, end = pd.Timestamp(window.start), pd.Timestamp(window.end)
+        end = pd.Timestamp(window.end)
         if end > cutoff:
             raise ValueError("fit_window_after_cutoff")
-        if last is not None and start <= last:
+        lower, upper, closed = time_window_timestamp_interval(window)
+        if last is not None and (lower < last[0] or (lower == last[0] and last[1])):
             raise ValueError("fit_windows_must_be_ordered_disjoint")
-        last = end
+        last = (upper, closed)
     return windows
 
 

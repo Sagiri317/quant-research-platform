@@ -8,34 +8,10 @@ from quant_research_platform.contracts.models import _MODEL_ALGORITHM_FACTS, _mo
 CONFIG_ROOT = Path(__file__).resolve().parents[2] / "docs" / "research-rosters"
 
 
-def research_configuration(
-    market="a_share", name="core6", *, validation=None, plan=None, small_models=False
-):
-    config = json.loads(
+def research_configuration(market="a_share", name="core6"):
+    return json.loads(
         (CONFIG_ROOT / market / (name + ".json")).read_text(encoding="utf-8")
     )
-    if validation is not None:
-        config["windows"]["validation"] = dict(
-            zip(("start", "end"), validation, strict=True)
-        )
-    if plan is not None:
-        config["research_plan"] = plan
-        config["windows"]["test"] = dict(plan["test"])
-        config["source_archives"] = None
-    if small_models:
-        for model in config["models"]:
-            if model["model_algorithm"] in {
-                "lightgbm_regressor",
-                "xgboost_regressor",
-                "gradient_boosting_regressor",
-                "random_forest_regressor",
-            }:
-                candidates = model.get("parameter_candidates")
-                if candidates is None:
-                    candidates = (model.setdefault("hyperparameters", {}),)
-                for parameters in candidates:
-                    parameters["n_estimators"] = 16
-    return config
 
 
 def model_specs(items):

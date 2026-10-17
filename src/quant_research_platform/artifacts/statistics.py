@@ -475,6 +475,7 @@ _ARROW_SCHEMAS = {
             pa.field("level_index", pa.int64()),
             pa.field("price_index", pa.int64()),
             pa.field("quantity", pa.float64()),
+            pa.field("known_price_bound", pa.int64(), nullable=False),
         ]
     ),
     "crypto_maker_calibration.parquet": pa.schema(

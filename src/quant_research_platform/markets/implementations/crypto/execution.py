@@ -190,11 +190,6 @@ def _weighted_mean(
 ) -> float:
     total = old_quantity + quantity
     old_weight, weight = old_quantity / total, quantity / total
-    minimum_normal = float.fromhex("0x1p-1022")
-    if (old_quantity and old_weight < minimum_normal) or weight < minimum_normal:
-        # A subnormal ratio can lose a finite weighted contribution before scaling.
-        old, new = Fraction(old_quantity), Fraction(quantity)
-        return float((old * Fraction(mean) + new * Fraction(value)) / (old + new))
     if (mean < 0) == (value < 0):
         # Update the larger weight so rounding the other ratio to one cannot cancel it.
         if quantity > old_quantity:
@@ -452,22 +447,12 @@ def _resolve_observed_markouts(
 
 
 def _execution_fee(quantity, price, fee_bps):
-    """Keep exceptional fee intermediates exact until their economic boundary."""
+    """Charge actual executed consideration without rescuing float overflow."""
     if isinstance(quantity, Fraction):
         return quantity * Fraction(price) * Fraction(fee_bps) / 10_000
-    notional = quantity * price
-    product = notional * fee_bps
-    fee = product / 10_000.0
-    if (
-        fee_bps
-        and quantity
-        and price
-        and any(
-            not math.isfinite(value) or abs(value) < float.fromhex("0x1p-1022")
-            for value in (notional, product, fee)
-        )
-    ):
-        fee = Fraction(quantity) * Fraction(price) * Fraction(fee_bps) / 10_000
+    fee = quantity * price * fee_bps / 10_000.0
+    if not math.isfinite(fee):
+        raise ValueError("hft_execution_fee_unrepresentable")
     return fee
 
 
@@ -506,24 +491,6 @@ def _taker_order_quantity(
             fee_per_unit = price * config.taker_fee_bps / 10_000.0
             unit_gain = sign * (forecast - price + funding_per_unit) - fee_per_unit
             increment = size * unit_gain
-            if (
-                not math.isfinite(increment)
-                or config.taker_fee_bps != 0
-                and abs(fee_per_unit) < float.fromhex("0x1p-1022")
-            ):
-                exact = Fraction(size) * (
-                    Fraction(sign)
-                    * (
-                        Fraction(forecast)
-                        - Fraction(price)
-                        + Fraction(funding_per_unit)
-                    )
-                    - Fraction(price) * Fraction(config.taker_fee_bps) / 10_000
-                )
-                try:
-                    increment = float(exact)
-                except OverflowError:
-                    raise ValueError("hft_expected_gain_unrepresentable") from None
             gain += increment
             if not math.isfinite(gain):
                 raise ValueError("hft_expected_gain_unrepresentable")
@@ -1336,8 +1303,15 @@ def _maker_join(order, state, observed_coverage, trade_coverage):
     ):
         return "post_only_crossing_rejected"
     levels = state.bids if order.side == "buy" else state.asks
-    if (order.side == "buy" and order.price_index < levels[-1][0]) or (
-        order.side == "sell" and order.price_index > levels[-1][0]
+    bound = getattr(
+        state,
+        "known_bid_floor_tick" if order.side == "buy" else "known_ask_ceiling_tick",
+        None,
+    )
+    if bound is None:
+        bound = levels[-1][0]
+    if (order.side == "buy" and order.price_index < bound) or (
+        order.side == "sell" and order.price_index > bound
     ):
         return "activation_queue_depth_unknown"
     order.queue_ahead = sum(
@@ -1531,6 +1505,12 @@ class MakerCalibration:
         traded = {trade_context: observed[book_context]}
         current_state = SimpleNamespace(
             segment_id=book_context,
+            known_bid_floor_tick=origin
+            + (getattr(state, "known_bid_floor_tick", None) or state.bids[-1][0])
+            - current_origin,
+            known_ask_ceiling_tick=origin
+            + (getattr(state, "known_ask_ceiling_tick", None) or state.asks[-1][0])
+            - current_origin,
             bids=tuple(
                 (origin + tick - current_origin, quantity)
                 for tick, quantity in state.bids
@@ -1566,6 +1546,16 @@ class MakerCalibration:
                             if history_scale == 1
                             else SimpleNamespace(
                                 segment_id=event.segment_id,
+                                known_bid_floor_tick=(
+                                    getattr(event, "known_bid_floor_tick", None)
+                                    or event.bids[-1][0]
+                                )
+                                * history_scale,
+                                known_ask_ceiling_tick=(
+                                    getattr(event, "known_ask_ceiling_tick", None)
+                                    or event.asks[-1][0]
+                                )
+                                * history_scale,
                                 bids=tuple(
                                     (tick * history_scale, quantity)
                                     for tick, quantity in event.bids
@@ -1629,6 +1619,11 @@ class MakerCalibration:
                 _old, reason = _maker_apply_command(
                     active, command, current_state, observed, traded
                 )
+                if reason in {
+                    "activation_queue_depth_unknown",
+                    "activation_coverage_missing",
+                }:
+                    raise PortfolioTargetBlocked(reason)
                 if command[2] is candidate and reason is not None:
                     candidate_reason = reason
             return candidate_reason or "expired"
@@ -1654,7 +1649,6 @@ class MakerCalibration:
         limit = new_order.remaining
         price = index_to_price(new_order.price_index, new_order.price_unit)
         fee_per_unit = _execution_fee(1.0, price, fee_bps)
-        exact = isinstance(fee_per_unit, Fraction)
         keep_gain = cancel_gain = 0.0
         sample_count = 0
         # Explicit source collections need not be nested. Historical integer
@@ -1666,7 +1660,7 @@ class MakerCalibration:
         history_scale = ratio.numerator
 
         def records():
-            nonlocal keep_gain, cancel_gain, sample_count, exact
+            nonlocal keep_gain, cancel_gain, sample_count
             for quantity in (0.0, limit):
                 choices.add(quantity)
             samples = self.samples(new_order.side)
@@ -1706,27 +1700,12 @@ class MakerCalibration:
                             cash = sum(
                                 cash for stamp, cash in funding if elapsed < stamp
                             )
-                            if exact or isinstance(fee, Fraction):
-                                exact = True
-                                gain = Fraction(quantity) * (
-                                    Fraction(sign)
-                                    * (
-                                        Fraction(forecast)
-                                        - Fraction(price)
-                                        + Fraction(mid) * Fraction(error)
-                                        + Fraction(cash)
-                                    )
-                                    - Fraction(fee)
-                                )
-                                keep_gain, cancel_gain = (
-                                    Fraction(keep_gain),
-                                    Fraction(cancel_gain),
-                                )
-                            else:
-                                gain = quantity * (
-                                    sign * (forecast - price) - fee + sign * mid * error
-                                )
-                                gain += quantity * sign * cash
+                            gain = quantity * (
+                                sign * (forecast - price) - fee + sign * mid * error
+                            )
+                            gain += quantity * sign * cash
+                            if not math.isfinite(gain):
+                                raise ValueError("hft_expected_gain_unrepresentable")
                             if replacement is None:
                                 keep_gain += gain
                             else:
@@ -1746,51 +1725,35 @@ class MakerCalibration:
         def curve(namespace):
             rows = sorted(curves.get(namespace, ()), key=lambda row: (row[0], row[1]))
             for quantity, group in groupby(rows, key=lambda row: row[0]):
-                count, error_sum = (0, Fraction() if exact else 0.0)
+                count, error_sum = 0, 0.0
                 for _quantity, _sample_id, error in group:
                     count += 1
-                    error_sum += Fraction(error) if exact else error
+                    error_sum += error
                 yield (quantity, count, error_sum)
 
-        edge = (
-            Fraction(sign) * (Fraction(forecast) - Fraction(price))
-            - Fraction(fee_per_unit)
-            if exact
-            else sign * (forecast - price) - fee_per_unit
-        )
+        edge = sign * (forecast - price) - fee_per_unit
 
         def responses(namespace, *, with_error):
 
             def weight(count, error):
-                return (
-                    count * edge
-                    + (
-                        Fraction(sign) * Fraction(mid) * Fraction(error)
-                        if exact
-                        else sign * mid * error
-                    )
-                    if with_error
-                    else count
-                )
+                return count * edge + sign * mid * error if with_error else count
 
-            total = Fraction() if exact else 0.0 if with_error else 0
+            total = 0.0 if with_error else 0
             groups = tuple(curve(namespace))
             for _quantity, count, error in groups:
                 total += weight(count, error)
-            weighted = Fraction() if exact else 0.0
-            prefix = Fraction() if exact else 0.0 if with_error else 0
+            weighted = 0.0
+            prefix = 0.0 if with_error else 0
             groups = iter(groups)
             current = next(groups, None)
             for choice in choices:
                 while current is not None and current[0] <= choice:
                     quantity, count, error = current
                     value = weight(count, error)
-                    weighted += (Fraction(quantity) if exact else quantity) * value
+                    weighted += quantity * value
                     prefix += value
                     current = next(groups, None)
-                yield weighted + (Fraction(choice) if exact else choice) * (
-                    total - prefix
-                )
+                yield weighted + choice * (total - prefix)
 
         streams = [
             responses("response", with_error=True),
@@ -1804,23 +1767,18 @@ class MakerCalibration:
         for choice, base, *funded in zip(choices, *streams, strict=True):
             gain = base
             for (_stamp, cash), value in zip(funding, funded, strict=True):
-                gain += (
-                    Fraction(sign) * Fraction(cash) * value
-                    if exact
-                    else sign * cash * value
-                )
-            gain = (
-                gain + (Fraction(cancel_gain) if exact else cancel_gain)
-            ) / sample_count
+                gain += sign * cash * value
+            gain = (gain + cancel_gain) / sample_count
+            if not math.isfinite(gain):
+                raise ValueError("hft_expected_gain_unrepresentable")
             if gain > best_gain:
                 best_gain = gain
                 best_quantity = choice
         keep_gain /= sample_count
         keep = bool(active_order is not None or commands) and keep_gain >= best_gain
-        try:
-            gain = float(keep_gain) if keep else float(best_gain)
-        except OverflowError:
-            raise ValueError("hft_expected_gain_unrepresentable") from None
+        gain = float(keep_gain) if keep else float(best_gain)
+        if not math.isfinite(gain):
+            raise ValueError("hft_expected_gain_unrepresentable")
         return keep, 0.0 if keep else float(best_quantity), gain
 
 
@@ -1970,10 +1928,12 @@ def replay_maker_calibration(
                         latest_book_id = record(state) if samples else None
                     next_event = next(events, None)
                 else:
-                    for sample in samples:
+                    unknown_decisions = set()
+                    for sample in tuple(samples):
                         order = sample["order"]
                         if (
-                            not sample["attempted"]
+                            order.created_time_ns not in unknown_decisions
+                            and not sample["attempted"]
                             and sample["terminal_reason"] is None
                             and order.effective_at_ns <= due
                         ):
@@ -1981,6 +1941,13 @@ def replay_maker_calibration(
                             reason = _maker_join(
                                 order, latest_state, observed_coverage, trade_coverage
                             )
+                            if reason in {
+                                "activation_queue_depth_unknown",
+                                "activation_coverage_missing",
+                            }:
+                                unknown_decisions.add(order.created_time_ns)
+                                exclude_references({order.created_time_ns})
+                                continue
                             sample["activated"] = reason is None
                             sample["terminal_reason"] = reason
 
@@ -2191,6 +2158,7 @@ def simulate_maker(
     created_orders = filled_orders = cancelled_orders = 0
     partial_fill_events = trade_through_fill_events = post_only_rejections = 0
     equity_rows = market_event_count = blocked_decisions = undefined_decisions = 0
+    unknown_queue_decisions = 0
     funding_required_decisions = 0
     max_abs_position = 0.0
     all_lifetime_count = all_lifetime_sum_ns = 0
@@ -2465,6 +2433,14 @@ def simulate_maker(
                 old, reason = _maker_apply_command(
                     active, command, latest_state, observed_coverage, trade_coverage
                 )
+                if reason in {
+                    "activation_queue_depth_unknown",
+                    "activation_coverage_missing",
+                }:
+                    # Activation is unresolved, not an exchange rejection. Retain
+                    # the command as censored exposure at the local account stop.
+                    commands.appendleft(command)
+                    raise _AccountPathStop(reason, stamp)
                 if old is not None:
                     finish_order(old, stamp, cancelled=True)
                 if new_order is not None:
@@ -2677,6 +2653,7 @@ def simulate_maker(
                     blocked_decisions += 1
             diagnostics = []
             for side, sign in (("buy", 1), ("sell", -1)):
+                unknown_queue_reason = None
                 desired_price = (
                     None
                     if not valid
@@ -2750,17 +2727,27 @@ def simulate_maker(
                             row,
                             config.latency_ms,
                         )
-                        keep, quantity, gain = calibrations[row["fold_id"]].select(
-                            state=latest_state,
-                            decision_ns=decision_time_ns,
-                            new_order=proposed,
-                            active_order=active.get(side),
-                            commands=side_commands,
-                            lifetime_ns=lifetime,
-                            prediction=row["price_prediction"],
-                            fee_bps=config.maker_fee_bps,
-                            funding=funding,
-                        )
+                        try:
+                            keep, quantity, gain = calibrations[row["fold_id"]].select(
+                                state=latest_state,
+                                decision_ns=decision_time_ns,
+                                new_order=proposed,
+                                active_order=active.get(side),
+                                commands=side_commands,
+                                lifetime_ns=lifetime,
+                                prediction=row["price_prediction"],
+                                fee_bps=config.maker_fee_bps,
+                                funding=funding,
+                            )
+                        except PortfolioTargetBlocked as error:
+                            if str(error) not in {
+                                "activation_queue_depth_unknown",
+                                "activation_coverage_missing",
+                            }:
+                                raise
+                            unknown_queue_reason = str(error)
+                            unknown_queue_decisions += 1
+                            keep, quantity, gain = True, 0.0, None
                         if keep and current is not None:
                             quantity = current.remaining
                 if not keep:
@@ -2786,7 +2773,9 @@ def simulate_maker(
                 if not funding_known:
                     gain = None
                 reason = (
-                    "decision_book_or_trade_unavailable"
+                    unknown_queue_reason
+                    if unknown_queue_reason is not None
+                    else "decision_book_or_trade_unavailable"
                     if not valid
                     else "proxy_gate_closed"
                     if not gate
@@ -2982,7 +2971,10 @@ def simulate_maker(
         if calibrations is not None
         else "public_l2_inventory_maker_baseline",
         "maker_prediction_used": calibrations is not None,
-        "selection_status": "BLOCKED"
+        "unknown_queue_decisions": unknown_queue_decisions,
+        "selection_status": "PARTIAL"
+        if unknown_queue_decisions
+        else "BLOCKED"
         if blocked_decisions and blocked_decisions == funding_required_decisions
         else "PARTIAL"
         if blocked_decisions

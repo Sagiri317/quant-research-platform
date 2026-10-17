@@ -126,6 +126,8 @@ def test_writer_validates_actual_rows_and_global_keys(tmp_path, mutation):
 @pytest.mark.parametrize("kind", ["string", "date", "ns", "us"])
 def test_timestamp_normalization_and_readback(tmp_path, kind):
     frame = make_price_volume_prediction_output_frame()
+    expected = frame.copy(deep=True)
+    expected["timestamp"] = expected.timestamp.dt.as_unit("ns")
     metadata = frame.attrs["prediction_metadata"]
     if kind == "string":
         frame["timestamp"] = frame.timestamp.dt.strftime("%Y-%m-%d")
@@ -137,7 +139,8 @@ def test_timestamp_normalization_and_readback(tmp_path, kind):
     root = write_prediction_outputs(
         output_path=tmp_path / "pred", output_chunks=[frame], metadata=metadata
     )
-    assert len(read_predictions(root)[0]) == 1
+    actual, _ = read_predictions(root)
+    pd.testing.assert_frame_equal(actual, expected, check_exact=True)
     pd.testing.assert_frame_equal(frame, before)
 
 
