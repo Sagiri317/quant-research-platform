@@ -3071,8 +3071,6 @@ def test_interim_owns_source_window_and_raw_preserves_all_business_values(
             path,
             dataset=data_id,
             chunksize=chunksize,
-            start_date=arguments["start_date"],
-            end_date=arguments["end_date"],
         ),
         ignore_index=True,
     )
@@ -3425,3 +3423,89 @@ def test_stock_master_unknown_listing_date_keeps_status_time_without_fabrication
     assert counts["excluded_missing_timestamp_rows"] == 0
     assert counts.get("invalid_listing_date_rows", 0) == (1 if listing_date else 0)
     assert _file_bytes(raw) == before
+
+
+def test_no_limit_description_missing_preserves_identified_events():
+    from quant_research_platform.markets.implementations.a_share.processed import panels
+
+    events = interim.normalize_raw_frame(
+        pd.DataFrame(
+            {
+                "TradingDate": ["2020-01-02"] * 3,
+                "Symbol": ["000001", "000002", "000003"],
+                "Reason": ["IPO", None, " "],
+            }
+        ),
+        "trading_no_limit",
+    )
+    assert len(events) == 3
+    assert events.reason.isna().tolist() == [False, True, True]
+    panel = pd.DataFrame(
+        {
+            "asset_id": ["000001", "000002", "000003", "000004"],
+            "timestamp": pd.to_datetime(["2020-01-02"] * 4),
+            "limit_status": [1.0] * 4,
+        }
+    )
+    assert panels._apply_no_limit_exceptions(panel, events).limit_status.tolist() == [
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    ]
+
+
+def test_index_weight_invalid_constituent_is_excluded_locally():
+    result = interim.normalize_raw_frame(
+        pd.DataFrame(
+            {
+                "Indexcd": ["000300", "000300"],
+                "Enddt": ["2020-01-02"] * 2,
+                "Stkcd": ["000001", "bad-code"],
+                "Constdnme": ["valid", "unknown"],
+                "Weight": [1.0, 2.0],
+            }
+        ),
+        "index_weights",
+    )
+    assert result.constituent_asset_id.tolist() == ["000001"]
+    assert result.weight.tolist() == [0.01]
+    assert result.attrs["source_row_counts"]["excluded_missing_required_rows"] == 1
+
+
+@pytest.mark.parametrize("chunksize,reverse", [(1, False), (8, True)])
+def test_index_market_conflicts_are_field_local_across_chunks(
+    tmp_path, chunksize, reverse
+):
+    from quant_research_platform.storage.datasets.reading import read_dataset
+    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from tests.helpers.a_share_raw import _write_csmar
+
+    rows = _nullable_index_numeric_rows("index_market")[1:3]
+    rows.append({**rows[0], "Idxtrd05": 110.0, "Idxtrd08": 3.0})
+    if reverse:
+        rows.reverse()
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    _write_csmar(raw, "index_market", rows)
+    result = interim.materialize_interim_data(
+        raw_root=raw,
+        output_roots={"index_market": tmp_path / "result"},
+        data_ids=("index_market",),
+        chunksize=chunksize,
+    )
+    root = result.artifact_roots["index_market"]
+    saved = read_dataset(root).sort_values("timestamp").reset_index(drop=True)
+    assert len(saved) == 2
+    assert saved.open.tolist() == [100.0, 100.0]
+    assert saved.index_name.tolist() == ["synthetic-index", "synthetic-index"]
+    assert pd.isna(saved.close.iloc[0]) and pd.isna(saved.period_return.iloc[0])
+    assert saved.close.iloc[1] == 100.0 and saved.period_return.iloc[1] == 0.0
+    counts = read_dataset_manifest_evidence(root)["producer_diagnostics"][
+        "source_row_counts"
+    ]
+    assert (
+        counts["conflicting_close_rows"]
+        == counts["conflicting_period_return_rows"]
+        == 2
+    )

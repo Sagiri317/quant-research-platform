@@ -548,13 +548,13 @@ def test_dataset_native_disk_failure_removes_partial_candidate_and_preserves_pub
     primary = OSError(errno.ENOSPC, "synthetic_native_disk_full")
     partial_paths = []
 
-    def fail_native_write(_table, path, **_kwargs):
+    def fail_native_writer(path, _schema, **_kwargs):
         partial = Path(path)
         partial.write_bytes(b"partial parquet")
         partial_paths.append(partial)
         raise primary
 
-    monkeypatch.setattr(dataset_writing.pq, "write_table", fail_native_write)
+    monkeypatch.setattr(dataset_writing.pq, "ParquetWriter", fail_native_writer)
     with pytest.raises(OSError) as caught:
         write_dataset(
             candidate,

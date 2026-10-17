@@ -392,7 +392,7 @@ def _processed_frames(
     reference = (
         source_sessions["market_bars_1d"]
         if panel_source
-        else panel_axis
+        else dependencies["market_panel_1d"]
         if panel_axis is not None
         else next(iter(dependencies.values()))
     )
@@ -447,9 +447,37 @@ def _processed_frames(
         calendar = source.get("trading_calendar")
         if calendar is None or calendar.empty:
             raise ValueError("a_share_panel_calendar_required")
+        # The declared dataset end remains independent of the selected assets:
+        # an asset's missing final observations do not shorten its session clock.
+        panel_end = panel_axis.manifest.get("date_max")
+        if panel_end is None:
+            with closing_iterator(
+                iter_dataset_chunks(panel_axis.projected_view(("timestamp",)))
+            ) as chunks:
+                panel_end = max(
+                    (frame.timestamp.max() for frame in chunks if not frame.empty),
+                    default=None,
+                )
+        # Only selected assets need a clock, but their full listing history and
+        # missing observation sessions remain independent of price/date filters.
+        panel_axis = replace(
+            panel_axis,
+            parquet_filters=(
+                *(panel_axis.parquet_filters or ()),
+                (
+                    "asset_id",
+                    "in",
+                    _prepare_in_filter(
+                        panel_axis.arrow_schema.field("asset_id"),
+                        tuple(asset_types.index),
+                    ),
+                ),
+            ),
+        )
         declared_axis = _calendar_panel_axis(
             materialize_dataset_session(panel_axis),
             calendar,
+            panel_end=panel_end,
             time_window=time_window,
             lookback=lookback,
             lookahead=lookahead,
@@ -681,7 +709,9 @@ def _processed_frames(
         del output, frames, current_source
 
 
-def _calendar_panel_axis(panel, calendar, *, time_window=None, lookback=0, lookahead=0):
+def _calendar_panel_axis(
+    panel, calendar, *, panel_end=None, time_window=None, lookback=0, lookahead=0
+):
     """Fill consumed own-market sessions without rewriting historical membership."""
     if panel.empty:
         return panel
@@ -695,7 +725,7 @@ def _calendar_panel_axis(panel, calendar, *, time_window=None, lookback=0, looka
     panel["_calendar_segment"] = (
         (unknown | previous_unknown).groupby(panel.asset_id).cumsum()
     )
-    stop = panel.timestamp.max()
+    stop = pd.Timestamp(panel_end) if panel_end is not None else panel.timestamp.max()
     lower, upper = panel.timestamp.min(), stop
     if time_window is not None:
         lower, upper, closed = time_window_timestamp_interval(time_window)

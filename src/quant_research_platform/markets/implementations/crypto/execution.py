@@ -135,15 +135,17 @@ class PortfolioEconomics:
         if self.quantity and (self.quantity > 0) != (quantity > 0):
             closed = min(abs(self.quantity), abs(quantity))
             entry = self._cost_basis / self.quantity
-            realized = (
+            realized = float(
                 closed * (1 if self.quantity > 0 else -1) * (Fraction(price) - entry)
             )
             remaining = self.quantity + quantity
-            self._cost_basis = remaining * (
-                entry
-                if remaining != 0 and (remaining > 0) == (self.quantity > 0)
-                else Fraction(price)
-            )
+            if remaining and (remaining > 0) == (self.quantity > 0):
+                # Retain the rounded settlement's residual in the open basis.
+                # This conserves cash plus unrealized PnL without retaining the
+                # average entry's growing rational denominator across fills.
+                self._cost_basis += quantity * Fraction(price) + Fraction(realized)
+            else:
+                self._cost_basis = remaining * Fraction(price)
         else:
             self._cost_basis += quantity * Fraction(price)
         self.quantity += quantity

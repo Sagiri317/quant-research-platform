@@ -386,6 +386,7 @@ def test_explicit_prediction_family_statistics_need_no_models_or_selection(
         "model_comparison.parquet",
         "model_reality_checks.parquet",
         "robustness.parquet",
+        "prediction_diagnostics.parquet",
     }
     with artifact.table("model_losses.parquet") as losses:
         assert len(losses) == 6
@@ -394,6 +395,27 @@ def test_explicit_prediction_family_statistics_need_no_models_or_selection(
             "ic_weighted_rank_ensemble": 2,
         }
         assert losses.common_observation_count.eq(2).all()
+    # The omitted analysis list is exactly the explicit default, including
+    # independent HAC and bootstrap diagnostics for every direct family.
+    from quant_research_platform.research.statistics_production import _MODEL_ANALYSES
+
+    explicit = read_statistics_artifact(
+        model_statistics(
+            {
+                **config,
+                "analyses": list(_MODEL_ANALYSES),
+                "output": str(tmp_path / "explicit-defaults"),
+            }
+        )
+    )
+    assert set(explicit._members) == set(artifact._members)
+    for member in artifact._members:
+        with artifact.table(member) as left, explicit.table(member) as right:
+            pd.testing.assert_frame_equal(left, right, check_exact=True)
+    with artifact.table("prediction_diagnostics.parquet") as diagnostics:
+        assert set(diagnostics.prediction_id) == set(config["family_ids"])
+        assert diagnostics.bootstrap_status.eq("DEFINED").all()
+        assert diagnostics.reason.ne("not_requested").all()
     excluded_label = {
         **config,
         "dataset": {"path": config["dataset"], "columns": ["timestamp", "asset_id"]},

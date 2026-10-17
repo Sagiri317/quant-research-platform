@@ -63,8 +63,8 @@ from quant_research_platform.storage.identity import (
 )
 from quant_research_platform.storage.manifests import write_internal_artifact_manifest
 from quant_research_platform.storage.parquet import (
-    _parquet_row_group_size,
     inspect_dataset_part,
+    parquet_table_writer,
 )
 
 
@@ -529,14 +529,10 @@ def write_parquet_file(
     table: pa.Table, path: Path, *, timestamp_column: str | None = None
 ) -> Path:
     filesystem_mkdir(path.parent, parents=True, exist_ok=True)
-    pq.write_table(
-        table,
+    with parquet_table_writer(
         native_filesystem_path(path),
         compression="zstd",
-        row_group_size=_parquet_row_group_size(table.num_rows),
-        use_dictionary=False,
-        write_statistics=[timestamp_column] if timestamp_column is not None else False,
-        write_page_index=False,
-        write_page_checksum=False,
-    )
+        statistics=(timestamp_column,) if timestamp_column is not None else (),
+    ) as write:
+        write(table)
     return path

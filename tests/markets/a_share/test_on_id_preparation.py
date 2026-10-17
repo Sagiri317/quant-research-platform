@@ -132,6 +132,34 @@ def test_price_filter_keeps_full_declared_axis_and_unknown_prices(tmp_path):
     assert pd.isna(b.on_id_endpoint_return_1d_available_at.iloc[0])
 
 
+@pytest.mark.parametrize("native", [False, True])
+def test_selected_asset_clock_does_not_require_unrelated_market(tmp_path, native):
+    frame, inputs = _inputs(tmp_path, native=native)
+    dates = pd.DatetimeIndex(frame.timestamp.unique()).sort_values()
+    frame = frame.loc[~(frame.asset_id.eq("b") & frame.timestamp.gt(dates[-4]))]
+    (tmp_path / "missing-tail").mkdir()
+    inputs["market_panel_1d"] = _input(
+        tmp_path / "missing-tail", "market_panel_1d", frame, native=native
+    )
+    expected = read_dataset(
+        prepare(
+            _request(tmp_path / "complete", inputs, frame, parameters={"horizons": [1]})
+        )
+    )
+    expected = expected.loc[expected.asset_id.eq("b")].reset_index(drop=True)
+    inputs["market_panel_1d"]["row_filters"] = [["asset_id", "==", "b"]]
+    inputs["trading_calendar"] = str(
+        _calendar_input(tmp_path / "selected-calendar", {1: dates})
+    )
+    actual = read_dataset(
+        prepare(
+            _request(tmp_path / "selected", inputs, frame, parameters={"horizons": [1]})
+        )
+    )
+    assert actual.asset_id.unique().tolist() == ["b"]
+    pd.testing.assert_frame_equal(actual, expected)
+
+
 def test_noncontiguous_year_selection_keeps_sessions_unknown(tmp_path):
     frame, inputs = _inputs(tmp_path)
     inputs["market_panel_1d"]["years"] = [2024]

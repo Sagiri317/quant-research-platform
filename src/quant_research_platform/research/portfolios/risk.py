@@ -440,97 +440,119 @@ class FactorRiskState:
             or np.linalg.matrix_rank(design) != p
         ):
             return None, tuple(current_industries)
-        weights, _ = _integer_coordinates(
-            np.sqrt(frame[self.config.weight_column].to_numpy(dtype="float64"))
-        )
-        weights = np.asarray(weights, dtype=object)
         returns = frame["asset_return"].to_numpy(dtype="float64")
-        responses, response_scale = _integer_coordinates(returns)
-        responses = np.asarray(responses, dtype=object)
-        dimension = len(self.style_columns)
-        styles, style_scale = _integer_coordinates(
-            design[:, len(industry_columns) :].flat
+        ordinary = _ordinary_weighted_fit(
+            design,
+            returns,
+            np.sqrt(frame[self.config.weight_column].to_numpy(dtype="float64")),
         )
-        styles = np.asarray(styles, dtype=object).reshape(len(frame), dimension)
-        gram = np.zeros((dimension, dimension), dtype=object)
-        response = np.zeros(dimension, dtype=object)
-        summaries = {}
-        # Eliminate industry intercepts in exact weighted coordinates.
-        for code, selected in group_codes.groupby(
-            group_codes, sort=True
-        ).indices.items():
-            x, y, w = styles[selected], responses[selected], weights[selected]
-            total = int(sum(w))
-            first_x, first_y = w @ x, w @ y
-            second_x = x.T @ (x * w[:, None])
-            second_xy = x.T @ (y * w)
-            for left in range(dimension):
-                response[left] += Fraction(
-                    int(total * second_xy[left] - first_x[left] * first_y), total
-                )
-                for right in range(dimension):
-                    gram[left, right] += Fraction(
-                        int(
-                            total * second_x[left, right]
-                            - first_x[left] * first_x[right]
-                        ),
-                        total,
-                    )
-            summaries[code] = (total, first_x, first_y)
-        system = np.column_stack((gram, response))
-        system_scale = lcm(*(value.denominator for value in system.flat))
-        system = np.asarray(
-            [
-                value.numerator * (system_scale // value.denominator)
-                for value in system.flat
-            ],
-            dtype=object,
-        ).reshape(dimension, dimension + 1)
-        previous = 1
-        for column in range(dimension - 1):
-            pivot = system[column, column]
-            system[column + 1 :, column + 1 :] = (
-                pivot * system[column + 1 :, column + 1 :]
-                - system[column + 1 :, column, None]
-                * system[None, column, column + 1 :]
-            ) // previous
-            previous = pivot
-        slopes = [Fraction()] * dimension
-        for column in range(dimension - 1, -1, -1):
-            slopes[column] = (
-                Fraction(int(system[column, -1]))
-                - sum(
-                    system[column, right] * slopes[right]
-                    for right in range(column + 1, dimension)
-                )
-            ) / int(system[column, column])
-        slope_scale = lcm(*(slope.denominator for slope in slopes))
-        slopes = np.asarray(
-            [slope.numerator * (slope_scale // slope.denominator) for slope in slopes],
-            dtype=object,
-        )
-        intercepts = {
-            code: (total, int(first_y * slope_scale - first_x @ slopes))
-            for code, (total, first_x, first_y) in summaries.items()
-        }
-        scale = slope_scale * response_scale
-        try:
-            coefficients = np.asarray(
-                [
-                    intercepts[code][1] / (intercepts[code][0] * scale)
-                    for code in current_industries
-                ]
-                + [int(slope * style_scale) / scale for slope in slopes],
-                dtype="float64",
+        if ordinary is not None:
+            coefficients, residuals = ordinary
+            exact_coefficients = None
+        else:
+            weights, _ = _integer_coordinates(
+                np.sqrt(frame[self.config.weight_column].to_numpy(dtype="float64"))
             )
-            residuals = np.empty(len(frame), dtype="float64")
-            for position, (code, value) in enumerate(
-                zip(group_codes, responses * slope_scale - styles @ slopes, strict=True)
-            ):
-                total, intercept = intercepts[code]
-                residuals[position] = int(total * value - intercept) / (total * scale)
-        except OverflowError:
-            raise ValueError("factor_risk_fit_non_finite") from None
+            weights = np.asarray(weights, dtype=object)
+            responses, response_scale = _integer_coordinates(returns)
+            responses = np.asarray(responses, dtype=object)
+            dimension = len(self.style_columns)
+            styles, style_scale = _integer_coordinates(
+                design[:, len(industry_columns) :].flat
+            )
+            styles = np.asarray(styles, dtype=object).reshape(len(frame), dimension)
+            gram = np.zeros((dimension, dimension), dtype=object)
+            response = np.zeros(dimension, dtype=object)
+            summaries = {}
+            # Eliminate industry intercepts in exact weighted coordinates.
+            for code, selected in group_codes.groupby(
+                group_codes, sort=True
+            ).indices.items():
+                x, y, w = styles[selected], responses[selected], weights[selected]
+                total = int(sum(w))
+                first_x, first_y = w @ x, w @ y
+                second_x = x.T @ (x * w[:, None])
+                second_xy = x.T @ (y * w)
+                for left in range(dimension):
+                    response[left] += Fraction(
+                        int(total * second_xy[left] - first_x[left] * first_y), total
+                    )
+                    for right in range(dimension):
+                        gram[left, right] += Fraction(
+                            int(
+                                total * second_x[left, right]
+                                - first_x[left] * first_x[right]
+                            ),
+                            total,
+                        )
+                summaries[code] = (total, first_x, first_y)
+            system = np.column_stack((gram, response))
+            system_scale = lcm(*(value.denominator for value in system.flat))
+            system = np.asarray(
+                [
+                    value.numerator * (system_scale // value.denominator)
+                    for value in system.flat
+                ],
+                dtype=object,
+            ).reshape(dimension, dimension + 1)
+            previous = 1
+            for column in range(dimension - 1):
+                pivot = system[column, column]
+                system[column + 1 :, column + 1 :] = (
+                    pivot * system[column + 1 :, column + 1 :]
+                    - system[column + 1 :, column, None]
+                    * system[None, column, column + 1 :]
+                ) // previous
+                previous = pivot
+            slopes = [Fraction()] * dimension
+            for column in range(dimension - 1, -1, -1):
+                slopes[column] = (
+                    Fraction(int(system[column, -1]))
+                    - sum(
+                        system[column, right] * slopes[right]
+                        for right in range(column + 1, dimension)
+                    )
+                ) / int(system[column, column])
+            slope_scale = lcm(*(slope.denominator for slope in slopes))
+            slopes = np.asarray(
+                [
+                    slope.numerator * (slope_scale // slope.denominator)
+                    for slope in slopes
+                ],
+                dtype=object,
+            )
+            intercepts = {
+                code: (total, int(first_y * slope_scale - first_x @ slopes))
+                for code, (total, first_x, first_y) in summaries.items()
+            }
+            scale = slope_scale * response_scale
+            try:
+                coefficients = np.asarray(
+                    [
+                        intercepts[code][1] / (intercepts[code][0] * scale)
+                        for code in current_industries
+                    ]
+                    + [int(slope * style_scale) / scale for slope in slopes],
+                    dtype="float64",
+                )
+                residuals = np.empty(len(frame), dtype="float64")
+                for position, (code, value) in enumerate(
+                    zip(
+                        group_codes,
+                        responses * slope_scale - styles @ slopes,
+                        strict=True,
+                    )
+                ):
+                    total, intercept = intercepts[code]
+                    residuals[position] = int(total * value - intercept) / (
+                        total * scale
+                    )
+            except OverflowError:
+                raise ValueError("factor_risk_fit_non_finite") from None
+            exact_coefficients = [
+                Fraction(intercepts[code][1], intercepts[code][0] * scale)
+                for code in current_industries
+            ] + [Fraction(int(slope * style_scale), scale) for slope in slopes]
         if not np.isfinite(coefficients).all() or not np.isfinite(residuals).all():
             raise ValueError("factor_risk_fit_non_finite")
         assets = pd.Index(frame["asset_id"].astype(str), name="asset_id")
@@ -550,10 +572,8 @@ class FactorRiskState:
                 )
             )
             projected_returns = projection.asset_return.to_numpy(dtype="float64")
-            exact_coefficients = [
-                Fraction(intercepts[code][1], intercepts[code][0] * scale)
-                for code in current_industries
-            ] + [Fraction(int(slope * style_scale), scale) for slope in slopes]
+            if exact_coefficients is None:
+                exact_coefficients = [Fraction(float(value)) for value in coefficients]
             # Project with the eligible fit; these rows never enter risk history.
             projected_residuals = np.asarray(
                 [
@@ -864,6 +884,58 @@ def _covariance_is_psd(covariance: np.ndarray) -> bool:
     return True
 
 
+def _ordinary_weighted_fit(
+    design: np.ndarray, returns: np.ndarray, weights: np.ndarray
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Stable sqrt(cap)-objective WLS, with narrow numerical fallbacks.
+
+    Normalizing the objective weights leaves the fit unchanged. SVD avoids
+    squaring the design condition number as normal equations would. Extreme
+    response ranges, ill conditioning and unresolved residual cancellation
+    keep the existing exact industry-elimination path.
+    """
+    nonzero = np.abs(returns[returns != 0])
+    if len(nonzero) and (
+        nonzero.min() < np.sqrt(np.finfo(float).tiny)
+        or nonzero.max() > np.sqrt(np.finfo(float).max)
+        or nonzero.min() < np.finfo(float).eps * nonzero.max()
+    ):
+        return None
+    root_weights = np.sqrt(weights / weights.max())
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        weighted_design = design * root_weights[:, None]
+        weighted_response = returns * root_weights
+    if not np.isfinite(weighted_design).all() or np.any(root_weights == 0):
+        return None
+    coefficients, _, rank, singular = np.linalg.lstsq(
+        weighted_design, weighted_response, rcond=None
+    )
+    if (
+        rank != design.shape[1]
+        or singular[-1] <= np.sqrt(np.finfo(float).eps) * singular[0]
+    ):
+        return None
+    with np.errstate(over="ignore", invalid="ignore"):
+        fitted = design @ coefficients
+        residuals = returns - fitted
+        # Backward error in the solve can dominate an almost-exact fit. Keep
+        # genuine tiny residuals and exact zeros through the exceptional path.
+        error = (
+            16
+            * max(design.shape)
+            * np.finfo(float).eps
+            * (singular[0] / singular[-1])
+            * max(np.max(np.abs(returns)), np.max(np.abs(fitted)))
+        )
+    if (
+        not np.isfinite(coefficients).all()
+        or not np.isfinite(residuals).all()
+        or np.any(np.abs(residuals) <= error)
+    ):
+        return None
+    return coefficients, residuals
+
+
 def _ewma_covariance(
     values: np.ndarray,
     *,
@@ -881,9 +953,13 @@ def _ewma_covariance(
             centered = values - np.average(values, axis=0, weights=weights)
             weighted = centered * np.sqrt(weights[:, None])
             gram = weighted.T @ weighted
-            cancellation = np.abs(gram) <= 8 * len(values) * np.finfo(float).eps * (
-                np.abs(weighted).T @ np.abs(weighted)
+            absolute_products = np.abs(weighted).T @ np.abs(weighted)
+            cancellation = (absolute_products > 0) & (
+                np.abs(gram)
+                <= 8 * len(values) * np.finfo(float).eps * absolute_products
             )
+            if diagonal_shrinkage == 1:
+                cancellation = np.diag(cancellation)
             covariance = gram * annualization_factor
             covariance *= 1 - diagonal_shrinkage
             np.fill_diagonal(covariance, np.diag(gram) * annualization_factor)
@@ -891,10 +967,11 @@ def _ewma_covariance(
             spread = np.max(np.abs(centered), axis=0)
             small = np.abs(weighted[(weighted != 0)])
             safe_range = (
-                not len(small) or small.min() >= np.sqrt(np.finfo(float).tiny)
+                not np.any((weighted == 0) & (centered != 0))
+                and (not len(small) or small.min() >= np.sqrt(np.finfo(float).tiny))
             ) and np.all(
                 np.abs(
-                    np.diag(covariance)
+                    np.diag(covariance)[np.diag(gram) != 0]
                     if diagonal_shrinkage == 1
                     else covariance[gram != 0]
                 )

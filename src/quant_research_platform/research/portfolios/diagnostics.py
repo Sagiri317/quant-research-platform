@@ -2297,7 +2297,6 @@ def _group_portfolio_comparison(matrix, config):
         }
     )
     access = config["sample_role"]
-    inference_blocker = None
     fdr_method = (
         None if _inference_blocker(config) is not None else declaration["fdr_method"]
     )
@@ -2319,8 +2318,6 @@ def _group_portfolio_comparison(matrix, config):
         )
         .set_index("timestamp")
         .set_axis(candidate_ids)
-        if inference_blocker is None
-        else None
     )
     rows = []
     for index, candidate in enumerate(candidate_ids):
@@ -2363,13 +2360,13 @@ def _group_portfolio_comparison(matrix, config):
                 np.nan,
             ),
             "status": "UNDEFINED",
-            "reason": inference_blocker,
+            "reason": None,
             "bootstrap_status": "UNDEFINED",
-            "bootstrap_reason": inference_blocker,
+            "bootstrap_reason": None,
         }
         if index in undefined_pairs:
             row["reason"] = row["bootstrap_reason"] = "nonpositive_start_nav"
-        elif inference is not None:
+        else:
             estimate = inference.loc[candidate]
             for key in (
                 "status",

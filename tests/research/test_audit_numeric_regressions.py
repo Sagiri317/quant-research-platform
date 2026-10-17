@@ -452,7 +452,6 @@ def test_ordinary_exact_fit_with_zero_coefficient_keeps_numeric_path(
 
 
 def test_test_set_keeps_rankic_by_and_explicit_exploratory_exclusion():
-    from contextlib import contextmanager
     from copy import deepcopy
 
     from quant_research_platform.research.protocols import a_share
@@ -485,23 +484,6 @@ def test_test_set_keeps_rankic_by_and_explicit_exploratory_exclusion():
     quarterly = global_losses.copy()
     quarterly["loss"] += rng.normal(-0.01, 0.04, len(quarterly))
 
-    class GlobalStatistics:
-        metadata = {
-            "selection_group": "global",
-            "coverage_basis": "model_prediction_domain",
-            "sample_role": "test",
-            "window": {"start": str(dates[0]), "end": str(dates[-1])},
-            "evaluation": {"primary_label": "label"},
-            "evaluation_axis": "cross_sectional",
-            "column_roles": {"label": "label"},
-            "column_units": {},
-        }
-
-        @contextmanager
-        def table(self, member):
-            assert member == "model_losses.parquet"
-            yield global_losses
-
     def compare(value):
         return _paired_group_rankic(
             quarterly.assign(
@@ -512,12 +494,10 @@ def test_test_set_keeps_rankic_by_and_explicit_exploratory_exclusion():
             config=value,
         )
 
-    ordinary = compare(manifest)
-    selected = deepcopy(manifest)
-    actual = compare(selected)
-    pd.testing.assert_frame_equal(actual, ordinary)
+    actual = compare(manifest)
     assert actual.fdr_method.eq("BY").all()
     assert actual.fdr_adjusted_p_value.notna().all()
+    selected = deepcopy(manifest)
     selected["sample_role"] = "validation"
     selected["selection_is_exploratory"] = True
     assert a_share._inference_blocker(selected) == "exploratory_selection_excluded"

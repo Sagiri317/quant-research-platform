@@ -257,19 +257,29 @@ def build_a_share_statistics_tables(
     manifest = dataset_session.manifest if dataset_session is not None else None
     dataset_id = str(dataset_spec.data_id)
     selection_group = config.get("selection_group", "explicit")
+    retrospective_entries = {
+        (period, family)
+        for (period, family), entry in model_entries.items()
+        if (cutoff := (entry.get("model_facts") or {}).get("selection_cutoff"))
+        is not None
+        and pd.Timestamp(cutoff) >= _statistics_window_bounds(period_windows[period])[0]
+    }
+    retrospective_selections = {
+        period
+        for period, selection in selections.items()
+        if selection.get("cutoff") is not None
+        and pd.Timestamp(selection["cutoff"])
+        >= _statistics_window_bounds(period_windows[period])[0]
+    }
+    selection_reason = "selection_reuses_evaluation_window"
     inference_blocker = (
-        "selection_reuses_evaluation_window"
-        if any(
-            (cutoff := (entry.get("model_facts") or {}).get("selection_cutoff"))
-            is not None
-            and pd.Timestamp(cutoff)
-            >= _statistics_window_bounds(period_windows[period])[0]
-            for (period, _family), entry in model_entries.items()
-        )
+        selection_reason if retrospective_entries or retrospective_selections else None
+    )
+    selected_path_blocker = (
+        selection_reason
+        if retrospective_selections
         or any(
-            selection.get("cutoff") is not None
-            and pd.Timestamp(selection["cutoff"])
-            >= _statistics_window_bounds(period_windows[period])[0]
+            (period, selection["selected_family_id"]) in retrospective_entries
             for period, selection in selections.items()
         )
         else None
@@ -630,8 +640,6 @@ def build_a_share_statistics_tables(
             [(prediction_id, _PREDICTION_COLUMN)]
             if selections
             else list(family_columns.items())
-            if "analyses" in config
-            else []
         )
         for identity, column in summaries:
             prediction_summaries.append(
@@ -640,7 +648,15 @@ def build_a_share_statistics_tables(
                         columns={column: _PREDICTION_COLUMN}
                     ),
                     prediction_id=identity,
-                    inference_blocker=inference_blocker,
+                    inference_blocker=(
+                        selected_path_blocker
+                        if selections
+                        else selection_reason
+                        if any(
+                            family == identity for _, family in retrospective_entries
+                        )
+                        else None
+                    ),
                     max_lags=max_lags if "prediction_hac" in analyses else None,
                     block_size=block_size
                     if "prediction_bootstrap" in analyses
@@ -2042,7 +2058,7 @@ def _factor_statistics_from_evaluations(config):
             "input_date_counts": input_counts,
             "inference_scope": "exploratory",
             "formal_selection_qualification": "not_established",
-            "hac_lag_unit": "observed_dates_with_defined_statistic",
+            "hac_lag_unit": "supplied_complete_input_date_clock",
             "multiple_testing_scope": (
                 "all_defined_signals_labels_strata_scopes_ic_rankic_in_explicit_inputs"
             ),

@@ -23,7 +23,6 @@ def test_saved_prediction_account_does_not_depend_on_historical_x(
         frames=frames,
         fee_frame=fees,
         output_window=window,
-        model_inputs=("feature_x",),
     )
     expected = pd.concat(list(baseline), ignore_index=True)
     frames["dataset"] = frames["dataset"].copy()
@@ -37,7 +36,6 @@ def test_saved_prediction_account_does_not_depend_on_historical_x(
         frames=frames,
         fee_frame=fees,
         output_window=window,
-        model_inputs=("feature_x",),
     )
     actual = pd.concat(list(changed), ignore_index=True)
     pd.testing.assert_frame_equal(actual, expected)

@@ -1154,20 +1154,33 @@ def _record_depth_snapshot(
         connection_id=connection_id,
         segment_id=segment_id,
     )
-    reconstructor.bootstrap(
-        normalize_recorder_record(
-            {
-                "capture_seq": capture_seq,
-                "tick_size": reconstructor.price_unit,
-                "market_type": market_type,
-                "payload": snapshot,
-                "receive_time": received,
-                "receive_monotonic_ns": monotonic_ns,
-                "connection_id": connection_id,
-                "segment_id": segment_id,
-            }
+    try:
+        reconstructor.bootstrap(
+            normalize_recorder_record(
+                {
+                    "capture_seq": capture_seq,
+                    "tick_size": reconstructor.price_unit,
+                    "market_type": market_type,
+                    "payload": snapshot,
+                    "receive_time": received,
+                    "receive_monotonic_ns": monotonic_ns,
+                    "connection_id": connection_id,
+                    "segment_id": segment_id,
+                }
+            )
         )
-    )
+    except ValueError as error:
+        # The raw snapshot and its connection remain evidence. Only known
+        # book-local failures use the existing bounded reconnect backoff;
+        # structural, identity, clock and storage failures still abort the run.
+        if str(error) not in {
+            "binance_replay_snapshot_invalid_numeric",
+            "binance_replay_snapshot_one_sided_book",
+            "binance_replay_snapshot_crossed_book",
+            "binance_replay_snapshot_unsupported_coverage",
+        }:
+            raise
+        raise _InvalidPayload() from error
 
 
 def record(config: RecorderConfig) -> dict[str, Any]:

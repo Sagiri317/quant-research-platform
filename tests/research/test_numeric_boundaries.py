@@ -589,7 +589,7 @@ def test_optimizer_blocks_genuinely_negative_risk_inside_psd_admission():
         )
 
 
-def test_optimizer_risk_roundoff_uses_exact_form_and_rejects_nonfinite():
+def test_optimizer_risk_roundoff_is_bounded_and_rejects_nonfinite():
     from quant_research_platform.research.portfolios.optimizer import _risk_variances
 
     active = np.array([0.01, -0.01])

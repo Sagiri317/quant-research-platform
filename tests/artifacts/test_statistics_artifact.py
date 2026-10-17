@@ -1221,23 +1221,11 @@ def test_prediction_loss_reasons_are_validated_on_write_and_read(
 def test_paired_group_fdr_methods_reach_native_artifact(
     tmp_path, tables, metadata, method
 ):
-    from contextlib import contextmanager
-
     from quant_research_platform.research.statistics_production import (
         _paired_group_rankic,
     )
 
     metadata = _test_statistics_metadata(metadata, tables)
-    bound = {
-        **metadata,
-        "selection_group": "global",
-        "coverage_basis": "model_prediction_domain",
-        "evaluation_axis": "cross_sectional",
-        "column_roles": {"label": "label"},
-        "column_units": {"label": "decimal_return"},
-        "evaluation": {"primary_label": "label"},
-        "selection_cutoffs": ["2022-12-31"],
-    }
     left = pd.DataFrame(
         {
             "timestamp": pd.date_range("2023-01-02", periods=8),
@@ -1251,14 +1239,6 @@ def test_paired_group_fdr_methods_reach_native_artifact(
     )
     right = left.copy()
     right["loss"] += [0.1, 0.05, 0.07, -0.03, 0.1, 0.02, -0.01, 0.09]
-
-    class GlobalStatistics:
-        metadata = bound
-
-        @contextmanager
-        def table(self, name):
-            assert name == "model_losses.parquet"
-            yield left
 
     policy = {"fdr_method": method, "alpha": 0.05, "seed": 42, "confidence": 0.95}
     config = {

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import stat
 from collections.abc import Iterable, Iterator
 from pathlib import Path
@@ -100,7 +99,6 @@ STRING_CODE_DTYPES = {
     "Fenddt": str,
     "InstitutionID": str,
 }
-INDEX_INFO_CODE_RE = re.compile("^[0-9A-Za-z_.-]{1,32}$")
 INDEX_INFO_SOURCE_CODE_ENUMS = (
     frozenset({"1", "2", "3", "4"}),
     frozenset({"1", "2", "3", "4"}),
@@ -161,8 +159,6 @@ def iter_private_export_chunks(
     chunksize: int,
     expected_identity: DatasetFileIdentity | None = None,
     content_hashes: list[str] | None = None,
-    start_date: str | None = None,
-    end_date: str | None = None,
 ) -> Iterator[pd.DataFrame]:
     if type(dataset) is not str or dataset not in RAW_TABLE_CONTRACTS:
         raise ValueError("unknown_csmar_dataset")
@@ -191,16 +187,10 @@ def iter_private_export_chunks(
                 if not emitted:
                     if header is None:
                         raise ValueError("malformed_csmar_csv_row")
-                    yield _raw_frame([], header, dataset=dataset)
+                    yield _raw_frame([], header)
                 return
             emitted = True
-            frame = _raw_frame(
-                pending,
-                header,
-                dataset=dataset,
-                start_date=start_date,
-                end_date=end_date,
-            )
+            frame = _raw_frame(pending, header)
             try:
                 yield frame
             except GeneratorExit:
@@ -276,10 +266,6 @@ def _iter_csv_records(
 def _raw_frame(
     rows: list[list[str]],
     header: list[str],
-    *,
-    dataset: str,
-    start_date: str | None = None,
-    end_date: str | None = None,
 ) -> pd.DataFrame:
     frame = pd.DataFrame(rows, columns=header)
     frame.replace("", pd.NA, inplace=True)

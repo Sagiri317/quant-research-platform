@@ -130,10 +130,9 @@ def test_hft_direct_preparation_assembly_and_fractional_window(tmp_path):
     assert read_dataset_manifest_evidence(root)["row_count"] == len(frame)
 
 
-@pytest.mark.parametrize("batch_rows", [2, 3, 4, 9])
 @pytest.mark.parametrize("monotonic", [None, 2**53 + 1])
 def test_independent_panel_persistence_preserves_source_nullable_dtypes(
-    tmp_path, batch_rows, monotonic
+    tmp_path, monotonic
 ):
     from dataclasses import replace
 

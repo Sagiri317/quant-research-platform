@@ -1,15 +1,17 @@
 """Persisted research inputs to the event-driven perpetual ledger."""
 
 import json
+import sqlite3
 from array import array
 from collections import deque
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 from dataclasses import replace
 from fractions import Fraction
 from functools import partial
 from itertools import chain, groupby, islice, zip_longest
 from math import isfinite
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
 import numpy as np
@@ -155,6 +157,74 @@ def _prediction_evidence(
     )
 
 
+def _context_session(inputs, input_spec, window):
+    """Shared market and decision-axis boundary for every execution consumer."""
+    options = _dataset_input_options(inputs)
+    if input_spec is not None:
+        options.update(
+            _dataset_input_options(
+                {"path": options["dataset_root"], "spec": input_spec}
+            )
+        )
+    session = open_dataset_session(**options).filtered_view(window)
+    validate_input_market(session.spec, "crypto")
+    _validate_asset_time_key(session.spec["primary_key"], session.spec["column_roles"])
+    return session, options
+
+
+def _fixed_maker_rows(inputs, input_spec, window, asset_id, fold_id):
+    session, _options = _context_session(inputs, input_spec, window)
+    columns = ("timestamp", "asset_id", *HFT_EXECUTION_CONTEXT_COLUMNS)
+    if set(columns) - set(session.logical_columns):
+        raise ValueError("crypto_prediction_required_columns_excluded")
+    session = session.projected_view(columns)
+    # Physical members may be arbitrarily interleaved. An operation-local B-tree
+    # keeps ordering and exact selected-axis uniqueness off the Python heap even
+    # for long 100ms histories. It is removed on success, error or early close.
+    with TemporaryDirectory(prefix="qrp-maker-") as temporary:
+        with closing(
+            sqlite3.connect(str(Path(temporary) / "decisions.sqlite"))
+        ) as rows:
+            rows.execute("PRAGMA cache_size = -2048")
+            rows.execute(
+                "CREATE TABLE decisions (timestamp INTEGER PRIMARY KEY, "
+                "book_segment_id TEXT, trade_observation_id TEXT, segment_id TEXT)"
+            )
+            with closing_iterator(iter_dataset_chunks(session)) as chunks:
+                for frame in chunks:
+                    selected = frame.loc[frame.asset_id.eq(asset_id)]
+                    try:
+                        rows.executemany(
+                            "INSERT INTO decisions VALUES (?, ?, ?, ?)",
+                            (
+                                (
+                                    pd.Timestamp(row.timestamp).value,
+                                    *(
+                                        value if isinstance(value, str) else None
+                                        for value in (
+                                            getattr(row, column)
+                                            for column in HFT_EXECUTION_CONTEXT_COLUMNS
+                                        )
+                                    ),
+                                )
+                                for row in selected.itertuples(index=False)
+                            ),
+                        )
+                    except sqlite3.IntegrityError as exc:
+                        raise ValueError("duplicate_prediction_input_keys") from exc
+            for stamp, book, trades, segment in rows.execute(
+                "SELECT * FROM decisions ORDER BY timestamp"
+            ):
+                if all((book, trades, segment)):
+                    yield {
+                        "timestamp_ms": stamp // 1_000_000,
+                        "asset_id": asset_id,
+                        "fold_id": fold_id,
+                        "book_segment_id": book,
+                        "trade_observation_id": trades,
+                    }
+
+
 def _prediction_rows(
     *,
     inputs,
@@ -181,14 +251,7 @@ def _prediction_rows(
     if is_rank != (calibration is not None):
         raise ValueError("crypto_prediction_score_units_invalid")
     target = facts["model"]["target_column"]
-    options = _dataset_input_options(inputs)
-    if input_spec is not None:
-        options.update(
-            _dataset_input_options(
-                {"path": options["dataset_root"], "spec": input_spec}
-            )
-        )
-    session = open_dataset_session(**options).filtered_view(window)
+    session, options = _context_session(inputs, input_spec, window)
     availability = session.spec.get("label_availability_columns", {}).get(
         target, training_availability_columns(target)[0]
     )
@@ -218,8 +281,6 @@ def _prediction_rows(
     ):
         raise ValueError("crypto_prediction_required_columns_excluded")
     session = session.projected_view(columns)
-    validate_input_market(session.spec, "crypto")
-    _validate_asset_time_key(session.spec["primary_key"], session.spec["column_roles"])
     if (
         sample_role == "validation"
         and session.spec["column_roles"].get(target) != "label"
@@ -239,7 +300,7 @@ def _prediction_rows(
             found = positions >= 0
             required = frame.loc[found]
             positions = positions[found]
-            if matched[positions].any():
+            if matched[positions].any() or len(np.unique(positions)) != len(positions):
                 raise ValueError("duplicate_prediction_input_keys")
             matched[positions] = True
             # Context members need not be chronological. Buffer only selected keys
@@ -1346,37 +1407,13 @@ def backtest_maker(config):
                     for _row in stream:
                         pass
         else:
-            options = _dataset_input_options(config["inputs"])
-            if config.get("input_spec") is not None:
-                options.update(
-                    _dataset_input_options(
-                        {"path": options["dataset_root"], "spec": config["input_spec"]}
-                    )
-                )
-            session = open_dataset_session(**options).filtered_view(window)
-            columns = ("timestamp", "asset_id", *HFT_EXECUTION_CONTEXT_COLUMNS)
-            if set(columns) - set(session.logical_columns):
-                raise ValueError("crypto_prediction_required_columns_excluded")
-            session = session.projected_view(columns)
-            chunks = iter_dataset_chunks(session)
-            with closing_iterator(chunks):
-                for frame in chunks:
-                    for row in frame.itertuples(index=False):
-                        if row.asset_id == config["asset_id"] and all(
-                            isinstance(getattr(row, col), str) and getattr(row, col)
-                            for col in HFT_EXECUTION_CONTEXT_COLUMNS
-                        ):
-                            yield {
-                                "timestamp_ms": pd.Timestamp(row.timestamp).value
-                                // 1_000_000,
-                                "asset_id": config["asset_id"],
-                                "fold_id": fold_id,
-                                **{
-                                    column: getattr(row, column)
-                                    for column in HFT_EXECUTION_CONTEXT_COLUMNS
-                                    if column != "segment_id"
-                                },
-                            }
+            yield from _fixed_maker_rows(
+                config["inputs"],
+                config.get("input_spec"),
+                window,
+                config["asset_id"],
+                fold_id,
+            )
 
     def produce(*, on_ledger=None, on_episode=None):
         symbol = config["symbol"]
@@ -1478,58 +1515,7 @@ def _calibration_samples(artifact, fold_id):
                 return
 
 
-def _calibration_events(artifact, fold_id):
-    with closing_iterator(
-        _calibration_rows(
-            artifact, "crypto_maker_events.parquet", (("fold_id", "==", fold_id),)
-        )
-    ) as rows:
-        for event_id, group in groupby(rows, key=lambda row: row.event_id):
-            first = next(group)
-            if first.event_kind == "book":
-                bids, asks = [], []
-                bounds = {}
-                for row in chain((first,), group):
-                    (bids if row.side == "buy" else asks).append(
-                        (int(row.price_index), float(row.quantity))
-                    )
-                    bounds[row.side] = int(row.known_price_bound) or None
-                _yield_value = SimpleNamespace(
-                    kind="book",
-                    event_id=event_id,
-                    event_at=first.event_at.value,
-                    segment_id=first.context_id,
-                    bids=tuple(bids),
-                    asks=tuple(asks),
-                    known_bid_floor_tick=bounds["buy"],
-                    known_ask_ceiling_tick=bounds["sell"],
-                )
-                try:
-                    yield _yield_value
-                except GeneratorExit:
-                    return
-            else:
-                _yield_value = SimpleNamespace(
-                    kind=first.event_kind,
-                    event_id=event_id,
-                    event_at=first.event_at.value,
-                    segment_id=first.context_id,
-                    observation_id=first.context_id,
-                    price_index=None
-                    if pd.isna(first.price_index)
-                    else int(first.price_index),
-                    visible_quantity=None
-                    if pd.isna(first.quantity)
-                    else float(first.quantity),
-                    buyer_is_maker=first.side == "buy",
-                )
-                try:
-                    yield _yield_value
-                except GeneratorExit:
-                    return
-
-
-def _calibration_headers(artifact, fold_id, cutoff):
+def _calibration_events(artifact, fold_id, cutoff=None):
     expected = 0
     previous_time = None
     with closing_iterator(
@@ -1542,15 +1528,16 @@ def _calibration_headers(artifact, fold_id, cutoff):
             stamp = first.event_at.value
             if (
                 event_id != expected
-                or stamp > cutoff
+                or cutoff is not None
+                and stamp > cutoff
                 or previous_time is not None
                 and stamp < previous_time
             ):
                 raise ValueError("crypto_calibration_event_order_invalid")
             expected += 1
             previous_time = stamp
-            counts = {"buy": 0, "sell": 0}
-            best, last, bounds = {}, {}, {}
+            bounds = {}
+            levels = {"buy": [], "sell": []}
             row_count = 0
             for row in chain((first,), group):
                 row_count += 1
@@ -1567,13 +1554,13 @@ def _calibration_headers(artifact, fold_id, cutoff):
                     raise ValueError("crypto_calibration_event_invalid")
                 if row.event_kind == "book":
                     if (
-                        row.side not in counts
+                        row.side not in levels
                         or not row.context_id
                         or row.price_index <= 0
                         or row.quantity <= 0
                     ):
                         raise ValueError("crypto_calibration_event_invalid")
-                    if row.level_index != counts[row.side]:
+                    if row.level_index != len(levels[row.side]):
                         raise ValueError("crypto_calibration_book_invalid")
                     if row.known_price_bound and (
                         row.known_price_bound > row.price_index
@@ -1581,24 +1568,22 @@ def _calibration_headers(artifact, fold_id, cutoff):
                         else row.known_price_bound < row.price_index
                     ):
                         raise ValueError("crypto_calibration_book_invalid")
-                    if counts[row.side]:
+                    if levels[row.side]:
                         if row.known_price_bound != bounds[row.side]:
                             raise ValueError("crypto_calibration_book_invalid")
                         if (
-                            row.price_index >= last[row.side]
+                            row.price_index >= levels[row.side][-1][0]
                             if row.side == "buy"
-                            else row.price_index <= last[row.side]
+                            else row.price_index <= levels[row.side][-1][0]
                         ):
                             raise ValueError("crypto_calibration_book_invalid")
                     else:
-                        best[row.side] = row.price_index
                         bounds[row.side] = row.known_price_bound
-                    last[row.side] = row.price_index
-                    counts[row.side] += 1
+                    levels[row.side].append((int(row.price_index), float(row.quantity)))
                 elif row.event_kind == "trade":
                     if (
                         row_count != 1
-                        or row.side not in counts
+                        or row.side not in levels
                         or not row.context_id
                         or (not pd.isna(row.price_index) and row.price_index <= 0)
                         or row.level_index != 0
@@ -1618,15 +1603,27 @@ def _calibration_headers(artifact, fold_id, cutoff):
                 else:
                     raise ValueError("crypto_calibration_event_invalid")
             if first.event_kind == "book" and (
-                not all(counts.values()) or best["buy"] >= best["sell"]
+                not all(levels.values()) or levels["buy"][0][0] >= levels["sell"][0][0]
             ):
                 raise ValueError("crypto_calibration_book_invalid")
             _yield_value = SimpleNamespace(
                 event_id=event_id,
                 event_at=stamp,
                 kind=first.event_kind,
-                context=first.context_id,
+                segment_id=first.context_id,
+                observation_id=first.context_id,
                 row_count=row_count,
+                bids=tuple(levels["buy"]),
+                asks=tuple(levels["sell"]),
+                known_bid_floor_tick=int(bounds.get("buy", 0)) or None,
+                known_ask_ceiling_tick=int(bounds.get("sell", 0)) or None,
+                price_index=None
+                if pd.isna(first.price_index)
+                else int(first.price_index),
+                visible_quantity=None
+                if pd.isna(first.quantity)
+                else float(first.quantity),
+                buyer_is_maker=first.side == "buy",
             )
             try:
                 yield _yield_value
@@ -1670,7 +1667,9 @@ def validate_maker_calibration(artifact, metadata):
         price_unit = validate_price_unit(summary.price_unit.iloc[0])
         if not summary.price_unit.eq(price_unit).all():
             raise ValueError("crypto_calibration_price_unit_invalid")
-    totals = dict.fromkeys(("samples", "events", "calibration"), 0)
+    if not summary.fold_id.isin(folds).all():
+        raise ValueError("crypto_calibration_keys_invalid")
+    totals = dict.fromkeys(("samples", "events"), 0)
     paired_columns = tuple(
         column
         for column in STATISTICS_TABLE_COLUMNS["crypto_maker_samples.parquet"]
@@ -1678,31 +1677,17 @@ def validate_maker_calibration(artifact, metadata):
     )
     for fold_id, (sample_window, cutoff_at) in folds.items():
         summaries = {}
-        with closing_iterator(
-            _calibration_rows(
-                artifact,
-                "crypto_maker_calibration.parquet",
-                (("fold_id", "==", fold_id),),
-            )
-        ) as rows:
-            for row in rows:
-                if row.side not in ("buy", "sell") or row.side in summaries:
-                    raise ValueError("crypto_calibration_keys_invalid")
-                summaries[row.side] = row
+        for row in summary.loc[summary.fold_id.eq(fold_id)].itertuples(index=False):
+            if row.side not in ("buy", "sell") or row.side in summaries:
+                raise ValueError("crypto_calibration_keys_invalid")
+            summaries[row.side] = row
         if set(summaries) != {"buy", "sell"}:
             raise ValueError("crypto_calibration_keys_invalid")
-        totals["calibration"] += 2
         cutoff = cutoff_at.value
         beginning = pd.Timestamp(sample_window.start).value
         last_decision = pd.Timestamp(sample_window.end).value
         counts = {side: [0, 0, 0] for side in ("buy", "sell")}
         with closing_iterator(ExitStack()) as reads:
-            starts = reads.enter_context(
-                closing_iterator(_calibration_headers(artifact, fold_id, cutoff))
-            )
-            ends = reads.enter_context(
-                closing_iterator(_calibration_headers(artifact, fold_id, cutoff))
-            )
             samples = [
                 reads.enter_context(
                     closing_iterator(
@@ -1721,14 +1706,11 @@ def validate_maker_calibration(artifact, metadata):
                 price_unit=price_unit,
             )
             native_events = reads.enter_context(
-                closing_iterator(_calibration_events(artifact, fold_id))
+                closing_iterator(_calibration_events(artifact, fold_id, cutoff))
             )
             window = deque()
-            native_count = 0
-            initial_state = None
-            start_header = next(starts, None)
-            end_header = next(ends, None)
-            previous_start = previous_end = latest_state = None
+            initial_state = previous_start = None
+            event = next(native_events, None)
             for sample_id, pair in enumerate(zip_longest(*samples)):
                 buy, sell = pair
                 if (
@@ -1777,48 +1759,45 @@ def validate_maker_calibration(artifact, metadata):
                 )
                 if not 0 <= initial < start <= stop:
                     raise ValueError("crypto_calibration_event_coordinates_invalid")
-                while start_header is not None and start_header.event_id < start:
-                    previous_start = start_header
-                    if start_header.kind in ("book", "boundary"):
-                        latest_state = start_header
-                    start_header = next(starts, None)
+                # Retain only the rolling response window plus its initial book.
+                # Header/coordinate checks and replay share this decoded traversal.
+                while window and window[0].event_id < start:
+                    previous_start = window.popleft()
+                    if previous_start.kind in ("book", "boundary"):
+                        initial_state = previous_start
+                while event is not None and event.event_id < start:
+                    previous_start = event
+                    if event.kind in ("book", "boundary"):
+                        initial_state = event
+                    totals["events"] += event.row_count
+                    event = next(native_events, None)
+                start_header = window[0] if window else event
                 if (
                     previous_start is None
                     or previous_start.event_id != start - 1
-                    or latest_state is None
-                    or latest_state.event_id != initial
-                    or latest_state.kind != "book"
-                    or latest_state.context != buy.book_segment_id
+                    or initial_state is None
+                    or initial_state.event_id != initial
+                    or initial_state.kind != "book"
+                    or initial_state.segment_id != buy.book_segment_id
                     or previous_start.event_at > decision
                     or start_header is not None
                     and start_header.event_at <= decision
                 ):
                     raise ValueError("crypto_calibration_event_coordinates_invalid")
-                while end_header is not None and end_header.event_id < stop:
-                    previous_end = end_header
-                    totals["events"] += end_header.row_count
-                    end_header = next(ends, None)
+                while event is not None and event.event_id < stop:
+                    window.append(event)
+                    totals["events"] += event.row_count
+                    event = next(native_events, None)
+                previous_end = window[-1] if window else previous_start
                 if (
                     previous_end is None
                     or previous_end.event_id != stop - 1
                     or stop > start
                     and previous_end.event_at >= expiry
-                    or end_header is not None
-                    and end_header.event_at < expiry
+                    or event is not None
+                    and event.event_at < expiry
                 ):
                     raise ValueError("crypto_calibration_event_coordinates_invalid")
-                while window and window[0].event_id < start:
-                    event = window.popleft()
-                    if event.kind in ("book", "boundary"):
-                        initial_state = event
-                while native_count < stop:
-                    event = next(native_events)
-                    native_count += 1
-                    if event.event_id < start:
-                        if event.kind in ("book", "boundary"):
-                            initial_state = event
-                    else:
-                        window.append(event)
                 for row in pair:
                     sample = row._asdict()
                     sample["decision_at"] = decision
@@ -1878,11 +1857,9 @@ def validate_maker_calibration(artifact, metadata):
                         row.terminal_reason == "post_only_crossing_rejected"
                     )
                     totals["samples"] += 1
-            while end_header is not None:
-                totals["events"] += end_header.row_count
-                end_header = next(ends, None)
-            for _event in native_events:
-                pass
+            while event is not None:
+                totals["events"] += event.row_count
+                event = next(native_events, None)
         for side, row in summaries.items():
             count, zero, rejected = counts[side]
             if (

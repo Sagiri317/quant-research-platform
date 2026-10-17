@@ -138,9 +138,9 @@ def test_relocated_source_can_reduce_existing_daily_facts(tmp_path):
             "statistics": {"hac_lag": 20, "fdr_method": "BY", "fdr_alpha": 0.05},
         }
     )
-    with read_statistics_artifact(root).table(
-        "factor_stratified_diagnostics.parquet"
-    ) as saved:
+    artifact = read_statistics_artifact(root)
+    assert artifact.metadata["hac_lag_unit"] == "supplied_complete_input_date_clock"
+    with artifact.table("factor_stratified_diagnostics.parquet") as saved:
         assert set(saved.sample_scope) == {"own", "common"}
 
 
@@ -451,3 +451,165 @@ def test_native_evaluation_ignores_null_payload_and_dictionary_encoding(
             alternative_tables[name].sort_values(keys).reset_index(drop=True),
             check_exact=True,
         )
+
+
+def test_public_prediction_inference_is_local_to_consumed_family(tmp_path):
+    from quant_research_platform.artifacts.outputs.prediction import (
+        read_predictions,
+        write_prediction_outputs,
+    )
+    from tests.research.test_prediction_runner_model_selection import candidates
+
+    _, scoring = candidates(tmp_path)
+    paths = []
+    for index, path in enumerate(scoring["predictions"]):
+        frame, metadata = read_predictions(path)
+        # Nonconstant daily RankIC makes HAC defined for the causal family.
+        middle = frame.timestamp.eq(pd.Timestamp("2020-01-05"))
+        for column in ("prediction_score", "prediction_rank_score"):
+            frame.loc[middle, column] *= -1
+        metadata["model_facts"]["selection_cutoff"] = "2020-01-03"
+        if index:
+            # This family was selected during the requested evaluation period,
+            # but its own saved forecasts still follow its actual fitting time.
+            metadata["model_facts"]["selection_cutoff"] = "2020-01-04"
+            metadata["model_facts"]["fit_cutoff"] = "2020-01-04"
+            metadata["prediction_window"]["start"] = "2020-01-05"
+            frame = frame.loc[frame.timestamp.ge(pd.Timestamp("2020-01-05"))]
+            metadata.pop("prediction_rows")
+        paths.append(
+            str(
+                write_prediction_outputs(
+                    output_path=tmp_path / f"saved-{index}",
+                    output_chunks=[frame],
+                    metadata=metadata,
+                )
+            )
+        )
+    config = {
+        "dataset": scoring["labels"],
+        "input_spec": scoring["label_spec"],
+        "window": scoring["scoring_window"],
+        "family_ids": scoring["candidate_ids"],
+        "comparison_model_id": scoring["candidate_ids"][0],
+        "evaluation": {"primary_label": "label"},
+        "analyses": [
+            "prediction_hac",
+            "prediction_bootstrap",
+            "model_comparison",
+            "spa_reality_check",
+        ],
+        "statistics": {"hac_lag": 0, "bootstrap_block": 1, "bootstrap_repetitions": 10},
+        "periods": [
+            {
+                "period_id": "explicit",
+                "window": scoring["scoring_window"],
+                "predictions": paths,
+            }
+        ],
+    }
+    both = read_statistics_artifact(
+        production.model_statistics({**config, "output": str(tmp_path / "both")})
+    )
+    single = read_statistics_artifact(
+        production.model_statistics(
+            {
+                **config,
+                "output": str(tmp_path / "single"),
+                "analyses": ["prediction_hac", "prediction_bootstrap"],
+                "family_ids": config["family_ids"][:1],
+                "periods": [{**config["periods"][0], "predictions": paths[:1]}],
+            }
+        )
+    )
+    with (
+        both.table("prediction_diagnostics.parquet") as mixed,
+        single.table("prediction_diagnostics.parquet") as alone,
+    ):
+        causal = mixed.loc[mixed.prediction_id.eq(config["family_ids"][0])]
+        pd.testing.assert_frame_equal(
+            causal.reset_index(drop=True), alone, check_exact=True
+        )
+        assert causal.status.tolist() == ["DEFINED"]
+        assert causal.bootstrap_status.tolist() == ["DEFINED"]
+        retrospective = mixed.loc[mixed.prediction_id.eq(config["family_ids"][1])]
+        assert retrospective.reason.tolist() == ["selection_reuses_evaluation_window"]
+        assert retrospective.bootstrap_reason.tolist() == [
+            "selection_reuses_evaluation_window"
+        ]
+        assert retrospective["mean"].notna().all()
+    for member in ("model_comparison.parquet", "model_reality_checks.parquet"):
+        with both.table(member) as joint:
+            assert joint.status.eq("UNDEFINED").all()
+            assert joint.reason.eq("selection_reuses_evaluation_window").all()
+
+
+@pytest.mark.parametrize(
+    "retrospective", ["unselected_family", "selected_family", "selection"]
+)
+def test_selected_prediction_checks_only_its_selection_path(tmp_path, retrospective):
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.storage.datasets.reading import open_dataset_session
+    from tests.helpers.statistics_artifacts import (
+        model_statistics_inputs,
+        statistics_config,
+    )
+    from tests.research.test_direct_statistics import _factor_tables
+    from tests.research.test_statistics_production import _PredictionLookup
+
+    _, metadata, dates = _factor_tables(tmp_path)
+    session = open_dataset_session(tmp_path / "input")
+    from tests.helpers.research_specs import make_demo_research_dataset_spec
+
+    spec = make_demo_research_dataset_spec(
+        data_id="direct_factor",
+        factor_columns=("factor",),
+        label_columns=("forward_return_20d", "forward_return_20d_available_at"),
+        filter_columns=("eligible",),
+        context_columns=("total_market_cap",),
+    )
+    config = statistics_config(factors=["factor"])
+    config["statistics"] = {
+        "hac_lag": 0,
+        "bootstrap_block": 1,
+        "bootstrap_repetitions": 10,
+    }
+    config["analyses"] = ["prediction_hac", "prediction_bootstrap", "model_comparison"]
+    config["label_cutoff"] = "2021-01-01"
+    window = TimeWindow(dates[0].date(), dates[-1].date())
+    inputs = model_statistics_inputs(spec, config, window, families=("chosen", "other"))
+    if retrospective == "selection":
+        inputs["selections"]["explicit_period"]["cutoff"] = str(dates[-1])
+    else:
+        family = "chosen" if retrospective == "selected_family" else "other"
+        inputs["model_entries"]["explicit_period", family]["model_facts"][
+            "selection_cutoff"
+        ] = str(dates[-1])
+    tables = production.build_a_share_statistics_tables(
+        dataset_path=tmp_path / "input",
+        dataset_spec=spec,
+        dataset_session=session,
+        prediction_id="chosen-path",
+        config=config,
+        time_window=window,
+        prediction_lookup=_PredictionLookup(),
+        **inputs,
+    )
+    artifact = read_statistics_artifact(
+        write_statistics_artifact(
+            tmp_path / "selected-path",
+            metadata=metadata,
+            tables=tables,
+        )
+    )
+    with artifact.table("prediction_diagnostics.parquet") as saved:
+        if retrospective == "unselected_family":
+            assert saved.status.tolist() == ["DEFINED"]
+            assert saved.bootstrap_status.tolist() == ["DEFINED"]
+        else:
+            assert saved.reason.tolist() == ["selection_reuses_evaluation_window"]
+            assert saved.bootstrap_reason.tolist() == [
+                "selection_reuses_evaluation_window"
+            ]
+    with artifact.table("model_comparison.parquet") as joint:
+        assert joint.reason.eq("selection_reuses_evaluation_window").all()

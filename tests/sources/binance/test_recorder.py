@@ -1074,8 +1074,120 @@ def test_snapshot_network_failure_preserves_cause_and_closes_connection(
     assert stats.connection_intervals == {}
 
 
+@pytest.mark.parametrize(
+    "failure", ["structure", "identity", "clock", "disk", "unknown"]
+)
+def test_snapshot_nonlocal_failures_remain_fatal(tmp_path, monkeypatch, failure):
+    from types import SimpleNamespace
+
+    attempts = []
+    payload = _snapshot_payload(100)
+    received = recorder._utc_now()
+    if failure == "structure":
+        payload["asks"] = [["100.1"]]
+    elif failure == "identity":
+        payload["lastUpdateId"] = -1
+    elif failure == "clock":
+        received = "not-a-clock"
+    writer = recorder._RunWriter(tmp_path)
+    primary = (
+        OSError("synthetic_disk_error")
+        if failure == "disk"
+        else ValueError("binance_replay_snapshot_unrecognized_failure")
+    )
+
+    def fail(*_args, **_kwargs):
+        raise primary
+
+    def connect(*_args, **_kwargs):
+        attempts.append(1)
+        return SimpleNamespace(close=lambda: None)
+
+    if failure == "disk":
+        monkeypatch.setattr(writer, "write", fail)
+    elif failure == "unknown":
+        monkeypatch.setattr(recorder.DepthReconstructor, "bootstrap", fail)
+    monkeypatch.setattr(recorder, "_connect_websocket", connect)
+    monkeypatch.setattr(
+        recorder,
+        "_http_get_json",
+        lambda *_a, **_k: (payload, received, recorder.time.monotonic_ns()),
+    )
+    stats = recorder._CaptureStats()
+    reader = recorder._StreamReader(
+        stream=FUTURES_STREAMS[0],
+        writer=writer,
+        stats=stats,
+        stop=threading.Event(),
+        config=RecorderConfig(tmp_path / "run", 1),
+        tick_size="0.1",
+    )
+    try:
+        reader._run_stream()
+    finally:
+        writer.close()
+    assert len(attempts) == 1
+    assert isinstance(reader.failure, (ValueError, OSError))
+    if failure in {"disk", "unknown"}:
+        assert reader.failure is primary
+    assert stats.connection_intervals == {}
+    assert stats.connection_errors == 0
+
+
+def test_persistent_bad_snapshot_uses_bounded_backoff(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    class Stop:
+        def __init__(self):
+            self.waits = []
+
+        def is_set(self):
+            return len(self.waits) == 4
+
+        def wait(self, seconds):
+            self.waits.append(seconds)
+
+    stop = Stop()
+    payload = _snapshot_payload(100)
+    payload["asks"][-1][1] = "-1"
+    monkeypatch.setattr(
+        recorder,
+        "_connect_websocket",
+        lambda *_a, **_k: SimpleNamespace(close=lambda: None),
+    )
+    monkeypatch.setattr(
+        recorder,
+        "_http_get_json",
+        lambda *_a, **_k: (payload, recorder._utc_now(), recorder.time.monotonic_ns()),
+    )
+    writer = recorder._RunWriter(tmp_path)
+    stats = recorder._CaptureStats(writer=writer)
+    reader = recorder._StreamReader(
+        stream=FUTURES_STREAMS[0],
+        writer=writer,
+        stats=stats,
+        stop=stop,
+        config=RecorderConfig(tmp_path / "run", 1, reconnect_max_seconds=3),
+        tick_size="0.1",
+    )
+    try:
+        reader._run_stream()
+    finally:
+        writer.close()
+    assert reader.failure is None
+    assert stop.waits == [1, 2, 3, 3]
+    assert stats.connection_errors == 4
+    assert stats.connection_intervals == {}
+    assert writer.connection_interval_manifest()["record_count"] == 4
+    assert sum(item["record_count"] for item in writer.file_manifests()) == 4
+
+
+@pytest.mark.parametrize(
+    "bad_snapshot",
+    [None, "invalid_numeric", "one_sided_book", "crossed_book", "unsupported_coverage"],
+)
 def test_recorder_recovers_exhausted_known_depth_with_new_connection_and_snapshot(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, bad_snapshot
 ):
     from collections import Counter
     from types import SimpleNamespace
@@ -1146,6 +1258,15 @@ def test_recorder_recovers_exhausted_known_depth_with_new_connection_and_snapsho
             payload = _snapshot_payload(
                 102 if recovered else 100, 900 if recovered else 1000
             )
+            if symbol == "BTCUSDT" and snapshots[symbol] == 2:
+                if bad_snapshot == "invalid_numeric":
+                    payload["asks"][-1][1] = "-1"
+                elif bad_snapshot == "one_sided_book":
+                    payload["asks"] = []
+                elif bad_snapshot == "crossed_book":
+                    payload["asks"][0][0] = "89.0"
+                elif bad_snapshot == "unsupported_coverage":
+                    payload["asks"] = payload["asks"][:1]
         return (payload, recorder._utc_now(), recorder.time.monotonic_ns())
 
     class Websocket:
@@ -1210,11 +1331,15 @@ def test_recorder_recovers_exhausted_known_depth_with_new_connection_and_snapsho
     monkeypatch.setattr(recorder, "_http_get_json", http)
     monkeypatch.setattr(recorder, "_connect_websocket", connect)
     root = tmp_path / "recording"
-    result = recorder.record(RecorderConfig(root, duration_seconds=0.2))
+    result = recorder.record(
+        RecorderConfig(root, duration_seconds=0.2, reconnect_max_seconds=0.001)
+    )
     assert recovered_recorded.is_set()
     assert result["status"] == "PARTIAL"
     assert result["capture"]["sequence_gaps"] == 0
-    assert connections == {"BTCUSDT": 2, "ETHUSDT": 1}
+    expected_segments = 3 if bad_snapshot else 2
+    assert connections == {"BTCUSDT": expected_segments, "ETHUSDT": 1}
+    assert result["capture"]["connection_errors"] == int(bad_snapshot is not None)
     assert snapshots == connections
     assert all(socket.closed.is_set() for socket in sockets)
     stats = ReconstructionStats()
@@ -1234,8 +1359,35 @@ def test_recorder_recovers_exhausted_known_depth_with_new_connection_and_snapsho
             102,
         ]
         snapshot_records = [r for r in records if r["data_kind"] == "depth_snapshot"]
-        assert len({r["connection_id"] for r in snapshot_records}) == 2
-        assert len({r["segment_id"] for r in snapshot_records}) == 2
+        assert len({r["connection_id"] for r in snapshot_records}) == expected_segments
+        assert len({r["segment_id"] for r in snapshot_records}) == expected_segments
+        if bad_snapshot == "invalid_numeric":
+            assert snapshot_records[1]["payload"]["asks"][-1][1] == "-1"
+        for symbol in ("BTCUSDT", "ETHUSDT"):
+            assert (
+                len(
+                    list(
+                        run.iter_records(
+                            symbol=symbol,
+                            market_type=FUTURES_MARKET_TYPE,
+                            data_kinds=("agg_trades",),
+                        )
+                    )
+                )
+                == 1
+            )
+        assert (
+            len(
+                list(
+                    run.iter_records(
+                        symbol="ETHUSDT",
+                        market_type=FUTURES_MARKET_TYPE,
+                        data_kinds=("depth_snapshot", "depth"),
+                    )
+                )
+            )
+            == 2
+        )
         for event in iter_reconstructed_depth(
             run, FUTURES_MARKET_TYPE, symbol="BTCUSDT", stats=stats
         ):
@@ -1247,7 +1399,7 @@ def test_recorder_recovers_exhausted_known_depth_with_new_connection_and_snapsho
     assert boundaries == ["one_sided_book", "connection_closed"]
     assert stats.valid_segments == 2
     assert stats.recovered_segments == 1
-    assert stats.one_sided_books == 1
+    assert stats.one_sided_books == 1 + (bad_snapshot == "one_sided_book")
     assert len(stats.coverage_segments) == 2
 
 

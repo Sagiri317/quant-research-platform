@@ -402,8 +402,11 @@ def normalize_raw_frame(
             }:
                 mapped[f"_invalid_{column}"] = values.notna() & ~valid
     valid_rows = pd.Series(True, index=mapped.index)
-    if "stock_code" in mapped:
-        text = mapped["stock_code"].astype("string").str.strip()
+    stock_code_column = (
+        "constituent_stock_code" if data_id == "index_weights" else "stock_code"
+    )
+    if stock_code_column in mapped:
+        text = mapped[stock_code_column].astype("string").str.strip()
         valid_rows &= text.str.fullmatch(r"[0-9]{1,6}(?:\.0)?").fillna(False)
     if "index_code" in mapped:
         valid_rows &= (
@@ -625,10 +628,6 @@ def _normalize_mapped_frame(
         result.loc[corrected, "version_identity"] = "correction@" + result.loc[
             corrected, "correction_disclosure_date"
         ].dt.strftime("%Y-%m-%d").astype("string")
-        for column in set(FINANCIAL_COLUMNS_BY_DATA_ID[data_id]).difference(
-            FINANCIAL_BASE_COLUMNS
-        ):
-            result[column] = result[column]
         result["timestamp"] = result["report_period"]
         result["source_asset_id"] = result["stock_code"]
         result.sort_values(
@@ -1027,8 +1026,8 @@ def _normalize_state_change_frame(frame: pd.DataFrame, data_id: str) -> pd.DataF
             result["trade_date"], error="invalid_trading_no_limit_date"
         ).dt.normalize()
         result["timestamp"] = result["trade_date"]
-        result["reason"] = strict_string_series(
-            result["reason"], error="invalid_trading_no_limit_reason"
+        result["reason"] = (
+            result["reason"].astype("string").str.strip().replace("", pd.NA)
         )
         return (
             result.loc[:, TRADING_NO_LIMIT_COLUMNS]
@@ -1214,6 +1213,7 @@ def _iter_normalized_interim_frames(
     # Event/reference facts must be reconciled before emission: a later file or
     # chunk can make one earlier cell unknown without erasing its event key.
     coalesce = data_id in {
+        "index_market",
         "stock_master",
         "corporate_actions",
         "financial_balance",
@@ -1245,8 +1245,6 @@ def _iter_normalized_interim_frames(
             chunksize=chunksize,
             expected_identity=expected_identity,
             content_hashes=content_hashes,
-            start_date=start_date,
-            end_date=end_date,
         )
         with closing_iterator(chunks):
             for chunk in chunks:
@@ -1322,8 +1320,12 @@ def _iter_normalized_interim_frames(
             raise ValueError("csmar_raw_export_incomplete_read")
     if pending:
         combined = pd.concat(pending, ignore_index=True)
-        exact_duplicates = int(combined.duplicated().sum())
-        combined = combined.drop_duplicates()
+        pending.clear()
+        exact_duplicate = combined.duplicated()
+        exact_duplicates = int(exact_duplicate.sum())
+        if exact_duplicates:
+            combined = combined.loc[~exact_duplicate].copy()
+        del exact_duplicate
         duplicate = combined.duplicated(list(primary_key), keep=False)
         if duplicate.any():
             if data_id == "stock_master":
@@ -1342,7 +1344,7 @@ def _iter_normalized_interim_frames(
                 distinct = (
                     combined.loc[duplicate]
                     .groupby(list(primary_key), dropna=False, sort=False)[column]
-                    .transform(lambda values: values.nunique(dropna=False))
+                    .transform("nunique", dropna=False)
                 )
                 conflict = distinct.gt(1).reindex(combined.index, fill_value=False)
                 if conflict.any():

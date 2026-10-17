@@ -517,13 +517,13 @@ def test_time_window_row_group_pruning_uses_parquet_leaf_path(
 ) -> None:
     import pyarrow.parquet as pq
 
-    original_write_table = pq.write_table
+    original_writer = pq.ParquetWriter
 
-    def write_table_with_statistics(*args, **kwargs):
+    def writer_with_statistics(*args, **kwargs):
         kwargs["write_statistics"] = True
-        return original_write_table(*args, **kwargs)
+        return original_writer(*args, **kwargs)
 
-    monkeypatch.setattr(pq, "write_table", write_table_with_statistics)
+    monkeypatch.setattr(pq, "ParquetWriter", writer_with_statistics)
     root = make_dataset_artifact_root(tmp_path, "nested_before_timestamp")
     spec = ProcessedDataSpec(
         data_id="nested_before_timestamp",

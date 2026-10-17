@@ -771,7 +771,7 @@ def _project_neutral_target(target, context, *, industry_limit=0.02, size_limit=
         or not np.allclose(matrix @ weights, right_hand_side, rtol=0.0, atol=1e-8)
         or np.any(np.abs(exposures @ (weights - b)) > limits + 1e-8)
     ):
-        raise PortfolioTargetBlocked("target_neutrality_infeasible")
+        raise PortfolioTargetBlocked("target_neutrality_solution_invalid")
     return pd.Series(
         weights, index=context.index, dtype="float64", name="target_weight"
     )

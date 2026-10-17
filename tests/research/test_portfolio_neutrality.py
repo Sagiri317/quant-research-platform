@@ -53,13 +53,25 @@ def test_projection_handcheck_includes_unpredicted_benchmark_assets(
         assert float(weights @ np.log(caps)) == pytest.approx(2 / 3 * np.log(2))
 
 
-def test_projection_failure_does_not_silently_relax(monkeypatch):
+@pytest.mark.parametrize(
+    "solution,reason",
+    [
+        (SimpleNamespace(success=False), "target_neutrality_solver_failed"),
+        (
+            SimpleNamespace(success=True, x=np.array([np.nan, 0.0])),
+            "target_neutrality_solution_invalid",
+        ),
+        (
+            SimpleNamespace(success=True, x=np.array([1.0, 1.0])),
+            "target_neutrality_solution_invalid",
+        ),
+    ],
+)
+def test_projection_failure_does_not_silently_relax(monkeypatch, solution, reason):
     import quant_research_platform.research.portfolios.optimizer as optimizer
 
-    monkeypatch.setattr(
-        optimizer, "minimize", lambda *a, **kw: SimpleNamespace(success=False)
-    )
-    with pytest.raises(PortfolioTargetBlocked, match="target_neutrality_solver_failed"):
+    monkeypatch.setattr(optimizer, "minimize", lambda *a, **kw: solution)
+    with pytest.raises(PortfolioTargetBlocked, match=reason):
         build_simple_target_weights(
             pd.Series({"a": 1.0, "b": 0.0}),
             eligible=pd.Series({"a": True, "b": True}),
@@ -434,7 +446,6 @@ def test_absent_cap_column_is_local_to_actual_scheduled_neutral_target(
         output_window=TimeWindow("2023-01-03", "2023-01-06"),
         candidate=candidate,
         typed_batches=True,
-        model_inputs=("total_market_cap",),
     )
     selected = list(batches)
     assert len(selected) == 2
@@ -456,7 +467,6 @@ def test_absent_cap_column_is_local_to_actual_scheduled_neutral_target(
         output_window=TimeWindow("2023-01-03", "2023-01-10"),
         candidate=candidate,
         typed_batches=True,
-        model_inputs=("total_market_cap",),
     )
     remaining = list(longer)
     assert remaining

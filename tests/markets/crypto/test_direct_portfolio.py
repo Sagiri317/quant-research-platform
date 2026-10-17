@@ -307,7 +307,7 @@ def test_explicit_maker_calibration_and_frozen_backtest(
     assert saved.metadata["execution_style"] == "maker"
 
 
-@pytest.mark.parametrize("mutation", ("missing", "extra", "rank_units"))
+@pytest.mark.parametrize("mutation", ("missing", "extra", "rank_units", "duplicate"))
 def test_prediction_consumer_preserves_full_expected_domain(
     tmp_path, monkeypatch, explicit_models, mutation
 ):
@@ -327,13 +327,19 @@ def test_prediction_consumer_preserves_full_expected_domain(
         )
     )
     assert [row["timestamp_ms"] for row in rows] == [8600, 8800, 9000]
-    if mutation == "missing":
+    if mutation in {"missing", "duplicate"}:
         chunks = portfolio.iter_dataset_chunks
 
         def without_context(session):
             with portfolio.closing_iterator(chunks(session)) as source:
                 for frame in source:
-                    yield frame.loc[frame.timestamp.ne(pd.Timestamp(8600, unit="ms"))]
+                    selected = frame.timestamp.eq(pd.Timestamp(8600, unit="ms"))
+                    if mutation == "missing":
+                        yield frame.loc[~selected]
+                    else:
+                        # A wider source PK can repeat the consumed asset/time axis
+                        # within one physical batch. Both matches must be rejected.
+                        yield pd.concat([frame, frame.loc[selected]], ignore_index=True)
 
         monkeypatch.setattr(portfolio, "iter_dataset_chunks", without_context)
     elif mutation == "extra":
@@ -344,7 +350,14 @@ def test_prediction_consumer_preserves_full_expected_domain(
         metadata["model_algorithm"] = "equal_weight_rank_ensemble"
     with pytest.raises(
         ValueError,
-        match="missing_required_prediction_keys|misaligned_persisted_prediction_keys|score_units",
+        match=(
+            "duplicate_prediction_input_keys"
+            if mutation == "duplicate"
+            else (
+                "missing_required_prediction_keys|"
+                "misaligned_persisted_prediction_keys|score_units"
+            )
+        ),
     ):
         list(
             portfolio._prediction_rows(
@@ -692,9 +705,7 @@ def test_native_calibration_preserves_unknown_trades_and_reference_relevance(
                 ),
             )
             with pytest.raises(ValueError, match="crypto_calibration_event_invalid"):
-                list(
-                    portfolio._calibration_headers(artifact, "observed", 2_700_000_000)
-                )
+                list(portfolio._calibration_events(artifact, "observed", 2_700_000_000))
     if relevant:
         return
 
@@ -1429,7 +1440,7 @@ def test_native_calibration_roundtrips_unknown_trade_price(
             lambda *a, **k: iter(damaged.itertuples(index=False)),
         )
         with pytest.raises(ValueError, match="crypto_calibration_event_invalid"):
-            list(portfolio._calibration_headers(artifact, "observed", 2_700_000_000))
+            list(portfolio._calibration_events(artifact, "observed", 2_700_000_000))
     events = list(portfolio._calibration_events(artifact, "observed"))
     assert next(event for event in events if event.kind == "trade").price_index is None
     with artifact.table("crypto_maker_calibration.parquet") as frame:
@@ -1439,3 +1450,178 @@ def test_native_calibration_roundtrips_unknown_trade_price(
             if visible_quantity
             else frame.excluded_decisions.eq(0).all()
         )
+
+
+@pytest.mark.parametrize(
+    ("market", "mode", "order"),
+    (
+        ("crypto", "continuous", "reverse"),
+        (None, "independent_segments", "interleaved"),
+        ("a_share", "continuous", "reverse"),
+    ),
+)
+def test_fixed_maker_validates_market_and_orders_native_context(
+    tmp_path, monkeypatch, market, mode, order
+):
+    from quant_research_platform.artifacts.crypto_hft import (
+        read_crypto_episode_artifact,
+    )
+    from quant_research_platform.contracts.data import ProcessedDataSpec
+
+    panel = _inputs(tmp_path)
+    _market(monkeypatch)
+    session = portfolio.open_dataset_session(panel)
+    with portfolio.closing_iterator(portfolio.iter_dataset_chunks(session)) as chunks:
+        frame = pd.concat(chunks, ignore_index=True)
+    frame = (
+        frame.iloc[::-1]
+        if order == "reverse"
+        else pd.concat([frame.iloc[1::2], frame.iloc[::2]])
+    )
+    fields = dict(
+        data_id="fixed_context",
+        frequency="tick",
+        grain="asset_timestamp",
+        column_roles=session.spec["column_roles"],
+        primary_key=("timestamp", "asset_id"),
+        partition_columns=("year",),
+    )
+    current = tmp_path / "fixed-context"
+    write_dataset(
+        current,
+        (frame.iloc[[i]] for i in range(len(frame))),
+        spec=DataSpec(**fields)
+        if market is None
+        else ProcessedDataSpec(**fields, market_id=market, kind="panel"),
+    )
+    config = {
+        "output": str(tmp_path / "fixed-ledger"),
+        "inputs": str(current),
+        "panel": str(panel),
+        "source": "explicit-source",
+        "asset_id": "btc_usdt",
+        "symbol": "BTCUSDT",
+        "prediction_window": _window(8600, 9000),
+        "execution_mode": mode,
+        "capital": asdict(
+            PortfolioCapital("maker", 1000.0, "USDT", "linear_perpetual")
+        ),
+        "execution": asdict(_maker_config()),
+        "calibration": None,
+        "models": [],
+    }
+    if market == "a_share":
+        with pytest.raises(ValueError, match="input_market_mismatch"):
+            portfolio.backtest_maker(config)
+        assert not Path(config["output"]).exists()
+        return
+    observed = []
+    execute = portfolio._execute_portfolio
+
+    def capture(**kwargs):
+        def decisions():
+            with portfolio.closing_iterator(kwargs["decisions"]) as rows:
+                for row in rows:
+                    observed.append(row["timestamp_ms"])
+                    yield row
+
+        return execute(**{**kwargs, "decisions": decisions()})
+
+    monkeypatch.setattr(portfolio, "_execute_portfolio", capture)
+    output = portfolio.backtest_maker(config)
+    assert observed == [8600, 8800, 9000]
+    summaries = []
+
+    def consume(artifact, batches):
+        summaries.append(summarize_crypto_ledger(artifact, batches))
+
+    if mode == "continuous":
+        read_portfolio_ledger_artifact(output, consume_batches=consume)
+    else:
+        read_crypto_episode_artifact(
+            output,
+            consume_episode=lambda _index, artifact, batches: consume(
+                artifact, batches
+            ),
+        )
+    assert len(summaries) == 1
+    assert summaries[0]["execution"]["selection_status"] == "COMPLETE"
+
+
+@pytest.mark.parametrize("completion", ("exhaust", "close", "duplicate"))
+def test_fixed_maker_spool_releases_resources_and_checks_actual_axis(
+    tmp_path, monkeypatch, completion
+):
+    panel = _inputs(tmp_path)
+    session = portfolio.open_dataset_session(panel)
+    with portfolio.closing_iterator(portfolio.iter_dataset_chunks(session)) as chunks:
+        frame = pd.concat(chunks, ignore_index=True)
+    fields = dict(
+        data_id="axis_context",
+        frequency="tick",
+        grain="asset_timestamp",
+        column_roles={**session.spec["column_roles"], "variant": "key"},
+        primary_key=("timestamp", "asset_id", "variant"),
+        partition_columns=("year",),
+    )
+    frame["variant"] = "a"
+    if completion == "duplicate":
+        duplicate = frame.loc[frame.timestamp.eq(pd.Timestamp(8600, unit="ms"))].copy()
+        duplicate["variant"] = "b"
+        # Even a duplicate with missing execution context must not disappear.
+        duplicate["segment_id"] = ""
+        frame = pd.concat([frame, duplicate], ignore_index=True)
+    current = tmp_path / "axis-context"
+    write_dataset(current, frame, spec=DataSpec(**fields))
+    temporary = portfolio.TemporaryDirectory
+    paths = []
+
+    def record_temporary(**kwargs):
+        directory = temporary(dir=tmp_path, **kwargs)
+        paths.append(Path(directory.name))
+        return directory
+
+    monkeypatch.setattr(portfolio, "TemporaryDirectory", record_temporary)
+    rows = portfolio._fixed_maker_rows(
+        current, None, TimeWindow(**_window(8600, 9000)), "btc_usdt", "fixed"
+    )
+    with portfolio.closing_iterator(rows):
+        if completion == "duplicate":
+            with pytest.raises(ValueError, match="duplicate_prediction_input_keys"):
+                list(rows)
+        elif completion == "close":
+            assert next(rows)["timestamp_ms"] == 8600
+            assert paths[0].is_dir()
+        else:
+            assert [row["timestamp_ms"] for row in rows] == [8600, 8800, 9000]
+    assert len(paths) == 1 and not paths[0].exists()
+
+
+def test_calibration_validation_shares_event_decode_and_summary_read(
+    independent_maker, monkeypatch
+):
+    from collections import Counter
+
+    from quant_research_platform.artifacts.statistics import StatisticsArtifact
+
+    config, _backtest = independent_maker
+    output = portfolio.calibrate_maker(config)
+    batches = StatisticsArtifact._batches
+    traversals, decoded = Counter(), Counter()
+
+    def counted(self, member, **kwargs):
+        traversals[member] += 1
+        with portfolio.closing_iterator(batches(self, member, **kwargs)) as frames:
+            for frame in frames:
+                decoded[member] += len(frame)
+                yield frame
+
+    monkeypatch.setattr(StatisticsArtifact, "_batches", counted)
+    artifact = read_statistics_artifact(
+        output, validate_tables=portfolio.validate_maker_calibration
+    )
+    with artifact.table("crypto_maker_events.parquet") as events:
+        assert decoded["crypto_maker_events.parquet"] == 2 * len(events)
+    # One validated native replay, then one necessary all-fold domain/count check.
+    assert traversals["crypto_maker_events.parquet"] == 2
+    assert traversals["crypto_maker_calibration.parquet"] == 0

@@ -137,10 +137,7 @@ class _PredictionLookup:
         values = frame["asset_id"].map({"a": 0.0, "b": 1.0}).to_numpy()
         found = bytearray(not self.missing and pd.notna(value) for value in values)
 
-        def result():
-            return (values, found)
-
-        return result()
+        return values, found
 
     def coverage_counts(self) -> tuple[int, int]:
         return (0, 1 if self.extra else 0)
@@ -265,8 +262,6 @@ def _build_producer(
     formal_dataset_window: TimeWindow | None = None,
     candidate: PortfolioCandidateSpec | None = None,
     prediction_window: TimeWindow | None = None,
-    model_inputs: tuple[str, ...] = ("float_market_cap",),
-    model_algorithm: str = "equal_weight_rank_ensemble",
     final_calibrations=None,
     frozen_calibration: production.AlphaCalibration | None = None,
     typed_batches: bool = False,
@@ -2427,8 +2422,6 @@ def test_feature_missing_held_asset_keeps_saved_prediction(
         fee_frame=fee_frame,
         output_window=output_window,
         prediction_lookup=lookup,
-        model_inputs=("feature_missing_x",),
-        model_algorithm="linear_regression",
     )
     output = pd.concat(list(chunks), ignore_index=True)
     held = output.loc[output.asset_id.eq("b")]
