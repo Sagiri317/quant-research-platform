@@ -3,6 +3,7 @@
 import copy
 import gzip
 import json
+from dataclasses import replace
 
 import numpy as np
 import pandas as pd
@@ -66,9 +67,19 @@ def _window(start=0, end=1000):
 
 
 def _panel(count=60, batch=7, coverage=None):
+    states = [_state(0), _state(count * 100, bid_index=996, ask_index=1006)]
+    # Depth-factor tests require actual ten-level observations, not partial sums.
+    states = [
+        replace(
+            state,
+            bids=state.bids + tuple((state.bids[-1][0] - i, 1.0) for i in range(1, 9)),
+            asks=state.asks + tuple((state.asks[-1][0] + i, 1.0) for i in range(1, 9)),
+        )
+        for state in states
+    ]
     return list(
         iter_panel_frames(
-            [_state(0), _state(count * 100, bid_index=996, ask_index=1006)],
+            states,
             [
                 _trade(index * 100, 1.0, maker_buyer=False)
                 for index in range(1, count + 1)
@@ -799,7 +810,11 @@ def test_native_empty_archive_day_does_not_gate_later_observed_day(tmp_path):
 def test_panel_unrepresentable_totals_do_not_block_healthy_book_research(tmp_path):
     from dataclasses import replace
 
-    state = replace(_state(0), bids=((995, 1e308), (994, 1e308)))
+    state = replace(
+        _state(0),
+        bids=tuple((995 - i, 1e308) for i in range(10)),
+        asks=tuple((1005 + i, 1.0) for i in range(10)),
+    )
     panel = pd.concat(
         iter_panel_frames(
             [state],
@@ -822,6 +837,9 @@ def test_panel_unrepresentable_totals_do_not_block_healthy_book_research(tmp_pat
     assert persisted.trade_count_100ms.tolist() == [0, 2]
     assert pd.isna(persisted.trade_volume_100ms.iloc[1])
     assert persisted.bid_depth_5.isna().all()
+    assert persisted.bid_depth_10.isna().all()
+    assert persisted.ask_depth_5.eq(5.0).all()
+    assert persisted.ask_depth_10.eq(10.0).all()
     assert persisted.bid_depth_1.eq(1e308).all()
     output = prepare(
         {

@@ -567,11 +567,13 @@ def _iter_single_asset_time_series_output_chunks(
             if response_frames
             else pd.DataFrame(columns=["timestamp", *numeric_columns])
         )
+        response_frames.clear()
         metadata.update(
             _response_tables(
                 frame, spec=spec, config=response_diagnostics, dates=response_dates
             )
         )
+        del frame
         pooled = metadata["response_metrics"]
         pooled = pooled.loc[pooled.period.eq("pooled") & pooled.sample_scope.eq("own")]
         metrics = _time_series_metric_records(

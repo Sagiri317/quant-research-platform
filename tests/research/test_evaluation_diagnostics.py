@@ -1122,6 +1122,7 @@ def test_direct_evaluation_pairs_actual_prediction_keys_with_current_mature_labe
     tmp_path,
     explicit_evaluation,
     damage,
+    monkeypatch,
 ):
     from quant_research_platform.artifacts.outputs.evaluation import (
         read_evaluation_outputs,
@@ -1130,7 +1131,7 @@ def test_direct_evaluation_pairs_actual_prediction_keys_with_current_mature_labe
         read_predictions,
         write_prediction_outputs,
     )
-    from quant_research_platform.research.evaluations.runner import evaluate
+    from quant_research_platform.research.evaluations import runner
     from tests.research.crypto_evaluation_test_support import (
         assert_pairwise_maturity_and_ic,
     )
@@ -1158,9 +1159,29 @@ def test_direct_evaluation_pairs_actual_prediction_keys_with_current_mature_labe
             "effective_prediction_end": None,
         },
     )
-    _, tables = read_evaluation_outputs(
-        evaluate({**config, "predictions": {"pred": str(mutated)}})
-    )
+    source_chunks = runner.iter_dataset_chunks
+    merge = pd.DataFrame.merge
+    chunk_sizes = []
+
+    def small_chunks(*args, **kwargs):
+        for chunk in source_chunks(*args, **kwargs):
+            for offset in range(0, len(chunk), 2):
+                piece = chunk.iloc[offset : offset + 2].copy()
+                piece.index = np.arange(100 + offset, 100 + offset + len(piece))
+                chunk_sizes.append(len(piece))
+                yield piece
+
+    def no_prediction_merge(left, right, *args, **kwargs):
+        assert "pred" not in right, "repeated whole-prediction merge"
+        return merge(left, right, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runner, "iter_dataset_chunks", small_chunks)
+        patch.setattr(pd.DataFrame, "merge", no_prediction_merge)
+        _, tables = read_evaluation_outputs(
+            runner.evaluate({**config, "predictions": {"pred": str(mutated)}})
+        )
+    assert len(chunk_sizes) > 1
     work = frame.loc[frame.timestamp.ge(pd.Timestamp(config["window"]["start"]))].merge(
         predictions[["timestamp", "asset_id", "prediction_score"]].rename(
             columns={"prediction_score": "pred"}

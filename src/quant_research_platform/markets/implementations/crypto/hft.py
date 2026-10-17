@@ -398,10 +398,18 @@ def _append_panel_columns(
     spread = index_to_price(asks[0][0] - bids[0][0], state.price_unit)
     bid_depth_1 = sum(quantity for _price, quantity in bids[:1])
     ask_depth_1 = sum(quantity for _price, quantity in asks[:1])
-    bid_depth_5 = sum(quantity for _price, quantity in bids[:5])
-    ask_depth_5 = sum(quantity for _price, quantity in asks[:5])
-    bid_depth_10 = sum(quantity for _price, quantity in bids)
-    ask_depth_10 = sum(quantity for _price, quantity in asks)
+    bid_depth_5 = (
+        sum(quantity for _price, quantity in bids[:5]) if len(bids) >= 5 else np.nan
+    )
+    ask_depth_5 = (
+        sum(quantity for _price, quantity in asks[:5]) if len(asks) >= 5 else np.nan
+    )
+    bid_depth_10 = (
+        sum(quantity for _price, quantity in bids) if len(bids) >= 10 else np.nan
+    )
+    ask_depth_10 = (
+        sum(quantity for _price, quantity in asks) if len(asks) >= 10 else np.nan
+    )
     buffers["market_id"].append(market_id)
     buffers["asset_id"].append(asset_id)
     buffers["timestamp"].append(_timestamp(grid_time))

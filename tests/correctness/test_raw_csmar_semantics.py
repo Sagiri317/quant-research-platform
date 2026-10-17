@@ -3467,6 +3467,164 @@ def test_index_weight_invalid_constituent_is_excluded_locally():
     assert result.attrs["source_row_counts"]["excluded_missing_required_rows"] == 1
 
 
+@pytest.mark.parametrize(
+    "dates,expected_rows,excluded_invalid,excluded_window",
+    (
+        (("invalid-date", "9999-12-31"), 0, 2, 0),
+        (("2019-12-31", "2020-01-06"), 0, 0, 2),
+        (
+            ("invalid-date", "2019-12-31", "2020-01-02", "2020-01-03"),
+            2,
+            1,
+            1,
+        ),
+    ),
+)
+def test_daily_bar_requested_window_preserves_typed_schema(
+    tmp_path, dates, expected_rows, excluded_invalid, excluded_window
+):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from quant_research_platform.storage.datasets.reading import read_dataset
+    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from tests.helpers.a_share_raw import _write_csmar
+
+    data_id = "market_bars_1d"
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    output = tmp_path / "result"
+    row = dict.fromkeys(raw_exports.RAW_TABLE_CONTRACTS[data_id].required_columns, 1.0)
+    row.update(
+        Stkcd="000001",
+        Markettype=1,
+        Trdsta=0,
+        Filling=0,
+        Ahshrtrd_D=0.0,
+        Ahvaltrd_D=0.0,
+        LimitStatus=0,
+        Dretwd=0.025,
+    )
+    _write_csmar(raw, data_id, [dict(row, Trddt=date) for date in dates])
+    original = _file_bytes(raw)
+    result = interim.materialize_interim_data(
+        raw_root=raw,
+        output_roots={data_id: output},
+        data_ids=(data_id,),
+        start_date="2020-01-02",
+        end_date="2020-01-03",
+        chunksize=1,
+    )
+    assert _file_bytes(raw) == original
+    assert result.skipped == ()
+    assert result.artifact_roots == {data_id: output}
+    saved = read_dataset(output)
+    assert len(saved) == expected_rows
+    assert tuple(saved.columns) == interim.MARKET_BARS_INTERIM_COLUMNS
+    assert pd.api.types.is_datetime64_any_dtype(saved.timestamp)
+    assert saved.source_asset_id.tolist() == ["000001"] * expected_rows
+    assert saved.period_return.tolist() == [0.025] * expected_rows
+    assert saved.timestamp.between("2020-01-02", "2020-01-03").all()
+    members = list(filesystem_glob(output, "**/*.parquet"))
+    assert members
+    for member in members:
+        schema = pq.ParquetFile(native_filesystem_path(member)).schema_arrow
+        assert schema.field("source_asset_id").type == pa.string()
+        assert pa.types.is_timestamp(schema.field("timestamp").type)
+        assert not any(pa.types.is_null(field.type) for field in schema)
+    counts = read_dataset_manifest_evidence(output)["producer_diagnostics"][
+        "source_row_counts"
+    ]
+    assert counts["raw_rows"] == len(dates)
+    assert counts.get("excluded_missing_required_rows", 0) == excluded_invalid
+    assert counts["excluded_date_range_rows"] == excluded_window
+    assert counts["retained_after_date_filter_rows"] == expected_rows
+
+
+@pytest.mark.parametrize(
+    "chunksize,reverse,split_files", [(1, False, False), (100, True, True)]
+)
+def test_daily_bar_conflicts_preserve_agreed_facts_and_returns(
+    tmp_path, chunksize, reverse, split_files
+):
+    from quant_research_platform.storage.datasets.reading import read_dataset
+    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from tests.helpers.a_share_raw import _write_csmar
+
+    data_id = "market_bars_1d"
+    row = dict.fromkeys(raw_exports.RAW_TABLE_CONTRACTS[data_id].required_columns, 1.0)
+    row.update(
+        Stkcd="000001",
+        Trddt="2020-01-02",
+        Markettype=1,
+        Trdsta=0,
+        Filling=0,
+        Ahshrtrd_D=0.0,
+        Ahvaltrd_D=0.0,
+        LimitStatus=0,
+        Opnprc=10.0,
+        Clsprc=10.0,
+        Adjprcwd=10.0,
+        Dretwd=0.025,
+    )
+    rows = [
+        row,
+        {**row, "Stkcd": "000002"},
+        {**row, "Dnshrtrd": 2.0},
+        {**row, "Stkcd": "000003"},
+        {**row, "Stkcd": "000004"},
+        {**row, "Stkcd": "000003", "Opnprc": 20.0},
+        {**row, "Stkcd": "000004", "Opnprc": 20.0, "Clsprc": 20.0},
+        dict(row),
+    ]
+    if reverse:
+        rows.reverse()
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    if split_files:
+        # Repeated keys cross files, not merely chunks within one file.
+        for name, part in (("a", rows[:4]), ("b", rows[4:])):
+            directory = raw / name
+            directory.mkdir()
+            _write_csmar(directory, data_id, part)
+    else:
+        _write_csmar(raw, data_id, rows)
+    before = _file_bytes(raw)
+    result = interim.materialize_interim_data(
+        raw_root=raw,
+        output_roots={data_id: tmp_path / "result"},
+        data_ids=(data_id,),
+        chunksize=chunksize,
+    )
+    root = result.artifact_roots[data_id]
+    saved = read_dataset(root).set_index("source_asset_id").sort_index()
+    assert saved.index.tolist() == ["000001", "000002", "000003", "000004"]
+    assert saved.period_return.tolist() == [0.025] * 4
+    assert saved.amount.tolist() == [1.0] * 4
+    assert pd.isna(saved.loc["000001", "volume"])
+    assert saved.loc["000001", ["open", "close", "adj_open"]].tolist() == [10.0] * 3
+    assert saved.loc["000002", ["open", "close", "volume"]].tolist() == [
+        10.0,
+        10.0,
+        1.0,
+    ]
+    assert pd.isna(saved.loc["000003", "open"])
+    assert pd.isna(saved.loc["000003", "adj_open"])
+    assert saved.loc["000003", "close"] == 10.0
+    # Both complete alternatives establish the same adjusted opening price.
+    assert saved.loc["000004", ["open", "close"]].isna().all()
+    assert saved.loc["000004", "adj_open"] == 10.0
+    diagnostics = read_dataset_manifest_evidence(root)["producer_diagnostics"]
+    assert diagnostics["exact_duplicate_count"] == 1
+    counts = diagnostics["source_row_counts"]
+    assert counts["conflicting_volume_rows"] == 2
+    assert counts["conflicting_open_rows"] == 4
+    assert counts["conflicting_close_rows"] == 2
+    assert counts["conflicting_adj_open_rows"] == 2
+    assert counts["raw_rows"] == len(rows)
+    assert _file_bytes(raw) == before
+
+
 @pytest.mark.parametrize("chunksize,reverse", [(1, False), (8, True)])
 def test_index_market_conflicts_are_field_local_across_chunks(
     tmp_path, chunksize, reverse

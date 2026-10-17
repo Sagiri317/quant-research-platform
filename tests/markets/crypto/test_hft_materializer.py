@@ -202,3 +202,112 @@ def test_independent_panel_persistence_preserves_source_nullable_dtypes(
         )
     assert restored.trade_source_sequence_min.dropna().tolist() == [2**53 + 1] * 2
     assert restored.book_receive_monotonic_ns.isna().all() == (monotonic is None)
+
+
+@pytest.mark.parametrize("bid_levels,ask_levels", [(1, 1), (3, 7), (10, 10)])
+def test_partial_depth_preserves_bbo_grid_and_local_persisted_dependencies(
+    tmp_path, bid_levels, ask_levels
+):
+    import json
+
+    from quant_research_platform.markets.prepare import prepare
+    from tests.markets.crypto.test_independent_execution_source import _mutate
+
+    raw = tmp_path / "raw"
+    write_binance_hft_run(raw, count=12)
+
+    def change(row, member):
+        if member["symbol"] != "BTCUSDT" or member["data_kind"] != "depth":
+            return
+        payload = row["payload"]
+        for side, best, count, sign in (
+            ("b", 99.5, bid_levels, -1),
+            ("a", 100.5, ask_levels, 1),
+        ):
+            if payload["T"] in (100, 600):
+                quantity = "0" if payload["T"] == 100 else "2"
+                payload[side].extend(
+                    [f"{best + sign * index:.1f}", quantity]
+                    for index in range(count, 10)
+                )
+
+    manifest = _mutate(raw, change)
+    (raw / "run.json").write_text(json.dumps(manifest))
+    # The output begins after the actual snapshot and removal event.
+    window = {"start": "1970-01-01T00:00:00.200", "end": "1970-01-01T00:00:01.200"}
+    panel_root = prepare(
+        {
+            "market_id": "crypto",
+            "data_id": HFT_PANEL_DATA_ID,
+            "inputs": {},
+            "source": {"root": str(raw)},
+            "time_window": window,
+            "output_root": str(tmp_path / "panel"),
+        }
+    )
+    panel = read_dataset(panel_root)
+    btc = panel.loc[panel.asset_id.eq("btc_usdt")].reset_index(drop=True)
+    assert (
+        btc.timestamp.tolist()
+        == pd.date_range(window["start"], periods=11, freq="100ms").tolist()
+    )
+    assert btc.segment_id.nunique() == btc.book_observation_id.nunique() == 1
+    assert btc.mid.notna().all()
+    assert btc.trade_volume_100ms.eq(0.1).all()
+    partial = btc.timestamp.lt(pd.Timestamp("1970-01-01T00:00:00.600"))
+    for side, count in (("bid", bid_levels), ("ask", ask_levels)):
+        for level in (1, 5, 10):
+            column = f"{side}_depth_{level}"
+            if count < level:
+                assert btc.loc[partial, column].isna().all()
+            else:
+                assert btc.loc[partial, column].eq(2.0 * level).all()
+            assert btc.loc[~partial, column].eq(2.0 * level).all()
+    factors_root = prepare(
+        {
+            "market_id": "crypto",
+            "data_id": HFT_FACTOR_DATA_ID,
+            "factor_columns": [
+                "imbalance_1",
+                "imbalance_5",
+                "imbalance_10",
+                "return_100ms",
+                "signed_trade_flow_100ms",
+            ],
+            "inputs": {HFT_PANEL_DATA_ID: str(panel_root)},
+            "time_window": window,
+            "output_root": str(tmp_path / "factors"),
+        }
+    )
+    factors = read_dataset(factors_root)
+    factors = factors.loc[factors.asset_id.eq("btc_usdt")].reset_index(drop=True)
+    assert factors.imbalance_1.eq(0.0).all()
+    assert factors.return_100ms.iloc[1:].notna().all()
+    assert factors.signed_trade_flow_100ms.eq(0.1).all()
+    for level in (5, 10):
+        if min(bid_levels, ask_levels) < level:
+            assert factors.loc[partial, f"imbalance_{level}"].isna().all()
+        assert factors.loc[~partial, f"imbalance_{level}"].eq(0.0).all()
+    labels_root = prepare(
+        {
+            "market_id": "crypto",
+            "data_id": HFT_LABEL_DATA_ID,
+            "label_columns": ["future_mid_return_100ms"],
+            "inputs": {HFT_PANEL_DATA_ID: str(panel_root)},
+            "time_window": window,
+            "output_root": str(tmp_path / "labels"),
+        }
+    )
+    labels = read_dataset(labels_root)
+    labels = labels.loc[labels.asset_id.eq("btc_usdt")].reset_index(drop=True)
+    expected = (btc.mid.shift(-1) - btc.mid) / btc.mid
+    pd.testing.assert_series_equal(
+        labels.future_mid_return_100ms,
+        expected.rename("future_mid_return_100ms"),
+        check_exact=True,
+    )
+    assert (
+        labels.future_mid_return_100ms_available_at.iloc[:-1].tolist()
+        == btc.timestamp.iloc[1:].tolist()
+    )
+    assert pd.isna(labels.future_mid_return_100ms_available_at.iloc[-1])

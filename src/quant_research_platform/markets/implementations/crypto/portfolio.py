@@ -740,7 +740,9 @@ def backtest_taker(config):
     bounds = _window_bounds(windows)
     symbol = config["symbol"]
     reconstruct = partial(
-        iter_reconstructed_depth, market_type=binance_ids.FUTURES_MARKET_TYPE
+        iter_reconstructed_depth,
+        market_type=binance_ids.FUTURES_MARKET_TYPE,
+        required_levels=1,
     )
     if execution.latency_ms >= horizon:
         reconstruct = partial(reconstruct, output_levels=1)
@@ -909,7 +911,9 @@ def _produce_maker_calibration(*, on_table, config):
     windows = _calibration_windows(config)
     symbol, asset_id = config["symbol"], config["asset_id"]
     market_type = binance_ids.FUTURES_MARKET_TYPE
-    reconstruct_depth = partial(iter_reconstructed_depth, market_type=market_type)
+    reconstruct_depth = partial(
+        iter_reconstructed_depth, market_type=market_type, required_levels=1
+    )
     read_trades = partial(iter_agg_trades, market_type=market_type)
     sample_columns = STATISTICS_TABLE_COLUMNS["crypto_maker_samples.parquet"]
     event_columns = STATISTICS_TABLE_COLUMNS["crypto_maker_events.parquet"]
@@ -1439,7 +1443,9 @@ def backtest_maker(config):
             ) as funding,
         ):
             _source_coordinates(run, panel, symbol)
-            reconstruct = partial(iter_reconstructed_depth, market_type=market_type)
+            reconstruct = partial(
+                iter_reconstructed_depth, market_type=market_type, required_levels=1
+            )
             source_stats = ReconstructionStats()
             coverage = (
                 _execution_coverage(

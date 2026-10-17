@@ -251,7 +251,10 @@ def evaluate(config):
                 declared_stop == stop and closed and not declared_closed
             ):
                 raise ValueError("evaluation_prediction_window_incomplete")
-        predictions[column] = (frame, metadata)
+        # The prediction reader already owns uniqueness of these exact keys.
+        frame.set_index(["timestamp", "asset_id"], inplace=True)
+        predictions[column] = (frame["prediction_score"], metadata)
+        del frame
 
     def prepared():
         # The reader owns the declared PK; only a wider PK needs this
@@ -274,15 +277,13 @@ def evaluate(config):
                     )
                 ):
                     raise ValueError("evaluation_input_duplicate_keys")
-                for column, (prediction, _metadata) in predictions.items():
-                    frame = frame.merge(
-                        prediction[
-                            ["timestamp", "asset_id", "prediction_score"]
-                        ].rename(columns={"prediction_score": column}),
-                        on=["timestamp", "asset_id"],
-                        how="left",
-                        validate="one_to_one",
-                    )
+                frame = frame.copy()
+                if predictions:
+                    keys = pd.MultiIndex.from_frame(frame[["timestamp", "asset_id"]])
+                    for column, (prediction, _metadata) in predictions.items():
+                        # Assign positionally: input chunk indexes need not match
+                        # the prediction key index or start at zero.
+                        frame[column] = prediction.reindex(keys).to_numpy()
                 if (
                     predictions
                     and not ordinary
@@ -299,7 +300,6 @@ def evaluate(config):
                         for asset in metadata["asset_ids"]
                     }
                     frame = frame.loc[frame.asset_id.isin(assets)]
-                frame = frame.copy()
                 for label, available in spec.label_availability_columns.items():
                     mature = label_maturity_mask(
                         frame,

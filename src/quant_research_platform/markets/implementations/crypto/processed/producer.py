@@ -149,6 +149,7 @@ def produce_hft_processed_data(
                         market_type,
                         symbol=symbol,
                         stats=active,
+                        required_levels=1,
                         output_levels=10,
                         end_ns=end_ms * 1000000,
                     ),

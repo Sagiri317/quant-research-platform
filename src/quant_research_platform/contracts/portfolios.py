@@ -390,6 +390,9 @@ class PortfolioLedgerBatch:
         lives = {asset: value.lifecycle_id for asset, value in before.items()}
         receivables = {asset: value.receivable for asset, value in before.items()}
         locked = {asset: value.locked_quantity for asset, value in before.items()}
+        trade_quantities = defaultdict(list)
+        for trade in self.trades:
+            trade_quantities[trade.asset_id].append(abs(trade.quantity))
         event_ids = set()
         covered_flows = set()
         for phase, prior, current in (("after", before, after), ("end", after, end)):
@@ -579,11 +582,7 @@ class PortfolioLedgerBatch:
                 if not _quantity_equal(
                     quantities[asset],
                     current[asset].quantity,
-                    *(
-                        abs(trade.quantity)
-                        for trade in self.trades
-                        if trade.asset_id == asset
-                    ),
+                    *trade_quantities[asset],
                 ):
                     raise ValueError("portfolio_ledger_position_reconciliation_invalid")
                 if quantities[asset] == 0 and current[asset].quantity == 0:

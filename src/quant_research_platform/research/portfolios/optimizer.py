@@ -289,31 +289,29 @@ def optimize_portfolio(
             np.zeros(count),
         ]
 
-    def net_name_bands(point):
+    def net_name_bands(point, *, derivative=False):
         weights = point[:count]
         cost, gradient = actual_cost(weights)
-        return (
-            np.r_[
+        if not derivative:
+            return np.r_[
                 weights[~cash] - net_lower[~cash] * (1.0 - cost),
                 net_upper[~cash] * (1.0 - cost) - weights[~cash],
-            ],
-            np.pad(
-                np.vstack(
-                    (
-                        identity[~cash] + np.outer(net_lower[~cash], gradient),
-                        -identity[~cash] - np.outer(net_upper[~cash], gradient),
-                    )
-                ),
-                ((0, 0), (0, count)),
+            ]
+        return np.pad(
+            np.vstack(
+                (
+                    identity[~cash] + np.outer(net_lower[~cash], gradient),
+                    -identity[~cash] - np.outer(net_upper[~cash], gradient),
+                )
             ),
+            ((0, 0), (0, count)),
         )
 
-    def cash_reserve(point):
+    def cash_reserve(point, *, derivative=False):
         cost, gradient = actual_cost(point[:count])
-        return (
-            float(point[:count][cash].sum() - cost),
-            np.r_[cash_direction - gradient, np.zeros(count)],
-        )
+        if not derivative:
+            return float(point[:count][cash].sum() - cost)
+        return np.r_[cash_direction - gradient, np.zeros(count)]
 
     def exposure_bands(matrix, limit):
         return np.concatenate(
@@ -383,13 +381,13 @@ def optimize_portfolio(
         (
             {
                 "type": "ineq",
-                "fun": lambda point: net_name_bands(point)[0],
-                "jac": lambda point: net_name_bands(point)[1],
+                "fun": net_name_bands,
+                "jac": lambda point: net_name_bands(point, derivative=True),
             },
             {
                 "type": "ineq",
-                "fun": lambda point: cash_reserve(point)[0],
-                "jac": lambda point: cash_reserve(point)[1],
+                "fun": cash_reserve,
+                "jac": lambda point: cash_reserve(point, derivative=True),
             },
         )
     )

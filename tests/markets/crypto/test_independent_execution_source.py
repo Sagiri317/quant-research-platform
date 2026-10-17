@@ -298,8 +298,9 @@ def test_public_taker_frozen_predictions_use_actual_source_identity(tmp_path):
     assert results[0][1] == results[1][1]
 
 
+@pytest.mark.parametrize("levels", [1, 10])
 def test_public_calibration_and_frozen_execution_bind_selected_native_source(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, levels
 ):
     from quant_research_platform.artifacts.statistics import read_statistics_artifact
     from tests.markets.crypto.test_direct_portfolio import _independent_maker_case
@@ -311,6 +312,21 @@ def test_public_calibration_and_frozen_execution_bind_selected_native_source(
     write_binance_hft_run(raw, count=90, maker_liquidity=True)
     write_hft_funding_fixture(raw)
     _independent_identity(raw)
+    if levels == 1:
+
+        def remove_deep_levels(row, member):
+            if member["data_kind"] == "depth" and row["payload"]["T"] == 100:
+                offset = 0 if member["symbol"] == "BTCUSDT" else 100
+                for side, best, sign in (
+                    ("b", 99.5 + offset, -1),
+                    ("a", 100.5 + offset, 1),
+                ):
+                    row["payload"][side].extend(
+                        [f"{best + sign * index:.1f}", "0"] for index in range(1, 10)
+                    )
+
+        manifest = _mutate(raw, remove_deep_levels)
+        (raw / "run.json").write_text(json.dumps(manifest))
     panel = _panel(
         tmp_path / "native-panel",
         raw,

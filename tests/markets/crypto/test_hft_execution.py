@@ -179,7 +179,15 @@ def _native_taker_projection_case(tmp_path, monkeypatch, *, count=300):
             finally:
                 closed.append("funding")
 
-        def reconstruct(source, *, output_levels=None, market_type=None, **kwargs):
+        def reconstruct(
+            source,
+            *,
+            output_levels=None,
+            market_type=None,
+            required_levels=20,
+            **kwargs,
+        ):
+            assert required_levels == 1
             prescan = output_levels == 0
             active_stats = kwargs.pop("stats", None) or stats
             if projection != "native" and not prescan:
@@ -215,6 +223,7 @@ def _native_taker_projection_case(tmp_path, monkeypatch, *, count=300):
                 source,
                 FUTURES_MARKET_TYPE,
                 output_levels=output_levels,
+                # Keep the stricter fixture contract independent of output projection.
                 required_levels=20,
                 stats=active_stats,
                 **kwargs,

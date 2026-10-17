@@ -332,8 +332,29 @@ def test_market_exposure_hac_and_regimes_use_intact_axis_and_descriptive_timing(
         },
         "regime_comparison": {"threshold": 0.0},
     }
+    from quant_research_platform.research.portfolios import comparison
+
+    monkeypatch.setattr(
+        comparison,
+        "_wealth",
+        lambda *_args, **_kwargs: pytest.fail("unrequested wealth path"),
+    )
+    monkeypatch.setattr(
+        comparison,
+        "return_standard_deviation",
+        lambda *_args, **_kwargs: pytest.fail("unrequested benchmark metrics"),
+    )
     tables, metadata = _compare(_axis(portfolio, dates), [ref], **options)
     assert set(tables) == {"portfolio_market_exposure", "portfolio_regime_comparison"}
+    for analysis, table in (
+        ("market_exposure", "portfolio_market_exposure"),
+        ("regime_comparison", "portfolio_regime_comparison"),
+    ):
+        single, _ = _compare(
+            _axis(portfolio, dates), [ref], **{**options, "analyses": [analysis]}
+        )
+        assert set(single) == {table}
+        pd.testing.assert_frame_equal(single[table], tables[table])
     exposure = tables["portfolio_market_exposure"].set_index("coefficient_id")
     beta = np.dot(market - market.mean(), portfolio - portfolio.mean()) / np.dot(
         market - market.mean(), market - market.mean()
@@ -624,7 +645,9 @@ def test_constant_cash_is_explicit_zero_and_never_implicit_risk_free(tmp_path):
         )
 
 
-def test_native_normalized_control_facts_are_inherited_and_conflicts_rejected(tmp_path):
+def test_native_normalized_control_facts_are_inherited_and_conflicts_rejected(
+    tmp_path, monkeypatch
+):
     from quant_research_platform.contracts.data import DataSpec
     from quant_research_platform.storage.datasets import write_dataset
 
@@ -681,6 +704,30 @@ def test_native_normalized_control_facts_are_inherited_and_conflicts_rejected(tm
         "portfolio_benchmark_intervals"
     ].return_difference.tolist() == pytest.approx([0.01, 0.02, 0.02])
     assert metadata["comparison_method"]["control_design_matching"] == "not_established"
+    from quant_research_platform.research.portfolios import comparison
+
+    wealth_calls = []
+    original_wealth = comparison._wealth
+
+    def wealth(values):
+        wealth_calls.append(1)
+        return original_wealth(values)
+
+    monkeypatch.setattr(comparison, "_wealth", wealth)
+    benchmark = reference_input(
+        tmp_path / "benchmark.parquet", [100.0, 101.0, 99.0, 102.0], dates=dates
+    )
+    mixed, _ = _compare(
+        _axis([0.02, 0.01, 0.04], dates),
+        [benchmark],
+        analyses=["control_comparison", "regime_comparison"],
+        comparison_controls=[ref],
+        regime_comparison={"threshold": 0.0},
+    )
+    assert len(wealth_calls) == 2  # Portfolio once, requested control once.
+    for name in ("portfolio_benchmark_intervals", "portfolio_benchmark_metrics"):
+        pd.testing.assert_frame_equal(mixed[name], tables[name])
+    assert set(mixed["portfolio_regime_comparison"].reference_kind) == {"benchmark"}
     ref["valuation_currency"] = "USD"
     with pytest.raises(ValueError, match="source_facts_conflict"):
         _compare(

@@ -2563,7 +2563,7 @@ def _ledger_batch(
                 raise ValueError("portfolio_zero_mark_trade_invalid")
             after = float(after_quantity * Fraction(entry_mark))
             if pd.isna(end_mark):
-                if after_quantity:
+                if end_quantity:
                     raise PortfolioTargetBlocked("portfolio_held_return_missing")
                 end_mark = 0.0
         valuations.extend(

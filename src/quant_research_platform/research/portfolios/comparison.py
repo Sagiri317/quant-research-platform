@@ -484,6 +484,12 @@ def comparison_tables(
         identity = dict(zip(group_columns, keys, strict=True))
         currency = currencies[identity["candidate_id"]]
         daily = _complete_daily(selected, clock, sessions)
+        rp = selected.portfolio_return.to_numpy(dtype=float)
+        wp = (
+            _wealth(rp)
+            if chosen & {"benchmark_comparison", "control_comparison"}
+            else None
+        )
         for kind, item in references:
             identity = {
                 **identity,
@@ -503,162 +509,165 @@ def comparison_tables(
                 currency=currency,
                 clock=clock,
             )
-            rp = selected.portfolio_return.to_numpy(dtype=float)
             rb = np.array([value for value, _reason in aligned])
-            wp, wb = _wealth(rp), _wealth(rb)
             with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
                 differences = rp - rb
-                relative = np.where(wb > 0, wp / wb, np.nan)
             differences[~np.isfinite(differences)] = np.nan
-            relative[~np.isfinite(relative)] = np.nan
-            for index, row in selected.iterrows():
-                reference_reason = aligned[index][1]
-                reason = (
-                    row.portfolio_reason
-                    or reference_reason
-                    or (
-                        "nonfinite_result"
-                        if not np.isfinite(differences[index])
-                        else ""
-                    )
-                )
-                records["portfolio_benchmark_intervals"].append(
-                    {
-                        **identity,
-                        "start_at": row.start_at,
-                        "end_at": row.end_at,
-                        "portfolio_return": rp[index],
-                        "benchmark_return": rb[index],
-                        "return_difference": differences[index],
-                        "portfolio_wealth": wp[index],
-                        "benchmark_wealth": wb[index],
-                        "relative_wealth": relative[index],
-                        "portfolio_status": "DEFINED"
-                        if np.isfinite(rp[index])
-                        else "UNDEFINED",
-                        "portfolio_reason": row.portfolio_reason,
-                        "benchmark_status": "DEFINED"
-                        if not reference_reason
-                        else "NOT_APPLICABLE"
-                        if reference_reason.endswith("mismatch")
-                        else "UNDEFINED",
-                        "benchmark_reason": reference_reason,
-                        "status": "DEFINED"
-                        if not reason
-                        else "NOT_APPLICABLE"
-                        if reason.endswith("mismatch")
-                        else "UNDEFINED",
-                        "reason": reason,
-                    }
-                )
             paired = np.isfinite(differences)
-            n, planned = int(paired.sum()), len(selected)
-            complete = n == planned and planned > 0
-            common_reason = next(
-                (
-                    row.portfolio_reason or aligned[i][1]
-                    for i, row in selected.iterrows()
-                    if row.portfolio_reason or aligned[i][1]
-                ),
-                "incomplete_paired_path",
-            )
-            values = {
-                "portfolio_total_return": wp[-1] - 1,
-                "benchmark_total_return": wb[-1] - 1,
-                "mean_return_difference": float(mean(differences))
-                if complete
-                else np.nan,
-                "relative_wealth": relative[-1],
-                "relative_wealth_return": relative[-1] - 1,
-                "maximum_relative_drawdown": float(
-                    np.min(
-                        relative / np.maximum.accumulate(np.r_[1.0, relative])[1:] - 1
+            if f"{kind}_comparison" in chosen:
+                wb = _wealth(rb)
+                with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                    relative = np.where(wb > 0, wp / wb, np.nan)
+                relative[~np.isfinite(relative)] = np.nan
+                for index, row in selected.iterrows():
+                    reference_reason = aligned[index][1]
+                    reason = (
+                        row.portfolio_reason
+                        or reference_reason
+                        or (
+                            "nonfinite_result"
+                            if not np.isfinite(differences[index])
+                            else ""
+                        )
                     )
+                    records["portfolio_benchmark_intervals"].append(
+                        {
+                            **identity,
+                            "start_at": row.start_at,
+                            "end_at": row.end_at,
+                            "portfolio_return": rp[index],
+                            "benchmark_return": rb[index],
+                            "return_difference": differences[index],
+                            "portfolio_wealth": wp[index],
+                            "benchmark_wealth": wb[index],
+                            "relative_wealth": relative[index],
+                            "portfolio_status": "DEFINED"
+                            if np.isfinite(rp[index])
+                            else "UNDEFINED",
+                            "portfolio_reason": row.portfolio_reason,
+                            "benchmark_status": "DEFINED"
+                            if not reference_reason
+                            else "NOT_APPLICABLE"
+                            if reference_reason.endswith("mismatch")
+                            else "UNDEFINED",
+                            "benchmark_reason": reference_reason,
+                            "status": "DEFINED"
+                            if not reason
+                            else "NOT_APPLICABLE"
+                            if reason.endswith("mismatch")
+                            else "UNDEFINED",
+                            "reason": reason,
+                        }
+                    )
+                n, planned = int(paired.sum()), len(selected)
+                complete = n == planned and planned > 0
+                common_reason = next(
+                    (
+                        row.portfolio_reason or aligned[i][1]
+                        for i, row in selected.iterrows()
+                        if row.portfolio_reason or aligned[i][1]
+                    ),
+                    "incomplete_paired_path",
                 )
-                if np.isfinite(relative).all()
-                else np.nan,
-            }
-            periods = (
-                config.get("statistics", {}).get("annualization_periods", 365.0)
-                if clock == "utc"
-                else 252.0
-            )
-            minimum = config.get("statistics", {}).get(
-                "annualization_minimum_observations", 2
-            )
-            annual_reason = (
-                "incomplete_daily_axis"
-                if not daily
-                else "insufficient_complete_daily_observations"
-                if planned < minimum
-                else ""
-            )
-            roundoff = np.zeros(planned)
-            if {"start_nav", "end_nav"} <= set(selected):
-                roundoff += _nav_return_roundoff(
-                    selected.start_nav, selected.end_nav, rp
+                values = {
+                    "portfolio_total_return": wp[-1] - 1,
+                    "benchmark_total_return": wb[-1] - 1,
+                    "mean_return_difference": float(mean(differences))
+                    if complete
+                    else np.nan,
+                    "relative_wealth": relative[-1],
+                    "relative_wealth_return": relative[-1] - 1,
+                    "maximum_relative_drawdown": float(
+                        np.min(
+                            relative / np.maximum.accumulate(np.r_[1.0, relative])[1:]
+                            - 1
+                        )
+                    )
+                    if np.isfinite(relative).all()
+                    else np.nan,
+                }
+                periods = (
+                    config.get("statistics", {}).get("annualization_periods", 365.0)
+                    if clock == "utc"
+                    else 252.0
                 )
-            if item["representation"] == "endpoint_level" and complete:
-                levels = loaded[item["reference_id"]][0].set_index(
-                    item["timestamp_column"]
-                )[item["value_column"]]
-                roundoff += _nav_return_roundoff(
-                    levels.reindex(selected.start_at).to_numpy(),
-                    levels.reindex(selected.end_at).to_numpy(),
-                    rb,
+                minimum = config.get("statistics", {}).get(
+                    "annualization_minimum_observations", 2
                 )
-            roundoff += np.spacing(np.abs(differences))
-            sd = (
-                float(return_standard_deviation(differences, roundoff=roundoff))
-                if complete and planned >= 2
-                else np.nan
-            )
-            values.update(
-                annualized_return_difference=float(mean(differences) * periods)
-                if complete and not annual_reason
-                else np.nan,
-                tracking_error=sd * np.sqrt(periods)
-                if complete and not annual_reason
-                else np.nan,
-                information_ratio=float(
-                    _return_sharpes(differences, roundoff=roundoff) * np.sqrt(periods)
+                annual_reason = (
+                    "incomplete_daily_axis"
+                    if not daily
+                    else "insufficient_complete_daily_observations"
+                    if planned < minimum
+                    else ""
                 )
-                if complete and not annual_reason and sd > 0
-                else np.nan,
-            )
-            for metric_id, value in values.items():
-                if not complete:
-                    value = np.nan
-                reason = (
-                    ""
-                    if np.isfinite(value)
-                    else common_reason
-                    if not complete
-                    else annual_reason
-                    if metric_id
-                    in {
-                        "annualized_return_difference",
-                        "tracking_error",
-                        "information_ratio",
-                    }
-                    and annual_reason
-                    else "statistic_not_identified"
+                roundoff = np.zeros(planned)
+                if {"start_nav", "end_nav"} <= set(selected):
+                    roundoff += _nav_return_roundoff(
+                        selected.start_nav, selected.end_nav, rp
+                    )
+                if item["representation"] == "endpoint_level" and complete:
+                    levels = loaded[item["reference_id"]][0].set_index(
+                        item["timestamp_column"]
+                    )[item["value_column"]]
+                    roundoff += _nav_return_roundoff(
+                        levels.reindex(selected.start_at).to_numpy(),
+                        levels.reindex(selected.end_at).to_numpy(),
+                        rb,
+                    )
+                roundoff += np.spacing(np.abs(differences))
+                sd = (
+                    float(return_standard_deviation(differences, roundoff=roundoff))
+                    if complete and planned >= 2
+                    else np.nan
                 )
-                records["portfolio_benchmark_metrics"].append(
-                    {
-                        **identity,
-                        "metric_id": metric_id,
-                        "value": value if np.isfinite(value) else np.nan,
-                        "observation_count": n,
-                        "planned_observation_count": planned,
-                        "status": "DEFINED"
-                        if not reason
-                        else "NOT_APPLICABLE"
-                        if reason.endswith("mismatch")
-                        else "UNDEFINED",
-                        "reason": reason,
-                    }
+                values.update(
+                    annualized_return_difference=float(mean(differences) * periods)
+                    if complete and not annual_reason
+                    else np.nan,
+                    tracking_error=sd * np.sqrt(periods)
+                    if complete and not annual_reason
+                    else np.nan,
+                    information_ratio=float(
+                        _return_sharpes(differences, roundoff=roundoff)
+                        * np.sqrt(periods)
+                    )
+                    if complete and not annual_reason and sd > 0
+                    else np.nan,
                 )
+                for metric_id, value in values.items():
+                    if not complete:
+                        value = np.nan
+                    reason = (
+                        ""
+                        if np.isfinite(value)
+                        else common_reason
+                        if not complete
+                        else annual_reason
+                        if metric_id
+                        in {
+                            "annualized_return_difference",
+                            "tracking_error",
+                            "information_ratio",
+                        }
+                        and annual_reason
+                        else "statistic_not_identified"
+                    )
+                    records["portfolio_benchmark_metrics"].append(
+                        {
+                            **identity,
+                            "metric_id": metric_id,
+                            "value": value if np.isfinite(value) else np.nan,
+                            "observation_count": n,
+                            "planned_observation_count": planned,
+                            "status": "DEFINED"
+                            if not reason
+                            else "NOT_APPLICABLE"
+                            if reason.endswith("mismatch")
+                            else "UNDEFINED",
+                            "reason": reason,
+                        }
+                    )
             if kind == "benchmark" and "market_exposure" in chosen:
                 rf_values = (
                     None

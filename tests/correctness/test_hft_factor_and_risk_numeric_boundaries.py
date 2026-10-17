@@ -42,8 +42,10 @@ def _panel(start=0, end=6100, batch=17, extreme=False):
         states = [
             replace(
                 _state(0, bid_qty=1e308, ask_qty=1e308),
-                bids=((950, 1e308),),
-                asks=((1050, 1e308),),
+                # Fixed-depth ratios require ten genuinely observed levels.
+                # Tiny deeper quantities retain the extreme top-level scale.
+                bids=((950, 1e308), *((950 - level, 1.0) for level in range(1, 10))),
+                asks=((1050, 1e308), *((1050 + level, 1.0) for level in range(1, 10))),
             )
         ]
     return list(

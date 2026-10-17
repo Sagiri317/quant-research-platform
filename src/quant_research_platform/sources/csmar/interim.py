@@ -645,7 +645,10 @@ def _normalize_mapped_frame(
             error="invalid_csmar_trade_date",
         )
         result["timestamp"] = result["trade_date"]
-        result["source_asset_id"] = result["stock_code"]
+        # Retain the identity type when the requested date window selects no rows.
+        result["source_asset_id"] = result["stock_code"].astype(
+            pd.ArrowDtype(pa.string())
+        )
         result["period_return"] = result["return_with_dividend"]
         result["adj_close"] = result["comparable_close_with_dividend"]
         close = result["close"]
@@ -1187,9 +1190,10 @@ def _iter_normalized_interim_frames(
     content_hashes = []
     empty_index_frame = None
     emitted_rows = 0
-    # Event/reference facts must be reconciled before emission: a later file or
+    # Facts must be reconciled before emission: a later file or
     # chunk can make one earlier cell unknown without erasing its event key.
     coalesce = data_id in {
+        MARKET_BARS_DATA_ID,
         "index_info",
         "index_weights",
         "trading_no_limit",

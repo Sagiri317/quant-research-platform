@@ -3927,3 +3927,139 @@ def test_persisted_cash_target_keeps_unpaid_dividend_out_of_cash(tmp_path, monke
     assert after["__cash__"].value == 90.0
     assert after["b"].quantity == 0
     assert after["b"].receivable == after["b"].value == 10.0
+
+
+@pytest.mark.parametrize("successor_mark", [np.nan, 0.0, 12.0])
+def test_endpoint_conversion_requires_mark_for_received_shares(
+    tmp_path, successor_mark
+):
+    from fractions import Fraction
+
+    from quant_research_platform.contracts.portfolios import TradeCostComponents
+
+    entry = pd.Timestamp("2024-01-02")
+    endpoint = pd.Timestamp("2024-01-03")
+    life = pd.Timestamp("2000-01-01")
+    weights = pd.Series({"old": 1.0})
+    account = execute_continuous_target(
+        weights,
+        weights,
+        nav=100.0,
+        average_daily_volume=pd.Series({"old": 1000.0}),
+        can_enter=pd.Series({"old": True}),
+        can_exit=pd.Series({"old": True}),
+        execution_date=entry.date(),
+        cost_for_trade=lambda _date, _asset, _side, amount, _volume, _settings: (
+            TradeCostComponents(float(amount), 0.0, 0.0, 0.0, 0.0, 0.0, "f" * 64)
+        ),
+        assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,)),
+        cost_source_identity="f" * 64,
+    )
+    entry_panel = pd.DataFrame(
+        [
+            {
+                "asset_id": "old",
+                "listing_date": life,
+                "open": 10.0,
+                "timestamp": entry,
+                "research_open_mark_at": pd.NaT,
+            }
+        ]
+    )
+    # Extinguished original shares need no endpoint quotation. A received
+    # successor needs its own mark; a supplied confirmed-zero mark stays valid.
+    endpoint_panel = pd.DataFrame(
+        [
+            {
+                "asset_id": asset,
+                "listing_date": life,
+                "open": mark,
+                "timestamp": endpoint,
+                "research_open_mark_at": pd.NaT,
+                "research_open_mark_kind": "confirmed_delisting_zero"
+                if mark == 0
+                else None,
+            }
+            for asset, mark in (("old", np.nan), ("new", successor_mark))
+        ]
+    )
+    events = pd.DataFrame(
+        [
+            {
+                "event_id": "conversion",
+                "asset_id": "old",
+                "listing_date": life,
+                "kind": "conversion",
+                "entitlement_proved": True,
+                "remaining_old_units_per_old_unit": Fraction(0),
+                "successor_asset_id": "new",
+                "successor_listing_date": life,
+                "successor_units_per_old_unit": Fraction(1),
+                "evidence_identity": "a" * 64,
+            }
+        ]
+    )
+
+    def build_batch():
+        return production._ledger_batch(
+            account=account,
+            asset_ledger=account.asset_ledger,
+            sequence=0,
+            end_timestamp=endpoint,
+            decision_timestamp=entry - pd.Timedelta(days=1),
+            held_units=pd.Series({"old": Fraction(10)}),
+            execution_units=pd.Series({"old": Fraction(10)}),
+            previous_values={},
+            rights_adjustments=(),
+            prediction_rank_score=pd.Series(dtype=float),
+            adv20=pd.Series(dtype=float),
+            enhanced_decision=None,
+            benchmark_weights=None,
+            optimization_result=None,
+            decision_reason=PORTFOLIO_DECISION_REASON_SIMPLE,
+            decision_delta=pd.Series({"old": 0.0}),
+            next_panel=entry_panel,
+            endpoint_panel=endpoint_panel,
+            endpoint_events=events,
+            corporate_events=pd.DataFrame(),
+            endpoint_corporate_events=pd.DataFrame(),
+            entitlements=accounting.EquityEntitlements(),
+            execution_lives=pd.Series({"old": life}),
+        )
+
+    if pd.isna(successor_mark):
+        with pytest.raises(
+            PortfolioTargetBlocked, match="portfolio_held_return_missing"
+        ):
+            build_batch()
+        return
+
+    batch = build_batch()
+    values = {(row.asset_id, row.phase): row for row in batch.valuations}
+    assert values["new", "after"].quantity == 0
+    assert values["new", "end"].quantity == Fraction(10)
+    assert values["new", "end"].mark_price == successor_mark
+    assert values["new", "end"].value == 10 * successor_mark
+    assert values["old", "end"].quantity == 0
+    assert values["old", "end"].value == 0
+    assert sum(row.value for row in batch.valuations if row.phase == "end") == (
+        10 * successor_mark
+    )
+    assert not batch.trades
+    (conversion,) = batch.rights_adjustments
+    assert conversion.quantity_before == Fraction(10)
+    assert conversion.quantity_after == 0
+    assert conversion.target_quantity == Fraction(10)
+    root = write_portfolio_ledger_artifact(
+        tmp_path / "ledger",
+        capital=PortfolioCapital("conversion", 100.0, "CNY", "cash_equity"),
+        metadata={
+            "window": {
+                "start": "2024-01-01",
+                "end": "2024-01-03",
+                "access": "development",
+            }
+        },
+        produce=lambda emit: emit(batch),
+    )
+    assert tuple(read_portfolio_ledger_artifact(root).iter_chunks()) == (batch,)

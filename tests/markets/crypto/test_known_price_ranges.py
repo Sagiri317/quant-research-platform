@@ -23,10 +23,10 @@ from tests.markets.crypto.test_independent_execution_source import (
 )
 
 
-def _source(root, delayed_bridge):
+def _source(root, delayed_bridge, levels):
     write_binance_hft_run(root, count=90, maker_liquidity=True)
     initial = [[str(Decimal("99.5") - Decimal("0.1") * i), "2"] for i in range(10)]
-    outside = [[str(Decimal("98.4") - Decimal("0.1") * i), "2"] for i in range(10)]
+    outside = [[str(Decimal("98.4") - Decimal("0.1") * i), "2"] for i in range(levels)]
 
     def change(row, member):
         if member["symbol"] != "BTCUSDT":
@@ -52,12 +52,13 @@ def _source(root, delayed_bridge):
     write_hft_funding_fixture(root)
 
 
+@pytest.mark.parametrize("levels", [1, 10])
 @pytest.mark.parametrize("delayed_bridge", [False, True])
 def test_public_prepare_batch_invariance_and_maker_taker_use_proven_ranges(
-    tmp_path, monkeypatch, delayed_bridge
+    tmp_path, monkeypatch, delayed_bridge, levels
 ):
     raw = tmp_path / "source" / "raw"
-    _source(raw, delayed_bridge)
+    _source(raw, delayed_bridge, levels)
     full = {"start": "1970-01-01T00:00:00", "end": "1970-01-01T00:00:09"}
     frames = []
     for index, batch_rows in enumerate((2, 17, 10000)):
@@ -85,7 +86,7 @@ def test_public_prepare_batch_invariance_and_maker_taker_use_proven_ranges(
     target = "future_mid_return_500ms"
     frame = frame.copy()
     frame["x"] = frame.timestamp.astype("int64") / 1e9
-    frame[target] = 0.03
+    frame[target] = -0.03
     frame[target + "_available_at"] = frame.timestamp + pd.Timedelta(milliseconds=500)
     roles = dict.fromkeys(frame, "context")
     roles.update(
@@ -154,13 +155,19 @@ def test_public_prepare_batch_invariance_and_maker_taker_use_proven_ranges(
                 **common,
                 "output": str(tmp_path / "taker"),
                 "predictions": str(predictions),
-                "execution": asdict(portfolio.TakerConfig(1.0, 2.0, 0, 0.0, 100)),
+                "execution": asdict(portfolio.TakerConfig(5.0, 5.0, 0, 0.0, 100)),
             }
         )
     )
     assert taker["execution"]["account_path_status"] == "COMPLETE"
     assert taker["execution"]["filled_orders"] > 0
     assert taker_fills
+    if levels == 1:
+        assert all(abs(fill.quantity) <= 2.0 for fill in taker_fills)
+        assert all(
+            abs(float(fill.notional / fill.quantity)) == pytest.approx(98.4)
+            for fill in taker_fills
+        )
     maker, maker_fills = _ledger(
         portfolio.backtest_maker(
             {

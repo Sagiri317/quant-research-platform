@@ -84,6 +84,32 @@ def test_constraint_jacobians_match_independent_central_differences(
         )
 
 
+@pytest.mark.parametrize("index", [-2, -1], ids=["name_bands", "cash_reserve"])
+def test_value_only_constraints_do_not_build_discarded_jacobians(monkeypatch, index):
+    constraints, _, _ = _capture_constraints(monkeypatch)
+    point = np.array([0.19, 0.21, 0.23, 0.25, 0.12, 0.01, 0.01, 0.03, 0.05, 0.08])
+    constraint = constraints[index]
+    expected = np.r_[point[:4] - 0.05, 0.45 - point[:4]] if index == -2 else point[4]
+
+    def unexpected_allocation(*args, **kwargs):
+        pytest.fail("value-only constraint constructed a discarded Jacobian")
+
+    # Patch only after preparation: SLSQP still needs its fixed Jacobians.
+    with monkeypatch.context() as allocations:
+        for name in ("outer", "vstack", "pad", "zeros"):
+            allocations.setattr(optimizer.np, name, unexpected_allocation)
+        value = constraint["fun"](point)
+    assert value == pytest.approx(expected)
+    jacobian = constraint["jac"](point)
+    assert jacobian.shape == ((8, 10) if index == -2 else (10,))
+    expected_jacobian = (
+        np.pad(np.vstack((np.eye(5)[:4], -np.eye(5)[:4])), ((0, 0), (0, 5)))
+        if index == -2
+        else np.r_[0.0, 0.0, 0.0, 0.0, 1.0, np.zeros(5)]
+    )
+    np.testing.assert_array_equal(jacobian, expected_jacobian)
+
+
 def test_trade_epigraph_is_exact_at_and_away_from_no_trade(monkeypatch):
     constraints, current, bounds = _capture_constraints(monkeypatch)
     turnover, trades = constraints[2], constraints[5]

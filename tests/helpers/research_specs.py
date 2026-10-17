@@ -181,6 +181,7 @@ def assemble_research_dataset(
                 "clip",
                 "industry_neutralize",
                 "size_neutralize",
+                "size_column",
                 "center",
                 "scale",
                 "impute_missing",
