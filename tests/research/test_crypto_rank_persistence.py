@@ -19,15 +19,17 @@ from tests.research.direct_model_test_support import fit_frame
 
 
 @pytest.mark.parametrize(
-    "algorithm",
-    ["equal_weight_rank_ensemble", "ic_weighted_rank_ensemble", "linear_regression"],
+    "algorithm,assets",
+    [
+        ("equal_weight_rank_ensemble", 3),
+        ("ic_weighted_rank_ensemble", 3),
+        ("linear_regression", 1),
+        ("linear_regression", 3),
+    ],
 )
-@pytest.mark.parametrize("assets", [1, 3])
 def test_native_crypto_state_predicts_without_relearning(
     tmp_path, algorithm, assets, monkeypatch
 ):
-    if assets == 1 and "rank" in algorithm:
-        assets = 3
     stamps = pd.date_range("2020-01-01", periods=6).repeat(assets)
     x = (
         np.tile(np.arange(assets, dtype=float), 6)

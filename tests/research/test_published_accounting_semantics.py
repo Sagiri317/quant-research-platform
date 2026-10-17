@@ -481,7 +481,7 @@ def test_persisted_adv_buy_gap_smaller_than_claim_keeps_buy_direction(
                 diagnostics=tuple(
                     replace(row, number=95.0)
                     if row.asset_id == "b" and row.name == "target_notional"
-                    else replace(row, number=5.0)
+                    else replace(row, number=0.0)
                     if row.asset_id == "__cash__" and row.name == "target_notional"
                     else row
                     for row in batch.diagnostics

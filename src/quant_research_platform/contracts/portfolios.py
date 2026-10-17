@@ -781,6 +781,20 @@ def validate_portfolio_transition(
                     and old.lifecycle_id != current.lifecycle_id
                 ):
                     raise ValueError("portfolio_held_lifecycle_unproven")
+                if capital.valuation_method == "cash_equity" and not isclose(
+                    old.share_value if old else 0.0,
+                    current.share_value if current else 0.0,
+                    rel_tol=0.0,
+                    abs_tol=tolerance,
+                ):
+                    raise ValueError("portfolio_ledger_cross_session_value_invalid")
+            if capital.valuation_method == "cash_equity" and not isclose(
+                sum(row.value for row in previous.values()),
+                sum(row.value for row in before.values()),
+                rel_tol=0.0,
+                abs_tol=tolerance,
+            ):
+                raise ValueError("portfolio_ledger_cross_session_value_invalid")
         finally:
             previous = old = None
     research_marks = [
@@ -958,21 +972,30 @@ def validate_portfolio_transition(
                 or final.cost_basis != post.cost_basis
             ):
                 raise ValueError("portfolio_ledger_cost_basis_invalid")
-    if capital.valuation_method == "cash_equity" and not isclose(
-        sum(diagnostics_by_asset[asset]["target_notional"].number for asset in before),
-        sum(row.value for row in after.values())
-        - sum(
+    if capital.valuation_method == "cash_equity":
+        requested_stock = sum(
+            diagnostics_by_asset[asset]["target_notional"].number
+            for asset in before
+            if asset != PORTFOLIO_CASH_ASSET_ID
+        )
+        target_nav = sum(row.value for row in after.values()) - sum(
             row.amount
             for row in batch.cashflows
             if row.kind in PORTFOLIO_LEDGER_COST_COLUMNS
-        ),
-        rel_tol=0.0,
-        abs_tol=max(
-            tolerance,
-            portfolio_notional_tolerance(sum(row.value for row in after.values())),
-        ),
-    ):
-        raise ValueError("portfolio_ledger_target_state_invalid")
+        )
+        tolerance = max(tolerance, portfolio_notional_tolerance(target_nav))
+        if requested_stock > target_nav + tolerance or not isclose(
+            diagnostics_by_asset[PORTFOLIO_CASH_ASSET_ID]["target_notional"].number,
+            max(
+                0.0,
+                target_nav
+                - sum(row.receivable for row in after.values())
+                - requested_stock,
+            ),
+            rel_tol=0.0,
+            abs_tol=tolerance,
+        ):
+            raise ValueError("portfolio_ledger_target_state_invalid")
     return {asset: replace(row) for asset, row in end.items()}
 
 

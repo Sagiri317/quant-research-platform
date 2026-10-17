@@ -139,7 +139,6 @@ def explicit_models(tmp_path):
                 "validation_windows": [chronology["folds"][0]["validation"]],
                 "scoring_window": chronology["folds"][0]["validation"],
                 "cutoff": chronology["folds"][0]["validation"]["end"],
-                "test_window": chronology["test"],
                 "selection_group": "global",
                 "validation_axis": "single_asset_time_series",
                 "output": str(tmp_path / (model_id + "-scores.json")),
@@ -165,7 +164,6 @@ def explicit_models(tmp_path):
                 **config,
                 "output": str(tmp_path / (model_id + "-final")),
                 "selection": str(selection),
-                "test_window": chronology["test"],
                 "fit_cutoff": chronology["folds"][0]["validation"]["end"],
                 "fit_windows": [
                     chronology["folds"][0]["train"],
@@ -316,9 +314,6 @@ def test_prediction_consumer_preserves_full_expected_domain(
     metadata, facts, predictions = portfolio._prediction_evidence(
         final[0]["predictions"],
         window=window,
-        sample_role="test",
-        chronology=chronology,
-        fold_id="first",
     )
     rows = list(
         portfolio._prediction_rows(
@@ -362,31 +357,58 @@ def test_direct_operations_reject_unused_fields(operation):
         operation({"unconsumed": True})
 
 
-@pytest.mark.parametrize("damage", ("gap", "after_validation"))
-def test_backtest_rejects_refit_outside_declared_learning_windows(
-    explicit_models, monkeypatch, damage
+@pytest.mark.parametrize("scope", ("continuous_history", "later_cutoff"))
+def test_backtest_uses_actual_fitting_facts_without_model_registration(
+    tmp_path, explicit_models, monkeypatch, scope
 ):
-    _inputs, chronology, _validation, final = explicit_models
-    read = portfolio.read_predictions
-
-    def changed(path, **kwargs):
-        predictions, metadata = read(path, **kwargs)
-        facts = metadata["model_facts"]
-        if damage == "gap":
-            facts["fit_windows"] = [_window(0, 3500)]
-        else:
-            facts["fit_cutoff"] = _window(0, 4000)["end"]
-        return predictions, metadata
-
-    monkeypatch.setattr(portfolio, "read_predictions", changed)
-    with pytest.raises(ValueError, match="freeze_invalid|outside_chronology"):
-        portfolio._prediction_evidence(
-            final[0]["predictions"],
-            window=TimeWindow(**chronology["test"]),
-            sample_role="test",
-            chronology=chronology,
-            fold_id="first",
-        )
+    inputs, chronology, _validation, final = explicit_models
+    _, previous = portfolio.read_predictions(final[0]["predictions"])
+    facts = previous["model_facts"]
+    windows = (
+        [_window(0, 3500)] if scope == "continuous_history" else facts["fit_windows"]
+    )
+    cutoff = _window(0, 4000)["end"]
+    model = fit(
+        {
+            "market_id": "crypto",
+            "inputs": str(inputs),
+            "model": facts["model"],
+            "label_unit": facts["label_unit"],
+            "fit_windows": windows,
+            "fit_cutoff": cutoff,
+            "output": str(tmp_path / "later_fit"),
+        }
+    )
+    predictions = predict(
+        {
+            "model": str(model),
+            "inputs": str(inputs),
+            "prediction_window": chronology["test"],
+            "output": str(tmp_path / "later_prediction"),
+        }
+    )
+    _market(monkeypatch)
+    ledger = portfolio.backtest_taker(
+        {
+            "output": str(tmp_path / "later_taker"),
+            "inputs": str(inputs),
+            "panel": str(inputs),
+            "source": "explicit-source",
+            "asset_id": "btc_usdt",
+            "symbol": "BTCUSDT",
+            "chronology": chronology,
+            "prediction_window": chronology["test"],
+            "execution_mode": "continuous",
+            "capital": asdict(
+                PortfolioCapital("taker", 1000.0, "USDT", "linear_perpetual")
+            ),
+            "execution": asdict(portfolio.TakerConfig(1.0, 2.0, 0, 0.0, 100)),
+            "predictions": str(predictions),
+        }
+    )
+    artifact = read_portfolio_ledger_artifact(ledger)
+    summary = summarize_crypto_ledger(artifact, artifact.iter_chunks())
+    assert summary["economics"]["nav"] == pytest.approx(1000.0)
 
 
 @pytest.mark.parametrize(
@@ -418,15 +440,22 @@ def test_episode_publication_rejects_nat_metadata_before_production(tmp_path, va
 
 @pytest.mark.parametrize("mode", ("continuous", "independent_segments"))
 @pytest.mark.parametrize("declare_chronology", (True, False))
+@pytest.mark.parametrize("window_kind", ("test", "dev"))
 def test_explicit_taker_uses_saved_predictions_without_training(
-    tmp_path, monkeypatch, explicit_models, mode, declare_chronology
+    tmp_path, monkeypatch, explicit_models, mode, declare_chronology, window_kind
 ):
     import quant_research_platform.research.models.fitting as fitting
     from quant_research_platform.artifacts.crypto_hft import (
         read_crypto_episode_artifact,
     )
 
-    inputs, chronology, _validation, final = explicit_models
+    inputs, chronology, validation, final = explicit_models
+    window = (
+        chronology["test"]
+        if window_kind == "test"
+        else chronology["folds"][0]["validation"]
+    )
+    models = final if window_kind == "test" else validation
     _market(monkeypatch)
     monkeypatch.setattr(
         fitting, "_fit_model_result", lambda *_a, **_k: pytest.fail("backtest fitted")
@@ -440,13 +469,13 @@ def test_explicit_taker_uses_saved_predictions_without_training(
             "asset_id": "btc_usdt",
             "symbol": "BTCUSDT",
             **({"chronology": chronology} if declare_chronology else {}),
-            "prediction_window": chronology["test"],
+            "prediction_window": window,
             "execution_mode": mode,
             "capital": asdict(
                 PortfolioCapital("taker", 1000.0, "USDT", "linear_perpetual")
             ),
             "execution": asdict(portfolio.TakerConfig(1.0, 2.0, 0, 0.0, 100)),
-            "predictions": final[0]["predictions"],
+            "predictions": models[0]["predictions"],
         }
     )
     values = []
@@ -767,8 +796,22 @@ def test_independent_calibration_rejects_missing_or_wrong_science(
     assert not Path(config["output"]).exists()
 
 
-def test_independent_calibration_cutoff_must_precede_execution(independent_maker):
+@pytest.mark.parametrize("declare_chronology", (False, True))
+def test_independent_calibration_cutoff_must_precede_execution(
+    independent_maker, declare_chronology
+):
     config, backtest = independent_maker
+    if declare_chronology:
+        backtest["chronology"] = {
+            "folds": [
+                {
+                    "fold_id": "dev",
+                    "train": _window(0, 1000),
+                    "validation": backtest["prediction_window"],
+                }
+            ],
+            "test": _window(10000, 11000),
+        }
     config["models"][0]["cutoff"] = backtest["prediction_window"]["start"]
     portfolio.calibrate_maker(config)
     with pytest.raises(ValueError, match="consumer_relationship_invalid"):
@@ -792,7 +835,7 @@ def test_calibration_samples_stay_inside_actual_window(independent_maker):
 @pytest.mark.parametrize(
     "damage", ("outside_validation", "late_cutoff", "missing_cutoff", "earlier_cutoff")
 )
-def test_explicit_chronology_only_bounds_actual_calibration_window(damage):
+def test_chronology_supplies_defaults_without_binding_explicit_calibration(damage):
     chronology = {
         "folds": [
             {
@@ -822,9 +865,14 @@ def test_explicit_chronology_only_bounds_actual_calibration_window(damage):
             TimeWindow(**entry["window"]),
             pd.Timestamp(chronology["folds"][0]["validation"]["end"]),
         )
-    else:
+    elif damage == "earlier_cutoff":
         with pytest.raises(ValueError, match="window_invalid"):
             portfolio._calibration_windows(config)
+    else:
+        assert portfolio._calibration_windows(config)["observed"] == (
+            TimeWindow(**entry["window"]),
+            pd.Timestamp(entry["cutoff"]),
+        )
 
 
 def test_unknown_calibration_maturity_is_excluded_and_streams_close(
@@ -914,3 +962,44 @@ def test_calibration_closes_support_columns_and_ignores_descriptive_prediction_r
     )
     with artifact.table("crypto_maker_calibration.parquet") as frame:
         assert frame.sample_count.tolist() == [2, 2]
+
+
+def test_dev_maker_consumes_causal_calibration_with_independent_explicit_windows(
+    independent_maker,
+):
+    config, backtest = independent_maker
+    config["chronology"] = {
+        "folds": [
+            {
+                "fold_id": "other",
+                "train": _window(0, 1000),
+                "validation": _window(6000, 7000),
+            }
+        ],
+        "test": _window(12000, 13000),
+    }
+    backtest["chronology"] = {
+        "folds": [
+            {
+                "fold_id": "dev",
+                "train": _window(0, 1000),
+                "validation": backtest["prediction_window"],
+            }
+        ],
+        "test": _window(10000, 11000),
+    }
+    calibration = portfolio.calibrate_maker(config)
+    artifact = read_statistics_artifact(
+        calibration, validate_tables=portfolio.validate_maker_calibration
+    )
+    assert artifact.metadata["models"][0]["window"] == config["models"][0]["window"]
+    assert artifact.metadata["models"][0]["cutoff"] == config["models"][0]["cutoff"]
+    ledger = read_portfolio_ledger_artifact(portfolio.backtest_maker(backtest))
+    assert ledger.metadata["sample_role"] == "prediction"
+    assert ledger.metadata["window"] == backtest["prediction_window"]
+    assert (
+        summarize_crypto_ledger(ledger, ledger.iter_chunks())["execution"][
+            "selection_status"
+        ]
+        == "COMPLETE"
+    )

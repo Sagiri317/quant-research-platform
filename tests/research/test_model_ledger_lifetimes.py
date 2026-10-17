@@ -57,7 +57,6 @@ def test_native_selected_refit_failure_preserves_prior_selection_and_model(
         "inputs": scoring["labels"],
         "output": str(tmp_path / "final-good"),
         "selection": str(selection),
-        "test_window": scoring["test_window"],
         "fit_windows": [{"start": "2020-01-01", "end": "2020-01-06"}],
         "fit_cutoff": "2020-01-06",
     }

@@ -490,15 +490,8 @@ def test_half_subnormal_forecast_centers_survive_both_medians(
     assert saved.forward_earnings_yield_fy2.iloc[-1] == expected
 
 
-@pytest.mark.parametrize("batch_rows", (3, 10000))
-@pytest.mark.parametrize("freshness", (30, 90, 180))
-def test_explicit_freshness_controls_native_source_history_and_values(
-    tmp_path, freshness, batch_rows, monkeypatch
-):
-    from quant_research_platform.markets.implementations.a_share.processed import (
-        producer,
-    )
-    from quant_research_platform.markets.prepare import prepare
+@pytest.fixture(scope="module")
+def freshness_inputs(tmp_path_factory):
     from quant_research_platform.storage.datasets import read_dataset
     from tests.helpers.a_share_sources import (
         _prepare,
@@ -506,15 +499,7 @@ def test_explicit_freshness_controls_native_source_history_and_values(
         _write_inputs,
     )
 
-    monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", batch_rows)
-    prepared = []
-    actual_prepare = producer._prepare_expectations
-
-    def counted_prepare(*args, **kwargs):
-        prepared.append(True)
-        return actual_prepare(*args, **kwargs)
-
-    monkeypatch.setattr(producer, "_prepare_expectations", counted_prepare)
+    tmp_path = tmp_path_factory.mktemp("freshness-inputs")
     dates = pd.bdate_range("2020-06-02", periods=2).as_unit("ns")
     source = _synthetic_interim_frames(
         pd.bdate_range(dates[0] - pd.Timedelta(days=180), dates[-1]).as_unit("ns")
@@ -541,6 +526,41 @@ def test_explicit_freshness_controls_native_source_history_and_values(
         tmp_path / "prepared", "market_panel_1d", inputs, dates[0], dates[-1]
     )
     panel = read_dataset(inputs["market_panel_1d"])
+    return dates, inputs, panel
+
+
+@pytest.mark.parametrize("batch_rows", (3, 10000))
+@pytest.mark.parametrize("freshness", (30, 90, 180))
+def test_explicit_freshness_controls_native_source_history_and_values(
+    tmp_path, freshness, batch_rows, monkeypatch, freshness_inputs
+):
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        producer,
+    )
+    from quant_research_platform.markets.prepare import prepare
+    from quant_research_platform.storage.datasets import read_dataset
+    from quant_research_platform.storage.datasets.reading import DatasetSession
+
+    dates, inputs, panel = freshness_inputs
+    source_windows = []
+    actual_view = DatasetSession.filtered_view
+
+    def observed_view(session, time_window):
+        if session.root == inputs["analyst_forecast"]:
+            source_windows.append(time_window)
+        return actual_view(session, time_window)
+
+    monkeypatch.setattr(DatasetSession, "filtered_view", observed_view)
+
+    monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", batch_rows)
+    prepared = []
+    actual_prepare = producer._prepare_expectations
+
+    def counted_prepare(*args, **kwargs):
+        prepared.append(True)
+        return actual_prepare(*args, **kwargs)
+
+    monkeypatch.setattr(producer, "_prepare_expectations", counted_prepare)
     root = prepare(
         {
             "market_id": "a_share",
@@ -559,6 +579,9 @@ def test_explicit_freshness_controls_native_source_history_and_values(
     )
     saved = read_dataset(root).query("asset_id == '000001'")
     assert prepared == [True]
+    assert len(source_windows) == 1
+    assert source_windows[0].start == (dates[0] - pd.Timedelta(days=freshness)).date()
+    assert source_windows[0].end == dates[-1].date()
     if freshness <= 90:
         assert saved.forward_earnings_yield_fy1.isna().all()
     else:

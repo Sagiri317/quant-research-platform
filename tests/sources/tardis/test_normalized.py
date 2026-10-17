@@ -283,9 +283,7 @@ def test_offline_publication_revalidates_original_bytes_without_iv(
 @pytest.mark.parametrize(
     "damage", (None, "digest", "coverage", "gzip_tail", "row_tail")
 )
-def test_early_close_finishes_actual_decode_before_source_evidence(
-    tmp_path, monkeypatch, damage
-):
+def test_early_close_does_not_read_unrequested_tail(tmp_path, monkeypatch, damage):
     import hashlib
     from collections import Counter
 
@@ -297,9 +295,9 @@ def test_early_close_finishes_actual_decode_before_source_evidence(
     text = "exchange,symbol,timestamp,local_timestamp,id,side,price,amount\n"
     text += "".join(
         f"bybit,BTCUSDT,1785542400000000,{1785542400000000 + i},{i},buy,100,2\n"
-        for i in range(2000)
+        for i in range(20000)
     )
-    raw = gzip.compress(text.encode(), mtime=0)
+    raw = gzip.compress(text.encode(), compresslevel=0, mtime=0)
     root = tmp_path / "archive"
     manifest = _publish_dataset(
         root,
@@ -319,6 +317,7 @@ def test_early_close_finishes_actual_decode_before_source_evidence(
         prefix, last = text.rstrip("\n").rsplit("\n", 1)
         raw = gzip.compress(
             (prefix + "\n" + last.replace(",BTCUSDT,", ",ETHUSDT,") + "\n").encode(),
+            compresslevel=0,
             mtime=0,
         )
         manifest.update(
@@ -342,25 +341,25 @@ def test_early_close_finishes_actual_decode_before_source_evidence(
         archive_paths=["archive"],
         time_window=TimeWindow("2026-08-01", "2026-08-01"),
         expected_scope=("bybit", "BTCUSDT", "trades"),
-        on_verified=identities.append,
+        on_source=identities.append,
     )
     assert next(records)["id"] == "0"
-    assert identities == []
-    if damage is None:
-        records.close()
-        assert identities == [canonical_json_hash(manifest)]
+    assert identities == [canonical_json_hash(manifest)]
+    before_close = consumed.copy()
+    records.close()
+    assert consumed == before_close
+    assert opened == Counter({root / "data.csv.gz": 1})
+    assert 0 < consumed[root / "data.csv.gz"] < len(raw)
+    assert handles and all(handle.closed for handle in handles)
+    full = iter_records(tmp_path, archive_paths=["archive"], time_window=None)
+    if damage in {None, "digest"}:
+        assert len(list(full)) == 20000
     else:
         with pytest.raises((ValueError, OSError)):
-            records.close()
-        assert identities == []
-    assert opened == Counter({root / "data.csv.gz": 1})
-    assert consumed == Counter({root / "data.csv.gz": len(raw)})
-    assert handles and all(handle.closed for handle in handles)
+            list(full)
 
 
-def test_consumer_failure_stays_primary_and_does_not_finish_source_evidence(
-    tmp_path, monkeypatch
-):
+def test_consumer_failure_stays_primary_without_tail_validation(tmp_path, monkeypatch):
     from quant_research_platform.policy.lifecycle import closing_iterator
     from quant_research_platform.sources.tardis.normalized import _publish_dataset
 
@@ -384,7 +383,7 @@ def test_consumer_failure_stays_primary_and_does_not_finish_source_evidence(
         tmp_path,
         archive_paths=["archive"],
         time_window=None,
-        on_verified=identities.append,
+        on_source=identities.append,
     )
     primary = KeyboardInterrupt("synthetic_consumer_failure")
     with pytest.raises(KeyboardInterrupt) as caught:
@@ -392,8 +391,8 @@ def test_consumer_failure_stays_primary_and_does_not_finish_source_evidence(
             next(records)
             raise primary
     assert caught.value is primary
-    assert any("BadGzipFile" in note for note in primary.__notes__)
-    assert identities == []
+    assert not getattr(primary, "__notes__", [])
+    assert len(identities) == 1
 
 
 def test_bad_numeric_cell_keeps_raw_row_and_unrelated_fields(tmp_path, monkeypatch):

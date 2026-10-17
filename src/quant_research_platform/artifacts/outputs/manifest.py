@@ -106,7 +106,12 @@ def validate_output_manifest(
     if output_definition_id == "evaluation_outputs":
         expected_files.extend(
             f"{name}.parquet"
-            for name in ("daily_coverage", "daily_strata")
+            for name in (
+                "daily_coverage",
+                "daily_strata",
+                "response_metrics",
+                "response_groups",
+            )
             if name in metadata.get("optional_member_rows", {})
         )
     if files != expected_files:

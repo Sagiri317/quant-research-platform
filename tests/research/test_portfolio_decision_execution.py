@@ -14,6 +14,7 @@ from quant_research_platform.artifacts.portfolio_ledger import (
     write_portfolio_ledger_artifact,
 )
 from quant_research_platform.contracts.portfolios import (
+    PORTFOLIO_LEDGER_COST_COLUMNS,
     ExecutionAssumptions,
     PortfolioCandidateSpec,
     PortfolioCapital,
@@ -133,7 +134,7 @@ def test_future_execution_changes_actual_constraints_without_changing_target(tmp
     account, adv, optimized, delta, snapshot = production._build_session(**changed)
     pd.testing.assert_series_equal(optimized.weights, baseline[2].weights)
     pd.testing.assert_series_equal(delta, baseline[3])
-    assert optimized.weights.tolist() == pytest.approx([0.505, 0.495])
+    assert optimized.weights.tolist() == pytest.approx([0.505, 0.495, 0.0])
     assert optimized.predicted_tracking_error == baseline[2].predicted_tracking_error
     assert (
         baseline[4].attrs["realized_constraints"]["realized_constraints_status"]
@@ -226,11 +227,17 @@ def test_known_fees_cannot_make_frozen_holding_exceed_decision_limit(monkeypatch
         inputs["amount_history"].pop(("a", pd.Timestamp("2000-01-01")))
         if rate:
             account, _, optimized, _, ledger = production._build_session(**inputs)
-            assert optimized is None
-            assert account.asset_ledger.executed_delta_notional.eq(0.0).all()
-            assert account.nav_after == account.nav_before
-            assert ledger.attrs["decision_availability"]["decision_skip_reason"] == (
-                "portfolio_post_trade_constraints_infeasible"
+            # Frozen a is already at .505. Any strictly positive fee c would
+            # make its net weight .505/(1-c) > .505, so only zero-cost no-trade
+            # is feasible. The correct optimizer returns that optimum.
+            assert optimized is not None
+            assert account.asset_ledger.executed_delta_notional.to_numpy() == (
+                pytest.approx(np.zeros(3), abs=1e-10)
+            )
+            assert account.nav_after == pytest.approx(account.nav_before, abs=1e-10)
+            assert (
+                ledger.attrs["realized_constraints"]["realized_constraints_status"]
+                == "SATISFIED"
             )
         else:
             account, _, _, _, _ = production._build_session(**inputs)
@@ -241,9 +248,12 @@ def test_known_fees_cannot_make_frozen_holding_exceed_decision_limit(monkeypatch
                 == 50.5
             )
     assert len(captured) == 2
-    assert captured[0].weights.tolist() == pytest.approx([0.505, 0.25, 0.245])
-    pd.testing.assert_series_equal(captured[0].weights, captured[1].weights)
-    assert captured[1].expected_transaction_cost > 0.0
+    assert captured[0].weights.tolist() == pytest.approx([0.505, 0.25, 0.245, 0.0])
+    assert captured[1].weights.tolist() == pytest.approx(
+        [0.505, 0.245, 0.25, 0.0], abs=1e-12
+    )
+    assert captured[1].expected_transaction_cost == pytest.approx(0.0, abs=1e-12)
+    assert captured[1].weights.loc["a"] * 100.0 == 50.5
 
 
 @pytest.mark.parametrize("missing", ["specific", "exposure"])
@@ -365,3 +375,107 @@ def test_invalid_risk_is_not_downgraded_to_missing_target(invalid):
         enhanced.exposures.loc[enhanced.exposures.asset_id.eq("a"), "style"] = np.inf
     with pytest.raises(ValueError, match="optimizer_risk_invalid"):
         production._build_session(**inputs)
+
+
+@pytest.mark.parametrize("missing", ["specific", "exposure"])
+@pytest.mark.parametrize("fee_rate", [0.0002, 0.005])
+def test_fee_normalized_missing_risk_survives_actual_account_projection(
+    missing, fee_rate
+):
+    inputs = _decision_inputs(holdings=(0.4, 0.4), fee_rate=fee_rate)
+    inputs["cash"] = 20.0
+    enhanced = inputs["enhanced_decision"]
+    inputs["enhanced_decision"] = replace(
+        enhanced, expected_alpha=pd.Series([0.0, 0.2], index=["a", "b"])
+    )
+    if missing == "specific":
+        enhanced.risk.specific_variance.loc["a"] = np.nan
+    else:
+        enhanced.exposures.loc[enhanced.exposures.asset_id.eq("a"), "style"] = np.nan
+    account, _, optimized, _, ledger = production._build_session(**inputs)
+    assert optimized is not None
+    # This fee fixture charges commission and transfer fee at fee_rate each.
+    rate = 2.0 * fee_rate
+    fee = 0.2 * rate / (1.0 + rate)
+    assert account.nav_after == pytest.approx(100.0 * (1.0 - fee), abs=1e-10)
+    assert ledger.post_trade_notional.tolist() == pytest.approx(
+        [50.0 * (1.0 - fee)] * 2, abs=1e-10
+    )
+    assert account.post_trade_cash == pytest.approx(0.0, abs=1e-10)
+    facts = ledger.attrs["realized_constraints"]
+    assert facts["realized_constraints_status"] == "SATISFIED"
+    assert facts["realized_tracking_error_status"] == "DEFINED"
+    assert facts["realized_tracking_error"] == pytest.approx(0.0, abs=1e-14)
+    assert optimized.predicted_tracking_error == pytest.approx(0.0, abs=1e-14)
+
+
+@pytest.mark.parametrize("missing", ["specific", "exposure"])
+@pytest.mark.parametrize("benchmark_a, relative_move", [(0.5, 4e-12), (1e-12, 1e-8)])
+def test_genuine_tiny_future_active_weight_still_requires_missing_risk(
+    missing, benchmark_a, relative_move
+):
+    benchmark = (benchmark_a, 1.0 - benchmark_a)
+    inputs = _decision_inputs(benchmark=benchmark)
+    enhanced = inputs["enhanced_decision"]
+    inputs["enhanced_decision"] = replace(
+        enhanced, expected_alpha=pd.Series([0.0, 0.0], index=["a", "b"])
+    )
+    if missing == "specific":
+        enhanced.risk.specific_variance.loc["a"] = np.nan
+    else:
+        enhanced.exposures.loc[enhanced.exposures.asset_id.eq("a"), "style"] = np.nan
+    inputs["execution"][["can_enter", "can_exit"]] = False
+    inputs["next_panel"].loc[inputs["next_panel"].asset_id.eq("a"), "open"] = 100.0 * (
+        1.0 + relative_move
+    )
+    account, _, optimized, _, ledger = production._build_session(**inputs)
+    assert optimized is not None
+    assert optimized.predicted_tracking_error == 0.0
+    active = (
+        ledger.set_index("asset_id").loc["a", "post_trade_notional"] / account.nav_after
+        - benchmark_a
+    )
+    assert 0.0 < active < 2e-12
+    # A tiny benchmark position must use a relative rounding bound. Its true
+    # 1e-20 active weight is far below a global epsilon or economic threshold.
+    assert active > 100.0 * np.finfo(float).eps * benchmark_a
+    facts = ledger.attrs["realized_constraints"]
+    assert facts["realized_constraints_status"] == "UNDEFINED"
+    assert facts["realized_constraints_reason"] == "active_risk_unavailable"
+    assert facts["realized_tracking_error_status"] == "UNDEFINED"
+    assert "realized_tracking_error" not in facts
+
+
+def test_post_projection_guard_rejects_corrupted_real_optimizer_target(monkeypatch):
+    real = production.optimize_portfolio
+    solved = []
+
+    def corrupted_target(*args, **kwargs):
+        result = real(*args, **kwargs)
+        solved.append(result)
+        # Deliberately corrupt a real solved target to exercise the defensive
+        # projection guard, not a claim that correctly funded fees are infeasible.
+        weights = pd.Series({"a": 0.6, "b": 0.4, "__cash__": 0.0})
+        return replace(result, weights=weights.reindex(result.weights.index))
+
+    monkeypatch.setattr(production, "optimize_portfolio", corrupted_target)
+    inputs = _decision_inputs(fee_rate=0.001)
+    account, _, optimized, _, ledger = production._build_session(**inputs)
+    assert len(solved) == 1
+    assert optimized is None
+    availability = ledger.attrs["decision_availability"]
+    assert availability["decision_status"] == "SKIPPED"
+    assert (
+        availability["decision_skip_reason"]
+        == "portfolio_post_trade_constraints_infeasible"
+    )
+    assert ledger.executed_delta_notional.eq(0.0).all()
+    assert ledger.loc[:, list(PORTFOLIO_LEDGER_COST_COLUMNS)].eq(0.0).all().all()
+    pd.testing.assert_series_equal(
+        ledger.set_index("asset_id").post_trade_notional,
+        inputs["holdings"],
+        check_names=False,
+        check_exact=True,
+    )
+    assert account.nav_after == account.nav_before == 100.0
+    assert account.post_trade_cash == 0.0

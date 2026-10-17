@@ -1,12 +1,13 @@
 """A declared model's empty domain is explicit; comparison may not drop it."""
 
+import json
+
 import numpy as np
 import pandas as pd
-import pytest
 
 from quant_research_platform.artifacts.outputs.prediction import read_predictions
 from quant_research_platform.contracts.models import ModelSpec
-from quant_research_platform.research.models.trial_selection import score
+from quant_research_platform.research.models.trial_selection import score, select
 from quant_research_platform.research.predictions.runner import predict
 from tests.research.direct_model_test_support import fit_frame
 
@@ -56,20 +57,33 @@ def test_empty_family_is_native_empty_without_fabricated_prediction(tmp_path):
         and metadata["prediction_rows"] == 0
         and metadata["effective_prediction_end"] is None
     )
-    with pytest.raises(ValueError, match="empty_model_selection_validation_window"):
-        score(
-            {
-                "predictions": [str(output)],
-                "candidate_ids": ["x"],
-                "labels": str(path),
-                "label_spec": case.config["input_spec"],
-                "validation_windows": [window],
-                "scoring_window": window,
-                "cutoff": "2020-01-02",
-                "test_window": {"start": "2020-01-03", "end": "2020-01-04"},
-                "selection_group": "global",
-                "validation_axis": "cross_sectional",
-                "label_unit": "decimal_return",
-                "output": str(tmp_path / "scores.json"),
-            }
-        )
+    scored = score(
+        {
+            "predictions": [str(output)],
+            "candidate_ids": ["x"],
+            "labels": str(path),
+            "label_spec": case.config["input_spec"],
+            "validation_windows": [window],
+            "scoring_window": window,
+            "cutoff": "2020-01-02",
+            "selection_group": "global",
+            "validation_axis": "cross_sectional",
+            "label_unit": "decimal_return",
+            "output": str(tmp_path / "scores.json"),
+        }
+    )
+    result = json.loads(scored.read_text())
+    assert result["common_rows"] == 0
+    assert result["metrics"][0]["validation_mse"] is None
+    selected = select(
+        {
+            "scores": str(scored),
+            "output": str(tmp_path / "selection.json"),
+            "selection_metric": "validation_mse",
+            "selection_direction": "minimize",
+            "tie_break_order": ["x"],
+            "refit_windows": case.config["fit_windows"],
+            "refit_cutoff": "2020-01-02",
+        }
+    )
+    assert json.loads(selected.read_text())["selected_model_id"] is None

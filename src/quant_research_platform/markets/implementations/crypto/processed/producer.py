@@ -153,7 +153,9 @@ def produce_hft_processed_data(
                         output_levels=10,
                         end_ns=end_ms * 1000000,
                     ),
-                    read_trades(run, market_type, symbol=symbol, end_ms=end_ms),
+                    read_trades(
+                        run, market_type, symbol=symbol, end_ns=end_ms * 1000000
+                    ),
                     start_ms=start_ms,
                     end_ms=end_ms,
                     book_coverage=active.coverage_segments,
@@ -803,7 +805,7 @@ def produce_normalized_context(
                                 symbol,
                                 kind,
                             ),
-                            on_verified=identities[symbol][kind].append,
+                            on_source=identities[symbol][kind].append,
                         )
                     )
                 )
@@ -822,11 +824,6 @@ def produce_normalized_context(
             )
             with closing_iterator(_output_frames(data, time_window)) as output:
                 yield from output
-            # A declared source is required even when its target PANEL is empty.
-            for kinds in sources.values():
-                for records in kinds.values():
-                    for _ in records:
-                        pass
             metadata["source_evidence"]["manifest_hash"] = canonical_json_hash(
                 identities
             )

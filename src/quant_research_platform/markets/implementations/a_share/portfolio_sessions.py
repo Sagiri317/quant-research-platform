@@ -87,6 +87,7 @@ class _PortfolioSession:
     execution: pd.DataFrame
     unproved_lifecycle_assets: frozenset[str]
     confirmed_delisted_lifecycles: frozenset[tuple[str, pd.Timestamp]]
+    unknown_market_assets: frozenset[str]
     rights_events: pd.DataFrame
     corporate_events: pd.DataFrame = field(default_factory=pd.DataFrame)
 
@@ -492,6 +493,8 @@ def iter_portfolio_sessions(
                 masks.reset_index(drop=True).copy(),
                 unproved_lifecycle,
                 confirmed_delisted_lifecycles,
+                frozenset(unknown_membership)
+                | frozenset(status.index[status.isna()].astype(str)),
                 current_rights,
                 current_corporate,
             )

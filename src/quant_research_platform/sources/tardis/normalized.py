@@ -25,7 +25,6 @@ from quant_research_platform.storage.atomic import (
     atomic_write_json,
 )
 from quant_research_platform.storage.identity import (
-    filesystem_stat,
     open_filesystem_file,
     require_unaliased_path,
 )
@@ -72,7 +71,7 @@ def _request_url(exchange, dataset_type, symbol, date):
     return f"https://datasets.tardis.dev/v1/{exchange}/{dataset_type}/{day:%Y/%m/%d}/{symbol}.csv.gz"
 
 
-def _rows(path, *, exchange, dataset_type, symbol, date, sha256):
+def _rows(path, *, exchange, dataset_type, symbol, date, sha256=None):
     day = _date(date)
     lower = int(dt.datetime.combine(day, dt.time(), dt.UTC).timestamp()) * 1_000_000
     upper = lower + 86_400_000_000
@@ -253,48 +252,32 @@ def _publish_dataset(output_root, open_source, *, exchange, dataset_type, symbol
 def _archive_manifest(root):
     require_unaliased_path(root, error="tardis_raw_identity_changed")
     manifest = read_manifest(root / "manifest.json")
-    if set(manifest) != {
+    if set(manifest) - {"sha256", "compressed_bytes", "request_url"} != {
         "schema_id",
         "source_id",
         "exchange",
         "dataset_type",
         "symbol",
         "date",
-        "request_url",
         "path",
-        "compressed_bytes",
-        "sha256",
         "row_count",
         "first_observed_us",
         "last_observed_us",
         "clock",
         "coverage",
         "amount_unit",
-    } or (
-        type(manifest["sha256"]) is not str
-        or len(manifest["sha256"]) != 64
-        or any(value not in "0123456789abcdef" for value in manifest["sha256"])
-        or type(manifest["compressed_bytes"]) is not int
-        or manifest["compressed_bytes"] <= 0
-    ):
+    }:
         raise ValueError("tardis_normalized_manifest_invalid")
     if manifest.get("schema_id") != SCHEMA_ID or manifest.get("source_id") != "tardis":
         raise ValueError("tardis_normalized_manifest_invalid")
-    url = _request_url(
+    _request_url(
         manifest["exchange"],
         manifest["dataset_type"],
         manifest["symbol"],
         manifest["date"],
     )
-    if manifest["path"] != "data.csv.gz" or manifest["request_url"] != url:
+    if manifest["path"] != "data.csv.gz":
         raise ValueError("tardis_normalized_manifest_invalid")
-    path = root / "data.csv.gz"
-    try:
-        size = filesystem_stat(path).st_size
-    except (FileNotFoundError, NotADirectoryError) as error:
-        raise ValueError("tardis_raw_identity_changed") from error
-    if size != manifest["compressed_bytes"]:
-        raise ValueError("tardis_raw_identity_changed")
     if (
         manifest["clock"] != "vendor_utc_microseconds"
         or manifest["coverage"] != "observed_rows_only_no_native_continuity_proof"
@@ -308,7 +291,7 @@ def _archive_manifest(root):
 
 
 def _iter_records(root, *, manifest):
-    """Verify the selected manifest against the bytes actually decoded."""
+    """Decode requested rows and check full coverage only at natural exhaustion."""
     root = Path(root)
     path = root / "data.csv.gz"
     with closing_iterator(
@@ -318,7 +301,6 @@ def _iter_records(root, *, manifest):
             dataset_type=manifest["dataset_type"],
             symbol=manifest["symbol"],
             date=manifest["date"],
-            sha256=manifest["sha256"],
         )
     ) as rows:
         count = 0
@@ -358,9 +340,9 @@ def _selected_archives(root, archive_paths, time_window):
 
 
 def iter_records(
-    root, *, archive_paths, time_window, expected_scope=None, on_verified=None
+    root, *, archive_paths, time_window, expected_scope=None, on_source=None
 ):
-    """Decode and verify each selected archive once, including on early close."""
+    """Describe selected sources and decode only the rows the caller consumes."""
     selected = _selected_archives(root, archive_paths, time_window)
     first = selected[0][1]
     scope = ("exchange", "symbol", "dataset_type")
@@ -370,17 +352,15 @@ def iter_records(
         for _, manifest in selected
     ):
         raise ValueError("tardis_normalized_scope_invalid")
-    emit = True
     for path, manifest in selected:
+        if on_source is not None:
+            on_source(canonical_json_hash(manifest))
         with closing_iterator(_iter_records(path, manifest=manifest)) as records:
             for row in records:
-                if emit:
-                    try:
-                        yield row
-                    except GeneratorExit:
-                        emit = False
-        if on_verified is not None:
-            on_verified(canonical_json_hash(manifest))
+                try:
+                    yield row
+                except GeneratorExit:
+                    return
 
 
 def source_identity(root, _target_id, *, exchange, archives, time_window=None):
@@ -398,6 +378,9 @@ def source_identity(root, _target_id, *, exchange, archives, time_window=None):
                         or manifest["dataset_type"] != kind
                     ):
                         raise ValueError("tardis_normalized_scope_invalid")
+                    digest = manifest.get("sha256")
+                    if not isinstance(digest, str) or len(digest) != 64:
+                        raise ValueError("tardis_normalized_manifest_invalid")
                     with _verified_file(
                         path / "data.csv.gz", expected_sha256=manifest["sha256"]
                     ) as raw:

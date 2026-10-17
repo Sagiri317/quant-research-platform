@@ -633,10 +633,8 @@ def test_unknown_quote_breaks_suspension_baseline_across_persisted_slabs(
     assert rows.loc[dates[-1], "adj_close"] == 120.0
 
 
-@pytest.mark.parametrize("target", ("price_volume_facts", "market_model_factors"))
-def test_processed_narrow_output_uses_existing_panel_history(
-    tmp_path, monkeypatch, target
-):
+@pytest.fixture(scope="module")
+def narrow_panel_history(tmp_path_factory):
     # Proven listing eligibility precedes the market-model and residual windows.
     dates = pd.bdate_range("2020-01-02", periods=620).as_unit("ns")
     source = _synthetic_interim_frames(dates)
@@ -654,7 +652,6 @@ def test_processed_narrow_output_uses_existing_panel_history(
     bars = source["market_bars_1d"]
     bars["period_return"] = np.sin(np.arange(len(bars)) / 3) * 0.01
     panel_spec = processed_catalog().get("market_panel_1d")
-    spec = processed_catalog().get(target)
     panel = producer._compute_processed_frame(
         panel_spec,
         source={
@@ -666,6 +663,35 @@ def test_processed_narrow_output_uses_existing_panel_history(
         dependencies={},
         trading_sessions=tuple(dates),
     )
+    layout = StorageLayout(tmp_path_factory.mktemp("narrow-panel-history"))
+    write_dataset(
+        layout.processed_data_root(
+            panel_spec.market_id, panel_spec.kind, panel_spec.data_id
+        ),
+        panel,
+        spec=panel_spec,
+    )
+    names = {
+        name
+        for target in ("price_volume_facts", "market_model_factors")
+        for name in processed_catalog().get(target).source_input_data_ids
+    }
+    for data_id in sorted(names):
+        source_spec = _source_catalog().get(data_id)
+        write_dataset(
+            layout.interim_data_root(source_spec.source_id, data_id),
+            source[data_id],
+            spec=source_spec,
+        )
+    return dates, source, panel, layout
+
+
+@pytest.mark.parametrize("target", ("price_volume_facts", "market_model_factors"))
+def test_processed_narrow_output_uses_existing_panel_history(
+    tmp_path, monkeypatch, target, narrow_panel_history
+):
+    dates, source, panel, input_layout = narrow_panel_history
+    spec = processed_catalog().get(target)
     expected = (
         pd.concat(
             producer.factor_engine._market_model_frames(
@@ -690,20 +716,6 @@ def test_processed_narrow_output_uses_existing_panel_history(
         .reset_index(drop=True)
     )
     layout = StorageLayout(tmp_path)
-    write_dataset(
-        layout.processed_data_root(
-            panel_spec.market_id, panel_spec.kind, panel_spec.data_id
-        ),
-        panel,
-        spec=panel_spec,
-    )
-    for data_id in spec.source_input_data_ids:
-        source_spec = _source_catalog().get(data_id)
-        write_dataset(
-            layout.interim_data_root(source_spec.source_id, data_id),
-            source[data_id],
-            spec=source_spec,
-        )
     input_sessions = []
     compute = producer._compute_processed_frame
 
@@ -733,7 +745,7 @@ def test_processed_narrow_output_uses_existing_panel_history(
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
     with producer.produce_a_share_processed_data(
         spec,
-        inputs=_published_inputs(layout, spec),
+        inputs=_published_inputs(input_layout, spec),
         time_window=TimeWindow(core[0], core[-1]),
         processed_catalog=processed_catalog(),
         source_catalog=_source_catalog(),
@@ -1071,20 +1083,19 @@ def test_own_market_all_label_horizons_preserve_unknown_and_suspended_sessions(
 
 
 @pytest.mark.parametrize(
-    "gap,batch_rows,old_market",
+    "gap,batch_rows,old_market,session_count",
     (
-        ("membership", 6, None),
-        ("membership", 6, 1),
-        ("membership", 6, 4),
-        ("calendar", 6, None),
-        ("membership", 300, None),
-        ("calendar", 300, None),
+        ("membership", 6, None, 8),
+        ("membership", 6, 1, 8),
+        ("membership", 6, 4, 8),
+        ("membership", 300, None, 260),
+        ("calendar", 300, None, 260),
     ),
 )
 def test_unobserved_initial_market_preserves_unknown_age_and_proven_252_sessions(
-    tmp_path, monkeypatch, batch_rows, gap, old_market
+    tmp_path, monkeypatch, batch_rows, gap, old_market, session_count
 ):
-    dates = pd.bdate_range("2019-01-02", periods=260).as_unit("ns")
+    dates = pd.bdate_range("2019-01-02", periods=session_count).as_unit("ns")
     source = _synthetic_interim_frames(dates)
     source["stock_master"]["listing_date"] = dates[0]
     source["stock_master"]["timestamp"] = dates[0]
@@ -1138,21 +1149,26 @@ def test_unobserved_initial_market_preserves_unknown_age_and_proven_252_sessions
     spec = processed_catalog().get("market_panel_1d")
     monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", batch_rows)
     windows = (
-        ((0, dates[:6]), (1, dates[-6:])) if gap == "membership" else ((1, dates[-6:]),)
+        ((0, dates[:6]),)
+        if session_count < 252
+        else ((0, dates[:6]), (1, dates[-6:]))
+        if gap == "membership"
+        else ((1, dates[-6:]),)
     )
+    input_layout = StorageLayout(tmp_path / "source")
+    for data_id in spec.source_input_data_ids:
+        source_spec = _source_catalog().get(data_id)
+        write_dataset(
+            input_layout.interim_data_root(source_spec.source_id, data_id),
+            source[data_id],
+            spec=source_spec,
+        )
     for index, requested in windows:
         layout = StorageLayout(tmp_path / str(index))
-        for data_id in spec.source_input_data_ids:
-            source_spec = _source_catalog().get(data_id)
-            write_dataset(
-                layout.interim_data_root(source_spec.source_id, data_id),
-                source[data_id],
-                spec=source_spec,
-            )
         root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
         with producer.produce_a_share_processed_data(
             spec,
-            inputs=_published_inputs(layout, spec),
+            inputs=_published_inputs(input_layout, spec),
             time_window=TimeWindow(requested[0], requested[-1]),
             processed_catalog=processed_catalog(),
             source_catalog=_source_catalog(),
@@ -1496,15 +1512,19 @@ def test_panel_preserves_proven_listing_lifecycles(
     )
 
 
-@pytest.mark.parametrize("batch_rows", (6, 3000))
+@pytest.mark.parametrize(
+    "old_sessions,new_sessions,batch_rows", ((300, 30, 3000), (23, 4, 6))
+)
 @pytest.mark.parametrize("gap,suspended", ((1, False), (25, True)))
 def test_native_lifecycle_history_does_not_join_relisting(
-    tmp_path, monkeypatch, batch_rows, gap, suspended
+    tmp_path, monkeypatch, batch_rows, gap, suspended, old_sessions, new_sessions
 ):
     from quant_research_platform.sources.csmar import interim
     from tests.helpers.a_share_raw import _write_csmar
 
-    dates = pd.bdate_range("2020-01-02", periods=330 + gap).as_unit("ns")
+    dates = pd.bdate_range(
+        "2020-01-02", periods=old_sessions + new_sessions + gap
+    ).as_unit("ns")
     source = _synthetic_interim_frames(dates)
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
@@ -1514,7 +1534,7 @@ def test_native_lifecycle_history_does_not_join_relisting(
             Stkcd="000001",
             Stknme="synthetic",
             Listdt=dates[0].date().isoformat(),
-            DelistedDate=dates[299].date().isoformat(),
+            DelistedDate=dates[old_sessions - 1].date().isoformat(),
             Markettype=1,
             Nnindcd="C",
             Nnindnme="synthetic",
@@ -1524,7 +1544,7 @@ def test_native_lifecycle_history_does_not_join_relisting(
         dict(
             Stkcd="000001",
             Stknme="synthetic",
-            Listdt=dates[300 + gap].date().isoformat(),
+            Listdt=dates[old_sessions + gap].date().isoformat(),
             DelistedDate="",
             Markettype=1,
             Nnindcd="C",
@@ -1536,16 +1556,16 @@ def test_native_lifecycle_history_does_not_join_relisting(
     _write_csmar(raw, "stock_master", masters[::-1])
     rows = []
     for i, stamp in enumerate(dates):
-        if 300 <= i < 300 + gap:
+        if old_sessions <= i < old_sessions + gap:
             continue
-        price = 10.0 if i < 300 else 100.0
+        price = 10.0 if i < old_sessions else 100.0
         rows.append(
             dict(
                 Stkcd="000001",
                 Trddt=stamp.date().isoformat(),
                 Markettype=1,
                 Trdsta=0,
-                Filling=int(suspended and i == 300 + gap),
+                Filling=int(suspended and i == old_sessions + gap),
                 Opnprc=price,
                 Hiprc=price,
                 Loprc=price,
@@ -1628,41 +1648,54 @@ def test_native_lifecycle_history_does_not_join_relisting(
             )
         results[data_id] = read_dataset(root).set_index("timestamp")
     panel = results["market_panel_1d"]
-    assert panel.loc[dates[289], "listing_age_trading_days"] == 290
-    assert a_share_eligibility(panel.reset_index(), "a_share_all").iloc[289]
+    assert (
+        panel.loc[dates[old_sessions - 11], "listing_age_trading_days"]
+        == old_sessions - 10
+    )
+    assert a_share_eligibility(panel.reset_index(), "a_share_all").iloc[
+        old_sessions - 11
+    ] == (old_sessions - 10 >= 252)
     mask = results["execution_mask"]
-    assert pd.isna(mask.loc[dates[299], "can_enter"])
-    assert mask.loc[dates[300 + gap], "can_enter"]
+    assert pd.isna(mask.loc[dates[old_sessions - 1], "can_enter"])
+    assert mask.loc[dates[old_sessions + gap], "can_enter"]
     labels = results["forward_returns"]
-    assert labels.loc[dates[270], "forward_return_20d"] == 0.0
+    # The short old life still spans entry 1 through exit 21 for a mature label.
+    mature_signal = max(0, old_sessions - 30)
+    assert labels.loc[dates[mature_signal], "forward_return_20d"] == 0.0
     for horizon in (1, 20):
-        edge = dates[299 - horizon]
+        edge = dates[old_sessions - 1 - horizon]
         assert pd.isna(labels.loc[edge, f"forward_return_{horizon}d"])
         assert pd.isna(labels.loc[edge, f"forward_return_{horizon}d_available_at"])
-    assert pd.isna(labels.loc[dates[289], "forward_return_20d"])
+    assert pd.isna(labels.loc[dates[old_sessions - 11], "forward_return_20d"])
     factors = results["price_volume_facts"]
-    assert pd.isna(factors.loc[dates[300 + gap], "reversal_1d"])
-    assert factors.loc[dates[302 + gap], "reversal_1d"] == 0.0
+    assert pd.isna(factors.loc[dates[old_sessions + gap], "reversal_1d"])
+    assert factors.loc[dates[old_sessions + gap + 2], "reversal_1d"] == 0.0
     from quant_research_platform.research.portfolios.production import (
         _completed_calibration_rows,
     )
 
     entry = (
-        panel.loc[[dates[289]]].reset_index().set_index(["asset_id", "listing_date"])
+        panel.loc[[dates[old_sessions - 11]]]
+        .reset_index()
+        .set_index(["asset_id", "listing_date"])
     )
     alpha = pd.Series(1.0, index=entry.index)
-    pending = (alpha, entry.adj_open, dates[288])
+    pending = (alpha, entry.adj_open, dates[old_sessions - 12])
     assert (
         _completed_calibration_rows(
-            pending, panel.loc[[dates[302 + gap]]].reset_index()
+            pending, panel.loc[[dates[old_sessions + gap + 2]]].reset_index()
         )
         == []
     )
     same_life = _completed_calibration_rows(
-        pending, panel.loc[[dates[295]]].reset_index()
+        pending, panel.loc[[dates[old_sessions - 5]]].reset_index()
     )
     assert same_life == [
-        {"timestamp": dates[288], "prediction_rank_score": 1.0, "holding_return": 0.0}
+        {
+            "timestamp": dates[old_sessions - 12],
+            "prediction_rank_score": 1.0,
+            "holding_return": 0.0,
+        }
     ]
 
 

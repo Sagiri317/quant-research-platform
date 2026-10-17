@@ -86,6 +86,18 @@ def validate_evaluation_science(metadata):
     from quant_research_platform.contracts.time import TimeWindow
 
     base = {"window", "cutoff", "sample_role"}
+    has_response = isinstance(metadata, dict) and "response_diagnostics" in metadata
+    if isinstance(metadata, dict) and "response_diagnostics" in metadata:
+        from quant_research_platform.contracts.evaluations import (
+            validate_response_diagnostics,
+        )
+
+        validate_response_diagnostics(metadata["response_diagnostics"])
+        metadata = {
+            key: value
+            for key, value in metadata.items()
+            if key != "response_diagnostics"
+        }
     if type(metadata) is not dict or set(metadata) not in (
         base,
         base | EVALUATION_SCIENCE_KEYS,
@@ -110,7 +122,7 @@ def validate_evaluation_science(metadata):
     if type(peers) is not list or (metadata["sample_scope"] == "own" and peers):
         raise ValueError("evaluation_comparison_inputs_invalid")
     for facts in [metadata["input_facts"], *peers]:
-        if type(facts) is not dict or set(facts) - {"input_observations"} != {
+        if type(facts) is not dict or set(facts) != {
             "selector",
             "columns",
             "column_units",
@@ -123,15 +135,6 @@ def validate_evaluation_science(metadata):
             "market_id",
         }:
             raise ValueError("evaluation_input_facts_invalid")
-        observations = facts.get("input_observations", {})
-        if type(observations) is not dict or any(
-            type(date) is not str
-            or type(digest) is not str
-            or len(digest) != 64
-            or any(character not in "0123456789abcdef" for character in digest)
-            for date, digest in observations.items()
-        ):
-            raise ValueError("evaluation_input_observations_invalid")
         if (
             type(facts["selector"]) is not dict
             or type(facts["selector"].get("path")) is not str
@@ -225,9 +228,19 @@ def validate_evaluation_science(metadata):
     ):
         raise ValueError("evaluation_stratum_domains_invalid")
     counts = metadata["optional_member_rows"]
+    if has_response != (
+        isinstance(counts, dict)
+        and set(counts) == {"response_metrics", "response_groups"}
+    ):
+        raise ValueError("evaluation_response_members_invalid")
     if (
         type(counts) is not dict
-        or set(counts) not in (set(), {"daily_coverage", "daily_strata"})
+        or set(counts)
+        not in (
+            set(),
+            {"daily_coverage", "daily_strata"},
+            {"response_metrics", "response_groups"},
+        )
         or any(type(value) is not int or value < 0 for value in counts.values())
         or ((strata or metadata["sample_scope"] == "common") and not counts)
     ):
@@ -238,6 +251,8 @@ def validate_evaluation_output_metadata_shape(
     metadata: object,
 ) -> dict[str, object]:
     science = {"window", "cutoff", "sample_role"}
+    if isinstance(metadata, dict) and "response_diagnostics" in metadata:
+        science.add("response_diagnostics")
     if type(metadata) is not dict or set(metadata) not in (
         _EVALUATION_OUTPUT_METADATA_KEYS,
         _EVALUATION_OUTPUT_METADATA_KEYS | science,
@@ -291,6 +306,27 @@ def validate_evaluation_output_metadata_shape(
             and metadata["strata"]["primary_label"] not in label_columns
         ):
             raise ValueError("evaluation_strata_invalid")
+    if "response_diagnostics" in metadata:
+        from quant_research_platform.contracts.evaluations import (
+            validate_response_diagnostics,
+        )
+
+        validate_response_diagnostics(
+            metadata["response_diagnostics"],
+            signals=signals,
+        )
+        if (
+            metadata["market_id"] != "crypto"
+            or metadata["evaluation_axis"] != "single_asset_time_series"
+            or metadata["sample_scope"] != "own"
+            or metadata["strata"]
+            or any(signal.transform != "identity" for signal in signals)
+            or any(
+                unit != "decimal_return"
+                for unit in metadata["input_facts"]["label_units"].values()
+            )
+        ):
+            raise ValueError("evaluation_response_domain_invalid")
     if not label_columns:
         raise ValueError("output_manifest_metadata_invalid")
 
@@ -525,6 +561,13 @@ def validate_evaluation_artifact_structure(
     )
     _validate_correlation_metrics(metrics, spec=spec)
     strict_non_negative_count_series(grouped_label_values["n_obs"])
+    if (
+        grouped_label_values["n_obs"]
+        .eq(0)
+        .ne(grouped_label_values["mean_label_value"].isna())
+        .any()
+    ):
+        raise ValueError("evaluation_group_observations_invalid")
     groups = strict_positive_group_series(grouped_label_values["group"])
     if bool(groups.gt(spec.n_groups).any()):
         raise ValueError("evaluation_group_out_of_range")
@@ -658,15 +701,14 @@ def validate_evaluation_artifact_structure(
         expected = {
             (row.timestamp, row.signal, row.label): int(row.n_obs)
             for row in metrics.itertuples(index=False)
-            if row.n_obs >= 2
         }
         observed = {}
         for row in grouped_label_values.itertuples(index=False):
-            if (row.n_obs == 0) != pd.isna(row.mean_label_value):
-                raise ValueError("evaluation_group_observations_invalid")
             key = (row.timestamp, row.signal, row.label)
+            if key not in expected:
+                raise ValueError("evaluation_metric_group_observations_mismatch")
             observed[key] = observed.get(key, 0) + int(row.n_obs)
-        if observed != expected:
+        if any(observed.get(key, 0) != count for key, count in expected.items()):
             raise ValueError("evaluation_metric_group_observations_mismatch")
 
 

@@ -267,8 +267,14 @@ def test_execution_end_stops_inside_invalid_book_segment(tmp_path, monkeypatch):
     [
         ("2025-01-01", {}, None),
         ("2025-12-30", {}, None),
+        ("2025-12-31", {}, None),
         ("2025-12-31", {"nq": "0.25"}, 0.25),
         ("2026-06-30", {"nq": "0.25", "st": 1}, 0.25),
+        ("2026-09-01", {"st": 1}, None),
+        ("2026-09-01", {"nq": None, "st": 1}, None),
+        ("2026-09-01", {"nq": "unavailable", "st": 1}, None),
+        ("2026-09-01", {"nq": "NaN", "st": 1}, None),
+        ("2026-09-01", {"nq": "0", "st": 1}, 0.0),
         ("2026-09-01", {"nq": "0.25", "st": 1}, 0.25),
     ],
 )
@@ -356,7 +362,7 @@ def test_native_schema_invalid_fields_fail_atomic_full_import(tmp_path, date, ch
     assert not published.exists()
 
 
-@pytest.mark.parametrize("boundary", ("manifest_stat", "member_open", "coverage_open"))
+@pytest.mark.parametrize("boundary", ("manifest_open", "member_open", "coverage_open"))
 def test_tardis_source_preserves_shared_owner_io_failure(
     tmp_path, monkeypatch, boundary
 ):
@@ -375,17 +381,22 @@ def test_tardis_source_preserves_shared_owner_io_failure(
         assert source.source_identity
     target = root / (
         "manifest.json"
-        if boundary == "manifest_stat"
+        if boundary == "manifest_open"
         else manifest["observation_intervals"]["path"]
         if boundary == "coverage_open"
         else manifest["files"][0]["path"]
     )
     from quant_research_platform.sources.tardis import raw
+    from quant_research_platform.storage import manifests
 
-    owner = raw if boundary == "member_open" else binance_replay
-    operation = (
-        "filesystem_stat" if boundary == "manifest_stat" else "open_filesystem_file"
+    owner = (
+        raw
+        if boundary == "member_open"
+        else manifests
+        if boundary == "manifest_open"
+        else binance_replay
     )
+    operation = "open_filesystem_file"
     original = getattr(owner, operation)
     primary = OSError(errno.EIO, "controlled_io_failure")
 
@@ -1676,19 +1687,22 @@ def test_late_snapshot_prefix_excludes_previous_observation(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "bad",
+    "bad,invalid",
     [
-        {"q": "0"},
-        {"p": "NaN"},
-        {"nq": None},
-        {"nq": "3"},
-        {"nq": "missing"},
-        {"m": None},
-        {"m": "missing"},
+        ({"q": "0"}, True),
+        ({"p": "NaN"}, True),
+        ({"nq": "-1"}, True),
+        ({"nq": "3"}, True),
+        ({"m": None}, True),
+        ({"m": "missing"}, True),
+        ({"nq": None}, False),
+        ({"nq": "missing"}, False),
+        ({"nq": "unavailable"}, False),
+        ({"nq": "0"}, False),
     ],
 )
-def test_identifiable_native_bad_trade_retains_raw_and_splits_only_trade_coverage(
-    tmp_path, bad
+def test_identifiable_native_trade_values_preserve_independent_facts(
+    tmp_path, bad, invalid
 ):
     import gzip
 
@@ -1744,20 +1758,29 @@ def test_identifiable_native_bad_trade_retains_raw_and_splits_only_trade_coverag
     ].read_bytes()
     with gzip.open(published / manifest["gaps"]["path"], "rt") as stream:
         gaps = [json.loads(line) for line in stream]
-    assert [gap["reason"] for gap in gaps] == ["invalid_trade_values"]
+    assert [gap["reason"] for gap in gaps] == (
+        ["invalid_trade_values"] if invalid else []
+    )
     with open_market_source(published) as source:
         events = list(iter_agg_trades(source, FUTURES_MARKET_TYPE, symbol="BTCUSDT"))
         trades = [event for event in events if isinstance(event, TradeEvent)]
-        assert len([event for event in events if isinstance(event, TradeBoundary)]) == 1
+        assert len(
+            [event for event in events if isinstance(event, TradeBoundary)]
+        ) == int(invalid)
         assert [event.transaction_time_ms for event in trades] == [
-            origin // 1000000 + 1000,
-            origin // 1000000 + 3000,
+            origin // 1000000 + second * 1000
+            for second in ((1, 3) if invalid else (1, 2, 3))
         ]
-        assert trades[0].observation_id != trades[1].observation_id
+        assert (trades[0].observation_id != trades[-1].observation_id) == invalid
+        if not invalid:
+            assert trades[1].quantity == 2.0
+            assert trades[1].visible_quantity == (0.0 if bad["nq"] == "0" else None)
         coverage = source.observation_coverage(
             market_type=FUTURES_MARKET_TYPE, data_kind="agg_trades", symbol="BTCUSDT"
         )
-        assert coverage.covering(origin + 1_500_000_000, origin + 2_500_000_000) == ()
+        assert len(
+            coverage.covering(origin + 1_500_000_000, origin + 2_500_000_000)
+        ) == int(not invalid)
         assert (
             len(coverage.covering(origin + 3_000_000_000, origin + 3_000_000_000)) == 1
         )
@@ -1818,3 +1841,119 @@ def test_native_bad_depth_waits_for_real_snapshot_and_preserves_original_bytes(
         not (start <= origin + 3_000_000_000 < stop)
         for start, stop in stats.coverage_segments.values()
     )
+
+
+def test_old_unknown_visible_gap_requires_reimport_of_unchanged_raw(
+    tmp_path, monkeypatch
+):
+    import gzip
+
+    from quant_research_platform.sources.binance.replay import iter_agg_trades
+    from quant_research_platform.sources.tardis import raw
+
+    origin = pd.Timestamp("2026-09-01T00:00:00Z").value
+    native = _line(
+        0,
+        "depthSnapshot",
+        {
+            "lastUpdateId": 100,
+            "bids": [[str(100 - i), "2"] for i in range(12)],
+            "asks": [[str(101 + i), "2"] for i in range(12)],
+        },
+    )
+    for second in (1, 2, 3):
+        native += _line(
+            second,
+            "aggTrade",
+            {
+                "e": "aggTrade",
+                "E": origin // 1_000_000 + second * 1000,
+                "T": origin // 1_000_000 + second * 1000,
+                "s": "BTCUSDT",
+                "st": 1,
+                "a": second,
+                "f": second,
+                "l": second,
+                "p": "100",
+                "q": "2",
+                "nq": None if second == 2 else "2",
+                "m": False,
+            },
+        )
+    slices = _slices(tmp_path / "native", native)
+    original = slices[0].read_bytes()
+    validate = raw._visible_trade_quantity
+
+    def strict_quantity(*args, **kwargs):
+        kwargs["allow_unknown"] = False
+        return validate(*args, **kwargs)
+
+    old = tmp_path / "old"
+    with monkeypatch.context() as patch:
+        patch.setattr(raw, "_visible_trade_quantity", strict_quantity)
+        old_manifest = import_slices(old, date="2026-09-01", slices=slices)
+    with gzip.open(old / old_manifest["gaps"]["path"], "rt") as stream:
+        assert [json.loads(line)["reason"] for line in stream] == [
+            "invalid_trade_values"
+        ]
+    with open_market_source(old) as source:
+        coverage = source.observation_coverage(
+            market_type=FUTURES_MARKET_TYPE, data_kind="agg_trades", symbol="BTCUSDT"
+        )
+        assert coverage.covering(origin + 1_500_000_000, origin + 2_500_000_000) == ()
+        with pytest.raises(ValueError, match="tardis_observation_interval_mismatch"):
+            list(iter_agg_trades(source, FUTURES_MARKET_TYPE, symbol="BTCUSDT"))
+    new = tmp_path / "rebuilt"
+    manifest = import_slices(new, date="2026-09-01", slices=slices)
+    with open_market_source(new) as source:
+        events = list(iter_agg_trades(source, FUTURES_MARKET_TYPE, symbol="BTCUSDT"))
+        assert len(events) == 3 and events[1].visible_quantity is None
+        coverage = source.observation_coverage(
+            market_type=FUTURES_MARKET_TYPE, data_kind="agg_trades", symbol="BTCUSDT"
+        )
+        assert (
+            len(coverage.covering(origin + 1_500_000_000, origin + 2_500_000_000)) == 1
+        )
+    assert slices[0].read_bytes() == original
+    assert (old / old_manifest["files"][0]["path"]).read_bytes() == original
+    assert (new / manifest["files"][0]["path"]).read_bytes() == original
+
+
+def test_late_snapshot_outside_facts_only_emit_after_real_bridge(tmp_path):
+    outside = [[str(price), "2"] for price in range(89, 79, -1)]
+    first = json.loads(_delta(1, 99, 101, 98).decode().split(" ", 1)[1])["data"]
+    first["b"] = outside
+    bridge = json.loads(_delta(3, 102, 102, 101).decode().split(" ", 1)[1])["data"]
+    bridge["b"] = [[str(price), "0"] for price in range(100, 89, -1)]
+    native = (
+        _line(1, "depth@0ms", first)
+        + _line(
+            2,
+            "depthSnapshot",
+            {
+                "lastUpdateId": 100,
+                "bids": [[str(price), "2"] for price in range(100, 90, -1)],
+                "asks": [[str(price), "2"] for price in range(101, 111)],
+            },
+        )
+        + _line(3, "depth@0ms", bridge)
+    )
+    published = tmp_path / "published"
+    import_slices(
+        published, date="2026-09-01", slices=_slices(tmp_path / "native", native)
+    )
+    with open_market_source(published) as source:
+        stats = ReconstructionStats()
+        books = [
+            event
+            for event in iter_reconstructed_depth(
+                source, FUTURES_MARKET_TYPE, symbol="BTCUSDT", stats=stats
+            )
+            if isinstance(event, BookState)
+        ]
+    assert len(books) == 1
+    assert books[0].bids == tuple((price, 2.0) for price in range(89, 79, -1))
+    assert books[0].observed_time_ns == pd.Timestamp("2026-09-01T00:00:03Z").value
+    assert list(stats.coverage_segments.values()) == [
+        (books[0].observed_time_ns, books[0].observed_time_ns + 1)
+    ]

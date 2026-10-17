@@ -102,7 +102,6 @@ def tables(request):
         common_date=1,
         common_observation_count=32,
         asset_coverage_id="d" * 64,
-        target_domain_id="e" * 64,
         block_size=20,
         repetitions=10000,
         alpha=0.05,
@@ -233,22 +232,21 @@ def _assert_rejected_at_write_and_read(
         )
     root = tmp_path / "persisted"
     root.mkdir()
-    for name, frame in tables.items():
-        pq.write_table(
-            pa.Table.from_pandas(
-                frame,
-                schema=statistics._ARROW_SCHEMAS[name + ".parquet"],
-                preserve_index=False,
-            ),
-            root / (name + ".parquet"),
-        )
+    pq.write_table(
+        pa.Table.from_pandas(
+            tables[member.removesuffix(".parquet")],
+            schema=statistics._ARROW_SCHEMAS[member],
+            preserve_index=False,
+        ),
+        root / member,
+    )
     (root / "manifest.json").write_text(
         json.dumps(
             {
                 "schema_id": "qrp-statistics",
                 "table_group": table_group,
                 "metadata": metadata,
-                "members": list(statistics.STATISTICS_TABLE_GROUPS[table_group]),
+                "members": [member],
             }
         )
     )
@@ -349,10 +347,10 @@ def test_research_measurement_domains(tmp_path, tables, metadata, table, column,
 
 
 @pytest.mark.parametrize("value", [None, "", "not-a-domain", "A" * 64])
-def test_model_target_domain_is_required_at_write_and_read(
+def test_model_asset_domain_is_required_at_write_and_read(
     tmp_path, tables, metadata, value
 ):
-    tables["model_losses"].loc[0, "target_domain_id"] = value
+    tables["model_losses"].loc[0, "asset_coverage_id"] = value
     _assert_rejected_at_write_and_read(
         tmp_path,
         tables,
@@ -860,7 +858,6 @@ def test_paired_rankic_and_champion_diagnostics_reach_native_artifacts(
                 common_date=values.notna().astype(int).to_numpy(),
                 common_observation_count=3,
                 asset_coverage_id="d" * 64,
-                target_domain_id="e" * 64,
             )
         )
         for group, values in ranks.items()
@@ -1024,7 +1021,6 @@ def test_native_model_persistence_preserves_std_reason_in_statistics(
             "scoring_window": window,
             "validation_windows": [window],
             "cutoff": "2020-01-05",
-            "test_window": {"start": "2020-01-06", "end": "2020-01-07"},
             "selection_group": "global",
             "validation_axis": "cross_sectional",
             "output": str(tmp_path / "scores.json"),

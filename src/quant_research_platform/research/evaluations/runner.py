@@ -86,6 +86,7 @@ def evaluate(config):
             "sample_scope",
             "comparison_inputs",
             "strata",
+            "response_diagnostics",
         },
     )
     reject_if_exists(Path(config["output"]))
@@ -137,6 +138,25 @@ def evaluate(config):
         if native_column is not None and native_column != column:
             raise ValueError("evaluation_label_availability_mismatch")
     _input_roles(declared, spec, selected_columns)
+    response = config.get("response_diagnostics")
+    if response is not None:
+        from quant_research_platform.contracts.evaluations import (
+            validate_response_diagnostics,
+        )
+
+        validate_response_diagnostics(response, signals=spec.signals)
+        if (
+            str(spec.market_id) != "crypto"
+            or spec.evaluation_axis != "single_asset_time_series"
+            or config["sample_scope"] != "own"
+            or config.get("strata")
+            or any(signal.transform != "identity" for signal in spec.signals)
+            or any(
+                declared.get("column_units", {}).get(label) != "decimal_return"
+                for label in spec.label_columns
+            )
+        ):
+            raise ValueError("evaluation_response_domain_invalid")
     prediction_sources = {
         signal.source_column
         for signal in spec.signals
@@ -340,6 +360,7 @@ def evaluate(config):
         spec=spec,
         asset_column="asset_id",
         declared_columns=declared["column_roles"],
+        response_diagnostics=response,
         source_columns_by_kind={
             kind: tuple(
                 signal.source_column
@@ -373,7 +394,10 @@ def evaluate(config):
                 "comparison_inputs": [],
                 "strata": {},
                 "stratum_domains": {},
-                "optional_member_rows": {},
+                "optional_member_rows": {}
+                if response is None
+                else {"response_metrics": 0, "response_groups": 0},
+                **({"response_diagnostics": response} if response is not None else {}),
                 "common_rule": "mask_only_no_retransform",
             },
         )
@@ -409,7 +433,6 @@ def _evaluation_source_facts(source, session, *, columns, signals, availability)
     return qrp_json_mapping_snapshot(
         {
             "selector": selector,
-            "input_observations": {},
             "columns": {column: roles[column] for column in columns},
             "column_units": {column: units.get(column) for column in columns},
             "observed_columns": {
@@ -672,6 +695,8 @@ def _scoped_evaluate(config, *, spec, session, source, columns, cutoff, window, 
         )
         if facts["label_units"] != focal["facts"]["label_units"]:
             raise ValueError("evaluation_label_units_mismatch")
+        if facts["label_semantics"] != focal["facts"]["label_semantics"]:
+            raise ValueError("evaluation_label_semantics_mismatch")
         sources.append(
             {
                 "session": peer_session,

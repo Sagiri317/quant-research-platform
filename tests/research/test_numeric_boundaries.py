@@ -13,6 +13,7 @@ from quant_research_platform.research.portfolios.risk import (
     FactorRiskState,
     _ewma_covariance,
 )
+from tests.helpers.optimizer import with_cash_asset
 
 
 def _risk_cross(returns, caps, timestamp="2023-01-02"):
@@ -454,19 +455,26 @@ def test_native_rank_one_industry_covariance_reaches_actual_optimizer():
         adv=1e9,
     )
     result = optimize_portfolio(
-        assets,
+        with_cash_asset(assets),
+        cash_column="is_cash",
         factor_covariance=estimate.factor_covariance,
         industry_columns=tuple(estimate.factor_covariance.columns),
-        expected_transaction_cost=lambda weights: 0.0,
+        expected_transaction_cost=lambda buy, sell: (
+            0.0,
+            np.zeros_like(buy),
+            np.zeros_like(sell),
+        ),
         nav=100.0,
         assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,)),
     )
     assert np.isfinite(result.weights).all()
     assert (result.weights >= 0.0).all()
     assert result.weights.sum() == pytest.approx(1.0, abs=1e-12)
-    active = result.weights.to_numpy() - assets.benchmark_weight.to_numpy()
+    active = result.weights.to_numpy()[:-1] - assets.benchmark_weight.to_numpy()
     assert sum(map(Fraction, active)) == 0
-    assert float(assets.expected_alpha.to_numpy() @ result.weights.to_numpy()) == 0.0
+    assert (
+        float(assets.expected_alpha.to_numpy() @ result.weights.to_numpy()[:-1]) == 0.0
+    )
     assert result.predicted_tracking_error == 0.0
 
 
@@ -515,15 +523,20 @@ def test_optimizer_covariance_boundaries_and_unique_asset_requirement(kind, erro
 
     with pytest.raises(ValueError, match=f"^{error}$") if error else nullcontext():
         result = optimize_portfolio(
-            assets,
+            with_cash_asset(assets),
+            cash_column="is_cash",
             factor_covariance=covariance,
             style_columns=("a", "b"),
-            expected_transaction_cost=lambda weights: 0.0,
+            expected_transaction_cost=lambda buy, sell: (
+                0.0,
+                np.zeros_like(buy),
+                np.zeros_like(sell),
+            ),
             nav=100.0,
             assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,)),
         )
     if error is None:
-        np.testing.assert_array_equal(result.weights, [0.5, 0.5])
+        np.testing.assert_array_equal(result.weights, [0.5, 0.5, 0.0])
 
 
 def test_named_quantile_recipe_keeps_extreme_interpolation_order_and_nulls():
@@ -558,10 +571,15 @@ def test_optimizer_blocks_genuinely_negative_risk_inside_psd_admission():
     )
     with pytest.raises(ValueError, match="optimizer_risk_negative"):
         optimize_portfolio(
-            assets,
+            with_cash_asset(assets),
+            cash_column="is_cash",
             factor_covariance=covariance,
             style_columns=("style",),
-            expected_transaction_cost=lambda weights: 0.0,
+            expected_transaction_cost=lambda buy, sell: (
+                0.0,
+                np.zeros_like(buy),
+                np.zeros_like(sell),
+            ),
             nav=100.0,
             assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,)),
         )

@@ -124,9 +124,10 @@ def _config(kind, independent_inputs, explicit_models):
 @pytest.mark.parametrize("settlement_rate", ["0.1", None])
 @pytest.mark.parametrize("kind", ["maker", "taker"])
 def test_imported_funding_is_consumed_without_relocation(
-    kind, independent_inputs, explicit_models, settlement_rate
+    kind, independent_inputs, request, settlement_rate
 ):
-    config = _config(kind, independent_inputs, explicit_models)
+    models = request.getfixturevalue("explicit_models") if kind == "taker" else None
+    config = _config(kind, independent_inputs, models)
     output = getattr(portfolio, "backtest_" + kind)(config)
     artifact = read_portfolio_ledger_artifact(output)
     summary = summarize_crypto_ledger(artifact, artifact.iter_chunks())
@@ -155,9 +156,10 @@ def test_imported_funding_is_consumed_without_relocation(
 
 @pytest.mark.parametrize("kind", ["maker", "taker"])
 def test_selected_corrupt_funding_never_falls_back(
-    tmp_path, kind, independent_inputs, explicit_models
+    tmp_path, kind, independent_inputs, request
 ):
-    config = _config(kind, independent_inputs, explicit_models)
+    models = request.getfixturevalue("explicit_models") if kind == "taker" else None
+    config = _config(kind, independent_inputs, models)
     # The original response is part of the native source contract, not a copied CSV.
     (tmp_path / "independent-funding" / "settlements.json").write_text("[]")
     with pytest.raises(ValueError, match="binance_funding_settlement_source_changed"):

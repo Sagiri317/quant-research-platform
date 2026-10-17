@@ -761,3 +761,51 @@ def test_factor_ic_distinguishes_missing_and_literal_stratum_labels():
         "factor | return | stratification='industry' | stratum='None'": [0],
         "factor | return | stratification='industry' | stratum='<NA>'": [1],
     }
+
+
+@pytest.mark.parametrize("value", [1e308, 5e-324])
+def test_series_uses_one_shared_finite_scale(value):
+    other = value * 2 if value < 1 else value / 2
+    rows = [dict(timestamp=f"2026-01-0{i}", first=value, second=-other) for i in (1, 2)]
+    fig, axes = plots.plot_series(
+        rows,
+        x_column="timestamp",
+        value_columns=["first", "second"],
+        title="数值边界",
+        units="CNY",
+        **TIMED,
+    )
+    first, second = [line.get_ydata() for line in axes[0].lines]
+    assert np.isfinite(first).all() and np.isfinite(second).all()
+    assert (first > 0).all() and (second < 0).all()
+    np.testing.assert_allclose(second / first, [-other / value] * len(rows), rtol=1e-15)
+    assert "×10^" in axes[0].get_ylabel()
+    fig.canvas.draw()
+
+
+@pytest.mark.parametrize("categorical", [False, True])
+def test_all_null_series_keeps_real_axis_and_one_annotation(categorical):
+    from matplotlib.dates import date2num
+
+    x = ["类别甲", "类别乙"] if categorical else ["2026-01-01", "2026-01-03"]
+    fig, axes = plots.plot_series(
+        [dict(x=value, a=None, b=None) for value in x],
+        x_column="x",
+        value_columns=["a", "b"],
+        title="缺失事实",
+        units="CNY",
+        categorical=categorical,
+        **TIMED,
+    )
+    axis = axes[0]
+    assert len(axis.texts) == 1
+    assert "a" in axis.texts[0].get_text() and "b" in axis.texts[0].get_text()
+    assert all(np.isnan(line.get_ydata()).all() for line in axis.lines)
+    if categorical:
+        assert [tick.get_text() for tick in axis.get_xticklabels()] == x
+        assert axis.get_xlim()[0] <= 0 < 1 <= axis.get_xlim()[1]
+    else:
+        first, last = date2num(pd.to_datetime(x))
+        assert first - 1 < axis.get_xlim()[0] <= first
+        assert last <= axis.get_xlim()[1] < last + 1
+    fig.canvas.draw()

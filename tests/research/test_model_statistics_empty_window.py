@@ -10,8 +10,8 @@ from quant_research_platform.research import statistics_production
 from tests.research.test_prediction_runner_model_selection import candidates
 
 
-def _config(tmp_path, window):
-    _, scoring = candidates(tmp_path, algorithms=("linear_regression",))
+def _config(tmp_path, window, *, algorithms=("linear_regression",)):
+    _, scoring = candidates(tmp_path, algorithms=algorithms)
     return {
         "dataset": scoring["labels"],
         "input_spec": scoring["label_spec"],
@@ -84,3 +84,96 @@ def test_model_statistics_preserves_observed_dates_with_undefined_labels(tmp_pat
         assert diagnostics.observation_count.tolist() == [0]
         assert diagnostics.status.tolist() == ["UNDEFINED"]
         assert pd.isna(diagnostics["mean"]).all()
+
+
+@pytest.mark.parametrize("coverage", ["empty", "unmatured", "constant"])
+@pytest.mark.parametrize(
+    "analysis,policy",
+    [
+        ("prediction_hac", {"hac_lag": -1}),
+        ("prediction_hac", {"hac_lag": True}),
+        ("prediction_hac", {"hac_lag": 0.5}),
+        ("prediction_bootstrap", {"bootstrap_block": 0}),
+        ("prediction_bootstrap", {"bootstrap_block": True}),
+        ("prediction_bootstrap", {"bootstrap_block": 1, "bootstrap_repetitions": 1}),
+    ],
+)
+def test_invalid_requested_configuration_precedes_data_availability(
+    tmp_path, coverage, analysis, policy
+):
+    window = (
+        {"start": "2020-01-07", "end": "2020-01-08"}
+        if coverage == "empty"
+        else {"start": "2020-01-04", "end": "2020-01-06"}
+    )
+    config = _config(tmp_path, window)
+    config.update(analyses=[analysis], statistics=policy)
+    if coverage == "unmatured":
+        config["label_cutoff"] = "2020-01-03"
+    with pytest.raises(ValueError, match="model_statistics_policy_invalid"):
+        statistics_production.model_statistics(config)
+    assert not Path(config["output"]).exists()
+
+
+def test_prediction_only_skips_unrequested_comparison_and_domain_work(
+    tmp_path, monkeypatch
+):
+    config = _config(tmp_path, {"start": "2020-01-04", "end": "2020-01-06"})
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("unrequested common rank, domain hash, or comparison")
+
+    for name in (
+        "_common_model_rank_ic",
+        "canonical_json_hash",
+        "_model_comparison",
+        "_paired_group_rankic",
+    ):
+        monkeypatch.setattr(statistics_production, name, unexpected)
+    original = pd.DataFrame.from_records
+
+    def records(*args, **kwargs):
+        assert "asset_coverage_id" not in kwargs.get("columns", ())
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(pd.DataFrame, "from_records", records)
+    artifact = read_statistics_artifact(statistics_production.model_statistics(config))
+    assert set(artifact._members) == {"prediction_diagnostics.parquet"}
+
+
+def test_requested_comparison_keeps_common_rank_without_unrequested_loss_hashes(
+    tmp_path, monkeypatch
+):
+    config = _config(
+        tmp_path,
+        {"start": "2020-01-04", "end": "2020-01-06"},
+        algorithms=("linear_regression", "ic_weighted_rank_ensemble"),
+    )
+    config.update(
+        analyses=["prediction_hac", "model_comparison"],
+        comparison_model_id="linear_regression",
+    )
+    config["statistics"].update(bootstrap_block=1, bootstrap_repetitions=10)
+    original = statistics_production._common_model_rank_ic
+    calls = []
+
+    def common(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("unrequested loss domain hash")
+
+    monkeypatch.setattr(statistics_production, "_common_model_rank_ic", common)
+    monkeypatch.setattr(statistics_production, "canonical_json_hash", unexpected)
+    artifact = read_statistics_artifact(statistics_production.model_statistics(config))
+    assert len(calls) == 3
+    assert set(artifact._members) == {
+        "prediction_diagnostics.parquet",
+        "model_comparison.parquet",
+    }
+    with artifact.table("model_comparison.parquet") as saved:
+        assert saved.observation_count.tolist() == [3]
+        assert saved["mean"].tolist() == [0.0]
+        assert saved.reason.tolist() == ["hac_inference_undefined"]
+        assert saved.bootstrap_status.tolist() == ["DEFINED"]

@@ -643,7 +643,7 @@ def _validate_model_selection_trial_record(trial: object) -> None:
         raise ValueError("invalid_model_metadata")
     model_id = trial["model_id"]
     rows = trial["validation_rows"]
-    if type(model_id) is not str or not model_id or type(rows) is not int or rows < 1:
+    if type(model_id) is not str or not model_id or type(rows) is not int or rows < 0:
         raise ValueError("invalid_model_metadata")
     for metric, reason_key in (
         ("validation_ic", "validation_ic_reason"),
@@ -726,7 +726,8 @@ def _validate_model_selection_trial_record(trial: object) -> None:
         ):
             raise ValueError("invalid_model_metadata")
     if trial["validation_mse"] is not None and (
-        type(trial["validation_mse"]) not in {int, float}
+        rows == 0
+        or type(trial["validation_mse"]) not in {int, float}
         or not np.isfinite(float(trial["validation_mse"]))
         or trial["validation_mse"] < 0
     ):
@@ -802,14 +803,13 @@ def _resolve_candidate_parameters(algorithm, parameters, n_train):
     return values
 
 
-def validate_model_facts(facts, metadata):
+def validate_model_facts(facts, metadata=None, *, expected=None):
+    """Own scientific recipe validation and comparison, independent of storage paths."""
     required = {
         "model",
         "market_id",
         "family_id",
         "candidate_parameters",
-        "fit_windows",
-        "fit_cutoff",
         "label_unit",
         "input_units",
     }
@@ -820,42 +820,83 @@ def validate_model_facts(facts, metadata):
     validate_market_id(facts["market_id"])
     _validate_non_empty_string(facts["family_id"], "model_family_id_invalid")
     spec = _model_spec(facts["model"])
-    expected_parameters = _resolve_candidate_parameters(
-        spec.model_algorithm,
-        facts["candidate_parameters"],
-        metadata["rows_after_input_label_dropna"],
-    )
-    if canonical_identity_bytes(expected_parameters) != canonical_identity_bytes(
-        metadata["hyperparameters"]
-    ):
-        raise ValueError("model_sample_scaled_parameters_mismatch")
-    if not metadata["training_asset_ids"]:
-        raise ValueError("native_model_training_asset_ids_required")
-    if facts.get("asset_ids") is not None and not set(
-        metadata["training_asset_ids"]
-    ) <= set(facts["asset_ids"]):
-        raise ValueError("model_training_asset_scope_mismatch")
-    for key in (
-        "model_algorithm",
-        "target_column",
-        "sample_filter_mode",
-        "random_seed",
-        "max_train_rows",
-    ):
-        if getattr(spec, key) != metadata[key]:
-            raise ValueError("model_facts_metadata_mismatch")
-    if spec.training_weighting.payload() != metadata["training_weighting"]:
-        raise ValueError("model_facts_metadata_mismatch")
-    if list(spec.input_columns) != metadata["input_columns"]:
-        raise ValueError("model_facts_metadata_mismatch")
-
+    parameters = facts["candidate_parameters"]
+    if not isinstance(parameters, Mapping):
+        raise ValueError("model_candidate_parameters_invalid")
+    _freeze_model_hyperparameters(parameters)
+    _resolve_candidate_parameters(spec.model_algorithm, parameters, 1)
+    if spec.hyperparameters and canonical_identity_bytes(
+        parameters
+    ) != canonical_identity_bytes(_thaw_model_hyperparameters(spec.hyperparameters)):
+        raise ValueError("model_candidate_parameters_mismatch")
+    if type(facts["label_unit"]) is not str or not facts["label_unit"].strip():
+        raise ValueError("model_label_unit_required")
     units = facts["input_units"]
     if not isinstance(units, Mapping) or set(units) - set(spec.input_columns):
         raise ValueError("model_input_units_invalid")
     for unit in units.values():
-        _validate_non_empty_string(unit, "model_input_units_invalid")
-        if not unit.strip():
+        if type(unit) is not str or not unit.strip():
             raise ValueError("model_input_units_invalid")
+    _validate_target_definition(facts.get("target_definition"), spec.target_column)
+    assets = facts.get("asset_ids")
+    if assets is not None and (
+        type(assets) is not list
+        or not assets
+        or any(type(asset) is not str or not asset for asset in assets)
+        or len(assets) != len(set(assets))
+    ):
+        raise ValueError("model_training_asset_scope_invalid")
+    if expected is not None:
+        validate_model_facts(expected)
+        for key in (
+            "market_id",
+            "family_id",
+            "asset_ids",
+            "candidate_parameters",
+            "label_unit",
+            "input_units",
+            "target_definition",
+        ):
+            if facts.get(key) != expected.get(key):
+                raise ValueError(f"model_scientific_facts_mismatch: {key}")
+        if model_spec_payload(spec) != model_spec_payload(
+            _model_spec(expected["model"])
+        ):
+            raise ValueError("model_scientific_facts_mismatch: model")
+    if metadata is None:
+        return
+    if "rows_after_input_label_dropna" in metadata:
+        expected_parameters = _resolve_candidate_parameters(
+            spec.model_algorithm, parameters, metadata["rows_after_input_label_dropna"]
+        )
+        if canonical_identity_bytes(expected_parameters) != canonical_identity_bytes(
+            metadata["hyperparameters"]
+        ):
+            raise ValueError("model_sample_scaled_parameters_mismatch")
+        for key in (
+            "model_algorithm",
+            "target_column",
+            "sample_filter_mode",
+            "random_seed",
+            "max_train_rows",
+        ):
+            if getattr(spec, key) != metadata[key]:
+                raise ValueError("model_facts_metadata_mismatch")
+        if (
+            spec.training_weighting.payload() != metadata["training_weighting"]
+            or list(spec.input_columns) != metadata["input_columns"]
+        ):
+            raise ValueError("model_facts_metadata_mismatch")
+    training_assets = metadata["training_asset_ids"]
+    if (
+        type(training_assets) is not list
+        or not training_assets
+        or any(type(asset) is not str or not asset for asset in training_assets)
+        or len(training_assets) != len(set(training_assets))
+    ):
+        raise ValueError("native_model_training_asset_ids_required")
+    if assets is not None and not set(training_assets) <= set(assets):
+        raise ValueError("model_training_asset_scope_mismatch")
     validate_model_fit_facts(facts, metadata)
 
 
@@ -947,9 +988,6 @@ def _validate_target_definition(definition, target):
 
 def validate_model_fit_facts(facts, metadata):
     """Validate chronology using only realized training and decision facts."""
-    _validate_target_definition(
-        facts.get("target_definition"), facts["model"]["target_column"]
-    )
     cutoff = strict_timestamp_series(
         pd.Series([facts["fit_cutoff"]]), error="invalid_fit_cutoff"
     ).iloc[0]
@@ -976,9 +1014,6 @@ def validate_model_fit_facts(facts, metadata):
 
     if not all(any(contains(window, bound) for window in windows) for bound in bounds):
         raise ValueError("model_training_window_outside_declared_fit")
-    if facts.get("test_window") is not None:
-        if cutoff >= pd.Timestamp(TimeWindow(**facts["test_window"]).start):
-            raise ValueError("model_test_freeze_missing")
     decision = facts.get("selection_cutoff")
     if (
         decision is not None
@@ -988,29 +1023,12 @@ def validate_model_fit_facts(facts, metadata):
         > cutoff
     ):
         raise ValueError("model_selection_after_fit_cutoff")
-    if facts.get("label_unit") in (None, ""):
-        raise ValueError("model_label_unit_required")
 
 
 def _validate_model_prediction_window(facts, window):
-    """Bind output to the actual decision cutoff and any explicit held-out freeze."""
+    """Require predictions to follow the actual fitting decision."""
     if pd.Timestamp(window.start) <= pd.Timestamp(facts["fit_cutoff"]):
         raise ValueError("prediction_must_follow_fit_cutoff")
-    frozen = facts.get("test_window")
-    if frozen is None:
-        return
-    if window.end is None:
-        raise ValueError("prediction_window_outside_freeze")
-    from quant_research_platform.contracts.time import time_window_timestamp_interval
-
-    start, stop, closed = time_window_timestamp_interval(TimeWindow(**frozen))
-    lower, upper, output_closed = time_window_timestamp_interval(window)
-    if (
-        lower < start
-        or upper > stop
-        or (upper == stop and output_closed and not closed)
-    ):
-        raise ValueError("prediction_window_outside_freeze")
 
 
 def validate_model_input_roles(

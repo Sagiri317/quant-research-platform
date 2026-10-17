@@ -475,6 +475,12 @@ def iter_factor_frames(
         for dependencies in scalar_definitions.values()
         for column in dependencies
     }
+    exact_columns = {
+        column
+        for name, dependencies in scalar_definitions.items()
+        if name not in {"return_100ms", "return_500ms", "realized_volatility_1s"}
+        for column in dependencies
+    }
     rolling = {
         name: {"100ms": 1, "500ms": 5, "1s": 10, "5s": 50}[name.rsplit("_", 1)[1]]
         for name in selected
@@ -549,8 +555,8 @@ def iter_factor_frames(
                 previous_mid = np.nan
             current = {name: float(inputs[name][index]) for name in scalar_columns}
             exact = {
-                name: Fraction(value) if math.isfinite(value) else None
-                for name, value in current.items()
+                name: Fraction(current[name]) if math.isfinite(current[name]) else None
+                for name in exact_columns
             }
             for (name, count), total in totals.items():
                 history = histories[name]
@@ -578,9 +584,9 @@ def iter_factor_frames(
                 returns.clear()
             for name, dependencies in scalar_definitions.items():
                 result = np.nan
-                values = [exact[column] for column in dependencies]
-                if any(value is None for value in values):
+                if any(not math.isfinite(current[column]) for column in dependencies):
                     continue
+                values = [exact.get(column, current[column]) for column in dependencies]
                 if name in rolling:
                     count = rolling[name]
                     accumulated = rolling_inputs[name]

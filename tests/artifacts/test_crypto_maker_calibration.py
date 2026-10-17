@@ -1,5 +1,6 @@
 """Native maker calibration scientific tape and publication contracts."""
 
+from math import ulp
 from pathlib import Path
 
 import pandas as pd
@@ -423,8 +424,9 @@ def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
 
     primary = KeyboardInterrupt("synthetic_maker_writer_failure")
     roots, group_counts = ([], [])
-    for build in (1, 2) if finish == "normal" else (1,):
-        closed, emitted, frames = ([], [], [])
+    for batch_rows in (1, 65_536) if finish == "normal" else (65_536,):
+        monkeypatch.setattr(portfolio, "DEFAULT_BATCH_ROWS", batch_rows)
+        closed, emitted = ([], [])
 
         def books(*_args, closed=closed, **_kwargs):
             _kwargs["stats"].coverage_segments.update(coverage)
@@ -470,7 +472,7 @@ def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
             finally:
                 closed.append("trades")
 
-        def produce(on_table, emitted=emitted, frames=frames):
+        def produce(on_table, emitted=emitted):
 
             def append(table_name, output_frame):
                 emitted.append((table_name, len(output_frame)))
@@ -488,7 +490,7 @@ def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
                 },
             )
 
-        logical = tmp_path / f"build_{build}"
+        logical = tmp_path / f"batch_{batch_rows}"
 
         def write(logical=logical):
             return statistics.write_statistics_artifact(
@@ -550,7 +552,24 @@ def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
             return
         for name, frame in expected.items():
             with artifact.table(f"{name}.parquet") as actual:
-                pd.testing.assert_frame_equal(actual, frame)
+                if name == "crypto_maker_samples":
+                    # The label/prediction and tape facts are copied, not recomputed.
+                    pd.testing.assert_frame_equal(
+                        actual.drop(columns="forecast_error"),
+                        frame.drop(columns="forecast_error"),
+                        check_exact=True,
+                    )
+                    # One subtraction in dimensionless returns permits a few float64
+                    # rounding units at unit-return scale, not a business tolerance.
+                    pd.testing.assert_series_equal(
+                        actual.forecast_error,
+                        frame.forecast_error,
+                        check_exact=False,
+                        rtol=8 * ulp(1.0),
+                        atol=8 * ulp(1.0),
+                    )
+                else:
+                    pd.testing.assert_frame_equal(actual, frame, check_exact=True)
             with pq.ParquetFile(
                 native_filesystem_path(root / f"{name}.parquet")
             ) as parquet:
@@ -563,8 +582,10 @@ def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
             native_filesystem_path(root / "crypto_maker_events.parquet")
         ) as parquet:
             group_counts.append(parquet.num_row_groups)
-    assert group_counts[0] == group_counts[1]
-    assert _bytes(roots[0]) == _bytes(roots[1])
+    assert group_counts[0] > group_counts[1] == 1
+    assert (roots[0] / "manifest.json").read_bytes() == (
+        roots[1] / "manifest.json"
+    ).read_bytes()
 
 
 @pytest.mark.parametrize("failure", ("disk_full", "interrupted", "writer_failed"))

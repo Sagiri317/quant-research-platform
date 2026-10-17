@@ -98,7 +98,11 @@ def validate_market_payload(
 
 
 def _visible_trade_quantity(
-    market_type: str, payload: dict, *, historical_time: int | None = None
+    market_type: str,
+    payload: dict,
+    *,
+    historical_time: int | None = None,
+    allow_unknown: bool = False,
 ) -> float | None:
     quantity = strict_positive_float(
         payload.get("q"), error="binance_recorder_trade_quantity_invalid"
@@ -106,17 +110,23 @@ def _visible_trade_quantity(
     if market_type != FUTURES_MARKET_TYPE:
         return quantity
     # nq first appeared on 2025-12-31; absence before that date is unknown,
-    # not total quantity and not zero. A supplied nq always remains validated.
+    # not total quantity and not zero. Replay may retain independently valid q
+    # when nq is unknown; a finite nq that contradicts q remains invalid.
     if (
         "nq" not in payload
         and historical_time is not None
         and historical_time < 1767139200000
     ):
         return None
-    visible = strict_non_negative_float(
-        payload.get("nq"), error="binance_recorder_trade_visible_quantity_invalid"
-    )
-    if visible > quantity:
+    try:
+        visible = strict_finite_float(
+            payload.get("nq"), error="binance_recorder_trade_visible_quantity_invalid"
+        )
+    except ValueError:
+        if allow_unknown:
+            return None
+        raise
+    if visible < 0 or visible > quantity:
         raise ValueError("binance_recorder_trade_visible_quantity_invalid")
     return visible
 

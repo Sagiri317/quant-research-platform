@@ -8,6 +8,7 @@ import pytest
 
 from quant_research_platform.contracts.portfolios import ExecutionAssumptions
 from quant_research_platform.research.portfolios import optimizer
+from tests.helpers.optimizer import with_cash_asset
 
 
 def _capture_constraints(monkeypatch, asymmetry=0.0):
@@ -30,14 +31,16 @@ def _capture_constraints(monkeypatch, asymmetry=0.0):
 
     def solve(fun, x0, **kwargs):
         captured.update(kwargs)
-        assert fun(np.r_[benchmark, np.abs(benchmark - current)]) == pytest.approx(0.0)
+        assert fun(np.r_[benchmark, np.abs(benchmark - current)])[0] == pytest.approx(
+            0.0
+        )
         return SimpleNamespace(
             success=True, x=np.r_[benchmark, np.abs(benchmark - current)]
         )
 
-    def expected_cost(weights):
-        assert weights.shape == current.shape
-        return 0.0
+    def expected_cost(buy, sell):
+        assert buy.shape == sell.shape == current.shape
+        return 0.0, np.zeros_like(buy), np.zeros_like(sell)
 
     monkeypatch.setattr(optimizer, "minimize", solve)
     optimizer.optimize_portfolio(
@@ -168,11 +171,16 @@ def test_exact_exposure_bands_reach_independent_linear_optimum():
     )
     columns = ["industry_a", "industry_b", "style"]
     result = optimizer.optimize_portfolio(
-        frame,
+        with_cash_asset(frame),
+        cash_column="is_cash",
         factor_covariance=pd.DataFrame(0.0, index=columns, columns=columns),
         industry_columns=tuple(columns[:2]),
         style_columns=("style",),
-        expected_transaction_cost=lambda weights: 0.0,
+        expected_transaction_cost=lambda buy, sell: (
+            0.0,
+            np.zeros_like(buy),
+            np.zeros_like(sell),
+        ),
         nav=100.0,
         assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,)),
         config=optimizer.OptimizerConfig(
@@ -183,8 +191,10 @@ def test_exact_exposure_bands_reach_independent_linear_optimum():
             style_active_limit=0.0,
         ),
     )
-    assert alpha @ result.weights.to_numpy() == pytest.approx(-oracle.fun, abs=1e-12)
-    assert centered.T @ result.weights.to_numpy() == pytest.approx(
+    assert alpha @ result.weights.to_numpy()[:-1] == pytest.approx(
+        -oracle.fun, abs=1e-12
+    )
+    assert centered.T @ result.weights.to_numpy()[:-1] == pytest.approx(
         np.zeros(3), abs=1e-12
     )
 
@@ -238,15 +248,21 @@ def test_native_turnover_boundary_converges_with_actual_cost_owner(perturbation)
         for name, mask in case["market_masks"].items()
     }
 
-    def expected_cost(weights):
+    def expected_cost(buys, sells):
+        total, gradients = 0.0, []
+        for side, notionals in (("buy", buys), ("sell", sells)):
+            gradient = np.zeros(len(notionals))
+            for market, mask in markets.items():
+                costs, gradient[mask] = prepared[market, side].totals_and_gradients(
+                    notionals[mask], adv[mask]
+                )
+                total += float(costs.sum())
+            gradients.append(gradient)
+        return total, *gradients
+
+    def actual_cost(weights):
         delta = weights - current
-        notional = np.abs(delta) * nav
-        totals = np.zeros(len(delta))
-        for (market, side), evaluator in prepared.items():
-            active = markets[market] & (delta > 0 if side == "buy" else delta < 0)
-            if active.any():
-                totals[active] = evaluator.totals(notional[active], adv[active])
-        return sum(map(float, totals), 0.0)
+        return expected_cost(np.maximum(delta, 0) * nav, np.maximum(-delta, 0) * nav)[0]
 
     assumptions = ExecutionAssumptions(
         **(
@@ -280,10 +296,9 @@ def test_native_turnover_boundary_converges_with_actual_cost_owner(perturbation)
     assert np.max(np.abs(delta) * nav / adv) <= assumptions.adv_participation + 1e-8
     assert result.predicted_tracking_error <= config.tracking_error_limit + 1e-8
     assert (
-        assets.expected_alpha.to_numpy() @ delta - expected_cost(weights) / nav
-        > 0.00036
+        assets.expected_alpha.to_numpy() @ delta - actual_cost(weights) / nav > 0.00036
     )
-    assert result.expected_transaction_cost == pytest.approx(expected_cost(weights))
+    assert result.expected_transaction_cost == pytest.approx(actual_cost(weights))
 
 
 @pytest.mark.parametrize("adv", [1e-320, np.nextafter(0.0, 1.0)])
@@ -301,15 +316,20 @@ def test_tiny_positive_capacity_preserves_feasible_no_trade(adv):
     )
     with np.errstate(over="raise", invalid="raise", divide="raise"):
         result = optimizer.optimize_portfolio(
-            assets,
+            with_cash_asset(assets),
+            cash_column="is_cash",
             factor_covariance=pd.DataFrame([[0.0]], index=["style"], columns=["style"]),
             style_columns=("style",),
-            expected_transaction_cost=lambda weights: 0.0,
+            expected_transaction_cost=lambda buy, sell: (
+                0.0,
+                np.zeros_like(buy),
+                np.zeros_like(sell),
+            ),
             nav=100.0,
             assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 0.05, (0.05,)),
             config=optimizer.OptimizerConfig(active_name_limit=0.1),
         )
-    assert result.weights.tolist() == [0.5, 0.5]
+    assert result.weights.tolist() == [0.5, 0.5, 0.0]
     assert result.maximum_adv_participation == 0.0
 
 
@@ -331,21 +351,27 @@ def test_small_money_capacity_does_not_round_before_dividing(nav, adv):
         }
     )
     result = optimizer.optimize_portfolio(
-        assets,
+        with_cash_asset(assets),
+        cash_column="is_cash",
         factor_covariance=pd.DataFrame([[0.0]], index=["style"], columns=["style"]),
         style_columns=("style",),
-        expected_transaction_cost=lambda weights: 0.0,
+        expected_transaction_cost=lambda buy, sell: (
+            0.0,
+            np.zeros_like(buy),
+            np.zeros_like(sell),
+        ),
         nav=nav,
         assumptions=ExecutionAssumptions(nav, 0.0, 0.0, 0.05, (0.05,)),
         config=optimizer.OptimizerConfig(active_name_limit=0.1),
     )
     capacity = float(Fraction(0.05) * Fraction(adv) / Fraction(nav))
     assert result.weights.to_numpy() == pytest.approx(
-        [0.5 + capacity, 0.5 - capacity], abs=1e-10
+        [0.5 + capacity, 0.5 - capacity, 0.0], abs=1e-10
     )
 
 
-def test_fixed_weights_fix_their_actual_trade_auxiliaries():
+@pytest.mark.parametrize("fee_rate", [0.0, 0.01])
+def test_fixed_benchmark_weights_reserve_actual_fee_cash(fee_rate):
     current = np.array([0.6, 0.4])
     assets = pd.DataFrame(
         {
@@ -360,16 +386,23 @@ def test_fixed_weights_fix_their_actual_trade_auxiliaries():
         }
     )
     result = optimizer.optimize_portfolio(
-        assets,
+        with_cash_asset(assets),
+        cash_column="is_cash",
         factor_covariance=pd.DataFrame([[0.0]], index=["style"], columns=["style"]),
         style_columns=("style",),
-        expected_transaction_cost=lambda weights: float(
-            np.abs(weights - current).sum()
+        expected_transaction_cost=lambda buy, sell: (
+            float((buy[:-1] + sell[:-1]).sum()) * fee_rate,
+            np.r_[np.full(len(buy) - 1, fee_rate), 0.0],
+            np.r_[np.full(len(sell) - 1, fee_rate), 0.0],
         ),
         financial_column="financial",
         nav=100.0,
         assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 0.05, (0.05,)),
     )
-    assert result.weights.to_numpy() == pytest.approx([0.5, 0.5])
-    assert result.target_turnover == pytest.approx(0.1)
-    assert result.expected_transaction_cost == pytest.approx(0.2)
+    # The stock rotation is 0.1 in each direction before common fee shrinkage.
+    fee = fee_rate * 0.2
+    assert result.weights.to_numpy() == pytest.approx(
+        [0.5 * (1.0 - fee), 0.5 * (1.0 - fee), fee]
+    )
+    assert result.target_turnover == pytest.approx(0.1 + fee / 2.0)
+    assert result.expected_transaction_cost == pytest.approx(fee * 100.0)

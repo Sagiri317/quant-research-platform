@@ -18,6 +18,7 @@ from quant_research_platform.artifacts.outputs.evaluation_daily import (
     daily_key_table,
     validate_daily_counts,
     validate_daily_frame,
+    validate_response_counts,
 )
 from quant_research_platform.artifacts.outputs.evaluation_validation import (
     EVALUATION_ARTIFACTS,
@@ -260,16 +261,6 @@ def _write_evaluation_artifact_chunks(
             for item in active_chunks:
                 value = item
                 metrics, grouped, metadata = value
-                if "input_observations" in metadata:
-                    if (
-                        science is None
-                        or "input_observations" not in science["input_facts"]
-                    ):
-                        raise ValueError("evaluation_input_observations_missing")
-                    observations = science["input_facts"]["input_observations"]
-                    if set(observations) & set(metadata["input_observations"]):
-                        raise ValueError("evaluation_input_observations_duplicate")
-                    observations.update(metadata["input_observations"])
                 validate_output_frame(
                     metrics,
                     required=required["metrics"],
@@ -321,7 +312,12 @@ def _write_evaluation_artifact_chunks(
                                 key=lambda value: (value is not None, value or ""),
                             )
                     write_frame(name, frame)
-                if optional:
+                validate_response_counts(
+                    metadata.get("response_metrics"),
+                    metadata.get("response_groups"),
+                    science=science,
+                )
+                if "daily_coverage" in optional:
                     validate_daily_counts(
                         metrics,
                         metadata["daily_coverage"],
@@ -485,7 +481,7 @@ def _iter_evaluation_member_batches(root, *, name, metadata, time_window=None):
     )
     filters = None
     if time_window is not None:
-        if "timestamp" not in _EVALUATION_COLUMNS[name]:
+        if name.startswith("response_") or "timestamp" not in _EVALUATION_COLUMNS[name]:
             raise ValueError("evaluation_summary_window_not_supported")
         start, stop, closed = time_window_timestamp_interval(time_window)
         if "window" not in metadata:
@@ -625,6 +621,9 @@ def read_evaluation_outputs(
         result.get("daily_strata"),
         spec=_evaluation_spec(metadata),
         science=metadata,
+    )
+    validate_response_counts(
+        result.get("response_metrics"), result.get("response_groups"), science=metadata
     )
     return manifest, result
 

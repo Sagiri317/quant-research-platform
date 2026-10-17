@@ -287,6 +287,43 @@ class PreparedTradeCost:
         commission, stamp, transfer, slippage, impact = self.components(notional, adv20)
         return commission + stamp + transfer + slippage + impact
 
+    def totals_and_gradients(self, notional, adv20):
+        """Return side cost and marginal rate, smoothly extended below zero.
+
+        SLSQP may evaluate infeasible buy/sell amounts. The linear fees retain
+        their tangent there; q**1.5 impact uses the C1 positive-part extension.
+        Actual execution continues to require nonnegative amounts.
+        """
+        if np.asarray(notional).dtype.kind == "b":
+            raise ValueError("a_share_trade_cost_inputs_invalid")
+        try:
+            amounts = np.asarray(notional, dtype="float64")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("a_share_trade_cost_inputs_invalid") from exc
+        if not np.isfinite(amounts).all():
+            raise ValueError("a_share_trade_cost_inputs_invalid")
+        positive = np.maximum(amounts, 0.0)
+        totals = self.totals(positive, adv20)
+        amount, amount_exponent = np.frexp(positive)
+        adv, adv_exponent = np.frexp(adv20)
+        root_exponent, odd_exponent = np.divmod(amount_exponent - adv_exponent, 2)
+        impact_rate, impact_exponent = self.impact
+        marginal_impact = np.ldexp(
+            1.5
+            * impact_rate
+            / 10_000.0
+            * np.sqrt(np.ldexp(amount / adv, odd_exponent)),
+            impact_exponent + root_exponent,
+        )
+        linear = sum(self.rates) + np.ldexp(
+            self.slippage[0] / 10_000.0, self.slippage[1]
+        )
+        gradient = linear + marginal_impact
+        extended = totals + np.minimum(amounts, 0.0) * linear
+        if not np.isfinite(gradient).all() or not np.isfinite(extended).all():
+            raise ValueError("trade_cost_components_invalid")
+        return extended, gradient
+
     def trade(self, notional, adv20, *, face_value_notional=None):
         values = self.components(
             notional, adv20, face_value_notional=face_value_notional

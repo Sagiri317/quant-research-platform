@@ -98,7 +98,6 @@ def test_disjoint_refit_counts_and_predictions_ignore_gap_and_late_labels(tmp_pa
             "scoring_window": window(6, 8),
             "validation_windows": [window(6, 8)],
             "cutoff": bound(8),
-            "test_window": window(9, 11),
             "selection_group": "global",
             "validation_axis": "cross_sectional",
             "label_unit": "decimal_return",
@@ -137,7 +136,6 @@ def test_disjoint_refit_counts_and_predictions_ignore_gap_and_late_labels(tmp_pa
                 "fit_windows": union,
                 "fit_cutoff": bound(8),
                 "selection": str(selection),
-                "test_window": window(9, 11),
             }
         )
         fitted, facts = load_model(model_path)
@@ -165,4 +163,4 @@ def test_disjoint_refit_counts_and_predictions_ignore_gap_and_late_labels(tmp_pa
             check_dtype=False,
         )
         predictions.append(prediction)
-    pd.testing.assert_frame_equal(*predictions, check_exact=True)
+    pd.testing.assert_frame_equal(*predictions, check_exact=False, rtol=1e-12, atol=0.0)

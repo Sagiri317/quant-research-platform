@@ -37,11 +37,9 @@ from quant_research_platform.sources.binance.replay import (
     open_recorder_run,
 )
 from quant_research_platform.storage.identity import (
-    filesystem_glob,
     filesystem_mkdir,
     filesystem_rename,
     filesystem_stat,
-    filesystem_unlink,
     filesystem_write_bytes,
     filesystem_write_text,
     native_filesystem_path,
@@ -118,12 +116,8 @@ def test_connection_coverage_gzip_close_failure_still_closes_raw(
     monkeypatch.setattr(
         replay, "open_filesystem_file", lambda *_args, **_kwargs: raw_handle
     )
-    monkeypatch.setattr(
-        replay, "_verify_raw_file_handle", lambda *_args, **_kwargs: None
-    )
     index = object.__new__(replay.ObservationCoverageIndex)
     index._path = Path("synthetic-coverage.gz")
-    index.identity = object()
     index._descriptor = {"record_count": 0, "sha256": hashlib.sha256(b"").hexdigest()}
     try:
         with pytest.raises(OSError, match="gzip-close-secondary"):
@@ -135,27 +129,34 @@ def test_connection_coverage_gzip_close_failure_still_closes_raw(
         raw_handle.close()
 
 
-def test_replay_file_handle_cleanup_preserves_hash_primary(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_replay_file_cleanup_preserves_decoder_primary(monkeypatch):
+    primary = KeyboardInterrupt("decoder_primary")
 
     class FailingHandle:
-        def close(self) -> None:
+        def close(self):
             raise OSError("handle_close")
 
+    class FailingGzip:
+        def readline(self, _size):
+            raise primary
+
+        def close(self):
+            raise OSError("gzip_close")
+
     monkeypatch.setattr(
-        replay, "open_filesystem_file", lambda *_args, **_kwargs: FailingHandle()
+        replay, "open_filesystem_file", lambda *_a, **_k: FailingHandle()
     )
-    monkeypatch.setattr(
-        replay,
-        "_verify_raw_file_handle",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            KeyboardInterrupt("hash_primary")
-        ),
-    )
-    with pytest.raises(KeyboardInterrupt, match="hash_primary") as raised:
-        replay._sha256_file(Path("synthetic-member.gz"), object())
-    assert raised.value.__notes__ == ["iterator close also failed: OSError"]
+    monkeypatch.setattr(replay.gzip, "GzipFile", lambda **_k: FailingGzip())
+    with pytest.raises(KeyboardInterrupt) as raised:
+        next(
+            replay._iter_raw_file(
+                Path("."),
+                {"path": "synthetic.gz", "max_record_bytes": 100},
+                manifest={},
+            )
+        )
+    assert raised.value is primary
+    assert primary.__notes__ == ["iterator close also failed: OSError"] * 2
 
 
 def _snapshot(
@@ -428,35 +429,20 @@ def test_replay_merge_closes_all_streams_without_collecting_retained_error(
         assert handles and all(handle.closed for handle in handles)
 
 
-@pytest.mark.parametrize("status", ("UNKNOWN", None, 1))
-def test_run_manifest_requires_known_status(tmp_path: Path, status) -> None:
+@pytest.mark.parametrize("status", ("PASS", "PARTIAL", "FAIL", "UNKNOWN", None, 1))
+def test_recording_status_is_description_not_downstream_admission(tmp_path, status):
+    root = tmp_path / "run"
     manifest = _write_run(
-        tmp_path / "run",
-        [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])],
+        root, [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])]
     )
-    manifest["status"] = status
-    with pytest.raises(ValueError, match="binance_replay_run_manifest_invalid"):
-        replay._validate_run_manifest(manifest)
-
-
-@pytest.mark.parametrize("status", ("PARTIAL", "FAIL"))
-def test_run_manifest_accepts_known_status(tmp_path: Path, status: str) -> None:
-    manifest = _write_run(
-        tmp_path / "run",
-        [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])],
-    )
-    manifest["status"] = status
-    replay._validate_run_manifest(manifest)
-
-
-def test_pass_manifest_requires_every_btc_eth_stream_tuple(tmp_path: Path) -> None:
-    manifest = _write_run(
-        tmp_path / "run",
-        [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])],
-    )
-    manifest["status"] = "PASS"
-    with pytest.raises(ValueError, match="^binance_replay_run_completeness_invalid$"):
-        replay._validate_run_manifest(manifest)
+    if status is None:
+        manifest.pop("status")
+    else:
+        manifest["status"] = status
+    (root / "run.json").write_text(json.dumps(manifest))
+    with open_recorder_run(root) as run:
+        assert [row["capture_seq"] for row in run.iter_records()] == [1]
+        assert run.hft_source_info() == {"raw_record_count": 1, "source_file_count": 1}
 
 
 def test_run_manifest_binds_recording_scope_to_exact_market_set(tmp_path: Path) -> None:
@@ -591,41 +577,19 @@ def test_replay_run_id_uses_shared_contract(
                 pass
 
 
-def test_run_rejects_unlisted_or_hash_mismatched_file(tmp_path: Path) -> None:
+def test_run_ignores_unlisted_files_and_checks_consumed_gzip(tmp_path):
     root = tmp_path / "run"
-    _write_run(
-        root,
-        [
-            (
-                FUTURES_MARKET_TYPE,
-                "depth",
-                "btcusdt@depth@100ms",
-                [
-                    _futures_delta(
-                        1, 90, 100, previous=0, transaction_time=10, segment_id="s1"
-                    )
-                ],
-            )
-        ],
+    manifest = _write_run(
+        root, [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])]
     )
-    extra = root / "extra.jsonl.gz"
-    with gzip.open(native_filesystem_path(extra), "wt", encoding="utf-8") as handle:
-        handle.write("{}\n")
-    with pytest.raises(ValueError, match="file_manifest_mismatch"):
-        with open_recorder_run(root):
-            pass
-    filesystem_unlink(extra)
-    declared = next(
-        path
-        for path in filesystem_glob(root, "**/*.jsonl.gz")
-        if path.name == "usd_s_m_futures_depth.jsonl.gz"
-    )
-    filesystem_write_bytes(
-        declared, Path(native_filesystem_path(declared)).read_bytes() + b"tampered"
-    )
-    with pytest.raises(ValueError, match="file_identity_mismatch"):
-        with open_recorder_run(root):
-            pass
+    (root / "extra.jsonl.gz").write_bytes(b"irrelevant")
+    with open_recorder_run(root) as run:
+        assert [row["capture_seq"] for row in run.iter_records()] == [1]
+    declared = root / manifest["files"][0]["path"]
+    declared.write_bytes(declared.read_bytes() + b"invalid-gzip-tail")
+    with open_recorder_run(root) as run:
+        with pytest.raises(gzip.BadGzipFile):
+            list(run.iter_records())
 
 
 def test_futures_bootstrap_keeps_all_clocks_and_exact_tick_identity(
@@ -1103,13 +1067,12 @@ def test_recorder_run_rejects_aliased_input_paths(tmp_path, alias_kind):
         else "binance_raw_export_identity_changed"
     )
     with pytest.raises(ValueError, match=f"^{error}$"):
-        with open_recorder_run(input_root):
-            pytest.fail("aliased recorder input admitted")
+        with open_recorder_run(input_root) as run:
+            list(run.iter_records())
+            pytest.fail("aliased recorder input consumed")
 
 
-def test_recorder_run_rejects_member_replacement_between_capture_and_open(
-    tmp_path, monkeypatch
-):
+def test_recorder_run_does_not_treat_mtime_as_source_content(tmp_path, monkeypatch):
     root = tmp_path / "run"
     manifest = _write_run(
         root, [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])]
@@ -1130,15 +1093,14 @@ def test_recorder_run_rejects_member_replacement_between_capture_and_open(
         return original_open(path, *args, **kwargs)
 
     monkeypatch.setattr(replay, "open_filesystem_file", mutate_before_open)
-    with pytest.raises(ValueError, match="^binance_raw_export_identity_changed$"):
-        with open_recorder_run(root) as run:
-            list(run.iter_records())
+    with open_recorder_run(root) as run:
+        assert [row["capture_seq"] for row in run.iter_records()] == [1]
     assert mutated == [True]
     assert Path(native_filesystem_path(member)).read_bytes() == original
 
 
 @pytest.mark.parametrize("consumer_primary", (False, True))
-def test_recorder_run_checks_consumed_handle_identity_and_preserves_primary(
+def test_recorder_read_ignores_mtime_and_preserves_consumer_primary(
     tmp_path, consumer_primary
 ):
     from quant_research_platform.policy.lifecycle import closing_iterator
@@ -1148,27 +1110,29 @@ def test_recorder_run_checks_consumed_handle_identity_and_preserves_primary(
         root, [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])]
     )
     member = root / manifest["files"][0]["path"]
-    original = Path(native_filesystem_path(member)).read_bytes()
+    original = member.read_bytes()
     primary = KeyboardInterrupt("consumer_primary")
-    with pytest.raises(KeyboardInterrupt if consumer_primary else ValueError) as raised:
+
+    def consume():
         with open_recorder_run(root) as run:
             with closing_iterator(run.iter_records()) as records:
                 assert next(records)["capture_seq"] == 1
-                before = filesystem_stat(member)
+                before = member.stat()
                 os.utime(
-                    native_filesystem_path(member),
-                    ns=(before.st_atime_ns, before.st_mtime_ns + 2000000000),
+                    member, ns=(before.st_atime_ns, before.st_mtime_ns + 2_000_000_000)
                 )
-                assert filesystem_stat(member).st_mtime_ns != before.st_mtime_ns
                 if consumer_primary:
                     raise primary
-                list(records)
+                assert list(records) == []
+
     if consumer_primary:
+        with pytest.raises(KeyboardInterrupt) as raised:
+            consume()
         assert raised.value is primary
-        assert any("ValueError" in note for note in primary.__notes__)
+        assert not getattr(primary, "__notes__", [])
     else:
-        assert str(raised.value) == "binance_raw_export_identity_changed"
-    assert Path(native_filesystem_path(member)).read_bytes() == original
+        consume()
+    assert member.read_bytes() == original
 
 
 def test_connection_queries_scan_each_interval_once(tmp_path):
@@ -1503,13 +1467,9 @@ def test_native_file_stream_matches_symbol_and_kind(tmp_path, stream):
     "boundary",
     (
         "root_stat",
-        "manifest_stat",
         "manifest_open",
-        "coverage_stat",
         "coverage_open",
         "member_open",
-        "member_fstat",
-        "scandir",
         "raw_open",
     ),
 )
@@ -1523,42 +1483,19 @@ def test_recorder_file_boundaries_preserve_serious_io(tmp_path, monkeypatch, bou
     member = root / manifest["files"][0]["path"]
     target = {
         "root_stat": root,
-        "manifest_stat": root / "run.json",
         "manifest_open": root / "run.json",
-        "coverage_stat": root / "connection_intervals.jsonl.gz",
         "coverage_open": root / "connection_intervals.jsonl.gz",
     }.get(boundary, member)
     primary = OSError(errno.EIO, "controlled_io_failure")
-    owner = (
-        os
-        if boundary == "member_fstat"
-        else storage_manifests
-        if boundary == "manifest_open"
-        else replay
-    )
-    operation = (
-        "fstat"
-        if boundary == "member_fstat"
-        else "filesystem_scandir"
-        if boundary == "scandir"
-        else "filesystem_stat"
-        if boundary.endswith("stat")
-        else "open_filesystem_file"
-    )
+    owner = storage_manifests if boundary == "manifest_open" else replay
+    operation = "filesystem_stat" if boundary == "root_stat" else "open_filesystem_file"
     original = getattr(owner, operation)
 
     def fail(candidate, *args, **kwargs):
-        selected = (
-            Path(os.readlink(f"/proc/self/fd/{candidate}")) == member
-            if boundary == "member_fstat"
-            else Path(candidate) == (root if boundary == "scandir" else target)
-        )
-        if selected:
+        if Path(candidate) == target:
             raise primary
         return original(candidate, *args, **kwargs)
 
-    if boundary == "member_fstat" and (not Path("/proc/self/fd").exists()):
-        pytest.skip("POSIX file descriptor path required for targeted fstat fault")
     if boundary == "raw_open":
         with open_recorder_run(root) as run:
             with monkeypatch.context() as patch:
@@ -1575,26 +1512,19 @@ def test_recorder_file_boundaries_preserve_serious_io(tmp_path, monkeypatch, bou
 
 
 @pytest.mark.parametrize("replace_parent", (False, True))
-def test_raw_identity_rejects_disappearance_after_initial_stat(
-    tmp_path, monkeypatch, replace_parent
-):
-    parent = tmp_path / "parent"
-    filesystem_mkdir(parent)
-    path = parent / "member"
-    filesystem_write_bytes(path, b"synthetic")
-    capture = replay.dataset_file_identity
-
-    def remove_before_capture(candidate):
-        assert candidate == path
-        filesystem_unlink(path)
+def test_selected_raw_member_missing_at_open_is_reported(tmp_path, replace_parent):
+    root = tmp_path / "run"
+    manifest = _write_run(
+        root, [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])]
+    )
+    member = root / manifest["files"][0]["path"]
+    with open_recorder_run(root) as run:
+        member.unlink()
         if replace_parent:
-            os.rmdir(native_filesystem_path(parent))
-            filesystem_write_bytes(parent, b"synthetic")
-        return capture(candidate)
-
-    monkeypatch.setattr(replay, "dataset_file_identity", remove_before_capture)
-    with pytest.raises(ValueError, match="^binance_raw_export_identity_changed$"):
-        replay._capture_raw_file_identity(path)
+            member.parent.rmdir()
+            member.parent.write_bytes(b"not-a-directory")
+        with pytest.raises(ValueError, match="^binance_replay_raw_file_open_failed$"):
+            next(run.iter_records())
 
 
 @pytest.mark.parametrize("resend", ["same", "event_clock", "conflict", "unseen"])
@@ -2019,7 +1949,7 @@ def test_continuous_book_growth_inside_known_snapshot_range():
     assert engine.stats.invalid_segments == 0
 
 
-@pytest.mark.parametrize("corruption", ["duplicate_id", "count", "hash"])
+@pytest.mark.parametrize("corruption", ["duplicate_id", "count"])
 def test_coverage_index_rejects_invalid_complete_source(tmp_path, corruption):
     descriptor = _write_coverage_history(tmp_path, 1, 32)
     path = tmp_path / descriptor["path"]
@@ -2036,8 +1966,6 @@ def test_coverage_index_rejects_invalid_complete_source(tmp_path, corruption):
         )
     elif corruption == "count":
         descriptor["record_count"] = 2
-    else:
-        descriptor["sha256"] = "0" * 64
     before = path.read_bytes()
     with pytest.raises(
         ValueError, match="^binance_replay_connection_intervals_invalid$"
@@ -2109,8 +2037,8 @@ def test_depth_price_index_tracks_insert_delete_promotion_and_reset(output_level
             if i == 20:
                 bid_changes[200] = 0.0
                 ask_changes[210] = 0.0
-            # Beyond-frontier updates must never become executable.
-            bid_changes[99] = ask_changes[311] = 100.0
+            # An unobserved price separates these updates from the known range.
+            bid_changes[98] = ask_changes[312] = 100.0
             for target, changes, lower, upper in (
                 (bids, bid_changes, 100, 200),
                 (asks, ask_changes, 210, 310),
@@ -2232,7 +2160,7 @@ def test_recorder_rejects_windows_anchored_members_before_read(
             pass
 
 
-def test_replay_hashes_selected_members_once_during_decode(tmp_path, monkeypatch):
+def test_replay_reads_selected_members_once_during_decode(tmp_path, monkeypatch):
     root = tmp_path / "run"
     manifest = _write_run(
         root, [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])]

@@ -356,6 +356,7 @@ def build_evaluation_result_from_frames(
     asset_column: str,
     source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
     declared_columns=None,
+    response_diagnostics=None,
 ) -> EvaluationResult:
     state = _EvaluationStreamingState(
         spec=spec,
@@ -368,6 +369,7 @@ def build_evaluation_result_from_frames(
             source_columns_by_kind=source_columns_by_kind,
             declared_columns=declared_columns,
             summary_state=state,
+            response_diagnostics=response_diagnostics,
         )
         if spec.evaluation_axis == "single_asset_time_series"
         else _iter_evaluation_output_chunks(
@@ -443,8 +445,11 @@ def _iter_single_asset_time_series_output_chunks(
     source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
     declared_columns=None,
     summary_state: _EvaluationStreamingState | None = None,
+    response_diagnostics=None,
 ) -> Iterator[_EvaluationOutputChunk]:
     """Yield one bounded across-time correlation row per signal-label pair."""
+    response_frames = []
+    response_dates = {}
     signal_columns = tuple(signal.signal_id for signal in spec.signals)
     label_columns = spec.label_columns
     numeric_columns = (*signal_columns, *label_columns)
@@ -526,10 +531,18 @@ def _iter_single_asset_time_series_output_chunks(
                 else min(minimum_timestamp, chunk_minimum)
             )
             maximum_timestamp = chunk_maximum
-            values = filtered.loc[:, list(numeric_columns)].to_numpy(
-                dtype="float64", copy=True
-            )
-            consume_values(values)
+            if response_diagnostics is not None:
+                response_dates.update(
+                    timestamps.groupby(timestamps.dt.normalize()).max().to_dict()
+                )
+            if response_diagnostics is None:
+                consume_values(
+                    filtered.loc[:, list(numeric_columns)].to_numpy(
+                        dtype="float64", copy=True
+                    )
+                )
+            else:
+                response_frames.append(filtered.loc[:, ["timestamp", *numeric_columns]])
     metrics = _time_series_metrics_frame(
         stats if maximum_timestamp is not None else {}, timestamp=maximum_timestamp
     )
@@ -548,6 +561,25 @@ def _iter_single_asset_time_series_output_chunks(
         else None,
         "skipped_timestamp_count": 0,
     }
+    if response_diagnostics is not None:
+        frame = (
+            pd.concat(response_frames, ignore_index=True)
+            if response_frames
+            else pd.DataFrame(columns=["timestamp", *numeric_columns])
+        )
+        metadata.update(
+            _response_tables(
+                frame, spec=spec, config=response_diagnostics, dates=response_dates
+            )
+        )
+        pooled = metadata["response_metrics"]
+        pooled = pooled.loc[pooled.period.eq("pooled") & pooled.sample_scope.eq("own")]
+        metrics = _time_series_metric_records(
+            [
+                {**row, "rankic": None, "rankic_reason": "not_applicable"}
+                for row in pooled.to_dict("records")
+            ]
+        )
     output = (metrics, grouped_label_values, metadata)
     if summary_state is not None:
         summary_state.consume(*output)
@@ -574,6 +606,10 @@ def _time_series_metrics_frame(
                 "rankic_reason": "not_applicable",
             }
         )
+    return _time_series_metric_records(records)
+
+
+def _time_series_metric_records(records):
     metrics = pd.DataFrame.from_records(records, columns=EVALUATION_METRICS_COLUMNS)
     metrics["timestamp"] = metrics["timestamp"].astype("datetime64[ns]")
     for column in ("signal", "label", "ic_reason", "rankic_reason"):
@@ -779,62 +815,6 @@ def _iter_evaluation_work_frames(
                 return
 
 
-def _evaluation_input_observation_id(raw, focal, columns):
-    """Hash canonical consumed columns, independent of layout and null payloads."""
-    import hashlib
-
-    import pyarrow as pa
-    import pyarrow.compute as pc
-
-    columns = sorted(columns)
-    observed = raw.loc[:, columns].copy()
-    consumed = [
-        column
-        for column in columns
-        if column not in {"timestamp", "asset_id", "market_id", "eligible"}
-    ]
-    observed[consumed] = focal.loc[:, consumed].reindex(raw.index)
-    observed = observed.sort_values(["timestamp", "asset_id"])
-    table = pa.Table.from_pandas(
-        observed, preserve_index=False
-    ).replace_schema_metadata(None)
-    arrays, names = [], []
-    for name in table.column_names:
-        values = table[name].combine_chunks()
-        if pa.types.is_dictionary(values.type):
-            values = values.dictionary_decode()
-        if pa.types.is_string(values.type):
-            values = values.cast(pa.large_string())
-        elif pa.types.is_binary(values.type):
-            values = values.cast(pa.large_binary())
-        valid = pc.is_valid(values)
-        kind = values.type
-        if values.null_count == len(values):
-            values = pa.repeat(pa.scalar(0, type=pa.uint8()), len(values))
-        else:
-            fill = (
-                ""
-                if pa.types.is_string(kind) or pa.types.is_large_string(kind)
-                else b""
-                if pa.types.is_binary(kind) or pa.types.is_large_binary(kind)
-                else False
-                if pa.types.is_boolean(kind)
-                else 0
-            )
-            if pa.types.is_temporal(kind):
-                scalar = pa.scalar(0, type=pa.int64()).cast(kind)
-            else:
-                scalar = pa.scalar(fill, type=kind)
-            values = pc.fill_null(values, scalar)
-        arrays.extend((values, valid))
-        names.extend(("value:" + name, "valid:" + name))
-    canonical = pa.Table.from_arrays(arrays, names=names)
-    sink = pa.BufferOutputStream()
-    with pa.ipc.new_stream(sink, canonical.schema) as writer:
-        writer.write_table(canonical)
-    return hashlib.sha256(sink.getvalue()).hexdigest()
-
-
 def build_scoped_evaluation_result(
     frames, *, spec, sources, cutoff, sample_scope, strata
 ):
@@ -858,6 +838,14 @@ def build_scoped_evaluation_result(
         for column in source["signal_columns"]:
             selected[column] = selected[column].where(np.isfinite(selected[column]))
         for label, availability in source["availability"].items():
+            if pd.api.types.is_integer_dtype(selected[label].dtype):
+                # Keep exact integer targets through maturity masking and
+                # peer reindexing instead of filling missing rows with float.
+                selected[label] = selected[label].astype(
+                    "UInt64"
+                    if pd.api.types.is_unsigned_integer_dtype(selected[label].dtype)
+                    else "Int64"
+                )
             mature = label_maturity_mask(
                 selected,
                 fitting_cutoff=cutoff,
@@ -878,9 +866,6 @@ def build_scoped_evaluation_result(
                 metadata["timestamps"] = raw.timestamp
                 metadata["asset_ids"] = raw.asset_id
                 timestamp = raw.timestamp.iloc[0]
-                input_observation_id = _evaluation_input_observation_id(
-                    raw, focal, sources[0]["columns"]
-                )
                 classification = focal.copy()
                 for column in (
                     "total_market_cap",
@@ -919,10 +904,28 @@ def build_scoped_evaluation_result(
                         for peer in aligned_peers:
                             domain &= peer[label].notna().to_numpy()
                         for peer in aligned_peers:
-                            if not np.equal(
-                                focal[label].to_numpy()[domain],
-                                peer[label].to_numpy()[domain],
-                            ).all():
+                            integral = any(
+                                pd.api.types.is_integer_dtype(values.dtype)
+                                for values in (focal[label], peer[label])
+                            )
+                            left = focal[label].to_numpy(
+                                dtype=object if integral else float
+                            )[domain]
+                            right = peer[label].to_numpy(
+                                dtype=object if integral else float
+                            )[domain]
+                            if integral:
+                                matches = np.equal(left, right)
+                            else:
+                                # Allow eight local float64 steps in label units,
+                                # including subnormals, without an absolute floor.
+                                # Stepping toward zero keeps the bound finite even
+                                # at the largest float; exact zeros have zero scale.
+                                scale = np.maximum(np.abs(left), np.abs(right))
+                                tolerance = 8 * (scale - np.nextafter(scale, 0.0))
+                                with np.errstate(over="ignore"):
+                                    matches = np.abs(left - right) <= tolerance
+                            if not matches.all():
                                 raise ValueError("evaluation_common_label_mismatch")
                         normalized[label] = normalized[label].where(domain)
                 coverage = daily_frame(
@@ -987,9 +990,6 @@ def build_scoped_evaluation_result(
                 facts.update(
                     daily_coverage=coverage,
                     daily_strata=daily,
-                    input_observations={
-                        pd.Timestamp(timestamp).isoformat(): input_observation_id
-                    },
                 )
                 yield metrics, grouped, facts
 
@@ -1050,3 +1050,248 @@ def _evaluation_strata(frame, strata):
         if not mature.empty:
             groups[kind] = values
     return groups, quality
+
+
+def training_quantile_cutpoints(scores, *, n_groups=5):
+    """Freeze empirical training-score bins; ties share their upper-inclusive bin.
+
+    Pass explicit predictions on the legal training reference domain, normally
+    in-sample scores from the frozen model. This function neither fits nor proves
+    out-of-sample provenance. If OOS reference scores are chosen, declare that
+    different reference design. Values must already use the evaluated direction.
+    """
+    values = np.asarray(scores, dtype="float64")
+    if (
+        type(n_groups) is not int
+        or not 2 <= n_groups <= 5
+        or values.ndim != 1
+        or not len(values)
+        or not np.isfinite(values).all()
+    ):
+        raise ValueError("evaluation_reference_scores_invalid")
+    edges = np.unique(
+        np.quantile(values, np.arange(1, n_groups) / n_groups, method="inverted_cdf")
+    )
+    return edges[edges < values.max()].tolist()
+
+
+def _response_tables(frame, *, spec, config, dates=None):
+    """Calculate both response tables from one selected finite-window cache.
+
+    Exact pooled medians retain O(N * selected columns) values. No sampling,
+    synthetic anchors, implicit fitting, inference, or cross-asset pooling occurs.
+    """
+    from statistics import mean, stdev
+
+    from quant_research_platform.artifacts.outputs.evaluation_daily import daily_frame
+    from quant_research_platform.compute.dataframe.cross_section import (
+        _batch_pearson_correlation_result,
+    )
+
+    def finite(value):
+        try:
+            value = float(value)
+        except OverflowError:
+            return np.nan
+        return value if math.isfinite(value) else np.nan
+
+    def mean_bp(values):
+        if not len(values):
+            return np.nan
+        try:
+            total = Fraction(math.fsum(values))
+        except OverflowError:
+            total = sum(Fraction(float(value)) for value in values)
+        return finite(total * 10000 / len(values))
+
+    def median_bp(values):
+        if not len(values):
+            return np.nan
+        middle = len(values) // 2
+        selected = np.partition(values, (max(0, middle - 1), middle))
+        central = (
+            selected[middle : middle + 1]
+            if len(values) % 2
+            else selected[middle - 1 : middle + 1]
+        )
+        return mean_bp(central)
+
+    signal, edges = next(iter(config["cutpoints"].items()))
+    n_groups = len(edges) + 1
+    all_scores = frame[signal].to_numpy(dtype="float64")
+    all_values = frame.loc[:, list(spec.label_columns)].to_numpy(dtype="float64")
+    all_predicted = np.isfinite(all_scores)
+    all_mature = np.isfinite(all_values).all(axis=1)
+    all_groups = np.searchsorted(edges, all_scores, side="left") + 1
+    timestamps = pd.DatetimeIndex(frame.timestamp)
+    by_day = frame.groupby(timestamps.normalize(), sort=False).indices
+    dates = dates or {
+        day: timestamps[positions[-1]] for day, positions in by_day.items()
+    }
+    metrics, grouped = [], []
+    periods = [
+        ("daily", stamp, by_day.get(day, np.empty(0, dtype="int64")))
+        for day, stamp in sorted(dates.items())
+    ]
+    if len(dates):
+        periods.append(("pooled", max(dates.values()), slice(None)))
+    for period, timestamp, positions in periods:
+        scores, labels = all_scores[positions], all_values[positions]
+        selected, all_labels, groups = (
+            all_predicted[positions],
+            all_mature[positions],
+            all_groups[positions],
+        )
+        for scope in ("common", "own"):
+            denominator = int(selected.sum())
+            for index, label in enumerate(spec.label_columns):
+                valid = selected & (
+                    all_labels if scope == "common" else np.isfinite(labels[:, index])
+                )
+                count = int(valid.sum())
+                ic, reason = _batch_pearson_correlation_result(
+                    scores[valid], labels[valid, index]
+                )
+                key = dict(
+                    timestamp=timestamp,
+                    period=period,
+                    sample_scope=scope,
+                    signal=signal,
+                    label=label,
+                )
+                means, counts = [], []
+                for group in range(1, n_groups + 1):
+                    values = labels[valid & (groups == group), index]
+                    average, median = mean_bp(values), median_bp(values)
+                    means.append(average)
+                    counts.append(len(values))
+                    grouped.append(
+                        dict(
+                            **key,
+                            group=group,
+                            mean_return_bp=average,
+                            median_return_bp=median,
+                            n_obs=len(values),
+                            mean_std_bp=None,
+                            valid_day_count=int(period == "daily" and len(values) > 0),
+                            mean_reason=None
+                            if math.isfinite(average)
+                            else "no_valid_observations"
+                            if not len(values)
+                            else "nonfinite_result",
+                            median_reason=None
+                            if math.isfinite(median)
+                            else "no_valid_observations"
+                            if not len(values)
+                            else "nonfinite_result",
+                        )
+                    )
+                spread_reason = (
+                    "one_signal_group"
+                    if n_groups == 1
+                    else "empty_extreme_group"
+                    if not all(counts[i] for i in (0, -1))
+                    else "nonfinite_result"
+                    if not all(math.isfinite(means[i]) for i in (0, -1))
+                    else None
+                )
+                spread = (
+                    finite(Fraction(means[-1]) - Fraction(means[0]))
+                    if spread_reason is None
+                    else np.nan
+                )
+                if spread_reason is None and not math.isfinite(spread):
+                    spread_reason = "nonfinite_result"
+                metrics.append(
+                    dict(
+                        **key,
+                        ic=ic,
+                        ic_reason=reason,
+                        n_obs=count,
+                        signal_count=denominator,
+                        coverage=count / denominator if denominator else None,
+                        ic_std=None,
+                        valid_day_count=int(period == "daily" and ic is not None),
+                        top_bottom_mean_bp=spread,
+                        spread_reason=spread_reason,
+                    )
+                )
+    if len(dates):
+        # Summary rows are explicitly means of daily estimates, never pooled IC.
+        for records, value, dispersion, keys in (
+            (metrics, "ic", "ic_std", ["sample_scope", "signal", "label"]),
+            (
+                grouped,
+                "mean_return_bp",
+                "mean_std_bp",
+                ["sample_scope", "signal", "label", "group"],
+            ),
+        ):
+            daily = pd.DataFrame(records).query("period == 'daily'")
+            for _, block in daily.groupby(keys, sort=False):
+                row = block.iloc[0].to_dict()
+                row.update(
+                    timestamp=max(dates.values()),
+                    period="daily_equal_weight",
+                    n_obs=int(block.n_obs.sum()),
+                )
+                values = block[value].dropna().tolist()
+                row[value] = finite(mean(values)) if values else None
+                try:
+                    row[dispersion] = finite(stdev(values)) if len(values) > 1 else None
+                except OverflowError:
+                    row[dispersion] = None
+                row["valid_day_count"] = len(values)
+                if value == "ic":
+                    row["ic_reason"] = None if values else "no_valid_observations"
+                    row["signal_count"] = int(block.signal_count.sum())
+                    row["coverage"] = (
+                        row["n_obs"] / row["signal_count"]
+                        if row["signal_count"]
+                        else None
+                    )
+                    spreads = block.top_bottom_mean_bp.dropna().tolist()
+                    row["top_bottom_mean_bp"] = (
+                        finite(mean(spreads)) if spreads else None
+                    )
+                    row["spread_reason"] = (
+                        None
+                        if spreads
+                        else "one_signal_group"
+                        if n_groups == 1
+                        else "no_valid_observations"
+                    )
+                else:
+                    row["mean_reason"] = None if values else "no_valid_observations"
+                    row["median_return_bp"] = None
+                    row["median_reason"] = "not_aggregated"
+                records.append(row)
+        for records, keys in (
+            (metrics, ["sample_scope", "signal", "label"]),
+            (grouped, ["sample_scope", "signal", "label", "group"]),
+        ):
+            counts = {
+                tuple(row[key] for key in keys): row["valid_day_count"]
+                for row in records
+                if row["period"] == "daily_equal_weight"
+            }
+            for row in records:
+                if row["period"] == "pooled":
+                    row["valid_day_count"] = counts[tuple(row[key] for key in keys)]
+    result = {}
+    for name, records in (("response_metrics", metrics), ("response_groups", grouped)):
+        result[name] = (
+            daily_frame(records, name)
+            .sort_values(
+                [
+                    "timestamp",
+                    "period",
+                    "sample_scope",
+                    "signal",
+                    "label",
+                    *(["group"] if name == "response_groups" else []),
+                ]
+            )
+            .reset_index(drop=True)
+        )
+    return result

@@ -193,15 +193,10 @@ def test_typed_canonical_timestamp_datetime_and_string_are_distinct() -> None:
     assert len(identities) == 3
 
 
-@pytest.mark.parametrize(
-    "value",
-    (pd.NaT, pd.Timestamp("NaT")),
-    ids=("pandas-nat", "timestamp-nat"),
-)
-def test_typed_canonical_identity_rejects_nat_sentinel(value: object) -> None:
-    assert value is pd.NaT
+def test_typed_canonical_identity_rejects_nat_sentinel() -> None:
+    assert pd.Timestamp("NaT") is pd.NaT
     with pytest.raises(ValueError, match="canonical_json_invalid_timestamp"):
-        canonical_identity_bytes(value)
+        canonical_identity_bytes(pd.NaT)
 
 
 def test_typed_canonical_identity_does_not_normalize_unicode() -> None:

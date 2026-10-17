@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pandas as pd
-
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
 from quant_research_platform.contracts.columns import ColumnRole
@@ -208,7 +206,7 @@ def label_horizon_ms(label_column):
 
 
 def research_chronology(value):
-    """Decode the chronology shared by model artifacts and execution operations."""
+    """Decode optional research-plan window defaults."""
     snapshot = qrp_json_object_snapshot(value)
     if set(snapshot) != {"folds", "test"}:
         raise ValueError("crypto_research_chronology_fields_invalid")
@@ -570,15 +568,3 @@ def factor_catalog():
         for column in HFT_EXTERNAL_FIELDS
     )
     return FactorCatalog(definitions)
-
-
-def crypto_execution_windows(plan, output_window, *, sample_role):
-    """Validate the requested final-evaluation extent for this frozen protocol."""
-    if sample_role != "test":
-        raise PermissionError("crypto_execution_requires_frozen_test")
-    boundary = TimeWindow(**plan["test"])
-    if pd.Timestamp(output_window.start) < pd.Timestamp(boundary.start) or pd.Timestamp(
-        output_window.end
-    ) > pd.Timestamp(boundary.end):
-        raise PermissionError("crypto_execution_test_window_invalid")
-    return ((plan["folds"][-1]["fold_id"], output_window),)

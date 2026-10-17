@@ -133,7 +133,7 @@ def _known_account_path(stopped):
         stopped.append(error)
 
 
-def _funding_consumer(events, economics, coverage=None):
+def _funding_consumer(events, economics, coverage, current_book, book_coverage):
     if type(events) is not tuple or any(
         type(event) is not FundingEvent for event in events
     ):
@@ -168,7 +168,15 @@ def _funding_consumer(events, economics, coverage=None):
                 raise _AccountPathStop(
                     "portfolio_required_funding_missing", next_event.timestamp_ns
                 )
-            economics.funding(next_event)
+            book = current_book()
+            mark = (
+                _mid(book)
+                if book is not None
+                and book.observed_time_ns <= next_event.timestamp_ns
+                and _covered(book_coverage, book.segment_id, next_event.timestamp_ns)
+                else None
+            )
+            economics.funding(next_event, mark_price=mark)
             next_event = next(pending, None)
         if stop is not None:
             raise _AccountPathStop("portfolio_required_funding_coverage_missing", stop)
@@ -529,6 +537,7 @@ def _taker_order_quantity(
 
 
 def _record_execution_result(economics, result, timestamp, mark):
+    result.update(economics.unvalued_funding)
     if result["net_pnl"] is None:
         # Repeat the last exact prefix valuation, never a stale endpoint estimate.
         timestamp, mark = economics.last_timestamp, economics.last_mark
@@ -652,7 +661,13 @@ def simulate_taker(
     action_timestamp = 0
     metrics = _Metrics()
     economics = PortfolioEconomics(capital, asset_id, on_ledger)
-    apply_funding = _funding_consumer(funding_events, economics, funding_coverage)
+    apply_funding = _funding_consumer(
+        funding_events,
+        economics,
+        funding_coverage,
+        lambda: latest_state,
+        observed_coverage,
+    )
 
     def resolved_fill(fill):
         economics.diagnostic(dict(fill))
@@ -733,6 +748,7 @@ def simulate_taker(
                 state.observed_time_ns,
             ):
                 terminal_mid = _mid(state)
+                economics._settle_funding(state.observed_time_ns, terminal_mid)
             _resolve_observed_markouts(
                 pending,
                 state,
@@ -2161,7 +2177,13 @@ def simulate_maker(
     commands = deque()
     metrics = _Metrics()
     economics = PortfolioEconomics(capital, asset_id, on_ledger)
-    apply_funding = _funding_consumer(funding_events, economics, funding_coverage)
+    apply_funding = _funding_consumer(
+        funding_events,
+        economics,
+        funding_coverage,
+        lambda: latest_state,
+        observed_coverage,
+    )
     latest_state = next_event = None
     trade_observation_id = None
     active_forecast = next_forecast = None
@@ -2313,6 +2335,8 @@ def simulate_maker(
                         "portfolio_pending_execution_unknown", state.observed_time_ns
                     )
             latest_state = state
+            if _covered(observed_coverage, state.segment_id, state.observed_time_ns):
+                economics._settle_funding(state.observed_time_ns, _mid(state))
             _resolve_observed_markouts(
                 pending, state, observed_coverage, previous_state=previous
             )

@@ -19,9 +19,8 @@ from tests.helpers.a_share_sources import (
 
 @pytest.mark.parametrize("block_rows", (30, 65536))
 @pytest.mark.parametrize("history_start", ("2009-11-02", "2019-11-01"))
-@pytest.mark.parametrize("precise", (False, True))
 def test_native_narrow_outputs_equal_full_with_actual_history_and_lookahead(
-    tmp_path, monkeypatch, block_rows, precise, history_start
+    tmp_path, monkeypatch, block_rows, history_start
 ):
     dates = pd.bdate_range(history_start, periods=180).as_unit("ns")
     source = _synthetic_interim_frames(dates)
@@ -43,16 +42,7 @@ def test_native_narrow_outputs_equal_full_with_actual_history_and_lookahead(
         tmp_path / "full", "market_panel_1d", inputs, dates[0], dates[-1]
     )
     monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", block_rows)
-    start, end = dates[45], dates[49]
-    window = {
-        "start": (start + pd.Timedelta(1, "ns")).isoformat()
-        if precise
-        else str(start.date()),
-        "end": (end - pd.Timedelta(1, "ns")).isoformat()
-        if precise
-        else str(end.date()),
-    }
-    outputs = {}
+    references = {}
     for name in ("price_volume_facts", "execution_mask", "forward_returns"):
         spec = processed_catalog().get(name)
         config = {
@@ -78,60 +68,74 @@ def test_native_narrow_outputs_equal_full_with_actual_history_and_lookahead(
                 "output_root": str(tmp_path / "full" / name),
             }
         )
-        full = read_dataset(inputs[name])
-        narrowed = read_dataset(
+        references[name] = config, read_dataset(inputs[name])
+    start, end = dates[45], dates[49]
+    # Precision changes only the requested projection, not the full reference.
+    for precise in (False, True):
+        output_root = tmp_path / ("precise" if precise else "daily")
+        window = {
+            "start": (start + pd.Timedelta(1, "ns")).isoformat()
+            if precise
+            else str(start.date()),
+            "end": (end - pd.Timedelta(1, "ns")).isoformat()
+            if precise
+            else str(end.date()),
+        }
+        outputs = {}
+        for name, (config, full) in references.items():
+            narrowed = read_dataset(
+                prepare(
+                    {
+                        **config,
+                        "time_window": window,
+                        "output_root": str(output_root / "narrow" / name),
+                    }
+                )
+            )
+            expected = full.loc[
+                full.timestamp.between(
+                    pd.Timestamp(window["start"]), pd.Timestamp(window["end"])
+                )
+            ].reset_index(drop=True)
+            pd.testing.assert_frame_equal(narrowed, expected, check_exact=True)
+            assert not narrowed.empty
+            outputs[name] = narrowed
+        assert outputs["price_volume_facts"].reversal_5d.notna().all()
+        assert outputs["execution_mask"][["can_enter", "can_exit"]].all().all()
+        labels = outputs["forward_returns"]
+        assert labels.forward_return_5d.notna().all()
+        assert labels.forward_return_5d_available_at.gt(end).all()
+        for row in labels.itertuples():
+            axis = dates[::3] if row.asset_id == "000001" else dates
+            assert row.forward_return_5d_available_at == axis[
+                axis.get_loc(row.timestamp) + 6
+            ] + pd.Timedelta(hours=7)
+
+        # Future prices exist for labels; they must not influence causal factors.
+        panel = read_dataset(inputs["market_panel_1d"])
+        panel.loc[panel.timestamp.gt(end), "adj_close"] *= 100.0
+        future_changed = output_root / "future-changed-panel"
+        write_dataset(
+            future_changed, panel, spec=processed_catalog().get("market_panel_1d")
+        )
+        unchanged = read_dataset(
             prepare(
                 {
-                    **config,
+                    "market_id": "a_share",
+                    "data_id": "price_volume_facts",
+                    "inputs": {
+                        "market_panel_1d": str(future_changed),
+                        "trading_calendar": str(inputs["trading_calendar"]),
+                    },
+                    "factor_columns": ["reversal_5d"],
                     "time_window": window,
-                    "output_root": str(tmp_path / "narrow" / name),
+                    "output_root": str(output_root / "causal-factors"),
                 }
             )
         )
-        expected = full.loc[
-            full.timestamp.between(
-                pd.Timestamp(window["start"]), pd.Timestamp(window["end"])
-            )
-        ].reset_index(drop=True)
-        pd.testing.assert_frame_equal(narrowed, expected, check_exact=True)
-        assert not narrowed.empty
-        outputs[name] = narrowed
-    assert outputs["price_volume_facts"].reversal_5d.notna().all()
-    assert outputs["execution_mask"][["can_enter", "can_exit"]].all().all()
-    labels = outputs["forward_returns"]
-    assert labels.forward_return_5d.notna().all()
-    assert labels.forward_return_5d_available_at.gt(end).all()
-    for row in labels.itertuples():
-        axis = dates[::3] if row.asset_id == "000001" else dates
-        assert row.forward_return_5d_available_at == axis[
-            axis.get_loc(row.timestamp) + 6
-        ] + pd.Timedelta(hours=7)
-
-    # Future prices exist for labels; they must not influence causal factors.
-    panel = read_dataset(inputs["market_panel_1d"])
-    panel.loc[panel.timestamp.gt(end), "adj_close"] *= 100.0
-    future_changed = tmp_path / "future-changed-panel"
-    write_dataset(
-        future_changed, panel, spec=processed_catalog().get("market_panel_1d")
-    )
-    unchanged = read_dataset(
-        prepare(
-            {
-                "market_id": "a_share",
-                "data_id": "price_volume_facts",
-                "inputs": {
-                    "market_panel_1d": str(future_changed),
-                    "trading_calendar": str(inputs["trading_calendar"]),
-                },
-                "factor_columns": ["reversal_5d"],
-                "time_window": window,
-                "output_root": str(tmp_path / "causal-factors"),
-            }
+        pd.testing.assert_frame_equal(
+            unchanged, outputs["price_volume_facts"], check_exact=True
         )
-    )
-    pd.testing.assert_frame_equal(
-        unchanged, outputs["price_volume_facts"], check_exact=True
-    )
 
 
 def test_native_panel_request_before_source_start_keeps_daily_axis(tmp_path):

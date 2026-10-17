@@ -366,29 +366,35 @@ def _attributions(result, context, indices, method, background, output_space):
         if method in {"affine", "linear_shap"}:
             coefficients, intercept = _linear_parameters(predictor)
             if method == "affine":
-                with np.errstate(over="ignore", invalid="ignore"):
-                    contributions = matrix.to_numpy() * coefficients
-                # Match the existing linear predictor's exact underflow recovery.
+                values = matrix.to_numpy(dtype="float64", copy=False)
+                with np.errstate(over="ignore", invalid="ignore", under="ignore"):
+                    contributions = values * coefficients
                 if isinstance(predictor, LinearScaledPredictor):
-                    for row, column in zip(
-                        *np.nonzero(
-                            (np.abs(matrix.to_numpy()) < np.finfo(float).tiny)
-                            | ~np.isfinite(matrix.to_numpy())
-                        ),
-                        strict=True,
-                    ):
-                        scale = predictor.scaler
+                    scale = predictor.scaler
+                    inputs = scale.input_matrix(selected.loc[:, columns]).to_numpy(
+                        dtype="float64", copy=False
+                    )
+                    active = coefficients != 0
+                    contributions[:, ~active] = 0.0
+                    displaced = (inputs != np.asarray(scale.origin_)) | np.asarray(
+                        [offset != 0 for offset in scale.offset_]
+                    )
+                    recover = active & (
+                        ~np.isfinite(contributions)
+                        | (
+                            (
+                                (np.abs(values) < np.finfo(float).tiny)
+                                | (np.abs(contributions) < np.finfo(float).tiny)
+                            )
+                            & displaced
+                        )
+                    )
+                    for row, column in zip(*np.nonzero(recover), strict=True):
                         try:
                             contributions[row, column] = float(
                                 Fraction(float(coefficients[column]))
                                 * (
-                                    Fraction(
-                                        float(
-                                            scale.input_matrix(
-                                                selected.loc[:, columns]
-                                            ).iloc[row, column]
-                                        )
-                                    )
+                                    Fraction(float(inputs[row, column]))
                                     - Fraction(scale.origin_[column])
                                     - scale.offset_[column]
                                 )

@@ -50,7 +50,7 @@ def _source(root, frame, declared, *, bare):
 
 @pytest.mark.parametrize("bare", [False, True])
 @pytest.mark.parametrize("partial_labels", [False, True])
-def test_unfiltered_coverage_precedes_mature_eligible_score_and_statistics(
+def test_exact_scoring_domain_and_strict_statistics_coverage(
     tmp_path, bare, partial_labels
 ):
     stamps = pd.date_range("2020-01-01", periods=6).repeat(3)
@@ -175,14 +175,25 @@ def test_unfiltered_coverage_precedes_mature_eligible_score_and_statistics(
         declared,
         bare=bare,
     )
-    with pytest.raises(ValueError, match="candidate_label_coverage_missing"):
+    missing_scores = json.loads(
         score(
             {
                 **scoring,
                 "labels": str(missing_labels),
                 "output": str(tmp_path / "missing-scores.json"),
             }
-        )
+        ).read_text()
+    )
+    # The absent key belongs to an ineligible asset. It is diagnosed but cannot
+    # change the exact mature/eligible scientific domain or any metric.
+    assert missing_scores["common_rows"] == sum(expected_counts)
+    assert missing_scores["metrics"] == scored["metrics"]
+    assert missing_scores["candidates"][0]["coverage"] == {
+        "current_mature_label_rows": sum(expected_counts),
+        "paired_prediction_rows": sum(expected_counts),
+        "mature_label_rows_without_prediction": 0,
+        "prediction_rows_without_label": 1,
+    }
     with pytest.raises(ValueError, match="prediction_dataset_coverage_mismatch"):
         model_statistics(
             {
@@ -200,14 +211,24 @@ def test_unfiltered_coverage_precedes_mature_eligible_score_and_statistics(
             "effective_prediction_end": None,
         },
     )
-    with pytest.raises(ValueError, match="candidate_prediction_coverage_missing"):
+    incomplete_scores = json.loads(
         score(
             {
                 **scoring,
                 "predictions": [str(incomplete)],
                 "output": str(tmp_path / "incomplete-scores.json"),
             }
-        )
+        ).read_text()
+    )
+    # Removing every prediction for ineligible c leaves the scored domain intact.
+    assert incomplete_scores["common_rows"] == sum(expected_counts)
+    assert incomplete_scores["metrics"] == scored["metrics"]
+    assert incomplete_scores["candidates"][0]["coverage"] == {
+        "current_mature_label_rows": sum(expected_counts),
+        "paired_prediction_rows": sum(expected_counts),
+        "mature_label_rows_without_prediction": 0,
+        "prediction_rows_without_label": 0,
+    }
     with pytest.raises(ValueError, match="missing_required_prediction_keys"):
         model_statistics(
             {

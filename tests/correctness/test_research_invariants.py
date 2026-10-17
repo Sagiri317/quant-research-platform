@@ -46,6 +46,7 @@ from quant_research_platform.research.portfolios.risk import (
     FactorRiskState,
 )
 from quant_research_platform.research.protocols.a_share import EXECUTION_ASSUMPTIONS
+from tests.helpers.optimizer import with_cash_asset
 from tests.helpers.research_configuration import CORE6_FACTORS, PV25_FACTORS
 
 
@@ -1144,11 +1145,16 @@ def test_enhanced_optimizer_is_deterministic_and_hard_constraint_only() -> None:
         solver_maxiter=1000,
     )
     result = optimize_portfolio(
-        assets,
+        with_cash_asset(assets),
+        cash_column="is_cash",
         factor_covariance=covariance,
         industry_columns=("industry_a",),
         style_columns=exposure_columns[1:],
-        expected_transaction_cost=lambda _weights: 0.0,
+        expected_transaction_cost=lambda buy, sell: (
+            0.0,
+            np.zeros_like(buy),
+            np.zeros_like(sell),
+        ),
         nav=1_000_000_000.0,
         assumptions=EXECUTION_ASSUMPTIONS,
         config=config,
@@ -1194,7 +1200,11 @@ def test_enhanced_optimizer_is_deterministic_and_hard_constraint_only() -> None:
         factor_covariance=covariance,
         industry_columns=("industry_a",),
         style_columns=exposure_columns[1:],
-        expected_transaction_cost=lambda _weights: 0.0,
+        expected_transaction_cost=lambda buy, sell: (
+            0.0,
+            np.zeros_like(buy),
+            np.zeros_like(sell),
+        ),
         nav=1_000_000_000.0,
         assumptions=EXECUTION_ASSUMPTIONS,
         cash_column="is_cash",
@@ -1234,11 +1244,16 @@ def test_optimizer_fixed_missing_exposure_retains_real_trade_capacity(
 
     def optimize():
         return optimize_portfolio(
-            assets,
+            with_cash_asset(assets),
+            cash_column="is_cash",
             factor_covariance=covariance,
             industry_columns=("industry",),
             style_columns=("style",),
-            expected_transaction_cost=lambda _weights: 0.0,
+            expected_transaction_cost=lambda buy, sell: (
+                0.0,
+                np.zeros_like(buy),
+                np.zeros_like(sell),
+            ),
             nav=1_000_000_000.0,
             assumptions=EXECUTION_ASSUMPTIONS,
         )

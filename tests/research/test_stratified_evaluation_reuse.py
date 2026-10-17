@@ -1,6 +1,7 @@
 """Persisted factor scope and stratification acceptance through public operations."""
 
 import json
+import shutil
 
 import numpy as np
 import pandas as pd
@@ -228,7 +229,10 @@ def test_common_final_domain_labels_only_and_missing_dates(tmp_path):
     assert tables["daily_coverage"].domain_rows.tolist() == [2, 0]
 
 
-def test_factor_evaluation_pair_rejects_real_input_change(tmp_path):
+@pytest.mark.parametrize(
+    "change", ["target", "units", "signal", "cutoff", "axis", "window"]
+)
+def test_factor_evaluation_pair_rejects_declared_science_change(tmp_path, change):
     _, config = _fixture(tmp_path)
     own = evaluate(config)
     common = evaluate(
@@ -236,9 +240,26 @@ def test_factor_evaluation_pair_rejects_real_input_change(tmp_path):
     )
     manifest_path = common / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
-    manifest["metadata"]["input_facts"]["label_semantics"] = {"label": {"horizon": 99}}
+    metadata = manifest["metadata"]
+    if change == "target":
+        metadata["input_facts"]["label_semantics"] = {"label": {"horizon": 99}}
+    elif change == "units":
+        metadata["input_facts"]["label_units"]["label"] = "basis_points"
+        metadata["input_facts"]["column_units"]["label"] = "basis_points"
+    elif change == "signal":
+        metadata["signals"][0]["direction"] = "lower_is_better"
+    elif change == "cutoff":
+        metadata["cutoff"] = "2025-01-01"
+    elif change == "axis":
+        metadata["evaluation_axis"] = "single_asset_time_series"
+    else:
+        config["window"] = {"start": "2023-01-02", "end": "2023-01-03"}
     manifest_path.write_text(json.dumps(manifest))
-    with pytest.raises(ValueError, match="evaluation.*incompatible"):
+    reason = {
+        "axis": "output_manifest_metadata_invalid",
+        "window": "factor_statistics_evaluation_window_outside",
+    }.get(change, "factor_statistics_evaluation_inputs_incompatible")
+    with pytest.raises(ValueError, match=reason):
         factor_statistics(
             {
                 "evaluation_inputs": [str(own), str(common)],
@@ -1126,3 +1147,179 @@ def test_null_stratum_must_belong_to_actual_published_domain(tmp_path):
                 "statistics": {"hac_lag": 20, "fdr_method": "BY", "fdr_alpha": 0.05},
             }
         )
+
+
+@pytest.mark.parametrize("change", ["unused_label", "factor_roundoff", "outer_window"])
+def test_selected_evaluation_reduction_needs_no_input_content(tmp_path, change):
+    frame, config = _fixture(tmp_path, days=2)
+    own = evaluate(config)
+    if change == "unused_label":
+        frame.loc[frame.timestamp.eq(frame.timestamp.max()), "label"] *= -1
+    elif change == "factor_roundoff":
+        frame.loc[0, "x"] = np.nextafter(frame.loc[0, "x"], np.inf)
+    other = write_evaluation_input(
+        tmp_path / "other", frame, factors=("x", "z"), labels=("label",)
+    )
+    window = {"start": "2023-01-02", "end": "2023-01-02"}
+    common = evaluate(
+        {
+            **config,
+            "inputs": str(other),
+            "output": str(tmp_path / "common"),
+            "sample_scope": "common",
+            **({"window": window} if change == "outer_window" else {}),
+        }
+    )
+    # Native EVAL is sufficient after all original DATASET ancestors disappear.
+    shutil.rmtree(tmp_path / "input")
+    shutil.rmtree(other)
+    reduced = factor_statistics(
+        {
+            "evaluation_inputs": [str(own), str(common)],
+            "window": window,
+            "output": str(tmp_path / "statistics"),
+            "analyses": ["stratified_ic"],
+            "statistics": {"hac_lag": 20},
+        }
+    )
+    with read_statistics_artifact(reduced).table(
+        "factor_stratified_diagnostics.parquet"
+    ) as result:
+        assert result.input_date_count.eq(1).all()
+        all_rows = result.loc[result.stratification.eq("all")]
+        assert all_rows.observation_pairs.eq(3).all()
+        assert all_rows.status.eq("UNDEFINED").all()
+        assert all_rows.reason.eq("insufficient_dates_for_hac").all()
+        own_rows = all_rows.loc[all_rows.sample_scope.eq("own")].set_index("statistic")
+        common_rows = all_rows.loc[all_rows.sample_scope.eq("common")].set_index(
+            "statistic"
+        )
+        np.testing.assert_allclose(
+            own_rows["mean"], common_rows["mean"], rtol=2e-15, atol=0
+        )
+    for path in (own, common):
+        metadata, _ = read_evaluation_outputs(path, tables=("metrics",))
+        assert "input_observations" not in metadata["metadata"]["input_facts"]
+
+
+@pytest.mark.parametrize(
+    "scale", [1024 * np.nextafter(0.0, 1.0), 1e-300, 1e-12, 1.0, 1e12, 1e306]
+)
+@pytest.mark.parametrize("change", ["roundoff", "material"])
+def test_common_labels_use_local_scale_roundoff_bound(tmp_path, scale, change):
+    frame, config = _fixture(tmp_path)
+    frame["label"] *= scale
+    config["inputs"] = str(
+        write_evaluation_input(
+            tmp_path / "scaled", frame, factors=("x", "z"), labels=("label",)
+        )
+    )
+    if change == "roundoff":
+        frame.loc[0, "label"] = np.nextafter(frame.loc[0, "label"], np.inf)
+    else:
+        frame.loc[0, "label"] += max(
+            scale * 1e-8, 16 * (scale - np.nextafter(scale, 0.0))
+        )
+    peer = write_evaluation_input(
+        tmp_path / "peer", frame, factors=("x", "z"), labels=("label",)
+    )
+    config.update(
+        sample_scope="common",
+        comparison_inputs=[{"inputs": str(peer), "signal_columns": ["x"]}],
+    )
+    if change == "material":
+        with pytest.raises(ValueError, match="evaluation_common_label_mismatch"):
+            evaluate(config)
+    else:
+        _, tables = read_evaluation_outputs(evaluate(config), tables=("metrics",))
+        assert tables["metrics"].n_obs.tolist() == [3]
+        assert tables["metrics"].rankic.tolist() == pytest.approx([0.5])
+
+
+@pytest.mark.parametrize("change", ["units", "target"])
+def test_common_labels_require_matching_declared_science(tmp_path, change):
+    frame, config = _fixture(tmp_path)
+    peer = _write_native(
+        tmp_path / "peer",
+        frame,
+        signals=("x",),
+        labels=("label",),
+        availability={"label": "label_available_at"},
+        units={"label": "basis_points"} if change == "units" else {},
+    )
+    if change == "target":
+        from pathlib import Path
+
+        path = Path(peer) / "_manifest" / "manifest.json"
+        manifest = json.loads(path.read_text())
+        manifest["producer_diagnostics"] = {
+            "label_semantics": {"label": {"horizon": 99}}
+        }
+        path.write_text(json.dumps(manifest))
+    fact = "units" if change == "units" else "semantics"
+    with pytest.raises(ValueError, match=f"evaluation_label_{fact}_mismatch"):
+        evaluate(
+            {
+                **config,
+                "sample_scope": "common",
+                "comparison_inputs": [{"inputs": peer, "signal_columns": ["x"]}],
+            }
+        )
+
+
+@pytest.mark.parametrize("steps", [0, 1, 16])
+def test_common_zero_labels_only_allow_local_subnormal_roundoff(tmp_path, steps):
+    frame, config = _fixture(tmp_path)
+    frame.loc[0, "label"] = 0.0
+    config["inputs"] = str(
+        write_evaluation_input(
+            tmp_path / "zero", frame, factors=("x", "z"), labels=("label",)
+        )
+    )
+    frame.loc[0, "label"] = steps * np.nextafter(0.0, 1.0)
+    peer = write_evaluation_input(
+        tmp_path / "peer", frame, factors=("x", "z"), labels=("label",)
+    )
+    config.update(
+        sample_scope="common",
+        comparison_inputs=[{"inputs": str(peer), "signal_columns": ["x"]}],
+    )
+    if steps > 8:
+        with pytest.raises(ValueError, match="evaluation_common_label_mismatch"):
+            evaluate(config)
+    else:
+        _, tables = read_evaluation_outputs(evaluate(config), tables=("metrics",))
+        assert tables["metrics"].n_obs.tolist() == [3]
+
+
+@pytest.mark.parametrize("domain", ["all_mature", "immature", "missing_peer"])
+@pytest.mark.parametrize("delta", [0, 1])
+def test_common_integer_labels_remain_exact_through_masking(tmp_path, domain, delta):
+    frame, config = _fixture(tmp_path)
+    frame["x"] = [1.0, 2.0, 4.0, 5.0]
+    frame["label"] = np.array(
+        [2**60, 2**60 + 512, 2**60 + 256, 2**60 + 768], dtype="int64"
+    )
+    if domain == "immature":
+        frame.loc[3, "label_available_at"] = pd.Timestamp("2025-01-01")
+    config["inputs"] = str(
+        write_evaluation_input(
+            tmp_path / "integers", frame, factors=("x", "z"), labels=("label",)
+        )
+    )
+    frame.loc[0, "label"] += delta
+    if domain == "missing_peer":
+        frame = frame.iloc[:3]
+    peer = write_evaluation_input(
+        tmp_path / "peer", frame, factors=("x", "z"), labels=("label",)
+    )
+    config.update(
+        sample_scope="common",
+        comparison_inputs=[{"inputs": str(peer), "signal_columns": ["x"]}],
+    )
+    if delta:
+        with pytest.raises(ValueError, match="evaluation_common_label_mismatch"):
+            evaluate(config)
+    else:
+        _, tables = read_evaluation_outputs(evaluate(config), tables=("metrics",))
+        assert tables["metrics"].n_obs.tolist() == [4 if domain == "all_mature" else 3]

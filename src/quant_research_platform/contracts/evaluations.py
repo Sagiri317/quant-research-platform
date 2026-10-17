@@ -309,3 +309,41 @@ def _validate_signal_label_separation(
     invalid = sorted(signal_names.intersection(label_columns))
     if invalid:
         raise ValueError("evaluation_signal_label_overlap: " + ", ".join(invalid))
+
+
+def validate_response_diagnostics(value, *, signals=None):
+    """Validate supplied numerical bins; reference dates are descriptive only."""
+    import math
+
+    if (
+        type(value) is not dict
+        or "cutpoints" not in value
+        or set(value) - {"cutpoints", "reference_window"}
+    ):
+        raise ValueError("evaluation_response_config_invalid")
+    if "reference_window" in value:
+        TimeWindow(**value["reference_window"])
+    cuts = value["cutpoints"]
+    if (
+        type(cuts) is not dict
+        or len(cuts) != 1
+        or (
+            signals is not None
+            and set(cuts) != {signal.signal_id for signal in signals}
+        )
+    ):
+        raise ValueError("evaluation_response_signal_invalid")
+    for signal, edges in cuts.items():
+        if (
+            type(signal) is not str
+            or not signal
+            or type(edges) is not list
+            or len(edges) > 4
+        ):
+            raise ValueError("evaluation_response_cutpoints_invalid")
+        if any(
+            type(edge) not in (int, float) or not math.isfinite(edge) for edge in edges
+        ):
+            raise ValueError("evaluation_response_cutpoints_invalid")
+        if any(left >= right for left, right in zip(edges, edges[1:], strict=False)):
+            raise ValueError("evaluation_response_cutpoints_invalid")

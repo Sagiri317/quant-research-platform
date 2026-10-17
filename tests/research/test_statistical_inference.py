@@ -770,3 +770,79 @@ def test_common_sample_does_not_hide_infinity_behind_another_missing_candidate(s
     result = aligned_candidate_matrix(frame)
     assert result.observation_count == 2
     assert result.dropped_observation_count == 1
+
+
+@pytest.mark.parametrize("confidence", [0.90, 0.95, 0.99])
+def test_summary_confidence_matches_manual_bartlett_interval(confidence):
+    from statistics import NormalDist
+
+    values = np.array([0.02, -0.01, 0.04, 0.01, 0.03, -0.02, 0.05, 0.01])
+    centered = values - values.mean()
+    standard_error = np.sqrt(centered @ centered + centered[1:] @ centered[:-1]) / len(
+        values
+    )
+    critical = NormalDist().inv_cdf((1 + confidence) / 2)
+    row = time_series_inference_summary(
+        pd.DataFrame(
+            {"timestamp": pd.date_range("2024-01-01", periods=len(values)), "x": values}
+        ),
+        identity_column="timestamp",
+        max_lags=1,
+        fdr_method="BY",
+        fdr_alpha=0.05,
+        confidence=confidence,
+    ).iloc[0]
+    assert row.standard_error == pytest.approx(standard_error, rel=1e-14)
+    np.testing.assert_allclose(
+        [row.ci_lower, row.ci_upper],
+        values.mean() + np.array([-1, 1]) * critical * standard_error,
+        rtol=1e-14,
+    )
+
+
+@pytest.mark.parametrize("values", [[], [np.nan, np.nan], [0.2, 0.2]])
+@pytest.mark.parametrize("lag", [-1, True, 1.5])
+def test_summary_rejects_invalid_lag_even_without_defined_inference(values, lag):
+    with pytest.raises(ValueError, match="hac_max_lags_invalid"):
+        time_series_inference_summary(
+            pd.DataFrame(
+                {
+                    "timestamp": pd.date_range("2024-01-01", periods=len(values)),
+                    "x": values,
+                }
+            ),
+            identity_column="timestamp",
+            max_lags=lag,
+            fdr_method="BY",
+            fdr_alpha=0.05,
+        )
+
+
+@pytest.mark.parametrize("confidence", [True, 0.0, 1.0, float("nan")])
+def test_empty_summary_still_validates_confidence(confidence):
+    with pytest.raises(ValueError, match="confidence_invalid"):
+        time_series_inference_summary(
+            pd.DataFrame({"timestamp": pd.DatetimeIndex([]), "x": []}),
+            identity_column="timestamp",
+            max_lags=0,
+            fdr_method="BY",
+            fdr_alpha=0.05,
+            confidence=confidence,
+        )
+
+
+@pytest.mark.parametrize("lag", [-1, True, 1.5])
+def test_factor_configuration_rejects_invalid_lag_before_opening_data(tmp_path, lag):
+    from quant_research_platform.research.statistics_production import factor_statistics
+
+    with pytest.raises(ValueError, match="factor_statistics_policy_invalid"):
+        factor_statistics(
+            {
+                "dataset": str(tmp_path / "absent"),
+                "output": str(tmp_path / "result"),
+                "window": {"start": "2024-01-01", "end": "2024-01-02"},
+                "evaluation": {"primary_label": "label", "factors": ["x"]},
+                "analyses": ["fama_macbeth"],
+                "statistics": {"hac_lag": lag, "fama_macbeth_core_factors": ["x"]},
+            }
+        )

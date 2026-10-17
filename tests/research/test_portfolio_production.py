@@ -1234,6 +1234,29 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
         account, adv, optimization, decision_delta, snapshot = actual_build(**kwargs)
         if kwargs["decision_timestamp"] == pd.Timestamp("2023-01-06"):
             assert optimization is not None
+            current = kwargs["holdings"] / kwargs["nav"]
+            # The positive-alpha stock binds the 0.505 post-fee name ceiling.
+            # With zero impact, the fee-reserve equation is linear in c/NAV.
+            net_target = pd.Series({"a": 0.495, "b": 0.505})
+            buying = net_target > current
+            rate = pd.Series(np.where(buying, 0.0004, 0.0009), index=current.index)
+            intercept = float((rate * abs(net_target - current)).sum())
+            slope = float((rate * net_target * np.where(buying, -1.0, 1.0)).sum())
+            fee_ratio = intercept / (1.0 - slope)
+            assert ((net_target * (1.0 - fee_ratio) > current) == buying).all()
+            assert fee_ratio > 0.0
+            assert optimization.weights.loc["a"] == pytest.approx(
+                0.495 * (1.0 - fee_ratio), abs=2e-8
+            )
+            assert optimization.weights.loc["b"] == pytest.approx(
+                0.505 * (1.0 - fee_ratio), abs=2e-8
+            )
+            assert optimization.weights.loc["__cash__"] == pytest.approx(
+                fee_ratio, abs=2e-8
+            )
+            assert optimization.expected_transaction_cost == pytest.approx(
+                fee_ratio * kwargs["nav"], abs=2e-8
+            )
             observed.append(
                 (
                     kwargs["holdings"].div(kwargs["nav"]).copy(),
@@ -1450,7 +1473,6 @@ def test_optimizer_assets_keep_residual_cash_as_explicit_current_weight(
         specific_variance=pd.Series(0.01, index=assets),
         adv=pd.Series(1000.0, index=assets),
         eligible=pd.Series(True, index=assets),
-        panel=pd.DataFrame({"asset_id": assets, "is_nonfinancial_industry": True}),
     )
     assert result["current_weight"].sum() == pytest.approx(1.0)
     cash_row = result.loc[result["asset_id"].eq("__cash__")]
@@ -1462,14 +1484,18 @@ def test_optimizer_assets_keep_residual_cash_as_explicit_current_weight(
         assert old.current_weight == pytest.approx(0.1)
         assert old.benchmark_weight == 0.0
         optimized = production.optimize_portfolio(
-            result,
+            result.assign(is_financial=False),
             factor_covariance=pd.DataFrame(
                 np.eye(len(RISK_STYLE_COLUMNS)) * 0.01,
                 index=RISK_STYLE_COLUMNS,
                 columns=RISK_STYLE_COLUMNS,
             ),
             style_columns=RISK_STYLE_COLUMNS,
-            expected_transaction_cost=lambda _weights: 0.0,
+            expected_transaction_cost=lambda buys, sells: (
+                0.0,
+                np.zeros_like(buys),
+                np.zeros_like(sells),
+            ),
             config=production.OptimizerConfig(),
             nav=100.0,
             assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 0.05, (0.05,)),
@@ -2851,7 +2877,7 @@ def test_amount_history_rejects_invalid_present_amounts(invalid):
         }
     )
     with pytest.raises(ValueError, match="portfolio_amount_invalid"):
-        production._update_amount_history(panel, {}, frozenset())
+        production._update_amount_history(panel, {}, frozenset(), frozenset())
 
 
 def test_amount_history_keeps_unknown_session_until_it_leaves_adv_window():
@@ -2868,6 +2894,7 @@ def test_amount_history_keeps_unknown_session_until_it_leaves_adv_window():
             ),
             history,
             frozenset(),
+            frozenset(),
         )
         assert np.mean(history[("known", pd.Timestamp("2000-01-01"))]) == 1000.0
         if index >= 20:
@@ -2882,6 +2909,7 @@ def test_amount_history_keeps_unknown_session_until_it_leaves_adv_window():
             }
         ),
         history,
+        frozenset(),
         frozenset(),
     )
     assert np.mean(history[("unrelated", pd.Timestamp("2000-01-01"))]) == 1000.0
@@ -3464,11 +3492,16 @@ def test_adv_history_restarts_for_new_listing_but_survives_same_life_closure():
     history = {}
     panel = pd.DataFrame({"asset_id": ["asset"], "listing_date": old, "amount": 10.0})
     for _ in range(20):
-        production._update_amount_history(panel, history, frozenset())
-    production._update_amount_history(panel.iloc[:0], history, frozenset({"asset"}))
+        production._update_amount_history(panel, history, frozenset(), frozenset())
+    production._update_amount_history(
+        panel.iloc[:0], history, frozenset({"asset"}), frozenset()
+    )
     assert len(history[("asset", old)]) == 20
     production._update_amount_history(
-        panel.assign(listing_date=new, amount=100.0), history, frozenset()
+        panel.assign(listing_date=new, amount=100.0),
+        history,
+        frozenset(),
+        frozenset(),
     )
     assert set(history) == {("asset", new)}
     assert list(history[("asset", new)]) == [100.0]
@@ -3706,3 +3739,188 @@ def test_persisted_adv_unavailable_rejects_fabricated_evidence(
                 ),
             )
         validate_portfolio_transition(batch, capital, None)
+
+
+@pytest.mark.parametrize("cash", (0.0, 1e-15, 10.0))
+def test_optimizer_assets_always_include_actual_cash(cash):
+    frame = production._optimizer_assets(
+        benchmark_weights=pd.Series({"a": 1.0}),
+        current_weights=pd.Series({"a": 1.0 - cash / 100.0}),
+        cash=cash,
+        nav=100.0,
+        expected_alpha=pd.Series({"a": 0.01}),
+        exposures=pd.DataFrame({"asset_id": ["a"], "style": [1.0]}),
+        specific_variance=pd.Series({"a": 0.01}),
+        adv=pd.Series({"a": 1000.0}),
+        eligible=pd.Series({"a": True}),
+    )
+    assert frame.asset_id.tolist() == ["a", "__cash__"]
+    assert frame.current_weight.iloc[-1] == cash / 100.0
+    assert frame.benchmark_weight.iloc[-1] == 0.0
+
+
+def test_adv_history_keeps_open_gap_and_resets_only_unknown_market():
+    life = pd.Timestamp("2000-01-01")
+    panel = pd.DataFrame(
+        {"asset_id": ["a", "b"], "listing_date": life, "amount": [100.0, 200.0]}
+    )
+    history = {}
+    for _ in range(20):
+        production._update_amount_history(panel, history, frozenset(), frozenset())
+    production._update_amount_history(panel.iloc[1:], history, frozenset(), frozenset())
+    assert len(history["a", life]) == 20
+    assert np.isnan(history["a", life][-1])
+    assert list(history["b", life]) == [200.0] * 20
+    # Confirmed closures do not advance the missing-slot clock.
+    before = list(history["a", life])
+    for _ in range(3):
+        production._update_amount_history(
+            panel.iloc[1:], history, frozenset({"a"}), frozenset()
+        )
+    assert list(history["a", life])[:-1] == before[:-1]
+    assert np.isnan(history["a", life][-1])
+    for count in range(1, 21):
+        production._update_amount_history(panel, history, frozenset(), frozenset())
+        assert np.isnan(np.mean(history["a", life])) == (count < 20)
+    production._update_amount_history(panel, history, frozenset(), frozenset({"a"}))
+    assert ("a", life) not in history
+    assert list(history["b", life]) == [200.0] * 20
+    for count in range(1, 21):
+        production._update_amount_history(panel, history, frozenset(), frozenset())
+        assert len(history["a", life]) == count
+    assert list(history["a", life]) == [100.0] * 20
+
+
+@pytest.mark.parametrize("gap", ("row", "calendar", "market", "closed"))
+def test_producer_adv_uses_own_market_evidence(tmp_path, monkeypatch, gap):
+    frames, fees, window = _inputs()
+    day = pd.Timestamp("2022-12-28")
+    frames["panel"].loc[frames["panel"].asset_id.eq("b"), "market_type"] = 4
+    calendar_b = frames["calendar"].assign(source_market_type=4)
+    # Explicit weekends and omitted weekends both leave own-market history intact.
+    weekends = pd.date_range("2022-11-14", "2023-01-10", freq="D")
+    weekends = weekends[weekends.dayofweek >= 5]
+    frames["calendar"] = pd.concat(
+        (
+            frames["calendar"],
+            calendar_b,
+            pd.DataFrame(
+                {
+                    "calendar_date": weekends,
+                    "source_market_type": 1,
+                    "is_trading_day": False,
+                }
+            ),
+        ),
+        ignore_index=True,
+    )
+    if gap in {"row", "closed"}:
+        for name in ("panel", "dataset", "execution"):
+            frame = frames[name]
+            frames[name] = frame.loc[
+                ~(frame.asset_id.eq("b") & frame.timestamp.eq(day))
+            ].copy()
+        if gap == "closed":
+            frames["calendar"].loc[
+                frames["calendar"].source_market_type.eq(4)
+                & frames["calendar"].calendar_date.eq(day),
+                "is_trading_day",
+            ] = False
+    elif gap == "calendar":
+        frames["calendar"] = (
+            frames["calendar"]
+            .loc[
+                ~(
+                    frames["calendar"].source_market_type.eq(4)
+                    & frames["calendar"].calendar_date.eq(day)
+                )
+            ]
+            .copy()
+        )
+    else:
+        frames["panel"].loc[
+            frames["panel"].asset_id.eq("b") & frames["panel"].timestamp.eq(day),
+            "market_type",
+        ] = 99
+    output, _ = _build_producer(
+        tmp_path,
+        monkeypatch,
+        frames=frames,
+        fee_frame=fees,
+        output_window=window,
+        typed_batches=True,
+    )
+    batches = list(output)
+    first = session_frame(batches[0]).set_index("asset_id")
+    evidence = {
+        row.name: row.number for row in batches[0].diagnostics if row.asset_id == "b"
+    }
+    if gap == "closed":
+        assert first.loc["b", "adv20"] == 1000.0
+        assert first.loc["b", "post_trade_notional"] > 0.0
+    else:
+        assert pd.isna(first.loc["b", "adv20"])
+        assert first.loc["b", "block_reason"] == "adv_unavailable"
+        assert first.loc["b", "post_trade_notional"] == 0.0
+        assert first.loc["__cash__", "post_trade_notional"] == 100.0
+        assert evidence["adv20_observation_count"] == (20 if gap == "row" else 4)
+        assert evidence["adv20_missing_observations"] == (1 if gap == "row" else 0)
+
+
+@pytest.mark.parametrize("branch", ("benchmark", "maintenance"))
+@pytest.mark.parametrize("known_risk", (False, True))
+def test_nonoptimizer_target_reports_actual_risk_independently(branch, known_risk):
+    from tests.research.test_portfolio_decision_execution import _decision_inputs
+
+    inputs = _decision_inputs(holdings=(0.6, 0.4))
+    decision = inputs["enhanced_decision"]
+    inputs["enhanced_decision"] = replace(
+        decision,
+        risk=decision.risk if known_risk else None,
+        calibration=replace(decision.calibration, slope=0.0),
+    )
+    # A blocked sale leaves the initial 60/40 holdings and zero cash intact.
+    inputs["execution"].loc[inputs["execution"].asset_id.eq("a"), "can_exit"] = False
+    if branch == "maintenance":
+        inputs["target_override"] = pd.Series({"a": 0.5, "b": 0.5})
+        inputs["decision_reason"] = PORTFOLIO_DECISION_REASON_MAINTENANCE
+    account, _, optimization, _, ledger = production._build_session(**inputs)
+    assert optimization is None
+    diagnostics = ledger.attrs["realized_constraints"]
+    assert account.post_trade_cash == 0.0
+    assert account.asset_ledger.post_trade_notional.tolist() == [60.0, 40.0]
+    assert diagnostics["realized_name_active_weight"] == pytest.approx(0.1)
+    assert diagnostics["realized_exposure_status"] == "DEFINED"
+    if known_risk:
+        assert diagnostics["realized_tracking_error"] == pytest.approx(np.sqrt(0.0002))
+        assert diagnostics["realized_constraints_status"] == "BREACHED"
+        assert diagnostics["realized_constraints_reason"] == "name_active_weight"
+    else:
+        assert diagnostics["realized_tracking_error_status"] == "UNDEFINED"
+        assert "realized_tracking_error" not in diagnostics
+        assert diagnostics["realized_constraints_status"] == "UNDEFINED"
+        assert (
+            diagnostics["realized_constraints_reason"]
+            == "factor_risk_factor_history_insufficient"
+        )
+
+
+def test_persisted_cash_target_keeps_unpaid_dividend_out_of_cash(tmp_path, monkeypatch):
+    from tests.research.test_raw_share_corporate_production import _distribution_batches
+
+    batches = _distribution_batches(tmp_path, monkeypatch, payment="2023-01-06")
+    sale = next(
+        batch for batch in batches if any(trade.quantity < 0 for trade in batch.trades)
+    )
+    targets = {
+        row.asset_id: row.number
+        for row in sale.diagnostics
+        if row.name == "target_notional"
+    }
+    after = {row.asset_id: row for row in sale.valuations if row.phase == "after"}
+    # One share bought for 100, sold ex-dividend for 90; 10 remains a claim.
+    assert targets["b"] == 0.0
+    assert targets["__cash__"] == 90.0
+    assert after["__cash__"].value == 90.0
+    assert after["b"].quantity == 0
+    assert after["b"].receivable == after["b"].value == 10.0

@@ -2,6 +2,7 @@
 
 import json
 import shutil
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -28,6 +29,8 @@ from tests.research.test_prediction_runner_model_selection import candidates
 def test_existing_predictions_score_and_evaluate_without_model_or_trial(tmp_path):
     cases, scoring = candidates(tmp_path, algorithms=("linear_regression",))
     case = cases[0]
+    _, prediction_metadata = read_predictions(scoring["predictions"][0])
+    Path(prediction_metadata["inputs"]).unlink()
     shutil.rmtree(case.root)
     shutil.rmtree(case.root.with_name(case.root.name + ".trial"))
     labels = pd.read_parquet(scoring["labels"])
@@ -35,9 +38,8 @@ def test_existing_predictions_score_and_evaluate_without_model_or_trial(tmp_path
         labels.timestamp.eq(pd.Timestamp("2020-01-06")), "label_available_at"
     ] = pd.Timestamp("2020-01-10")
     labels.to_parquet(scoring["labels"], index=False)
-    scoring.pop("test_window")
     scored = json.loads(score(scoring).read_text())
-    assert scored["test_window"] is None
+    assert "test_window" not in scored
     assert scored["common_rows"] == 4
     spec = EvaluationSpec(
         evaluation_id="posthoc",
@@ -120,6 +122,8 @@ def test_source_selection_intersects_prediction_window_without_changing_rank_dom
     rows, metadata = read_predictions(output)
     assert rows.timestamp.tolist() == list(pd.to_datetime(["2020-01-05", "2020-01-06"]))
     assert rows.prediction_rank_score.tolist() == pytest.approx([1 / 3, 1 / 3])
+    # Training days 1, 2, 3 give OLS y = 2*x + 2; the projected c has x = 3.
+    assert rows.prediction_score.tolist() == pytest.approx([8.0, 8.0], rel=1e-13)
     assert metadata["sample_role"] == "prediction"
 
 
@@ -466,7 +470,7 @@ def test_fit_reader_closes_on_primary_failure_before_model_publication(
     assert any("close also failed" in note for note in primary.__notes__)
 
 
-def test_common_candidate_intersection_cannot_hide_a_shared_missing_key(tmp_path):
+def test_common_candidate_intersection_reports_shared_missing_keys(tmp_path):
     _, config = candidates(tmp_path)
     for index, path in enumerate(config["predictions"]):
         frame, metadata = read_predictions(path)
@@ -484,15 +488,23 @@ def test_common_candidate_intersection_cannot_hide_a_shared_missing_key(tmp_path
                 },
             )
         )
-    with pytest.raises(ValueError, match="candidate_prediction_coverage_missing"):
-        score(config)
+    result = json.loads(score(config).read_text())
+    assert result["common_rows"] == 5
+    assert [item["coverage"] for item in result["candidates"]] == [
+        {
+            "current_mature_label_rows": 9,
+            "paired_prediction_rows": paired,
+            "mature_label_rows_without_prediction": 9 - paired,
+            "prediction_rows_without_label": 0,
+        }
+        for paired in (5, 5)
+    ]
 
 
-def test_frozen_prediction_allows_later_label_evaluation_and_later_refit(tmp_path):
+def test_saved_model_allows_later_prediction_evaluation_and_refit(tmp_path):
     source = data(tmp_path)
     window = {"start": "2020-01-04", "end": "2020-01-06"}
-    config = {**fit_config(tmp_path, source), "test_window": window}
-    model = fit(config)
+    model = fit(fit_config(tmp_path, source))
     request = {
         "model": str(model),
         "inputs": str(source),
@@ -501,14 +513,17 @@ def test_frozen_prediction_allows_later_label_evaluation_and_later_refit(tmp_pat
         "output": str(tmp_path / "prediction"),
     }
     prediction = predict(request)
-    with pytest.raises(ValueError, match="prediction_window_outside_freeze"):
+    later_predictions, _ = read_predictions(
         predict(
             {
                 **request,
-                "output": str(tmp_path / "outside"),
+                "output": str(tmp_path / "later_prediction"),
                 "prediction_window": {"start": "2020-01-07", "end": "2020-01-09"},
             }
         )
+    )
+    assert later_predictions.timestamp.min() == pd.Timestamp("2020-01-07")
+    assert later_predictions.timestamp.max() == pd.Timestamp("2020-01-09")
     shutil.rmtree(model)
     shutil.rmtree(model.with_name(model.name + ".trial"))
     frame = pd.read_parquet(source)
@@ -517,7 +532,7 @@ def test_frozen_prediction_allows_later_label_evaluation_and_later_refit(tmp_pat
     ] = pd.Timestamp("2020-01-10")
     frame.to_parquet(source, index=False)
     spec = EvaluationSpec(
-        evaluation_id="mature_frozen",
+        evaluation_id="mature_saved",
         market_id="a_share",
         research_dataset_id="synthetic",
         signals=(
@@ -549,4 +564,98 @@ def test_frozen_prediction_allows_later_label_evaluation_and_later_refit(tmp_pat
     assert pd.Timestamp(fitted.metadata["label_available_max"]) == pd.Timestamp(
         "2020-01-10"
     )
-    assert facts["test_window"] is None
+    assert "test_window" not in facts
+
+
+@pytest.mark.parametrize("change", ("roundoff", "zero_subnormal", "material", "column"))
+def test_model_importance_uses_numeric_tolerance_and_exact_columns(tmp_path, change):
+    source = data(tmp_path)
+    if change == "zero_subnormal":
+        frame = pd.read_parquet(source)
+        frame["label"] = 0.0
+        frame.to_parquet(source, index=False)
+    model = fit(fit_config(tmp_path, source))
+    path = model / "model.json"
+    payload = json.loads(path.read_text())
+    importance = payload["model_metadata"]["feature_importance"]
+    column = next(iter(importance))
+    if change == "zero_subnormal":
+        assert importance[column] == 0.0
+    if change in {"roundoff", "zero_subnormal"}:
+        importance[column] = float(np.nextafter(importance[column], np.inf))
+    elif change == "material":
+        importance[column] *= 1.000001
+    else:
+        importance["different_column"] = importance.pop(column)
+    path.write_text(json.dumps(payload))
+    if change in {"roundoff", "zero_subnormal"}:
+        result, _ = load_model(model)
+        assert result.metadata["feature_importance"] == importance
+    else:
+        with pytest.raises(
+            ValueError, match="model_state_metadata_mismatch|invalid_model_metadata"
+        ):
+            load_model(model)
+
+
+@pytest.mark.parametrize("missing_label", ("absent", "immature"))
+def test_score_coverage_uses_current_mature_labels_and_requested_subwindow(
+    tmp_path, missing_label
+):
+    _, config = candidates(tmp_path, algorithms=("linear_regression",))
+    labels = pd.read_parquet(config["labels"])
+    labels = labels.loc[
+        labels.timestamp.eq(pd.Timestamp("2020-01-04"))
+        & labels.asset_id.isin(["b", "c"])
+    ].copy()
+    extra = labels.loc[labels.asset_id.eq("b")].assign(asset_id="no_prediction")
+    if missing_label == "absent":
+        labels = labels.loc[labels.asset_id.eq("b")]
+    else:
+        labels.loc[labels.asset_id.eq("c"), "label_available_at"] = pd.Timestamp(
+            "2020-01-05"
+        )
+        labels.loc[labels.asset_id.eq("c"), "label"] = 1e6
+    pd.concat([labels, extra], ignore_index=True).to_parquet(
+        config["labels"], index=False
+    )
+    window = {"start": "2020-01-04", "end": "2020-01-04"}
+    config.update(
+        validation_windows=[window], scoring_window=window, cutoff="2020-01-04"
+    )
+    result = json.loads(score(config).read_text())
+    assert result["common_rows"] == 1
+    assert result["candidates"][0]["coverage"] == {
+        "current_mature_label_rows": 2,
+        "paired_prediction_rows": 1,
+        "mature_label_rows_without_prediction": 1,
+        "prediction_rows_without_label": int(missing_label == "absent"),
+    }
+    assert result["metrics"][0]["validation_rows"] == 1
+    assert result["metrics"][0]["validation_mse"] == pytest.approx(0.0, abs=1e-25)
+
+
+@pytest.mark.parametrize("gap_value", (1e9, np.inf))
+def test_score_selects_disjoint_windows_from_the_same_prediction_file(
+    tmp_path, gap_value
+):
+    _, config = candidates(tmp_path, algorithms=("linear_regression",))
+    labels = pd.read_parquet(config["labels"])
+    labels.loc[labels.timestamp.eq(pd.Timestamp("2020-01-05")), "label"] = gap_value
+    labels.to_parquet(config["labels"], index=False)
+    source = config["predictions"][0]
+    config.update(
+        predictions=[[source, source]],
+        validation_windows=[
+            {"start": "2020-01-04", "end": "2020-01-04"},
+            {"start": "2020-01-06", "end": "2020-01-06"},
+        ],
+    )
+    result = json.loads(score(config).read_text())
+    assert result["common_rows"] == 4
+    assert result["candidates"][0]["coverage"] == {
+        "current_mature_label_rows": 6,
+        "paired_prediction_rows": 4,
+        "mature_label_rows_without_prediction": 2,
+        "prediction_rows_without_label": 0,
+    }

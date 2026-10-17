@@ -1,4 +1,4 @@
-"""Open prediction keeps native persistence, causal samples, and frozen test bounds."""
+"""Open prediction keeps native persistence and causal, freely selected windows."""
 
 import json
 
@@ -171,7 +171,7 @@ def test_open_prediction_preserves_nanoseconds_in_filter_and_saved_extent(tmp_pa
         read_predictions(output)
 
 
-def test_open_prediction_cannot_bypass_frozen_test_scope(tmp_path):
+def test_selected_refit_predicts_open_windows_for_any_purpose(tmp_path):
     cases, config = candidates(tmp_path, algorithms=("linear_regression",))
     case = cases[0]
     scores = score(config)
@@ -194,14 +194,14 @@ def test_open_prediction_cannot_bypass_frozen_test_scope(tmp_path):
             "fit_windows": [{"start": "2020-01-01", "end": "2020-01-06"}],
             "fit_cutoff": "2020-01-06",
             "selection": str(selection),
-            "test_window": config["test_window"],
         }
     )
-    for role, error in (
-        ("test", "prediction_window_outside_freeze"),
-        ("validation", "prediction_window_outside_freeze"),
-    ):
-        with pytest.raises(ValueError, match=error):
+    future = pd.read_parquet(config["labels"])
+    future["timestamp"] += pd.Timedelta(days=6)
+    future["label_available_at"] += pd.Timedelta(days=6)
+    future.to_parquet(config["labels"], index=False)
+    for role in ("test", "validation", "later_research"):
+        actual, metadata = read_predictions(
             predict(
                 {
                     "model": str(final),
@@ -212,4 +212,20 @@ def test_open_prediction_cannot_bypass_frozen_test_scope(tmp_path):
                     "sample_role": role,
                 }
             )
-        assert not (tmp_path / role).exists()
+        )
+        assert metadata["prediction_window"] == {"start": "2020-01-07", "end": None}
+        assert "test_window" not in metadata["model_facts"]
+        assert actual.timestamp.min() == pd.Timestamp("2020-01-07")
+        assert actual.timestamp.max() == pd.Timestamp("2020-01-12")
+        expected = actual.asset_id.map({"a": 0.1, "b": 0.2, "c": 0.3})
+        np.testing.assert_allclose(actual.prediction_score, expected, rtol=1e-12)
+    with pytest.raises(ValueError, match="prediction_must_follow_fit_cutoff"):
+        predict(
+            {
+                "model": str(final),
+                "inputs": config["labels"],
+                "input_spec": case.config["input_spec"],
+                "output": str(tmp_path / "overlap"),
+                "prediction_window": {"start": "2020-01-06", "end": None},
+            }
+        )

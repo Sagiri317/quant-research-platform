@@ -742,22 +742,37 @@ def plot_series(
             raise ValueError("plot_timestamp_order_invalid")
         if key:
             axis.set_title(" | ".join(key), fontsize=9)
-        for column in value_columns:
-            values = [
+        displayed, scale = _scale(
+            [
                 math.nan if pd.isna(value) else _number(value)
+                for column in value_columns
                 for value in frame[column].tolist()
             ]
+        )
+        messages = []
+        for index, column in enumerate(value_columns):
+            values = displayed[index * len(frame) : (index + 1) * len(frame)]
             axis.plot(x, values, label=column, marker=".", linewidth=1)
             missing = sum(not math.isfinite(value) for value in values)
             if missing:
-                _note(axis, f"UNDEFINED：{column} 缺失 {missing} 个，不连接缺口")
-        axis.set_ylabel(units)
+                messages.append(f"{column} 缺失 {missing} 个")
+        if messages:
+            _note(axis, "UNDEFINED：" + "；".join(messages) + "，不连接缺口")
+        if not any(math.isfinite(value) for value in displayed):
+            axis.update_datalim(
+                [(value, 0) for value in axis.convert_xunits(x)], updatey=False
+            )
+            axis.autoscale_view(scaley=False)
+        axis.set_ylabel(units + scale)
         if categorical:
             axis.set_xlabel(x_column)
             axis.tick_params(axis="x", labelrotation=45)
         else:
             _time_axis(axis, timezone)
-        axis.legend()
+        if len(value_columns) > 1:
+            axis.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0))
+        else:
+            axis.legend()
     return figure, axes
 
 

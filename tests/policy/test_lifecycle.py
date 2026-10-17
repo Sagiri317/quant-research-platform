@@ -51,11 +51,13 @@ def test_closing_iterator_records_secondary_without_replacing_primary(
             raise OSError("close_failure")
 
     iterator = IteratorWithFailingClose()
+    primary = primary_type("primary_failure")
     with pytest.raises(primary_type) as raised:
         with closing_iterator(iterator) as active:
             assert active is iterator
-            raise primary_type("primary_failure")
+            raise primary
 
+    assert raised.value is primary
     assert iterator.close_calls == 1
     assert raised.value.__notes__ == ["iterator close also failed: OSError"]
 
@@ -84,3 +86,30 @@ def test_generator_close_surfaces_nested_resource_failure() -> None:
     assert next(stream) == 1
     with pytest.raises(OSError, match="close_failure"):
         stream.close()
+
+
+@pytest.mark.parametrize(
+    "primary_type", (RuntimeError, KeyboardInterrupt, GeneratorExit)
+)
+def test_nested_closing_iterators_preserve_primary_and_each_secondary(primary_type):
+    closed = []
+
+    class Resource:
+        def __init__(self, name, failure):
+            self.name, self.failure = name, failure
+
+        def close(self):
+            closed.append(self.name)
+            raise self.failure
+
+    primary = primary_type("consumer_failure")
+    with pytest.raises(primary_type) as caught:
+        with closing_iterator(Resource("outer", ValueError("outer_close"))):
+            with closing_iterator(Resource("inner", OSError("inner_close"))):
+                raise primary
+    assert caught.value is primary
+    assert closed == ["inner", "outer"]
+    assert primary.__notes__ == [
+        "iterator close also failed: OSError",
+        "iterator close also failed: ValueError",
+    ]

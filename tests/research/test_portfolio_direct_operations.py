@@ -24,6 +24,7 @@ from quant_research_platform.research.portfolios.optimizer import (
 from quant_research_platform.research.portfolios.production import (
     _ResearchValuationMarks,
 )
+from tests.helpers.optimizer import with_cash_asset
 
 
 def _view(day, opening, closing, *, life="2020-01-01", unproved=False):
@@ -183,10 +184,16 @@ def test_frozen_adv_retains_actual_factor_and_specific_risk(limit, passes, monke
         return SimpleNamespace(success=True, x=x0)
 
     monkeypatch.setattr(optimizer, "minimize", solve)
+    frame = with_cash_asset(frame)
     kwargs = dict(
+        cash_column="is_cash",
         factor_covariance=pd.DataFrame([[0.04]], index=["style"], columns=["style"]),
         style_columns=("style",),
-        expected_transaction_cost=lambda weights: 0.0,
+        expected_transaction_cost=lambda buy, sell: (
+            0.0,
+            np.zeros_like(buy),
+            np.zeros_like(sell),
+        ),
         nav=1000.0,
         assumptions=ExecutionAssumptions(1000.0, 0.0, 0.0, 1.0, (1.0,)),
         config=OptimizerConfig(active_name_limit=0.2, tracking_error_limit=limit),
@@ -246,16 +253,22 @@ def test_frozen_adv_intersects_the_existing_single_name_bounds(current):
             "style": [1.0, 1.0],
         }
     )
+    frame = with_cash_asset(frame)
     kwargs = dict(
+        cash_column="is_cash",
         factor_covariance=pd.DataFrame([[0.0]], index=["style"], columns=["style"]),
         style_columns=("style",),
-        expected_transaction_cost=lambda weights: 0.0,
+        expected_transaction_cost=lambda buy, sell: (
+            0.0,
+            np.zeros_like(buy),
+            np.zeros_like(sell),
+        ),
         nav=100.0,
         assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,)),
     )
     if current == (0.505, 0.495):
         result = optimize_portfolio(frame, **kwargs)
-        assert tuple(result.weights) == current
+        assert tuple(result.weights) == (*current, 0.0)
     else:
         with pytest.raises(ValueError, match="optimizer_frozen_constraints_infeasible"):
             optimize_portfolio(frame, **kwargs)

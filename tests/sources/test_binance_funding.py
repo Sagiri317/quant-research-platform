@@ -245,7 +245,7 @@ def test_funding_adjacent_sources_require_declared_order_and_all_roots(tmp_path)
                 pytest.fail("missing funding is not zero")
 
 
-def test_funding_forecast_order_is_checked_across_sources(tmp_path):
+def test_funding_identical_prior_forecasts_are_deduplicated_across_sources(tmp_path):
     roots = []
     for number, start in enumerate((0, 200)):
         raw = tmp_path / str(number) / "raw"
@@ -261,9 +261,11 @@ def test_funding_forecast_order_is_checked_across_sources(tmp_path):
             },
         )
         roots.append(raw.parent / "funding" / "BTCUSDT")
-    with pytest.raises(ValueError, match="binance_funding_record_order_invalid"):
-        with read_funding_observations(tuple(roots), symbol="BTCUSDT"):
-            pytest.fail("cross-source forecasts must remain strictly ordered")
+    with read_funding_observations(tuple(roots), symbol="BTCUSDT") as source:
+        forecasts = tuple(source.forecasts)
+        assert len(forecasts) == 1
+        assert forecasts[0].available_at_ns == 0
+        assert forecasts[0].known_until_ns == 500
 
 
 def test_funding_numeric_strings_are_normalized_through_persisted_reader(tmp_path):
@@ -319,3 +321,83 @@ def test_funding_coverage_status_types_reject_in_reader_and_identity(tmp_path, b
     } == changed_before
     assert {path.name: path.read_bytes() for path in good.iterdir()} == before
     assert funding_source_identity((good,), "ledger", symbol="BTCUSDT") == identity
+
+
+def test_funding_forecasts_merge_prior_observations_without_reordering_sources(
+    tmp_path,
+):
+    roots = []
+    for index, stamps in enumerate(((0, 100), (50, 100, 250), (25, 300))):
+        raw = tmp_path / str(index) / "raw"
+        start = index * 200
+        _write(
+            raw,
+            rows=(
+                ("settlement", start + 50, None, 0.1, 100.0, None),
+                *(
+                    ("forecast", stamp, 600, None, None, [[550, -float(stamp)]])
+                    for stamp in stamps
+                ),
+            ),
+            metadata_changes={
+                "coverage": {
+                    "start_ns": start,
+                    "end_ns": start + 100,
+                    "status": "COMPLETE",
+                }
+            },
+        )
+        roots.append(raw.parent / "funding" / "BTCUSDT")
+    with read_funding_observations(tuple(roots), symbol="BTCUSDT") as source:
+        assert source.coverage == ((0, 100), (200, 300), (400, 500))
+        assert [event.timestamp_ns for event in source.events] == [50, 250, 450]
+        forecasts = tuple(source.forecasts)
+        assert [item.available_at_ns for item in forecasts] == [
+            0,
+            25,
+            50,
+            100,
+            250,
+            300,
+        ]
+        assert forecasts[1].cashflows == ((550, -25.0),)
+
+
+@pytest.mark.parametrize("conflict", ["horizon", "cashflow", "local_order"])
+def test_funding_merged_forecasts_reject_conflicting_facts_and_local_order(
+    tmp_path, conflict
+):
+    roots = []
+    for index in range(2):
+        raw = tmp_path / str(index) / "raw"
+        rows = [
+            (
+                "forecast",
+                100,
+                600 if conflict != "horizon" or index == 0 else 601,
+                None,
+                None,
+                [[550, float(index) if conflict == "cashflow" else 0.0]],
+            )
+        ]
+        if conflict == "local_order" and index == 1:
+            rows.append(("forecast", 50, 600, None, None, []))
+        _write(
+            raw,
+            rows=rows,
+            metadata_changes={
+                "coverage": {
+                    "start_ns": index * 200,
+                    "end_ns": index * 200 + 100,
+                    "status": "COMPLETE",
+                }
+            },
+        )
+        roots.append(raw.parent / "funding" / "BTCUSDT")
+    with pytest.raises(
+        ValueError,
+        match="binance_funding_record_"
+        + ("order_invalid" if conflict == "local_order" else "conflict"),
+    ):
+        with read_funding_observations(tuple(roots), symbol="BTCUSDT"):
+            pytest.fail("conflicting or out-of-order observations cannot be accepted")

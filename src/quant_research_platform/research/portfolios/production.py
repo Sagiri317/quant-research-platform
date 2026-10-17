@@ -72,6 +72,7 @@ from quant_research_platform.research.portfolios.optimizer import (
     OptimizationResult,
     OptimizerConfig,
     _project_neutral_target,
+    _risk_active_weights,
     _risk_variances,
     _stock_leg_active_exposure,
     optimize_portfolio,
@@ -742,7 +743,8 @@ def backtest_a_share(
             _update_amount_history(
                 panel,
                 amount_history,
-                view.closed_assets | _unquoted_assets(view.valuation),
+                view.closed_assets,
+                view.unknown_market_assets,
             )
             benchmark_weights = pd.Series(dtype="float64")
             alpha: pd.Series | None = None
@@ -1489,7 +1491,6 @@ def _optimizer_assets(
     specific_variance: pd.Series,
     adv: pd.Series,
     eligible: pd.Series,
-    panel: pd.DataFrame,
     receivable: float = 0.0,
 ) -> pd.DataFrame:
     assets = pd.Index(
@@ -1499,17 +1500,12 @@ def _optimizer_assets(
         ),
         dtype="string",
     )
-    panel_by_asset = panel.set_index("asset_id")
     exposure_columns = tuple(
         column
         for column in exposures.columns
         if column not in {"asset_id", "industry_standard_id", "industry_level1_code"}
     )
     exposures_by_asset = exposures.set_index("asset_id")
-    nonfinancial = _bool_series(
-        panel_by_asset["is_nonfinancial_industry"].reindex(assets),
-        "portfolio_financial_context_invalid",
-    )
     result = pd.DataFrame(
         {
             "asset_id": assets,
@@ -1523,7 +1519,6 @@ def _optimizer_assets(
             "specific_variance": specific_variance.reindex(assets).to_numpy(),
             "adv": adv.reindex(assets).to_numpy(dtype="float64"),
             "eligible": eligible.reindex(assets, fill_value=False).to_numpy(),
-            "is_financial": (~nonfinancial).to_numpy(),
             "is_cash": [False] * len(assets),
         }
     )
@@ -1534,20 +1529,18 @@ def _optimizer_assets(
     cash_weight = float(cash / nav)
     if cash_weight < -1e-12:
         raise ValueError("optimizer_current_state_invalid")
-    if cash_weight > 1e-12:
-        cash_row = {
-            "asset_id": PORTFOLIO_CASH_ASSET_ID,
-            "expected_alpha": 0.0,
-            "current_weight": cash_weight,
-            "benchmark_weight": 0.0,
-            "specific_variance": 0.0,
-            "adv": np.inf,
-            "eligible": True,
-            "is_financial": False,
-            "is_cash": True,
-            **{column: 0.0 for column in exposure_columns},
-        }
-        result = pd.concat([result, pd.DataFrame([cash_row])], ignore_index=True)
+    cash_row = {
+        "asset_id": PORTFOLIO_CASH_ASSET_ID,
+        "expected_alpha": 0.0,
+        "current_weight": cash_weight,
+        "benchmark_weight": 0.0,
+        "specific_variance": 0.0,
+        "adv": np.inf,
+        "eligible": True,
+        "is_cash": True,
+        **{column: 0.0 for column in exposure_columns},
+    }
+    result = pd.concat([result, pd.DataFrame([cash_row])], ignore_index=True)
     if not np.isclose(float(result["current_weight"].sum()) + receivable / nav, 1.0):
         raise ValueError("optimizer_current_state_invalid")
     return result
@@ -1846,14 +1839,8 @@ def _build_session(
     )
     independent_exits = assets.isin(exit_assets)
     hold_target = execution_weights.where(~independent_exits, 0.0)
-    if (
-        nav > 0
-        and not decision_skip_reason
-        and target_override is None
-        and enhanced_decision is not None
-        and (enhanced_decision.risk is not None)
-        and (not enhanced_decision.calibration.benchmark_only)
-    ):
+    assets_frame = None
+    if nav > 0 and enhanced_decision is not None:
         risk = enhanced_decision.risk
         assets_frame = _optimizer_assets(
             benchmark_weights=enhanced_decision.benchmark_weights,
@@ -1863,37 +1850,54 @@ def _build_session(
             receivable=decision_receivable,
             expected_alpha=enhanced_decision.expected_alpha,
             exposures=enhanced_decision.exposures,
-            specific_variance=risk.specific_variance,
+            specific_variance=(
+                risk.specific_variance
+                if risk is not None
+                else pd.Series(dtype="float64")
+            ),
             adv=decision_adv,
             eligible=eligible,
-            panel=panel,
         )
+    if (
+        nav > 0
+        and not decision_skip_reason
+        and target_override is None
+        and enhanced_decision is not None
+        and (enhanced_decision.risk is not None)
+        and (not enhanced_decision.calibration.benchmark_only)
+    ):
+        assets_frame["is_financial"] = False
+        stock = ~assets_frame.is_cash
+        assets_frame.loc[stock, "is_financial"] = ~_bool_series(
+            decision_panel.is_nonfinancial_industry.reindex(
+                assets_frame.loc[stock, "asset_id"]
+            ),
+            "portfolio_financial_context_invalid",
+        ).to_numpy()
         unavailable = assets_frame.asset_id.isin(missing_assets)
         assets_frame["can_enter"] = ~unavailable
         assets_frame["can_exit"] = ~unavailable
         assets_frame.loc[unavailable, "expected_alpha"] = 0.0
-        current_values = assets_frame["current_weight"].to_numpy(dtype="float64")
         adv_values = assets_frame["adv"].to_numpy(dtype="float64")
         market_masks = {
             market: assets_frame["asset_id"].map(decision_markets).eq(market).to_numpy()
             for market in set(decision_markets.values())
         }
 
-        def expected_cost(weights: np.ndarray) -> float:
-            delta = weights - current_values
-            notionals = np.abs(delta) * nav
-            totals = np.zeros(len(delta), dtype="float64")
-            for (market, side), evaluator in prepared.items():
-                if market not in market_masks:
-                    continue
-                active = market_masks[market] & (
-                    delta > 0 if side == "buy" else delta < 0
-                )
-                if active.any():
-                    totals[active] = evaluator.totals(
-                        notionals[active], adv_values[active]
-                    )
-            return sum(map(float, totals), 0.0)
+        def expected_cost(buys, sells):
+            total = 0.0
+            gradients = []
+            for side, notionals in (("buy", buys), ("sell", sells)):
+                gradient = np.zeros(len(notionals), dtype="float64")
+                for market, market_mask in market_masks.items():
+                    active = market_mask & np.isfinite(adv_values) & (adv_values > 0)
+                    if active.any():
+                        costs, gradient[active] = prepared[
+                            market, side
+                        ].totals_and_gradients(notionals[active], adv_values[active])
+                        total += float(costs.sum())
+                gradients.append(gradient)
+            return total, *gradients
 
         try:
             optimization = optimize_portfolio(
@@ -2004,10 +2008,21 @@ def _build_session(
         config = optimizer_config or OptimizerConfig()
         risk = enhanced_decision.risk
         benchmark = assets_frame.benchmark_weight.to_numpy(dtype="float64")
-        columns = tuple(risk.factor_covariance.index)
+        columns = (
+            tuple(
+                column
+                for column in enhanced_decision.exposures
+                if column
+                not in {"asset_id", "industry_standard_id", "industry_level1_code"}
+            )
+            if risk is None
+            else tuple(risk.factor_covariance.index)
+        )
         exposure = assets_frame.loc[:, columns].to_numpy(dtype="float64")
         specific = assets_frame.specific_variance.to_numpy(dtype="float64")
-        covariance = risk.factor_covariance.to_numpy(dtype="float64")
+        covariance = (
+            None if risk is None else risk.factor_covariance.to_numpy(dtype="float64")
+        )
         industry = [i for i, name in enumerate(columns) if name.startswith("industry_")]
         style = [
             i for i, name in enumerate(columns) if not name.startswith("industry_")
@@ -2037,9 +2052,13 @@ def _build_session(
                     / risk_account.nav_after
                 )
                 active = weights - benchmark
-                nonzero = active != 0.0
+                risk_active = _risk_active_weights(
+                    weights, benchmark, exposure, specific
+                )
+                nonzero = risk_active != 0.0
                 risk_complete = (
-                    np.isfinite(exposure[nonzero]).all()
+                    risk is not None
+                    and np.isfinite(exposure[nonzero]).all()
                     and np.isfinite(specific[nonzero]).all()
                     and (specific[nonzero] >= 0.0).all()
                 )
@@ -2081,7 +2100,7 @@ def _build_session(
                 }
                 if risk_complete:
                     factor, residual = _risk_variances(
-                        active, exposure, covariance, specific
+                        risk_active, exposure, covariance, specific
                     )
                     diagnostics.update(
                         realized_factor_variance=factor,
@@ -2134,7 +2153,9 @@ def _build_session(
                     if breached
                     else "SATISFIED",
                     realized_constraints_reason=(
-                        "active_risk_unavailable"
+                        "factor_risk_factor_history_insufficient"
+                        if risk is None
+                        else "active_risk_unavailable"
                         if not risk_complete
                         else "stock_active_exposure_unavailable"
                         if stock_positive
@@ -2347,23 +2368,28 @@ def _update_amount_history(
     panel: pd.DataFrame,
     history: dict[tuple[str, pd.Timestamp], deque[float]],
     closed_assets: frozenset[str],
+    unknown_market_assets: frozenset[str],
 ) -> None:
     current = dict(
         zip(panel["asset_id"].astype(str), panel["listing_date"], strict=True)
     )
-    for key in tuple(history):
-        asset, listing = key
-        if asset in current and current[asset] != listing:
-            del history[key]
-        elif asset not in current and asset not in closed_assets:
-            del history[key]
     amounts = pd.to_numeric(panel["amount"], errors="raise").astype("float64")
     if not np.isfinite(amounts.dropna().to_numpy()).all() or amounts.lt(0).any():
         raise ValueError("portfolio_amount_invalid")
+    for key in tuple(history):
+        asset, listing = key
+        if asset in unknown_market_assets or (
+            asset in current and current[asset] != listing
+        ):
+            del history[key]
+        elif asset not in current and asset not in closed_assets:
+            # A missing own-market open row consumes an unknown observation.
+            history[key].append(float("nan"))
     for asset, listing, amount in zip(
         panel["asset_id"].astype(str), panel["listing_date"], amounts, strict=True
     ):
-        history.setdefault((asset, listing), deque(maxlen=20)).append(float(amount))
+        if asset not in closed_assets | unknown_market_assets:
+            history.setdefault((asset, listing), deque(maxlen=20)).append(float(amount))
 
 
 def _mask_values(
@@ -2773,7 +2799,10 @@ def _ledger_batch(
         None,
         {
             "target_notional": max(
-                0.0, account.nav_before - float(asset_ledger.target_notional.sum())
+                0.0,
+                account.nav_before
+                - account.receivable
+                - float(asset_ledger.target_notional.sum()),
             ),
             "decision_delta_weight": -float(decision_delta.sum()),
             "decision_reason": PORTFOLIO_DECISION_REASON_ENHANCED

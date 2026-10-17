@@ -129,7 +129,6 @@ def test_crypto_comparison_intersects_exact_keys_without_mutating_full_outputs(
         "validation_windows": [window],
         "scoring_window": window,
         "cutoff": window["end"],
-        "test_window": {"start": "2026-08-02", "end": "2026-08-03"},
         "selection_group": "global",
         "validation_axis": "single_asset_time_series",
         "label_unit": "decimal_return",
@@ -153,12 +152,25 @@ def test_crypto_comparison_intersects_exact_keys_without_mutating_full_outputs(
     _, other, _ = predict_frame(tmp_path / "other", disjoint, cases[1], window=window)
     pd.concat([frame.iloc[4:], disjoint]).to_parquet(labels, index=False)
     output = tmp_path / "disjoint.json"
-    with pytest.raises(ValueError, match="empty_model_selection_validation_window"):
+    result = json.loads(
         score(
             {
                 **config,
                 "predictions": [str(paths[0]), str(other)],
                 "output": str(output),
             }
+        ).read_text()
+    )
+    assert result["common_rows"] == 0
+    assert all(row["validation_rows"] == 0 for row in result["metrics"])
+    assert all(row["validation_mse"] is None for row in result["metrics"])
+
+    with pytest.raises(ValueError, match="model_validation_axis_invalid"):
+        score(
+            {
+                **config,
+                "predictions": [str(paths[0]), str(other)],
+                "validation_axis": "INVALID_AXIS",
+                "output": str(tmp_path / "invalid-axis.json"),
+            }
         )
-    assert not output.exists()

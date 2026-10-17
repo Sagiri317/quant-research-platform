@@ -43,6 +43,7 @@ from quant_research_platform.research.portfolios.schedules import holding_interv
 from quant_research_platform.research.protocols.a_share import _inference_blocker
 from quant_research_platform.research.statistics import (
     _return_sharpes,
+    _validate_bootstrap_configuration,
     cscv_pbo,
     probabilistic_and_deflated_sharpe,
     return_standard_deviation,
@@ -1547,13 +1548,6 @@ def _portfolio_statistics_tables(
                     raise ValueError("portfolio_statistics_window_incomplete")
                 if previous_end is not None and row["entry_at"] != previous_end:
                     raise ValueError("portfolio_statistics_interval_gap")
-                if not np.isclose(
-                    previous_nav,
-                    row["nav_before"],
-                    rtol=0,
-                    atol=max(1e-10, abs(previous_nav) * 1e-12),
-                ):
-                    raise ValueError("portfolio_statistics_nav_discontinuity")
                 previous_end, previous_nav = (row["end_at"], row["nav_end"])
                 previous[candidate_id] = (previous_end, previous_nav)
                 row = {"candidate_id": candidate_id, **row}
@@ -2303,6 +2297,7 @@ def _group_portfolio_comparison(matrix, config):
             fdr_method=fdr_method,
             fdr_alpha=declaration["alpha"],
             fdr_family_size=len(candidate_ids),
+            confidence=declaration["confidence"],
         )
         .set_index("timestamp")
         .set_axis(candidate_ids)
@@ -2504,6 +2499,23 @@ def portfolio_statistics(config):
         )
     ):
         raise ValueError("portfolio_statistics_comparison_policy_invalid")
+    if paired and "group_comparison" in analyses:
+        declaration = policy["group_comparison"]
+        if (
+            type(policy["hac_lag"]) is not int
+            or policy["hac_lag"] < 0
+            or type(declaration["confidence"]) is not float
+            or not 0 < declaration["confidence"] < 1
+            or type(declaration["alpha"]) is not float
+            or not 0 < declaration["alpha"] < 1
+            or declaration["fdr_method"] not in ("BH", "BY")
+        ):
+            raise ValueError("portfolio_statistics_comparison_policy_invalid")
+        _validate_bootstrap_configuration(
+            policy["bootstrap_block"],
+            policy["bootstrap_repetitions"],
+            declaration["seed"],
+        )
     participation = config.get("adv_sensitivities", [])
     if "capacity" in analyses and (
         not isinstance(participation, list)
@@ -2664,12 +2676,9 @@ def crypto_statistics(config):
         )
     ):
         raise ValueError("crypto_statistics_windows_invalid")
-    folds = (metadata.get("chronology") or {}).get("folds", [])
     windows = tuple(
         (
-            folds[-1]["fold_id"]
-            if len(declared_windows) == 1 and folds
-            else f"window_{index}",
+            f"window_{index}",
             TimeWindow(pd.Timestamp(begin), pd.Timestamp(end)),
         )
         for index, (begin, end) in enumerate(declared_windows)

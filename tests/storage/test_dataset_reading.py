@@ -41,6 +41,7 @@ from tests.storage.low_level_fixtures import (
 
 def test_read_dataset_materialized_chunked_projection_and_time_window(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     root = make_dataset_artifact_root(tmp_path)
     write_dataset(
@@ -51,11 +52,33 @@ def test_read_dataset_materialized_chunked_projection_and_time_window(
         columns=["asset_id", "value"],
         time_window=TimeWindow("2014-01-01", "2014-12-31"),
     )
-    chunks = list(read_dataset(root, mode=DatasetReadMode.CHUNKED))
+    consumed = []
+    original = dataset_reading.iter_dataset_file_batches
+
+    def measured(*args, **kwargs):
+        for path, frame in original(*args, **kwargs):
+            consumed.append(len(frame))
+            yield path, frame
+
+    monkeypatch.setattr(dataset_reading, "iter_dataset_file_batches", measured)
+    stream = read_dataset(root, mode=DatasetReadMode.CHUNKED)
+    assert consumed == []
+    first = next(stream)
+    assert consumed == [len(first)]
+    chunks = [first, *stream]
     assert list(materialized.columns) == ["asset_id", "value"]
     assert materialized["asset_id"].tolist() == ["asset_001"]
-    assert chunks
-    assert all(isinstance(chunk, pd.DataFrame) for chunk in chunks)
+    assert materialized["value"].tolist() == [1.0]
+    expected = (
+        make_default_dataset_frame()
+        .sort_values("timestamp", kind="stable")
+        .astype({"timestamp": "datetime64[ns]"})
+        .reset_index(drop=True)
+    )
+    pd.testing.assert_frame_equal(
+        pd.concat(chunks, ignore_index=True), expected, check_exact=True
+    )
+    assert sum(consumed) == len(expected) == 3
 
 
 def test_internal_physical_reader_uses_bounded_record_batches(tmp_path: Path) -> None:

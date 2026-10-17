@@ -285,12 +285,12 @@ def test_external_prior_day_prefix_and_delayed_warmup(tmp_path, native_panel, mi
     ]
     reads = []
 
-    def records(_root, *, archive_paths, time_window, expected_scope, on_verified):
+    def records(_root, *, archive_paths, time_window, expected_scope, on_source):
         reads.append(time_window)
         yield from (
             [] if missing else [quote] if archive_paths == ["quotes"] else trades
         )
-        on_verified("a" * 64)
+        on_source("a" * 64)
 
     spec = catalog.hft_processed_catalog().get(ids.HFT_EXTERNAL_DATA_IDS["bybit"])
     params = json.loads(spec.parameters_json)

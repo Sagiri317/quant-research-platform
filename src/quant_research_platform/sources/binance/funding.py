@@ -2,8 +2,9 @@
 
 import hashlib
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
+from heapq import merge
 from pathlib import Path
 
 from quant_research_platform.contracts.json_codec import (
@@ -372,40 +373,56 @@ def read_funding_observations(funding_roots, *, symbol):
         del manifest, interval
     identity = canonical_json_hash({"sources": [item[1] for item in sources]})
 
-    def records():
-        previous = {FundingEvent: -1, FundingForecast: -1}
-        for root, _expected, manifest, settlements, _original_identity in sources:
-            rows = _records(root, manifest, settlements=settlements)
-            with closing_iterator(rows):
-                for item in rows:
-                    kind = type(item)
-                    stamp = (
-                        item.timestamp_ns
-                        if kind is FundingEvent
-                        else item.available_at_ns
-                    )
-                    if stamp <= previous[kind]:
-                        raise ValueError("binance_funding_record_order_invalid")
-                    previous[kind] = stamp
-                    try:
-                        yield item
-                    except GeneratorExit:
-                        return
-
-    events = []
-    with closing_iterator(records()) as rows:
-        for item in rows:
-            if type(item) is FundingEvent:
-                events.append(item)
-
-    def forecasts():
-        with closing_iterator(records()) as rows:
+    def source_forecasts(source, events):
+        root, _expected, manifest, settlements, _original_identity = source
+        with closing_iterator(
+            _records(root, manifest, settlements=settlements)
+        ) as rows:
             for item in rows:
-                if type(item) is FundingForecast:
+                if type(item) is FundingEvent:
+                    if events is not None:
+                        events.append(item)
+                else:
                     try:
                         yield item
                     except GeneratorExit:
                         return
+
+    def forecasts(event_groups=None):
+        # Settlement intervals stay disjoint; their prior PIT observations may
+        # overlap. Merge those ordered streams without discarding older knowledge.
+        with ExitStack() as readers:
+            streams = [
+                readers.enter_context(
+                    closing_iterator(
+                        source_forecasts(
+                            source,
+                            None if event_groups is None else event_groups[index],
+                        )
+                    )
+                )
+                for index, source in enumerate(sources)
+            ]
+            previous = None
+            for item in merge(*streams, key=lambda item: item.available_at_ns):
+                if (
+                    previous is not None
+                    and item.available_at_ns == previous.available_at_ns
+                ):
+                    if item != previous:
+                        raise ValueError("binance_funding_record_conflict")
+                    continue
+                previous = item
+                try:
+                    yield item
+                except GeneratorExit:
+                    return
+
+    event_groups = [[] for _ in sources]
+    with closing_iterator(forecasts(event_groups)) as rows:
+        for _item in rows:
+            pass
+    events = tuple(item for group in event_groups for item in group)
 
     with closing_iterator(forecasts()) as source:
         qualification = []

@@ -186,7 +186,8 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
             if split_windows:
                 mark(day, 200.0, "oos_window_end", 0.0)
             economic.funding(
-                FundingEvent(start + day + day // 2, -0.5, 200.0 / quantity_scale)
+                FundingEvent(start + day + day // 2, -0.5, 200.0 / quantity_scale),
+                mark_price=economic.last_mark,
             )
             mark(2 * day, 500.0, "utc_day_boundary", float((start + 2 * day) // day))
             if split_windows:
@@ -267,6 +268,7 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
         assert scanned == [roots[candidate.candidate_id]]
         artifact = read_statistics_artifact(root)
         owned = _tables(artifact)
+        assert set(owned["crypto_portfolio_daily"].fold_id) == {"window_0"}
         if (
             quantity_scale == 1.0
             and not missing_boundary

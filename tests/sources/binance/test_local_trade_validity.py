@@ -54,7 +54,7 @@ def _recording(root, bad, *, same_timestamp=False):
         {"p": "bad"},
         {"p": "100.01"},
         {"nq": "2"},
-        {"nq": "missing"},
+        {"nq": "-1"},
         {"m": "missing"},
         {"m": None},
         {"m": "SELL"},

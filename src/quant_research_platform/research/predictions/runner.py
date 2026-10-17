@@ -15,7 +15,6 @@ from quant_research_platform.contracts.models import (
 )
 from quant_research_platform.contracts.time import (
     PredictionWindow,
-    TimeWindow,
     _window_payload,
 )
 from quant_research_platform.research.features.transforms import (
@@ -57,8 +56,6 @@ def predict(config: Mapping) -> Path:
     _validate_model_prediction_window(facts, window)
     from quant_research_platform.contracts.filtering import required_filter_columns
 
-    # ponytail: open prediction streams prior rows too; add lower-only read filters
-    # if that scan becomes costly, rather than inventing a finite endpoint.
     source = config["inputs"]
     if config.get("input_spec") is not None:
         if isinstance(source, Mapping):
@@ -90,8 +87,7 @@ def predict(config: Mapping) -> Path:
             )
         )
     )
-    if window.end is not None:
-        session = session.filtered_view(TimeWindow(window.start, window.end))
+    session = session.filtered_view(window)
     frames = iter_dataset_chunks(session.projected_view(columns))
     from quant_research_platform.policy.lifecycle import closing_iterator
     from quant_research_platform.runtime.dataframes import iter_complete_time_frames
@@ -158,8 +154,8 @@ def predict(config: Mapping) -> Path:
                 "fit_cutoff",
                 "candidate_parameters",
                 "label_unit",
+                "input_units",
                 "target_definition",
-                "test_window",
                 "selection_cutoff",
             )
         },

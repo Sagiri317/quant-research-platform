@@ -74,7 +74,6 @@ def candidates(
         "validation_windows": [window],
         "scoring_window": window,
         "cutoff": "2020-01-06",
-        "test_window": {"start": "2020-01-07", "end": "2020-01-09"},
         "selection_group": "quarterly",
         "validation_axis": "cross_sectional",
         "label_unit": "decimal_return",
@@ -85,22 +84,38 @@ def candidates(
 
 def test_candidate_domains_survive_new_common_comparison(tmp_path):
     cases, config = candidates(tmp_path)
+    second = cases[1]
+    scoped = predict(
+        {
+            "model": str(second.root),
+            "inputs": str(
+                tmp_path / second.facts["model"]["model_id"] / "future.parquet"
+            ),
+            "input_spec": second.config["input_spec"],
+            "output": str(tmp_path / "scoped"),
+            "prediction_window": config["scoring_window"],
+            "sample_role": "validation",
+            "asset_ids": ["c"],
+        }
+    )
+    config["predictions"][1] = str(scoped)
     frames = [read_predictions(path)[0] for path in config["predictions"]]
-    assert [len(frame) for frame in frames] == [6, 6]
+    assert [len(frame) for frame in frames] == [6, 3]
+    assert [set(frame.asset_id) for frame in frames] == [{"b", "c"}, {"c"}]
     before = [
         (Path(path) / "prediction.parquet").read_bytes()
         for path in config["predictions"]
     ]
     scored = json.loads(score(config).read_text())
-    assert scored["common_rows"] == 6
-    assert all(row["validation_rows"] == 6 for row in scored["metrics"])
+    assert scored["common_rows"] == 3
+    assert all(row["validation_rows"] == 3 for row in scored["metrics"])
     single = {
         **config,
         "predictions": config["predictions"][:1],
         "candidate_ids": config["candidate_ids"][:1],
         "output": str(tmp_path / "single.json"),
     }
-    score(single)
+    assert json.loads(score(single).read_text())["common_rows"] == 6
     assert before == [
         (Path(path) / "prediction.parquet").read_bytes()
         for path in config["predictions"]
@@ -111,8 +126,8 @@ def test_candidate_domains_survive_new_common_comparison(tmp_path):
 @pytest.mark.parametrize(
     "mutation", ["missing", "duplicate", "wrong_key", "inf", "nat_metadata"]
 )
-def test_scoring_rejects_broken_candidate_before_intersection(tmp_path, mutation):
-    _cases, config = candidates(tmp_path)
+def test_scoring_reports_missing_keys_and_rejects_invalid_rows(tmp_path, mutation):
+    _cases, config = candidates(tmp_path, algorithms=("linear_regression",))
     root = Path(config["predictions"][0])
     frame = pd.read_parquet(root / "prediction.parquet")
     if mutation == "missing":
@@ -129,8 +144,15 @@ def test_scoring_rejects_broken_candidate_before_intersection(tmp_path, mutation
         payload["metadata"]["effective_prediction_end"] = "NaT"
         path.write_text(json.dumps(payload))
     frame.to_parquet(root / "prediction.parquet", index=False)
-    with pytest.raises(ValueError):
-        score(config)
+    if mutation in {"missing", "wrong_key"}:
+        result = json.loads(score(config).read_text())
+        coverage = result["candidates"][0]["coverage"]
+        assert coverage["paired_prediction_rows"] == 5
+        assert coverage["mature_label_rows_without_prediction"] == 4
+        assert coverage["prediction_rows_without_label"] == int(mutation == "wrong_key")
+    else:
+        with pytest.raises(ValueError):
+            score(config)
 
 
 @pytest.mark.parametrize(
@@ -175,13 +197,48 @@ def test_selection_requires_full_declared_validation_science(tmp_path, mutation)
 
 def test_future_labels_do_not_change_prior_causal_selection(tmp_path):
     _cases, config = candidates(tmp_path)
-    config.update(
-        cutoff="2020-01-05",
-        validation_windows=[{"start": "2020-01-04", "end": "2020-01-06"}],
-    )
-    # A validation interval after the decision is never admissible.
+    labels = Path(config["labels"])
+    frame = pd.read_parquet(labels)
+    future = frame.timestamp.eq(pd.Timestamp("2020-01-06"))
+    assert future.sum() == 3
+    frame.loc[future, "label_available_at"] = pd.Timestamp("2020-01-10")
+    frame.to_parquet(labels, index=False)
+
+    def selected(name):
+        scores = score({**config, "output": str(tmp_path / f"{name}-scores.json")})
+        selected = select(
+            {
+                "scores": str(scores),
+                "output": str(tmp_path / f"{name}-selection.json"),
+                "selection_metric": "validation_rankic",
+                "selection_direction": "maximize",
+                "tie_break_order": config["candidate_ids"],
+                "refit_windows": [{"start": "2020-01-01", "end": "2020-01-06"}],
+                "refit_cutoff": "2020-01-06",
+            }
+        )
+        return json.loads(scores.read_text()), read_selection(selected)
+
+    before, frozen_before = selected("before")
+    frame.loc[future, "label"] = [-1e9, 0.0, 1e9]
+    frame.to_parquet(labels, index=False)
+    after, frozen_after = selected("after")
+    assert before["common_rows"] == after["common_rows"] == 4
+    assert before["metrics"] == after["metrics"]
+    assert frozen_before["selected_model_id"] == frozen_after["selected_model_id"]
+    assert frozen_before["selected_model_id"] is not None
+    # The oracle must react to a change on the admitted mature domain.
+    mature = frame.timestamp.eq(pd.Timestamp("2020-01-04"))
+    frame.loc[mature, "label"] = [0.3, 0.2, 0.1]
+    frame.to_parquet(labels, index=False)
+    changed, _ = selected("mature-changed")
+    assert changed["metrics"] != before["metrics"]
+
+
+def test_validation_window_after_cutoff_is_rejected(tmp_path):
+    _cases, config = candidates(tmp_path, algorithms=("linear_regression",))
     with pytest.raises(ValueError, match="fit_window_after_cutoff"):
-        score(config)
+        score({**config, "cutoff": "2020-01-05"})
 
 
 @pytest.mark.parametrize(
@@ -303,7 +360,6 @@ def test_refit_uses_explicit_current_domain_without_filling_disjoint_gaps():
     value = {
         "refit_cutoff": "2020-01-06",
         "cutoff": "2020-01-06",
-        "test_window": {"start": "2020-01-07", "end": "2020-01-09"},
         "families": [{"family_id": "f", "selected_config_id": "m"}],
         "candidates": [
             {
@@ -351,10 +407,11 @@ def test_each_frozen_family_winner_can_refit_but_family_change_cannot(tmp_path):
             "fit_windows": [{"start": "2020-01-01", "end": "2020-01-06"}],
             "fit_cutoff": "2020-01-06",
             "selection": str(selected),
-            "test_window": config["test_window"],
         }
         assert fit(refit).exists()
-        with pytest.raises(ValueError, match="family_market_or_units"):
+        with pytest.raises(
+            ValueError, match="model_scientific_facts_mismatch: family_id"
+        ):
             fit(
                 {
                     **refit,
@@ -411,7 +468,7 @@ def test_output_asset_projection_preserves_full_current_cross_section(
 
 
 @pytest.mark.parametrize("explicit_scope", [True, False, "multi"])
-def test_crypto_validation_axis_comes_from_training_universe(tmp_path, explicit_scope):
+def test_crypto_validation_axis_follows_current_samples(tmp_path, explicit_scope):
     stamps = pd.date_range("2020-01-01", periods=6)
     frame = pd.DataFrame(
         {
@@ -430,7 +487,12 @@ def test_crypto_validation_axis_comes_from_training_universe(tmp_path, explicit_
         target_column="label",
         random_seed=19,
     )
-    case = fit_frame(tmp_path / "single", frame.iloc[:3], spec)
+    training = frame.iloc[:3]
+    if explicit_scope == "multi":
+        training = pd.concat(
+            [training, training.assign(asset_id="eth")], ignore_index=True
+        )
+    case = fit_frame(tmp_path / "single", training, spec)
     if explicit_scope:
         case_config = {
             **case.config,
@@ -461,27 +523,28 @@ def test_crypto_validation_axis_comes_from_training_universe(tmp_path, explicit_
         "validation_windows": [window],
         "scoring_window": window,
         "cutoff": "2020-01-06",
-        "test_window": {"start": "2020-01-07", "end": "2020-01-09"},
         "selection_group": "global",
         "validation_axis": "cross_sectional",
         "label_unit": "decimal_return",
         "output": str(tmp_path / "scores.json"),
     }
-    if explicit_scope == "multi":
-        assert (
-            json.loads(score(config).read_text())["metrics"][0]["validation_ic"] is None
-        )
-        config.update(
-            validation_axis="single_asset_time_series",
-            output=str(tmp_path / "invalid-axis.json"),
-        )
-        with pytest.raises(ValueError, match="training_scope_validation_axis"):
-            score(config)
-        return
-    with pytest.raises(ValueError, match="training_scope_validation_axis"):
-        score(config)
+    assert json.loads(score(config).read_text())["metrics"][0]["validation_ic"] is None
+    config.update(
+        validation_axis="single_asset_time_series",
+        output=str(tmp_path / "temporal-scores.json"),
+    )
+    assert json.loads(score(config).read_text())["metrics"][0][
+        "validation_ic"
+    ] == pytest.approx(1.0)
+
+
+def test_temporal_score_still_requires_actual_single_asset_samples(tmp_path):
+    _, config = candidates(tmp_path, algorithms=("linear_regression",))
     config["validation_axis"] = "single_asset_time_series"
-    assert json.loads(score(config).read_text())["metrics"][0]["validation_ic"] == 1.0
+    with pytest.raises(
+        ValueError, match="single_asset_time_series_evaluation_requires_one_asset"
+    ):
+        score(config)
 
 
 def test_scoring_uses_saved_training_domain_without_reopening_training_data(tmp_path):

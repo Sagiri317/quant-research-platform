@@ -205,7 +205,6 @@ _ARROW_SCHEMAS = {
             pa.field("common_date", pa.int64()),
             pa.field("common_observation_count", pa.int64()),
             pa.field("asset_coverage_id", pa.string()),
-            pa.field("target_domain_id", pa.string()),
         ]
     ),
     "model_comparison.parquet": pa.schema(
@@ -1343,7 +1342,6 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
     if member == "model_losses.parquet":
         if (
             not result.asset_coverage_id.str.fullmatch("[0-9a-f]{64}").all()
-            or not result.target_domain_id.str.fullmatch("[0-9a-f]{64}").all()
             or not result["loss"].dropna().between(-1, 1).all()
             or (not result["common_date"].isin((0, 1)).all())
             or (result["common_observation_count"] > result["observation_count"]).any()

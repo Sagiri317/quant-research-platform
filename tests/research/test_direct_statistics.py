@@ -375,7 +375,7 @@ def test_failed_family_keeps_planned_inference_members_without_fake_prediction(
     assert len(lost) == len(dates)
     assert lost.status.eq("UNDEFINED").all()
     assert lost.reason.eq("family_training_failed").all()
-    assert lost.target_domain_id.eq(canonical_json_hash([])).all()
+    assert lost.asset_coverage_id.eq(canonical_json_hash([])).all()
     assert lost.config_id.eq("").all()
     assert set(tables["model_trials"].family_id) == {"working", "failed"}
     assert tables["model_comparison"].prediction_id.tolist() == ["failed"]

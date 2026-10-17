@@ -423,64 +423,109 @@ def test_public_expectations_window_preserves_fresh_preceding_forecasts(tmp_path
     assert selected.forward_earnings_yield_fy1.notna().all()
 
 
-@pytest.mark.parametrize("dataset_id", ("pv_all", "pv_expanded", "fusion_nf_core"))
-def test_explicit_preparation_reaches_eligible_research_dataset(tmp_path, dataset_id):
+@pytest.mark.parametrize(
+    "dataset_ids", (("pv_all", "fusion_nf_core"), ("pv_expanded",))
+)
+def test_explicit_preparation_reaches_eligible_research_dataset(tmp_path, dataset_ids):
     from quant_research_platform.research.datasets.assembler import assemble
     from quant_research_platform.research.protocols.a_share import (
         research_dataset_catalog,
     )
 
     sessions = pd.bdate_range(
-        "2020-01-02", periods=600 if dataset_id == "pv_expanded" else 400
+        "2020-01-02", periods=600 if dataset_ids == ("pv_expanded",) else 400
     ).as_unit("ns")
     frames = _synthetic_interim_frames(sessions)
-    if dataset_id == "pv_expanded":
+    if dataset_ids == ("pv_expanded",):
         bars = frames["market_bars_1d"]
         bars["period_return"] = np.sin(np.arange(len(bars)) / 3) * 0.01
-    if dataset_id == "fusion_nf_core":
+    if "fusion_nf_core" in dataset_ids:
         frames.update(_synthetic_financial_frames())
     inputs = _write_inputs(tmp_path / "source", frames)
     steps = [
         "market_panel_1d",
-        "execution_mask",
         "price_volume_facts",
         "forward_returns",
     ]
     steps.append("market_model_factors")
-    if dataset_id == "fusion_nf_core":
-        steps.extend(("fundamental_pit", "fundamental_factors"))
     for name in steps:
         inputs[name] = _prepare(
             tmp_path / "prepared", name, inputs, sessions[0], sessions[-1]
         )
-    spec = research_dataset_catalog().get(dataset_id)
-    output = read_dataset(
-        assemble(
-            {
-                "market_id": "a_share",
-                "dataset_id": dataset_id,
-                "inputs": {key: str(inputs[key]) for key in spec.input_data_ids},
-                "time_window": {
-                    "start": str(sessions[0].date()),
-                    "end": str(sessions[-1].date()),
-                },
-                "output_root": str(tmp_path / "dataset"),
-            }
+    # Keep native startup, mature, and label-missing branches with full history.
+    witness_windows = (sessions[:1], sessions[-23:-20], sessions[-1:])
+    # These two recipes consume identical published price/volume inputs.
+    for dataset_id in dataset_ids:
+        if dataset_id == "fusion_nf_core":
+            for name in ("fundamental_pit", "fundamental_factors"):
+                inputs[name] = _prepare(
+                    tmp_path / "prepared", name, inputs, sessions[0], sessions[-1]
+                )
+        spec = research_dataset_catalog().get(dataset_id)
+        outputs = []
+        for index, window in enumerate(witness_windows):
+            rows = read_dataset(
+                assemble(
+                    {
+                        "market_id": "a_share",
+                        "dataset_id": dataset_id,
+                        "inputs": {
+                            key: str(inputs[key]) for key in spec.input_data_ids
+                        },
+                        "time_window": {
+                            "start": str(window[0].date()),
+                            "end": str(window[-1].date()),
+                        },
+                        "output_root": str(tmp_path / dataset_id / str(index)),
+                    }
+                )
+            )
+            keys = ["market_id", "asset_id", "timestamp"]
+            expected_keys = (
+                pd.MultiIndex.from_product(
+                    [
+                        ["a_share"],
+                        sorted(frames["stock_master"].source_asset_id.unique()),
+                        window,
+                    ],
+                    names=keys,
+                )
+                .to_frame(index=False)
+                .astype({"asset_id": object})
+                .sort_values(["timestamp", "market_id", "asset_id"], ignore_index=True)
+            )
+            pd.testing.assert_frame_equal(rows[keys], expected_keys, check_exact=True)
+            outputs.append(rows)
+        output = pd.concat(outputs, ignore_index=True)
+        startup = output.loc[output.timestamp.eq(sessions[0])]
+        assert not startup.eligible.any() and startup.model_target.isna().all()
+        mature = output.loc[output.timestamp.isin(sessions[-23:-21])]
+        assert mature.eligible.all() and mature.model_target.notna().all()
+        assert mature.model_target_available_at.notna().all() and (
+            mature.model_target_available_at.dt.normalize().le(sessions[-1]).all()
         )
-    )
-    assert {"eligible", "model_target"}.issubset(output.columns)
-    assert {"scenario_universe", "can_enter", "can_exit"}.isdisjoint(output)
-    assert output.eligible.any()
-    assert output.loc[output.eligible, "model_target"].notna().any()
-    if dataset_id == "pv_expanded":
-        for name in (
-            "share_price",
-            "avg_amount_126d",
-            "turnover_250d",
-            "beta_252d",
-            "residual_volatility_60d",
-        ):
-            assert output[name].notna().any(), name
+        tail = output.loc[output.timestamp.isin(sessions[[-21, -1]])]
+        assert tail.eligible.all()
+        assert (
+            tail[["forward_return_20d", "model_target", "model_target_available_at"]]
+            .isna()
+            .all()
+            .all()
+        )
+        assert outputs[-1].filter(regex=r"^forward_return_\d+d$").isna().all().all()
+        assert {"eligible", "model_target"}.issubset(output.columns)
+        assert {"scenario_universe", "can_enter", "can_exit"}.isdisjoint(output)
+        assert output.eligible.any()
+        assert output.loc[output.eligible, "model_target"].notna().any()
+        if dataset_id == "pv_expanded":
+            for name in (
+                "share_price",
+                "avg_amount_126d",
+                "turnover_250d",
+                "beta_252d",
+                "residual_volatility_60d",
+            ):
+                assert output[name].notna().any(), name
 
 
 @pytest.mark.parametrize("negative_component", ("current_ytd", "prior_fy", "prior_ytd"))

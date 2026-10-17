@@ -181,36 +181,42 @@ def test_evaluation_science_ignores_unconsumed_transform_and_keeps_borrowed(tmp_
 
 
 @pytest.mark.parametrize(
-    "analysis,policy,extra,members",
+    "analysis,policy,extra,members,seed_mode",
     [
-        (
-            "model_losses",
-            {},
-            {},
-            {"model_losses.parquet", "model_prediction_metrics.parquet"},
-        ),
-        ("prediction_hac", {"hac_lag": 0}, {}, {"prediction_diagnostics.parquet"}),
-        (
-            "prediction_bootstrap",
-            {"bootstrap_block": 1, "bootstrap_repetitions": 10},
-            {"root_seed": 1},
-            {"prediction_diagnostics.parquet"},
-        ),
-        (
-            "model_confidence_set",
-            {"bootstrap_block": 1, "bootstrap_repetitions": 10},
-            {"root_seed": 1},
-            {"model_reality_checks.parquet", "robustness.parquet"},
-        ),
-        (
-            "spa_reality_check",
-            {"bootstrap_block": 1, "bootstrap_repetitions": 10},
-            {"root_seed": 1, "comparison_model_id": "linear_regression"},
-            {"model_reality_checks.parquet", "robustness.parquet"},
-        ),
+        (*case, seed_mode)
+        for case in [
+            (
+                "model_losses",
+                {},
+                {},
+                {"model_losses.parquet", "model_prediction_metrics.parquet"},
+            ),
+            ("prediction_hac", {"hac_lag": 0}, {}, {"prediction_diagnostics.parquet"}),
+            (
+                "prediction_bootstrap",
+                {"bootstrap_block": 1, "bootstrap_repetitions": 10},
+                {"root_seed": 1},
+                {"prediction_diagnostics.parquet"},
+            ),
+            (
+                "model_confidence_set",
+                {"bootstrap_block": 1, "bootstrap_repetitions": 10},
+                {"root_seed": 1},
+                {"model_reality_checks.parquet", "robustness.parquet"},
+            ),
+            (
+                "spa_reality_check",
+                {"bootstrap_block": 1, "bootstrap_repetitions": 10},
+                {"root_seed": 1, "comparison_model_id": "linear_regression"},
+                {"model_reality_checks.parquet", "robustness.parquet"},
+            ),
+        ]
+        for seed_mode in ("override", "omitted", "explicit42", "null")
+        if not (
+            case[0] in {"model_losses", "prediction_hac"} and seed_mode == "override"
+        )
     ],
 )
-@pytest.mark.parametrize("seed_mode", ["override", "omitted", "explicit42", "null"])
 def test_public_model_analysis_subsets_require_only_used_inputs(
     tmp_path, analysis, policy, extra, members, seed_mode
 ):
@@ -273,7 +279,7 @@ def test_public_model_analysis_subsets_require_only_used_inputs(
 
 
 @pytest.mark.parametrize("change", ["assets", "labels", "row_order"])
-def test_saved_evaluation_pair_checks_actual_consumed_domain(tmp_path, change):
+def test_saved_evaluation_pair_uses_declared_science_and_daily_values(tmp_path, change):
     from tests.research.crypto_evaluation_test_support import write_evaluation_input
 
     frame, config = _fixture(tmp_path)
@@ -301,11 +307,19 @@ def test_saved_evaluation_pair_checks_actual_consumed_domain(tmp_path, change):
         "analyses": ["stratified_ic"],
         "statistics": {"hac_lag": 20, "fdr_method": "BY", "fdr_alpha": 0.05},
     }
-    if change == "row_order":
-        assert production.factor_statistics(reduction).exists()
-    else:
-        with pytest.raises(ValueError, match="evaluation_inputs_incompatible"):
-            production.factor_statistics(reduction)
+    # These are separate daily-statistic series, not paired raw observations.
+    # Selecting their original inputs belongs to the caller.
+    output = production.factor_statistics(reduction)
+    with read_statistics_artifact(output).table(
+        "factor_stratified_diagnostics.parquet"
+    ) as result:
+        rows = result.loc[
+            result.stratification.eq("all") & result.statistic.eq("rankic")
+        ]
+        assert rows.observation_pairs.tolist() == [3, 3]
+        actual = rows.set_index("sample_scope")["mean"].to_dict()
+        assert actual["own"] == pytest.approx(0.5)
+        assert actual["common"] == pytest.approx(-0.5 if change == "labels" else 0.5)
 
 
 def test_paired_group_requires_its_bootstrap_inputs_before_reading(tmp_path):
@@ -370,64 +384,70 @@ def test_borrowed_forecast_age_transform_remains_available_to_strata(tmp_path):
     assert evaluate(config).exists()
 
 
-def test_scientific_domain_digest_canonicalizes_nulls_and_dictionaries():
-    from quant_research_platform.research.evaluations.engine import (
-        _evaluation_input_observation_id,
-    )
-
-    left = pd.DataFrame(
-        {
-            "timestamp": [pd.Timestamp("2020-01-01")] * 3,
-            "asset_id": ["a", "b", "c"],
-            "eligible": [True] * 3,
-            "score": [np.nan, 2.0, 3.0],
-            "available_at": [
-                pd.NaT,
-                pd.Timestamp("2020-01-02"),
-                pd.Timestamp("2020-01-03"),
-            ],
-            "industry": pd.Categorical(["A", None, "B"], categories=["A", "B"]),
-        }
-    )
-    right = left.copy()
-    right.loc[0, "score"] = np.array([0x7FF8000000000001], dtype="uint64").view(
-        "float64"
-    )[0]
-    right["industry"] = pd.Categorical(["A", None, "B"], categories=["B", "A"])
-    right = right.iloc[::-1, ::-1]
-    expected = _evaluation_input_observation_id(left, left, left.columns)
-    assert expected == _evaluation_input_observation_id(right, right, right.columns)
-    right["industry"] = right["industry"].astype(object)
-    assert expected == _evaluation_input_observation_id(right, right, right.columns)
-    right.loc[1, "score"] = 5.0
-    assert expected != _evaluation_input_observation_id(right, right, right.columns)
-
-
 @pytest.mark.parametrize(
-    "missing",
-    [
-        pd.Series([None, None], dtype=object),
-        pd.Series(pd.Categorical([None, None], categories=["A", "B"])),
-        pd.Series([None, None], dtype="string"),
-        pd.Series([np.nan, np.nan], dtype="float64"),
-    ],
+    "encoding", ["categories", "missing_categories", "string", "float"]
 )
-def test_scientific_domain_digest_all_missing_ignores_physical_type(missing):
-    from quant_research_platform.research.evaluations.engine import (
-        _evaluation_input_observation_id,
+def test_native_evaluation_ignores_null_payload_and_dictionary_encoding(
+    tmp_path, encoding
+):
+    from quant_research_platform.artifacts.outputs.evaluation import (
+        read_evaluation_outputs,
     )
+    from tests.research.crypto_evaluation_test_support import write_evaluation_input
 
-    reference = pd.DataFrame(
+    frame, config = _fixture(tmp_path)
+    if encoding == "categories":
+        frame["industry_level1_code"] = pd.Categorical(
+            ["A", None, "B", "A"], categories=["A", "B"]
+        )
+    else:
+        frame["industry_level1_code"] = pd.Series([None] * len(frame), dtype="string")
+    config["inputs"] = str(
+        write_evaluation_input(
+            tmp_path / "reference", frame, factors=("x", "z"), labels=("label",)
+        )
+    )
+    own = evaluate(config)
+    frame.loc[3, "x"] = np.array([0x7FF8000000000001], dtype="uint64").view("float64")[
+        0
+    ]
+    if encoding == "categories":
+        frame["industry_level1_code"] = (
+            frame.industry_level1_code.cat.reorder_categories(["B", "A"])
+        )
+    elif encoding == "missing_categories":
+        frame["industry_level1_code"] = pd.Categorical(
+            [None] * len(frame), categories=["A", "B"]
+        )
+    else:
+        frame["industry_level1_code"] = frame.industry_level1_code.astype(
+            {"string": "string", "float": "float64"}[encoding]
+        )
+    alternative = write_evaluation_input(
+        tmp_path / "alternative",
+        frame.iloc[::-1, ::-1],
+        factors=("x", "z"),
+        labels=("label",),
+    )
+    alternative_eval = evaluate(
         {
-            "timestamp": [pd.Timestamp("2020-01-01")] * 2,
-            "asset_id": ["a", "b"],
-            "eligible": [True, True],
-            "industry": pd.Series([None, None], dtype=object),
+            **config,
+            "inputs": str(alternative),
+            "output": str(tmp_path / "common"),
+            "sample_scope": "own",
         }
     )
-    alternative = reference.assign(industry=missing)
-    assert _evaluation_input_observation_id(
-        reference, reference, reference.columns
-    ) == (
-        _evaluation_input_observation_id(alternative, alternative, alternative.columns)
-    )
+    tables = ("metrics", "daily_coverage", "daily_strata")
+    own_tables = read_evaluation_outputs(own, tables=tables)[1]
+    alternative_tables = read_evaluation_outputs(alternative_eval, tables=tables)[1]
+    for name in tables:
+        keys = [
+            column
+            for column in ("timestamp", "signal", "label", "stratification", "stratum")
+            if column in own_tables[name]
+        ]
+        pd.testing.assert_frame_equal(
+            own_tables[name].sort_values(keys).reset_index(drop=True),
+            alternative_tables[name].sort_values(keys).reset_index(drop=True),
+            check_exact=True,
+        )

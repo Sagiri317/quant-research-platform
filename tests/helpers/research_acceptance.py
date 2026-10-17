@@ -214,6 +214,30 @@ def run_a_share_acceptance(project_root: Path):
         {},
     )
     case.enhanced_ledgers, case.portfolio_configs, case.enhanced_configs = {}, {}, {}
+    refit_window = {"start": train["start"], "end": validation["end"]}
+    final_models, test_predictions = {}, {}
+    for identifier, original in configurations.items():
+        final = fit(
+            {
+                **original,
+                "output": str(case.root / "final" / identifier),
+                "fit_windows": [refit_window],
+                "fit_cutoff": validation["end"],
+            }
+        )
+        _, facts = load_model(final)
+        assert facts["fit_windows"] == [refit_window]
+        predicted = predict(
+            {
+                "model": str(final),
+                "inputs": str(case.dataset),
+                "output": str(case.root / "test" / identifier),
+                "prediction_window": test,
+                "sample_role": "test",
+            }
+        )
+        final_models[identifier] = final
+        test_predictions[identifier] = predicted
     for group in ("global", "quarterly"):
         scored = score(
             {
@@ -223,13 +247,11 @@ def run_a_share_acceptance(project_root: Path):
                 "validation_windows": [validation],
                 "scoring_window": validation,
                 "cutoff": validation["end"],
-                "test_window": test,
                 "selection_group": group,
                 "validation_axis": "cross_sectional",
                 "output": str(case.root / group / "scores.json"),
             }
         )
-        refit_window = {"start": train["start"], "end": validation["end"]}
         selected = select(
             {
                 "scores": str(scored),
@@ -244,29 +266,9 @@ def run_a_share_acceptance(project_root: Path):
         case.selections[group] = selected
         decision = read_selection(selected)
         assert {row["family_id"] for row in decision["families"]} == set(models)
-        for identifier, original in configurations.items():
-            final = fit(
-                {
-                    **original,
-                    "output": str(case.root / group / "final" / identifier),
-                    "fit_windows": [refit_window],
-                    "fit_cutoff": validation["end"],
-                    "test_window": test,
-                }
-            )
-            _, facts = load_model(final)
-            assert facts["fit_windows"] == [refit_window]
-            predicted = predict(
-                {
-                    "model": str(final),
-                    "inputs": str(case.dataset),
-                    "output": str(case.root / group / "test" / identifier),
-                    "prediction_window": test,
-                    "sample_role": "test",
-                }
-            )
-            case.final_models[group, identifier] = final
-            case.test_predictions[group, identifier] = predicted
+        for identifier in configurations:
+            case.final_models[group, identifier] = final_models[identifier]
+            case.test_predictions[group, identifier] = test_predictions[identifier]
         champion = decision["selected_model_id"]
         inputs = {
             "dataset": str(case.dataset),

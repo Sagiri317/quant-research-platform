@@ -36,6 +36,8 @@ def test_a_share_real_source_model_portfolio_chain(source_chain):
     case = source_chain
     assert set(case.selections) == {"global", "quarterly"}
     assert len(case.final_models) == len(case.test_predictions) == 4
+    assert len(set(case.final_models.values())) == 2
+    assert len(set(case.test_predictions.values())) == 2
     assert len(case.ledgers) == len(case.enhanced_ledgers) == 2
     for (group, family), path in case.test_predictions.items():
         frame, metadata = read_predictions(path)
@@ -93,52 +95,66 @@ def test_native_enhancement_obeys_capacity_and_postcost_limits(source_chain):
         assert all(value <= 0.05 + 1e-8 for value in participation)
 
 
-def test_native_postcost_boundary_skips_trading_and_keeps_marks(
+def test_native_turnover_boundary_skips_rebalance_and_keeps_marks(
     source_chain, tmp_path, monkeypatch
 ):
     from quant_research_platform.research.portfolios import production
 
-    optimized, executed = [], []
+    rejected = []
     solve = production.optimize_portfolio
-    execute = production.execute_continuous_target
 
     def observe_solution(assets, **kwargs):
-        result = solve(assets, **kwargs)
-        optimized.append((assets.set_index("asset_id"), result))
-        return result
-
-    def observe_execution(*args, **kwargs):
-        result = execute(*args, **kwargs)
-        if "share_quantities" not in kwargs:
-            # Capture the decision-time projection, not realized next-open marks.
-            executed.append((*optimized[-1], result))
-        return result
+        try:
+            return solve(assets, **kwargs)
+        except ValueError as error:
+            if str(error) == "optimizer_turnover_bounds_infeasible":
+                rejected.append((assets.copy(), kwargs["config"].target_turnover_limit))
+            raise
 
     monkeypatch.setattr(production, "optimize_portfolio", observe_solution)
-    monkeypatch.setattr(production, "execute_continuous_target", observe_execution)
     original = source_chain.enhanced_configs["global"]
-    destination = tmp_path / "infeasible"
-    # Near-exact replication forces drift rebalancing, whose known fees change
-    # post-trade weights. Keep the real solver, risk model and execution costs;
-    # do not rely on an alpha-driven optimum landing on a default name bound.
-    name_limit = 1e-8
-    config = {
-        **original,
-        "assumptions": {**original["assumptions"], "initial_nav": 1e9},
-        "optimizer_config": {"active_name_limit": name_limit},
-        "output": str(destination),
-    }
-    ledger = read_portfolio_ledger_artifact(backtest(config))
+    # The real initial allocation is exempt from turnover, so it can fill.
+    # Later price drift forces sales larger than the tiny turnover budget.
+    name_limit, turnover_limit = 1e-8, 1e-10
+    window = {**original["output_window"], "end": "2019-09-10"}
+    ledger = read_portfolio_ledger_artifact(
+        backtest(
+            {
+                **original,
+                "assumptions": {**original["assumptions"], "initial_nav": 1e9},
+                "optimizer_config": {
+                    "active_name_limit": name_limit,
+                    "target_turnover_limit": turnover_limit,
+                },
+                "output_window": window,
+                "prediction_window": window,
+                "predictions": [
+                    {**item, "window": window} for item in original["predictions"]
+                ],
+                "output": str(tmp_path / "infeasible"),
+            }
+        )
+    )
     batches = list(ledger.iter_chunks())
     skipped_dates = set()
     for batch in batches:
+        if batch.trades:
+            after = {
+                item.asset_id: item.value
+                for item in batch.valuations
+                if item.phase == "after"
+            }
+            nav = sum(after.values())
+            active = [
+                after[item.asset_id] / nav - item.number
+                for item in batch.diagnostics
+                if item.name == "benchmark_weight"
+            ]
+            assert active and max(map(abs, active)) <= name_limit + 1e-8
         facts = {item.name: item.text for item in batch.diagnostics if item.text}
         if facts.get("decision_status") != "SKIPPED":
             continue
-        assert (
-            facts["decision_skip_reason"]
-            == "portfolio_post_trade_constraints_infeasible"
-        )
+        assert facts["decision_skip_reason"] == "optimizer_turnover_bounds_infeasible"
         assert not batch.trades and not batch.cashflows
         assert batch.valuations
         assert any(item.quantity > 0 for item in batch.valuations)
@@ -146,32 +162,25 @@ def test_native_postcost_boundary_skips_trading_and_keeps_marks(
     assert skipped_dates
     summary = summarize_portfolio_ledger(ledger.capital, iter(batches))
     assert summary["fees"] > 0 and summary["fill_events"] > 0
-    # Preserve a concrete rejected decision: its optimizer solution respects the
-    # nominal limit, but real projected fees break the post-cost name constraint.
-    witnesses = 0
-    for assets, solution, projected in executed:
-        if projected.execution_date not in skipped_dates:
-            continue
-        benchmark = assets.loc[~assets.is_cash, "benchmark_weight"]
-        target_active = solution.weights.reindex(benchmark.index) - benchmark
-        assert target_active.abs().max() <= name_limit + 1e-8
-        assert solution.expected_transaction_cost > 0.0
-        assert projected.nav_after < projected.nav_before
-        weights = (
-            projected.asset_ledger.set_index("asset_id").post_trade_notional
-            / projected.nav_after
+    assert len(rejected) == len(skipped_dates)
+    for assets, configured_limit in rejected:
+        assert configured_limit == turnover_limit
+        stocks = assets.loc[~assets.is_cash]
+        # Fees cannot increase NAV. Even these necessary upper-band sales alone
+        # exceed the allowed half-L1 turnover, independent of the solver result.
+        minimum_sale = (
+            (stocks.current_weight - stocks.benchmark_weight - name_limit)
+            .clip(lower=0)
+            .sum()
         )
-        assert (
-            weights.reindex(benchmark.index) - benchmark
-        ).abs().max() > name_limit + 1e-8
-        witnesses += 1
-    assert witnesses == len(skipped_dates)
+        assert 0.5 * minimum_sale > turnover_limit + 1e-8
 
 
 def test_native_excess_capital_skips_capacity_infeasible_targets(
     source_chain, tmp_path
 ):
     original = source_chain.enhanced_configs["global"]
+    window = {**original["output_window"], "end": "2019-09-05"}
     # At 1e12, the first cash-funded 0.5% per-name lower bound exceeds 5% ADV.
     # Keep the actual risk model, optimizer, costs and raw-share account path.
     ledger = read_portfolio_ledger_artifact(
@@ -179,6 +188,11 @@ def test_native_excess_capital_skips_capacity_infeasible_targets(
             {
                 **original,
                 "assumptions": {**original["assumptions"], "initial_nav": 1e12},
+                "output_window": window,
+                "prediction_window": window,
+                "predictions": [
+                    {**item, "window": window} for item in original["predictions"]
+                ],
                 "output": str(tmp_path / "capacity-infeasible"),
             }
         )

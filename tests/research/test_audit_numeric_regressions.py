@@ -227,8 +227,8 @@ def test_perpetual_published_pnl_keeps_small_cost_and_funding(tmp_path, capital_
             mark_price=100.0,
             fee=1.0,
         )
-        economics.funding(FundingEvent(2, 0.01, 100.0))
-        economics.funding(FundingEvent(3, 0.01, 100.0))
+        economics.funding(FundingEvent(2, 0.01, 100.0), mark_price=economics.last_mark)
+        economics.funding(FundingEvent(3, 0.01, 100.0), mark_price=economics.last_mark)
         summary = economics.mark(4, 100.0)
         assert summary["net_pnl"] == -3.0
         assert summary["gross_pnl"] == 0.0
@@ -468,7 +468,6 @@ def test_test_set_keeps_rankic_by_and_explicit_exploratory_exclusion():
                 timestamp=date,
                 family_id=family,
                 asset_coverage_id="a" * 64,
-                target_domain_id="b" * 64,
                 observation_count=100,
                 sample_role="test",
                 status="DEFINED",

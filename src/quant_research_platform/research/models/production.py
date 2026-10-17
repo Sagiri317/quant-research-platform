@@ -16,6 +16,7 @@ from quant_research_platform.contracts.models import (
     _resolve_candidate_parameters,
     _target_definition,
     model_spec_payload,
+    validate_model_facts,
     validate_model_input_roles,
 )
 from quant_research_platform.contracts.time import (
@@ -139,7 +140,6 @@ def fit(config: Mapping) -> Path:
             "label_unit",
             "candidate_parameters",
             "selection",
-            "test_window",
             "asset_ids",
             "input_spec",
             "family_id",
@@ -189,9 +189,6 @@ def fit(config: Mapping) -> Path:
         pd.Series([config["fit_cutoff"]]), error="invalid_fit_cutoff"
     ).iloc[0]
     windows = _fit_windows(config["fit_windows"], cutoff)
-    test = TimeWindow(**config["test_window"]) if "test_window" in config else None
-    if test is not None and cutoff >= pd.Timestamp(test.start):
-        raise ValueError("fit_cutoff_must_precede_test")
     selection = None
     if "selection" in config:
         from quant_research_platform.research.models.trial_selection import (
@@ -205,48 +202,18 @@ def fit(config: Mapping) -> Path:
             or pd.Timestamp(selection["cutoff"]) > cutoff
         ):
             raise ValueError("refit_selection_mismatch")
-        if selection.get("test_window") != (
-            None if test is None else _window_payload(test)
-        ):
-            raise ValueError("refit_test_window_mismatch")
         selected = next(
             item
             for item in selection["candidates"]
             if item["model_id"] == spec.model_id
         )
-        if config.get("asset_ids") != selected.get("asset_ids"):
-            raise ValueError("refit_training_asset_scope_mismatch")
         family = selected["family_id"]
-        if (
-            config.get("family_id", spec.model_id) != family
-            or selection["market_id"] != str(market)
-            or selection["label_unit"] != config["label_unit"]
-        ):
-            raise ValueError("refit_family_market_or_units_mismatch")
         if (
             selection["refit_windows"][family]
             != [_window_payload(window) for window in windows]
             or pd.Timestamp(selection["refit_cutoff"]) != cutoff
         ):
-            raise ValueError("refit_frozen_domain_mismatch")
-        original = selected["model"]
-        for key in (
-            "model_id",
-            "model_algorithm",
-            "input_factor_columns",
-            "input_feature_columns",
-            "target_column",
-            "sample_filter_mode",
-            "training_weighting",
-            "max_train_rows",
-        ):
-            if model_spec_payload(spec)[key] != original[key]:
-                raise ValueError("refit_selected_configuration_mismatch")
-        if (
-            config.get("candidate_parameters", dict(spec.hyperparameters))
-            != selected["candidate_parameters"]
-        ):
-            raise ValueError("refit_selected_parameters_mismatch")
+            raise ValueError("refit_selection_scope_mismatch")
     family_id = config.get("family_id", spec.model_id)
     if type(family_id) is not str or not family_id or family_id == "champion":
         raise ValueError("model_family_id_invalid")
@@ -273,9 +240,9 @@ def fit(config: Mapping) -> Path:
         },
         "selection": config.get("selection"),
         "selection_cutoff": None if selection is None else selection["cutoff"],
-        "test_window": None if test is None else _window_payload(test),
         "input_spec": config.get("input_spec"),
     }
+    validate_model_facts(facts, expected=selected if selection is not None else None)
     recorder = TrialRecorder(output.with_name(output.name + ".trial"), facts)
     recorder.begin()
     try:

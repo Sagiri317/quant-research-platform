@@ -55,8 +55,6 @@ class ModelMatrixScaler:
                     for column in columns
                 ]
             )
-            if np.isnan(values).all(axis=0).any():
-                raise ValueError("model_training_feature_all_missing")
             if missing == "native":
                 return cls(
                     columns,
@@ -65,6 +63,8 @@ class ModelMatrixScaler:
                     (1.0,) * len(columns),
                     native_missing=True,
                 )
+            if np.isnan(values).all(axis=0).any():
+                raise ValueError("model_training_feature_all_missing")
             medians = []
             for index in range(len(columns)):
                 observed = np.sort(values[~np.isnan(values[:, index]), index])

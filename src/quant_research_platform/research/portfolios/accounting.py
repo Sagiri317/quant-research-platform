@@ -7,7 +7,7 @@ from dataclasses import dataclass, fields
 from datetime import date
 from decimal import Decimal, localcontext
 from fractions import Fraction
-from math import lcm
+from math import fsum, lcm
 
 import numpy as np
 import pandas as pd
@@ -440,6 +440,7 @@ class PortfolioEconomics:
         self.fill_count = 0
         self.last_timestamp = 0
         self.last_mark: float | None = None
+        self._unvalued_funding: list[PortfolioCashFlow] = []
 
     @property
     def cost_basis(self):
@@ -496,6 +497,7 @@ class PortfolioEconomics:
             or min(price, mark_price) <= 0
         ):
             raise ValueError("portfolio_execution_fill_invalid")
+        self._settle_funding(timestamp_ns, mark_price)
         before = self._values(timestamp_ns, "before", mark_price)
         self.fill_count += 1
         fill_id = f"fill:{self.fill_count}"
@@ -543,32 +545,53 @@ class PortfolioEconomics:
         self._emit((trade,), cashflows, before, timestamp_ns, mark_price)
         return fill_id
 
-    def funding(self, event: FundingEvent) -> None:
-        if self.quantity == 0 or event.rate == 0 and event.mark_price is None:
+    def funding(self, event: FundingEvent, *, mark_price: float | None) -> None:
+        """Keep settlement cash evidence separate from the causal book valuation."""
+        if self.quantity == 0 or event.rate == 0:
             return
         if event.rate is None or event.mark_price is None:
             raise PortfolioTargetBlocked("portfolio_required_funding_missing")
-        before = self._values(event.timestamp_ns, "before", event.mark_price)
         amount = float(
             -self.quantity * Fraction(event.mark_price) * Fraction(event.rate)
         )
-        self._cash += Fraction(amount)
-        self._emit(
-            (),
-            (
-                PortfolioCashFlow(
-                    f"funding:{event.timestamp_ns}",
-                    event.timestamp_ns,
-                    self.asset_id,
-                    None,
-                    "funding",
-                    amount,
-                ),
-            ),
-            before,
-            event.timestamp_ns,
-            event.mark_price,
+        self._unvalued_funding.append(
+            PortfolioCashFlow(
+                f"funding:{event.timestamp_ns}",
+                event.timestamp_ns,
+                self.asset_id,
+                None,
+                "funding",
+                amount,
+            )
         )
+        self._settle_funding(event.timestamp_ns, mark_price)
+
+    @property
+    def unvalued_funding(self):
+        return {
+            "unvalued_funding_cashflow": float(
+                sum(
+                    (Fraction(row.amount) for row in self._unvalued_funding), Fraction()
+                )
+            ),
+            "unvalued_funding_event_count": len(self._unvalued_funding),
+        }
+
+    def _settle_funding(self, timestamp, mark):
+        if (
+            not self._unvalued_funding
+            or mark is None
+            or timestamp < self._unvalued_funding[-1].timestamp_ns
+        ):
+            return
+        if not np.isfinite(mark) or mark <= 0:
+            raise ValueError("portfolio_valuation_mark_invalid")
+        # An unquoted interval retains its cash facts without inventing a NAV.
+        before = self._values(self.last_timestamp, "before", self.last_mark)
+        cashflows = tuple(self._unvalued_funding)
+        self._cash += sum((Fraction(row.amount) for row in cashflows), Fraction())
+        self._emit((), cashflows, before, timestamp, mark)
+        self._unvalued_funding.clear()
 
     def mark(
         self,
@@ -581,6 +604,7 @@ class PortfolioEconomics:
             mark_price is not None and (not np.isfinite(mark_price) or mark_price <= 0)
         ):
             raise ValueError("portfolio_valuation_mark_invalid")
+        self._settle_funding(timestamp_ns, mark_price)
         before = self._values(timestamp_ns, "before", mark_price)
         self._emit((), (), before, timestamp_ns, mark_price, diagnostics)
         summary = self._economics.summary()
@@ -1128,7 +1152,6 @@ def execute_continuous_target(
         for asset in assets
     }
     sell_delta = pd.Series(0.0, index=assets, dtype="float64")
-    sell_cost_total = 0.0
     for asset in assets:
         desired_delta = float(desired[asset])
         if desired_delta >= 0.0:
@@ -1155,7 +1178,6 @@ def execute_continuous_target(
                 source_identity=cost_source_identity,
                 assumptions=assumptions,
             )
-            sell_cost_total += cost.total_cost
         sell_delta[asset] = -amount
         _update_ledger_row(
             record,
@@ -1170,11 +1192,20 @@ def execute_continuous_target(
             else None,
             cost=cost,
         )
-    pre_trade_cash = nav_value - float(pre_notional.sum()) - receivable
+    pre_trade_cash = fsum((nav_value, -receivable, *(-pre_notional)))
     if -tolerance <= pre_trade_cash < 0.0:
         pre_trade_cash = 0.0
-    sell_notional = float(-sell_delta.sum())
-    cash_after_sells = pre_trade_cash + sell_notional - sell_cost_total
+    cash_after_sells = fsum(
+        (
+            pre_trade_cash,
+            *(-sell_delta),
+            *(
+                -record[name]
+                for record in records.values()
+                for name in PORTFOLIO_LEDGER_COST_COLUMNS
+            ),
+        )
+    )
     if cash_after_sells < -tolerance:
         raise ValueError("execution_cash_after_sells_invalid")
 
@@ -1202,30 +1233,11 @@ def execute_continuous_target(
             or (costs < 0).any()
         ):
             raise ValueError("execution_cost_provider_invalid")
-        return sum(map(float, amounts), 0.0) + sum(map(float, costs), 0.0)
-
-    def buy_spend(
-        scale: float,
-    ) -> tuple[float, float, dict[str, TradeCostComponents]]:
-        notional = 0.0
-        costs: dict[str, TradeCostComponents] = {}
-        for asset, candidate in buy_candidates.items():
-            amount = candidate * scale
-            if amount <= 0.0:
-                continue
-            cost = _validated_trade_cost(
-                cost_for_trade,
-                execution_date=execution_date,
-                asset=asset,
-                side="buy",
-                notional=amount,
-                adv20=float(adv[asset]),
-                source_identity=cost_source_identity,
-                assumptions=assumptions,
-            )
-            notional += amount
-            costs[asset] = cost
-        return notional, sum(cost.total_cost for cost in costs.values()), costs
+        try:
+            return fsum((*amounts, *costs))
+        except OverflowError:
+            # Every term is nonnegative: this trial exceeds any finite cash.
+            return np.inf
 
     scale = 0.0
     if buy_candidates and cash_after_sells > 0.0:
@@ -1242,10 +1254,21 @@ def execute_continuous_target(
                 else:
                     high = middle
             scale = low
-    buy_notional, buy_cost_total, buy_costs = buy_spend(scale)
     buy_delta = pd.Series(0.0, index=assets, dtype="float64")
     for asset, candidate in buy_candidates.items():
         amount = candidate * scale
+        cost = None
+        if amount > 0.0:
+            cost = _validated_trade_cost(
+                cost_for_trade,
+                execution_date=execution_date,
+                asset=asset,
+                side="buy",
+                notional=amount,
+                adv20=float(adv[asset]),
+                source_identity=cost_source_identity,
+                assumptions=assumptions,
+            )
         buy_delta[asset] = amount
         target_delta = float(desired[asset])
         blocked = amount < target_delta - tolerance
@@ -1265,10 +1288,27 @@ def execute_continuous_target(
             records[asset],
             executed_delta=amount,
             reason=reason,
-            cost=buy_costs.get(asset),
+            cost=cost,
         )
-    total_cost = float(sell_cost_total + buy_cost_total)
-    post_trade_cash = cash_after_sells - buy_notional - buy_cost_total
+    total_cost = fsum(
+        record[name]
+        for record in records.values()
+        for name in PORTFOLIO_LEDGER_COST_COLUMNS
+    )
+    # Reconcile cash from the same component amounts that become native flows.
+    # Repeated float accumulation loses NAV ULPs as the number of fills grows.
+    post_trade_cash = fsum(
+        (
+            pre_trade_cash,
+            *(-sell_delta),
+            *(-buy_delta),
+            *(
+                -record[name]
+                for record in records.values()
+                for name in PORTFOLIO_LEDGER_COST_COLUMNS
+            ),
+        )
+    )
     if -tolerance <= post_trade_cash < 0.0:
         post_trade_cash = 0.0
     post_trade = pre_notional + sell_delta + buy_delta
@@ -1460,9 +1500,9 @@ def portfolio_interval_economics(batch: PortfolioLedgerBatch) -> dict[str, objec
         raise ValueError("portfolio_interval_valuation_invalid")
     entry, endpoint = pd.Timestamp(next(iter(starts))), pd.Timestamp(next(iter(ends)))
     b, a, e = (
-        float(sum(before.values())),
-        float(sum(after.values())),
-        float(sum(end.values())),
+        fsum(before.values()),
+        fsum(after.values()),
+        fsum(end.values()),
     )
     costs = -sum(
         Fraction(row.amount)

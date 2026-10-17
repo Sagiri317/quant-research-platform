@@ -25,8 +25,6 @@ from quant_research_platform.sources.binance.ids import (
 from quant_research_platform.sources.binance.replay import (
     ObservationCoverage,
     ObservationCoverageIndex,
-    _capture_raw_file_identity,
-    _sha256_file,
     _validate_raw_path,
     native_trade_identities,
 )
@@ -40,10 +38,10 @@ from quant_research_platform.sources.tardis.raw import (
     _filename,
     _ObservedStreams,
     _request_scope,
-    _request_url,
     _stream_suffix,
     iter_native_slice,
 )
+from quant_research_platform.storage.identity import filesystem_is_dir, filesystem_stat
 from quant_research_platform.storage.manifests import read_qrp_json_file
 
 _MANIFEST_KEYS = {
@@ -80,22 +78,12 @@ _FILE_KEYS = {
 def _descriptor(value, path):
     if (
         type(value) is not dict
-        or set(value) != {"path", "sha256", "compressed_bytes", "record_count"}
+        or not {"path", "record_count"}
+        <= set(value)
+        <= {"path", "sha256", "compressed_bytes", "record_count"}
         or value["path"] != path
         or type(value["record_count"]) is not int
         or value["record_count"] < 0
-    ):
-        raise ValueError("tardis_manifest_invalid")
-    _file_identity_fields(value)
-
-
-def _file_identity_fields(value):
-    if (
-        type(value["compressed_bytes"]) is not int
-        or value["compressed_bytes"] <= 0
-        or type(value["sha256"]) is not str
-        or len(value["sha256"]) != 64
-        or any(c not in "0123456789abcdef" for c in value["sha256"])
     ):
         raise ValueError("tardis_manifest_invalid")
 
@@ -137,20 +125,14 @@ def _validate_manifest(value):
         }
         if (
             type(item) is not dict
-            or set(item) != _FILE_KEYS
+            or not _FILE_KEYS - {"sha256", "compressed_bytes", "request_url"}
+            <= set(item)
+            <= _FILE_KEYS
             or type(item["offset_minutes"]) is not int
             or item["offset_minutes"] != offset
             or item["slice_minutes"] != SLICE_MINUTES
             or item["path"]
             != _filename(value["date"], offset, exchange=value["exchange"])
-            or item["request_url"]
-            != _request_url(
-                value["date"],
-                offset,
-                exchange=value["exchange"],
-                symbols=tuple(value["symbols"]),
-                channels=tuple(value["requested_channels"]),
-            )
             or type(item["record_counts"]) is not dict
             or not set(item["record_counts"]) <= streams
             or any(type(n) is not int or n <= 0 for n in item["record_counts"].values())
@@ -161,7 +143,6 @@ def _validate_manifest(value):
             != sum(item["record_counts"].values()) + item["disconnect_markers"]
         ):
             raise ValueError("tardis_manifest_invalid")
-        _file_identity_fields(item)
         if item["record_counts"]:
             if not all(
                 type(item[key]) is str
@@ -263,7 +244,6 @@ class TardisArchive:
                     self.root / member["path"],
                     date=self.manifest["date"],
                     offset_minutes=member["offset_minutes"],
-                    expected_sha256=member["sha256"],
                     exchange=self.manifest["exchange"],
                     symbols=tuple(self.manifest["symbols"]),
                     channels=tuple(self.manifest["requested_channels"]),
@@ -507,36 +487,9 @@ class TardisArchive:
 
 
 @contextmanager
-def _open_tardis_archive(root, *, expected_manifest_hash):
+def _open_tardis_archive(root, *, manifest):
     root = Path(root)
-    _validate_raw_path(root)
-    manifest_path = root / "manifest.json"
-    _capture_raw_file_identity(manifest_path, missing_is_file_not_found=False)
-    _raw = manifest = members = identities = None
-    _raw, manifest = read_qrp_json_file(manifest_path)
-    _validate_manifest(manifest)
     manifest_hash = canonical_json_hash(manifest)
-    if manifest_hash != expected_manifest_hash:
-        raise ValueError("tardis_archive_selection_identity_changed")
-    _raw = None
-    members = (
-        *manifest["files"],
-        manifest["gaps"],
-        manifest["observation_intervals"],
-    )
-    identities = tuple(
-        _capture_raw_file_identity(root / item["path"], missing_is_file_not_found=False)
-        for item in members
-    )
-
-    for member, expected in zip(members, identities, strict=True):
-        if expected.size != member["compressed_bytes"]:
-            raise ValueError("tardis_raw_identity_changed")
-    # Native members verify while consumed, including a drain on early close.
-    # Coverage verifies while decoded below; gaps have no separate decoder.
-    gaps = manifest["gaps"]
-    if _sha256_file(root / gaps["path"], identities[-2]) != gaps["sha256"]:
-        raise ValueError("tardis_raw_identity_changed")
     index = ObservationCoverageIndex(
         root,
         manifest["observation_intervals"],
@@ -749,23 +702,28 @@ def open_tardis_archive(root, *, archive_paths=None, time_window=None):
     with ExitStack() as readers:
         selected = []
         for path in paths:
-            _capture_raw_file_identity(path / "manifest.json")
+            _validate_raw_path(path)
+            filesystem_stat(path)
             _raw = manifest = None
-            _raw, manifest = read_qrp_json_file(path / "manifest.json")
+            try:
+                _raw, manifest = read_qrp_json_file(path / "manifest.json")
+            except IsADirectoryError as exc:
+                raise ValueError("tardis_manifest_invalid") from exc
+            except PermissionError as exc:
+                if filesystem_is_dir(path / "manifest.json"):
+                    raise ValueError("tardis_manifest_invalid") from exc
+                raise
             _validate_manifest(manifest)
-            manifest_hash = canonical_json_hash(manifest)
             if _archive_intersects(manifest, time_window):
-                selected.append((path, manifest_hash))
+                selected.append((path, manifest))
 
         if not selected:
             raise PortfolioTargetBlocked("tardis_archive_window_empty")
         archives = tuple(
             sorted(
                 (
-                    readers.enter_context(
-                        _open_tardis_archive(path, expected_manifest_hash=identity)
-                    )
-                    for path, identity in selected
+                    readers.enter_context(_open_tardis_archive(path, manifest=manifest))
+                    for path, manifest in selected
                 ),
                 key=lambda archive: _archive_span(archive.manifest),
             )

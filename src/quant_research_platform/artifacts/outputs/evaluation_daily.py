@@ -138,6 +138,9 @@ def validate_daily_frame(frame, *, name, spec, science, check_domains=True):
         or frame.duplicated(list(DAILY_KEYS[name])).any()
     ):
         raise ValueError("evaluation_daily_domain_or_keys_invalid")
+    if name.startswith("response_"):
+        _validate_response_frame(frame, name=name, science=science)
+        return
     strata = science["strata"]
     if name == "daily_coverage":
         if not (
@@ -295,3 +298,125 @@ def validate_daily_counts(metrics, coverage, strata, *, spec, science):
     ):
         if block.stratum_rows.nunique() != 1 or set(block.signal) != signals:
             raise ValueError("evaluation_stratum_population_mismatch")
+
+
+_RESPONSE_KEYS = (
+    "timestamp",
+    "period",
+    "sample_scope",
+    "signal",
+    "label",
+)
+_RESPONSE_FIELDS = [
+    pa.field("timestamp", pa.timestamp("ns"), nullable=False),
+    *[pa.field(name, pa.string(), nullable=False) for name in _RESPONSE_KEYS[1:]],
+]
+DAILY_SCHEMAS.update(
+    {
+        "response_metrics": pa.schema(
+            [
+                *_RESPONSE_FIELDS,
+                pa.field("ic", pa.float64()),
+                pa.field("ic_reason", pa.string()),
+                pa.field("n_obs", pa.int64(), nullable=False),
+                pa.field("signal_count", pa.int64(), nullable=False),
+                pa.field("coverage", pa.float64()),
+                pa.field("ic_std", pa.float64()),
+                pa.field("valid_day_count", pa.int64(), nullable=False),
+                pa.field("top_bottom_mean_bp", pa.float64()),
+                pa.field("spread_reason", pa.string()),
+            ]
+        ),
+        "response_groups": pa.schema(
+            [
+                *_RESPONSE_FIELDS,
+                pa.field("group", pa.int64(), nullable=False),
+                pa.field("mean_return_bp", pa.float64()),
+                pa.field("median_return_bp", pa.float64()),
+                pa.field("n_obs", pa.int64(), nullable=False),
+                pa.field("mean_reason", pa.string()),
+                pa.field("median_reason", pa.string()),
+                pa.field("mean_std_bp", pa.float64()),
+                pa.field("valid_day_count", pa.int64(), nullable=False),
+            ]
+        ),
+    }
+)
+DAILY_KEYS.update(
+    {"response_metrics": _RESPONSE_KEYS, "response_groups": (*_RESPONSE_KEYS, "group")}
+)
+
+
+def _validate_response_frame(frame, *, name, science):
+    import numpy as np
+
+    signal, cutpoints = next(iter(science["response_diagnostics"]["cutpoints"].items()))
+    if (
+        not frame.signal.eq(signal).all()
+        or not frame.period.isin(["daily", "pooled", "daily_equal_weight"]).all()
+        or not frame.sample_scope.isin(["own", "common"]).all()
+    ):
+        raise ValueError("evaluation_response_domain_invalid")
+    for column in frame.select_dtypes(include="floating"):
+        if np.isinf(frame[column].to_numpy(dtype=float, na_value=np.nan)).any():
+            raise ValueError("evaluation_response_numeric_invalid")
+    summary = frame.period.eq("daily_equal_weight")
+    if name == "response_metrics":
+        if (
+            frame.n_obs.gt(frame.signal_count).any()
+            or frame.ic.dropna().abs().gt(1).any()
+            or frame.ic.isna().ne(frame.ic_reason.notna()).any()
+            or frame.top_bottom_mean_bp.isna().ne(frame.spread_reason.notna()).any()
+            or frame.coverage.isna().ne(frame.signal_count.eq(0)).any()
+            or not np.allclose(
+                frame.coverage,
+                frame.n_obs / frame.signal_count,
+                equal_nan=True,
+                rtol=1e-12,
+                atol=0,
+            )
+        ):
+            raise ValueError("evaluation_response_metric_invalid")
+    else:
+        if (
+            not frame.group.between(1, len(cutpoints) + 1).all()
+            or (frame.n_obs.eq(0) & frame.mean_return_bp.notna()).any()
+            or (frame.n_obs.eq(0) & frame.median_return_bp.notna()).any()
+            or frame.mean_return_bp.isna().ne(frame.mean_reason.notna()).any()
+            or frame.median_return_bp.isna().ne(frame.median_reason.notna()).any()
+            or frame.loc[summary, "median_return_bp"].notna().any()
+        ):
+            raise ValueError("evaluation_response_groups_invalid")
+
+
+def validate_response_counts(metrics, groups, *, science):
+    """Check concrete paired response rows when both members are consumed."""
+    if metrics is None or groups is None or metrics.empty:
+        return
+    key = list(_RESPONSE_KEYS)
+    sums = groups.groupby(key, dropna=False, sort=False).n_obs.sum()
+    counts = metrics.set_index(key).n_obs
+    if not sums.sort_index().equals(counts.sort_index()):
+        raise ValueError("evaluation_response_group_count_mismatch")
+    expected = set(
+        range(
+            1,
+            len(next(iter(science["response_diagnostics"]["cutpoints"].values()))) + 2,
+        )
+    )
+    if any(
+        set(block.group) != expected for _, block in groups.groupby(key, sort=False)
+    ):
+        raise ValueError("evaluation_response_group_domain_incomplete")
+    for _, block in metrics.groupby(["timestamp", "period", "signal"], sort=False):
+        if (
+            block.signal_count.nunique() != 1
+            or block.loc[block.sample_scope.eq("common"), "n_obs"].nunique() != 1
+        ):
+            raise ValueError("evaluation_response_common_count_mismatch")
+        paired = block.pivot(index="label", columns="sample_scope", values="n_obs")
+        if (
+            set(paired.columns) != {"own", "common"}
+            or paired.common.gt(paired.own).any()
+        ):
+            raise ValueError("evaluation_response_common_count_mismatch")

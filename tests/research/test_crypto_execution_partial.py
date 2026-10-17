@@ -513,16 +513,18 @@ def test_native_bad_trade_stops_current_account_without_future_fills(tmp_path, m
             == execution["known_prefix_valuation_timestamp_ns"] + 1
         )
         assert frame.kind.eq("missing").any()
-    # A local account stop must still close and verify the selected source.
+    # Descriptive checksum drift cannot change the same consumed scientific prefix.
     for member in manifest["files"]:
         if member["symbol"] == "BTCUSDT" and member["data_kind"] == "depth":
             member["sha256"] = "0" * 64
     (raw / "run.json").write_text(json.dumps(manifest))
-    invalid_output = tmp_path / "invalid_identity"
-    with pytest.raises(ValueError, match="binance_replay_file_identity_mismatch"):
-        portfolio.backtest_maker({**config, "output": str(invalid_output)})
-    assert not invalid_output.exists()
-    assert root.exists()
+    replay_root = portfolio.backtest_maker(
+        {**config, "output": str(tmp_path / "stale_checksum")}
+    )
+    replay_summaries, replay_fills = read(replay_root)
+    assert replay_summaries == summaries
+    assert replay_fills == fills
+    assert read(root) == (summaries, fills)
 
 
 @pytest.mark.parametrize("boundary_kind", ["trade", "book", "visible_quantity"])

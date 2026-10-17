@@ -1,4 +1,5 @@
 from fractions import Fraction
+from functools import cache
 
 import numpy as np
 import pandas as pd
@@ -80,33 +81,41 @@ def test_native_market_model_return_gap_persists_and_recovers_complete_windows(
         else np.nan
         for row in returns.to_numpy()
     ]
+
+    @cache
+    def exact_window(asset, end):
+        # Adjacent requested dates reuse the identical exact-rational oracle.
+        paired = [
+            (a, b)
+            for a, b in zip(
+                market[end - 251 : end + 1],
+                returns[asset].iloc[end - 251 : end + 1],
+                strict=True,
+            )
+            if np.isfinite(a) and np.isfinite(b)
+        ]
+        x = [Fraction(a) for a, _ in paired]
+        y = [Fraction(b) for _, b in paired]
+        mx, my = sum(x) / len(x), sum(y) / len(y)
+        slope = sum((a - mx) * (b - my) for a, b in zip(x, y, strict=True)) / sum(
+            (a - mx) ** 2 for a in x
+        )
+        residual = (
+            float(
+                Fraction(returns[asset].iloc[end])
+                - my
+                - slope * (Fraction(market[end]) - mx)
+            )
+            if np.isfinite(market[end]) and np.isfinite(returns[asset].iloc[end])
+            else None
+        )
+        return float(slope), residual
+
     for day in (gap - 1, gap, gap + 1, gap + 311):
         for asset in returns:
-            residuals = []
-            for end in range(day - 59, day + 1):
-                paired = [
-                    (a, b)
-                    for a, b in zip(
-                        market[end - 251 : end + 1],
-                        returns[asset].iloc[end - 251 : end + 1],
-                        strict=True,
-                    )
-                    if np.isfinite(a) and np.isfinite(b)
-                ]
-                x = [Fraction(a) for a, _ in paired]
-                y = [Fraction(b) for _, b in paired]
-                mx, my = sum(x) / len(x), sum(y) / len(y)
-                slope = sum(
-                    (a - mx) * (b - my) for a, b in zip(x, y, strict=True)
-                ) / sum((a - mx) ** 2 for a in x)
-                if np.isfinite(market[end]) and np.isfinite(returns[asset].iloc[end]):
-                    residuals.append(
-                        float(
-                            Fraction(returns[asset].iloc[end])
-                            - my
-                            - slope * (Fraction(market[end]) - mx)
-                        )
-                    )
+            windows = [exact_window(asset, end) for end in range(day - 59, day + 1)]
+            slope = windows[-1][0]
+            residuals = [residual for _, residual in windows if residual is not None]
             row = factors.loc[
                 factors.timestamp.eq(dates[day]) & factors.asset_id.eq(asset)
             ].iloc[0]

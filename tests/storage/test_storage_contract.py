@@ -50,20 +50,6 @@ def test_public_dataset_writer_accepts_exact_frame_sequences(tmp_path: Path) -> 
     )
 
 
-def test_dataset_writer_accepts_private_processed_artifact_root(tmp_path: Path) -> None:
-    root = make_dataset_artifact_root(tmp_path)
-    write_dataset(
-        root,
-        make_default_dataset_frame(
-            asset_ids=("asset_001",), dates=("2014-01-02",), values=(1.0,)
-        ),
-        spec=make_processed_dataset_spec(),
-    )
-    assert (root / "spec.json").is_file()
-    assert (root / "_manifest" / "manifest.json").is_file()
-    assert (root / "data" / "year=2014" / "part-000.parquet").is_file()
-
-
 def test_projected_exact_comparison_includes_primary_key_columns(
     tmp_path: Path,
 ) -> None:

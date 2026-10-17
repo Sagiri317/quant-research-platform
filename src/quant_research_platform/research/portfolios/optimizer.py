@@ -52,16 +52,24 @@ def optimize_portfolio(
     factor_covariance: pd.DataFrame,
     industry_columns: tuple[str, ...] = (),
     style_columns: tuple[str, ...] = (),
-    expected_transaction_cost: Callable[[np.ndarray], float],
+    expected_transaction_cost: Callable[
+        [np.ndarray, np.ndarray], tuple[float, np.ndarray, np.ndarray]
+    ],
     nav: float,
     assumptions: ExecutionAssumptions,
     financial_column: str | None = None,
-    cash_column: str | None = None,
+    cash_column: str,
     config: OptimizerConfig | None = None,
     eligibility_column: str | None = None,
     receivable_weight: float = 0.0,
 ) -> OptimizationResult:
-    """Maximize expected active alpha minus expected trade cost under hard limits."""
+    """Maximize active alpha less actual costs in a self-financing account.
+
+    Holdings and explicit cash use pre-trade NAV units; cash reserves the true
+    fee, while name and risk limits use post-fee NAV. The cost owner supplies
+    convex side costs and marginal rates, with zero cash cost. Its smooth
+    extension covers signed epigraph iterates; feasibility uses actual trades.
+    """
     required = {
         "asset_id",
         "expected_alpha",
@@ -136,11 +144,9 @@ def optimize_portfolio(
     if not np.isclose(current.sum(), budget) or not np.isclose(benchmark.sum(), 1.0):
         raise ValueError("optimizer_weight_sum_invalid")
     valid_adv = np.isfinite(data["adv"]) & data["adv"].gt(0.0)
-    cash = (
-        data[cash_column].to_numpy(dtype=bool)
-        if cash_column is not None
-        else np.zeros(len(data), dtype=bool)
-    )
+    cash = data[cash_column].to_numpy(dtype=bool)
+    if cash.sum() != 1 or benchmark[cash].any():
+        raise ValueError("optimizer_cash_asset_invalid")
     frozen = ~valid_adv.to_numpy(dtype=bool) & ~cash
     for column in ("can_enter", "can_exit"):
         if column in data:
@@ -159,16 +165,17 @@ def optimize_portfolio(
     incomplete = risk_missing | ~np.isfinite(data["expected_alpha"])
     # Frozen holdings remain real active risk. Missing volume never authorizes
     # replacing their exposures or specific variance with zero.
-    cannot_reach_benchmark = frozen.copy()
-    if "can_enter" in data:
-        cannot_reach_benchmark |= (current < benchmark) & ~data.can_enter.fillna(
-            False
-        ).to_numpy(dtype=bool)
+    cannot_reduce = frozen.copy()
     if "can_exit" in data:
-        cannot_reach_benchmark |= (current > benchmark) & ~data.can_exit.fillna(
-            False
-        ).to_numpy(dtype=bool)
-    if (risk_missing & (current != benchmark) & cannot_reach_benchmark).any():
+        cannot_reduce |= ~data.can_exit.fillna(False).to_numpy(dtype=bool)
+    # Fees can raise a frozen underweight to its net benchmark, but cannot
+    # reduce an overweight. Keep the same normalization policy at admission.
+    if (
+        risk_missing
+        & (current > benchmark)
+        & ~_normalization_matches(current, benchmark)
+        & cannot_reduce
+    ).any():
         raise ValueError("optimizer_held_risk_unavailable")
     data["expected_alpha"] = data["expected_alpha"].where(~incomplete, 0.0)
     original_specific = data["specific_variance"].to_numpy(dtype="float64")
@@ -179,24 +186,7 @@ def optimize_portfolio(
     expected_alpha = data["expected_alpha"].to_numpy(dtype="float64")
     specific = data["specific_variance"].to_numpy(dtype="float64")
     adv = data["adv"].to_numpy(dtype="float64")
-    bounds = _bounds(
-        data,
-        benchmark=benchmark,
-        financial_column=financial_column,
-        cash_column=cash_column,
-        eligibility_column=eligibility_column,
-        incomplete=incomplete.to_numpy(dtype=bool),
-        frozen=frozen,
-        config=config,
-    )
-    # These are necessary box constraints, independent of the numerical solver.
-    # Report proven economic infeasibility separately from solver failures.
-    tolerance = 1e-8
-    lower, upper = np.asarray(bounds, dtype="float64").T
-    if lower.sum() > budget + tolerance or upper.sum() < budget - tolerance:
-        raise ValueError("optimizer_budget_bounds_infeasible")
     # Scale before multiplying so representable capacity survives tiny ADV/NAV.
-    # An unrepresentably large capacity is nonbinding for bounded portfolio weights.
     participation_mantissa, participation_exponent = np.frexp(
         assumptions.adv_participation
     )
@@ -207,6 +197,41 @@ def optimize_portfolio(
             participation_mantissa * adv_mantissa / nav_mantissa,
             participation_exponent + adv_exponent - nav_exponent,
         )
+    # Monotone side costs at individual maximum trades bound every feasible fee.
+    # This only proves necessary box infeasibility; actual constraints below use
+    # the exact net trades, never a fee margin or the objective's epigraph slack.
+    try:
+        with np.errstate(over="raise"):
+            maximum_cost = expected_transaction_cost(
+                np.where(cash, 0.0, np.minimum(1.0 - current, capacity)) * nav,
+                np.where(cash, 0.0, np.minimum(current, capacity)) * nav,
+            )[0]
+    except (FloatingPointError, OverflowError):
+        # An unrepresentable hypothetical fee cannot rule out a finite trade.
+        # Cash funds actual fees, so c <= cash <= 1 - receivable_weight.
+        minimum_nav_ratio = receivable_weight
+    else:
+        minimum_nav_ratio = max(receivable_weight, 1.0 - maximum_cost / nav)
+    bounds, net_bounds = _bounds(
+        data,
+        benchmark=benchmark,
+        financial_column=financial_column,
+        cash_column=cash_column,
+        eligibility_column=eligibility_column,
+        incomplete=incomplete.to_numpy(dtype=bool),
+        frozen=frozen,
+        config=config,
+        minimum_nav_ratio=minimum_nav_ratio,
+    )
+    tolerance = 1e-8
+    lower, upper = np.asarray(bounds, dtype="float64").T
+    net_lower, net_upper = np.asarray(net_bounds, dtype="float64").T
+    if (
+        net_lower.sum() > budget + tolerance
+        or lower.sum() > budget + tolerance
+        or upper.sum() < budget - tolerance
+    ):
+        raise ValueError("optimizer_budget_bounds_infeasible")
     reachable_lower = np.maximum(lower, current - capacity)
     reachable_upper = np.minimum(upper, current + capacity)
     if (
@@ -222,24 +247,70 @@ def optimize_portfolio(
     if minimum_turnover > config.target_turnover_limit + tolerance:
         raise ValueError("optimizer_turnover_bounds_infeasible")
 
-    def risk(weights: np.ndarray) -> float:
-        active = weights - benchmark
-        return sum(_risk_variances(active, exposure, covariance, specific))
-
     relative_exposure = _stock_leg_exposures(exposure, benchmark, cash)
-
-    # Turnover uses an exact epigraph: u >= +/- (w - current), sum(u) <= 2T.
-    # Bounding u by ADV capacity also enforces the original per-name trade limit.
-    # Eliminating u gives exactly the original feasible weights; no absolute-value
-    # constraint kink remains for SLSQP at unchanged names.
     count = len(current)
+    identity = np.eye(count)
+    cash_direction = cash.astype("float64")
 
-    def risk_jacobian(weights: np.ndarray) -> np.ndarray:
-        active = weights - benchmark
+    def actual_cost(weights):
+        delta = weights - current
+        cost, buy_gradient, sell_gradient = expected_transaction_cost(
+            np.maximum(delta, 0.0) * nav,
+            np.maximum(-delta, 0.0) * nav,
+        )
+        # At an unchanged name, use the central subgradient of the convex fee
+        # kink. The smooth objective still uses its exact trade epigraph.
+        gradient = np.where(
+            delta > 0.0,
+            buy_gradient,
+            np.where(delta < 0.0, -sell_gradient, (buy_gradient - sell_gradient) / 2),
+        )
+        return cost / nav, gradient
+
+    def net_risk(point):
+        weights = point[:count]
+        cost, gradient = actual_cost(weights)
+        active = weights - benchmark + (benchmark - cash_direction) * cost
         factor_active = active @ exposure
-        return -(
+        variance = sum(_risk_variances(active, exposure, covariance, specific))
+        variance_gradient = (
             exposure @ (covariance @ factor_active + covariance.T @ factor_active)
             + 2.0 * specific * active
+        )
+        active_jacobian = identity + np.outer(benchmark - cash_direction, gradient)
+        return (
+            config.tracking_error_limit**2 * (1.0 - cost) ** 2 - variance,
+            np.r_[
+                -2.0 * config.tracking_error_limit**2 * (1.0 - cost) * gradient
+                - variance_gradient @ active_jacobian,
+                np.zeros(count),
+            ],
+        )
+
+    def net_name_bands(point):
+        weights = point[:count]
+        cost, gradient = actual_cost(weights)
+        return (
+            np.r_[
+                weights[~cash] - net_lower[~cash] * (1.0 - cost),
+                net_upper[~cash] * (1.0 - cost) - weights[~cash],
+            ],
+            np.pad(
+                np.vstack(
+                    (
+                        identity[~cash] + np.outer(net_lower[~cash], gradient),
+                        -identity[~cash] - np.outer(net_upper[~cash], gradient),
+                    )
+                ),
+                ((0, 0), (0, count)),
+            ),
+        )
+
+    def cash_reserve(point):
+        cost, gradient = actual_cost(point[:count])
+        return (
+            float(point[:count][cash].sum() - cost),
+            np.r_[cash_direction - gradient, np.zeros(count)],
         )
 
     def exposure_bands(matrix, limit):
@@ -274,10 +345,8 @@ def optimize_portfolio(
         },
         {
             "type": "ineq",
-            "fun": lambda point: float(
-                config.tracking_error_limit**2 - risk(point[:count])
-            ),
-            "jac": lambda point: np.r_[risk_jacobian(point[:count]), np.zeros(count)],
+            "fun": lambda point: net_risk(point)[0],
+            "jac": lambda point: net_risk(point)[1],
         },
         {
             "type": "ineq",
@@ -307,12 +376,40 @@ def optimize_portfolio(
             "jac": lambda point: trade_jacobian,
         },
     ]
+
+    constraints.extend(
+        (
+            {
+                "type": "ineq",
+                "fun": lambda point: net_name_bands(point)[0],
+                "jac": lambda point: net_name_bands(point)[1],
+            },
+            {
+                "type": "ineq",
+                "fun": lambda point: cash_reserve(point)[0],
+                "jac": lambda point: cash_reserve(point)[1],
+            },
+        )
+    )
+
+    def objective(point):
+        delta, absolute_trade = point[:count] - current, point[count:]
+        cost, buy_gradient, sell_gradient = expected_transaction_cost(
+            ((absolute_trade + delta) / 2.0) * nav,
+            ((absolute_trade - delta) / 2.0) * nav,
+        )
+        return (
+            float(-expected_alpha @ (point[:count] - benchmark) + cost / nav),
+            np.r_[
+                -expected_alpha + (buy_gradient - sell_gradient) / 2.0,
+                (buy_gradient + sell_gradient) / 2.0,
+            ],
+        )
+
     result = minimize(
-        lambda point: float(
-            -(expected_alpha @ (point[:count] - benchmark))
-            + float(expected_transaction_cost(point[:count])) / nav
-        ),
+        objective,
         np.r_[current, np.zeros(count)],
+        jac=True,
         method="SLSQP",
         bounds=(*bounds, *zip(trade_lower, trade_upper, strict=True)),
         constraints=constraints,
@@ -321,8 +418,14 @@ def optimize_portfolio(
     if not result.success:
         raise ValueError("optimizer_failed_closed")
     weights = np.asarray(result.x[:count], dtype="float64")
+    cost_ratio, _ = actual_cost(weights)
+    if cost_ratio >= 1.0 or weights[cash].sum() < cost_ratio - tolerance:
+        raise ValueError("optimizer_solution_invalid")
+    net_weights = (weights - cash_direction * cost_ratio) / (1.0 - cost_ratio)
     _verify_solution(
         weights,
+        net_weights=net_weights,
+        net_bounds=net_bounds,
         bounds=bounds,
         current=current,
         benchmark=benchmark,
@@ -337,7 +440,9 @@ def optimize_portfolio(
         cash=cash,
         receivable_weight=receivable_weight,
     )
-    active = weights - benchmark
+    active = _risk_active_weights(
+        net_weights, benchmark, original_exposure, original_specific
+    )
     factor_variance, specific_variance = _risk_variances(
         active, original_exposure, covariance, original_specific
     )
@@ -348,9 +453,35 @@ def optimize_portfolio(
         factor_variance=factor_variance,
         specific_variance=specific_variance,
         target_turnover=float(0.5 * np.abs(weights - current).sum()),
-        expected_transaction_cost=float(expected_transaction_cost(weights)),
+        expected_transaction_cost=float(cost_ratio * nav),
         maximum_adv_participation=float(participation.max(initial=0.0)),
     )
+
+
+def _normalization_matches(weights, reference):
+    """Compare normalized coefficients only within scale-relative roundoff."""
+    roundoff = 8 * np.finfo(float).eps * np.maximum(abs(weights), abs(reference))
+    return (
+        np.isfinite(weights)
+        & np.isfinite(reference)
+        & (abs(weights - reference) <= roundoff)
+    )
+
+
+def _risk_active_weights(weights, benchmark, exposure, specific):
+    """Keep known risk exact; certify zero unknown-risk benchmark coefficients.
+
+    A fixed net-benchmark holding can differ by a few rounding bits after fees
+    and NAV division. Only that normalization-sized residual may omit unknown
+    risk. A true position against a zero benchmark never meets this relative
+    test, and known-risk coefficients retain their full numerical value.
+    """
+    active = weights - benchmark
+    unavailable = (
+        ~np.isfinite(exposure).all(axis=1) | ~np.isfinite(specific) | (specific < 0.0)
+    )
+    active[unavailable & _normalization_matches(weights, benchmark)] = 0.0
+    return active
 
 
 def _risk_variances(active, exposure, covariance, specific) -> tuple[float, float]:
@@ -396,7 +527,8 @@ def _bounds(
     incomplete: np.ndarray,
     frozen: np.ndarray,
     config: OptimizerConfig,
-) -> tuple[tuple[float, float], ...]:
+    minimum_nav_ratio: float,
+) -> tuple[tuple[tuple[float, float], ...], tuple[tuple[float, float], ...]]:
     bounds: list[tuple[float, float]] = []
     for position, row in data.iterrows():
         if cash_column is not None and bool(row[cash_column]):
@@ -418,8 +550,10 @@ def _bounds(
                 min(1.0, float(benchmark[position]) + config.active_name_limit),
             )
         )
+    net_bounds = tuple(bounds)
     for position, row in data.iterrows():
         lower, upper = bounds[position]
+        lower *= minimum_nav_ratio
         current = float(row.current_weight)
         if frozen[position]:
             lower, upper = max(lower, current), min(upper, current)
@@ -428,9 +562,12 @@ def _bounds(
         if "can_exit" in data and (pd.isna(row.can_exit) or not bool(row.can_exit)):
             lower = max(lower, current)
         if lower > upper:
-            raise ValueError("optimizer_frozen_constraints_infeasible")
+            if not _normalization_matches(lower, upper):
+                raise ValueError("optimizer_frozen_constraints_infeasible")
+            # A rounding-only intersection must preserve the physical holding.
+            lower, upper = current, current
         bounds[position] = (lower, upper)
-    return tuple(bounds)
+    return tuple(bounds), net_bounds
 
 
 def _stock_leg_exposures(exposure, benchmark, cash):
@@ -454,8 +591,7 @@ def _stock_leg_active_exposure(weights, benchmark, exposure, cash):
     normalized = weights[stock] / gross
     reference = benchmark[stock] / reference_gross
     active = normalized - reference
-    roundoff = 8 * np.finfo(float).eps * np.maximum(abs(normalized), abs(reference))
-    nonzero = abs(active) > roundoff
+    nonzero = ~_normalization_matches(normalized, reference)
     selected = exposure[stock]
     complete = np.isfinite(selected[nonzero]).all(axis=0)
     result = np.full(exposure.shape[1], np.nan)
@@ -467,6 +603,8 @@ def _stock_leg_active_exposure(weights, benchmark, exposure, cash):
 def _verify_solution(
     weights: np.ndarray,
     *,
+    net_weights: np.ndarray,
+    net_bounds: tuple[tuple[float, float], ...],
     bounds: tuple[tuple[float, float], ...],
     current: np.ndarray,
     benchmark: np.ndarray,
@@ -482,7 +620,7 @@ def _verify_solution(
     receivable_weight: float = 0.0,
 ) -> None:
     tolerance = 1e-08
-    active = weights - benchmark
+    active = _risk_active_weights(net_weights, benchmark, exposure, specific)
     risk = sum(_risk_variances(active, exposure, covariance, specific))
     if not np.isfinite(weights).all() or not np.isclose(
         weights.sum(), 1.0 - receivable_weight, atol=tolerance
@@ -493,6 +631,11 @@ def _verify_solution(
             value < lower - tolerance or value > upper + tolerance
             for value, (lower, upper) in zip(weights, bounds, strict=True)
         )
+    ):
+        raise ValueError("optimizer_solution_invalid")
+    if any(
+        value < lower - tolerance or value > upper + tolerance
+        for value, (lower, upper) in zip(net_weights, net_bounds, strict=True)
     ):
         raise ValueError("optimizer_solution_invalid")
     if risk > config.tracking_error_limit**2 + tolerance:

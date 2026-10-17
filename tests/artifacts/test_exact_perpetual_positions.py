@@ -41,7 +41,7 @@ def test_exact_perpetual_position_survives_cancellation_and_native_roundtrip(
         assert account.mark(stamp, 100.0)["net_pnl"] == 0.0
     closing_batch = next(batch for batch in reversed(batches) if batch.trades)
     assert abs(expected) == 1
-    account.funding(FundingEvent(4, 0.01, 100.0))
+    account.funding(FundingEvent(4, 0.01, 100.0), mark_price=account.last_mark)
     funding = float(-expected * 100 * Fraction(0.01))
     assert account.funding_cashflows == funding
     assert account.cash == 1000.0 + funding
@@ -126,7 +126,7 @@ def test_funding_uses_exact_position_before_rounding_cashflow():
             mark_price=100.0,
             fee=0.0,
         )
-    account.funding(FundingEvent(2, 1e-16, 100.0))
+    account.funding(FundingEvent(2, 1e-16, 100.0), mark_price=account.last_mark)
     expected = float(-Fraction(10**16 + 1) * 100 * Fraction(1e-16))
     assert expected != -100.0
     assert batches[-1].cashflows[0].amount == expected

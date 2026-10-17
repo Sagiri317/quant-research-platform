@@ -27,6 +27,7 @@ from quant_research_platform.research.portfolios.optimizer import (
 )
 from quant_research_platform.research.predictions.runner import predict
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
+from tests.helpers.optimizer import with_cash_asset
 from tests.helpers.portfolio_inputs import _interim_specs, _processed_specs
 from tests.helpers.research_specs import make_demo_research_dataset_spec
 from tests.research.direct_model_test_support import fit_frame
@@ -496,10 +497,15 @@ def test_optimizer_rejects_invalid_reserved_receivable_weight(receivable_weight)
     )
     with pytest.raises(ValueError, match="optimizer_receivable_weight_invalid"):
         optimize_portfolio(
-            assets,
+            with_cash_asset(assets),
+            cash_column="is_cash",
             factor_covariance=pd.DataFrame([[0.0]], index=["style"], columns=["style"]),
             style_columns=("style",),
-            expected_transaction_cost=lambda w: 0.0,
+            expected_transaction_cost=lambda buy, sell: (
+                0.0,
+                np.zeros_like(buy),
+                np.zeros_like(sell),
+            ),
             nav=100.0,
             assumptions=_decision_inputs()["assumptions"],
             receivable_weight=receivable_weight,
@@ -917,7 +923,6 @@ def test_optimizer_stock_domain_excludes_zero_current_and_reference_names():
         specific_variance=enhanced.risk.specific_variance,
         adv=pd.Series(1000.0, index=["a", "b"]),
         eligible=args["dataset"].set_index("asset_id").eligible,
-        panel=panel,
     )
-    assert assets.asset_id.tolist() == ["a"]
-    assert assets.current_weight.tolist() == [0.9]
+    assert assets.asset_id.tolist() == ["a", "__cash__"]
+    assert assets.current_weight.tolist() == [0.9, 0.0]

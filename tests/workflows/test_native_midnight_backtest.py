@@ -170,7 +170,6 @@ def _freeze_models(root, inputs, chronology):
                     "end": cutoff,
                 },
                 "cutoff": cutoff,
-                "test_window": chronology["test"],
                 "selection_group": "global",
                 "validation_axis": "cross_sectional",
                 "output": str(root / (role + "-scores.json")),
@@ -193,7 +192,6 @@ def _freeze_models(root, inputs, chronology):
                 **config,
                 "output": str(root / (role + "-final")),
                 "selection": str(selection),
-                "test_window": chronology["test"],
                 "fit_windows": refit_windows,
                 "fit_cutoff": cutoff,
             }
@@ -201,7 +199,7 @@ def _freeze_models(root, inputs, chronology):
         result, facts = load_model(model)
         assert facts["selection"] == str(selection)
         assert facts["fit_windows"] == refit_windows
-        assert facts["test_window"] == chronology["test"]
+        assert "test_window" not in facts
         assert set(result.metadata["training_asset_ids"]) == {"btc_usdt", "eth_usdt"}
         final.append({"model": str(model)})
     trials = list(root.glob("*.trial"))
@@ -218,6 +216,14 @@ def _freeze_models(root, inputs, chronology):
 @pytest.mark.parametrize("gap_kind", (None, "depth", "agg_trades"))
 def test_native_midnight_models_reach_frozen_backtests(tmp_path, monkeypatch, gap_kind):
     raw, panel, inputs, chronology = _prepare_midnight(tmp_path, gap_kind)
+    # A future archive may have different coordinates or damaged raw members;
+    # it must not enter either calibration or OOS source qualification.
+    from tests.workflows.test_tardis_frozen_calibration import _publish
+
+    future = _publish(tmp_path, "2026-09-03", fine=True)
+    for member in (tmp_path / future).rglob("*.gz"):
+        member.write_bytes(b"unreadable future source")
+    archive_paths = [raw.relative_to(tmp_path).as_posix(), future]
     learned = tmp_path / "learned"
     validation, models = _freeze_models(learned, inputs, chronology)
     calibrations = {}
@@ -226,7 +232,8 @@ def test_native_midnight_models_reach_frozen_backtests(tmp_path, monkeypatch, ga
             {
                 "output": str(learned / (asset + "-calibration")),
                 "panel": str(panel),
-                "source": str(raw),
+                "source": str(tmp_path),
+                "archive_paths": archive_paths,
                 "asset_id": asset,
                 "symbol": symbol,
                 "chronology": chronology,
@@ -314,7 +321,8 @@ def test_native_midnight_models_reach_frozen_backtests(tmp_path, monkeypatch, ga
                     "output": str(output),
                     "inputs": str(inputs),
                     "panel": str(panel),
-                    "source": str(raw),
+                    "source": str(tmp_path),
+                    "archive_paths": archive_paths,
                     "asset_id": asset,
                     "symbol": symbol,
                     "chronology": chronology,
@@ -380,7 +388,7 @@ def test_native_midnight_models_reach_frozen_backtests(tmp_path, monkeypatch, ga
                     assert summary["execution"]["maker_prediction_used"] is (
                         style == "maker_calibrated"
                     )
-                assert artifact.metadata["sample_role"] == "test"
+                assert artifact.metadata["sample_role"] == "prediction"
                 assert artifact.metadata["window"] == chronology["test"]
                 assert batches and any(batch.valuations for batch in batches)
                 if repeat == 0:

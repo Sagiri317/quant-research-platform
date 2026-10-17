@@ -1,5 +1,7 @@
 """Native prediction domains preserve raw/canonical/rank differences and exact joins."""
 
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -129,22 +131,63 @@ def test_causal_current_rank_permutation_and_exact_native_lookup(tmp_path):
 
 
 @pytest.mark.parametrize("coordinate", ["asset_id", "timestamp"])
-def test_native_scoring_rejects_missing_exact_prediction_keys(tmp_path, coordinate):
+@pytest.mark.parametrize("all_keys", [False, True])
+def test_native_scoring_pairs_only_exact_prediction_keys(
+    tmp_path, coordinate, all_keys
+):
     from pathlib import Path
 
-    from quant_research_platform.research.models.trial_selection import score
+    from quant_research_platform.research.models.trial_selection import score, select
     from tests.research.test_prediction_runner_model_selection import candidates
 
     _, config = candidates(tmp_path, algorithms=("linear_regression",))
     path = Path(config["predictions"][0]) / "prediction.parquet"
     frame = pd.read_parquet(path)
-    frame.loc[0, coordinate] = (
+    changed = frame.index if all_keys else frame.index[:1]
+    frame.loc[changed, coordinate] = (
         "missing"
         if coordinate == "asset_id"
-        else frame.loc[0, coordinate] + pd.Timedelta(nanoseconds=1)
+        else frame.loc[changed, coordinate] + pd.Timedelta(nanoseconds=1)
     )
+    # Poison unmatched values: any positional alignment would corrupt the loss.
+    frame.loc[changed, "prediction_score"] = 1e6
+    if all_keys and coordinate == "asset_id":
+        # Keep the mutated prediction keys unique within each timestamp.
+        frame.loc[changed, coordinate] = [f"missing-{i}" for i in changed]
     # Count, window and effective end remain valid: the consumer must compare keys.
+    frame = frame.iloc[::-1].reset_index(drop=True)
     frame.to_parquet(path, index=False)
-    with pytest.raises(ValueError, match="candidate_prediction_coverage_missing"):
-        score(config)
-    assert not Path(config["output"]).exists()
+    scored = json.loads(score(config).read_text())
+    paired = 0 if all_keys else 5
+    assert scored["common_rows"] == paired
+    assert scored["candidates"][0]["coverage"] == {
+        "current_mature_label_rows": 9,
+        "paired_prediction_rows": paired,
+        "mature_label_rows_without_prediction": 9 - paired,
+        "prediction_rows_without_label": 6 if all_keys else 1,
+    }
+    metrics = scored["metrics"][0]
+    assert metrics["validation_rows"] == paired
+    if all_keys:
+        assert metrics["validation_mse"] is None
+        assert metrics["validation_rankic"] is None
+        assert metrics["validation_rankic_reason"] == "no_valid_observations"
+        assert metrics["validation_valid_rankic_count"] == 0
+        selection = json.loads(
+            select(
+                {
+                    "scores": config["output"],
+                    "output": str(tmp_path / "selection.json"),
+                    "selection_metric": "validation_rankic",
+                    "selection_direction": "maximize",
+                    "tie_break_order": config["candidate_ids"],
+                    "refit_windows": [{"start": "2020-01-01", "end": "2020-01-06"}],
+                    "refit_cutoff": "2020-01-06",
+                }
+            ).read_text()
+        )
+        assert selection["selected_model_id"] is None
+    else:
+        assert metrics["validation_mse"] < 1e-24
+        assert metrics["validation_rankic"] == pytest.approx(1.0)
+        assert metrics["validation_valid_rankic_count"] == 2

@@ -38,6 +38,7 @@ from quant_research_platform.research.randomness import derive_seed
 from quant_research_platform.research.statistics import (
     _apply_fdr,
     _selected_analyses,
+    _validate_bootstrap_configuration,
     cross_sectional_rank_ic,
     fama_macbeth_period,
     hac_mean,
@@ -362,6 +363,10 @@ def build_a_share_statistics_tables(
         dataset_session.logical_columns
     ):
         raise ValueError("statistics_required_columns_excluded")
+    needs_losses = "model_losses" in analyses or "group_comparison" in statistics
+    needs_comparison = bool(
+        set(analyses) & {"model_comparison", *_MODEL_ROBUSTNESS_TESTS}
+    )
     rank_records: list[dict[str, object]] = []
     comparison_records: list[dict[str, object]] = []
     loss_records: list[dict[str, object]] = []
@@ -524,34 +529,36 @@ def build_a_share_statistics_tables(
                     )
                 rank_records.extend(rank.to_dict("records"))
                 daily = rank.iloc[0]
-                paired_rank, paired_count = (
-                    (rank.loc[:, ["timestamp", *prediction_columns]], 0)
-                    if mature.empty
-                    else _common_model_rank_ic(
-                        mature,
-                        family_ids=prediction_columns,
-                        label_column=primary_label,
-                    )
-                )
-                comparison_records.extend(paired_rank.to_dict("records"))
-                common = bool(
-                    np.isfinite(
-                        paired_rank.loc[:, list(prediction_columns)].to_numpy(
-                            dtype="float64"
+                if needs_losses or needs_comparison:
+                    paired_rank, paired_count = (
+                        (rank.loc[:, ["timestamp", *prediction_columns]], 0)
+                        if mature.empty
+                        else _common_model_rank_ic(
+                            mature,
+                            family_ids=prediction_columns,
+                            label_column=primary_label,
                         )
-                    ).all()
-                )
-                for family_id in family_ids:
+                    )
+                    comparison_records.extend(paired_rank.to_dict("records"))
+                    common = bool(
+                        np.isfinite(
+                            paired_rank.loc[:, list(prediction_columns)].to_numpy(
+                                dtype="float64"
+                            )
+                        ).all()
+                    )
+                for family_id in family_ids if needs_losses else ():
                     column = family_columns[family_id]
                     value = daily[column]
                     defined = bool(np.isfinite(value))
-                    paired = mature.loc[
-                        mature[[column, primary_label]].notna().all(axis=1),
-                        ["asset_id", primary_label],
-                    ].copy()
-                    paired["asset_id"] = paired.asset_id.astype(str)
-                    paired = paired.sort_values("asset_id")
-                    paired_assets = paired.asset_id
+                    paired_assets = (
+                        mature.loc[
+                            mature[[column, primary_label]].notna().all(axis=1),
+                            "asset_id",
+                        ]
+                        .astype(str)
+                        .sort_values()
+                    )
                     loss_records.append(
                         {
                             "timestamp": timestamp,
@@ -565,14 +572,6 @@ def build_a_share_statistics_tables(
                             "observation_count": len(paired_assets),
                             "asset_coverage_id": canonical_json_hash(
                                 paired_assets.tolist()
-                            ),
-                            "target_domain_id": canonical_json_hash(
-                                [
-                                    [asset, float(label)]
-                                    for asset, label in paired.itertuples(
-                                        index=False, name=None
-                                    )
-                                ]
                             ),
                             "status": "DEFINED" if defined else "UNDEFINED",
                             "reason": None
@@ -621,56 +620,59 @@ def build_a_share_statistics_tables(
                     else None,
                 )
             )
-    model_trials = trial_rows.copy()
-    model_losses = pd.DataFrame.from_records(
-        loss_records,
-        columns=(
-            "timestamp",
-            "sample_role",
-            "period_id",
-            "family_id",
-            "config_id",
-            "loss",
-            "observation_count",
-            "status",
-            "reason",
-            "common_date",
-            "common_observation_count",
-            "asset_coverage_id",
-            "target_domain_id",
-        ),
-    )
-    comparison_by_date = (
-        pd.DataFrame.from_records(
-            comparison_records, columns=["timestamp", *prediction_columns]
+    if needs_losses:
+        model_losses = pd.DataFrame.from_records(
+            loss_records,
+            columns=(
+                "timestamp",
+                "sample_role",
+                "period_id",
+                "family_id",
+                "config_id",
+                "loss",
+                "observation_count",
+                "status",
+                "reason",
+                "common_date",
+                "common_observation_count",
+                "asset_coverage_id",
+            ),
         )
-        .set_index("timestamp")
-        .rename(columns={column: family for family, column in family_columns.items()})
-    )
-    comparison, tests, robustness = _model_comparison(
-        comparison_by_date,
-        family_ids=family_ids,
-        benchmark_id=benchmark_id,
-        sample_role=config["sample_role"],
-        inference_blocker=inference_blocker,
-        joint_blocker=joint_blocker,
-        max_lags=max_lags,
-        block_size=block_size,
-        repetitions=repetitions,
-        root_seed=root_seed,
-        dataset_id=dataset_id,
-        analyses=analyses,
-    )
-    group_comparison = _paired_group_rankic(
-        model_losses,
-        global_statistics=global_statistics,
-        selection_group=selection_group,
-        family_ids=family_ids,
-        config=config,
-        target_metadata=_model_target_metadata(
-            config, dataset_spec, time_window, selections
-        ),
-    )
+    if needs_comparison:
+        comparison_by_date = (
+            pd.DataFrame.from_records(
+                comparison_records, columns=["timestamp", *prediction_columns]
+            )
+            .set_index("timestamp")
+            .rename(
+                columns={column: family for family, column in family_columns.items()}
+            )
+        )
+        comparison, tests, robustness = _model_comparison(
+            comparison_by_date,
+            family_ids=family_ids,
+            benchmark_id=benchmark_id,
+            sample_role=config["sample_role"],
+            inference_blocker=inference_blocker,
+            joint_blocker=joint_blocker,
+            max_lags=max_lags,
+            block_size=block_size,
+            repetitions=repetitions,
+            root_seed=root_seed,
+            dataset_id=dataset_id,
+            analyses=analyses,
+        )
+    if "group_comparison" in statistics:
+        group_comparison = _paired_group_rankic(
+            model_losses,
+            global_statistics=global_statistics,
+            selection_group=selection_group,
+            family_ids=family_ids,
+            config=config,
+            target_metadata=_model_target_metadata(
+                config, dataset_spec, time_window, selections
+            ),
+        )
     tables = {}
     if "model_losses" in analyses:
         tables["model_losses"] = model_losses
@@ -686,7 +688,7 @@ def build_a_share_statistics_tables(
             prediction_summaries, ignore_index=True
         )
     if selections and "analyses" not in config:
-        tables["model_trials"] = model_trials
+        tables["model_trials"] = trial_rows.copy()
     if "group_comparison" in statistics:
         tables["model_group_comparison"] = group_comparison
     return tables
@@ -919,15 +921,6 @@ def _paired_group_rankic(
                     )
                     or not left.loc[
                         left.status.eq("DEFINED") & right.status.eq("DEFINED"),
-                        "target_domain_id",
-                    ].equals(
-                        right.loc[
-                            left.status.eq("DEFINED") & right.status.eq("DEFINED"),
-                            "target_domain_id",
-                        ]
-                    )
-                    or not left.loc[
-                        left.status.eq("DEFINED") & right.status.eq("DEFINED"),
                         "observation_count",
                     ].equals(
                         right.loc[
@@ -977,6 +970,7 @@ def _paired_group_rankic(
             fdr_method=fdr_method,
             fdr_alpha=declaration["alpha"],
             fdr_family_size=len(family_ids),
+            confidence=declaration["confidence"],
         )
         .set_index("timestamp")
         .set_axis(differences.columns)
@@ -1667,7 +1661,13 @@ def factor_statistics(config):
         "fdr_robustness",
         "fama_macbeth_core_factors",
     }
-    if not isinstance(policy, dict) or expected - set(policy) or set(policy) - known:
+    if (
+        not isinstance(policy, dict)
+        or expected - set(policy)
+        or set(policy) - known
+        or type(policy["hac_lag"]) is not int
+        or policy["hac_lag"] < 0
+    ):
         raise ValueError("factor_statistics_policy_invalid")
     output = Path(config["output"])
     reject_if_exists(output)
@@ -1773,12 +1773,11 @@ def _factor_statistics_from_evaluations(config):
             or metadata["evaluation_axis"] != "cross_sectional"
         ):
             raise ValueError("factor_statistics_evaluation_science_missing")
-        if len(paths) > 1 and not metadata["input_facts"].get("input_observations"):
-            raise ValueError("factor_statistics_evaluation_observations_missing")
         scope = metadata["sample_scope"]
         if scope in scopes:
             raise ValueError("factor_statistics_evaluation_duplicate_scope")
         scopes.add(scope)
+        config.setdefault("window", metadata["window"])
         current = {
             key: metadata[key]
             for key in (
@@ -1795,6 +1794,7 @@ def _factor_statistics_from_evaluations(config):
                 "common_rule",
             )
         }
+        current["window"] = config["window"]
         current["input_facts"] = {
             key: value
             for key, value in current["input_facts"].items()
@@ -1803,7 +1803,7 @@ def _factor_statistics_from_evaluations(config):
         if binding is not None and current != binding:
             raise ValueError("factor_statistics_evaluation_inputs_incompatible")
         binding = current
-        requested = TimeWindow(**config.get("window", metadata["window"]))
+        requested = TimeWindow(**config["window"])
         low, high = _statistics_window_bounds(requested)
         original_low, original_high = _statistics_window_bounds(
             TimeWindow(**metadata["window"])
@@ -1817,7 +1817,6 @@ def _factor_statistics_from_evaluations(config):
                 None if low == original_low and high == original_high else requested,
             )
         )
-    config.setdefault("window", entries[0][1]["window"])
     config.setdefault("sample_role", entries[0][1]["sample_role"])
     if type(config["sample_role"]) is not str or not config["sample_role"].strip():
         raise ValueError("statistics_sample_role_invalid")
@@ -2224,7 +2223,12 @@ def model_statistics(config):
         or set(policy)
         - {"hac_lag", "bootstrap_block", "bootstrap_repetitions", "group_comparison"}
         or needed - set(policy)
-        or any(type(policy[key]) is not int for key in needed if key in policy)
+        or any(
+            type(policy[key]) is not int
+            or policy[key]
+            < {"hac_lag": 0, "bootstrap_block": 1, "bootstrap_repetitions": 2}[key]
+            for key in needed
+        )
     ):
         raise ValueError("model_statistics_policy_invalid")
     paired = "group_comparison" in policy
@@ -2240,6 +2244,21 @@ def model_statistics(config):
         != {"fdr_method", "alpha", "seed", "confidence"}
     ):
         raise ValueError("model_statistics_comparison_policy_invalid")
+    if paired:
+        declaration = policy["group_comparison"]
+        if (
+            type(declaration["confidence"]) is not float
+            or not 0 < declaration["confidence"] < 1
+            or type(declaration["alpha"]) is not float
+            or not 0 < declaration["alpha"] < 1
+            or declaration["fdr_method"] not in ("BH", "BY")
+        ):
+            raise ValueError("model_statistics_comparison_policy_invalid")
+        _validate_bootstrap_configuration(
+            policy["bootstrap_block"],
+            policy["bootstrap_repetitions"],
+            declaration["seed"],
+        )
     output = Path(config["output"])
     reject_if_exists(output)
     window = TimeWindow(**config["window"])
@@ -2342,6 +2361,17 @@ def model_statistics(config):
                 validate_input_market(facts, market)
                 if facts["family_id"] != family:
                     raise ValueError("statistics_prediction_family_mismatch")
+                if selection is not None:
+                    from quant_research_platform.contracts.models import (
+                        validate_model_facts,
+                    )
+
+                    selected = next(
+                        candidate
+                        for candidate in selection["candidates"]
+                        if candidate["model_id"] == wanted[family]
+                    )
+                    validate_model_facts(facts, expected=selected)
                 supplied.add(family)
                 model_metadata = prediction_model_metadata(metadata)
                 if (

@@ -60,5 +60,5 @@ def test_panel_routes_end_bound_without_losing_snapshot_prefix(tmp_path):
     assert actual.timestamp.max() == pd.Timestamp("2026-09-01T00:00:04")
     pd.testing.assert_frame_equal(actual, expected, check_exact=True)
 
-    with pytest.raises(ValueError, match="binance_raw_export_identity_changed"):
+    with pytest.raises(ValueError, match="^tardis_raw_identity_changed$"):
         run(["market", future.name], "boundary", end="2026-09-02T00:00:00")

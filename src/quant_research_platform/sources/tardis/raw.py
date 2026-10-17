@@ -167,6 +167,7 @@ def _valid_trade_values(exchange, native, observed_ns):
             FUTURES_MARKET_TYPE if exchange == EXCHANGE else SPOT_MARKET_TYPE,
             native,
             historical_time=observed_ns // 1_000_000,
+            allow_unknown=True,
         )
     except ValueError:
         return False
@@ -220,7 +221,7 @@ def _filename(date: str, offset: int, *, exchange=EXCHANGE) -> str:
 
 @contextmanager
 def _verified_file(path: Path, *, expected_sha256=None):
-    """Verify consumed source bytes before successful completion or early close."""
+    """Open native bytes; audit the full digest only when explicitly requested."""
     require_unaliased_path(path, error="tardis_raw_identity_changed")
     try:
         handle = open_filesystem_file(path, "rb")

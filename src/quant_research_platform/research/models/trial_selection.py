@@ -33,9 +33,6 @@ from quant_research_platform.contracts.models import (
 from quant_research_platform.contracts.time import _window_payload
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.research.features.transforms import (
-    model_input_validity_columns,
-)
 from quant_research_platform.research.models.rank_ensemble import _label_predictions
 from quant_research_platform.runtime.dataframes import iter_complete_time_frames
 from quant_research_platform.storage.datasets.reading import (
@@ -396,14 +393,15 @@ def score(config):
         prediction_model_metadata,
         read_predictions,
     )
-    from quant_research_platform.contracts.filtering import required_filter_columns
     from quant_research_platform.contracts.models import (
         _fit_windows,
         _model_spec,
-        validate_model_input_roles,
+        validate_model_facts,
     )
-    from quant_research_platform.contracts.time import TimeWindow
-    from quant_research_platform.research.predictions.outputs import prediction_rows
+    from quant_research_platform.contracts.time import (
+        TimeWindow,
+        prediction_window_mask,
+    )
     from quant_research_platform.storage.atomic import (
         atomic_write_json,
         reject_if_exists,
@@ -422,8 +420,13 @@ def score(config):
             "validation_axis",
             "output",
         },
-        {"label_spec", "test_window", "label_unit"},
+        {"label_spec", "label_unit"},
     )
+    if (
+        type(config["validation_axis"]) is not str
+        or config["validation_axis"] not in EVALUATION_AXES
+    ):
+        raise ValueError("model_validation_axis_invalid")
     reject_if_exists(Path(config["output"]))
     ids, paths = config["candidate_ids"], config["predictions"]
     if (
@@ -441,14 +444,9 @@ def score(config):
         pd.Series([config["cutoff"]]), error="invalid_selection_cutoff"
     ).iloc[0]
     window = TimeWindow(**config["scoring_window"])
-    test = TimeWindow(**config["test_window"]) if "test_window" in config else None
     validation_windows = _fit_windows(config["validation_windows"], cutoff)
-    if (
-        window.end is None
-        or pd.Timestamp(window.end) > cutoff
-        or (test is not None and cutoff >= pd.Timestamp(test.start))
-    ):
-        raise ValueError("selection_test_isolation_invalid")
+    if window.end is None or pd.Timestamp(window.end) > cutoff:
+        raise ValueError("selection_scoring_window_after_cutoff")
     if config["selection_group"] == "global" and (
         pd.Timestamp(window.start) != pd.Timestamp(validation_windows[0].start)
         or pd.Timestamp(window.end) != pd.Timestamp(validation_windows[-1].end)
@@ -469,7 +467,6 @@ def score(config):
     declared = label_session.spec
     labels = None
     candidates, frames, common, target, market = [], [], None, None, None
-    expected_domains = {}
     for candidate_id, candidate_paths in zip(ids, paths, strict=True):
         if type(candidate_paths) is dict:
             if set(candidate_paths) != {"trial"}:
@@ -505,6 +502,15 @@ def score(config):
                     "asset_ids": record.get("asset_ids"),
                     "model": record["model"],
                     "candidate_parameters": record["candidate_parameters"],
+                    **{
+                        key: record.get(key)
+                        for key in (
+                            "market_id",
+                            "label_unit",
+                            "target_definition",
+                            "input_units",
+                        )
+                    },
                     "predictions": [],
                     "fit_windows": record["fit_windows"],
                     "trial": candidate_paths["trial"],
@@ -517,24 +523,26 @@ def score(config):
         candidate_paths = (
             [candidate_paths] if type(candidate_paths) is str else candidate_paths
         )
-        if (
-            type(candidate_paths) is not list
-            or len(candidate_paths) != len(validation_windows)
-            or len(set(candidate_paths)) != len(candidate_paths)
+        if type(candidate_paths) is not list or len(candidate_paths) != len(
+            validation_windows
         ):
             raise ValueError("candidate_validation_windows_incomplete")
         pieces, training_windows, first_facts = [], [], None
+        missing_label_rows = 0
         mse_reason = None
         for path, declared_window in zip(
             candidate_paths, validation_windows, strict=True
         ):
             predictions, prediction = read_predictions(
-                Path(path), columns=("timestamp", "asset_id", "prediction_score")
+                Path(path),
+                columns=("timestamp", "asset_id", "prediction_score"),
+                time_window=declared_window,
             )
-            if prediction["model_id"] != candidate_id or prediction[
-                "prediction_window"
-            ] != _window_payload(declared_window):
-                raise ValueError("selection_requires_declared_validation_candidate")
+            if prediction["model_id"] != candidate_id:
+                raise ValueError("selection_candidate_model_mismatch")
+            predictions = predictions.loc[
+                prediction_window_mask(predictions.timestamp, window)
+            ]
             facts = prediction["model_facts"]
             model_metadata = prediction_model_metadata(prediction)
             if pd.Timestamp(facts["fit_cutoff"]) >= pd.Timestamp(declared_window.start):
@@ -548,17 +556,6 @@ def score(config):
             if market is not None and facts["market_id"] != market:
                 raise ValueError("selection_label_units_or_market_mismatch")
             market = facts["market_id"]
-            if market == "crypto":
-                training_assets = facts.get("asset_ids")
-                if training_assets is None:
-                    training_assets = model_metadata["training_asset_ids"]
-                expected_axis = (
-                    "single_asset_time_series"
-                    if len(training_assets) == 1
-                    else "cross_sectional"
-                )
-                if not training_assets or config["validation_axis"] != expected_axis:
-                    raise ValueError("crypto_training_scope_validation_axis_mismatch")
             label = model_metadata["target_column"]
             if target is not None and target != label:
                 raise ValueError("model_selection_label_mismatch")
@@ -574,158 +571,57 @@ def score(config):
                 availability = declared.get("label_availability_columns", {}).get(
                     target, training_availability_columns(target)[0]
                 )
-                with closing_iterator(
-                    iter_dataset_chunks(
-                        label_session.filtered_view(
-                            TimeWindow(
-                                validation_windows[0].start, validation_windows[-1].end
+                label_parts = []
+                for part in validation_windows:
+                    with closing_iterator(
+                        iter_dataset_chunks(
+                            label_session.filtered_view(part)
+                            .filtered_view(window)
+                            .projected_view(
+                                (
+                                    "timestamp",
+                                    "asset_id",
+                                    "eligible",
+                                    target,
+                                    availability,
+                                )
                             )
-                        ).projected_view(
-                            ("timestamp", "asset_id", "eligible", target, availability)
                         )
-                    )
-                ) as label_chunks:
-                    labels = pd.concat(list(label_chunks), ignore_index=True)
+                    ) as label_chunks:
+                        label_parts.extend(label_chunks)
+                labels = pd.concat(label_parts, ignore_index=True)
+                labels["timestamp"] = strict_timestamp_series(
+                    labels.timestamp, error="invalid_scoring_timestamp"
+                )
                 if labels.duplicated(["timestamp", "asset_id"]).any() or labels.loc[
                     :, ["timestamp", "asset_id"]
                 ].isna().any(axis=None):
                     raise ValueError("invalid_scoring_label_keys")
-                labels["timestamp"] = strict_timestamp_series(
-                    labels.timestamp, error="invalid_scoring_timestamp"
+                supplied_label_keys = pd.MultiIndex.from_frame(
+                    labels.loc[:, ["timestamp", "asset_id"]]
                 )
-            if first_facts is not None:
-                if facts.get("asset_ids") != first_facts.get("asset_ids"):
-                    raise ValueError(
-                        "candidate_training_asset_scope_changed_across_folds"
+                labels = labels.loc[
+                    legal_training_mask(
+                        labels,
+                        fitting_cutoff=cutoff,
+                        availability_column=availability,
+                        target_column=label,
                     )
-                for key in (
-                    "model_algorithm",
-                    "input_factor_columns",
-                    "input_feature_columns",
-                    "target_column",
-                    "sample_filter_mode",
-                    "training_weighting",
-                    "max_train_rows",
-                ):
-                    if facts["model"][key] != first_facts["model"][key]:
-                        raise ValueError("candidate_configuration_changed_across_folds")
-                if facts["candidate_parameters"] != first_facts["candidate_parameters"]:
-                    raise ValueError("candidate_parameters_changed_across_folds")
+                ]
+            if first_facts is not None:
+                validate_model_facts(facts, expected=first_facts)
             else:
                 first_facts = facts
-            columns = tuple(
-                dict.fromkeys(
-                    (
-                        "timestamp",
-                        "asset_id",
-                        *model_metadata["input_columns"],
-                        *required_filter_columns(model_metadata["sample_filter_mode"]),
-                    )
-                )
-            )
-            from quant_research_platform.contracts.json_codec import (
-                canonical_identity_bytes,
-            )
-
-            domain = canonical_identity_bytes(
-                {
-                    "inputs": prediction["inputs"],
-                    "input_spec": prediction["input_spec"],
-                    "window": prediction["prediction_window"],
-                    "columns": list(columns),
-                    "assets": prediction.get("asset_ids"),
-                    "algorithm": model_metadata["model_algorithm"],
-                    "filter": model_metadata["sample_filter_mode"],
-                }
-            )
-            if domain not in expected_domains:
-                source = prediction["inputs"]
-                if prediction["input_spec"] is not None:
-                    if isinstance(source, Mapping):
-                        raise ValueError("duplicate_input_spec")
-                    source = {"path": source, "spec": prediction["input_spec"]}
-                options = _dataset_input_options(source)
-                selected_columns = options.get("columns")
-                options.setdefault("columns", ("timestamp", "asset_id"))
-                session = open_dataset_session(**options)
-                validate_model_input_roles(
-                    session.spec,
-                    _model_spec(facts["model"]),
-                    market_id=facts["market_id"],
-                    selected_columns=selected_columns,
-                )
-                read_columns = tuple(
-                    dict.fromkeys(
-                        (
-                            *columns,
-                            *model_input_validity_columns(
-                                tuple(model_metadata["input_columns"]),
-                                model_metadata["model_algorithm"],
-                                session.spec["column_roles"],
-                            ),
-                        )
-                    )
-                )
-                keys = []
-                with closing_iterator(
-                    iter_dataset_chunks(
-                        session.filtered_view(declared_window).projected_view(
-                            read_columns
-                        )
-                    )
-                ) as input_chunks:
-                    for frame in input_chunks:
-                        expected = prediction_rows(
-                            frame,
-                            model_metadata,
-                            declared_window,
-                            declared_columns=session.spec["column_roles"],
-                        )
-                        if prediction.get("asset_ids") is not None:
-                            expected = expected.loc[
-                                expected.asset_id.isin(prediction["asset_ids"])
-                            ]
-                        keys.append(expected.loc[:, ["timestamp", "asset_id"]])
-                expected_keys = pd.MultiIndex.from_frame(
-                    pd.concat(keys, ignore_index=True)
-                )
-                if not expected_keys.is_unique:
-                    raise ValueError("candidate_input_duplicate_keys")
-                expected_domains[domain] = expected_keys
-            expected_keys = expected_domains[domain]
             actual_keys = pd.MultiIndex.from_frame(
                 predictions.loc[:, ["timestamp", "asset_id"]]
             )
-            if len(expected_keys) != len(actual_keys) or len(
-                expected_keys.difference(actual_keys)
-            ):
-                raise ValueError("candidate_prediction_coverage_missing")
+            missing_label_rows += len(actual_keys.difference(supplied_label_keys))
             joined = predictions.merge(
                 labels,
                 on=["timestamp", "asset_id"],
-                how="left",
+                how="inner",
                 validate="one_to_one",
-                indicator=True,
             )
-            if not joined["_merge"].eq("both").all():
-                raise ValueError("candidate_label_coverage_missing")
-            mature = legal_training_mask(
-                joined,
-                fitting_cutoff=cutoff,
-                availability_column=availability,
-                target_column=label,
-            )
-            from quant_research_platform.contracts.time import (
-                time_window_timestamp_interval,
-            )
-
-            lower, upper, closed = time_window_timestamp_interval(window)
-            mature &= joined.timestamp.ge(pd.Timestamp(lower)) & (
-                joined.timestamp.le(pd.Timestamp(upper))
-                if closed
-                else joined.timestamp.lt(pd.Timestamp(upper))
-            )
-            joined = joined.loc[mature].drop(columns="_merge")
             calibration = model_metadata.get("rank_parameters", {}).get(
                 "label_calibration"
             )
@@ -762,9 +658,25 @@ def score(config):
                 "asset_ids": first_facts.get("asset_ids"),
                 "model": first_facts["model"],
                 "candidate_parameters": first_facts["candidate_parameters"],
+                **{
+                    key: first_facts.get(key)
+                    for key in (
+                        "market_id",
+                        "label_unit",
+                        "target_definition",
+                        "input_units",
+                    )
+                },
                 "predictions": candidate_paths,
                 "fit_windows": training_windows,
                 "mse_reason": mse_reason,
+                "coverage": {
+                    "current_mature_label_rows": len(labels),
+                    "paired_prediction_rows": len(candidate_frame),
+                    "mature_label_rows_without_prediction": len(labels)
+                    - len(candidate_frame),
+                    "prediction_rows_without_label": missing_label_rows,
+                },
             }
         )
     validate_input_market(declared, market)
@@ -774,11 +686,10 @@ def score(config):
         )
 
         validate_model_selection([_model_spec(item["model"]) for item in candidates])
-    if common is None or not len(common):
-        raise ValueError("empty_model_selection_validation_window")
+    common_rows = 0 if common is None else len(common)
     rows = []
     for candidate, frame in zip(candidates, frames, strict=True):
-        if frame is None:
+        if frame is None or not common_rows:
             from quant_research_platform.contracts.models import (
                 _MODEL_SELECTION_TRIAL_METRIC_KEYS,
             )
@@ -816,10 +727,9 @@ def score(config):
         "validation_windows": [_window_payload(item) for item in validation_windows],
         "scoring_window": _window_payload(window),
         "cutoff": cutoff.isoformat(),
-        "test_window": None if test is None else _window_payload(test),
         "selection_group": config["selection_group"],
         "validation_axis": config["validation_axis"],
-        "common_rows": len(common),
+        "common_rows": common_rows,
         "label_unit": config["label_unit"],
         "target_column": target,
         "market_id": market,
@@ -847,8 +757,6 @@ def _selection_choice(value):
         item["model_id"] for item in value["metrics"]
     ] != ids:
         raise ValueError("selection_candidate_coverage_missing")
-    from pathlib import Path
-
     from quant_research_platform.contracts.models import (
         _validate_model_selection_trial_record,
     )
@@ -860,19 +768,6 @@ def _selection_choice(value):
         ):
             raise ValueError("selection_mse_reason_invalid")
         if candidate.get("status") in {"failed", "abandoned"}:
-            from quant_research_platform.storage.experiments import read_trial_ledger
-
-            terminal = read_trial_ledger(Path(candidate["trial"]))[-1]
-            if (
-                terminal["status"] != candidate["status"]
-                or terminal["model"] != candidate["model"]
-                or terminal["family_id"] != candidate["family_id"]
-                or terminal.get("error") != candidate.get("failure_reason")
-                or terminal["candidate_parameters"] != candidate["candidate_parameters"]
-                or terminal["fit_windows"] != candidate["fit_windows"]
-                or terminal.get("asset_ids") != candidate.get("asset_ids")
-            ):
-                raise ValueError("selection_failed_trial_reference_mismatch")
             if metrics["validation_rows"] != 0 or any(
                 metrics[key] is not None for key in MODEL_SELECTION_METRIC_DIRECTIONS
             ):
@@ -903,7 +798,7 @@ def _selection_choice(value):
 
 
 def select(config):
-    """Freeze a complete validation comparison, without automatically refitting."""
+    """Select from a complete validation comparison, without refitting."""
     from pathlib import Path
 
     from quant_research_platform.contracts.json_codec import (
@@ -945,6 +840,16 @@ def select(config):
 
 
 def _selection_decisions(value):
+    from quant_research_platform.contracts.models import validate_model_facts
+
+    for candidate in value["candidates"]:
+        validate_model_facts(candidate)
+        validate_input_market(candidate, value["market_id"])
+        if (
+            candidate["model_id"] != candidate["model"]["model_id"]
+            or candidate["model"]["target_column"] != value["target_column"]
+        ):
+            raise ValueError("selection_candidate_facts_mismatch")
     _selection_choice(value)
     family_order = list(
         dict.fromkeys(item["family_id"] for item in value["candidates"])
@@ -1032,11 +937,11 @@ def _validate_refit_scope(value):
     cutoff = strict_timestamp_series(
         pd.Series([value["refit_cutoff"]]), error="invalid_refit_cutoff"
     ).iloc[0]
-    if cutoff < pd.Timestamp(value["cutoff"]) or (
-        value.get("test_window") is not None
-        and cutoff >= pd.Timestamp(value["test_window"]["start"])
-    ):
-        raise ValueError("refit_cutoff_outside_frozen_domain")
+    selection_cutoff = strict_timestamp_series(
+        pd.Series([value["cutoff"]]), error="invalid_selection_cutoff"
+    ).iloc[0]
+    if cutoff < selection_cutoff:
+        raise ValueError("refit_cutoff_before_selection")
     eligible_families = [
         item for item in value["families"] if item["selected_config_id"] is not None
     ]
@@ -1070,14 +975,4 @@ def read_selection(path):
     decisions = _selection_decisions(value)
     if any(value.get(key) != item for key, item in decisions.items()):
         raise ValueError("selection_choice_mismatch")
-    original = parse_qrp_json_object(Path(value["scores"]).read_bytes())
-    if any(value.get(key) != item for key, item in original.items()):
-        raise ValueError("selection_score_reference_mismatch")
-    cutoff = strict_timestamp_series(
-        pd.Series([value["cutoff"]]), error="invalid_selection_cutoff"
-    ).iloc[0]
-    if value.get("test_window") is not None and cutoff >= pd.Timestamp(
-        value["test_window"]["start"]
-    ):
-        raise ValueError("selection_test_isolation_invalid")
     return value

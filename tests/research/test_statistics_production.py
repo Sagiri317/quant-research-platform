@@ -59,8 +59,8 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
     layout = StorageLayout(tmp_path)
     config = statistics_config()
     config["statistics"]["factor_fdr_families"] = {"fixture": ["x"]}
-    if full_factor_history:
-        config["statistics"]["bootstrap_repetitions"] = 32
+    # Native-backend parity needs reproducible draws, not a research-sized run.
+    config["statistics"]["bootstrap_repetitions"] = 32 if full_factor_history else 199
     config["statistics"]["fama_macbeth_core_factors"] = ["x"]
     families = tuple(f"pv_all_{algorithm}" for algorithm in A_SHARE_MODEL_ALGORITHMS)
     dates = pd.bdate_range("2019-01-01", periods=64)
@@ -307,7 +307,11 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
                 seed = derive_seed(
                     42, "a_share_model_reality_check", "pv_all", "validation", test_id
                 )
-                options = dict(block_size=20, reps=10000, seed=seed)
+                options = dict(
+                    block_size=20,
+                    reps=config["statistics"]["bootstrap_repetitions"],
+                    seed=seed,
+                )
                 native = (
                     constructor(losses, size=0.05, **options)
                     if constructor is MCS
@@ -1105,7 +1109,6 @@ def test_paired_model_rankic_consumes_explicit_comparison_config(has_observation
         "timestamp",
         "family_id",
         "asset_coverage_id",
-        "target_domain_id",
         "observation_count",
         "sample_role",
         "loss",
@@ -1117,7 +1120,6 @@ def test_paired_model_rankic_consumes_explicit_comparison_config(has_observation
                 pd.Timestamp("2023-01-03"),
                 family,
                 "a" * 64,
-                "b" * 64,
                 2,
                 "validation",
                 -0.5,
@@ -1723,7 +1725,25 @@ def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_pat
         assert len(predicted) == 45 * 12 and (
             not predicted.duplicated(["timestamp", "asset_id"]).any()
         )
-        assert np.isfinite(predicted.prediction_score).all()
+        training = frame.loc[
+            frame.timestamp.le("2022-12-31")
+            & frame[primary + "_available_at"].le("2022-12-31")
+            & frame[primary].notna()
+        ]
+        assert fitted.metadata["rows_after_input_label_dropna"] == len(training)
+        # All admitted dates contain 12 assets, so equal-date OLS weights are uniform.
+        assert training.groupby("timestamp").size().eq(12).all()
+        design = np.column_stack((np.ones(len(training)), training[factor]))
+        coefficients = np.linalg.lstsq(design, training[primary], rcond=None)[0]
+        selected = predicted.merge(
+            frame[["timestamp", "asset_id", factor]],
+            on=["timestamp", "asset_id"],
+            validate="one_to_one",
+        )
+        expected = coefficients[0] + coefficients[1] * selected[factor]
+        np.testing.assert_allclose(
+            selected.prediction_score, expected, rtol=1e-12, atol=1e-14
+        )
         scored = score(
             {
                 "predictions": [str(predictions)],
@@ -1732,7 +1752,6 @@ def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_pat
                 "validation_windows": [prediction_window],
                 "scoring_window": prediction_window,
                 "cutoff": str(cutoff),
-                "test_window": {"start": "2024-01-01", "end": "2024-03-31"},
                 "selection_group": "global",
                 "validation_axis": "cross_sectional",
                 "output": str(root / "scores.json"),

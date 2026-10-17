@@ -66,27 +66,27 @@ def compute_ic_and_grouped_label_values(
                         signal_ranks,
                         label_ranks_by_mask[mask_key],
                     )
-                    predicted = np.isfinite(signal_values)
-                    groups = _assign_groups_from_ranks(
-                        _average_ranks(signal_values[predicted]), n_groups
+                predicted = np.isfinite(signal_values)
+                groups = _assign_groups_from_ranks(
+                    _average_ranks(signal_values[predicted]), n_groups
+                )
+                predicted_labels = label_values[predicted]
+                for group in np.unique(groups):
+                    group_mask = (groups == group) & np.isfinite(predicted_labels)
+                    grouped_records.append(
+                        {
+                            "timestamp": timestamp,
+                            "signal": signal,
+                            "label": label,
+                            "group": group,
+                            "mean_label_value": float(
+                                mean(predicted_labels[group_mask])
+                            )
+                            if group_mask.any()
+                            else np.nan,
+                            "n_obs": int(group_mask.sum()),
+                        }
                     )
-                    predicted_labels = label_values[predicted]
-                    for group in np.unique(groups):
-                        group_mask = (groups == group) & np.isfinite(predicted_labels)
-                        grouped_records.append(
-                            {
-                                "timestamp": timestamp,
-                                "signal": signal,
-                                "label": label,
-                                "group": group,
-                                "mean_label_value": float(
-                                    mean(predicted_labels[group_mask])
-                                )
-                                if group_mask.any()
-                                else np.nan,
-                                "n_obs": int(group_mask.sum()),
-                            }
-                        )
                 ic_records.append(
                     {
                         "timestamp": timestamp,
@@ -392,3 +392,34 @@ def _correlation_ratio_reason(
     if std == 0:
         return "zero_variance"
     return "nonfinite_result"
+
+
+def _batch_pearson_correlation_result(left_values, right_values):
+    """Compute bounded-array Pearson using shared stable centering.
+
+    The exact streaming accumulator remains the owner for incremental updates;
+    this batch path avoids per-row Python arithmetic for already materialized data.
+    """
+    left = np.asarray(left_values, dtype="float64")
+    right = np.asarray(right_values, dtype="float64")
+    if left.ndim != 1 or right.shape != left.shape:
+        raise ValueError("correlation_array_shape_invalid")
+    if len(left) < 2:
+        return None, "insufficient_observations"
+    if not np.isfinite(left).all() or not np.isfinite(right).all():
+        return None, "nonfinite_result"
+    left = _scaled_centered_values(left)
+    right = _scaled_centered_values(right)
+    if left is None or right is None:
+        return None, "zero_variance"
+    value, reason = _pearson_correlation_from_moments(
+        count=len(left),
+        left_m2=float(np.dot(left, left)),
+        right_m2=float(np.dot(right, right)),
+        covariance=float(np.dot(left, right)),
+    )
+    return (
+        (float(np.clip(value, -1.0, 1.0)), reason)
+        if value is not None
+        else (value, reason)
+    )

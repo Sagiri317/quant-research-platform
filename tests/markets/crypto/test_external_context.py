@@ -460,7 +460,7 @@ def test_external_archive_units_clocks_and_invalid_rows_reach_publication(
             write_dataset(rejected_root, chunks, spec=spec, metadata=metadata)
     assert not rejected_root.exists()
 
-    # Even an empty target selection must admit every required source before publish.
+    # An empty target never opens an unconsumed native member.
     empty_request = request | {
         "inputs": {
             ids.HFT_PANEL_DATA_ID: {
@@ -473,10 +473,8 @@ def test_external_archive_units_clocks_and_invalid_rows_reach_publication(
     original_data = source_file.read_bytes()
     source_file.unlink()
     try:
-        with pytest.raises(ValueError, match="tardis_raw_identity_changed"):
-            with binding.producer(spec, **empty_request) as (chunks, metadata):
-                assert "manifest_hash" not in metadata["source_evidence"]
-                write_dataset(rejected_root, chunks, spec=spec, metadata=metadata)
+        with binding.producer(spec, **empty_request) as (chunks, metadata):
+            assert list(chunks) == []
     finally:
         source_file.write_bytes(original_data)
     assert not rejected_root.exists()

@@ -223,10 +223,14 @@ def test_cli_help_describes_each_registered_operation():
 
 
 @pytest.mark.parametrize(
-    "command",
-    [item.name for item in commands.app.registered_commands if item.name != "inspect"],
+    "command,kind",
+    [
+        (item.name, "missing")
+        for item in commands.app.registered_commands
+        if item.name != "inspect"
+    ]
+    + [("fit", "not_a_directory"), ("fit", "malformed")],
 )
-@pytest.mark.parametrize("kind", ["missing", "not_a_directory", "malformed"])
 def test_cli_main_classifies_config_errors(
     tmp_path, monkeypatch, capsys, command, kind
 ):

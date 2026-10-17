@@ -175,7 +175,7 @@ def hac_mean(
     data = _finite_vector(values, minimum=2)
     if type(max_lags) is not int or max_lags < 0 or max_lags >= len(data):
         raise ValueError("hac_max_lags_invalid")
-    if not 0.0 < confidence < 1.0:
+    if type(confidence) is not float or not 0.0 < confidence < 1.0:
         raise ValueError("confidence_invalid")
     _, exponent = np.frexp(np.max(np.abs(data)))
     normalized = np.ldexp(data, -int(exponent))
@@ -930,8 +930,13 @@ def time_series_inference_summary(
     fdr_method: Literal["BH", "BY"] | None,
     fdr_alpha: float,
     fdr_family_size: int | None = None,
+    confidence: float = 0.95,
 ) -> pd.DataFrame:
     """Summarize complete time-series columns with HAC inference and one FDR family."""
+    if type(max_lags) is not int or max_lags < 0:
+        raise ValueError("hac_max_lags_invalid")
+    if type(confidence) is not float or not 0.0 < confidence < 1.0:
+        raise ValueError("confidence_invalid")
     if not isinstance(frame, pd.DataFrame) or identity_column not in frame.columns:
         raise ValueError("time_series_inference_columns_invalid")
     value_columns = tuple(
@@ -971,7 +976,9 @@ def time_series_inference_summary(
             )
             continue
         try:
-            result = hac_mean(values.loc[valid], max_lags=max_lags)
+            result = hac_mean(
+                values.loc[valid], max_lags=max_lags, confidence=confidence
+            )
         except ValueError as exc:
             if str(exc) != "hac_inference_undefined":
                 raise
@@ -1010,6 +1017,10 @@ def time_series_inference_summary(
 
 def _apply_fdr(result, fdr_method, fdr_alpha, family_size):
     """Apply the full declared family to an existing individual-inference table."""
+    if fdr_method is not None:
+        _validate_alpha(fdr_alpha)
+        if fdr_method not in {"BH", "BY"}:
+            raise ValueError("fdr_input_invalid")
     defined = result["status"].eq("DEFINED")
     if fdr_method is None:
         result["fdr_method"] = None
@@ -1052,6 +1063,7 @@ def _validate_bootstrap_configuration(
         or type(repetitions) is not int
         or (repetitions < 2)
         or (type(seed) is not int)
+        or seed < 0
     ):
         raise ValueError("bootstrap_configuration_invalid")
 

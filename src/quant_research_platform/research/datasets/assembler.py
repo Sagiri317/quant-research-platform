@@ -733,11 +733,6 @@ def assemble(config: Mapping) -> Path:
             column_units=declared.get("column_units", {}),
             label_availability_columns=declared.get("label_availability_columns", {}),
         )
-    roles = {
-        column: role
-        for item in actual_specs.values()
-        for column, role in item.column_roles.items()
-    }
     selected_roles = {
         column: role
         for data_id, item in actual_specs.items()
@@ -1019,9 +1014,12 @@ def assemble(config: Mapping) -> Path:
     for label in tuple(labels):
         maturity = availability.get(label)
         if maturity and maturity not in labels and maturity not in context:
-            (labels if roles.get(maturity) is ColumnRole.LABEL else context).append(
-                maturity
-            )
+            producer = actual_specs[maturity_producers[maturity]]
+            (
+                labels
+                if producer.column_roles[maturity] is ColumnRole.LABEL
+                else context
+            ).append(maturity)
     labels = tuple(dict.fromkeys(labels))
     context = tuple(dict.fromkeys(context))
     if set(sparse_inputs) - set(inputs) or base_input in sparse_inputs:
@@ -1142,11 +1140,14 @@ def assemble(config: Mapping) -> Path:
                 elif source_unit is not None:
                     units["feature_" + suffix] = source_unit
     if "model_target" in labels:
-        units["model_target"] = (
-            "decimal_return"
-            if spec.target_transform in {"raw", "industry_size_residual"}
-            else "dimensionless"
-        )
+        if spec.target_transform in {"raw", "industry_size_residual"}:
+            source_unit = consumed_specs[
+                producers["forward_return_20d"]
+            ].column_units.get("forward_return_20d")
+            if source_unit is not None:
+                units["model_target"] = source_unit
+        else:
+            units["model_target"] = "dimensionless"
     spec = replace(spec, column_units=units)
     existing = ()
     projected = {}

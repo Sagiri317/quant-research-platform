@@ -94,7 +94,11 @@ def test_enhanced_cash_does_not_change_stock_leg_industry_neutrality():
         factor_covariance=pd.DataFrame(0.0, index=columns, columns=columns),
         industry_columns=columns,
         cash_column="is_cash",
-        expected_transaction_cost=lambda weights: 0.0,
+        expected_transaction_cost=lambda buy, sell: (
+            0.0,
+            np.zeros_like(buy),
+            np.zeros_like(sell),
+        ),
         nav=100.0,
         assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,)),
         config=OptimizerConfig(

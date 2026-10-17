@@ -361,8 +361,18 @@ def test_taker_projection_keeps_native_reconstruction_failures(
     )
     assert full == projected
     if fault == "depth":
-        assert full[3]["unsupported_coverage"] > 0
-        assert full[3]["emitted_states"] == 19
+        assert full[3]["unsupported_coverage"] == 1
+        # The next continuous absolute update restores all required levels.
+        # Preserve the real uncovered interval rather than halting forever.
+        assert full[3]["emitted_states"] == 299
+        assert full[3]["valid_segments"] == 2
+        assert full[3]["invalid_segments"] == full[3]["recovered_segments"] == 1
+        bounds = sorted(full[3]["coverage_segments"].values())
+        start = pd.Timestamp("2026-09-01T00:00:00Z").value
+        assert bounds == [
+            (start + 10_000_000, start + 200_000_000),
+            (start + 210_000_000, start + 3_000_000_001),
+        ]
     else:
         assert full[0] == ("ValueError", "binance_replay_observed_time_non_monotonic")
 

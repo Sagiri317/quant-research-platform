@@ -106,7 +106,6 @@ def test_explicit_model_roundtrip_freeze_and_repeated_prediction(tmp_path, monke
             "scoring_window": prediction_config["prediction_window"],
             "validation_windows": [prediction_config["prediction_window"]],
             "cutoff": "2020-01-06",
-            "test_window": {"start": "2020-01-07", "end": "2020-01-09"},
             "selection_group": "quarterly",
             "validation_axis": "cross_sectional",
             "output": str(tmp_path / "scores.json"),
@@ -133,7 +132,6 @@ def test_explicit_model_roundtrip_freeze_and_repeated_prediction(tmp_path, monke
             "fit_windows": [{"start": "2020-01-01", "end": "2020-01-06"}],
             "fit_cutoff": "2020-01-06",
             "selection": str(selection),
-            "test_window": {"start": "2020-01-07", "end": "2020-01-09"},
         }
     )
     test = predict(

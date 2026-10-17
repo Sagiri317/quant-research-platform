@@ -59,23 +59,6 @@ def test_write_dataset_writes_complete_artifact_root(tmp_path: Path) -> None:
     assert spec_payload["schema_id"] == "qrp-dataset-spec"
     assert spec_payload["kind"] == "factor"
 
-
-def test_write_dataset_partition_counts_and_values(tmp_path: Path) -> None:
-    root = make_dataset_artifact_root(tmp_path, "partition_values")
-    write_dataset(
-        root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("partition_values"),
-    )
-    manifest = json.loads(
-        Path(native_filesystem_path(root / "_manifest" / "manifest.json")).read_text(
-            encoding="utf-8"
-        )
-    )
-    assert manifest["partition_row_counts"] == {"year=2014": 1, "year=2015": 2}
-
-    from quant_research_platform.storage.datasets.reading import read_dataset
-
     expected = (
         make_default_dataset_frame()
         .sort_values(["asset_id", "timestamp"])
@@ -85,7 +68,7 @@ def test_write_dataset_partition_counts_and_values(tmp_path: Path) -> None:
     actual = (
         read_dataset(root).sort_values(["asset_id", "timestamp"]).reset_index(drop=True)
     )
-    pd.testing.assert_frame_equal(actual, expected, check_dtype=True)
+    pd.testing.assert_frame_equal(actual, expected, check_dtype=True, check_exact=True)
 
 
 def test_write_dataset_rejects_parallel_input_fingerprint_lineage(

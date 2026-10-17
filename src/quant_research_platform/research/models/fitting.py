@@ -83,8 +83,6 @@ class PreparedTraining:
         )
         if self.rank_inputs:
             return weights, None, self.training
-        if self.training.loc[:, self.input_columns].isna().all(axis=0).any():
-            raise ValueError("model_training_feature_all_missing")
         matrix = self.training.loc[:, self.input_columns]
         scaler = ModelMatrixScaler.fit(
             matrix,
@@ -209,7 +207,20 @@ def validate_model_state(predictor: object, metadata: dict[str, object]) -> None
             or predictor.scaler.to_payload() != metadata["scaler"]
         ):
             raise ValueError("model_state_metadata_mismatch")
-    if importance != metadata.get("feature_importance"):
+    saved_importance = metadata.get("feature_importance")
+    if (importance is None) != (saved_importance is None) or (
+        importance is not None
+        and (
+            set(importance) != set(saved_importance)
+            or not np.allclose(
+                list(importance.values()),
+                [saved_importance[column] for column in importance],
+                rtol=1e-12,
+                atol=1e-15 * max(map(abs, importance.values()), default=0.0)
+                + np.nextafter(0.0, 1.0),
+            )
+        )
+    ):
         raise ValueError("model_state_metadata_mismatch")
 
 
@@ -354,6 +365,41 @@ def _fit_estimator_model_result(
     return result
 
 
+def _legal_training_rows(
+    frame: pd.DataFrame,
+    spec: ModelSpec,
+    *,
+    fitting_cutoff: object,
+    availability_column: str,
+    declared_columns=(),
+):
+    """Select legal rows without learning preprocessing or applying a row cap."""
+    validity = model_input_validity_columns(
+        spec.input_columns, spec.model_algorithm, declared_columns
+    )
+    columns = tuple(dict.fromkeys((*spec.input_columns, *validity)))
+    missing = sorted(set(columns).difference(frame.columns))
+    if missing:
+        raise ValueError(f"missing_model_columns: {', '.join(missing)}")
+    for column in columns:
+        strict_finite_numeric_series(
+            frame[column], error=f"invalid_training_value: {column}", allow_null=True
+        )
+    keep = legal_training_mask(
+        frame,
+        fitting_cutoff=fitting_cutoff,
+        availability_column=availability_column,
+        feature_columns=(),
+        target_column=spec.target_column,
+    )
+    keep &= model_observed_input_mask(frame, spec.input_columns, declared_columns)
+    masked = mask_unobserved_features(frame, spec.input_columns, declared_columns)
+    filtered, metadata = apply_filter_mode(
+        masked, mode=spec.sample_filter_mode, metadata_key="sample_filter_mode"
+    )
+    return filtered.loc[keep.loc[filtered.index]], metadata
+
+
 def _collect_training_frame(
     frames: Iterable[pd.DataFrame],
     spec: ModelSpec,
@@ -407,29 +453,12 @@ def _collect_training_frame(
     ) as work_frames:
         for chunk in work_frames:
             chunk = chunk.reset_index(drop=True)
-            for column in tuple(
-                dict.fromkeys((*spec.input_columns, *validity_columns))
-            ):
-                strict_finite_numeric_series(
-                    chunk[column],
-                    error=f"invalid_training_value: {column}",
-                    allow_null=True,
-                )
-            keep = legal_training_mask(
+            filtered, metadata = _legal_training_rows(
                 chunk,
+                spec,
                 fitting_cutoff=fitting_cutoff,
                 availability_column=availability_columns[0],
-                feature_columns=(),
-                target_column=spec.target_column,
-            )
-            keep &= model_observed_input_mask(
-                chunk, spec.input_columns, declared_columns
-            )
-            chunk = mask_unobserved_features(
-                chunk, spec.input_columns, declared_columns
-            )
-            filtered, metadata = apply_filter_mode(
-                chunk, mode=spec.sample_filter_mode, metadata_key="sample_filter_mode"
+                declared_columns=declared_columns,
             )
             rows_input += _strict_non_negative_count_value(metadata["rows_input"])
             rows_after_filter += _strict_non_negative_count_value(
@@ -445,7 +474,7 @@ def _collect_training_frame(
                 spec.target_column,
                 availability_columns[0],
             ]
-            usable = filtered.loc[keep.loc[filtered.index], selected_columns].copy()
+            usable = filtered.loc[:, selected_columns].copy()
             if usable.empty:
                 continue
             blocks = (

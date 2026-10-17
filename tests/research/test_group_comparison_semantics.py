@@ -62,7 +62,7 @@ def test_native_same_models_predictions_and_unknown_units_remain_legal(paired_so
         _losses(paths[group]) for group in ("global", "quarterly")
     )
     pd.testing.assert_series_equal(
-        global_losses.target_domain_id, quarterly_losses.target_domain_id
+        global_losses.asset_coverage_id, quarterly_losses.asset_coverage_id
     )
     metadata = read_statistics_artifact(paths["global"]).metadata
     assert metadata["column_units"] == {}
@@ -76,7 +76,7 @@ def test_native_same_models_predictions_and_unknown_units_remain_legal(paired_so
     )
     undefined = global_losses.loc[global_losses.status.eq("UNDEFINED")]
     assert not undefined.empty
-    assert undefined.target_domain_id.eq(canonical_json_hash([])).all()
+    assert undefined.asset_coverage_id.eq(canonical_json_hash([])).all()
     with read_statistics_artifact(paths["quarterly"]).table(
         "model_group_comparison.parquet"
     ) as rows:
@@ -84,7 +84,7 @@ def test_native_same_models_predictions_and_unknown_units_remain_legal(paired_so
         assert rows.mean_difference.eq(0).all()
 
 
-def test_native_target_proof_reuses_the_single_dataset_scan(
+def test_native_comparison_reuses_the_single_dataset_scan(
     paired_sources, tmp_path, monkeypatch
 ):
     _case, configs, _paths = paired_sources
@@ -125,7 +125,7 @@ def test_native_global_slot_requires_actual_global_selection(
 
 
 @pytest.mark.parametrize("mutation", ["primary_label", "values", "maturity"])
-def test_native_target_mismatches_reject_group_difference(
+def test_native_declared_target_and_key_domain_control_comparison(
     paired_sources, tmp_path, mutation
 ):
     case, configs, paths = paired_sources
@@ -163,18 +163,20 @@ def test_native_target_mismatches_reject_group_difference(
         "global_statistics": str(left),
         "output": str(tmp_path / "rejected"),
     }
-    with pytest.raises(
-        ValueError, match="model_group_comparison_(target_metadata|coverage)_invalid"
-    ):
-        model_statistics(right)
-    assert not (tmp_path / "rejected").exists()
     if mutation == "values":
-        pd.testing.assert_series_equal(
-            _losses(left).asset_coverage_id, _losses(paths["global"]).asset_coverage_id
-        )
-        assert not _losses(left).target_domain_id.equals(
-            _losses(paths["global"]).target_domain_id
-        )
+        compared = model_statistics(right)
+        with read_statistics_artifact(compared).table(
+            "model_group_comparison.parquet"
+        ) as result:
+            assert result.observation_count.gt(0).all()
+            assert result.mean_difference.ne(0).any()
+    else:
+        with pytest.raises(
+            ValueError,
+            match="model_group_comparison_(target_metadata|coverage)_invalid",
+        ):
+            model_statistics(right)
+        assert not (tmp_path / "rejected").exists()
 
 
 @pytest.mark.parametrize(
@@ -222,7 +224,7 @@ def test_native_equal_consumed_targets_do_not_bind_unrelated_inputs(
     )
     actual = model_statistics(config)
     pd.testing.assert_series_equal(
-        _losses(actual).target_domain_id, _losses(paths["global"]).target_domain_id
+        _losses(actual).asset_coverage_id, _losses(paths["global"]).asset_coverage_id
     )
     with read_statistics_artifact(actual).table(
         "model_group_comparison.parquet"
@@ -256,7 +258,7 @@ def test_native_explicit_unit_conflict_rejects_pair(paired_sources, tmp_path):
 
 
 @pytest.mark.parametrize("variation", ["signed_zero", "one_ulp"])
-def test_native_target_domain_keeps_exact_float_semantics(
+def test_native_comparison_accepts_recomputed_float_targets(
     paired_sources, tmp_path, variation
 ):
     case, configs, _paths = paired_sources
@@ -284,16 +286,15 @@ def test_native_target_domain_keeps_exact_float_semantics(
             left = model_statistics(config)
         else:
             config["global_statistics"] = str(left)
-            if variation == "one_ulp":
-                with pytest.raises(
-                    ValueError, match="model_group_comparison_coverage_invalid"
-                ):
-                    model_statistics(config)
-            else:
-                right = model_statistics(config)
-                pd.testing.assert_series_equal(
-                    _losses(left).target_domain_id, _losses(right).target_domain_id
-                )
+            right = model_statistics(config)
+            pd.testing.assert_series_equal(
+                _losses(left).asset_coverage_id, _losses(right).asset_coverage_id
+            )
+            assert "target_domain_id" not in _losses(right)
+            with read_statistics_artifact(right).table(
+                "model_group_comparison.parquet"
+            ) as result:
+                assert result.observation_count.gt(0).all()
 
 
 @pytest.mark.parametrize(
@@ -469,3 +470,123 @@ def test_native_paired_size_basis_matches_only_when_consumed(tmp_path, neutralit
         config["analyses"] = ["performance"]
     output = portfolio_statistics(config)
     assert output.is_dir()
+
+
+@pytest.mark.parametrize("confidence", [0.90, 0.95, 0.99])
+@pytest.mark.parametrize("kind", ["model", "portfolio"])
+def test_paired_confidence_is_used_by_hac_and_persisted(tmp_path, confidence, kind):
+    from contextlib import nullcontext
+    from statistics import NormalDist
+    from types import SimpleNamespace
+
+    from quant_research_platform.research.portfolios.diagnostics import (
+        _group_portfolio_comparison,
+    )
+
+    values = np.array([0.02, -0.01, 0.04, 0.01, 0.03, -0.02, 0.05, 0.01])
+    dates = pd.date_range("2024-01-01", periods=len(values))
+    metadata = {
+        "selection_group": "global",
+        "coverage_basis": "model_prediction_domain",
+        "sample_role": "test",
+        "window": {"start": str(dates[0]), "end": str(dates[-1])},
+        "evaluation": {"primary_label": "label"},
+        "evaluation_axis": "cross_sectional",
+        "column_roles": {"label": "label"},
+        "column_units": {},
+    }
+    declaration = {
+        "fdr_method": "BY",
+        "alpha": 0.05,
+        "seed": 42,
+        "confidence": confidence,
+    }
+    config = {
+        "sample_role": "test",
+        "statistics": {
+            "hac_lag": 1,
+            "bootstrap_block": 2,
+            "bootstrap_repetitions": 20,
+            "group_comparison": declaration,
+        },
+    }
+    if kind == "model":
+        left = pd.DataFrame(
+            {
+                "timestamp": dates,
+                "family_id": "one",
+                "sample_role": "test",
+                "status": "DEFINED",
+                "asset_coverage_id": "a" * 64,
+                "observation_count": 100,
+                "loss": 0.0,
+            }
+        )
+        result = _paired_group_rankic(
+            left.assign(loss=-values),
+            global_statistics=SimpleNamespace(
+                metadata=metadata, table=lambda member: nullcontext(left)
+            ),
+            selection_group="quarterly",
+            family_ids=("one",),
+            config=config,
+            target_metadata={**metadata, "selection_group": "quarterly"},
+        )
+    else:
+        declaration.update(portfolio_ids=["one"], primary_portfolio_id="one")
+        result = _group_portfolio_comparison(
+            pd.DataFrame(
+                {"global_one": np.zeros(len(values)), "quarterly_one": values},
+                index=dates.rename("end_at"),
+            ),
+            config,
+        )
+    centered = values - values.mean()
+    standard_error = np.sqrt(centered @ centered + centered[1:] @ centered[:-1]) / len(
+        values
+    )
+    critical = NormalDist().inv_cdf((1 + confidence) / 2)
+    member = f"{kind}_group_comparison"
+    path = write_statistics_artifact(
+        tmp_path / "comparison",
+        metadata={**metadata, "comparison_portfolio_ids": ["one"]},
+        tables={member: result},
+        table_group="portfolio" if kind == "portfolio" else "research",
+    )
+    with read_statistics_artifact(path).table(f"{member}.parquet") as saved:
+        row = saved.iloc[0]
+        assert row.confidence == confidence
+        assert row.standard_error == pytest.approx(standard_error, rel=1e-14)
+        np.testing.assert_allclose(
+            [row.ci_lower, row.ci_upper],
+            values.mean() + np.array([-1, 1]) * critical * standard_error,
+            rtol=1e-14,
+        )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("hac_lag", -1),
+        ("hac_lag", True),
+        ("hac_lag", 0.5),
+        ("bootstrap_block", 0),
+        ("bootstrap_repetitions", 1),
+        ("seed", -1),
+        ("seed", True),
+        ("confidence", 1.0),
+        ("alpha", -0.05),
+        ("fdr_method", "invalid"),
+    ],
+)
+def test_undefined_cash_comparison_still_rejects_invalid_configuration(
+    tmp_path, field, value
+):
+    config = _portfolio_pair(tmp_path)
+    policy = config["statistics"]
+    (policy if field in policy else policy["group_comparison"])[field] = value
+    with pytest.raises(
+        ValueError, match="(comparison_policy|bootstrap_configuration)_invalid"
+    ):
+        portfolio_statistics(config)
+    assert not (tmp_path / "statistics").exists()

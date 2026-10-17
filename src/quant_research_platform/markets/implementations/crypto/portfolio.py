@@ -65,7 +65,6 @@ from quant_research_platform.research.predictions.outputs import prediction_rows
 from quant_research_platform.research.protocols.crypto_hft import (
     HFT_EXECUTION_ASSET_IDS,
     HFT_EXECUTION_CONTEXT_COLUMNS,
-    crypto_execution_windows,
     label_horizon_ms,
     research_chronology,
 )
@@ -128,9 +127,6 @@ def _prediction_evidence(
     predictions_path,
     *,
     window,
-    sample_role="prediction",
-    chronology=None,
-    fold_id="direct",
 ):
     predictions, metadata = read_predictions(
         Path(predictions_path),
@@ -153,53 +149,6 @@ def _prediction_evidence(
     cutoff = pd.Timestamp(facts["fit_cutoff"])
     if cutoff >= pd.Timestamp(window.start):
         raise ValueError("crypto_prediction_model_after_decision")
-    if chronology is not None:
-        folds, test = research_chronology(chronology)
-    if chronology is not None and sample_role == "test":
-        frozen = facts.get("test_window")
-        selection_cutoff = facts.get("selection_cutoff")
-        if (
-            (frozen is not None and _window(frozen) != test)
-            or cutoff > pd.Timestamp(folds[-1].validation.end)
-            or cutoff >= pd.Timestamp(test.start)
-            or (
-                selection_cutoff is not None
-                and pd.Timestamp(selection_cutoff) >= pd.Timestamp(test.start)
-            )
-        ):
-            raise ValueError("crypto_execution_model_freeze_invalid")
-        allowed = sorted(
-            (pd.Timestamp(part.start), pd.Timestamp(part.end))
-            for fold in folds
-            for part in (fold.train, fold.validation)
-        )
-        for item in facts["fit_windows"]:
-            first, last = pd.Timestamp(item["start"]), pd.Timestamp(item["end"])
-            cursor = first
-            covered = False
-            for start, end in allowed:
-                if end < cursor:
-                    continue
-                if start > cursor:
-                    break
-                if end >= last:
-                    covered = True
-                    break
-                cursor = end + pd.Timedelta(1, "ns")
-            if not covered:
-                raise ValueError("crypto_execution_refit_window_outside_chronology")
-    elif chronology is not None:
-        fold = next(fold for fold in folds if fold.fold_id == fold_id)
-        if cutoff > pd.Timestamp(fold.train.end) or cutoff >= pd.Timestamp(
-            window.start
-        ):
-            raise ValueError("crypto_calibration_model_after_training")
-        if any(
-            pd.Timestamp(item["start"]) < pd.Timestamp(fold.train.start)
-            or pd.Timestamp(item["end"]) > pd.Timestamp(fold.train.end)
-            for item in facts["fit_windows"]
-        ):
-            raise ValueError("crypto_calibration_model_training_window_invalid")
     declared = TimeWindow(
         metadata["prediction_window"]["start"],
         metadata["prediction_window"]["end"] or metadata["effective_prediction_end"],
@@ -631,13 +580,8 @@ def _backtest_inputs(config):
         ):
             raise ValueError("crypto_funding_roots_invalid")
     reject_if_exists(Path(config["output"]))
-    chronology = config.get("chronology")
     window = _window(config["prediction_window"])
-    if chronology is not None:
-        research_chronology(chronology)
-        windows = crypto_execution_windows(chronology, window, sample_role="test")
-    else:
-        windows = (("direct", window),)
+    windows = (("direct", window),)
     capital = PortfolioCapital(
         **_strict_config(
             config["capital"],
@@ -694,7 +638,7 @@ def _write_backtest(config, capital, produce):
     }
     metadata.update(
         window=config["prediction_window"],
-        sample_role="test" if config.get("chronology") is not None else "prediction",
+        sample_role="prediction",
         execution_style="taker" if "predictions" in config else "maker",
     )
     if config["execution_mode"] == "independent_segments":
@@ -726,9 +670,6 @@ def backtest_taker(config):
     evidence = _prediction_evidence(
         config["predictions"],
         window=window,
-        sample_role="test",
-        chronology=config.get("chronology"),
-        fold_id=windows[0][0],
     )
     _metadata, facts, _predictions = evidence
     target = facts["model"]["target_column"]
@@ -746,7 +687,12 @@ def backtest_taker(config):
     def produce(*, on_ledger=None, on_episode=None):
         with (
             open_market_source(
-                Path(config["source"]), archive_paths=config.get("archive_paths")
+                Path(config["source"]),
+                archive_paths=config.get("archive_paths"),
+                time_window=TimeWindow(
+                    "1970-01-01T00:00:00",
+                    pd.Timestamp(max(end for _, end in bounds)).isoformat(),
+                ),
             ) as run,
             read_funding_observations(
                 tuple(config["funding_roots"])
@@ -852,14 +798,22 @@ def _paired_validation(streams, *, asset_id):
 
 
 def _calibration_windows(config):
-    """Resolve actual sample windows and maturity cutoffs, with optional plan bounds."""
+    """Resolve explicit windows and cutoffs, using chronology only for defaults."""
     chronology = config.get("chronology")
-    folds = (
-        {}
-        if chronology is None
-        else {fold.fold_id: fold for fold in research_chronology(chronology)[0]}
-    )
     entries = config.get("models")
+    needs_defaults = (
+        entries is None
+        or type(entries) is list
+        and any(
+            type(item) is dict and not {"window", "cutoff"} <= item.keys()
+            for item in entries
+        )
+    )
+    folds = (
+        {fold.fold_id: fold for fold in research_chronology(chronology)[0]}
+        if chronology is not None and needs_defaults
+        else {}
+    )
     if "models" not in config:
         entries = [{"fold_id": fold_id} for fold_id in folds]
     if (
@@ -871,29 +825,18 @@ def _calibration_windows(config):
             for item in entries
         )
         or len({item["fold_id"] for item in entries}) != len(entries)
-        or folds
-        and [item["fold_id"] for item in entries] != list(folds)
     ):
         raise ValueError("crypto_calibration_fold_models_invalid")
     windows = {}
     for item in entries:
         fold_id = item["fold_id"]
-        validation = folds[fold_id].validation if folds else None
+        validation = folds[fold_id].validation if fold_id in folds else None
         if validation is None and not {"window", "cutoff"} <= item.keys():
             raise ValueError("crypto_calibration_window_cutoff_required")
         window = _window(item["window"]) if "window" in item else validation
         cutoff = item.get("cutoff", validation.end if validation else None)
         cutoff = pd.Timestamp(TimeWindow(cutoff, cutoff).end)
-        if (
-            pd.isna(cutoff)
-            or cutoff < pd.Timestamp(window.end)
-            or validation is not None
-            and (
-                window.start < validation.start
-                or window.end > validation.end
-                or cutoff > pd.Timestamp(validation.end)
-            )
-        ):
+        if pd.isna(cutoff) or cutoff < pd.Timestamp(window.end):
             raise ValueError("crypto_calibration_window_invalid")
         windows[fold_id] = (window, cutoff)
     return windows
@@ -990,7 +933,12 @@ def _produce_maker_calibration(*, on_table, config, model_evidence):
             count -= take
 
     with open_market_source(
-        Path(config["source"]), archive_paths=config.get("archive_paths")
+        Path(config["source"]),
+        archive_paths=config.get("archive_paths"),
+        time_window=TimeWindow(
+            "1970-01-01T00:00:00",
+            max(cutoff for _, cutoff in windows.values()).isoformat(),
+        ),
     ) as run:
         _source_coordinates(run, panel, symbol)
         price_unit = run.market_metadata(market_type, symbol)["price_unit"]
@@ -1109,7 +1057,7 @@ def _produce_maker_calibration(*, on_table, config, model_evidence):
                     end_ns=cutoff,
                     stats=source_stats,
                 ),
-                read_trades(run, symbol=symbol, end_ms=cutoff // 1000000),
+                read_trades(run, symbol=symbol, end_ns=cutoff),
                 _paired_validation(
                     [
                         _prediction_rows(
@@ -1217,9 +1165,6 @@ def calibrate_maker(config):
             evidence = _prediction_evidence(
                 item[f"{role}_predictions"],
                 window=window,
-                sample_role="validation",
-                chronology=config.get("chronology"),
-                fold_id=fold_id,
             )
             model_evidence[fold_id][role] = evidence
             _metadata, facts, _predictions = evidence
@@ -1237,6 +1182,17 @@ def calibrate_maker(config):
             ).isoformat(),
         },
         sample_role="calibration",
+        models=[
+            {
+                **item,
+                "window": {
+                    "start": windows[item["fold_id"]][0].start.isoformat(),
+                    "end": windows[item["fold_id"]][0].end.isoformat(),
+                },
+                "cutoff": windows[item["fold_id"]][1].isoformat(),
+            }
+            for item in config["models"]
+        ],
         model_ids=model_ids,
     )
     return write_statistics_artifact(
@@ -1251,7 +1207,7 @@ def calibrate_maker(config):
 
 
 def backtest_maker(config):
-    """Execute a maker baseline or explicit frozen calibration on the declared test."""
+    """Execute a maker baseline or causal saved calibration on the explicit window."""
     from quant_research_platform.artifacts.statistics import read_statistics_artifact
 
     config = _strict_config(
@@ -1278,15 +1234,7 @@ def backtest_maker(config):
         )
         calibration_windows = _calibration_windows(artifact.metadata)
         if (
-            (
-                config.get("chronology") is not None
-                and (
-                    artifact.metadata.get("chronology") is None
-                    or research_chronology(artifact.metadata["chronology"])
-                    != research_chronology(config["chronology"])
-                )
-            )
-            or artifact.metadata["asset_id"] != config["asset_id"]
+            artifact.metadata["asset_id"] != config["asset_id"]
             or artifact.metadata["symbol"] != config["symbol"]
             or any(
                 cutoff >= pd.Timestamp(window.start)
@@ -1294,11 +1242,7 @@ def backtest_maker(config):
             )
         ):
             raise ValueError("crypto_calibration_consumer_relationship_invalid")
-        if config.get("chronology") is None:
-            fold_id = max(
-                calibration_windows, key=lambda key: calibration_windows[key][1]
-            )
-            windows = ((fold_id, window),)
+        fold_id = max(calibration_windows, key=lambda key: calibration_windows[key][1])
         ids = []
         for item, target in zip(
             config["models"],
@@ -1309,9 +1253,6 @@ def backtest_maker(config):
             evidence = _prediction_evidence(
                 item["predictions"],
                 window=window,
-                sample_role="test",
-                chronology=config.get("chronology"),
-                fold_id=fold_id,
             )
             model_evidence.append(evidence)
             _metadata, facts, _predictions = evidence
@@ -1418,7 +1359,12 @@ def backtest_maker(config):
         market_type = binance_ids.FUTURES_MARKET_TYPE
         with (
             open_market_source(
-                Path(config["source"]), archive_paths=config.get("archive_paths")
+                Path(config["source"]),
+                archive_paths=config.get("archive_paths"),
+                time_window=TimeWindow(
+                    "1970-01-01T00:00:00",
+                    pd.Timestamp(max(end for _, end in bounds)).isoformat(),
+                ),
             ) as run,
             read_funding_observations(
                 tuple(config["funding_roots"])
@@ -1466,7 +1412,7 @@ def backtest_maker(config):
                     run,
                     market_type=market_type,
                     symbol=symbol,
-                    end_ms=bounds[-1][1] // 1_000_000,
+                    end_ns=bounds[-1][1],
                 ),
                 decisions=quotes(),
                 funding=funding,

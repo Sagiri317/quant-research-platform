@@ -84,17 +84,19 @@ def test_research_dataset_assembler_uses_explicit_base_not_input_order(
         make_dummy_research_dataset_spec(
             input_data_ids=("factors", "base", "labels", "filters", "context"),
             base_input_data_id="base",
+            key_coverage={"factors": "sparse"},
         )
     )
-    write_dummy_processed_inputs(layout, processed_catalog)
+    write_dummy_processed_inputs(layout, processed_catalog, truncate_factors=True)
+    # Catalogs sort their members, so explicitly preserve the declared input order.
+    inputs = {
+        data_id: layout.processed_data_root(item.market_id, item.kind, data_id)
+        for data_id in dataset_catalog.get("dummy_dataset").input_data_ids
+        for item in (processed_catalog.get(data_id),)
+    }
+    assert next(iter(inputs)) == "factors"
     assemble_research_dataset(
-        inputs={
-            item.data_id: layout.processed_data_root(
-                item.market_id, item.kind, item.data_id
-            )
-            for item in processed_catalog.list()
-            if item.data_id in dataset_catalog.get("dummy_dataset").input_data_ids
-        },
+        inputs=inputs,
         output_root=layout.research_dataset_root(
             dataset_catalog.get("dummy_dataset").market_id, "dummy_dataset"
         ),
@@ -105,6 +107,9 @@ def test_research_dataset_assembler_uses_explicit_base_not_input_order(
     )
     result = read_dataset(tmp_path / "data/research/dummy_market/dummy_dataset")
     assert result["asset_id"].tolist() == ["asset_a", "asset_b"]
+    assert result["factor_1"].iloc[0] == 1.0
+    assert pd.isna(result["factor_1"].iloc[1])
+    assert set(result["market_id"]) == {"dummy_market"}
     assert result.columns.tolist() == [
         "market_id",
         "asset_id",
@@ -158,33 +163,6 @@ def test_research_dataset_columns_extend_without_assembler_change(
         "context_1",
         "context_2",
     ]
-
-
-def test_dummy_market_assembly_preserves_generic_market_identity(
-    tmp_path: Path,
-) -> None:
-    layout = StorageLayout(project_root=tmp_path)
-    processed_catalog = make_dummy_processed_catalog()
-    dataset_catalog = make_research_dataset_catalog(make_dummy_research_dataset_spec())
-    write_dummy_processed_inputs(layout, processed_catalog)
-    assemble_research_dataset(
-        inputs={
-            item.data_id: layout.processed_data_root(
-                item.market_id, item.kind, item.data_id
-            )
-            for item in processed_catalog.list()
-            if item.data_id in dataset_catalog.get("dummy_dataset").input_data_ids
-        },
-        output_root=layout.research_dataset_root(
-            dataset_catalog.get("dummy_dataset").market_id, "dummy_dataset"
-        ),
-        dataset_catalog=dataset_catalog,
-        processed_catalog=processed_catalog,
-        dataset_id="dummy_dataset",
-        time_window=TimeWindow("2024-01-02", "2024-01-03"),
-    )
-    result = read_dataset(tmp_path / "data/research/dummy_market/dummy_dataset")
-    assert set(result["market_id"]) == {"dummy_market"}
 
 
 def test_missing_join_key_fails_closed(tmp_path: Path) -> None:

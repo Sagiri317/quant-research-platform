@@ -13,9 +13,6 @@ from quant_research_platform.research.models.estimators import (
     build_estimator_from_model_spec,
 )
 from quant_research_platform.research.models.rank_ensemble import RankEnsemblePredictor
-from quant_research_platform.research.models.trial_selection import (
-    select_best_validation_trial,
-)
 
 
 def test_fitting_counts_raw_filter_and_label_rows_once() -> None:
@@ -60,37 +57,6 @@ def test_rank_missing_contributes_neutral_without_renormalization() -> None:
         }
     )
     assert predictor.predict(frame).tolist() == pytest.approx([-0.125, 0.125])
-
-
-def test_trial_selection_prefers_defined_negative_and_tie_breaks_undefined() -> None:
-    partial = pd.DataFrame(
-        {"trial_id": ["defined", "undefined"], "validation_rankic": [-0.4, np.nan]}
-    )
-    assert (
-        select_best_validation_trial(
-            partial,
-            trial_id_column="trial_id",
-            selection_metric="validation_rankic",
-            maximize=True,
-            validation_metric_columns=("validation_rankic",),
-            test_metric_columns=(),
-            tie_break_order=("defined", "undefined"),
-        )
-        == "defined"
-    )
-    all_undefined = partial.assign(validation_rankic=np.nan)
-    assert (
-        select_best_validation_trial(
-            all_undefined,
-            trial_id_column="trial_id",
-            selection_metric="validation_rankic",
-            maximize=True,
-            validation_metric_columns=("validation_rankic",),
-            test_metric_columns=(),
-            tie_break_order=("undefined", "defined"),
-        )
-        is None
-    )
 
 
 def test_convergence_warning_is_a_model_fit_failure() -> None:

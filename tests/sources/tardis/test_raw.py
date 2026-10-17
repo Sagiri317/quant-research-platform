@@ -519,19 +519,15 @@ def test_download_response_close_preserves_primary_and_published_archive(
 
 @pytest.mark.parametrize("member_kind", ["files", "gaps", "observation_intervals"])
 @pytest.mark.parametrize("during_read", [False, True])
-def test_declared_native_member_missing_is_invalid_not_unacquired(
+def test_native_member_is_required_only_when_consumed(
     tmp_path, member_kind, during_read
 ):
     from quant_research_platform.sources.market import open_market_source
 
     root = tmp_path / "published"
     manifest = import_slices(
-        root,
-        date="2026-08-01",
-        slices=_slices(tmp_path / "native", count=1),
+        root, date="2026-08-01", slices=_slices(tmp_path / "native", count=1)
     )
-    with open_market_source(root) as source:
-        assert source.source_identity
     member = (
         manifest[member_kind][0] if member_kind == "files" else manifest[member_kind]
     )
@@ -546,39 +542,39 @@ def test_declared_native_member_missing_is_invalid_not_unacquired(
         assert not getattr(primary, "__notes__", [])
     else:
         path.unlink()
-    with pytest.raises(ValueError, match="identity"):
-        with open_market_source(root):
-            pass
+    if member_kind == "observation_intervals":
+        with pytest.raises(ValueError, match="connection_intervals_invalid"):
+            with open_market_source(root):
+                pass
+    else:
+        with open_market_source(root) as source:
+            if member_kind == "files":
+                with pytest.raises(ValueError, match="tardis_raw_identity_changed"):
+                    next(source.archives[0]._iter_canonical_records())
+            else:
+                assert list(source.archives[0]._iter_canonical_records()) == []
 
 
-def test_native_manifest_removed_after_selection_is_identity_failure(
+def test_native_manifest_is_read_once_without_reproving_selection(
     tmp_path, monkeypatch
 ):
     import quant_research_platform.sources.tardis.replay as replay
-    from quant_research_platform.sources.market import open_market_source
 
     root = tmp_path / "published"
-    import_slices(
-        root,
-        date="2026-08-01",
-        slices=_slices(tmp_path / "native", count=1),
-    )
-    original = replay._capture_raw_file_identity
-    calls = 0
+    import_slices(root, date="2026-08-01", slices=_slices(tmp_path / "native", count=1))
+    original = replay.read_qrp_json_file
+    calls = []
 
-    def capture(path, **kwargs):
-        nonlocal calls
-        if path == root / "manifest.json":
-            calls += 1
-            if calls == 2:
-                path.unlink()
-        return original(path, **kwargs)
+    def read(path):
+        result = original(path)
+        calls.append(path)
+        path.unlink()
+        return result
 
-    monkeypatch.setattr(replay, "_capture_raw_file_identity", capture)
-    with pytest.raises(ValueError, match="identity"):
-        with open_market_source(root):
-            pass
-    assert calls == 2
+    monkeypatch.setattr(replay, "read_qrp_json_file", read)
+    with replay.open_tardis_archive(root) as source:
+        assert list(source.archives[0]._iter_canonical_records()) == []
+    assert calls == [root / "manifest.json"]
 
 
 def test_verified_file_preserves_non_missing_contract_failure(tmp_path):

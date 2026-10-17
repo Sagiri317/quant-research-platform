@@ -19,6 +19,7 @@ import pyarrow.compute as pc
 
 from quant_research_platform.contracts.data import DataSpec
 from quant_research_platform.contracts.time import (
+    PredictionWindow,
     TimeWindow,
     time_window_date_bounds,
     time_window_timestamp_interval,
@@ -119,7 +120,9 @@ class DatasetSession:
         )
         return replace(self, logical_columns=requested, physical_columns=physical)
 
-    def filtered_view(self, time_window: TimeWindow) -> DatasetSession:
+    def filtered_view(
+        self, time_window: TimeWindow | PredictionWindow
+    ) -> DatasetSession:
         spec = self.spec
         return replace(
             self,
@@ -488,7 +491,7 @@ def _partition_years_for_selection(years, time_window):
     selected = None if years is None else set(years)
     if time_window is not None:
         start, end = time_window_date_bounds(time_window)
-        window_years = set(range(int(start.year), int(end.year) + 1))
+        window_years = set(range(int(start.year), (end or date.max).year + 1))
         selected = window_years if selected is None else selected & window_years
     return selected
 
@@ -1074,6 +1077,8 @@ def parquet_filters_for_time_window(
         return None
     if timestamp_column is None:
         raise ValueError("time_window_not_supported")
+    if time_window.end is None:
+        return [(timestamp_column, ">=", pd.Timestamp(time_window.start))]
     start, end, end_inclusive = time_window_timestamp_interval(time_window)
     upper_operator = "<=" if end_inclusive else "<"
     return [

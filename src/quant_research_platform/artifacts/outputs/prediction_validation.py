@@ -8,7 +8,7 @@ import pandas as pd
 from quant_research_platform.contracts.models import (
     _model_spec,
     _validate_model_prediction_window,
-    validate_model_fit_facts,
+    validate_model_facts,
 )
 from quant_research_platform.contracts.time import (
     PredictionWindow,
@@ -82,7 +82,7 @@ def validate_prediction_output_metadata_shape(metadata):
             raise ValueError("prediction_effective_end_outside_window")
     facts = metadata["model_facts"]
     model = metadata["model_metadata"]
-    _validate_prediction_model_facts(facts, model)
+    _validate_prediction_training_facts(facts, model)
     if (
         metadata["model_id"] != facts["model"]["model_id"]
         or metadata["family_id"] != facts["family_id"]
@@ -93,7 +93,7 @@ def validate_prediction_output_metadata_shape(metadata):
     return metadata
 
 
-def _validate_prediction_model_facts(facts, realized):
+def _validate_prediction_training_facts(facts, realized):
     """Check self-contained score evidence without fitting-state metadata."""
     if type(facts) is not dict or set(facts) - {"target_definition"} != {
         "family_id",
@@ -104,18 +104,11 @@ def _validate_prediction_model_facts(facts, realized):
         "fit_cutoff",
         "candidate_parameters",
         "label_unit",
-        "test_window",
+        "input_units",
         "selection_cutoff",
     }:
         raise ValueError("prediction_model_facts_invalid")
-    from quant_research_platform.contracts.ids import validate_market_id
-
-    validate_market_id(facts["market_id"])
-    if type(facts["family_id"]) is not str or not facts["family_id"]:
-        raise ValueError("prediction_model_facts_invalid")
     spec = _model_spec(facts["model"])
-    if type(facts["candidate_parameters"]) is not dict:
-        raise ValueError("prediction_candidate_parameters_invalid")
     fields = {
         "training_asset_ids",
         "train_start",
@@ -136,19 +129,6 @@ def _validate_prediction_model_facts(facts, realized):
         or not realized["label_availability_column"]
     ):
         raise ValueError("prediction_label_availability_invalid")
-    for assets in (facts["asset_ids"], realized["training_asset_ids"]):
-        if assets is not None and (
-            type(assets) is not list
-            or not assets
-            or any(type(asset) is not str or not asset for asset in assets)
-            or len(assets) != len(set(assets))
-        ):
-            raise ValueError("prediction_training_assets_invalid")
-    if realized["training_asset_ids"] is None or (
-        facts["asset_ids"] is not None
-        and not set(realized["training_asset_ids"]) <= set(facts["asset_ids"])
-    ):
-        raise ValueError("prediction_training_assets_invalid")
     if is_rank:
         parameters = realized["rank_parameters"]
         if type(parameters) is not dict or set(parameters) != {"label_calibration"}:
@@ -163,7 +143,7 @@ def _validate_prediction_model_facts(facts, realized):
             )
         ):
             raise ValueError("prediction_label_calibration_invalid")
-    validate_model_fit_facts(facts, realized)
+    validate_model_facts(facts, realized)
 
 
 def validate_prediction_frame(frame, metadata, *, columns=None):

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import datetime as dt
 import gzip
-import hashlib
 import heapq
 import json
 import os
@@ -54,11 +53,6 @@ from quant_research_platform.sources.binance.validation import (
 )
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
-    DatasetFileIdentity,
-    _DigestingReader,
-    dataset_file_identity,
-    dataset_file_identity_from_stat,
-    filesystem_scandir,
     filesystem_stat,
     open_filesystem_file,
     require_unaliased_path,
@@ -82,8 +76,6 @@ _FILE_MANIFEST_KEYS = frozenset(
     }
 )
 _FILE_STREAM_IDENTITY_KEYS = ("market", "symbol", "data_kind", "stream")
-_LOWER_HEX = frozenset("0123456789abcdef")
-_HASH_BUFFER_BYTES = 64 * 1024
 _RAW_IDENTITY_ERROR = "binance_raw_export_identity_changed"
 RECONSTRUCTION_REQUIRED_LEVELS = 10
 _CONNECTION_INTERVAL_KEYS = frozenset(
@@ -152,12 +144,6 @@ class ReconstructionStats:
         )
 
 
-@dataclass(frozen=True)
-class _RunFile:
-    metadata: dict[str, Any]
-    identity: DatasetFileIdentity
-
-
 class ObservationCoverageIndex:
     def __init__(
         self,
@@ -171,12 +157,6 @@ class ObservationCoverageIndex:
         self._root = root
         self._descriptor = descriptor
         self._path = root / descriptor["path"]
-        self.identity = _capture_raw_file_identity(
-            self._path,
-            missing_is_file_not_found=False,
-        )
-        if self.identity.size != descriptor["compressed_bytes"]:
-            raise ValueError("binance_replay_connection_intervals_invalid")
         self._rows = {}
         self._groups = {}
         self._invalid_trade_times = {}
@@ -189,15 +169,15 @@ class ObservationCoverageIndex:
             rows.sort()
 
     def _load(self, *, markets: set[str]) -> None:
+        require_unaliased_path(self._path, error="binance_replay_file_path_invalid")
         try:
             raw_handle = open_filesystem_file(self._path, "rb")
         except (FileNotFoundError, NotADirectoryError) as exc:
             raise ValueError("binance_replay_connection_intervals_invalid") from exc
         with closing_iterator(raw_handle):
-            digesting_handle = _DigestingReader(raw_handle)
             count = 0
             with closing_iterator(
-                gzip.GzipFile(fileobj=digesting_handle, mode="rb")
+                gzip.GzipFile(fileobj=raw_handle, mode="rb")
             ) as gzip_handle:
                 while True:
                     line: bytes | None = None
@@ -217,13 +197,8 @@ class ObservationCoverageIndex:
                         raise ValueError("binance_replay_connection_intervals_invalid")
                     self._rows[row[0]] = row
                     count += 1
-            digesting_handle.drain()
-            if (
-                count != self._descriptor["record_count"]
-                or digesting_handle.hexdigest() != self._descriptor["sha256"]
-            ):
+            if count != self._descriptor["record_count"]:
                 raise ValueError("binance_replay_connection_intervals_invalid")
-            _verify_raw_file_handle(raw_handle, expected_identity=self.identity)
 
     def bounds(
         self,
@@ -247,7 +222,7 @@ class ObservationCoverageIndex:
         return None if row is None else row[4]
 
     def invalidate_trade(self, observation_id, observed_ns):
-        """Record only a consumed invalid event; authenticated sidecars stay intact."""
+        """Record a consumed invalid event; retain declared source intervals."""
         times = self._invalid_trade_times.setdefault(observation_id, [])
         if observed_ns not in times:
             insort(times, observed_ns)
@@ -392,15 +367,13 @@ class RecorderRun:
     root: Path
     manifest: dict[str, Any]
     source_identity: dict[str, str]
-    _files: tuple[_RunFile, ...] = field(repr=False)
+    _files: tuple[dict[str, Any], ...] = field(repr=False)
     _coverage_index: ObservationCoverageIndex = field(repr=False)
 
     def funding_roots(self, symbol, *, time_window):
         return (self.root.parent / "funding" / symbol,)
 
     def hft_source_info(self):
-        if self.manifest["status"] == "FAIL":
-            raise ValueError("hft_recorder_run_failed")
         if (
             self.manifest["recording_scope"] != FUTURES_HFT_RECORDING_SCOPE
             or FUTURES_MARKET_TYPE not in self.manifest["market_types"]
@@ -435,9 +408,9 @@ class RecorderRun:
         selected = [
             item
             for item in self._files
-            if (symbol is None or item.metadata["symbol"] == symbol)
-            and (market_type is None or item.metadata["market"] == market_type)
-            and (kinds is None or item.metadata["data_kind"] in kinds)
+            if (symbol is None or item["symbol"] == symbol)
+            and (market_type is None or item["market"] == market_type)
+            and (kinds is None or item["data_kind"] in kinds)
         ]
         if not selected:
             raise ValueError("binance_replay_requested_files_missing")
@@ -455,9 +428,9 @@ class RecorderRun:
 
         previous_capture_seq: int | None = None
         for group in _overlapping_capture_groups(selected):
-            by_owner: dict[tuple[str, str, str, str], list[_RunFile]] = {}
+            by_owner: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
             for item in group:
-                owner = tuple(item.metadata[key] for key in _FILE_STREAM_IDENTITY_KEYS)
+                owner = tuple(item[key] for key in _FILE_STREAM_IDENTITY_KEYS)
                 by_owner.setdefault(owner, []).append(item)
             with ExitStack() as stack:
                 streams = [
@@ -540,43 +513,6 @@ def _validate_raw_path(root: Path) -> None:
         raise ValueError(_RAW_IDENTITY_ERROR)
 
 
-def _capture_raw_file_identity(
-    path: Path,
-    *,
-    expected_identity: DatasetFileIdentity | None = None,
-    missing_is_file_not_found: bool = True,
-) -> DatasetFileIdentity:
-    raw_path = Path(path)
-    try:
-        filesystem_stat(raw_path, follow_symlinks=False)
-    except NotADirectoryError as error:
-        raise ValueError(_RAW_IDENTITY_ERROR) from error
-    except FileNotFoundError as error:
-        if missing_is_file_not_found and expected_identity is None:
-            raise FileNotFoundError(raw_path) from error
-        raise ValueError(_RAW_IDENTITY_ERROR) from error
-    try:
-        identity = dataset_file_identity(raw_path)
-    except (FileNotFoundError, NotADirectoryError, ValueError) as error:
-        raise ValueError(_RAW_IDENTITY_ERROR) from error
-    if expected_identity is not None and identity != expected_identity:
-        raise ValueError(_RAW_IDENTITY_ERROR)
-    return identity
-
-
-def _verify_raw_file_handle(
-    handle: Any,
-    *,
-    expected_identity: DatasetFileIdentity,
-) -> None:
-    try:
-        handle_identity = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
-    except ValueError as error:
-        raise ValueError(_RAW_IDENTITY_ERROR) from error
-    if handle_identity != expected_identity:
-        raise ValueError(_RAW_IDENTITY_ERROR)
-
-
 def _reject_raw_reparse(metadata: os.stat_result) -> None:
     reparse_flag = getattr(metadata, "st_file_attributes", 0) & getattr(
         stat,
@@ -592,14 +528,14 @@ def open_recorder_run(root: Path) -> Iterator[RecorderRun]:
     """Admit one declared recorder source and yield its native observations."""
     run_root = Path(root)
     _validate_raw_path(run_root)
-    manifest, manifest_identity = _read_run_manifest(run_root)
+    manifest = _read_run_manifest(run_root)
     coverage_index = ObservationCoverageIndex(
         run_root,
         manifest["capture"]["connection_intervals"],
         markets=set(manifest["market_types"]),
         decode_interval=_decode_recorder_interval,
     )
-    files = _capture_run_files(run_root, manifest)
+    files = tuple(manifest["files"])
     run = RecorderRun(
         root=run_root,
         manifest=manifest,
@@ -614,33 +550,13 @@ def open_recorder_run(root: Path) -> Iterator[RecorderRun]:
     yield run
 
 
-def _read_run_manifest(
-    root: Path,
-) -> tuple[dict[str, Any], DatasetFileIdentity]:
-    path = root / "run.json"
-    identity = _capture_raw_file_identity(path)
-    if identity.size <= 0:
-        raise ValueError("binance_replay_run_manifest_invalid")
-    manifest: dict[str, Any] | None = None
+def _read_run_manifest(root: Path) -> dict[str, Any]:
     try:
-        manifest = read_qrp_json_file(path)[1]
-    except (
-        FileNotFoundError,
-        NotADirectoryError,
-        UnicodeError,
-        ValueError,
-    ) as exc:
-        if str(exc) in {
-            "dataset_metadata_file_identity_changed",
-            "dataset_metadata_file_too_large",
-        }:
-            raise ValueError("binance_replay_run_identity_changed") from exc
+        manifest = read_qrp_json_file(root / "run.json")[1]
+    except (FileNotFoundError, NotADirectoryError, UnicodeError, ValueError) as exc:
         raise ValueError("binance_replay_run_manifest_invalid") from exc
-    if _capture_raw_file_identity(path) != identity:
-        raise ValueError("binance_replay_run_identity_changed")
     _validate_run_manifest(manifest)
-    assert manifest is not None
-    return manifest, identity
+    return manifest
 
 
 def _validate_run_manifest(value: object) -> None:
@@ -650,7 +566,6 @@ def _validate_run_manifest(value: object) -> None:
         "run_id",
         "recording_scope",
         "venue",
-        "status",
     ):
         if not isinstance(value.get(key), str) or not value[key]:
             raise ValueError("binance_replay_run_manifest_invalid")
@@ -668,9 +583,6 @@ def _validate_run_manifest(value: object) -> None:
         or len(set(value["symbols"])) != len(value["symbols"])
     ):
         raise ValueError("binance_replay_run_manifest_identity_invalid")
-    statuses = {"PASS", "PARTIAL", "FAIL"}
-    if value["status"] not in statuses:
-        raise ValueError("binance_replay_run_manifest_invalid")
     market_types = value.get("market_types")
     recording_scope = value["recording_scope"]
     if (
@@ -709,7 +621,6 @@ def _validate_run_manifest(value: object) -> None:
     if not isinstance(files, list) or not files:
         raise ValueError("binance_replay_run_files_missing")
     normalized: set[str] = set()
-    present_tuples: set[tuple[str, str, str]] = set()
     for item in files:
         _validate_file_manifest(
             item, markets=set(market_types), symbols=set(value["symbols"])
@@ -719,26 +630,16 @@ def _validate_run_manifest(value: object) -> None:
         if normalized_path != item["path"] or normalized_path in normalized:
             raise ValueError("binance_replay_file_manifest_invalid")
         normalized.add(normalized_path)
-        present_tuples.add((item["symbol"], item["market"], item["data_kind"]))
-    stream_kinds = (
-        {"metadata", "depth", "depth_snapshot", "agg_trades"}
-        if recording_scope == "futures-hft"
-        else {"metadata", "depth", "depth_snapshot"}
-    )
-    required_tuples = {
-        (symbol, market, data_kind)
-        for symbol in value["symbols"]
-        for market in market_types
-        for data_kind in stream_kinds
-    }
-    if value["status"] == "PASS" and present_tuples != required_tuples:
-        raise ValueError("binance_replay_run_completeness_invalid")
 
 
 def _validate_file_manifest(
     value: object, *, markets: set[str], symbols: set[str]
 ) -> None:
-    if not isinstance(value, dict) or set(value) != _FILE_MANIFEST_KEYS:
+    if not isinstance(value, dict) or not (
+        _FILE_MANIFEST_KEYS - {"sha256", "compressed_bytes"}
+        <= set(value)
+        <= _FILE_MANIFEST_KEYS
+    ):
         raise ValueError("binance_replay_file_manifest_invalid")
     path = Path(value["path"]) if isinstance(value.get("path"), str) else None
     if (
@@ -764,31 +665,22 @@ def _validate_file_manifest(
         "capture_seq_min",
         "capture_seq_max",
         "max_record_bytes",
-        "compressed_bytes",
     ):
         item = value.get(key)
         if isinstance(item, bool) or type(item) is not int or item <= 0:
             raise ValueError("binance_replay_file_manifest_invalid")
     if value["capture_seq_min"] > value["capture_seq_max"]:
         raise ValueError("binance_replay_file_manifest_invalid")
-    digest = value.get("sha256")
-    if (
-        not isinstance(digest, str)
-        or len(digest) != 64
-        or any(character not in _LOWER_HEX for character in digest)
-    ):
-        raise ValueError("binance_replay_file_manifest_invalid")
 
 
 def _validate_connection_interval_descriptor(
     value: object,
 ) -> None:
-    if not isinstance(value, dict) or set(value) != {
-        "path",
-        "record_count",
-        "compressed_bytes",
-        "sha256",
-    }:
+    if not isinstance(value, dict) or not (
+        {"path", "record_count"}
+        <= set(value)
+        <= {"path", "record_count", "compressed_bytes", "sha256"}
+    ):
         raise ValueError("binance_replay_connection_intervals_invalid")
     path = Path(value["path"]) if isinstance(value.get("path"), str) else None
     if (
@@ -800,21 +692,10 @@ def _validate_connection_interval_descriptor(
     ):
         raise ValueError("binance_replay_connection_intervals_invalid")
     record_count = value.get("record_count")
-    compressed_bytes = value.get("compressed_bytes")
     if (
         isinstance(record_count, bool)
         or type(record_count) is not int
         or record_count < 0
-        or isinstance(compressed_bytes, bool)
-        or type(compressed_bytes) is not int
-        or compressed_bytes <= 0
-    ):
-        raise ValueError("binance_replay_connection_intervals_invalid")
-    digest = value.get("sha256")
-    if (
-        not isinstance(digest, str)
-        or len(digest) != 64
-        or any(character not in _LOWER_HEX for character in digest)
     ):
         raise ValueError("binance_replay_connection_intervals_invalid")
 
@@ -909,200 +790,91 @@ def _validate_record_coverage(
         raise ValueError("binance_replay_connection_coverage_invalid")
 
 
-def _capture_run_files(root: Path, manifest: dict[str, Any]) -> tuple[_RunFile, ...]:
-    declared_paths = {item["path"] for item in manifest["files"]} | {
-        manifest["capture"]["connection_intervals"]["path"]
-    }
-    _verify_exact_run_tree(root, declared_paths)
-    result = []
-    for metadata in manifest["files"]:
-        path = root / metadata["path"]
-        identity = _capture_raw_file_identity(path, missing_is_file_not_found=False)
-        if identity.size != metadata["compressed_bytes"]:
-            raise ValueError("binance_replay_file_identity_mismatch")
-        result.append(_RunFile(dict(metadata), identity))
-    return tuple(result)
-
-
-def _verify_exact_run_tree(root: Path, declared_paths: set[str]) -> None:
-    declared = {Path(value) for value in declared_paths}
-    allowed_files = {Path("run.json"), *declared}
-    allowed_directories = {Path(".")}
-    for path in declared:
-        allowed_directories.update(
-            parent for parent in path.parents if parent != Path(".")
-        )
-    seen_files: set[Path] = set()
-    pending = [Path(".")]
-    while pending:
-        relative_directory = pending.pop()
-        directory = (
-            root if relative_directory == Path(".") else root / relative_directory
-        )
-        require_unaliased_path(directory, error="binance_replay_file_path_invalid")
-        try:
-            entries = filesystem_scandir(directory)
-        except (FileNotFoundError, NotADirectoryError) as exc:
-            raise ValueError("binance_replay_file_manifest_mismatch") from exc
-        with entries:
-            for entry in entries:
-                relative = (
-                    Path(entry.name)
-                    if relative_directory == Path(".")
-                    else relative_directory / entry.name
-                )
-                path = directory / entry.name
-                require_unaliased_path(path, error="binance_replay_file_path_invalid")
-                if relative in allowed_directories:
-                    if not entry.is_dir(follow_symlinks=False):
-                        raise ValueError("binance_replay_file_manifest_mismatch")
-                    pending.append(relative)
-                elif relative in allowed_files:
-                    if not entry.is_file(follow_symlinks=False):
-                        raise ValueError("binance_replay_file_manifest_mismatch")
-                    seen_files.add(relative)
-                else:
-                    raise ValueError("binance_replay_file_manifest_mismatch")
-    if (
-        seen_files != allowed_files
-        or {path.as_posix() for path in seen_files if path != Path("run.json")}
-        != declared_paths
-    ):
-        raise ValueError("binance_replay_file_manifest_mismatch")
-
-
-def _sha256_file(path: Path, identity: DatasetFileIdentity) -> str:
-    try:
-        handle = open_filesystem_file(path, "rb")
-    except (FileNotFoundError, NotADirectoryError) as exc:
-        raise ValueError("binance_replay_file_identity_mismatch") from exc
-    with closing_iterator(handle):
-        _verify_raw_file_handle(handle, expected_identity=identity)
-        digest = hashlib.sha256()
-        buffer = bytearray(_HASH_BUFFER_BYTES)
-        while count := handle.readinto(buffer):
-            digest.update(memoryview(buffer)[:count])
-        _verify_raw_file_handle(handle, expected_identity=identity)
-        return digest.hexdigest()
-
-
-def _overlapping_capture_groups(files: list[_RunFile]) -> Iterator[list[_RunFile]]:
-    ordered = sorted(files, key=lambda item: item.metadata["capture_seq_min"])
-    group: list[_RunFile] = []
+def _overlapping_capture_groups(
+    files: list[dict[str, Any]],
+) -> Iterator[list[dict[str, Any]]]:
+    ordered = sorted(files, key=lambda item: item["capture_seq_min"])
+    group: list[dict[str, Any]] = []
     group_max = -1
     owner_ends: dict[tuple[str, str, str, str], int] = {}
     for item in ordered:
-        start = item.metadata["capture_seq_min"]
-        owner = tuple(item.metadata[key] for key in _FILE_STREAM_IDENTITY_KEYS)
+        start = item["capture_seq_min"]
+        owner = tuple(item[key] for key in _FILE_STREAM_IDENTITY_KEYS)
         if group and start > group_max:
             yield group
             group = []
             group_max = -1
         if start <= owner_ends.get(owner, -1):
             raise ValueError("binance_replay_file_capture_ranges_overlap")
-        owner_ends[owner] = item.metadata["capture_seq_max"]
+        owner_ends[owner] = item["capture_seq_max"]
         group.append(item)
-        group_max = max(group_max, item.metadata["capture_seq_max"])
+        group_max = max(group_max, item["capture_seq_max"])
     if group:
         yield group
 
 
 def _iter_raw_file(
-    root: Path, item: _RunFile, *, manifest: dict[str, Any]
+    root: Path, metadata: dict[str, Any], *, manifest: dict[str, Any]
 ) -> Iterator[dict[str, Any]]:
-    metadata = item.metadata
-    path = root / metadata["path"]
+    path = require_unaliased_path(
+        root / metadata["path"], error="binance_replay_file_path_invalid"
+    )
     try:
         raw_handle = open_filesystem_file(path, "rb")
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("binance_replay_raw_file_open_failed") from exc
-    primary = None
-    try:
-        _verify_raw_file_handle(raw_handle, expected_identity=item.identity)
-        digesting_handle = _DigestingReader(raw_handle)
-        gzip_handle = gzip.GzipFile(fileobj=digesting_handle, mode="rb")
-        primary = None
-        try:
-            count = 0
-            minimum: int | None = None
-            maximum: int | None = None
-            previous: int | None = None
-            while True:
-                line = gzip_handle.readline(metadata["max_record_bytes"] + 1)
-                if not line:
-                    line = None
-                    break
-                record: dict[str, Any] | None = None
-                if len(line) > metadata["max_record_bytes"]:
-                    raise ValueError("binance_replay_raw_record_too_large")
-                try:
-                    record = parse_qrp_json_object(line)
-                except (UnicodeError, ValueError) as exc:
-                    raise ValueError("binance_replay_raw_json_invalid") from exc
-                _validate_raw_record(record, metadata=metadata)
-                capture_seq = record["capture_seq"]
-                if previous is not None and capture_seq <= previous:
-                    raise ValueError("binance_replay_capture_seq_non_monotonic")
-                previous = capture_seq
-                minimum = capture_seq if minimum is None else min(minimum, capture_seq)
-                maximum = capture_seq if maximum is None else max(maximum, capture_seq)
-                count += 1
-                market_metadata = manifest["market_metadata"][metadata["symbol"]][
-                    metadata["market"]
-                ]
-                output = {
-                    **record,
-                    "run_id": manifest["run_id"],
-                    "venue": metadata["venue"],
-                    "symbol": metadata["symbol"],
-                    "market_type": metadata["market"],
-                    "stream": metadata["stream"],
-                    "data_kind": metadata["data_kind"],
-                    "tick_size": market_metadata["tick_size"],
-                    "snapshot_limit": market_metadata["snapshot_limit"],
-                }
-                try:
-                    yield output
-                except GeneratorExit:
-                    return
-            if (
-                count != metadata["record_count"]
-                or minimum != metadata["capture_seq_min"]
-                or maximum != metadata["capture_seq_max"]
-            ):
-                raise ValueError("binance_replay_file_manifest_mismatch")
-        except BaseException as body_error:
-            primary = body_error
-            raise
-        finally:
+    with (
+        closing_iterator(raw_handle),
+        closing_iterator(gzip.GzipFile(fileobj=raw_handle, mode="rb")) as gzip_handle,
+    ):
+        count = 0
+        minimum: int | None = None
+        maximum: int | None = None
+        previous: int | None = None
+        while True:
+            line = gzip_handle.readline(metadata["max_record_bytes"] + 1)
+            if not line:
+                line = None
+                break
+            record: dict[str, Any] | None = None
+            if len(line) > metadata["max_record_bytes"]:
+                raise ValueError("binance_replay_raw_record_too_large")
             try:
-                gzip_handle.close()
-                digesting_handle.drain()
-                if digesting_handle.hexdigest() != metadata["sha256"]:
-                    raise ValueError("binance_replay_file_identity_mismatch")
-                _verify_raw_file_handle(raw_handle, expected_identity=item.identity)
-            except BaseException as verify_error:
-                if primary is not None:
-                    primary.add_note(
-                        "Binance consumed-file verification also failed: "
-                        f"{type(verify_error).__name__}"
-                    )
-                else:
-                    raise
-
-    except BaseException as body_error:
-        primary = body_error
-        raise
-    finally:
-        try:
-            raw_handle.close()
-        except BaseException as close_error:
-            if primary is None:
-                raise
-            primary.add_note(
-                "Binance replay raw handle close also failed: "
-                f"{type(close_error).__name__}"
-            )
+                record = parse_qrp_json_object(line)
+            except (UnicodeError, ValueError) as exc:
+                raise ValueError("binance_replay_raw_json_invalid") from exc
+            _validate_raw_record(record, metadata=metadata)
+            capture_seq = record["capture_seq"]
+            if previous is not None and capture_seq <= previous:
+                raise ValueError("binance_replay_capture_seq_non_monotonic")
+            previous = capture_seq
+            minimum = capture_seq if minimum is None else min(minimum, capture_seq)
+            maximum = capture_seq if maximum is None else max(maximum, capture_seq)
+            count += 1
+            market_metadata = manifest["market_metadata"][metadata["symbol"]][
+                metadata["market"]
+            ]
+            output = {
+                **record,
+                "run_id": manifest["run_id"],
+                "venue": metadata["venue"],
+                "symbol": metadata["symbol"],
+                "market_type": metadata["market"],
+                "stream": metadata["stream"],
+                "data_kind": metadata["data_kind"],
+                "tick_size": market_metadata["tick_size"],
+                "snapshot_limit": market_metadata["snapshot_limit"],
+            }
+            try:
+                yield output
+            except GeneratorExit:
+                return
+        if (
+            count != metadata["record_count"]
+            or minimum != metadata["capture_seq_min"]
+            or maximum != metadata["capture_seq_max"]
+        ):
+            raise ValueError("binance_replay_file_manifest_mismatch")
 
 
 def _validate_raw_record(value: object, *, metadata: dict[str, Any]) -> None:
@@ -1222,6 +994,8 @@ class DepthReconstructor:
         self.stats = stats
         self._bids: dict[int, float] = {}
         self._asks: dict[int, float] = {}
+        self._pending_bids: dict[int, float] = {}
+        self._pending_asks: dict[int, float] = {}
         self._segment_id: str | None = None
         self._source_segment_id: str | None = None
         self._observation_id: str | None = None
@@ -1230,11 +1004,12 @@ class DepthReconstructor:
         self._known_bid_floor_tick: int | None = None
         self._known_ask_ceiling_tick: int | None = None
         self._bootstrapped = False
+        self._uncovered = False
         self._invalid = False
 
     @property
     def valid(self) -> bool:
-        return self._bootstrapped and not self._invalid
+        return self._bootstrapped and not self._invalid and not self._uncovered
 
     def bootstrap(self, record: dict[str, Any]) -> None:
         if record.get("market_type") != self.market_type:
@@ -1278,6 +1053,8 @@ class DepthReconstructor:
         self._asks = asks
         self._bid_prices = bid_prices
         self._ask_prices = ask_prices
+        self._pending_bids.clear()
+        self._pending_asks.clear()
         self._known_bid_floor_tick = bid_prices[0]
         self._known_ask_ceiling_tick = ask_prices[-1]
         self._segment_id = self._source_segment_id = segment_id
@@ -1285,6 +1062,7 @@ class DepthReconstructor:
         self._last_update_id = last_update_id
         self._last_times = None
         self._bootstrapped = False
+        self._uncovered = False
         self._invalid = False
 
     def advance(
@@ -1360,21 +1138,33 @@ class DepthReconstructor:
             return self._invalidate(record, "invalid_numeric")
         assert self._known_bid_floor_tick is not None
         assert self._known_ask_ceiling_tick is not None
-        known_bid_updates = {
-            price_index: quantity
-            for price_index, quantity in bid_updates.items()
-            if price_index >= self._known_bid_floor_tick
-        }
-        known_ask_updates = {
-            price_index: quantity
-            for price_index, quantity in ask_updates.items()
-            if price_index <= self._known_ask_ceiling_tick
-        }
+        # Outside updates certify individual prices, including explicit zeros.
+        # Promote only an adjacent, fully observed chain on the representation
+        # grid; an unobserved price is never inferred empty or non-tradable.
+        known_bid_updates = {}
+        for price_index, quantity in bid_updates.items():
+            if price_index >= self._known_bid_floor_tick:
+                known_bid_updates[price_index] = quantity
+            else:
+                self._pending_bids[price_index] = quantity
+        while self._known_bid_floor_tick - 1 in self._pending_bids:
+            self._known_bid_floor_tick -= 1
+            known_bid_updates[self._known_bid_floor_tick] = self._pending_bids.pop(
+                self._known_bid_floor_tick
+            )
+        known_ask_updates = {}
+        for price_index, quantity in ask_updates.items():
+            if price_index <= self._known_ask_ceiling_tick:
+                known_ask_updates[price_index] = quantity
+            else:
+                self._pending_asks[price_index] = quantity
+        while self._known_ask_ceiling_tick + 1 in self._pending_asks:
+            self._known_ask_ceiling_tick += 1
+            known_ask_updates[self._known_ask_ceiling_tick] = self._pending_asks.pop(
+                self._known_ask_ceiling_tick
+            )
         _apply_levels(self._bids, self._bid_prices, known_bid_updates)
         _apply_levels(self._asks, self._ask_prices, known_ask_updates)
-        reason = self._invalid_reason(self._bid_prices, self._ask_prices)
-        if reason is not None:
-            return self._invalidate(record, reason)
         event_time, transaction_time, observed_time = _record_times(
             record,
             market_type=self.market_type,
@@ -1384,8 +1174,24 @@ class DepthReconstructor:
             raise ValueError("binance_replay_observed_time_non_monotonic")
         self._last_times = (event_time, transaction_time, observed_time)
         self._last_update_id = last
-        if not self._bootstrapped:
+        reason = self._invalid_reason(
+            self._bid_prices, self._ask_prices, include_pending=True
+        )
+        if reason in {"one_sided_book", "unsupported_coverage"}:
+            # Missing book coverage does not erase a continuous native sequence.
             self._bootstrapped = True
+            if self._uncovered:
+                return False
+            return self._invalidate(record, reason)
+        if reason is not None:
+            return self._invalidate(record, reason)
+        if not self._bootstrapped or self._uncovered:
+            if self._uncovered:
+                self._segment_id = (
+                    f"{self._source_segment_id}:recovery:{record['source_sequence']}"
+                )
+            self._bootstrapped = True
+            self._uncovered = False
             self.stats.valid_segments += 1
             if self.stats.valid_segments > 1:
                 self.stats.recovered_segments += 1
@@ -1451,16 +1257,32 @@ class DepthReconstructor:
         self,
         bids: list[int],
         asks: list[int],
+        *,
+        include_pending: bool = False,
     ) -> str | None:
+        # A certified best price dominates all pending prices on that side.
+        # Only an empty certified side needs a sparse outside-fact check.
+        crossed_pending = include_pending and (
+            (
+                not bids
+                and asks
+                and any(p >= asks[0] and q > 0 for p, q in self._pending_bids.items())
+            )
+            or (
+                not asks
+                and bids
+                and any(p <= bids[-1] and q > 0 for p, q in self._pending_asks.items())
+            )
+        )
+        if (bids and asks and bids[-1] >= asks[0]) or crossed_pending:
+            self.stats.crossed_books += 1
+            return "crossed_book"
         if len(bids) < self.required_levels or len(asks) < self.required_levels:
             if not bids or not asks:
                 self.stats.one_sided_books += 1
                 return "one_sided_book"
             self.stats.unsupported_coverage += 1
             return "unsupported_coverage"
-        if bids[-1] >= asks[0]:
-            self.stats.crossed_books += 1
-            return "crossed_book"
         return None
 
     def _close_coverage(self, observed_time: int) -> None:
@@ -1479,10 +1301,14 @@ class DepthReconstructor:
         )
         segment_id, observation_id = self._segment_id, self._observation_id
         self._close_coverage(observed_time)
-        self._invalid = True
-        self._bootstrapped = False
-        self._bids.clear()
-        self._asks.clear()
+        self._uncovered = reason in {"one_sided_book", "unsupported_coverage"}
+        self._invalid = not self._uncovered
+        if self._invalid:
+            self._bootstrapped = False
+            self._bids.clear()
+            self._asks.clear()
+            self._pending_bids.clear()
+            self._pending_asks.clear()
         self.stats.invalid_segments += 1
         if reason == "sequence_gap":
             self.stats.gaps += 1
@@ -1798,7 +1624,7 @@ def iter_agg_trades(
     market_type: str,
     *,
     symbol: str,
-    end_ms: int | None = None,
+    end_ns: int | None = None,
 ) -> Iterator[TradeEvent | TradeBoundary]:
     """Normalize one recorder trade stream while preserving local identity."""
 
@@ -1808,7 +1634,7 @@ def iter_agg_trades(
         symbol=symbol,
         market_type=market_type,
         data_kinds=("agg_trades",),
-        end_ns=None if end_ms is None else end_ms * 1_000_000,
+        end_ns=end_ns,
     )
     with closing_iterator(records):
         for record in records:
@@ -1853,6 +1679,7 @@ def iter_agg_trades(
                 visible_quantity = _visible_trade_quantity(
                     market_type,
                     payload,
+                    allow_unknown=True,
                     historical_time=observed_time // 1_000_000
                     if schema == "qrp-tardis-native-archive"
                     else None,
