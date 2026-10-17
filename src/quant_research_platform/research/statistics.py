@@ -897,18 +897,36 @@ def cross_sectional_rank_ic(
     if bool(selected.duplicated(["timestamp", "asset_id"]).any()):
         raise ValueError("rank_ic_primary_key_duplicate")
     for column in (label_column, *value_columns):
-        selected[column] = strict_real_numeric_series(
-            selected[column], error="rank_ic_numeric_invalid"
-        )
+        # Integer dtypes already contain only real observations. Keep their exact
+        # ordering: conversion to float can turn adjacent integers into ties.
+        if not pd.api.types.is_integer_dtype(selected[column].dtype):
+            selected[column] = strict_real_numeric_series(
+                selected[column], error="rank_ic_numeric_invalid"
+            )
     records: list[dict[str, object]] = []
     for timestamp, group in selected.groupby("timestamp", sort=True):
         record: dict[str, object] = {"timestamp": timestamp}
-        labels_all = group[label_column].to_numpy(dtype="float64")
-        label_present = ~np.isnan(labels_all)
+        arrays = {}
+        present = {}
+        for column in (label_column, *value_columns):
+            series = group[column]
+            present[column] = series.notna().to_numpy()
+            dtype = (
+                "uint64"
+                if pd.api.types.is_unsigned_integer_dtype(series.dtype)
+                else "int64"
+                if pd.api.types.is_integer_dtype(series.dtype)
+                else "float64"
+            )
+            # Missing integer slots need a placeholder; the separate mask keeps
+            # it out of ranks, including when zero is a genuine observation.
+            arrays[column] = series.to_numpy(dtype=dtype, na_value=0)
+        labels_all = arrays[label_column]
+        label_present = present[label_column]
         label_ranks = {}
         for column in value_columns:
-            values_all = group[column].to_numpy(dtype="float64")
-            mask = label_present & ~np.isnan(values_all)
+            values_all = arrays[column]
+            mask = label_present & present[column]
             values, labels = values_all[mask], labels_all[mask]
             if not np.isfinite(values).all() or not np.isfinite(labels).all():
                 record[column] = np.nan

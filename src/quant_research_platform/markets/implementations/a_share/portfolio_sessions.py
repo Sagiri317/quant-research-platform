@@ -103,10 +103,16 @@ def _portfolio_session_evidence(
     *,
     panel_columns,
     include_asset_sessions,
+    time_window=None,
 ):
     bars = open_dataset_session(
         **_dataset_input_options(market_bars_root)
     ).projected_view(_MARKET_FACT_COLUMNS)
+    # Preserve all preceding membership evidence, but never inspect later bars.
+    if time_window is not None:
+        bars = bars.filtered_view(
+            TimeWindow(pd.Timestamp.min, pd.Timestamp(time_window.end))
+        )
     panel = open_dataset_session(**_dataset_input_options(panel_root))
     business_columns = set(panel_columns) & {
         "open",
@@ -158,6 +164,9 @@ def iter_portfolio_sessions(
         raise ValueError("portfolio_mark_price_columns_invalid")
     if not set(mark_price_columns) <= set(panel_columns):
         raise ValueError("portfolio_mark_price_columns_missing")
+    calendar = calendar.loc[
+        calendar.calendar_date.le(pd.Timestamp(time_window.end))
+    ].copy()
     bars, panel, membership, asset_sessions, stocks, raw_axis = (
         _portfolio_session_evidence(
             market_bars_root,
@@ -166,6 +175,7 @@ def iter_portfolio_sessions(
             calendar,
             panel_columns=panel_columns,
             include_asset_sessions=execution_root is not None,
+            time_window=time_window,
         )
     )
     rights_root = equity_events_root
@@ -614,6 +624,10 @@ def _corporate_action_events(source, stocks, calendar):
         market: market_type_calendar_state(calendar, market)
         for market in CURRENT_MARKET_TYPES
     }
+    open_axes = {
+        market: state.index[state.fillna(False)].sort_values()
+        for market, state in calendars.items()
+    }
     for event in source.itertuples(index=False):
         if event.kind in {"RO", "SN"}:
             continue
@@ -622,7 +636,7 @@ def _corporate_action_events(source, stocks, calendar):
         record = pd.NaT
         calendar_proved = False
         if state is not None and bool(state.get(effective, False)):
-            axis = state.index[state.fillna(False)].sort_values()
+            axis = open_axes[event.market_type]
             position = axis.searchsorted(effective)
             if position:
                 record = axis[position - 1]

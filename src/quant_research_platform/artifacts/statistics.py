@@ -657,6 +657,8 @@ for _member in _COMPARISON_MEMBERS:
             _fields += [
                 pa.field("hac_lag", pa.int64(), nullable=False),
                 pa.field("confidence", pa.float64(), nullable=False),
+                pa.field("inference_status", pa.string(), nullable=False),
+                pa.field("inference_reason", pa.string(), nullable=False),
             ]
     if _member == "portfolio_market_exposure.parquet":
         _fields += [
@@ -1432,8 +1434,20 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
         hypothesis = result.coefficient_id.isin(
             ("alpha", "market_return_intercept", "beta")
         )
+        inferred = result.inference_status.eq("DEFINED")
         if (
-            not result.fdr_method.eq("BY").all()
+            not result.inference_status.isin(
+                ("DEFINED", "UNDEFINED", "NOT_APPLICABLE")
+            ).all()
+            or not result.inference_status.eq("NOT_APPLICABLE").eq(~hypothesis).all()
+            or (inferred & ~result.status.eq("DEFINED")).any()
+            or result.loc[inferred, "inference_reason"].ne("").any()
+            or result.loc[~inferred, "inference_reason"].eq("").any()
+            or result.loc[~inferred, ["t_statistic", "p_value", "fdr_adjusted_p_value"]]
+            .notna()
+            .any()
+            .any()
+            or not result.fdr_method.eq("BY").all()
             or result.defined_hypothesis_count.gt(result.planned_hypothesis_count).any()
             or not result.coefficient_id.isin(
                 ("alpha", "market_return_intercept", "beta", "correlation", "r_squared")
@@ -1441,7 +1455,7 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
             or not result.p_value.dropna().between(0, 1).all()
             or not result.fdr_adjusted_p_value.dropna().between(0, 1).all()
             or result.loc[
-                hypothesis & result.status.eq("DEFINED"),
+                inferred,
                 [
                     "standard_error",
                     "t_statistic",

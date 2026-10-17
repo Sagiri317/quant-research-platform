@@ -18,8 +18,10 @@ from tests.helpers.a_share_sources import (
 )
 
 
-def test_native_market_model_return_gap_persists_and_recovers_complete_windows(
+@pytest.mark.parametrize("missing_column", ("period_return", "float_market_cap"))
+def test_native_market_model_gap_persists_and_recovers_complete_windows(
     tmp_path,
+    missing_column,
 ):
     dates = pd.bdate_range("2020-01-02", periods=953).as_unit("ns")
     frames = _synthetic_interim_frames(dates)
@@ -30,7 +32,7 @@ def test_native_market_model_return_gap_persists_and_recovers_complete_windows(
     gap = 640
     bars.loc[
         bars.source_asset_id.eq("000001") & bars.timestamp.eq(dates[gap]),
-        "period_return",
+        missing_column,
     ] = np.nan
     inputs = _write_inputs(tmp_path / "source", frames)
     for name in ("market_panel_1d", "market_model_factors"):
@@ -48,7 +50,7 @@ def test_native_market_model_return_gap_persists_and_recovers_complete_windows(
     assert (
         panel.loc[
             panel.asset_id.eq("000001") & panel.timestamp.eq(dates[gap]),
-            "period_return",
+            missing_column,
         ]
         .isna()
         .all()
@@ -81,6 +83,10 @@ def test_native_market_model_return_gap_persists_and_recovers_complete_windows(
         else np.nan
         for row in returns.to_numpy()
     ]
+    if missing_column == "float_market_cap":
+        # The missing current cap leaves today's lagged proxy intact but
+        # prevents next-session normalization over only the other members.
+        market[gap + 1] = np.nan
 
     @cache
     def exact_window(asset, end):
@@ -254,7 +260,8 @@ def test_unknown_incumbent_cap_keeps_next_market_pair_unknown():
     missing = panel.assign(period_return=0.04)
     missing.loc[0, ["float_market_cap", "close"]] = np.nan
     missing.loc[0, "eligible"] = False
-    assert state.observe(missing).beta.isna().all()
+    assert state.observe(missing).beta.eq(1.0).all()
+    assert state._market_returns["b"][-1] == pytest.approx(0.04)
     # A real incumbent's absent lagged weight must not disappear via
     # renormalization onto the members whose quotes happen to remain visible.
     assert state.observe(panel.assign(period_return=0.05)).beta.isna().all()
@@ -322,23 +329,48 @@ def test_unknown_membership_cannot_drop_lagged_market_member(scope_fact):
     assert all(np.isnan(values[-1]) for values in state._market_returns.values())
 
 
-def test_eligible_missing_cap_is_unknown_evidence_not_global_exception():
-    state = MarketModelRiskState(window=2)
+@pytest.mark.parametrize("bad_cap", (np.nan, 0.0, -1.0, np.inf, "invalid", True))
+def test_current_cap_gap_preserves_lagged_proxy_then_invalidates_next_pair(bad_cap):
+    state = MarketModelRiskState(window=2, residual_window=1)
     panel = pd.DataFrame(
         {
             "asset_id": ["a", "b"],
             "listing_date": pd.Timestamp("2000-01-01"),
-            "period_return": 0.01,
-            "float_market_cap": 100.0,
+            "period_return": [0.01, 0.02],
+            "float_market_cap": [100.0, 200.0],
             "eligible": True,
         }
     )
-    state.observe(panel)
-    missing = panel.assign(period_return=0.02)
-    missing.loc[0, "float_market_cap"] = np.nan
-    actual = state.observe(missing)
+
+    def observe(value, *, missing=False):
+        current = panel.assign(period_return=[value, 2 * value])
+        if missing:
+            current["float_market_cap"] = pd.Series([bad_cap, 900.0], dtype=object)
+        return state.observe(current)
+
+    for value in (0.01, 0.02, 0.03):
+        observe(value)
+    actual = observe(0.04, missing=True)
+    # Unequal returns and caps distinguish lagged weighting from both equal
+    # weighting and today's available-cap subset. No current cap is consumed.
+    expected = float((100 * Fraction(0.04) + 200 * Fraction(0.08)) / 300)
+    assert all(values[-1] == expected for values in state._market_returns.values())
+    assert actual.beta.to_numpy() == pytest.approx([0.6, 1.2])
+    assert actual.residual_volatility.to_numpy() == pytest.approx([0.0, 0.0])
+    # Neither a repeated gap nor restored current caps provide the missing
+    # previous-session weight. Do not renormalize onto the remaining member.
+    for missing in (True, False):
+        actual = observe(0.05, missing=missing)
+        assert actual.beta.isna().all()
+        assert actual.residual_volatility.isna().all()
+        assert all(np.isnan(values[-1]) for values in state._market_returns.values())
+    actual = observe(0.06)
+    expected = float((100 * Fraction(0.06) + 200 * Fraction(0.12)) / 300)
+    assert all(values[-1] == expected for values in state._market_returns.values())
     assert actual.beta.isna().all()
-    assert all(np.isnan(values[-1]) for values in state._market_returns.values())
+    actual = observe(0.07)
+    assert actual.beta.to_numpy() == pytest.approx([0.6, 1.2])
+    assert actual.residual_volatility.to_numpy() == pytest.approx([0.0, 0.0])
 
 
 def test_unknown_market_barrier_retains_prior_membership_obligation():
@@ -371,3 +403,32 @@ def test_unknown_market_barrier_retains_prior_membership_obligation():
     assert np.isnan(state._market_returns["b"][-1])
     state.observe(returned.assign(period_return=0.4), open_market_types=frozenset({1}))
     assert state._market_returns["b"][-1] == pytest.approx(0.4)
+
+
+@pytest.mark.parametrize("boundary", ("relisting", "calendar_segment"))
+def test_cap_gap_cannot_reuse_weight_across_lifecycle_boundary(boundary):
+    state = MarketModelRiskState(window=2)
+    panel = pd.DataFrame(
+        {
+            "asset_id": ["a", "b"],
+            "listing_date": pd.Timestamp("2000-01-01"),
+            "_calendar_segment": 0,
+            "period_return": [0.01, 0.02],
+            "float_market_cap": [100.0, 200.0],
+            "eligible": True,
+        }
+    )
+    state.observe(panel)
+    current = panel.assign(period_return=[0.04, 0.08])
+    current.loc[0, "float_market_cap"] = np.nan
+    if boundary == "relisting":
+        current.loc[0, "listing_date"] = pd.Timestamp("2020-01-01")
+    else:
+        current.loc[0, "_calendar_segment"] = 1
+    state.observe(current)
+    if boundary == "relisting":
+        assert state._market_returns["b"][-1] == 0.08
+    else:
+        assert np.isnan(state._market_returns["b"][-1])
+    state.observe(current.assign(float_market_cap=[100.0, 200.0]))
+    assert np.isnan(state._market_returns["b"][-1])

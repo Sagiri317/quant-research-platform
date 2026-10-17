@@ -69,14 +69,13 @@ def test_holiday_weekly_calibration_reusable_by_independent_compatible_consumers
     assert payload["interval_semantics"] == alpha_interval_semantics(
         config["rebalance_schedule"]
     )
-    for _benchmark in ("csi500", "csi1000"):
-        frozen, _ = frozen_alpha_calibration(
-            payload,
-            cutoff=config["cutoff"],
-            selection_group="global",
-            rebalance_schedule="weekly-last-trading-day",
-        )
-        assert frozen.slope == pytest.approx(0.1)
+    frozen, _ = frozen_alpha_calibration(
+        payload,
+        cutoff=config["cutoff"],
+        selection_group="global",
+        rebalance_schedule="weekly-last-trading-day",
+    )
+    assert frozen.slope == pytest.approx(0.1)
     with pytest.raises(ValueError, match="test_alpha_calibration_binding_invalid"):
         frozen_alpha_calibration(
             payload,

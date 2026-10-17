@@ -372,14 +372,19 @@ def _reference_returns(axis, item, loaded, *, currency, clock):
     return returns
 
 
-def _complete_daily(axis, clock):
+def _complete_daily(axis, clock, sessions=None):
     if axis.empty:
         return False
     adjacent = np.array_equal(
         axis.start_at.iloc[1:].to_numpy(), axis.end_at.iloc[:-1].to_numpy()
     )
     if clock != "utc":
-        return adjacent
+        if sessions is None:
+            return False
+        sessions = pd.DatetimeIndex(sessions)
+        starts = sessions.get_indexer(axis.start_at)
+        ends = sessions.get_indexer(axis.end_at)
+        return adjacent and bool(((starts >= 0) & (ends == starts + 1)).all())
     day = pd.Timedelta(days=1)
     return (
         adjacent
@@ -401,7 +406,9 @@ def _wealth(returns):
     return np.asarray(result)
 
 
-def comparison_tables(axis, *, config, analyses, currencies, clock, metadata):
+def comparison_tables(
+    axis, *, config, analyses, currencies, clock, metadata, sessions=None
+):
     """Consume ledger-owned net interval returns without redoing its accounting."""
     from quant_research_platform.artifacts.statistics import STATISTICS_TABLE_COLUMNS
 
@@ -476,7 +483,7 @@ def comparison_tables(axis, *, config, analyses, currencies, clock, metadata):
             raise ValueError("comparison_portfolio_intervals_invalid")
         identity = dict(zip(group_columns, keys, strict=True))
         currency = currencies[identity["candidate_id"]]
-        daily = _complete_daily(selected, clock)
+        daily = _complete_daily(selected, clock, sessions)
         for kind, item in references:
             identity = {
                 **identity,
@@ -820,8 +827,20 @@ def _exposure(identity, axis, rp, rb, rf, daily, policy):
     result = []
     for name in names:
         measurements = values.get(name, (np.nan,) * 6)
-        valid = np.isfinite(measurements[0]) and (
-            name in names[2:] or np.isfinite(measurements).all()
+        valid = bool(np.isfinite(measurements[0]))
+        hypothesis = name in names[:2]
+        inference_defined = hypothesis and valid and np.isfinite(measurements).all()
+        if not inference_defined:
+            measurements = (
+                measurements[0],
+                measurements[1],
+                np.nan,
+                np.nan,
+                measurements[4],
+                measurements[5],
+            )
+        measurements = tuple(
+            value if np.isfinite(value) else np.nan for value in measurements
         )
         result.append(
             {
@@ -844,7 +863,21 @@ def _exposure(identity, axis, rp, rb, rf, daily, policy):
                 "observation_count": count,
                 "planned_observation_count": planned,
                 "status": "DEFINED" if valid else "UNDEFINED",
-                "reason": "" if valid else reason or "regression_not_identified",
+                "reason": "" if valid else reason or "statistic_not_identified",
+                "inference_status": (
+                    "NOT_APPLICABLE"
+                    if not hypothesis
+                    else "DEFINED"
+                    if inference_defined
+                    else "UNDEFINED"
+                ),
+                "inference_reason": (
+                    "descriptive_statistic"
+                    if not hypothesis
+                    else ""
+                    if inference_defined
+                    else reason or "nonfinite_inference"
+                ),
                 "start_at": axis.start_at.iloc[0],
                 "end_at": axis.end_at.iloc[-1],
                 "hac_lag": policy["hac_lag"],

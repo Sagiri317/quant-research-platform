@@ -106,10 +106,7 @@ class MarketModelRiskState:
                 raw_caps.map(lambda value: isinstance(value, (bool, np.bool_)))
             )
         frame["float_market_cap"] = caps.where(np.isfinite(caps) & caps.gt(0))
-        unknown_quote = pd.Series(False, index=frame.index)
-        for name in ("period_return", "float_market_cap"):
-            if name in frame:
-                unknown_quote |= frame[name].isna()
+        unknown_quote = frame["period_return"].isna()
         if "filling_flag" in frame:
             unknown_quote |= ~frame.filling_flag.isin((0, 1))
         elif "is_trading" in frame:
@@ -125,6 +122,9 @@ class MarketModelRiskState:
                 unknown_quote |= frame[name].isna()
                 known_excluded |= frame[name].eq(excluded_value).fillna(False)
         frame["unknown_quote"] = unknown_quote & ~known_excluded
+        # Today's proxy consumes lagged caps; today's absent cap only makes
+        # the next session's weight unknown, unless membership is excluded.
+        frame["unknown_weight"] = frame.float_market_cap.isna() & ~known_excluded
         frame["fresh"] = (
             frame.filling_flag.eq(0).fillna(False)
             if "filling_flag" in frame
@@ -165,7 +165,7 @@ class MarketModelRiskState:
                 frame["eligible"] if "eligible" in frame else True
             ) & known
             frame.loc[~known, ["period_return", "float_market_cap"]] = np.nan
-            frame.loc[~known, "unknown_quote"] = True
+            frame.loc[~known, ["unknown_quote", "unknown_weight"]] = True
         frame = frame.sort_values("asset_id", kind="mergesort").reset_index(drop=True)
         if open_market_types is not None and asset_market_types is not None:
             self._asset_markets.update(
@@ -209,7 +209,7 @@ class MarketModelRiskState:
                 and row.listing_date != prior_listing
             )
             if (
-                row.unknown_quote
+                (row.unknown_quote or row.unknown_weight)
                 and not known_new_listing
                 and row.asset_id in self._previous_weights
             ):
@@ -239,7 +239,14 @@ class MarketModelRiskState:
                 ),
                 float(row.float_market_cap),
                 bool(row.eligible) if "eligible" in frame else True,
-                bool(row.unknown_quote),
+                # A weight carried across an unknown lifecycle boundary is
+                # only a membership obligation, not a usable lagged weight.
+                bool(row.unknown_quote)
+                or (
+                    row.asset_id in required_previous
+                    and row.asset_id not in self._previous_weights
+                ),
+                bool(row.unknown_weight),
                 bool(row.fresh),
                 bool(row.suspended),
             )
@@ -247,7 +254,7 @@ class MarketModelRiskState:
         ]
         market_weight = Fraction()
         market_total = Fraction()
-        for _, value, weight, _, eligible, unknown_quote, _, _ in weighted:
+        for _, value, weight, _, eligible, unknown_quote, _, _, _ in weighted:
             if weight is not None and unknown_quote:
                 market_weight = Fraction()
                 break
@@ -268,10 +275,8 @@ class MarketModelRiskState:
             else np.nan
         )
         self._previous_market_complete = market_input_complete and not any(
-            unknown
-            and not np.isfinite(cap)
-            and (eligible or previous_weight is not None)
-            for _, _, previous_weight, cap, eligible, unknown, _, _ in weighted
+            unknown_weight and (eligible or previous_weight is not None)
+            for _, _, previous_weight, _, eligible, _, unknown_weight, _, _ in weighted
         )
         for asset in closed_assets:
             gross = self._pending_market_gross.get(asset, Fraction(1))
@@ -290,6 +295,7 @@ class MarketModelRiskState:
             _current_weight,
             _eligible,
             _unknown_quote,
+            _unknown_weight,
             fresh,
             suspended,
         ) in weighted:
@@ -389,11 +395,12 @@ class MarketModelRiskState:
                     current_weight,
                     _eligible,
                     unknown_quote,
+                    unknown_weight,
                     _fresh,
                     _suspended,
                 ) in weighted
                 if np.isfinite(current_weight)
-                or (unknown_quote and previous_weight is not None)
+                or ((unknown_quote or unknown_weight) and previous_weight is not None)
             },
         }
 

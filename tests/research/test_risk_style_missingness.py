@@ -85,7 +85,14 @@ def test_joint_risk_fit_uses_per_style_domain_then_complete_cases_and_reconciles
     )
     assert "asset_23" not in fit.exposures.index
     assert "asset_22" not in fit.exposures.index
-    state.observe_return_session(cross)
+    unknown = cross.iloc[[0]].assign(
+        asset_id="unrelated_unknown",
+        eligible=False,
+        listing_date=pd.NaT,
+        asset_return=np.nan,
+    )
+    state.observe_return_session(pd.concat([cross, unknown], ignore_index=True))
+    assert "unrelated_unknown" not in state._listings
     np.testing.assert_allclose(
         [state._factor_rows[0][column] for column in fit.factor_returns.index],
         fit.factor_returns,

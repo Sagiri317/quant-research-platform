@@ -25,6 +25,7 @@ from quant_research_platform.research.portfolios.accounting import (
 )
 from quant_research_platform.research.portfolios.comparison import (
     COMPARISON_ANALYSES,
+    _complete_daily,
     _nav_return_roundoff,
     comparison_tables,
     selected_portfolio_analyses,
@@ -1011,9 +1012,9 @@ def iter_holding_factor_inputs(
     from quant_research_platform.contracts.time import TimeWindow
     from quant_research_platform.research.portfolios.production import (
         _ENHANCED_PANEL_COLUMNS,
-        _enhanced_risk_cross,
         _iter_input_sessions,
         _risk_context_input_sessions,
+        _risk_exposure_cross,
         _validate_input_keys,
     )
 
@@ -1052,7 +1053,14 @@ def iter_holding_factor_inputs(
                         *(
                             column
                             for column in _ENHANCED_PANEL_COLUMNS
-                            if column != "open"
+                            if column
+                            not in {
+                                "open",
+                                "close",
+                                "amount",
+                                "period_return",
+                                "is_nonfinancial_industry",
+                            }
                         ),
                         risk.config.weight_column,
                     ),
@@ -1112,7 +1120,7 @@ def iter_holding_factor_inputs(
                             raise ValueError("holding_risk_context_keys_invalid")
                         _validate_input_keys(current, context)
                         risk_frames.append(context)
-                    cross = _enhanced_risk_cross(
+                    cross = _risk_exposure_cross(
                         panel=current,
                         risk_frames=risk_frames,
                         style_columns=style_columns,
@@ -1293,7 +1301,19 @@ def build_portfolio_statistics_tables(
             inputs["calendar"],
             ("calendar_date", "source_market_type", "is_trading_day"),
         )
-        if "attribution" in analyses
+        if "calendar" in inputs
+        and set(analyses).intersection(
+            {
+                "attribution",
+                "performance",
+                "sharpe_inference",
+                "cscv",
+                "group_comparison",
+                "benchmark_comparison",
+                "control_comparison",
+                "market_exposure",
+            }
+        )
         else None
     )
     codes = (
@@ -1434,11 +1454,14 @@ def _portfolio_statistics_tables(
     ids = tuple(candidate.candidate_id for candidate in candidates)
     if len(ids) != len(set(ids)) or set(ledgers) != set(ids):
         raise ValueError("portfolio_statistics_candidate_set_invalid")
-    expected_intervals = (
-        holding_intervals(
-            pd.DatetimeIndex(unified_trading_sessions(calendar)), time_window
-        )
+    sessions = (
+        pd.DatetimeIndex(unified_trading_sessions(calendar))
         if calendar is not None
+        else None
+    )
+    expected_intervals = (
+        holding_intervals(sessions, time_window)
+        if "attribution" in analyses and sessions is not None
         else None
     )
     access = config["sample_role"]
@@ -1799,6 +1822,11 @@ def _portfolio_statistics_tables(
         if not {"performance"} & set(analyses):
             continue
         returns_defined = selected.return_status.eq("DEFINED").all()
+        daily_complete = _complete_daily(
+            selected.rename(columns={"entry_at": "start_at"}),
+            "trading_day_open",
+            sessions,
+        )
         count = len(selected)
         deviation = float(
             return_standard_deviation(
@@ -1927,6 +1955,13 @@ def _portfolio_statistics_tables(
             else "statistic_not_identified"
         )
         for name, value in values.items():
+            missing_daily = not daily_complete and name in {
+                "cagr",
+                "annualized_volatility",
+                "sharpe",
+            }
+            if missing_daily:
+                value = np.nan
             summary_rows.append(
                 dict(
                     candidate_id=candidate_id,
@@ -1935,6 +1970,8 @@ def _portfolio_statistics_tables(
                     status="DEFINED" if np.isfinite(value) else "UNDEFINED",
                     reason=""
                     if np.isfinite(value)
+                    else "incomplete_daily_axis"
+                    if missing_daily
                     else "nonfinite_result"
                     if np.isinf(value)
                     or name
@@ -1960,8 +1997,13 @@ def _portfolio_statistics_tables(
         )
     ):
         raise ValueError("portfolio_statistics_window_incomplete")
+    daily_complete = _complete_daily(
+        matrix.index.to_frame(index=False).rename(columns={"entry_at": "start_at"}),
+        "trading_day_open",
+        sessions,
+    )
     paired_comparison = (
-        _group_portfolio_comparison(matrix, config)
+        _group_portfolio_comparison(matrix, config, daily_complete=daily_complete)
         if "group_comparison" in analyses
         else pd.DataFrame(columns=_PORTFOLIO_COMPARISON_COLUMNS)
     )
@@ -2005,7 +2047,11 @@ def _portfolio_statistics_tables(
             else None
         )
         for candidate_id in ids if "sharpe_inference" in analyses else ():
-            if inference_matrix[candidate_id].isna().any():
+            if not daily_complete:
+                outputs = tuple(
+                    (name, None, "incomplete_daily_axis") for name in ("psr", "dsr")
+                )
+            elif inference_matrix[candidate_id].isna().any():
                 outputs = tuple(
                     (
                         name,
@@ -2051,7 +2097,9 @@ def _portfolio_statistics_tables(
                 )
         if "cscv" in analyses:
             blocks = config["statistics"]["cscv_blocks"]
-            if not np.isfinite(inference_matrix.to_numpy()).all():
+            if not daily_complete:
+                value, status, reason = np.nan, "UNDEFINED", "incomplete_daily_axis"
+            elif not np.isfinite(inference_matrix.to_numpy()).all():
                 value, status, reason = (
                     np.nan,
                     "UNDEFINED",
@@ -2227,6 +2275,7 @@ def _portfolio_statistics_tables(
                     for key, ledger in ledgers.items()
                 },
                 clock="trading_day_open",
+                sessions=sessions,
                 metadata={} if comparison_metadata is None else comparison_metadata,
             )
         )
@@ -2268,8 +2317,8 @@ _PORTFOLIO_COMPARISON_COLUMNS = (
 )
 
 
-def _group_portfolio_comparison(matrix, config):
-    """Compare both frozen groups on the complete, already validated daily grid."""
+def _group_portfolio_comparison(matrix, config, *, daily_complete):
+    """Keep paired descriptions; infer only on a caller-verified daily grid."""
     statistics = config["statistics"]
     declaration = statistics.get("group_comparison")
     if declaration is None:
@@ -2318,6 +2367,8 @@ def _group_portfolio_comparison(matrix, config):
         )
         .set_index("timestamp")
         .set_axis(candidate_ids)
+        if daily_complete
+        else None
     )
     rows = []
     for index, candidate in enumerate(candidate_ids):
@@ -2364,7 +2415,9 @@ def _group_portfolio_comparison(matrix, config):
             "bootstrap_status": "UNDEFINED",
             "bootstrap_reason": None,
         }
-        if index in undefined_pairs:
+        if not daily_complete:
+            row["reason"] = row["bootstrap_reason"] = "incomplete_daily_axis"
+        elif index in undefined_pairs:
             row["reason"] = row["bootstrap_reason"] = "nonpositive_start_nav"
         else:
             estimate = inference.loc[candidate]

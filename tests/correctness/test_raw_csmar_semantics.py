@@ -1279,20 +1279,13 @@ def test_quoted_index_info_csv_preserves_semantics(tmp_path: Path) -> None:
     assert by_asset.loc["000905", "calculation_formula"] == "formula after merge"
 
 
-@pytest.mark.parametrize(
-    "column,maximum",
-    tuple(
-        zip(
-            ("Idxinfo05", "Idxinfo06", "Idxinfo07", "Idxinfo08", "Idxinfo09"),
-            (4, 4, 7, 5, 9),
-            strict=True,
-        )
-    ),
-)
 @pytest.mark.parametrize("chunksize", (1, 100))
-@pytest.mark.parametrize("all_unsupported", (False, True))
+@pytest.mark.parametrize(
+    "isolated_column",
+    (None, "Idxinfo05", "Idxinfo06", "Idxinfo07", "Idxinfo08", "Idxinfo09"),
+)
 def test_index_info_preserves_optional_source_codes_and_discloses_unknowns(
-    tmp_path, column, maximum, chunksize, all_unsupported
+    tmp_path, chunksize, isolated_column
 ):
     import json
 
@@ -1317,21 +1310,42 @@ def test_index_info_preserves_optional_source_codes_and_discloses_unknowns(
         Idxinfo09="5",
         Idxinfo10="formula",
     )
-    supported = [
-        dict(row, Indexcd=f"{number:06d}", **{column: value})
-        for number, value in enumerate(["", *map(str, range(1, maximum + 1))])
-    ]
-    unsupported = [
-        dict(row, Indexcd=f"{100 + number:06d}", **{column: value})
-        for number, value in enumerate((str(maximum + 1), "unknown", "-9666", "1;2"))
-    ]
-    other_column = "Idxinfo06" if column == "Idxinfo05" else "Idxinfo05"
-    unsupported[0][other_column] = "unknown"
-    rows = (
-        unsupported
-        if all_unsupported
-        else [unsupported[0], *supported, *unsupported[1:], supported[0]]
+    # Disjoint IDs retain each column's original logical group in one publication.
+    code_groups = (
+        ("Idxinfo05", 4),
+        ("Idxinfo06", 4),
+        ("Idxinfo07", 7),
+        ("Idxinfo08", 5),
+        ("Idxinfo09", 9),
     )
+    rows = []
+    unsupported = []
+    unsupported_counts = {column: 0 for column, _maximum in code_groups}
+    all_unsupported = isolated_column is not None
+    if all_unsupported:
+        # Keep the whole-column unsupported boundary, independent of other groups.
+        code_groups = tuple(item for item in code_groups if item[0] == isolated_column)
+    for group, (column, maximum) in enumerate(code_groups):
+        supported = [
+            dict(row, Indexcd=f"{group * 1000 + number:06d}", **{column: value})
+            for number, value in enumerate(["", *map(str, range(1, maximum + 1))])
+        ]
+        bad_rows = [
+            dict(row, Indexcd=f"{group * 1000 + 100 + number:06d}", **{column: value})
+            for number, value in enumerate(
+                (str(maximum + 1), "unknown", "-9666", "1;2")
+            )
+        ]
+        other_column = "Idxinfo06" if column == "Idxinfo05" else "Idxinfo05"
+        bad_rows[0][other_column] = "unknown"
+        unsupported_counts[column] += 4
+        unsupported_counts[other_column] += 1
+        unsupported.extend(bad_rows)
+        rows.extend(
+            bad_rows
+            if all_unsupported
+            else [bad_rows[0], *supported, *bad_rows[1:], supported[0]]
+        )
     extra = tuple(
         name
         for name in row
@@ -1363,7 +1377,9 @@ def test_index_info_preserves_optional_source_codes_and_discloses_unknowns(
     for item in unsupported:
         for source_column in raw_exports.INDEX_INFO_SOURCE_CODE_COLUMNS:
             output_column = COLUMN_MAPPINGS["index_info"][source_column]
-            assert by_asset.loc[item["Indexcd"], output_column] == item[source_column]
+            assert (
+                by_asset.loc[item["Indexcd"], output_column] == item[source_column]
+            ), (item["Indexcd"], source_column)
     manifest = json.loads(
         Path(native_filesystem_path(root / "_manifest/manifest.json")).read_text(
             encoding="utf-8"
@@ -1373,12 +1389,10 @@ def test_index_info_preserves_optional_source_codes_and_discloses_unknowns(
     assert manifest["producer_diagnostics"]["source_row_counts"] == {
         "raw_rows": len(rows),
         **{
-            f"unsupported_{name}_rows": 4
-            if name == column
-            else int(name == other_column)
+            f"unsupported_{name}_rows": unsupported_counts[name]
             for name in raw_exports.INDEX_INFO_SOURCE_CODE_COLUMNS
         },
-        "unsupported_source_code_rows": 4,
+        "unsupported_source_code_rows": 4 * len(code_groups),
         "invalid_base_date_rows": 0,
         "invalid_start_date_rows": 0,
         "excluded_missing_timestamp_rows": 0,
@@ -1386,8 +1400,8 @@ def test_index_info_preserves_optional_source_codes_and_discloses_unknowns(
         "retained_after_date_filter_rows": retained,
         "excluded_date_range_rows": 0,
     }
-    assert manifest["producer_diagnostics"]["exact_duplicate_count"] == int(
-        not all_unsupported
+    assert manifest["producer_diagnostics"]["exact_duplicate_count"] == (
+        len(code_groups) * int(not all_unsupported)
     )
     assert Path(native_filesystem_path(raw_path)).read_bytes() == original
 
@@ -2387,27 +2401,9 @@ def test_raw_table_identity_ignores_parent_directory_and_rejects_conflict(tmp_pa
             _collect_raw_export(path, dataset)
 
 
-@pytest.mark.parametrize(
-    ("code", "column"),
-    [
-        ("invalid_index_info_date", "start_date"),
-        ("invalid_index_info_date", "base_date"),
-        ("invalid_stock_master_date", "listing_date"),
-        ("invalid_stock_master_date", "delisting_date"),
-        ("invalid_stock_master_date", "status_change_date"),
-        ("invalid_industry_version_date", "abandon_date"),
-        ("invalid_analyst_date", "declare_date"),
-        ("invalid_listing_status_date", "announcement_date"),
-        ("invalid_stock_info_change_date", "announcement_date"),
-    ],
-)
-def test_optional_csmar_dates_keep_invalid_cells_unknown_without_losing_neighbors(
-    code, column
-):
+def test_optional_csmar_dates_keep_invalid_cells_unknown_without_losing_neighbors():
     result = interim._parse_optional_csmar_date(
-        pd.Series(["invalid-date", "9999-12-31", "", " ", None, "2020-01-01"]),
-        column,
-        error_code=code,
+        pd.Series(["invalid-date", "9999-12-31", "", " ", None, "2020-01-01"])
     )
     assert result.isna().tolist() == [True, True, True, True, True, False]
     assert result.iloc[-1] == pd.Timestamp("2020-01-01")
@@ -3266,9 +3262,7 @@ def test_index_date_vectorized_valid_values_match_existing_owner(dates):
         }
     )
     normalized = interim.normalize_raw_frame(frame, "index_info")
-    expected = interim._parse_optional_csmar_date(
-        values, "start_date", error_code="invalid_index_info_date"
-    )
+    expected = interim._parse_optional_csmar_date(values)
     pd.testing.assert_series_equal(normalized.start_date, expected, check_names=False)
     assert normalized.attrs["source_row_counts"]["invalid_start_date_rows"] == 0
 
@@ -3509,3 +3503,111 @@ def test_index_market_conflicts_are_field_local_across_chunks(
         == counts["conflicting_period_return_rows"]
         == 2
     )
+
+
+def test_optional_reference_conflicts_preserve_consumed_facts(tmp_path, subtests):
+    from quant_research_platform.markets.implementations.a_share.benchmark import (
+        iter_benchmark_weight_snapshots,
+    )
+    from quant_research_platform.markets.implementations.a_share.processed import panels
+    from quant_research_platform.storage.datasets import read_dataset
+    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from tests.helpers.a_share_raw import _write_csmar
+
+    info = {
+        "Indexcd": "000905",
+        "Idxinfo01": "中证小盘500指数",
+        "Idxinfo11": "2014-01-02",
+        "Idxinfo02": "2013-12-31",
+        "Idxinfo05": "1",
+    }
+    no_limit = {"Symbol": "000001", "TradingDate": "2020-01-02", "Reason": "IPO"}
+    weight = {
+        "Indexcd": "000905",
+        "Enddt": "2020-01-02",
+        "Stkcd": "000001",
+        "Constdnme": "first name",
+        "Weight": 60.0,
+    }
+    cases = {
+        "index_info": (
+            [
+                info,
+                {**info, "Idxinfo05": "2"},
+                {**info, "Indexcd": "000852", "Idxinfo01": "中证1000指数"},
+            ],
+            "weighting_method",
+            ("Idxinfo05",),
+        ),
+        "trading_no_limit": (
+            [
+                no_limit,
+                {**no_limit, "Reason": "relisting"},
+                {**no_limit, "Symbol": "000002"},
+            ],
+            "reason",
+            (),
+        ),
+        "index_weights": (
+            [
+                weight,
+                {**weight, "Constdnme": "changed name"},
+                {**weight, "Stkcd": "000002", "Weight": 40.0},
+            ],
+            "constituent_name",
+            (),
+        ),
+    }
+    benchmark_info = pd.DataFrame(
+        {"source_asset_id": ["000905"], "index_name": ["中证小盘500指数"]}
+    )
+    benchmark_weights = pd.DataFrame(
+        {
+            "source_asset_id": ["000905"],
+            "constituent_asset_id": ["000001"],
+            "effective_date": [pd.Timestamp("2020-01-02")],
+            "weight": [1.0],
+        }
+    )
+    for data_id, (rows, column, extra) in cases.items():
+        raw = tmp_path / data_id / "raw"
+        raw.mkdir(parents=True)
+        _write_csmar(raw, data_id, rows, extra_columns=extra)
+        for chunksize in (1, 100):
+            with subtests.test(data_id=data_id, chunksize=chunksize):
+                root = tmp_path / data_id / str(chunksize)
+                interim.materialize_interim_data(
+                    raw_root=raw,
+                    output_roots={data_id: root},
+                    data_ids=(data_id,),
+                    chunksize=chunksize,
+                )
+                saved = read_dataset(root)
+                assert len(saved) == 2
+                assert saved[column].isna().sum() == 1
+                counts = read_dataset_manifest_evidence(root)["producer_diagnostics"][
+                    "source_row_counts"
+                ]
+                assert counts[f"conflicting_{column}_rows"] == 2
+                if data_id == "trading_no_limit":
+                    panel = pd.DataFrame(
+                        {
+                            "asset_id": ["000001", "000002", "000003"],
+                            "timestamp": pd.to_datetime(["2020-01-02"] * 3),
+                            "limit_status": [1.0] * 3,
+                        }
+                    )
+                    assert panels._apply_no_limit_exceptions(
+                        panel, saved
+                    ).limit_status.tolist() == [0.0, 0.0, 1.0]
+                else:
+                    frames = iter_benchmark_weight_snapshots(
+                        saved if data_id == "index_info" else benchmark_info,
+                        [saved if data_id == "index_weights" else benchmark_weights],
+                    )
+                    actual = pd.concat(frames, ignore_index=True).sort_values(
+                        "asset_id"
+                    )
+                    assert actual.weight.tolist() == (
+                        [0.6, 0.4] if data_id == "index_weights" else [1.0]
+                    )

@@ -976,11 +976,9 @@ def test_declared_reader_preserves_observer_generator_exit(
 
 
 @pytest.mark.parametrize("unit", ("ms", "us", "ns"))
-@pytest.mark.parametrize("offset_ns", (0, 1, 1000, 1000000))
 @pytest.mark.parametrize("kind", ("timestamp", "duration"))
-@pytest.mark.parametrize("operator", ("==", "in"))
 def test_temporal_equality_and_membership_keep_predicate_precision(
-    tmp_path, unit, offset_ns, kind, operator
+    tmp_path, unit, kind, subtests
 ):
     from quant_research_platform.contracts.columns import ColumnRole
 
@@ -1000,26 +998,35 @@ def test_temporal_equality_and_membership_keep_predicate_precision(
             "temporal_equality", value_role=ColumnRole.CONTEXT
         ),
     )
-    predicate = origin + pd.Timedelta(offset_ns, unit="ns")
-    session = dataset_reading.open_dataset_session(
-        root,
-        columns=("value",),
-        time_window=None,
-        row_filters=(
-            ("value", operator, predicate if operator == "==" else (predicate,)),
-        ),
-    )
-    assert session.arrow_schema.field("value").type == (
-        pa.timestamp(unit) if kind == "timestamp" else pa.duration(unit)
-    )
-    rows = 0
-    with closing_iterator(
-        dataset_reading.iter_dataset_chunks(session, batch_rows=2048)
-    ) as chunks:
-        for result in chunks:
-            rows += len(result)
-            assert (result["value"] == predicate).all()
-    assert rows == (1 if offset_ns in (0, 1000000) else 0)
+    for offset_ns in (0, 1, 1000, 1000000):
+        for operator in ("==", "in"):
+            with subtests.test(
+                unit=unit, kind=kind, offset_ns=offset_ns, operator=operator
+            ):
+                predicate = origin + pd.Timedelta(offset_ns, unit="ns")
+                session = dataset_reading.open_dataset_session(
+                    root,
+                    columns=("value",),
+                    time_window=None,
+                    row_filters=(
+                        (
+                            "value",
+                            operator,
+                            predicate if operator == "==" else (predicate,),
+                        ),
+                    ),
+                )
+                assert session.arrow_schema.field("value").type == (
+                    pa.timestamp(unit) if kind == "timestamp" else pa.duration(unit)
+                )
+                rows = 0
+                with closing_iterator(
+                    dataset_reading.iter_dataset_chunks(session, batch_rows=2048)
+                ) as chunks:
+                    for result in chunks:
+                        rows += len(result)
+                        assert (result["value"] == predicate).all()
+                assert rows == (1 if offset_ns in (0, 1000000) else 0)
 
 
 @pytest.mark.parametrize("dtype", ["object", "float64"])

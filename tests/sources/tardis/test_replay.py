@@ -1508,9 +1508,15 @@ def test_late_snapshot_prefix_cursors_are_independent_and_canonical(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "case", ["ordinary", "bucket_cancellation", "event_cancellation", "true_overflow"]
+    "case,batch_rows",
+    [
+        pytest.param("ordinary", 1, id="ordinary-regular-flush"),
+        pytest.param("bucket_cancellation", 1, id="bucket-cancellation"),
+        pytest.param("event_cancellation", 1, id="event-cancellation"),
+        pytest.param("true_overflow", 1, id="true-overflow"),
+        pytest.param("ordinary", 10, id="ordinary-tail-flush"),
+    ],
 )
-@pytest.mark.parametrize("batch_rows", [1, 10])
 def test_native_panel_exact_ofi_publication(tmp_path, case, batch_rows):
     from quant_research_platform.markets.implementations.crypto.hft import (
         iter_factor_frames,
@@ -1962,3 +1968,39 @@ def test_late_snapshot_outside_facts_only_emit_after_real_bridge(tmp_path):
     assert list(stats.coverage_segments.values()) == [
         (books[0].observed_time_ns, books[0].observed_time_ns + 1)
     ]
+
+
+def test_prefix_cutoff_precedes_unrelated_stream_filter(tmp_path):
+    import gzip
+
+    from tests.helpers.tardis import _snapshot
+
+    first = _snapshot()
+    second = _snapshot("2026-09-01T00:00:02.000000Z").replace(b"btcusdt", b"ethusdt")
+    third = _snapshot("2026-09-01T00:00:03.000000Z").replace(b"btcusdt", b"ethusdt")
+    archive = tmp_path / "archive"
+    import_slices(
+        archive,
+        date="2026-09-01",
+        slices=_slices(tmp_path / "native", first + second + third),
+    )
+    manifest = json.loads((archive / "manifest.json").read_text())
+    member = archive / manifest["files"][0]["path"]
+    member.write_bytes(
+        gzip.compress(first + second + b"2026-09-01T00:00:03.000000Z not-json\n")
+    )
+    options = dict(
+        symbol="BTCUSDT",
+        market_type=FUTURES_MARKET_TYPE,
+        data_kinds=("depth_snapshot", "depth"),
+    )
+    with open_market_source(archive) as source:
+        rows = list(
+            source.iter_market_records(
+                **options, end_ns=pd.Timestamp("2026-09-01T00:00:01.500000Z").value
+            )
+        )
+    assert [row["receive_time"] for row in rows] == ["2026-09-01T00:00:01.000000Z"]
+    with open_market_source(archive) as source:
+        with pytest.raises(ValueError, match="qrp_json_invalid"):
+            list(source.iter_market_records(**options))

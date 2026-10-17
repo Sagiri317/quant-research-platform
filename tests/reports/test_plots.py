@@ -451,6 +451,65 @@ def test_curve_clock_distinguishes_crypto_epoch_from_daily_civil_dates(
     assert pd.Timestamp(axes[0].lines[0].get_xdata()[0]).hour == expected_hour
 
 
+@pytest.mark.parametrize(
+    "timestamps,local_hours",
+    [
+        (
+            ["2026-11-01T05:30:00Z", "2026-11-01T06:00:00Z", "2026-11-01T06:30:00Z"],
+            [1, 1, 1],
+        ),
+        (
+            ["2026-03-08T06:30:00Z", "2026-03-08T07:00:00Z", "2026-03-08T07:30:00Z"],
+            [1, 3, 3],
+        ),
+    ],
+)
+@pytest.mark.parametrize("aware", [True, False])
+def test_plot_clocks_preserve_dst_instants_and_naive_wall_time(
+    timestamps, local_hours, aware
+):
+    from matplotlib.dates import num2date
+
+    times = pd.to_datetime(timestamps)
+    if not aware:
+        times = times.tz_localize(None)
+    data = curve((100, 110, 105))
+    data["valuation_method"] = "linear_perpetual" if aware else "cash_equity"
+    for point, timestamp in zip(data["points"], times, strict=True):
+        point["timestamp_ns"] = timestamp.value
+    _, curve_axes = plots.plot_portfolio_curve(
+        data, sample_role="test", timezone="America/New_York"
+    )
+    _, series_axes = plots.plot_series(
+        [
+            dict(timestamp=timestamp, value=value)
+            for timestamp, value in zip(times, (100, 110, 105), strict=True)
+        ],
+        x_column="timestamp",
+        value_columns=["value"],
+        title="时间",
+        units="数值",
+        **{**TIMED, "timezone": "America/New_York"},
+    )
+    for axis in [*curve_axes, *series_axes]:
+        line = axis.lines[0]
+        coordinates = line.get_xdata(orig=False)
+        np.testing.assert_allclose(
+            np.diff(coordinates) * 86400, [1800, 1800], atol=1e-6
+        )
+        displayed = pd.DatetimeIndex(line.get_xdata())
+        assert displayed.is_monotonic_increasing and displayed.is_unique
+        assert displayed.hour.tolist() == (
+            local_hours if aware else times.hour.tolist()
+        )
+        formatter = axis.xaxis.get_major_formatter()
+        labels = [num2date(value, tz=formatter._tz) for value in coordinates]
+        assert [value.hour for value in labels] == displayed.hour.tolist()
+        assert axis.xaxis.get_major_locator().tz == formatter._tz
+        if aware and timestamps[0].startswith("2026-11"):
+            assert [value.fold for value in labels] == [0, 1, 1]
+
+
 def test_series_long_table_group_filter_and_physical_projection(tmp_path, monkeypatch):
     from contextlib import contextmanager
 
@@ -529,6 +588,7 @@ def test_plot_risk_example_consumes_native_comparisons_and_unavailable_reason(tm
     from quant_research_platform.research.portfolios.diagnostics import (
         portfolio_statistics,
     )
+    from tests.helpers.a_share_sources import _calendar_input
     from tests.helpers.benchmark_references import reference_input
     from tests.research.test_optional_statistics import _cash_ledger
 
@@ -551,6 +611,14 @@ def test_plot_risk_example_consumes_native_comparisons_and_unavailable_reason(tm
         {
             "ledgers": [str(ledger)],
             "window": window,
+            "inputs": {
+                "calendar": str(
+                    _calendar_input(
+                        tmp_path / "calendar",
+                        {1: pd.bdate_range(window["start"], window["end"])},
+                    )
+                )
+            },
             "analyses": ["performance", "benchmark_comparison"],
             "comparison_benchmarks": references,
             "output": str(tmp_path / "statistics"),

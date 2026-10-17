@@ -155,7 +155,11 @@ def test_persisted_funding_cash_nav_and_drawdown_share_one_basis(
     tmp_path, style, direction
 ):
     produced = []
-    _, config = _run(style, direction=direction)
+    config = (
+        replace(_taker_config(), taker_fee_bps=5.0)
+        if style == "taker"
+        else replace(_maker_config(), maker_fee_bps=2.0)
+    )
 
     def produce(emit):
         result, _ = _run(style, direction=direction, emit=emit)

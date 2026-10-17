@@ -373,6 +373,13 @@ def _validate(metadata, tables, *, partial=False):
         result[name] = converted
     if "predictions" in result:
         predictions = result["predictions"].set_index(["timestamp", "asset_id"])
+        if (
+            metadata["output_space"] == "model_output"
+            and not predictions["explained_output"]
+            .eq(predictions["prediction_score"])
+            .all()
+        ):
+            raise ValueError("explanation_prediction_binding_invalid")
         contributions = result["contributions"]
         counts = contributions.groupby(["timestamp", "asset_id"]).size()
         if (

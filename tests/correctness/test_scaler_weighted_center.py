@@ -70,11 +70,60 @@ def test_tiny_weight_preserves_representable_center_and_reloaded_coordinates(
     assert Fraction(*payload["weighted_mean_offset"][0]) == restored.offset_[0]
 
 
-def test_center_survives_cancellation_of_large_anchor():
-    frame = pd.DataFrame({"x": [1e200, 1.0, -1e200]})
-    fitted = ModelMatrixScaler.fit(frame)
-    assert fitted.mean_[0] == float(Fraction(1, 3))
+@pytest.mark.parametrize("weight", [None, np.nextafter(0.0, 1.0), 2.0, 1e308])
+@pytest.mark.parametrize("subnormal", [False, True])
+def test_center_survives_cancellation_of_large_anchor(weight, subnormal):
+    tiny = np.nextafter(0.0, 1.0)
+    values = [tiny, tiny, -tiny] if subnormal else [1e200, 1.0, -1e200]
+    frame = pd.DataFrame({"x": values})
+    mean = sum(map(Fraction, values)) / len(values)
+    fitted = ModelMatrixScaler.fit(
+        frame, sample_weight=None if weight is None else [weight] * len(values)
+    )
+    assert Fraction(fitted.origin_[0]) + fitted.offset_[0] == mean
+    assert fitted.mean_[0] == float(mean)
     assert fitted.transform(pd.DataFrame({"x": [0.0]})).x.iloc[0] < 0
+
+
+@pytest.mark.parametrize("row_count", [64, 2048])
+@pytest.mark.parametrize("weight", [None, np.nextafter(0.0, 1.0), 2.0, 1e308])
+def test_centered_equal_weights_use_column_cost_exact_arithmetic(
+    monkeypatch, row_count, weight
+):
+    from quant_research_platform.research.models import scaler
+
+    base = np.random.default_rng(42).integers(1, 9, size=(row_count // 2, 3)) / 8
+    base[0] = 1.0
+    frame = pd.DataFrame(np.concatenate([base, -base]), columns=list("xyz"))
+    calls = []
+
+    def counted(*args):
+        calls.append(1)
+        return Fraction(*args)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(scaler, "Fraction", counted)
+        fitted = ModelMatrixScaler.fit(
+            frame,
+            sample_weight=None if weight is None else np.full(row_count, weight),
+        )
+    # Exact cancellation is exercised without per-row rational construction.
+    assert len(frame.columns) < len(calls) <= 3 * len(frame.columns)
+    restored = pickle.loads(pickle.dumps(fitted))
+    assert restored.to_payload() == fitted.to_payload()
+    pd.testing.assert_frame_equal(
+        restored.transform(frame), fitted.transform(frame), check_exact=True
+    )
+    for index, column in enumerate(frame):
+        mean = sum(map(Fraction, frame[column])) / row_count
+        assert Fraction(fitted.origin_[index]) + fitted.offset_[index] == mean
+        expected = [
+            float((Fraction(value) - mean) / Fraction(fitted.scale_[index]))
+            for value in frame[column]
+        ]
+        np.testing.assert_allclose(
+            restored.transform(frame)[column], expected, rtol=2e-15, atol=0
+        )
 
 
 def test_center_with_native_equal_timestamp_extreme_weights():

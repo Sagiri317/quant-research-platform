@@ -24,7 +24,7 @@ from quant_research_platform.research.portfolios.diagnostics import portfolio_st
 from quant_research_platform.research.statistics_production import factor_statistics
 
 
-def _cash_ledger(root, *, candidate=None):
+def _cash_ledger(root, *, candidate=None, dates=None):
     candidate = candidate or PortfolioCandidateSpec(
         candidate_id="cash",
         selection_group="global",
@@ -34,7 +34,9 @@ def _cash_ledger(root, *, candidate=None):
         top_quantile=0.2,
         benchmark_id=None,
     )
-    dates = pd.bdate_range("2024-01-02", periods=4)
+    dates = pd.DatetimeIndex(
+        pd.bdate_range("2024-01-02", periods=4) if dates is None else dates
+    )
     capital = PortfolioCapital(
         candidate_id=candidate.candidate_id,
         initial_capital=1000.0,
@@ -44,7 +46,7 @@ def _cash_ledger(root, *, candidate=None):
     window = {"start": str(dates[0].date()), "end": str(dates[-1].date())}
 
     def produce(emit):
-        for index in range(2):
+        for index in range(len(dates) - 2):
             entry, end = dates[index + 1 : index + 3]
             emit(
                 PortfolioLedgerBatch(
@@ -183,7 +185,7 @@ def test_rank_ic_only_uses_declared_maturity_and_no_market_cap(
             "timestamp": np.repeat(dates, 4),
             "asset_id": ["a", "b", "c", "d"] * 4,
             "eligible": True,
-            "signal": [0.0, 1.0, 2.0, 3.0] * 4,
+            "signal": [2**60 + i for i in (0, 1, 2, 3)] * 4,
             "return": [0.0, 0.1, 0.3, 0.2] * 4,
             "mature_at": np.repeat(dates + pd.Timedelta(days=2), 4),
             "unused": ["not numeric"] * 16,
@@ -250,6 +252,8 @@ def test_rank_ic_only_uses_declared_maturity_and_no_market_cap(
     assert len(projections) == 1 and set(projections[0]) == set(frame) - {"unused"}
     with artifact.table("factor_diagnostics.parquet") as values:
         assert values.observation_count.eq(4).all()
+        assert values["mean"].tolist() == pytest.approx([0.8, 0.8])
+        assert values.reason.eq("hac_inference_undefined").all()
         assert values.fdr_method.tolist() == ["BY", "BH"]
     with pytest.raises(ValueError, match="statistics_table_member_invalid"):
         with artifact.table("fama_macbeth.parquet"):
@@ -299,21 +303,46 @@ def test_cscv_complement_reuse_preserves_exhaustive_result_and_work(monkeypatch)
     assert len(calls) == comb(8, 4)
 
 
-def test_rank_ic_reuses_only_identical_masks(monkeypatch):
+@pytest.mark.parametrize(
+    "value_dtype,label_dtype,origin",
+    [
+        ("float64", "float64", 0),
+        ("int64", "float64", 2**60),
+        ("uint64", "uint64", 2**64 - 5),
+        ("float64", "int64", -(2**60)),
+        ("Int64", "Int64", 2**60),
+        ("UInt64", "UInt64", 2**64 - 5),
+    ],
+)
+def test_rank_ic_reuses_only_identical_masks(
+    monkeypatch, value_dtype, label_dtype, origin
+):
     frame = pd.DataFrame(
         {
             "timestamp": [pd.Timestamp("2024-01-02")] * 5,
             "asset_id": list("abcde"),
-            "label": [0.0, 2.0, 1.0, 4.0, 3.0],
+            "label": [0.0, 2.0, 1.0, 3.0, 3.0],
             "a": [0.0, 1.0, 2.0, 3.0, 4.0],
             "b": [4.0, 3.0, 2.0, 1.0, 0.0],
             "c": [np.nan, 1.0, 4.0, 3.0, 2.0],
         }
     )
+    if label_dtype in {"Int64", "UInt64"}:
+        frame.loc[1, "label"] = np.nan
     expected = {
         column: frame[[column, "label"]].dropna().corr(method="spearman").iloc[0, 1]
         for column in ("a", "b", "c")
     }
+    # Compute the oracle before exact translation, never from rounded floats.
+    for column, dtype in (
+        ("label", label_dtype),
+        ("a", value_dtype),
+        ("b", value_dtype),
+        ("c", {"int64": "Int64", "uint64": "UInt64"}.get(value_dtype, value_dtype)),
+    ):
+        frame[column] = frame[column].astype(dtype)
+        if pd.api.types.is_integer_dtype(frame[column].dtype):
+            frame[column] += origin
     calls = []
     original = statistics._average_ranks
 
@@ -607,9 +636,8 @@ def test_comparison_only_supports_simple_and_enhanced_without_risk(
         for _, rows in metrics.groupby("candidate_id"):
             selected = rows.set_index("metric_id")
             assert selected.loc["relative_wealth", "value"] == pytest.approx(100 / 99)
-            assert selected.loc["tracking_error", "value"] == pytest.approx(
-                0.1 * 2**0.5 * 252**0.5
-            )
+            assert pd.isna(selected.loc["tracking_error", "value"])
+            assert selected.loc["tracking_error", "reason"] == "incomplete_daily_axis"
             assert selected.loc["maximum_relative_drawdown", "value"] == pytest.approx(
                 1 / 1.1 - 1
             )

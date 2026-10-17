@@ -11,39 +11,54 @@ from tests.research.test_enhanced_decision_semantics import _decision_inputs
 from tests.research.test_portfolio_production import _build_producer, _inputs
 
 
-@pytest.mark.parametrize("feature", ["missing", "removed"])
 def test_saved_prediction_account_does_not_depend_on_historical_x(
-    tmp_path, monkeypatch, feature
+    tmp_path, monkeypatch, subtests
 ):
     frames, fees, window = _inputs()
     frames["dataset"]["feature_x"] = 1.0
-    baseline, _ = _build_producer(
-        tmp_path / "baseline",
-        monkeypatch,
-        frames=frames,
-        fee_frame=fees,
-        output_window=window,
-    )
-    expected = pd.concat(list(baseline), ignore_index=True)
-    frames["dataset"] = frames["dataset"].copy()
-    if feature == "missing":
-        frames["dataset"]["feature_x"] = np.nan
-    else:
-        frames["dataset"] = frames["dataset"].drop(columns="feature_x")
-    changed, calls = _build_producer(
-        tmp_path / "changed",
-        monkeypatch,
-        frames=frames,
-        fee_frame=fees,
-        output_window=window,
-    )
-    actual = pd.concat(list(changed), ignore_index=True)
-    pd.testing.assert_frame_equal(actual, expected)
+    with monkeypatch.context() as patch:
+        baseline, _ = _build_producer(
+            tmp_path / "baseline",
+            patch,
+            frames=frames,
+            fee_frame=fees,
+            output_window=window,
+        )
+        expected = pd.concat(list(baseline), ignore_index=True)
+    for feature in ("missing", "removed"):
+        with subtests.test(feature=feature), monkeypatch.context() as patch:
+            # Every mutation starts from new inputs, never the preceding case.
+            frames, fees, window = _inputs()
+            frames["dataset"]["feature_x"] = 1.0
+            if feature == "missing":
+                frames["dataset"]["feature_x"] = np.nan
+            else:
+                frames["dataset"] = frames["dataset"].drop(columns="feature_x")
+            changed, _ = _build_producer(
+                tmp_path / feature,
+                patch,
+                frames=frames,
+                fee_frame=fees,
+                output_window=window,
+            )
+            actual = pd.concat(list(changed), ignore_index=True)
+            pd.testing.assert_frame_equal(actual, expected)
 
 
-@pytest.mark.parametrize(
-    "column,invalid",
-    [
+def test_unselected_unheld_bad_cells_preserve_independent_account(
+    tmp_path, monkeypatch, subtests
+):
+    frames, fees, window = _inputs()
+    with monkeypatch.context() as patch:
+        baseline, _ = _build_producer(
+            tmp_path / "baseline",
+            patch,
+            frames=frames,
+            fee_frame=fees,
+            output_window=window,
+        )
+        expected = pd.concat(list(baseline), ignore_index=True)
+    cases = [
         ("amount", -1.0),
         ("amount", "unavailable"),
         ("amount", True),
@@ -53,31 +68,24 @@ def test_saved_prediction_account_does_not_depend_on_historical_x(
         ("open", True),
         ("open", 1 + 2j),
         ("close", np.inf),
-    ],
-)
-def test_unselected_unheld_bad_cells_preserve_independent_account(
-    tmp_path, monkeypatch, column, invalid
-):
-    frames, fees, window = _inputs()
-    baseline, _ = _build_producer(
-        tmp_path / "baseline",
-        monkeypatch,
-        frames=frames,
-        fee_frame=fees,
-        output_window=window,
-    )
-    expected = pd.concat(list(baseline), ignore_index=True)
-    frames["panel"][column] = frames["panel"][column].astype(object)
-    frames["panel"].loc[frames["panel"].asset_id.eq("a"), column] = invalid
-    changed, _ = _build_producer(
-        tmp_path / "changed",
-        monkeypatch,
-        frames=frames,
-        fee_frame=fees,
-        output_window=window,
-    )
-    actual = pd.concat(list(changed), ignore_index=True)
-    pd.testing.assert_frame_equal(actual, expected)
+    ]
+    for index, (column, invalid) in enumerate(cases):
+        with (
+            subtests.test(column=column, invalid=invalid),
+            monkeypatch.context() as patch,
+        ):
+            frames, fees, window = _inputs()
+            frames["panel"][column] = frames["panel"][column].astype(object)
+            frames["panel"].loc[frames["panel"].asset_id.eq("a"), column] = invalid
+            changed, _ = _build_producer(
+                tmp_path / f"changed-{index}",
+                patch,
+                frames=frames,
+                fee_frame=fees,
+                output_window=window,
+            )
+            actual = pd.concat(list(changed), ignore_index=True)
+            pd.testing.assert_frame_equal(actual, expected)
 
 
 @pytest.mark.parametrize(
@@ -186,54 +194,61 @@ def test_partial_saved_prediction_matches_context_without_requiring_extra_scores
 
 
 @pytest.mark.parametrize("asset", ["a", "b"])
-@pytest.mark.parametrize("unknown", ["amount", "settlement", "announcement"])
 def test_unknown_corporate_terms_block_only_real_entitlement(
-    tmp_path, monkeypatch, asset, unknown
+    tmp_path, monkeypatch, subtests, asset
 ):
     from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
 
-    frames, fees, window = _inputs()
-    baseline, _ = _build_producer(
-        tmp_path / "baseline",
-        monkeypatch,
-        frames=frames,
-        fee_frame=fees,
-        output_window=window,
-    )
-    expected = pd.concat(list(baseline), ignore_index=True)
-    event = dict(
-        source_asset_id=asset,
-        timestamp=pd.Timestamp("2023-01-05"),
-        kind="CA",
-        market_type=1,
-        announcement_date=pd.Timestamp("2023-01-02"),
-        settlement_date=pd.NaT,
-        settlement_date_unresolved=False,
-        amount=1.0,
-    )
-    if unknown == "amount":
-        event["amount"] = np.nan
-    elif unknown == "settlement":
-        event["settlement_date_unresolved"] = True
-    else:
-        event["announcement_date"] = pd.NaT
-    frames["corporate_actions"] = pd.DataFrame([event])
-    changed, _ = _build_producer(
-        tmp_path / "changed",
-        monkeypatch,
-        frames=frames,
-        fee_frame=fees,
-        output_window=window,
-    )
     if asset == "a":
-        pd.testing.assert_frame_equal(
-            pd.concat(list(changed), ignore_index=True), expected
-        )
-    else:
-        with pytest.raises(
-            PortfolioTargetBlocked, match="portfolio_held_rights_unproved"
+        frames, fees, window = _inputs()
+        with monkeypatch.context() as patch:
+            baseline, _ = _build_producer(
+                tmp_path / "baseline",
+                patch,
+                frames=frames,
+                fee_frame=fees,
+                output_window=window,
+            )
+            expected = pd.concat(list(baseline), ignore_index=True)
+    for unknown in ("amount", "settlement", "announcement"):
+        with (
+            subtests.test(asset=asset, unknown=unknown),
+            monkeypatch.context() as patch,
         ):
-            list(changed)
+            frames, fees, window = _inputs()
+            event = dict(
+                source_asset_id=asset,
+                timestamp=pd.Timestamp("2023-01-05"),
+                kind="CA",
+                market_type=1,
+                announcement_date=pd.Timestamp("2023-01-02"),
+                settlement_date=pd.NaT,
+                settlement_date_unresolved=False,
+                amount=1.0,
+            )
+            if unknown == "amount":
+                event["amount"] = np.nan
+            elif unknown == "settlement":
+                event["settlement_date_unresolved"] = True
+            else:
+                event["announcement_date"] = pd.NaT
+            frames["corporate_actions"] = pd.DataFrame([event])
+            changed, _ = _build_producer(
+                tmp_path / unknown,
+                patch,
+                frames=frames,
+                fee_frame=fees,
+                output_window=window,
+            )
+            if asset == "a":
+                pd.testing.assert_frame_equal(
+                    pd.concat(list(changed), ignore_index=True), expected
+                )
+            else:
+                with pytest.raises(
+                    PortfolioTargetBlocked, match="portfolio_held_rights_unproved"
+                ):
+                    list(changed)
 
 
 @pytest.mark.parametrize("column,invalid", [("amount", -1.0), ("open", 0.0)])
@@ -268,15 +283,18 @@ def test_unresolved_delisting_status_blocks_only_dependent_holding(
 ):
     from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
 
+    if asset == "a":
+        frames, fees, window = _inputs()
+        with monkeypatch.context() as patch:
+            baseline, _ = _build_producer(
+                tmp_path / "baseline",
+                patch,
+                frames=frames,
+                fee_frame=fees,
+                output_window=window,
+            )
+            expected = pd.concat(list(baseline), ignore_index=True)
     frames, fees, window = _inputs()
-    baseline, _ = _build_producer(
-        tmp_path / "baseline",
-        monkeypatch,
-        frames=frames,
-        fee_frame=fees,
-        output_window=window,
-    )
-    expected = pd.concat(list(baseline), ignore_index=True)
     first = frames["panel"].timestamp.min()
     frames["stock_master"] = pd.DataFrame(
         [

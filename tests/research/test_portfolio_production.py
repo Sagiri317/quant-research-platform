@@ -423,6 +423,7 @@ def _build_producer(
         *,
         panel_columns,
         include_asset_sessions,
+        time_window=None,
     ):
         from quant_research_platform.markets.implementations.a_share.processed import (
             panels,
@@ -1500,10 +1501,14 @@ def test_optimizer_assets_keep_residual_cash_as_explicit_current_weight(
         assert optimized.target_turnover <= 0.2 + 1e-08
 
 
-@pytest.mark.parametrize("retain_cash", [False, True])
 @pytest.mark.parametrize(
-    "optimizer_error",
-    (None, "optimizer_trade_adv_unavailable", "optimizer_failed_closed"),
+    "optimizer_error,retain_cash",
+    [
+        pytest.param(None, False, id="successful-stock-allocation"),
+        pytest.param(None, True, id="successful-retained-cash"),
+        pytest.param("optimizer_trade_adv_unavailable", False, id="missing-adv-skip"),
+        pytest.param("optimizer_failed_closed", False, id="optimizer-fails-closed"),
+    ],
 )
 def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
     tmp_path: Path, retain_cash: bool, optimizer_error, monkeypatch

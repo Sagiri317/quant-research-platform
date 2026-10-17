@@ -495,21 +495,42 @@ def test_explanation_without_labels_and_no_implicit_fit(tmp_path, monkeypatch):
     assert len(tables["predictions"]) == 24
 
 
-def test_read_rejects_tampered_contribution_additivity(tmp_path):
-    _, _, config = _case(tmp_path)
-    output = explain(config)
-    path = output / "contributions.parquet"
-    frame = pd.read_parquet(path)
-    frame.loc[0, "contribution"] += 1
+def test_read_rejects_tampered_explanation_values(tmp_path, subtests):
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    schema = pq.read_schema(path)
-    pq.write_table(
-        pa.Table.from_pandas(frame, schema=schema, preserve_index=False), path
-    )
-    with pytest.raises(ValueError, match="additivity_failed"):
-        read_explanation(output)
+    from quant_research_platform.artifacts.explanations import write_explanation
+
+    _, _, config = _case(tmp_path)
+    output = explain(config)
+    metadata, tables = read_explanation(output)
+    for member, column, error in (
+        ("contributions", "contribution", "additivity_failed"),
+        ("predictions", "prediction_score", "prediction_binding_invalid"),
+    ):
+        with subtests.test(member=member):
+            changed = {name: frame.copy() for name, frame in tables.items()}
+            changed[member].loc[0, column] += 1
+            with pytest.raises(ValueError, match=error):
+                write_explanation(tmp_path / member, metadata=metadata, tables=changed)
+            path = output / f"{member}.parquet"
+            schema = pq.read_schema(path)
+            pq.write_table(
+                pa.Table.from_pandas(
+                    changed[member], schema=schema, preserve_index=False
+                ),
+                path,
+            )
+            try:
+                with pytest.raises(ValueError, match=error):
+                    read_explanation(output)
+            finally:
+                pq.write_table(
+                    pa.Table.from_pandas(
+                        tables[member], schema=schema, preserve_index=False
+                    ),
+                    path,
+                )
 
 
 def test_cli_is_same_explain_operation(tmp_path):

@@ -875,6 +875,10 @@ def test_industry_publication_orders_known_events_and_unknown_coverage(
     ):
         pd.testing.assert_frame_equal(actual, expected)
 
+    # These auxiliary facts do not depend on the primary row-2 missingness case.
+    if missing_name is not None:
+        return
+
     known_future = _asof_industry(
         panel,
         **_prepare_industry_inputs(

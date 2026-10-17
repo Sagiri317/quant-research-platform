@@ -439,9 +439,7 @@ def normalize_raw_frame(
         if column not in mapped or data_id == "corporate_actions":
             continue
         values = mapped[column]
-        parsed = _parse_optional_csmar_date(
-            values, column, error_code="invalid_source_date"
-        )
+        parsed = _parse_optional_csmar_date(values)
         invalid = (
             values.notna() & values.astype("string").str.strip().ne("") & parsed.isna()
         )
@@ -478,9 +476,7 @@ def normalize_raw_frame(
         "index_membership": "effective_date",
     }.get(data_id)
     if date_column is not None:
-        mapped[date_column] = _parse_optional_csmar_date(
-            mapped[date_column], date_column, error_code="invalid_source_date"
-        )
+        mapped[date_column] = _parse_optional_csmar_date(mapped[date_column])
         valid_rows &= mapped[date_column].notna()
     if data_id == "trading_calendar":
         valid_rows &= mapped["source_market_type"].notna()
@@ -725,11 +721,7 @@ def _normalize_mapped_frame(
         result = mapped
         for column in ("listing_date", "delisting_date", "status_change_date"):
             if column in result.columns:
-                result[column] = _parse_optional_csmar_date(
-                    result[column],
-                    column,
-                    error_code="invalid_stock_master_date",
-                )
+                result[column] = _parse_optional_csmar_date(result[column])
         result["timestamp"] = result["status_change_date"].fillna(
             result["listing_date"].where(~result.pop("_invalid_status_change_date"))
         )
@@ -854,11 +846,7 @@ def _normalize_mapped_frame(
             error="invalid_industry_version_date",
             allow_null=True,
         ).dt.normalize()
-        result["abandon_date"] = _parse_optional_csmar_date(
-            result["abandon_date"],
-            "abandon_date",
-            error_code="invalid_industry_version_date",
-        )
+        result["abandon_date"] = _parse_optional_csmar_date(result["abandon_date"])
         result["timestamp"] = result["implement_date"]
         result = result.loc[result["timestamp"].notna()].copy()
         return (
@@ -881,7 +869,7 @@ def _normalize_mapped_frame(
             result["stock_code"]
         ).astype("string")
         result["declare_date"] = _parse_optional_csmar_date(
-            result["declare_date"], "declare_date", error_code="invalid_analyst_date"
+            result["declare_date"]
         ).dt.normalize()
         result["forecast_end_date"] = strict_timestamp_series(
             result["forecast_end_date"], error="invalid_analyst_forecast_end_date"
@@ -982,9 +970,7 @@ def _normalize_state_change_frame(frame: pd.DataFrame, data_id: str) -> pd.DataF
     result["source_asset_id"] = result["stock_code"]
     if data_id == "listing_status_changes":
         result["announcement_date"] = _parse_optional_csmar_date(
-            result["announcement_date"],
-            "announcement_date",
-            error_code="invalid_listing_status_date",
+            result["announcement_date"]
         )
         result["effective_date"] = strict_timestamp_series(
             result["effective_date"], error="invalid_listing_status_date"
@@ -997,9 +983,7 @@ def _normalize_state_change_frame(frame: pd.DataFrame, data_id: str) -> pd.DataF
         )
     if data_id == "stock_info_changes":
         result["announcement_date"] = _parse_optional_csmar_date(
-            result["announcement_date"],
-            "announcement_date",
-            error_code="invalid_stock_info_change_date",
+            result["announcement_date"]
         )
         result["effective_date"] = strict_timestamp_series(
             result["effective_date"], error="invalid_stock_info_change_date"
@@ -1078,14 +1062,9 @@ def _normalize_state_change_frame(frame: pd.DataFrame, data_id: str) -> pd.DataF
     )
 
 
-def _parse_optional_csmar_date(
-    series: pd.Series,
-    column: str,
-    *,
-    error_code: str,
-) -> pd.Series:
+def _parse_optional_csmar_date(series: pd.Series) -> pd.Series:
     return strict_timestamp_series(
-        series, error=error_code, allow_null=True, errors="coerce"
+        series, error="invalid_source_date", allow_null=True, errors="coerce"
     )
 
 
@@ -1098,11 +1077,7 @@ def _parse_financial_correction_date(series: pd.Series) -> pd.Series:
             latest.append(pd.NaT)
             continue
         tokens = [token.strip() for token in str(value).split(",")]
-        parsed = _parse_optional_csmar_date(
-            pd.Series(tokens),
-            "correction_disclosure_date",
-            error_code="invalid_financial_correction_date",
-        )
+        parsed = _parse_optional_csmar_date(pd.Series(tokens))
         if (
             parsed.isna().any()
             or bool(parsed.duplicated().any())
@@ -1213,6 +1188,9 @@ def _iter_normalized_interim_frames(
     # Event/reference facts must be reconciled before emission: a later file or
     # chunk can make one earlier cell unknown without erasing its event key.
     coalesce = data_id in {
+        "index_info",
+        "index_weights",
+        "trading_no_limit",
         "index_market",
         "stock_master",
         "corporate_actions",

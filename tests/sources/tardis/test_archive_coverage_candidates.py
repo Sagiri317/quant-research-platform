@@ -51,12 +51,14 @@ def test_archive_dispatch_is_local_for_20000_monotone_queries(archives):
     fast = [_reader(row) for row in rows]
     reference = [_reader(row) for row in rows]
     coverage = _ArchiveCoverage(tuple(fast))
-    for value in range((archives - 1) * 30000, (archives - 1) * 30000 + 20000):
-        assert coverage.covering(value, value + 1) == _linear(
-            reference, value, value + 1
-        )
+    start = (archives - 1) * 30000
+    expected = (str(archives - 1),)
+    # Check the independent oracle at the first, interior, and final query.
+    for value in (start, start + 10000, start + 19999):
+        assert _linear(reference, value, value + 1) == expected
+    for value in range(start, start + 20000):
+        assert coverage.covering(value, value + 1) == expected
     assert sum(reader.calls for reader in fast) == 20000
-    assert sum(reader.calls for reader in reference) == 20000 * archives
 
 
 @pytest.mark.parametrize("invalid", [None, 12])

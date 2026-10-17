@@ -347,8 +347,6 @@ class TardisArchive:
         requested = symbol, data_kind
         with closing_iterator(self._iter_canonical_records()) as records:
             for key, record in records:
-                if key != requested:
-                    continue
                 if (
                     end_ns is not None
                     and strict_iso_timestamp(
@@ -357,7 +355,8 @@ class TardisArchive:
                     > end_ns
                 ):
                     return
-                yield record
+                if key == requested:
+                    yield record
 
     def funding_root(self, symbol):
         return self.root / "funding" / symbol / "observations"

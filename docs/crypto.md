@@ -237,7 +237,8 @@ origin/book/trade；不可整除时以 `hft_maker_calibration_price_unit_incompa
 官方相同 UTC 的事件仍按真实 `receive_monotonic_ns`、再按原生序号排序；
 Tardis 相同 UTC 按切片及原生行序排序，`receive_monotonic_ns` 保持缺失。
 原生成交按 symbol 与聚合成交 ID 核对重发：仅事件时间 E 改变而其余字段相同的消息保留原字节，
-研究回放只采用首次观察，不重复计量成交，也不回退连续性高水位。未见过的倒序 ID 或成交字段冲突明确失败；
+研究回放只采用首次观察，不重复计量成交，也不回退连续性高水位。Recorder 原生读取遇到未见过的倒序 ID 或成交字段冲突明确失败；
+Tardis 导入保留原件并仅中断受影响成交区间，后续独立区间仍可用；
 身份摘要用于精确去重，不参与资源准入。
 观察段标识只表示来源可证明的区间，不冒充物理连接。
 PANEL 的 `observed_utc`、`book_source_sequence`、`book_observation_id` 及

@@ -1223,6 +1223,8 @@ def _risk_context_input_sessions(
         if available.intersection(columns):
             raise ValueError("portfolio_risk_context_owner_duplicate")
         available.update(columns)
+        if not columns:
+            continue
         projection = (*_SESSION_KEY, *columns)
         inputs[position] = (
             projection,
@@ -1242,17 +1244,31 @@ def _enhanced_risk_cross(
     style_columns: tuple[str, ...],
     weight_column: str = "total_market_cap",
 ) -> pd.DataFrame:
+    result = _risk_exposure_cross(
+        panel=panel,
+        risk_frames=risk_frames,
+        style_columns=style_columns,
+        weight_column=weight_column,
+    )
+    result["asset_return"] = result.asset_id.map(
+        pd.to_numeric(panel.set_index("asset_id")["period_return"], errors="raise")
+    ).astype("float64")
+    return result
+
+
+def _risk_exposure_cross(
+    *,
+    panel: pd.DataFrame,
+    risk_frames: list[pd.DataFrame],
+    style_columns: tuple[str, ...],
+    weight_column: str = "total_market_cap",
+) -> pd.DataFrame:
     panel_by_asset = panel.set_index("asset_id")
     assets = pd.Index(sorted(set(panel_by_asset.index)), dtype="string")
     result = pd.DataFrame(index=assets)
     result["timestamp"] = panel["timestamp"].iloc[0] if not panel.empty else pd.NaT
     result["listing_date"] = panel_by_asset["listing_date"].reindex(assets)
     result["is_trading"] = panel_by_asset["is_trading"].reindex(assets)
-    result["asset_return"] = (
-        pd.to_numeric(panel_by_asset["period_return"], errors="raise")
-        .reindex(assets)
-        .astype("float64")
-    )
     result[weight_column] = (
         pd.to_numeric(panel_by_asset[weight_column], errors="raise")
         .reindex(assets)
@@ -2526,7 +2542,7 @@ def _ledger_batch(
                 if (
                     held_units.get(asset, 0)
                     or execution_units.get(asset, 0)
-                    or any(row.asset_id == asset for row in trades)
+                    or fill_id is not None
                 ):
                     raise PortfolioTargetBlocked("portfolio_held_return_missing")
                 entry_mark = 0.0
@@ -2543,8 +2559,7 @@ def _ledger_batch(
                 before_lifecycle = prior.lifecycle_id
             else:
                 before = float(before_quantity * Fraction(entry_mark))
-            delta = sum(row.notional for row in trades if row.asset_id == asset)
-            if entry_mark == 0 and delta != 0:
+            if entry_mark == 0 and fill_id is not None:
                 raise ValueError("portfolio_zero_mark_trade_invalid")
             after = float(after_quantity * Fraction(entry_mark))
             if pd.isna(end_mark):
@@ -3005,6 +3020,7 @@ def backtest(config: Mapping) -> Path:
         frames.append(chosen)
         domains.append(window)
     frame = pd.concat(frames, ignore_index=True)
+    del frames, chosen
     if frame.duplicated(["timestamp", "asset_id"]).any():
         raise ValueError("portfolio_prediction_keys_invalid")
     index = ExactPrimaryKeyIndex(primary_key=("timestamp", "asset_id"))
@@ -3020,6 +3036,7 @@ def backtest(config: Mapping) -> Path:
         prediction_column="prediction_rank_score",
     )
     lookup.row_count = len(frame)
+    del frame
     frozen = None
     if "calibration" in config:
         payload = read_qrp_json_file(Path(config["calibration"]))[1]

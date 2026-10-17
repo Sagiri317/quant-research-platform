@@ -626,21 +626,29 @@ class FactorRiskState:
             fresh.to_numpy(dtype=bool), index=cross.asset_id.astype(str)
         )
         listings = strict_timestamp_series(
-            cross["listing_date"], error="factor_risk_listing_invalid"
+            cross["listing_date"],
+            error="factor_risk_listing_invalid",
+            allow_null=True,
+            errors="coerce",
         )
         for asset, listing in zip(cross.asset_id.astype(str), listings, strict=True):
-            if asset in self._listings and self._listings[asset] != listing:
+            if pd.isna(listing) or (
+                asset in self._listings and self._listings[asset] != listing
+            ):
                 self._residuals.pop(asset, None)
                 self._residual_sessions.pop(asset, None)
                 self._residual_fresh.pop(asset, None)
                 self._specific_session_counts.pop(asset, None)
+            if pd.isna(listing):
+                self._listings.pop(asset, None)
+                continue
             self._listings[asset] = listing
         for asset in self._listings:
             if asset not in closed_assets:
                 self._specific_session_counts[asset] = (
                     self._specific_session_counts.get(asset, 0) + 1
                 )
-        fitted, industries = self._fit_return_session(cross)
+        fitted, industries = self._fit_return_session(cross.loc[listings.notna()])
         fitted = None if fitted is None else (fitted.factor_returns, fitted.residuals)
         self._industry_codes.update(industries)
         self._session_count += 1

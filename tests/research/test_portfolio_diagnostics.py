@@ -170,6 +170,7 @@ def test_extreme_valid_ledgers_keep_finite_group_bootstrap(tmp_path):
                 },
             },
         },
+        daily_complete=True,
     )
     row = result.iloc[0]
     assert row.status == row.bootstrap_status == "DEFINED"
@@ -859,14 +860,7 @@ def test_holding_input_reader_freezes_decision_universe_over_holding_interval(
         stream = iter_holding_factor_inputs(
             iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
             benchmark_required=True,
-            inputs=_holding_paths(
-                selected_roots,
-                risk_targets
-                if len(selected_styles) == 6
-                else tuple(
-                    target for target in risk_targets if target != "fundamental_factors"
-                ),
-            ),
+            inputs=_holding_paths(selected_roots, risk_targets),
             calendar=calendar,
             time_window=window,
             unified_trading_sessions=lambda frame: pd.DatetimeIndex(
@@ -900,6 +894,64 @@ def test_holding_input_reader_freezes_decision_universe_over_holding_interval(
     )
     six = first_for_styles(RISK_STYLE_COLUMNS, missing_earnings_inputs)
     assert six.fitted is None and six.reason == "holding_factor_fit_unidentified"
+    if not st_holding and relist_step is None:
+        # Both groups receive the public combined input list. An unselected
+        # source contributes neither a session requirement nor a key domain.
+        sparse_root = tmp_path / "sparse_fundamental"
+        write_dataset(
+            sparse_root,
+            risk_data.loc[
+                risk_data.timestamp.ne(dates[0]),
+                list(fundamental_spec.required_columns),
+            ],
+            spec=fundamental_spec,
+        )
+        sparse_inputs = {**roots, "fundamental_factors": sparse_root}
+        five_sparse = first_for_styles(RISK_STYLE_COLUMNS[:-1], sparse_inputs)
+        pd.testing.assert_series_equal(
+            five.fitted.factor_returns,
+            five_sparse.fitted.factor_returns,
+            check_exact=True,
+        )
+        pd.testing.assert_frame_equal(
+            five.fitted.exposures, five_sparse.fitted.exposures, check_exact=True
+        )
+        with pytest.raises(ValueError, match="holding_risk_context_session_missing"):
+            first_for_styles(RISK_STYLE_COLUMNS, sparse_inputs)
+
+        invalid_daily = panel.copy()
+        invalid_daily["period_return"] = "vendor-invalid"
+        invalid_daily_root = tmp_path / "invalid_daily_return"
+        write_dataset(
+            invalid_daily_root,
+            invalid_daily,
+            spec=_processed_specs().get("market_panel_1d"),
+        )
+        five_holding = first_for_styles(
+            RISK_STYLE_COLUMNS[:-1],
+            {**roots, "market_panel_1d": invalid_daily_root},
+        )
+        pd.testing.assert_series_equal(
+            five.fitted.factor_returns,
+            five_holding.fitted.factor_returns,
+            check_exact=True,
+        )
+        pd.testing.assert_series_equal(
+            five.fitted.asset_returns,
+            five_holding.fitted.asset_returns,
+            check_exact=True,
+        )
+        # Daily risk still requires and validates its own return input.
+        from quant_research_platform.research.portfolios.production import (
+            _enhanced_risk_cross,
+        )
+
+        with pytest.raises(ValueError, match="Unable to parse string"):
+            _enhanced_risk_cross(
+                panel=invalid_daily.loc[invalid_daily.timestamp.eq(dates[0])],
+                risk_frames=[risk_data.loc[risk_data.timestamp.eq(dates[0])]],
+                style_columns=RISK_STYLE_COLUMNS[:-1],
+            )
     missing_panel = panel.copy()
     missing_panel.loc[
         missing_panel.timestamp.eq(dates[-2]) & missing_panel.asset_id.eq(assets[0]),

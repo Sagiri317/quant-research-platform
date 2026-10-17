@@ -1025,13 +1025,13 @@ neutralization n >= max(100, 5p)  # 中性化样本门槛
 
 不使用 ridge/pinv 挽救失败。
 
-行业截距与共同规模斜率使用组内中心化的等权 OLS 闭式计算。对有限浮点输入，
-中间累积及投影保留精确有理数。`rescale=False`在原单位下将最终残差转换为float；
-供zscore使用的`rescale=True`先将精确残差除以共同最大绝对值，再转换为float，
-避免全部残差小于float可表示范围时丢失可表示的相对差异，也避免大残差中间溢出。
-精确位于设计空间内的输入残差仍为零，不以epsilon合并非零差异。共同尺度不改变OLS投影或标准分数的定义。
-设有效行业数为K：Size自身的p=K；非Size的p=K+1，满秩等价于精确组内Size平方和大于0。
-复用同一精确组内统计判定，不另建one-hot矩阵或浮点SVD门槛。必要Size即使不输出自身feature，
+行业截距与共同规模斜率使用组内中心化的等权 OLS 闭式计算。普通数值域使用向量化浮点
+累积和投影；有限性或消减检查不满足时，回退到精确有理数计算。科学结果按适当数值容差比较。
+精确回退中，`rescale=False` 将原单位残差转换为 float；`rescale=True` 先除以共同最大绝对值，
+再转换为 float，避免极小残差丢失相对差异或极大残差中间溢出。共同尺度不改变 OLS 投影或标准分数。
+精确位于设计空间内的输入残差仍为零，不以 epsilon 合并非零差异。
+设有效行业数为 K：Size 自身的 p=K；非 Size 的 p=K+1，满秩等价于组内 Size 平方和大于 0。
+复用同一组内统计及其数值回退，不另建 one-hot 矩阵或浮点 SVD 门槛。必要Size即使不输出自身feature，
 也按同一eligible截面执行MAD缩尾再作为协变量；单因子与完整配置的同一因子输出必须一致。
 辅助Size维持FACTOR角色，仅补数据依赖，不自动加入评价信号或生成无消费者feature。
 
@@ -1565,9 +1565,9 @@ N_train
 | `rebalance_schedule` | `daily`、`weekly-last-trading-day` 或 `monthly-last-trading-day` |
 | `benchmark_id` | 增强组合的 CSI500/CSI1000 基准；简单组合为 `null` |
 
-`prediction_selector` 精确区分大小写；`champion` 按指定选择记录的 `selected_model_id`
-选取其优胜家族配置，留出消费开发期冻结选择对应的最终模型。
-具名 selector 只读取所声明模型家族，不隐式映射 `winner` 或其他拼写。模型家族与候选身份分别由配置声明，不从 `candidate_id` 推断选择器。
+`prediction_selector` 精确区分大小写。调用者显式提供已经选定的预测路径；`champion`
+接受该明确选择，不重新读取选择记录或执行选型。具名 selector 额外核对所声明的模型家族，
+不隐式映射 `winner` 或其他拼写。模型家族与候选身份分别由配置声明，不从 `candidate_id` 推断选择器。
 
 `quantile_equal_weight` / `quantile_float_cap` 按显式 `top_quantile` 选择最高分位；构建标识只说明加权方法。
 增强组合所需 benchmark、风险及数据依赖由同一组合合同派生；配置不能省略必要事实。

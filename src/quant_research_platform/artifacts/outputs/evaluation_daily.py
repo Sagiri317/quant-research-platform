@@ -251,6 +251,11 @@ def validate_daily_counts(metrics, coverage, strata, *, spec, science):
     primary = coverage.loc[coverage.label.eq(definition["primary_label"])].set_index(
         "timestamp"
     )
+    metric_counts = None
+    if metrics is not None:
+        metric_counts = metrics.set_index(["timestamp", "signal", "label"])["n_obs"]
+        if not metric_counts.index.is_unique:
+            raise ValueError("evaluation_stratum_observations_mismatch")
     actual_groups = set()
     for (timestamp, kind, signal), block in strata.groupby(
         ["timestamp", "stratification", "signal"], sort=False
@@ -265,16 +270,11 @@ def validate_daily_counts(metrics, coverage, strata, *, spec, science):
                 raise ValueError("evaluation_age_bins_incomplete")
         elif block.stratum_rows.eq(0).any():
             raise ValueError("evaluation_empty_stratum_invalid")
-        if metrics is not None:
-            total = metrics.loc[
-                metrics.timestamp.eq(timestamp)
-                & metrics.signal.eq(signal)
-                & metrics.label.eq(definition["primary_label"]),
-                "n_obs",
-            ]
-            if len(total) != 1:
+        if metric_counts is not None:
+            total = metric_counts.get((timestamp, signal, definition["primary_label"]))
+            if total is None:
                 raise ValueError("evaluation_stratum_observations_mismatch")
-            unassigned = int(total.iloc[0]) - int(block.n_obs.sum())
+            unassigned = int(total) - int(block.n_obs.sum())
             maximum_unassigned = (
                 int(primary.loc[timestamp, "fractional_boundary_unassigned"])
                 if kind == "forecast_age"

@@ -387,6 +387,7 @@ def test_paired_confidence_is_used_by_hac_and_persisted(tmp_path, confidence, ki
                 index=dates.rename("end_at"),
             ),
             config,
+            daily_complete=True,
         )
     centered = values - values.mean()
     standard_error = np.sqrt(centered @ centered + centered[1:] @ centered[:-1]) / len(
@@ -481,7 +482,15 @@ def test_portfolio_group_inference_methods_have_independent_preconditions(
             },
         },
     }
-    row = _group_portfolio_comparison(matrix, config).iloc[0]
+    row = _group_portfolio_comparison(matrix, config, daily_complete=True).iloc[0]
+    unavailable = _group_portfolio_comparison(
+        matrix, config, daily_complete=False
+    ).iloc[0]
+    assert unavailable.mean_difference == row.mean_difference
+    assert unavailable.global_terminal_wealth == row.global_terminal_wealth
+    assert unavailable.quarterly_terminal_wealth == row.quarterly_terminal_wealth
+    assert unavailable.reason == unavailable.bootstrap_reason == "incomplete_daily_axis"
+    assert pd.isna(unavailable.t_statistic) and pd.isna(unavailable.bootstrap_lower)
     assert row.status == status
     assert row.bootstrap_status == bootstrap_status
     if bootstrap_status == "DEFINED":

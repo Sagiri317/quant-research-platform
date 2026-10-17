@@ -132,6 +132,17 @@ def test_pause_zero_is_numeric_but_not_fresh_unknown_is_not_zero():
     state.observe_return_session(_cross(6))
     assert "a0" in state.estimate().specific_variance
     assert "a1" in state.estimate().specific_variance
+    unknown = _cross(7)
+    unknown.loc[unknown.asset_id.eq("a0"), ["listing_date", "eligible"]] = [
+        pd.NaT,
+        False,
+    ]
+    state.observe_return_session(unknown)
+    assert "a0" not in state._listings and "a0" not in state._residuals
+    assert "a1" in state.estimate().specific_variance
+    state.observe_return_session(_cross(8))
+    assert len(state._residuals["a0"]) == 1
+    assert "a0" not in state.estimate().specific_variance
 
 
 def test_whole_unknown_session_occupies_window_without_a_zero_fit():

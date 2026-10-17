@@ -573,20 +573,56 @@ def test_future_lifecycle_append_cannot_change_previous_ledger_prefix(tmp_path):
             assert all(not view.unproved_lifecycle_assets for view in source)
 
 
-def test_closed_calendar_rejects_real_activity_even_in_future_source(tmp_path):
-    layout, _roots, calendar, _panel = _native_inputs(
-        tmp_path, fault="actual_activity_on_closed"
+def test_closed_calendar_validates_only_consumed_history(tmp_path):
+    from dataclasses import fields
+
+    original, _, calendar, _ = _native_inputs(tmp_path / "original")
+    conflicted, _, _, _ = _native_inputs(
+        tmp_path / "conflicted", fault="actual_activity_on_closed"
     )
-    source = market_sessions.iter_portfolio_sessions(
-        market_bars_root=layout["market_bars"],
-        stock_master_root=layout["stock_master"],
-        panel_root=layout["panel"],
-        panel_columns=production._PANEL_COLUMNS,
-        calendar=calendar,
-        time_window=TimeWindow("2022-12-01", "2022-12-30"),
+
+    def sessions(layout, calendar, window):
+        with closing_iterator(
+            market_sessions.iter_portfolio_sessions(
+                market_bars_root=layout["market_bars"],
+                stock_master_root=layout["stock_master"],
+                panel_root=layout["panel"],
+                panel_columns=production._PANEL_COLUMNS,
+                calendar=calendar,
+                time_window=window,
+            )
+        ) as source:
+            return list(source)
+
+    historical = TimeWindow("2022-12-01", "2022-12-30")
+    expected = sessions(original, calendar, historical)
+    assert len(expected) == 22
+    duplicate_future_calendar = pd.concat(
+        (calendar, calendar.loc[calendar.calendar_date.eq("2023-01-03")]),
+        ignore_index=True,
     )
+    for layout, supplied_calendar, reason in (
+        (conflicted, calendar, "market_bar_session_missing_from_calendar"),
+        (original, duplicate_future_calendar, "duplicate_trading_calendar_key"),
+    ):
+        actual = sessions(layout, supplied_calendar, historical)
+        assert len(actual) == len(expected)
+        for left, right in zip(actual, expected, strict=True):
+            for field in fields(left):
+                observed, control = (
+                    getattr(left, field.name),
+                    getattr(right, field.name),
+                )
+                if isinstance(observed, pd.DataFrame):
+                    pd.testing.assert_frame_equal(observed, control)
+                else:
+                    assert observed == control, field.name
+        with pytest.raises(ValueError, match=f"^{reason}$"):
+            sessions(layout, supplied_calendar, TimeWindow("2022-12-30", "2023-01-04"))
+
+    missing_endpoint = calendar.loc[calendar.calendar_date.ne("2023-01-06")]
     with pytest.raises(ValueError, match="^market_bar_session_missing_from_calendar$"):
-        next(source)
+        sessions(original, missing_endpoint, TimeWindow("2022-12-30", "2023-01-06"))
 
 
 def test_identified_open_factor_domain_does_not_invent_closed_exposures(tmp_path):

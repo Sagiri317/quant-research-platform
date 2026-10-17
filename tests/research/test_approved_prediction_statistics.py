@@ -60,6 +60,18 @@ def test_no_selected_family_retains_undefined_statistics(tmp_path):
         prediction_lookup=SimpleNamespace(coverage_counts=lambda: (0, 0)),
         global_prediction_lookup=None,
     )
+    assert len(tables["prediction_diagnostics"]) == 1
+    assert tables["prediction_diagnostics"].prediction_id.tolist() == ["no_winner"]
+    expected_losses = {(date, "family") for date in dates}
+    assert len(tables["model_losses"]) == len(expected_losses)
+    assert (
+        set(
+            tables["model_losses"][["timestamp", "family_id"]].itertuples(
+                index=False, name=None
+            )
+        )
+        == expected_losses
+    )
     assert tables["prediction_diagnostics"].status.eq("UNDEFINED").all()
     assert tables["model_losses"].status.eq("UNDEFINED").all()
     assert tables["model_losses"].config_id.isna().all()
@@ -77,6 +89,11 @@ def test_no_selected_family_retains_undefined_statistics(tmp_path):
         },
     )
     with read_statistics_artifact(output).table("model_losses.parquet") as saved:
+        assert len(saved) == len(expected_losses)
+        assert (
+            set(saved[["timestamp", "family_id"]].itertuples(index=False, name=None))
+            == expected_losses
+        )
         assert saved.config_id.eq("").all()
         assert saved.status.eq("UNDEFINED").all()
 

@@ -372,6 +372,7 @@ def test_equal_replacement_native_statistics_has_no_artificial_drawdown_or_volat
             {
                 "ledgers": [str(ledger)],
                 "window": window,
+                "inputs": {"calendar": str(tmp_path / "input" / "trading_calendar")},
                 "analyses": ["performance"],
                 "output": str(tmp_path / "statistics"),
             }

@@ -412,9 +412,12 @@ def _processed_frames(
         calendar=source["trading_calendar"] if panel_source else None,
         stock_master=stocks,
         validation_window=time_window if panel_source else None,
-        include_asset_sessions=spec.kind is ProcessedDataKind.LABEL
-        or spec.data_id == "execution_mask"
-        or spec.kind is ProcessedDataKind.FACTOR,
+        include_asset_sessions=panel_axis is None
+        and (
+            spec.kind is ProcessedDataKind.LABEL
+            or spec.data_id == "execution_mask"
+            or spec.kind is ProcessedDataKind.FACTOR
+        ),
     )
     definitions = (
         tuple(

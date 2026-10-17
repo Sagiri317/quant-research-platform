@@ -377,7 +377,9 @@ def test_undefined_return_pair_preserves_other_pairs_and_fdr_family():
         ),
     )
     matrix.iloc[20, 0] = np.nan
-    result = _group_portfolio_comparison(matrix, manifest).set_index("portfolio_id")
+    result = _group_portfolio_comparison(
+        matrix, manifest, daily_complete=True
+    ).set_index("portfolio_id")
     assert len(result) == len(pairs)
     assert result.fdr_family_size.eq(len(pairs)).all()
     assert result.observation_count.eq(75).all()

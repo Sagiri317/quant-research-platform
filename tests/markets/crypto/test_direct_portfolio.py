@@ -96,8 +96,7 @@ def _inputs(tmp_path, *, ineligible_at=None, distinct_domains=False):
     return inputs
 
 
-@pytest.fixture
-def explicit_models(tmp_path):
+def _explicit_models(tmp_path, *, roles):
     inputs = _inputs(tmp_path)
     price, proxy = "future_mid_return_500ms", "maker_bid_sell_pressure_proxy_500ms"
     chronology = {
@@ -111,7 +110,9 @@ def explicit_models(tmp_path):
         "test": _window(8600, 9000),
     }
     validation_models, final_models = [], []
-    for model_id, target in (("price", price), ("proxy", proxy)):
+    targets = {"price": price, "proxy": proxy}
+    for model_id in roles:
+        target = targets[model_id]
         config = {
             "market_id": "crypto",
             "inputs": str(inputs),
@@ -188,6 +189,16 @@ def explicit_models(tmp_path):
         )
         final_models.append({"model": str(final), "predictions": str(predictions)})
     return inputs, chronology, validation_models, final_models
+
+
+@pytest.fixture
+def explicit_models(tmp_path):
+    return _explicit_models(tmp_path, roles=("price", "proxy"))
+
+
+@pytest.fixture
+def explicit_price_models(tmp_path):
+    return _explicit_models(tmp_path, roles=("price",))
 
 
 def _market(monkeypatch):
@@ -309,9 +320,9 @@ def test_explicit_maker_calibration_and_frozen_backtest(
 
 @pytest.mark.parametrize("mutation", ("missing", "extra", "rank_units", "duplicate"))
 def test_prediction_consumer_preserves_full_expected_domain(
-    tmp_path, monkeypatch, explicit_models, mutation
+    tmp_path, monkeypatch, explicit_price_models, mutation
 ):
-    inputs, chronology, _validation, final = explicit_models
+    inputs, chronology, _validation, final = explicit_price_models
     window = TimeWindow(**chronology["test"])
     metadata, facts, predictions = portfolio._prediction_evidence(
         final[0]["predictions"],
@@ -381,9 +392,9 @@ def test_direct_operations_reject_unused_fields(operation):
 
 @pytest.mark.parametrize("scope", ("continuous_history", "later_cutoff"))
 def test_backtest_uses_actual_fitting_facts_without_model_registration(
-    tmp_path, explicit_models, monkeypatch, scope
+    tmp_path, explicit_price_models, monkeypatch, scope
 ):
-    inputs, chronology, _validation, final = explicit_models
+    inputs, chronology, _validation, final = explicit_price_models
     _, previous = portfolio.read_predictions(final[0]["predictions"])
     facts = previous["model_facts"]
     windows = (
@@ -462,14 +473,14 @@ def test_episode_publication_rejects_nat_metadata_before_production(tmp_path, va
 @pytest.mark.parametrize("mode", ("continuous", "independent_segments"))
 @pytest.mark.parametrize("window_kind", ("test", "dev"))
 def test_explicit_taker_uses_saved_predictions_without_training(
-    tmp_path, monkeypatch, explicit_models, mode, window_kind
+    tmp_path, monkeypatch, explicit_price_models, mode, window_kind
 ):
     import quant_research_platform.research.models.fitting as fitting
     from quant_research_platform.artifacts.crypto_hft import (
         read_crypto_episode_artifact,
     )
 
-    inputs, chronology, validation, final = explicit_models
+    inputs, chronology, validation, final = explicit_price_models
     window = (
         chronology["test"]
         if window_kind == "test"
@@ -516,8 +527,10 @@ def test_explicit_taker_uses_saved_predictions_without_training(
     assert values[0]["fill_events"] == 0
 
 
-def test_prediction_facts_are_self_contained_after_model_files_move(explicit_models):
-    inputs, chronology, _validation, final = explicit_models
+def test_prediction_facts_are_self_contained_after_model_files_move(
+    explicit_price_models,
+):
+    inputs, chronology, _validation, final = explicit_price_models
     model_path = Path(final[0]["model"])
     model_path.rename(model_path.with_name(model_path.name + "-detached"))
     assert not model_path.exists()

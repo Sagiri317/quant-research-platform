@@ -57,6 +57,9 @@ def _axis(returns, dates):
 
 
 def _compare(axis, references, **options):
+    sessions = options.pop(
+        "sessions", pd.bdate_range(axis.start_at.min(), axis.end_at.max())
+    )
     config = {"comparison_benchmarks": references, **options}
     analyses = options.pop("analyses", ["benchmark_comparison"])
     metadata = {
@@ -71,6 +74,7 @@ def _compare(axis, references, **options):
         analyses=analyses,
         currencies={"strategy": "CNY"},
         clock="trading_day_open",
+        sessions=sessions,
         metadata=metadata,
     )
     return tables, metadata
@@ -731,6 +735,30 @@ def test_requested_risk_free_defines_alpha_and_missing_rf_blocks_without_fallbac
         rows.planned_hypothesis_count.eq(2).all()
         and rows.defined_hypothesis_count.eq(2).all()
     )
+    zero, metadata = _compare(_axis(risk_free, dates), [ref], **kwargs)
+    estimates = zero["portfolio_market_exposure"].set_index("coefficient_id")
+    assert estimates.loc[["alpha", "beta"], "value"].eq(0).all()
+    assert estimates.loc[["alpha", "beta"], "inference_status"].eq("UNDEFINED").all()
+    assert estimates.defined_hypothesis_count.eq(0).all()
+    restored = read_statistics_artifact(
+        write_statistics_artifact(
+            tmp_path / "zero-excess",
+            metadata=metadata,
+            tables=zero,
+            table_group="portfolio",
+        )
+    )
+    with restored.table("portfolio_market_exposure.parquet") as rows:
+        pd.testing.assert_frame_equal(rows, zero["portfolio_market_exposure"])
+    invalid = zero["portfolio_market_exposure"].copy()
+    invalid.loc[invalid.coefficient_id.eq("alpha"), "p_value"] = 0.0
+    with pytest.raises(ValueError, match="statistics_exposure_inference_invalid"):
+        write_statistics_artifact(
+            tmp_path / "invalid-zero-excess",
+            metadata=metadata,
+            tables={"portfolio_market_exposure": invalid},
+            table_group="portfolio",
+        )
     (tmp_path / "rf.parquet").unlink()
     missing, _ = _compare(_axis(portfolio, dates), [ref], **kwargs)
     assert missing["portfolio_market_exposure"].status.eq("UNDEFINED").all()
@@ -826,3 +854,125 @@ def test_missing_file_cannot_hide_schema_known_column_errors(tmp_path, mutation)
         ref[f"{mutation}_column"] = "not_a_column"
     with pytest.raises(ValueError, match="column.*(found|missing)"):
         _compare(_axis([0.01, 0.02], dates), [ref])
+
+
+@pytest.mark.parametrize(
+    "cadence", ["no_calendar", "weekly", "omitted_session", "holiday"]
+)
+def test_native_calendar_evidence_localizes_daily_statistics(tmp_path, cadence):
+    sessions = pd.bdate_range("2024-01-02", periods=30)
+    if cadence == "weekly":
+        dates = sessions[::5][:6]
+    elif cadence == "omitted_session":
+        dates = sessions[:8].delete(3)
+    elif cadence == "holiday":
+        # The explicit market calendar, not elapsed days, proves this long closure.
+        sessions = sessions.delete([3, 4, 5, 6, 7])
+        dates = sessions[:7]
+    else:
+        dates = sessions[:7]
+    ledger = tmp_path / "ledger"
+    window = _cash_ledger(ledger, dates=dates)
+    market = np.array([0.01, -0.02, 0.03, 0.005, -0.01])[: len(dates) - 2]
+    reference = reference_input(
+        tmp_path / "reference.parquet",
+        [*market, 0.0],
+        dates=dates[1:],
+        representation="interval_simple_return",
+    )
+    config = {
+        "ledgers": [str(ledger)],
+        "window": window,
+        "analyses": [
+            "performance",
+            "benchmark_comparison",
+            "market_exposure",
+            "sharpe_inference",
+            "cscv",
+        ],
+        "statistics": {"cscv_blocks": 4},
+        "comparison_benchmarks": [reference],
+        "market_exposure": {
+            "minimum_observations": 3,
+            "hac_lag": 1,
+            "confidence": 0.95,
+        },
+        "output": str(tmp_path / "statistics"),
+    }
+    if cadence != "no_calendar":
+        calendar = tmp_path / "calendar.parquet"
+        pd.DataFrame(
+            {"calendar_date": sessions, "source_market_type": 1, "is_trading_day": True}
+        ).to_parquet(calendar, index=False)
+        config["inputs"] = {
+            "calendar": {
+                "path": str(calendar),
+                "spec": {
+                    "data_id": "calendar",
+                    "frequency": "1d",
+                    "grain": "asset_timestamp",
+                    "column_roles": {
+                        "calendar_date": "timestamp",
+                        "source_market_type": "key",
+                        "is_trading_day": "context",
+                    },
+                    "primary_key": ["calendar_date", "source_market_type"],
+                    "partition_columns": [],
+                },
+            }
+        }
+    artifact = read_statistics_artifact(portfolio_statistics(config))
+    with artifact.table("portfolio_benchmark_intervals.parquet") as rows:
+        assert rows.status.eq("DEFINED").all()
+        assert rows.relative_wealth.notna().all()
+    with artifact.table("portfolio_benchmark_metrics.parquet") as rows:
+        annual = rows.loc[
+            rows.metric_id.isin(
+                ["annualized_return_difference", "tracking_error", "information_ratio"]
+            )
+        ]
+        assert annual.status.eq(
+            "DEFINED" if cadence == "holiday" else "UNDEFINED"
+        ).all()
+        if cadence != "holiday":
+            assert annual.reason.eq("incomplete_daily_axis").all()
+    with artifact.table("portfolio_performance.parquet") as rows:
+        assert rows.loc[rows.metric_id.eq("terminal_nav"), "value"].iloc[0] == 1000
+        annual = rows.loc[
+            rows.metric_id.isin(["cagr", "annualized_volatility", "sharpe"])
+        ]
+        if cadence != "holiday":
+            assert annual.reason.eq("incomplete_daily_axis").all()
+        else:
+            assert annual.loc[annual.metric_id.eq("cagr"), "value"].iloc[0] == 0
+    with artifact.table("portfolio_robustness.parquet") as rows:
+        if cadence != "holiday":
+            assert rows.reason.eq("incomplete_daily_axis").all()
+    with artifact.table("portfolio_market_exposure.parquet") as rows:
+        if cadence != "holiday":
+            assert rows.reason.eq("incomplete_daily_axis").all()
+            assert rows.inference_status.isin(["UNDEFINED", "NOT_APPLICABLE"]).all()
+        else:
+            estimates = rows.loc[
+                rows.coefficient_id.isin(["market_return_intercept", "beta"])
+            ]
+            assert estimates.status.eq("DEFINED").all()
+            assert estimates.value.eq(0).all()
+            assert estimates.inference_status.eq("UNDEFINED").all()
+            assert estimates.inference_reason.eq("nonfinite_inference").all()
+            assert (
+                estimates[["t_statistic", "p_value", "fdr_adjusted_p_value"]]
+                .isna()
+                .all()
+                .all()
+            )
+            assert estimates.standard_error.eq(0).all()
+            assert estimates.defined_hypothesis_count.eq(0).all()
+            assert estimates.planned_hypothesis_count.eq(2).all()
+            assert (
+                rows.loc[
+                    rows.coefficient_id.isin(["correlation", "r_squared"]), "status"
+                ]
+                .eq("UNDEFINED")
+                .all()
+            )

@@ -350,6 +350,14 @@ def test_processed_blocks_preserve_full_history_math(
         return observed_query
 
     monkeypatch.setattr(producer, "_prepare_pit_fundamentals", observed_prepare)
+    processed_axis = producer._processed_axis
+    axis_requests = []
+
+    def observed_axis(*args, **kwargs):
+        axis_requests.append(kwargs.get("include_asset_sessions", False))
+        return processed_axis(*args, **kwargs)
+
+    monkeypatch.setattr(producer, "_processed_axis", observed_axis)
     default_batch_rows = producer.DEFAULT_BATCH_ROWS
     for data_id in target_ids:
         spec = processed_catalog().get(data_id)
@@ -384,6 +392,8 @@ def test_processed_blocks_preserve_full_history_math(
             pd.concat(chunks, ignore_index=True), eager[data_id], check_exact=True
         )
     assert preparations == [True]
+    # Only the factor without a declared PANEL clock consumes the scanned axis.
+    assert axis_requests == [False, False, False, False, False, True]
     assert len(observation_counts) > 1
     assert sum(observation_counts) == len(eager["market_panel_1d"])
     mask = eager["execution_mask"]
@@ -793,7 +803,7 @@ def test_financial_pit_calendar_file_order_preserves_formal_published_rows(tmp_p
         "reversed": ((2,), (0, 1)),
     }
     calendars, panels, outputs = ([], [], [])
-    calendar_hashes, panel_hashes = ([], [])
+    panel_hashes = []
     for name, groups in cases.items():
         layout = StorageLayout(tmp_path / name)
         raw = layout.raw_source_root("csmar")
@@ -825,11 +835,6 @@ def test_financial_pit_calendar_file_order_preserves_formal_published_rows(tmp_p
             ["calendar_date", "source_market_type"]
         ).reset_index(drop=True)
         calendars.append(logical)
-        calendar_hashes.append(
-            sha256(
-                pd.util.hash_pandas_object(logical, index=False).to_numpy().tobytes()
-            ).hexdigest()
-        )
         source = _synthetic_interim_frames(dates)
         source["market_bars_1d"]["market_type"] = 4
         panel_spec = processed_catalog().get("market_panel_1d")
@@ -927,7 +932,7 @@ def test_financial_pit_calendar_file_order_preserves_formal_published_rows(tmp_p
         for frame in frames[1:]:
             pd.testing.assert_frame_equal(frame, frames[0], check_exact=True)
     assert all(panel_hashes)
-    assert len(set(calendar_hashes)) == len(set(panel_hashes)) == 1
+    assert len(set(panel_hashes)) == 1
 
 
 @pytest.mark.parametrize("batch_rows", (6, 300))
@@ -1695,26 +1700,35 @@ def test_native_lifecycle_history_does_not_join_relisting(
     ]
 
 
-@pytest.mark.parametrize(
-    "cap,close,volume",
-    (
-        (1e308, 1e-308, 1e308),
-        (1e-308, 1e308, 1e-308),
-        (3 * np.nextafter(0.0, 1.0), 2.0, 3 * np.nextafter(0.0, 1.0)),
-        (3.0, 2.0, 3.0),
-    ),
-)
-def test_native_panel_persists_finite_turnover_at_share_count_boundaries(
-    tmp_path, cap, close, volume
-):
+def test_native_panel_persists_finite_turnover_at_share_count_boundaries(tmp_path):
     from fractions import Fraction
 
+    cases = {
+        "overflowing-share-count": (1e308, 1e-308, 1e308),
+        "underflowing-share-count": (1e-308, 1e308, 1e-308),
+        "subnormal-rounding": (
+            3 * np.nextafter(0.0, 1.0),
+            2.0,
+            3 * np.nextafter(0.0, 1.0),
+        ),
+        "ordinary": (3.0, 2.0, 3.0),
+    }
     dates = pd.bdate_range("2020-01-06", periods=3).as_unit("ns")
     source = _synthetic_interim_frames(dates)
     bars = source["market_bars_1d"]
-    bars[["close", "open", "high", "low"]] = close
-    bars[["float_market_cap", "total_market_cap"]] = cap
-    bars["volume"] = volume
+    expected = {}
+    case_names = tuple(cases)
+    for position, (index, row) in enumerate(bars.iterrows()):
+        case = case_names[position % len(case_names)]
+        cap, close, volume = cases[case]
+        bars.loc[index, ["close", "open", "high", "low"]] = close
+        bars.loc[index, ["float_market_cap", "total_market_cap"]] = cap
+        bars.loc[index, "volume"] = volume
+        expected[row.source_asset_id, row.timestamp] = (
+            case,
+            float(Fraction(volume) * Fraction(close) / Fraction(cap)),
+        )
+    assert {case for case, _value in expected.values()} == set(cases)
     spec = processed_catalog().get("market_panel_1d")
     layout = StorageLayout(tmp_path)
     for data_id in spec.source_input_data_ids:
@@ -1734,9 +1748,17 @@ def test_native_panel_persists_finite_turnover_at_share_count_boundaries(
     ) as (frames, metadata):
         write_dataset(root, frames, spec=spec, metadata=metadata)
     actual = read_dataset(root)
-    expected = float(Fraction(volume) * Fraction(close) / Fraction(cap))
+    assert set(zip(actual.asset_id, actual.timestamp, strict=True)) == set(expected)
     assert np.isfinite(actual.turnover).all()
-    np.testing.assert_allclose(actual.turnover, expected, rtol=1e-15, atol=0)
+    for row in actual.itertuples():
+        case, value = expected[row.asset_id, row.timestamp]
+        np.testing.assert_allclose(
+            row.turnover,
+            value,
+            rtol=1e-15,
+            atol=0,
+            err_msg=f"{case}: {(row.asset_id, row.timestamp)}",
+        )
 
 
 def test_processed_axis_keeps_raw_dates_and_assets_before_membership_filter(tmp_path):

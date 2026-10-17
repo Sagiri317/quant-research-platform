@@ -187,40 +187,6 @@ def test_maker_requote_uses_exact_position_headroom(tmp_path, direction):
 
 
 @pytest.mark.parametrize("direction", (-1, 1))
-def test_taker_multiple_depth_takes_publish_exact_total(direction):
-    capital = PortfolioCapital("exact_takes", 1000.0, "USDT", "linear_perpetual")
-    level = 1005 if direction == 1 else 995
-    side = "ask_levels" if direction == 1 else "bid_levels"
-    batches = []
-    simulate_taker(
-        [
-            _state(0, **{side: ((level, 1e16 + 2),)}),
-            _state(5, **{side: ((level, 1e16), (level + direction * 5, 1.0))}),
-            _state(200),
-        ],
-        [{"timestamp_ms": 0, "prediction": direction * 0.1}],
-        prediction_column="prediction",
-        prediction_horizon_ms=500,
-        config=TakerConfig(1e16 + 2, 1e16 + 2, 10, 0.0, 100),
-        observed_coverage={"s1": _coverage(0, 201)},
-        capital=capital,
-        asset_id="btc_usdt",
-        funding_events=(),
-        funding_forecasts=KNOWN_NO_FUNDING,
-        on_ledger=batches.append,
-    )
-    trades = [trade for batch in batches for trade in batch.trades]
-    assert len(trades) == 1
-    assert trades[0].quantity == direction * (10**16 + 1)
-    final = next(
-        row
-        for row in batches[-1].valuations
-        if row.asset_id == "btc_usdt" and row.phase == "end"
-    )
-    assert final.quantity == trades[0].quantity
-
-
-@pytest.mark.parametrize("direction", (-1, 1))
 def test_maker_queue_depletion_preserves_small_observations(direction):
     maker_buyer = direction == 1
     level = 995 if maker_buyer else 1005
@@ -328,8 +294,16 @@ def test_taker_multilevel_notional_and_pnl_round_once_at_native_boundary(
         on_ledger=batches.append,
     )
     expected_notional = Fraction(10**16) * Fraction(first, 10) + Fraction(second, 10)
-    trade = next(trade for batch in batches for trade in batch.trades)
+    trades = [trade for batch in batches for trade in batch.trades]
+    assert len(trades) == 1
+    trade = trades[0]
     assert trade.quantity == direction * (10**16 + 1)
+    final = next(
+        row
+        for row in batches[-1].valuations
+        if row.asset_id == "btc_usdt" and row.phase == "end"
+    )
+    assert final.quantity == trade.quantity
     assert trade.notional == float(direction * expected_notional)
     expected_pnl = float(direction * (Fraction(10**16 + 1) * 100 - expected_notional))
     output = write_portfolio_ledger_artifact(

@@ -285,7 +285,7 @@ def _ordinal_rank_bounds(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Return one-based ordinal rank bounds without splitting equal values."""
 
     _, inverse, counts = np.unique(
-        np.asarray(values, dtype="float64"),
+        np.asarray(values),
         return_inverse=True,
         return_counts=True,
     )

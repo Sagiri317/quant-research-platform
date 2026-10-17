@@ -10,8 +10,20 @@ from quant_research_platform.research import statistics_production
 from tests.research.test_prediction_runner_model_selection import candidates
 
 
-def _config(tmp_path, window, *, algorithms=("linear_regression",)):
+def _config(tmp_path, window, *, algorithms=("linear_regression",), constant=False):
     _, scoring = candidates(tmp_path, algorithms=algorithms)
+    if constant:
+        labels = pd.read_parquet(scoring["labels"])
+        labels.loc[labels.timestamp.between("2020-01-04", "2020-01-06"), "label"] = 0.2
+        consumed = labels.loc[
+            labels.timestamp.between("2020-01-04", "2020-01-06")
+            & labels.asset_id.isin(["b", "c"])
+            & labels.eligible
+            & labels.label_available_at.le(pd.Timestamp("2020-01-06"))
+        ]
+        assert consumed.groupby("timestamp").size().tolist() == [2, 2, 2]
+        assert consumed.groupby("timestamp").label.nunique().tolist() == [1, 1, 1]
+        labels.to_parquet(scoring["labels"], index=False)
     return {
         "dataset": scoring["labels"],
         "input_spec": scoring["label_spec"],
@@ -86,6 +98,19 @@ def test_model_statistics_preserves_observed_dates_with_undefined_labels(tmp_pat
         assert pd.isna(diagnostics["mean"]).all()
 
 
+def test_model_statistics_keeps_constant_labels_explicitly_undefined(tmp_path):
+    config = _config(
+        tmp_path, {"start": "2020-01-04", "end": "2020-01-06"}, constant=True
+    )
+    saved = read_statistics_artifact(statistics_production.model_statistics(config))
+    with saved.table("prediction_diagnostics.parquet") as diagnostics:
+        assert diagnostics.input_date_count.tolist() == [3]
+        assert diagnostics.observation_count.tolist() == [0]
+        assert diagnostics.status.tolist() == ["UNDEFINED"]
+        assert diagnostics.reason.tolist() == ["incomplete_session_clock"]
+        assert pd.isna(diagnostics["mean"]).all()
+
+
 @pytest.mark.parametrize("coverage", ["empty", "unmatured", "constant"])
 @pytest.mark.parametrize(
     "analysis,policy",
@@ -106,7 +131,7 @@ def test_invalid_requested_configuration_precedes_data_availability(
         if coverage == "empty"
         else {"start": "2020-01-04", "end": "2020-01-06"}
     )
-    config = _config(tmp_path, window)
+    config = _config(tmp_path, window, constant=coverage == "constant")
     config.update(analyses=[analysis], statistics=policy)
     if coverage == "unmatured":
         config["label_cutoff"] = "2020-01-03"

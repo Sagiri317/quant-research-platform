@@ -11,6 +11,7 @@ from scipy.linalg import norm
 
 from quant_research_platform.contracts.models import TrainingWeighting
 from quant_research_platform.contracts.validation import strict_finite_numeric_series
+from quant_research_platform.research.features.transforms import _integer_coordinates
 
 
 @dataclass(frozen=True)
@@ -173,20 +174,27 @@ class ModelMatrixScaler:
         scale = np.minimum(normalized_scale, 1.0) * magnitude
         exact_offsets = [Fraction(float(value)) for value in offset]
         if exact_columns.any():
-            exact_weights = tuple(
-                Fraction(float(weight)) for weight in original_weights
-            )
-            exact_total = sum(exact_weights)
-            for column in np.flatnonzero(exact_columns):
-                exact_mean = (
-                    sum(
-                        weight * Fraction(float(value))
-                        for weight, value in zip(
-                            exact_weights, values[:, column], strict=True
-                        )
-                    )
-                    / exact_total
+            equal_weights = np.all(original_weights == original_weights[0])
+            if not equal_weights:
+                exact_weights = tuple(
+                    Fraction(float(weight)) for weight in original_weights
                 )
+                exact_total = sum(exact_weights)
+            for column in np.flatnonzero(exact_columns):
+                if equal_weights:
+                    # The common positive weight cancels before exact reduction.
+                    integers, unit = _integer_coordinates(values[:, column])
+                    exact_mean = Fraction(sum(integers), unit * len(integers))
+                else:
+                    exact_mean = (
+                        sum(
+                            weight * Fraction(float(value))
+                            for weight, value in zip(
+                                exact_weights, values[:, column], strict=True
+                            )
+                        )
+                        / exact_total
+                    )
                 exact_offset = exact_mean - Fraction(float(origin[column]))
                 if abs(exact_mean) < abs(exact_offset):
                     origin[column] = 0.0

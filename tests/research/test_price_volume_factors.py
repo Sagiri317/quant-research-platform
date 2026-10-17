@@ -284,6 +284,7 @@ def test_price_volume_skew_matches_independent_decimal_oracle(size, scale):
 
     expected = []
     error_bounds = []
+    independent_windows = []
     for start in range(len(values) - size + 1):
         window = values[start : start + size]
         if np.isnan(window).any():
@@ -306,15 +307,27 @@ def test_price_volume_skew_matches_independent_decimal_oracle(size, scale):
             error_bounds.append(
                 gamma * float(correction * absolute_m3 / (m2 * m2.sqrt()))
             )
-        single = calculate_price_volume_factors(
-            panel.iloc[start : start + size],
-            min_fresh_fraction=1.0,
-            factor_columns=(f"skewness_{size}d",),
+        independent_windows.append(
+            panel.iloc[start : start + size].assign(asset_id=f"window_{start:04d}")
         )
+    # Each asset starts a separate rolling history at the original window offset.
+    # Batch only the engine setup; retain an exact comparison for every window.
+    independent = pd.concat(independent_windows, ignore_index=True)
+    independent_original = independent.copy(deep=True)
+    batched = calculate_price_volume_factors(
+        independent,
+        min_fresh_fraction=1.0,
+        factor_columns=(f"skewness_{size}d",),
+    )
+    terminal = batched.groupby("asset_id", sort=False).tail(1).set_index("asset_id")
+    for window in independent_windows:
+        asset_id = window.iloc[0]["asset_id"]
+        start = int(asset_id.removeprefix("window_"))
         assert (
-            single.iloc[-1][f"skewness_{size}d"]
+            terminal.loc[asset_id, f"skewness_{size}d"]
             == actual.iloc[start][f"skewness_{size}d"]
-        )
+        ), (size, scale, start)
+    pd.testing.assert_frame_equal(independent, independent_original, check_exact=True)
     observed = actual[f"skewness_{size}d"].to_numpy()
     expected = np.asarray(expected)
     assert np.array_equal(np.isnan(observed), np.isnan(expected))

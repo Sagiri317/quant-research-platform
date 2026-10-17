@@ -161,11 +161,15 @@ def _time_axis(axis, timezone):
 
     if not timezone:
         raise ValueError("plot_timezone_required")
-    locator = AutoDateLocator(minticks=3, maxticks=6)
+    # Matplotlib carries the timezone of aware coordinates in the axis units.
+    # Naive source clocks use UTC numeric coordinates without shifting labels.
+    display_timezone = axis.xaxis.get_units() or "UTC"
+    locator = AutoDateLocator(tz=display_timezone, minticks=3, maxticks=6)
     axis.xaxis.set_major_locator(locator)
     axis.xaxis.set_major_formatter(
         ConciseDateFormatter(
             locator,
+            tz=locator.tz,
             formats=["%Y", "%m月", "%d日", "%H:%M", "%H:%M", "%S秒"],
             zero_formats=["", "%Y年", "%m月", "%m-%d", "%H:%M", "%H:%M"],
             offset_formats=[
@@ -189,7 +193,7 @@ def _times(values, timezone):
     if times.hasnans:
         raise ValueError("plot_timestamp_invalid")
     if times.tz is not None:
-        times = times.tz_convert(timezone).tz_localize(None)
+        times = times.tz_convert(timezone)
     return times
 
 
