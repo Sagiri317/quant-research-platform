@@ -631,3 +631,124 @@ def test_delayed_source_epoch_cannot_move_panel_flow_boundary_backwards():
         ignore_index=True,
     )
     assert result.observed_force_order_imbalance_5s.isna().all()
+
+
+@pytest.mark.parametrize("delay", [0, 100])
+@pytest.mark.parametrize(
+    "case", ["continuous", "source_restart", "target_restart", "missing_mid"]
+)
+def test_public_information_state_preserves_source_continuity(
+    tmp_path, monkeypatch, case, delay
+):
+    from quant_research_platform.markets.implementations.crypto.ids import (
+        HFT_CROSS_ASSET_DATA_ID,
+        HFT_INFORMATION_STATE_DATA_ID,
+        HFT_PANEL_DATA_ID,
+    )
+    from quant_research_platform.markets.implementations.crypto.processed import (
+        producer,
+    )
+    from quant_research_platform.markets.prepare import prepare
+    from quant_research_platform.storage.datasets.reading import read_dataset
+    from tests.markets.crypto.test_local_data_dependencies import _persist
+
+    target = panel().assign(segment_id="target")
+    source = panel(spot=True).assign(asset_id="eth_usdt", segment_id="source")
+    if case == "source_restart":
+        source.loc[10:, "segment_id"] = "source-reconnected"
+    elif case == "target_restart":
+        target.loc[10:, "segment_id"] = "target-reconnected"
+    elif case == "missing_mid":
+        source.loc[10, "mid"] = np.nan
+    # Force both producer/consumer chunk boundaries to coincide with the restart.
+    original_chunks = producer.iter_dataset_chunks
+    monkeypatch.setattr(
+        producer,
+        "iter_dataset_chunks",
+        lambda session, **_: original_chunks(session, batch_rows=5),
+    )
+    window = {
+        "start": source.timestamp.min().isoformat(),
+        "end": source.timestamp.max().isoformat(),
+    }
+    state = prepare(
+        {
+            "market_id": "crypto",
+            "data_id": HFT_INFORMATION_STATE_DATA_ID,
+            "inputs": {HFT_PANEL_DATA_ID: str(_persist(tmp_path / "source", source))},
+            "parameters": {"asset_ids": ["eth_usdt"]},
+            "time_window": window,
+            "output_root": str(tmp_path / "information"),
+        }
+    )
+    saved = read_dataset(state)
+    assert saved.segment_id.tolist() == source.segment_id.tolist()
+    columns = [
+        "eth_return_100ms",
+        "eth_tfi_500ms",
+        "eth_lagged_return_100ms",
+        "eth_lagged_tfi_500ms",
+    ]
+    output = prepare(
+        {
+            "market_id": "crypto",
+            "data_id": HFT_CROSS_ASSET_DATA_ID,
+            "factor_columns": columns,
+            "inputs": {
+                HFT_PANEL_DATA_ID: str(_persist(tmp_path / "target", target)),
+                HFT_INFORMATION_STATE_DATA_ID: str(state),
+            },
+            "parameters": {
+                "information_assets": ["eth_usdt"],
+                "target_assets": ["btc_usdt"],
+                "max_age_ms": 200,
+                "input_delay_ms": delay,
+            },
+            "time_window": window,
+            "output_root": str(tmp_path / "context"),
+        }
+    )
+    boundary = read_dataset(output).iloc[10 + delay // 100]
+    assert boundary.eth_grid_at == source.timestamp.iloc[10]
+    if case == "source_restart":
+        assert boundary[columns].isna().all()
+    else:
+        assert boundary.eth_lagged_return_100ms == saved.return_100ms.iloc[9]
+        assert boundary.eth_lagged_tfi_500ms == 0.25
+        assert pd.isna(boundary.eth_return_100ms) == (case == "missing_mid")
+        assert boundary.eth_tfi_500ms == 0.25
+
+
+def test_cross_asset_source_gaps_age_and_chunk_boundaries():
+    source = panel(spot=True).assign(asset_id="eth_usdt", segment_id="source")
+    source.loc[10:, "segment_id"] = "source-reconnected"
+    state = pd.concat(
+        iter_factor_frames([source.iloc[:10], source.iloc[10:]]), ignore_index=True
+    )
+    # A missing persisted grid must not become a valid lag even within one ID.
+    state = state.drop(index=[13, 14])
+    results = []
+    for split in [1, 20]:
+        results.append(
+            pd.concat(
+                iter_cross_asset_factor_frames(
+                    [source.iloc[i : i + split] for i in range(0, len(source), split)],
+                    information_frames={
+                        "eth_usdt": [
+                            state.iloc[i : i + split]
+                            for i in range(0, len(state), split)
+                        ]
+                    },
+                    max_age_ms=100,
+                    batch_rows=3,
+                ),
+                ignore_index=True,
+            )
+        )
+    pd.testing.assert_frame_equal(*results)
+    result = results[0]
+    assert pd.isna(result.eth_lagged_return_100ms.iloc[10])
+    assert result.eth_grid_age_ms.iloc[14] == 200
+    assert pd.isna(result.eth_return_100ms.iloc[14])
+    assert pd.isna(result.eth_lagged_return_100ms.iloc[15])
+    assert result.eth_lagged_return_100ms.iloc[16] == state.loc[15, "return_100ms"]

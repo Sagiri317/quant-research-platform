@@ -82,7 +82,7 @@ def _research_valuation_observation(batch, economics):
         raise ValueError("portfolio_research_valuation_policy_invalid")
     values = {
         phase: {
-            row.asset_id: row.value
+            row.asset_id: row.share_value
             for row in batch.valuations
             if row.phase == phase and row.asset_id != PORTFOLIO_CASH_ASSET_ID
         }
@@ -1590,7 +1590,7 @@ def _portfolio_statistics_tables(
                 if "attribution" in analyses:
                     after = pd.Series(
                         {
-                            value.asset_id: value.value
+                            value.asset_id: value.share_value
                             for value in batch.valuations
                             if value.phase == "after"
                             and value.asset_id != PORTFOLIO_CASH_ASSET_ID
@@ -1598,7 +1598,7 @@ def _portfolio_statistics_tables(
                     )
                     endpoint = pd.Series(
                         {
-                            value.asset_id: value.value
+                            value.asset_id: value.share_value
                             for value in batch.valuations
                             if value.phase == "end"
                             and value.asset_id != PORTFOLIO_CASH_ASSET_ID
@@ -1714,7 +1714,7 @@ def _portfolio_statistics_tables(
                     if value.phase == "after" and value.asset_id in missing_orders:
                         desired = Fraction(
                             facts[value.asset_id, "target_notional"].number
-                        ) - Fraction(value.value)
+                        ) - Fraction(value.share_value)
                         side = "buy" if desired > 0 else "sell"
                         adv_gaps[candidate_id][f"adv_unavailable_{side}_orders"] += 1
                         adv_gaps[candidate_id][

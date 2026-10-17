@@ -14,6 +14,7 @@ from quant_research_platform.contracts.models import (
     _fit_windows,
     _model_spec,
     _resolve_candidate_parameters,
+    _target_definition,
     model_spec_payload,
     validate_model_input_roles,
 )
@@ -262,6 +263,9 @@ def fit(config: Mapping) -> Path:
             "candidate_parameters", dict(spec.hyperparameters)
         ),
         "label_unit": config["label_unit"],
+        "target_definition": _target_definition(
+            declared, spec.target_column, session.manifest
+        ),
         "input_units": {
             column: declared["column_units"][column]
             for column in spec.input_columns

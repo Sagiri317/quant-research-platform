@@ -51,6 +51,15 @@ def test_price_volume_selections_use_one_definition_and_minimum_inputs():
     )
     assert factor_lookback_bars(reversal) == 5
     assert reversal[0].required_windows == (5,)
+    average = price_volume_factor_definitions(
+        **binding, factor_columns=("avg_amount_20d",)
+    )
+    assert factor_lookback_bars(average) == 19
+    assert average[0].required_windows == (20,)
+    shock = price_volume_factor_definitions(
+        **binding, factor_columns=("amount_shock_20d",)
+    )
+    assert factor_lookback_bars(shock) == 20
     x = np.arange(1.0, 301.0)
     panel = pd.DataFrame(
         {

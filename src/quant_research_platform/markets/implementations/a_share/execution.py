@@ -388,15 +388,27 @@ def derive_execution_mask(panel: pd.DataFrame) -> pd.DataFrame:
     result["one_word_limit_up"] = (status.eq(1) & equal_price).where(known_prices)
     result["one_word_limit_down"] = (status.eq(-1) & equal_price).where(known_prices)
     result["listing_date"] = strict_timestamp_series(
-        result["listing_date"], error="execution_listing_date_invalid"
+        result["listing_date"], error="execution_listing_date_invalid", allow_null=True
     )
-    grouped = result.groupby(["asset_id", "listing_date"], sort=False)
+    grouped = result.groupby("asset_id", sort=False)
+    same_lifecycle = result["listing_date"].notna() & result["listing_date"].eq(
+        grouped["listing_date"].shift(-EXECUTION_LOOKAHEAD_SESSIONS)
+    )
+    if "market_type" in result:
+        same_lifecycle &= (
+            result["market_type"].notna()
+            & grouped["market_type"].shift(-EXECUTION_LOOKAHEAD_SESSIONS).notna()
+        )
+    if "_calendar_segment" in result:
+        same_lifecycle &= result["_calendar_segment"].eq(
+            grouped["_calendar_segment"].shift(-EXECUTION_LOOKAHEAD_SESSIONS)
+        )
     next_trading = grouped["is_trading"].shift(-EXECUTION_LOOKAHEAD_SESSIONS)
     next_up = grouped["one_word_limit_up"].shift(-EXECUTION_LOOKAHEAD_SESSIONS)
     next_down = grouped["one_word_limit_down"].shift(-EXECUTION_LOOKAHEAD_SESSIONS)
     output = result.loc[:, ("market_id", "asset_id", "timestamp")].copy()
-    output["can_enter"] = next_trading & ~next_up
-    output["can_exit"] = next_trading & ~next_down
+    output["can_enter"] = (next_trading & ~next_up).where(same_lifecycle)
+    output["can_exit"] = (next_trading & ~next_down).where(same_lifecycle)
     return output.sort_values(
         ["market_id", "asset_id", "timestamp"], kind="mergesort"
     ).reset_index(drop=True)

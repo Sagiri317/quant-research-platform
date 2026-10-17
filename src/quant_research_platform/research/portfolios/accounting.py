@@ -1538,16 +1538,19 @@ def portfolio_interval_economics(batch: PortfolioLedgerBatch) -> dict[str, objec
         sum((abs(Fraction(value)) for value in executed.values()), Fraction())
         + abs(sum((Fraction(value) for value in executed.values()), Fraction()))
     ) / 2
+    requested_stock = [
+        Fraction(target[asset])
+        - Fraction(value.share_value)
+        + Fraction(executed.get(asset, 0.0))
+        for asset, value in post.items()
+        if asset != PORTFOLIO_CASH_ASSET_ID
+    ]
+    # Requests are measured at the execution open, after nontrade rights changes.
+    # The cash leg offsets net stock requests; receivables are never traded cash.
     requested = (
-        sum(
-            (
-                abs(Fraction(target[asset]) - Fraction(before[asset]))
-                for asset in before
-            ),
-            Fraction(),
-        )
-        / 2
-    )
+        sum(map(abs, requested_stock), Fraction())
+        + abs(sum(requested_stock, Fraction()))
+    ) / 2
     return {
         "entry_at": entry,
         "end_at": endpoint,

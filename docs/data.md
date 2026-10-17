@@ -378,7 +378,7 @@ valuations、diagnostics、rights_adjustments；不在本文手写第二套完�
 | 字段 | 单位与定义 |
 | --- | --- |
 | prediction_count / target_count | 有限预测数 / 预测与成熟主目标成对有效数 |
-| mse / baseline_mse | 当日成对域等权平方误差 / 零预测基准平方误差，单位为主目标单位的平方 |
+| mse / mse_reason / baseline_mse | 当日成对域等权平方误差及未定义原因 / 零预测基准平方误差，单位为主目标单位的平方 |
 | oos_r2 / oos_r2_reason | `1−mse/baseline_mse`；零基准误差、无目标或不可表示结果为 NULL 并说明原因 |
 | head_selected_count / head_evaluable_count | 仅由预测确定的头部人数 / 固定头部中原始收益已成熟人数 |
 | head_coverage | 可评价人数除以选中人数；无选中人为 NULL，不以覆盖硬门槛过滤 |
@@ -390,6 +390,17 @@ valuations、diagnostics、rights_adjustments；不在本文手写第二套完�
 边界并列全部入组，再检查目标/收益可用性。`raw_return_label` 可显式指定，默认只在输入存在
 `forward_return_20d` 时使用该列，否则收益指标未定义，不把标准化目标冒充原始收益。
 元数据 `prediction_metrics` 保存解析后的头部比例、原始收益列和聚合口径。
+MSE 使用标签尺度预测：rank 模型使用各次训练冻结的 `label_calibration`，普通回归输出不重复缩放；原始排序分数继续用于 IC 和头部选择。
+训练从实际消费的 spec/manifest 冻结 `facts.target_definition`：源标签、目标 transform、clip 以及所选源标签的 `label_semantics`；PRED 的 `model_facts` 原样携带。
+普通标签记录源列本身、不追加变换；`model_target` 记录 `forward_return_20d` 及实际 `target_transform`/`target_clip`。
+不绑定路径、data ID、hash 或整份 spec，不在后来从训练源回读补造历史事实。
+score 的显式 `label_unit` 可补充标签输入未声明的单位；若输入已有单位，两者仍须一致。该声明保存在评分/选择记录中，不从训练单位猜测评价单位。
+只有目标定义和两侧明确单位相同，才计算 MSE 和 OOS R²；`model_target` 的 raw/none 与同源原始标签可比较。
+目标不同、单位缺失或不同分别记为 `prediction_target_mismatch`、`target_unit_missing`、
+`prediction_target_unit_mismatch`；冻结定义未知（含旧模型未保存定义）、对侧缺必需定义或定义不同分别记
+`prediction_target_definition_missing`、`prediction_target_definition_mismatch`。仅将 MSE/R² 设为 NULL，
+保留目标计数、零预测基准、RankIC 和头部描述；不猜测单位换算。普通声明标签两侧均未提供额外 `label_semantics` 时按同源列定义比较；一侧有额外定义而另一侧无则未定义。
+`mse_reason` 还区分 `no_valid_targets` 与 `nonfinite_result`；非零损失下溢不得伪装成完美预测。
 跨日 MSE 先算每日均方误差再日期等权；跨日 OOS R² 为同一可评价日期域上
 `1−mean(mse)/mean(baseline_mse)`，不平均每日 R²，不按资产行数加权。
 这些重叠 horizon 收益不连乘为日净值。训练均值基准尚无训练域来源证明，当前不提供该选项。

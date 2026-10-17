@@ -160,6 +160,11 @@ class PortfolioValuation:
     receivable: float = 0.0
     locked_quantity: float | Fraction = 0.0
 
+    @property
+    def share_value(self) -> float:
+        """Raw-share notional for cash-equity consumers, excluding receivables."""
+        return float(Fraction(self.quantity) * Fraction(self.mark_price))
+
 
 @dataclass(frozen=True, slots=True)
 class PortfolioDiagnostic:
@@ -759,21 +764,20 @@ def validate_portfolio_transition(
                 ):
                     raise ValueError("portfolio_ledger_cross_session_timing_invalid")
                 if (
-                    old is not None
-                    and current is not None
-                    and (
-                        old.cost_basis != current.cost_basis
-                        or old.receivable != current.receivable
-                        or not _quantity_equal(
-                            old.locked_quantity, current.locked_quantity
-                        )
+                    (old.cost_basis if old else 0.0)
+                    != (current.cost_basis if current else 0.0)
+                    or (old.receivable if old else 0.0)
+                    != (current.receivable if current else 0.0)
+                    or not _quantity_equal(
+                        old.locked_quantity if old else 0.0,
+                        current.locked_quantity if current else 0.0,
                     )
                 ):
                     raise ValueError("portfolio_ledger_cost_basis_invalid")
                 if (
                     old is not None
                     and current is not None
-                    and old.quantity != 0
+                    and (old.quantity != 0 or old.receivable != 0)
                     and old.lifecycle_id != current.lifecycle_id
                 ):
                     raise ValueError("portfolio_held_lifecycle_unproven")
@@ -892,7 +896,7 @@ def validate_portfolio_transition(
                     or (desired < 0 and executed > 0)
                     or (desired == 0 and executed != 0)
                     or abs(executed) > abs(desired) + tolerance
-                    or (abs(target.number - (post.value - post.receivable)) > tolerance)
+                    or (abs(target.number - post.share_value) > tolerance)
                     != (reason is not None)
                 ):
                     raise ValueError("portfolio_ledger_direction_invalid")

@@ -26,12 +26,17 @@ from quant_research_platform.contracts.ids import validate_input_market
 from quant_research_platform.contracts.json_codec import (
     _strict_config,
 )
+from quant_research_platform.contracts.models import (
+    _PREDICTION_LOSS_REASONS,
+    _prediction_loss_reason,
+)
 from quant_research_platform.contracts.time import _window_payload
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.features.transforms import (
     model_input_validity_columns,
 )
+from quant_research_platform.research.models.rank_ensemble import _label_predictions
 from quant_research_platform.runtime.dataframes import iter_complete_time_frames
 from quant_research_platform.storage.datasets.reading import (
     _dataset_input_options,
@@ -205,11 +210,8 @@ def _cross_sectional_metric_summary(
         "rankic_positive": 0,
     }
     row_count = 0
-    squared_errors = _ScaledSquareAccumulator()
-    date_errors = _ScaledSquareAccumulator()
-    date_count = 0
-    date_rows = 0
-    mse_defined = True
+    squared_errors = _MeanSquaredError()
+    date_errors = _MeanSquaredError()
     current_timestamp: int | None = None
     timestamp_state: _TimestampMetricState | None = None
     for row in rows:
@@ -217,10 +219,8 @@ def _cross_sectional_metric_summary(
         timestamp_ns = int(timestamp_ns) if validation_axis == "cross_sectional" else 0
         if current_timestamp != timestamp_ns:
             if timestamp_state is not None:
-                squared_errors.add(date_errors.root_mean_square(date_rows))
-                date_count += 1
-                date_errors = _ScaledSquareAccumulator()
-                date_rows = 0
+                squared_errors.add_period(date_errors)
+                date_errors = _MeanSquaredError()
                 row_count += timestamp_state.ic.count
                 _add_correlation_aggregate(stats, "ic", timestamp_state.ic.result()[0])
                 _add_correlation_aggregate(
@@ -234,34 +234,18 @@ def _cross_sectional_metric_summary(
         label_prediction = (
             economic[0]
             if economic
-            else (
-                prediction
-                if label_calibration is None
-                else label_calibration[0] + label_calibration[1] * prediction
-            )
+            else _label_predictions(prediction, label_calibration)
         )
-        residual = label_prediction - label
-        if not np.isfinite(residual):
-            mse_defined = False
         timestamp_state.ic.update(label, prediction)
         if validation_axis == "cross_sectional":
             timestamp_state.rank.update(float(label_rank), float(prediction_rank))
-        date_rows += 1
-        if mse_defined:
-            date_errors.add(residual)
+        date_errors.add(label_prediction, label)
     if timestamp_state is not None:
-        squared_errors.add(date_errors.root_mean_square(date_rows))
-        date_count += 1
+        squared_errors.add_period(date_errors)
         row_count += timestamp_state.ic.count
         _add_correlation_aggregate(stats, "ic", timestamp_state.ic.result()[0])
         _add_correlation_aggregate(stats, "rankic", timestamp_state.rank.result()[0])
-    mse = None
-    if mse_defined:
-        try:
-            mse = squared_errors.result(date_count)
-        except ValueError as exc:
-            if str(exc) != "model_selection_mse_unrepresentable":
-                raise
+    mse = squared_errors.result()
     result = {"validation_rows": row_count, "validation_mse": mse}
     for prefix in ("ic", "rankic"):
         summary = _summarize_correlation_aggregates(
@@ -306,39 +290,50 @@ class _TimestampMetricState:
         self.rank = _CorrelationMoments()
 
 
-class _ScaledSquareAccumulator:
-    __slots__ = ("scale", "scaled_sum")
+class _MeanSquaredError:
+    """Accumulate exact daily losses and their equally weighted period means."""
+
+    __slots__ = ("moments", "total", "count")
 
     def __init__(self) -> None:
-        self.scale = 0.0
-        self.scaled_sum = 0.0
+        self.moments = _CorrelationMoments()
+        self.total = Fraction()
+        self.count = 0
 
-    def add(self, value: float) -> None:
-        magnitude = abs(value)
-        if magnitude == 0.0:
-            return
-        if self.scale == 0.0:
-            self.scale = magnitude
-            self.scaled_sum = 1.0
-            return
-        if magnitude > self.scale:
-            ratio = self.scale / magnitude
-            self.scaled_sum = self.scaled_sum * ratio * ratio + 1.0
-            self.scale = magnitude
-            return
-        self.scaled_sum += (magnitude / self.scale) ** 2
+    def add(self, prediction: float, label: float) -> None:
+        self.count += 1
+        if self.total is not None:
+            if np.isfinite(prediction) and np.isfinite(label):
+                self.moments.update(float(prediction), float(label))
+            else:
+                self.total = None
 
-    def root_mean_square(self, count: int) -> float:
-        return float(self.scale * np.sqrt(self.scaled_sum / count)) if count else 0.0
+    def add_period(self, errors: _MeanSquaredError) -> None:
+        self.count += 1
+        value = errors.mean()
+        self.total = (
+            self.total + value if self.total is not None and value is not None else None
+        )
 
-    def result(self, count: int) -> float:
-        if count <= 0 or self.scale == 0.0:
-            return 0.0
-        mean_scaled_square = self.scaled_sum / count
-        result = self.scale * (self.scale * mean_scaled_square)
-        if result == 0.0 or not np.isfinite(result):
-            raise ValueError("model_selection_mse_unrepresentable")
-        return float(result)
+    def mean(self) -> Fraction | None:
+        if not self.count or self.total is None:
+            return None
+        moments = self.moments
+        squared_error = Fraction(
+            moments.left_square + moments.right_square - 2 * moments.product,
+            1 << (2 * moments.exponent),
+        )
+        return (self.total + squared_error) / self.count
+
+    def result(self) -> float | None:
+        value = self.mean()
+        if value is None:
+            return None
+        try:
+            result = float(value)
+        except OverflowError:
+            return None
+        return result if np.isfinite(result) and (result != 0 or value == 0) else None
 
 
 def _metric_chunk(
@@ -498,9 +493,7 @@ def score(config):
             )
             if type(config["label_unit"]) is not str or not config["label_unit"]:
                 raise ValueError("label_unit_required")
-            if record["label_unit"] != config["label_unit"] or (
-                market is not None and record["market_id"] != market
-            ):
+            if market is not None and record["market_id"] != market:
                 raise ValueError("selection_label_units_or_market_mismatch")
             if target is not None and record["model"]["target_column"] != target:
                 raise ValueError("model_selection_label_mismatch")
@@ -531,6 +524,7 @@ def score(config):
         ):
             raise ValueError("candidate_validation_windows_incomplete")
         pieces, training_windows, first_facts = [], [], None
+        mse_reason = None
         for path, declared_window in zip(
             candidate_paths, validation_windows, strict=True
         ):
@@ -551,9 +545,7 @@ def score(config):
             )
             if type(config["label_unit"]) is not str or not config["label_unit"]:
                 raise ValueError("label_unit_required")
-            if facts["label_unit"] != config["label_unit"] or (
-                market is not None and facts["market_id"] != market
-            ):
+            if market is not None and facts["market_id"] != market:
                 raise ValueError("selection_label_units_or_market_mismatch")
             market = facts["market_id"]
             if market == "crypto":
@@ -737,10 +729,18 @@ def score(config):
             calibration = model_metadata.get("rank_parameters", {}).get(
                 "label_calibration"
             )
+            reason = _prediction_loss_reason(
+                facts,
+                target,
+                declared,
+                label_session.manifest,
+                target_unit=config["label_unit"],
+            )
+            mse_reason = mse_reason or reason
             joined["prediction_label_value"] = (
-                joined.prediction_score
-                if calibration is None
-                else calibration[0] + calibration[1] * joined.prediction_score
+                _label_predictions(joined.prediction_score, calibration)
+                if reason is None
+                else np.nan
             )
             pieces.append(joined)
             training_windows.extend(facts["fit_windows"])
@@ -764,6 +764,7 @@ def score(config):
                 "candidate_parameters": first_facts["candidate_parameters"],
                 "predictions": candidate_paths,
                 "fit_windows": training_windows,
+                "mse_reason": mse_reason,
             }
         )
     validate_input_market(declared, market)
@@ -853,6 +854,11 @@ def _selection_choice(value):
     )
 
     for candidate, metrics in zip(value["candidates"], value["metrics"], strict=True):
+        if candidate.get("mse_reason") is not None and (
+            candidate["mse_reason"] not in _PREDICTION_LOSS_REASONS
+            or metrics["validation_mse"] is not None
+        ):
+            raise ValueError("selection_mse_reason_invalid")
         if candidate.get("status") in {"failed", "abandoned"}:
             from quant_research_platform.storage.experiments import read_trial_ledger
 

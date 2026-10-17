@@ -31,6 +31,7 @@ from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.json_codec import _strict_config
 from quant_research_platform.contracts.models import (
     _model_spec,
+    _prediction_loss_reason,
     _validate_model_prediction_window,
     validate_model_input_roles,
 )
@@ -49,11 +50,12 @@ from quant_research_platform.research.models.persisted import load_model
 from quant_research_platform.research.models.rank_ensemble import (
     ICWeightedRankEnsemble,
     RankEnsemblePredictor,
+    _label_predictions,
     _rank_frame_columns,
 )
 from quant_research_platform.research.models.scaler import LinearScaledPredictor
 from quant_research_platform.research.models.trial_selection import (
-    _ScaledSquareAccumulator,
+    _MeanSquaredError,
 )
 from quant_research_platform.research.predictions.outputs import prediction_rows
 from quant_research_platform.research.randomness import derive_seed
@@ -118,12 +120,6 @@ def _session(source, input_spec, result, facts, *, labels=False):
         selected_columns=selected_columns,
         input_units=facts["input_units"],
     )
-    if (
-        labels
-        and session.spec.get("column_units", {}).get(result.metadata["target_column"])
-        != facts["label_unit"]
-    ):
-        raise ValueError("explanation_label_unit_required_or_mismatched")
     return session
 
 
@@ -310,7 +306,7 @@ def _output(result, frame, output_space):
         calibration = getattr(predictor, "label_calibration", None)
         if calibration is None:
             raise ValueError("explanation_frozen_calibration_required")
-        explained = calibration[0] + calibration[1] * raw
+        explained = _label_predictions(raw, calibration)
     elif output_space == "raw_margin":
         matrix = predictor.scaler.transform(
             frame.loc[:, result.metadata["input_columns"]]
@@ -742,7 +738,17 @@ def _permutation_segments(frame, config):
     return segments
 
 
-def _permutation(result, facts, frame, indices, availability, config, output_space):
+def _permutation(
+    result,
+    facts,
+    frame,
+    indices,
+    availability,
+    config,
+    output_space,
+    *,
+    loss_reason=None,
+):
     target = result.metadata["target_column"]
     rank = isinstance(
         result.prediction_model, (RankEnsemblePredictor, ICWeightedRankEnsemble)
@@ -813,14 +819,13 @@ def _permutation(result, facts, frame, indices, availability, config, output_spa
             scores = values[positions]
             metrics = {}
             for metric in config["metrics"]:
-                if metric == "mse":
-                    accumulator = _ScaledSquareAccumulator()
+                if metric == "mse" and loss_reason is not None:
+                    metrics[metric] = None
+                elif metric == "mse":
+                    accumulator = _MeanSquaredError()
                     for score, label in zip(scores, labels, strict=True):
-                        residual = float(score) - float(label)
-                        if not np.isfinite(residual):
-                            raise ValueError("explanation_mse_unrepresentable")
-                        accumulator.add(residual)
-                    metrics[metric] = accumulator.result(len(labels))
+                        accumulator.add(score, label)
+                    metrics[metric] = accumulator
                 else:
                     left, right = (
                         (_average_ranks(scores), _average_ranks(labels))
@@ -847,15 +852,13 @@ def _permutation(result, facts, frame, indices, availability, config, output_spa
                 return None
             if metric != "mse":
                 return float(_mean(float(values[period][0][key]) for period in common))
-            weights = [values[period][1] for period in common]
-            # Weighted fmean can overflow products even when the mean is finite.
-            return float(
-                sum(
-                    Fraction(float(values[period][0][key])) * weight
-                    for period, weight in zip(common, weights, strict=True)
-                )
-                / sum(weights)
-            )
+            accumulator = _MeanSquaredError()
+            for period in common:
+                accumulator.add_period(values[period][0][key])
+            result = accumulator.result()
+            if result is None:
+                raise ValueError("explanation_mse_unrepresentable")
+            return result
 
         baseline_value = aggregate(measured[0][2])
         for name, repeat, values in measured[1:]:
@@ -881,7 +884,13 @@ def _permutation(result, facts, frame, indices, availability, config, output_spa
                     if metric == "mse"
                     else "dimensionless",
                     "status": "DEFINED" if delta is not None else "UNDEFINED",
-                    "reason": "" if delta is not None else "no_common_defined_periods",
+                    "reason": ""
+                    if delta is not None
+                    else (
+                        loss_reason
+                        if metric == "mse" and loss_reason is not None
+                        else "no_common_defined_periods"
+                    ),
                 }
             )
     repeats = pd.DataFrame(rows)
@@ -1082,6 +1091,12 @@ def explain(config: Mapping) -> Path:
                 availability,
                 permutation,
                 config["output_space"],
+                loss_reason=_prediction_loss_reason(
+                    facts,
+                    result.metadata["target_column"],
+                    session.spec,
+                    session.manifest,
+                ),
             )
             tables.update(permutation_repeats=repeats, permutation_summary=summary)
             metadata["permutation"] = details

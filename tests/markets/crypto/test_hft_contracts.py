@@ -519,7 +519,7 @@ def test_maker_terminal_order_is_unknown_at_coverage_validity_end() -> None:
     assert result["censored_active_order_count"] == 2
 
 
-def test_maker_requires_matching_book_and_trade_schedule_identity() -> None:
+def test_maker_independent_lineage_retains_actual_source_lifetime() -> None:
     result = simulate_maker(
         [_state(0)],
         [],
@@ -535,7 +535,10 @@ def test_maker_requires_matching_book_and_trade_schedule_identity() -> None:
         asset_id="btc_usdt",
         funding_events=(),
     )
-    assert result["created_orders"] == 0
+    assert result["created_orders"] == 2
+    assert result["account_path_status"] == "PARTIAL"
+    assert result["account_stop_ns"] == 200_000_000
+    assert result["censored_active_order_count"] == 2
 
 
 def test_book_state_taker_timing_and_terminal_mark() -> None:

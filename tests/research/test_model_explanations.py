@@ -294,8 +294,13 @@ def test_permutation_maturity_grouped_values_determinism_and_units(tmp_path):
     )
     config["output"] += "-unit"
     config["input_spec"]["column_units"]["label"] = "percent_return"
-    with pytest.raises(ValueError, match="label_unit"):
-        explain(config)
+    _, mismatched = read_explanation(explain(config))
+    rows = mismatched["permutation_repeats"]
+    mse = rows.loc[rows.metric.eq("mse")]
+    assert mse.status.eq("UNDEFINED").all()
+    assert mse.reason.eq("prediction_target_unit_mismatch").all()
+    assert mse[["baseline", "perturbed", "delta"]].isna().all().all()
+    assert rows.loc[~rows.metric.eq("mse"), "status"].eq("DEFINED").all()
 
 
 def test_permutation_requires_calibrated_rank_mse(tmp_path):

@@ -62,6 +62,7 @@ def tables(request):
         prediction_count=32,
         target_count=32,
         mse=0.2,
+        mse_reason="",
         baseline_mse=0.4,
         oos_r2=0.5,
         oos_r2_reason="",
@@ -1159,3 +1160,40 @@ def test_equity_return_uses_money_rounding_bound_without_erasing_small_pnl(start
     missing.loc[0, "net_return"] = float("nan")
     with pytest.raises(ValueError, match="statistics_return_status_invalid"):
         statistics._validated_frame(missing, member=member, metadata=metadata)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"mse": None, "mse_reason": ""},
+        {"mse": None, "mse_reason": "invented_reason"},
+        {"mse": 0.2, "mse_reason": "prediction_target_unit_mismatch"},
+        {"mse": -0.2},
+        {"baseline_mse": -0.2},
+        {"mse": None, "mse_reason": "no_valid_targets"},
+        {
+            "mse": None,
+            "mse_reason": "prediction_target_unit_mismatch",
+            "oos_r2": None,
+            "oos_r2_reason": "nonfinite_result",
+        },
+        {"oos_r2": None, "oos_r2_reason": "invented_reason"},
+        {"oos_r2": None, "oos_r2_reason": "prediction_target_unit_mismatch"},
+        {"target_count": 0},
+        {"oos_r2": None, "oos_r2_reason": "no_valid_targets"},
+        {"oos_r2": None, "oos_r2_reason": "zero_baseline_error"},
+        {"oos_r2": 1.01},
+    ],
+)
+def test_prediction_loss_reasons_are_validated_on_write_and_read(
+    tmp_path, tables, metadata, changes
+):
+    for column, value in changes.items():
+        tables["model_prediction_metrics"].loc[0, column] = value
+    _assert_rejected_at_write_and_read(
+        tmp_path,
+        tables,
+        metadata,
+        "model_prediction_metrics.parquet",
+        error="statistics_prediction_metrics_invalid",
+    )

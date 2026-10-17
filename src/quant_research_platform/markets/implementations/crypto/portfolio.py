@@ -994,10 +994,10 @@ def _produce_maker_calibration(*, on_table, config, model_evidence):
     ) as run:
         _source_coordinates(run, panel, symbol)
         price_unit = run.market_metadata(market_type, symbol)["price_unit"]
-        trade_coverage = run.observation_coverage(
-            market_type=market_type, data_kind="agg_trades", symbol=symbol
-        )
         for fold_id, (window, cutoff_at) in windows.items():
+            trade_coverage = run.observation_coverage(
+                market_type=market_type, data_kind="agg_trades", symbol=symbol
+            )
             model_inputs = next(
                 item for item in config["models"] if item["fold_id"] == fold_id
             )

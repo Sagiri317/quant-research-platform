@@ -137,6 +137,9 @@ Binance 官方录制与 Tardis 原生历史归档均可作为明确来源；历�
 Bybit/OKX normalized 信息准备使用 `source={root, archives}`。
 有显式来源请求窗时，source owner 按真实覆盖跨度相交选择。执行与校准独立选择来源，核对 PANEL 声明的价格单位与档深坐标；
 每次所选源保留自身重建所需历史前缀、顺序与连续性证据，不要求与 PANEL/PRED 的来源集合或 run_id 相同。
+输入 PANEL/PRED 的局部 segment/connection ID 仅说明原样本谱系与资格；taker 在决策时刻推进实际所选源，取得当时可见的盘口段。
+maker 与其校准还要求此时实际源的唯一成交覆盖。订单寿命、延迟成交、撤换、markout 与校准事件表仍严格绑定该源的连续性；
+无法唯一确定覆盖的局部决策保持未定义；不会用另一来源的 UUID 判定等价经济事件失效，也不会跳过真实缺口、单位或时钟验证。
 maker 校准只消费合法成熟 validation 样本；测试显式选用已保存校准并核模型、资产、
 时序和价格坐标关系，不重训、不改写已发布文件，也不要求重扫全部开发原件。
 跨日归档按实际首尾切片范围选择，date 上界与 datetime 上界复用统一 TimeWindow 合同。
@@ -295,7 +298,9 @@ SOL→BTC、BTC/ETH→SOL 的迁移选择。只有训练或评估需要 SOL 行�
 与 nullable dtype，不按共同时间取交集，也不按资产串接造成跨批时间回退。
 
 三资产共用 native panel、微观结构因子、完整窗口标签和模型生产器。
-跨资产 context 只读取持久化的成熟 100/500ms 收益、深度归一 OFI 和 TFI；
+跨资产 context 读取持久化的成熟 100/500ms 收益、深度归一 OFI 和 TFI；information state 同时原样保留来源资产的真实 segment_id。
+仅所选 lag 因子额外投影源 segment_id，要求同一信息资产的前后两格同段；不比较目标与信息资产的段名，当前单字段 NULL 也不抹除同段合法历史。
+旧 information state 若未保存该字段，选择 lag 时明确失败，须由调用者重新准备；仅选当前值时仍使用最小数值依赖。
 来源资产的数值及上一格连续 100ms 的滞后值先在 producer 内按观测 grid 对齐，
 记录各来源 grid 时间与 age。缺口、过期或不完整窗口保持 NULL。
 同一个数学核负责 500ms 收益，不在 Spot、SOL 或跨资产层复制公式。

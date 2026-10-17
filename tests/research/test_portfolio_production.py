@@ -2470,7 +2470,7 @@ def test_risk_exposures_leave_unknown_industry_assets_unavailable():
 
 
 @pytest.mark.parametrize("unknown_asset", ("a", "b"))
-def test_enhanced_producer_blocks_only_required_unknown_industry(
+def test_enhanced_producer_skips_only_required_unknown_industry(
     tmp_path, monkeypatch, unknown_asset
 ):
     frames, fee_frame, output_window = _inputs()
@@ -2514,12 +2514,23 @@ def test_enhanced_producer_blocks_only_required_unknown_industry(
         fee_frame=fee_frame,
         output_window=output_window,
         candidate=candidate,
+        typed_batches=unknown_asset == "a",
     )
     if unknown_asset == "a":
-        with pytest.raises(
-            PortfolioTargetBlocked, match="portfolio_industry_context_missing"
-        ):
-            list(chunks)
+        result = list(chunks)
+        assert result and all(not batch.trades for batch in result)
+        for batch in result:
+            assert all(
+                row.asset_id == "__cash__" and row.value == 100.0
+                for row in batch.valuations
+            )
+            facts = {
+                row.name: row.text
+                for row in batch.diagnostics
+                if row.asset_id == "__cash__"
+            }
+            assert facts["decision_status"] == "SKIPPED"
+            assert facts["decision_skip_reason"] == "portfolio_industry_context_missing"
     else:
         result = pd.concat(list(chunks), ignore_index=True)
         assert set(result.asset_id) == {"a", "__cash__"}

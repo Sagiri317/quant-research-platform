@@ -73,6 +73,7 @@ from quant_research_platform.research.portfolios.optimizer import (
     OptimizerConfig,
     _project_neutral_target,
     _risk_variances,
+    _stock_leg_active_exposure,
     optimize_portfolio,
 )
 from quant_research_platform.research.portfolios.risk import (
@@ -291,6 +292,9 @@ class _ResearchValuationMarks:
         for phase in ("open", "close"):
             column = phase
             known = observed.loc[current[column].reindex(observed.index).notna()]
+            # Nontrading PANEL rows can contain prepared carry prices. Only an
+            # observed trading quote resets the raw-share valuation anchor.
+            current.loc[~assets.isin(known.index), column] = np.nan
             # Today's close cannot fill today's missing open.
             if phase == "close":
                 previous = self.last.reindex(assets)
@@ -332,8 +336,12 @@ class _ResearchValuationMarks:
                     try:
                         adjusted, evidence = adjust_carried_share_mark(
                             previous.loc[asset, "mark_price"],
-                            view.corporate_events,
-                            view.rights_events,
+                            pd.DataFrame(
+                                self.corporate_mark_history.get(identity, {}).values()
+                            ),
+                            pd.DataFrame(
+                                self.rights_mark_history.get(identity, {}).values()
+                            ),
                             asset=str(asset),
                             listing=identity[1],
                             timestamp=view.timestamp,
@@ -347,13 +355,13 @@ class _ResearchValuationMarks:
                         continue
                     if evidence:
                         previous = previous.astype({"mark_price": "object"})
-                        self.last = self.last.astype({"mark_price": "object"})
                         current = current.astype({column: "object"})
                         previous.loc[asset, "mark_price"] = adjusted
-                        previous.loc[asset, "mark_at"] = view.timestamp
                         previous.loc[asset, "mark_kind"] = "corporate_action_carry"
                         previous.loc[asset, "mark_evidence"] = ",".join(evidence)
-                        self.last.loc[asset, previous.columns] = previous.loc[asset]
+                        # Keep self.last as the original observed quote. Replay
+                        # all currently known actions, including late earlier
+                        # events, without compounding yesterday's adjusted mark.
                 if previous.mark_price.dtype == object:
                     current = current.astype({column: "object"})
                 current.loc[missing, column] = previous.loc[missing, "mark_price"]
@@ -413,7 +421,7 @@ class _ResearchValuationMarks:
                         # a later disclosure may prove an earlier share action.
                         current.loc[asset, column] = adjusted
                         current.loc[asset, f"research_{phase}_mark_at"] = (
-                            view.timestamp if evidence else event.effective_at
+                            event.effective_at
                         )
                         current.loc[asset, f"research_{phase}_mark_kind"] = (
                             "evidenced_rights_quote"
@@ -896,6 +904,8 @@ def backtest_a_share(
             enhanced_decision: _EnhancedDecision | None = None
             target_override: pd.Series | None = None
             decision_reason = PORTFOLIO_DECISION_REASON_SIMPLE
+            decision_skip_reason = None
+            missing_industry_context = False
             if not held_units.empty:
                 prices = view.valuation.set_index("asset_id").reindex(held_units.index)
                 active = held_units.ne(0)
@@ -924,11 +934,28 @@ def backtest_a_share(
                     previous_benchmark_assets = frozenset(benchmark_weights.index)
                 initializing = not capital_allocated
                 maintenance = membership_changed and (not scheduled)
-                if scheduled or maintenance or initializing:
-                    if benchmark_weights.empty:
-                        raise PortfolioTargetBlocked(
-                            "portfolio_benchmark_snapshot_missing"
-                        )
+                has_predictions = bool(
+                    (dataset.set_index("asset_id").eligible & alpha.notna()).any()
+                )
+                needs_target = has_predictions and (
+                    scheduled or maintenance or initializing
+                )
+                required_assets = benchmark_weights.index[
+                    benchmark_weights.ne(0.0)
+                ].union(holdings.index[holdings.ne(0.0)])
+                industry = _industry_group_codes(
+                    view.valuation.set_index("asset_id"), "industry_level1_code"
+                ).reindex(required_assets)
+                missing_industry_context = industry.isna().any()
+                if needs_target:
+                    decision_skip_reason = (
+                        "portfolio_benchmark_snapshot_missing"
+                        if benchmark_weights.empty
+                        else "portfolio_industry_context_missing"
+                        if missing_industry_context
+                        else None
+                    )
+                if needs_target and decision_skip_reason is None:
                     enhanced_decision = _enhanced_decision(
                         benchmark_weights=benchmark_weights,
                         alpha=alpha,
@@ -950,17 +977,11 @@ def backtest_a_share(
                         else holdings.multiply(0.0)
                     )
                     decision_reason = PORTFOLIO_DECISION_REASON_BENCHMARK
-            missing_industry_context = False
-            if enhanced:
-                required_assets = benchmark_weights.index.union(holdings.index)
-                industry = _industry_group_codes(
-                    view.valuation.set_index("asset_id"), "industry_level1_code"
-                ).reindex(required_assets)
-                missing_industry_context = industry.isna().any()
-                if missing_industry_context and (
-                    initializing or scheduled or maintenance
-                ):
-                    raise PortfolioTargetBlocked("portfolio_industry_context_missing")
+                    if membership_changed:
+                        # The proved membership snapshot authorizes independent
+                        # removals even when there is no forecast or risk target.
+                        target_override = benchmark_weights.copy(deep=True)
+                        decision_reason = PORTFOLIO_DECISION_REASON_MAINTENANCE
             decision_receivable = sum(entitlements.receivables.values())
             if not emitted:
                 # Every account starts in cash. Pre-inception record dates cannot
@@ -1029,6 +1050,7 @@ def backtest_a_share(
                 enhanced_decision=enhanced_decision,
                 target_override=target_override,
                 decision_reason=decision_reason,
+                decision_skip_reason=decision_skip_reason,
                 optimizer_config=effective_optimizer_config,
                 initializing=enhanced and initializing,
                 assumptions=assumptions,
@@ -1468,9 +1490,13 @@ def _optimizer_assets(
     adv: pd.Series,
     eligible: pd.Series,
     panel: pd.DataFrame,
+    receivable: float = 0.0,
 ) -> pd.DataFrame:
     assets = pd.Index(
-        sorted(set(benchmark_weights.index) | set(current_weights.index)),
+        sorted(
+            set(benchmark_weights.index[benchmark_weights.ne(0.0)])
+            | set(current_weights.index[current_weights.ne(0.0)])
+        ),
         dtype="string",
     )
     panel_by_asset = panel.set_index("asset_id")
@@ -1522,7 +1548,7 @@ def _optimizer_assets(
             **{column: 0.0 for column in exposure_columns},
         }
         result = pd.concat([result, pd.DataFrame([cash_row])], ignore_index=True)
-    if not np.isclose(float(result["current_weight"].sum()), 1.0):
+    if not np.isclose(float(result["current_weight"].sum()) + receivable / nav, 1.0):
         raise ValueError("optimizer_current_state_invalid")
     return result
 
@@ -1551,6 +1577,7 @@ def _build_session(
     enhanced_decision: _EnhancedDecision | None,
     target_override: pd.Series | None,
     decision_reason: str,
+    decision_skip_reason: str | None = None,
     optimizer_config: OptimizerConfig | None = None,
     assumptions: ExecutionAssumptions,
     fee_schedule: object,
@@ -1595,7 +1622,7 @@ def _build_session(
         if missing_scores.any() and not prediction_eligible.any()
         else "partial_predictions_missing_neutrality"
         if missing_scores.any() and candidate.neutrality != "none"
-        else None
+        else decision_skip_reason
     )
     neutrality = None
     neutrality_reason = "nonpositive_nav"
@@ -1625,12 +1652,20 @@ def _build_session(
                 size_market_cap=dataset.get(candidate.size_cap_column),
             )
         except PortfolioTargetBlocked as exc:
-            if scheduled:
+            if str(exc) not in {
+                "target_neutrality_benchmark_empty",
+                "target_neutrality_size_missing",
+                "target_neutrality_size_undefined",
+            }:
                 raise
             neutrality_reason = str(exc)
+            if scheduled and prediction_eligible.any():
+                decision_skip_reason = neutrality_reason
+                scheduled = False
         if neutrality is not None:
             prediction_eligible &= prediction_eligible.index.isin(neutrality.index)
     optimization: OptimizationResult | None = None
+    assets_frame = None
     if decision_skip_reason:
         target = holdings.div(nav) if nav > 0 else holdings.multiply(0.0)
     elif nav == 0:
@@ -1645,39 +1680,64 @@ def _build_session(
                 raise PortfolioTargetBlocked("target_selection_unavailable")
             target = pd.Series(0.0, index=dataset.index, dtype="float64")
         else:
-            target = build_simple_target_weights(
-                alpha,
-                eligible=prediction_eligible,
-                method="float_cap_weight"
-                if candidate.construction == "quantile_float_cap"
-                else "equal_weight",
-                top_quantile=float(candidate.top_quantile),
-                bottom_quantile=float(candidate.top_quantile),
-                float_market_cap=dataset["float_market_cap"]
-                if candidate.construction == "quantile_float_cap"
-                else None,
-            )
-            if candidate.construction == "quantile_equal_weight_half_step":
-                retained = holdings.div(nav).reindex(target.index, fill_value=0.0)
-                retained = retained.where(prediction_eligible, 0.0)
-                target = (target + retained) / 2.0
+            try:
+                target = build_simple_target_weights(
+                    alpha,
+                    eligible=prediction_eligible,
+                    method="float_cap_weight"
+                    if candidate.construction == "quantile_float_cap"
+                    else "equal_weight",
+                    top_quantile=float(candidate.top_quantile),
+                    bottom_quantile=float(candidate.top_quantile),
+                    float_market_cap=dataset["float_market_cap"]
+                    if candidate.construction == "quantile_float_cap"
+                    else None,
+                )
+            except PortfolioTargetBlocked as error:
+                if str(error) != "target_float_market_cap_missing":
+                    raise
+                decision_skip_reason = str(error)
+                target = holdings.div(nav).copy(deep=True)
     else:
         target = holdings.div(nav).copy(deep=True)
     if missing_scores.any() and not decision_skip_reason and nav > 0:
         frozen = holdings.div(nav).reindex(missing_assets, fill_value=0.0)
         target = target.drop(missing_assets, errors="ignore")
         if target.sum() > 0:
-            target *= max(0.0, 1.0 - float(frozen.sum())) / float(target.sum())
+            target *= max(
+                0.0, 1.0 - decision_receivable / nav - float(frozen.sum())
+            ) / float(target.sum())
         target = pd.concat((target, frozen))
     target = target.where(~target.index.isin(exit_assets), 0.0)
+    if nav > 0.0 and not decision_skip_reason:
+        stock_budget = max(0.0, 1.0 - decision_receivable / nav)
+        if target.sum() > stock_budget:
+            target *= stock_budget / float(target.sum())
+        if (
+            candidate.construction == "quantile_equal_weight_half_step"
+            and scheduled
+            and target_override is None
+            and enhanced_decision is None
+        ):
+            # Budget the new stock leg before mixing; missing-score holdings
+            # occur unchanged on both sides and never absorb a half-step gap.
+            retained = holdings.div(nav).reindex(target.index, fill_value=0.0)
+            retained = retained.where(
+                eligible.reindex(target.index, fill_value=False), 0.0
+            )
+            target = (target + retained) / 2.0
     raw_target = target.copy(deep=True)
-    if neutrality is not None and scheduled:
+    stock_gross = float(target.sum())
+    if neutrality is not None and scheduled and stock_gross > 0.0:
         try:
-            target = _project_neutral_target(
-                target,
-                neutrality,
-                industry_limit=candidate.industry_neutrality_limit,
-                size_limit=candidate.size_neutrality_limit,
+            target = (
+                _project_neutral_target(
+                    target / stock_gross,
+                    neutrality,
+                    industry_limit=candidate.industry_neutrality_limit,
+                    size_limit=candidate.size_neutrality_limit,
+                )
+                * stock_gross
             )
         except PortfolioTargetBlocked as error:
             if str(error) != "target_neutrality_infeasible":
@@ -1800,6 +1860,7 @@ def _build_session(
             current_weights=holdings.div(nav),
             cash=cash,
             nav=nav,
+            receivable=decision_receivable,
             expected_alpha=enhanced_decision.expected_alpha,
             exposures=enhanced_decision.exposures,
             specific_variance=risk.specific_variance,
@@ -1851,6 +1912,7 @@ def _build_session(
                 eligibility_column="eligible",
                 financial_column="is_financial",
                 cash_column="is_cash",
+                receivable_weight=float(decision_receivable / nav),
             )
         except ValueError as error:
             if str(error) not in {
@@ -1859,6 +1921,8 @@ def _build_session(
                 "optimizer_budget_bounds_infeasible",
                 "optimizer_capacity_bounds_infeasible",
                 "optimizer_turnover_bounds_infeasible",
+                "optimizer_stock_exposure_unavailable",
+                "optimizer_held_risk_unavailable",
             }:
                 raise
             decision_skip_reason = str(error)
@@ -1936,6 +2000,7 @@ def _build_session(
             assumptions=assumptions,
             cost_source_identity=fee_identity,
         )
+    if assets_frame is not None:
         config = optimizer_config or OptimizerConfig()
         risk = enhanced_decision.risk
         benchmark = assets_frame.benchmark_weight.to_numpy(dtype="float64")
@@ -1948,10 +2013,10 @@ def _build_session(
             i for i, name in enumerate(columns) if not name.startswith("industry_")
         ]
         tolerance = 1e-8
-        for phase, risk_account in (
-            ("decision", projected_account),
-            ("realized", account),
-        ):
+        for phase in ("decision", "realized"):
+            if phase == "decision" and optimization is None:
+                continue
+            risk_account = projected_account if phase == "decision" else account
             diagnostics = {}
             if risk_account.nav_after <= 0:
                 if phase == "decision":
@@ -1973,111 +2038,143 @@ def _build_session(
                 )
                 active = weights - benchmark
                 nonzero = active != 0.0
-                complete = (
+                risk_complete = (
                     np.isfinite(exposure[nonzero]).all()
                     and np.isfinite(specific[nonzero]).all()
                     and (specific[nonzero] >= 0.0).all()
                 )
-                if not complete:
-                    if phase == "decision":
-                        raise PortfolioTargetBlocked(
-                            "portfolio_post_trade_risk_unavailable"
-                        )
-                    diagnostics.update(
-                        realized_constraints_status="UNDEFINED",
-                        realized_constraints_reason="active_risk_unavailable",
-                    )
-                else:
+                cash_mask = assets_frame.is_cash.to_numpy()
+                has_stocks = weights[~cash_mask].sum() > 0.0
+                stock_positive = has_stocks and benchmark[~cash_mask].sum() > 0.0
+                factor_active = _stock_leg_active_exposure(
+                    weights, benchmark, exposure, cash_mask
+                )
+                exposure_complete = stock_positive and np.isfinite(factor_active).all()
+                diagnostics.update(
+                    realized_exposure_status="DEFINED"
+                    if exposure_complete
+                    else "UNDEFINED",
+                    realized_exposure_reason=None
+                    if exposure_complete
+                    else "stock_active_exposure_unavailable"
+                    if stock_positive
+                    else "nonpositive_stock_value",
+                )
+                limits = {
+                    "tracking_error": (None, config.tracking_error_limit),
+                    "name_active_weight": (
+                        np.abs(active[~cash_mask]).max(initial=0.0),
+                        config.active_name_limit,
+                    ),
+                    "industry_active_exposure": (
+                        np.abs(factor_active[industry]).max(initial=0.0)
+                        if stock_positive and np.isfinite(factor_active[industry]).all()
+                        else None,
+                        config.industry_active_limit,
+                    ),
+                    "style_active_exposure": (
+                        np.abs(factor_active[style]).max(initial=0.0)
+                        if stock_positive and np.isfinite(factor_active[style]).all()
+                        else None,
+                        config.style_active_limit,
+                    ),
+                }
+                if risk_complete:
                     factor, residual = _risk_variances(
                         active, exposure, covariance, specific
                     )
-                    stock = ~assets_frame.is_cash.to_numpy()
-                    stock_weight = float(weights[stock].sum())
-                    benchmark_stock_weight = float(benchmark[stock].sum())
-                    if stock_weight > 0.0 and benchmark_stock_weight > 0.0:
-                        stock_active = (
-                            weights[stock] / stock_weight
-                            - benchmark[stock] / benchmark_stock_weight
-                        )
-                        factor_active = exposure[stock].T @ stock_active
-                        diagnostics.update(realized_exposure_status="DEFINED")
-                    else:
-                        factor_active = np.zeros(len(columns))
-                        diagnostics.update(
-                            realized_exposure_status="UNDEFINED",
-                            realized_exposure_reason="nonpositive_stock_value",
-                        )
-                    limits = {
-                        "tracking_error": (
-                            np.sqrt(factor + residual),
-                            config.tracking_error_limit,
-                        ),
-                        "name_active_weight": (
-                            np.abs(active[~assets_frame.is_cash.to_numpy()]).max(
-                                initial=0.0
-                            ),
-                            config.active_name_limit,
-                        ),
-                        "industry_active_exposure": (
-                            np.abs(factor_active[industry]).max(initial=0.0),
-                            config.industry_active_limit,
-                        ),
-                        "style_active_exposure": (
-                            np.abs(factor_active[style]).max(initial=0.0),
-                            config.style_active_limit,
-                        ),
-                    }
-                    breached = [
-                        name
-                        for name, (value, limit) in limits.items()
-                        if (
-                            value**2 > limit**2 + tolerance
-                            if name == "tracking_error"
-                            else value > limit + tolerance
-                        )
-                    ]
-                    if phase == "decision" and breached:
-                        decision_skip_reason = (
-                            "portfolio_post_trade_constraints_infeasible"
-                        )
-                        optimization = None
-                        account = account_for(hold_target)
-                        asset_ledger = account.asset_ledger
-                        decision_delta = pd.Series(0.0, index=assets)
-                        if nav > 0 and len(independent_exits):
-                            decision_delta.loc[independent_exits] = (
-                                -current.div(nav)
-                                .reindex(assets, fill_value=0.0)
-                                .loc[independent_exits]
-                            ).astype("float64")
-                        break
                     diagnostics.update(
-                        realized_constraints_status="BREACHED"
-                        if breached
-                        else "SATISFIED",
-                        realized_constraints_reason=",".join(breached)
-                        if breached
-                        else None,
                         realized_factor_variance=factor,
                         realized_specific_variance=residual,
-                        **{
-                            f"realized_{name}": float(value)
-                            for name, (value, _) in limits.items()
-                        },
                     )
-                    if stock_weight <= 0.0 or benchmark_stock_weight <= 0.0:
-                        diagnostics["realized_industry_active_exposure"] = None
-                        diagnostics["realized_style_active_exposure"] = None
+                    limits["tracking_error"] = (
+                        np.sqrt(factor + residual),
+                        config.tracking_error_limit,
+                    )
+                unavailable = [
+                    name for name, (value, _) in limits.items() if value is None
+                ]
+                breached = [
+                    name
+                    for name, (value, limit) in limits.items()
+                    if value is not None
+                    and (
+                        value**2 > limit**2 + tolerance
+                        if name == "tracking_error"
+                        else value > limit + tolerance
+                    )
+                ]
+                required_unavailable = [
+                    name
+                    for name in unavailable
+                    if has_stocks
+                    or name not in {"industry_active_exposure", "style_active_exposure"}
+                ]
+                if phase == "decision" and (required_unavailable or breached):
+                    decision_skip_reason = (
+                        "portfolio_post_trade_risk_unavailable"
+                        if required_unavailable
+                        else "portfolio_post_trade_constraints_infeasible"
+                    )
+                    optimization = None
+                    account = account_for(hold_target)
+                    asset_ledger = account.asset_ledger
+                    decision_delta = pd.Series(0.0, index=assets)
+                    if nav > 0 and len(independent_exits):
+                        decision_delta.loc[independent_exits] = (
+                            -current.div(nav)
+                            .reindex(assets, fill_value=0.0)
+                            .loc[independent_exits]
+                        ).astype("float64")
+                    continue
+                diagnostics.update(
+                    realized_constraints_status="UNDEFINED"
+                    if unavailable
+                    else "BREACHED"
+                    if breached
+                    else "SATISFIED",
+                    realized_constraints_reason=(
+                        "active_risk_unavailable"
+                        if not risk_complete
+                        else "stock_active_exposure_unavailable"
+                        if stock_positive
+                        else "nonpositive_stock_value"
+                    )
+                    if unavailable
+                    else ",".join(breached)
+                    if breached
+                    else None,
+                )
+                for name, (value, _) in limits.items():
+                    diagnostics[f"realized_{name}_status"] = (
+                        "UNDEFINED" if value is None else "DEFINED"
+                    )
+                    if value is not None:
+                        diagnostics[f"realized_{name}"] = float(value)
             if phase == "realized":
                 asset_ledger.attrs["realized_constraints"] = diagnostics
     asset_ledger.attrs["initial_allocation_attempt"] = float(initializing)
     if decision_skip_reason:
         target = hold_target
         raw_target = hold_target.copy(deep=True)
-        asset_ledger.attrs["realized_constraints"] = {
-            "realized_constraints_status": "UNDEFINED",
-            "realized_constraints_reason": decision_skip_reason,
-        }
+        asset_ledger.attrs.setdefault(
+            "realized_constraints",
+            {
+                "realized_constraints_status": "UNDEFINED",
+                "realized_constraints_reason": decision_skip_reason,
+            },
+        )
+    if enhanced_decision is not None and enhanced_decision.risk is None:
+        asset_ledger.attrs.setdefault(
+            "realized_constraints",
+            {
+                "realized_constraints_status": "UNDEFINED",
+                "realized_constraints_reason": (
+                    "factor_risk_factor_history_insufficient"
+                ),
+                "realized_tracking_error_status": "UNDEFINED",
+            },
+        )
     asset_ledger.attrs["decision_availability"] = {
         "decision_status": "SKIPPED"
         if decision_skip_reason
@@ -2727,15 +2824,19 @@ def _ledger_batch(
     unquoted = _unquoted_assets(endpoint_panel)
     end_values = [row for row in valuations if row.phase == "end"]
     nav_end = sum(row.value for row in end_values)
-    unquoted_value = sum(
-        row.value if row.asset_id in unquoted else 0.0 for row in end_values
-    )
     diagnostics.extend(
         PortfolioDiagnostic(
             PORTFOLIO_CASH_ASSET_ID,
             None,
             f"research_valuation_nav_{percent}pct",
-            number=nav_end - (1 - percent / 100) * unquoted_value,
+            number=nav_end
+            if percent == 100
+            else sum(
+                row.receivable + percent / 100 * row.share_value
+                if row.asset_id in unquoted
+                else row.value
+                for row in end_values
+            ),
         )
         for percent in (0, 50, 100)
     )
@@ -2946,6 +3047,9 @@ def backtest(config: Mapping) -> Path:
     risk_config = (
         FactorRiskConfig(**config.get("risk_config", {})) if enhanced else None
     )
+    optimizer_config = (
+        OptimizerConfig(**config.get("optimizer_config", {})) if enhanced else None
+    )
 
     def produce(emit):
         with closing_iterator(
@@ -2957,9 +3061,7 @@ def backtest(config: Mapping) -> Path:
                 prediction_lookup=lookup,
                 assumptions=assumptions,
                 risk_config=risk_config,
-                optimizer_config=OptimizerConfig(**config["optimizer_config"])
-                if "optimizer_config" in config
-                else None,
+                optimizer_config=optimizer_config,
                 frozen_calibration=frozen,
                 on_final_calibration=final.append,
             )
@@ -2970,7 +3072,14 @@ def backtest(config: Mapping) -> Path:
     metadata = {
         **dict(config),
         "candidate": asdict(candidate),
-        **({"risk_config": asdict(risk_config)} if enhanced else {}),
+        **(
+            {
+                "risk_config": asdict(risk_config),
+                "optimizer_config": asdict(optimizer_config),
+            }
+            if enhanced
+            else {}
+        ),
         "window": dict(config["output_window"]),
         "corporate_action_policy": portfolio_sessions.CORPORATE_ACTION_POLICY,
         "initial_holding_convention": "cash",

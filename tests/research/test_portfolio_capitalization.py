@@ -347,8 +347,17 @@ def test_missing_size_nonrebalance_marks_undefined_and_preserves_account():
     assert diagnostics["target_exposure_status"] == "UNDEFINED"
     assert diagnostics["target_exposure_reason"] == "target_neutrality_size_missing"
     inputs["candidate"] = replace(inputs["candidate"], rebalance_schedule="daily")
-    with pytest.raises(PortfolioTargetBlocked, match="target_neutrality_size_missing"):
-        _build_session(**inputs)
+    account, _, optimized, _, ledger = _build_session(**inputs)
+    assert optimized is None
+    assert account.nav_after == 100.0
+    assert ledger.executed_delta_notional.eq(0.0).all()
+    assert (
+        ledger.attrs["decision_availability"]["decision_skip_reason"]
+        == "target_neutrality_size_missing"
+    )
+    assert (
+        ledger.attrs["neutrality_exposures"]["realized_exposure_status"] == "UNDEFINED"
+    )
 
 
 @pytest.mark.parametrize("column", ["total_market_cap", "float_market_cap"])

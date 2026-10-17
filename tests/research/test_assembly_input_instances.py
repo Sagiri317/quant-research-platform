@@ -254,8 +254,17 @@ def test_selected_feature_cannot_collide_with_new_transform(tmp_path):
         )
 
 
-def test_projection_preserves_selected_units_and_label_clock_authority(tmp_path):
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("source_unit", ["fraction", None])
+@pytest.mark.parametrize("scale", [False, True, "default"])
+@pytest.mark.parametrize(
+    "groups", [["raw", "processed"], ["processed"], ["processed", "pre_neutral"]]
+)
+def test_projection_preserves_selected_units_and_label_clock_authority(
+    tmp_path, reverse, source_unit, scale, groups
+):
     frame = _frame(4).assign(
+        momentum_20d=[1.0, 2.0, 3.0, 4.0],
         eligible=True,
         return_next=[0.1, 0.2, 0.3, 0.4],
         matured_at=pd.Timestamp("2024-01-03"),
@@ -264,7 +273,10 @@ def test_projection_preserves_selected_units_and_label_clock_authority(tmp_path)
         tmp_path / "left",
         frame,
         data_id="batch",
-        units={"momentum_20d": "fraction", "return_next": "decimal_return"},
+        units={
+            **({"momentum_20d": source_unit} if source_unit is not None else {}),
+            "return_next": "decimal_return",
+        },
         availability={"return_next": "matured_at"},
     )
     right, _ = _source(
@@ -274,31 +286,53 @@ def test_projection_preserves_selected_units_and_label_clock_authority(tmp_path)
         units={"momentum_20d": "percent", "return_next": "percent"},
         availability={"return_next": "matured_at"},
     )
+    inputs = {
+        "left": {
+            "path": str(left),
+            "columns": ["momentum_20d", "return_next", "eligible"],
+        },
+        "right": {"path": str(right), "columns": ["asset_id"]},
+    }
+    if reverse:
+        inputs = dict(reversed(list(inputs.items())))
     output = assembler.assemble(
         _config(
             tmp_path,
             left,
-            inputs={
-                "left": {
-                    "path": str(left),
-                    "columns": ["momentum_20d", "return_next", "eligible"],
-                },
-                "right": {"path": str(right), "columns": ["asset_id"]},
-            },
+            inputs=inputs,
+            base_input_data_id="left",
             label_columns=["return_next"],
             feature_recipe="a_share_canonical",
+            feature_groups=groups,
             feature_transform={
+                "clip": "none",
                 "industry_neutralize": False,
                 "size_neutralize": False,
-                "center": False,
-                "scale": False,
+                **({"center": False, "scale": scale} if scale != "default" else {}),
             },
         )
     )
     spec = inspect_dataset(output).spec
-    assert spec["column_units"]["feature_momentum_20d"] == "fraction"
+    actual = read_dataset(output)
+    assert ("momentum_20d" in actual) is ("raw" in groups)
+    expected = frame.momentum_20d.to_numpy()
+    if scale == "default":
+        expected = expected - expected.mean()
+    if scale is not False:
+        expected = expected / frame.momentum_20d.to_numpy().std()
+    for group in (group for group in groups if group != "raw"):
+        suffix = ("pre_neutral_" if group == "pre_neutral" else "") + "momentum_20d"
+        assert spec["column_units"].get("feature_" + suffix) == (
+            "dimensionless" if scale is not False else source_unit
+        )
+        for prefix in ("feature_missing_", "feature_observed_"):
+            assert spec["column_units"][prefix + suffix] == "dimensionless"
+        np.testing.assert_allclose(actual["feature_" + suffix], expected)
+    if "raw" in groups:
+        assert spec["column_units"].get("momentum_20d") == source_unit
+        np.testing.assert_array_equal(actual.momentum_20d, frame.momentum_20d)
     assert spec["column_units"]["return_next"] == "decimal_return"
-    assert read_dataset(output).matured_at.eq(pd.Timestamp("2024-01-03")).all()
+    assert actual.matured_at.eq(pd.Timestamp("2024-01-03")).all()
 
 
 def test_same_native_identity_never_allows_conflicting_business_columns(tmp_path):

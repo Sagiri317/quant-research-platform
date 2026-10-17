@@ -152,8 +152,12 @@ Bybit/OKX normalized 来源另用 `source={root, archives}`，不套用原生事
 
 `assemble` 必填 `market_id, dataset_id, inputs, time_window, output_root`；
 可明确选择 `factor_columns, label_columns, feature_recipe, base_input_data_id`。
-A 股的 feature recipe 不自动训练变换。Crypto 的 `sparse_input_data_ids`
-只允许明确选定的衍生品、现货、外部辅助输入，不能把基表或标签改成稀疏。
+原生 manifest 的 `inputs` 保留本次输入路径及显式 `files/years/time_window/row_filters/columns`
+等选择；省略的选择器不额外限域。`parameters.input_columns` 记录实际消费列（含必要依赖），
+输入级时间窗口与总体 `time_window` 取交集，不建立下游身份绑定或自动重算。
+A 股的 feature recipe 不自动训练变换；未标准化的派生特征保留实际选中源列的单位，
+源单位未知则继续未知。Crypto 的 `sparse_input_data_ids` 可明确选择非基表输入，
+包括标签；缺失标签保留 NULL，依赖标签的训练或评价各自筛选合法样本，基表仍须完整。
 标签成熟时刻和辅助信息可用时刻保留为真实 context，不进入模型输入 X。
 
 模型选择的 `score` 配置明确列出完整 `validation_windows`；该字段表示本次选型评价窗口，
@@ -260,6 +264,8 @@ freshness 选择 90 或 180 天；闭区间为 0–7、8–30、31–60、61–9
 `dataset` 计算路径与持久化输入路径互斥；原有 FMB 仍由实际数据计算 owner 承担。
 `stratified_ic` 使用本次声明的 HAC/FDR 参数，常用研究配方为 lag=20、BY、alpha=0.05；它们不是不可改的阶段版本。
 校正家族一次覆盖本次明确输入的 scope、信号、层和 IC/RankIC，不能逐层校正后拼接或冒称覆盖全部历史探索。
+预定家族中未定义的假设仍参与校正数量，内部以 p=1 占位；对外 p/q 保持 NULL 及原原因。
+`defined_hypothesis_count` 仅披露可定义项数，不用它缩小校正家族。
 两份 own/common 归约核焦点实际输入、信号、单位、成熟、窗口与分层事实，不以 evaluation_id/data_id 昵称放行。
 
 ## 研究比较的科学绑定
@@ -350,6 +356,10 @@ background 的 `root_seed` 省略时为 42，显式值覆盖默认。
 `within_timestamp` 在日期截面内置换；`temporal_blocks` 明确 episode_column、block_size、step_seconds，
 要求单资产连续窗口、max_dates=null，只支持 ic/mse，不跨独立 episode 或缺口重排。
 同组列一起置换；原始与置换后的评分键保持一致。rank 的 MSE 只在 calibrated_label 尺度计算。
+模型选型、统计和置换解释复用目标定义/单位比较；定义从训练实际消费的 spec/label_semantics 冻结，随 MODEL→PRED 保存。
+未知或不一致只使平方损失未定义，合法 IC/RankIC 继续计算；score 的候选 `mse_reason` 与解释行 `reason` 保存准确原因。
+定义只包含源标签、transform、clip 和所选源标签语义，不绑定路径、hash 或无关 spec 字段。
+within_timestamp 的 MSE 先逐日算均值，再日期等权；temporal_blocks 保持整条成熟时间序列一个评分 period。
 重复结果与均值/标准差均保存，未成熟标签不参与，测试集结果不反馈为自动调参。
 
 `explanation_summary`、`explanation_waterfall` 只消费 EXPLAIN，支持 PNG/SVG/PDF 与中文字体。

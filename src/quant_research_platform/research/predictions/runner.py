@@ -158,6 +158,7 @@ def predict(config: Mapping) -> Path:
                 "fit_cutoff",
                 "candidate_parameters",
                 "label_unit",
+                "target_definition",
                 "test_window",
                 "selection_cutoff",
             )

@@ -114,6 +114,11 @@ class ICWeightedRankEnsemble:
         return scores
 
 
+def _label_predictions(scores, calibration):
+    """Return label-scale values; callers retain raw scores for ordering."""
+    return scores if calibration is None else calibration[0] + calibration[1] * scores
+
+
 def rank_model_parameters(
     predictor: RankEnsemblePredictor | ICWeightedRankEnsemble,
 ) -> dict[str, list]:

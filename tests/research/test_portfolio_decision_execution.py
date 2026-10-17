@@ -264,14 +264,23 @@ def test_exact_zero_active_missing_risk_is_zero_but_future_active_is_undefined(m
     inputs["execution"]["can_exit"] = False
     _, _, changed, _, snapshot = production._build_session(**inputs)
     pd.testing.assert_series_equal(changed.weights, optimized.weights)
-    assert snapshot.attrs["realized_constraints"] == {
-        "realized_constraints_status": "UNDEFINED",
-        "realized_constraints_reason": "active_risk_unavailable",
-    }
+    facts = snapshot.attrs["realized_constraints"]
+    assert facts["realized_constraints_status"] == "UNDEFINED"
+    assert facts["realized_constraints_reason"] == "active_risk_unavailable"
+    assert facts["realized_tracking_error_status"] == "UNDEFINED"
+    assert "realized_tracking_error" not in facts
+    assert facts["realized_name_active_weight"] == pytest.approx(0.1)
+    assert facts["realized_style_active_exposure_status"] == (
+        "DEFINED" if missing == "specific" else "UNDEFINED"
+    )
+    if missing == "specific":
+        assert facts["realized_style_active_exposure"] == pytest.approx(0.0, abs=1e-15)
+    else:
+        assert "realized_style_active_exposure" not in facts
 
 
 @pytest.mark.parametrize("missing", ["specific", "exposure"])
-def test_frozen_nonzero_decision_active_missing_risk_is_rejected(missing):
+def test_frozen_nonzero_missing_risk_skips_target_and_keeps_real_account(missing):
     inputs = _decision_inputs(holdings=(0.501, 0.499))
     inputs["amount_history"].pop(("a", pd.Timestamp("2000-01-01")))
     enhanced = inputs["enhanced_decision"]
@@ -279,8 +288,23 @@ def test_frozen_nonzero_decision_active_missing_risk_is_rejected(missing):
         enhanced.risk.specific_variance.loc["a"] = np.nan
     else:
         enhanced.exposures.loc[enhanced.exposures.asset_id.eq("a"), "style"] = np.nan
-    with pytest.raises(ValueError, match="optimizer_held_risk_unavailable"):
-        production._build_session(**inputs)
+    account, _, optimized, _, ledger = production._build_session(**inputs)
+    assert optimized is None
+    assert account.nav_after == 100.0
+    assert ledger.executed_delta_notional.eq(0.0).all()
+    assert ledger.post_trade_notional.tolist() == [50.1, 49.9]
+    assert (
+        ledger.attrs["decision_availability"]["decision_skip_reason"]
+        == "optimizer_held_risk_unavailable"
+    )
+    facts = ledger.attrs["realized_constraints"]
+    assert facts["realized_constraints_status"] == "UNDEFINED"
+    assert facts["realized_constraints_reason"] == "active_risk_unavailable"
+    assert facts["realized_tracking_error_status"] == "UNDEFINED"
+    assert "realized_tracking_error" not in facts
+    assert facts["realized_style_active_exposure_status"] == (
+        "DEFINED" if missing == "specific" else "UNDEFINED"
+    )
 
 
 def test_zero_nav_neutrality_has_no_defined_weights_or_exposures():
@@ -328,3 +352,16 @@ def test_future_zero_nav_keeps_valid_target_and_reports_undefined_actual_risk():
         "realized_constraints_status": "UNDEFINED",
         "realized_constraints_reason": "nonpositive_nav",
     }
+
+
+@pytest.mark.parametrize("invalid", ["negative_variance", "infinite_exposure"])
+def test_invalid_risk_is_not_downgraded_to_missing_target(invalid):
+    inputs = _decision_inputs(holdings=(0.501, 0.499))
+    inputs["amount_history"].pop(("a", pd.Timestamp("2000-01-01")))
+    enhanced = inputs["enhanced_decision"]
+    if invalid == "negative_variance":
+        enhanced.risk.specific_variance.loc["a"] = -0.1
+    else:
+        enhanced.exposures.loc[enhanced.exposures.asset_id.eq("a"), "style"] = np.inf
+    with pytest.raises(ValueError, match="optimizer_risk_invalid"):
+        production._build_session(**inputs)

@@ -253,7 +253,7 @@ def test_neutral_projection_satisfies_kkt_on_active_and_boundary_assets():
 
 
 @pytest.mark.parametrize("missing", ["absent", "null", "zero", "negative", "industry"])
-def test_missing_neutral_context_carries_nonrebalance_account_and_blocks_target(
+def test_missing_neutral_context_carries_account_and_skips_new_target(
     missing,
 ):
     from quant_research_platform.research.portfolios.production import _build_session
@@ -293,10 +293,17 @@ def test_missing_neutral_context_carries_nonrebalance_account_and_blocks_target(
         assert diagnostics[f"{kind}_exposure_excluded_weight"] is None
     assert not any(key.startswith("benchmark_exposure:") for key in diagnostics)
     inputs["candidate"] = replace(inputs["candidate"], rebalance_schedule="daily")
-    with pytest.raises(
-        PortfolioTargetBlocked, match="target_neutrality_benchmark_empty"
-    ):
-        _build_session(**inputs)
+    account, _, optimized, _, ledger = _build_session(**inputs)
+    assert optimized is None
+    assert account.nav_after == 100.0
+    assert ledger.executed_delta_notional.eq(0.0).all()
+    assert (
+        ledger.attrs["decision_availability"]["decision_skip_reason"]
+        == "target_neutrality_benchmark_empty"
+    )
+    assert (
+        ledger.attrs["neutrality_exposures"]["realized_exposure_status"] == "UNDEFINED"
+    )
 
 
 def test_enhanced_nonrebalance_unknown_industry_preserves_held_account(
@@ -451,7 +458,12 @@ def test_absent_cap_column_is_local_to_actual_scheduled_neutral_target(
         typed_batches=True,
         model_inputs=("total_market_cap",),
     )
-    with pytest.raises(
-        PortfolioTargetBlocked, match="target_neutrality_benchmark_empty"
-    ):
-        list(longer)
+    remaining = list(longer)
+    assert remaining
+    assert all(not batch.trades for batch in remaining)
+    assert any(
+        row.name == "decision_skip_reason"
+        and row.text == "target_neutrality_benchmark_empty"
+        for batch in remaining
+        for row in batch.diagnostics
+    )

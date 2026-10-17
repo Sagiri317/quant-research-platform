@@ -246,7 +246,9 @@ def test_signed_information_and_known_lag_do_not_depend_on_current_value(
     tmp_path, field, output
 ):
     target = panel().iloc[:4]
-    info = target.loc[:, list(KEYS)].assign(asset_id="eth_usdt")
+    info = target.loc[:, list(KEYS)].assign(
+        asset_id="eth_usdt", segment_id="eth-source"
+    )
     info[field] = [-0.5, float("nan"), 0.7, 0.8]
     target_root = _persist(tmp_path / "target", target.loc[:, list(KEYS)])
     info_root = _persist(tmp_path / "info", info)
@@ -286,4 +288,40 @@ def test_unknown_external_archive_selector_is_configuration_error(tmp_path, arch
             {HFT_PANEL_DATA_ID: str(target)},
             frame,
             source={"root": str(tmp_path), "archives": archives},
+        )
+
+
+def test_cross_asset_lag_requires_persisted_source_segment_only_when_selected(tmp_path):
+    target = panel().iloc[:4]
+    info = target.loc[:, list(KEYS)].assign(asset_id="eth_usdt", return_100ms=0.25)
+    inputs = {
+        HFT_PANEL_DATA_ID: str(
+            _persist(tmp_path / "target", target.loc[:, list(KEYS)])
+        ),
+        HFT_INFORMATION_STATE_DATA_ID: str(
+            _persist(tmp_path / "legacy-information", info)
+        ),
+    }
+    current = _run(
+        tmp_path,
+        "current",
+        HFT_CROSS_ASSET_DATA_ID,
+        "eth_return_100ms",
+        inputs,
+        target,
+        parameters={"information_assets": ["eth_usdt"], "target_assets": ["btc_usdt"]},
+    )
+    assert current.eth_return_100ms.eq(0.25).all()
+    with pytest.raises(ValueError, match="crypto_information_segment_required"):
+        _run(
+            tmp_path,
+            "lag",
+            HFT_CROSS_ASSET_DATA_ID,
+            "eth_lagged_return_100ms",
+            inputs,
+            target,
+            parameters={
+                "information_assets": ["eth_usdt"],
+                "target_assets": ["btc_usdt"],
+            },
         )

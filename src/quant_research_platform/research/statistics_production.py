@@ -17,6 +17,7 @@ from quant_research_platform.contracts.experiments import (
 )
 from quant_research_platform.contracts.ids import validate_input_market
 from quant_research_platform.contracts.json_codec import canonical_json_hash
+from quant_research_platform.contracts.models import _prediction_loss_reason
 from quant_research_platform.contracts.time import (
     TimeWindow,
     time_window_timestamp_interval,
@@ -27,6 +28,8 @@ from quant_research_platform.research.features.transforms import (
     mask_unobserved_features,
     model_input_validity_columns,
 )
+from quant_research_platform.research.models.rank_ensemble import _label_predictions
+from quant_research_platform.research.models.trial_selection import _MeanSquaredError
 from quant_research_platform.research.predictions.outputs import prediction_rows
 from quant_research_platform.research.protocols.a_share import (
     _inference_blocker,
@@ -51,6 +54,7 @@ from quant_research_platform.storage.datasets.reading import (
     open_dataset_session,
     read_dataset,
 )
+from quant_research_platform.storage.datasets.schema import data_spec_payload
 from quant_research_platform.storage.datasets.types import DatasetReadMode
 
 _PREDICTION_COLUMN = "__prediction_alpha__"
@@ -240,6 +244,12 @@ def build_a_share_statistics_tables(
     global_statistics: object | None,
     dataset_session=None,
 ) -> dict[str, pd.DataFrame]:
+    declared = (
+        dataset_session.spec
+        if dataset_session is not None
+        else data_spec_payload(dataset_spec)
+    )
+    manifest = dataset_session.manifest if dataset_session is not None else None
     dataset_id = str(dataset_spec.data_id)
     selection_group = config.get("selection_group", "explicit")
     inference_blocker = (
@@ -418,18 +428,19 @@ def build_a_share_statistics_tables(
                     metadata = entry["model_metadata"]
                     if metadata is None:
                         mature[family_columns[family_id]] = np.nan
-                        predictive_records.append(
-                            dict(
-                                timestamp=timestamp,
-                                family_id=family_id,
-                                **_prediction_quality(
-                                    pd.Series(dtype="float64"),
-                                    mature[primary_label],
-                                    raw_mature,
-                                    head_fraction=head_fraction,
-                                ),
+                        if "model_losses" in analyses:
+                            predictive_records.append(
+                                dict(
+                                    timestamp=timestamp,
+                                    family_id=family_id,
+                                    **_prediction_quality(
+                                        pd.Series(dtype="float64"),
+                                        mature[primary_label],
+                                        raw_mature,
+                                        head_fraction=head_fraction,
+                                    ),
+                                )
                             )
-                        )
                         continue
                     expected = (
                         prediction_rows(
@@ -456,21 +467,37 @@ def build_a_share_statistics_tables(
                         np.asarray(values, dtype="float64"), index=keys.index
                     )
                     mature[family_columns[family_id]] = scores.reindex(mature.index)
-                    eligible_scores = scores.reindex(
-                        session.index[session.eligible.fillna(False)]
-                    )
-                    predictive_records.append(
-                        dict(
-                            timestamp=timestamp,
-                            family_id=family_id,
-                            **_prediction_quality(
-                                eligible_scores,
-                                mature[primary_label],
-                                raw_mature,
-                                head_fraction=head_fraction,
-                            ),
+                    if "model_losses" in analyses:
+                        eligible_scores = scores.reindex(
+                            session.index[session.eligible.fillna(False)]
                         )
-                    )
+                        facts = entry.get("model_facts", {})
+                        loss_reason = _prediction_loss_reason(
+                            facts,
+                            primary_label,
+                            declared,
+                            manifest,
+                            model_target=metadata["target_column"],
+                        )
+                        predictive_records.append(
+                            dict(
+                                timestamp=timestamp,
+                                family_id=family_id,
+                                **_prediction_quality(
+                                    eligible_scores,
+                                    mature[primary_label],
+                                    raw_mature,
+                                    head_fraction=head_fraction,
+                                    label_predictions=_label_predictions(
+                                        eligible_scores,
+                                        metadata.get("rank_parameters", {}).get(
+                                            "label_calibration"
+                                        ),
+                                    ),
+                                    loss_reason=loss_reason,
+                                ),
+                            )
+                        )
                 if selection is not None:
                     winner = selection["selected_family_id"]
                     mature[_PREDICTION_COLUMN] = (
@@ -665,16 +692,29 @@ def build_a_share_statistics_tables(
     return tables
 
 
-def _prediction_quality(scores, target, raw_returns, *, head_fraction):
-    """Keep the prediction cohort fixed before inspecting future outcomes."""
+def _prediction_quality(
+    scores,
+    target,
+    raw_returns,
+    *,
+    head_fraction,
+    label_predictions=None,
+    loss_reason=None,
+):
+    """Keep raw-score cohorts fixed and compute losses only in the target scale."""
     scores = scores.loc[np.isfinite(scores)]
     paired = target.reindex(scores.index)
     valid = np.isfinite(paired)
-    error = sum(
-        (Fraction(float(y)) - Fraction(float(p))) ** 2
-        for y, p in zip(paired.loc[valid], scores.loc[valid], strict=True)
+    predictions = (
+        scores if label_predictions is None else label_predictions.reindex(scores.index)
     )
-    baseline = sum(Fraction(float(y)) ** 2 for y in paired.loc[valid])
+    errors, baseline_errors = _MeanSquaredError(), _MeanSquaredError()
+    for label, prediction in zip(
+        paired.loc[valid], predictions.loc[valid], strict=True
+    ):
+        if loss_reason is None:
+            errors.add(prediction, label)
+        baseline_errors.add(0.0, label)
     count = int(valid.sum())
 
     def represent(value):
@@ -684,9 +724,14 @@ def _prediction_quality(scores, target, raw_returns, *, head_fraction):
             return np.nan
         return result if np.isfinite(result) else np.nan
 
-    mse = represent(error / count) if count else np.nan
-    baseline_mse = represent(baseline / count) if count else np.nan
-    r2 = represent(1 - error / baseline) if count and baseline else np.nan
+    error, baseline = errors.mean(), baseline_errors.mean()
+    mse = errors.result()
+    baseline_mse = baseline_errors.result()
+    r2 = (
+        represent(1 - error / baseline)
+        if loss_reason is None and error is not None and baseline
+        else np.nan
+    )
     head = scores.iloc[:0]
     if len(scores):
         cutoff = scores.nlargest(int(np.ceil(len(scores) * head_fraction))).iloc[-1]
@@ -704,11 +749,16 @@ def _prediction_quality(scores, target, raw_returns, *, head_fraction):
     return {
         "prediction_count": len(scores),
         "target_count": count,
-        "mse": mse,
-        "baseline_mse": baseline_mse,
+        "mse": np.nan if mse is None else mse,
+        "mse_reason": None
+        if mse is not None
+        else loss_reason or ("no_valid_targets" if not count else "nonfinite_result"),
+        "baseline_mse": np.nan if baseline_mse is None else baseline_mse,
         "oos_r2": r2,
         "oos_r2_reason": None
         if np.isfinite(r2)
+        else loss_reason
+        if loss_reason is not None
         else "no_valid_targets"
         if not count
         else "zero_baseline_error"
@@ -1946,20 +1996,13 @@ def _factor_statistics_from_evaluations(config):
                             ci_upper=inference.confidence_interval[1],
                         )
                 rows.append(row)
-        defined = [row for row in rows if row["status"] == "DEFINED"]
-        if defined:
-            adjusted = fdr_adjust(
-                [row["p_value"] for row in defined],
-                method=policy["fdr_method"],
-                alpha=policy["fdr_alpha"],
-            )
-            for row, value in zip(defined, adjusted.adjusted_p_values, strict=True):
-                row["fdr_adjusted_p_value"] = float(value)
-        for row in rows:
-            row["defined_hypothesis_count"] = len(defined)
-        tables["factor_stratified_diagnostics"] = pd.DataFrame.from_records(
+        result = pd.DataFrame.from_records(
             rows,
             columns=STATISTICS_TABLE_COLUMNS["factor_stratified_diagnostics.parquet"],
+        )
+        result["defined_hypothesis_count"] = int(result.status.eq("DEFINED").sum())
+        tables["factor_stratified_diagnostics"] = _apply_fdr(
+            result, policy["fdr_method"], policy["fdr_alpha"], len(result)
         )
     if "rank_ic" in analyses:
         evaluation = config.get("evaluation")

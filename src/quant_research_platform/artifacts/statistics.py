@@ -12,6 +12,7 @@ from pathlib import Path
 import pandas as pd
 import pyarrow as pa
 
+from quant_research_platform.contracts.models import _PREDICTION_LOSS_REASONS
 from quant_research_platform.contracts.time import (
     TimeWindow,
     time_window_timestamp_interval,
@@ -177,6 +178,7 @@ _ARROW_SCHEMAS = {
             pa.field("prediction_count", pa.int64()),
             pa.field("target_count", pa.int64()),
             pa.field("mse", pa.float64()),
+            pa.field("mse_reason", pa.string()),
             pa.field("baseline_mse", pa.float64()),
             pa.field("oos_r2", pa.float64()),
             pa.field("oos_r2_reason", pa.string()),
@@ -1304,14 +1306,38 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
             ):
                 raise ValueError("statistics_terminal_wealth_invalid")
     if member == "model_prediction_metrics.parquet":
+        incomparable_reasons = _PREDICTION_LOSS_REASONS
+        mse_reasons = ("no_valid_targets", "nonfinite_result", *incomparable_reasons)
+        no_targets = result.target_count.eq(0)
+        incomparable = result.mse_reason.isin(
+            incomparable_reasons
+        ) | result.oos_r2_reason.isin(incomparable_reasons)
         if (
             result.duplicated(["timestamp", "family_id"]).any()
             or result.target_count.gt(result.prediction_count).any()
             or result.head_selected_count.gt(result.prediction_count).any()
             or result.head_evaluable_count.gt(result.head_selected_count).any()
             or not result.head_coverage.dropna().between(0, 1).all()
+            or result.mse.dropna().lt(0).any()
+            or result.baseline_mse.dropna().lt(0).any()
+            or result.oos_r2.dropna().gt(1).any()
+            or result.loc[no_targets, ["mse", "baseline_mse", "oos_r2"]]
+            .notna()
+            .any()
+            .any()
+            or result.loc[result.mse.notna(), "mse_reason"].ne("").any()
+            or not result.loc[result.mse.isna(), "mse_reason"].isin(mse_reasons).all()
+            or (result.mse_reason.eq("no_valid_targets") & ~no_targets).any()
             or result.loc[result.oos_r2.notna(), "oos_r2_reason"].ne("").any()
-            or result.loc[result.oos_r2.isna(), "oos_r2_reason"].eq("").any()
+            or not result.loc[result.oos_r2.isna(), "oos_r2_reason"]
+            .isin((*mse_reasons, "zero_baseline_error"))
+            .all()
+            or (result.oos_r2_reason.eq("no_valid_targets") & ~no_targets).any()
+            or (
+                result.oos_r2_reason.eq("zero_baseline_error")
+                & result.baseline_mse.ne(0)
+            ).any()
+            or (incomparable & result.oos_r2_reason.ne(result.mse_reason)).any()
         ):
             raise ValueError("statistics_prediction_metrics_invalid")
     if member == "model_losses.parquet":

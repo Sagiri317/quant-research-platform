@@ -528,9 +528,11 @@ def _maker_config(*, calibrated=False) -> MakerConfig:
 
 
 @pytest.mark.parametrize(
-    "wrong_identity", (None, "book_segment_id", "trade_observation_id")
+    "lineage_identity", (None, "book_segment_id", "trade_observation_id")
 )
-def test_common_panel_maker_quotes_use_raw_execution_identities(wrong_identity) -> None:
+def test_common_panel_maker_quotes_bind_actual_source_identities(
+    lineage_identity,
+) -> None:
     from quant_research_platform.markets.implementations.crypto.portfolio import (
         _paired_validation,
     )
@@ -554,8 +556,8 @@ def test_common_panel_maker_quotes_use_raw_execution_identities(wrong_identity) 
     }
     panel = pd.concat(frames.values(), ignore_index=True)
     assert panel["segment_id"].tolist() == ["s1:trade-connection-1"] * 2
-    if wrong_identity is not None:
-        panel[wrong_identity] = "wrong-raw-identity"
+    if lineage_identity is not None:
+        panel[lineage_identity] = "independent-input-identity"
 
     quotes = list(
         _paired_validation(
@@ -581,8 +583,8 @@ def test_common_panel_maker_quotes_use_raw_execution_identities(wrong_identity) 
         asset_id="btc_usdt",
         funding_events=(),
     )
-    assert len(fills) == (1 if wrong_identity is None else 0)
-    assert result["created_orders"] == (2 if wrong_identity is None else 0)
+    assert len(fills) == 1
+    assert result["created_orders"] == 2
 
 
 @pytest.mark.usefixtures("coordinate_scale")
@@ -1336,7 +1338,7 @@ def test_truncated_pending_cancels_survive_native_ledger_summary(tmp_path):
             [],
             [
                 _quote(0, book_segment_id="s1"),
-                _quote(200, book_segment_id="unavailable"),
+                _quote(200, book_segment_id="s1"),
             ],
             config=replace(_maker_config(), latency_ms=100),
             observed_coverage={"s1": (0, 1000000001)},
@@ -1344,7 +1346,7 @@ def test_truncated_pending_cancels_survive_native_ledger_summary(tmp_path):
             capital=capital,
             asset_id="btc_usdt",
             funding_events=(),
-            decision_windows_ns=((0, 1000000000),),
+            decision_windows_ns=((0, 250000000),),
             observation_window_ns=(0, 250000000),
             on_ledger=emit,
         )
@@ -2205,3 +2207,34 @@ def test_cost_sensitivity_still_rejects_negative_additional_spread():
             fee_scenarios_bps=(-2.0,),
             additional_spread_scenarios_bps=(-1.0,),
         )
+
+
+@pytest.mark.parametrize("missing", ["book", "trade", "overlap"])
+def test_maker_source_context_requires_unique_observable_coverage(missing):
+    coverage = {"actual-trade": (0, 300_000_000)}
+    if missing == "trade":
+        coverage = {"actual-trade": (1, 300_000_000)}
+    elif missing == "overlap":
+        coverage["overlapping-trade"] = (0, 300_000_000)
+    result = simulate_maker(
+        [
+            _state(stamp, segment_id="actual-book")
+            for stamp in ((100, 200) if missing == "book" else (0, 200))
+        ],
+        [],
+        [
+            _quote(
+                0,
+                book_segment_id="independent-input",
+                trade_observation_id="independent-input",
+            )
+        ],
+        config=_maker_config(),
+        observed_coverage={"actual-book": (0, 300_000_000)},
+        trade_coverage=coverage,
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
+    )
+    assert result["created_orders"] == 0
+    assert result["undefined_decisions"] == 1

@@ -167,18 +167,30 @@ def factor_panel_input_columns(
 
 
 def factor_lookback_bars(definitions: Sequence[FactorDefinition]) -> int:
-    return max(
-        (
-            value
-            for definition in definitions
-            for value in (
-                definition.lookback_window,
-                *definition.required_windows,
-            )
-            if value is not None
-        ),
-        default=0,
-    )
+    """Return preceding sessions consumed by the requested definitions."""
+    lookback = 0
+    for definition in definitions:
+        current = max(
+            (
+                value
+                for value in (definition.lookback_window, *definition.required_windows)
+                if value is not None
+            ),
+            default=0,
+        )
+        column = definition.output_column
+        # Unshifted windows include today's sample; endpoint lags and shocks
+        # consume the full number of preceding sessions.
+        if (
+            current
+            and definition.family == PRICE_VOLUME_FACTOR_FAMILY
+            and not column.startswith(("reversal_", "momentum_"))
+            and not column.endswith("_change_20d")
+            and column not in {"amount_shock_20d", "volume_shock_20d"}
+        ):
+            current -= 1
+        lookback = max(lookback, current)
+    return lookback
 
 
 def _require_factor_input_columns(

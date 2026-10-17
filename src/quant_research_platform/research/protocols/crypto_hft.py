@@ -106,6 +106,7 @@ HFT_SPOT_CONTEXT_COLUMNS = (
     "spot_book_observed_at",
 )
 HFT_INFORMATION_COLUMNS = (
+    "segment_id",
     "return_100ms",
     "return_500ms",
     "depth_normalized_ofi_500ms",
@@ -465,7 +466,10 @@ def cross_asset_inputs(columns):
     for column in columns:
         if column not in HFT_CROSS_ASSET_FACTOR_COLUMNS:
             continue
-        name = column.split("_", 1)[1].removeprefix("lagged_")
+        name = column.split("_", 1)[1]
+        if name.startswith("lagged_"):
+            fields.append("segment_id")
+        name = name.removeprefix("lagged_")
         fields.append(
             {
                 "normalized_ofi_500ms": "depth_normalized_ofi_500ms",

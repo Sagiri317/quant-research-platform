@@ -1,6 +1,8 @@
 """Small explicit scientific inputs shared by native statistics regression tests."""
 
+from quant_research_platform.contracts.models import _target_definition
 from quant_research_platform.research.statistics_production import _selection_trial_rows
+from quant_research_platform.storage.datasets.schema import data_spec_payload
 from tests.helpers.research_configuration import (
     A_SHARE_MODEL_ALGORITHMS,
     research_configuration,
@@ -101,7 +103,16 @@ def model_statistics_inputs(
         (period, family["family_id"]): {
             "family_id": family["family_id"],
             "model_id": family["selected_config_id"],
+            "model_facts": {
+                "label_unit": spec.column_units.get(
+                    config["evaluation"]["primary_label"]
+                ),
+                "target_definition": _target_definition(
+                    data_spec_payload(spec), config["evaluation"]["primary_label"]
+                ),
+            },
             "model_metadata": {
+                "target_column": config["evaluation"]["primary_label"],
                 "input_columns": [spec.factor_columns[0]],
                 "sample_filter_mode": "eligible",
                 "model_algorithm": A_SHARE_MODEL_ALGORITHMS[

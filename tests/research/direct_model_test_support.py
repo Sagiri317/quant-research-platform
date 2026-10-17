@@ -49,6 +49,7 @@ def fit_frame(
             "primary_key": ["timestamp", "asset_id"],
             "partition_columns": ["year"],
             "column_roles": roles,
+            "column_units": {spec.target_column: "decimal_return"},
         },
     }
     if trading_calendar is not None:

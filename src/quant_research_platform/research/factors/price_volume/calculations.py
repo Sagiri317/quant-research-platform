@@ -509,11 +509,14 @@ def _calculate_values(
         exponents = return_exponent - amount_exponent
         scale = np.max(
             np.where(
-                quotients != 0, exponents, np.min(exponents, axis=1, keepdims=True)
+                np.isfinite(quotients) & (quotients != 0),
+                exponents,
+                np.iinfo(exponents.dtype).min,
             ),
             axis=1,
             keepdims=True,
         )
+        scale = np.where(scale == np.iinfo(exponents.dtype).min, 0, scale)
         normalized = np.ldexp(quotients, exponents - scale)
         result = np.ldexp(np.nanmean(normalized, axis=1), scale[:, 0])
     elif factor == "trend_efficiency_60d":

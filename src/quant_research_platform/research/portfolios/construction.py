@@ -198,11 +198,12 @@ def _selected_capitals(
     )
     selected_values = capitals.reindex(selected)
     if (
-        selected_values.isna().any()
-        or not np.isfinite(selected_values.to_numpy(dtype="float64")).all()
+        np.isinf(selected_values.to_numpy(dtype="float64")).any()
         or selected_values.le(0.0).any()
     ):
         raise ValueError("target_float_market_cap_invalid")
+    if selected_values.isna().any():
+        raise PortfolioTargetBlocked("target_float_market_cap_missing")
     return capitals
 
 

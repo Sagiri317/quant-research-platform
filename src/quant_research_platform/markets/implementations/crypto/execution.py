@@ -1048,58 +1048,54 @@ def simulate_taker(
                 observed_coverage, latest_state.segment_id, decision_ns
             ):
                 decision_mid = _mid(latest_state)
-                segment = row.get(
-                    "book_segment_id",
-                    row.get("segment_id", latest_state.segment_id),
-                )
-                reason = "decision_segment_mismatch"
-                if segment == latest_state.segment_id:
-                    reason = "forecast_expired_before_execution"
-                    if config.latency_ms < prediction_horizon_ms:
-                        forecast_end = (
-                            decision_time + prediction_horizon_ms
-                        ) * _NANOSECONDS_PER_MILLISECOND
-                        funding_required_decisions += 1
-                        funding_per_unit = None
-                        if (
-                            active_forecast is not None
-                            and active_forecast.known_until_ns >= forecast_end
-                        ):
-                            cashflows = tuple(
-                                value
-                                for timestamp, value in active_forecast.cashflows
-                                if (decision_time + config.latency_ms)
-                                * _NANOSECONDS_PER_MILLISECOND
-                                < timestamp
-                                <= forecast_end
-                            )
-                            if all(value is not None for value in cashflows):
-                                funding_per_unit = sum(cashflows)
-                        if funding_per_unit is None:
-                            blocked_decisions += 1
-                            reason = "portfolio_expected_funding_missing"
-                        else:
-                            selected, gain = _taker_order_quantity(
-                                latest_state,
-                                prediction=prediction,
-                                config=config,
-                                buy_limit=_position_headroom(
-                                    config.position_size,
-                                    economics.quantity,
-                                    reserved_buy,
-                                ),
-                                sell_limit=_position_headroom(
-                                    config.position_size,
-                                    -economics.quantity,
-                                    reserved_sell,
-                                ),
-                                funding_per_unit=funding_per_unit,
-                            )
-                            reason = (
-                                "positive_expected_net_gain"
-                                if selected
-                                else "no_positive_expected_net_gain"
-                            )
+                # Input segment IDs describe sample lineage, not this execution source.
+                segment = latest_state.segment_id
+                reason = "forecast_expired_before_execution"
+                if config.latency_ms < prediction_horizon_ms:
+                    forecast_end = (
+                        decision_time + prediction_horizon_ms
+                    ) * _NANOSECONDS_PER_MILLISECOND
+                    funding_required_decisions += 1
+                    funding_per_unit = None
+                    if (
+                        active_forecast is not None
+                        and active_forecast.known_until_ns >= forecast_end
+                    ):
+                        cashflows = tuple(
+                            value
+                            for timestamp, value in active_forecast.cashflows
+                            if (decision_time + config.latency_ms)
+                            * _NANOSECONDS_PER_MILLISECOND
+                            < timestamp
+                            <= forecast_end
+                        )
+                        if all(value is not None for value in cashflows):
+                            funding_per_unit = sum(cashflows)
+                    if funding_per_unit is None:
+                        blocked_decisions += 1
+                        reason = "portfolio_expected_funding_missing"
+                    else:
+                        selected, gain = _taker_order_quantity(
+                            latest_state,
+                            prediction=prediction,
+                            config=config,
+                            buy_limit=_position_headroom(
+                                config.position_size,
+                                economics.quantity,
+                                reserved_buy,
+                            ),
+                            sell_limit=_position_headroom(
+                                config.position_size,
+                                -economics.quantity,
+                                reserved_sell,
+                            ),
+                            funding_per_unit=funding_per_unit,
+                        )
+                        reason = (
+                            "positive_expected_net_gain"
+                            if selected
+                            else "no_positive_expected_net_gain"
+                        )
             if gain is None and reason != "portfolio_expected_funding_missing":
                 undefined_decisions += 1
             marked = None
@@ -1812,6 +1808,24 @@ class MakerCalibration:
         return keep, 0.0 if keep else float(best_quantity), gain
 
 
+def _source_quote_context(row, state, trade_coverage, timestamp):
+    """Bind eligible sample lineage to this source after causal event advancement."""
+    identities = (
+        trade_coverage.covering(timestamp, timestamp)
+        if hasattr(trade_coverage, "covering")
+        else tuple(
+            identity
+            for identity, (start, stop) in trade_coverage.items()
+            if start <= timestamp < stop
+        )
+    )
+    return {
+        **row,
+        "book_segment_id": None if state is None else state.segment_id,
+        "trade_observation_id": identities[0] if len(identities) == 1 else None,
+    }
+
+
 def replay_maker_calibration(
     book_events,
     trades,
@@ -1960,9 +1974,10 @@ def replay_maker_calibration(
             if row["label_available_at_ns"] > cutoff_ns or end > cutoff_ns:
                 raise ValueError("maker_calibration_outcome_not_mature")
             process_until(timestamp)
+            row = _source_quote_context(row, latest_state, trade_coverage, timestamp)
             valid = (
                 latest_state is not None
-                and latest_state.segment_id == row["book_segment_id"]
+                and row["trade_observation_id"] is not None
                 and _covered(observed_coverage, row["book_segment_id"], timestamp)
                 and _covered(observed_coverage, row["book_segment_id"], end - 1)
                 and _covered(trade_coverage, row["trade_observation_id"], timestamp)
@@ -2582,15 +2597,12 @@ def simulate_maker(
                 active_forecast = next_forecast
                 forecast_timestamp = active_forecast.available_at_ns
                 next_forecast = next(forecasts, None)
+            row = _source_quote_context(
+                row, latest_state, trade_coverage, decision_time_ns
+            )
             observe_trade_connection(row["trade_observation_id"], decision_time_ns)
             mid = observed_mark(decision_time_ns)
-            valid = (
-                mid is not None
-                and latest_state.segment_id == row["book_segment_id"]
-                and _covered(
-                    trade_coverage, row["trade_observation_id"], decision_time_ns
-                )
-            )
+            valid = mid is not None and row["trade_observation_id"] is not None
             if not valid:
                 undefined_decisions += 1
             if calibrations is not None:

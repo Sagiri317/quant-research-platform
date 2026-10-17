@@ -95,7 +95,7 @@ def validate_prediction_output_metadata_shape(metadata):
 
 def _validate_prediction_model_facts(facts, realized):
     """Check self-contained score evidence without fitting-state metadata."""
-    if type(facts) is not dict or set(facts) != {
+    if type(facts) is not dict or set(facts) - {"target_definition"} != {
         "family_id",
         "asset_ids",
         "market_id",

@@ -529,6 +529,7 @@ def iter_factor_frames(
         )
         inputs = {name: _nullable_numeric_column(frame, name) for name in required}
         output = _identity_frame(frame)
+        output["segment_id"] = frame["segment_id"]
         calculated = {name: np.full(len(frame), np.nan) for name in selected}
         for name in copied:
             calculated[name] = inputs[definitions[name][0]]
@@ -1071,7 +1072,8 @@ def iter_cross_asset_factor_frames(
                         "trade_flow_imbalance_500ms",
                     )
                 ]
-                for row in zip(frame["timestamp"], *values, strict=True):
+                segments = frame.get("segment_id", [None] * len(frame))
+                for row in zip(frame["timestamp"], *values, segments, strict=True):
                     yield (pd.Timestamp(row[0]).value, *row[1:])
 
     records = []
@@ -1120,13 +1122,17 @@ def iter_cross_asset_factor_frames(
                             "normalized_ofi_500ms",
                             "tfi_500ms",
                         ),
-                        last[1:],
+                        last[1:5],
                         strict=True,
                     ):
                         row[prefix + name] = value
                     prior = previous.get(asset)
                     if (
                         prior is not None
+                        and isinstance(last[5], str)
+                        and isinstance(prior[5], str)
+                        and bool(last[5])
+                        and last[5] == prior[5]
                         and last[0] - prior[0] == 100_000_000
                         and stamp - prior[0] <= max_age_ms * 1_000_000
                     ):

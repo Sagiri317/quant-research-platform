@@ -859,8 +859,97 @@ def validate_model_facts(facts, metadata):
     validate_model_fit_facts(facts, metadata)
 
 
+_PREDICTION_LOSS_REASONS = (
+    "prediction_target_mismatch",
+    "target_unit_missing",
+    "prediction_target_unit_mismatch",
+    "prediction_target_definition_missing",
+    "prediction_target_definition_mismatch",
+)
+
+
+def _target_definition(declared, target, manifest=None):
+    """Freeze only the consumed label definition, never its storage identity."""
+    source = target
+    transform, clip = "raw", "none"
+    if target == "model_target":
+        transform, clip = declared.get("target_transform"), declared.get("target_clip")
+        if transform is None or clip is None:
+            return None
+        source = "forward_return_20d"
+    semantics = (
+        (manifest or {})
+        .get("producer_diagnostics", {})
+        .get("label_semantics", {})
+        .get(source)
+    )
+    return {
+        "source_label": source,
+        "target_transform": transform,
+        "target_clip": clip,
+        "label_semantics": None if semantics is None else dict(semantics),
+    }
+
+
+def _prediction_loss_reason(
+    facts, target, declared, manifest=None, *, model_target=None, target_unit=None
+):
+    """Check label-scale loss comparability independently of rank/IC evidence."""
+    trained_target = model_target or facts["model"]["target_column"]
+    trained = facts.get("target_definition")
+    evaluated = _target_definition(declared, target, manifest)
+    if trained_target != target and (trained is None or trained != evaluated):
+        return "prediction_target_mismatch"
+    unit = declared.get("column_units", {}).get(target, target_unit)
+    if unit is None or facts.get("label_unit") is None:
+        return "target_unit_missing"
+    if facts["label_unit"] != unit:
+        return "prediction_target_unit_mismatch"
+    if (
+        trained is None
+        or evaluated is None
+        or (trained["label_semantics"] is None)
+        != (evaluated["label_semantics"] is None)
+    ):
+        return "prediction_target_definition_missing"
+    if trained != evaluated:
+        return "prediction_target_definition_mismatch"
+    return None
+
+
+def _validate_target_definition(definition, target):
+    if definition is None:
+        return
+    if (
+        type(definition) is not dict
+        or set(definition)
+        != {"source_label", "target_transform", "target_clip", "label_semantics"}
+        or definition["source_label"]
+        != ("forward_return_20d" if target == "model_target" else target)
+        or type(definition["target_transform"]) is not str
+        or type(definition["target_clip"]) is not str
+        or definition["target_transform"]
+        not in (
+            {"raw", "date_zscore", "percentile", "industry_size_residual"}
+            if target == "model_target"
+            else {"raw"}
+        )
+        or definition["target_clip"]
+        not in (
+            {"none", "mad", "quantile_1_99"} if target == "model_target" else {"none"}
+        )
+        or definition["label_semantics"] is not None
+        and type(definition["label_semantics"]) is not dict
+    ):
+        raise ValueError("model_target_definition_invalid")
+    canonical_identity_bytes(definition)
+
+
 def validate_model_fit_facts(facts, metadata):
     """Validate chronology using only realized training and decision facts."""
+    _validate_target_definition(
+        facts.get("target_definition"), facts["model"]["target_column"]
+    )
     cutoff = strict_timestamp_series(
         pd.Series([facts["fit_cutoff"]]), error="invalid_fit_cutoff"
     ).iloc[0]

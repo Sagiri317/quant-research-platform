@@ -566,6 +566,14 @@ def _open_tardis_archive(root, *, expected_manifest_hash):
 class _ArchiveCoverage:
     def __init__(self, readers):
         self.readers = readers
+        self.ranges = sorted(
+            (reader.rows[0][0], max(row[1] for row in reader.rows), index)
+            for index, reader in enumerate(readers)
+            if reader.rows
+        )
+        self.position = 0
+        self.active = {}
+        self.last_bounds = None
 
     def get(self, observation_id, default=None):
         for reader in self.readers:
@@ -581,9 +589,26 @@ class _ArchiveCoverage:
         return value
 
     def covering(self, start_ns, end_ns):
+        if len(self.readers) == 1 and self.ranges:
+            return self.readers[0].covering(start_ns, end_ns)
+        if self.last_bounds is not None and (
+            start_ns < self.last_bounds[0] or end_ns < self.last_bounds[1]
+        ):
+            raise ValueError("binance_coverage_window_non_monotonic")
+        self.last_bounds = (start_ns, end_ns)
+        self.active = {
+            index: stop for index, stop in self.active.items() if stop > start_ns
+        }
+        while self.position < len(self.ranges):
+            start, stop, index = self.ranges[self.position]
+            if start > end_ns:
+                break
+            self.position += 1
+            if stop > start_ns:
+                self.active[index] = stop
         result = []
-        for reader in self.readers:
-            result.extend(reader.covering(start_ns, end_ns))
+        for index in sorted(self.active):
+            result.extend(self.readers[index].covering(start_ns, end_ns))
             if len(result) >= 2:
                 break
         return tuple(result[:2])

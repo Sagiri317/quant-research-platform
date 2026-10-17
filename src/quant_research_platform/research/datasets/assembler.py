@@ -98,9 +98,6 @@ def _assemble_research_dataset_from_sessions(
         diagnostics=diagnostics,
     )
 
-    metadata["inputs"] = {
-        data_id: str(session.root) for data_id, session in input_sessions.items()
-    }
     write_dataset(
         artifact_root,
         chunks,
@@ -117,7 +114,7 @@ def _iter_joined_processed_chunks(
     time_window: TimeWindow,
     diagnostics: dict | None = None,
 ) -> Iterator[pd.DataFrame]:
-    base_session = sessions[dataset_spec.base_input_data_id].filtered_view(time_window)
+    base_session = sessions[dataset_spec.base_input_data_id]
     physical_order = (
         "timestamp",
         *(key for key in dataset_spec.primary_key if key != "timestamp"),
@@ -138,9 +135,7 @@ def _iter_joined_processed_chunks(
                 continue
             # Physical partitions may be asset-major. Read selected rows once,
             # then order their actual timestamps before slicing base domains.
-            frame = materialize_dataset_session(
-                sessions[data_id].filtered_view(time_window)
-            )
+            frame = materialize_dataset_session(sessions[data_id])
             timestamps = strict_timestamp_series(
                 frame.timestamp, error="invalid_time_chunk_timestamp_values"
             )
@@ -1044,36 +1039,6 @@ def assemble(config: Mapping) -> Path:
         },
         **dict.fromkeys(context, ColumnRole.CONTEXT),
     }
-    units = {
-        column: unit
-        for name, item in actual_specs.items()
-        for column, unit in item.column_units.items()
-        if column in output_roles and column in sessions[name].logical_columns
-    }
-    for transform in transforms:
-        for group in transform.output_groups:
-            for factor in transform.source_columns:
-                suffix = ("pre_neutral_" if group == "pre_neutral" else "") + factor
-                for prefix in ("feature_missing_", "feature_observed_"):
-                    units[prefix + suffix] = "dimensionless"
-                source_unit = next(
-                    (
-                        item.column_units[factor]
-                        for item in actual_specs.values()
-                        if factor in item.column_units
-                    ),
-                    None,
-                )
-                if transform.scale:
-                    units["feature_" + suffix] = "dimensionless"
-                elif source_unit is not None:
-                    units["feature_" + suffix] = source_unit
-    if "model_target" in labels:
-        units["model_target"] = (
-            "decimal_return"
-            if config.get("target_transform") in {"raw", "industry_size_residual"}
-            else "dimensionless"
-        )
     spec = ResearchDatasetSpec(
         data_id=config["dataset_id"],
         market_id=config["market_id"],
@@ -1099,7 +1064,6 @@ def assemble(config: Mapping) -> Path:
         exclude_st=config.get("exclude_st", True),
         exclude_pt=config.get("exclude_pt", True),
         column_roles=output_roles,
-        column_units=units,
         label_availability_columns={
             label: maturity
             for label, maturity in availability.items()
@@ -1159,23 +1123,31 @@ def assemble(config: Mapping) -> Path:
                 if label in consumed and maturity in consumed
             },
         )
-    spec = replace(
-        spec,
-        column_units={
-            **{
-                column: unit
-                for column, unit in spec.column_units.items()
-                if column in generated_features or column == "model_target"
-            },
-            **{
-                column: unit
-                for item in consumed_specs.values()
-                for column, unit in item.column_units.items()
-                if column in output_roles
-            },
-        },
-    )
     _validate_research_input_specs(spec, consumed_specs)
+    units = {
+        column: unit
+        for item in consumed_specs.values()
+        for column, unit in item.column_units.items()
+        if column in output_roles
+    }
+    for transform in transforms:
+        for group in transform.output_groups:
+            for factor in transform.source_columns:
+                suffix = ("pre_neutral_" if group == "pre_neutral" else "") + factor
+                for prefix in ("feature_missing_", "feature_observed_"):
+                    units[prefix + suffix] = "dimensionless"
+                source_unit = consumed_specs[producers[factor]].column_units.get(factor)
+                if transform.scale:
+                    units["feature_" + suffix] = "dimensionless"
+                elif source_unit is not None:
+                    units["feature_" + suffix] = source_unit
+    if "model_target" in labels:
+        units["model_target"] = (
+            "decimal_return"
+            if spec.target_transform in {"raw", "industry_size_residual"}
+            else "dimensionless"
+        )
+    spec = replace(spec, column_units=units)
     existing = ()
     projected = {}
     for data_id in _ordered_input_data_ids(spec):
@@ -1190,6 +1162,7 @@ def assemble(config: Mapping) -> Path:
         time_window=window,
         input_sessions=projected,
         metadata={
+            "inputs": inputs,
             "producer_diagnostics": {"reused_feature_transforms": feature_lineage},
             "parameters": {
                 "base_input_data_id": base_input,

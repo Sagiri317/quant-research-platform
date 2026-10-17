@@ -644,6 +644,11 @@ def produce_cross_asset_context(
         sessions[data_id] = _selected_context_session(root, dependencies).filtered_view(
             time_window if data_id == target_id else TimeWindow(_EPOCH, time_window.end)
         )
+        if (
+            "segment_id" in dependencies
+            and "segment_id" not in sessions[data_id].logical_columns
+        ):
+            raise ValueError("crypto_information_segment_required")
     metadata = {
         "inputs": {key: str(session.root) for key, session in sessions.items()},
         "producer_diagnostics": {

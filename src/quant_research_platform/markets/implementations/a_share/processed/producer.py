@@ -414,33 +414,6 @@ def _processed_frames(
         or spec.data_id == "execution_mask"
         or spec.kind is ProcessedDataKind.FACTOR,
     )
-    lower, upper, closed = time_window_timestamp_interval(time_window)
-    declared_axis = None
-    if panel_axis is not None:
-        calendar = source.get("trading_calendar")
-        if calendar is None or calendar.empty:
-            raise ValueError("a_share_panel_calendar_required")
-        declared_axis = _calendar_panel_axis(
-            materialize_dataset_session(panel_axis), calendar
-        )
-        sessions = tuple(sorted(declared_axis.timestamp.unique()))
-        sessions = tuple(pd.Timestamp(value) for value in sessions)
-        asset_sessions = {
-            asset: tuple(group.timestamp.sort_values())
-            for asset, group in declared_axis.groupby("asset_id", sort=False)
-        }
-    if panel_source:
-        source["observed_market_sessions"] = observed_sessions
-        history_start = pd.Timestamp(
-            min(lower, sessions[0]) if sessions else lower
-        ).normalize()
-        # Candidate dates cannot come from a potentially incomplete calendar.
-        # The panel certifies requested O/C; older unknowns only break state carry.
-        sessions = tuple(
-            pd.date_range(
-                history_start, upper, inclusive="both" if closed else "left"
-            ).as_unit("ns")
-        )
     definitions = (
         tuple(
             definition
@@ -464,9 +437,40 @@ def _processed_frames(
     )
     if spec.data_id == "on_id_decomposition":
         lookahead = max(json.loads(spec.parameters_json)["horizons"]) + 1
-    events = None
     if spec.data_id == "execution_mask":
         lookahead = EXECUTION_LOOKAHEAD_SESSIONS
+    lower, upper, closed = time_window_timestamp_interval(time_window)
+    declared_axis = None
+    if panel_axis is not None:
+        calendar = source.get("trading_calendar")
+        if calendar is None or calendar.empty:
+            raise ValueError("a_share_panel_calendar_required")
+        declared_axis = _calendar_panel_axis(
+            materialize_dataset_session(panel_axis),
+            calendar,
+            time_window=time_window,
+            lookback=lookback,
+            lookahead=lookahead,
+        )
+        sessions = tuple(sorted(declared_axis.timestamp.unique()))
+        sessions = tuple(pd.Timestamp(value) for value in sessions)
+        asset_sessions = {
+            asset: tuple(group.timestamp.sort_values())
+            for asset, group in declared_axis.groupby("asset_id", sort=False)
+        }
+    if panel_source:
+        source["observed_market_sessions"] = observed_sessions
+        history_start = pd.Timestamp(
+            min(lower, sessions[0]) if sessions else lower
+        ).normalize()
+        # Candidate dates cannot come from a potentially incomplete calendar.
+        # The panel certifies requested O/C; older unknowns only break state carry.
+        sessions = tuple(
+            pd.date_range(
+                history_start, upper, inclusive="both" if closed else "left"
+            ).as_unit("ns")
+        )
+    events = None
     if spec.data_id == "fundamental_pit":
         events = _financial_pit_events(
             source, required_sources=spec.source_input_data_ids
@@ -675,8 +679,8 @@ def _processed_frames(
         del output, frames, current_source
 
 
-def _calendar_panel_axis(panel, calendar):
-    """Fill evidenced own-market segments; unknown membership is a local barrier."""
+def _calendar_panel_axis(panel, calendar, *, time_window=None, lookback=0, lookahead=0):
+    """Fill consumed own-market sessions without rewriting historical membership."""
     if panel.empty:
         return panel
     panel = panel.sort_values(["asset_id", "timestamp"], kind="mergesort").reset_index(
@@ -688,16 +692,15 @@ def _calendar_panel_axis(panel, calendar):
         (unknown | previous_unknown).groupby(panel.asset_id).cumsum()
     )
     stop = panel.timestamp.max()
+    lower, upper = panel.timestamp.min(), stop
+    if time_window is not None:
+        lower, upper, closed = time_window_timestamp_interval(time_window)
+        lower = pd.Timestamp(lower)
+        upper = pd.Timestamp(upper) - pd.Timedelta(0 if closed else 1, "ns")
     states = {
-        market: market_type_calendar_state(calendar, market)
+        market: market_type_calendar_state(calendar, market).sort_index()
         for market in panel.market_type.dropna().unique()
     }
-    for market, observed in panel.groupby("market_type", sort=False):
-        state = states[market].reindex(pd.DatetimeIndex(observed.timestamp))
-        if state.isna().any():
-            raise ValueError("a_share_panel_calendar_coverage_missing")
-        if not state.all():
-            raise ValueError("a_share_input_key_outside_calendar")
     columns = [
         "market_id",
         "asset_id",
@@ -706,8 +709,30 @@ def _calendar_panel_axis(panel, calendar):
         "market_type",
         "_calendar_segment",
     ]
-    pieces = [panel.loc[unknown, columns]]
+    pieces = [panel.loc[unknown & panel.timestamp.between(lower, upper), columns]]
+    for market, observed in pieces[0].groupby("market_type", sort=False):
+        state = states[market].reindex(pd.DatetimeIndex(observed.timestamp))
+        if state.isna().any():
+            raise ValueError("a_share_panel_calendar_coverage_missing")
+        if not state.all():
+            raise ValueError("a_share_input_key_outside_calendar")
     for asset, asset_rows in panel.groupby("asset_id", sort=False):
+        if "delisting_date" in asset_rows:
+            # Knowledge follows the explicit listing identity, while unknown
+            # membership independently breaks numerical window continuity.
+            listing = asset_rows.listing_date
+            exit_date = asset_rows.delisting_date.groupby(listing, sort=False).ffill()
+            exit_changed = exit_date.notna() & exit_date.ne(
+                exit_date.groupby(listing, sort=False).shift()
+            )
+            known_at = (
+                asset_rows.timestamp.where(exit_changed)
+                .groupby(listing, sort=False)
+                .ffill()
+            )
+            asset_rows = asset_rows.assign(
+                _calendar_exit=exit_date.where(exit_date.ge(known_at), known_at)
+            )
         for (_, _), lifecycle in asset_rows.loc[~unknown.loc[asset_rows.index]].groupby(
             ["listing_date", "_calendar_segment"], sort=False
         ):
@@ -723,9 +748,17 @@ def _calendar_panel_axis(panel, calendar):
             segment_end = (
                 stop if later.empty else later.timestamp.min() - pd.Timedelta(days=1)
             )
-            changes = lifecycle.loc[
-                lifecycle.market_type.ne(lifecycle.market_type.shift()).fillna(True)
-            ]
+            changed = lifecycle.market_type.ne(lifecycle.market_type.shift()).fillna(
+                True
+            )
+            if "_calendar_exit" in lifecycle:
+                changed |= (
+                    lifecycle._calendar_exit.notna()
+                    & lifecycle._calendar_exit.ne(lifecycle._calendar_exit.shift())
+                )
+            changes = lifecycle.loc[changed]
+            intervals = []
+            candidates = []
             for position, (_, row) in enumerate(changes.iterrows()):
                 start = max(row.timestamp, row.listing_date)
                 end = segment_end
@@ -733,14 +766,50 @@ def _calendar_panel_axis(panel, calendar):
                     end = min(
                         end, changes.iloc[position + 1].timestamp - pd.Timedelta(days=1)
                     )
-                if pd.notna(row.get("delisting_date", pd.NaT)):
-                    end = min(end, row.delisting_date)
+                if pd.notna(row.get("_calendar_exit", pd.NaT)):
+                    end = min(end, row._calendar_exit)
+                if end < start:
+                    continue
+                intervals.append((row, start, end))
+                state = states[row.market_type].loc[start:end]
+                candidates.extend(state.index[state.to_numpy(dtype=bool)])
+            if not intervals:
+                continue
+            start, end = intervals[0][1], intervals[-1][2]
+            if end < lower or start > upper:
+                continue
+            # Select the true per-lifecycle halo before requiring O/C evidence.
+            # Unknown calendar dates inside it still fail; they cannot be skipped.
+            dates = pd.DatetimeIndex(candidates).sort_values()
+            preceding = dates[dates < lower]
+            following = dates[dates > upper]
+            required_start = (
+                preceding[-lookback]
+                if lookback and len(preceding) >= lookback
+                else start
+                if lookback
+                else lower.ceil("D")
+            )
+            required_end = (
+                following[lookahead - 1]
+                if lookahead and len(following) >= lookahead
+                else end
+                if lookahead
+                else upper.floor("D")
+            )
+            for row, start, end in intervals:
+                start, end = max(start, required_start), min(end, required_end)
                 if end < start:
                     continue
                 days = pd.date_range(start, end).as_unit("ns")
                 state = states[row.market_type].reindex(days)
                 if state.isna().any():
                     raise ValueError("a_share_panel_calendar_coverage_missing")
+                observed = lifecycle.loc[
+                    lifecycle.timestamp.between(start, end), "timestamp"
+                ]
+                if not state.reindex(pd.DatetimeIndex(observed)).all():
+                    raise ValueError("a_share_input_key_outside_calendar")
                 pieces.append(
                     pd.DataFrame(
                         {
@@ -754,14 +823,33 @@ def _calendar_panel_axis(panel, calendar):
                     )
                 )
     declared = pd.concat(pieces, ignore_index=True)
-    if declared.duplicated(["market_id", "asset_id", "timestamp"]).any():
+    keys = ["market_id", "asset_id", "timestamp"]
+    if declared.duplicated(keys).any():
         raise ValueError("a_share_panel_lifecycle_overlap")
+    requested = panel.loc[panel.timestamp.between(lower, upper), keys]
+    if (
+        not pd.MultiIndex.from_frame(requested)
+        .isin(pd.MultiIndex.from_frame(declared[keys]))
+        .all()
+    ):
+        raise ValueError("a_share_input_key_outside_panel")
     return declared
 
 
 def _align_panel_observations(declared, dependencies):
     """Retain the full clock while selected rows alone define published signals."""
     keys = ["market_id", "asset_id", "timestamp"]
+    # Shared block reads may include another market's longer halo. Those rows
+    # are not dependencies of this asset's bounded calculation.
+    bounds = declared.groupby("asset_id", sort=False).timestamp.agg(["min", "max"])
+    dependencies = {
+        name: frame.loc[
+            frame.timestamp.between(
+                frame.asset_id.map(bounds["min"]), frame.asset_id.map(bounds["max"])
+            )
+        ]
+        for name, frame in dependencies.items()
+    }
     for selected in dependencies.values():
         if (
             selected.merge(

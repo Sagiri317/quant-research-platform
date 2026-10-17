@@ -59,6 +59,7 @@ def optimize_portfolio(
     cash_column: str | None = None,
     config: OptimizerConfig | None = None,
     eligibility_column: str | None = None,
+    receivable_weight: float = 0.0,
 ) -> OptimizationResult:
     """Maximize expected active alpha minus expected trade cost under hard limits."""
     required = {
@@ -82,6 +83,13 @@ def optimize_portfolio(
         raise ValueError("optimizer_execution_assumptions_invalid")
     if type(nav) is not float or not np.isfinite(nav) or nav <= 0:
         raise ValueError("optimizer_nav_invalid")
+    if (
+        type(receivable_weight) is not float
+        or not np.isfinite(receivable_weight)
+        or not 0.0 <= receivable_weight <= 1.0
+    ):
+        raise ValueError("optimizer_receivable_weight_invalid")
+    budget = 1.0 - receivable_weight
     if eligibility_column is not None and eligibility_column not in assets:
         raise ValueError("optimizer_eligibility_column_missing")
     if financial_column is not None and financial_column not in assets:
@@ -125,7 +133,7 @@ def optimize_portfolio(
             raise ValueError("optimizer_weight_invalid")
     current = data["current_weight"].to_numpy()
     benchmark = data["benchmark_weight"].to_numpy()
-    if not np.isclose(current.sum(), 1.0) or not np.isclose(benchmark.sum(), 1.0):
+    if not np.isclose(current.sum(), budget) or not np.isclose(benchmark.sum(), 1.0):
         raise ValueError("optimizer_weight_sum_invalid")
     valid_adv = np.isfinite(data["adv"]) & data["adv"].gt(0.0)
     cash = (
@@ -138,10 +146,15 @@ def optimize_portfolio(
         if column in data:
             if not pd.api.types.is_bool_dtype(data[column]):
                 raise ValueError("optimizer_boolean_column_invalid")
-    risk_missing = (
-        ~np.isfinite(data["specific_variance"])
-        | data["specific_variance"].lt(0.0)
-        | ~np.isfinite(data.loc[:, columns]).all(axis=1)
+    if (
+        data["specific_variance"].lt(0.0).any()
+        or np.isinf(
+            data.loc[:, ["specific_variance", *columns]].to_numpy(dtype="float64")
+        ).any()
+    ):
+        raise ValueError("optimizer_risk_invalid")
+    risk_missing = data["specific_variance"].isna() | data.loc[:, columns].isna().any(
+        axis=1
     )
     incomplete = risk_missing | ~np.isfinite(data["expected_alpha"])
     # Frozen holdings remain real active risk. Missing volume never authorizes
@@ -158,11 +171,11 @@ def optimize_portfolio(
     if (risk_missing & (current != benchmark) & cannot_reach_benchmark).any():
         raise ValueError("optimizer_held_risk_unavailable")
     data["expected_alpha"] = data["expected_alpha"].where(~incomplete, 0.0)
+    original_specific = data["specific_variance"].to_numpy(dtype="float64")
+    original_exposure = data.loc[:, columns].to_numpy(dtype="float64")
     data["specific_variance"] = data["specific_variance"].where(~risk_missing, 0.0)
     data["adv"] = data["adv"].where(valid_adv, np.inf)
-    exposure = (
-        data.loc[:, columns].where(~risk_missing, 0.0, axis=0).to_numpy(dtype="float64")
-    )
+    exposure = np.where(np.isfinite(original_exposure), original_exposure, 0.0)
     expected_alpha = data["expected_alpha"].to_numpy(dtype="float64")
     specific = data["specific_variance"].to_numpy(dtype="float64")
     adv = data["adv"].to_numpy(dtype="float64")
@@ -180,15 +193,26 @@ def optimize_portfolio(
     # Report proven economic infeasibility separately from solver failures.
     tolerance = 1e-8
     lower, upper = np.asarray(bounds, dtype="float64").T
-    if lower.sum() > 1.0 + tolerance or upper.sum() < 1.0 - tolerance:
+    if lower.sum() > budget + tolerance or upper.sum() < budget - tolerance:
         raise ValueError("optimizer_budget_bounds_infeasible")
-    capacity = assumptions.adv_participation * adv / nav
+    # Scale before multiplying so representable capacity survives tiny ADV/NAV.
+    # An unrepresentably large capacity is nonbinding for bounded portfolio weights.
+    participation_mantissa, participation_exponent = np.frexp(
+        assumptions.adv_participation
+    )
+    adv_mantissa, adv_exponent = np.frexp(adv)
+    nav_mantissa, nav_exponent = np.frexp(nav)
+    with np.errstate(over="ignore", under="ignore"):
+        capacity = np.ldexp(
+            participation_mantissa * adv_mantissa / nav_mantissa,
+            participation_exponent + adv_exponent - nav_exponent,
+        )
     reachable_lower = np.maximum(lower, current - capacity)
     reachable_upper = np.minimum(upper, current + capacity)
     if (
         np.any(reachable_lower > reachable_upper + tolerance)
-        or reachable_lower.sum() > 1.0 + tolerance
-        or reachable_upper.sum() < 1.0 - tolerance
+        or reachable_lower.sum() > budget + tolerance
+        or reachable_upper.sum() < budget - tolerance
     ):
         raise ValueError("optimizer_capacity_bounds_infeasible")
     minimum_turnover = max(
@@ -204,8 +228,12 @@ def optimize_portfolio(
 
     relative_exposure = _stock_leg_exposures(exposure, benchmark, cash)
 
-    # Exact derivatives avoid forward-difference bias at no-trade kinks.
-    # np.sign(0) selects the valid zero subgradient of absolute value.
+    # Turnover uses an exact epigraph: u >= +/- (w - current), sum(u) <= 2T.
+    # Bounding u by ADV capacity also enforces the original per-name trade limit.
+    # Eliminating u gives exactly the original feasible weights; no absolute-value
+    # constraint kink remains for SLSQP at unchanged names.
+    count = len(current)
+
     def risk_jacobian(weights: np.ndarray) -> np.ndarray:
         active = weights - benchmark
         factor_active = active @ exposure
@@ -214,95 +242,104 @@ def optimize_portfolio(
             + 2.0 * specific * active
         )
 
-    def exposure_jacobian(weights, matrix, limit):
-        return (
-            limit * (~cash)[None, :] - np.sign(matrix.T @ weights)[:, None] * matrix.T
+    def exposure_bands(matrix, limit):
+        return np.concatenate(
+            (limit * (~cash)[None, :] - matrix.T, limit * (~cash)[None, :] + matrix.T)
         )
 
+    industry_bands = exposure_bands(
+        relative_exposure[:, : len(industry_columns)], config.industry_active_limit
+    )
+    style_bands = exposure_bands(
+        relative_exposure[:, len(industry_columns) :], config.style_active_limit
+    )
+
+    # Fixed weights also have fixed absolute trades. Leaving their auxiliaries
+    # free can create a zero-row budget Jacobian when all weights are fixed.
+    trade_upper = np.where(
+        lower == upper, np.minimum(capacity, abs(lower - current)), capacity
+    )
+    trade_lower = np.where(lower == upper, trade_upper, 0.0)
+    turnover_jacobian = np.r_[np.zeros(count), np.full(count, -0.5)]
+    trade_jacobian = np.block(
+        [[-np.eye(count), np.eye(count)], [np.eye(count), np.eye(count)]]
+    )
+    industry_jacobian = np.pad(industry_bands, ((0, 0), (0, count)))
+    style_jacobian = np.pad(style_bands, ((0, 0), (0, count)))
     constraints = [
         {
             "type": "eq",
-            "fun": lambda weights: float(weights.sum() - 1.0),
-            "jac": lambda weights: np.ones(len(weights)),
+            "fun": lambda point: float(point[:count].sum() - budget),
+            "jac": lambda point: np.r_[np.ones(count), np.zeros(count)],
         },
         {
             "type": "ineq",
-            "fun": lambda weights: float(
-                config.tracking_error_limit**2 - risk(weights)
+            "fun": lambda point: float(
+                config.tracking_error_limit**2 - risk(point[:count])
             ),
-            "jac": risk_jacobian,
+            "jac": lambda point: np.r_[risk_jacobian(point[:count]), np.zeros(count)],
         },
         {
             "type": "ineq",
-            "fun": lambda weights: float(
-                config.target_turnover_limit - 0.5 * np.abs(weights - current).sum()
+            "fun": lambda point: float(
+                config.target_turnover_limit - 0.5 * point[count:].sum()
             ),
-            "jac": lambda weights: -0.5 * np.sign(weights - current),
+            "jac": lambda point: turnover_jacobian,
         },
         {
             "type": "ineq",
-            "fun": lambda weights: (
-                config.industry_active_limit * weights[~cash].sum()
-                - np.abs(relative_exposure[:, : len(industry_columns)].T @ weights)
-            ),
-            "jac": lambda weights: exposure_jacobian(
-                weights,
-                relative_exposure[:, : len(industry_columns)],
-                config.industry_active_limit,
-            ),
+            "fun": lambda point: industry_bands @ point[:count],
+            "jac": lambda point: industry_jacobian,
         },
         {
             "type": "ineq",
-            "fun": lambda weights: (
-                config.style_active_limit * weights[~cash].sum()
-                - np.abs(relative_exposure[:, len(industry_columns) :].T @ weights)
-            ),
-            "jac": lambda weights: exposure_jacobian(
-                weights,
-                relative_exposure[:, len(industry_columns) :],
-                config.style_active_limit,
-            ),
+            "fun": lambda point: style_bands @ point[:count],
+            "jac": lambda point: style_jacobian,
         },
         {
             "type": "ineq",
-            "fun": lambda weights: (
-                assumptions.adv_participation - np.abs(weights - current) * nav / adv
+            "fun": lambda point: np.concatenate(
+                (
+                    point[count:] - (point[:count] - current),
+                    point[count:] + (point[:count] - current),
+                )
             ),
-            "jac": lambda weights: np.diag(-np.sign(weights - current) * nav / adv),
+            "jac": lambda point: trade_jacobian,
         },
     ]
     result = minimize(
-        lambda weights: float(
-            -(expected_alpha @ (weights - benchmark))
-            + float(expected_transaction_cost(weights)) / nav
+        lambda point: float(
+            -(expected_alpha @ (point[:count] - benchmark))
+            + float(expected_transaction_cost(point[:count])) / nav
         ),
-        current.copy(),
+        np.r_[current, np.zeros(count)],
         method="SLSQP",
-        bounds=bounds,
+        bounds=(*bounds, *zip(trade_lower, trade_upper, strict=True)),
         constraints=constraints,
         options={"ftol": config.solver_ftol, "maxiter": config.solver_maxiter},
     )
     if not result.success:
         raise ValueError("optimizer_failed_closed")
-    weights = np.asarray(result.x, dtype="float64")
+    weights = np.asarray(result.x[:count], dtype="float64")
     _verify_solution(
         weights,
         bounds=bounds,
         current=current,
         benchmark=benchmark,
-        exposure=exposure,
+        exposure=original_exposure,
         covariance=covariance,
-        specific=specific,
+        specific=original_specific,
         adv=adv,
         config=config,
         industry_count=len(industry_columns),
         nav=nav,
         assumptions=assumptions,
         cash=cash,
+        receivable_weight=receivable_weight,
     )
     active = weights - benchmark
     factor_variance, specific_variance = _risk_variances(
-        active, exposure, covariance, specific
+        active, original_exposure, covariance, original_specific
     )
     participation = np.abs(weights - current) * nav / adv
     return OptimizationResult(
@@ -408,6 +445,25 @@ def _stock_leg_exposures(exposure, benchmark, cash):
     return centered
 
 
+def _stock_leg_active_exposure(weights, benchmark, exposure, cash):
+    """Ignore only normalization roundoff; unknown required facts stay NaN."""
+    stock = ~cash
+    gross, reference_gross = weights[stock].sum(), benchmark[stock].sum()
+    if gross <= 0.0 or reference_gross <= 0.0:
+        return np.full(exposure.shape[1], np.nan)
+    normalized = weights[stock] / gross
+    reference = benchmark[stock] / reference_gross
+    active = normalized - reference
+    roundoff = 8 * np.finfo(float).eps * np.maximum(abs(normalized), abs(reference))
+    nonzero = abs(active) > roundoff
+    selected = exposure[stock]
+    complete = np.isfinite(selected[nonzero]).all(axis=0)
+    result = np.full(exposure.shape[1], np.nan)
+    known = np.where(np.isfinite(selected), selected, 0.0)
+    result[complete] = active @ known[:, complete]
+    return result
+
+
 def _verify_solution(
     weights: np.ndarray,
     *,
@@ -423,12 +479,13 @@ def _verify_solution(
     nav: float,
     assumptions: ExecutionAssumptions,
     cash: np.ndarray | None = None,
+    receivable_weight: float = 0.0,
 ) -> None:
     tolerance = 1e-08
     active = weights - benchmark
     risk = sum(_risk_variances(active, exposure, covariance, specific))
     if not np.isfinite(weights).all() or not np.isclose(
-        weights.sum(), 1.0, atol=tolerance
+        weights.sum(), 1.0 - receivable_weight, atol=tolerance
     ):
         raise ValueError("optimizer_solution_invalid")
     if any(
@@ -444,8 +501,19 @@ def _verify_solution(
         raise ValueError("optimizer_solution_invalid")
     if cash is None:
         cash = np.zeros(len(weights), dtype=bool)
-    relative_exposure = _stock_leg_exposures(exposure, benchmark, cash)
     stock_gross = weights[~cash].sum()
+    if (
+        stock_gross > 0.0
+        and not np.isfinite(
+            _stock_leg_active_exposure(weights, benchmark, exposure, cash)
+        ).all()
+    ):
+        raise ValueError("optimizer_stock_exposure_unavailable")
+    # Unknown rows may be eliminated only after their actual coefficients were
+    # proved zero above. Keep the original absolute-band feasibility checker.
+    relative_exposure = _stock_leg_exposures(
+        np.where(np.isfinite(exposure), exposure, 0.0), benchmark, cash
+    )
     if np.any(
         np.abs(relative_exposure[:, :industry_count].T @ weights)
         > config.industry_active_limit * stock_gross + tolerance
