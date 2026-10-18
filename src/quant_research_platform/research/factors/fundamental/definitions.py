@@ -79,11 +79,32 @@ FUNDAMENTAL_FORMULAS = {
 
 FUNDAMENTAL_FACTORS = tuple(FUNDAMENTAL_FORMULAS)
 
+# Only cross-statement formulas require matching accounting endpoints.
+FUNDAMENTAL_PERIOD_INPUTS = {
+    "roe": ("income_report_period", "balance_report_period"),
+    "roa": ("income_report_period", "balance_report_period"),
+    "gross_profitability": ("income_report_period", "balance_report_period"),
+    "earnings_change_to_assets": ("income_report_period", "balance_report_period"),
+    "cfo_to_assets": ("cashflow_report_period", "balance_report_period"),
+    "capex_to_assets": ("cashflow_report_period", "balance_report_period"),
+    "accruals": (
+        "income_report_period",
+        "cashflow_report_period",
+        "balance_report_period",
+    ),
+}
+
 
 def fundamental_inputs(factor: str) -> tuple[str, ...]:
     terms, denominator, _ = FUNDAMENTAL_FORMULAS[factor]
     return tuple(
-        dict.fromkeys((*[term.removeprefix("-") for term in terms], denominator))
+        dict.fromkeys(
+            (
+                *[term.removeprefix("-") for term in terms],
+                denominator,
+                *FUNDAMENTAL_PERIOD_INPUTS.get(factor, ()),
+            )
+        )
     )
 
 

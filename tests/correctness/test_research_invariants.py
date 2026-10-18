@@ -1336,6 +1336,9 @@ def test_fundamental_value_factors_use_panel_total_cap() -> None:
             "average_total_assets": [90.0, 110.0],
             "average_parent_equity": [55.0, 66.0],
             "total_market_cap": [200.0, 220.0],
+            "balance_report_period": pd.Timestamp("2023-12-31"),
+            "income_report_period": pd.Timestamp("2023-12-31"),
+            "cashflow_report_period": pd.Timestamp("2023-12-31"),
         }
     )
     result = calculate_fundamental_factors(frame)
@@ -1640,6 +1643,9 @@ def test_compound_fundamental_ratios_preserve_units_and_undefined_domains(scale)
 
     values = dict.fromkeys(FUNDAMENTAL_INPUT_COLUMNS, scale)
     values.update(
+        balance_report_period=pd.Timestamp("2023-12-31"),
+        income_report_period=pd.Timestamp("2023-12-31"),
+        cashflow_report_period=pd.Timestamp("2023-12-31"),
         operating_cost_ttm=-scale,
         operating_cash_flow_ttm=-scale,
         prior_year_parent_net_income_ttm=-scale,
@@ -1683,6 +1689,9 @@ def test_compound_fundamental_ratio_preserves_cancellation() -> None:
 
     values = dict.fromkeys(FUNDAMENTAL_INPUT_COLUMNS, 1.0)
     values.update(
+        balance_report_period=pd.Timestamp("2023-12-31"),
+        income_report_period=pd.Timestamp("2023-12-31"),
+        cashflow_report_period=pd.Timestamp("2023-12-31"),
         short_term_borrowings=1e8,
         current_portion_noncurrent_liabilities=1.0,
         long_term_borrowings=-1e8,

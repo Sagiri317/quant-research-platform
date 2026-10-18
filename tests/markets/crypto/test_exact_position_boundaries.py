@@ -12,6 +12,8 @@ from quant_research_platform.contracts.portfolios import PortfolioCapital
 from quant_research_platform.markets.implementations.crypto.execution import (
     TakerConfig,
     _position_headroom,
+    _taker_order_quantity,
+    replay_maker_calibration,
     simulate_maker,
     simulate_taker,
 )
@@ -313,3 +315,122 @@ def test_taker_multilevel_notional_and_pnl_round_once_at_native_boundary(
         summarize_portfolio_ledger(capital, artifact.iter_chunks())["net_pnl"]
         == expected_pnl
     )
+
+
+@pytest.mark.parametrize("direction", (-1, 1))
+@pytest.mark.parametrize("latency", (0, 100))
+def test_taker_multilevel_candidates_reach_ledger_within_exact_budget(
+    tmp_path, direction, latency
+):
+    capital = PortfolioCapital("depth_budget", 1000.0, "USDT", "linear_perpetual")
+    levels = tuple((1000 + direction * (5 + index), 0.03) for index in range(11))
+    book = _state(0, **{"ask_levels" if direction == 1 else "bid_levels": levels})
+    batches = []
+    simulate_taker(
+        [book, replace(book, observed_time_ns=200_000_000)],
+        [{"timestamp_ms": stamp, "prediction": direction * 0.1} for stamp in (0, 10)],
+        prediction_column="prediction",
+        prediction_horizon_ms=500,
+        config=TakerConfig(0.3, 0.5, latency, 0.0, 100),
+        observed_coverage={"s1": _coverage(0, 201)},
+        capital=capital,
+        asset_id="btc_usdt",
+        funding_events=(),
+        funding_forecasts=KNOWN_NO_FUNDING,
+        on_ledger=batches.append,
+    )
+    output = write_portfolio_ledger_artifact(
+        tmp_path / "ledger",
+        capital=capital,
+        metadata={"window": {"start": "1970-01-01", "end": "1970-01-02"}},
+        produce=lambda emit: [emit(batch) for batch in batches],
+    )
+    reread = list(read_portfolio_ledger_artifact(output).iter_chunks())
+    assert reread == batches
+    trades = [trade for batch in reread for trade in batch.trades]
+    diagnostics = [row for batch in reread for row in batch.diagnostics]
+    requests = [
+        row.number for row in diagnostics if row.name == "decision_requested_quantity"
+    ]
+    gains = [
+        row.number
+        for row in diagnostics
+        if row.name == "expected_net_gain" and row.fill_id is None
+    ]
+    assert requests == [direction * 0.3, direction * 0.2]
+    assert [trade.quantity for trade in trades] == [
+        Fraction(value) for value in requests
+    ]
+    position = Fraction()
+    for trade, requested, gain in zip(trades, requests, gains, strict=True):
+        assert abs(trade.quantity) <= Fraction(0.3)
+        position += trade.quantity
+        assert abs(position) <= Fraction(0.5)
+        # Independently integrate the selected depth; gain uses ordinary tolerance.
+        remaining = abs(Fraction(requested))
+        expected = Fraction()
+        forecast = 100.0 * (1.0 + direction * 0.1)
+        for tick, available in levels:
+            take = min(remaining, Fraction(available))
+            expected += take * direction * (Fraction(forecast) - Fraction(tick, 10))
+            remaining -= take
+        assert remaining == 0
+        assert gain == pytest.approx(float(expected), rel=1e-14, abs=1e-14)
+
+
+def test_taker_depth_endpoint_is_rounded_down_before_gain_evaluation():
+    quantity, gain = _taker_order_quantity(
+        _state(0, ask_levels=((1005, 0.1), (1006, 0.2), (1200, 1.0))),
+        prediction=0.1,
+        config=TakerConfig(1.0, 1.0, 0, 0.0, 100),
+        buy_limit=1.0,
+        sell_limit=1.0,
+        funding_per_unit=0.0,
+    )
+    depth = Fraction(0.1) + Fraction(0.2)
+    assert Fraction(quantity) <= depth < Fraction(math.nextafter(quantity, math.inf))
+    forecast = 100.0 * 1.1
+    expected = Fraction(0.1) * (Fraction(forecast) - Fraction(1005, 10)) + (
+        Fraction(quantity) - Fraction(0.1)
+    ) * (Fraction(forecast) - Fraction(1006, 10))
+    assert gain == pytest.approx(float(expected), rel=1e-14)
+
+
+@pytest.mark.parametrize("direction", (-1, 1))
+def test_maker_calibration_zero_fill_keeps_partial_remaining_exact(direction):
+    buyer = direction == 1
+    price = "99.5" if buyer else "100.5"
+    samples = []
+    replay_maker_calibration(
+        [_state(0)],
+        [
+            _trade(50, price=price, quantity="3" if buyer else "2", maker_buyer=buyer),
+            _trade(
+                100,
+                price="100.5" if buyer else "99.5",
+                quantity="1",
+                maker_buyer=not buyer,
+            ),
+            _trade(150, price=price, quantity="1", maker_buyer=buyer),
+        ],
+        [
+            {
+                **_quote(0),
+                "proxy_prediction": 1.0,
+                "price_prediction": 0.0,
+                "price_label": 0.0,
+                "label_available_at_ns": 500_000_000,
+            }
+        ],
+        order_quantity=1e16,
+        latency_ms=0,
+        observed_coverage={"s1": _coverage(0, 501)},
+        trade_coverage={"trade-connection-1": _coverage(0, 501)},
+        cutoff_ns=500_000_000,
+        on_sample=lambda **sample: samples.append(sample),
+        on_event=lambda **_event: None,
+    )
+    sample = next(row for row in samples if row["side"] == ("buy" if buyer else "sell"))
+    # One unit after queue depletion, a zero-fill opposite trade, then one more unit.
+    assert sample["filled"] == 2.0
+    assert sample["terminal_reason"] == "expired"

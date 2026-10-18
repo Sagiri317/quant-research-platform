@@ -101,7 +101,7 @@ def explanation_fixture(root, *, native_only=False, undefined=False):
                 "timestamp": [timestamp] * 4,
                 "asset_id": ["asset-A"] * 4,
                 "feature": features,
-                "input_value": [2.0, -3.0, 1.0, 4.0],
+                "input_value": ["2.0", "-3.0", "1.0", "4.0"],
                 "contribution": values,
             }
         )

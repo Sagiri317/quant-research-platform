@@ -127,6 +127,97 @@ def test_real_eleven_models_roundtrip_matches_production_prediction(
         assert Path(config["model"], "predictor.pkl").read_bytes() == before
 
 
+@pytest.mark.parametrize("columns", [("x",), ("x", "y")])
+def test_rank_input_evidence_survives_mixed_numeric_persistence(tmp_path, columns):
+    from quant_research_platform.reports import plots
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.Timestamp("2020-01-01"),
+            "asset_id": list("abcd"),
+            "x": pd.array([2**53, 2**53 + 1, 2**53 + 2, None], dtype="Int64"),
+            "y": pd.array([0.1, 0.2, 0.3, 0.4], dtype="Float32"),
+            "label": [0.0, 1.0, 2.0, 3.0],
+            "eligible": True,
+            "label_available_at": pd.Timestamp("2020-01-01"),
+        }
+    )
+    if len(columns) == 1:
+        frame = frame.iloc[:3].copy()
+    case = fit_frame(
+        tmp_path / "fit",
+        frame,
+        ModelSpec(
+            model_id="rank",
+            model_algorithm="equal_weight_rank_ensemble",
+            input_factor_columns=columns,
+            target_column="label",
+        ),
+    )
+    frame["timestamp"] = pd.Timestamp("2020-01-02")
+    window = {"start": "2020-01-02", "end": "2020-01-02"}
+    predictions, _, _ = predict_frame(tmp_path / "predict", frame, case, window=window)
+    source = tmp_path / "future.parquet"
+    frame.to_parquet(source, index=False)
+    output = explain(
+        {
+            "model": str(case.root),
+            "inputs": str(source),
+            "input_spec": case.config["input_spec"],
+            "output": str(tmp_path / "explained"),
+            "window": window,
+            "methods": ["rank"],
+            "selection": {"max_rows": 4, "max_dates": 1},
+            "sample_role": "test",
+            "output_space": "model_output",
+        }
+    )
+    # Consumers need only the artifact, not the original observations or model.
+    source.unlink()
+    _, tables = read_explanation(output)
+    rows = tables["contributions"].set_index(["asset_id", "feature"])
+    assert rows.loc[("a", "x"), "input_value"] == "9007199254740992"
+    assert rows.loc[("b", "x"), "input_value"] == "9007199254740993"
+    assert rows.loc[("c", "x"), "input_value"] == "9007199254740994"
+    # Average rank centered by (n + 1) / 2, divided by n, then equal weights.
+    expected = pd.DataFrame({"x": [-1 / 3, 0, 1 / 3]}, index=list("abc"))
+    if len(columns) == 2:
+        assert pd.isna(rows.loc[("d", "x"), "input_value"])
+        saved_y = rows.xs("y", level="feature").input_value
+        assert saved_y.iloc[0] == "0.10000000149011612"
+        assert saved_y.map(float).tolist() == [float(value) for value in frame.y]
+        expected.loc["d", "x"] = 0
+        expected["y"] = [-3 / 8, -1 / 8, 1 / 8, 3 / 8]
+        expected /= 2
+        assert (
+            plots.plot(
+                {
+                    "kind": "explanation_waterfall",
+                    "inputs": str(output),
+                    "output": str(tmp_path / "waterfall.svg"),
+                    "timestamp": "2020-01-02",
+                    "asset_id": "d",
+                }
+            )
+            .stat()
+            .st_size
+            > 1000
+        )
+    np.testing.assert_allclose(
+        rows.contribution.unstack("feature").loc[expected.index, columns],
+        expected,
+        rtol=1e-14,
+        atol=1e-16,
+    )
+    for actual in (predictions, tables["predictions"]):
+        np.testing.assert_allclose(
+            actual.set_index("asset_id").loc[expected.index, "prediction_score"],
+            expected.sum(axis=1),
+            rtol=1e-14,
+            atol=1e-16,
+        )
+
+
 @pytest.mark.parametrize("algorithm", list(_ALGORITHMS)[:4])
 def test_linear_shap_uses_exact_explicit_historical_mean(tmp_path, algorithm):
     case, frame, config = _case(tmp_path, algorithm)
@@ -491,13 +582,28 @@ def test_read_rejects_tampered_explanation_values(tmp_path, subtests):
     _, _, config = _case(tmp_path)
     output = explain(config)
     metadata, tables = read_explanation(output)
-    for member, column, error in (
-        ("contributions", "contribution", "additivity_failed"),
-        ("predictions", "prediction_score", "prediction_binding_invalid"),
+    for member, column, value, error in (
+        (
+            "contributions",
+            "contribution",
+            tables["contributions"].contribution[0] + 1,
+            "additivity_failed",
+        ),
+        (
+            "predictions",
+            "prediction_score",
+            tables["predictions"].prediction_score[0] + 1,
+            "prediction_binding_invalid",
+        ),
+        ("contributions", "contribution", np.inf, "table_nonfinite"),
+        *(
+            ("contributions", "input_value", value, "input_value_invalid")
+            for value in ("None", "nan", "inf", "not-a-number")
+        ),
     ):
-        with subtests.test(member=member):
+        with subtests.test(member=member, column=column, value=value):
             changed = {name: frame.copy() for name, frame in tables.items()}
-            changed[member].loc[0, column] += 1
+            changed[member].loc[0, column] = value
             with pytest.raises(ValueError, match=error):
                 write_explanation(tmp_path / member, metadata=metadata, tables=changed)
             path = output / f"{member}.parquet"

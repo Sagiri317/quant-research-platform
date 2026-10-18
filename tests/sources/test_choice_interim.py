@@ -567,17 +567,9 @@ def test_missing_predecessor_is_not_a_proven_all_null_snapshot(tmp_path):
     assert frame.total_assets.tolist() == [100.0, 110.0]
 
 
-@pytest.mark.parametrize(
-    ("mode", "reason"),
-    [
-        ("initial", "choice_first_disclosure_snapshot_missing"),
-        ("revision", "choice_revision_snapshot_missing"),
-        ("predecessor", "choice_revision_predecessor_missing"),
-        ("chronology", "choice_disclosure_chronology_unresolved"),
-    ],
-)
+@pytest.mark.parametrize("mode", ["initial", "revision", "predecessor", "chronology"])
 def test_known_missing_coordinates_are_unknown_at_their_real_public_dates(
-    tmp_path, mode, reason
+    tmp_path, mode
 ):
     layout = StorageLayout(tmp_path)
     with choice_session(SDK(response())) as session:

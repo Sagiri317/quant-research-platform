@@ -387,7 +387,8 @@ background 的 `root_seed` 省略时为 42，显式值覆盖默认。
 背景逐行受真实拟合窗口、精确拟合截止和训练资产域约束，但标为历史参考分布，不冒称还原全部训练样本。
 抽样使用有界 reservoir；其余方法不接收未使用的背景选项。
 
-贡献表保存 timestamp、asset_id、feature、input_value、contribution；预测表保存基值、真实输出、预测分数、
+贡献表保存 timestamp、asset_id、feature、input_value、contribution；input_value 是逐源列保真的可空数值文本，缺失保存为 null，不参与贡献计算；旧浮点 input_value 产物需重新解释生成。
+预测表保存基值、真实输出、预测分数、
 加和残差与容差及逐行状态。不可表示或强抵消导致解释精度丢失时保留有效预测，贡献标 UNDEFINED 与原因，
 不能用巨大项幅度容差伪装解释成功。summary 给出有符号/绝对均值、绝对占比、排序与覆盖，另可按 month/quarter 汇总。
 贡献汇总先逐日取截面均值，再对日期等权，不按展示行数跨日期加权。

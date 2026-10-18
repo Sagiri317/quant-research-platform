@@ -8,9 +8,17 @@ from math import fsum
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.contracts.validation import strict_finite_numeric_series
+from quant_research_platform.contracts.validation import (
+    strict_finite_numeric_series,
+    strict_timestamp_series,
+)
 
-from .definitions import FUNDAMENTAL_FACTORS, FUNDAMENTAL_FORMULAS, fundamental_inputs
+from .definitions import (
+    FUNDAMENTAL_FACTORS,
+    FUNDAMENTAL_FORMULAS,
+    FUNDAMENTAL_PERIOD_INPUTS,
+    fundamental_inputs,
+)
 
 
 def calculate_fundamental_factors(
@@ -33,11 +41,23 @@ def calculate_fundamental_factors(
     if not set(inputs).issubset(panel.columns):
         raise ValueError("fundamental_factor_input_columns_missing")
     result = panel.loc[:, ("asset_id", "timestamp")].copy()
+    period_columns = {
+        name
+        for factor in requested
+        for name in FUNDAMENTAL_PERIOD_INPUTS.get(factor, ())
+    }
+    periods = {
+        name: strict_timestamp_series(
+            panel[name], error=f"invalid_fundamental_period: {name}", allow_null=True
+        )
+        for name in period_columns
+    }
     values = {
         column: strict_finite_numeric_series(
             panel[column], error=f"invalid_fundamental_value: {column}", allow_null=True
         ).astype("float64")
         for column in inputs
+        if column not in period_columns
     }
 
     for column in requested:
@@ -52,6 +72,13 @@ def calculate_fundamental_factors(
         if adjustment:
             numerator = (*numerator, adjustment * divisor)
         ratio = _ratio(numerator[0] if len(numerator) == 1 else numerator, divisor)
+        required_periods = FUNDAMENTAL_PERIOD_INPUTS.get(column, ())
+        if required_periods:
+            endpoint = periods[required_periods[0]]
+            aligned = endpoint.notna()
+            for name in required_periods[1:]:
+                aligned &= endpoint.eq(periods[name])
+            ratio = ratio.where(aligned)
         result[column] = ratio.replace([np.inf, -np.inf], np.nan).astype("float64")
     return result
 

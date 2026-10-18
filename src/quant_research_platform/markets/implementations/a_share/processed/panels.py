@@ -901,6 +901,7 @@ def _snapshot_industry_history(
             category_entry is not None
             and leaf_entry is not None
             and str(category_entry.industry_level) == "1"
+            and pd.notna(leaf_entry.parent_industry_code)
             and leaf_entry.parent_industry_code == (major or row.industry_category_code)
         )
         if major:
@@ -908,6 +909,7 @@ def _snapshot_industry_history(
             valid = (
                 valid
                 and major_entry is not None
+                and pd.notna(major_entry.parent_industry_code)
                 and major_entry.parent_industry_code == row.industry_category_code
             )
         valid_paths.append(valid)

@@ -70,7 +70,7 @@ _SCHEMAS = {
             ("timestamp", _T),
             ("asset_id", _S),
             ("feature", _S),
-            ("input_value", _F),
+            ("input_value", _S),
             ("contribution", _F),
         ]
     ),
@@ -305,6 +305,11 @@ def _validate(metadata, tables, *, partial=False):
         ):
             raise ValueError("explanation_table_keys_invalid")
         for field in schema:
+            if name == "contributions" and field.name == "input_value":
+                values = pd.to_numeric(converted.input_value.dropna(), errors="coerce")
+                if not np.isfinite(values).all():
+                    raise ValueError("explanation_input_value_invalid")
+                continue
             if pa.types.is_string(field.type) and (
                 converted[field.name].isna().any()
                 or field.name != "reason"

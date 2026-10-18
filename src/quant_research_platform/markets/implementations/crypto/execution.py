@@ -766,24 +766,33 @@ def _taker_order_quantity(
         (1.0, state.asks, buy_limit),
         (-1.0, state.bids, sell_limit),
     ):
-        remaining = min(config.order_quantity, limit)
-        quantity = gain = 0.0
+        budget = Fraction(min(config.order_quantity, limit))
+        quantity = Fraction()
+        gain = 0.0
         for tick, available in levels:
-            size = min(remaining, available)
+            size = min(budget - quantity, Fraction(available))
             if size <= 0:
                 continue
             price = index_to_price(tick, state.price_unit)
             fee_per_unit = price * config.taker_fee_bps / 10_000.0
             unit_gain = sign * (forecast - price + funding_per_unit) - fee_per_unit
-            increment = size * unit_gain
-            gain += increment
+            endpoint = quantity + size
+            candidate = _position_headroom(endpoint, 0)
+            # Evaluate the representable order, not the unrounded depth endpoint.
+            # If it precedes this level, it was already considered at an earlier one.
+            if candidate >= quantity:
+                candidate_gain = (
+                    gain + float(Fraction(candidate) - quantity) * unit_gain
+                )
+                if not math.isfinite(candidate_gain):
+                    raise ValueError("hft_expected_gain_unrepresentable")
+                if candidate_gain > best_gain:
+                    best_quantity, best_gain = sign * candidate, candidate_gain
+            gain += float(size) * unit_gain
             if not math.isfinite(gain):
                 raise ValueError("hft_expected_gain_unrepresentable")
-            quantity += size
-            remaining -= size
-            if gain > best_gain:
-                best_quantity, best_gain = sign * quantity, gain
-            if remaining <= 0:
+            quantity = endpoint
+            if quantity == budget:
                 break
     return best_quantity, best_gain
 
@@ -1071,7 +1080,7 @@ def simulate_taker(
                     continue
                 price = index_to_price(price_index, latest_state.price_unit)
                 takes.append((quantity, price))
-                rest = remaining - quantity
+                rest = remaining - (Fraction(quantity) if exact_remaining else quantity)
                 # FastTwoSum preserves lost residuals before consuming later depth.
                 if not exact_remaining and (remaining - rest) - quantity != 0:
                     rest = Fraction(remaining) - Fraction(quantity)
@@ -2188,9 +2197,10 @@ def replay_maker_calibration(
                             except PortfolioTargetBlocked:
                                 unknown_decisions.add(order.created_time_ns)
                                 continue
-                            order.remaining -= quantity
-                            if order.remaining <= 0:
-                                sample["terminal_reason"] = "filled"
+                            if quantity > 0:
+                                order.remaining -= quantity
+                                if order.remaining <= 0:
+                                    sample["terminal_reason"] = "filled"
                         if unknown_decisions:
                             exclude_references(unknown_decisions)
                     else:

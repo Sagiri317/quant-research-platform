@@ -89,6 +89,9 @@ PANEL_COLUMNS = (
 EXECUTION_COLUMNS = (*PLATFORM_ASSET_TIME_KEY, "can_enter", "can_exit")
 FINANCIAL_PIT_COLUMNS = (
     *PLATFORM_ASSET_TIME_KEY,
+    "balance_report_period",
+    "income_report_period",
+    "cashflow_report_period",
     "total_assets",
     "total_liabilities",
     "parent_equity",

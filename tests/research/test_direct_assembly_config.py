@@ -101,6 +101,76 @@ def test_disabled_steps_accept_input_without_unneeded_context_and_persist_option
     assert spec["column_units"]["feature_observed_momentum_20d"] == "dimensionless"
 
 
+def test_declared_industry_pairs_have_independent_native_feature_and_target_residuals(
+    tmp_path,
+):
+    group = np.repeat([0, 1], 60)
+    residual = np.tile([-1.0, 1.0], 60)
+    size = np.tile([-1.0, -1.0, 1.0, 1.0], 30)
+    frame = _frame().assign(
+        eligible=True,
+        industry_standard_id=np.where(group == 0, "research:sector", "research"),
+        industry_level1_code=np.where(group == 0, "A", "sector:A"),
+        momentum_20d=10 + 10 * group + residual,
+        log_total_market_cap=10 + size,
+        forward_return_20d=0.1 + 0.1 * group + 0.01 * size + 0.001 * residual,
+        matured_at=pd.Timestamp("2024-02-01"),
+    )
+    root, _ = _source(
+        tmp_path, frame, availability={"forward_return_20d": "matured_at"}
+    )
+    actual = read_dataset(
+        assembler.assemble(
+            _config(
+                tmp_path,
+                root,
+                feature_recipe="a_share_canonical",
+                feature_transform={
+                    "clip": "none",
+                    "industry_neutralize": True,
+                    "size_neutralize": False,
+                    "center": False,
+                    "scale": False,
+                    "impute_missing": False,
+                },
+                label_columns=["model_target"],
+                target_transform="industry_size_residual",
+                target_clip="none",
+            )
+        )
+    ).sort_values("asset_id")
+    # Separate industry intercepts remove both offsets. The size pattern is
+    # orthogonal to +/-1, and residual targets retain their return units.
+    np.testing.assert_allclose(actual.feature_momentum_20d, residual, atol=1e-12)
+    np.testing.assert_allclose(actual.model_target, 0.001 * residual, atol=1e-14)
+    assert actual.feature_observed_momentum_20d.eq(1).all()
+    assert actual.model_target_available_at.eq(pd.Timestamp("2024-02-01")).all()
+
+
+def test_industry_pair_encoding_escapes_both_components_and_preserves_nulls():
+    from quant_research_platform.research.features.transforms import (
+        _industry_group_codes,
+    )
+
+    frame = pd.DataFrame(
+        {
+            "industry_standard_id": ["CSRC2012", "a:b", "a", "a\\b", "a", None, "a"],
+            "industry_level1_code": ["A", "c", "b:c", "c", "b\\c", "c", None],
+        }
+    )
+    actual = _industry_group_codes(frame)
+    assert actual.iloc[:5].tolist() == [
+        "CSRC2012:A",
+        r"a\:b:c",
+        r"a:b\:c",
+        r"a\\b:c",
+        r"a:b\\c",
+    ]
+    assert actual.iloc[5:].isna().all()
+    assert actual.nunique() == 5
+    assert isinstance(actual.dtype, pd.StringDtype)
+
+
 def test_actual_label_clock_and_units_survive_selection(tmp_path):
     frame = _frame(3).assign(
         return_next=[0.1, 0.2, 0.3],

@@ -138,6 +138,56 @@ def test_price_dependent_fundamental_retains_market_cap_input(tmp_path, native):
 
 
 @pytest.mark.parametrize("native", [False, True])
+def test_cross_statement_selection_consumes_only_required_periods(tmp_path, native):
+    frame = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": ["aligned", "mixed", "unknown"],
+            "timestamp": pd.Timestamp("2024-01-02"),
+            "parent_net_income_ttm": 25.0,
+            "average_parent_equity": 100.0,
+            "income_report_period": pd.Timestamp("2023-12-31"),
+            "balance_report_period": pd.to_datetime(["2023-12-31", "2022-12-31", None]),
+            "has_legal_fundamental_pit": True,
+            "unrelated_value": "not numeric",
+        }
+    )
+    source = _input(tmp_path, "fundamental_pit", frame, native=native)
+    source["columns"] = [
+        "parent_net_income_ttm",
+        "average_parent_equity",
+        "income_report_period",
+        "balance_report_period",
+    ]
+    request = _request(
+        tmp_path,
+        "fundamental_factors",
+        {"fundamental_pit": source},
+        "2024-01-02",
+        "2024-01-02",
+        factor_columns=["roe"],
+    )
+    result = read_dataset(prepare(request)).set_index("asset_id")
+    assert result.loc["aligned", "roe"] == 0.25
+    assert result.loc[["mixed", "unknown"], "roe"].isna().all()
+    assert result.has_legal_fundamental_pit.all()
+    # Explicit projection cannot discard the dates required by this formula.
+    source["columns"].remove("income_report_period")
+    with pytest.raises(ValueError, match="data_operation_input_columns_missing"):
+        prepare(request)
+    (tmp_path / "legacy").mkdir()
+    legacy = _input(
+        tmp_path / "legacy",
+        "fundamental_pit",
+        frame.drop(columns=["income_report_period", "balance_report_period"]),
+        native=native,
+    )
+    request["inputs"] = {"fundamental_pit": legacy}
+    with pytest.raises(ValueError, match=".*column.*"):
+        prepare(request)
+
+
+@pytest.mark.parametrize("native", [False, True])
 def test_selected_a_share_label_bounds_real_lookahead_and_persisted_schema(
     tmp_path, monkeypatch, native
 ):

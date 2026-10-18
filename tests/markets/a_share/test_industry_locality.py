@@ -312,6 +312,75 @@ def test_unresolvable_dictionary_path_is_unknown_without_harming_other_assets(
     _assert_prices_unchanged(actual)
 
 
+@pytest.mark.parametrize(
+    "major,missing_code", [("", "A01"), ("AA", "A01"), ("AA", "AA")]
+)
+def test_native_nullable_parent_only_invalidates_its_dependent_path(
+    tmp_path, major, missing_code
+):
+    from quant_research_platform.sources.csmar.interim import normalize_raw_frame
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+    from tests.helpers.a_share_catalogs import scientific_catalogs
+
+    dictionary = _dictionary()
+    dictionary.loc[dictionary.industry_level.eq("1"), "parent_industry_code"] = None
+    if major:
+        selected = dictionary.industry_standard_id.eq(
+            "CSRC2012"
+        ) & dictionary.industry_code.eq("A01")
+        dictionary.loc[selected, ["parent_industry_code", "industry_level"]] = [
+            major,
+            "3",
+        ]
+        dictionary.loc[len(dictionary)] = ["CSRC2012", major, "major", "A", "2"]
+    records = [
+        {**_snapshot("000001", "2020-01-02"), "industry_major_code": major},
+        _snapshot("000002", "2020-01-02", code="J66"),
+        _snapshot("000003", "2020-01-02", standard="CAPCO"),
+    ]
+    # Missing root parents are legitimate; only required edges need evidence.
+    control = _panel(records, dictionary=dictionary)
+    assert control.query("asset_id == '000001'").industry_level1_code.eq("A").all()
+    missing = dictionary.industry_standard_id.eq(
+        "CSRC2012"
+    ) & dictionary.industry_code.eq(missing_code)
+    dictionary.loc[missing, "parent_industry_code"] = None
+    raw = dictionary.rename(
+        columns={
+            "industry_standard_id": "INDCLASSIFYSYSTEMCODE",
+            "industry_code": "INDUSTRYCODE",
+            "industry_name": "INDUSTRYNAME",
+            "parent_industry_code": "P_INDUSTRYCODE",
+            "industry_level": "RANK",
+        }
+    ).assign(INDUSTRYID=[str(i) for i in range(len(dictionary))])
+    normalized = normalize_raw_frame(raw, "industry_classification_sets")
+    root = tmp_path / "dictionary"
+    write_dataset(
+        root,
+        normalized,
+        spec=scientific_catalogs().interim.get("industry_classification_sets"),
+    )
+    restored = read_dataset(root)
+    assert (
+        restored.loc[
+            restored.industry_code.eq(missing_code)
+            & restored.industry_standard_id.eq("CSRC2012"),
+            "parent_industry_code",
+        ]
+        .isna()
+        .all()
+    )
+    actual = _panel(records, dictionary=restored)
+    assert actual.query("asset_id == '000001'")[INDUSTRY_COLUMNS].isna().all().all()
+    pd.testing.assert_frame_equal(
+        actual.loc[actual.asset_id.ne("000001")],
+        control.loc[control.asset_id.ne("000001")],
+        check_exact=True,
+    )
+    _assert_prices_unchanged(actual)
+
+
 def test_coalesced_reference_conflict_remains_unknown_until_newer_evidence(tmp_path):
     from quant_research_platform.sources.reference import interim
     from quant_research_platform.storage.datasets import read_dataset

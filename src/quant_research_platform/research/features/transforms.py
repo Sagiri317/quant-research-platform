@@ -340,12 +340,15 @@ def _neutralize_cross_section(
 def _industry_group_codes(
     frame: pd.DataFrame, industry_column: str = "industry_level1_code"
 ) -> pd.Series:
-    """Keep industry categories from different standards distinct."""
-    return (
-        frame["industry_standard_id"]
+    """Encode the standard/code pair without conflating literal separators."""
+    standard, code = (
+        frame[column]
         .astype("string")
-        .str.cat(frame[industry_column].astype("string"), sep=":")
+        .str.replace("\\", "\\\\", regex=False)
+        .str.replace(":", "\\:", regex=False)
+        for column in ("industry_standard_id", industry_column)
     )
+    return standard.str.cat(code, sep=":")
 
 
 def _center_scale(values, *, center, scale):

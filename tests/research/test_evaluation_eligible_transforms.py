@@ -1,4 +1,4 @@
-"""Proposed native regression for eligible-domain EVAL transformations."""
+"""Native regressions for eligible-domain EVAL transformations."""
 
 import numpy as np
 import pandas as pd
@@ -78,3 +78,49 @@ def test_native_evaluation_transforms_only_selected_cross_section(tmp_path, tran
         assert diagnostics["rows_after_signal_label_dropna"] == 3
         assert diagnostics["filter_columns_used"] == ["eligible"]
         assert diagnostics["filter_definition"] == "eligible == True"
+
+
+def test_native_zscore_is_undefined_on_singleton_eligible_cross_section(tmp_path):
+    frame = pd.DataFrame(
+        {
+            "asset_id": ["a", "b"],
+            "timestamp": pd.Timestamp("2023-01-02"),
+            "x": [1.0, 2.0],
+            "label": [1.0, 2.0],
+            "available_at": pd.Timestamp("2023-01-02"),
+            "eligible": [True, False],
+        }
+    )
+    inputs = write_evaluation_input(
+        tmp_path / "inputs", frame, factors=("x",), labels=("label",)
+    )
+    spec = EvaluationSpec(
+        evaluation_id="singleton",
+        market_id="a_share",
+        research_dataset_id="fixture",
+        signals=(
+            SignalSpec(
+                signal_id="score",
+                source_kind="factor",
+                source_column="x",
+                transform="zscore",
+            ),
+        ),
+        label_columns=("label",),
+        label_availability_columns={"label": "available_at"},
+        filter_mode="eligible",
+        n_groups=3,
+    )
+    output = evaluate(
+        evaluation_config(
+            inputs,
+            tmp_path / "evaluation",
+            spec,
+            start="2023-01-02",
+            end="2023-01-03",
+        )
+    )
+    _, tables = read_evaluation_outputs(output)
+    # A singleton has zero variance; an ineligible peer must not define its score.
+    assert tables["metrics"].n_obs.tolist() == [0]
+    assert tables["grouped_label_values"].empty

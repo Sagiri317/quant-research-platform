@@ -501,7 +501,15 @@ def _attributions(result, context, indices, method, background, output_space):
     predictions["additivity_tolerance"] = tolerance
     predictions["status"] = ["UNDEFINED" if reason else "DEFINED" for reason in reasons]
     predictions["reason"] = reasons
-    rows = selected[["timestamp", "asset_id", *columns]].melt(
+    # Preserve each source column before melt can coerce mixed integers/floats.
+    rows = selected[["timestamp", "asset_id", *columns]].copy()
+    for column in columns:
+        values = rows[column]
+        # Promote narrow floats so the text is exact without a source dtype tag.
+        if pd.api.types.is_float_dtype(values.dtype):
+            values = values.astype("float64")
+        rows[column] = values.astype("string")
+    rows = rows.melt(
         id_vars=["timestamp", "asset_id"], var_name="feature", value_name="input_value"
     )
     rows["contribution"] = contributions.T.reshape(-1)

@@ -1594,7 +1594,10 @@ def test_forecast_age_feature_persists_transform_and_strata(tmp_path, group, reu
         ].tolist() == [4, 4]
 
 
-def test_native_industry_standards_survive_evaluation_and_statistics(tmp_path):
+@pytest.mark.parametrize("declared_pairs", [False, True])
+def test_native_industry_standards_survive_evaluation_and_statistics(
+    tmp_path, declared_pairs
+):
     from tests.markets.a_share.test_industry_locality import _panel, _snapshot
 
     panel = _panel(
@@ -1617,6 +1620,11 @@ def test_native_industry_standards_survive_evaluation_and_statistics(tmp_path):
             label_available_at=pd.Timestamp("2020-01-02"),
         )
     )
+    first, second = "CSRC2012:A", "CAPCO:A"
+    if declared_pairs:
+        frame["industry_standard_id"] = ["research:sector", "research", "research"]
+        frame["industry_level1_code"] = ["A", "sector:A", "sector:A"]
+        first, second = r"research\:sector:A", r"research:sector\:A"
     spec = EvaluationSpec(
         evaluation_id="industry",
         market_id="a_share",
@@ -1632,9 +1640,7 @@ def test_native_industry_standards_survive_evaluation_and_statistics(tmp_path):
     for name in ("known", "unknown"):
         selected = frame.copy()
         if name == "unknown":
-            selected.loc[
-                selected.industry_standard_id.eq("CSRC2012"), "industry_standard_id"
-            ] = None
+            selected.loc[selected.asset_id.eq("000001"), "industry_standard_id"] = None
         inputs = write_evaluation_input(
             tmp_path / name, selected, factors=("x",), labels=("label",)
         )
@@ -1654,14 +1660,14 @@ def test_native_industry_standards_survive_evaluation_and_statistics(tmp_path):
         else:
             pd.testing.assert_frame_equal(overall, tables["metrics"], check_exact=True)
         daily = tables["daily_strata"]
-        known = daily.loc[daily.stratum.eq("CAPCO:A")]
+        known = daily.loc[daily.stratum.eq(second)]
         assert known.n_obs.tolist() == [2]
         assert known.ic.tolist() == pytest.approx([-1.0])
-        other = daily.loc[~daily.stratum.eq("CAPCO:A").fillna(False)]
+        other = daily.loc[~daily.stratum.eq(second).fillna(False)]
         assert other.n_obs.tolist() == [1]
         assert other.ic.isna().all()
         assert (
-            other.stratum.tolist() == ["CSRC2012:A"]
+            other.stratum.tolist() == [first]
             if name == "known"
             else other.stratum.isna().all()
         )
@@ -1676,7 +1682,7 @@ def test_native_industry_standards_survive_evaluation_and_statistics(tmp_path):
         with read_statistics_artifact(reduced).table(
             "factor_stratified_diagnostics.parquet"
         ) as stats:
-            capco = stats.loc[stats.stratum.eq("CAPCO:A")]
+            capco = stats.loc[stats.stratum.eq(second)]
             assert capco.observation_pairs.tolist() == [2, 2]
             assert capco["mean"].tolist() == pytest.approx([-1.0, -1.0])
     # The pre-existing code-only fixture has no declared standard and remains legal.

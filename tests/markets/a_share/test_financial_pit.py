@@ -986,6 +986,10 @@ def test_empty_legal_financial_event_domain_persists_unknown_panel_rows(tmp_path
     restored = read_dataset(root)
     pd.testing.assert_frame_equal(restored[list(panel.columns)], panel)
     assert not restored.has_legal_fundamental_pit.any()
+    for statement in ("balance", "income", "cashflow"):
+        assert restored[f"{statement}_report_period"].dtype == np.dtype(
+            "datetime64[ns]"
+        )
     assert (
         restored.drop(columns=[*panel.columns, "has_legal_fundamental_pit"])
         .isna()
@@ -1141,6 +1145,8 @@ def test_multi_term_factor_vectorization_preserves_domains_and_ratios():
     )
     frame["asset_id"] = "a"
     frame["timestamp"] = pd.date_range("2024-01-01", periods=len(frame))
+    for statement in ("income", "cashflow", "balance"):
+        frame[f"{statement}_report_period"] = pd.Timestamp("2023-12-31")
     actual = calculate_fundamental_factors(frame, factor_columns=["accruals"])
     expected = [
         float((Fraction(a) - Fraction(b)) / Fraction(c))

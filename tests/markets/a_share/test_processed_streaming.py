@@ -1468,6 +1468,7 @@ def test_fundamental_adapter_reuses_prior_year_for_beginning_balances(
                 "asset_id": asset,
                 "timestamp": pd.Timestamp("2020-08-03"),
                 "metric_id": metric,
+                "report_period": pd.Timestamp("2020-06-30"),
                 "value": 100.0,
                 "prior_year_value": prior,
             }

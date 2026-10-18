@@ -533,6 +533,173 @@ def test_explicit_preparation_reaches_eligible_research_dataset(tmp_path, datase
                 assert output[name].notna().any(), name
 
 
+def test_native_cross_statement_periods_mask_only_dependent_factors(tmp_path):
+    from quant_research_platform.markets.implementations.a_share.fundamentals import (
+        FINANCIAL_VALUE_COLUMNS,
+    )
+    from quant_research_platform.research.datasets.assembler import assemble
+
+    sessions = pd.bdate_range("2021-01-04", "2021-01-11").as_unit("ns")
+    frames = _synthetic_interim_frames(sessions)
+    financial = _synthetic_financial_frames()
+    lagging = {
+        "financial_cashflow": "000001",
+        "financial_income": "000002",
+        "financial_balance": "000003",
+    }
+    for source, metrics in FINANCIAL_VALUE_COLUMNS.items():
+        annual = (
+            financial[source]
+            .loc[financial[source].report_period.dt.month.eq(12)]
+            .copy()
+        )
+        previous = annual.loc[annual.report_period.dt.year.eq(2019)].copy()
+        previous["report_period"] = previous["timestamp"] = pd.Timestamp("2018-12-31")
+        annual = pd.concat([previous, annual], ignore_index=True)
+        for metric in metrics:
+            annual[metric] = (annual.report_period.dt.year - 2017).astype(float) * (
+                100.0 if source == "financial_balance" else 10.0
+            )
+        late = annual.source_asset_id.eq(
+            lagging[source]
+        ) & annual.report_period.dt.year.eq(2020)
+        annual.loc[late, "is_corrected"] = True
+        annual.loc[late, "correction_disclosure_date"] = pd.Timestamp("2021-01-06")
+        annual.loc[late, "version_identity"] = "correction@2021-01-06"
+        if source == "financial_income":
+            revision = annual.loc[
+                annual.source_asset_id.eq("000001")
+                & annual.report_period.dt.year.eq(2020)
+            ].copy()
+            revision.loc[:, list(metrics)] = 40.0
+            revision["is_corrected"] = True
+            revision["correction_disclosure_date"] = pd.Timestamp("2021-01-08")
+            revision["version_identity"] = "correction@2021-01-08"
+            annual = pd.concat([annual, revision], ignore_index=True)
+        financial[source] = annual
+    financial["financial_first_disclosure"] = pd.DataFrame(
+        [
+            dict(
+                asset_id=asset,
+                report_period=pd.Timestamp(year, 12, 31),
+                first_disclosure_date=pd.Timestamp(year + 1, 1, 1),
+            )
+            for asset in lagging.values()
+            for year in (2018, 2019, 2020)
+        ]
+    )
+    frames.update(financial)
+    inputs = _write_inputs(tmp_path / "source", frames)
+    inputs["market_panel_1d"] = _prepare(
+        tmp_path / "prepared", "market_panel_1d", inputs, sessions[0], sessions[-1]
+    )
+    results = []
+    for label, end in (("prefix", sessions[2]), ("full", sessions[-1])):
+        local = dict(inputs)
+        for name in ("fundamental_pit", "fundamental_factors"):
+            local[name] = _prepare(tmp_path / label, name, local, sessions[0], end)
+        results.append(
+            tuple(
+                read_dataset(local[name])
+                for name in ("fundamental_pit", "fundamental_factors")
+            )
+        )
+    for prefix, full in zip(results[0], results[1], strict=True):
+        pd.testing.assert_frame_equal(
+            prefix,
+            full.loc[full.timestamp.le(sessions[2])].reset_index(drop=True),
+            check_exact=True,
+        )
+    pit, factors = results[1]
+    market = read_dataset(inputs["market_panel_1d"]).set_index(
+        ["asset_id", "timestamp"]
+    )
+    income_balance = ("roe", "roa", "gross_profitability", "earnings_change_to_assets")
+    cash_balance = ("cfo_to_assets", "capex_to_assets")
+    for asset in lagging.values():
+        facts = pit.loc[pit.asset_id.eq(asset)].set_index("timestamp")
+        values = factors.loc[factors.asset_id.eq(asset)].set_index("timestamp")
+        for statement, lagged_asset in lagging.items():
+            column = statement.removeprefix("financial_") + "_report_period"
+            assert facts[column].dtype == np.dtype("datetime64[ns]")
+            assert facts.loc[sessions[0], column] == pd.Timestamp(
+                "2019-12-31" if asset == lagged_asset else "2020-12-31"
+            )
+            assert facts.loc[sessions[3] :, column].eq(pd.Timestamp("2020-12-31")).all()
+        income = 20.0 if asset == "000002" else 30.0
+        cash = 20.0 if asset == "000001" else 30.0
+        balance = 200.0 if asset == "000003" else 300.0
+        average = 150.0 if asset == "000003" else 250.0
+        cap = market.loc[(asset, sessions[0]), "total_market_cap"]
+        expected = {
+            "earnings_yield": income / cap,
+            "book_to_market": balance / cap,
+            "sales_to_price": income / cap,
+            "cashflow_to_price": cash / cap,
+            "gross_margin": 0.0,
+            "asset_growth_yoy": 1.0 if asset == "000003" else 0.5,
+            "revenue_growth_ttm_yoy": 1.0 if asset == "000002" else 0.5,
+            "parent_equity_growth_yoy": 1.0 if asset == "000003" else 0.5,
+            "liabilities_to_assets": 1.0,
+            "debt_to_assets": 4.0,
+            "cash_to_assets": 1.0,
+            "net_debt_to_assets": 3.0,
+            "roe": income / average,
+            "roa": income / average,
+            "gross_profitability": 0.0,
+            "earnings_change_to_assets": 10.0 / average,
+            "cfo_to_assets": cash / average,
+            "capex_to_assets": cash / average,
+            "accruals": np.nan,
+        }
+        for name in income_balance:
+            if asset != "000001":
+                expected[name] = np.nan
+        for name in cash_balance:
+            if asset != "000002":
+                expected[name] = np.nan
+        np.testing.assert_allclose(
+            values.loc[sessions[0], list(expected)].to_numpy(dtype=float),
+            list(expected.values()),
+            rtol=1e-13,
+            atol=0.0,
+            equal_nan=True,
+        )
+        assert facts.loc[sessions[0], "parent_net_income_ttm"] == income
+        assert facts.loc[sessions[0], "operating_cash_flow_ttm"] == cash
+        assert facts.loc[sessions[0], "average_total_assets"] == average
+        assert facts.has_legal_fundamental_pit.all()
+        np.testing.assert_allclose(
+            values.loc[
+                sessions[3], [*income_balance, *cash_balance, "accruals"]
+            ].to_numpy(dtype=float),
+            [30 / 250, 30 / 250, 0.0, 10 / 250, 30 / 250, 30 / 250, 0.0],
+            rtol=1e-13,
+            atol=0.0,
+        )
+    revised = factors.loc[factors.asset_id.eq("000001")].set_index("timestamp")
+    assert revised.loc[sessions[-1], "roe"] == pytest.approx(40 / 250)
+    assert revised.loc[sessions[-1], "accruals"] == pytest.approx(10 / 250)
+    assembled = read_dataset(
+        assemble(
+            {
+                "market_id": "a_share",
+                "dataset_id": "period_alignment",
+                "inputs": {"fundamental_factors": str(local["fundamental_factors"])},
+                "factor_columns": list(expected),
+                "label_columns": [],
+                "feature_recipe": None,
+                "context_columns": ["has_legal_fundamental_pit"],
+                "time_window": {"start": "2021-01-04", "end": "2021-01-11"},
+                "output_root": str(tmp_path / "assembled"),
+            }
+        )
+    )
+    pd.testing.assert_frame_equal(
+        assembled, factors.loc[:, assembled.columns], check_exact=True
+    )
+
+
 @pytest.mark.parametrize("negative_component", ("current_ytd", "prior_fy", "prior_ytd"))
 def test_negative_source_capex_propagates_through_native_pit_and_factor_revision(
     tmp_path, monkeypatch, negative_component
@@ -603,6 +770,12 @@ def test_negative_source_capex_propagates_through_native_pit_and_factor_revision
 
     pit = restored("fundamental_pit")
     factors = restored("fundamental_factors")
+    for statement in ("balance", "income", "cashflow"):
+        assert (
+            pit.loc[pit.timestamp.ge("2020-04-03"), f"{statement}_report_period"]
+            .eq(periods[-1])
+            .all()
+        )
     assert not factors.duplicated(["market_id", "asset_id", "timestamp"]).any()
     assert len(factors) == 3 * len(sessions)
     assert factors.timestamp.dtype == np.dtype("datetime64[ns]")

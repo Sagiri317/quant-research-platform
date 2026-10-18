@@ -1373,6 +1373,19 @@ def _fundamental_pit_frame(
             prior_year, on=["asset_id", "timestamp"], how="left", validate="one_to_one"
         )
     )
+    period_columns = []
+    for source, metrics in FINANCIAL_VALUE_COLUMNS.items():
+        column = source.removeprefix("financial_") + "_report_period"
+        period_columns.append(column)
+        # Native statement rows retain every metric, including NULL values.
+        periods = pit.loc[
+            pit.metric_id.isin(metrics), ["asset_id", "timestamp", "report_period"]
+        ].drop_duplicates(["asset_id", "timestamp"])
+        periods = periods.rename(columns={"report_period": column})
+        periods[column] = pd.to_datetime(periods[column]).astype("datetime64[ns]")
+        output = output.merge(
+            periods, on=["asset_id", "timestamp"], how="left", validate="one_to_one"
+        )
     pit_value_columns = tuple(
         column for columns in FINANCIAL_VALUE_COLUMNS.values() for column in columns
     )
@@ -1386,7 +1399,7 @@ def _fundamental_pit_frame(
     numeric_columns = {
         column
         for column in spec.required_columns
-        if column not in {"market_id", "asset_id", "timestamp"}
+        if column not in {"market_id", "asset_id", "timestamp", *period_columns}
     }
     for column in numeric_columns:
         if column in output:
