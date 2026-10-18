@@ -541,3 +541,96 @@ def test_native_partial_maturity_and_empty_date_preserve_domains(tmp_path):
     )
     assert len(empty) == 4 and empty.n_obs.eq(0).all()
     assert empty.signal_count.eq(0).all() and empty.coverage.isna().all()
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["ordinary", "large_offset", "subnormal", "cancellation", "constant", "empty"],
+)
+def test_time_series_batch_pairs_match_exact_oracle_across_chunks(case):
+    from dataclasses import replace
+
+    from quant_research_platform.research.evaluations.engine import (
+        build_evaluation_result_from_frames,
+    )
+
+    frame = _frame()
+    x = np.array([1.0, 2.0, 4.0, 8.0, 16.0, 32.0])
+    y = np.array([3.0, -2.0, 7.0, 5.0, 13.0, -1.0])
+    if case == "large_offset":
+        x, y = 1e14 + x * 0.02, -1e14 + y * 0.03
+    elif case == "subnormal":
+        x, y = x * np.nextafter(0.0, 1.0), y * np.nextafter(0.0, 1.0)
+    elif case == "cancellation":
+        x = np.array([-1.0, -1.0, 1.0, 1.0, 0.0, 0.0])
+        y = np.array([-1.0, 1.0, -1.0, np.nextafter(1.0, 2.0), 0.0, 0.0])
+    elif case == "constant":
+        x[:] = 1.0
+    elif case == "empty":
+        x[:] = np.nan
+    frame["score"], frame["r100"] = x, y
+    frame["other"] = x
+    frame.loc[1, "other"] = np.nan
+    frame["r500"] = y
+    frame.loc[2, "r500"] = np.nan
+    spec = replace(
+        _spec(),
+        signals=(
+            *_spec().signals,
+            SignalSpec(signal_id="other", source_kind="feature", source_column="other"),
+        ),
+    )
+    outputs = []
+    for size in (1, 2, 6):
+        with build_evaluation_result_from_frames(
+            (frame.iloc[start : start + size] for start in range(0, len(frame), size)),
+            spec=spec,
+            asset_column="asset_id",
+            source_columns_by_kind={"feature": ("score", "other")},
+        ) as result:
+            metrics, grouped, facts = list(result.output_chunks)[0]
+            assert grouped.empty and facts["timestamp_count"] == len(frame)
+            assert "response_metrics" not in facts
+            outputs.append(metrics)
+    for metrics in outputs:
+        pd.testing.assert_frame_equal(metrics, outputs[0], check_exact=True)
+        for row in metrics.itertuples():
+            left, right = frame[row.signal].to_numpy(), frame[row.label].to_numpy()
+            valid = np.isfinite(left) & np.isfinite(right)
+            assert row.n_obs == int(valid.sum())
+            assert row.rankic_reason == "not_applicable"
+            if case in {"constant", "empty"}:
+                assert pd.isna(row.ic)
+                assert row.ic_reason == (
+                    "zero_variance"
+                    if case == "constant"
+                    else "insufficient_observations"
+                )
+            else:
+                expected = _independent_exact_pearson(left[valid], right[valid])
+                assert pd.isna(row.ic_reason)
+                assert row.ic == pytest.approx(expected, rel=2e-14, abs=0)
+
+
+def test_native_time_series_optional_response_preserves_mature_pair_domain(tmp_path):
+    frame = _frame()
+    frame.loc[0, "a100"] = pd.Timestamp("2026-01-05")
+    frame.loc[1, "score"] = np.nan
+    frame.loc[4, "eligible"] = False
+    config = _native_config(tmp_path, frame)
+    with_response = evaluate(config)
+    _, expected = read_evaluation_outputs(
+        with_response, tables=("metrics", "ic_summary")
+    )
+    config.pop("response_diagnostics")
+    config["output"] = str(tmp_path / "plain")
+    _, actual = read_evaluation_outputs(
+        evaluate(config), tables=("metrics", "ic_summary")
+    )
+    for name in actual:
+        pd.testing.assert_frame_equal(actual[name], expected[name], check_exact=True)
+    assert actual["metrics"].n_obs.tolist() == [3, 3]
+    valid = frame.loc[[2, 3, 5]]
+    assert actual["metrics"].iloc[0].ic == pytest.approx(
+        _independent_exact_pearson(valid.score, valid.r100), abs=2e-14
+    )

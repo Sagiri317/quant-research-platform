@@ -79,7 +79,7 @@ from quant_research_platform.storage.datasets.reading import (
 )
 from quant_research_platform.storage.identity import filesystem_exists
 
-# Amortize per-issuer preparation across panel and downstream session blocks.
+# Amortize preparation for stateful panel and market-model session streams.
 DEFAULT_BATCH_ROWS = 8 * resources.DEFAULT_BATCH_ROWS
 
 
@@ -573,6 +573,10 @@ def _processed_frames(
         return
     first = 0 if panel_source else bisect_left(sessions, lower)
     stop = bisect_right(sessions, upper) if closed else bisect_left(sessions, upper)
+    # Stateless calculations consume the whole requested scientific window once.
+    # Reader/writer I/O batches do not justify recomputing overlapping halos.
+    if not panel_source:
+        block_sessions = max(1, stop - first)
     history = None
     expectations = None
     financial_calculate = None
@@ -1303,21 +1307,28 @@ def _compute_processed_frame(
             for definition in a_share.label_catalog().list()
             if definition.output_column in spec.required_columns
         )
-        pieces = [
-            label_engine.calculate_labels_for_panel(
-                group,
-                definitions=definitions,
-                sessions=trading_sessions
-                if asset_sessions is None
-                else asset_sessions[key[0]],
+        pieces = []
+        for key, group in panel.groupby(
+            ["asset_id", "listing_date"]
+            + (["_calendar_segment"] if "_calendar_segment" in panel else []),
+            sort=False,
+            dropna=False,
+        ):
+            axis = (
+                trading_sessions if asset_sessions is None else asset_sessions[key[0]]
             )
-            for key, group in panel.groupby(
-                ["asset_id", "listing_date"]
-                + (["_calendar_segment"] if "_calendar_segment" in panel else []),
-                sort=False,
-                dropna=False,
+            # The input already includes the requested endpoint lookahead.
+            # Retain interior missing sessions without rebuilding full history.
+            axis = axis[
+                bisect_left(axis, group.timestamp.min()) : bisect_right(
+                    axis, group.timestamp.max()
+                )
+            ]
+            pieces.append(
+                label_engine.calculate_labels_for_panel(
+                    group, definitions=definitions, sessions=axis
+                )
             )
-        ]
         return pd.concat(pieces, ignore_index=True).loc[:, list(spec.required_columns)]
     raise ValueError(f"unsupported_a_share_processed_kind: {spec.kind}")
 

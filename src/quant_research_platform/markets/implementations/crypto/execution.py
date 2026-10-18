@@ -420,18 +420,25 @@ def _funding_consumer(events, economics, coverage, current_book, book_coverage):
     pending = iter(events)
     next_event = next(pending, None)
     previous = 0
+    coverage_index = 0
 
     def consume(timestamp_ns):
-        nonlocal next_event, previous
+        nonlocal next_event, previous, coverage_index
+        index = coverage_index
         stop = None
         if economics.quantity and coverage is not None:
             cursor = previous + 1
-            for start, end in coverage:
+            while index < len(coverage):
+                start, end = coverage[index]
                 if end < cursor:
+                    index += 1
                     continue
                 if start > cursor or cursor > timestamp_ns:
                     break
                 cursor = end + 1
+                if cursor > timestamp_ns:
+                    break
+                index += 1
             if cursor <= timestamp_ns:
                 stop = cursor
         known_until = timestamp_ns if stop is None else stop - 1
@@ -457,6 +464,8 @@ def _funding_consumer(events, economics, coverage, current_book, book_coverage):
         if stop is not None:
             raise _AccountPathStop("portfolio_required_funding_coverage_missing", stop)
         previous = max(previous, timestamp_ns)
+        # Retain the spanning interval for the next timestamp.
+        coverage_index = index
 
     return consume
 

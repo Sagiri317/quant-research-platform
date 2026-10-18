@@ -5,9 +5,11 @@ from __future__ import annotations
 import datetime as dt
 import pickle
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, field
 from fractions import Fraction
 from functools import partial
+from itertools import tee
 from pathlib import Path
 from tempfile import TemporaryFile
 
@@ -223,6 +225,54 @@ class TardisArchive:
     source_identity: dict
     _coverage_index: ObservationCoverageIndex
     _sequence_offset: int = 0
+    _native_slices: dict = field(default_factory=dict, init=False, repr=False)
+    _native_resources: ExitStack = field(
+        default_factory=ExitStack, init=False, repr=False
+    )
+
+    def _decode_slice(self, member):
+        records = self._native_resources.enter_context(
+            closing_iterator(
+                iter_native_slice(
+                    self.root / member["path"],
+                    date=self.manifest["date"],
+                    offset_minutes=member["offset_minutes"],
+                    exchange=self.manifest["exchange"],
+                    symbols=tuple(self.manifest["symbols"]),
+                    channels=tuple(self.manifest["requested_channels"]),
+                )
+            )
+        )
+        while True:
+            try:
+                row = next(records)
+            except StopIteration:
+                return
+            except BaseException as error:
+                # Existing cursors replay the failure; a new cursor can retry.
+                self._native_slices.pop(member["path"], None)
+                yield error
+                return
+            number, timestamp, value = row
+            observed = (
+                None
+                if value is None
+                else strict_iso_timestamp(
+                    timestamp, error="tardis_observed_time_invalid"
+                ).value
+            )
+            yield number, timestamp, value, observed
+
+    def _shared_slice(self, member):
+        path = member["path"]
+        if path not in self._native_slices:
+            self._native_slices[path] = tee(self._decode_slice(member), 1)[0]
+        # Keep the anchor at the start for consumers created later in this owner.
+        records = tee(self._native_slices[path], 1)[0]
+        for row in records:
+            if isinstance(row, BaseException):
+                raise row
+            yield row
 
     def _iter_canonical_records(self, requested_symbol, data_kind, end_ns):
         """Validate native rows while tracking only this consumer's continuity."""
@@ -239,17 +289,8 @@ class TardisArchive:
         state_epoch = 0
         for member in self.manifest["files"]:
             number = 0
-            with closing_iterator(
-                iter_native_slice(
-                    self.root / member["path"],
-                    date=self.manifest["date"],
-                    offset_minutes=member["offset_minutes"],
-                    exchange=self.manifest["exchange"],
-                    symbols=tuple(self.manifest["symbols"]),
-                    channels=tuple(self.manifest["requested_channels"]),
-                )
-            ) as records:
-                for number, timestamp, value in records:
+            with closing_iterator(self._shared_slice(member)) as records:
+                for number, timestamp, value, observed in records:
                     if value is None:
                         _identity, closed, _gap = tracker.observe(
                             member["offset_minutes"], number, timestamp, value
@@ -257,13 +298,7 @@ class TardisArchive:
                         for interval in closed:
                             self._check_interval(interval)
                         continue
-                    if (
-                        end_ns is not None
-                        and strict_iso_timestamp(
-                            timestamp, error="tardis_observed_time_invalid"
-                        ).value
-                        > end_ns
-                    ):
+                    if end_ns is not None and observed > end_ns:
                         return
                     if tracker.epoch != state_epoch:
                         state_epoch = tracker.epoch
@@ -272,6 +307,7 @@ class TardisArchive:
                                 (requested_symbol, "state"),
                                 {
                                     "receive_time": timestamp,
+                                    "observed_time_ns": observed,
                                     "channel": None,
                                     "payload": None,
                                     "epoch": self._sequence_offset + state_epoch,
@@ -293,7 +329,11 @@ class TardisArchive:
                     if (symbol, kind) != (requested_symbol, data_kind):
                         continue
                     identity, closed, _gap = tracker.observe(
-                        member["offset_minutes"], number, timestamp, value
+                        member["offset_minutes"],
+                        number,
+                        timestamp,
+                        value,
+                        observed_time_ns=observed,
                     )
                     for interval in closed:
                         self._check_interval(interval)
@@ -302,8 +342,9 @@ class TardisArchive:
                             (symbol, "state"),
                             {
                                 "receive_time": timestamp,
+                                "observed_time_ns": observed,
                                 "channel": channel,
-                                "payload": value["data"],
+                                "payload": deepcopy(value["data"]),
                                 "epoch": self._sequence_offset + tracker.epoch,
                             },
                         )
@@ -324,7 +365,7 @@ class TardisArchive:
                             )
                         )
                     depth = channel != "aggTrade"
-                    payload = value["data"]
+                    payload = deepcopy(value["data"])
                     if market_type == SPOT_MARKET_TYPE:
                         payload = dict(payload)
                         for clock in ("E", "T"):
@@ -342,6 +383,7 @@ class TardisArchive:
                             else "agg_trades",
                             "payload": payload,
                             "receive_time": timestamp,
+                            "observed_time_ns": observed,
                             "receive_monotonic_ns": None,
                             "observation_id": self.source_identity["manifest_hash"]
                             + ":"
@@ -365,7 +407,7 @@ class TardisArchive:
             self._check_interval(interval)
 
     def _stream_records(self, symbol, data_kind, end_ns):
-        """Give each active consumer a streaming decoder, with no replay cache."""
+        """Track each consumer independently over request-local decoded rows."""
         requested = symbol, data_kind
         with closing_iterator(
             self._iter_canonical_records(symbol, data_kind, end_ns)
@@ -426,9 +468,7 @@ class TardisArchive:
             for record in records:
                 if record["channel"] is not None and record["channel"] not in channels:
                     continue
-                observed = strict_iso_timestamp(
-                    record["receive_time"], error="tardis_observed_time_invalid"
-                ).value
+                observed = record["observed_time_ns"]
                 _yield_value = (
                     observed,
                     record["channel"],
@@ -517,7 +557,7 @@ def _open_tardis_archive(root, *, manifest):
             symbols={symbol.upper() for symbol in manifest["symbols"]},
         ),
     )
-    yield TardisArchive(
+    archive = TardisArchive(
         root,
         manifest,
         {
@@ -527,6 +567,11 @@ def _open_tardis_archive(root, *, manifest):
         },
         index,
     )
+    try:
+        with closing_iterator(archive._native_resources):
+            yield archive
+    finally:
+        archive._native_slices.clear()
 
 
 class _ArchiveCoverage:

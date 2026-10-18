@@ -12,7 +12,7 @@ import pandas as pd
 
 from quant_research_platform.compute.dataframe.cross_section import (
     _add_correlation_aggregate,
-    _CorrelationMoments,
+    _pearson_correlation_result,
     _summarize_correlation_aggregates,
     compute_ic_and_grouped_label_values,
 )
@@ -447,17 +447,12 @@ def _iter_single_asset_time_series_output_chunks(
     summary_state: _EvaluationStreamingState | None = None,
     response_diagnostics=None,
 ) -> Iterator[_EvaluationOutputChunk]:
-    """Yield one bounded across-time correlation row per signal-label pair."""
-    response_frames = []
+    """Evaluate each pair over the complete selected narrow time-series input."""
+    selected_frames = []
     response_dates = {}
     signal_columns = tuple(signal.signal_id for signal in spec.signals)
     label_columns = spec.label_columns
     numeric_columns = (*signal_columns, *label_columns)
-    stats = {
-        (signal, label): _CorrelationMoments()
-        for signal in signal_columns
-        for label in label_columns
-    }
     rows_input = 0
     rows_after_filter = 0
     filter_columns_used = tuple(required_filter_columns(spec.filter_mode))
@@ -466,17 +461,6 @@ def _iter_single_asset_time_series_output_chunks(
     timestamp_count = 0
     minimum_timestamp: pd.Timestamp | None = None
     maximum_timestamp: pd.Timestamp | None = None
-
-    def consume_values(values: np.ndarray) -> None:
-        label_offset = len(signal_columns)
-        for signal_index, signal in enumerate(signal_columns):
-            left = values[:, signal_index]
-            for label_index, label in enumerate(label_columns):
-                right = values[:, label_offset + label_index]
-                valid = np.isfinite(left) & np.isfinite(right)
-                moments = stats[signal, label]
-                for x, y in zip(left[valid], right[valid], strict=True):
-                    moments.update(float(x), float(y))
 
     work_frames = _iter_evaluation_work_frames(
         frames,
@@ -535,17 +519,13 @@ def _iter_single_asset_time_series_output_chunks(
                 response_dates.update(
                     timestamps.groupby(timestamps.dt.normalize()).max().to_dict()
                 )
-            if response_diagnostics is None:
-                consume_values(
-                    filtered.loc[:, list(numeric_columns)].to_numpy(
-                        dtype="float64", copy=True
-                    )
-                )
-            else:
-                response_frames.append(filtered.loc[:, ["timestamp", *numeric_columns]])
-    metrics = _time_series_metrics_frame(
-        stats if maximum_timestamp is not None else {}, timestamp=maximum_timestamp
+            selected_frames.append(filtered.loc[:, ["timestamp", *numeric_columns]])
+    frame = (
+        pd.concat(selected_frames, ignore_index=True)
+        if selected_frames
+        else pd.DataFrame(columns=["timestamp", *numeric_columns])
     )
+    selected_frames.clear()
     grouped_label_values = _empty_grouped_label_values()
     metadata = {
         "rows_input": rows_input,
@@ -562,18 +542,11 @@ def _iter_single_asset_time_series_output_chunks(
         "skipped_timestamp_count": 0,
     }
     if response_diagnostics is not None:
-        frame = (
-            pd.concat(response_frames, ignore_index=True)
-            if response_frames
-            else pd.DataFrame(columns=["timestamp", *numeric_columns])
-        )
-        response_frames.clear()
         metadata.update(
             _response_tables(
                 frame, spec=spec, config=response_diagnostics, dates=response_dates
             )
         )
-        del frame
         pooled = metadata["response_metrics"]
         pooled = pooled.loc[pooled.period.eq("pooled") & pooled.sample_scope.eq("own")]
         metrics = _time_series_metric_records(
@@ -582,6 +555,11 @@ def _iter_single_asset_time_series_output_chunks(
                 for row in pooled.to_dict("records")
             ]
         )
+    else:
+        metrics = _time_series_metrics_frame(
+            frame, spec=spec, timestamp=maximum_timestamp
+        )
+    del frame
     output = (metrics, grouped_label_values, metadata)
     if summary_state is not None:
         summary_state.consume(*output)
@@ -589,25 +567,30 @@ def _iter_single_asset_time_series_output_chunks(
 
 
 def _time_series_metrics_frame(
-    stats: Mapping[tuple[str, str], _CorrelationMoments],
-    *,
-    timestamp: pd.Timestamp | None,
+    frame: pd.DataFrame, *, spec: EvaluationSpec, timestamp: pd.Timestamp | None
 ) -> pd.DataFrame:
     records: list[dict[str, object]] = []
-    for (signal, label), values in sorted(stats.items()):
-        correlation, reason = values.result()
-        records.append(
-            {
-                "timestamp": timestamp,
-                "signal": signal,
-                "label": label,
-                "ic": correlation,
-                "rankic": None,
-                "n_obs": values.count,
-                "ic_reason": reason,
-                "rankic_reason": "not_applicable",
-            }
-        )
+    if timestamp is not None:
+        for signal in sorted(signal.signal_id for signal in spec.signals):
+            left = frame[signal].to_numpy(dtype="float64")
+            for label in sorted(spec.label_columns):
+                right = frame[label].to_numpy(dtype="float64")
+                valid = np.isfinite(left) & np.isfinite(right)
+                correlation, reason = _pearson_correlation_result(
+                    left[valid], right[valid]
+                )
+                records.append(
+                    {
+                        "timestamp": timestamp,
+                        "signal": signal,
+                        "label": label,
+                        "ic": correlation,
+                        "rankic": None,
+                        "n_obs": int(valid.sum()),
+                        "ic_reason": reason,
+                        "rankic_reason": "not_applicable",
+                    }
+                )
     return _time_series_metric_records(records)
 
 
@@ -1086,9 +1069,6 @@ def _response_tables(frame, *, spec, config, dates=None):
     from statistics import mean, stdev
 
     from quant_research_platform.artifacts.outputs.evaluation_daily import daily_frame
-    from quant_research_platform.compute.dataframe.cross_section import (
-        _pearson_correlation_result,
-    )
 
     def finite(value):
         try:

@@ -76,7 +76,7 @@ MODEL_SELECTION_METRIC_DIRECTIONS = {
 _PARALLEL_MODEL_ALGORITHMS = frozenset(
     algorithm for algorithm, facts in _MODEL_ALGORITHM_FACTS.items() if facts.parallel
 )
-DEFAULT_MODEL_THREAD_COUNT = 1
+DEFAULT_MODEL_THREAD_COUNT = -1
 
 
 def _model_algorithm_facts(algorithm: str) -> _ModelAlgorithmFacts:
@@ -144,40 +144,17 @@ def _resolved_model_hyperparameters_match(
     hyperparameters: dict[str, object],
     resolved_hyperparameters: dict[str, object],
 ) -> bool:
-    """Check an artifact against the explicit protocol parameters."""
+    """Check scientific parameters; execution parallelism is descriptive metadata."""
 
     try:
         expected = dict(hyperparameters)
+        actual = dict(resolved_hyperparameters)
         if algorithm in _PARALLEL_MODEL_ALGORITHMS:
-            requested = expected.get("n_jobs", DEFAULT_MODEL_THREAD_COUNT)
-            actual = resolved_hyperparameters.get("n_jobs")
-            if (
-                type(requested) is not int
-                or requested == 0
-                or type(actual) is not int
-                or actual <= 0
-                or (requested > 0 and actual > requested)
-            ):
-                return False
-            expected["n_jobs"] = actual
-        return canonical_identity_bytes(
-            resolved_hyperparameters
-        ) == canonical_identity_bytes(expected)
+            expected.pop("n_jobs", None)
+            actual.pop("n_jobs", None)
+        return canonical_identity_bytes(actual) == canonical_identity_bytes(expected)
     except (TypeError, ValueError):
         return False
-
-
-def _resolved_model_thread_count(
-    value: object, *, physical_cores: int, available_cores: int
-) -> int:
-    if type(value) is not int or value == 0:
-        raise ValueError("invalid_model_thread_count")
-    if value > physical_cores:
-        raise ValueError("model_threads_exceed_physical_cores")
-    resolved = min(value, available_cores) if value > 0 else available_cores + 1 + value
-    if resolved <= 0:
-        raise ValueError("invalid_model_thread_count")
-    return resolved
 
 
 @dataclass(frozen=True)
@@ -227,6 +204,16 @@ class ModelSpec:
         _validate_non_empty_string(self.model_id, "model_id_required")
         _validate_non_empty_string(self.model_algorithm, "model_algorithm_required")
         _model_algorithm_facts(self.model_algorithm)
+        if (
+            self.model_algorithm in _PARALLEL_MODEL_ALGORITHMS
+            and "n_jobs" in hyperparameters
+        ):
+            jobs = hyperparameters["n_jobs"]
+            if jobs is not None and (
+                type(jobs) is not int
+                or (jobs == 0 and self.model_algorithm == "random_forest_regressor")
+            ):
+                raise ValueError("invalid_model_thread_count")
         scaling = self.training_scaling
         if scaling is None:
             scaling = self.model_algorithm in {

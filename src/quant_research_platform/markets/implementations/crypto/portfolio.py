@@ -3,6 +3,7 @@
 import json
 import sqlite3
 from array import array
+from bisect import bisect_left, bisect_right
 from collections import deque
 from contextlib import ExitStack, closing
 from dataclasses import replace
@@ -432,6 +433,7 @@ def _qualified_episodes(coverage, trade_coverage, funding, bounds):
     for event in funding.events:
         if event.rate is None or event.mark_price is None and event.rate != 0:
             funding_cuts.update((event.timestamp_ns, event.timestamp_ns + 1))
+    ordered_cuts = sorted(funding_cuts)
     with closing_iterator(trades):
         book, trade = next(books, None), next(trades, None)
         while book is not None and trade is not None:
@@ -445,9 +447,9 @@ def _qualified_episodes(coverage, trade_coverage, funding, bounds):
                     reasons.append("book_coverage_end")
                 if trade_coverage is not None and right == trade[1]:
                     reasons.append("trade_coverage_end")
-                for cut in sorted(
-                    value for value in funding_cuts if left < value < right
-                ):
+                for cut in ordered_cuts[
+                    bisect_right(ordered_cuts, left) : bisect_left(ordered_cuts, right)
+                ]:
                     yield left, cut, "TRUNCATED", ("funding_coverage_end",)
                     left = cut
                 if right in funding_cuts:
@@ -490,6 +492,11 @@ def _execute_episodes(
         iterator = resources.enter_context(closing_iterator(iter(source)))
         cursor = _EpisodeCursor(iterator, key, sticky=sticky)
         streams[name] = cursor
+    funding_events = tuple(funding.events)
+    funding_times = tuple(event.timestamp_ns for event in funding_events)
+    funding_coverage = tuple(funding.coverage)
+    coverage_starts = tuple(begin for begin, _end in funding_coverage)
+    coverage_ends = tuple(end for _begin, end in funding_coverage)
     count = 0
     for start, stop, termination, reasons in _qualified_episodes(
         coverage, trade_coverage, funding, bounds
@@ -498,13 +505,15 @@ def _execute_episodes(
         def produce(emit, start=start, stop=stop):
             kwargs = {
                 "book_events": streams["books"].window(start, stop, bootstrap=True),
-                "funding_events": tuple(
-                    event
-                    for event in funding.events
-                    if start <= event.timestamp_ns < stop
-                ),
+                "funding_events": funding_events[
+                    bisect_left(funding_times, start) : bisect_left(funding_times, stop)
+                ],
                 "funding_forecasts": streams["forecasts"].window(start, stop),
-                "funding_coverage": funding.coverage,
+                "funding_coverage": funding_coverage[
+                    bisect_left(coverage_ends, start) : bisect_left(
+                        coverage_starts, stop
+                    )
+                ],
                 "observation_window_ns": (start, stop),
                 "on_ledger": emit,
             }

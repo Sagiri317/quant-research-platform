@@ -10,7 +10,6 @@ from functools import cached_property
 
 import numpy as np
 import pandas as pd
-from threadpoolctl import threadpool_limits
 
 import quant_research_platform.research.models.estimators as estimators
 import quant_research_platform.research.models.feature_importance as feature_importance
@@ -176,6 +175,9 @@ def validate_model_state(predictor: object, metadata: dict[str, object]) -> None
             actual.get_params(deep=False),
             expected.get_params(deep=False),
         )
+        if spec.model_algorithm in estimators._PARALLEL_MODEL_ALGORITHMS:
+            actual_parameters.pop("n_jobs", None)
+            expected_parameters.pop("n_jobs", None)
         if set(actual_parameters) != set(expected_parameters):
             raise ValueError("model_state_metadata_mismatch")
         for name, expected_value in expected_parameters.items():
@@ -266,12 +268,11 @@ def _fit_linear_model_result(
     target = training[spec.target_column].to_numpy(dtype="float64")
     _, target_exponent = np.frexp(float(np.max(np.abs(target))))
     design *= weighted[:, None]
-    with threadpool_limits(limits=1, user_api="blas"):
-        beta = np.linalg.lstsq(
-            design,
-            np.ldexp(target, -target_exponent) * weighted,
-            rcond=None,
-        )[0]
+    beta = np.linalg.lstsq(
+        design,
+        np.ldexp(target, -target_exponent) * weighted,
+        rcond=None,
+    )[0]
     beta = np.ldexp(beta, target_exponent)
     predictor = LinearScaledPredictor(
         coefficients=tuple(float(value) for value in beta), scaler=scaler
@@ -349,17 +350,11 @@ def _fit_estimator_model_result(
     filter_metadata = prepared_training.filter_metadata
     if training.empty:
         raise ValueError("model_training_sample_empty")
-    threads = estimators.model_thread_count(spec)
     predictor = _fit_predictor(
-        spec, prepared_training=prepared_training, estimator=estimator, threads=threads
+        spec, prepared_training=prepared_training, estimator=estimator
     )
 
     resolved_hyperparameters = estimators.resolved_model_hyperparameters(spec)
-    if spec.model_algorithm in estimators._PARALLEL_MODEL_ALGORITHMS:
-        fitted_threads = getattr(predictor, "n_jobs", None)
-        if type(fitted_threads) is not int or fitted_threads <= 0:
-            raise RuntimeError("invalid_fitted_model_thread_count")
-        resolved_hyperparameters["n_jobs"] = fitted_threads
     metadata = model_metadata(
         spec,
         filter_metadata=filter_metadata,
@@ -588,7 +583,6 @@ def _fit_predictor(
     *,
     prepared_training: PreparedTraining,
     estimator: object,
-    threads: int,
 ) -> object:
     y = prepared_training.training[spec.target_column].to_numpy(
         dtype="float64", copy=True
@@ -604,23 +598,11 @@ def _fit_predictor(
         )
     from sklearn.exceptions import ConvergenceWarning
 
-    if spec.model_algorithm in estimators._PARALLEL_MODEL_ALGORITHMS:
-        set_params = getattr(estimator, "set_params", None)
-        if not callable(set_params):
-            raise RuntimeError("model_thread_configuration_unavailable")
-        set_params(n_jobs=threads)
-    openmp_threads = (
-        threads
-        if spec.model_algorithm in {"xgboost_regressor", "lightgbm_regressor"}
-        else 1
-    )
     scaled_matrix = matrix.copy(deep=True)
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", ConvergenceWarning)
-            with threadpool_limits(limits=1, user_api="blas"):
-                with threadpool_limits(limits=openmp_threads, user_api="openmp"):
-                    estimator.fit(scaled_matrix, y, sample_weight=weights)
+            estimator.fit(scaled_matrix, y, sample_weight=weights)
     except ConvergenceWarning:
         raise ValueError("model_fit_non_converged") from None
     return ScaledPredictor(estimator, scaler)

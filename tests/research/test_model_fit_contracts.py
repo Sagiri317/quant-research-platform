@@ -89,7 +89,6 @@ def test_convergence_warning_is_a_model_fit_failure() -> None:
                 fitting_cutoff="2018-01-02",
             ),
             estimator=WarningEstimator(),
-            threads=1,
         )
 
 
@@ -150,7 +149,6 @@ def test_estimator_without_fit_cannot_be_returned_as_fitted():
                 fitting_cutoff="2018-01-02",
             ),
             estimator=object(),
-            threads=1,
         )
 
 
@@ -311,7 +309,7 @@ def test_estimator_mutation_cannot_change_shared_preprocessing(algorithm):
 
     with pytest.raises(RuntimeError, match="mutated_estimator_inputs"):
         fitting._fit_predictor(
-            spec, prepared_training=prepared, estimator=MutatingEstimator(), threads=1
+            spec, prepared_training=prepared, estimator=MutatingEstimator()
         )
     assert pickle.dumps(prepared.preprocessing) == original
     pd.testing.assert_frame_equal(prepared.training, training, check_exact=True)

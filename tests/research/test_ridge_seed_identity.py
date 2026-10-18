@@ -102,27 +102,13 @@ def test_ridge_native_seed_type_aliases_are_rejected(seed, alias):
         fitting.validate_model_state(fitted.prediction_model, fitted.metadata)
 
 
-def test_resolved_parameters_preserve_only_legal_thread_resolution_and_float_zero():
+def test_resolved_scientific_parameters_preserve_typed_identity_and_float_zero():
     from quant_research_platform.contracts.models import (
         _resolved_model_hyperparameters_match,
     )
 
     assert _resolved_model_hyperparameters_match(
         "ridge_regression", {"alpha": -0.0}, {"alpha": 0.0}
-    )
-    assert _resolved_model_hyperparameters_match(
-        "random_forest_regressor",
-        {"n_jobs": -1, "min_samples_split": 2},
-        {"n_jobs": 2, "min_samples_split": 2},
-    )
-    assert _resolved_model_hyperparameters_match(
-        "random_forest_regressor", {"n_jobs": 4}, {"n_jobs": 2}
-    )
-    assert not _resolved_model_hyperparameters_match(
-        "random_forest_regressor", {"n_jobs": 1}, {"n_jobs": 2}
-    )
-    assert not _resolved_model_hyperparameters_match(
-        "random_forest_regressor", {"n_jobs": 2}, {"n_jobs": 2.0}
     )
     assert not _resolved_model_hyperparameters_match(
         "random_forest_regressor",

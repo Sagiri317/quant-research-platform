@@ -666,3 +666,209 @@ def test_native_episode_cut_points_keep_half_open_endpoints_across_funding_roots
         early = _qualified_episodes(books, coverage, funding, bounds)
         assert next(early) == actual[0]
         early.close()
+
+
+def test_funding_coverage_cursor_visits_history_only_once():
+    from types import SimpleNamespace
+
+    from quant_research_platform.markets.implementations.crypto.execution import (
+        _funding_consumer,
+    )
+
+    class Coverage(tuple):
+        visits = 0
+
+        def __iter__(self):
+            for interval in super().__iter__():
+                self.visits += 1
+                yield interval
+
+        def __getitem__(self, index):
+            self.visits += 1
+            return super().__getitem__(index)
+
+    coverage = Coverage((i * 100, (i + 1) * 100 - 1) for i in range(32))
+    account = SimpleNamespace(quantity=0)
+    consume = _funding_consumer((), account, coverage, lambda: None, {})
+    consume(3100)
+    account.quantity = 1
+    for stamp in range(3101, 3133):
+        consume(stamp)
+        consume(stamp)
+        consume(stamp - 1)
+    assert coverage.visits <= len(coverage) + 3 * 32
+
+
+def test_funding_coverage_cursor_preserves_gap_flat_and_cashflows():
+    from fractions import Fraction
+
+    from quant_research_platform.markets.implementations.crypto.execution import (
+        PortfolioEconomics,
+        _AccountPathStop,
+        _funding_consumer,
+    )
+
+    account = PortfolioEconomics(
+        PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
+        "btc_usdt",
+        None,
+    )
+    account.quantity = Fraction(2)
+    events = (
+        FundingEvent(3, 0.125, 80.0),
+        FundingEvent(8, 0.0, None),
+        FundingEvent(12, -0.25, 40.0),
+        FundingEvent(19, 0.125, 40.0),
+        FundingEvent(25, None, None),
+        FundingEvent(32, -0.125, 80.0),
+        FundingEvent(39, 0.125, 80.0),
+    )
+    consume = _funding_consumer(
+        events, account, ((0, 10), (11, 20), (30, 40)), lambda: None, {}
+    )
+    for stamp in (5, 15, 15, 7):
+        consume(stamp)
+    consume(20)
+    assert [row.timestamp_ns for row in account._unvalued_funding] == [3, 12, 19]
+    assert [row.amount for row in account._unvalued_funding] == [-20.0, 20.0, -10.0]
+    account.quantity = Fraction()
+    consume(30)
+    account.quantity = Fraction(-1)
+    for stamp in (35, 35, 20):
+        consume(stamp)
+    assert [row.timestamp_ns for row in account._unvalued_funding] == [3, 12, 19, 32]
+    assert [row.amount for row in account._unvalued_funding] == [
+        -20.0,
+        20.0,
+        -10.0,
+        -10.0,
+    ]
+
+    with pytest.raises(_AccountPathStop) as stopped:
+        consume(45)
+    assert stopped.value.reason == "portfolio_required_funding_coverage_missing"
+    assert stopped.value.timestamp_ns == 41
+    assert account._unvalued_funding[-1].timestamp_ns == 39
+    assert account._unvalued_funding[-1].amount == 10.0
+
+
+def test_episode_funding_selection_visits_history_linearly():
+    count = 32
+    from types import SimpleNamespace
+
+    from quant_research_platform.markets.implementations.crypto.portfolio import (
+        _execute_episodes,
+    )
+
+    class Counted(tuple):
+        visits = 0
+
+        def __iter__(self):
+            for value in super().__iter__():
+                self.visits += 1
+                yield value
+
+    events = Counted(FundingEvent(i * 100 + 50, 0.0, None) for i in range(count))
+    coverage = Counted((i * 100, i * 100 + 89) for i in range(count))
+    selected = []
+    with ExitStack() as resources:
+        result = _execute_episodes(
+            books=(),
+            trades=None,
+            decisions=(),
+            forecasts=(),
+            funding=SimpleNamespace(events=events, coverage=coverage),
+            coverage={str(i): (i * 100 + 10, i * 100 + 80) for i in range(count)},
+            trade_coverage=None,
+            bounds=((0, count * 100 - 1),),
+            resources=resources,
+            execute=lambda **kwargs: selected.append(
+                (kwargs["funding_events"], kwargs["funding_coverage"])
+            ),
+            on_episode=lambda **kwargs: kwargs["produce"](lambda _batch: None),
+        )
+    assert result == {"episode_count": count}
+    assert events.visits <= 2 * count
+    assert coverage.visits <= 2 * count
+    assert selected == [((events[i],), (coverage[i],)) for i in range(count)]
+
+
+def test_episode_funding_slices_keep_boundary_events_and_spanning_coverage():
+    from fractions import Fraction
+    from types import SimpleNamespace
+
+    from quant_research_platform.markets.implementations.crypto.execution import (
+        PortfolioEconomics,
+        _AccountPathStop,
+        _funding_consumer,
+    )
+    from quant_research_platform.markets.implementations.crypto.portfolio import (
+        _execute_episodes,
+    )
+
+    events = tuple(
+        FundingEvent(
+            stamp,
+            None if stamp == 10 else 1.0 if stamp == 40 else 0.125,
+            None if stamp in (10, 40) else 80.0,
+        )
+        for stamp in (4, 5, 9, 10, 11, 19, 20, 29, 30, 39, 40, 41, 44, 45)
+    )
+    coverage = ((-10, 9), (10, 19), (30, 100))
+    selected = []
+    with ExitStack() as resources:
+        _execute_episodes(
+            books=(),
+            trades=None,
+            decisions=(),
+            forecasts=(),
+            funding=SimpleNamespace(events=events, coverage=coverage),
+            coverage={"book": (5, 45)},
+            trade_coverage=None,
+            bounds=((5, 44),),
+            resources=resources,
+            execute=lambda **kwargs: selected.append(kwargs),
+            on_episode=lambda **kwargs: kwargs["produce"](lambda _batch: None),
+        )
+    assert [row["observation_window_ns"] for row in selected] == [
+        (5, 10),
+        (10, 11),
+        (11, 20),
+        (20, 30),
+        (30, 40),
+        (40, 41),
+        (41, 45),
+    ]
+    for row in selected:
+        start, stop = row["observation_window_ns"]
+        assert row["funding_events"] == tuple(
+            event for event in events if start <= event.timestamp_ns < stop
+        )
+        assert row["funding_coverage"] == tuple(
+            interval
+            for interval in coverage
+            if interval[1] >= start and interval[0] < stop
+        )
+        outcomes = []
+        for intervals in (coverage, row["funding_coverage"]):
+            account = PortfolioEconomics(
+                PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
+                "btc_usdt",
+                None,
+            )
+            consume = _funding_consumer(
+                row["funding_events"], account, intervals, lambda: None, {}
+            )
+            # A fresh episode settles its start event while flat, before trading.
+            consume(start)
+            account.quantity = Fraction(2)
+            stopped = None
+            try:
+                consume(stop - 1)
+            except _AccountPathStop as error:
+                stopped = (error.reason, error.timestamp_ns)
+            outcomes.append((account.cash, account._unvalued_funding, stopped))
+        assert outcomes[0] == outcomes[1]
+        assert outcomes[1][2] == (
+            ("portfolio_required_funding_coverage_missing", 21) if start == 20 else None
+        )

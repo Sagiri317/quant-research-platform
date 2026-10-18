@@ -857,7 +857,7 @@ def test_archive_independent_cursors_close_without_spools(
                             )
                             assert len(result) == (1 if kinds == ("agg_trades",) else 3)
                     assert len(list(slow)) == 2
-                    assert calls == 5 and rows == 40
+                    assert calls == 1 and rows == 8
                     repeated = list(
                         source.iter_market_records(
                             symbol="BTCUSDT",
@@ -865,7 +865,7 @@ def test_archive_independent_cursors_close_without_spools(
                             data_kinds=("agg_trades",),
                         )
                     )
-                    assert len(repeated) == 1 and calls == 6
+                    assert len(repeated) == 1 and calls == 1
     except KeyboardInterrupt as error:
         interrupted = True
         assert cancel and str(error) == "cancel_native_scan"
@@ -874,7 +874,7 @@ def test_archive_independent_cursors_close_without_spools(
     assert not buffers
 
 
-def test_archive_redecoding_preserves_order_and_independent_payloads(
+def test_archive_shared_decoding_preserves_order_and_independent_payloads(
     tmp_path, monkeypatch
 ):
     from collections import Counter
@@ -968,7 +968,7 @@ def test_archive_redecoding_preserves_order_and_independent_payloads(
             )
             == 8
         )
-        assert calls["native_scans"] == 4 and calls["native_rows"] >= 3 * 514
+        assert calls["native_scans"] == 1 and calls["native_rows"] == 514
     assert handles and all(handle.closed for handle in handles)
 
 

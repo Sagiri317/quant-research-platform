@@ -474,7 +474,8 @@ def _validated_rows(
                     or row[:2] != (response["Codes"][count // dates], count % dates)
                 ):
                     raise ValueError("choice_saved_coordinates_invalid")
-            _observe_scope(scope, response["Indicators"], row[2:], request.cutoff)
+            if verify_bytes:
+                _observe_scope(scope, response["Indicators"], row[2:], request.cutoff)
             count += 1
             try:
                 yield row

@@ -192,3 +192,71 @@ def test_native_producer_persists_observed_endpoint_labels_without_execution(
     request["output_root"] = str(tmp_path / "missing-facts")
     with pytest.raises(ValueError, match="data_operation_input_columns_missing"):
         prepare(request)
+
+
+def test_producer_clips_each_lifecycle_and_market_axis_without_compressing_gaps(
+    monkeypatch,
+):
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        catalog,
+        producer,
+    )
+
+    axis = pd.bdate_range("2010-01-01", periods=5000).as_unit("ns")
+    dates = axis[3650:3680]
+    other_axis = axis[axis != dates[3]]
+    panel = pd.DataFrame(
+        [
+            dict(
+                market_id="a_share",
+                asset_id=asset,
+                timestamp=date,
+                listing_date=dates[0] if i < 18 else dates[18],
+                _calendar_segment=0 if i < 12 else 1,
+                adj_open=100.0 + i,
+                filling_flag=1 if i == 5 else 0,
+                is_trading=i != 5,
+            )
+            for asset in ("a", "b")
+            for i, date in enumerate(dates)
+            if i != 7 and not (asset == "b" and i == 3)
+        ]
+    )
+    spec = catalog.processed_catalog().get("forward_returns")
+    definitions = tuple(
+        item
+        for item in producer.a_share.label_catalog().list()
+        if item.output_column in spec.required_columns
+    )
+    axes = {"a": axis, "b": other_axis}
+    expected = pd.concat(
+        [
+            producer.label_engine.calculate_labels_for_panel(
+                group, definitions=definitions, sessions=axes[key[0]]
+            )
+            for key, group in panel.groupby(
+                ["asset_id", "listing_date", "_calendar_segment"],
+                sort=False,
+                dropna=False,
+            )
+        ],
+        ignore_index=True,
+    ).loc[:, list(spec.required_columns)]
+    owner = producer.label_engine.calculate_labels_for_panel
+    lengths = []
+
+    def record(frame, *, sessions, **kwargs):
+        lengths.append(len(sessions))
+        assert frame.timestamp.isin(sessions).all()
+        return owner(frame, sessions=sessions, **kwargs)
+
+    monkeypatch.setattr(producer.label_engine, "calculate_labels_for_panel", record)
+    actual = producer._compute_processed_frame(
+        spec,
+        source={},
+        dependencies={"market_panel_1d": panel},
+        trading_sessions=axis,
+        asset_sessions=axes,
+    )
+    pd.testing.assert_frame_equal(actual, expected, check_exact=True)
+    assert lengths == [12, 6, 12, 11, 6, 12]

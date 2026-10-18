@@ -28,7 +28,6 @@ from quant_research_platform.markets.implementations.a_share.calendar import (
 )
 from quant_research_platform.markets.implementations.a_share.processed import panels
 from quant_research_platform.markets.implementations.a_share.processed.producer import (
-    DEFAULT_BATCH_ROWS,
     _processed_axis,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
@@ -130,7 +129,7 @@ def _portfolio_session_evidence(
         raise ValueError("portfolio_input_business_columns_excluded")
     asset_sessions = {}
     if include_asset_sessions:
-        _, _, _, asset_sessions, _, _raw_axis = _processed_axis(
+        _, _, _, asset_sessions, _, _ = _processed_axis(
             panel, panel_source=False, include_asset_sessions=True
         )
     stock_source = open_dataset_session(**_dataset_input_options(stock_master_root))
@@ -140,10 +139,10 @@ def _portfolio_session_evidence(
     stocks = panels._canonical_stock_master(
         materialize_dataset_session(stock_source.projected_view(stock_columns))
     )
-    _, _, membership, _, _, raw_axis = _processed_axis(
+    _, _, membership, _, _, _ = _processed_axis(
         bars, panel_source=True, calendar=calendar, stock_master=stocks
     )
-    return bars, panel, membership, asset_sessions, stocks, raw_axis
+    return bars, panel, membership, asset_sessions, stocks
 
 
 def iter_portfolio_sessions(
@@ -167,16 +166,14 @@ def iter_portfolio_sessions(
     calendar = calendar.loc[
         calendar.calendar_date.le(pd.Timestamp(time_window.end))
     ].copy()
-    bars, panel, membership, asset_sessions, stocks, raw_axis = (
-        _portfolio_session_evidence(
-            market_bars_root,
-            stock_master_root,
-            panel_root,
-            calendar,
-            panel_columns=panel_columns,
-            include_asset_sessions=execution_root is not None,
-            time_window=time_window,
-        )
+    bars, panel, membership, asset_sessions, stocks = _portfolio_session_evidence(
+        market_bars_root,
+        stock_master_root,
+        panel_root,
+        calendar,
+        panel_columns=panel_columns,
+        include_asset_sessions=execution_root is not None,
+        time_window=time_window,
     )
     rights_root = equity_events_root
     rights_session = (
@@ -247,15 +244,13 @@ def iter_portfolio_sessions(
     )
 
     def ordered_bars():
-        dates, assets = raw_axis
-        block_size = max(1, DEFAULT_BATCH_ROWS // max(1, len(assets)))
-        for start in range(0, len(dates), block_size):
-            core = dates[start : start + block_size]
-            frame = materialize_dataset_session(
-                bars.filtered_view(TimeWindow(core[0], core[-1]))
-            ).sort_values("timestamp", kind="mergesort")
-            for _, day in frame.groupby("timestamp", sort=False):
-                yield day
+        # Read the selected four-column history once: date blocks would rescan
+        # asset-ordered annual parts. Memory scales with this narrow selection.
+        frame = materialize_dataset_session(bars).sort_values(
+            "timestamp", kind="mergesort"
+        )
+        for _, day in frame.groupby("timestamp", sort=False):
+            yield day
 
     with closing_iterator(ExitStack()) as channels:
         bar_frames = channels.enter_context(closing_iterator(ordered_bars()))

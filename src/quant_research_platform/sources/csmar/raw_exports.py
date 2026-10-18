@@ -258,11 +258,8 @@ def _raw_frame(
     rows: list[list[str]],
     header: list[str],
 ) -> pd.DataFrame:
-    frame = pd.DataFrame(rows, columns=header)
-    frame.replace("", pd.NA, inplace=True)
     # Raw IO owns readable structure, never business numeric interpretation.
-    frame = frame.astype("string")
-    return frame
+    return pd.DataFrame(rows, columns=header, dtype="string").replace("", pd.NA)
 
 
 def dataset_files_by_id(

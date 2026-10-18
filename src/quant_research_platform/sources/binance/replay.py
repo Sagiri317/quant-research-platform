@@ -1367,6 +1367,7 @@ def _record_times(
         if market_type == FUTURES_MARKET_TYPE
         else None
     )
+    # Public reconstructor inputs are ordinary mappings, not trusted source rows.
     observed_time = strict_iso_timestamp(
         record.get("receive_time"),
         error="binance_replay_receive_time_invalid",
@@ -1446,9 +1447,7 @@ def iter_reconstructed_depth(
         for record in records:
             if last_state is not None:
                 bounds = active_stats.coverage_segments.get(last_state.segment_id)
-                observed = strict_iso_timestamp(
-                    record["receive_time"], error="binance_replay_receive_time_invalid"
-                ).value
+                observed = record["observed_time_ns"]
                 if bounds is not None and bounds[1] <= observed:
                     yield close_boundary(last_state)
                     last_state = None
@@ -1664,10 +1663,7 @@ def iter_agg_trades(
                 payload.get("T"),
                 error="binance_replay_transaction_time_invalid",
             )
-            observed_time = strict_iso_timestamp(
-                record["receive_time"],
-                error="binance_replay_receive_time_invalid",
-            ).value
+            observed_time = record["observed_time_ns"]
             schema = run.source_identity["schema_id"]
             validate_market_payload(
                 market_type,

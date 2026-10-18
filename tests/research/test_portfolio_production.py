@@ -448,10 +448,6 @@ def _build_producer(
                 for asset, group in panel.groupby("asset_id", sort=False)
             },
             panels._canonical_stock_master(frames.get("stock_master", stocks)),
-            (
-                tuple(sorted(frames["market_bars_1d"].timestamp.unique())),
-                frozenset(frames["market_bars_1d"].source_asset_id),
-            ),
         )
 
     def materialize_source(session):

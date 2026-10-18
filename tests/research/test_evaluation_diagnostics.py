@@ -905,10 +905,10 @@ def test_single_asset_cancel_preserves_close_failure(monkeypatch):
             closed.append(True)
             raise RuntimeError("source_close_failed")
 
-    def interrupt(*args):
+    def interrupt(*args, **kwargs):
         raise failure
 
-    monkeypatch.setattr(evaluation_engine._CorrelationMoments, "update", interrupt)
+    monkeypatch.setattr(evaluation_engine, "normalize_signal_frame", interrupt)
     with evaluation_engine.build_evaluation_result_from_frames(
         Source(),
         spec=spec,

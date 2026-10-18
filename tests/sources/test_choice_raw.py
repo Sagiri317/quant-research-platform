@@ -53,7 +53,7 @@ def _request(endpoint: str = "ctr") -> ChoiceRequest:
 
 @pytest.mark.parametrize("endpoint", ["ctr", "css", "sector"])
 def test_official_shapes_roundtrip_and_exact_reuse(
-    tmp_path: Path, endpoint: str
+    tmp_path: Path, endpoint: str, monkeypatch
 ) -> None:
     request = _request(endpoint)
     if endpoint == "ctr":
@@ -89,8 +89,21 @@ def test_official_shapes_roundtrip_and_exact_reuse(
                 request,
             )
         assert sdk.calls == 1
+        from quant_research_platform.sources.choice import raw_exports
+
+        scope_calls = []
+        observe_scope = raw_exports._observe_scope
+
+        def counted_scope(*args):
+            scope_calls.append(1)
+            return observe_scope(*args)
+
+        monkeypatch.setattr(raw_exports, "_observe_scope", counted_scope)
         restored = read_choice_response(root, request)
         assert restored == vars(response)
+        assert not scope_calls
+        assert read_choice_response(root, request, verify_bytes=True) == restored
+        assert len(scope_calls) == 2
         actual = copy.deepcopy(restored)
         assert actual == vars(response)
         assert (

@@ -81,8 +81,22 @@ def test_online_pearson_preserves_extreme_units(scale):
     stats = _CorrelationMoments()
     for x, y in zip(left, right, strict=True):
         stats.update(float(x), float(y))
+    assert stats.result()[0] == pytest.approx(1.0)
     result = _time_series_metrics_frame(
-        {("signal", "label"): stats}, timestamp=pd.Timestamp("2023-01-01")
+        pd.DataFrame({"signal": left, "label": right}),
+        spec=EvaluationSpec(
+            evaluation_id="extreme_units",
+            market_id=MarketId("crypto"),
+            research_dataset_id="fixture",
+            signals=(
+                SignalSpec(
+                    signal_id="signal", source_kind="feature", source_column="signal"
+                ),
+            ),
+            label_columns=("label",),
+            evaluation_axis="single_asset_time_series",
+        ),
+        timestamp=pd.Timestamp("2023-01-01"),
     )
     assert result.n_obs.iloc[0] == len(left)
     assert pd.isna(result.ic_reason.iloc[0])

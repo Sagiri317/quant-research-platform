@@ -167,14 +167,14 @@ def test_all_supported_horizons_and_permission_unknown():
 def test_genuine_endpoint_disagreement_is_a_scientific_error(monkeypatch):
     from quant_research_platform.research.labels import forward_returns
 
-    owner = forward_returns.add_forward_return_labels
+    owner = forward_returns._forward_return_labels
 
     def corrupted(*args, **kwargs):
         result = owner(*args, **kwargs)
         result["forward_return_1d"] += 0.01
         return result
 
-    monkeypatch.setattr(forward_returns, "add_forward_return_labels", corrupted)
+    monkeypatch.setattr(forward_returns, "_forward_return_labels", corrupted)
     with pytest.raises(ValueError, match="on_id_endpoint_mismatch"):
         _calculate(_prices(3), (1,))
 
@@ -237,3 +237,71 @@ def test_string_quote_facts_match_typed_suspension_facts():
     expected, actual = _calculate(typed, (1, 2)), _calculate(textual, (1, 2))
     columns = [column for column in expected if column.startswith("on_id_")]
     pd.testing.assert_frame_equal(actual[columns], expected[columns], check_exact=False)
+
+
+def test_bounded_asset_axes_preserve_missing_future_reasons_and_lifecycles(monkeypatch):
+    from quant_research_platform.research.labels import forward_returns
+
+    axis = pd.bdate_range("2020-01-01", periods=2000).as_unit("ns")
+    # The declared calendar skips a holiday and spans a year boundary.
+    axis = axis[axis != pd.Timestamp("2024-01-01")]
+    start = axis.get_loc(pd.Timestamp("2023-12-20"))
+    first = _prices(20)
+    first["timestamp"] = axis[start : start + len(first)]
+    first.loc[8:, "listing_date"] = first.timestamp.iloc[8]
+    first.loc[15, "listing_date"] = pd.NaT
+    first.loc[4, ["filling_flag", "is_trading"]] = [1, False]
+    first = first.drop(index=6)
+    second = _prices(5)
+    second["asset_id"] = "b"
+    second["timestamp"] = axis[-5:]
+    frames = [first, second]
+    expected = pd.concat(
+        [
+            add_on_id_decomposition(
+                group,
+                horizons=(1, 5),
+                sessions=axis[
+                    max(
+                        0, axis.searchsorted(group.timestamp.min()) - 1
+                    ) : axis.searchsorted(group.timestamp.max(), side="right") + 6
+                ],
+            )
+            for group in frames
+        ],
+        ignore_index=True,
+    )
+    lengths = []
+    owner = forward_returns._forward_return_labels
+
+    def record(frame, sessions, horizons, **kwargs):
+        lengths.append(len(sessions))
+        return owner(frame, sessions, horizons, **kwargs)
+
+    def redundant_validation(*args, **kwargs):
+        raise AssertionError("ON/ID already validated its complete session axis")
+
+    monkeypatch.setattr(forward_returns, "_forward_return_labels", record)
+    monkeypatch.setattr(forward_returns, "_session_axis", redundant_validation)
+    result = add_on_id_decomposition(
+        pd.concat(frames, ignore_index=True), horizons=(1, 5), sessions=axis
+    )
+    pd.testing.assert_frame_equal(result, expected, check_exact=True)
+    assert lengths == [27, 27, 27, 6]
+    tail = result.groupby("asset_id", sort=False).tail(1).set_index("asset_id")
+    assert tail.loc["a", "on_id_endpoint_return_1d_reason"] == (
+        "unknown_listing_lifecycle"
+    )
+    assert tail.loc["b", "on_id_endpoint_return_1d_reason"] == (
+        "insufficient_future_sessions"
+    )
+
+
+def test_terminal_asset_preserves_full_axis_missing_value_dtypes():
+    axis = pd.bdate_range("2020-01-01", periods=5000).as_unit("ns")
+    frame = _prices(5)
+    frame["timestamp"] = axis[-5:]
+    result = add_on_id_decomposition(frame, horizons=(1,), sessions=axis)
+    assert result.filling_flag.dtype == np.dtype("float64")
+    assert result.is_trading.dtype == np.dtype("object")
+    assert result.can_enter.dtype == np.dtype("object")

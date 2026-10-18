@@ -13,6 +13,53 @@ from quant_research_platform.markets.implementations.a_share import portfolio_se
 from quant_research_platform.research.portfolios import production
 
 
+@pytest.mark.parametrize("selected_assets", [[], ["a0"]])
+def test_portfolio_bar_read_preserves_selected_history_and_empty_dates(
+    tmp_path, monkeypatch, selected_assets
+):
+    from tests.research.test_closed_market_portfolios import _native_inputs
+
+    layout, roots, calendar, _ = _native_inputs(tmp_path)
+    materialize = portfolio_sessions.materialize_dataset_session
+    bar_reads = []
+
+    def observed(session):
+        frame = materialize(session)
+        if tuple(frame.columns) == portfolio_sessions._MARKET_FACT_COLUMNS:
+            bar_reads.append(frame)
+        return frame
+
+    monkeypatch.setattr(portfolio_sessions, "materialize_dataset_session", observed)
+    views = list(
+        portfolio_sessions.iter_portfolio_sessions(
+            market_bars_root={
+                "path": str(layout["market_bars"]),
+                "time_window": {"start": "2022-12-15", "end": "2023-01-06"},
+                "row_filters": [
+                    ["source_asset_id", "in", selected_assets or ["absent"]]
+                ],
+            },
+            stock_master_root=layout["stock_master"],
+            panel_root=roots["market_panel_1d"],
+            panel_columns=production._PANEL_COLUMNS,
+            calendar=calendar,
+            time_window=TimeWindow("2023-01-02", "2023-01-04"),
+        )
+    )
+    assert [view.timestamp for view in views] == list(
+        pd.date_range("2023-01-02", "2023-01-04")
+    )
+    assert len(bar_reads) == 1
+    bars = bar_reads[0]
+    assert set(bars.source_asset_id) == set(selected_assets)
+    assert bars.timestamp.between("2022-12-15", "2023-01-04").all()
+    if selected_assets:
+        assert bars.timestamp.min() == pd.Timestamp("2022-12-15")
+        assert bars.timestamp.max() == pd.Timestamp("2023-01-04")
+    else:
+        assert bars.empty
+
+
 def test_session_inputs_intersect_years_source_window_history_files_and_filters(
     tmp_path,
 ):

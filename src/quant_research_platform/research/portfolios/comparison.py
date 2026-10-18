@@ -394,16 +394,40 @@ def _complete_daily(axis, clock, sessions=None):
 
 
 def _wealth(returns):
-    wealth = Fraction(1)
-    result = []
-    for value in returns:
-        if pd.isna(value) or not np.isfinite(value):
-            wealth = None
-        if wealth is not None:
-            wealth *= 1 + Fraction(float(value))
-        converted = None if wealth is None else finite_exact_float(wealth)
-        result.append(np.nan if converted is None else converted)
-    return np.asarray(result)
+    values = np.asarray(returns, dtype=float)
+    missing = np.logical_or.accumulate(~np.isfinite(values))
+    zero = np.logical_or.accumulate(values == -1)
+    finite = np.where(np.isfinite(values), values, 0.0)
+    factors = 1 + finite
+    # TwoSum retains the rounding residual in 1 + r, including tiny returns
+    # whose rounded factor is one. Correct the ordinary cumulative product.
+    rounded = factors - 1
+    residual = (1 - (factors - rounded)) + (finite - rounded)
+    correction = np.divide(
+        residual, factors, out=np.zeros_like(values), where=factors != 0
+    )
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        result = np.cumprod(factors) * np.exp(np.cumsum(np.log1p(correction)))
+    active = ~missing & ~zero
+    # Only representation-boundary paths need exact state for later recovery;
+    # ordinary rows never grow Fraction numerators/denominators.
+    limits = np.finfo(float)
+    if np.any(
+        active
+        & (
+            ~np.isfinite(result)
+            | (np.abs(result) <= 2 * limits.tiny)
+            | (np.abs(result) >= limits.max / 2)
+        )
+    ):
+        wealth = Fraction(1)
+        for index in np.flatnonzero(~missing):
+            wealth *= 1 + Fraction(float(values[index]))
+            converted = finite_exact_float(wealth)
+            result[index] = np.nan if converted is None else converted
+    result[zero] = 0.0
+    result[missing] = np.nan
+    return result
 
 
 def comparison_tables(

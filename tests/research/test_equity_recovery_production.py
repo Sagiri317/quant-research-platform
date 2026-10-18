@@ -453,7 +453,12 @@ def test_event_wealth_and_cash_count_are_chunk_and_reporting_window_invariant(
         events_override=_replacement_events("cash_cancel"),
         panel_transform=_flat_prices,
     )
-    monkeypatch.setattr(portfolio_sessions, "DEFAULT_BATCH_ROWS", 1)
+    materialize = portfolio_sessions.materialize_dataset_session
+    monkeypatch.setattr(
+        portfolio_sessions,
+        "materialize_dataset_session",
+        lambda session: materialize(session, batch_rows=1),
+    )
     changed = recovered_batches(
         tmp_path / "small",
         "cash_cancel",

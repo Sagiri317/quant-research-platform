@@ -350,7 +350,7 @@ class _ObservedStreams:
         self.previous = {}
         self.epoch = 0
 
-    def observe(self, offset, number, timestamp, value):
+    def observe(self, offset, number, timestamp, value, *, observed_time_ns=None):
         closed = []
         if value is None:
             closed.extend(self.active.values())
@@ -382,9 +382,11 @@ class _ObservedStreams:
                 except ValueError as error:
                     if str(error) != "binance_native_sequence_non_monotonic":
                         raise
-                    observed = strict_iso_timestamp(
-                        timestamp, error="tardis_observed_time_invalid"
-                    ).value
+                    observed = observed_time_ns
+                    if observed is None:
+                        observed = strict_iso_timestamp(
+                            timestamp, error="tardis_observed_time_invalid"
+                        ).value
                     if key in self.active:
                         interval = self.active.pop(key)
                         interval["end_ns"] = observed
@@ -426,9 +428,11 @@ class _ObservedStreams:
             # observations without moving the continuity high-water mark backwards.
             if previous is None or current > previous[0]:
                 self.previous[key] = current, self.epoch
-        observed = strict_iso_timestamp(
-            timestamp, error="tardis_observed_time_invalid"
-        ).value
+        observed = observed_time_ns
+        if observed is None:
+            observed = strict_iso_timestamp(
+                timestamp, error="tardis_observed_time_invalid"
+            ).value
         if channel == "aggTrade" and not _valid_trade_values(
             self.exchange, native, observed
         ):

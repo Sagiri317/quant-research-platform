@@ -328,3 +328,121 @@ def test_cutoff_on_unrequested_stream_does_not_decode_later_error(tmp_path):
         assert [r["source_sequence"] for r in result] == [1]
         with pytest.raises(ValueError, match="tardis_observed_time_invalid"):
             list(_records(source))
+
+
+def test_shared_failure_reaches_existing_lagging_cursor(archive, monkeypatch):
+    original = replay.iter_native_slice
+    primary = ValueError("controlled_shared_decode_failure")
+    calls = closed = 0
+
+    def broken(*args, **kwargs):
+        nonlocal calls, closed
+        calls += 1
+        try:
+            with replay.closing_iterator(original(*args, **kwargs)) as rows:
+                yield next(rows)
+                raise primary
+        finally:
+            closed += 1
+
+    monkeypatch.setattr(replay, "iter_native_slice", broken)
+    with open_market_source(archive) as source:
+        fast, slow = _records(source), _records(source)
+        assert next(fast) == next(slow)
+        for cursor in (fast, slow):
+            with pytest.raises(ValueError) as caught:
+                next(cursor)
+            assert caught.value is primary
+    assert calls == closed == 1
+
+
+def test_shared_prefix_window_does_not_reach_future_failure(archive, monkeypatch):
+    import pandas as pd
+
+    original = replay.iter_native_slice
+    consumed = []
+
+    def broken(*args, **kwargs):
+        with replay.closing_iterator(original(*args, **kwargs)) as rows:
+            for row in rows:
+                consumed.append(row[0])
+                yield row
+            raise ValueError("unconsumed_future_failure")
+
+    monkeypatch.setattr(replay, "iter_native_slice", broken)
+    with open_market_source(archive) as source:
+        slow = source.iter_market_records(
+            symbol="BTCUSDT",
+            market_type=FUTURES_MARKET_TYPE,
+            data_kinds=("depth_snapshot", "depth"),
+            end_ns=pd.Timestamp("2026-09-01T00:00:01Z").value,
+        )
+        assert next(slow)["data_kind"] == "depth_snapshot"
+        with pytest.raises(ValueError, match="unconsumed_future_failure"):
+            list(_records(source))
+        # A previously opened short cursor consumes the shared valid prefix only.
+        assert len(list(slow)) == 1
+        assert consumed == [1, 2, 3]
+
+
+@pytest.mark.parametrize("body_failure", [False, True])
+def test_shared_decoder_closes_once_preserving_primary(
+    archive, monkeypatch, body_failure
+):
+    original = replay.iter_native_slice
+    closes = 0
+    primary = ValueError("consumer_primary")
+
+    def broken_close(*args, **kwargs):
+        nonlocal closes
+        try:
+            yield from original(*args, **kwargs)
+        finally:
+            closes += 1
+            raise RuntimeError("decoder_close_failure")
+
+    monkeypatch.setattr(replay, "iter_native_slice", broken_close)
+    with pytest.raises(ValueError if body_failure else RuntimeError) as caught:
+        with open_market_source(archive) as source:
+            fast, slow = _records(source), _records(source)
+            assert next(fast) == next(slow)
+            fast.close()
+            if body_failure:
+                raise primary
+    assert closes == 1
+    if body_failure:
+        assert caught.value is primary
+        assert any("RuntimeError" in note for note in primary.__notes__)
+
+
+def test_shared_clock_is_reused_except_at_public_book_boundary(archive, monkeypatch):
+    from quant_research_platform.sources.binance import replay as binance
+
+    parse = replay.strict_iso_timestamp
+    clocks = []
+
+    def counted(value, **kwargs):
+        clocks.append(value)
+        return parse(value, **kwargs)
+
+    boundary_clocks = []
+
+    def boundary(value, **kwargs):
+        boundary_clocks.append(value)
+        return parse(value, **kwargs)
+
+    monkeypatch.setattr(replay, "strict_iso_timestamp", counted)
+    monkeypatch.setattr(binance, "strict_iso_timestamp", boundary)
+    with open_market_source(archive) as source:
+        outputs = [
+            list(
+                binance.iter_reconstructed_depth(
+                    source, symbol="BTCUSDT", market_type=FUTURES_MARKET_TYPE
+                )
+            )
+            for _ in range(2)
+        ]
+        assert outputs[0] == outputs[1]
+        assert outputs[0]
+    assert len(clocks) == 3
+    assert len(boundary_clocks) == 4

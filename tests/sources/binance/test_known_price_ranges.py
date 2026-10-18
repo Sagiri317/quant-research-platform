@@ -272,3 +272,19 @@ def test_insufficient_depth_recovers_only_from_continuous_new_evidence(market):
     gap = engine.advance(_delta(market, first_id + 5, [(99, 5)]))
     assert isinstance(gap, BookBoundary) and gap.reason == "sequence_gap"
     assert engine.advance(_delta(market, first_id + 6, [(99, 5)])) is False
+
+
+def test_public_reconstructor_cannot_trust_caller_supplied_clock():
+    engine = _engine(FUTURES_MARKET_TYPE)
+    record = _delta(FUTURES_MARKET_TYPE, 100)
+    record.update(receive_time="not-a-clock", observed_time_ns=123)
+    with pytest.raises(ValueError, match="binance_replay_receive_time_invalid"):
+        list(engine.feed(record))
+
+
+def test_public_reconstructor_clock_remains_receive_time():
+    engine = _engine(FUTURES_MARKET_TYPE)
+    record = _delta(FUTURES_MARKET_TYPE, 100)
+    record["observed_time_ns"] = 123
+    state = list(engine.feed(record))[0]
+    assert state.observed_time_ns == 1790812800000000100

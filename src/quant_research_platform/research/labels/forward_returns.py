@@ -41,6 +41,26 @@ def add_forward_return_labels(
         execution_price_column=execution_price_column,
     )
     axis = _session_axis(sessions)
+    return _forward_return_labels(
+        validated,
+        axis,
+        horizons,
+        asset_column=asset_column,
+        date_column=date_column,
+        execution_price_column=execution_price_column,
+    )
+
+
+def _forward_return_labels(
+    validated,
+    axis,
+    horizons,
+    *,
+    asset_column="asset_id",
+    date_column="timestamp",
+    execution_price_column="adj_open",
+):
+    """Calculate endpoints after the caller validates keys and the session axis."""
     result = validated.sort_values([asset_column, date_column], kind="mergesort")
     price = strict_finite_numeric_series(
         result[execution_price_column],
@@ -240,6 +260,12 @@ def add_on_id_decomposition(
 
 
 def _on_id_asset_decomposition(group, axis, horizons):
+    # Preserve every intervening session and the future dependency context,
+    # including missing rows whose lifecycle reasons precede price failures.
+    # One preceding session preserves reindex's missing-value dtype promotion.
+    start = max(0, axis.searchsorted(group.timestamp.min()) - 1)
+    stop = axis.searchsorted(group.timestamp.max(), side="right") + max(horizons) + 1
+    axis = axis[start:stop]
     block = group.sort_values("timestamp").set_index("timestamp").reindex(axis)
     n = len(block)
     prices = block[["adj_open", "adj_close"]].to_numpy(dtype="float64")
@@ -324,9 +350,7 @@ def _on_id_asset_decomposition(group, axis, horizons):
         clean["adj_open"] = clean.adj_open.where(
             np.isfinite(clean.adj_open) & clean.adj_open.gt(0)
         )
-        endpoint_parts.append(
-            add_forward_return_labels(clean, horizons=horizons, sessions=axis)
-        )
+        endpoint_parts.append(_forward_return_labels(clean, axis, horizons))
     endpoints = pd.concat(endpoint_parts).set_index("timestamp").reindex(axis)
     for horizon in horizons:
         intraday = f"on_id_holding_intraday_log_return_{horizon}d"

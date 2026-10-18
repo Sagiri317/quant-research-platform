@@ -10,14 +10,12 @@ from quant_research_platform.contracts.models import (
     DEFAULT_MODEL_THREAD_COUNT,
     ModelSpec,
     _model_algorithm_facts,
-    _resolved_model_thread_count,
     _thaw_model_hyperparameters,
 )
 from quant_research_platform.research.models.rank_ensemble import (
     EqualWeightRankEnsembleFactory,
     ICWeightedRankEnsembleFactory,
 )
-from quant_research_platform.runtime.resources import model_cpu_capacity
 
 
 def ridge_regression_estimator(spec: ModelSpec, params: dict[str, object]) -> object:
@@ -141,18 +139,6 @@ def build_estimator_from_model_spec(spec: ModelSpec) -> object | None:
 
 def resolved_model_hyperparameters(spec: ModelSpec) -> dict[str, object]:
     params = _thaw_model_hyperparameters(spec.hyperparameters)
-    if spec.model_algorithm in _PARALLEL_MODEL_ALGORITHMS and "n_jobs" in params:
-        physical, available = model_cpu_capacity()
-        params["n_jobs"] = _resolved_model_thread_count(
-            params["n_jobs"], physical_cores=physical, available_cores=available
-        )
+    if spec.model_algorithm in _PARALLEL_MODEL_ALGORITHMS:
+        params.setdefault("n_jobs", DEFAULT_MODEL_THREAD_COUNT)
     return params
-
-
-def model_thread_count(spec: ModelSpec) -> int:
-    if spec.model_algorithm not in _PARALLEL_MODEL_ALGORITHMS:
-        return DEFAULT_MODEL_THREAD_COUNT
-    params = resolved_model_hyperparameters(spec)
-    if "n_jobs" not in params:
-        return DEFAULT_MODEL_THREAD_COUNT
-    return int(params["n_jobs"])

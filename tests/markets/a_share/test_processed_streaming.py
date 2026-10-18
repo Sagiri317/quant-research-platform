@@ -358,15 +358,21 @@ def test_processed_blocks_preserve_full_history_math(
         return processed_axis(*args, **kwargs)
 
     monkeypatch.setattr(producer, "_processed_axis", observed_axis)
-    default_batch_rows = producer.DEFAULT_BATCH_ROWS
+    compute = producer._compute_processed_frame
+    computations = {}
+
+    def observed_compute(spec, **kwargs):
+        computations.setdefault(spec.data_id, []).append(
+            {key: len(frame) for key, frame in kwargs["dependencies"].items()}
+        )
+        return compute(spec, **kwargs)
+
+    monkeypatch.setattr(producer, "_compute_processed_frame", observed_compute)
+    # Small transport/state batches must not split stateless scientific windows.
+    monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", 200)
     for data_id in target_ids:
         spec = processed_catalog().get(data_id)
         root = layout.processed_data_root(spec.market_id, spec.kind, data_id)
-        monkeypatch.setattr(
-            producer,
-            "DEFAULT_BATCH_ROWS",
-            200 if data_id == "fundamental_pit" else default_batch_rows,
-        )
         with producer.produce_a_share_processed_data(
             spec,
             inputs=_published_inputs(layout, spec),
@@ -394,8 +400,13 @@ def test_processed_blocks_preserve_full_history_math(
     assert preparations == [True]
     # Only the factor without a declared PANEL clock consumes the scanned axis.
     assert axis_requests == [False, False, False, False, False, True]
-    assert len(observation_counts) > 1
-    assert sum(observation_counts) == len(eager["market_panel_1d"])
+    assert len(computations["market_panel_1d"]) > 1
+    for data_id in target_ids[1:]:
+        spec = processed_catalog().get(data_id)
+        assert computations[data_id] == [
+            {key: len(eager[key]) for key in spec.processed_input_data_ids}
+        ]
+    assert observation_counts == [len(eager["market_panel_1d"])]
     mask = eager["execution_mask"]
     assert mask.loc[
         mask["asset_id"].eq("000001") & mask["timestamp"].eq(dates[63]), "can_enter"
@@ -723,7 +734,20 @@ def test_processed_narrow_output_uses_existing_panel_history(
     )
     layout = StorageLayout(tmp_path)
     input_sessions = []
+    materialized_sessions = []
     compute = producer._compute_processed_frame
+    materialize = producer.materialize_dataset_session
+
+    def observed_materialize(session, **kwargs):
+        result = materialize(session, **kwargs)
+        if session.spec["data_id"] == "market_panel_1d" and {
+            "adj_close",
+            "period_return",
+        }.intersection(session.logical_columns):
+            materialized_sessions.append(result.timestamp.nunique())
+        return result
+
+    monkeypatch.setattr(producer, "materialize_dataset_session", observed_materialize)
 
     def observed(spec, **kwargs):
         input_sessions.append(
@@ -748,6 +772,7 @@ def test_processed_narrow_output_uses_existing_panel_history(
         monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", 300)
     else:
         monkeypatch.setattr(producer, "_compute_processed_frame", observed)
+        monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", 3)
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
     with producer.produce_a_share_processed_data(
         spec,
@@ -778,6 +803,9 @@ def test_processed_narrow_output_uses_existing_panel_history(
         100 if target == "market_model_factors" else lookback + len(core)
     )
     assert max(input_sessions) < len(dates)
+    assert materialized_sessions == input_sessions
+    if target == "price_volume_facts":
+        assert input_sessions == [lookback + len(core)]
 
 
 def test_financial_pit_calendar_file_order_preserves_formal_published_rows(tmp_path):
