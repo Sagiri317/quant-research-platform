@@ -1533,11 +1533,12 @@ def _portfolio_statistics_tables(
             ):
                 raise ValueError("portfolio_statistics_window_incomplete")
             batch_group = group[: len(streams)]
+            interval_economics = tuple(map(portfolio_interval_economics, batch_group))
             interval_inputs = dict(zip(fit_streams, group[len(streams) :], strict=True))
             if expected_intervals is not None:
                 expected = expected_intervals.iloc[interval_index]
             else:
-                first = portfolio_interval_economics(batch_group[0])
+                first = interval_economics[0]
                 expected = pd.Series(
                     {"entry_at": first["entry_at"], "end_at": first["end_at"]}
                 )
@@ -1561,12 +1562,13 @@ def _portfolio_statistics_tables(
                         )
                         for name, value in holding_input.fitted.factor_returns.items()
                     )
-            for candidate, batch in zip(candidates, batch_group, strict=True):
+            for candidate, batch, row in zip(
+                candidates, batch_group, interval_economics, strict=True
+            ):
                 holding_input = interval_inputs.get(candidate.risk_style_columns)
                 candidate_id = candidate.candidate_id
                 previous_end, previous_nav = previous[candidate_id]
                 economic_totals[candidate_id].consume(batch)
-                row = portfolio_interval_economics(batch)
                 if (row["entry_at"], row["end_at"]) != (
                     expected.entry_at,
                     expected.end_at,

@@ -516,7 +516,9 @@ def test_calibration_weighted_cluster_reference_and_unit_scaling(
                 + 0.001 * ((g + i) % 3 - 1),
             }
             for g, timestamp in enumerate(dates)
-            for i, x in enumerate((-1.0, 0.0, 1.0))
+            for i, x in enumerate(
+                np.linspace(-1.0 + 0.1 * g, 1.0, (2, 3, 4, 5, 2, 7)[g])
+            )
         ]
     )
     alpha_scale = float(np.ldexp(1.0, alpha_exponent))
@@ -532,7 +534,7 @@ def test_calibration_weighted_cluster_reference_and_unit_scaling(
         scheduled_intervals=intervals,
     )
     x = sm.add_constant(frame.prediction_rank_score)
-    weights = np.full(len(frame), 1 / 18)
+    weights = 1.0 / frame.groupby("timestamp")["timestamp"].transform("size")
     fit = sm.WLS(frame.holding_return, x, weights=weights).fit()
     # Same uncorrected date-cluster sandwich as production; no df policy change.
     covariance = cov_cluster(fit, frame.timestamp, use_correction=False)
@@ -1466,25 +1468,41 @@ def test_decimal_constant_scaler_freezes_exact_training_value(count):
     assert ModelMatrixScaler.fit(training).scale_[0] != 1.0
 
 
-@pytest.mark.parametrize("alpha_exponent", (0, 600, -600))
-@pytest.mark.parametrize("case", ("exact_zero", "small_positive"))
-def test_alpha_cluster_variance_preserves_zero_and_binary64_signal(
-    case, alpha_exponent
-):
+@pytest.mark.parametrize(
+    "case,noise",
+    (
+        ("zero_residuals", 0.0),
+        ("symmetric_residuals", 0.0),
+        ("symmetric_residuals", 1e-6),
+        ("symmetric_residuals", 0.001),
+        ("economic_noise", 0.001),
+    ),
+)
+def test_alpha_cluster_variance_resolves_local_scores(case, noise):
+    import statsmodels.api as sm
+    from statsmodels.stats.sandwich_covariance import cov_cluster
+
     dates = pd.date_range("2024-01-01", periods=6, freq="MS")
-    counts = (3,) * 6 if case == "exact_zero" else (2, 3, 4, 5, 2, 7)
-    rows = [
-        {
-            "timestamp": day,
-            "prediction_rank_score": x,
-            "holding_return": 0.125 + 0.25 * x + (group - 2) * 0.0078125 * (x * x + 1),
-        }
-        for group, (day, count) in enumerate(zip(dates, counts, strict=True))
-        for x in np.linspace(-1, 1, count)
-    ]
-    frame = pd.DataFrame(rows)
-    scale = float(np.ldexp(1.0, alpha_exponent))
-    frame["prediction_rank_score"] *= scale
+    counts = (3,) * 6 if case == "symmetric_residuals" else (2, 3, 4, 5, 2, 7)
+    frame = pd.DataFrame(
+        [
+            {
+                "timestamp": day,
+                "prediction_rank_score": x,
+                "holding_return": (
+                    0.125
+                    + 0.25 * x
+                    + (group - 2) * 0.0078125 * (x * x + 1)
+                    + noise * (group - 2) * x
+                    if case == "symmetric_residuals"
+                    else 0.5 + 0.25 * x + noise * (group - 2) * (x * x + x + 1)
+                ),
+            }
+            for group, (day, count) in enumerate(zip(dates, counts, strict=True))
+            for x in np.linspace(-1, 1, count)
+        ]
+    )
+    frame = frame.sample(frac=1.0, random_state=42)
     intervals = pd.DataFrame(
         {
             "timestamp": dates,
@@ -1499,20 +1517,34 @@ def test_alpha_cluster_variance_preserves_zero_and_binary64_signal(
         scheduled_intervals=intervals,
     )
     assert result.status == "DEFINED" and not result.benchmark_only
-    assert result.slope == pytest.approx(0.25 / scale, rel=1e-12, abs=0)
-    if case == "exact_zero":
-        # Symmetric binary inputs give exactly zero date-cluster slope scores.
+    if noise == 0.0:
+        assert result.slope == pytest.approx(0.25, rel=1e-12)
         assert result.slope_standard_error == 0.0
         assert result.slope_t_statistic is result.slope_pvalue is None
         assert result.slope_ci_low is result.slope_ci_high is None
+        if case == "symmetric_residuals":
+            # Nonzero even residuals cancel each date's odd slope score.
+            assert result.weighted_r2 < 1.0
+        else:
+            assert result.weighted_r2 == 1.0
     else:
-        # Exact rational WLS and uncorrected six-date sandwich on binary64 inputs.
-        standard_error = 1.3003283717694013e-18
-        assert result.slope_standard_error == pytest.approx(
-            standard_error / scale, rel=1e-12, abs=0
+        weights = 1.0 / frame.groupby("timestamp")["timestamp"].transform("size")
+        fit = sm.WLS(
+            frame.holding_return,
+            sm.add_constant(frame.prediction_rank_score),
+            weights=weights,
+        ).fit()
+        standard_error = np.sqrt(
+            cov_cluster(fit, frame.timestamp, use_correction=False)[1, 1]
         )
+        assert result.slope == pytest.approx(fit.params.iloc[1], rel=1e-12)
+        assert result.inference_status == "DEFINED" and result.slope_standard_error > 0
+        assert result.slope_standard_error == pytest.approx(
+            standard_error, rel=1e-10, abs=1e-16
+        )
+        # Small cluster scores amplify floating cancellation error in the t ratio.
         assert result.slope_t_statistic == pytest.approx(
-            0.25 / standard_error, rel=1e-12, abs=0
+            fit.params.iloc[1] / standard_error, rel=1e-10
         )
 
 

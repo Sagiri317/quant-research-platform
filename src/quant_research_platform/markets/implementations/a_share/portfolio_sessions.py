@@ -107,12 +107,12 @@ def _portfolio_session_evidence(
     bars = open_dataset_session(
         **_dataset_input_options(market_bars_root)
     ).projected_view(_MARKET_FACT_COLUMNS)
-    # Preserve all preceding membership evidence, but never inspect later bars.
-    if time_window is not None:
-        bars = bars.filtered_view(
-            TimeWindow(pd.Timestamp.min, pd.Timestamp(time_window.end))
-        )
     panel = open_dataset_session(**_dataset_input_options(panel_root))
+    # Preserve preceding membership and valuation evidence, not unrelated future rows.
+    if time_window is not None:
+        history = TimeWindow(pd.Timestamp.min, pd.Timestamp(time_window.end))
+        bars = bars.filtered_view(history)
+        panel = panel.filtered_view(history)
     business_columns = set(panel_columns) & {
         "open",
         "close",
@@ -133,6 +133,8 @@ def _portfolio_session_evidence(
             panel, panel_source=False, include_asset_sessions=True
         )
     stock_source = open_dataset_session(**_dataset_input_options(stock_master_root))
+    if time_window is not None:
+        stock_source = stock_source.filtered_view(history)
     stock_columns = _STOCK_FACT_COLUMNS
     if "delisting_date_unresolved" in stock_source.spec["column_roles"]:
         stock_columns = (*stock_columns, "delisting_date_unresolved")
@@ -177,7 +179,9 @@ def iter_portfolio_sessions(
     )
     rights_root = equity_events_root
     rights_session = (
-        open_dataset_session(**_dataset_input_options(rights_root))
+        open_dataset_session(**_dataset_input_options(rights_root)).filtered_view(
+            TimeWindow(pd.Timestamp.min, pd.Timestamp(time_window.end))
+        )
         if rights_root is not None
         else None
     )
@@ -202,7 +206,6 @@ def iter_portfolio_sessions(
         )
     if rights.timestamp.isna().any():
         raise ValueError("equity_event_timestamp_invalid")
-    rights = rights.loc[rights.timestamp.le(pd.Timestamp(time_window.end))].copy()
     rights["entitlement_proved"] = True
     pending_rights = rights
     rights_lineage = {}
@@ -211,6 +214,8 @@ def iter_portfolio_sessions(
         corporate_source = open_dataset_session(
             **_dataset_input_options(corporate_actions_root)
         ).filtered_view(time_window)
+        if "amount" not in corporate_source.logical_columns:
+            raise ValueError("portfolio_input_business_columns_excluded")
         corporate_columns = _CORPORATE_SOURCE_COLUMNS
         if "settlement_date_unresolved" in corporate_source.spec["column_roles"]:
             corporate_columns = (*corporate_columns, "settlement_date_unresolved")
@@ -261,7 +266,11 @@ def iter_portfolio_sessions(
             channels.enter_context(
                 closing_iterator(
                     _iter_dataset_session_frames(
-                        open_dataset_session(**_dataset_input_options(execution_root)),
+                        open_dataset_session(
+                            **_dataset_input_options(execution_root)
+                        ).filtered_view(
+                            TimeWindow(pd.Timestamp.min, pd.Timestamp(time_window.end))
+                        ),
                         _EXECUTION_COLUMNS,
                     )
                 )

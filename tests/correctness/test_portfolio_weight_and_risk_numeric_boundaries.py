@@ -584,7 +584,14 @@ def test_native_market_model_relisting_resets_beta_and_residual_warmup(tmp_path)
     actual = actual.loc[actual.asset_id.eq(assets[0]) & actual.timestamp.ge(dates[600])]
     expected = expected.loc[expected.asset_id.eq("new_life")]
     columns = ["beta_252d", "residual_volatility_60d"]
-    np.testing.assert_array_equal(actual[columns], expected[columns])
+    # Relabeling changes reduction order, not the lifecycle or missing samples.
+    np.testing.assert_allclose(
+        actual[columns].to_numpy(dtype=float, na_value=np.nan),
+        expected[columns].to_numpy(dtype=float, na_value=np.nan),
+        rtol=1e-13,
+        atol=0.0,
+        equal_nan=True,
+    )
     assert actual.beta_252d.iloc[:251].isna().all()
     assert np.isfinite(actual.beta_252d.iloc[251])
     # The mature 60-session residual window needs 45 fresh residuals.

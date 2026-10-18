@@ -391,6 +391,22 @@ def _microstructure_inputs(column):
     )
 
 
+def _microstructure_windows(column):
+    """Count nominal 100ms observations, including both return endpoints."""
+    if column in {"return_100ms", "return_500ms", "realized_volatility_1s"}:
+        return (
+            {"return_100ms": 2, "return_500ms": 6, "realized_volatility_1s": 11}[
+                column
+            ],
+        )
+    if (
+        column.startswith(("trade_flow_imbalance_", "depth_normalized_ofi_", "ofi_"))
+        or "pressure" in column
+    ):
+        return ({"100ms": 1, "500ms": 5, "1s": 10, "5s": 50}[column.rsplit("_", 1)[1]],)
+    return ()
+
+
 def derivative_channels(columns):
     """Resolve selected factor and context columns to native state channels."""
     channels = set()
@@ -500,6 +516,7 @@ def factor_catalog():
             input_columns=_microstructure_inputs(column),
             output_column=column,
             family="microstructure",
+            required_windows=_microstructure_windows(column),
             required_input_data_id="binance_futures_microstructure_factors_100ms",
             timing_semantics="observed_by_decision_on_contiguous_100ms_segment",
             null_policy="full_window_positive_denominator",

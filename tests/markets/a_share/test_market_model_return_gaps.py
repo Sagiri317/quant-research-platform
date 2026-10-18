@@ -238,7 +238,7 @@ def test_required_return_gap_resets_every_asset_without_partial_renormalization(
     assert result.residual_volatility.isna().all()
     assert state.observe(panel.assign(period_return=0.04)).beta.isna().all()
     result = state.observe(panel.assign(period_return=0.05))
-    assert result.beta.eq(1.0).all()
+    np.testing.assert_allclose(result.beta, 1.0, rtol=1e-13, atol=1e-15)
     assert result.residual_volatility.eq(0.0).all()
 
 

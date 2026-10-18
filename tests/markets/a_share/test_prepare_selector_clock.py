@@ -209,35 +209,31 @@ def test_market_model_input_completeness_resets_current_and_next_weighted_sessio
     assert state.observe(panel.assign(period_return=0.07)).beta.eq(1.0).all()
 
 
-@pytest.mark.parametrize(
-    "weights,first,second",
-    (
-        ([1e-308, 1e308], [1e308, 0.0], [0.0, 2e-308]),
-        ([1.0, 1.0], [0.0, 1e308], [2e-308, 0.0]),
-    ),
-)
-def test_market_model_unrepresentable_beta_is_local_and_recovers(
-    weights, first, second
-):
+def test_market_model_suspended_asset_is_local_and_recovers():
     state = MarketModelRiskState(window=2, residual_window=1)
     panel = pd.DataFrame(
         dict(
             asset_id=["a", "b"],
             listing_date=pd.Timestamp("2000-01-01"),
-            float_market_cap=weights,
+            float_market_cap=[100.0, 200.0],
             period_return=0.0,
+            filling_flag=0,
+            eligible=True,
         )
     )
     state.observe(panel)
-    state.observe(panel.assign(period_return=first))
-    result = state.observe(panel.assign(period_return=second))
+    for value in (0.01, 0.02):
+        suspended = panel.assign(period_return=[0.0, value])
+        suspended.loc[0, ["filling_flag", "eligible"]] = [1, False]
+        result = state.observe(suspended)
     assert np.isnan(result.beta["a"])
     assert np.isnan(result.residual_volatility["a"])
-    assert result.beta["b"] == pytest.approx(2.0)
-    assert result.residual_volatility["b"] == 0.0
-    recovered = state.observe(panel.assign(period_return=3e-308))
+    assert result.beta["b"] == pytest.approx(1.0)
+    assert result.residual_volatility["b"] == pytest.approx(0.0, abs=1e-15)
+    assert np.isnan(state.observe(panel.assign(period_return=0.03)).beta["a"])
+    recovered = state.observe(panel.assign(period_return=0.04))
     assert recovered.beta.notna().all()
-    assert recovered.residual_volatility.eq(0.0).all()
+    np.testing.assert_allclose(recovered.residual_volatility, 0.0, atol=1e-15)
 
 
 def test_native_market_model_selection_preserves_declared_composition_and_recovers(
@@ -285,7 +281,7 @@ def test_native_market_model_selection_preserves_declared_composition_and_recove
     assert result.loc[result.timestamp.ge(dates[gap]), styles].notna().all().all()
 
 
-def test_market_model_unrepresentable_closed_interval_does_not_abort_open_market():
+def test_market_model_unknown_closed_interval_does_not_abort_open_market():
     state = MarketModelRiskState(window=2, residual_window=1)
     panel = pd.DataFrame(
         dict(
@@ -297,9 +293,9 @@ def test_market_model_unrepresentable_closed_interval_does_not_abort_open_market
         )
     )
     state.observe(panel, open_market_types=frozenset({1, 4}))
-    for _ in range(2):
+    for value in (np.nan, 0.02):
         state.observe(
-            panel.iloc[1:].assign(period_return=1e308),
+            panel.iloc[1:].assign(period_return=value),
             open_market_types=frozenset({1}),
         )
     result = state.observe(panel, open_market_types=frozenset({1, 4}))

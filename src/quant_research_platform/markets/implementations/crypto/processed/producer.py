@@ -227,24 +227,10 @@ def produce_hft_processed_data(
                     factor_catalog().get(name) for name in factor_columns
                 )
                 transform = partial(iter_factor_frames, columns=factor_columns)
-                # Endpoint returns need their earlier point; flow sums include
-                # the current bin, and volatility needs ten one-step returns.
                 history_ms = max(
                     (
-                        1000
-                        if name == "realized_volatility_1s"
-                        else 500
-                        if name == "return_500ms"
-                        else 100
-                        if name == "return_100ms"
-                        else 4900
-                        if name.endswith("_5s")
-                        else 900
-                        if name.endswith("_1s")
-                        else 400
-                        if name.endswith("_500ms")
-                        else 0
-                        for name in factor_columns
+                        (max(item.required_windows, default=1) - 1) * HFT_GRID_MS
+                        for item in definitions
                     ),
                     default=0,
                 )
@@ -717,27 +703,31 @@ def produce_cross_asset_context(
         yield from iter_dataset_chunks(view, batch_rows=DEFAULT_BATCH_ROWS)
 
     def frames():
-        for asset in parameters["target_assets"]:
-            with closing_iterator(
-                iter_cross_asset_factor_frames(
-                    asset_chunks(sessions[target_id], asset),
-                    information_frames={
-                        key: asset_chunks(sessions[information_id], key)
-                        for key in parameters["information_assets"]
-                    },
-                    max_age_ms=parameters["max_age_ms"],
-                    input_delay_ms=parameters.get("input_delay_ms", 0),
-                    batch_rows=batch_rows,
-                )
-            ) as aligned:
-                for frame in aligned:
-                    frame["market_id"] = str(MARKET_ID)
-                    frame["asset_id"] = asset
-                    _yield_value = frame.loc[:, list(spec.required_columns)]
-                    try:
-                        yield _yield_value
-                    except GeneratorExit:
-                        return
+        targets = _union_panel_frames(
+            (
+                asset_chunks(sessions[target_id], asset)
+                for asset in parameters["target_assets"]
+            ),
+            columns=("market_id", "asset_id", "timestamp"),
+            batch_rows=batch_rows,
+        )
+        with closing_iterator(
+            iter_cross_asset_factor_frames(
+                targets,
+                information_frames={
+                    key: asset_chunks(sessions[information_id], key)
+                    for key in parameters["information_assets"]
+                },
+                max_age_ms=parameters["max_age_ms"],
+                input_delay_ms=parameters.get("input_delay_ms", 0),
+                batch_rows=batch_rows,
+            )
+        ) as aligned:
+            for frame in aligned:
+                try:
+                    yield frame.loc[:, list(spec.required_columns)]
+                except GeneratorExit:
+                    return
 
     data = frames()
 

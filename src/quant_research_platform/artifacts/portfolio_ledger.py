@@ -378,7 +378,7 @@ class _LedgerValidation:
                     event.asset_id,
                     event.lifecycle_id,
                     event.evidence_identity,
-                    str(Fraction(event.entitlement_quantity)),
+                    encode_exact_numeric(Fraction(event.entitlement_quantity)),
                     str(event.entitlement_record_at_ns),
                 )
             ).encode("utf-8")

@@ -220,6 +220,7 @@ def plot_portfolio_curve(curve, *, sample_role, timezone):
         title=f"净值与回撤 | {curve['candidate_id']} | "
         + {
             "DEFINED": "已定义",
+            "PARTIAL": "部分已知",
             "UNDEFINED": "未定义",
             "BLOCKED": "受阻",
             "FAILED": "失败",
@@ -234,7 +235,7 @@ def plot_portfolio_curve(curve, *, sample_role, timezone):
         ),
         sample_role=sample_role,
     )
-    if curve["status"] != "DEFINED":
+    if curve["status"] not in {"DEFINED", "PARTIAL"}:
         for axis in axes:
             _note(axis, f"{curve['status']}: {curve['reason']}")
         return figure, axes
@@ -276,10 +277,11 @@ def plot_portfolio_curve(curve, *, sample_role, timezone):
         from matplotlib.ticker import PercentFormatter
 
         dd_axis.yaxis.set_major_formatter(PercentFormatter(1))
-        complete = part["stride"] == 1 and part["source_point_count"] == part[
+        full_resolution = part["stride"] == 1 and part["source_point_count"] == part[
             "displayed_point_count"
         ] == len(points)
-        if complete and values:
+        partial = part.get("status", curve["status"]) == "PARTIAL"
+        if full_resolution and values:
             peak = _number(curve["initial_capital"])
             if peak <= 0:
                 raise ValueError("plot_initial_capital_invalid")
@@ -293,19 +295,32 @@ def plot_portfolio_curve(curve, *, sample_role, timezone):
             )
             _note(
                 dd_axis,
-                "完整账本派生回撤；正式最大回撤以统计产物为准",
+                "已知前缀的局部回撤；全窗回撤未定义"
+                if partial
+                else "完整账本派生回撤；正式最大回撤以统计产物为准",
             )
         else:
             _note(
                 dd_axis,
                 "UNDEFINED：需要未抽样完整曲线" if values else "UNDEFINED：没有净值点",
             )
-        if not complete:
-            _note(
-                nav_axis,
+        notes = []
+        if not full_resolution:
+            notes.append(
                 f"抽样净值：{part['displayed_point_count']}/"
-                f"{part['source_point_count']} 点；步长={part['stride']}",
+                f"{part['source_point_count']} 点；步长={part['stride']}"
             )
+        if partial:
+            stop = _times(
+                [pd.Timestamp(part["account_stop_ns"], unit="ns", tz=epoch_timezone)],
+                timezone,
+            )[0]
+            notes.append(
+                f"PARTIAL / known_prefix；停止原因：{part['account_stop_reason']}；"
+                f"停止时点：{stop.isoformat()}"
+            )
+        if notes:
+            _note(nav_axis, "\n".join(notes))
         boundaries = part["boundaries"]
         starts = {
             row["window_index"]: row["timestamp_ns"]
@@ -355,6 +370,24 @@ def plot_portfolio_curve(curve, *, sample_role, timezone):
             if indices:
                 axis.legend(fontsize=8, loc="lower left")
             _time_axis(axis, timezone)
+            if "window" in part:
+                from quant_research_platform.contracts.time import (
+                    TimeWindow,
+                    time_window_timestamp_interval,
+                )
+
+                start, stop, _closed = time_window_timestamp_interval(
+                    TimeWindow(**part["window"])
+                )
+                axis.set_xlim(
+                    _times(
+                        [
+                            pd.Timestamp(value, tz=epoch_timezone)
+                            for value in (start, stop)
+                        ],
+                        timezone,
+                    )
+                )
     return figure, axes
 
 

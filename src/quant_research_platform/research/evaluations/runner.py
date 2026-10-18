@@ -26,11 +26,7 @@ from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.ids import validate_input_market
 from quant_research_platform.contracts.json_codec import _strict_config
 from quant_research_platform.contracts.signals import SignalSpec
-from quant_research_platform.contracts.time import (
-    PredictionWindow,
-    TimeWindow,
-    time_window_timestamp_interval,
-)
+from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.evaluations.engine import (
@@ -100,7 +96,6 @@ def evaluate(config):
         pd.isna(pd.Timestamp(value)) for value in (window.start, window.end)
     ):
         raise ValueError("evaluation_window_invalid")
-    start, stop, closed = time_window_timestamp_interval(window)
     cutoff = strict_timestamp_series(
         pd.Series([config["cutoff"]]), error="evaluation_cutoff_invalid"
     ).iloc[0]
@@ -241,17 +236,6 @@ def evaluate(config):
             time_window=window,
         )
         validate_input_market(metadata["model_facts"], spec.market_id)
-        prediction_window = PredictionWindow(**metadata["prediction_window"])
-        if pd.Timestamp(prediction_window.start) > pd.Timestamp(start):
-            raise ValueError("evaluation_prediction_window_incomplete")
-        if prediction_window.end is not None:
-            _, declared_stop, declared_closed = time_window_timestamp_interval(
-                prediction_window
-            )
-            if declared_stop < stop or (
-                declared_stop == stop and closed and not declared_closed
-            ):
-                raise ValueError("evaluation_prediction_window_incomplete")
         # The prediction reader already owns uniqueness of these exact keys.
         frame.set_index(["timestamp", "asset_id"], inplace=True)
         predictions[column] = (frame["prediction_score"], metadata)

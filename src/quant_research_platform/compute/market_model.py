@@ -5,15 +5,12 @@ from __future__ import annotations
 from array import array
 from collections.abc import Mapping
 from dataclasses import dataclass
-from fractions import Fraction
 from math import ceil
 
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.compute.dataframe.cross_section import _CorrelationMoments
 from quant_research_platform.contracts.validation import (
-    finite_exact_float,
     strict_finite_numeric_series,
     strict_integer_series,
     strict_timestamp_series,
@@ -47,12 +44,11 @@ class MarketModelRiskState:
         self.residual_window = residual_window
         self._listings: dict[str, pd.Timestamp | tuple[pd.Timestamp, int]] = {}
         self._returns: dict[str, array] = {}
-        self._moments: dict[str, _CorrelationMoments] = {}
         self._market_returns: dict[str, array] = {}
         self._residuals: dict[str, array] = {}
         self._previous_weights: dict[str, float] = {}
         self._asset_markets: dict[str, int] = {}
-        self._pending_market_gross: dict[str, Fraction | None] = {}
+        self._pending_market_returns: dict[str, float] = {}
         self._previous_market_complete = True
 
     def observe(
@@ -217,12 +213,11 @@ class MarketModelRiskState:
         for asset in (absent - closed_assets) | changed:
             self._listings.pop(asset, None)
             del self._returns[asset]
-            del self._moments[asset]
             del self._market_returns[asset]
             del self._residuals[asset]
             self._previous_weights.pop(asset, None)
             self._asset_markets.pop(asset, None)
-            self._pending_market_gross.pop(asset, None)
+            self._pending_market_returns.pop(asset, None)
         self._listings.update(listings)
         if open_market_types is not None:
             known = frame.loc[frame.market_type.notna()]
@@ -252,43 +247,43 @@ class MarketModelRiskState:
             )
             for row in frame.itertuples(index=False)
         ]
-        market_weight = Fraction()
-        market_total = Fraction()
-        for _, value, weight, _, eligible, unknown_quote, _, _, _ in weighted:
-            if weight is not None and unknown_quote:
-                market_weight = Fraction()
-                break
-            if eligible and weight is not None:
-                if np.isnan(value):
-                    # A required member makes the whole session unknown.
-                    market_weight = Fraction()
-                    break
-                exact_weight = Fraction(weight)
-                market_weight += exact_weight
-                market_total += exact_weight * Fraction(value)
         # A selector gap also leaves the next session's lagged weights unknown.
-        market_return = (
-            float(market_total / market_weight)
-            if market_weight
+        market_return = np.nan
+        members = [
+            (value, weight)
+            for _, value, weight, _, eligible, _, _, _, _ in weighted
+            if eligible and weight is not None
+        ]
+        if (
+            members
             and market_input_complete
             and self._previous_market_complete
-            else np.nan
-        )
+            and not any(
+                weight is not None and unknown_quote
+                for _, _, weight, _, _, unknown_quote, _, _, _ in weighted
+            )
+        ):
+            market_values, weights = np.asarray(members).T
+            weights = weights / weights.max()
+            anchor = market_values[weights.argmax()]
+            market_return = float(
+                anchor + np.dot(weights, market_values - anchor) / weights.sum()
+            )
         self._previous_market_complete = market_input_complete and not any(
             unknown_weight and (eligible or previous_weight is not None)
             for _, _, previous_weight, _, eligible, _, unknown_weight, _, _ in weighted
         )
         for asset in closed_assets:
-            gross = self._pending_market_gross.get(asset, Fraction(1))
-            self._pending_market_gross[asset] = (
-                gross * (1 + Fraction.from_float(float(market_return)))
-                if gross is not None and np.isfinite(market_return)
-                else None
+            pending = self._pending_market_returns.get(asset, 0.0)
+            self._pending_market_returns[asset] = (
+                pending + (1 + pending) * market_return
             )
 
-        betas: dict[str, float] = {}
-        volatilities: dict[str, float] = {}
-        for (
+        assets = frame.asset_id.to_list()
+        betas = np.full(len(assets), np.nan)
+        residual_values = np.full(len(assets), np.nan)
+        mature = []
+        for position, (
             asset,
             return_value,
             _previous_weight,
@@ -298,32 +293,19 @@ class MarketModelRiskState:
             _unknown_weight,
             fresh,
             suspended,
-        ) in weighted:
-            if asset not in self._moments:
-                self._moments[asset] = _CorrelationMoments()
-            moments = self._moments[asset]
+        ) in enumerate(weighted):
             returns = self._returns.setdefault(asset, array("d"))
             markets = self._market_returns.setdefault(asset, array("d"))
-            residuals = self._residuals.setdefault(asset, array("d"))
             interval_market_return = market_return
             if suspended:
-                gross = self._pending_market_gross.get(asset, Fraction(1))
-                self._pending_market_gross[asset] = (
-                    gross * (1 + Fraction.from_float(float(market_return)))
-                    if gross is not None and np.isfinite(market_return)
-                    else None
+                pending = self._pending_market_returns.get(asset, 0.0)
+                self._pending_market_returns[asset] = (
+                    pending + (1 + pending) * market_return
                 )
                 interval_market_return = np.nan
-            elif asset in self._pending_market_gross:
-                gross = self._pending_market_gross.pop(asset)
-                converted = (
-                    finite_exact_float(
-                        gross * (1 + Fraction.from_float(float(market_return))) - 1
-                    )
-                    if gross is not None and np.isfinite(market_return)
-                    else None
-                )
-                interval_market_return = np.nan if converted is None else converted
+            elif asset in self._pending_market_returns:
+                pending = self._pending_market_returns.pop(asset)
+                interval_market_return = pending + (1 + pending) * market_return
             paired = (
                 fresh
                 and np.isfinite(interval_market_return)
@@ -331,51 +313,65 @@ class MarketModelRiskState:
             )
             returns.append(return_value if paired else np.nan)
             markets.append(interval_market_return if paired else np.nan)
-            if paired:
-                moments.update(float(interval_market_return), return_value)
             if len(returns) > self.window:
-                old_market, old_return = markets.pop(0), returns.pop(0)
-                if np.isfinite(old_market) and np.isfinite(old_return):
-                    moments.remove(old_market, old_return)
-            beta = np.nan
-            residual = np.nan
-            if len(returns) == self.window and moments.count >= max(
-                2, ceil(self.min_fresh_fraction * self.window)
-            ):
-                market_mean, return_mean, market_square, _, product = moments.averages()
-                variance = market_square - market_mean * market_mean
-                if variance > 0:
-                    slope = (product - market_mean * return_mean) / variance
-                    converted = finite_exact_float(slope)
-                    if converted is not None:
-                        beta = converted
-                    if converted is not None and paired:
-                        converted = finite_exact_float(
-                            Fraction(return_value)
-                            - return_mean
-                            - slope
-                            * (Fraction(float(interval_market_return)) - market_mean)
-                        )
-                        if converted is not None:
-                            residual = converted
-            residuals.append(residual)
+                markets.pop(0)
+                returns.pop(0)
+            if len(returns) == self.window:
+                mature.append(position)
+
+        if mature:
+            markets = np.asarray([self._market_returns[assets[i]] for i in mature])
+            returns = np.asarray([self._returns[assets[i]] for i in mature])
+            paired = np.isfinite(markets) & np.isfinite(returns)
+            counts = paired.sum(axis=1)
+            enough = counts >= max(2, ceil(self.min_fresh_fraction * self.window))
+            # Center observed differences, avoiding raw second-moment subtraction.
+            centered = []
+            for values in (markets, returns):
+                anchors = values[np.arange(len(values)), paired.argmax(axis=1)]
+                differences = np.where(paired, values - anchors[:, None], 0.0)
+                means = np.divide(
+                    differences.sum(axis=1),
+                    counts,
+                    out=np.zeros(len(values)),
+                    where=counts > 0,
+                )
+                centered.append(np.where(paired, differences - means[:, None], 0.0))
+            x, y = centered
+            variance = np.sum(x * x, axis=1)
+            slopes = np.divide(
+                np.sum(x * y, axis=1),
+                variance,
+                out=np.full(len(mature), np.nan),
+                where=enough & (variance > 0),
+            )
+            slopes[~np.isfinite(slopes)] = np.nan
+            betas[mature] = slopes
+            residual_values[mature] = np.where(
+                paired[:, -1], y[:, -1] - slopes * x[:, -1], np.nan
+            )
+        residual_values[~np.isfinite(residual_values)] = np.nan
+
+        mature = []
+        for position, asset in enumerate(assets):
+            residuals = self._residuals.setdefault(asset, array("d"))
+            residuals.append(residual_values[position])
             if len(residuals) > self.residual_window:
                 residuals.pop(0)
-            betas[asset] = float(beta)
-            volatility = np.nan
             if len(residuals) == self.residual_window:
-                values = np.asarray(residuals)
-                values = values[np.isfinite(values)]
-                if len(values) < ceil(self.min_fresh_fraction * self.residual_window):
-                    volatilities[asset] = np.nan
-                    continue
-                residual_scale = float(np.max(np.abs(values)))
-                volatility = (
-                    0.0
-                    if residual_scale == 0.0
-                    else float(np.std(values / residual_scale, ddof=0) * residual_scale)
-                )
-            volatilities[asset] = volatility
+                mature.append(position)
+        volatilities = np.full(len(assets), np.nan)
+        if mature:
+            values = np.asarray([self._residuals[assets[i]] for i in mature])
+            finite = np.isfinite(values)
+            counts = finite.sum(axis=1)
+            valid = counts >= ceil(self.min_fresh_fraction * self.residual_window)
+            values, finite, counts = values[valid], finite[valid], counts[valid]
+            means = np.sum(np.where(finite, values, 0.0), axis=1) / counts
+            centered = np.where(finite, values - means[:, None], 0.0)
+            volatilities[np.asarray(mature)[valid]] = np.sqrt(
+                np.sum(centered * centered, axis=1) / counts
+            )
         self._previous_weights = {
             **{
                 asset: self._previous_weights[asset]
@@ -405,9 +401,10 @@ class MarketModelRiskState:
         }
 
         return MarketModelRiskStyles(
-            beta=pd.Series(betas, dtype="float64", name="beta_252d"),
+            beta=pd.Series(betas, index=assets, dtype="float64", name="beta_252d"),
             residual_volatility=pd.Series(
                 volatilities,
+                index=assets,
                 dtype="float64",
                 name="residual_volatility_60d",
             ),

@@ -240,6 +240,8 @@ def test_common_rows_do_not_hide_a_whole_missing_training_column():
     frame, _, models, plan = inputs()
     frame["feature_observed_x"] = 0.0
     frame.loc[3, "feature_observed_x"] = 1.0
+    frame["feature_missing_x"] = 1.0 - frame.feature_observed_x
+    frame["feature_x"] = frame.feature_x.where(frame.feature_observed_x.eq(1))
     result, _ = masks(frame, models, plan)
     assert result.index[result.common_train].tolist() == [0, 1]
     prepared = _collect_training_frame(

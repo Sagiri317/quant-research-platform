@@ -819,18 +819,7 @@ def assemble(config: Mapping) -> Path:
             raise ValueError("duplicate_research_output_columns: " + column)
         name = candidates[0]
         declared = actual_specs[name].required_columns
-        companions = [column]
-        for value in canonical_feature_validity_columns((column,), declared):
-            suffix = value[len("feature_") :]
-            companions.extend(
-                c
-                for c in (
-                    value,
-                    "feature_missing_" + suffix,
-                    "feature_observed_" + suffix,
-                )
-                if c in declared
-            )
+        companions = (column, *canonical_feature_validity_columns((column,), declared))
         for companion in companions:
             if companion in feature_producers and feature_producers[companion] != name:
                 raise ValueError("duplicate_research_output_columns: " + companion)

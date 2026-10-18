@@ -165,30 +165,6 @@ class _CorrelationMoments:
         self.right_square += y * y
         self.product += x * y
 
-    def remove(self, left: float, right: float) -> None:
-        """Remove a previously observed pair from the retained rolling window."""
-        left_numerator, left_denominator = left.as_integer_ratio()
-        right_numerator, right_denominator = right.as_integer_ratio()
-        x = left_numerator << (self.exponent - left_denominator.bit_length() + 1)
-        y = right_numerator << (self.exponent - right_denominator.bit_length() + 1)
-        self.count -= 1
-        self.left_sum -= x
-        self.right_sum -= y
-        self.left_square -= x * x
-        self.right_square -= y * y
-        self.product -= x * y
-
-    def averages(self) -> tuple[Fraction, Fraction, Fraction, Fraction, Fraction]:
-        """Return exact first and second raw moments in observation units."""
-        unit = 1 << self.exponent
-        return (
-            Fraction(self.left_sum, self.count * unit),
-            Fraction(self.right_sum, self.count * unit),
-            Fraction(self.left_square, self.count * unit * unit),
-            Fraction(self.right_square, self.count * unit * unit),
-            Fraction(self.product, self.count * unit * unit),
-        )
-
     def result(self) -> tuple[float | None, str | None]:
         # Multiplying centered moments by count avoids division until the ratio.
         return _pearson_correlation_from_moments(

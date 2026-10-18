@@ -109,7 +109,7 @@ def test_market_model_invalid_slots_advance_without_resetting_history():
             )
         )
     assert result.beta.to_numpy() == pytest.approx([1.0, 1.0])
-    assert state._moments["a"].count == 15
+    assert np.isfinite(state._returns["a"]).sum() == 15
     result = state.observe(frame.assign(period_return=np.nan))
     assert result.beta.isna().all()
     assert len(state._returns["a"]) == 20
@@ -166,7 +166,7 @@ def test_market_model_252_pair_and_60_residual_exact_fresh_thresholds():
     for day in range(253):
         value = np.nan if 1 <= day <= 63 else (day % 13) * 0.001
         result = state.observe(frame.assign(period_return=value))
-    assert state._moments["a"].count == 189
+    assert np.isfinite(state._returns["a"]).sum() == 189
     assert result.beta.to_numpy() == pytest.approx([1.0, 1.0])
     # A missing next observation replaces a missing oldest observation; then
     # a valid oldest observation expires when the gap is moved to the tail.
@@ -186,7 +186,7 @@ def test_market_model_252_pair_and_60_residual_exact_fresh_thresholds():
         result = state.observe(
             frame.assign(period_return=np.nan if 1 <= day <= 64 else (day % 13) * 0.001)
         )
-    assert state._moments["a"].count == 188
+    assert np.isfinite(state._returns["a"]).sum() == 188
     assert result.beta.isna().all()
 
 
@@ -282,3 +282,104 @@ def test_fresh_projection_is_required_only_for_partial_statistics():
         ]
         == 100
     )
+
+
+def test_batched_market_regressions_match_independent_masked_least_squares():
+    rng = np.random.default_rng(412)
+    assets = list("abcdefgh")
+    state = MarketModelRiskState(window=12, residual_window=5)
+    expected_residuals = {asset: [] for asset in assets}
+    for day in range(45):
+        frame = pd.DataFrame(
+            {
+                "asset_id": assets,
+                "listing_date": pd.Timestamp("2000-01-01"),
+                "period_return": rng.normal(0, 0.015, len(assets)),
+                "float_market_cap": rng.uniform(1e8, 1e10, len(assets)),
+                "filling_flag": 0.0,
+            }
+        )
+        if day % 4 == 0:
+            frame.loc[day % len(assets), ["period_return", "filling_flag"]] = [0, 1]
+        if day in (14, 29):
+            frame.loc[3, "period_return"] = np.nan
+        if day >= 20:
+            frame.loc[1, "listing_date"] = pd.Timestamp("2024-01-01")
+        if day == 20:
+            expected_residuals["b"] = []
+        actual = state.observe(frame)
+        for asset in assets:
+            x = np.array(state._market_returns[asset])
+            y = np.array(state._returns[asset])
+            paired = np.isfinite(x) & np.isfinite(y)
+            beta = residual = np.nan
+            if len(x) == 12 and paired.sum() >= 9:
+                design = np.column_stack((np.ones(paired.sum()), x[paired]))
+                intercept, beta = np.linalg.lstsq(design, y[paired], rcond=None)[0]
+                if paired[-1]:
+                    residual = y[-1] - intercept - beta * x[-1]
+            history = expected_residuals[asset]
+            history.append(residual)
+            window = np.asarray(history[-5:])
+            valid = np.isfinite(window)
+            volatility = (
+                np.std(window[valid])
+                if len(window) == 5 and valid.sum() >= 4
+                else np.nan
+            )
+            np.testing.assert_allclose(
+                [actual.beta[asset], actual.residual_volatility[asset]],
+                [beta, volatility],
+                rtol=1e-11,
+                atol=1e-14,
+                equal_nan=True,
+            )
+
+
+@pytest.mark.parametrize("pause", ["closed", "suspended"])
+def test_market_interval_full_loss_absorbs_later_known_returns(pause):
+    state = MarketModelRiskState(window=3)
+    frame = pd.DataFrame(
+        {
+            "asset_id": ["a", "b"],
+            "listing_date": pd.Timestamp("2000-01-01"),
+            "market_type": [1, 4],
+            "period_return": 0.01,
+            "float_market_cap": 100.0,
+            "filling_flag": 0,
+            "eligible": True,
+        }
+    )
+    state.observe(frame, open_market_types=frozenset({1, 4}))
+    for value in (-1.0, 0.02):
+        current = frame.assign(period_return=[value, 0.0])
+        if pause == "closed":
+            current = current.iloc[:1]
+        else:
+            current.loc[1, ["filling_flag", "eligible"]] = [1, False]
+        state.observe(
+            current,
+            open_market_types=frozenset({1} if pause == "closed" else {1, 4}),
+        )
+    state.observe(frame, open_market_types=frozenset({1, 4}))
+    assert state._market_returns["b"][-1] == -1.0
+
+
+@pytest.mark.parametrize("window", [4, 252])
+def test_constant_market_return_stays_undefined_with_varying_caps(window):
+    rng = np.random.default_rng(58)
+    state = MarketModelRiskState(window=window, residual_window=2)
+    for _ in range(window + 4):
+        result = state.observe(
+            pd.DataFrame(
+                {
+                    "asset_id": list("abcdefgh"),
+                    "listing_date": pd.Timestamp("2000-01-01"),
+                    "period_return": 0.012345,
+                    "float_market_cap": rng.uniform(1e8, 1e10, 8),
+                }
+            )
+        )
+    assert result.beta.isna().all()
+    assert result.residual_volatility.isna().all()
+    assert all(values[-1] == 0.012345 for values in state._market_returns.values())

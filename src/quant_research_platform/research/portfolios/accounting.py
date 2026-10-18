@@ -5,9 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, fields
 from datetime import date
-from decimal import Decimal, localcontext
 from fractions import Fraction
-from math import fsum, lcm
+from math import fsum
 
 import numpy as np
 import pandas as pd
@@ -35,7 +34,6 @@ from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_real_numeric_series,
 )
-from quant_research_platform.research.features.transforms import _integer_coordinates
 from quant_research_platform.research.portfolios.schedules import is_rebalance_session
 
 _LEDGER_COLUMNS = (
@@ -729,76 +727,59 @@ def calibrate_expected_alpha(
     left = alpha.loc[selected].to_numpy(dtype="float64")
     right = returns.loc[selected].to_numpy(dtype="float64")
     _, cluster_codes = np.unique(dates.loc[selected].to_numpy(), return_inverse=True)
-    order = np.argsort(cluster_codes, kind="stable")
-    boundaries = np.flatnonzero(np.diff(cluster_codes[order])) + 1
-    groups = np.split(order, boundaries)
-
-    left, left_scale = _integer_coordinates(left)
-    right, right_scale = _integer_coordinates(right)
-    left, right = np.asarray(left, dtype=object), np.asarray(right, dtype=object)
-    pooled = [Fraction(0)] * 5
-    for positions in groups:
-        x, y = left[positions], right[positions]
-        counts = len(positions)
-        totals = (sum(x), sum(y), x @ x, y @ y, x @ y)
-        scales = (
-            left_scale,
-            right_scale,
-            left_scale**2,
-            right_scale**2,
-            left_scale * right_scale,
-        )
-        for index, (total, scale) in enumerate(zip(totals, scales, strict=True)):
-            pooled[index] += Fraction(int(total), counts * scale)
-    sx, sy, sxx, syy, sxy = pooled
-    cluster_count = len(groups)
-    determinant = cluster_count * sxx - sx * sx
-    if determinant == 0:
-        return undefined("alpha_calibration_rank_deficient")
-    slope = (cluster_count * sxy - sx * sy) / determinant
-    intercept = (sy - slope * sx) / cluster_count
-    variance = residual_variation = Fraction(0)
-    # One integer residual scale preserves the exact binary64 resolution test.
-    denominator = lcm(
-        right_scale, intercept.denominator, slope.denominator * left_scale
+    counts = np.bincount(cluster_codes)
+    cluster_count = len(counts)
+    weights = 1.0 / counts[cluster_codes]
+    # Power-of-two scaling preserves inputs; centering avoids raw-moment cancellation.
+    left_exponent = int(np.frexp(np.max(np.abs(left)))[1])
+    right_exponent = int(np.frexp(np.max(np.abs(right)))[1])
+    left = np.ldexp(left, -left_exponent)
+    right = np.ldexp(right, -right_exponent)
+    left_offset, right_offset = left[0], right[0]
+    left_shift, right_shift = left - left_offset, right - right_offset
+    left_mean = (
+        np.sum(np.bincount(cluster_codes, weights=left_shift) / counts) / cluster_count
     )
-    for positions in groups:
-        x = left[positions]
-        fitted = intercept.numerator * (denominator // intercept.denominator) + x * (
-            slope.numerator * (denominator // (slope.denominator * left_scale))
-        )
-        observed = right[positions] * (denominator // right_scale)
-        residual = observed - fitted
-        residual[
-            np.abs(residual) * (1 << 49) <= np.maximum(np.abs(observed), np.abs(fitted))
-        ] = 0
-        score_intercept = Fraction(int(sum(residual)), denominator)
-        score_slope = Fraction(int(x @ residual), left_scale * denominator)
-        squared_residuals = Fraction(int(residual @ residual), denominator**2)
-        influence = (cluster_count * score_slope - sx * score_intercept) / (
-            determinant * len(positions)
-        )
-        variance += influence * influence
-        residual_variation += squared_residuals / len(positions)
-    slope_value = float(slope)
+    right_mean = (
+        np.sum(np.bincount(cluster_codes, weights=right_shift) / counts) / cluster_count
+    )
+    centered_left = left_shift - left_mean
+    centered_right = right_shift - right_mean
+    weighted_left = weights * centered_left
+    total_left = centered_left @ weighted_left
+    if total_left == 0.0:
+        return undefined("alpha_calibration_rank_deficient")
+    slope = (weighted_left @ centered_right) / total_left
+    intercept = right_offset + right_mean - slope * (left_offset + left_mean)
+    fitted = intercept + slope * left
+    residual = right - fitted
+    epsilon = np.finfo(np.float64).eps
+    residual_resolution = 8 * epsilon * np.maximum(np.abs(right), np.abs(fitted))
+    resolved_zero = np.abs(residual) <= residual_resolution
+    residual[resolved_zero] = 0.0
+    residual_resolution[resolved_zero] = 0.0
+    score_terms = centered_left * residual
+    scores = np.bincount(cluster_codes, weights=score_terms)
+    # Propagate only this date's active residual and dot-product rounding bounds.
+    score_resolution = np.bincount(
+        cluster_codes, weights=np.abs(centered_left) * residual_resolution
+    ) + (counts * epsilon / (1 - counts * epsilon)) * np.bincount(
+        cluster_codes, weights=np.abs(score_terms)
+    )
+    scores[np.abs(scores) <= score_resolution] = 0.0
+    influence = scores / counts / total_left
+    scaled_standard_error = np.linalg.norm(influence)
+    slope_value = float(np.ldexp(slope, right_exponent - left_exponent))
+    standard_error = float(
+        np.ldexp(scaled_standard_error, right_exponent - left_exponent)
+    )
     if slope and slope_value == 0.0:
         raise ValueError("alpha_calibration_slope_unrepresentable")
-    with localcontext() as context:
-        context.prec = 80
-        standard_error_decimal = (
-            Decimal(variance.numerator) / Decimal(variance.denominator)
-        ).sqrt()
-        standard_error = float(standard_error_decimal)
-        if variance and standard_error == 0.0:
-            raise ValueError("alpha_calibration_standard_error_unrepresentable")
-        t_statistic = (
-            float(
-                (Decimal(slope.numerator) / Decimal(slope.denominator))
-                / standard_error_decimal
-            )
-            if variance
-            else None
-        )
+    if scaled_standard_error and standard_error == 0.0:
+        raise ValueError("alpha_calibration_standard_error_unrepresentable")
+    t_statistic = (
+        float(slope / scaled_standard_error) if scaled_standard_error else None
+    )
     if t_statistic is not None:
         degrees_freedom = max(1, cluster_count - 2)
         pvalue = float(2.0 * student_t.sf(abs(t_statistic), df=degrees_freedom))
@@ -807,10 +788,11 @@ def calibrate_expected_alpha(
         ci_high = slope_value + critical * standard_error
     else:
         pvalue = ci_low = ci_high = None
-    total_variation = syy - sy * sy / cluster_count
+    total_variation = centered_right @ (weights * centered_right)
+    residual_variation = residual @ (weights * residual)
     return AlphaCalibration(
         slope=slope_value,
-        intercept=float(intercept),
+        intercept=float(np.ldexp(intercept, right_exponent)),
         slope_standard_error=standard_error,
         slope_t_statistic=t_statistic,
         slope_pvalue=pvalue,
@@ -1295,19 +1277,16 @@ def portfolio_interval_economics(batch: PortfolioLedgerBatch) -> dict[str, objec
     tolerance = portfolio_notional_tolerance(b)
     initial = {row.asset_id: row for row in batch.valuations if row.phase == "before"}
     post = {row.asset_id: row for row in batch.valuations if row.phase == "after"}
+    traded_quantities, executed = {}, {}
+    for trade in batch.trades:
+        asset = trade.asset_id
+        traded_quantities[asset] = traded_quantities.get(asset, 0) + Fraction(
+            trade.quantity
+        )
+        executed[asset] = executed.get(asset, 0.0) + trade.notional
     rights_change = sum(
         float(
-            (
-                Fraction(post[asset].quantity)
-                - sum(
-                    (
-                        Fraction(trade.quantity)
-                        for trade in batch.trades
-                        if trade.asset_id == asset
-                    ),
-                    Fraction(),
-                )
-            )
+            (Fraction(post[asset].quantity) - traded_quantities.get(asset, 0))
             * Fraction(post[asset].mark_price)
         )
         + post[asset].receivable
@@ -1333,9 +1312,6 @@ def portfolio_interval_economics(batch: PortfolioLedgerBatch) -> dict[str, objec
     }
     if any(value is None for value in (*target.values(), *decision.values())):
         raise ValueError("portfolio_interval_decision_facts_missing")
-    executed = {}
-    for trade in batch.trades:
-        executed[trade.asset_id] = executed.get(trade.asset_id, 0.0) + trade.notional
 
     def ratio(numerator, denominator):
         if denominator == 0:

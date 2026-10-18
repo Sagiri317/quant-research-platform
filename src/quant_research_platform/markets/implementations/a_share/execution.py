@@ -414,16 +414,16 @@ def derive_execution_mask(panel: pd.DataFrame) -> pd.DataFrame:
         )
         .astype("Float64")
     )
+    prices = prices.where(prices.gt(0))
+    # A known inequality disproves a one-word bar despite other missing quotes.
     equal_price = (
         prices["open"].eq(prices["high"])
         & prices["open"].eq(prices["low"])
         & prices["open"].eq(prices["close"])
     )
-    known_prices = (
-        status.notna() & prices.notna().all(axis=1) & prices.gt(0).all(axis=1)
-    )
-    result["one_word_limit_up"] = (status.eq(1) & equal_price).where(known_prices)
-    result["one_word_limit_down"] = (status.eq(-1) & equal_price).where(known_prices)
+    known_execution = status.notna() & prices["open"].notna()
+    result["one_word_limit_up"] = (status.eq(1) & equal_price).where(known_execution)
+    result["one_word_limit_down"] = (status.eq(-1) & equal_price).where(known_execution)
     result["listing_date"] = strict_timestamp_series(
         result["listing_date"], error="execution_listing_date_invalid", allow_null=True
     )

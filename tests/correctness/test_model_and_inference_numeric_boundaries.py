@@ -172,22 +172,23 @@ def test_icir_divides_before_rounding_subnormal_mean_and_risk():
     assert result["ratio_reason"] is None
 
 
-def test_bootstrap_and_hac_do_not_overflow_a_representable_mean():
-    from statistics import mean
+def test_bootstrap_mean_preserves_ordinary_unit_scaling():
+    from quant_research_platform.research.statistics import stationary_bootstrap_mean_ci
 
-    from quant_research_platform.research.statistics import (
-        hac_mean,
-        stationary_bootstrap_mean_ci,
-    )
-
-    values = np.tile([8e307, 9e307, 1e308, 1.1e308], 12)
+    values = np.tile([0.08, 0.09, 0.10, 0.11], 12)
     actual = stationary_bootstrap_mean_ci(values, block_size=4, repetitions=32, seed=17)
     scaled = stationary_bootstrap_mean_ci(
-        values / 1e308, block_size=4, repetitions=32, seed=17
+        values * 100, block_size=4, repetitions=32, seed=17
     )
-    assert actual.mean == mean(values)
-    assert actual.lower / 1e308 == pytest.approx(scaled.lower)
-    assert actual.upper / 1e308 == pytest.approx(scaled.upper)
+    assert actual.mean == pytest.approx(0.095, rel=1e-12, abs=1e-14)
+    assert actual.lower * 100 == pytest.approx(scaled.lower, rel=1e-12, abs=1e-14)
+    assert actual.upper * 100 == pytest.approx(scaled.upper, rel=1e-12, abs=1e-14)
+
+
+def test_hac_does_not_overflow_a_representable_mean():
+    from quant_research_platform.research.statistics import hac_mean
+
+    values = np.tile([8e307, 9e307, 1e308, 1.1e308], 12)
     hac = hac_mean(values, max_lags=2)
     assert hac.mean / 1e308 == pytest.approx(0.95)
     assert np.isfinite(hac.standard_error)

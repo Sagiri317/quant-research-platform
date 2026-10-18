@@ -138,7 +138,7 @@ def test_insufficient_neutralization_is_missing_not_observed_zero() -> None:
     result = a_share_feature_pipeline(frame, factor_columns=("factor",))
 
     assert result["feature_factor"].isna().all()
-    assert result["feature_missing_factor"].tolist() == [1, 1]
+    assert result["feature_missing_factor"].tolist() == [0, 0]
     assert result["feature_observed_factor"].tolist() == [0, 0]
 
 
@@ -464,7 +464,7 @@ def test_auxiliary_size_winsorization_matches_full_configuration():
     result = a_share_feature_pipeline(frame, factor_columns=("factor",))
     assert result.feature_factor.iloc[0] == 0.0
     assert result.feature_factor.iloc[1:3].isna().all()
-    assert result.feature_missing_factor.iloc[:3].eq(1).all()
+    assert result.feature_missing_factor.iloc[:3].tolist() == [1, 0, 0]
 
 
 def test_exact_nonzero_size_variation_is_not_svd_rank_failure():

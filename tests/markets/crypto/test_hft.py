@@ -593,7 +593,7 @@ def test_maker_bid_sell_pressure_proxy_uses_future_observed_sell_flow() -> None:
     assert available.iloc[2:].isna().all()
 
 
-def test_factor_and_label_rows_reject_non_grid_gap_in_same_segment() -> None:
+def test_factor_and_label_rows_preserve_unknown_grid_gap_in_same_segment() -> None:
     complete = list(
         _panel_rows(
             [_state(0), _state(200)],
@@ -605,10 +605,16 @@ def test_factor_and_label_rows_reject_non_grid_gap_in_same_segment() -> None:
         )
     )
     rows = [complete[0], complete[2]]
-    with pytest.raises(ValueError, match="hft_grid_non_contiguous"):
-        list(iter_factor_frames((pd.DataFrame(rows),)))
-    with pytest.raises(ValueError, match="hft_grid_non_contiguous"):
-        list(iter_label_frames((pd.DataFrame(rows),), horizons_ms=(HFT_GRID_MS,)))
+    factors = pd.concat(iter_factor_frames((pd.DataFrame(rows),)))
+    assert factors.spread.notna().all()
+    assert factors.return_100ms.isna().all()
+    assert factors.ofi_500ms.isna().all()
+    assert factors.segment_id.tolist() == [row["segment_id"] for row in rows]
+    labels = pd.concat(
+        iter_label_frames((pd.DataFrame(rows),), horizons_ms=(HFT_GRID_MS,))
+    )
+    assert labels.future_mid_return_100ms.isna().all()
+    assert labels.future_mid_return_100ms_available_at.isna().all()
 
 
 def test_factor_and_label_frames_match_across_chunk_boundaries() -> None:

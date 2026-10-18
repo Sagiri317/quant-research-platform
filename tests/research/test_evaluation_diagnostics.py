@@ -1193,6 +1193,101 @@ def test_direct_evaluation_pairs_actual_prediction_keys_with_current_mature_labe
     assert_pairwise_maturity_and_ic(tables["metrics"], work, spec, config["cutoff"])
 
 
+@pytest.mark.parametrize("overlap", ("head", "tail", "none", "different_windows"))
+def test_prediction_windows_only_constrain_their_actual_pairs(
+    tmp_path, explicit_evaluation, overlap
+):
+    from dataclasses import replace
+
+    from quant_research_platform.artifacts.outputs.evaluation import (
+        read_evaluation_outputs,
+    )
+    from quant_research_platform.artifacts.outputs.prediction import (
+        read_predictions,
+        write_prediction_outputs,
+    )
+    from quant_research_platform.contracts.signals import SignalSpec
+    from quant_research_platform.research.evaluations.runner import evaluate
+    from tests.research.crypto_evaluation_test_support import (
+        assert_pairwise_maturity_and_ic,
+    )
+
+    frame, spec, config = explicit_evaluation
+    _, baseline = read_evaluation_outputs(evaluate(config))
+    config["output"] = str(tmp_path / "partial-windows")
+    predictions, metadata = read_predictions(Path(config["predictions"]["pred"]))
+    bounds = (5, 7) if overlap in {"head", "different_windows"} else (3, 5)
+    selections = {"pred": bounds}
+    if overlap == "different_windows":
+        selections["other"] = (3, 5)
+        other = SignalSpec(
+            signal_id="other", source_kind="prediction", source_column="other"
+        )
+        spec = replace(spec, signals=(*spec.signals, other))
+        config["evaluation"]["signals"].append(
+            {
+                "signal_id": "other",
+                "source_kind": "prediction",
+                "source_column": "other",
+            }
+        )
+    if overlap == "none":
+        config["window"] = {
+            "start": frame.timestamp.iloc[0].isoformat(),
+            "end": frame.timestamp.iloc[2].isoformat(),
+        }
+    work = frame.loc[
+        frame.timestamp.between(
+            pd.Timestamp(config["window"]["start"]),
+            pd.Timestamp(config["window"]["end"]),
+        )
+    ]
+    for name, (first, last) in selections.items():
+        start, end = frame.timestamp.iloc[[first, last]]
+        selected = predictions.loc[predictions.timestamp.between(start, end)]
+        root = write_prediction_outputs(
+            output_path=tmp_path / f"prediction-{name}",
+            output_chunks=(selected,),
+            metadata={
+                **metadata,
+                "prediction_window": {
+                    "start": start.isoformat(),
+                    "end": end.isoformat(),
+                },
+                "prediction_rows": None,
+                "effective_prediction_end": None,
+            },
+        )
+        config["predictions"][name] = str(root)
+        work = work.merge(
+            selected[["timestamp", "asset_id", "prediction_score"]].rename(
+                columns={"prediction_score": name}
+            ),
+            on=["timestamp", "asset_id"],
+            how="left",
+            validate="one_to_one",
+        )
+    _, tables = read_evaluation_outputs(evaluate(config))
+    assert_pairwise_maturity_and_ic(tables["metrics"], work, spec, config["cutoff"])
+    if overlap == "none":
+        empty = tables["metrics"].loc[tables["metrics"].signal.eq("pred")]
+        assert empty.n_obs.eq(0).all() and empty.ic.isna().all()
+    else:
+        for name in tables:
+            # Other signals' new reasons can change pandas' nullable-string
+            # inference; the native reader already enforces the persisted schema.
+            pd.testing.assert_frame_equal(
+                tables[name]
+                .loc[tables[name].signal.eq("spread")]
+                .reset_index(drop=True),
+                baseline[name]
+                .loc[baseline[name].signal.eq("spread")]
+                .reset_index(drop=True),
+                check_exact=True,
+                check_dtype=False,
+            )
+
+
 def test_evaluation_collision_never_opens_input_or_overwrites(tmp_path, monkeypatch):
     from quant_research_platform.research.evaluations import runner
 

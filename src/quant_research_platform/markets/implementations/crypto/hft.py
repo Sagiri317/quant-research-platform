@@ -462,7 +462,8 @@ def iter_factor_frames(
     selected = set(HFT_FACTOR_COLUMNS if columns is None else columns)
     if not selected <= set(HFT_FACTOR_COLUMNS):
         raise ValueError("hft_factor_columns_invalid")
-    definitions = {name: factor_catalog().get(name).input_columns for name in selected}
+    catalog = factor_catalog()
+    definitions = {name: catalog.get(name).input_columns for name in selected}
     required = tuple(
         dict.fromkeys(name for names in definitions.values() for name in names)
     )
@@ -491,7 +492,7 @@ def iter_factor_frames(
         for column in dependencies
     }
     rolling = {
-        name: {"100ms": 1, "500ms": 5, "1s": 10, "5s": 50}[name.rsplit("_", 1)[1]]
+        name: catalog.get(name).required_windows[0]
         for name in selected
         if name.startswith(("trade_flow_imbalance_", "depth_normalized_ofi_"))
         or name
@@ -1109,7 +1110,7 @@ def iter_spot_perp_factor_frames(
 def iter_cross_asset_factor_frames(
     target_frames, *, information_frames, max_age_ms, batch_rows, input_delay_ms=0
 ):
-    """Align matured, dimensionless asset states to one target asset's grid."""
+    """Share causal information states across the ordered union of target keys."""
 
     def rows(frames):
         with closing_iterator(iter(frames)) as source:
@@ -1128,6 +1129,8 @@ def iter_cross_asset_factor_frames(
                     yield (pd.Timestamp(row[0]).value, *row[1:])
 
     records = []
+    previous_stamp = None
+    context = {}
     with ExitStack() as readers:
         sources = {
             asset: readers.enter_context(closing_iterator(rows(frames)))
@@ -1137,58 +1140,67 @@ def iter_cross_asset_factor_frames(
         current, previous = {}, {}
         frames = readers.enter_context(closing_iterator(iter(target_frames)))
         for frame in frames:
-            for timestamp in frame["timestamp"]:
-                stamp = pd.Timestamp(timestamp).value
-                row = {key: np.nan for key in HFT_CROSS_ASSET_FACTOR_COLUMNS}
-                row.update(
-                    {
-                        key: pd.NaT if key.endswith("_at") else np.nan
-                        for key in HFT_CROSS_ASSET_CONTEXT_COLUMNS
-                    }
-                )
+            keys = [
+                name for name in ("market_id", "asset_id", "timestamp") if name in frame
+            ]
+            for identity in frame.loc[:, keys].itertuples(index=False, name=None):
+                row = dict(zip(keys, identity, strict=True))
+                stamp = pd.Timestamp(row["timestamp"]).value
                 row["timestamp"] = pd.Timestamp(stamp)
-                for asset, stream in sources.items():
-                    point = upcoming[asset]
-                    while (
-                        point is not None
-                        and point[0] <= stamp - input_delay_ms * 1_000_000
-                    ):
-                        previous[asset] = current.get(asset)
-                        current[asset] = point
-                        point = next(stream, None)
-                    upcoming[asset] = point
-                    last = current.get(asset)
-                    if last is None:
-                        continue
-                    prefix = asset.removesuffix("_usdt") + "_"
-                    age = (stamp - last[0]) / 1_000_000
-                    row[prefix + "grid_age_ms"] = age
-                    row[prefix + "grid_at"] = pd.Timestamp(last[0])
-                    if age > max_age_ms:
-                        continue
-                    for name, value in zip(
-                        (
-                            "return_100ms",
-                            "return_500ms",
-                            "normalized_ofi_500ms",
-                            "tfi_500ms",
-                        ),
-                        last[1:5],
-                        strict=True,
-                    ):
-                        row[prefix + name] = value
-                    prior = previous.get(asset)
-                    if (
-                        prior is not None
-                        and isinstance(last[5], str)
-                        and isinstance(prior[5], str)
-                        and bool(last[5])
-                        and last[5] == prior[5]
-                        and last[0] - prior[0] == 100_000_000
-                        and stamp - prior[0] <= max_age_ms * 1_000_000
-                    ):
-                        row[prefix + "lagged_return_100ms"] = prior[1]
-                        row[prefix + "lagged_tfi_500ms"] = prior[4]
+                if previous_stamp is not None and stamp < previous_stamp:
+                    raise ValueError("hft_cross_asset_target_time_non_monotonic")
+                if stamp != previous_stamp:
+                    context = {key: np.nan for key in HFT_CROSS_ASSET_FACTOR_COLUMNS}
+                    context.update(
+                        {
+                            key: pd.NaT if key.endswith("_at") else np.nan
+                            for key in HFT_CROSS_ASSET_CONTEXT_COLUMNS
+                        }
+                    )
+                    for asset, stream in sources.items():
+                        point = upcoming[asset]
+                        while (
+                            point is not None
+                            and point[0] <= stamp - input_delay_ms * 1_000_000
+                        ):
+                            previous[asset] = current.get(asset)
+                            current[asset] = point
+                            point = next(stream, None)
+                        upcoming[asset] = point
+                        last = current.get(asset)
+                        if last is None:
+                            continue
+                        prefix = asset.removesuffix("_usdt") + "_"
+                        age = (stamp - last[0]) / 1_000_000
+                        context[prefix + "grid_age_ms"] = age
+                        context[prefix + "grid_at"] = pd.Timestamp(last[0])
+                        if age > max_age_ms:
+                            continue
+                        for name, value in zip(
+                            (
+                                "return_100ms",
+                                "return_500ms",
+                                "normalized_ofi_500ms",
+                                "tfi_500ms",
+                            ),
+                            last[1:5],
+                            strict=True,
+                        ):
+                            context[prefix + name] = value
+                        prior = previous.get(asset)
+                        if (
+                            prior is not None
+                            and isinstance(last[5], str)
+                            and isinstance(prior[5], str)
+                            and bool(last[5])
+                            and last[5] == prior[5]
+                            and last[0] - prior[0] == 100_000_000
+                            and stamp - prior[0] <= max_age_ms * 1_000_000
+                        ):
+                            context[prefix + "lagged_return_100ms"] = prior[1]
+                            context[prefix + "lagged_tfi_500ms"] = prior[4]
+                    previous_stamp = stamp
+                row.update(context)
                 records.append(row)
                 if len(records) == batch_rows:
                     _yield_value = pd.DataFrame.from_records(records)
@@ -1510,14 +1522,17 @@ def _validated_grid_arrays(
     boundaries = np.empty(len(frame), dtype=bool)
     boundaries[0] = str(segments[0]) != active_segment
     boundaries[1:] = segments[1:] != segments[:-1]
-    if (
-        not boundaries[0]
-        and previous_time is not None
-        and timestamps[0] - previous_time != HFT_GRID_MS
-    ) or bool(
-        np.any((~boundaries[1:]) & (timestamps[1:] - timestamps[:-1] != HFT_GRID_MS))
-    ):
-        raise ValueError("hft_grid_non_contiguous")
+    elapsed = np.diff(
+        timestamps,
+        prepend=timestamps[0] - HFT_GRID_MS if previous_time is None else previous_time,
+    )
+    if bool(np.any(elapsed <= 0)):
+        raise ValueError("hft_grid_time_non_monotonic")
+    if bool(np.any((~boundaries) & (elapsed % HFT_GRID_MS != 0))):
+        raise ValueError("hft_grid_time_invalid")
+    # Missing observations interrupt every dependent full window without
+    # relabeling the native segment or changing selected pointwise values.
+    boundaries |= elapsed != HFT_GRID_MS
     return timestamps, segments, boundaries
 
 
@@ -1551,7 +1566,10 @@ def _label_frame(
     frame: pd.DataFrame, *, horizons: tuple[int, ...], columns: set[str]
 ) -> pd.DataFrame:
     output = _identity_frame(frame)
-    segment_groups = frame["segment_id"].ne(frame["segment_id"].shift()).cumsum()
+    segment_groups = (
+        frame["segment_id"].ne(frame["segment_id"].shift())
+        | frame["timestamp_ms"].diff().ne(HFT_GRID_MS)
+    ).cumsum()
     mid_horizons = tuple(
         horizon
         for horizon in horizons

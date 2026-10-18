@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from quant_research_platform.contracts.json_codec import parse_qrp_json_object
 from quant_research_platform.interfaces.models import (
     FactorCatalogResponse,
     LabelCatalogResponse,
@@ -48,6 +49,7 @@ def _ledger_curve(batches, *, stride):
     total_points = 0
     last_points = []
     last_retained_sequence = -1
+    execution = {}
     with closing_iterator(iter(batches)) as batches:
         for batch in batches:
             last_points = [
@@ -74,6 +76,17 @@ def _ledger_curve(batches, *, stride):
                 points.extend(last_points)
                 last_retained_sequence = batch.sequence
             for marker in batch.diagnostics:
+                if marker.name == "execution_summary" and marker.text is not None:
+                    summary = parse_qrp_json_object(marker.text.encode("utf-8"))
+                    execution.update(
+                        (name, summary[name])
+                        for name in (
+                            "account_path_status",
+                            "account_stop_reason",
+                            "account_stop_ns",
+                        )
+                        if name in summary
+                    )
                 if marker.name not in {"oos_window_start", "oos_window_end"}:
                     continue
                 boundaries.append(
@@ -85,7 +98,20 @@ def _ledger_curve(batches, *, stride):
                 )
     if last_points and last_retained_sequence != last_points[-1]["sequence"]:
         points.extend(last_points)
+    partial = execution.get("account_path_status") == "PARTIAL"
     return {
+        "status": "PARTIAL" if partial else "DEFINED",
+        **execution,
+        **(
+            {
+                "observed_totals_scope": "known_prefix",
+                "reason": execution["account_stop_reason"],
+            }
+            if partial
+            else {}
+        ),
+        "observed_start_ns": points[0]["timestamp_ns"] if points else None,
+        "observed_end_ns": last_points[-1]["timestamp_ns"] if last_points else None,
         "points": points,
         "boundaries": boundaries,
         "source_point_count": total_points,
@@ -139,8 +165,8 @@ def portfolio_curve(path: Path, *, stride: int = 1, execution_mode="continuous")
             ),
         )
         return {
-            "status": "DEFINED",
             "source_reference": str(path),
+            "window": artifact.metadata["window"],
             **(
                 {"sample_role": artifact.metadata["sample_role"]}
                 if "sample_role" in artifact.metadata
@@ -163,7 +189,7 @@ def portfolio_curve(path: Path, *, stride: int = 1, execution_mode="continuous")
 
     episodes = []
 
-    def consume_episode(index, _child, batches):
+    def consume_episode(index, child, batches):
         episodes.append(
             {
                 **{
@@ -177,14 +203,18 @@ def portfolio_curve(path: Path, *, stride: int = 1, execution_mode="continuous")
                         "stop_reasons",
                     )
                 },
+                "window": child.metadata["window"],
                 **_ledger_curve(batches, stride=stride),
             }
         )
 
     artifact = read_crypto_episode_artifact(path, consume_episode=consume_episode)
     return {
-        "status": "DEFINED",
+        "status": "PARTIAL"
+        if any(item["status"] == "PARTIAL" for item in episodes)
+        else "DEFINED",
         "source_reference": str(path),
+        "window": artifact.metadata["window"],
         **(
             {"sample_role": artifact.metadata["sample_role"]}
             if "sample_role" in artifact.metadata

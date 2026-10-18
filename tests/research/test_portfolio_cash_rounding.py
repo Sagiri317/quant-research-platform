@@ -17,6 +17,7 @@ from quant_research_platform.artifacts.portfolio_ledger import (
 from quant_research_platform.artifacts.statistics import read_statistics_artifact
 from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_DECISION_REASON_SIMPLE,
+    ExecutedTrade,
     PortfolioCandidateSpec,
     PortfolioCapital,
     PortfolioDiagnostic,
@@ -118,10 +119,31 @@ def test_many_fills_conserve_cash_and_publish_native_returns(
             ),
             Fraction(),
         )
-        economic = portfolio_interval_economics(batch)
+        asset_reads = 0
+        original_getattribute = ExecutedTrade.__getattribute__
+
+        def count_trade_assets(trade, name, getattribute=original_getattribute):
+            nonlocal asset_reads
+            asset_reads += name == "asset_id"
+            return getattribute(trade, name)
+
+        with monkeypatch.context() as observed:
+            observed.setattr(ExecutedTrade, "__getattribute__", count_trade_assets)
+            economic = portfolio_interval_economics(batch)
+        assert asset_reads <= 2 * len(batch.trades)
         assert economic["net_return"] == float(
             -fees_paid / Fraction(economic["nav_before"])
         )
+    economics_calls = []
+
+    def observe_economics(batch):
+        economics_calls.append(batch.sequence)
+        return portfolio_interval_economics(batch)
+
+    monkeypatch.setattr(
+        "quant_research_platform.research.portfolios.diagnostics.portfolio_interval_economics",
+        observe_economics,
+    )
     daily = _publish(
         tmp_path,
         batches,
@@ -129,6 +151,7 @@ def test_many_fills_conserve_cash_and_publish_native_returns(
         candidate=candidate,
         window={"start": str(window.start), "end": str(window.end)},
     )
+    assert economics_calls == [batch.sequence for batch in batches]
     assert daily.return_status.eq("DEFINED").all()
     # One purchase of a constant-price asset pool costs 0.04% of bought notional.
     expected = -0.0002 if construction.endswith("half_step") else -0.0004 / 1.0004

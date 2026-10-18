@@ -225,6 +225,13 @@ def test_observation_mask_excludes_fill_without_masking_indicator_signals():
         transforms.mask_unobserved_features(
             frame.assign(feature_observed_x=[0, 1, 2]), ("feature_x",), frame.columns
         )
+    for invalid in (np.nan, 2, 1):
+        with pytest.raises(ValueError, match="invalid_feature_missing_flag"):
+            transforms.model_observed_input_mask(
+                frame.assign(feature_missing_x=[1, 0, invalid]),
+                ("feature_x",),
+                frame.columns,
+            )
 
 
 @pytest.mark.parametrize(
@@ -261,7 +268,7 @@ def test_zero_variance_convention_depends_on_requested_math(center, scale, defin
     else:
         assert result.feature_x.isna().all()
         assert result.feature_observed_x.eq(0).all()
-        assert result.feature_missing_x.eq(1).all()
+        assert result.feature_missing_x.eq(0).all()
     assert diagnostic["zero_variance_by_factor"]["x"] == int(scale)
 
 

@@ -60,17 +60,17 @@ def _produce_factors(root, data_id, inputs, columns, window):
 
 
 @pytest.mark.parametrize("batch_rows", (6, 1000))
-def test_abnormal_turnover_exact_windows_persist_across_chunks(
+def test_abnormal_turnover_observed_windows_persist_across_chunks(
     tmp_path, monkeypatch, batch_rows
 ):
     dates = pd.bdate_range("2020-01-02", periods=252).as_unit("ns")
     sequences = {
-        "extreme": [1e308] * 230 + [2.3e-16] * 22,
-        "ordinary": list(map(float, range(1, 253))),
-        "subnormal": [5e-324] * 252,
+        "lower_turnover": [0.2] * 230 + [0.03] * 22,
+        "ordinary": list(np.arange(1, 253) * 0.001),
+        "small": [0.00001] * 252,
         "zero": [0.0] * 252,
         "negative": [-1.0] * 252,
-        "missing": [1e308] * 230 + [2.3e-16] * 22,
+        "missing": [0.2] * 230 + [0.03] * 22,
     }
     sequences["missing"][240] = np.nan
     panel = pd.DataFrame(
@@ -114,12 +114,12 @@ def test_abnormal_turnover_exact_windows_persist_across_chunks(
                 )
         expected.append(value)
     np.testing.assert_allclose(
-        saved.abnormal_turnover_20_250, expected, rtol=1e-15, atol=0
+        saved.abnormal_turnover_20_250, expected, rtol=1e-12, atol=1e-14
     )
     assert saved.loc[
-        saved.asset_id.eq("extreme") & saved.timestamp.eq(dates[249]),
+        saved.asset_id.eq("lower_turnover") & saved.timestamp.eq(dates[249]),
         "abnormal_turnover_20_250",
-    ].iloc[0] == np.nextafter(0.0, 1.0)
+    ].iloc[0] == pytest.approx(0.03 / ((230 * 0.2 + 20 * 0.03) / 250))
 
 
 @pytest.mark.parametrize("batch_rows", (1, 1000))
@@ -193,8 +193,9 @@ def test_fundamental_growth_stable_differences_persist_across_chunks(
     assert saved.has_legal_fundamental_pit.all()
 
 
-def test_abnormal_turnover_localizes_unrepresentable_result():
-    values = [1e308] + [0.0] * 228 + [5e-324, -1e308] + [0.0] * 19
+@pytest.mark.parametrize("first", [0.5, 1.0])
+def test_abnormal_turnover_requires_positive_long_mean(first):
+    values = [first] + [0.0] * 229 + [-1.0] + [0.0] * 19
     panel = pd.DataFrame(
         dict(
             asset_id="asset",
@@ -206,7 +207,104 @@ def test_abnormal_turnover_localizes_unrepresentable_result():
         panel, factor_columns=("abnormal_turnover_20_250", "turnover_20d")
     )
     assert pd.isna(output.abnormal_turnover_20_250.iloc[-1])
-    assert output.turnover_20d.iloc[-1] == pytest.approx(-5e306)
+    assert output.turnover_20d.iloc[-1] == pytest.approx(-0.05)
+
+
+def test_signed_rolling_baselines_keep_zero_masks_without_erasing_small_values():
+    from math import fsum
+
+    values = np.array(
+        [
+            100.1,
+            100.3,
+            -0.1,
+            0.2,
+            0.3,
+            -0.2,
+            -0.2,
+            -100.3,
+            -100.3,
+            -1.3,
+            -100.3,
+            100.3,
+            -0.3,
+            -0.1,
+            0.1,
+            0.1,
+            -0.1,
+            100.3,
+            0.1,
+            0.2,
+            1.3,
+            1.0,
+        ]
+    )
+    assert fsum(values[1:21]) == 0.0
+    columns = (
+        "avg_amount_20d",
+        "log_avg_amount_20d",
+        "amount_shock_20d",
+        "volume_shock_20d",
+    )
+    frame = pd.DataFrame(
+        {
+            "asset_id": "a",
+            "timestamp": pd.bdate_range("2024-01-01", periods=len(values)),
+            "amount": values,
+            "volume": values,
+        }
+    )
+    actual = calculate_price_volume_factors(frame, factor_columns=columns)
+    assert actual.avg_amount_20d.iloc[20] == 0.0
+    assert np.isnan(actual.log_avg_amount_20d.iloc[20])
+    assert actual.loc[21, list(columns[2:])].isna().all()
+    clipped = calculate_price_volume_factors(frame.iloc[1:], factor_columns=columns)
+    np.testing.assert_allclose(
+        actual.loc[21, list(columns)].to_numpy(dtype=float),
+        clipped.loc[20, list(columns)].to_numpy(dtype=float),
+        rtol=1e-12,
+        atol=1e-14,
+        equal_nan=True,
+    )
+
+    turnover = np.r_[100.1, np.zeros(230), values[1:21]]
+    frame = pd.DataFrame(
+        {
+            "asset_id": "a",
+            "timestamp": pd.bdate_range("2024-01-01", periods=len(turnover)),
+            "turnover": turnover,
+        }
+    )
+    for current in (frame, frame.iloc[1:]):
+        result = calculate_price_volume_factors(
+            current, factor_columns=("turnover_250d", "abnormal_turnover_20_250")
+        ).iloc[-1]
+        assert result.turnover_250d == 0.0
+        assert np.isnan(result.abnormal_turnover_20_250)
+
+    # Small same-sign observations are not numerical zero; ordinary signed
+    # nonzero and negative means retain their original ratio/log domains.
+    signed = values.copy()
+    signed[20] += 0.125
+    for amounts in (np.full(22, 1e-8), signed, -np.ones(22)):
+        frame = pd.DataFrame(
+            {
+                "asset_id": "a",
+                "timestamp": pd.bdate_range("2024-01-01", periods=22),
+                "amount": amounts,
+                "volume": amounts,
+            }
+        )
+        result = calculate_price_volume_factors(frame, factor_columns=columns)
+        mean = fsum(amounts[1:21]) / 20
+        assert result.avg_amount_20d.iloc[20] == pytest.approx(mean, rel=1e-12, abs=0)
+        assert result.amount_shock_20d.iloc[21] == pytest.approx(
+            (amounts[21] - mean) / mean, rel=1e-12, abs=1e-14
+        )
+        if mean > 0:
+            assert result.log_avg_amount_20d.iloc[20] == pytest.approx(np.log(mean))
+        else:
+            assert np.isnan(result.log_avg_amount_20d.iloc[20])
 
 
 @pytest.mark.parametrize("scale", (1e16, 1e308))

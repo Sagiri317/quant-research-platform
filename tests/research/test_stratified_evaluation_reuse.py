@@ -793,6 +793,66 @@ def test_legacy_rank_ic_reduces_one_persisted_evaluation(tmp_path):
         assert frame.observation_count.eq(3).all()
 
 
+@pytest.mark.parametrize("member", ("daily_coverage", "daily_strata"))
+@pytest.mark.parametrize("damage", ("corrupt", "missing"))
+def test_rank_ic_reads_only_its_selected_evaluation_members(
+    tmp_path, monkeypatch, member, damage
+):
+    from quant_research_platform.storage.datasets import reading
+
+    _, config = _fixture(tmp_path, days=3)
+    output = evaluate(config)
+    request = {
+        "evaluation_inputs": [str(output)],
+        "output": str(tmp_path / "baseline"),
+        "analyses": ["rank_ic"],
+        "evaluation": {"primary_label": "label", "factors": ["score"]},
+        "statistics": {
+            "hac_lag": 1,
+            "factor_fdr_families": {"selected": ["score"]},
+        },
+    }
+    scans = []
+    original = reading.iter_declared_parquet_member_batches
+
+    def observed(path, **kwargs):
+        scans.append(path.name)
+        yield from original(path, **kwargs)
+
+    monkeypatch.setattr(reading, "iter_declared_parquet_member_batches", observed)
+    baseline = factor_statistics(request)
+    assert scans == ["metrics.parquet"]
+    with read_statistics_artifact(baseline).table(
+        "factor_diagnostics.parquet"
+    ) as frame:
+        expected = frame.copy()
+    path = output / f"{member}.parquet"
+    if damage == "missing":
+        path.unlink()
+    else:
+        path.write_bytes(b"unselected corrupt member")
+    scans.clear()
+    actual = factor_statistics({**request, "output": str(tmp_path / "rank-only")})
+    assert scans == ["metrics.parquet"]
+    artifact = read_statistics_artifact(actual)
+    assert artifact.metadata["stratum_domains"] == {}
+    with artifact.table("factor_diagnostics.parquet") as frame:
+        pd.testing.assert_frame_equal(frame, expected, check_exact=True)
+    for analyses in (["stratified_ic"], ["rank_ic", "stratified_ic"]):
+        policy = {"hac_lag": 1, "fdr_method": "BY", "fdr_alpha": 0.05}
+        if "rank_ic" in analyses:
+            policy["factor_fdr_families"] = {"selected": ["score"]}
+        with pytest.raises((ValueError, OSError)):
+            factor_statistics(
+                {
+                    **request,
+                    "output": str(tmp_path / "selected-damage"),
+                    "analyses": analyses,
+                    "statistics": policy,
+                }
+            )
+
+
 def test_selected_metrics_reader_rejects_non_native_physical_type(tmp_path):
     import pyarrow as pa
     import pyarrow.parquet as pq

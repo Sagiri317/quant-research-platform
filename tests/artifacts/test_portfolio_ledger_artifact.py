@@ -1425,3 +1425,150 @@ def test_perpetual_rounded_cost_preserves_exact_pnl(
                 corrupted if row is value else row for row in last.valuations
             ),
         )
+
+
+def test_repeated_partial_fills_preserve_registered_rights_through_native_roundtrip(
+    tmp_path,
+):
+    from fractions import Fraction
+
+    from quant_research_platform.contracts.portfolios import (
+        PortfolioCashFlow,
+        PortfolioDiagnostic,
+    )
+    from quant_research_platform.research.portfolios.accounting import (
+        EquityEntitlements,
+    )
+
+    dates = pd.bdate_range("2024-01-02", periods=325)
+    life = pd.Timestamp("2000-01-01")
+    entitlements = EquityEntitlements()
+    units, lives = pd.Series({"a": Fraction()}, dtype=object), pd.Series({"a": life})
+    cash = 100_000.0
+    events = pd.DataFrame(
+        [
+            dict(
+                event_id=kind,
+                asset_id="a",
+                listing_date=life,
+                record_at=dates[322],
+                effective_at=dates[323],
+                settlement_at=dates[324],
+                available_at=dates[0],
+                entitlement_proved=True,
+                evidence_identity="a" * 64,
+                kind=kind,
+                cash_per_share=0.25,
+                additional_shares_per_share=0.5,
+            )
+            for kind in ("cash_dividend", "stock_distribution")
+        ]
+    )
+    batches = []
+
+    def valuation(phase, at, price):
+        receivable = entitlements.receivables.get("a", 0.0)
+        return (
+            PortfolioValuation(
+                at.value,
+                "a",
+                phase,
+                units.a,
+                float(units.a * Fraction(price)) + receivable,
+                price,
+                lifecycle_id="2000-01-01",
+                receivable=receivable,
+                locked_quantity=entitlements.locked_quantities.get("a", Fraction()),
+            ),
+            PortfolioValuation(at.value, "__cash__", phase, cash, cash),
+        )
+
+    for sequence in range(324):
+        start, end = dates[sequence : sequence + 2]
+        price = round(100.01 + min(sequence, 322) / 100, 2)
+        next_price = round(100.01 + min(sequence + 1, 322) / 100, 2)
+        before = valuation("before", start, price)
+        trades, flows = (), ()
+        if sequence < 322:
+            quantity = Fraction(100.0) / Fraction(price)
+            units.a += quantity
+            cash -= 100.0
+            fill = f"fill{sequence}"
+            trades = (ExecutedTrade(fill, fill, start.value, "a", quantity, 100.0),)
+            flows = (
+                PortfolioCashFlow(fill, start.value, "a", fill, "principal", -100.0),
+            )
+        after = valuation("after", start, price)
+        rights = entitlements.register(events, units, lives, end, phase="end")
+        units, lives, paid, adjustments = entitlements.process(
+            events, pd.DataFrame(), units, lives, end, phase="end"
+        )
+        rights += adjustments
+        cash += paid
+        if paid:
+            flows += (
+                PortfolioCashFlow(
+                    "dividend:cash_dividend:settlement",
+                    end.value,
+                    "a",
+                    None,
+                    "dividend",
+                    paid,
+                ),
+            )
+        diagnostics = (
+            PortfolioDiagnostic(
+                "a", None, "target_notional", number=after[0].share_value
+            ),
+            PortfolioDiagnostic("a", None, "adv20", number=1_000_000.0),
+            PortfolioDiagnostic(
+                "__cash__", None, "target_notional", number=after[1].value
+            ),
+            PortfolioDiagnostic(
+                "__cash__", None, "decision_reason", text="simple_rule"
+            ),
+        )
+        batches.append(
+            PortfolioLedgerBatch(
+                sequence,
+                trades,
+                flows,
+                before + after + valuation("end", end, next_price),
+                diagnostics,
+                rights,
+            )
+        )
+    registered = sum(
+        (
+            Fraction(100.0) / Fraction(round(100.01 + index / 100, 2))
+            for index in range(322)
+        ),
+        Fraction(),
+    )
+    assert 300 < float(registered) < 400
+    assert registered.denominator.bit_length() > 14_300
+    root = ledger_artifact.write_portfolio_ledger_artifact(
+        tmp_path / "portfolio",
+        capital=PortfolioCapital("ordinary", 100_000.0, "CNY", "cash_equity"),
+        metadata={
+            "window": {"start": str(dates[0].date()), "end": str(dates[-1].date())}
+        },
+        produce=lambda emit: [emit(batch) for batch in batches],
+    )
+    restored = list(read_portfolio_ledger_artifact(root).iter_chunks())
+    assert restored == batches
+    rights = [row for batch in restored for row in batch.rights_adjustments]
+    assert {row.kind for row in rights} == {
+        "registration",
+        "dividend",
+        "stock_distribution",
+        "unlock",
+    }
+    assert all(row.entitlement_quantity == registered for row in rights)
+    final = next(
+        row
+        for row in restored[-1].valuations
+        if row.asset_id == "a" and row.phase == "end"
+    )
+    assert final.quantity == registered * Fraction(3, 2)
+    assert final.locked_quantity == final.receivable == 0

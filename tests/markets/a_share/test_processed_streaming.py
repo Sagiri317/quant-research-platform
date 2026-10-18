@@ -783,7 +783,10 @@ def test_processed_narrow_output_uses_existing_panel_history(
     ) as (frames, metadata):
         write_dataset(root, frames, spec=spec, metadata=metadata)
     actual = read_dataset(root)
-    pd.testing.assert_frame_equal(actual, expected, check_exact=True)
+    # Independent full and bounded reductions may differ by floating roundoff.
+    pd.testing.assert_frame_equal(
+        actual, expected, check_exact=False, rtol=1e-13, atol=0.0
+    )
     assert actual.timestamp.min() == core[0]
     assert actual.timestamp.max() == core[-1]
     columns = [
@@ -1307,7 +1310,10 @@ def test_factor_warmup_uses_own_sessions_across_closure_and_migration(
     ) as (frames, metadata):
         write_dataset(root, frames, spec=spec, metadata=metadata)
     actual = read_dataset(root)
-    pd.testing.assert_frame_equal(actual, expected, check_exact=True)
+    # Independent full and bounded reductions may differ by floating roundoff.
+    pd.testing.assert_frame_equal(
+        actual, expected, check_exact=False, rtol=1e-13, atol=0.0
+    )
     assert actual.momentum_252_20.notna().all()
     row = actual.loc[actual.asset_id.eq("000001")].iloc[0]
     position = own_panel.index.get_loc(core[0])

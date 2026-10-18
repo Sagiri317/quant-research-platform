@@ -400,6 +400,278 @@ def test_market_axis_reprojections_keep_filter_support_during_migration(tmp_path
     assert membership.market_type.tolist() == [1, 4]
 
 
+@pytest.mark.parametrize("source_name", ("panel", "execution"))
+@pytest.mark.parametrize("selected", (False, True))
+def test_bounded_backtest_ignores_future_bad_keys_and_keeps_required_history(
+    tmp_path, source_name, selected
+):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from quant_research_platform.contracts.portfolios import (
+        ExecutionAssumptions,
+        PortfolioCandidateSpec,
+    )
+    from tests.helpers.portfolio_ledger import session_frame
+    from tests.research.test_closed_market_portfolios import _native_inputs
+
+    inputs, _, _, _ = _native_inputs(tmp_path, fault="normal_open")
+    root = inputs[source_name]
+    if selected:
+        inputs[source_name] = {
+            "path": str(root),
+            "files": sorted(
+                str(path.relative_to(root)) for path in root.rglob("*.parquet")
+            ),
+            "columns": ["open", "close", "amount"]
+            if source_name == "panel"
+            else ["can_enter", "can_exit"],
+            "years": [2022, 2023],
+            "time_window": {"start": "2022-12-01", "end": "2023-01-06"},
+            "row_filters": [["market_id", "==", "a_share"]],
+        }
+
+    class Predictions:
+        def values_for_frame(self, frame, **kwargs):
+            return [
+                10.0 if str(asset).startswith("a") else 1.0 for asset in frame.asset_id
+            ], [True] * len(frame)
+
+        def coverage_counts(self):
+            return 0, 0
+
+    def backtest(end):
+        return list(
+            production.backtest_a_share(
+                candidate=PortfolioCandidateSpec(
+                    selection_group="global",
+                    prediction_selector="champion",
+                    candidate_id="bounded",
+                    construction="quantile_equal_weight",
+                    rebalance_schedule="daily",
+                    top_quantile=0.5,
+                    benchmark_id=None,
+                ),
+                inputs=inputs,
+                output_window=TimeWindow("2022-12-30", end),
+                input_window=TimeWindow("2022-12-01", end),
+                formal_dataset_window=TimeWindow("2022-12-01", end),
+                prediction_lookup=Predictions(),
+                assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,)),
+            )
+        )
+
+    expected = backtest("2023-01-05")
+    part = next(root.rglob("year=2023/*.parquet"))
+    table = pq.ParquetFile(part).read()
+    frame = table.to_pandas()
+    position = frame.index[frame.timestamp.eq("2023-01-06")][0]
+    frame.loc[position, "asset_id"] = None
+    pq.write_table(pa.Table.from_pandas(frame, schema=table.schema), part)
+
+    actual = backtest("2023-01-05")
+    assert actual == expected
+    assert len(actual) == 3
+    assert any(batch.trades for batch in actual)
+    first = session_frame(actual[0]).set_index("asset_id")
+    assert first.loc["a0", "adv20"] == 1000.0
+    with pytest.raises(ValueError, match="dataset_primary_key_null"):
+        backtest("2023-01-06")
+
+
+@pytest.mark.parametrize("source_name", ("stock_master", "equity_events"))
+@pytest.mark.parametrize("selected", (False, True))
+def test_future_lifecycle_and_rights_keys_do_not_affect_current_sessions(
+    tmp_path, source_name, selected
+):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from tests.research.test_closed_market_portfolios import _native_inputs
+    from tests.sources.reference.test_equity_events import native_equity_inputs
+
+    if source_name == "stock_master":
+        inputs, _, calendar, _ = _native_inputs(
+            tmp_path, fault="future_lifecycle_append"
+        )
+        key, columns, filters = (
+            "source_asset_id",
+            ["company_status"],
+            [["company_status", "==", "active"]],
+        )
+    else:
+        inputs, _, calendar = native_equity_inputs(
+            tmp_path,
+            events=lambda event: [
+                event,
+                dict(
+                    event,
+                    event_id="future",
+                    effective_date="2023-01-09",
+                    publication_date="2023-01-09",
+                ),
+            ],
+        )
+        key, columns, filters = (
+            "event_id",
+            [
+                "value_per_old_unit",
+                "remaining_old_units_per_old_unit",
+                "successor_units_per_old_unit",
+            ],
+            [["kind", "==", "quote"]],
+        )
+    root = inputs[source_name]
+    source = {"path": str(root)}
+    if selected:
+        source.update(
+            files=sorted(
+                str(path.relative_to(root)) for path in root.rglob("*.parquet")
+            ),
+            columns=columns,
+            years=[2022, 2023],
+            time_window={"start": "2022-12-01", "end": "2023-01-10"},
+            row_filters=filters,
+        )
+
+    def sessions(end, chosen=source):
+        roots = {**inputs, source_name: chosen}
+        return list(
+            portfolio_sessions.iter_portfolio_sessions(
+                market_bars_root=roots["market_bars"],
+                stock_master_root=roots["stock_master"],
+                equity_events_root=roots.get("equity_events"),
+                panel_root=roots["panel"],
+                panel_columns=production._PANEL_COLUMNS,
+                calendar=calendar,
+                time_window=TimeWindow("2023-01-02", end),
+            )
+        )
+
+    expected = sessions("2023-01-06")
+    damaged = 0
+    for part in root.rglob("*.parquet"):
+        table = pq.ParquetFile(part).read()
+        frame = table.to_pandas()
+        future = frame.timestamp.gt("2023-01-06")
+        if future.any():
+            damaged += int(future.sum())
+            frame.loc[future, key] = None
+            pq.write_table(pa.Table.from_pandas(frame, schema=table.schema), part)
+    assert damaged == 1
+    actual = sessions("2023-01-06")
+    assert len(actual) == 5
+    for before, after in zip(expected, actual, strict=True):
+        for name in before.__dataclass_fields__:
+            old, new = getattr(before, name), getattr(after, name)
+            if isinstance(old, pd.DataFrame):
+                pd.testing.assert_frame_equal(old, new, check_exact=True)
+            else:
+                assert old == new
+    with pytest.raises(ValueError, match="dataset_primary_key_null"):
+        sessions("2023-01-10")
+    narrower = {**source, "time_window": {"start": "2022-12-01", "end": "2023-01-06"}}
+    assert len(sessions("2023-01-10", narrower)) == 5
+
+
+def test_corporate_amount_selection_preserves_cash_and_structural_companions(tmp_path):
+    from fractions import Fraction
+
+    from quant_research_platform.research.portfolios.accounting import (
+        EquityEntitlements,
+    )
+    from quant_research_platform.sources.csmar.interim import interim_catalog
+    from quant_research_platform.storage.datasets import write_dataset
+    from tests.research.test_closed_market_portfolios import _native_inputs
+
+    inputs, _, calendar, _ = _native_inputs(tmp_path, fault="normal_open")
+    source = pd.DataFrame(
+        {
+            "source_asset_id": ["a0"],
+            "timestamp": pd.to_datetime(["2023-01-05"]),
+            "kind": ["CA"],
+            "market_type": pd.Series([1], dtype="Int64"),
+            "announcement_date": pd.to_datetime(["2023-01-02"]),
+            "settlement_date": pd.to_datetime(["2023-01-06"]),
+            "settlement_date_unresolved": False,
+            "amount": [0.25],
+            "subscription_price": [float("nan")],
+        }
+    )
+    root = tmp_path / "selected-actions"
+    write_dataset(root, source, spec=interim_catalog().get("corporate_actions"))
+
+    def sessions(columns):
+        return portfolio_sessions.iter_portfolio_sessions(
+            market_bars_root=inputs["market_bars"],
+            stock_master_root=inputs["stock_master"],
+            panel_root=inputs["panel"],
+            panel_columns=production._PANEL_COLUMNS,
+            corporate_actions_root={"path": str(root), "columns": columns},
+            calendar=calendar,
+            time_window=TimeWindow("2023-01-02", "2023-01-06"),
+        )
+
+    book = EquityEntitlements()
+    units = pd.Series({"a0": Fraction(100)}, dtype="object")
+    lives = pd.Series({"a0": pd.Timestamp("2022-12-01")})
+    paid = 0.0
+    for view in sessions(["amount"]):
+        units, lives, cash, _ = book.process(
+            view.corporate_events, pd.DataFrame(), units, lives, view.timestamp
+        )
+        paid += cash
+        book.register(view.corporate_events, units, lives, view.timestamp)
+    assert paid == 25.0
+    assert units["a0"] == 100
+    with pytest.raises(ValueError, match="portfolio_input_business_columns_excluded"):
+        list(sessions(["market_type"]))
+
+
+def test_portfolio_upper_bound_preserves_narrower_panel_and_execution_selectors(
+    tmp_path,
+):
+    from tests.research.test_closed_market_portfolios import _native_inputs
+
+    inputs, _, calendar, _ = _native_inputs(tmp_path, fault="normal_open")
+
+    def selected(name, columns):
+        root = inputs[name]
+        return {
+            "path": str(root),
+            "files": sorted(
+                str(path.relative_to(root))
+                for path in root.rglob("year=2023/*.parquet")
+            ),
+            "columns": columns,
+            "years": [2023],
+            "time_window": {"start": "2022-12-15", "end": "2023-01-03"},
+            "row_filters": [["asset_id", "in", ["a0"]]],
+        }
+
+    views = list(
+        portfolio_sessions.iter_portfolio_sessions(
+            market_bars_root=inputs["market_bars"],
+            stock_master_root=inputs["stock_master"],
+            panel_root=selected("panel", ["open", "close", "amount"]),
+            execution_root=selected("execution", ["can_enter", "can_exit"]),
+            panel_columns=production._PANEL_COLUMNS,
+            calendar=calendar,
+            time_window=TimeWindow("2023-01-02", "2023-01-05"),
+        )
+    )
+    assert [set(view.panel.asset_id) for view in views] == [
+        {"a0"},
+        {"a0"},
+        set(),
+        set(),
+    ]
+    assert views[0].execution.execution_at.tolist() == [pd.Timestamp("2023-01-03")]
+    assert all(set(view.execution.asset_id) == {"a0"} for view in views)
+    assert views[-1].execution.timestamp.tolist() == [pd.Timestamp("2023-01-03")]
+    assert views[-1].execution.execution_at.isna().all()
+
+
 @pytest.mark.parametrize("operation", [production.backtest, production.calibrate])
 def test_stage_configuration_rejects_non_json_types_before_opening_inputs(
     tmp_path, operation

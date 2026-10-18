@@ -248,7 +248,7 @@ def stationary_bootstrap_mean_ci(
 
     bootstrap = StationaryBootstrap(block_size, data, seed=seed)
     interval = bootstrap.conf_int(
-        lambda sample: np.array([float(_mean(sample))]),
+        lambda sample: np.array([sample.mean()]),
         reps=repetitions,
         method="percentile",
         size=confidence,
@@ -256,7 +256,7 @@ def stationary_bootstrap_mean_ci(
     if not np.isfinite(interval).all() or interval[0, 0] > interval[1, 0]:
         raise ValueError("bootstrap_inference_undefined")
     return BootstrapInterval(
-        mean=float(_mean(data)),
+        mean=float(data.mean()),
         lower=float(interval[0, 0]),
         upper=float(interval[1, 0]),
         block_size=block_size,

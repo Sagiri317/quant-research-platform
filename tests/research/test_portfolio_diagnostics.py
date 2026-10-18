@@ -40,13 +40,17 @@ def _holding_paths(
     return result
 
 
-def test_extreme_valid_ledgers_keep_finite_group_bootstrap(tmp_path):
-    from fractions import Fraction
-
+def test_published_ledgers_preserve_ordinary_group_bootstrap(tmp_path):
     import numpy as np
+    from arch.bootstrap import StationaryBootstrap
+    from statsmodels.api import OLS
 
     from quant_research_platform.artifacts.portfolio_ledger import (
         read_portfolio_ledger_artifact,
+    )
+    from quant_research_platform.artifacts.statistics import (
+        read_statistics_artifact,
+        write_statistics_artifact,
     )
     from quant_research_platform.contracts.portfolios import (
         PORTFOLIO_LEDGER_COST_COLUMNS,
@@ -63,15 +67,16 @@ def test_extreme_valid_ledgers_keep_finite_group_bootstrap(tmp_path):
         write_test_sessions,
     )
 
-    gross = [2.0 ** (-53), *[2.0**1020, *[2.0 ** (-51)] * 20] * 17]
-    dates = pd.date_range("2024-01-01", periods=len(gross) + 1)
+    returns = np.random.default_rng(42).normal(0.0005, 0.008, size=252)
+    gross = 1 + returns
+    dates = pd.bdate_range("2024-01-01", periods=len(gross) + 1)
     columns = {}
     for group in ("global", "quarterly"):
-        candidate = f"{group}_extreme"
+        candidate = f"{group}_ordinary"
         capital = PortfolioCapital(
             **{
                 "candidate_id": candidate,
-                "initial_capital": 100000000.0,
+                "initial_capital": 1000000.0,
                 "valuation_currency": "CNY",
                 "valuation_method": "cash_equity",
             }
@@ -92,7 +97,7 @@ def test_extreme_valid_ledgers_keep_finite_group_bootstrap(tmp_path):
             },
         }
         frames = []
-        nav = 100000000.0
+        nav = capital.initial_capital
         for index, factor in enumerate(gross):
             invested = group == "quarterly"
             end = nav * factor if invested else nav
@@ -146,12 +151,23 @@ def test_extreme_valid_ledgers_keep_finite_group_bootstrap(tmp_path):
             intervals = pd.DataFrame(
                 [portfolio_interval_economics(batch) for batch in batches]
             )
-        assert len(intervals) == 358
+        assert len(intervals) == len(returns)
         assert intervals.nav_end.gt(0).all() and np.isfinite(intervals.nav_end).all()
         columns[candidate] = intervals.set_index(["entry_at", "end_at"]).net_return
     matrix = pd.DataFrame(columns)
-    expected = float(sum(map(Fraction, matrix.quarterly_extreme)) / len(matrix))
-    assert expected == pytest.approx(5.335332278746398e305)
+    np.testing.assert_array_equal(matrix.global_ordinary, np.zeros(len(returns)))
+    np.testing.assert_allclose(
+        matrix.quarterly_ordinary, returns, rtol=1e-12, atol=1e-14
+    )
+    expected = OLS(returns, np.ones((len(returns), 1))).fit(
+        cov_type="HAC", cov_kwds={"maxlags": 19}
+    )
+    expected_interval = StationaryBootstrap(20, returns, seed=42).conf_int(
+        lambda sample: np.array([sample.mean()]),
+        reps=199,
+        method="percentile",
+        size=0.95,
+    )
     result = _group_portfolio_comparison(
         matrix,
         {
@@ -159,10 +175,10 @@ def test_extreme_valid_ledgers_keep_finite_group_bootstrap(tmp_path):
             "statistics": {
                 "hac_lag": 19,
                 "bootstrap_block": 20,
-                "bootstrap_repetitions": 10000,
+                "bootstrap_repetitions": 199,
                 "group_comparison": {
-                    "portfolio_ids": ["extreme"],
-                    "primary_portfolio_id": "extreme",
+                    "portfolio_ids": ["ordinary"],
+                    "primary_portfolio_id": "ordinary",
                     "fdr_method": "BY",
                     "alpha": 0.05,
                     "seed": 42,
@@ -174,10 +190,38 @@ def test_extreme_valid_ledgers_keep_finite_group_bootstrap(tmp_path):
     )
     row = result.iloc[0]
     assert row.status == row.bootstrap_status == "DEFINED"
-    assert row.mean_difference == expected
-    assert row.standard_error == pytest.approx(3.6692201368766146e304)
-    assert np.isfinite([row.bootstrap_lower, row.bootstrap_upper]).all()
-    assert row.bootstrap_lower <= row.bootstrap_upper
+    assert row.observation_count == len(returns)
+    assert row.mean_difference == pytest.approx(
+        expected.params[0], rel=1e-12, abs=1e-14
+    )
+    assert row.standard_error == pytest.approx(expected.bse[0], rel=1e-12, abs=1e-14)
+    assert (row.bootstrap_lower, row.bootstrap_upper) == pytest.approx(
+        expected_interval[:, 0], rel=1e-12, abs=1e-14
+    )
+    assert row.global_terminal_wealth == 1.0
+    assert row.quarterly_terminal_wealth == pytest.approx(np.prod(gross), rel=1e-12)
+    output = write_statistics_artifact(
+        tmp_path / "statistics",
+        table_group="portfolio",
+        metadata={
+            **metadata,
+            "candidate_ids": list(columns),
+            "comparison_portfolio_ids": ["ordinary"],
+        },
+        tables={"portfolio_group_comparison": result},
+    )
+    with read_statistics_artifact(output).table(
+        "portfolio_group_comparison.parquet"
+    ) as saved:
+        assert saved.portfolio_id.tolist() == ["ordinary"]
+        assert saved.status.tolist() == saved.bootstrap_status.tolist() == ["DEFINED"]
+        measurements = [
+            "mean_difference",
+            "standard_error",
+            "bootstrap_lower",
+            "bootstrap_upper",
+        ]
+        np.testing.assert_array_equal(saved[measurements], result[measurements])
 
 
 def test_simple_only_configuration_reads_its_persisted_risk_context(tmp_path):

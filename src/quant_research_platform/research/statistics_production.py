@@ -1848,7 +1848,7 @@ def _factor_statistics_from_evaluations(config):
                     "rankic_daily": [],
                 }
         members = ["metrics"]
-        if metadata["optional_member_rows"]:
+        if "stratified_ic" in analyses and metadata["optional_member_rows"]:
             members += ["daily_coverage", "daily_strata"]
         validate_output_bundle(
             path,
@@ -1936,12 +1936,13 @@ def _factor_statistics_from_evaluations(config):
                         )
                         if "rank_ic" in analyses and name == "metrics":
                             values["rankic_daily"].append(float(row.rankic))
-                        values["dates"] += 1
-                        values["pairs"] += int(row.n_obs)
-                        for statistic in ("ic", "rankic"):
-                            value = getattr(row, statistic)
-                            if pd.notna(value):
-                                values[statistic].append(float(value))
+                        if "stratified_ic" in analyses:
+                            values["dates"] += 1
+                            values["pairs"] += int(row.n_obs)
+                            for statistic in ("ic", "rankic"):
+                                value = getattr(row, statistic)
+                                if pd.notna(value):
+                                    values[statistic].append(float(value))
             if any(head is not None and not head.empty for head in heads.values()):
                 raise ValueError("evaluation_daily_dates_mismatch")
         input_counts[scope] = date_count
@@ -2071,6 +2072,7 @@ def _factor_statistics_from_evaluations(config):
                     key=lambda value: (value is not None, value or ""),
                 )
                 for kind in binding["strata"].get("kinds", [])
+                if "stratified_ic" in analyses
             },
             "input_date_counts": input_counts,
             "inference_scope": "exploratory",

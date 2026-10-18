@@ -643,10 +643,6 @@ def model_training_read_columns(
                 *input_columns,
                 *canonical_feature_validity_columns(input_columns, declared_columns),
                 *feature_observation_columns(input_columns, declared_columns),
-                *feature_observation_columns(
-                    canonical_feature_validity_columns(input_columns, declared_columns),
-                    declared_columns,
-                ),
                 label_column,
                 "eligible",
                 *(

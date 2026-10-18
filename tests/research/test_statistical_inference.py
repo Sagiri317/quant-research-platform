@@ -121,6 +121,34 @@ def test_stationary_bootstrap_and_cscv_are_deterministic_and_bounded() -> None:
     assert duplicate.reason == "duplicate_candidate_series"
 
 
+def test_bootstrap_uses_float_resampling_with_same_seed_and_mean_semantics(monkeypatch):
+    from statistics import mean
+
+    from arch.bootstrap import StationaryBootstrap
+
+    from quant_research_platform.research import statistics
+
+    values = np.random.default_rng(18).normal(0.01, 0.08, size=2520)
+    expected = StationaryBootstrap(20, values, seed=18).conf_int(
+        lambda sample: np.array([mean(sample)]),
+        reps=199,
+        method="percentile",
+        size=0.95,
+    )
+    monkeypatch.setattr(
+        statistics,
+        "_mean",
+        lambda _data: pytest.fail("bootstrap used exact Python mean"),
+    )
+    result = stationary_bootstrap_mean_ci(
+        values, block_size=20, repetitions=199, seed=18
+    )
+    assert result.mean == pytest.approx(mean(values), rel=1e-12, abs=1e-14)
+    assert (result.lower, result.upper) == pytest.approx(
+        expected[:, 0], rel=1e-12, abs=1e-14
+    )
+
+
 def test_psr_dsr_fixed_oracle() -> None:
     returns = np.array([0.02, -0.01, 0.03, 0.01, 0.0, 0.04, -0.02, 0.01])
     result = probabilistic_and_deflated_sharpe(

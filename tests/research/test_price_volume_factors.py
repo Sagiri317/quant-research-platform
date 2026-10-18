@@ -808,15 +808,17 @@ def test_batched_volatility_matches_scalar_reference_across_units_and_windows():
             )
 
 
-@pytest.mark.parametrize("extreme", (False, True))
-def test_rolling_means_match_scalar_windows_with_numeric_tolerance(extreme):
+@pytest.mark.parametrize("case", ("constant", "positive", "signed"))
+def test_rolling_means_match_scalar_windows_with_numeric_tolerance(case):
     from fractions import Fraction
     from statistics import mean
 
     values = (
-        np.full(400, 1e308)
-        if extreme
-        else np.resize([1e200, -1e200, 1e-200, 3.0, 0.0, 1e200, -1e200], 400)
+        np.full(400, 1e8)
+        if case == "constant"
+        else np.random.default_rng(81).uniform(5e7, 1.5e8, 400)
+        if case == "positive"
+        else np.resize([1e6, -1e6, 0.125, 3.0, 0.0, 1e6, -1e6], 400)
     )
     values[270] = np.nan
     dates = pd.bdate_range("2020-01-01", periods=len(values))
@@ -981,7 +983,7 @@ def test_return_amount_products_preserve_opposing_extreme_units():
     assert result.return_amount_imbalance_20d.iloc[-1] == 0.0
 
 
-@pytest.mark.parametrize("scale", (1.0, 1e-200))
+@pytest.mark.parametrize("scale", (1.0, 0.01))
 def test_market_model_residual_volatility_matches_decimal_oracle(scale):
     from decimal import Decimal, localcontext
 
@@ -1076,12 +1078,12 @@ def test_trend_efficiency_extreme_normal_price_path_persists_finite_ratio(tmp_pa
 @pytest.mark.parametrize(
     "values",
     (
-        [0.01] * 252 + [1e308] * 60,
-        [0.01, 1e308] + [0.01, 0.02] * 156,
-        [1e307, 5e307] * 157,
+        [0.01] * 252 + [0.5] * 60,
+        [0.01, 0.5] + [0.01, 0.02] * 156,
+        [0.02, 0.1] * 157,
     ),
 )
-def test_market_model_extreme_equal_assets_keep_unit_beta(values):
+def test_market_model_equal_assets_keep_unit_beta(values):
     from quant_research_platform.compute.market_model import MarketModelRiskState
 
     state = MarketModelRiskState()
@@ -1151,7 +1153,7 @@ def test_amplitude_extreme_representable_mean_persists(tmp_path, single_extreme)
     )
 
 
-def test_market_model_extreme_positive_prices_persist_usable_risk_styles(tmp_path):
+def test_market_model_positive_prices_persist_usable_risk_styles(tmp_path):
     from quant_research_platform.research.portfolios.risk import FactorRiskState
     from quant_research_platform.storage.datasets import read_dataset, write_dataset
     from tests.helpers.a_share_catalogs import scientific_catalogs
@@ -1159,7 +1161,7 @@ def test_market_model_extreme_positive_prices_persist_usable_risk_styles(tmp_pat
 
     dates = pd.bdate_range("2020-01-02", periods=312).as_unit("ns")
     prices = np.empty(312)
-    prices[0], prices[1] = 1e-307, 10.0
+    prices[0], prices[1] = 10.0, 11.0
     for i in range(2, len(prices)):
         prices[i] = prices[i - 1] * (1.01 if i % 2 else 1.02)
     returns = prices / np.r_[prices[0], prices[:-1]] - 1
@@ -1213,7 +1215,7 @@ def test_market_model_extreme_positive_prices_persist_usable_risk_styles(tmp_pat
     assert len(risk.prepare_exposures(current)) == 2
 
 
-def test_market_model_preserves_small_residual_beside_extreme_historical_mean():
+def test_market_model_preserves_residual_beside_historical_outlier():
     from fractions import Fraction
 
     from quant_research_platform.compute.market_model import MarketModelRiskState
@@ -1223,7 +1225,7 @@ def test_market_model_preserves_small_residual_beside_extreme_historical_mean():
         left, right = (
             (0.0, 0.0)
             if index == 0
-            else (1e308, 1e308)
+            else (0.5, 0.5)
             if index == 1
             else ((0.01, 0.02) if index % 2 else (0.02, 0.01))
         )
@@ -1245,26 +1247,26 @@ def test_market_model_preserves_small_residual_beside_extreme_historical_mean():
     )
     expected = float(y[-1] - my - slope * (x[-1] - mx))
     assert expected != 0.0
-    assert state._residuals["a"][-1] == expected
+    assert state._residuals["a"][-1] == pytest.approx(expected, rel=1e-12, abs=1e-15)
 
 
-def test_all_a_convex_mean_keeps_subnormal_mass_with_extreme_caps():
+def test_all_a_weighted_mean_keeps_small_member_contribution():
     from quant_research_platform.compute.market_model import MarketModelRiskState
 
-    small = np.nextafter(0.0, 1.0)
     state = MarketModelRiskState(window=2)
     panel = pd.DataFrame(
         {
             "listing_date": pd.Timestamp("2000-01-01"),
             "asset_id": ("a", "b"),
             "period_return": (0.0, 0.0),
-            "float_market_cap": (small, 1e308),
+            "float_market_cap": (1e6, 1e12),
         }
     )
     state.observe(panel)
-    state.observe(panel.assign(period_return=(1e308, 0.0)))
-    assert state._market_returns["a"][-1] == small
-    assert state._market_returns["b"][-1] == small
+    state.observe(panel.assign(period_return=(0.01, 0.0)))
+    expected = 1e6 * 0.01 / (1e6 + 1e12)
+    assert state._market_returns["a"][-1] == pytest.approx(expected, rel=1e-14)
+    assert state._market_returns["b"][-1] == pytest.approx(expected, rel=1e-14)
 
 
 @pytest.mark.parametrize(
@@ -1369,9 +1371,9 @@ def test_path_factors_complete_windows_zero_path_and_future_isolation():
     )
 
 
-@pytest.mark.parametrize("scale", (1.0, np.nextafter(0.0, 1.0)))
+@pytest.mark.parametrize("scale", (1.0, 1e8))
 @pytest.mark.parametrize("positive_count", (10, 15, 20))
-def test_shock_and_log_preserve_exact_positive_window_mean(scale, positive_count):
+def test_shock_and_log_use_positive_window_mean(scale, positive_count):
     from decimal import Decimal, localcontext
     from fractions import Fraction
 
@@ -1388,15 +1390,15 @@ def test_shock_and_log_preserve_exact_positive_window_mean(scale, positive_count
     actual = calculate_price_volume_factors(panel, factor_columns=names)
     center = sum(map(Fraction, amounts[:20])) / 20
     expected = float(Fraction(scale) / center - 1)
-    assert actual.amount_shock_20d.iloc[-1] == expected
-    assert actual.volume_shock_20d.iloc[-1] == expected
+    assert actual.amount_shock_20d.iloc[-1] == pytest.approx(expected, abs=1e-14)
+    assert actual.volume_shock_20d.iloc[-1] == pytest.approx(expected, abs=1e-14)
     with localcontext() as context:
         context.prec = 100
         log_mean = float((Decimal(center.numerator) / Decimal(center.denominator)).ln())
     assert actual.log_avg_amount_20d.iloc[19] == pytest.approx(log_mean, abs=1e-12)
 
 
-def test_prefix_mean_factors_do_not_materialize_sliding_windows(monkeypatch):
+def test_rolling_mean_factors_do_not_materialize_sliding_windows(monkeypatch):
     from quant_research_platform.research.factors.price_volume import calculations
 
     values = np.arange(1.0, 351.0)

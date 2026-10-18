@@ -18,9 +18,9 @@ from quant_research_platform.contracts.validation import strict_finite_numeric_s
 
 
 def canonical_feature_validity_columns(input_columns, declared_columns):
-    """Resolve structural dependencies only from declared canonical companions."""
+    """Resolve declared canonical families, with each source value before its flags."""
     declared = set(declared_columns)
-    values = []
+    dependencies = []
     for column in input_columns:
         for prefix in reversed(FEATURE_PREFIXES):
             if column.startswith(prefix):
@@ -29,9 +29,13 @@ def canonical_feature_validity_columns(input_columns, declared_columns):
                 if value in declared and any(
                     companion + suffix in declared for companion in FEATURE_PREFIXES[1:]
                 ):
-                    values.append(value)
+                    dependencies.extend(
+                        companion + suffix
+                        for companion in FEATURE_PREFIXES
+                        if companion + suffix in declared
+                    )
                     break
-    return tuple(dict.fromkeys(values))
+    return tuple(dict.fromkeys(dependencies))
 
 
 def feature_observation_columns(columns, declared_columns):
@@ -80,10 +84,6 @@ def model_input_validity_columns(input_columns, model_algorithm, declared_column
             (
                 *canonical_feature_validity_columns(input_columns, declared_columns),
                 *feature_observation_columns(input_columns, declared_columns),
-                *feature_observation_columns(
-                    canonical_feature_validity_columns(input_columns, declared_columns),
-                    declared_columns,
-                ),
                 *direct,
             )
         )
@@ -91,7 +91,7 @@ def model_input_validity_columns(input_columns, model_algorithm, declared_column
 
 
 def model_observed_input_mask(frame, input_columns, declared_columns):
-    """A model needs at least one original input, not only missingness flags."""
+    """Require usable consumed families and at least one original observation."""
     originals = tuple(
         dict.fromkeys(
             (
@@ -102,7 +102,26 @@ def model_observed_input_mask(frame, input_columns, declared_columns):
         )
     )
     observed = mask_unobserved_features(frame, originals, declared_columns)
-    return observed.loc[:, originals].notna().any(axis=1)
+    keep = observed.loc[:, originals].notna().any(axis=1)
+    canonical = canonical_feature_validity_columns(input_columns, declared_columns)
+    for column in originals:
+        if column not in canonical:
+            continue
+        usable = observed[column].notna()
+        missing = "feature_missing_" + column[len("feature_") :]
+        if missing in canonical:
+            ordinary_missing = strict_finite_numeric_series(
+                frame[missing], error=f"invalid_feature_missing_flag: {missing}"
+            )
+            observation = "feature_observed_" + column[len("feature_") :]
+            if not ordinary_missing.isin((0, 1)).all() or (
+                observation in canonical
+                and (ordinary_missing.eq(1) & frame[observation].eq(1)).any()
+            ):
+                raise ValueError(f"invalid_feature_missing_flag: {missing}")
+            usable |= ordinary_missing.eq(1)
+        keep &= usable
+    return keep
 
 
 def apply_feature_transforms(
@@ -536,6 +555,18 @@ def a_share_feature_pipeline(
         for factor in factor_columns:
             values = group_frame[factor]
             raw_missing = scoped[factor].isna()
+            needs_fit = (
+                recipe.clip != "none"
+                or center
+                or scale
+                or (
+                    group_name == "processed"
+                    and (
+                        industry_neutralize
+                        or (size_neutralize and factor != size_column)
+                    )
+                )
+            )
             suffix = ("pre_neutral_" if group_name == "pre_neutral" else "") + factor
             if variance_counts is not None:
                 variance_counts.setdefault(suffix, 0)
@@ -553,19 +584,21 @@ def a_share_feature_pipeline(
                     variance_counts[suffix] += 1
                 transformed = _center_scale(group, center=center, scale=scale)
                 scoped_feature.iloc[positions] = transformed
-                identifiable.iloc[positions] = transformed.notna().any()
+                identifiable.iloc[positions] = (
+                    not needs_fit or transformed.notna().any()
+                )
             final_missing = raw_missing | scoped_feature.isna()
             context_valid = context_present
             if group_name == "processed" and needs_size and factor != size_column:
                 context_valid = context_valid & scoped[size_column].notna()
-            ordinary_missing = (
-                raw_missing & identifiable & context_valid & impute_missing
-            )
+            ordinary_missing = raw_missing & identifiable & context_valid
             feature = pd.Series(np.nan, index=result.index, dtype="float64")
-            feature.loc[scoped.index] = scoped_feature.mask(ordinary_missing, 0.0)
+            feature.loc[scoped.index] = scoped_feature.mask(
+                ordinary_missing & impute_missing, 0.0
+            )
             missing = pd.Series(0, index=result.index, dtype="int8")
             observed = pd.Series(0, index=result.index, dtype="int8")
-            missing.loc[scoped.index] = final_missing.astype("int8")
+            missing.loc[scoped.index] = ordinary_missing.astype("int8")
             observed.loc[scoped.index] = final_missing.eq(False).astype("int8")
             for prefix, values in zip(
                 FEATURE_PREFIXES, (feature, missing, observed), strict=True

@@ -78,7 +78,7 @@ CSMAR `index_weights.Weight` 与 `index_market.Idxtrd08` 的原始缺失值在�
 ### Choice
 
 Choice 是现有正式财务 PIT 的来源绑定；原生响应先不可变保存，再由已有 owner 离线处理。
-Raw 响应状态以 `status` 为唯一事实；原始请求、响应字节及哈希保留。
+Raw 请求是否成功由原始响应 `ErrorCode` 判定；`status` 保存派生诊断，原始请求、响应字节及哈希保留。
 资产负债表、利润表和现金流量表分别接纳，只阻塞实际依赖缺失表的因子。
 绑定配置按已选因子和组合风险暴露的字段依赖裁剪报表输入；仍要求真实披露与日历，
 不造空表、不以零填补缺失财务值。Raw CTR 接受官方 `IndexCode` 选项，
@@ -331,7 +331,8 @@ NULL/NaN 只表示该字段没有数值，不能单独区分未采集、源缺�
 真实 0 不等于缺失，未知也不等于 False；来源诊断、状态和观测伴随列保存原因。
 标签不可插补；模型缺失处理按 [拟合与预处理合同](a-share.md#514-正式模型层级与预处理)在合法训练域估计并冻结。`feature_`、`feature_missing_`、`feature_observed_`
 的现有输出关系由 [FeatureTransformSpec](../src/quant_research_platform/contracts/features.py) 定义，
-特征支持列不自动成为模型 X，模型列序由拟合合同保存。
+特征支持列不自动成为模型 X，模型列序由拟合合同保存。canonical 特征以 missing/observed 两位区分普通缺失与结构不可用，
+模型按实际消费的完整列族判断样本资格，数值 NULL 本身不足以判断。
 
 ### CSMAR equity_changes：报表来源与科目粒度
 
@@ -383,6 +384,8 @@ INTERIM 主键为 `source_asset_id, timestamp, report_type, data_source, subject
 - `row_filters` 是现有 `==`/`in` 有限物理筛选，不是任意表达式引擎，也不证明样本科学资格。
 - `spec` 为裸 Parquet 补足本操作真实需要的角色、键、单位和标签成熟映射，不能用声明替代来源证据。
 - 选择输出窗口不缩短公式回看、标签端点或完整截面。排除的报价保持未知，不压紧交易会话轴。
+- PK 和声明的科学伴随列由消费 owner 补齐；明确排除计算必需业务值（如分红金额）时，该依赖操作报出缺少的列。
+- 有界计算只验证必要输入范围，保留回看历史与前瞻端点，范围以后的无关行不参与本次消费。
 
 ### 阶段输入、输出与唯一合同位置
 

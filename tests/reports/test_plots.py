@@ -90,6 +90,29 @@ def test_independent_episodes_and_sampled_drawdown():
     fig.canvas.draw()
 
 
+def test_partial_episode_keeps_other_complete_episode_drawdown():
+    partial = {
+        **curve((1000, 980), stride=2),
+        "episode_id": "partial",
+        "status": "PARTIAL",
+        "account_stop_reason": "execution_unknown",
+        "account_stop_ns": pd.Timestamp("2026-01-01T00:00:02").value,
+    }
+    data = {
+        **curve((1000, 1099)),
+        "status": "PARTIAL",
+        "execution_mode": "independent_segments",
+        "episodes": [{**curve((1000, 1099)), "episode_id": "complete"}, partial],
+    }
+    figure, axes = plots.plot_portfolio_curve(data, sample_role="test", timezone="UTC")
+    assert "完整账本派生回撤" in axes[1].texts[0].get_text()
+    assert len(axes[1].lines) == 1 and not axes[3].lines
+    assert len(axes[2].texts) == 1
+    assert "抽样净值" in axes[2].texts[0].get_text()
+    assert "known_prefix" in axes[2].texts[0].get_text()
+    figure.canvas.draw()
+
+
 def test_blocked_curve_and_metric_availability():
     _, axes = plots.plot_portfolio_curve(
         dict(candidate_id="blocked", status="BLOCKED", reason="missing_source"),

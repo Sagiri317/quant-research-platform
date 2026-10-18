@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Iterable
 from decimal import Decimal, localcontext
 from fractions import Fraction
-from itertools import accumulate
 from math import ceil, fsum
 from statistics import mean as arithmetic_mean
 
@@ -327,6 +326,27 @@ def _calculate_values(
         valid &= counts >= math_minimum
     if shift:
         valid &= np.isfinite(source[first:stop]) & fresh[first:stop]
+
+    def rolling_mean(width: int) -> np.ndarray:
+        key = ("mean", source_name, width)
+        if key not in sums:
+            means = pd.Series(source).rolling(width, min_periods=1).mean().to_numpy()
+            if np.any(source < 0):
+                magnitude = (
+                    pd.Series(np.abs(source))
+                    .rolling(width, min_periods=1)
+                    .mean()
+                    .to_numpy()
+                )
+                cancelled = (magnitude > 0) & (
+                    np.abs(means) <= width * np.finfo(float).eps * magnitude
+                )
+                # Signed means within their summation error scale are numerical
+                # zero, not valid logarithms or divisors for huge ratios.
+                means = np.where(cancelled, 0.0, means)
+            sums[key] = means
+        return sums[key][first - shift : stop - shift]
+
     if shift or factor in {
         "log_avg_amount_20d",
         "avg_amount_20d",
@@ -335,37 +355,15 @@ def _calculate_values(
         "turnover_20d",
         "turnover_60d",
     }:
-        if source_name not in sums:
-            sums[source_name] = _binary_prefix(source)
-        totals, unit = sums[source_name]
-        result = np.full(np.count_nonzero(valid), np.nan)
-        for index, position in enumerate(np.flatnonzero(valid) + first):
-            count = int(counts[position - first])
-            total = totals[position + 1 - shift] - totals[position + 1 - shift - size]
-            if shift:
-                if total:
-                    numerator, denominator = float(source[position]).as_integer_ratio()
-                    numerator = numerator * count * unit - denominator * total
-                    denominator *= total
-                    try:
-                        result[index] = numerator / denominator
-                    except OverflowError:
-                        result[index] = (
-                            np.inf if (numerator > 0) == (denominator > 0) else -np.inf
-                        )
-            elif factor == "log_avg_amount_20d":
-                if total > 0:
-                    mean = total / (count * unit)
-                    if mean > 5e-324 or total * (1 << 1074) >= count * unit:
-                        result[index] = np.log(mean)
-                    else:
-                        with localcontext() as context:
-                            context.prec = 80
-                            result[index] = float(
-                                (Decimal(total) / Decimal(count * unit)).ln()
-                            )
-            else:
-                result[index] = total / (count * unit)
+        means = rolling_mean(size)
+        if shift:
+            valid &= means != 0
+            with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+                result = (source[first:stop][valid] - means[valid]) / means[valid]
+        elif factor == "log_avg_amount_20d":
+            result = _log(means[valid])
+        else:
+            result = means[valid]
         output[first - start :][valid] = result
         return output
     if factor in {"amount_cv_126d", "turnover_cv_126d"}:
@@ -400,27 +398,13 @@ def _calculate_values(
         output[first - start :][valid] = result
         return output
     if factor == "abnormal_turnover_20_250":
-        if source_name not in sums:
-            sums[source_name] = _binary_prefix(source)
-        totals, _unit = sums[source_name]
         short = windows[1]
-        short_numeric = window_count(numeric, short)
         short_fresh = window_count(numeric & fresh, short)
         valid &= short_fresh >= ceil(min_fresh_fraction * short)
-        result = np.full(np.count_nonzero(valid), np.nan)
-        for index, position in enumerate(np.flatnonzero(valid) + first + 1):
-            denominator = totals[position] - totals[position - size]
-            if denominator > 0:
-                numerator = int(counts[position - first - 1]) * (
-                    totals[position] - totals[position - short]
-                )
-                try:
-                    result[index] = numerator / (
-                        int(short_numeric[position - first - 1]) * denominator
-                    )
-                except OverflowError:
-                    # Preserve the nonfinite result of an unrepresentable signed ratio.
-                    result[index] = np.inf if numerator > 0 else -np.inf
+        means = rolling_mean(size)
+        valid &= means > 0
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            result = rolling_mean(short)[valid] / means[valid]
         output[first - start :][valid] = result
         return output
     matrix = window(np.where(numeric, source, np.nan)) if partial else window(source)
@@ -639,28 +623,6 @@ def _calculate_values(
         raise ValueError("price_volume_calculation_missing")
     output[first - start :][valid] = result
     return output
-
-
-def _binary_prefix(values: np.ndarray) -> tuple[list[int], int]:
-    # Exact binary sums make subtraction safe across windows and chunk boundaries.
-    # Missing values are zero only inside this accumulator; callers use numeric
-    # sample counts and separate fresh-observation validity gates.
-    ratios = [
-        float(value).as_integer_ratio() if np.isfinite(value) else (0, 1)
-        for value in values
-    ]
-    exponent = max(denominator.bit_length() - 1 for _, denominator in ratios)
-    unit = 1 << exponent
-    totals = list(
-        accumulate(
-            (
-                numerator << (exponent - (denominator.bit_length() - 1))
-                for numerator, denominator in ratios
-            ),
-            initial=0,
-        )
-    )
-    return totals, unit
 
 
 def _sample_standard_deviation(windows: np.ndarray) -> np.ndarray:
