@@ -9,9 +9,18 @@ from quant_research_platform.storage.raw_snapshots import (
 )
 
 
-@pytest.mark.parametrize("outer_handled", [False, True])
-@pytest.mark.parametrize("changed", [False, True])
-@pytest.mark.parametrize("termination", ["exhaust", "close", "primary"])
+@pytest.mark.parametrize(
+    ("changed", "termination", "outer_handled"),
+    [
+        (False, "exhaust", False),
+        (True, "exhaust", False),
+        (True, "exhaust", True),
+        (True, "close", False),
+        (True, "close", True),
+        (True, "primary", False),
+        (True, "primary", True),
+    ],
+)
 def test_csv_acceptance_verifies_consumed_digest_without_draining_on_close(
     tmp_path, changed, termination, outer_handled
 ):
@@ -47,7 +56,7 @@ def test_csv_acceptance_verifies_consumed_digest_without_draining_on_close(
             assert not getattr(primary, "__notes__", [])
         elif changed and termination == "exhaust":
             with pytest.raises(ValueError, match="raw_csv_content_invalid"):
-                list(rows) if termination == "exhaust" else rows.close()
+                list(rows)
         elif termination == "exhaust":
             assert list(rows) == [(2,)]
         else:

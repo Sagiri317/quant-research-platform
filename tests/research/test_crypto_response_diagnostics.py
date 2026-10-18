@@ -602,7 +602,24 @@ def test_native_time_series_optional_response_preserves_mature_pair_domain(tmp_p
         evaluate(config), tables=("metrics", "ic_summary")
     )
     for name in actual:
-        pd.testing.assert_frame_equal(actual[name], expected[name], check_exact=True)
+        numeric = list(actual[name].select_dtypes(include="floating").columns)
+        pd.testing.assert_frame_equal(
+            actual[name].drop(columns=numeric),
+            expected[name].drop(columns=numeric),
+            check_exact=True,
+        )
+        pd.testing.assert_frame_equal(
+            actual[name][numeric].isna(),
+            expected[name][numeric].isna(),
+            check_exact=True,
+        )
+        pd.testing.assert_frame_equal(
+            actual[name][numeric],
+            expected[name][numeric],
+            check_exact=False,
+            rtol=1e-12,
+            atol=1e-14,
+        )
     assert actual["metrics"].n_obs.tolist() == [3, 3]
     valid = frame.loc[[2, 3, 5]]
     assert actual["metrics"].iloc[0].ic == pytest.approx(

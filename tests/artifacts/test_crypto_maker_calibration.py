@@ -76,8 +76,9 @@ def _maker_calibration_tables(*, fractional=False):
         replay_maker_calibration,
     )
     from tests.helpers.binance_hft import _quote, hft_research_plan
+    from tests.helpers.binance_hft import execution_state as _state
+    from tests.helpers.binance_hft import execution_trade as _trade
     from tests.markets.crypto.calibration_test_support import maker_event_rows
-    from tests.markets.crypto.test_hft_execution import _state, _trade
 
     plan = hft_research_plan()
     plan["folds"][0]["validation"] = {
@@ -402,7 +403,8 @@ def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
     from types import SimpleNamespace
 
     from quant_research_platform.markets.implementations.crypto import portfolio
-    from tests.markets.crypto.test_hft_execution import _state, _trade
+    from tests.helpers.binance_hft import execution_state as _state
+    from tests.helpers.binance_hft import execution_trade as _trade
 
     expected, envelope = maker_calibration_tables
     config = _producer_config(envelope)
@@ -479,7 +481,7 @@ def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
             _kwargs["stats"].coverage_segments.update(coverage)
             try:
                 if finish == "book_gap":
-                    from tests.markets.crypto.test_hft import _boundary
+                    from tests.helpers.binance_hft import panel_boundary as _boundary
 
                     yield _state(2100)
                     yield _boundary(2150)
@@ -694,10 +696,11 @@ def test_maker_calibration_streams_many_events_without_full_table_reads(
     from types import SimpleNamespace
 
     from quant_research_platform.markets.implementations.crypto import portfolio
+    from tests.helpers.binance_hft import execution_state as _state
     from tests.helpers.binance_hft import hft_research_plan
-    from tests.markets.crypto.test_hft_execution import _state
 
-    count, depth = (129, 512)
+    count, depth = (5, 2)
+    monkeypatch.setattr(portfolio, "DEFAULT_BATCH_ROWS", 7)
     first, last = (2100, 2100 + (count - 1) * 1000)
 
     def iso(stamp):
@@ -748,9 +751,9 @@ def test_maker_calibration_streams_many_events_without_full_table_reads(
 
     def validation_chunks(*, fold_id, model_id):
         assert fold_id == "fold_1"
-        for start in range(0, count, 64):
+        for start in range(0, count, 2):
             stamps = [
-                first + index * 1000 for index in range(start, min(count, start + 64))
+                first + index * 1000 for index in range(start, min(count, start + 2))
             ]
             yield pd.DataFrame(
                 {
@@ -854,7 +857,18 @@ def test_maker_calibration_streams_many_events_without_full_table_reads(
         "crypto_maker_events": count * depth * 2,
         "crypto_maker_calibration": 2,
     }
-    assert event_batch_rows == [65_536, 65_536, 1_024]
+    assert event_batch_rows == [7, 7, 6]
+    events = pd.concat(
+        artifact._batches("crypto_maker_events.parquet"), ignore_index=True
+    )
+    # Each book has bid levels then ask levels; row seven splits the second book.
+    assert events.event_at.tolist() == [
+        pd.Timestamp(first + index * 1000, unit="ms")
+        for index in range(count)
+        for _ in range(4)
+    ]
+    assert events.price_index.tolist() == [995, 994, 1005, 1006] * count
+    assert events.quantity.tolist() == [1.0] * 20
     record_testsuite_property("maker_event_rows", emitted["crypto_maker_events"])
 
 
@@ -895,8 +909,8 @@ def test_maker_validator_reuses_overlapping_and_adjacent_native_paths(
 
     tables, envelope = maker_calibration_tables
     if boundary:
+        from tests.helpers.binance_hft import execution_boundary as _boundary
         from tests.markets.crypto.calibration_test_support import maker_event_rows
-        from tests.markets.crypto.test_hft_execution import _boundary
 
         events = tables["crypto_maker_events"]
         rows = pd.DataFrame(

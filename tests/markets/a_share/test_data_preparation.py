@@ -420,7 +420,12 @@ def test_public_expectations_window_preserves_fresh_preceding_forecasts(tmp_path
         outputs.append(saved.loc[saved.timestamp.ge(dates[2])].reset_index(drop=True))
     pd.testing.assert_frame_equal(outputs[0], outputs[1], check_exact=True)
     selected = outputs[1].loc[outputs[1].asset_id.eq("000001")]
-    assert selected.forward_earnings_yield_fy1.notna().all()
+    prices = read_dataset(inputs["market_panel_1d"])
+    prices = prices.loc[prices.asset_id.eq("000001") & prices.timestamp.ge(dates[2])]
+    assert selected.timestamp.tolist() == prices.timestamp.tolist()
+    np.testing.assert_allclose(
+        selected.forward_earnings_yield_fy1, 2.0 / prices.close, rtol=1e-13, atol=0.0
+    )
 
 
 @pytest.mark.parametrize(
@@ -619,13 +624,17 @@ def test_negative_source_capex_propagates_through_native_pit_and_factor_revision
         .eq(expected_ttm)
         .all()
     )
-    assert (
-        factors.loc[factors.timestamp.ge("2020-04-07"), "capex_to_assets"]
-        .eq(expected_ttm / 100)
-        .all()
+    np.testing.assert_allclose(
+        factors.loc[factors.timestamp.ge("2020-04-07"), "capex_to_assets"],
+        expected_ttm / 100,
+        rtol=1e-13,
+        atol=0.0,
     )
-    assert (
-        factors.loc[factors.timestamp.ge("2020-04-03"), "cfo_to_assets"].eq(-0.4).all()
+    np.testing.assert_allclose(
+        factors.loc[factors.timestamp.ge("2020-04-03"), "cfo_to_assets"],
+        -0.4,
+        rtol=1e-13,
+        atol=0.0,
     )
     if negative_component != "prior_fy":
         assert (

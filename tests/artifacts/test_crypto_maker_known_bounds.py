@@ -14,8 +14,8 @@ from quant_research_platform.sources.binance.replay import (
     ReconstructionStats,
 )
 from tests.helpers.binance_hft import _quote
+from tests.helpers.binance_hft import execution_state as _state
 from tests.markets.crypto.test_direct_portfolio import _independent_maker_case
-from tests.markets.crypto.test_hft_execution import _state
 from tests.sources.binance.test_known_price_ranges import _delta, _snapshot
 
 

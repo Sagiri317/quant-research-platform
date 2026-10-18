@@ -120,16 +120,18 @@ def test_transition_empty_depth_members_are_rejected_before_publication(
 
 @pytest.mark.parametrize("backend", ("raw", "normalized"))
 @pytest.mark.parametrize(
-    "boundary,cancel",
+    "boundary,cancel,close_error",
     [
-        ("none", False),
-        ("read", False),
-        ("read", True),
-        ("write", False),
-        ("write", True),
+        ("none", False, "none"),
+        ("read", False, "both"),
+        ("write", False, "both"),
+        ("read", True, "both"),
+        ("flush", False, "none"),
+        ("none", False, "response"),
+        ("none", False, "output"),
+        ("none", False, "both"),
     ],
 )
-@pytest.mark.parametrize("close_error", ("none", "response", "output", "both"))
 def test_copy_closes_real_files_and_preserves_primary_identity(
     tmp_path, monkeypatch, backend, boundary, cancel, close_error
 ):
@@ -181,6 +183,11 @@ def test_copy_closes_real_files_and_preserves_primary_identity(
                 self.handle.write(data[:1])
                 raise primary
             return self.handle.write(data)
+
+        def flush(self):
+            self.handle.flush()
+            if boundary == "flush":
+                raise primary
 
         def close(self):
             self.close_count += 1

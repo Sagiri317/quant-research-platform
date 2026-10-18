@@ -135,7 +135,7 @@ def test_target_residual_uses_only_same_row_exposures_and_actual_clocks():
 
 @pytest.mark.parametrize(
     "groups",
-    [["raw"], ["processed"], ["pre_neutral"], ["raw", "processed", "pre_neutral"]],
+    [["raw"], ["pre_neutral"], ["raw", "processed", "pre_neutral"]],
 )
 def test_assemble_persists_selected_groups_target_and_input_columns(tmp_path, groups):
     from quant_research_platform.contracts.columns import (

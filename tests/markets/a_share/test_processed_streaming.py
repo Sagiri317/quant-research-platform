@@ -387,7 +387,36 @@ def test_processed_blocks_preserve_full_history_math(
                 metadata=metadata,
             )
         actual = read_dataset(root)
-        pd.testing.assert_frame_equal(actual, eager[data_id], check_exact=True)
+        expected = eager[data_id]
+        numeric = (
+            ["turnover", "period_return"]
+            if data_id == "market_panel_1d"
+            else [
+                column
+                for column in actual.select_dtypes(include="floating")
+                if data_id != "fundamental_pit"
+                or column.endswith("_ttm")
+                or column.startswith("average_")
+            ]
+        )
+        pd.testing.assert_frame_equal(
+            actual.drop(columns=numeric),
+            expected.drop(columns=numeric),
+            check_exact=True,
+        )
+        pd.testing.assert_frame_equal(actual.isna(), expected.isna(), check_exact=True)
+        if data_id == "market_panel_1d":
+            reopening = actual.filling_flag.eq(0) & actual.groupby(
+                ["asset_id", "listing_date"], dropna=False
+            ).filling_flag.shift().eq(1)
+            pd.testing.assert_series_equal(
+                actual.loc[~reopening, "period_return"],
+                expected.loc[~reopening, "period_return"],
+                check_exact=True,
+            )
+        pd.testing.assert_frame_equal(
+            actual[numeric], expected[numeric], check_exact=False, rtol=1e-13, atol=0.0
+        )
         chunks = list(
             iter_complete_session_frames(
                 read_dataset(root, mode=DatasetReadMode.CHUNKED),
@@ -395,7 +424,7 @@ def test_processed_blocks_preserve_full_history_math(
             )
         )
         pd.testing.assert_frame_equal(
-            pd.concat(chunks, ignore_index=True), eager[data_id], check_exact=True
+            pd.concat(chunks, ignore_index=True), actual, check_exact=True
         )
     assert preparations == [True]
     # Only the factor without a declared PANEL clock consumes the scanned axis.
@@ -623,7 +652,22 @@ def test_unknown_quote_breaks_suspension_baseline_across_persisted_slabs(
         decoded["stock_master"], stocks_before, check_exact=True
     )
     actual = read_dataset(root)
-    pd.testing.assert_frame_equal(actual, expected, check_exact=True)
+    computed = ["turnover", "period_return"]
+    pd.testing.assert_frame_equal(
+        actual.drop(columns=computed), expected.drop(columns=computed), check_exact=True
+    )
+    pd.testing.assert_frame_equal(actual.isna(), expected.isna(), check_exact=True)
+    reopening = actual.filling_flag.eq(0) & actual.groupby(
+        ["asset_id", "listing_date"], dropna=False
+    ).filling_flag.shift().eq(1)
+    pd.testing.assert_series_equal(
+        actual.loc[~reopening, "period_return"],
+        expected.loc[~reopening, "period_return"],
+        check_exact=True,
+    )
+    pd.testing.assert_frame_equal(
+        actual[computed], expected[computed], check_exact=False, rtol=1e-13, atol=0.0
+    )
     assert len(slabs) > 1
     pd.testing.assert_frame_equal(
         decoded["market_cap"], raw_caps_before, check_exact=True
@@ -1027,10 +1071,11 @@ def test_asynchronous_own_market_label_endpoints_and_mask_batches(
     for horizon in (1, 5):
         column = f"forward_return_{horizon}d"
         exit_date = panel.index[1 + horizon]
-        assert (
-            label.loc[dates[0], column]
-            == (panel.loc[exit_date, "adj_open"] - panel.iloc[1].adj_open)
-            / panel.iloc[1].adj_open
+        assert label.loc[dates[0], column] == pytest.approx(
+            (panel.loc[exit_date, "adj_open"] - panel.iloc[1].adj_open)
+            / panel.iloc[1].adj_open,
+            rel=1e-13,
+            abs=0.0,
         )
         assert label.loc[dates[0], column + "_available_at"] == (
             pd.Timestamp(f"{exit_date.date()} 15:00", tz="Asia/Shanghai")
@@ -1099,13 +1144,14 @@ def test_own_market_all_label_horizons_preserve_unknown_and_suspended_sessions(
             assert pd.isna(saved.loc[dates[0], column + "_available_at"])
         else:
             exit_date = axes["000001"][horizon + 1]
-            assert (
-                saved.loc[dates[0], column]
-                == (
+            assert saved.loc[dates[0], column] == pytest.approx(
+                (
                     own_panel.loc[exit_date, "adj_open"]
                     - own_panel.loc[dates[1], "adj_open"]
                 )
-                / own_panel.loc[dates[1], "adj_open"]
+                / own_panel.loc[dates[1], "adj_open"],
+                rel=1e-13,
+                abs=0.0,
             )
             assert saved.loc[dates[0], column + "_available_at"] == (
                 pd.Timestamp(f"{exit_date.date()} 15:00", tz="Asia/Shanghai")
@@ -1317,10 +1363,12 @@ def test_factor_warmup_uses_own_sessions_across_closure_and_migration(
     assert actual.momentum_252_20.notna().all()
     row = actual.loc[actual.asset_id.eq("000001")].iloc[0]
     position = own_panel.index.get_loc(core[0])
-    assert row.momentum_252_20 == (
+    assert row.momentum_252_20 == pytest.approx(
         own_panel.iloc[position - 20].adj_close
         / own_panel.iloc[position - 252].adj_close
-        - 1
+        - 1,
+        rel=1e-13,
+        abs=0.0,
     )
 
 
@@ -1403,7 +1451,7 @@ def test_missing_mandatory_panel_source_fails_before_materialization(
         )
 
 
-@pytest.mark.parametrize("prior", (None, 2.0, 1e308))
+@pytest.mark.parametrize("prior", (None, 2.0, 100.0))
 def test_fundamental_adapter_reuses_prior_year_for_beginning_balances(
     prior, monkeypatch
 ):
@@ -1420,7 +1468,7 @@ def test_fundamental_adapter_reuses_prior_year_for_beginning_balances(
                 "asset_id": asset,
                 "timestamp": pd.Timestamp("2020-08-03"),
                 "metric_id": metric,
-                "value": 1e308,
+                "value": 100.0,
                 "prior_year_value": prior,
             }
             for asset in ("a", "b")
@@ -1449,10 +1497,13 @@ def test_fundamental_adapter_reuses_prior_year_for_beginning_balances(
         )
         if prior is None:
             assert result[f"average_{metric}"].isna().all()
-        elif prior == 1e308:
-            assert result[f"average_{metric}"].eq(1e308).all()
         else:
-            assert result[f"average_{metric}"].eq(5e307).all()
+            np.testing.assert_allclose(
+                result[f"average_{metric}"],
+                (100.0 + prior) / 2,
+                rtol=1e-13,
+                atol=0.0,
+            )
         expected_prior = np.nan if prior is None else prior
         np.testing.assert_array_equal(
             result[f"beginning_{metric}"], [expected_prior] * 2

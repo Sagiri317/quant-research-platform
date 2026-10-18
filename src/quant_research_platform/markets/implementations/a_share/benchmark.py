@@ -55,8 +55,16 @@ def _normalize_benchmark_weight_snapshots(
     }
     if not required_weights.issubset(weight_interim.columns):
         raise ValueError("a_share_benchmark_weight_schema_invalid")
+    weights = weight_interim.loc[
+        weight_interim["source_asset_id"].isin(FORMAL_BENCHMARKS)
+    ].copy()
+    weights["source_asset_id"] = strict_string_series(
+        weights["source_asset_id"],
+        error="a_share_benchmark_source_index_invalid",
+    )
+
     index_info = index_info_interim.loc[
-        index_info_interim["source_asset_id"].isin(FORMAL_BENCHMARKS)
+        index_info_interim["source_asset_id"].isin(weights["source_asset_id"].unique())
     ].copy()
     index_info["source_asset_id"] = strict_string_series(
         index_info["source_asset_id"],
@@ -67,13 +75,6 @@ def _normalize_benchmark_weight_snapshots(
         error="a_share_benchmark_index_name_invalid",
     )
 
-    weights = weight_interim.loc[
-        weight_interim["source_asset_id"].isin(FORMAL_BENCHMARKS)
-    ].copy()
-    weights["source_asset_id"] = strict_string_series(
-        weights["source_asset_id"],
-        error="a_share_benchmark_source_index_invalid",
-    )
     for source_id in weights["source_asset_id"].unique():
         _benchmark_id, expected_name = FORMAL_BENCHMARKS[source_id]
         names = set(

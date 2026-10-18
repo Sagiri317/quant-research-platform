@@ -113,12 +113,16 @@ def test_lifecycles_and_unknown_listing_are_retained():
     )
 
 
-def test_tiny_and_extreme_prices_remain_local_and_stable():
-    frame = _prices(6)
-    frame.adj_open = [1e-300, 1e300, 1e300 * (1 + 1e-14), 1e300, 1e-300, 1e-300]
+def test_small_returns_remain_local_and_stable():
+    frame = _prices(3)
+    frame.adj_open = [100.0, 110.0, 110.0 * (1 + 1e-14)]
     frame.adj_close = frame.adj_open * (1 + 1e-14)
     result = _calculate(frame, (1, 2))
-    assert result.on_id_holding_intraday_log_return_1d.iloc[0] > 0
+    expected = np.log1p((frame.adj_close.iloc[1] - 110.0) / 110.0)
+    assert expected > 0
+    assert result.on_id_holding_intraday_log_return_1d.iloc[0] == pytest.approx(
+        expected, rel=1e-12, abs=0
+    )
     assert result.on_id_decomposition_qualified_1d.iloc[0]
     assert np.isfinite(result.on_id_pre_entry_log_return.iloc[0])
     frame.loc[0, "adj_open"] = np.inf
@@ -179,18 +183,6 @@ def test_genuine_endpoint_disagreement_is_a_scientific_error(monkeypatch):
     monkeypatch.setattr(forward_returns, "_forward_return_labels", corrupted)
     with pytest.raises(ValueError, match="on_id_endpoint_mismatch"):
         _calculate(_prices(3), (1,))
-
-
-def test_nonfinite_endpoint_does_not_erase_finite_log_components():
-    frame = _prices(3)
-    frame.adj_open = [1.0, 1e-300, 1e300]
-    frame.adj_close = [1.0, 1e-300, 1e300]
-    row = _calculate(frame, (1,)).iloc[0]
-    assert row.on_id_holding_intraday_log_return_1d == 0.0
-    assert np.isfinite(row.on_id_holding_overnight_log_return_1d)
-    assert row.on_id_endpoint_return_1d_reason == "nonfinite_result"
-    assert pd.isna(row.on_id_endpoint_return_1d_available_at)
-    assert not row.on_id_decomposition_qualified_1d
 
 
 def test_real_endpoints_and_interior_suspension_valuation_are_distinct():

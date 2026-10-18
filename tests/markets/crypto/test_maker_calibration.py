@@ -13,12 +13,14 @@ from quant_research_platform.markets.implementations.crypto.execution import (
     simulate_maker,
 )
 from tests.helpers.binance_hft import _quote
+from tests.helpers.binance_hft import execution_state as _state
+from tests.helpers.binance_hft import execution_trade as _trade
+from tests.helpers.binance_hft import maker_config as _maker_config
 from tests.helpers.portfolio_ledger import capture_fill_rows
 from tests.markets.crypto.calibration_test_support import (
     calibration_from_paths,
     calibration_inputs,
 )
-from tests.markets.crypto.test_hft_execution import _maker_config, _state, _trade
 
 
 def _run_calibrated(paths, errors, *, books, trades, quotes, latency):
@@ -740,12 +742,20 @@ def test_native_history_is_shared_by_sides_and_recomputes_economic_queries(monke
     )
     shared = MakerCalibration(samples, events, price_unit="0.1")
     answers = [shared.select(**query) for query in queries]
+    # Each sample fills 0.5 after the unit queue: half of (forecast 101 -
+    # quote 99.5 + mean residual 0.05), with no fee or funding in query zero.
+    assert answers[0][:2] == (False, 0.5)
+    assert answers[0][2] == pytest.approx(0.775, rel=2e-13, abs=0)
     assert reads == ["samples", "events"]
     shared.select(**queries[0])
     assert reads == ["samples", "events"]
     for answer, query in zip(answers, queries, strict=True):
         fresh = MakerCalibration(sample_source, event_source, price_unit="0.1")
-        assert fresh.select(**query) == answer
+        fresh_answer = fresh.select(**query)
+        assert fresh_answer[:2] == answer[:2]
+        assert (fresh_answer[2] is None) == (answer[2] is None)
+        if answer[2] is not None:
+            assert fresh_answer[2] == pytest.approx(answer[2], rel=2e-13, abs=0)
     # Eleven replacements and four nonempty KEEP queries each replay two samples.
     assert decoded == {"book": 0, "trade": 2 * (11 + 4)}
 

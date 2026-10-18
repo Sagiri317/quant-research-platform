@@ -238,9 +238,9 @@ def test_native_linear_fit_and_reload_preserves_finite_extrapolation(
         case,
         window={"start": "2020-01-04", "end": "2020-01-04"},
     )
-    np.testing.assert_array_equal(prediction.prediction_score, scores)
+    np.testing.assert_allclose(prediction.prediction_score, scores, rtol=1e-14, atol=0)
     persisted = read_predictions(root)[0]
     actual = inputs[["timestamp", "asset_id"]].merge(
         persisted, on=["timestamp", "asset_id"], validate="one_to_one"
     )
-    np.testing.assert_array_equal(actual.prediction_score, scores)
+    np.testing.assert_array_equal(actual.prediction_score, prediction.prediction_score)

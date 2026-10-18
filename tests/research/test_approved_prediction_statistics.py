@@ -210,7 +210,7 @@ def test_model_statistics_resolves_bootstrap_default_and_persists_head_metrics(
 ):
     from quant_research_platform.artifacts.statistics import read_statistics_artifact
     from quant_research_platform.research.statistics_production import model_statistics
-    from tests.research.test_prediction_runner_model_selection import candidates
+    from tests.research.direct_model_test_support import candidates
 
     _, scoring = candidates(tmp_path)
     policy = {"bootstrap_block": 1}

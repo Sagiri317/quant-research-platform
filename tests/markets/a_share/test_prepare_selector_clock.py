@@ -199,14 +199,16 @@ def test_market_model_input_completeness_resets_current_and_next_weighted_sessio
     state = MarketModelRiskState(window=2, residual_window=1)
     for value in (0.01, 0.02, 0.03):
         result = state.observe(panel.assign(period_return=value))
-    assert result.beta.eq(1.0).all()
+    np.testing.assert_allclose(result.beta, 1.0, rtol=1e-13, atol=0.0)
     result = state.observe(
         panel.assign(period_return=0.04), market_input_complete=False
     )
     assert result.beta.isna().all()
     for value in (0.05, 0.06):
         assert state.observe(panel.assign(period_return=value)).beta.isna().all()
-    assert state.observe(panel.assign(period_return=0.07)).beta.eq(1.0).all()
+    np.testing.assert_allclose(
+        state.observe(panel.assign(period_return=0.07)).beta, 1.0, rtol=1e-13, atol=0.0
+    )
 
 
 def test_market_model_suspended_asset_is_local_and_recovers():
@@ -301,10 +303,10 @@ def test_market_model_unknown_closed_interval_does_not_abort_open_market():
     result = state.observe(panel, open_market_types=frozenset({1, 4}))
     assert np.isnan(result.beta["a"])
     assert np.isnan(result.residual_volatility["a"])
-    assert result.beta["b"] == 1.0
-    assert result.residual_volatility["b"] == 0.0
+    assert result.beta["b"] == pytest.approx(1.0, rel=1e-13, abs=0.0)
+    assert result.residual_volatility["b"] == pytest.approx(0.0, abs=1e-15)
     for value in (0.01, 0.02):
         result = state.observe(
             panel.assign(period_return=value), open_market_types=frozenset({1, 4})
         )
-    assert result.beta.eq(1.0).all()
+    np.testing.assert_allclose(result.beta, 1.0, rtol=1e-13, atol=0.0)

@@ -13,6 +13,18 @@ from quant_research_platform.research.evaluations import engine as evaluation_en
 from tests.helpers.output_frames import make_artifact_signal_spec
 
 
+def _assert_recomputed_evaluation_equal(left, right):
+    """Compare rerun evaluation values with exact domains and missing masks."""
+    continuous = left.select_dtypes(include="floating").columns
+    pd.testing.assert_frame_equal(
+        left.drop(columns=continuous), right.drop(columns=continuous), check_exact=True
+    )
+    pd.testing.assert_frame_equal(left.isna(), right.isna(), check_exact=True)
+    pd.testing.assert_frame_equal(
+        left[continuous], right[continuous], check_exact=False, rtol=1e-12, atol=1e-15
+    )
+
+
 @pytest.mark.parametrize("valid_pairs", (None, 0, 1))
 def test_single_asset_insufficient_pairs_publish_with_rankic_not_applicable(
     tmp_path: Path, valid_pairs: int | None
@@ -214,9 +226,7 @@ def test_single_asset_time_series_evaluation_is_stable_across_chunks() -> None:
         assert summary.loc[0, "valid_ic_count"] == 1
         assert summary.loc[0, "valid_rankic_count"] == 0
         outputs.append(metrics)
-    pd.testing.assert_frame_equal(
-        outputs[0], outputs[1], check_exact=False, rtol=1e-12, atol=1e-14
-    )
+    _assert_recomputed_evaluation_equal(outputs[0], outputs[1])
 
 
 @pytest.mark.parametrize("case", ("ordinary", "missing", "offset"))
@@ -264,15 +274,23 @@ def test_single_asset_time_series_values_are_chunk_stable(case: str) -> None:
                 next(chunks)
         return metrics
 
+    valid = np.isfinite(feature) & np.isfinite(label)
+    x = feature[valid] - np.mean(feature[valid])
+    y = label[valid] - np.mean(label[valid])
+    expected_ic = np.dot(x, y) / np.sqrt(np.dot(x, x) * np.dot(y, y))
     chunks_127 = evaluate(
         tuple(frame.iloc[start : start + 127] for start in range(0, row_count, 127))
     )
     chunks_251 = evaluate(
         tuple(frame.iloc[start : start + 251] for start in range(0, row_count, 251))
     )
-    pd.testing.assert_frame_equal(
-        chunks_127, chunks_251, check_exact=False, rtol=1e-12, atol=1e-14
-    )
+    for metrics in (chunks_127, chunks_251):
+        assert metrics.n_obs.tolist() == [int(valid.sum())]
+        assert metrics.ic.tolist() == pytest.approx([expected_ic], rel=1e-11, abs=1e-14)
+        assert metrics.ic_reason.isna().all()
+        assert metrics.rankic.isna().all()
+        assert metrics.rankic_reason.tolist() == ["not_applicable"]
+    _assert_recomputed_evaluation_equal(chunks_127, chunks_251)
 
 
 @pytest.mark.parametrize("epsilon", (1e-07, 1e-08))
@@ -1070,7 +1088,7 @@ def test_direct_evaluation_preserves_each_mature_pair_and_late_label_invariance(
     )
     _, actual = read_evaluation_outputs(other)
     for name in tables:
-        pd.testing.assert_frame_equal(tables[name], actual[name], check_exact=True)
+        _assert_recomputed_evaluation_equal(tables[name], actual[name])
 
 
 @pytest.mark.parametrize("change", ("drop", "null"))
@@ -1103,7 +1121,7 @@ def test_direct_evaluation_does_not_requalify_saved_predictions(
         )
     )
     for name in expected:
-        pd.testing.assert_frame_equal(expected[name], actual[name], check_exact=True)
+        _assert_recomputed_evaluation_equal(expected[name], actual[name])
 
 
 @pytest.mark.parametrize("damage", ("missing", "extra", "unusable_extra"))
@@ -1265,15 +1283,30 @@ def test_prediction_windows_only_constrain_their_actual_pairs(
         for name in tables:
             # Other signals' new reasons can change pandas' nullable-string
             # inference; the native reader already enforces the persisted schema.
-            pd.testing.assert_frame_equal(
+            left, right = (
                 tables[name]
                 .loc[tables[name].signal.eq("spread")]
                 .reset_index(drop=True),
                 baseline[name]
                 .loc[baseline[name].signal.eq("spread")]
                 .reset_index(drop=True),
+            )
+            continuous = left.select_dtypes(include="floating").columns
+            pd.testing.assert_frame_equal(
+                left.drop(columns=continuous),
+                right.drop(columns=continuous),
                 check_exact=True,
                 check_dtype=False,
+            )
+            pd.testing.assert_frame_equal(
+                left.isna(), right.isna(), check_exact=True, check_dtype=False
+            )
+            pd.testing.assert_frame_equal(
+                left[continuous],
+                right[continuous],
+                check_exact=False,
+                rtol=1e-12,
+                atol=1e-15,
             )
 
 

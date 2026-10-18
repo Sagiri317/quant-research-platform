@@ -24,8 +24,9 @@ from quant_research_platform.research.protocols.crypto_hft import (
 )
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
 from tests.helpers.binance_hft import _coverage, coverage_lookup
+from tests.helpers.binance_hft import panel_state as _state
+from tests.helpers.binance_hft import panel_trade as _trade
 from tests.helpers.paths import StorageLayout
-from tests.markets.crypto.test_hft import _state, _trade
 
 
 def _persist(tmp_path, data_id, frames):

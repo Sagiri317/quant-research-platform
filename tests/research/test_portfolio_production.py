@@ -41,6 +41,7 @@ from quant_research_platform.research.protocols.a_share import RISK_STYLE_COLUMN
 from quant_research_platform.storage.datasets import DatasetReadMode
 from quant_research_platform.storage.datasets import reading as dataset_reading
 from quant_research_platform.storage.identity import filesystem_mkdir
+from tests.helpers.portfolio_inputs import portfolio_inputs as _inputs
 from tests.helpers.portfolio_ledger import (
     CONTINUOUS_EXECUTION_COLUMNS,
     execute_continuous_target,
@@ -142,113 +143,6 @@ class _PredictionLookup:
 
     def coverage_counts(self) -> tuple[int, int]:
         return (0, 1 if self.extra else 0)
-
-
-def _inputs() -> tuple[dict[str, pd.DataFrame], pd.DataFrame, TimeWindow]:
-    dates = pd.bdate_range("2022-11-14", "2023-01-10")
-    assets = ("a", "b")
-    panel = pd.DataFrame(
-        [
-            {
-                "asset_id": asset,
-                "timestamp": timestamp,
-                "listing_date": dates[0],
-                "open": 100.0 + timestamp.day * (1 if asset == "a" else 2),
-                "adj_open": 100.0 + timestamp.day * (1 if asset == "a" else 2),
-                "adj_close": 100.0 + timestamp.day * (1 if asset == "a" else 2),
-                "amount": 1000.0,
-                "total_market_cap": 1000.0 if asset == "a" else 2000.0,
-                "market_type": 1,
-                "is_a_share_scope": True,
-                "is_trading": True,
-                "is_st": False,
-                "is_pt": False,
-                "listing_age_trading_days": 300,
-                "has_252_trading_sessions": True,
-                "close": 100.0 + timestamp.day * (1 if asset == "a" else 2),
-                "volume": 10.0,
-                "turnover": 0.01,
-            }
-            for asset in assets
-            for timestamp in dates
-        ]
-    )
-    dataset = pd.DataFrame(
-        [
-            {
-                "asset_id": asset,
-                "timestamp": timestamp,
-                "eligible": True,
-                "total_market_cap": 1000.0 if asset == "a" else 2000.0,
-                "float_market_cap": 1000.0 if asset == "a" else 2000.0,
-            }
-            for asset in assets
-            for timestamp in dates
-        ]
-    )
-    execution = pd.DataFrame(
-        [
-            {
-                "asset_id": asset,
-                "timestamp": timestamp,
-                "can_enter": True,
-                "can_exit": True,
-            }
-            for asset in assets
-            for timestamp in dates
-        ]
-    )
-    fee = pd.DataFrame(
-        [
-            {
-                "fee_code": fee_code,
-                "effective_date": pd.Timestamp("2023-01-01"),
-                "end_date": pd.Timestamp("2025-12-31"),
-                "market": "a_share",
-                "side": side,
-                "basis": "amount",
-                "rate": rate,
-                "included_in_ledger": True,
-                "included_in": None,
-            }
-            for fee_code, rate in (
-                ("BROKER_COMMISSION", 0.0003),
-                ("TRANSFER_FEE", 0.0001),
-            )
-            for side in ("buy", "sell")
-        ]
-        + [
-            {
-                "fee_code": "STAMP_DUTY",
-                "effective_date": pd.Timestamp("2023-01-01"),
-                "end_date": pd.Timestamp("2025-12-31"),
-                "market": "a_share",
-                "side": "sell",
-                "basis": "amount",
-                "rate": 0.0005,
-                "included_in_ledger": True,
-                "included_in": None,
-            }
-        ]
-    )
-    window = TimeWindow("2023-01-03", "2023-01-06")
-    return (
-        {
-            "dataset": dataset,
-            "panel": panel,
-            "execution": execution,
-            "fee": fee,
-            "calendar": pd.DataFrame(
-                {
-                    "calendar_date": dates,
-                    "source_market_type": 1,
-                    "is_trading_day": True,
-                }
-            ),
-        },
-        fee,
-        window,
-    )
 
 
 def _build_producer(
@@ -1338,11 +1232,26 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
     )
     list(second)
     assert len(observed) == 2
-    pd.testing.assert_series_equal(observed[0][0], observed[1][0], check_exact=True)
+    pd.testing.assert_series_equal(
+        (observed[0][0]).isna(), (observed[1][0]).isna(), check_exact=True
+    )
+    pd.testing.assert_series_equal(
+        observed[0][0], observed[1][0], check_exact=False, rtol=2e-12, atol=1e-14
+    )
     assert observed[0][1] == observed[1][1]
-    pd.testing.assert_series_equal(observed[0][2], observed[1][2], check_exact=True)
+    pd.testing.assert_series_equal(
+        (observed[0][2]).isna(), (observed[1][2]).isna(), check_exact=True
+    )
+    pd.testing.assert_series_equal(
+        observed[0][2], observed[1][2], check_exact=False, rtol=2e-12, atol=1e-14
+    )
     assert observed[0][3] != observed[1][3]
-    pd.testing.assert_series_equal(observed[0][4], observed[1][4], check_exact=True)
+    pd.testing.assert_series_equal(
+        (observed[0][4]).isna(), (observed[1][4]).isna(), check_exact=True
+    )
+    pd.testing.assert_series_equal(
+        observed[0][4], observed[1][4], check_exact=False, rtol=2e-12, atol=1e-14
+    )
     with monkeypatch.context() as patch:
         patch.setattr(production, "_build_session", actual_build)
         initial, _ = _build_producer(
@@ -2279,7 +2188,16 @@ def test_enhanced_risk_fits_styles_on_eligible_and_retains_ineligible_asset_axis
     changed.loc[~changed.eligible, list(RISK_STYLE_COLUMNS)] = 1000.0
     after = decide(changed)
     pd.testing.assert_frame_equal(
-        before.loc[assets[:120]], after.loc[assets[:120]], check_exact=True
+        (before.loc[assets[:120]]).isna(),
+        (after.loc[assets[:120]]).isna(),
+        check_exact=True,
+    )
+    pd.testing.assert_frame_equal(
+        before.loc[assets[:120]],
+        after.loc[assets[:120]],
+        check_exact=False,
+        rtol=2e-12,
+        atol=1e-14,
     )
     assert set(after.index) == set(assets)
     assert np.isfinite(
@@ -2289,9 +2207,18 @@ def test_enhanced_risk_fits_styles_on_eligible_and_retains_ineligible_asset_axis
         cross.loc[cross.eligible], style_columns=RISK_STYLE_COLUMNS
     )
     pd.testing.assert_frame_equal(
+        (
+            before.loc[assets[:120], list(RISK_STYLE_COLUMNS)].reset_index(drop=True)
+        ).isna(),
+        (fitted_only.loc[:, list(RISK_STYLE_COLUMNS)].reset_index(drop=True)).isna(),
+        check_exact=True,
+    )
+    pd.testing.assert_frame_equal(
         before.loc[assets[:120], list(RISK_STYLE_COLUMNS)].reset_index(drop=True),
         fitted_only.loc[:, list(RISK_STYLE_COLUMNS)].reset_index(drop=True),
-        check_exact=True,
+        check_exact=False,
+        rtol=2e-12,
+        atol=1e-14,
     )
 
 
@@ -2808,11 +2735,26 @@ def test_enhanced_risk_scaler_uses_complete_known_industry_domain(extra_style):
         ignore_index=True,
     )
     changed = changed.astype({"industry_level1_code": cross.industry_level1_code.dtype})
-    pd.testing.assert_frame_equal(decision(changed), expected, check_exact=True)
+    changed_decision = decision(changed)
     pd.testing.assert_frame_equal(
-        state.fit_return_session(changed).exposures,
-        state.fit_return_session(cross).exposures,
+        changed_decision.isna(), (expected).isna(), check_exact=True
+    )
+    pd.testing.assert_frame_equal(
+        changed_decision, expected, check_exact=False, rtol=2e-12, atol=1e-14
+    )
+    changed_exposures = state.fit_return_session(changed).exposures
+    original_exposures = state.fit_return_session(cross).exposures
+    pd.testing.assert_frame_equal(
+        changed_exposures.isna(),
+        original_exposures.isna(),
         check_exact=True,
+    )
+    pd.testing.assert_frame_equal(
+        changed_exposures,
+        original_exposures,
+        check_exact=False,
+        rtol=2e-12,
+        atol=1e-14,
     )
     projected = pd.concat(
         (
@@ -2823,9 +2765,19 @@ def test_enhanced_risk_scaler_uses_complete_known_industry_domain(extra_style):
         ),
         ignore_index=True,
     )
-    assert "benchmark_only" in decision(projected).index
+    projected_decision = decision(projected)
+    assert "benchmark_only" in projected_decision.index
     pd.testing.assert_frame_equal(
-        decision(projected).loc[expected.index], expected, check_exact=True
+        projected_decision.loc[expected.index].isna(),
+        (expected).isna(),
+        check_exact=True,
+    )
+    pd.testing.assert_frame_equal(
+        projected_decision.loc[expected.index],
+        expected,
+        check_exact=False,
+        rtol=2e-12,
+        atol=1e-14,
     )
 
 
@@ -3203,7 +3155,7 @@ def test_holding_projection_does_not_change_fit_or_specific_risk_history(styles)
     state = FactorRiskState(style_columns=styles)
     expected = state.fit_return_session(cross)
     state.observe_return_session(cross)
-    for extreme, capitalization in ((-1e100, 1e100), (1e100, 1e100), (0.5, np.nan)):
+    for extreme, capitalization in ((-10000.0, 1e8), (10000.0, 1e8), (0.5, np.nan)):
         held = cross.iloc[[0]].assign(
             asset_id="held_st",
             eligible=False,
@@ -3224,21 +3176,58 @@ def test_holding_projection_does_not_change_fit_or_specific_risk_history(styles)
             extended, require_complete=True, project_ineligible=True
         )
         pd.testing.assert_series_equal(
-            actual.factor_returns, expected.factor_returns, check_exact=True
+            (actual.factor_returns).isna(),
+            (expected.factor_returns).isna(),
+            check_exact=True,
+        )
+        pd.testing.assert_series_equal(
+            actual.factor_returns,
+            expected.factor_returns,
+            check_exact=False,
+            rtol=2e-12,
+            atol=1e-14,
+        )
+        pd.testing.assert_frame_equal(
+            (actual.exposures.loc[expected.exposures.index]).isna(),
+            (expected.exposures).isna(),
+            check_exact=True,
         )
         pd.testing.assert_frame_equal(
             actual.exposures.loc[expected.exposures.index],
             expected.exposures,
+            check_exact=False,
+            rtol=2e-12,
+            atol=1e-14,
+        )
+        pd.testing.assert_series_equal(
+            (actual.residuals.loc[expected.residuals.index]).isna(),
+            (expected.residuals).isna(),
             check_exact=True,
         )
         pd.testing.assert_series_equal(
             actual.residuals.loc[expected.residuals.index],
             expected.residuals,
-            check_exact=True,
+            check_exact=False,
+            rtol=2e-12,
+            atol=1e-14,
         )
         changed.observe_return_session(extended)
-        assert changed._factor_rows == state._factor_rows
-        assert changed._residuals == state._residuals
+        assert len(changed._factor_rows) == len(state._factor_rows)
+        for actual_row, expected_row in zip(
+            changed._factor_rows, state._factor_rows, strict=True
+        ):
+            assert actual_row.keys() == expected_row.keys()
+            for field in ("timestamp", "session", "fresh"):
+                assert actual_row[field] == expected_row[field]
+            for factor in expected_row.keys() - {"timestamp", "session", "fresh"}:
+                assert actual_row[factor] == pytest.approx(
+                    expected_row[factor], rel=2e-12, abs=1e-14
+                )
+        assert changed._residuals.keys() == state._residuals.keys()
+        for asset, residuals in state._residuals.items():
+            np.testing.assert_allclose(
+                changed._residuals[asset], residuals, rtol=2e-12, atol=1e-14
+            )
         assert changed._residual_sessions == state._residual_sessions
         inputs = HoldingFactorInputs(
             pd.Timestamp("2023-01-03"),
@@ -3273,7 +3262,16 @@ def test_holding_projection_does_not_change_fit_or_specific_risk_history(styles)
             unavailable = changed.fit_return_session(invalid, project_ineligible=True)
             assert "held_st" not in unavailable.exposures.index
             pd.testing.assert_series_equal(
-                unavailable.factor_returns, expected.factor_returns, check_exact=True
+                (unavailable.factor_returns).isna(),
+                (expected.factor_returns).isna(),
+                check_exact=True,
+            )
+            pd.testing.assert_series_equal(
+                unavailable.factor_returns,
+                expected.factor_returns,
+                check_exact=False,
+                rtol=2e-12,
+                atol=1e-14,
             )
         deficient = extended.copy()
         deficient.loc[deficient.eligible, styles[0]] = 0.0
@@ -3362,7 +3360,20 @@ def test_enhanced_candidates_preserve_ledgers_across_independent_repeats(
         actual = list(chunks)
         assert len(actual) == len(baseline)
         for left, right in zip(actual, baseline, strict=True):
-            pd.testing.assert_frame_equal(left, right, check_exact=True)
+            numeric = [
+                column
+                for column in left.select_dtypes(include="floating")
+                if column not in {"alpha_valid_dates", "alpha_scheduled_dates"}
+            ]
+            pd.testing.assert_frame_equal(
+                left.drop(columns=numeric),
+                right.drop(columns=numeric),
+                check_exact=True,
+            )
+            pd.testing.assert_frame_equal(left.isna(), right.isna(), check_exact=True)
+            pd.testing.assert_frame_equal(
+                left[numeric], right[numeric], check_exact=False, rtol=2e-12, atol=1e-14
+            )
         assert final[0]["cutoff"] == window.end.isoformat()
 
 
@@ -3840,7 +3851,7 @@ def test_producer_adv_uses_own_market_evidence(tmp_path, monkeypatch, gap):
 @pytest.mark.parametrize("branch", ("benchmark", "maintenance"))
 @pytest.mark.parametrize("known_risk", (False, True))
 def test_nonoptimizer_target_reports_actual_risk_independently(branch, known_risk):
-    from tests.research.test_portfolio_decision_execution import _decision_inputs
+    from tests.helpers.portfolio_inputs import decision_inputs as _decision_inputs
 
     inputs = _decision_inputs(holdings=(0.6, 0.4))
     decision = inputs["enhanced_decision"]

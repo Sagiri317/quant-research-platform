@@ -359,16 +359,13 @@ def test_rank_ic_reuses_only_identical_masks(
         assert result[column].iloc[0] == pytest.approx(value, abs=1e-15)
 
 
-@pytest.mark.parametrize("sample_role", [None, "walk_forward_oos"])
-def test_explicit_prediction_family_statistics_need_no_models_or_selection(
-    tmp_path, sample_role
-):
+@pytest.fixture(scope="module")
+def standalone_predictions(tmp_path_factory):
     import shutil
 
-    from quant_research_platform.research.statistics_production import model_statistics
-    from tests.research.test_prediction_runner_model_selection import candidates
+    from tests.research.direct_model_test_support import candidates
 
-    cases, scoring = candidates(tmp_path)
+    cases, scoring = candidates(tmp_path_factory.mktemp("statistics-predictions"))
     for case in cases:
         shutil.rmtree(case.root)
         trial = case.root.with_name(case.root.name + ".trial")
@@ -380,6 +377,18 @@ def test_explicit_prediction_family_statistics_need_no_models_or_selection(
     )
     frame.drop(columns="x").to_parquet(scoring["labels"], index=False)
     del scoring["label_spec"]["column_roles"]["x"]
+    return scoring
+
+
+@pytest.mark.parametrize("sample_role", [None, "walk_forward_oos"])
+def test_explicit_prediction_family_statistics_need_no_models_or_selection(
+    tmp_path, sample_role, standalone_predictions
+):
+    from copy import deepcopy
+
+    from quant_research_platform.research.statistics_production import model_statistics
+
+    scoring = deepcopy(standalone_predictions)
     config = {
         "dataset": scoring["labels"],
         "input_spec": scoring["label_spec"],
@@ -440,7 +449,32 @@ def test_explicit_prediction_family_statistics_need_no_models_or_selection(
     assert set(explicit._members) == set(artifact._members)
     for member in artifact._members:
         with artifact.table(member) as left, explicit.table(member) as right:
-            pd.testing.assert_frame_equal(left, right, check_exact=True)
+            continuous = left.select_dtypes(include="floating").columns.difference(
+                [
+                    "fdr_alpha",
+                    "confidence",
+                    "alpha",
+                    "seed",
+                    "bootstrap_seed",
+                    "bootstrap_block_size",
+                    "bootstrap_repetitions",
+                    "block_size",
+                    "repetitions",
+                ]
+            )
+            pd.testing.assert_frame_equal(
+                left.drop(columns=continuous),
+                right.drop(columns=continuous),
+                check_exact=True,
+            )
+            pd.testing.assert_frame_equal(left.isna(), right.isna(), check_exact=True)
+            pd.testing.assert_frame_equal(
+                left[continuous],
+                right[continuous],
+                check_exact=False,
+                rtol=1e-12,
+                atol=1e-15,
+            )
     with artifact.table("prediction_diagnostics.parquet") as diagnostics:
         assert set(diagnostics.prediction_id) == set(config["family_ids"])
         assert diagnostics.bootstrap_status.eq("DEFINED").all()

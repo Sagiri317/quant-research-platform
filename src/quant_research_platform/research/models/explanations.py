@@ -35,7 +35,6 @@ from quant_research_platform.contracts.models import (
 )
 from quant_research_platform.contracts.time import (
     PredictionWindow,
-    TimeWindow,
     _window_payload,
     prediction_window_mask,
 )
@@ -97,12 +96,12 @@ def _selection(value):
     return selected
 
 
-def _session(source, input_spec, result, facts, *, labels=False):
+def _session(source, input_spec, result, facts, *, window, labels=False):
     if input_spec is not None:
         if isinstance(source, Mapping):
             raise ValueError("duplicate_input_spec")
         source = {"path": source, "spec": input_spec}
-    options = _dataset_input_options(source)
+    options = _dataset_input_options(source, time_window=window)
     # Input row selection defines a different rank intervention domain. Keep this
     # operation's domain complete; select display/scoring assets only afterwards.
     if options.get("row_filters"):
@@ -139,11 +138,7 @@ def _prediction_frames(session, result, window, *, extra=()):
             )
         )
     )
-    frames = iter_dataset_chunks(
-        session.filtered_view(TimeWindow(window.start, window.end)).projected_view(
-            columns
-        )
-    )
+    frames = iter_dataset_chunks(session.projected_view(columns))
     with closing_iterator(
         iter_complete_time_frames(iter(frames), timestamp_column="timestamp")
     ) as source:
@@ -209,7 +204,9 @@ def _background(config, result, facts):
         facts["fit_cutoff"]
     ):
         raise ValueError("explanation_background_after_fit_cutoff")
-    session = _session(config["inputs"], config.get("input_spec"), result, facts)
+    session = _session(
+        config["inputs"], config.get("input_spec"), result, facts, window=window
+    )
     if not hasattr(result.prediction_model, "scaler"):
         raise ValueError("explanation_background_method_not_supported")
     rng = np.random.default_rng(
@@ -1014,6 +1011,7 @@ def explain(config: Mapping) -> Path:
             config.get("input_spec"),
             result,
             facts,
+            window=window,
             labels=permutation is not None,
         )
         availability = None

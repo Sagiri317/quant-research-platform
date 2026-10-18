@@ -1,5 +1,6 @@
 """Empty input windows fail clearly without changing sparse observation counts."""
 
+from copy import deepcopy
 from pathlib import Path
 
 import pandas as pd
@@ -7,11 +8,31 @@ import pytest
 
 from quant_research_platform.artifacts.statistics import read_statistics_artifact
 from quant_research_platform.research import statistics_production
-from tests.research.test_prediction_runner_model_selection import candidates
+from tests.research.direct_model_test_support import candidates
 
 
-def _config(tmp_path, window, *, algorithms=("linear_regression",), constant=False):
-    _, scoring = candidates(tmp_path, algorithms=algorithms)
+@pytest.fixture(scope="module")
+def saved_candidates(tmp_path_factory):
+    return candidates(tmp_path_factory.mktemp("empty-window-predictions"))[1]
+
+
+def _config(
+    tmp_path,
+    window,
+    saved_candidates,
+    *,
+    algorithms=("linear_regression",),
+    constant=False,
+):
+    scoring = deepcopy(saved_candidates)
+    scoring["predictions"] = [
+        path
+        for family, path in zip(
+            scoring["candidate_ids"], scoring["predictions"], strict=True
+        )
+        if family in algorithms
+    ]
+    scoring["candidate_ids"] = list(algorithms)
     if constant:
         labels = pd.read_parquet(scoring["labels"])
         labels.loc[labels.timestamp.between("2020-01-04", "2020-01-06"), "label"] = 0.2
@@ -23,6 +44,7 @@ def _config(tmp_path, window, *, algorithms=("linear_regression",), constant=Fal
         ]
         assert consumed.groupby("timestamp").size().tolist() == [2, 2, 2]
         assert consumed.groupby("timestamp").label.nunique().tolist() == [1, 1, 1]
+        scoring["labels"] = str(tmp_path / "constant-labels.parquet")
         labels.to_parquet(scoring["labels"], index=False)
     return {
         "dataset": scoring["labels"],
@@ -45,9 +67,11 @@ def _config(tmp_path, window, *, algorithms=("linear_regression",), constant=Fal
 
 @pytest.mark.parametrize("empty_stream", [False, True])
 def test_model_statistics_rejects_window_without_observations(
-    tmp_path, monkeypatch, empty_stream
+    tmp_path, monkeypatch, empty_stream, saved_candidates
 ):
-    config = _config(tmp_path, {"start": "2020-01-07", "end": "2020-01-08"})
+    config = _config(
+        tmp_path, {"start": "2020-01-07", "end": "2020-01-08"}, saved_candidates
+    )
     if empty_stream:
         monkeypatch.setattr(
             statistics_production, "iter_dataset_chunks", lambda session: iter(())
@@ -58,9 +82,11 @@ def test_model_statistics_rejects_window_without_observations(
 
 
 def test_model_statistics_keeps_sparse_windows_and_skips_empty_frames(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, saved_candidates
 ):
-    config = _config(tmp_path, {"start": "2020-01-04", "end": "2020-01-08"})
+    config = _config(
+        tmp_path, {"start": "2020-01-04", "end": "2020-01-08"}, saved_candidates
+    )
     config["periods"][0]["window"] = {"start": "2020-01-04", "end": "2020-01-06"}
     config["periods"].append(
         {
@@ -87,8 +113,12 @@ def test_model_statistics_keeps_sparse_windows_and_skips_empty_frames(
         assert diagnostics["mean"].tolist() == pytest.approx([1.0])
 
 
-def test_model_statistics_preserves_observed_dates_with_undefined_labels(tmp_path):
-    config = _config(tmp_path, {"start": "2020-01-04", "end": "2020-01-06"})
+def test_model_statistics_preserves_observed_dates_with_undefined_labels(
+    tmp_path, saved_candidates
+):
+    config = _config(
+        tmp_path, {"start": "2020-01-04", "end": "2020-01-06"}, saved_candidates
+    )
     config["label_cutoff"] = "2020-01-03"
     saved = read_statistics_artifact(statistics_production.model_statistics(config))
     with saved.table("prediction_diagnostics.parquet") as diagnostics:
@@ -98,9 +128,14 @@ def test_model_statistics_preserves_observed_dates_with_undefined_labels(tmp_pat
         assert pd.isna(diagnostics["mean"]).all()
 
 
-def test_model_statistics_keeps_constant_labels_explicitly_undefined(tmp_path):
+def test_model_statistics_keeps_constant_labels_explicitly_undefined(
+    tmp_path, saved_candidates
+):
     config = _config(
-        tmp_path, {"start": "2020-01-04", "end": "2020-01-06"}, constant=True
+        tmp_path,
+        {"start": "2020-01-04", "end": "2020-01-06"},
+        saved_candidates,
+        constant=True,
     )
     saved = read_statistics_artifact(statistics_production.model_statistics(config))
     with saved.table("prediction_diagnostics.parquet") as diagnostics:
@@ -140,9 +175,11 @@ def test_invalid_requested_configuration_precedes_input_read(
 
 
 def test_prediction_only_skips_unrequested_comparison_and_domain_work(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, saved_candidates
 ):
-    config = _config(tmp_path, {"start": "2020-01-04", "end": "2020-01-06"})
+    config = _config(
+        tmp_path, {"start": "2020-01-04", "end": "2020-01-06"}, saved_candidates
+    )
 
     def unexpected(*args, **kwargs):
         raise AssertionError("unrequested common rank, domain hash, or comparison")
@@ -166,11 +203,12 @@ def test_prediction_only_skips_unrequested_comparison_and_domain_work(
 
 
 def test_requested_comparison_keeps_common_rank_without_unrequested_loss_hashes(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, saved_candidates
 ):
     config = _config(
         tmp_path,
         {"start": "2020-01-04", "end": "2020-01-06"},
+        saved_candidates,
         algorithms=("linear_regression", "ic_weighted_rank_ensemble"),
     )
     config.update(

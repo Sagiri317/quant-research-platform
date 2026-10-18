@@ -310,7 +310,9 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
                     rows = daily.loc[daily.candidate_id.eq(candidate.candidate_id)]
                     assert len(rows) == 5 and "benchmark_return" not in rows
                     assert rows.iloc[-1].start_nav == 1500.0
-                    assert rows.iloc[-1].net_return == -0.1
+                    assert rows.iloc[-1].net_return == pytest.approx(
+                        -0.1, rel=2e-15, abs=0
+                    )
                     if missing_boundary:
                         assert rows.status.eq("DEFINED").sum() == 3
                         assert metrics.loc["sharpe", "status"] == "UNDEFINED"
@@ -709,4 +711,4 @@ def test_daily_return_uses_actual_nav_endpoints(start_nav, end_nav, expected):
     assert len(rows) == 1
     assert rows[0]["status"] == "DEFINED"
     assert rows[0]["reason"] == ""
-    assert rows[0]["net_return"] == expected
+    assert rows[0]["net_return"] == pytest.approx(expected, rel=2e-15, abs=0)

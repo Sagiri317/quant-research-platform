@@ -28,8 +28,9 @@ from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
 from quant_research_platform.sources.tardis.raw import import_slices
 from tests.artifacts.test_crypto_maker_calibration import _maker_calibration_tables
 from tests.helpers.binance_hft import _quote, hft_research_plan
+from tests.helpers.binance_hft import execution_state as _state
+from tests.helpers.binance_hft import maker_config as _maker_config
 from tests.helpers.tardis import _slices
-from tests.markets.crypto.test_hft_execution import _maker_config, _state
 
 
 def _publish(root, date, *, fine):
@@ -420,8 +421,8 @@ def test_final_maker_gate_uses_only_required_fold_but_validates_full_artifact(
 def test_frozen_maker_coordinates_require_an_exact_integer_rescale(
     current_unit, accepted
 ):
+    from tests.helpers.binance_hft import execution_trade as _trade
     from tests.markets.crypto.calibration_test_support import calibration_from_paths
-    from tests.markets.crypto.test_hft_execution import _trade
 
     history = _state(0)
     model = calibration_from_paths(

@@ -150,6 +150,15 @@ def test_first_purchase_on_ex_date_does_not_inherit_prior_record_date_dividend(
         typed_batches=True,
     )
     batches = list(chunks)
+    root = write_portfolio_ledger_artifact(
+        tmp_path / "ledger",
+        capital=PortfolioCapital(candidate.candidate_id, 100.0, "CNY", "cash_equity"),
+        metadata={"window": {"start": str(window.start), "end": str(window.end)}},
+        produce=lambda emit: [emit(batch) for batch in batches],
+    )
+    restored = list(read_portfolio_ledger_artifact(root).iter_chunks())
+    assert restored == batches
+    batches = restored
     assert batches[0].trades
     assert all(
         trade.timestamp_ns == pd.Timestamp("2023-01-04").value

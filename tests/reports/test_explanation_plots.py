@@ -296,13 +296,22 @@ sys.meta_path.insert(0, NoModel())
 from quant_research_platform.reports.plots import plot
 plot({'kind': 'explanation_summary', 'inputs': sys.argv[1], 'output': sys.argv[2]})
 """
-    result = subprocess.run(
-        [sys.executable, "-c", code, str(source), str(output)],
-        env={**os.environ, "PYTHONPATH": str(Path(plots.__file__).parents[2])},
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
+    if suffix == "png":
+        result = subprocess.run(
+            [sys.executable, "-c", code, str(source), str(output)],
+            env={**os.environ, "PYTHONPATH": str(Path(plots.__file__).parents[2])},
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+    else:
+        plots.plot(
+            {
+                "kind": "explanation_summary",
+                "inputs": str(source),
+                "output": str(output),
+            }
+        )
     assert output.stat().st_size > 1000
     original = output.read_bytes()
     with pytest.raises(Exception, match="output_already_exists"):

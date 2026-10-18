@@ -20,69 +20,7 @@ from quant_research_platform.research.models.trial_selection import (
     select_best_validation_trial,
 )
 from quant_research_platform.research.predictions.runner import predict
-from tests.research.direct_model_test_support import fit_frame
-
-
-def candidates(
-    tmp_path, *, algorithms=("linear_regression", "ic_weighted_rank_ensemble")
-):
-    stamps = pd.date_range("2020-01-01", periods=6).repeat(3)
-    frame = pd.DataFrame(
-        {
-            "timestamp": stamps,
-            "asset_id": ["a", "b", "c"] * 6,
-            "x": [1.0, 2.0, 3.0] * 6,
-            "label": [0.1, 0.2, 0.3] * 6,
-            "eligible": True,
-            "label_available_at": stamps,
-        }
-    )
-    frame.loc[
-        (frame.timestamp >= pd.Timestamp("2020-01-04")) & frame.asset_id.eq("a"), "x"
-    ] = np.nan
-    cases, paths = [], []
-    window = {"start": "2020-01-04", "end": "2020-01-06"}
-    for algorithm in algorithms:
-        spec = ModelSpec(
-            model_id=algorithm,
-            model_algorithm=algorithm,
-            input_factor_columns=("x",),
-            target_column="label",
-            random_seed=19,
-        )
-        case = fit_frame(
-            tmp_path / algorithm,
-            frame.loc[frame.timestamp <= pd.Timestamp("2020-01-03")],
-            spec,
-        )
-        future = tmp_path / algorithm / "future.parquet"
-        frame.to_parquet(future, index=False)
-        config = {
-            "model": str(case.root),
-            "inputs": str(future),
-            "input_spec": case.config["input_spec"],
-            "output": str(tmp_path / algorithm / "predictions"),
-            "prediction_window": window,
-            "sample_role": "validation",
-        }
-        paths.append(str(predict(config)))
-        cases.append(case)
-    labels = tmp_path / "labels.parquet"
-    frame.to_parquet(labels, index=False)
-    config = {
-        "predictions": paths,
-        "candidate_ids": list(algorithms),
-        "labels": str(labels),
-        "label_spec": cases[0].config["input_spec"],
-        "validation_windows": [window],
-        "scoring_window": window,
-        "cutoff": "2020-01-06",
-        "selection_group": "quarterly",
-        "validation_axis": "cross_sectional",
-        "label_unit": "decimal_return",
-        "output": str(tmp_path / "scores.json"),
-    }
-    return cases, config
+from tests.research.direct_model_test_support import candidates, fit_frame
 
 
 def test_candidate_domains_survive_new_common_comparison(tmp_path):
@@ -584,9 +522,7 @@ def test_score_retains_only_predictions_and_matches_full_join(tmp_path, monkeypa
     import weakref
 
     from quant_research_platform.artifacts.outputs import prediction as artifact
-    from quant_research_platform.contracts.experiments import legal_training_mask
     from quant_research_platform.research.models import trial_selection
-    from quant_research_platform.research.models.rank_ensemble import _label_predictions
 
     _cases, config = candidates(tmp_path)
     labels = pd.read_parquet(config["labels"])
@@ -597,37 +533,37 @@ def test_score_retains_only_predictions_and_matches_full_join(tmp_path, monkeypa
         labels.timestamp.eq("2020-01-05") & labels.asset_id.eq("c"),
         "label_available_at",
     ] = pd.Timestamp("2020-01-07")
+    labels.loc[labels.timestamp.eq("2020-01-06") & labels.asset_id.eq("c"), "label"] = (
+        0.4
+    )
     labels.to_parquet(config["labels"], index=False)
-    mature = labels.loc[
-        legal_training_mask(
-            labels,
-            fitting_cutoff=pd.Timestamp(config["cutoff"]),
-            availability_column="label_available_at",
-            target_column="label",
-        )
-    ]
-    expected = []
+    # Literal mature shared keys: neither production filtering nor metric reduction
+    # participates in this independent date-equal loss oracle.
+    expected_keys = pd.MultiIndex.from_tuples(
+        [
+            (pd.Timestamp("2020-01-04"), "c"),
+            (pd.Timestamp("2020-01-05"), "b"),
+            (pd.Timestamp("2020-01-06"), "b"),
+            (pd.Timestamp("2020-01-06"), "c"),
+        ],
+        names=["timestamp", "asset_id"],
+    )
+    expected_losses = {}
     for path in config["predictions"]:
         predictions, metadata = read_predictions(path)
-        joined = predictions.merge(
-            mature, on=["timestamp", "asset_id"], validate="one_to_one"
-        )
+        selected = predictions.set_index(["timestamp", "asset_id"]).loc[expected_keys]
         calibration = (
             artifact.prediction_model_metadata(metadata)
             .get("rank_parameters", {})
             .get("label_calibration")
         )
-        joined["prediction_label_value"] = _label_predictions(
-            joined.prediction_score, calibration
-        )
-        expected.append(
-            trial_selection.evaluate_model_trial_metrics_from_chunks(
-                [joined],
-                model_id=metadata["model_id"],
-                label_column="label",
-                prediction_column="prediction_score",
-                label_prediction_column="prediction_label_value",
-            )
+        economic = selected.prediction_score
+        if calibration is not None:
+            economic = calibration[0] + calibration[1] * economic
+        target = labels.set_index(["timestamp", "asset_id"]).loc[expected_keys, "label"]
+        loss = (economic - target) ** 2
+        expected_losses[metadata["model_id"]] = (
+            loss.groupby(level="timestamp").mean().mean()
         )
 
     retained = []
@@ -672,7 +608,22 @@ def test_score_retains_only_predictions_and_matches_full_join(tmp_path, monkeypa
         trial_selection, "evaluate_model_trial_metrics_from_chunks", observe_evaluate
     )
     scored = json.loads(score(config).read_text())
-    assert scored["metrics"] == expected
+    for metric in scored["metrics"]:
+        assert metric["validation_rows"] == 4
+        assert metric["validation_valid_ic_count"] == 1
+        assert metric["validation_valid_rankic_count"] == 1
+        assert metric["validation_mse"] == pytest.approx(
+            expected_losses[metric["model_id"]], rel=1e-12, abs=1e-16
+        )
+        assert metric["validation_ic"] == pytest.approx(1.0, abs=1e-14)
+        assert metric["validation_rankic"] == pytest.approx(1.0, abs=1e-14)
+        assert metric["validation_ic_reason"] is None
+        assert metric["validation_rankic_reason"] is None
+    linear = next(
+        item for item in scored["metrics"] if item["model_id"] == "linear_regression"
+    )
+    assert linear["validation_mse"] == pytest.approx(0.01 / 2 / 3, rel=1e-12, abs=1e-16)
+    assert linear["validation_mse"] != pytest.approx(0.01 / 4, rel=1e-12, abs=1e-16)
     assert scored["common_rows"] == 4
     assert len(reads) == len(config["predictions"])
     assert len(retained) == len(config["candidate_ids"])

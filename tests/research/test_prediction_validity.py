@@ -108,7 +108,9 @@ def test_mixed_feature_families_keep_structural_failure_out_of_models(
     from quant_research_platform.research.models.persisted import load_model
     from quant_research_platform.research.models.production import fit
     from quant_research_platform.storage.datasets import read_dataset
-    from tests.research.test_direct_assembly_config import _config, _frame, _source
+    from tests.helpers.research_processed_inputs import assembly_config as _config
+    from tests.helpers.research_processed_inputs import assembly_frame as _frame
+    from tests.helpers.research_processed_inputs import assembly_source as _source
 
     x, y = "momentum_20d", "log_float_market_cap"
     raw = _frame(106).assign(
@@ -410,7 +412,7 @@ def test_native_scoring_pairs_only_exact_prediction_keys(
     from pathlib import Path
 
     from quant_research_platform.research.models.trial_selection import score, select
-    from tests.research.test_prediction_runner_model_selection import candidates
+    from tests.research.direct_model_test_support import candidates
 
     _, config = candidates(tmp_path, algorithms=("linear_regression",))
     path = Path(config["predictions"][0]) / "prediction.parquet"

@@ -161,7 +161,9 @@ def test_whole_unknown_session_occupies_window_without_a_zero_fit():
 def test_assembly_persists_custom_research_scope_without_market_activity(tmp_path):
     from quant_research_platform.research.datasets.assembler import assemble
     from quant_research_platform.storage.datasets import inspect_dataset, read_dataset
-    from tests.research.test_direct_assembly_config import _config, _frame, _source
+    from tests.helpers.research_processed_inputs import assembly_config as _config
+    from tests.helpers.research_processed_inputs import assembly_frame as _frame
+    from tests.helpers.research_processed_inputs import assembly_source as _source
 
     frame = _frame(3).assign(
         is_a_share_scope=True, listing_age_trading_days=[19, 20, 21]

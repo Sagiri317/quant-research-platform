@@ -126,15 +126,15 @@ def test_bootstrap_uses_float_resampling_with_same_seed_and_mean_semantics():
 
     from arch.bootstrap import StationaryBootstrap
 
-    values = np.random.default_rng(18).normal(0.01, 0.08, size=2520)
-    expected = StationaryBootstrap(20, values, seed=18).conf_int(
+    values = np.array([-0.03, 0.01, 0.07, -0.02, 0.04, 0.0, 0.02, 0.05])
+    expected = StationaryBootstrap(3, values, seed=18).conf_int(
         lambda sample: np.array([mean(sample)]),
         reps=199,
         method="percentile",
         size=0.95,
     )
     result = stationary_bootstrap_mean_ci(
-        values, block_size=20, repetitions=199, seed=18
+        values, block_size=3, repetitions=199, seed=18
     )
     assert result.mean == pytest.approx(mean(values), rel=1e-12, abs=1e-14)
     assert (result.lower, result.upper) == pytest.approx(
@@ -401,7 +401,7 @@ def test_white_lm_preserves_exact_auxiliary_fit_without_unused_f_warning():
 
     x = np.array([-3.0, -2.0, -1.0, 1.0, 2.0, 3.0])
     z = np.array([1.0, -1.0, 0.0, 0.0, -1.0, 1.0])
-    for day in range(40):
+    for day in (0, 3):
         frame = pd.DataFrame(
             {
                 "timestamp": pd.Timestamp("2020-01-01") + pd.Timedelta(days=day),

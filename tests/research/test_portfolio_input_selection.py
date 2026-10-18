@@ -17,7 +17,7 @@ from quant_research_platform.research.portfolios import production
 def test_portfolio_bar_read_preserves_selected_history_and_empty_dates(
     tmp_path, monkeypatch, selected_assets
 ):
-    from tests.research.test_closed_market_portfolios import _native_inputs
+    from tests.helpers.portfolio_inputs import closed_market_inputs as _native_inputs
 
     layout, roots, calendar, _ = _native_inputs(tmp_path)
     materialize = portfolio_sessions.materialize_dataset_session
@@ -269,7 +269,13 @@ def test_calibration_selection_preserves_duplicate_observations(
         as_of=pd.Timestamp("2023-02-01"),
     )
     assert expected.status == "DEFINED"
-    assert json.loads(result.read_text())["calibration"] == asdict(expected)
+    saved = json.loads(result.read_text())["calibration"]
+    assert saved == asdict(expected)
+    # Each of the six equally weighted dates has the same duplicated score axis.
+    # Its common slope is .01 and the mean date intercept is .00025.
+    assert saved["slope"] == pytest.approx(0.01, rel=1e-12, abs=0)
+    assert saved["intercept"] == pytest.approx(0.00025, rel=1e-12, abs=0)
+    assert saved["valid_rebalance_dates"] == saved["scheduled_rebalance_dates"] == 6
     with pytest.raises(ValueError, match="portfolio_input_business_columns_excluded"):
         production.calibrate(
             {
@@ -412,8 +418,8 @@ def test_bounded_backtest_ignores_future_bad_keys_and_keeps_required_history(
         ExecutionAssumptions,
         PortfolioCandidateSpec,
     )
+    from tests.helpers.portfolio_inputs import closed_market_inputs as _native_inputs
     from tests.helpers.portfolio_ledger import session_frame
-    from tests.research.test_closed_market_portfolios import _native_inputs
 
     inputs, _, _, _ = _native_inputs(tmp_path, fault="normal_open")
     root = inputs[source_name]
@@ -487,7 +493,7 @@ def test_future_lifecycle_and_rights_keys_do_not_affect_current_sessions(
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    from tests.research.test_closed_market_portfolios import _native_inputs
+    from tests.helpers.portfolio_inputs import closed_market_inputs as _native_inputs
     from tests.sources.reference.test_equity_events import native_equity_inputs
 
     if source_name == "stock_master":
@@ -582,7 +588,7 @@ def test_corporate_amount_selection_preserves_cash_and_structural_companions(tmp
     )
     from quant_research_platform.sources.csmar.interim import interim_catalog
     from quant_research_platform.storage.datasets import write_dataset
-    from tests.research.test_closed_market_portfolios import _native_inputs
+    from tests.helpers.portfolio_inputs import closed_market_inputs as _native_inputs
 
     inputs, _, calendar, _ = _native_inputs(tmp_path, fault="normal_open")
     source = pd.DataFrame(
@@ -631,7 +637,7 @@ def test_corporate_amount_selection_preserves_cash_and_structural_companions(tmp
 def test_portfolio_upper_bound_preserves_narrower_panel_and_execution_selectors(
     tmp_path,
 ):
-    from tests.research.test_closed_market_portfolios import _native_inputs
+    from tests.helpers.portfolio_inputs import closed_market_inputs as _native_inputs
 
     inputs, _, calendar, _ = _native_inputs(tmp_path, fault="normal_open")
 

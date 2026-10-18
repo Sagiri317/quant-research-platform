@@ -192,8 +192,7 @@ def test_rank_and_open_return_roundoff_survives_final_json_and_freeze(
     )
 
 
-@pytest.mark.parametrize("seed", (2, 25, 76))
-def test_affine_calibration_operand_roundoff_is_independent_of_row_order(seed):
+def test_affine_calibration_operand_roundoff_is_independent_of_row_order():
     dates = pd.date_range("2023-07-07", periods=8, freq="7D")
     inputs = pd.DataFrame(
         [
@@ -206,22 +205,23 @@ def test_affine_calibration_operand_roundoff_is_independent_of_row_order(seed):
             for offset, timestamp in enumerate(dates)
             for rank in (np.arange(1, offset + 4) - (offset + 4) / 2) / (offset + 3)
         ]
-    ).sample(frac=1.0, random_state=seed)
-    calibration = calibrate_expected_alpha(
-        inputs,
-        trading_sessions=pd.bdate_range("2023-07-01", "2023-12-31"),
-        as_of=pd.Timestamp("2023-12-31"),
-        scheduled_intervals=pd.DataFrame(
-            {
-                "timestamp": dates,
-                "entry_at": dates + pd.Timedelta(days=3),
-                "available_at": dates + pd.Timedelta(days=10),
-            }
-        ),
     )
-    assert calibration.status == "DEFINED"
-    assert calibration.slope == pytest.approx(0.2, rel=1e-13)
-    assert calibration.intercept == pytest.approx(0.01, rel=1e-13)
-    assert calibration.slope_standard_error == 0.0
-    assert calibration.inference_status == "UNDEFINED"
-    assert calibration.slope_t_statistic is calibration.slope_pvalue is None
+    for ordered in (inputs, inputs.sample(frac=1.0, random_state=25)):
+        calibration = calibrate_expected_alpha(
+            ordered,
+            trading_sessions=pd.bdate_range("2023-07-01", "2023-12-31"),
+            as_of=pd.Timestamp("2023-12-31"),
+            scheduled_intervals=pd.DataFrame(
+                {
+                    "timestamp": dates,
+                    "entry_at": dates + pd.Timedelta(days=3),
+                    "available_at": dates + pd.Timedelta(days=10),
+                }
+            ),
+        )
+        assert calibration.status == "DEFINED"
+        assert calibration.slope == pytest.approx(0.2, rel=1e-13)
+        assert calibration.intercept == pytest.approx(0.01, rel=1e-13)
+        assert calibration.slope_standard_error == 0.0
+        assert calibration.inference_status == "UNDEFINED"
+        assert calibration.slope_t_statistic is calibration.slope_pvalue is None

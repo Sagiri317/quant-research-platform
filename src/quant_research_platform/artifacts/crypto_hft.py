@@ -23,6 +23,10 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioCapital,
     PortfolioTargetBlocked,
 )
+from quant_research_platform.contracts.time import (
+    TimeWindow,
+    time_window_timestamp_interval,
+)
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.datasets.reading import (
@@ -63,11 +67,11 @@ def _episode_window(metadata):
     if not isinstance(window, dict) or set(window) != {"start", "end"}:
         raise ValueError("crypto_episode_window_invalid")
     try:
-        start, end = (pd.Timestamp(window[key]) for key in ("start", "end"))
-        if pd.isna(start) or pd.isna(end) or start > end:
-            raise ValueError("crypto_episode_window_invalid")
-        return start.value, end.value
-    except (TypeError, OverflowError) as error:
+        start, end, closed = time_window_timestamp_interval(
+            TimeWindow(window["start"], window["end"])
+        )
+        return pd.Timestamp(start).value, pd.Timestamp(end).value - (not closed)
+    except (ValueError, TypeError, OverflowError) as error:
         raise ValueError("crypto_episode_window_invalid") from error
 
 

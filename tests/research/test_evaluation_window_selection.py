@@ -209,3 +209,187 @@ def test_source_operation_intersection_preserves_calendar_end_nanosecond(
     _, tables = read_evaluation_outputs(evaluate(config))
     assert tables["metrics"].timestamp.tolist() == [stamps[0]]
     assert tables["metrics"].n_obs.tolist() == [3]
+
+
+def test_native_operation_domains_share_discovery_and_persisted_consumers(tmp_path):
+    """One real fitted model covers the independent consumers, not one per selector."""
+    import json
+
+    from quant_research_platform.artifacts.explanations import read_explanation
+    from quant_research_platform.artifacts.outputs.prediction import read_predictions
+    from quant_research_platform.research.datasets.assembler import assemble
+    from quant_research_platform.research.models.explanations import explain
+    from quant_research_platform.research.models.production import fit
+    from quant_research_platform.research.models.trial_selection import (
+        read_selection,
+        score,
+        select,
+    )
+    from quant_research_platform.research.predictions.runner import predict
+    from quant_research_platform.research.statistics_production import model_statistics
+    from quant_research_platform.storage.datasets import read_dataset
+
+    stamps = pd.date_range("2020-01-01", periods=6).repeat(3)
+    frame = pd.DataFrame(
+        {
+            "timestamp": stamps,
+            "asset_id": list("abc") * 6,
+            "x": [1.0, 2.0, 3.0] * 6,
+            "label": [0.1, 0.2, 0.3] * 6,
+            "eligible": True,
+            "label_available_at": stamps,
+        }
+    )
+    source = write_evaluation_input(
+        tmp_path / "native",
+        pd.concat(
+            [
+                frame,
+                *[
+                    frame.iloc[:3].assign(
+                        timestamp=stamps[:3] + pd.DateOffset(years=offset),
+                        label_available_at=stamps[:3] + pd.DateOffset(years=offset),
+                    )
+                    for offset in (-3, -2, -1, 1)
+                ],
+            ],
+            ignore_index=True,
+        ),
+        factors=("x",),
+        labels=("label",),
+    )
+    for year in (2018, 2021):
+        (source / f"data/year={year}/unselected.parquet").write_bytes(
+            b"unselected defect"
+        )
+    fit_windows = [
+        {"start": f"{year}-01-01", "end": f"{year}-01-01"} for year in (2017, 2019)
+    ]
+    window = {"start": "2020-01-04", "end": "2020-01-06"}
+    model = fit(
+        {
+            "inputs": str(source),
+            "output": str(tmp_path / "model"),
+            "market_id": "crypto",
+            "label_unit": "decimal_return",
+            "model": {
+                "model_id": "linear",
+                "model_algorithm": "linear_regression",
+                "input_factor_columns": ["x"],
+                "target_column": "label",
+            },
+            "fit_windows": fit_windows,
+            "fit_cutoff": "2019-01-01",
+        }
+    )
+    predictions = predict(
+        {
+            "model": str(model),
+            "inputs": str(source),
+            "output": str(tmp_path / "predictions"),
+            "prediction_window": window,
+        }
+    )
+    predicted, _ = read_predictions(predictions)
+    expected_keys = [
+        (pd.Timestamp(f"2020-01-0{day}"), asset) for day in (4, 5, 6) for asset in "abc"
+    ]
+    assert (
+        list(zip(predicted.timestamp, predicted.asset_id, strict=True)) == expected_keys
+    )
+    assert predicted.prediction_score.tolist() == pytest.approx([0.1, 0.2, 0.3] * 3)
+    scoring = {
+        "predictions": [[str(predictions)] * 2],
+        "candidate_ids": ["linear"],
+        "labels": str(source),
+        "label_unit": "decimal_return",
+        "validation_windows": [
+            {"start": f"2020-01-0{day}", "end": f"2020-01-0{day}"} for day in (4, 6)
+        ],
+        "scoring_window": window,
+        "cutoff": "2020-01-06",
+        "selection_group": "global",
+        "validation_axis": "cross_sectional",
+        "output": str(tmp_path / "score.json"),
+    }
+    scored = json.loads(score(scoring).read_text())
+    assert scored["common_rows"] == 6
+    assert scored["metrics"][0]["validation_rows"] == 6
+    selection = select(
+        {
+            "scores": scoring["output"],
+            "output": str(tmp_path / "selection.json"),
+            "selection_metric": "validation_rankic",
+            "selection_direction": "maximize",
+            "tie_break_order": ["linear"],
+            "refit_windows": fit_windows,
+            "refit_cutoff": "2020-01-06",
+        }
+    )
+    assert read_selection(selection)["selected_model_id"] == "linear"
+    assembled = assemble(
+        {
+            "market_id": "crypto",
+            "dataset_id": "selected",
+            "inputs": {"source": str(source)},
+            "time_window": window,
+            "factor_columns": ["x"],
+            "label_columns": ["label"],
+            "feature_recipe": None,
+            "output_root": str(tmp_path / "assembled"),
+        }
+    )
+    actual = read_dataset(assembled)
+    assert list(zip(actual.timestamp, actual.asset_id, strict=True)) == expected_keys
+    assert actual.label.tolist() == [0.1, 0.2, 0.3] * 3
+    saved = read_statistics_artifact(
+        model_statistics(
+            {
+                "dataset": str(source),
+                "output": str(tmp_path / "statistics"),
+                "window": window,
+                "family_ids": ["linear"],
+                "evaluation": {"primary_label": "label"},
+                "analyses": ["prediction_hac"],
+                "statistics": {"hac_lag": 0},
+                "periods": [
+                    {
+                        "period_id": "selected",
+                        "window": window,
+                        "predictions": [str(predictions)],
+                    }
+                ],
+            }
+        )
+    )
+    with saved.table("prediction_diagnostics.parquet") as diagnostics:
+        assert diagnostics.observation_count.tolist() == [3]
+        assert diagnostics["mean"].tolist() == pytest.approx([1.0])
+    metadata, tables = read_explanation(
+        explain(
+            {
+                "model": str(model),
+                "inputs": str(source),
+                "output": str(tmp_path / "explanation"),
+                "window": window,
+                "sample_role": "validation",
+                "methods": ["affine"],
+                "selection": {"max_rows": 9, "max_dates": None, "root_seed": 1},
+                "output_space": "model_output",
+            }
+        )
+    )
+    assert metadata["context_row_count"] == 9
+    assert (
+        list(
+            zip(
+                tables["predictions"].timestamp,
+                tables["predictions"].asset_id,
+                strict=True,
+            )
+        )
+        == expected_keys
+    )
+    assert tables["predictions"].prediction_score.tolist() == pytest.approx(
+        [0.1, 0.2, 0.3] * 3
+    )

@@ -17,7 +17,6 @@ from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
 from quant_research_platform.contracts.time import (
     TimeWindow,
     is_datetime_window,
-    time_window_timestamp_interval,
 )
 from quant_research_platform.markets.implementations.crypto.hft import (
     HFT_GRID_MS,
@@ -54,7 +53,6 @@ from quant_research_platform.sources.binance import ids as binance_ids
 from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
     _dataset_input_options,
-    _validated_years,
     iter_dataset_chunks,
     open_dataset_session,
 )
@@ -441,33 +439,9 @@ def produce_derivative_processed_data(
             yield (data, metadata)
 
 
-def _windowed_input_options(root, time_window):
-    """Intersect input and computation selections before native file discovery."""
-    options = _dataset_input_options(root)
-    selected = options.get("time_window")
-    if selected is not None:
-        lower, upper, closed = time_window_timestamp_interval(selected)
-        start = max(pd.Timestamp(lower), pd.Timestamp(time_window.start))
-        end = min(
-            pd.Timestamp(upper)
-            if closed
-            else pd.Timestamp(upper) - pd.Timedelta(1, "ns"),
-            pd.Timestamp(time_window.end),
-        )
-        if start > end:
-            # An empty intersection has no native partitions to discover.
-            # Keep the declared selector validation in the reader.
-            _validated_years(options.get("years"))
-            options["years"] = []
-        else:
-            time_window = TimeWindow(start, end)
-    options["time_window"] = time_window
-    return options
-
-
 def _selected_context_session(root, columns, time_window):
     """Project the chosen definition while leaving absent values locally unknown."""
-    options = _windowed_input_options(root, time_window)
+    options = _dataset_input_options(root, time_window=time_window)
     session = open_dataset_session(**{**options, "columns": None})
     keys = ("market_id", "asset_id", "timestamp")
     selected = options.get("columns")
@@ -667,7 +641,7 @@ def produce_information_panel(
     identities = {}
     for data_id in spec.processed_input_data_ids:
         root = inputs[data_id]
-        options = _windowed_input_options(root, time_window)
+        options = _dataset_input_options(root, time_window=time_window)
         if options.get("columns") is not None and not set(
             spec.required_columns
         ).difference({"market_id", "asset_id", "timestamp", "segment_id"}) <= set(

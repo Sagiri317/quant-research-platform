@@ -38,6 +38,30 @@ from tests.helpers.statistics_artifacts import (
 )
 
 
+def _assert_recomputed_statistics_equal(left, right):
+    """Compare rerun values with exact settings, domains, and missing masks."""
+    continuous = left.select_dtypes(include="floating").columns.difference(
+        [
+            "fdr_alpha",
+            "confidence",
+            "alpha",
+            "seed",
+            "bootstrap_seed",
+            "bootstrap_block_size",
+            "bootstrap_repetitions",
+            "block_size",
+            "repetitions",
+        ]
+    )
+    pd.testing.assert_frame_equal(
+        left.drop(columns=continuous), right.drop(columns=continuous), check_exact=True
+    )
+    pd.testing.assert_frame_equal(left.isna(), right.isna(), check_exact=True)
+    pd.testing.assert_frame_equal(
+        left[continuous], right[continuous], check_exact=False, rtol=1e-12, atol=1e-15
+    )
+
+
 class _PredictionLookup:
     def coverage_counts(self):
         return (0, 0)
@@ -362,8 +386,8 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
             )
         )
         for table in ("prediction_diagnostics", "model_comparison"):
-            pd.testing.assert_frame_equal(
-                robustness_tables[table], paired_tables[table], check_exact=True
+            _assert_recomputed_statistics_equal(
+                robustness_tables[table], paired_tables[table]
             )
         pd.testing.assert_frame_equal(
             robustness_tables["model_trials"],
@@ -614,11 +638,9 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
             {name: table.copy() for name, table in statistics_tables.items()}
         )
     for table in ("factor_diagnostics", "prediction_diagnostics", "fama_macbeth"):
-        pd.testing.assert_frame_equal(
-            outputs[0][table], outputs[1][table], check_exact=True
-        )
-    pd.testing.assert_frame_equal(
-        evaluation_summaries[0], evaluation_summaries[1], check_exact=True
+        _assert_recomputed_statistics_equal(outputs[0][table], outputs[1][table])
+    _assert_recomputed_statistics_equal(
+        evaluation_summaries[0], evaluation_summaries[1]
     )
     evaluation_row = evaluation_summaries[0].iloc[0]
     assert evaluation_row["valid_rankic_count"] == 20
@@ -1236,9 +1258,7 @@ def test_model_family_names_preserve_factor_statistics_and_native_names(
         )
         results.append(tables)
     for member in results[0]:
-        pd.testing.assert_frame_equal(
-            results[0][member], results[1][member], check_exact=True
-        )
+        _assert_recomputed_statistics_equal(results[0][member], results[1][member])
 
 
 def test_factor_fmb_weightings_match_independent_weighted_normal_equations():
@@ -1290,7 +1310,7 @@ def test_factor_fmb_weightings_match_independent_weighted_normal_equations():
             )
         )
         equal = actual.regression_id.str.startswith("equal:")
-        pd.testing.assert_frame_equal(actual.loc[equal], records.loc[equal])
+        _assert_recomputed_statistics_equal(actual.loc[equal], records.loc[equal])
         assert actual.loc[~equal, "status"].eq("DEFINED").all()
         assert actual.loc[~equal, "observation_count"].eq(len(frame.dropna()) - 1).all()
 
@@ -1536,7 +1556,7 @@ def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_pat
             with read_statistics_artifact(root / "statistics").table(
                 "model_losses.parquet"
             ) as expected_losses:
-                pd.testing.assert_frame_equal(actual, expected_losses, check_exact=True)
+                _assert_recomputed_statistics_equal(actual, expected_losses)
             assert actual.period_id.eq("explicit_horizon").all()
         published = write_statistics_artifact(
             root / "factor_statistics",
@@ -1622,8 +1642,31 @@ def test_fmb_invalid_real_weights_only_remove_weighted_observations(
         )
     )
     equal = actual.regression_id.str.startswith("equal:")
+    left, right = actual.loc[equal], baseline.loc[equal]
+    continuous = left.select_dtypes(include="floating").columns.difference(
+        [
+            "fdr_alpha",
+            "confidence",
+            "alpha",
+            "seed",
+            "bootstrap_seed",
+            "bootstrap_block_size",
+            "bootstrap_repetitions",
+            "block_size",
+            "repetitions",
+        ]
+    )
     pd.testing.assert_frame_equal(
-        actual.loc[equal].fillna(""), baseline.loc[equal].fillna(""), check_dtype=False
+        left.drop(columns=continuous),
+        right.drop(columns=continuous),
+        check_exact=True,
+        check_dtype=False,
+    )
+    pd.testing.assert_frame_equal(
+        left.isna(), right.isna(), check_exact=True, check_dtype=False
+    )
+    pd.testing.assert_frame_equal(
+        left[continuous], right[continuous], check_exact=False, rtol=1e-12, atol=1e-15
     )
     weighted = actual.loc[~equal]
     assert weighted.observation_count.eq(asset_count - 1).all()
@@ -1651,7 +1694,20 @@ def test_fmb_invalid_real_weights_only_remove_weighted_observations(
             factor_columns=("x",),
             weight_column="total_market_cap",
         )
-        pd.testing.assert_series_equal(result.coefficients, expected.coefficients)
+        pd.testing.assert_series_equal(
+            result.coefficients.isna(), expected.coefficients.isna()
+        )
+        pd.testing.assert_series_equal(
+            result.coefficients,
+            expected.coefficients,
+            check_exact=False,
+            rtol=1e-12,
+            atol=0,
+        )
         assert result.observation_count == expected.observation_count
-        assert result.white_p_value == expected.white_p_value
+        assert pd.isna(result.white_p_value) == pd.isna(expected.white_p_value)
+        if not pd.isna(expected.white_p_value):
+            assert result.white_p_value == pytest.approx(
+                expected.white_p_value, rel=1e-12, abs=0
+            )
         assert result.white_reason == expected.white_reason

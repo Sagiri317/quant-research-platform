@@ -25,8 +25,8 @@ from quant_research_platform.markets.implementations.crypto.portfolio import (
     _execute_portfolio,
 )
 from quant_research_platform.research.portfolios.diagnostics import crypto_statistics
+from tests.helpers.binance_hft import execution_state as _state
 from tests.helpers.binance_hft import hft_research_plan
-from tests.markets.crypto.test_hft_execution import _state
 
 
 def _metadata(plan, mode):
@@ -242,8 +242,9 @@ def test_calibrated_maker_gap_cancel_respects_latency_and_settlement(gap_ms, tra
         simulate_maker,
     )
     from tests.helpers.binance_hft import _quote
+    from tests.helpers.binance_hft import execution_trade as _trade
+    from tests.helpers.binance_hft import maker_config as _maker_config
     from tests.markets.crypto.calibration_test_support import calibration_from_paths
-    from tests.markets.crypto.test_hft_execution import _maker_config, _trade
 
     calibration = calibration_from_paths(
         [([_state(0)], [_trade(150, price="99.5", quantity="4", maker_buyer=True)])],
@@ -413,8 +414,9 @@ def test_maker_impossible_new_order_without_pending_risk_needs_no_forecast():
         simulate_maker,
     )
     from tests.helpers.binance_hft import _quote
+    from tests.helpers.binance_hft import execution_trade as _trade
+    from tests.helpers.binance_hft import maker_config as _maker_config
     from tests.markets.crypto.calibration_test_support import calibration_from_paths
-    from tests.markets.crypto.test_hft_execution import _maker_config, _trade
 
     calibration = calibration_from_paths(
         [([_state(0)], [_trade(150, price="99.5", quantity="4", maker_buyer=True)])],

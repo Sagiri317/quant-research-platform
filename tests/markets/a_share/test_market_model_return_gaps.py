@@ -155,8 +155,8 @@ def test_missing_return_without_required_weight_does_not_poison_all_a(lifecycle)
         # Establish a real exclusion, rather than inferring it from missing returns.
         panel["is_st"] = [False, True]
     result = state.observe(panel)
-    assert result.beta["a"] == 1.0
-    assert result.residual_volatility["a"] == 0.0
+    assert result.beta["a"] == pytest.approx(1.0, rel=1e-13, abs=0.0)
+    assert result.residual_volatility["a"] == pytest.approx(0.0, abs=1e-15)
     assert np.isnan(result.beta.iloc[1])
 
 
@@ -187,7 +187,7 @@ def test_required_missing_return_poisoning_survives_market_closure():
     result = state.observe(
         panel.assign(period_return=0.05), open_market_types=frozenset({1, 4})
     )
-    assert result.beta["a"] == 1.0
+    assert result.beta["a"] == pytest.approx(1.0, rel=1e-13, abs=0.0)
     assert np.isnan(result.beta["b"])
 
 
@@ -433,7 +433,7 @@ def test_cap_gap_cannot_reuse_weight_across_lifecycle_boundary(boundary):
         current.loc[0, "_calendar_segment"] = 1
     state.observe(current)
     if boundary == "relisting":
-        assert state._market_returns["b"][-1] == 0.08
+        assert state._market_returns["b"][-1] == pytest.approx(0.08, rel=1e-13, abs=0.0)
     else:
         assert np.isnan(state._market_returns["b"][-1])
     state.observe(current.assign(float_market_cap=[100.0, 200.0]))

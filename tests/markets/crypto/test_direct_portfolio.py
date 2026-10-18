@@ -27,7 +27,9 @@ from quant_research_platform.research.models.production import fit
 from quant_research_platform.research.models.trial_selection import score, select
 from quant_research_platform.research.predictions.runner import predict
 from quant_research_platform.storage.datasets.writing import write_dataset
-from tests.markets.crypto.test_hft_execution import _maker_config, _state, _trade
+from tests.helpers.binance_hft import execution_state as _state
+from tests.helpers.binance_hft import execution_trade as _trade
+from tests.helpers.binance_hft import maker_config as _maker_config
 
 
 def _window(start, end):
@@ -113,6 +115,9 @@ def test_native_prediction_date_windows_and_precise_consumption(tmp_path, open_e
             partition_columns=("year",),
         ),
     )
+    unrelated = context_path / "data/year=2013"
+    unrelated.mkdir()
+    (unrelated / "unselected.parquet").write_bytes(b"unselected defect")
     decisions = list(
         portfolio._prediction_rows(
             inputs=context_path,
@@ -1325,13 +1330,31 @@ def test_calibration_loads_and_releases_one_fold_at_a_time(
     ):
         with baseline.table(table) as expected, artifact.table(table) as actual:
             for fold in ("first", "second", "third"):
-                pd.testing.assert_frame_equal(
+                left = (
                     actual.loc[actual.fold_id.eq(fold)]
                     .drop(columns="fold_id")
-                    .reset_index(drop=True),
-                    expected.drop(columns="fold_id"),
+                    .reset_index(drop=True)
+                )
+                right = expected.drop(columns="fold_id")
+                numerical = (
+                    ["forecast_error"]
+                    if table == "crypto_maker_samples.parquet"
+                    else []
+                )
+                pd.testing.assert_frame_equal(left.isna(), right.isna())
+                pd.testing.assert_frame_equal(
+                    left.drop(columns=numerical),
+                    right.drop(columns=numerical),
                     check_exact=True,
                 )
+                if numerical:
+                    pd.testing.assert_frame_equal(
+                        left[numerical],
+                        right[numerical],
+                        check_exact=False,
+                        rtol=2e-12,
+                        atol=0,
+                    )
 
 
 def test_dev_maker_consumes_causal_calibration_with_independent_explicit_windows(

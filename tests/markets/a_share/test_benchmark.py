@@ -409,7 +409,7 @@ def test_complete_500_and_1000_source_rounding_preserves_relative_weights(direct
 
 
 @pytest.mark.parametrize("benchmark_id", ["csi500", "csi1000"])
-def test_single_benchmark_requires_its_own_identity(benchmark_id):
+def test_single_benchmark_requires_its_own_identity(benchmark_id, subtests):
     from quant_research_platform.markets.implementations.a_share.ids import (
         FORMAL_BENCHMARKS,
     )
@@ -432,10 +432,50 @@ def test_single_benchmark_requires_its_own_identity(benchmark_id):
             "weight": [0.4, 0.6],
         }
     )
-    result = pd.concat(iter_benchmark_weight_snapshots(info, [weights]))
-    assert set(result.benchmark_id) == {benchmark_id}
-    assert result.weight.sum() == 1.0
-    with pytest.raises(ValueError, match="index_identity_invalid"):
-        list(iter_benchmark_weight_snapshots(info.iloc[:0], [weights]))
+    other_id = next(key for key in FORMAL_BENCHMARKS if key != source_id)
+    for case, selected, name, error in (
+        ("unselected absent", False, "absent", None),
+        ("unselected unknown", False, None, None),
+        ("unselected wrong", False, "wrong", None),
+        ("selected absent", True, "absent", "index_identity_invalid"),
+        ("selected unknown", True, None, "index_name_invalid"),
+        ("selected wrong", True, "wrong", "index_identity_invalid"),
+    ):
+        with subtests.test(case=case):
+            reference = info.iloc[:0] if selected else info.copy()
+            if name != "absent":
+                reference = pd.concat(
+                    [
+                        reference,
+                        pd.DataFrame(
+                            {
+                                "source_asset_id": [
+                                    source_id if selected else other_id
+                                ],
+                                "index_name": [name],
+                            }
+                        ),
+                    ],
+                    ignore_index=True,
+                )
+            if error is not None:
+                with pytest.raises(ValueError, match=error):
+                    list(iter_benchmark_weight_snapshots(reference, [weights]))
+            else:
+                result = pd.concat(
+                    iter_benchmark_weight_snapshots(reference, [weights])
+                )
+                assert set(result.benchmark_id) == {benchmark_id}
+                assert result.weight.tolist() == [0.4, 0.6]
+    # A reference unused by an earlier block becomes required when consumed.
+    reference = pd.concat(
+        [info, pd.DataFrame({"source_asset_id": [other_id], "index_name": [None]})]
+    )
+    frames = iter_benchmark_weight_snapshots(
+        reference, [weights, weights.assign(source_asset_id=other_id)]
+    )
+    assert set(next(frames).benchmark_id) == {benchmark_id}
+    with pytest.raises(ValueError, match="index_name_invalid"):
+        next(frames)
     with pytest.raises(ValueError, match="coverage_incomplete"):
         list(iter_benchmark_weight_snapshots(info, [weights.iloc[:0]]))

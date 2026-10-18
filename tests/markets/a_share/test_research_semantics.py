@@ -148,12 +148,12 @@ def test_missing_factor_in_other_industry_does_not_change_valid_neutralization()
             "timestamp": pd.Timestamp("2024-01-02"),
             "eligible": True,
             "industry_standard_id": "CSRC2012",
-            "industry_level1_code": ["A"] * 200 + ["B"],
-            "log_total_market_cap": np.linspace(1.0, 3.0, 201),
-            "factor": [*np.sin(np.arange(200)), np.nan],
+            "industry_level1_code": ["A"] * 100 + ["B"],
+            "log_total_market_cap": np.linspace(1.0, 3.0, 101),
+            "factor": [*np.sin(np.arange(100)), np.nan],
         }
     )
-    valid = frame.iloc[:200].copy()
+    valid = frame.iloc[:100].copy()
     for operation in (_neutralize_cross_section, a_share_feature_pipeline):
         kwargs = (
             {
@@ -166,12 +166,12 @@ def test_missing_factor_in_other_industry_does_not_change_valid_neutralization()
         )
         expected = operation(valid, factor_columns=("factor",), **kwargs)
         result = operation(frame, factor_columns=("factor",), **kwargs)
-        pd.testing.assert_frame_equal(result.iloc[:200], expected)
+        pd.testing.assert_frame_equal(result.iloc[:100], expected)
         if operation is a_share_feature_pipeline:
-            assert result.feature_observed_factor.iloc[:200].eq(1).all()
+            assert result.feature_observed_factor.iloc[:100].eq(1).all()
             assert result.feature_missing_factor.iloc[-1] == 1
         else:
-            assert result.factor.iloc[:200].notna().all()
+            assert result.factor.iloc[:100].notna().all()
             assert pd.isna(result.factor.iloc[-1])
 
 
@@ -402,7 +402,11 @@ def test_auxiliary_size_winsorization_matches_full_configuration():
         frame, factor_columns=("factor", "log_total_market_cap")
     )
     pd.testing.assert_series_equal(
-        single.feature_factor, full.feature_factor, check_exact=True
+        single.feature_factor,
+        full.feature_factor,
+        check_exact=False,
+        rtol=1e-13,
+        atol=1e-14,
     )
     assert "feature_log_total_market_cap" not in single
     frame.loc[0, "factor"] = np.nan

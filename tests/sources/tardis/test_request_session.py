@@ -129,7 +129,7 @@ def test_many_archives_keep_only_active_bootstrap_prefixes(tmp_path, monkeypatch
     import pandas as pd
 
     paths = []
-    for number in range(6):
+    for number in range(2):
         native = (
             _delta(1, 99, 101, 98)
             + _line(
@@ -183,12 +183,16 @@ def test_many_archives_keep_only_active_bootstrap_prefixes(tmp_path, monkeypatch
         first = next(slow)
         assert first["data_kind"] == "depth_snapshot"
         expected = list(_records(source))
-        assert len(expected) == 18
+        assert [row["data_kind"] for row in expected] == [
+            "depth_snapshot",
+            "depth_bootstrap",
+            "depth",
+        ] * 2
         assert sum(not item.closed for item in buffers) == 1
         assert [first, *slow] == expected
         assert all(item.closed for item in buffers)
     assert peak == 2
-    assert len(buffers) == 12 and all(item.closed for item in buffers)
+    assert len(buffers) == 4 and all(item.closed for item in buffers)
 
 
 def test_decoder_failure_does_not_contaminate_an_independent_read(archive, monkeypatch):

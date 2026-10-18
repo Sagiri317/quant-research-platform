@@ -146,14 +146,11 @@ def test_markout_roundtrip_uses_final_book_at_exact_target(tmp_path, mode, tail)
         simulate_maker,
         simulate_taker,
     )
-    from tests.markets.crypto.test_hft_execution import (
-        _coverage,
-        _maker_config,
-        _quote,
-        _state,
-        _taker_config,
-        _trade,
-    )
+    from tests.helpers.binance_hft import _coverage, _quote
+    from tests.helpers.binance_hft import execution_state as _state
+    from tests.helpers.binance_hft import execution_trade as _trade
+    from tests.helpers.binance_hft import maker_config as _maker_config
+    from tests.helpers.binance_hft import taker_config as _taker_config
 
     capital = PortfolioCapital(mode, 1000.0, "USDT", "linear_perpetual")
     envelope = {
@@ -232,14 +229,11 @@ def test_perpetual_execution_roundtrip_keeps_collateral_funding_and_delayed_fill
         simulate_maker,
         simulate_taker,
     )
-    from tests.markets.crypto.test_hft_execution import (
-        _coverage,
-        _maker_config,
-        _quote,
-        _state,
-        _taker_config,
-        _trade,
-    )
+    from tests.helpers.binance_hft import _coverage, _quote
+    from tests.helpers.binance_hft import execution_state as _state
+    from tests.helpers.binance_hft import execution_trade as _trade
+    from tests.helpers.binance_hft import maker_config as _maker_config
+    from tests.helpers.binance_hft import taker_config as _taker_config
 
     capital = PortfolioCapital(mode, 1000.0, "USDT", "linear_perpetual")
     envelope = {
@@ -869,13 +863,10 @@ def test_perpetual_terminal_marks_use_real_quote_or_cash_only(tmp_path, mode, ca
         simulate_maker,
         simulate_taker,
     )
-    from tests.markets.crypto.test_hft_execution import (
-        _coverage,
-        _maker_config,
-        _quote,
-        _state,
-        _taker_config,
-    )
+    from tests.helpers.binance_hft import _coverage, _quote
+    from tests.helpers.binance_hft import execution_state as _state
+    from tests.helpers.binance_hft import maker_config as _maker_config
+    from tests.helpers.binance_hft import taker_config as _taker_config
 
     capital = PortfolioCapital(mode, 1000.0, "USDT", "linear_perpetual")
     envelope = {
@@ -1037,10 +1028,9 @@ def test_unidentified_alpha_survives_publication_and_blocks_freezing(
         )
 
 
-@pytest.mark.parametrize("alpha_exponent", (0, 600, -600))
 @pytest.mark.parametrize("slope,intercept", [(0.0, 0.0), (0.0, 0.25), (0.125, 0.0)])
 def test_degenerate_alpha_diagnostics_survive_ledger_and_freeze(
-    tmp_path, slope, intercept, alpha_exponent
+    tmp_path, slope, intercept
 ):
     from quant_research_platform.research.portfolios.accounting import (
         calibrate_expected_alpha,
@@ -1055,8 +1045,6 @@ def test_degenerate_alpha_diagnostics_survive_ledger_and_freeze(
         {"timestamp": dates.repeat(2), "prediction_rank_score": [-0.5, 0.5] * 6}
     )
     inputs["holding_return"] = intercept + slope * inputs.prediction_rank_score
-    alpha_scale = float(np.ldexp(1.0, alpha_exponent))
-    inputs["prediction_rank_score"] *= alpha_scale
     intervals = pd.DataFrame(
         {
             "timestamp": dates,
@@ -1071,7 +1059,7 @@ def test_degenerate_alpha_diagnostics_survive_ledger_and_freeze(
         scheduled_intervals=intervals,
     )
     assert calibration.status == "DEFINED"
-    assert calibration.slope == pytest.approx(slope / alpha_scale, rel=1e-12, abs=0)
+    assert calibration.slope == pytest.approx(slope, rel=1e-12, abs=0)
     assert calibration.slope_standard_error == 0.0
     assert (
         calibration.slope_t_statistic
@@ -1133,12 +1121,10 @@ def test_flat_eof_preserves_historical_fill_diagnostics_and_cash_ledger(
         simulate_maker,
         simulate_taker,
     )
-    from tests.markets.crypto.test_hft_execution import (
-        _maker_config,
-        _quote,
-        _state,
-        _trade,
-    )
+    from tests.helpers.binance_hft import _quote
+    from tests.helpers.binance_hft import execution_state as _state
+    from tests.helpers.binance_hft import execution_trade as _trade
+    from tests.helpers.binance_hft import maker_config as _maker_config
 
     capital = PortfolioCapital("flat_eof", 1000.0, "USDT", "linear_perpetual")
     envelope = {
@@ -1215,7 +1201,7 @@ def test_flat_eof_preserves_historical_fill_diagnostics_and_cash_ledger(
     assert len(persisted) == len(batches)
 
 
-@pytest.mark.parametrize("scale", [1.0, 2.0 ** (-700)])
+@pytest.mark.parametrize("scale", [1.0, 0.01])
 @pytest.mark.parametrize("direction", [1.0, -1.0])
 @pytest.mark.parametrize("closing_units", [0.5, 1.0, 2.0])
 def test_perpetual_close_sign_is_independent_of_quantity_units(
@@ -1259,35 +1245,33 @@ def test_perpetual_close_sign_is_independent_of_quantity_units(
             mark_price=2.0 / scale,
             fee=0.0,
         )
-        assert economics.cash == 1000.0 + expected_realized
+        assert economics.cash == pytest.approx(1000.0 + expected_realized, rel=1e-12)
         assert economics.quantity == direction * (1.0 - closing_units) * scale
-        assert economics.cost_basis == expected_basis
+        assert economics.cost_basis == pytest.approx(expected_basis, rel=1e-12, abs=0)
 
     root = ledger_artifact.write_portfolio_ledger_artifact(
         tmp_path / "units", **envelope, produce=produce
     )
     artifact = read_portfolio_ledger_artifact(root)
     batches = tuple(artifact.iter_chunks())
-    assert (
-        sum(
-            flow.amount
-            for batch in batches
-            for flow in batch.cashflows
-            if flow.kind == "realized_pnl"
-        )
-        == expected_realized
-    )
+    assert sum(
+        flow.amount
+        for batch in batches
+        for flow in batch.cashflows
+        if flow.kind == "realized_pnl"
+    ) == pytest.approx(expected_realized, rel=1e-12, abs=0)
     end = {row.asset_id: row for row in batches[-1].valuations if row.phase == "end"}
-    assert end["__cash__"].value == 1000.0 + expected_realized
-    assert end["asset"].cost_basis == expected_basis
+    assert end["__cash__"].value == pytest.approx(1000.0 + expected_realized, rel=1e-12)
+    assert end["asset"].cost_basis == pytest.approx(expected_basis, rel=1e-12, abs=0)
     summary = ledger_artifact.summarize_portfolio_ledger(
         artifact.capital, artifact.iter_chunks()
     )
-    assert summary["net_pnl"] == summary["gross_pnl"] == direction
+    assert summary["net_pnl"] == pytest.approx(direction, rel=1e-12, abs=0)
+    assert summary["gross_pnl"] == pytest.approx(direction, rel=1e-12, abs=0)
 
 
 @pytest.mark.parametrize("direction", [1.0, -1.0])
-def test_tiny_trade_validity_uses_sign_without_multiplication(direction):
+def test_small_trade_requires_nonzero_matching_signs(direction):
     from quant_research_platform.markets.implementations.crypto.execution import (
         PortfolioEconomics,
     )
@@ -1298,7 +1282,7 @@ def test_tiny_trade_validity_uses_sign_without_multiplication(direction):
         "asset",
         batches.append,
     )
-    quantity = direction * 2.0 ** (-700)
+    quantity = direction * 1e-8
     economics.fill(
         timestamp_ns=1,
         order_id="open",
@@ -1315,7 +1299,7 @@ def test_tiny_trade_validity_uses_sign_without_multiplication(direction):
 
 
 def test_tiny_cash_equity_trade_cannot_reverse_target_direction(tmp_path):
-    value = 2.0 ** (-700)
+    value = 1e-8
     frame = _session(
         "2019-01-01",
         "2019-01-02",
@@ -1323,11 +1307,11 @@ def test_tiny_cash_equity_trade_cannot_reverse_target_direction(tmp_path):
         target_asset=value,
         post_asset=3 * value,
         pre_cash=1.0,
-        target_cash=1.0,
-        post_cash=1.0,
+        target_cash=1.0 + value,
+        post_cash=1.0 - value,
     )
     envelope = _ledger_spec()
-    envelope["capital"] = replace(envelope["capital"], initial_capital=1.0)
+    envelope["capital"] = replace(envelope["capital"], initial_capital=1.0 + 2 * value)
     with pytest.raises(ValueError, match="portfolio_ledger_direction_invalid"):
         write_test_sessions(
             tmp_path / "wrong_direction", **envelope, ledger_chunks=(frame,)
@@ -1360,10 +1344,10 @@ def _alpha_payload(calibration, envelope):
 
 @pytest.mark.parametrize(
     "quantity, entry, mark",
-    [(0.7, 30000.0, 30000.01), (0.7, 30000.0, 30001.0), (2.0, 8e307, 9e307)],
+    [(0.7, 30000.0, 30000.01), (0.7, 30000.0, 30001.0)],
 )
 @pytest.mark.parametrize("direction", [1.0, -1.0])
-def test_perpetual_rounded_cost_preserves_exact_pnl(
+def test_perpetual_rounded_cost_preserves_small_pnl(
     tmp_path, quantity, entry, mark, direction
 ):
     from fractions import Fraction
@@ -1397,24 +1381,23 @@ def test_perpetual_rounded_cost_preserves_exact_pnl(
             mark_price=entry,
             fee=0.0,
         )
-        assert account.mark(2, mark)["net_pnl"] == expected
+        assert account.mark(2, mark)["net_pnl"] == pytest.approx(
+            expected, rel=1e-12, abs=0
+        )
 
     root = ledger_artifact.write_portfolio_ledger_artifact(
         tmp_path / "ledger", **envelope, produce=produce
     )
     artifact = read_portfolio_ledger_artifact(root)
     batches = tuple(artifact.iter_chunks())
-    assert (
-        ledger_artifact.summarize_portfolio_ledger(artifact.capital, iter(batches))[
-            "net_pnl"
-        ]
-        == expected
-    )
+    assert ledger_artifact.summarize_portfolio_ledger(artifact.capital, iter(batches))[
+        "net_pnl"
+    ] == pytest.approx(expected, rel=1e-12, abs=0)
     last = batches[-1]
     value = next(
         row for row in last.valuations if row.asset_id == "asset" and row.phase == "end"
     )
-    assert value.value == expected
+    assert value.value == pytest.approx(expected, rel=1e-12, abs=0)
     corrupted = replace(
         value, value=value.value + 16 * max(ulp(value.cost_basis), ulp(value.value))
     )

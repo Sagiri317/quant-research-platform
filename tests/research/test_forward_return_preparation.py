@@ -258,5 +258,23 @@ def test_producer_clips_each_lifecycle_and_market_axis_without_compressing_gaps(
         trading_sessions=axis,
         asset_sessions=axes,
     )
-    pd.testing.assert_frame_equal(actual, expected, check_exact=True)
+    observed_values, reference_values = actual, expected
+    numeric = list(observed_values.select_dtypes(include="floating").columns)
+    pd.testing.assert_frame_equal(
+        observed_values.drop(columns=numeric),
+        reference_values.drop(columns=numeric),
+        check_exact=True,
+    )
+    pd.testing.assert_frame_equal(
+        observed_values[numeric].isna(),
+        reference_values[numeric].isna(),
+        check_exact=True,
+    )
+    pd.testing.assert_frame_equal(
+        observed_values[numeric],
+        reference_values[numeric],
+        check_exact=False,
+        rtol=1e-12,
+        atol=0.0,
+    )
     assert lengths == [12, 6, 12, 11, 6, 12]

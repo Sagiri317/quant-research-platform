@@ -10,7 +10,9 @@ from quant_research_platform.storage.datasets import (
     read_dataset,
     reading,
 )
-from tests.research.test_direct_assembly_config import _config, _frame, _source
+from tests.helpers.research_processed_inputs import assembly_config as _config
+from tests.helpers.research_processed_inputs import assembly_frame as _frame
+from tests.helpers.research_processed_inputs import assembly_source as _source
 
 
 @pytest.mark.parametrize("storage", ["native", "parquet"])
@@ -92,10 +94,24 @@ def test_assembly_persists_scientific_input_selection(tmp_path, storage):
 def test_assembly_applies_overall_window_once_to_each_reader(
     tmp_path, monkeypatch, input_window, intraday
 ):
+    stamps = pd.to_datetime(
+        [
+            "2024-01-01",
+            "2024-01-02",
+            "2024-01-02T00:00:00.000000001",
+            "2024-01-02T12:00:00",
+            "2024-01-03",
+            "2024-01-04",
+            "2024-01-04T00:00:00.000000001",
+            "2024-01-04T23:59:59.999999999",
+            "2024-01-05",
+        ],
+        format="mixed",
+    )
     frame = pd.concat(
         [
-            _frame(1).assign(timestamp=date, momentum_20d=float(index))
-            for index, date in enumerate(pd.date_range("2024-01-01", "2024-01-05"))
+            _frame(1).assign(timestamp=stamp, momentum_20d=float(index))
+            for index, stamp in enumerate(stamps)
         ],
         ignore_index=True,
     )
@@ -106,19 +122,29 @@ def test_assembly_applies_overall_window_once_to_each_reader(
     overall = {"start": "2024-01-02", "end": "2024-01-04"}
     if intraday:
         overall = {
-            "start": "2024-01-02T00:00:00.000000001",
-            "end": "2024-01-04T00:00:00",
+            "start": "2024-01-02T01:00:00.000000001+01:00",
+            "end": "2024-01-04T01:00:00+01:00",
         }
     inputs = {
         name: {"path": str(root), "time_window": input_window}
         for name, root in (("base", base), ("auxiliary", auxiliary))
     }
-    observed = {}
+    lower = (
+        pd.Timestamp(TimeWindow(**input_window).start)
+        if input_window is not None
+        else pd.Timestamp("2024-01-02") + pd.Timedelta(int(intraday), "ns")
+    )
+    upper = pd.Timestamp("2024-01-04" if intraday else "2024-01-04T23:59:59.999999999")
+    selected = frame.loc[frame.timestamp.between(lower, upper)]
+    scans = []
+    consumed = {base: [], auxiliary: []}
     original = reading.iter_dataset_file_batches
 
     def measured(session, **kwargs):
-        observed[session.root] = session.parquet_filters
-        yield from original(session, **kwargs)
+        scans.append(session.root)
+        for path, batch in original(session, **kwargs):
+            consumed[session.root].extend(batch.timestamp.tolist())
+            yield path, batch
 
     monkeypatch.setattr(reading, "iter_dataset_file_batches", measured)
     output = assembler.assemble(
@@ -130,24 +156,18 @@ def test_assembly_applies_overall_window_once_to_each_reader(
             time_window=overall,
         )
     )
-    expected_filters = []
-    for bounds in (input_window, overall):
-        if bounds is not None:
-            expected_filters.extend(
-                reading.parquet_filters_for_time_window(
-                    timestamp_column="timestamp", time_window=TimeWindow(**bounds)
-                )
-            )
-    assert observed == {
-        base: tuple(expected_filters),
-        auxiliary: tuple(expected_filters),
+    # Both inputs scan once and consume only the exact intersection, regardless
+    # of whether the reader represents a day end with < or <= predicates.
+    assert len(scans) == 2 and set(scans) == {base, auxiliary}
+    assert consumed == {
+        base: selected.timestamp.tolist(),
+        auxiliary: selected.timestamp.tolist(),
     }
+    monkeypatch.setattr(reading, "iter_dataset_file_batches", original)
     actual = read_dataset(output)
-    first = 2 if input_window is not None or intraday else 1
     expected = (
-        frame.iloc[first:4]
-        .assign(context=frame.momentum_20d)
+        selected.assign(context=selected.momentum_20d)
         .astype({"timestamp": "datetime64[ns]"})
         .reset_index(drop=True)
     )
-    pd.testing.assert_frame_equal(actual, expected)
+    pd.testing.assert_frame_equal(actual, expected, check_exact=True)

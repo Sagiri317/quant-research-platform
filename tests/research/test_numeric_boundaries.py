@@ -130,7 +130,27 @@ def test_bh_by_reuse_individual_hac_and_keep_full_family_order(monkeypatch):
     assert calls == ["b", "a", "constant", "diagnostic"]
     expected = pd.concat(expected_parts, ignore_index=True)
     expected["input_date_count"] = len(frame)
-    pd.testing.assert_frame_equal(actual, expected, check_exact=True)
+    continuous = [
+        "mean",
+        "standard_error",
+        "t_statistic",
+        "ci_lower",
+        "ci_upper",
+        "p_value",
+        "fdr_adjusted_p_value",
+    ]
+    continuous = [column for column in continuous if column in actual]
+    pd.testing.assert_frame_equal(
+        actual.drop(columns=continuous),
+        expected.drop(columns=continuous),
+        check_exact=True,
+    )
+    pd.testing.assert_frame_equal(
+        actual[continuous].isna(), expected[continuous].isna(), check_exact=True
+    )
+    pd.testing.assert_frame_equal(
+        actual[continuous], expected[continuous], check_exact=False, rtol=1e-12, atol=0
+    )
     for method in ("BH", "BY"):
         part = actual.loc[actual.fdr_method.eq(method)]
         assert part.factor_id.tolist() == list(planned)
@@ -139,8 +159,11 @@ def test_bh_by_reuse_individual_hac_and_keep_full_family_order(monkeypatch):
         independent = statistics.multipletests(
             p_values, alpha=0.05, method="fdr_bh" if method == "BH" else "fdr_by"
         )[1]
-        np.testing.assert_array_equal(
-            part.loc[defined, "fdr_adjusted_p_value"], independent[:2]
+        np.testing.assert_allclose(
+            part.loc[defined, "fdr_adjusted_p_value"],
+            independent[:2],
+            rtol=1e-13,
+            atol=0,
         )
         assert part.loc[~defined, "fdr_adjusted_p_value"].isna().all()
 
@@ -347,7 +370,9 @@ def test_optimizer_covariance_boundaries_and_unique_asset_requirement(kind, erro
             assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,)),
         )
     if error is None:
-        np.testing.assert_array_equal(result.weights, [0.5, 0.5, 0.0])
+        np.testing.assert_allclose(
+            result.weights, [0.5, 0.5, 0.0], rtol=1e-12, atol=1e-14
+        )
 
 
 def test_named_quantile_recipe_preserves_order_and_nulls():

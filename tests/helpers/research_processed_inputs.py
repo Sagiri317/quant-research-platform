@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
+import numpy as np
 import pandas as pd
 
 from quant_research_platform.catalog.processed import ProcessedDataCatalog
@@ -321,3 +322,74 @@ def _with_optional_columns(
     if include_extensions:
         return frame.assign(**{extension_column: list(values)})
     return frame
+
+
+def assembly_source(
+    tmp_path, frame, *, data_id="external_table", units=None, availability=None
+):
+    roles = {
+        "market_id": ColumnRole.KEY,
+        "asset_id": ColumnRole.KEY,
+        "timestamp": ColumnRole.TIMESTAMP,
+    }
+    roles.update(
+        {column: ColumnRole.CONTEXT for column in frame if column not in roles}
+    )
+    roles.update(
+        {
+            column: ColumnRole.FACTOR
+            for column in (
+                "momentum_20d",
+                "log_total_market_cap",
+                "log_float_market_cap",
+            )
+            if column in frame
+        }
+    )
+    if "eligible" in frame:
+        roles["eligible"] = ColumnRole.UNIVERSE
+    for column in ("return_next", "forward_return_20d"):
+        if column in frame:
+            roles[column] = ColumnRole.LABEL
+    spec = ProcessedDataSpec(
+        data_id=data_id,
+        market_id="a_share",
+        kind="panel",
+        frequency="1d",
+        grain="asset_timestamp",
+        primary_key=PLATFORM_ASSET_TIME_KEY,
+        partition_columns=("year",),
+        column_roles=roles,
+        column_units=units or {},
+        label_availability_columns=availability or {},
+    )
+    root = tmp_path / data_id
+    write_dataset(
+        root, (frame.iloc[i : i + 17] for i in range(0, len(frame), 17)), spec=spec
+    )
+    return root, spec
+
+
+def assembly_config(tmp_path, root, **choices):
+    return {
+        "market_id": "a_share",
+        "dataset_id": "external_research",
+        "inputs": {root.name: str(root)},
+        "factor_columns": ["momentum_20d"],
+        "label_columns": [],
+        "feature_recipe": None,
+        "time_window": {"start": "2024-01-02", "end": "2024-01-02"},
+        "output_root": str(tmp_path / "assembled"),
+        **choices,
+    }
+
+
+def assembly_frame(n=120):
+    return pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": [f"asset_{i:03d}" for i in range(n)],
+            "timestamp": pd.Timestamp("2024-01-02"),
+            "momentum_20d": np.sin(np.arange(n)),
+        }
+    )

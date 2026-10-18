@@ -608,7 +608,7 @@ def test_suspended_forced_share_change_preserves_wealth_with_or_without_quote(tm
 
     from quant_research_platform.sources.reference import interim
     from tests.helpers.portfolio_inputs import _interim_specs
-    from tests.research.test_closed_market_portfolios import _native_inputs
+    from tests.helpers.portfolio_inputs import closed_market_inputs as _native_inputs
     from tests.sources.reference.test_equity_events import write_equity_source
 
     def produce(root, quoted):

@@ -1,8 +1,6 @@
 """Keep decision feasibility separate from future execution constraints."""
 
-from collections import deque
 from dataclasses import replace
-from fractions import Fraction
 
 import numpy as np
 import pandas as pd
@@ -15,113 +13,11 @@ from quant_research_platform.artifacts.portfolio_ledger import (
 )
 from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_LEDGER_COST_COLUMNS,
-    ExecutionAssumptions,
     PortfolioCandidateSpec,
     PortfolioCapital,
 )
-from quant_research_platform.markets.implementations.a_share.execution import (
-    fee_schedule_from_frame,
-    prepare_trade_cost,
-)
 from quant_research_platform.research.portfolios import production
-from quant_research_platform.research.portfolios.risk import FactorRiskEstimate
-from tests.research.test_portfolio_production import _inputs
-
-
-def _decision_inputs(*, benchmark=(0.5, 0.5), holdings=None, fee_rate=0.0):
-    assets = list("abc"[: len(benchmark)])
-    day, entry, end = pd.to_datetime(["2023-01-03", "2023-01-04", "2023-01-05"])
-    life = pd.Timestamp("2000-01-01")
-    panel = pd.DataFrame(
-        {
-            "asset_id": assets,
-            "listing_date": life,
-            "timestamp": day,
-            "open": 100.0,
-            "close": 100.0,
-            "amount": 1000.0,
-            "market_type": 1,
-            "is_trading": True,
-            "is_nonfinancial_industry": True,
-            "research_open_mark_at": pd.NaT,
-        }
-    )
-    _, fees, _ = _inputs()
-    fees["rate"] = fee_rate
-    values = pd.Series(benchmark if holdings is None else holdings, index=assets) * 100
-    alpha = pd.Series([0.1, *([0.0] * (len(assets) - 1))], index=assets)
-    risk = FactorRiskEstimate(
-        pd.DataFrame(),
-        pd.DataFrame([[0.01]], index=["style"], columns=["style"]),
-        pd.Series(0.01, index=assets),
-        126.0,
-        63.0,
-        0.2,
-        252.0,
-    )
-    enhanced = production._EnhancedDecision(
-        pd.Series(benchmark, index=assets),
-        alpha,
-        pd.DataFrame({"asset_id": assets, "style": 1.0}),
-        risk,
-        production.AlphaCalibration(
-            1.0, 0.0, 1.0, 1.0, 0.5, -1.0, 1.0, 0.0, 1.0, 6, 6, None
-        ),
-    )
-    return dict(
-        candidate=PortfolioCandidateSpec(
-            "timing",
-            "global",
-            "benchmark_enhanced",
-            "champion",
-            "daily",
-            None,
-            "csi500",
-            ("style",),
-        ),
-        decision_timestamp=day,
-        next_timestamp=entry,
-        panel=panel,
-        next_panel=panel.assign(timestamp=entry),
-        endpoint_panel=panel.assign(timestamp=end),
-        closed_assets=frozenset(),
-        dataset=pd.DataFrame(
-            {
-                "asset_id": assets,
-                "timestamp": day,
-                "eligible": True,
-                "total_market_cap": 1000.0,
-                "float_market_cap": 1000.0,
-            }
-        ),
-        execution=pd.DataFrame(
-            {
-                "asset_id": assets,
-                "timestamp": day,
-                "execution_at": entry,
-                "can_enter": True,
-                "can_exit": True,
-            }
-        ),
-        holdings=values,
-        held_units=values.map(lambda value: Fraction(value) / 100),
-        cash=0.0,
-        recovery_cash=0.0,
-        decision_receivable=0.0,
-        receivable=0.0,
-        locked_quantities={},
-        nav=100.0,
-        amount_history={(asset, life): deque([1000.0] * 20) for asset in assets},
-        alpha=alpha,
-        enhanced_decision=enhanced,
-        target_override=None,
-        decision_reason="enhanced_optimizer",
-        assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,)),
-        fee_schedule=fee_schedule_from_frame(fees, content_identity="synthetic"),
-        fee_identity="synthetic",
-        prepare_trade_cost=prepare_trade_cost,
-        market_name_for_type=lambda _: "shanghai",
-    )
+from tests.helpers.portfolio_inputs import decision_inputs as _decision_inputs
 
 
 def test_future_execution_changes_actual_constraints_without_changing_target(tmp_path):

@@ -1,5 +1,6 @@
 """Proposed native regression for eligible-domain EVAL transformations."""
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -19,14 +20,18 @@ def test_native_evaluation_transforms_only_selected_cross_section(tmp_path, tran
         {
             "asset_id": list("abcdef"),
             "timestamp": pd.Timestamp("2023-01-02"),
-            "x": [1.0, 2.0, 3.0, 1.5, 1.6, 1.7],
-            "label": [1.0, 2.0, 3.0, 10.0, 10.0, 10.0],
+            "x": [1.0, 2.0, 8.0, 1.5, 1.6, 1.7],
+            "label": [1.0, 4.0, 2.0, 10.0, 10.0, 10.0],
             "available_at": pd.Timestamp("2023-01-02"),
             "eligible": [True] * 3 + [False] * 3,
         }
     )
     if transform == "zscore":
-        frame.loc[3, "x"] = 1e308
+        frame.loc[3, "x"] = 1000.0
+    raw_ic = np.corrcoef([1.0, 2.0, 8.0], [1.0, 4.0, 2.0])[0, 1]
+    rank_ic = np.corrcoef([1.0, 2.0, 3.0], [1.0, 4.0, 2.0])[0, 1]
+    assert abs(rank_ic - raw_ic) > 0.1
+    expected_ic = rank_ic if transform == "rank" else raw_ic
     for name, selected in (
         ("eligible_only", frame.iloc[:3]),
         ("with_ineligible", frame),
@@ -61,8 +66,10 @@ def test_native_evaluation_transforms_only_selected_cross_section(tmp_path, tran
             )
         )
         manifest, tables = read_evaluation_outputs(output)
-        assert tables["metrics"].ic.tolist() == pytest.approx([1.0])
-        assert tables["metrics"].rankic.tolist() == pytest.approx([1.0])
+        assert tables["metrics"].ic.tolist() == pytest.approx(
+            [expected_ic], rel=1e-12, abs=1e-15
+        )
+        assert tables["metrics"].rankic.tolist() == pytest.approx([0.5])
         assert tables["metrics"].n_obs.tolist() == [3]
         assert tables["metrics"].ic_reason.isna().all()
         diagnostics = manifest["metadata"]["evaluation_diagnostics"]

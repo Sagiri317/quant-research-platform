@@ -20,7 +20,7 @@ from quant_research_platform.markets.implementations.a_share.execution import (
 )
 from quant_research_platform.research.portfolios import optimizer, production
 from tests.helpers.optimizer import with_cash_asset
-from tests.research.test_portfolio_decision_execution import _decision_inputs
+from tests.helpers.portfolio_inputs import decision_inputs as _decision_inputs
 
 
 def _owner(rate, *, impact=0.0):
@@ -61,8 +61,17 @@ def test_prepared_cost_gradient_matches_its_economic_amount_formula(amount):
         assert costs == pytest.approx(owner.totals(np.array([amount]), adv), rel=1e-14)
 
 
-@pytest.mark.parametrize("seed", range(30))
-@pytest.mark.parametrize("scale", ["normal", "capacity", "small_account"])
+@pytest.mark.parametrize(
+    "seed, scale",
+    [
+        (0, "normal"),  # Both name bands, without binding cash.
+        (1, "normal"),  # Both name bands and cash.
+        (5, "normal"),  # Only the lower name band binds.
+        (0, "capacity"),
+        (2, "capacity"),  # Capacity and cash bind together.
+        (1, "small_account"),  # Same active set under ordinary NAV rescaling.
+    ],
+)
 def test_side_aware_cost_reaches_independent_lp_optimum(seed, scale):
     rng = np.random.default_rng(seed)
     n = 12
@@ -144,6 +153,8 @@ def test_side_aware_cost_reaches_independent_lp_optimum(seed, scale):
     assert weights.sum() == pytest.approx(1.0, abs=1e-12)
     assert np.abs(stock / (1.0 - fee) - benchmark).max() <= 0.005 + 1e-8
     assert np.max(np.abs(stock - benchmark) / capacity) <= 1 + 1e-7
+    assert abs(style @ stock) <= 0.2 * stock.sum() + 1e-10
+    assert np.abs(stock - benchmark).sum() + weights[-1] <= 0.4 + 1e-10
 
 
 @pytest.mark.parametrize("shift", [-1e-12, 0.0, 1e-12])

@@ -366,8 +366,8 @@ def test_explicit_native_fit_prediction_and_backtest_roundtrip(
     from quant_research_platform.research.portfolios.production import backtest
     from quant_research_platform.research.predictions.runner import predict
     from quant_research_platform.storage.datasets import read_dataset
+    from tests.helpers.portfolio_inputs import closed_market_inputs as _native_inputs
     from tests.research.direct_model_test_support import fit_frame
-    from tests.research.test_closed_market_portfolios import _native_inputs
 
     inputs, _, _, _ = _native_inputs(tmp_path / "market", fault="normal_open")
     training = read_dataset(inputs["dataset"])
@@ -653,7 +653,8 @@ def test_adv_warmup_counts_twenty_own_market_observations_across_union_holiday(
     tmp_path, monkeypatch
 ):
     from quant_research_platform.contracts.time import TimeWindow
-    from tests.research.test_portfolio_production import _build_producer, _inputs
+    from tests.helpers.portfolio_inputs import portfolio_inputs as _inputs
+    from tests.research.test_portfolio_production import _build_producer
 
     frames, fees, window = _inputs()
     frames["panel"].loc[frames["panel"].asset_id.eq("b"), "market_type"] = 4

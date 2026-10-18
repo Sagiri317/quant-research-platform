@@ -119,6 +119,31 @@ def test_research_dataset_assembler_uses_explicit_base_not_input_order(
         "context_1",
     ]
 
+    assert isinstance(result.index, pd.RangeIndex)
+    assert result.index.tolist() == [0, 1]
+    assert result["factor_1"].dtype == "float64"
+    assert result["timestamp"].dtype == "datetime64[ns]"
+    root = tmp_path / "data/research/dummy_market/dummy_dataset"
+    spec_payload = json.loads((root / "spec.json").read_text(encoding="utf-8"))
+    manifest_payload = json.loads(
+        (root / "_manifest" / "manifest.json").read_text(encoding="utf-8")
+    )
+    expected = {
+        "base": "strict",
+        "factors": "sparse",
+        "labels": "strict",
+        "filters": "strict",
+        "context": "strict",
+    }
+    assert spec_payload["key_coverage"] == expected
+    assert "key_coverage" not in manifest_payload
+    expected_roles = {
+        column: role.value
+        for column, role in dataset_catalog.get("dummy_dataset").column_roles.items()
+    }
+    assert spec_payload["column_roles"] == expected_roles
+    assert "column_roles" not in manifest_payload
+
 
 def test_research_dataset_columns_extend_without_assembler_change(
     tmp_path: Path,
@@ -362,79 +387,6 @@ def test_strict_research_input_missing_base_key_fails_in_assembler(
             dataset_id="dummy_dataset",
             time_window=TimeWindow("2024-01-02", "2024-01-03"),
         )
-
-
-def test_sparse_research_input_missing_base_key_passes_with_nan(tmp_path: Path) -> None:
-    layout = StorageLayout(project_root=tmp_path)
-    processed_catalog = make_dummy_processed_catalog()
-    dataset_catalog = make_research_dataset_catalog(
-        make_dummy_research_dataset_spec(key_coverage={"factors": "sparse"})
-    )
-    write_dummy_processed_inputs(layout, processed_catalog, truncate_factors=True)
-    assemble_research_dataset(
-        inputs={
-            item.data_id: layout.processed_data_root(
-                item.market_id, item.kind, item.data_id
-            )
-            for item in processed_catalog.list()
-            if item.data_id in dataset_catalog.get("dummy_dataset").input_data_ids
-        },
-        output_root=layout.research_dataset_root(
-            dataset_catalog.get("dummy_dataset").market_id, "dummy_dataset"
-        ),
-        dataset_catalog=dataset_catalog,
-        dataset_id="dummy_dataset",
-        time_window=TimeWindow("2024-01-02", "2024-01-03"),
-    )
-    result = read_dataset(tmp_path / "data/research/dummy_market/dummy_dataset")
-    assert result.loc[result["asset_id"].eq("asset_a"), "factor_1"].tolist() == [1.0]
-    assert pd.isna(result.loc[result["asset_id"].eq("asset_b"), "factor_1"]).all()
-
-
-def test_research_dataset_semantic_snapshots_are_persisted_for_all_inputs(
-    tmp_path: Path,
-) -> None:
-    layout = StorageLayout(project_root=tmp_path)
-    processed_catalog = make_dummy_processed_catalog()
-    dataset_catalog = make_research_dataset_catalog(
-        make_dummy_research_dataset_spec(key_coverage={"factors": "sparse"})
-    )
-    write_dummy_processed_inputs(layout, processed_catalog, truncate_factors=True)
-    assemble_research_dataset(
-        inputs={
-            item.data_id: layout.processed_data_root(
-                item.market_id, item.kind, item.data_id
-            )
-            for item in processed_catalog.list()
-            if item.data_id in dataset_catalog.get("dummy_dataset").input_data_ids
-        },
-        output_root=layout.research_dataset_root(
-            dataset_catalog.get("dummy_dataset").market_id, "dummy_dataset"
-        ),
-        dataset_catalog=dataset_catalog,
-        dataset_id="dummy_dataset",
-        time_window=TimeWindow("2024-01-02", "2024-01-03"),
-    )
-    root = tmp_path / "data/research/dummy_market/dummy_dataset"
-    spec_payload = json.loads((root / "spec.json").read_text(encoding="utf-8"))
-    manifest_payload = json.loads(
-        (root / "_manifest" / "manifest.json").read_text(encoding="utf-8")
-    )
-    expected = {
-        "base": "strict",
-        "factors": "sparse",
-        "labels": "strict",
-        "filters": "strict",
-        "context": "strict",
-    }
-    assert spec_payload["key_coverage"] == expected
-    assert "key_coverage" not in manifest_payload
-    expected_roles = {
-        column: role.value
-        for column, role in dataset_catalog.get("dummy_dataset").column_roles.items()
-    }
-    assert spec_payload["column_roles"] == expected_roles
-    assert "column_roles" not in manifest_payload
 
 
 def test_strict_research_input_value_nan_does_not_count_as_missing_key(

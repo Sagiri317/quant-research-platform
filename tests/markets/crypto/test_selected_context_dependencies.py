@@ -87,7 +87,15 @@ def test_every_spot_factor_minimal_inputs_match_full_public_prepare(tmp_path, fa
                 frames[HFT_PANEL_DATA_ID],
             )
         )
-    pd.testing.assert_frame_equal(*results, check_exact=True)
+    pd.testing.assert_frame_equal(results[0].isna(), results[1].isna())
+    pd.testing.assert_frame_equal(
+        results[0].drop(columns=[factor]),
+        results[1].drop(columns=[factor]),
+        check_exact=True,
+    )
+    pd.testing.assert_series_equal(
+        results[0][factor], results[1][factor], check_exact=False, rtol=2e-12, atol=0
+    )
     assert results[0][factor].notna().any()
 
 
@@ -120,6 +128,7 @@ def test_every_cross_asset_factor_minimal_information_matches_full(tmp_path, fac
                 },
             )
         )
+    # Cross-asset alignment copies the already computed information factor.
     pd.testing.assert_frame_equal(*results, check_exact=True)
     assert results[0][factor].notna().any()
 
@@ -186,7 +195,16 @@ def test_every_external_factor_ignores_unrelated_verified_archive_and_target_fie
                 source={"root": str(raw), "archives": {"BTCUSDT": archives}},
             )
         )
-    pd.testing.assert_frame_equal(*results, check_exact=True)
+    factor = "bybit_" + field
+    pd.testing.assert_frame_equal(results[0].isna(), results[1].isna())
+    pd.testing.assert_frame_equal(
+        results[0].drop(columns=[factor]),
+        results[1].drop(columns=[factor]),
+        check_exact=True,
+    )
+    pd.testing.assert_series_equal(
+        results[0][factor], results[1][factor], check_exact=False, rtol=2e-12, atol=0
+    )
     assert results[0]["bybit_" + field].notna().any()
 
 

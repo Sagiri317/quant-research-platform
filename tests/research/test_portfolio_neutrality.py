@@ -98,7 +98,8 @@ def test_mixed_precision_windows_keep_whole_date_and_nanosecond_bounds():
 def test_neutral_target_and_blocked_realized_exposure_are_distinct(
     tmp_path, monkeypatch
 ):
-    from tests.research.test_portfolio_production import _build_producer, _inputs
+    from tests.helpers.portfolio_inputs import portfolio_inputs as _inputs
+    from tests.research.test_portfolio_production import _build_producer
 
     frames, fees, window = _inputs()
     frames["panel"]["industry_standard_id"] = "fixture"
@@ -143,7 +144,8 @@ def test_neutral_target_and_blocked_realized_exposure_are_distinct(
 def test_nonrebalance_blocked_exit_keeps_realized_exposure_unknown(
     tmp_path, monkeypatch
 ):
-    from tests.research.test_portfolio_production import _build_producer, _inputs
+    from tests.helpers.portfolio_inputs import portfolio_inputs as _inputs
+    from tests.research.test_portfolio_production import _build_producer
 
     frames, fees, window = _inputs()
     for name in ("panel", "dataset", "execution"):
@@ -269,7 +271,7 @@ def test_missing_neutral_context_carries_account_and_skips_new_target(
     missing,
 ):
     from quant_research_platform.research.portfolios.production import _build_session
-    from tests.research.test_portfolio_decision_execution import _decision_inputs
+    from tests.helpers.portfolio_inputs import decision_inputs as _decision_inputs
 
     inputs = _decision_inputs()
     inputs["candidate"] = replace(
@@ -321,11 +323,9 @@ def test_missing_neutral_context_carries_account_and_skips_new_target(
 def test_enhanced_nonrebalance_unknown_industry_preserves_held_account(
     tmp_path, monkeypatch
 ):
-    from tests.research.test_portfolio_production import (
-        RISK_STYLE_COLUMNS,
-        _build_producer,
-        _inputs,
-    )
+    from quant_research_platform.research.protocols.a_share import RISK_STYLE_COLUMNS
+    from tests.helpers.portfolio_inputs import portfolio_inputs as _inputs
+    from tests.research.test_portfolio_production import _build_producer
 
     frames, fees, window = _inputs()
     frames["panel"] = frames["panel"].assign(
@@ -398,7 +398,7 @@ def test_enhanced_nonrebalance_unknown_industry_preserves_held_account(
 @pytest.mark.parametrize("schedule", ["daily", "weekly-last-trading-day"])
 def test_unheld_missing_cap_does_not_make_known_exposures_undefined(schedule):
     from quant_research_platform.research.portfolios.production import _build_session
-    from tests.research.test_portfolio_decision_execution import _decision_inputs
+    from tests.helpers.portfolio_inputs import decision_inputs as _decision_inputs
 
     inputs = _decision_inputs(benchmark=(0.5, 0.5, 0.0))
     inputs["candidate"] = replace(
@@ -424,7 +424,8 @@ def test_unheld_missing_cap_does_not_make_known_exposures_undefined(schedule):
 def test_absent_cap_column_is_local_to_actual_scheduled_neutral_target(
     tmp_path, monkeypatch
 ):
-    from tests.research.test_portfolio_production import _build_producer, _inputs
+    from tests.helpers.portfolio_inputs import portfolio_inputs as _inputs
+    from tests.research.test_portfolio_production import _build_producer
 
     frames, fees, _ = _inputs()
     frames["dataset"] = frames["dataset"].drop(columns="float_market_cap")

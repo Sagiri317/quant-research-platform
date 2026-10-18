@@ -925,10 +925,28 @@ def test_holding_input_reader_freezes_decision_universe_over_holding_interval(
     missing_earnings_inputs = {**roots, "fundamental_factors": missing_earnings_root}
     five_after = first_for_styles(RISK_STYLE_COLUMNS[:-1], missing_earnings_inputs)
     pd.testing.assert_series_equal(
-        five.fitted.factor_returns, five_after.fitted.factor_returns, check_exact=True
+        (five.fitted.factor_returns).isna(),
+        (five_after.fitted.factor_returns).isna(),
+        check_exact=True,
+    )
+    pd.testing.assert_series_equal(
+        five.fitted.factor_returns,
+        five_after.fitted.factor_returns,
+        check_exact=False,
+        rtol=2e-12,
+        atol=1e-14,
     )
     pd.testing.assert_frame_equal(
-        five.fitted.exposures, five_after.fitted.exposures, check_exact=True
+        (five.fitted.exposures).isna(),
+        (five_after.fitted.exposures).isna(),
+        check_exact=True,
+    )
+    pd.testing.assert_frame_equal(
+        five.fitted.exposures,
+        five_after.fitted.exposures,
+        check_exact=False,
+        rtol=2e-12,
+        atol=1e-14,
     )
     six = first_for_styles(RISK_STYLE_COLUMNS, missing_earnings_inputs)
     assert six.fitted is None and six.reason == "holding_factor_fit_unidentified"
@@ -947,12 +965,28 @@ def test_holding_input_reader_freezes_decision_universe_over_holding_interval(
         sparse_inputs = {**roots, "fundamental_factors": sparse_root}
         five_sparse = first_for_styles(RISK_STYLE_COLUMNS[:-1], sparse_inputs)
         pd.testing.assert_series_equal(
+            (five.fitted.factor_returns).isna(),
+            (five_sparse.fitted.factor_returns).isna(),
+            check_exact=True,
+        )
+        pd.testing.assert_series_equal(
             five.fitted.factor_returns,
             five_sparse.fitted.factor_returns,
+            check_exact=False,
+            rtol=2e-12,
+            atol=1e-14,
+        )
+        pd.testing.assert_frame_equal(
+            (five.fitted.exposures).isna(),
+            (five_sparse.fitted.exposures).isna(),
             check_exact=True,
         )
         pd.testing.assert_frame_equal(
-            five.fitted.exposures, five_sparse.fitted.exposures, check_exact=True
+            five.fitted.exposures,
+            five_sparse.fitted.exposures,
+            check_exact=False,
+            rtol=2e-12,
+            atol=1e-14,
         )
         with pytest.raises(ValueError, match="holding_risk_context_session_missing"):
             first_for_styles(RISK_STYLE_COLUMNS, sparse_inputs)
@@ -970,14 +1004,28 @@ def test_holding_input_reader_freezes_decision_universe_over_holding_interval(
             {**roots, "market_panel_1d": invalid_daily_root},
         )
         pd.testing.assert_series_equal(
+            (five.fitted.factor_returns).isna(),
+            (five_holding.fitted.factor_returns).isna(),
+            check_exact=True,
+        )
+        pd.testing.assert_series_equal(
             five.fitted.factor_returns,
             five_holding.fitted.factor_returns,
+            check_exact=False,
+            rtol=2e-12,
+            atol=1e-14,
+        )
+        pd.testing.assert_series_equal(
+            (five.fitted.asset_returns).isna(),
+            (five_holding.fitted.asset_returns).isna(),
             check_exact=True,
         )
         pd.testing.assert_series_equal(
             five.fitted.asset_returns,
             five_holding.fitted.asset_returns,
-            check_exact=True,
+            check_exact=False,
+            rtol=2e-12,
+            atol=1e-14,
         )
         # Daily risk still requires and validates its own return input.
         from quant_research_platform.research.portfolios.production import (

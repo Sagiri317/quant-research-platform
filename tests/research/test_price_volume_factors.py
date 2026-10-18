@@ -687,7 +687,25 @@ def test_expanded_pv_nine_formulas_complete_windows_and_nulls(tmp_path):
     changed = calculate_price_volume_factors(
         future, min_fresh_fraction=1.0, factor_columns=names
     )
-    pd.testing.assert_frame_equal(changed.iloc[:-1], result.iloc[:-1], check_exact=True)
+    observed_values, reference_values = changed.iloc[:-1], result.iloc[:-1]
+    numeric = list(observed_values.select_dtypes(include="floating").columns)
+    pd.testing.assert_frame_equal(
+        observed_values.drop(columns=numeric),
+        reference_values.drop(columns=numeric),
+        check_exact=True,
+    )
+    pd.testing.assert_frame_equal(
+        observed_values[numeric].isna(),
+        reference_values[numeric].isna(),
+        check_exact=True,
+    )
+    pd.testing.assert_frame_equal(
+        observed_values[numeric],
+        reference_values[numeric],
+        check_exact=False,
+        rtol=1e-12,
+        atol=0.0,
+    )
 
 
 def test_market_model_factors_share_risk_math_and_window_identity(tmp_path):

@@ -56,43 +56,29 @@ def test_validate_compute_panel_rejects_duplicate_timestamp_asset_keys() -> None
         validate_compute_panel(panel, spec)
 
 
-def test_compute_ic_by_timestamp_computes_pearson_and_rankic() -> None:
+def test_compute_ic_and_groups_have_independent_nonperfect_oracles() -> None:
     spec = ComputePanelSpec(
         signal_columns=("factor",), label_columns=("forward_return",)
     )
-
-    result, _ = compute_ic_and_grouped_label_values(
-        make_perfect_cross_section_compute_panel(),
-        spec,
-    )
-
-    assert result["timestamp"].nunique() == 2
-    assert result["signal"].tolist() == ["factor", "factor"]
-    assert result["ic"].round(6).tolist() == [1.0, 1.0]
-    assert result["rankic"].round(6).tolist() == [1.0, 1.0]
-    assert result["n_obs"].tolist() == [3, 3]
-
-
-def test_compute_grouped_label_values_assigns_timestamp_level_groups() -> None:
-    spec = ComputePanelSpec(
-        signal_columns=("factor",), label_columns=("forward_return",)
-    )
-
-    _, result = compute_ic_and_grouped_label_values(
-        make_perfect_cross_section_compute_panel(),
-        spec,
-        n_groups=3,
-    )
-
-    assert result["group"].tolist() == [1, 2, 3, 1, 2, 3]
-    assert result["mean_label_value"].round(6).tolist() == [
-        0.01,
-        0.02,
-        0.03,
-        0.01,
-        0.02,
-        0.03,
+    panel = make_perfect_cross_section_compute_panel()
+    panel.loc[panel.timestamp.eq(panel.timestamp.min()), "factor"] = [1.0, 2.0, 4.0]
+    panel.loc[panel.timestamp.eq(panel.timestamp.min()), "forward_return"] = [
+        1.0,
+        4.0,
+        2.0,
     ]
+    metrics, groups = compute_ic_and_grouped_label_values(panel, spec, n_groups=3)
+
+    assert metrics["timestamp"].nunique() == 2
+    assert metrics["signal"].tolist() == ["factor", "factor"]
+    # Centered dot products give 1/7; the rank permutations give 1/2.
+    assert metrics["ic"].tolist() == pytest.approx([1 / 7, 1.0], rel=1e-13)
+    assert metrics["rankic"].tolist() == pytest.approx([0.5, 1.0], rel=1e-13)
+    assert metrics["n_obs"].tolist() == [3, 3]
+    assert groups["group"].tolist() == [1, 2, 3, 1, 2, 3]
+    assert groups["mean_label_value"].tolist() == pytest.approx(
+        [1.0, 4.0, 2.0, 0.01, 0.02, 0.03], rel=1e-13
+    )
 
 
 def test_grouped_label_values_keep_tie_classes_and_real_tiny_variation() -> None:

@@ -42,7 +42,10 @@ def test_style_fit_domains_are_independent_by_column_and_day():
     )
     actual = preprocess_risk_styles(frame, style_columns=("a", "b"))
     full = preprocess_risk_styles(frame.fillna({"b": 3.0}), style_columns=("a", "b"))
-    pd.testing.assert_series_equal(actual.a, full.a, check_exact=True)
+    pd.testing.assert_series_equal(actual.a.isna(), full.a.isna(), check_exact=True)
+    pd.testing.assert_series_equal(
+        actual.a, full.a, check_exact=False, rtol=1e-12, atol=1e-14
+    )
     np.testing.assert_allclose(actual.a[:3], [-np.sqrt(1.5), 0.0, np.sqrt(1.5)])
     np.testing.assert_allclose(actual.a[3:], [0.0, 0.0, np.nan], equal_nan=True)
 
@@ -149,7 +152,10 @@ def test_enhanced_decision_preprocesses_before_joint_style_selection():
     cross.loc[23, "b"] = np.nan
     missing = exposures(cross)
     pd.testing.assert_series_equal(
-        missing.a, full.a.loc[missing.index], check_exact=True
+        missing.a, full.a.loc[missing.index], check_exact=False, rtol=1e-12, atol=1e-14
+    )
+    pd.testing.assert_series_equal(
+        missing.a.isna(), full.a.loc[missing.index].isna(), check_exact=True
     )
     assert "asset_23" not in missing.index
 

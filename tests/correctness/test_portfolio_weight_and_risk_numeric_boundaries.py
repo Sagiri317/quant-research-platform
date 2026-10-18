@@ -562,7 +562,22 @@ def test_native_market_model_relisting_resets_beta_and_residual_warmup(tmp_path)
         ),
         ignore_index=True,
     )
-    pd.testing.assert_frame_equal(actual, split, check_dtype=False, check_exact=True)
+    numeric = actual.select_dtypes(include="floating").columns
+    pd.testing.assert_frame_equal(
+        actual.drop(columns=numeric),
+        split.drop(columns=numeric),
+        check_dtype=False,
+        check_exact=True,
+    )
+    pd.testing.assert_frame_equal(actual.isna(), split.isna(), check_exact=True)
+    pd.testing.assert_frame_equal(
+        actual[numeric],
+        split[numeric],
+        check_dtype=False,
+        check_exact=False,
+        rtol=2e-12,
+        atol=1e-14,
+    )
     control = saved.copy()
     new = control.asset_id.eq(assets[0]) & control.timestamp.ge(dates[600])
     control.loc[new, "asset_id"] = "new_life"

@@ -71,81 +71,6 @@ def test_native_comparison_reuses_the_single_dataset_scan(
     assert len(scans) == 1
 
 
-@pytest.mark.parametrize(
-    "variation",
-    [
-        "values",
-        "maturity",
-        "primary_label",
-        "unconsumed_factor",
-        "maturity_names_and_cutoff",
-        "unknown_to_known_unit",
-        "future_values",
-        "signed_zero",
-        "one_ulp",
-    ],
-)
-def test_native_both_predictions_use_the_explicit_current_target(
-    paired_sources, tmp_path, variation
-):
-    case, configs, paths = paired_sources
-    frame, spec = case.frame.copy(), case.spec
-    config = deepcopy(configs["quarterly"])
-    if variation == "values":
-        frame["forward_return_20d"] *= -1
-    elif variation == "maturity":
-        frame.loc[frame.asset_id.eq("a0"), "forward_return_20d_available_at"] = (
-            pd.Timestamp("2021-01-01")
-        )
-    elif variation == "primary_label":
-        frame["inverse_label"] = -frame.forward_return_20d
-        spec = replace(
-            spec,
-            label_columns=(*spec.label_columns, "inverse_label"),
-            column_roles={**spec.column_roles, "inverse_label": "label"},
-            label_availability_columns={
-                "inverse_label": "forward_return_20d_available_at"
-            },
-        )
-        config["evaluation"]["primary_label"] = "inverse_label"
-    elif variation == "unconsumed_factor":
-        frame[case.factor] = np.nan
-    elif variation == "maturity_names_and_cutoff":
-        frame["actual_maturity"] = frame.forward_return_20d_available_at
-        spec = replace(
-            spec,
-            context_columns=(*spec.context_columns, "actual_maturity"),
-            column_roles={**spec.column_roles, "actual_maturity": "context"},
-            label_availability_columns={"forward_return_20d": "actual_maturity"},
-        )
-        config["label_cutoff"] = "2019-02-16"
-    elif variation == "unknown_to_known_unit":
-        spec = replace(spec, column_units={"forward_return_20d": "decimal_return"})
-    elif variation == "future_values":
-        frame.loc[
-            frame.forward_return_20d_available_at.gt(pd.Timestamp("2019-02-15")),
-            "forward_return_20d",
-        ] *= -9
-    else:
-        frame.loc[frame.asset_id.eq("a0"), "forward_return_20d"] = (
-            -0.0 if variation == "signed_zero" else np.nextafter(0.1, 1.0)
-        )
-    write_dataset(tmp_path / "chosen-target", frame, spec=spec)
-    config.update(
-        dataset=str(tmp_path / "chosen-target"), output=str(tmp_path / "right")
-    )
-    original_losses = _losses(paths["global"])
-    actual = model_statistics(config)
-    with read_statistics_artifact(actual).table(
-        "model_group_comparison.parquet"
-    ) as rows:
-        assert rows.observation_count.gt(0).all()
-        assert rows.mean_difference.eq(0).all()
-    # The prior independent statistic is neither an input nor rewritten.
-    pd.testing.assert_frame_equal(_losses(paths["global"]), original_losses)
-    assert not _losses(actual).empty
-
-
 def test_native_reference_missing_family_only_undefines_its_pair(
     paired_sources, tmp_path
 ):
@@ -525,19 +450,83 @@ def test_portfolio_group_inference_methods_have_independent_preconditions(
         assert row.bootstrap_reason == "bootstrap_block_exceeds_observations"
 
 
-@pytest.mark.parametrize("split", [False, True])
+@pytest.mark.parametrize(
+    "variation,split",
+    [
+        ("baseline", False),
+        ("baseline", True),
+        ("values", False),
+        ("maturity", False),
+        ("primary_label", False),
+        ("unconsumed_factor", False),
+        ("maturity_names_and_cutoff", False),
+        ("unknown_to_known_unit", False),
+        ("future_values", False),
+    ],
+)
 def test_native_reference_scores_are_recomputed_on_common_label_keys(
-    paired_sources, tmp_path, split
+    paired_sources, tmp_path, variation, split
 ):
     from quant_research_platform.artifacts.outputs.prediction import (
         read_predictions,
         write_prediction_outputs,
     )
 
-    case, configs, _paths = paired_sources
+    case, configs, paths = paired_sources
     config = deepcopy(configs["quarterly"])
+    frame, spec = case.frame.copy(), case.spec
+    if variation == "values":
+        frame["forward_return_20d"] *= -1
+    elif variation == "maturity":
+        frame.loc[
+            frame.timestamp.eq(pd.Timestamp("2019-01-02")),
+            "forward_return_20d_available_at",
+        ] = pd.Timestamp("2021-01-01")
+    elif variation == "primary_label":
+        frame["inverse_label"] = -frame.forward_return_20d
+        spec = replace(
+            spec,
+            label_columns=(*spec.label_columns, "inverse_label"),
+            column_roles={**spec.column_roles, "inverse_label": "label"},
+            label_availability_columns={
+                "inverse_label": "forward_return_20d_available_at"
+            },
+        )
+        config["evaluation"]["primary_label"] = "inverse_label"
+    elif variation == "unconsumed_factor":
+        frame[case.factor] = np.nan
+    elif variation == "maturity_names_and_cutoff":
+        frame["actual_maturity"] = frame.forward_return_20d_available_at
+        spec = replace(
+            spec,
+            context_columns=(*spec.context_columns, "actual_maturity"),
+            column_roles={**spec.column_roles, "actual_maturity": "context"},
+            label_availability_columns={"forward_return_20d": "actual_maturity"},
+        )
+        config["label_cutoff"] = "2019-02-16"
+    elif variation == "unknown_to_known_unit":
+        spec = replace(spec, column_units={"forward_return_20d": "decimal_return"})
+    elif variation == "future_values":
+        frame.loc[
+            frame.forward_return_20d_available_at.gt(pd.Timestamp("2019-02-15")),
+            "forward_return_20d",
+        ] *= -9
+    target = frame
+    write_dataset(tmp_path / "chosen-target", target, spec=spec)
+    config["dataset"] = str(tmp_path / "chosen-target")
+    label = config["evaluation"]["primary_label"]
+    available = spec.label_availability_columns.get(
+        label, "forward_return_20d_available_at"
+    )
+    cutoff = (
+        pd.Timestamp(config.get("label_cutoff", "2019-02-15"))
+        + pd.Timedelta(days=1)
+        - pd.Timedelta(1, "ns")
+    )
+    original_losses = _losses(paths["global"])
     references = []
     expected = {}
+    counts = {}
     for family, path in zip(case.models, config["global_predictions"], strict=True):
         frame, metadata = read_predictions(path)
         metadata = {
@@ -566,26 +555,34 @@ def test_native_reference_scores_are_recomputed_on_common_label_keys(
                 metadata=metadata,
             )
             references.append(str(reference))
-        eligible = case.frame.loc[
-            case.frame.forward_return_20d_available_at.le(
-                pd.Timestamp("2019-02-15 23:59:59.999999999")
-            )
-        ]
+        eligible = target.loc[target[available].le(cutoff)]
         joined = frame.merge(
             original, on=["timestamp", "asset_id"], suffixes=("_g", "_q")
         ).merge(eligible, on=["timestamp", "asset_id"])
         differences = [
-            group.prediction_score_q.corr(group.forward_return_20d, method="spearman")
-            - group.prediction_score_g.corr(group.forward_return_20d, method="spearman")
+            group.prediction_score_q.corr(group[label], method="spearman")
+            - group.prediction_score_g.corr(group[label], method="spearman")
             for _, group in joined.groupby("timestamp")
         ]
         expected[family] = float(np.mean(differences))
+        counts[family] = len(differences)
+        assert not joined.asset_id.eq("a0").any()
+        assert joined.groupby("timestamp").size().eq(5).all()
+        if variation == "maturity":
+            assert not joined.timestamp.eq(pd.Timestamp("2019-01-02")).any()
     config.update(global_predictions=references, output=str(tmp_path / "paired"))
     artifact = read_statistics_artifact(model_statistics(config))
     with artifact.table("model_group_comparison.parquet") as rows:
         for row in rows.itertuples():
             assert row.mean_difference == pytest.approx(expected[row.family_id])
-            assert row.mean_difference > 1.5
+            assert row.observation_count == counts[row.family_id]
+            assert abs(row.mean_difference) > 1.5
+            assert np.sign(row.mean_difference) == (
+                -1 if variation in {"values", "primary_label"} else 1
+            )
+    pd.testing.assert_frame_equal(
+        _losses(paths["global"]), original_losses, check_exact=True
+    )
 
 
 def test_unknown_reference_chronology_only_blocks_its_family():

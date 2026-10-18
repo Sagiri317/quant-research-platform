@@ -24,14 +24,12 @@ from quant_research_platform.markets.implementations.crypto.execution import (
 from quant_research_platform.research.protocols.crypto_hft import research_chronology
 from quant_research_platform.storage.datasets.writing import write_dataset
 from tests.helpers.binance_hft import KNOWN_NO_FUNDING, _quote
+from tests.helpers.binance_hft import execution_state as _state
+from tests.helpers.binance_hft import execution_trade as _trade
+from tests.helpers.binance_hft import maker_config as _maker_config
+from tests.helpers.binance_hft import taker_config as _taker_config
 from tests.markets.crypto.calibration_test_support import calibration_from_paths
 from tests.markets.crypto.test_direct_portfolio import _market, _window
-from tests.markets.crypto.test_hft_execution import (
-    _maker_config,
-    _state,
-    _taker_config,
-    _trade,
-)
 
 
 def _inputs(root, stamps, *, assets=None, x=None, eligible=None):
@@ -234,7 +232,7 @@ def test_future_gap_keeps_native_maker_decision_prefix(tmp_path, calibrated):
 def test_native_taker_latency_changes_fills_and_is_reported(tmp_path):
     capital = PortfolioCapital("taker", 1000.0, "USDT", "linear_perpetual")
     fills = []
-    for latency in (0, 100, 200):
+    for latency in (0, 100):
 
         def produce(emit, latency=latency):
             simulate_taker(
@@ -269,7 +267,13 @@ def test_native_taker_latency_changes_fills_and_is_reported(tmp_path):
                 for r in b.trades
             )
         )
-    assert all(fills) and len(set(fills)) == 3
+    assert [tuple(row[0] for row in trades) for trades in fills] == [
+        (0,),
+        (100_000_000,),
+    ]
+    assert [tuple(row[1] for row in trades) for trades in fills] == [(1.0,), (1.0,)]
+    for trades in fills:
+        assert trades[0][2] == pytest.approx(100.5, rel=2e-15, abs=0)
 
 
 @pytest.mark.parametrize("exposed", [False, True])

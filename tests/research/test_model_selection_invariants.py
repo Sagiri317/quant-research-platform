@@ -376,7 +376,7 @@ def test_undefined_auxiliary_mse_survives_score_select_roundtrip(
         score,
         select,
     )
-    from tests.research.test_prediction_runner_model_selection import candidates
+    from tests.research.direct_model_test_support import candidates
 
     _, config = candidates(tmp_path)
     labels = pd.read_parquet(config["labels"])

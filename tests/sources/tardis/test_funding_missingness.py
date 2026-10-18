@@ -19,8 +19,9 @@ from quant_research_platform.sources.binance.funding import read_funding_observa
 from quant_research_platform.sources.tardis.funding import import_funding_history
 from quant_research_platform.sources.tardis.raw import import_slices
 from quant_research_platform.sources.tardis.replay import open_tardis_archive
+from tests.helpers.binance_hft import execution_state as _state
+from tests.helpers.binance_hft import taker_config as _taker_config
 from tests.helpers.tardis import _line, _slices
-from tests.markets.crypto.test_hft_execution import _state, _taker_config
 
 _START_MS = pd.Timestamp("2026-09-01T00:00:00Z").value // 1_000_000
 

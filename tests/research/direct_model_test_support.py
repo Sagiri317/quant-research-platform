@@ -3,9 +3,13 @@
 from pathlib import Path
 from types import SimpleNamespace
 
-from quant_research_platform.contracts.models import model_spec_payload
+import numpy as np
+import pandas as pd
+
+from quant_research_platform.contracts.models import ModelSpec, model_spec_payload
 from quant_research_platform.research.models.persisted import load_model
 from quant_research_platform.research.models.production import fit
+from quant_research_platform.research.predictions.runner import predict
 
 
 def fit_frame(
@@ -99,3 +103,65 @@ def predict_frame(root, frame, case, *, window):
     )
     prediction, metadata = read_predictions(output)
     return prediction, output, metadata
+
+
+def candidates(
+    tmp_path, *, algorithms=("linear_regression", "ic_weighted_rank_ensemble")
+):
+    stamps = pd.date_range("2020-01-01", periods=6).repeat(3)
+    frame = pd.DataFrame(
+        {
+            "timestamp": stamps,
+            "asset_id": ["a", "b", "c"] * 6,
+            "x": [1.0, 2.0, 3.0] * 6,
+            "label": [0.1, 0.2, 0.3] * 6,
+            "eligible": True,
+            "label_available_at": stamps,
+        }
+    )
+    frame.loc[
+        (frame.timestamp >= pd.Timestamp("2020-01-04")) & frame.asset_id.eq("a"), "x"
+    ] = np.nan
+    cases, paths = [], []
+    window = {"start": "2020-01-04", "end": "2020-01-06"}
+    for algorithm in algorithms:
+        spec = ModelSpec(
+            model_id=algorithm,
+            model_algorithm=algorithm,
+            input_factor_columns=("x",),
+            target_column="label",
+            random_seed=19,
+        )
+        case = fit_frame(
+            tmp_path / algorithm,
+            frame.loc[frame.timestamp <= pd.Timestamp("2020-01-03")],
+            spec,
+        )
+        future = tmp_path / algorithm / "future.parquet"
+        frame.to_parquet(future, index=False)
+        config = {
+            "model": str(case.root),
+            "inputs": str(future),
+            "input_spec": case.config["input_spec"],
+            "output": str(tmp_path / algorithm / "predictions"),
+            "prediction_window": window,
+            "sample_role": "validation",
+        }
+        paths.append(str(predict(config)))
+        cases.append(case)
+    labels = tmp_path / "labels.parquet"
+    frame.to_parquet(labels, index=False)
+    config = {
+        "predictions": paths,
+        "candidate_ids": list(algorithms),
+        "labels": str(labels),
+        "label_spec": cases[0].config["input_spec"],
+        "validation_windows": [window],
+        "scoring_window": window,
+        "cutoff": "2020-01-06",
+        "selection_group": "quarterly",
+        "validation_axis": "cross_sectional",
+        "label_unit": "decimal_return",
+        "output": str(tmp_path / "scores.json"),
+    }
+    return cases, config

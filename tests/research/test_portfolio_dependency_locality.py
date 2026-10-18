@@ -7,8 +7,9 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.research.portfolios import accounting, production
-from tests.research.test_enhanced_decision_semantics import _decision_inputs
-from tests.research.test_portfolio_production import _build_producer, _inputs
+from tests.helpers.portfolio_inputs import decision_inputs as _decision_inputs
+from tests.helpers.portfolio_inputs import portfolio_inputs as _inputs
+from tests.research.test_portfolio_production import _build_producer
 
 
 def test_saved_prediction_account_does_not_depend_on_historical_x(

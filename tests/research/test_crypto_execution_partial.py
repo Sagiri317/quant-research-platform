@@ -36,7 +36,7 @@ from tests.helpers.binance_hft import (
     write_binance_hft_run,
     write_hft_funding_fixture,
 )
-from tests.markets.crypto.test_hft_execution import _state
+from tests.helpers.binance_hft import execution_state as _state
 from tests.research.test_crypto_funding_gaps import _policy
 
 CAPITAL = PortfolioCapital("partial", 1000.0, "USDT", "linear_perpetual")
@@ -279,7 +279,7 @@ def test_taker_selected_source_half_open_boundary_censors_committed_command(
 def test_book_gap_without_pending_orders_preserves_identifiable_endpoint(
     tmp_path, position
 ):
-    from tests.markets.crypto.test_hft import _boundary
+    from tests.helpers.binance_hft import panel_boundary as _boundary
 
     metadata = {
         "window": WINDOW,
@@ -365,7 +365,8 @@ def test_trade_numeric_boundary_censors_pending_execution_without_erasing_book()
         simulate_maker,
     )
     from tests.helpers.binance_hft import _quote
-    from tests.markets.crypto.test_hft_execution import _maker_config, _trade
+    from tests.helpers.binance_hft import execution_trade as _trade
+    from tests.helpers.binance_hft import maker_config as _maker_config
 
     trade = _trade(100, price="99.4", quantity="1", maker_buyer=True)
     boundary = TradeBoundary(
@@ -534,7 +535,7 @@ def test_calibration_excludes_unknown_outcomes_and_resumes_later_samples(boundar
         replay_maker_calibration,
     )
     from tests.helpers.binance_hft import _quote
-    from tests.markets.crypto.test_hft_execution import _trade
+    from tests.helpers.binance_hft import execution_trade as _trade
 
     trade = _trade(400, price="99.4", quantity="1", maker_buyer=True)
     boundary = TradeBoundary(
@@ -552,7 +553,7 @@ def test_calibration_excludes_unknown_outcomes_and_resumes_later_samples(boundar
 
         trade_events = [replace(trade, visible_quantity=None)]
     if boundary_kind == "book":
-        from tests.markets.crypto.test_hft import _boundary
+        from tests.helpers.binance_hft import panel_boundary as _boundary
 
         book_events.insert(2, _boundary(400))
         trade_events = []
@@ -632,7 +633,7 @@ def test_partial_independent_account_does_not_erase_later_declared_episode(
         simulate_maker,
     )
     from tests.helpers.binance_hft import _quote
-    from tests.markets.crypto.test_hft_execution import _trade
+    from tests.helpers.binance_hft import execution_trade as _trade
 
     event = _trade(400, price="99.4", quantity="1", maker_buyer=True)
     bad = TradeBoundary(
@@ -754,7 +755,7 @@ def test_account_stop_preserves_markouts_mature_before_stop(tmp_path, style):
         simulate_maker,
     )
     from tests.helpers.binance_hft import _quote
-    from tests.markets.crypto.test_hft_execution import _trade
+    from tests.helpers.binance_hft import execution_trade as _trade
 
     def produce(emit):
         common = dict(

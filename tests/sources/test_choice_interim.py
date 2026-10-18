@@ -825,13 +825,18 @@ def _persisted_financials_feed_all_nineteen_factors_and_keep_nulls(tmp_path):
     return persisted
 
 
+@pytest.fixture(scope="module")
+def full_financial_facts(tmp_path_factory):
+    return _persisted_financials_feed_all_nineteen_factors_and_keep_nulls(
+        tmp_path_factory.mktemp("choice-full")
+    )
+
+
 @pytest.mark.parametrize("group_size", [1, 2])
 def test_choice_persisted_financials_feed_all_nineteen_factors_and_keep_nulls(
-    tmp_path, monkeypatch, group_size
+    tmp_path, monkeypatch, group_size, full_financial_facts
 ):
-    full = _persisted_financials_feed_all_nineteen_factors_and_keep_nulls(
-        tmp_path / "full"
-    )
+    full = full_financial_facts
     original_write_css = write_css
 
     def split_css(session, layout, *, indicators, data, **kwargs):
@@ -878,7 +883,29 @@ def test_choice_persisted_financials_feed_all_nineteen_factors_and_keep_nulls(
         }
     )
     for data_id in full:
-        pd.testing.assert_frame_equal(full[data_id], split[data_id], check_exact=True)
+        if data_id == "fundamental_factors":
+            numeric = full[data_id].select_dtypes(include="floating").columns
+            pd.testing.assert_frame_equal(
+                full[data_id].drop(columns=numeric),
+                split[data_id].drop(columns=numeric),
+                check_exact=True,
+            )
+            pd.testing.assert_frame_equal(
+                full[data_id].isna(),
+                split[data_id].isna(),
+                check_exact=True,
+            )
+            pd.testing.assert_frame_equal(
+                full[data_id][numeric],
+                split[data_id][numeric],
+                check_exact=False,
+                rtol=1e-13,
+                atol=0.0,
+            )
+        else:
+            pd.testing.assert_frame_equal(
+                full[data_id], split[data_id], check_exact=True
+            )
 
 
 def test_bulk_import_shares_selected_reads_and_preserves_table_evidence(

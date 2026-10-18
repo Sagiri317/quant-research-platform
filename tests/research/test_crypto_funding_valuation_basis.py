@@ -24,13 +24,11 @@ from quant_research_platform.markets.implementations.crypto.execution import (
 )
 from quant_research_platform.research.portfolios.diagnostics import crypto_statistics
 from tests.helpers.binance_hft import _quote
-from tests.markets.crypto.test_hft_execution import (
-    _boundary,
-    _maker_config,
-    _state,
-    _taker_config,
-    _trade,
-)
+from tests.helpers.binance_hft import execution_boundary as _boundary
+from tests.helpers.binance_hft import execution_state as _state
+from tests.helpers.binance_hft import execution_trade as _trade
+from tests.helpers.binance_hft import maker_config as _maker_config
+from tests.helpers.binance_hft import taker_config as _taker_config
 
 CAPITAL = PortfolioCapital("funding_basis", 1000.0, "USDT", "linear_perpetual")
 

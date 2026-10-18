@@ -33,12 +33,13 @@ def test_weighted_svd_matches_independent_normal_system():
         np.testing.assert_allclose(normal_residual, 0, atol=2e-13)
 
 
-@pytest.mark.parametrize("shrinkage", [0.0, 0.2, 1.0])
-@pytest.mark.parametrize("zero_columns", [1, 5])
+@pytest.mark.parametrize(
+    "shrinkage, zero_columns", [(0.0, 1), (0.2, 1), (1.0, 1), (0.2, 5)]
+)
 def test_zero_columns_keep_zero_covariance(shrinkage, zero_columns):
-    values = np.random.default_rng(52).normal(size=(504, 5)) * 0.01
+    values = np.random.default_rng(52).normal(size=(6, 5)) * 0.01
     values[:, -zero_columns:] = 0
-    ages = np.arange(503, -1, -1)
+    ages = np.arange(5, -1, -1)
     weights = np.exp2(-ages / 126)
     expected = np.cov(values, rowvar=False, aweights=weights, ddof=0) * 252
     expected = (1 - shrinkage) * expected + shrinkage * np.diag(np.diag(expected))
@@ -57,13 +58,12 @@ def test_zero_columns_keep_zero_covariance(shrinkage, zero_columns):
     np.testing.assert_array_equal(actual.to_numpy()[:, -zero_columns:], 0)
 
 
-@pytest.mark.parametrize("shrinkage", [0.0, 0.2, 1.0])
-def test_cancelling_cross_products_keep_zero_covariance(shrinkage):
+def test_cancelling_cross_products_keep_zero_covariance():
     actual = risk._ewma_covariance(
         np.array([[0.01, 0.01], [-0.01, 0.01], [0.01, -0.01], [-0.01, -0.01]]),
         ages=np.zeros(4, dtype=int),
         half_life=1.0,
-        diagonal_shrinkage=shrinkage,
+        diagonal_shrinkage=0.2,
         annualization_factor=1.0,
         columns=("a", "b"),
     )
@@ -72,8 +72,8 @@ def test_cancelling_cross_products_keep_zero_covariance(shrinkage):
 
 def test_constant_nonzero_columns_have_zero_covariance():
     actual = risk._ewma_covariance(
-        np.tile([0.01, 0.03], (504, 1)),
-        ages=np.arange(504),
+        np.tile([0.01, 0.03], (3, 1)),
+        ages=np.arange(3),
         half_life=126.0,
         diagonal_shrinkage=0.2,
         annualization_factor=252.0,

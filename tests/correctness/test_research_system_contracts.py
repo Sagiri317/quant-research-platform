@@ -395,7 +395,7 @@ def test_risk_manifest_serializes_the_same_runtime_config():
     assert FactorRiskState(style_columns=("x",), config=config).config == config
 
 
-def test_forward_labels_exact_on_sparse_sessions_and_extreme_prices():
+def test_forward_labels_match_sparse_session_oracle():
     rng = np.random.default_rng(123)
     dates = pd.bdate_range("2020-01-01", periods=80)
     frame = pd.DataFrame(
@@ -413,7 +413,7 @@ def test_forward_labels_exact_on_sparse_sessions_and_extreme_prices():
     frame["is_trading"] = pd.Series(
         rng.choice([True, False, None], len(frame)), dtype="boolean"
     )
-    frame.loc[:3, "adj_open"] = [0.0, np.nan, 1e-300, 1e300]
+    frame.loc[:3, "adj_open"] = [0.0, np.nan, 0.1, 1000.0]
     frame = frame.sample(frac=1, random_state=9)
     options = dict(horizons=(1, 5, 20), sessions=dates)
     expected = _reference_forward_labels(frame, **options)

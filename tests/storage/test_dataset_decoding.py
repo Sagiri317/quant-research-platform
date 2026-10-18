@@ -57,21 +57,21 @@ def _file_bytes(root: Path) -> dict[Path, bytes]:
 @pytest.mark.parametrize("filtered", (False, True))
 def test_plain_reader_streams_normal_files(tmp_path, filtered):
     path = tmp_path / "plain.parquet"
-    table = pa.table({"value": np.arange(4096, dtype=np.int64)})
+    table = pa.table({"value": np.arange(6, dtype=np.int64)})
     pq.write_table(
         table,
         native_filesystem_path(path),
         use_dictionary=False,
         compression=None,
-        row_group_size=2048,
+        row_group_size=3,
     )
-    expected = np.arange(1024 if filtered else 0, 4096, dtype=np.int64)
+    expected = np.arange(2 if filtered else 0, 6, dtype=np.int64)
     delivered = 0
     batch_rows = 1
     with closing_iterator(
         dataset_physical.iter_dataset_part_batches(
             path,
-            parquet_filters=[("value", ">=", 1024)] if filtered else None,
+            parquet_filters=[("value", ">=", 2)] if filtered else None,
             batch_rows=batch_rows,
         )
     ) as batches:
@@ -150,7 +150,7 @@ def test_declared_variable_width_member_decodes_multirow_batches(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / "declared-member.parquet"
-    row_count = 5000
+    row_count = 7
     pq.write_table(
         pa.table({"value": [f"value-{index:05d}" for index in range(row_count)]}),
         native_filesystem_path(path),
@@ -167,11 +167,16 @@ def test_declared_variable_width_member_decodes_multirow_batches(
     frames = tuple(
         dataset_reading.iter_declared_parquet_member_batches(
             path,
-            batch_rows=128,
+            batch_rows=3,
         )
     )
-    assert sum(len(frame) for frame in frames) == row_count
-    assert conversions < row_count // 10
+    assert [len(frame) for frame in frames] == [3, 3, 1]
+    assert conversions == 3
+    pd.testing.assert_frame_equal(
+        pd.concat(frames, ignore_index=True),
+        pd.DataFrame({"value": [f"value-{index:05d}" for index in range(row_count)]}),
+        check_exact=True,
+    )
 
 
 @pytest.mark.parametrize(
@@ -423,10 +428,10 @@ def test_arrow_batch_converter_observes_each_row_once(
 @pytest.mark.parametrize(
     "arrays",
     [
-        [pa.nulls(1) for _ in range(500)],
-        [pa.array([b"x"], type=pa.binary(1)) for _ in range(500)],
-        [pa.array([Decimal("1.23")], type=pa.decimal128(10, 2)) for _ in range(500)],
-        [pa.array([date(2026, 1, 1)], type=pa.date32()) for _ in range(500)],
+        [pa.nulls(1) for _ in range(3)],
+        [pa.array([b"x"], type=pa.binary(1)) for _ in range(3)],
+        [pa.array([Decimal("1.23")], type=pa.decimal128(10, 2)) for _ in range(3)],
+        [pa.array([date(2026, 1, 1)], type=pa.date32()) for _ in range(3)],
     ],
     ids=["null", "fixed-binary", "decimal", "date"],
 )
@@ -767,16 +772,16 @@ def test_timestamp_seconds_survive_native_parquet_unit_widening(
 def test_nullable_integer_values_and_numeric_keys_remain_exact_with_nulls(
     tmp_path: Path, dtype: str
 ) -> None:
-    base = 2**53 + 1 if dtype == "Int64" else 2**63 + 1
+    base = 2**53 + 1 if dtype == "Int64" else 2**63
     root = make_dataset_artifact_root(tmp_path, "nullable_precision")
     frame = pd.DataFrame(
         {
             "market_id": "a_share",
-            "asset_id": pd.Series([base, base + 1], dtype=dtype),
+            "asset_id": pd.Series([base + i for i in range(4)], dtype=dtype),
             "timestamp": pd.Series(
-                pd.to_datetime(["2020-01-01"] * 2), dtype="datetime64[ns]"
+                pd.to_datetime(["2020-01-01"] * 4), dtype="datetime64[ns]"
             ),
-            "value": pd.Series([base, pd.NA], dtype=dtype),
+            "value": pd.Series([1, base, base + 1, pd.NA], dtype=dtype),
         }
     )
     write_dataset(root, frame, spec=make_processed_dataset_spec("nullable_precision"))

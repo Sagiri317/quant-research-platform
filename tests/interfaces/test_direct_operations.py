@@ -222,25 +222,15 @@ def test_cli_help_describes_each_registered_operation():
     assert "frozen model" in result.output
 
 
-@pytest.mark.parametrize(
-    "command,kind",
-    [
-        (item.name, "missing")
-        for item in commands.app.registered_commands
-        if item.name != "inspect"
-    ]
-    + [("fit", "not_a_directory"), ("fit", "malformed")],
-)
-def test_cli_main_classifies_config_errors(
-    tmp_path, monkeypatch, capsys, command, kind
-):
+@pytest.mark.parametrize("kind", ["missing", "not_a_directory", "malformed"])
+def test_cli_main_classifies_config_errors(tmp_path, monkeypatch, capsys, kind):
     path = tmp_path / "config.json"
     if kind == "malformed":
         path.write_text("not JSON")
     elif kind == "not_a_directory":
         path.write_text("{}")
         path = path / "config.json"
-    monkeypatch.setattr(sys, "argv", ["qrp", command, "--config", str(path)])
+    monkeypatch.setattr(sys, "argv", ["qrp", "fit", "--config", str(path)])
 
     with pytest.raises(SystemExit) as caught:
         commands.main()

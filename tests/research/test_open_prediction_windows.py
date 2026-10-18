@@ -11,8 +11,7 @@ from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.research.models.production import fit
 from quant_research_platform.research.models.trial_selection import score, select
 from quant_research_platform.research.predictions.runner import predict
-from tests.research.direct_model_test_support import fit_frame
-from tests.research.test_prediction_runner_model_selection import candidates
+from tests.research.direct_model_test_support import candidates, fit_frame
 
 
 @pytest.mark.parametrize(

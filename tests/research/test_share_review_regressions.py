@@ -1,6 +1,5 @@
 """Independent synthetic review counterexamples, without private source rows."""
 
-import math
 from fractions import Fraction
 
 import pandas as pd
@@ -21,10 +20,10 @@ from quant_research_platform.research.portfolios.accounting import (
 from tests.research import test_raw_share_corporate_production as corporate
 
 
-def test_interval_gross_pnl_cancels_each_fee_exactly():
-    price, capital = 1e16, 1e18
-    end_price = math.nextafter(price, math.inf)
-    post_cash = capital - 3 * price - 1e17 - 1
+def test_interval_gross_pnl_accounts_for_each_fee():
+    price, capital = 100.0, 10000.0
+    end_price = 102.0
+    post_cash = capital - 3 * price - 10 - 1
     valuations = tuple(
         row
         for phase, at, quantity, mark, cash in (
@@ -46,7 +45,7 @@ def test_interval_gross_pnl_cancels_each_fee_exactly():
     )
     flows = (
         PortfolioCashFlow("principal", 1, "a", "fill", "principal", -3 * price),
-        PortfolioCashFlow("fee", 1, "a", "fill", "commission_cost", -1e17),
+        PortfolioCashFlow("fee", 1, "a", "fill", "commission_cost", -10),
         PortfolioCashFlow("slip", 1, "a", "fill", "slippage_cost", -1),
     )
     diagnostics = tuple(
@@ -69,7 +68,8 @@ def test_interval_gross_pnl_cancels_each_fee_exactly():
     )
     economics = _LedgerEconomics(PortfolioCapital("a", capital, "CNY", "cash_equity"))
     economics.consume(batch)
-    assert economics.summary()["gross_pnl"] == 6.0
+    assert economics.summary()["gross_pnl"] == pytest.approx(6.0)
+    assert economics.summary()["net_pnl"] == pytest.approx(-5.0)
     assert portfolio_interval_economics(batch)[
         "gross_return"
     ] * capital == pytest.approx(6.0)

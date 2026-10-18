@@ -81,9 +81,11 @@ def test_read_dataset_materialized_chunked_projection_and_time_window(
     assert sum(consumed) == len(expected) == 3
 
 
-def test_internal_physical_reader_uses_bounded_record_batches(tmp_path: Path) -> None:
+def test_internal_physical_reader_uses_bounded_record_batches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     root = make_dataset_artifact_root(tmp_path, "bounded_reader", market_id="dummy")
-    row_count = 4096
+    row_count = 7
     frame = pd.DataFrame(
         {
             "market_id": ["dummy"] * row_count,
@@ -92,34 +94,47 @@ def test_internal_physical_reader_uses_bounded_record_batches(tmp_path: Path) ->
             "value": [float(index) for index in range(row_count)],
         }
     )
-    ordered_input = pd.concat(
-        (frame.iloc[row_count // 2 :].copy(), frame.iloc[: row_count // 2].copy()),
-        ignore_index=True,
-    )
-    ordered_input["timestamp"] = ordered_input["timestamp"].astype("datetime64[ns]")
+    frame["timestamp"] = frame["timestamp"].astype("datetime64[ns]")
     write_dataset(
         root,
-        (frame.iloc[row_count // 2 :].copy(), frame.iloc[: row_count // 2].copy()),
+        frame,
         spec=make_processed_dataset_spec("bounded_reader", market_id="dummy"),
     )
     context = dataset_reading.open_dataset_session(root, columns=None, time_window=None)
-    chunks = list(dataset_reading.iter_dataset_chunks(context))
-    assert len(chunks) > 1
-    pd.testing.assert_frame_equal(pd.concat(chunks, ignore_index=True), ordered_input)
-    window = TimeWindow(frame.loc[28, "timestamp"], frame.loc[36, "timestamp"])
+    assert len(context.read_paths) == 1
+    physical_sizes = []
+
+    physical_reader = dataset_reading.iter_dataset_part_batches
+
+    def observe(path, **kwargs):
+        assert kwargs["batch_rows"] == 2
+        for batch in physical_reader(path, **kwargs):
+            physical_sizes.append(batch.num_rows)
+            yield batch
+
+    monkeypatch.setattr(dataset_reading, "iter_dataset_part_batches", observe)
+    chunks = list(dataset_reading.iter_dataset_chunks(context, batch_rows=2))
+    assert physical_sizes == [2, 2, 2, 1]
+    assert [len(chunk) for chunk in chunks] == [2, 2, 2, 1]
+    pd.testing.assert_frame_equal(
+        pd.concat(chunks, ignore_index=True), frame, check_exact=True
+    )
+    window = TimeWindow(frame.loc[1, "timestamp"], frame.loc[5, "timestamp"])
     projected_context = dataset_reading.open_dataset_session(
-        root, columns=("asset_id", "value"), time_window=window
+        root, columns=("value", "asset_id"), time_window=window
     )
-    projected = pd.concat(
-        dataset_reading.iter_dataset_chunks(projected_context), ignore_index=True
+    physical_sizes.clear()
+    projected_chunks = list(
+        dataset_reading.iter_dataset_chunks(projected_context, batch_rows=2)
     )
-    expected_projected = ordered_input.loc[
-        ordered_input["timestamp"].between(
-            pd.Timestamp(window.start), pd.Timestamp(window.end)
-        ),
-        ["asset_id", "value"],
-    ].reset_index(drop=True)
-    pd.testing.assert_frame_equal(projected, expected_projected)
+    assert physical_sizes and max(physical_sizes) <= 2
+    assert all(len(chunk) <= 2 for chunk in projected_chunks)
+    expected_projected = frame.loc[1:5, ["value", "asset_id"]].reset_index(drop=True)
+    pd.testing.assert_frame_equal(
+        pd.concat(projected_chunks, ignore_index=True),
+        expected_projected,
+        check_exact=True,
+    )
 
 
 def test_internal_physical_reader_preserves_single_8kib_text_row(
@@ -643,3 +658,110 @@ def test_fingerprint_normalizes_float_primary_key_zero(
         frame, arrow_schema=schema, primary_key=("asset_id",)
     )
     assert bool(hashes[0] == hashes[1]) == (values[0] == values[1])
+
+
+@pytest.mark.parametrize(
+    "selected, operation, expected",
+    [
+        ({}, {"start": "2021-01-02", "end": "2021-01-02"}, ["d", "e"]),
+        (
+            {"time_window": {"start": "2021-01-02", "end": "2021-01-02"}},
+            {"start": "2021-01-02T23:59:59.999999999", "end": None},
+            ["e"],
+        ),
+        ({}, {"start": "2021-01-03T01:00:00+01:00", "end": None}, ["f"]),
+        ({"years": [2019]}, {"start": "2021-01-02", "end": "2021-01-02"}, []),
+        (
+            {"time_window": {"start": "2021-01-03", "end": "2021-01-03"}},
+            {"start": "2021-01-02", "end": "2021-01-02"},
+            [],
+        ),
+        (
+            {"row_filters": [["asset_id", "in", ["e", "f"]]], "columns": ["asset_id"]},
+            {"start": "2021-01-02", "end": "2021-01-02"},
+            ["e"],
+        ),
+    ],
+)
+def test_shared_operation_input_selection_preserves_boundaries(
+    tmp_path, selected, operation, expected
+):
+    from quant_research_platform.contracts.time import PredictionWindow
+
+    root = make_dataset_artifact_root(tmp_path)
+    frame = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": list("abcdef"),
+            "value": range(6),
+            "timestamp": pd.to_datetime(
+                [
+                    "2019-01-01",
+                    "2020-01-01",
+                    "2021-01-01",
+                    "2021-01-02",
+                    "2021-01-02T23:59:59.999999999",
+                    "2021-01-03",
+                ],
+                format="mixed",
+            ),
+        }
+    )
+    write_dataset(root, frame, spec=make_processed_dataset_spec())
+    (root / "data/year=2020/unselected.parquet").write_bytes(b"unselected defect")
+    options = dataset_reading._dataset_input_options(
+        {"path": root, **selected}, time_window=PredictionWindow(**operation)
+    )
+    result = dataset_reading.materialize_dataset_session(
+        dataset_reading.open_dataset_session(**options)
+    )
+    assert result.asset_id.tolist() == expected
+    if "columns" in selected:
+        assert result.columns.tolist() == ["asset_id"]
+
+
+def test_disjoint_discovery_skips_year_gap_without_bypassing_input_validation(tmp_path):
+    root = make_dataset_artifact_root(tmp_path)
+    frame = make_default_dataset_frame().copy()
+    frame["timestamp"] = pd.to_datetime(["2019-01-02", "2020-01-02", "2021-01-02"])
+    write_dataset(root, frame, spec=make_processed_dataset_spec())
+    (root / "data/year=2020/unselected.parquet").write_bytes(b"unselected defect")
+    windows = (
+        TimeWindow("2019-01-02", "2019-01-02"),
+        TimeWindow("2021-01-02", "2021-01-02"),
+    )
+    options = dataset_reading._dataset_input_options(root, discovery_windows=windows)
+    session = dataset_reading.open_dataset_session(**options)
+    assert {path.parent.name for path in session.read_paths} == {
+        "year=2019",
+        "year=2021",
+    }
+    actual = pd.concat(
+        [
+            dataset_reading.materialize_dataset_session(session.filtered_view(window))
+            for window in windows
+        ]
+    )
+    assert actual.timestamp.tolist() == [
+        pd.Timestamp("2019-01-02"),
+        pd.Timestamp("2021-01-02"),
+    ]
+    selected = {
+        "path": root,
+        "time_window": {"start": "2021-01-01", "end": "2021-01-01"},
+    }
+    for fields, error in [
+        ({"years": [True]}, "dataset_years_invalid"),
+        ({"columns": ["absent"]}, "dataset_column_not_found"),
+        ({"row_filters": [["absent", "==", 1]]}, "dataset_filter_column_not_found"),
+        ({"files": ["../outside.parquet"]}, "dataset_files_invalid"),
+    ]:
+        with pytest.raises(ValueError, match=error):
+            dataset_reading.open_dataset_session(
+                **dataset_reading._dataset_input_options(
+                    {**selected, **fields}, time_window=windows[0]
+                )
+            )
+    (root / "data/year=2021/selected.parquet").write_bytes(b"selected defect")
+    with pytest.raises(ValueError, match="invalid_dataset_part_files"):
+        dataset_reading.open_dataset_session(**options)

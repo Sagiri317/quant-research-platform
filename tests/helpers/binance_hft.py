@@ -9,7 +9,17 @@ from pathlib import Path
 
 import pandas as pd
 
+from quant_research_platform.contracts.order_book import (
+    BookBoundary,
+    BookState,
+    TradeEvent,
+    price_to_index,
+)
 from quant_research_platform.contracts.portfolios import FundingForecast
+from quant_research_platform.markets.implementations.crypto.execution import (
+    MakerConfig,
+    TakerConfig,
+)
 from quant_research_platform.markets.implementations.crypto.hft import (
     iter_panel_frames,
 )
@@ -553,4 +563,147 @@ def _write_file(
 def coverage_lookup(mapping):
     return lambda start, end: tuple(
         key for key, bounds in mapping.items() if bounds[0] <= start and bounds[1] > end
+    )
+
+
+def execution_state(
+    timestamp_ms: int,
+    *,
+    bid_index: int = 995,
+    ask_index: int = 1005,
+    bid_levels: tuple[tuple[int, float], ...] | None = None,
+    ask_levels: tuple[tuple[int, float], ...] | None = None,
+    segment_id: str = "s1",
+) -> BookState:
+    return BookState(
+        source_sequence=timestamp_ms + 1,
+        event_time_ms=timestamp_ms + 1,
+        transaction_time_ms=timestamp_ms,
+        observed_time_ns=timestamp_ms * 1000000,
+        receive_time=pd.Timestamp(timestamp_ms, unit="ms", tz="UTC").isoformat(),
+        receive_monotonic_ns=timestamp_ms + 1,
+        update_id=timestamp_ms + 1,
+        segment_id=segment_id,
+        observation_id=f"connection-{segment_id}",
+        market_type=FUTURES_MARKET_TYPE,
+        price_unit="0.1",
+        bids=bid_levels or ((bid_index, 2.0), (bid_index - 5, 3.0)),
+        asks=ask_levels or ((ask_index, 1.0), (ask_index + 5, 2.0)),
+    )
+
+
+def execution_trade(
+    timestamp_ms: int, *, price: str, quantity: str, maker_buyer: bool
+) -> TradeEvent:
+    quantity_value = float(quantity)
+    return TradeEvent(
+        source_sequence=timestamp_ms + 10,
+        event_time_ms=timestamp_ms,
+        transaction_time_ms=timestamp_ms,
+        observed_time_ns=timestamp_ms * 1000000,
+        receive_time=pd.Timestamp(timestamp_ms, unit="ms", tz="UTC").isoformat(),
+        receive_monotonic_ns=timestamp_ms + 10,
+        observation_id="trade-connection-1",
+        market_type=FUTURES_MARKET_TYPE,
+        price_unit="0.1",
+        price_index=price_to_index(price, "0.1", error="bad"),
+        quantity=quantity_value,
+        visible_quantity=quantity_value,
+        buyer_is_maker=maker_buyer,
+    )
+
+
+def execution_boundary(timestamp_ms: int, *, segment_id: str = "s1") -> BookBoundary:
+    return BookBoundary(
+        source_sequence=timestamp_ms + 1,
+        event_time_ms=timestamp_ms + 1,
+        transaction_time_ms=timestamp_ms,
+        observed_time_ns=timestamp_ms * 1000000,
+        receive_time=pd.Timestamp(timestamp_ms, unit="ms", tz="UTC").isoformat(),
+        receive_monotonic_ns=timestamp_ms + 1,
+        segment_id=segment_id,
+        observation_id=f"connection-{segment_id}",
+        market_type=FUTURES_MARKET_TYPE,
+        reason="sequence_gap",
+    )
+
+
+def maker_config(*, calibrated=False) -> MakerConfig:
+    return MakerConfig(
+        latency_ms=0,
+        order_quantity=1.0,
+        max_position=2.0,
+        maker_fee_bps=-1.0,
+        inventory_target=None if calibrated else 0.0,
+        inventory_skew=None if calibrated else 0.0,
+        markout_horizon_ms=100,
+    )
+
+
+def taker_config(*, latency_ms: int = 0, order_quantity: float = 1.0) -> TakerConfig:
+    return TakerConfig(
+        order_quantity=order_quantity,
+        position_size=2.0,
+        latency_ms=latency_ms,
+        taker_fee_bps=1.0,
+        markout_horizon_ms=100,
+    )
+
+
+def panel_state(
+    timestamp_ms: int,
+    *,
+    bid_index: int = 995,
+    ask_index: int = 1005,
+    bid_qty: float = 2.0,
+    ask_qty: float = 1.0,
+    segment_id: str = "s1",
+) -> BookState:
+    return BookState(
+        source_sequence=timestamp_ms + 1,
+        event_time_ms=timestamp_ms + 1,
+        transaction_time_ms=timestamp_ms,
+        observed_time_ns=timestamp_ms * 1000000,
+        receive_time=pd.Timestamp(timestamp_ms, unit="ms").isoformat() + "Z",
+        receive_monotonic_ns=timestamp_ms + 1,
+        update_id=timestamp_ms + 1,
+        segment_id=segment_id,
+        observation_id=f"connection-{segment_id}",
+        market_type=FUTURES_MARKET_TYPE,
+        price_unit="0.1",
+        bids=((bid_index, bid_qty), (bid_index - 10, 3.0)),
+        asks=((ask_index, ask_qty), (ask_index + 10, 2.0)),
+    )
+
+
+def panel_trade(timestamp_ms: int, quantity: float, *, maker_buyer: bool) -> TradeEvent:
+    return TradeEvent(
+        source_sequence=timestamp_ms + 10,
+        event_time_ms=timestamp_ms + 1,
+        transaction_time_ms=timestamp_ms,
+        observed_time_ns=timestamp_ms * 1000000,
+        receive_time=pd.Timestamp(timestamp_ms, unit="ms").isoformat() + "Z",
+        receive_monotonic_ns=timestamp_ms + 10,
+        observation_id="trade-connection-1",
+        market_type=FUTURES_MARKET_TYPE,
+        price_unit="0.1",
+        price_index=1005,
+        quantity=quantity,
+        visible_quantity=quantity,
+        buyer_is_maker=maker_buyer,
+    )
+
+
+def panel_boundary(timestamp_ms: int, *, segment_id: str = "s1") -> BookBoundary:
+    return BookBoundary(
+        source_sequence=timestamp_ms + 1,
+        event_time_ms=timestamp_ms + 1,
+        transaction_time_ms=timestamp_ms,
+        observed_time_ns=timestamp_ms * 1000000,
+        receive_time=pd.Timestamp(timestamp_ms, unit="ms").isoformat() + "Z",
+        receive_monotonic_ns=timestamp_ms + 1,
+        segment_id=segment_id,
+        observation_id=f"connection-{segment_id}",
+        market_type=FUTURES_MARKET_TYPE,
+        reason="sequence_gap",
     )

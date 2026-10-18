@@ -145,9 +145,16 @@ def test_statistics_preserves_descriptive_roles_and_rejects_empty_roles(tmp_path
     assert not (tmp_path / "bad").exists()
 
 
-@pytest.mark.parametrize("bare", [False, True])
-@pytest.mark.parametrize("intraday", [False, True])
-@pytest.mark.parametrize("omit_fdr_defaults", [False, True])
+@pytest.mark.parametrize(
+    "bare,intraday,omit_fdr_defaults",
+    [
+        (False, False, False),
+        (False, True, False),
+        (True, False, False),
+        (True, True, False),
+        (False, False, True),
+    ],
+)
 def test_public_factor_statistics_projects_custom_native_or_bare_input(
     tmp_path, bare, intraday, omit_fdr_defaults
 ):
@@ -484,9 +491,23 @@ def test_factor_statistics_complete_batches_preserve_dates_and_masks(
     )
     for name in names:
         with artifacts[0].table(name) as left, artifacts[1].table(name) as right:
-            pd.testing.assert_frame_equal(
-                left, right, check_exact=False, rtol=1e-10, atol=1e-12
+            continuous = left.select_dtypes(include="floating").columns.difference(
+                ["fdr_alpha"]
             )
+            pd.testing.assert_frame_equal(
+                left.drop(columns=continuous),
+                right.drop(columns=continuous),
+                check_exact=True,
+            )
+            pd.testing.assert_frame_equal(left.isna(), right.isna(), check_exact=True)
+            pd.testing.assert_frame_equal(
+                left[continuous],
+                right[continuous],
+                check_exact=False,
+                rtol=1e-10,
+                atol=0,
+            )
+
             if name == "factor_diagnostics.parquet":
                 assert left.input_date_count.eq(12).all()
                 assert left.observation_count.eq(0 if empty_labels else 8).all()

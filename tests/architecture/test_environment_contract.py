@@ -27,6 +27,9 @@ def test_python_and_ruff_contracts_follow_root_config() -> None:
         "py" + python_minor.replace(".", "")
     )
 
+    environment = ENVIRONMENT_YML.read_text(encoding="utf-8")
+    assert _environment_python_pin(environment) == python_minor
+
 
 def test_repo_output_ignore_does_not_hide_source_packages() -> None:
     rules = GITIGNORE.read_text(encoding="utf-8").splitlines()
@@ -63,16 +66,6 @@ def test_tooling_environment_dependencies_match_pyproject_dependency_specs() -> 
     }
 
     assert mismatches == {}
-
-
-def test_environment_python_pin_matches_requires_python_lower_bound() -> None:
-    pyproject = _load_pyproject()
-    environment = ENVIRONMENT_YML.read_text(encoding="utf-8")
-    expected_minor = _python_minor_from_requires(
-        pyproject["project"]["requires-python"]
-    )
-
-    assert _environment_python_pin(environment) == expected_minor
 
 
 def test_environment_gate_rejects_missing_runtime_dependency(tmp_path, monkeypatch):

@@ -69,7 +69,7 @@ def test_risk_default_and_explicit_float_use_sqrt_objective_weights():
 
 
 def test_production_risk_cross_consumes_only_selected_capitalization():
-    from tests.research.test_portfolio_production import _inputs
+    from tests.helpers.portfolio_inputs import portfolio_inputs as _inputs
 
     frames, _, _ = _inputs()
     panel = (
@@ -211,11 +211,9 @@ def test_backtest_risk_reads_only_configured_capitalization(
     tmp_path, monkeypatch, weight_column
 ):
     from quant_research_platform.research.portfolios import production
-    from tests.research.test_portfolio_production import (
-        RISK_STYLE_COLUMNS,
-        _build_producer,
-        _inputs,
-    )
+    from quant_research_platform.research.protocols.a_share import RISK_STYLE_COLUMNS
+    from tests.helpers.portfolio_inputs import portfolio_inputs as _inputs
+    from tests.research.test_portfolio_production import _build_producer
 
     frames, fees, window = _inputs()
     frames["panel"] = (
@@ -280,7 +278,8 @@ def test_simple_production_reads_selected_size_and_keeps_reference(
     tmp_path, monkeypatch, column
 ):
     from quant_research_platform.research.portfolios import production
-    from tests.research.test_portfolio_production import _build_producer, _inputs
+    from tests.helpers.portfolio_inputs import portfolio_inputs as _inputs
+    from tests.research.test_portfolio_production import _build_producer
 
     frames, fees, window = _inputs()
     frames["dataset"]["total_market_cap"] = frames["dataset"].asset_id.map(
@@ -325,7 +324,7 @@ def test_simple_production_reads_selected_size_and_keeps_reference(
 
 def test_missing_size_nonrebalance_marks_undefined_and_preserves_account():
     from quant_research_platform.research.portfolios.production import _build_session
-    from tests.research.test_portfolio_decision_execution import _decision_inputs
+    from tests.helpers.portfolio_inputs import decision_inputs as _decision_inputs
 
     inputs = _decision_inputs()
     inputs["candidate"] = replace(
@@ -370,7 +369,7 @@ def test_panel_selection_cannot_reintroduce_excluded_risk_capitalization(
     from quant_research_platform.research.portfolios.production import (
         _ENHANCED_PANEL_COLUMNS,
     )
-    from tests.research.test_closed_market_portfolios import _native_inputs
+    from tests.helpers.portfolio_inputs import closed_market_inputs as _native_inputs
 
     inputs, _, calendar, _ = _native_inputs(tmp_path, fault="normal_open")
     kwargs = dict(
@@ -410,8 +409,8 @@ def test_native_backtest_persists_resolved_risk_and_size_defaults(tmp_path, colu
     from quant_research_platform.research.predictions.runner import predict
     from quant_research_platform.storage.datasets import read_dataset, write_dataset
     from tests.helpers.portfolio_inputs import _processed_specs
+    from tests.helpers.portfolio_inputs import closed_market_inputs as _native_inputs
     from tests.research.direct_model_test_support import fit_frame
-    from tests.research.test_closed_market_portfolios import _native_inputs
 
     inputs, _, _, panel = _native_inputs(tmp_path / "market", fault="normal_open")
     training = (

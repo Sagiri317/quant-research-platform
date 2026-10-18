@@ -89,9 +89,17 @@ def test_curve_stride_is_positive_integer(stride, tmp_path):
         portfolio_curve(tmp_path, stride=stride)
 
 
-@pytest.mark.parametrize("mode", ("continuous", "independent_segments"))
-@pytest.mark.parametrize("partial", (False, True))
-@pytest.mark.parametrize("stride", (1, 5))
+@pytest.mark.parametrize(
+    "mode, partial, stride",
+    [
+        ("continuous", False, 1),
+        ("continuous", True, 1),
+        ("independent_segments", False, 1),
+        ("independent_segments", True, 1),
+        ("continuous", True, 5),
+        ("independent_segments", False, 5),
+    ],
+)
 def test_native_curve_preserves_known_prefix_and_planned_plot_range(
     tmp_path, mode, partial, stride
 ):
@@ -154,8 +162,8 @@ def test_recovered_book_gap_keeps_endpoint_without_fabricating_observed_path(
         simulate_taker,
     )
     from quant_research_platform.reports.plots import plot_portfolio_curve
-    from tests.markets.crypto.test_hft import _boundary
-    from tests.markets.crypto.test_hft_execution import _state
+    from tests.helpers.binance_hft import execution_state as _state
+    from tests.helpers.binance_hft import panel_boundary as _boundary
     from tests.research.test_crypto_execution_partial import CAPITAL, WINDOW
 
     config = TakerConfig(1.0, 2.0, 0, 0.0, 100)

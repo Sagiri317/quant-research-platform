@@ -183,14 +183,14 @@ def _prediction_metadata(metadata, *, window):
 
 def _context_session(inputs, input_spec, window):
     """Shared market and decision-axis boundary for every execution consumer."""
-    options = _dataset_input_options(inputs)
+    options = _dataset_input_options(inputs, time_window=window)
     if input_spec is not None:
         options.update(
             _dataset_input_options(
                 {"path": options["dataset_root"], "spec": input_spec}
             )
         )
-    session = open_dataset_session(**options).filtered_view(window)
+    session = open_dataset_session(**options)
     validate_input_market(session.spec, "crypto")
     _validate_asset_time_key(session.spec["primary_key"], session.spec["column_roles"])
     return session, options

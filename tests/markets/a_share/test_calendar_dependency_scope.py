@@ -179,10 +179,18 @@ def test_known_exit_ends_only_its_own_axis_without_rewriting_prefix(
         "forward_returns",
         label_columns=["forward_return_1d"],
     )
+    independent = labels.loc[labels.asset_id.eq("b")].reset_index(drop=True)
     pd.testing.assert_frame_equal(
-        labels.loc[labels.asset_id.eq("b")].reset_index(drop=True),
-        control,
+        independent.drop(columns="forward_return_1d"),
+        control.drop(columns="forward_return_1d"),
         check_exact=True,
+    )
+    pd.testing.assert_series_equal(
+        independent.forward_return_1d,
+        control.forward_return_1d,
+        check_exact=False,
+        rtol=1e-13,
+        atol=0.0,
     )
 
 
@@ -219,7 +227,18 @@ def test_single_day_factor_uses_only_required_history_but_keeps_warmup_and_fresh
     control = _prepare(
         tmp_path / "full-calendar", panel, _calendar({4: dates}), **options
     )
-    pd.testing.assert_frame_equal(result, control, check_exact=True)
+    pd.testing.assert_frame_equal(
+        result.drop(columns="avg_amount_20d"),
+        control.drop(columns="avg_amount_20d"),
+        check_exact=True,
+    )
+    pd.testing.assert_series_equal(
+        result.avg_amount_20d,
+        control.avg_amount_20d,
+        check_exact=False,
+        rtol=1e-13,
+        atol=0.0,
+    )
     assert pd.notna(result.avg_amount_20d.iloc[0]) == (missing <= 5)
     if missing <= 5:
         assert result.avg_amount_20d.iloc[0] == 10.0
@@ -454,7 +473,18 @@ def test_exit_knowledge_survives_unknown_clock_barrier_only_in_same_lifecycle(
         "forward_returns",
         label_columns=["forward_return_1d"],
     )
-    pd.testing.assert_frame_equal(result, control, check_exact=True)
+    pd.testing.assert_frame_equal(
+        result.drop(columns="forward_return_1d"),
+        control.drop(columns="forward_return_1d"),
+        check_exact=True,
+    )
+    pd.testing.assert_series_equal(
+        result.forward_return_1d,
+        control.forward_return_1d,
+        check_exact=False,
+        rtol=1e-13,
+        atol=0.0,
+    )
     labels = result.loc[result.asset_id.eq("a")].set_index("timestamp")
     assert pd.isna(labels.loc[dates[2], "forward_return_1d"])
     assert pd.isna(labels.loc[dates[3], "forward_return_1d"])

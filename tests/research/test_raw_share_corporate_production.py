@@ -10,7 +10,8 @@ from quant_research_platform.artifacts.portfolio_ledger import (
 from quant_research_platform.contracts.portfolios import PortfolioCapital
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share import portfolio_sessions
-from tests.research.test_portfolio_production import _build_producer, _inputs
+from tests.helpers.portfolio_inputs import portfolio_inputs as _inputs
+from tests.research.test_portfolio_production import _build_producer
 
 
 def _distribution_batches(

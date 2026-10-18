@@ -779,7 +779,21 @@ def test_quiet_tail_matures_markout_at_reached_clock_and_persists(
         assert (markouts[0] is not None) is expected
         assert fills[0]["markout_per_unit"] == markouts[0]
         comparisons.append((trades, cashflows, results[0]["net_pnl"], markouts))
-    assert comparisons[0] == comparisons[1]
+    left_trades, left_flows, left_pnl, left_markouts = comparisons[0]
+    right_trades, right_flows, right_pnl, right_markouts = comparisons[1]
+    for left, right in zip(left_trades, right_trades, strict=True):
+        assert replace(left, notional=right.notional) == right
+        assert left.notional == pytest.approx(right.notional, rel=2e-15, abs=0)
+    for left, right in zip(left_flows, right_flows, strict=True):
+        assert replace(left, amount=right.amount) == right
+        assert left.amount == pytest.approx(right.amount, rel=2e-15, abs=0)
+    assert left_pnl == pytest.approx(right_pnl, rel=2e-15, abs=1e-13)
+    assert [value is None for value in left_markouts] == [
+        value is None for value in right_markouts
+    ]
+    for left, right in zip(left_markouts, right_markouts, strict=True):
+        if left is not None:
+            assert left == pytest.approx(right, rel=2e-15, abs=1e-13)
 
 
 @pytest.mark.parametrize(

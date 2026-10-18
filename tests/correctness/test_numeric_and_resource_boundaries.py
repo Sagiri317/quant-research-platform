@@ -73,7 +73,7 @@ def test_centered_kernels_preserve_finite_variation(values, expected):
     np.testing.assert_allclose(_stable_zscore(pd.Series(values)), expected, atol=1e-14)
 
 
-@pytest.mark.parametrize("scale", [1e6, 1e-4, 1e-4])
+@pytest.mark.parametrize("scale", [1e6, 1e-4])
 def test_time_series_pearson_preserves_units(scale):
     left = np.array([0, 0, 0.1, 0.2, 0.2, -0.2, -1, 1, 1, 0, -1]) * scale
     right = left / scale

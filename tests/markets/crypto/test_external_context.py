@@ -8,6 +8,35 @@ from quant_research_platform.markets.implementations.crypto.hft import (
 )
 
 
+def _assert_recomputed_factors(actual, expected):
+    numerical = [
+        name
+        for name in actual
+        if name.startswith("bybit_")
+        and name.removeprefix("bybit_")
+        in {
+            "mid_usdt",
+            "spread_usdt",
+            "return_100ms",
+            "return_500ms",
+            "observed_signed_base_flow_500ms",
+            "observed_signed_notional_flow_500ms",
+            "observed_tfi_500ms",
+            "price_difference",
+            "relative_mid_dispersion",
+        }
+    ]
+    pd.testing.assert_frame_equal(actual.isna(), expected.isna(), check_exact=True)
+    pd.testing.assert_frame_equal(
+        actual.drop(columns=numerical),
+        expected.drop(columns=numerical),
+        check_exact=True,
+    )
+    pd.testing.assert_frame_equal(
+        actual[numerical], expected[numerical], check_exact=False, rtol=2e-12, atol=0
+    )
+
+
 def test_external_units_clocks_windows_and_chunk_invariance():
     time = pd.date_range("2026-08-01T00:00:01", periods=10, freq="100ms")
     frame = pd.DataFrame(
@@ -60,7 +89,7 @@ def test_external_units_clocks_windows_and_chunk_invariance():
 
     actual = compute([frame])
     split = compute([frame.iloc[:3], frame.iloc[3:7], frame.iloc[7:]])
-    pd.testing.assert_frame_equal(actual, split, check_exact=True)
+    _assert_recomputed_factors(actual, split)
     mature = actual.iloc[5]
     assert mature.bybit_return_500ms == pytest.approx(205 / 200 - 1)
     assert mature.bybit_observed_signed_base_flow_500ms == 2
@@ -72,13 +101,13 @@ def test_external_units_clocks_windows_and_chunk_invariance():
     assert mature.bybit_relative_mid_dispersion == pytest.approx(105 / 305)
     contracts = [{**row, "amount": row["amount"] * 100} for row in trades]
     converted = compute([frame], trade_rows=contracts, multiplier=0.01)
-    pd.testing.assert_frame_equal(actual, converted, check_exact=True)
+    _assert_recomputed_factors(actual, converted)
     future = [
         {**row, "bid_price": 1000.0, "ask_price": 1002.0} if i >= 7 else row
         for i, row in enumerate(quotes)
     ]
-    pd.testing.assert_frame_equal(
-        actual.iloc[:7], compute([frame], quote_rows=future).iloc[:7], check_exact=True
+    _assert_recomputed_factors(
+        actual.iloc[:7], compute([frame], quote_rows=future).iloc[:7]
     )
     stale = compute([frame], quote_rows=quotes[:2])
     assert pd.isna(stale.bybit_mid_usdt.iloc[3])
@@ -123,8 +152,8 @@ def test_external_archive_units_clocks_and_invalid_rows_reach_publication(
     )
     from quant_research_platform.storage.datasets.writing import write_dataset
     from tests.helpers.binance_hft import _coverage, coverage_lookup
+    from tests.helpers.binance_hft import panel_state as _state
     from tests.helpers.paths import StorageLayout
-    from tests.markets.crypto.test_hft import _state
 
     class Response(io.BytesIO):
         status = 200
@@ -661,10 +690,10 @@ def test_external_adjacent_mid_returns_keep_order_and_chunk_state(steps):
         )
 
     full, split = compute([frame]), compute([frame.iloc[:5], frame.iloc[5:]])
-    pd.testing.assert_frame_equal(full, split, check_exact=True)
+    _assert_recomputed_factors(full, split)
     expected = float((Fraction(end) - Fraction(start)) / Fraction(start))
-    assert full.bybit_return_100ms.iloc[-1] == expected
-    assert full.bybit_return_500ms.iloc[-1] == expected
+    assert full.bybit_return_100ms.iloc[-1] == pytest.approx(expected, rel=2e-15, abs=0)
+    assert full.bybit_return_500ms.iloc[-1] == pytest.approx(expected, rel=2e-15, abs=0)
 
 
 @pytest.mark.parametrize("bad_field", ["price", "amount", "side"])

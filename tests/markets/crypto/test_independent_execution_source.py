@@ -6,7 +6,7 @@ import gzip
 import hashlib
 import json
 import shutil
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 import pandas as pd
 import pytest
@@ -32,6 +32,39 @@ from tests.helpers.binance_hft import (
 from tests.research.test_crypto_execution_partial import _close_depth
 
 WINDOW = {"start": "1970-01-01T00:00:00", "end": "1970-01-01T00:00:01"}
+
+
+def _assert_same_source_economics(actual, expected, fills, expected_fills):
+    # Recomputed monetary amounts/estimates are not copied source facts.
+    numeric = {
+        "net_pnl",
+        "gross_pnl",
+        "nav",
+        "capital_return",
+        "fees",
+        "funding",
+        "turnover",
+        "average_slippage_bps",
+        "spread_capture_pnl",
+        "average_markout_per_unit",
+        "average_markout_bps",
+        "markout_pnl",
+        "adverse_selection_cost",
+        "average_order_lifetime_ms",
+        "average_filled_order_lifetime_ms",
+    }
+    for section in ("economics", "execution"):
+        left, right = actual[section], expected[section]
+        assert left.keys() == right.keys()
+        for key, value in left.items():
+            if key in numeric and value is not None:
+                assert right[key] is not None
+                assert value == pytest.approx(right[key], rel=2e-13, abs=0)
+            else:
+                assert value == right[key]
+    for left, right in zip(fills, expected_fills, strict=True):
+        assert replace(left, notional=right.notional) == right
+        assert left.notional == pytest.approx(right.notional, rel=2e-15, abs=0)
 
 
 def _mutate(root, transform):
@@ -213,9 +246,7 @@ def test_public_maker_uses_independent_source_context_and_real_events(
         return
     result, fills = _maker(tmp_path / "actual", old_panel, selected)
     if change == "identity":
-        assert result["execution"] == baseline["execution"]
-        assert result["economics"] == baseline["economics"]
-        assert fills == baseline_fills
+        _assert_same_source_economics(result, baseline, fills, baseline_fills)
     elif change == "closed":
         assert result["execution"]["account_path_status"] == "PARTIAL"
         assert result["economics"]["net_pnl"] is None
@@ -310,9 +341,9 @@ def test_public_taker_frozen_predictions_use_actual_source_identity(tmp_path):
         )
         results.append(_ledger(output))
     assert results[0][0]["execution"]["filled_orders"] > 0
-    assert results[0][0]["economics"] == results[1][0]["economics"]
-    assert results[0][0]["execution"] == results[1][0]["execution"]
-    assert results[0][1] == results[1][1]
+    _assert_same_source_economics(
+        results[0][0], results[1][0], results[0][1], results[1][1]
+    )
 
 
 @pytest.mark.parametrize("levels", [1, 10])

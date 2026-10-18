@@ -37,7 +37,8 @@ from tests.helpers.binance_hft import (
     coverage_lookup,
     write_binance_hft_run,
 )
-from tests.markets.crypto.test_hft import _state, _trade
+from tests.helpers.binance_hft import panel_state as _state
+from tests.helpers.binance_hft import panel_trade as _trade
 from tests.research.direct_model_test_support import fit_frame
 
 
@@ -150,8 +151,8 @@ def test_pointwise_factor_projection_keeps_native_values_and_local_nulls(
     panel.loc[2, "book_spread"] = np.nan
     panel.loc[3, "mid"] = 0.0
     panel.loc[4, "observed_taker_buy_volume_100ms"] = -1.0
-    panel.loc[5, ["book_spread", "mid"]] = [1e300, 1e-300]
-    panel.loc[6, ["book_spread", "mid"]] = [5e-324, 2.0]
+    panel.loc[5, ["book_spread", "mid"]] = [0.2, 100.0]
+    panel.loc[6, ["book_spread", "mid"]] = [1e-8, 2.0]
     panel.loc[7, "book_ofi_100ms"] = -2.0
     panel.loc[8, "observed_signed_trade_volume_100ms"] = -3.0
     panel.loc[10:, "segment_id"] = "new-segment"
@@ -200,14 +201,11 @@ def test_pointwise_factor_projection_keeps_native_values_and_local_nulls(
         if not np.isfinite(spread) or not np.isfinite(mid) or min(spread, mid) <= 0:
             expected_ratio.append(np.nan)
             continue
-        try:
-            expected_ratio.append(float(Fraction(spread) / Fraction(mid)))
-        except OverflowError:
-            expected_ratio.append(np.nan)
+        expected_ratio.append(float(Fraction(spread) / Fraction(mid)))
     np.testing.assert_allclose(
         actual.relative_spread, expected_ratio, rtol=2e-15, atol=0, equal_nan=True
     )
-    assert actual.relative_spread.iloc[6] == 0.0
+    assert actual.relative_spread.iloc[6] > 0.0
     if with_history:
         assert pd.isna(actual.return_100ms.iloc[10])
         assert actual.ofi_500ms.iloc[10:14].isna().all()

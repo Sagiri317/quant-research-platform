@@ -364,7 +364,9 @@ def score(config):
         if isinstance(source, Mapping):
             raise ValueError("duplicate_input_spec")
         source = {"path": source, "spec": config["label_spec"]}
-    options = _dataset_input_options(source)
+    options = _dataset_input_options(
+        source, time_window=window, discovery_windows=validation_windows
+    )
     label_projection = options.get("columns")
     options.setdefault("columns", ("timestamp", "asset_id"))
     label_session = open_dataset_session(**options)
@@ -482,9 +484,7 @@ def score(config):
                 for part in validation_windows:
                     with closing_iterator(
                         iter_dataset_chunks(
-                            label_session.filtered_view(part)
-                            .filtered_view(window)
-                            .projected_view(
+                            label_session.filtered_view(part).projected_view(
                                 (
                                     "timestamp",
                                     "asset_id",

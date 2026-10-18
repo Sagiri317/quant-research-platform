@@ -259,9 +259,10 @@ def test_public_builder_small_nav_cash_and_fee_publish(
         ExecutionAssumptions,
         PortfolioCapital,
     )
+    from tests.helpers.portfolio_inputs import portfolio_inputs
     from tests.research import test_portfolio_production as fixture
 
-    frames, fees, window = fixture._inputs()
+    frames, fees, window = portfolio_inputs()
     frames["dataset"]["eligible"] = (
         frames["dataset"].asset_id.eq("b") if trade else False
     )

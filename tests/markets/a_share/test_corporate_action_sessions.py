@@ -132,7 +132,7 @@ def test_native_interim_events_follow_record_to_payment_span_and_skip_old_claims
     from quant_research_platform.contracts.time import TimeWindow
     from quant_research_platform.sources.csmar.interim import interim_catalog
     from quant_research_platform.storage.datasets import write_dataset
-    from tests.research.test_closed_market_portfolios import _native_inputs
+    from tests.helpers.portfolio_inputs import closed_market_inputs as _native_inputs
 
     inputs, roots, calendar, _ = _native_inputs(tmp_path, fault="normal_open")
     source = pd.DataFrame(

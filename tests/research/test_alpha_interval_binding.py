@@ -146,8 +146,8 @@ def test_native_independent_consumers_share_schedule_but_reject_other_horizon(tm
     from quant_research_platform.research.portfolios.production import backtest
     from quant_research_platform.research.predictions.runner import predict
     from quant_research_platform.storage.datasets import read_dataset
+    from tests.helpers.portfolio_inputs import closed_market_inputs as _native_inputs
     from tests.research.direct_model_test_support import fit_frame
-    from tests.research.test_closed_market_portfolios import _native_inputs
 
     calibration_dir = tmp_path / "alpha"
     calibration_dir.mkdir()

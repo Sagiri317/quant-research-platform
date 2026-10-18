@@ -73,7 +73,7 @@ def test_index_reference_cannot_buy_outside_pool_to_satisfy_exposure():
 
 @pytest.mark.parametrize("missing", ["snapshot", "size"])
 def test_missing_index_reference_preserves_positions_and_cash(missing):
-    from tests.research.test_portfolio_decision_execution import _decision_inputs
+    from tests.helpers.portfolio_inputs import decision_inputs as _decision_inputs
 
     inputs = _decision_inputs()
     inputs["candidate"] = _candidate("size" if missing == "size" else "industry")
@@ -103,7 +103,8 @@ def test_missing_index_reference_preserves_positions_and_cash(missing):
 def test_simple_index_producer_uses_current_snapshot_without_risk_or_calibration(
     tmp_path, monkeypatch, neutrality
 ):
-    from tests.research.test_portfolio_production import _build_producer, _inputs
+    from tests.helpers.portfolio_inputs import portfolio_inputs as _inputs
+    from tests.research.test_portfolio_production import _build_producer
 
     frames, fees, window = _inputs()
     # All three names are real current-frame rows; the external member is ineligible.

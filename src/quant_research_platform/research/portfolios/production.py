@@ -559,7 +559,9 @@ def backtest_a_share(
         ).date(),
         pd.Timestamp(output_window.end).date(),
     )
-    dataset_options = _dataset_input_options(inputs["dataset"])
+    dataset_options = _dataset_input_options(
+        inputs["dataset"], time_window=TimeWindow(sessions[0], sessions[-1])
+    )
     dataset_options["columns"] = ("timestamp", "asset_id")
     dataset_session = open_dataset_session(**dataset_options)
     declared_columns = dataset_session.spec["column_roles"]
@@ -1186,15 +1188,17 @@ def _iter_input_sessions(
     business_columns=(),
     session=None,
 ) -> Iterator[pd.DataFrame]:
-    options = _dataset_input_options(source)
+    options = _dataset_input_options(source, time_window=time_window)
     if options.get("columns") is not None and not set(business_columns) <= set(
         options["columns"]
     ):
         raise ValueError("portfolio_input_business_columns_excluded")
     options["columns"] = columns
     session = (
-        open_dataset_session(**options) if session is None else session
-    ).filtered_view(time_window)
+        open_dataset_session(**options)
+        if session is None
+        else session.filtered_view(time_window)
+    )
     validate_input_market(session.spec, "a_share")
     with closing_iterator(
         _iter_dataset_session_frames(session, columns)
@@ -1231,8 +1235,8 @@ def _risk_context_input_sessions(
     available: set[str] = set()
     inputs = {}
     for position, root in enumerate(roots):
-        session = open_dataset_session(**_dataset_input_options(root)).filtered_view(
-            time_window
+        session = open_dataset_session(
+            **_dataset_input_options(root, time_window=time_window)
         )
         columns = tuple(
             column for column in style_columns if column in session.logical_columns

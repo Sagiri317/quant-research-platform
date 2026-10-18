@@ -29,10 +29,10 @@ from quant_research_platform.research.predictions.runner import predict
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
 from tests.helpers.optimizer import with_cash_asset
 from tests.helpers.portfolio_inputs import _interim_specs, _processed_specs
+from tests.helpers.portfolio_inputs import closed_market_inputs as _native_inputs
+from tests.helpers.portfolio_inputs import decision_inputs as _decision_inputs
 from tests.helpers.research_specs import make_demo_research_dataset_spec
 from tests.research.direct_model_test_support import fit_frame
-from tests.research.test_closed_market_portfolios import _native_inputs
-from tests.research.test_portfolio_decision_execution import _decision_inputs
 
 
 def _data_spec():
@@ -910,9 +910,6 @@ def test_native_receivable_only_asset_has_no_stock_context_dependency(
 
 def test_optimizer_stock_domain_excludes_zero_current_and_reference_names():
     args = _decision_inputs(benchmark=(1.0, 0.0), holdings=(0.9, 0.0))
-    panel = args["panel"].copy()
-    panel["is_nonfinancial_industry"] = panel.is_nonfinancial_industry.astype("boolean")
-    panel.loc[panel.asset_id.eq("b"), "is_nonfinancial_industry"] = pd.NA
     enhanced = args["enhanced_decision"]
     enhanced.exposures.loc[enhanced.exposures.asset_id.eq("b"), "style"] = np.nan
     assets = production._optimizer_assets(

@@ -38,19 +38,12 @@ def test_json_snapshot_matches_pretty_renderer():
     "writer_name", ("write_manifest", "write_internal_artifact_manifest")
 )
 def test_manifest_writers_roundtrip_above_former_capacity(writer_name, tmp_path):
-    payload = {"schema_id": "qrp-test", "value": "x" * (1024 * 1024 + 1)}
+    payload = _deep_pretty_payload()
+    payload["large"] = "x" * (1024 * 1024 + 1)
     path = tmp_path / writer_name / "manifest.json"
     getattr(manifests, writer_name)(path, payload)
     assert manifests.read_manifest(path) == payload
 
-
-@pytest.mark.parametrize(
-    "writer_name", ("write_manifest", "write_internal_artifact_manifest")
-)
-def test_manifest_writers_preserve_pretty_rendering(writer_name, tmp_path):
-    payload = _deep_pretty_payload()
-    path = tmp_path / (writer_name + ".json")
-    getattr(manifests, writer_name)(path, payload)
     assert (
         path.read_text(encoding="utf-8")
         == json_owner.render_qrp_json_object(payload) + "\n"

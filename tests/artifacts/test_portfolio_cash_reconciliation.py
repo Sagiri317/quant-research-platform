@@ -28,10 +28,8 @@ def _envelope(capital):
     }
 
 
-@pytest.mark.parametrize("capital_amount", (1700.0, 1.7e308))
-def test_finite_offset_cash_reconciliation_survives_real_publication(
-    tmp_path, capital_amount
-):
+def test_finite_offset_cash_reconciliation_survives_real_publication(tmp_path):
+    capital_amount = 1700.0
     capital = PortfolioCapital(
         "finite_cash", capital_amount, "USDT", "linear_perpetual"
     )

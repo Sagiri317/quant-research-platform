@@ -262,10 +262,14 @@ def _selection_filters(schema, *, timestamp, time_window, years, row_filters):
     return filters
 
 
-def _dataset_input_options(value):
-    """Parse the existing input fields without opening a file or inferring semantics."""
+def _dataset_input_options(value, *, time_window=None, discovery_windows=None):
+    """Intersect explicit inputs with the consumer domain before discovering files.
+
+    Disjoint consumers still read each window separately; discovery_windows only
+    narrows their shared inventory, without filling the intervening years.
+    """
     if isinstance(value, (str, Path)):
-        return {"dataset_root": Path(value)}
+        value = {"path": value}
     if (
         not isinstance(value, Mapping)
         or set(value)
@@ -320,6 +324,50 @@ def _dataset_input_options(value):
             )
             for column, operator, items in filters
         )
+    if time_window is not None or discovery_windows is not None:
+        years = _validated_years(options.get("years"))
+
+        def interval(window):
+            if window.end is None:
+                return pd.Timestamp(window.start), None
+            lower, upper, closed = time_window_timestamp_interval(window)
+            return pd.Timestamp(lower), pd.Timestamp(upper) - (
+                pd.Timedelta(0) if closed else pd.Timedelta(1, "ns")
+            )
+
+        limits = [
+            interval(window)
+            for window in (options.get("time_window"), time_window)
+            if window is not None
+        ]
+        if time_window is not None:
+            start = max(lower for lower, _ in limits)
+            ends = [upper for _, upper in limits if upper is not None]
+            end = min(ends) if ends else None
+            if end is not None and start > end:
+                options["years"] = ()
+                return options
+            options["time_window"] = (
+                PredictionWindow(start, None) if end is None else TimeWindow(start, end)
+            )
+        if discovery_windows is not None:
+            selected_years = set()
+            for window in discovery_windows:
+                bounds = [*limits, interval(window)]
+                start = max(lower for lower, _ in bounds)
+                ends = [upper for _, upper in bounds if upper is not None]
+                end = min(ends) if ends else None
+                if end is None or start <= end:
+                    selected_years.update(
+                        range(start.year, (end.year if end is not None else 9999) + 1)
+                    )
+            options["years"] = tuple(
+                sorted(
+                    selected_years
+                    if years is None
+                    else selected_years.intersection(years)
+                )
+            )
     return options
 
 
@@ -988,6 +1036,7 @@ def _arrow_slice_to_pandas(
             )
     native_types = set()
     nullable_float_columns = []
+    nullable_discrete_columns = {}
     for name, dtype in (dtype_overrides or {}).items():
         dtype = pd.api.types.pandas_dtype(dtype)
         data_type = arrow_slice.schema.field(name).type
@@ -1005,6 +1054,11 @@ def _arrow_slice_to_pandas(
                 )
         if pa.types.is_integer(data_type) or pa.types.is_boolean(data_type):
             native_types.add(data_type)
+            if (
+                isinstance(dtype, pd.api.extensions.ExtensionDtype)
+                and dtype.kind in "biu"
+            ):
+                nullable_discrete_columns[name] = dtype
         if isinstance(dtype, (pd.Float32Dtype, pd.Float64Dtype)):
             native_types.add(data_type)
             nullable_float_columns.append(name)
@@ -1025,6 +1079,9 @@ def _arrow_slice_to_pandas(
         if native_types
         else None,
     )
+    for name, dtype in nullable_discrete_columns.items():
+        # Convert from Arrow directly: astype can round nullable integers via float.
+        frame[name] = dtype.__from_arrow__(arrow_slice.column(name))
     for name in nullable_float_columns:
         values = arrow_slice.column(name)
         frame[name] = pd.arrays.FloatingArray(

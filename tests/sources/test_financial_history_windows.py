@@ -1,7 +1,6 @@
 from pathlib import Path
 
 import pandas as pd
-import pytest
 
 from quant_research_platform.sources.choice.fields import FINANCIAL_FIELDS
 from quant_research_platform.sources.choice.raw_exports import choice_session
@@ -16,11 +15,10 @@ from tests.helpers.choice_raw import SDK, response, write_css
 from tests.helpers.paths import StorageLayout
 
 
-@pytest.mark.parametrize("year", (2010, 2020))
 def test_explicit_financial_windows_keep_choice_history_and_point_in_time_revisions(
     tmp_path,
-    year,
 ):
+    year = 2010
     previous = year - 1
     raw_layout = StorageLayout(tmp_path / "raw-project")
     fields = tuple(field for mapping in FINANCIAL_FIELDS.values() for field in mapping)

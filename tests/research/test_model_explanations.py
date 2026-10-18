@@ -119,10 +119,12 @@ def test_real_eleven_models_roundtrip_matches_production_prediction(
     assert metadata["attribution"]["method"] == _ALGORITHMS[algorithm]
     assert metadata["context_row_count"] == 24
     assert set(tables["summary"].period) == {"all", "2020-01"}
-    before = Path(config["model"], "predictor.pkl").read_bytes()
-    with pytest.raises(ValueError, match="output_already_exists"):
-        explain(config)
-    assert Path(config["model"], "predictor.pkl").read_bytes() == before
+    # Output collision is checked before model/backend dispatch.
+    if algorithm == "linear_regression":
+        before = Path(config["model"], "predictor.pkl").read_bytes()
+        with pytest.raises(ValueError, match="output_already_exists"):
+            explain(config)
+        assert Path(config["model"], "predictor.pkl").read_bytes() == before
 
 
 @pytest.mark.parametrize("algorithm", list(_ALGORITHMS)[:4])

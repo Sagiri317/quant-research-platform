@@ -203,7 +203,7 @@ def test_assembled_selected_label_semantics_and_real_evaluate_cutoffs(tmp_path):
     )
     from quant_research_platform.research.datasets.assembler import assemble
     from quant_research_platform.research.evaluations.runner import evaluate
-    from tests.research.test_direct_assembly_config import _source
+    from tests.helpers.research_processed_inputs import assembly_source as _source
 
     frame, inputs = _inputs(tmp_path)
     labels_root = prepare(

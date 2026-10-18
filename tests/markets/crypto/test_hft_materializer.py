@@ -206,7 +206,8 @@ def test_independent_panel_persistence_preserves_source_nullable_dtypes(
     from quant_research_platform.markets.implementations.crypto import hft
     from quant_research_platform.storage.datasets.writing import write_dataset
     from tests.helpers.binance_hft import _coverage, coverage_lookup
-    from tests.markets.crypto.test_hft import _state, _trade
+    from tests.helpers.binance_hft import panel_state as _state
+    from tests.helpers.binance_hft import panel_trade as _trade
 
     spec = catalog.hft_processed_catalog().get(HFT_PANEL_DATA_ID)
     inputs = {}

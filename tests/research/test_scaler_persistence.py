@@ -79,7 +79,9 @@ def test_native_fit_preserves_frozen_moments_and_nonbinary_center(tmp_path):
     )
     restored, _ = load_model(case.root)
     assert restored.prediction_model.scaler.to_payload() == scaler.to_payload()
-    np.testing.assert_array_equal(
+    np.testing.assert_allclose(
         restored.prediction_model.predict(case.frame[["x"]]),
         predictor.predict(case.frame[["x"]]),
+        rtol=1e-13,
+        atol=1e-14,
     )

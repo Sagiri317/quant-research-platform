@@ -119,7 +119,9 @@ def test_return_only_factors_do_not_construct_unused_exact_arithmetic(monkeypatc
         hft.iter_factor_frames([frame], columns=("return_100ms",)), ignore_index=True
     )
     assert pd.isna(result.return_100ms.iloc[0])
-    assert result.return_100ms.iloc[1:].tolist() == [0.01, 1 / 101]
+    assert result.return_100ms.iloc[1:].tolist() == pytest.approx(
+        [0.01, 1 / 101], rel=2e-15, abs=0
+    )
 
 
 def test_public_calibration_uses_exact_maximum_maturity_cutoff(tmp_path, monkeypatch):

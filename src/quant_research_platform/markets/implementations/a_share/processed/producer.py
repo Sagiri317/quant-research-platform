@@ -6,7 +6,7 @@ import json
 from bisect import bisect_left, bisect_right
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import date, timedelta
+from datetime import timedelta
 from itertools import chain
 
 import numpy as np
@@ -19,7 +19,6 @@ from quant_research_platform.catalog.processed import (
 from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
 from quant_research_platform.contracts.time import (
     TimeWindow,
-    is_datetime_window,
     time_window_timestamp_interval,
 )
 from quant_research_platform.contracts.validation import (
@@ -114,29 +113,27 @@ def produce_a_share_processed_data(
                 source[data_id] = pd.DataFrame(columns=source_spec.required_columns)
                 continue
             continue
-        options = _dataset_input_options(root)
+        input_window = None
+        if not (
+            data_id in _FULL_HISTORY_SOURCE_IDS
+            or data_id in spec.optional_source_input_data_ids
+        ):
+            input_window = time_window
+            if source_spec.source_id == "choice" or data_id == "market_bars_1d":
+                input_window = _preceding_input_window(time_window)
+            elif data_id == "analyst_forecast":
+                freshness = json.loads(spec.parameters_json).get(
+                    "freshness_days", FORECAST_FRESHNESS_DAYS
+                )
+                input_window = TimeWindow(
+                    time_window.start - timedelta(days=freshness), time_window.end
+                )
+        options = _dataset_input_options(root, time_window=input_window)
         if options.get("columns") is not None:
             options["columns"] = tuple(
                 dict.fromkeys((*source_spec.primary_key, *options["columns"]))
             )
-        session = open_dataset_session(**options)
-        if (
-            data_id in _FULL_HISTORY_SOURCE_IDS
-            or data_id in spec.optional_source_input_data_ids
-        ):
-            source_sessions[data_id] = session
-            continue
-        input_window = time_window
-        if source_spec.source_id == "choice" or data_id == "market_bars_1d":
-            input_window = _preceding_input_window(session, time_window)
-        elif data_id == "analyst_forecast":
-            freshness = json.loads(spec.parameters_json).get(
-                "freshness_days", FORECAST_FRESHNESS_DAYS
-            )
-            input_window = TimeWindow(
-                time_window.start - timedelta(days=freshness), time_window.end
-            )
-        source_sessions[data_id] = session.filtered_view(input_window)
+        source_sessions[data_id] = open_dataset_session(**options)
     if spec.data_id == "market_panel_1d":
         missing = {
             "market_bars_1d",
@@ -164,7 +161,14 @@ def produce_a_share_processed_data(
     for data_id in spec.processed_input_data_ids:
         dependency = processed.get(data_id)
         root = inputs[data_id]
-        options = _dataset_input_options(root)
+        input_window = (
+            None
+            if spec.kind is ProcessedDataKind.LABEL or spec.data_id == "execution_mask"
+            else _preceding_input_window(time_window)
+            if factor_engine.factor_lookback_bars(factor_definitions)
+            else time_window
+        )
+        options = _dataset_input_options(root, time_window=input_window)
         if not filesystem_exists(options["dataset_root"]):
             raise ValueError(f"missing_processed_dependency: {data_id}")
         columns = None
@@ -272,18 +276,11 @@ def produce_a_share_processed_data(
                 axis_columns += ("delisting_date",)
             if "delisting_date_unresolved" in session.arrow_schema.names:
                 axis_columns += ("delisting_date_unresolved",)
+            if input_window is not None:
+                axis_options["time_window"] = input_window
             panel_axis = open_dataset_session(**axis_options, columns=axis_columns)
-        if spec.kind is ProcessedDataKind.LABEL or spec.data_id == "execution_mask":
-            # Actual supplied PANEL sessions own the future execution/label clock.
-            # Each block below reads only its required own-market lookahead.
-            dependencies[data_id] = session
-        else:
-            input_window = (
-                _preceding_input_window(session, time_window)
-                if factor_engine.factor_lookback_bars(factor_definitions)
-                else time_window
-            )
-            dependencies[data_id] = session.filtered_view(input_window)
+        # Label and execution clocks retain the actual supplied future sessions.
+        dependencies[data_id] = session
     for data_id, session in source_sessions.items():
         if data_id not in {"market_bars_1d", "index_weights"}:
             source[data_id] = materialize_dataset_session(session)
@@ -362,23 +359,11 @@ def produce_a_share_processed_data(
         yield (chain((first,), data), metadata)
 
 
-def _preceding_input_window(session, window):
-    """Keep supplied history through the exact cutoff, without a protocol epoch."""
-    minimum = session.manifest.get("date_min")
-    if minimum is None:
-        with closing_iterator(
-            iter_dataset_chunks(session.projected_view(("timestamp",)))
-        ) as chunks:
-            minimum = min(
-                (frame.timestamp.min() for frame in chunks if not frame.empty),
-                default=None,
-            )
-        start = pd.Timestamp(minimum).date() if minimum is not None else window.start
-    else:
-        start = date.fromisoformat(minimum)
-    if is_datetime_window(window):
-        start = pd.Timestamp(start)
-    return TimeWindow(min(start, window.start), window.end)
+def _preceding_input_window(window):
+    """Keep all representable history through the operation's exact cutoff."""
+    _, upper, closed = time_window_timestamp_interval(window)
+    end = pd.Timestamp(upper) - (pd.Timedelta(0) if closed else pd.Timedelta(1, "ns"))
+    return TimeWindow(pd.Timestamp.min, end)
 
 
 def _processed_frames(

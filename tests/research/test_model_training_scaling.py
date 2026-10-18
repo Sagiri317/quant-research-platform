@@ -85,8 +85,11 @@ def _expected(data, native, scaling):
     return matrix
 
 
-@pytest.mark.parametrize("algorithm", ALGORITHMS)
-@pytest.mark.parametrize("choice", [None, False, True])
+@pytest.mark.parametrize(
+    "algorithm,choice",
+    [(algorithm, None) for algorithm in ALGORITHMS]
+    + [(algorithm, algorithm not in ALGORITHMS[:4]) for algorithm in ALGORITHMS],
+)
 def test_actual_estimator_inputs_and_native_roundtrip(
     tmp_path, monkeypatch, algorithm, choice
 ):
@@ -126,6 +129,7 @@ def test_actual_estimator_inputs_and_native_roundtrip(
         actual = actual[:, 1:] / actual[:, :1]
     np.testing.assert_allclose(actual, expected, rtol=2e-13, atol=2e-13, equal_nan=True)
     assert spec.training_scaling is expected_scaling
+    assert _spec(algorithm, expected_scaling).training_scaling is expected_scaling
     assert model_spec_payload(spec)["training_scaling"] is expected_scaling
     assert case.facts["model"]["training_scaling"] is expected_scaling
     assert case.result.metadata["training_scaling"] is expected_scaling

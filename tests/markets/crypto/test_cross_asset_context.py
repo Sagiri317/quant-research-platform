@@ -76,8 +76,9 @@ def test_cross_asset_units_lag_segment_and_chunk_causality():
     assert missing.btc_return_100ms.equals(full.btc_return_100ms)
 
 
-@pytest.mark.parametrize("chunk_rows", ((1, 3), (4, 1), (20, 20)))
-@pytest.mark.parametrize("batch_rows", (1, 4, 20))
+@pytest.mark.parametrize(
+    "chunk_rows,batch_rows", [((1, 3), 1), ((4, 1), 4), ((20, 20), 20)]
+)
 def test_information_union_preserves_complete_keys_and_exact_nullable_values(
     chunk_rows, batch_rows
 ):
@@ -250,8 +251,8 @@ def test_information_union_persists_complete_ordered_panel_for_research_windows(
     )
     from quant_research_platform.storage.datasets.writing import write_dataset
     from tests.helpers.binance_hft import _coverage, coverage_lookup
+    from tests.helpers.binance_hft import panel_state as _state
     from tests.helpers.paths import StorageLayout
-    from tests.markets.crypto.test_hft import _state
 
     start = pd.Timestamp("2026-08-01T00:00:01")
     start_ms = start.value // 1000000

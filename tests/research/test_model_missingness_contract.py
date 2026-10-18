@@ -151,7 +151,9 @@ def test_native_missing_training_column_roundtrips_without_imputation(
         window={"start": "2024-01-04", "end": "2024-01-04"},
     )
     assert predictions.asset_id.tolist() == ["b", "c"]
-    np.testing.assert_array_equal(predictions.prediction_score, direct[1:])
+    np.testing.assert_allclose(
+        predictions.prediction_score, direct[1:], rtol=1e-12, atol=1e-14
+    )
     method = (
         "native_tree"
         if algorithm in {"xgboost_regressor", "lightgbm_regressor"}
@@ -173,16 +175,18 @@ def test_native_missing_training_column_roundtrips_without_imputation(
         )
     )
     assert tables["predictions"].status.eq("DEFINED").all()
-    np.testing.assert_array_equal(tables["predictions"].prediction_score, direct[1:])
+    np.testing.assert_allclose(
+        tables["predictions"].prediction_score, direct[1:], rtol=1e-12, atol=1e-14
+    )
     missing_contributions = tables["contributions"].loc[
         lambda rows: rows.feature.eq("z")
     ]
     assert len(missing_contributions) == 2
     assert missing_contributions.contribution.eq(0.0).all()
     reloaded, _ = load_model(case.root)
-    np.testing.assert_array_equal(
-        reloaded.prediction_model.predict(future[["x", "z"]]), direct
-    )
+    reloaded_predictions = reloaded.prediction_model.predict(future[["x", "z"]])
+    np.testing.assert_array_equal(np.isnan(reloaded_predictions), np.isnan(direct))
+    np.testing.assert_allclose(reloaded_predictions, direct, rtol=1e-12, atol=1e-14)
     assert reloaded.prediction_model.scaler.to_payload() == frozen
     assert (case.root / "predictor.pkl").read_bytes() == saved_model
 

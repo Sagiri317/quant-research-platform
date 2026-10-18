@@ -15,14 +15,10 @@ from quant_research_platform.markets.implementations.crypto.execution import (
     simulate_maker,
     simulate_taker,
 )
-from tests.helpers.binance_hft import KNOWN_NO_FUNDING
-from tests.markets.crypto.test_hft_execution import (
-    _coverage,
-    _maker_config,
-    _quote,
-    _state,
-    _trade,
-)
+from tests.helpers.binance_hft import KNOWN_NO_FUNDING, _coverage, _quote
+from tests.helpers.binance_hft import execution_state as _state
+from tests.helpers.binance_hft import execution_trade as _trade
+from tests.helpers.binance_hft import maker_config as _maker_config
 
 
 @pytest.mark.parametrize("direction", (-1, 1))

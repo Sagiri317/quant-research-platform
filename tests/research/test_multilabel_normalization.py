@@ -85,6 +85,19 @@ def test_multilabel_normalizes_shared_panel_once_and_matches_separate_labels(lab
             actual[index], expected, check_exact=False, rtol=1e-12, atol=1e-14
         )
     assert normalize.call_count == frame.timestamp.nunique()
+    first = (
+        actual[0]
+        .loc[
+            actual[0].timestamp.eq(pd.Timestamp("2020-01-01"))
+            & actual[0].signal.eq("signal")
+            & actual[0].label.eq("first")
+        ]
+        .iloc[0]
+    )
+    # Paired feature [1, 3, 5], label [3, 2, 4]; ranks [1, 2, 3] vs [2, 1, 3].
+    assert first.n_obs == 3
+    assert first.ic == pytest.approx(0.5, rel=1e-12, abs=0.0)
+    assert first.rankic == pytest.approx(0.5, rel=1e-12, abs=0.0)
 
 
 def test_multilabel_chunk_continuity_and_diagnostics():

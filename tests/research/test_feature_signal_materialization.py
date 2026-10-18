@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from itertools import permutations
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -20,48 +18,68 @@ from quant_research_platform.research.signals.normalization import (
 )
 
 
-def test_signal_overlap_sets_preserve_unique_contract_and_error_order():
-    names = ("a", "b", "c", "prediction_score")
-    count = 0
-    for length in range(1, len(names) + 1):
-        for ids in permutations(names, length):
-            for columns in permutations(names, length):
-                signals = tuple(
-                    SignalSpec(
-                        signal_id=signal_id,
-                        source_kind="prediction",
-                        source_column=column,
-                    )
-                    for signal_id, column in zip(ids, columns, strict=True)
-                )
-                expected = sorted(
-                    {
-                        signal_id
-                        for position, signal_id in enumerate(ids)
-                        for other, column in enumerate(columns)
-                        if position != other and signal_id == column
-                    }
-                )
-                assert _cross_signal_id_column_overlaps(signals) == expected
-                arguments = dict(
-                    evaluation_id="case",
-                    market_id="crypto",
-                    research_dataset_id="case",
-                    signals=signals,
-                    label_columns=("label",),
-                )
-                if expected:
-                    with pytest.raises(
-                        ValueError,
-                        match="^evaluation_signal_id_column_overlap: "
-                        + ", ".join(expected)
-                        + "$",
-                    ):
-                        EvaluationSpec(**arguments)
-                else:
-                    assert EvaluationSpec(**arguments).signals == signals
-                count += 1
-    assert count == 1312
+@pytest.mark.parametrize(
+    "ids,columns,literal_overlaps",
+    [
+        (("a",), ("a",), []),
+        (("a", "b"), ("score", "prediction_score"), []),
+        (("a", "b"), ("b", "a"), ["a", "b"]),
+        (("a", "b"), ("b", "c"), ["b"]),
+        (("c", "b", "a"), ("b", "a", "c"), ["a", "b", "c"]),
+        (("a", "b", "c"), ("a", "c", "b"), ["b", "c"]),
+    ],
+)
+def test_signal_overlap_sets_preserve_unique_contract_and_error_order(
+    ids, columns, literal_overlaps
+):
+    signals = tuple(
+        SignalSpec(signal_id=signal_id, source_kind="prediction", source_column=column)
+        for signal_id, column in zip(ids, columns, strict=True)
+    )
+    assert _cross_signal_id_column_overlaps(signals) == literal_overlaps
+    arguments = dict(
+        evaluation_id="case",
+        market_id="crypto",
+        research_dataset_id="case",
+        signals=signals,
+        label_columns=("label",),
+    )
+    if literal_overlaps:
+        with pytest.raises(
+            ValueError,
+            match="^evaluation_signal_id_column_overlap: "
+            + ", ".join(literal_overlaps)
+            + "$",
+        ):
+            EvaluationSpec(**arguments)
+    else:
+        assert EvaluationSpec(**arguments).signals == signals
+
+
+@pytest.mark.parametrize(
+    "ids,columns,error",
+    [
+        (("a", "a"), ("x", "y"), "evaluation_signal_ids_must_not_contain_duplicates"),
+        (
+            ("a", "b"),
+            ("x", "x"),
+            "evaluation_signal_columns_must_not_contain_duplicates",
+        ),
+    ],
+)
+def test_signal_overlap_requires_unique_declarations(ids, columns, error):
+    signals = tuple(
+        SignalSpec(signal_id=key, source_kind="prediction", source_column=column)
+        for key, column in zip(ids, columns, strict=True)
+    )
+    with pytest.raises(ValueError, match=f"^{error}$"):
+        EvaluationSpec(
+            evaluation_id="case",
+            market_id="crypto",
+            research_dataset_id="case",
+            signals=signals,
+            label_columns=("label",),
+        )
 
 
 def test_winsorization_preserves_positional_groups_and_duplicate_indexes():
@@ -153,8 +171,8 @@ def test_feature_transforms_reject_invalid_numeric_sources(value: object) -> Non
 def test_signal_materialization_normalizes_direction_and_transform() -> None:
     frame = pd.DataFrame(
         {
-            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-02", "2024-01-02"]),
-            "risk": [1.0, 2.0, 3.0],
+            "timestamp": pd.to_datetime(["2024-01-02"] * 3 + ["2024-01-03"] * 3),
+            "risk": [8.0, 2.0, 2.0, 4.0, 9.0, 1.0],
         }
     )
     signal = SignalSpec(
@@ -165,7 +183,9 @@ def test_signal_materialization_normalizes_direction_and_transform() -> None:
         transform="rank",
     )
     result = normalize_signal_frame(frame, (signal,))
-    assert result["risk_signal"].tolist() == pytest.approx([-1.0, -2.0, -3.0])
+    assert result["risk_signal"].tolist() == pytest.approx(
+        [-3.0, -1.5, -1.5, -2.0, -3.0, -1.0]
+    )
     assert "risk" not in result.columns
 
 

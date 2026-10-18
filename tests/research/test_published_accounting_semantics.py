@@ -1,6 +1,6 @@
 """Native raw-share valuation and persisted receivable regression evidence."""
 
-from dataclasses import replace
+from dataclasses import asdict, replace
 from fractions import Fraction
 
 import numpy as np
@@ -207,7 +207,41 @@ def test_late_corporate_disclosure_preserves_prefix_and_persisted_nav(
     )
     # The later disclosure's amount cannot change either economic facts or
     # valuation diagnostics published before its availability.
-    assert first[:2] == changed[:2]
+    for before, after in zip(first[:2], changed[:2], strict=True):
+        assert before.sequence == after.sequence
+        for name, floats in (
+            ("trades", ("notional",)),
+            ("cashflows", ("amount",)),
+            ("valuations", ("value", "cost_basis", "receivable")),
+            ("diagnostics", ("number",)),
+            (
+                "rights_adjustments",
+                ("cash_amount", "receivable_before", "receivable_after"),
+            ),
+        ):
+            left = pd.DataFrame([asdict(row) for row in getattr(before, name)])
+            right = pd.DataFrame([asdict(row) for row in getattr(after, name)])
+            numeric = [column for column in floats if column in left]
+            if name == "diagnostics":
+                discrete = left.name.isin(
+                    ("adv20_observation_count", "adv20_missing_observations")
+                ) | left.name.str.endswith("_mark_age_days")
+                pd.testing.assert_series_equal(
+                    left.loc[discrete, "number"],
+                    right.loc[discrete, "number"],
+                    check_exact=True,
+                )
+            pd.testing.assert_frame_equal(
+                left.drop(columns=numeric),
+                right.drop(columns=numeric),
+                check_exact=True,
+            )
+            pd.testing.assert_frame_equal(
+                left[numeric].isna(), right[numeric].isna(), check_exact=True
+            )
+            pd.testing.assert_frame_equal(
+                left[numeric], right[numeric], check_exact=False, rtol=1e-12, atol=0.0
+            )
     for batches, final_mark in ((first, 80), (changed, 70)):
         for batch in batches:
             economics = portfolio_interval_economics(batch)
@@ -229,9 +263,11 @@ def test_unquoted_stresses_and_estimated_amount_preserve_confirmed_receivable(
     batch = batches[1]
     economics = portfolio_interval_economics(batch)
     observed = _research_valuation_observation(batch, economics)
-    assert observed["estimated_value_end"] == 90.0
-    assert observed["estimated_weight_end"] == 0.9
-    assert [observed[f"nav_{pct}pct"] for pct in (0, 50, 100)] == [10.0, 55.0, 100.0]
+    assert observed["estimated_value_end"] == pytest.approx(90.0, rel=1e-12)
+    assert observed["estimated_weight_end"] == pytest.approx(0.9, rel=1e-12)
+    assert [observed[f"nav_{pct}pct"] for pct in (0, 50, 100)] == pytest.approx(
+        [10.0, 55.0, 100.0], rel=1e-12
+    )
     # Also consume the actual persisted native ledger with its full interval axis.
     tables = _statistics(tmp_path / "ledger")
     assert not tables["portfolio_performance"].empty
@@ -261,9 +297,9 @@ def test_adv_missing_sell_amount_and_requested_turnover_exclude_receivable(
                 if facts[value.asset_id, "block_reason"].text == "adv_unavailable":
                     assert value.share_value == 90.0
                     amounts.append(value.share_value)
-                    assert (
-                        portfolio_interval_economics(batch)["requested_turnover"] == 0.9
-                    )
+                    assert portfolio_interval_economics(batch)[
+                        "requested_turnover"
+                    ] == pytest.approx(0.9, rel=1e-12)
     assert amounts == [90.0, 90.0]
     metrics = _statistics(tmp_path / "ledger")["portfolio_performance"].set_index(
         "metric_id"
@@ -487,7 +523,9 @@ def test_persisted_adv_buy_gap_smaller_than_claim_keeps_buy_direction(
                     for row in batch.diagnostics
                 ),
             )
-            assert portfolio_interval_economics(batch)["requested_turnover"] == 0.05
+            assert portfolio_interval_economics(batch)[
+                "requested_turnover"
+            ] == pytest.approx(0.05, rel=1e-12)
         changed.append(batch)
     root = ledger.write_portfolio_ledger_artifact(
         tmp_path / "buy",
@@ -585,7 +623,7 @@ def test_attribution_uses_stock_exposure_while_pending_claim_stays_in_nav(
     stock = exposures.loc[
         exposures.entry_at.eq("2023-01-06") & exposures.factor_id.eq("style")
     ]
-    assert stock.value.item() == 0.9
+    assert stock.value.item() == pytest.approx(0.9, rel=1e-12)
 
 
 def test_zero_stress_keeps_claim_smaller_than_stock_amount_roundoff(

@@ -38,7 +38,7 @@ def test_native_selected_refit_failure_preserves_prior_selection_and_model(
     import quant_research_platform.research.models.persisted as persisted
     import quant_research_platform.research.models.production as production
     from quant_research_platform.research.models.trial_selection import score, select
-    from tests.research.test_prediction_runner_model_selection import candidates
+    from tests.research.direct_model_test_support import candidates
 
     cases, scoring = candidates(tmp_path, algorithms=("linear_regression",))
     selection = select(

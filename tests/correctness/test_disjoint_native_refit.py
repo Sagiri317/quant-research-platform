@@ -2,6 +2,7 @@
 
 import json
 
+import numpy as np
 import pandas as pd
 
 from quant_research_platform.artifacts.outputs.prediction import read_predictions
@@ -78,6 +79,9 @@ def test_disjoint_refit_counts_and_predictions_ignore_gap_and_late_labels(tmp_pa
     train_path = fit(config)
     trained, _ = load_model(train_path)
     assert trained.metadata["rows_after_input_label_dropna"] == 3
+    assert pd.Timestamp(
+        trained.metadata["label_available_max"]
+    ) == start + pd.Timedelta(seconds=3)
     union = [window(1, 3), window(6, 8)]
     validation = predict(
         {
@@ -140,6 +144,9 @@ def test_disjoint_refit_counts_and_predictions_ignore_gap_and_late_labels(tmp_pa
         )
         fitted, facts = load_model(model_path)
         assert fitted.metadata["rows_after_input_label_dropna"] == 9
+        assert pd.Timestamp(
+            fitted.metadata["label_available_max"]
+        ) == start + pd.Timedelta(seconds=8)
         assert facts["fit_windows"] == union
         published = predict(
             {
@@ -161,6 +168,10 @@ def test_disjoint_refit_counts_and_predictions_ignore_gap_and_late_labels(tmp_pa
             prediction.loc[:, ["timestamp", "asset_id"]].reset_index(drop=True),
             expected_keys,
             check_dtype=False,
+        )
+        expected_x = frame.loc[frame.timestamp.ge(start + pd.Timedelta(seconds=9)), "x"]
+        np.testing.assert_allclose(
+            prediction.prediction_score, 2 * expected_x + 1, rtol=1e-12, atol=0.0
         )
         predictions.append(prediction)
     pd.testing.assert_frame_equal(*predictions, check_exact=False, rtol=1e-12, atol=0.0)

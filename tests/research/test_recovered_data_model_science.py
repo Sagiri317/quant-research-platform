@@ -26,8 +26,10 @@ from quant_research_platform.storage.datasets import (
     read_dataset,
     write_dataset,
 )
-from tests.research.test_direct_assembly_config import _config, _frame, _source
-from tests.research.test_prediction_runner_model_selection import candidates
+from tests.helpers.research_processed_inputs import assembly_config as _config
+from tests.helpers.research_processed_inputs import assembly_frame as _frame
+from tests.helpers.research_processed_inputs import assembly_source as _source
+from tests.research.direct_model_test_support import candidates
 
 
 @pytest.mark.parametrize("unit", ["percent_return", "decimal_return", None])

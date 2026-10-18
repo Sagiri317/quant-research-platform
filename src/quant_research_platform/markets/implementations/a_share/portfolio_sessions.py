@@ -105,17 +105,20 @@ def _portfolio_session_evidence(
     include_asset_sessions,
     time_window=None,
 ):
+    # Preserve preceding membership and valuation evidence, not unrelated future rows.
+    history = (
+        TimeWindow(pd.Timestamp.min, pd.Timestamp(time_window.end))
+        if time_window is not None
+        else None
+    )
     bars = open_dataset_session(
-        **_dataset_input_options(market_bars_root)
+        **_dataset_input_options(market_bars_root, time_window=history)
     ).projected_view(_MARKET_FACT_COLUMNS)
-    panel = open_dataset_session(**_dataset_input_options(panel_root))
+    panel = open_dataset_session(
+        **_dataset_input_options(panel_root, time_window=history)
+    )
     validate_input_market(bars.spec, "a_share")
     validate_input_market(panel.spec, "a_share")
-    # Preserve preceding membership and valuation evidence, not unrelated future rows.
-    if time_window is not None:
-        history = TimeWindow(pd.Timestamp.min, pd.Timestamp(time_window.end))
-        bars = bars.filtered_view(history)
-        panel = panel.filtered_view(history)
     business_columns = set(panel_columns) & {
         "open",
         "close",
@@ -135,10 +138,10 @@ def _portfolio_session_evidence(
         _, _, _, asset_sessions, _ = _processed_axis(
             panel, panel_source=False, include_asset_sessions=True
         )
-    stock_source = open_dataset_session(**_dataset_input_options(stock_master_root))
+    stock_source = open_dataset_session(
+        **_dataset_input_options(stock_master_root, time_window=history)
+    )
     validate_input_market(stock_source.spec, "a_share")
-    if time_window is not None:
-        stock_source = stock_source.filtered_view(history)
     stock_columns = _STOCK_FACT_COLUMNS
     if "delisting_date_unresolved" in stock_source.spec["column_roles"]:
         stock_columns = (*stock_columns, "delisting_date_unresolved")
@@ -183,8 +186,11 @@ def iter_portfolio_sessions(
     )
     rights_root = equity_events_root
     rights_session = (
-        open_dataset_session(**_dataset_input_options(rights_root)).filtered_view(
-            TimeWindow(pd.Timestamp.min, pd.Timestamp(time_window.end))
+        open_dataset_session(
+            **_dataset_input_options(
+                rights_root,
+                time_window=TimeWindow(pd.Timestamp.min, pd.Timestamp(time_window.end)),
+            )
         )
         if rights_root is not None
         else None
@@ -218,8 +224,8 @@ def iter_portfolio_sessions(
     corporate = pd.DataFrame(columns=_CORPORATE_EVENT_COLUMNS)
     if corporate_actions_root is not None:
         corporate_source = open_dataset_session(
-            **_dataset_input_options(corporate_actions_root)
-        ).filtered_view(time_window)
+            **_dataset_input_options(corporate_actions_root, time_window=time_window)
+        )
         validate_input_market(corporate_source.spec, "a_share")
         if "amount" not in corporate_source.logical_columns:
             raise ValueError("portfolio_input_business_columns_excluded")
@@ -267,8 +273,11 @@ def iter_portfolio_sessions(
     execution_session = None
     if execution_root is not None:
         execution_session = open_dataset_session(
-            **_dataset_input_options(execution_root)
-        ).filtered_view(TimeWindow(pd.Timestamp.min, pd.Timestamp(time_window.end)))
+            **_dataset_input_options(
+                execution_root,
+                time_window=TimeWindow(pd.Timestamp.min, pd.Timestamp(time_window.end)),
+            )
+        )
         validate_input_market(execution_session.spec, "a_share")
     with closing_iterator(ExitStack()) as channels:
         bar_frames = channels.enter_context(closing_iterator(ordered_bars()))

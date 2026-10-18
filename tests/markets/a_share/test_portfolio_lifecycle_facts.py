@@ -6,7 +6,7 @@ from quant_research_platform.markets.implementations.a_share import portfolio_se
 from quant_research_platform.research.portfolios import production
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
 from tests.helpers.portfolio_inputs import _interim_specs
-from tests.research.test_closed_market_portfolios import _native_inputs
+from tests.helpers.portfolio_inputs import closed_market_inputs as _native_inputs
 
 
 @pytest.mark.parametrize("late_status", [False, True])

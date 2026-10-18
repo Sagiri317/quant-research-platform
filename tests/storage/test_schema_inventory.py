@@ -189,14 +189,10 @@ def test_schema_inventory_uses_full_posix_path_order_for_prefix_names(tmp_path, 
     )
 
 
-@pytest.mark.parametrize("deep_root", (False, True))
-def test_schema_inventory_keeps_all_explicit_dataset_paths(
-    tmp_path: Path, deep_root: bool
-) -> None:
-    if deep_root:
-        while len(str(tmp_path)) <= 270:
-            tmp_path /= "segment_" + "a" * 32
-        assert len(str(tmp_path)) > 260
+def test_schema_inventory_keeps_all_explicit_dataset_paths(tmp_path: Path) -> None:
+    while len(str(tmp_path)) <= 270:
+        tmp_path /= "segment_" + "a" * 32
+    assert len(str(tmp_path)) > 260
     layout = StorageLayout(tmp_path)
     common = {
         "data_id": "inventory_current",
@@ -242,24 +238,23 @@ def test_schema_inventory_keeps_all_explicit_dataset_paths(
         ),
     )
     expected = {}
-    for spec, logical_root, layer, kind in specs:
-        for rows in (1, 2, 3):
-            root = logical_root / f"sample-{rows}"
-            frame = pd.DataFrame(
-                {
-                    "market_id": ["a_share"] * rows,
-                    "asset_id": [f"asset_{index}" for index in range(rows)],
-                    "timestamp": pd.date_range("2024-01-01", periods=rows),
-                    "value": [1.0] + [float("nan")] * (rows - 1),
-                    "label": [0.5] * rows,
-                }
-            )
-            write_dataset(
-                root,
-                frame,
-                spec=spec,
-            )
-            expected[root.relative_to(tmp_path).as_posix()] = (layer, kind, rows)
+    for rows, (spec, logical_root, layer, kind) in enumerate(specs, start=1):
+        root = logical_root / f"sample-{rows}"
+        frame = pd.DataFrame(
+            {
+                "market_id": ["a_share"] * rows,
+                "asset_id": [f"asset_{index}" for index in range(rows)],
+                "timestamp": pd.date_range("2024-01-01", periods=rows),
+                "value": [1.0] + [float("nan")] * (rows - 1),
+                "label": [0.5] * rows,
+            }
+        )
+        write_dataset(
+            root,
+            frame,
+            spec=spec,
+        )
+        expected[root.relative_to(tmp_path).as_posix()] = (layer, kind, rows)
     output = tmp_path / "inventory.json"
     schema_inventory.write_schema_inventory(
         tmp_path, output, important_null_count_columns=("value",)
@@ -267,8 +262,8 @@ def test_schema_inventory_keeps_all_explicit_dataset_paths(
     items = json.loads(
         Path(native_filesystem_path(output)).read_text(encoding="utf-8")
     )["datasets"]
-    assert len(items) == 9
-    assert sum(item["row_count"] for item in items) == 18
+    assert len(items) == 3
+    assert sum(item["row_count"] for item in items) == 6
     assert [item["logical_relative_root"] for item in items] == sorted(expected)
     for item in items:
         layer, kind, rows = expected[item["logical_relative_root"]]

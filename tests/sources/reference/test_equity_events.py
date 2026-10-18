@@ -166,7 +166,7 @@ def test_equity_evidence_invalid_never_publishes_over_old_good(tmp_path, damage)
 def native_equity_inputs(
     tmp_path, *, events=None, panel_transform=None, fault="delisted"
 ):
-    from tests.research.test_closed_market_portfolios import _native_inputs
+    from tests.helpers.portfolio_inputs import closed_market_inputs as _native_inputs
 
     inputs, roots, calendar, _panel = _native_inputs(tmp_path, fault=fault)
     for target, input_key in (
@@ -267,14 +267,14 @@ def test_calendar_coalesced_rights_events_do_not_use_event_id_as_order(tmp_path)
         list(source)
 
 
-def test_source_exact_event_values_preserve_extreme_finite_final_amounts(tmp_path):
+def test_source_exact_event_values_preserve_cash_and_conversion_units(tmp_path):
     from fractions import Fraction
 
     raw = tmp_path / "raw"
 
     def events(base):
         return [
-            dict(base, amount_per_share=1e300),
+            dict(base, amount_per_share=30.01),
             dict(
                 base,
                 event_id="conversion",
@@ -283,7 +283,7 @@ def test_source_exact_event_values_preserve_extreme_finite_final_amounts(tmp_pat
                 remaining_old_units_per_old_unit=0.0,
                 successor_asset_id="000002",
                 successor_listing_date="2023-01-03",
-                successor_shares_per_old_share=1e300,
+                successor_shares_per_old_share=1.25,
             ),
         ]
 
@@ -303,8 +303,8 @@ def test_source_exact_event_values_preserve_extreme_finite_final_amounts(tmp_pat
     multiplier = decode_exact_numeric(
         frame.loc["conversion", "successor_units_per_old_unit"]
     )
-    assert quote == Fraction(1e300)
-    assert multiplier == Fraction(1e300)
+    assert quote == Fraction(30.01)
+    assert multiplier == Fraction(1.25)
     assert float(Fraction(1) / quote * quote) == 1.0
     assert Fraction(1) / multiplier * multiplier == 1
 

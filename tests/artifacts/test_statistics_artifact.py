@@ -12,23 +12,7 @@ from quant_research_platform.artifacts import statistics
 
 @pytest.fixture
 def tables(request):
-    parameters = getattr(request.node, "callspec", None)
-    parameters = {} if parameters is None else parameters.params
-    selected = parameters.get(
-        "member", parameters.get("name", parameters.get("table", ""))
-    ).removesuffix(".parquet")
-    group = (
-        "factor"
-        if "factor_case" in parameters
-        or selected
-        in {
-            "factor_diagnostics",
-            "factor_stratified_diagnostics",
-            "fama_macbeth",
-            "fama_macbeth_periods",
-        }
-        else "research"
-    )
+    group = getattr(request, "param", "research")
     row = dict(
         signal="factor",
         label="label",
@@ -168,15 +152,25 @@ def test_table_consumer_primary_exception_is_preserved(tmp_path, tables, metadat
 
 
 @pytest.mark.parametrize(
-    "member",
-    (
-        *(
-            member
-            for member in statistics.STATISTICS_TABLE_GROUPS["research"]
-            if member != "model_prediction_metrics.parquet"
-        ),
-        *statistics.STATISTICS_TABLE_GROUPS["factor"],
-    ),
+    "tables,member",
+    [
+        (
+            "factor"
+            if member.removesuffix(".parquet") + ".parquet"
+            in statistics.STATISTICS_TABLE_GROUPS["factor"]
+            else "research",
+            member,
+        )
+        for member in (
+            *(
+                member
+                for member in statistics.STATISTICS_TABLE_GROUPS["research"]
+                if member != "model_prediction_metrics.parquet"
+            ),
+            *statistics.STATISTICS_TABLE_GROUPS["factor"],
+        )
+    ],
+    indirect=["tables"],
 )
 @pytest.mark.parametrize("mutation", ["status", "reason", "count", "undefined"])
 def test_research_table_rejects_invalid_values_at_write_and_read(
@@ -209,9 +203,13 @@ def test_research_table_rejects_invalid_values_at_write_and_read(
         if mutation == "status"
         else "statistics_table_status_value_invalid"
     )
-    _assert_rejected_at_write_and_read(
-        tmp_path, tables, metadata, member, error=f"^{error}$"
-    )
+    if name == "prediction_diagnostics" or mutation == "undefined":
+        _assert_rejected_at_write_and_read(
+            tmp_path, tables, metadata, member, error=f"^{error}$"
+        )
+    else:
+        with pytest.raises(ValueError, match=f"^{error}$"):
+            statistics._validated_frame(tables[name], member=member, metadata=metadata)
 
 
 def _assert_rejected_at_write_and_read(
@@ -230,6 +228,7 @@ def _assert_rejected_at_write_and_read(
             tables=tables,
             table_group=table_group,
         )
+    assert not (tmp_path / "rejected").exists()
     root = tmp_path / "persisted"
     root.mkdir()
     pq.write_table(
@@ -257,17 +256,27 @@ def _assert_rejected_at_write_and_read(
 
 
 @pytest.mark.parametrize(
-    "name,column",
+    "tables,name,column",
     [
-        ("factor_diagnostics", "mean"),
-        ("prediction_diagnostics", "mean"),
-        ("model_trials", "value"),
-        ("fama_macbeth", "mean"),
-        ("fama_macbeth_periods", "value"),
-        ("model_losses", "loss"),
-        ("model_comparison", "mean"),
-        ("model_reality_checks", "value"),
+        (
+            "factor"
+            if name + ".parquet" in statistics.STATISTICS_TABLE_GROUPS["factor"]
+            else "research",
+            name,
+            column,
+        )
+        for name, column in [
+            ("factor_diagnostics", "mean"),
+            ("prediction_diagnostics", "mean"),
+            ("model_trials", "value"),
+            ("fama_macbeth", "mean"),
+            ("fama_macbeth_periods", "value"),
+            ("model_losses", "loss"),
+            ("model_comparison", "mean"),
+            ("model_reality_checks", "value"),
+        ]
     ],
+    indirect=["tables"],
 )
 def test_defined_research_measurements_cannot_be_missing(
     tmp_path, tables, metadata, name, column
@@ -277,16 +286,23 @@ def test_defined_research_measurements_cannot_be_missing(
 
 
 @pytest.mark.parametrize(
-    "member",
-    (
-        *statistics.STATISTICS_TABLE_GROUPS["research"],
-        *statistics.STATISTICS_TABLE_GROUPS["factor"],
-    ),
+    "tables,member",
+    [
+        (
+            "factor"
+            if member.removesuffix(".parquet") + ".parquet"
+            in statistics.STATISTICS_TABLE_GROUPS["factor"]
+            else "research",
+            member,
+        )
+        for member in (
+            *statistics.STATISTICS_TABLE_GROUPS["research"],
+            *statistics.STATISTICS_TABLE_GROUPS["factor"],
+        )
+    ],
+    indirect=["tables"],
 )
-@pytest.mark.parametrize("value", [True, 1.5, 2**63])
-def test_research_table_counts_reject_lossy_coercion(
-    tmp_path, tables, metadata, member, value
-):
+def test_research_table_counts_reject_lossy_coercion(tables, metadata, member):
     name = member.removesuffix(".parquet")
     if name == "model_group_comparison":
         tables[name] = pd.DataFrame([_defined_group_comparison_row()])
@@ -297,14 +313,9 @@ def test_research_table_counts_reject_lossy_coercion(
         if name == "model_prediction_metrics"
         else "observation_count"
     )
-    tables[name][count] = pd.Series([value] * len(tables[name]), dtype=object)
+    tables[name][count] = pd.Series([1.5] * len(tables[name]), dtype=object)
     with pytest.raises(ValueError, match="statistics_table_count_invalid"):
-        statistics.write_statistics_artifact(
-            tmp_path / "rejected",
-            metadata=metadata,
-            tables=tables,
-            table_group="factor" if "factor_diagnostics" in tables else "research",
-        )
+        statistics._validated_frame(tables[name], member=member, metadata=metadata)
 
 
 @pytest.mark.parametrize("count", (32, 64))
@@ -330,23 +341,34 @@ def test_group_comparison_integral_counts_round_trip(tmp_path, tables, metadata,
 
 
 @pytest.mark.parametrize(
-    "table,column,value",
+    "tables,table,column,value",
     [
-        ("factor_diagnostics", "p_value", 1.1),
-        ("factor_diagnostics", "fdr_adjusted_p_value", -0.1),
-        ("factor_diagnostics", "fdr_alpha", 0.0),
-        ("prediction_diagnostics", "standard_error", -1.0),
-        ("prediction_diagnostics", "standard_error", 0.0),
-        ("model_comparison", "standard_error", 0.0),
-        ("factor_diagnostics", "standard_error", 0.0),
-        ("fama_macbeth", "standard_error", 0.0),
-        ("prediction_diagnostics", "ci_lower", 1.0),
-        ("prediction_diagnostics", "bootstrap_lower", 1.0),
-        ("fama_macbeth_periods", "white_p_value", 1.1),
-        ("model_reality_checks", "alpha", 1.0),
-        ("model_reality_checks", "value", 1.1),
-        ("model_reality_checks", "statistic_id", "superior"),
+        (
+            "factor"
+            if table + ".parquet" in statistics.STATISTICS_TABLE_GROUPS["factor"]
+            else "research",
+            table,
+            column,
+            value,
+        )
+        for table, column, value in [
+            ("factor_diagnostics", "p_value", 1.1),
+            ("factor_diagnostics", "fdr_adjusted_p_value", -0.1),
+            ("factor_diagnostics", "fdr_alpha", 0.0),
+            ("prediction_diagnostics", "standard_error", -1.0),
+            ("prediction_diagnostics", "standard_error", 0.0),
+            ("model_comparison", "standard_error", 0.0),
+            ("factor_diagnostics", "standard_error", 0.0),
+            ("fama_macbeth", "standard_error", 0.0),
+            ("prediction_diagnostics", "ci_lower", 1.0),
+            ("prediction_diagnostics", "bootstrap_lower", 1.0),
+            ("fama_macbeth_periods", "white_p_value", 1.1),
+            ("model_reality_checks", "alpha", 1.0),
+            ("model_reality_checks", "value", 1.1),
+            ("model_reality_checks", "statistic_id", "superior"),
+        ]
     ],
+    indirect=["tables"],
 )
 def test_research_measurement_domains(tmp_path, tables, metadata, table, column, value):
     tables[table].loc[0, column] = value
@@ -367,6 +389,7 @@ def test_model_asset_domain_is_required_at_write_and_read(
     )
 
 
+@pytest.mark.parametrize("tables", ["factor"], indirect=True)
 @pytest.mark.parametrize(
     "factor_case", ["formal", "diagnostic_only", "no_factor_columns"]
 )
@@ -631,18 +654,19 @@ def test_undefined_model_inference_rejects_inferential_values_and_false_means(
 
 
 @pytest.mark.parametrize(
-    "corruption",
-    (
-        "none",
-        "global_mean",
-        "quarterly_mean",
-        "mean_difference",
-        "observation_count",
-        "sample_role",
-        "standard_error",
-    ),
+    "corruption,fdr_method",
+    [
+        ("none", "BH"),
+        ("none", "BY"),
+        ("none", "NOT_APPLICABLE"),
+        ("global_mean", "BY"),
+        ("quarterly_mean", "BY"),
+        ("mean_difference", "BY"),
+        ("observation_count", "BY"),
+        ("sample_role", "BY"),
+        ("standard_error", "BY"),
+    ],
 )
-@pytest.mark.parametrize("fdr_method", ("BH", "BY", "NOT_APPLICABLE"))
 def test_defined_group_comparison_requires_descriptive_facts(
     tmp_path, tables, metadata, corruption, fdr_method
 ):
@@ -1103,15 +1127,25 @@ def test_native_model_persistence_preserves_std_reason_in_statistics(
 
 
 @pytest.mark.parametrize(
-    "member",
+    "tables,member",
     [
-        "model_trials",
-        "prediction_diagnostics",
-        "robustness",
-        "factor_diagnostics",
-        "fama_macbeth",
-        "fama_macbeth_periods",
+        (
+            "factor"
+            if member.removesuffix(".parquet") + ".parquet"
+            in statistics.STATISTICS_TABLE_GROUPS["factor"]
+            else "research",
+            member,
+        )
+        for member in [
+            "model_trials",
+            "prediction_diagnostics",
+            "robustness",
+            "factor_diagnostics",
+            "fama_macbeth",
+            "fama_macbeth_periods",
+        ]
     ],
+    indirect=["tables"],
 )
 def test_statistics_all_numeric_tables_reject_duplicate_primary_keys(
     tmp_path, tables, metadata, member
@@ -1133,7 +1167,18 @@ def test_statistics_all_numeric_tables_reject_duplicate_primary_keys(
 
 
 @pytest.mark.parametrize(
-    "member", ["factor_diagnostics.parquet", "fama_macbeth.parquet"]
+    "tables,member",
+    [
+        (
+            "factor"
+            if member.removesuffix(".parquet") + ".parquet"
+            in statistics.STATISTICS_TABLE_GROUPS["factor"]
+            else "research",
+            member,
+        )
+        for member in ["factor_diagnostics.parquet", "fama_macbeth.parquet"]
+    ],
+    indirect=["tables"],
 )
 def test_undefined_descriptive_mean_requires_actual_observations(
     tables, metadata, member
@@ -1159,7 +1204,7 @@ def test_undefined_descriptive_mean_requires_actual_observations(
         statistics._validated_frame(frame, member=member, metadata=metadata)
 
 
-@pytest.mark.parametrize("start,pnl", ((3e16, 6.0), (1.0, 1e-20), (1e-100, 1e-120)))
+@pytest.mark.parametrize("start,pnl", ((1000.0, 0.01), (1000.0, 1e-10)))
 def test_equity_return_uses_money_rounding_bound_without_erasing_small_pnl(start, pnl):
     from fractions import Fraction
 

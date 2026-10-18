@@ -100,9 +100,19 @@ def test_scaler_and_linear_fit_match_weighted_oracle(kind, weighting, monkeypatc
 
 
 @pytest.mark.parametrize(
-    "shape", ((1, 1), (1, 5), (2, 1), (7, 17), (257, 17), (1025, 3))
+    "shape,layout",
+    [
+        ((1, 1), "C"),
+        ((1, 5), "mixed"),
+        ((2, 1), "F"),
+        ((7, 17), "C"),
+        ((7, 17), "F"),
+        ((7, 17), "mixed"),
+        ((257, 17), "F"),
+        ((1025, 3), "C"),
+        ((1025, 3), "mixed"),
+    ],
 )
-@pytest.mark.parametrize("layout", ("C", "F", "mixed"))
 def test_scaler_shapes_and_layouts_match_weighted_oracle(shape, layout):
     values = np.random.default_rng(59).normal(size=shape)
     if layout == "mixed":

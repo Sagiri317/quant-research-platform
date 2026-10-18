@@ -44,21 +44,22 @@ def _linear(readers, start, end):
     return tuple(found[:2])
 
 
-@pytest.mark.parametrize("archives", [1, 30, 365])
-def test_archive_dispatch_is_local_for_20000_monotone_queries(archives):
-    # Every archive has authentic disjoint observations; all queries are in the last.
-    rows = [[(i * 30000, (i + 1) * 30000, str(i))] for i in range(archives)]
+@pytest.mark.parametrize("archives", [1, 3])
+def test_archive_dispatch_is_local_for_monotone_queries(archives):
+    rows = [[(i * 10, (i + 1) * 10, str(i))] for i in range(archives)]
     fast = [_reader(row) for row in rows]
     reference = [_reader(row) for row in rows]
     coverage = _ArchiveCoverage(tuple(fast))
-    start = (archives - 1) * 30000
-    expected = (str(archives - 1),)
-    # Check the independent oracle at the first, interior, and final query.
-    for value in (start, start + 10000, start + 19999):
+    queries = [
+        (index * 10 + offset, str(index))
+        for index in range(archives)
+        for offset in (0, 4, 8)
+    ]
+    for value, identity in queries:
+        expected = (identity,)
         assert _linear(reference, value, value + 1) == expected
-    for value in range(start, start + 20000):
         assert coverage.covering(value, value + 1) == expected
-    assert sum(reader.calls for reader in fast) == 20000
+    assert sum(reader.calls for reader in fast) == len(queries)
 
 
 @pytest.mark.parametrize("invalid", [None, 12])

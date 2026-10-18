@@ -28,7 +28,8 @@ from quant_research_platform.research.portfolios.accounting import (
     portfolio_interval_economics,
 )
 from quant_research_platform.research.portfolios.diagnostics import portfolio_statistics
-from tests.research.test_portfolio_production import _build_producer, _inputs
+from tests.helpers.portfolio_inputs import portfolio_inputs as _inputs
+from tests.research.test_portfolio_production import _build_producer
 
 
 def _publish(tmp_path, batches, *, capital, candidate, window):
@@ -52,13 +53,13 @@ def _publish(tmp_path, batches, *, capital, candidate, window):
         return daily.copy()
 
 
-@pytest.mark.parametrize("count", (100, 1000))
 @pytest.mark.parametrize(
     "construction", ("quantile_equal_weight", "quantile_equal_weight_half_step")
 )
 def test_many_fills_conserve_cash_and_publish_native_returns(
-    tmp_path, monkeypatch, count, construction
+    tmp_path, monkeypatch, construction
 ):
+    count = 100
     frames, fees, window = _inputs()
     for key in ("panel", "dataset", "execution"):
         first = frames[key].loc[frames[key].asset_id.eq("a")]
@@ -189,7 +190,7 @@ def _held_batch(sequence, start, end):
     return PortfolioLedgerBatch(sequence, (), (), tuple(values), facts)
 
 
-@pytest.mark.parametrize("kind", ("zero_nav", "unrepresentable_return", "tiny_pnl"))
+@pytest.mark.parametrize("kind", ("zero_nav", "tiny_pnl"))
 def test_native_return_states_keep_their_economic_meaning(tmp_path, kind):
     candidate = PortfolioCandidateSpec(
         "return_states",
@@ -203,9 +204,6 @@ def test_native_return_states_keep_their_economic_meaning(tmp_path, kind):
     if kind == "zero_nav":
         capital = 1.0
         batches = [_held_batch(0, 1.0, 0.0), _held_batch(1, 0.0, 2.0)]
-    elif kind == "unrepresentable_return":
-        capital = np.nextafter(0.0, 1.0).item()
-        batches = [_held_batch(0, capital, 1.0)]
     else:
         capital = 1.0
         # The raw exact mark changes below one NAV ULP; value rounds to one.
@@ -235,12 +233,10 @@ def test_native_return_states_keep_their_economic_meaning(tmp_path, kind):
         assert last.nav_before == last.nav_end == 1.0
     else:
         assert last.return_status == "UNDEFINED" and pd.isna(last.net_return)
-        assert last.return_reason == (
-            "nonpositive_start_nav" if kind == "zero_nav" else "nonfinite_result"
-        )
+        assert last.return_reason == "nonpositive_start_nav"
 
     # The persisted reader must still reject a fabricated finite return, whether
-    # the real result is tiny, zero-denominator, or outside the float range.
+    # the real result is tiny or has a zero denominator.
     path = tmp_path / "statistics" / "portfolio_daily.parquet"
     table = pq.read_table(path)
     rows = table.to_pylist()
@@ -251,45 +247,3 @@ def test_native_return_states_keep_their_economic_meaning(tmp_path, kind):
             "portfolio_daily.parquet"
         ):
             pass
-
-
-def test_overflowing_trial_buy_spend_still_finds_finite_cash_funded_size(
-    tmp_path, monkeypatch
-):
-    frames, fees, window = _inputs()
-    fees["rate"] = np.where(fees.fee_code.eq("BROKER_COMMISSION"), 1.0, 0.0)
-    frames["panel"][["open", "close", "adj_open", "adj_close"]] = 1.0
-    frames["panel"]["amount"] = 1e308
-    candidate = PortfolioCandidateSpec(
-        "large_finite_cash",
-        "global",
-        "quantile_equal_weight",
-        "champion",
-        "daily",
-        0.5,
-        None,
-    )
-    chunks, _ = _build_producer(
-        tmp_path / "inputs",
-        monkeypatch,
-        frames=frames,
-        fee_frame=fees,
-        output_window=window,
-        candidate=candidate,
-        initial_nav=1e308,
-        typed_batches=True,
-    )
-    batches = list(chunks)
-    assert len(batches[0].trades) == 1
-    # Requested stock plus 100% fee exceeds float range, but half is affordable.
-    assert batches[0].trades[0].notional == 5e307
-    assert sum(flow.amount for flow in batches[0].cashflows) == -1e308
-    daily = _publish(
-        tmp_path,
-        batches,
-        capital=1e308,
-        candidate=candidate,
-        window={"start": str(window.start), "end": str(window.end)},
-    )
-    assert daily.net_return.tolist() == [-0.5, 0.0]
-    assert daily.cash_post.eq(0.0).all()

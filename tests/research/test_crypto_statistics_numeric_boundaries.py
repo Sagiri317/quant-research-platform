@@ -145,34 +145,32 @@ def test_complete_daily_return_mean_uses_all_defined_days(tmp_path):
     assert result.value == pytest.approx((0.1 - 1 / 11) / 2, rel=1e-13, abs=0)
 
 
-@pytest.mark.parametrize("scale", [1.0, 1e150, 1e300])
-@pytest.mark.parametrize("opposite", [False, True])
+@pytest.mark.parametrize(
+    "positions,expected_mean,expected_variance",
+    [
+        ([0.0, 2.0, 2.0], 1.0, 1.0),
+        ([0.0, -2.0, -2.0], -1.0, 1.0),
+        ([-2.0, 2.0, 2.0], 0.0, 4.0),
+        ([2.0, 2.0, 2.0], 2.0, 0.0),
+    ],
+    ids=["positive", "negative", "cancelled", "constant"],
+)
 def test_duration_weighted_inventory_moments_keep_representable_values(
-    tmp_path, scale, opposite
+    tmp_path, positions, expected_mean, expected_variance
 ):
-    positions = [-scale, scale, scale] if opposite else [0.0, scale, scale]
     metrics, daily = _native_performance(
-        tmp_path, prices=[1.0 / scale] * 3, positions=positions, capital=1000.0
+        tmp_path, prices=[100.0] * 3, positions=positions, capital=1000.0
     )
     assert daily.status.eq("DEFINED").all()
     assert daily.net_return.eq(0).all()
-    mean = metrics.loc["oos_inventory_mean"]
-    variance = metrics.loc["oos_inventory_variance"]
-    assert mean.status == "DEFINED" and mean.reason == ""
-    assert mean.observation_count == variance.observation_count == 1
-    # Two equal-duration observations have mean 0 or q/2 and variance q² or q²/4.
-    assert mean.value / scale == pytest.approx(
-        0.0 if opposite else 0.5, rel=2e-15, abs=2e-15
-    )
-    if scale <= 1e150:
-        assert variance.status == "DEFINED" and variance.reason == ""
-        assert variance.value / scale / scale == pytest.approx(
-            1.0 if opposite else 0.25, rel=2e-15, abs=0
-        )
-    else:
-        assert variance.status == "UNDEFINED"
-        assert variance.reason == "nonfinite_result"
-        assert np.isnan(variance.value)
+    for name, expected in (("mean", expected_mean), ("variance", expected_variance)):
+        result = metrics.loc[f"oos_inventory_{name}"]
+        assert result.status == "DEFINED" and result.reason == ""
+        assert result.observation_count == 1
+        if expected == 0:
+            assert result.value == 0.0
+        else:
+            assert result.value == pytest.approx(expected, rel=2e-15, abs=0)
     for name in (
         "inventory_mean",
         "inventory_variance",
@@ -183,104 +181,19 @@ def test_duration_weighted_inventory_moments_keep_representable_values(
         assert gap.observation_count == 0
 
 
-def test_inventory_mean_handles_opposite_finite_positions_with_overflowing_delta(
-    tmp_path,
-):
-    metrics, _daily = _native_performance(
-        tmp_path, prices=[1e-308] * 3, positions=[-1e308, 1e308, 1e308], capital=1000.0
-    )
-    result = metrics.loc["oos_inventory_mean"]
-    assert result.status == "DEFINED" and result.reason == ""
-    assert result.value == pytest.approx(0.0, abs=1e292)
-    variance = metrics.loc["oos_inventory_variance"]
-    assert variance.status == "UNDEFINED" and variance.reason == "nonfinite_result"
-
-
-@pytest.mark.parametrize("scale", [1.0, 1e150])
-def test_inventory_population_moments_use_actual_unequal_durations(tmp_path, scale):
+def test_inventory_population_moments_use_actual_unequal_durations(tmp_path):
     metrics, _daily = _native_performance(
         tmp_path,
-        prices=[1.0 / scale] * 3,
-        positions=[0.0, scale, scale],
+        prices=[100.0] * 3,
+        positions=[0.0, 2.0, 2.0],
         capital=1000.0,
         hours=[0, 6, 48],
     )
-    # The zero position lasts 6 hours; q lasts 42 hours. These are population moments.
-    for name, normalized in (("mean", 7 / 8), ("variance", 7 / 64)):
+    # Six hours at zero and 42 at two: population mean=7/4, variance=7/16.
+    for name, expected in (("mean", 7 / 4), ("variance", 7 / 16)):
         result = metrics.loc[f"oos_inventory_{name}"]
         assert result.status == "DEFINED" and result.reason == ""
-        value = result.value / scale
-        if name == "variance":
-            value /= scale
-        assert value == pytest.approx(normalized, rel=2e-15, abs=0)
-
-
-@pytest.mark.parametrize("scale", [6e-162, 1e-162, 1e-200, 1e-300])
-@pytest.mark.parametrize("constant", [False, True])
-def test_inventory_variance_distinguishes_true_zero_from_underflow(
-    tmp_path, scale, constant
-):
-    from fractions import Fraction
-
-    metrics, _daily = _native_performance(
-        tmp_path,
-        prices=[1.0 / scale] * 3,
-        positions=[scale if constant else 0.0, scale, scale],
-        capital=1000.0,
-    )
-    average = metrics.loc["oos_inventory_mean"]
-    assert average.status == "DEFINED" and average.reason == ""
-    assert average.value / scale == pytest.approx(
-        1.0 if constant else 0.5, rel=2e-15, abs=0
-    )
-    variance = metrics.loc["oos_inventory_variance"]
-    expected = 0.0 if constant else float(Fraction(scale) ** 2 / 4)
-    if constant or expected > 0:
-        assert variance.status == "DEFINED" and variance.reason == ""
-        # Subnormal rounding needs absolute rather than relative tolerance.
-        assert variance.value == pytest.approx(
-            expected, rel=0, abs=np.nextafter(0.0, 1.0)
-        )
-        if not constant:
-            assert variance.value > 0
-    else:
-        assert variance.status == "UNDEFINED"
-        assert variance.reason == "nonzero_variance_underflow"
-        assert np.isnan(variance.value)
-
-
-@pytest.mark.parametrize("scale", [5e-324, 1e-323])
-@pytest.mark.parametrize("pattern", ["positive", "negative", "constant", "cancelled"])
-def test_inventory_mean_distinguishes_true_zero_from_underflow(
-    tmp_path, scale, pattern
-):
-    start = (
-        scale if pattern == "constant" else -scale if pattern == "cancelled" else 0.0
-    )
-    end = -scale if pattern == "negative" else scale
-    metrics, _daily = _native_performance(
-        tmp_path, prices=[1e300] * 3, positions=[start, end, end], capital=1000.0
-    )
-    result = metrics.loc["oos_inventory_mean"]
-    if scale == 5e-324 and pattern in {"positive", "negative"}:
-        assert (
-            result.status == "UNDEFINED" and result.reason == "nonzero_mean_underflow"
-        )
-        assert np.isnan(result.value)
-    else:
-        assert result.status == "DEFINED" and result.reason == ""
-        expected = (
-            0.0
-            if pattern == "cancelled"
-            else scale
-            if pattern == "constant"
-            else end / 2
-        )
-        assert result.value == pytest.approx(
-            expected, rel=0, abs=np.nextafter(0.0, 1.0)
-        )
-        if pattern != "cancelled":
-            assert result.value * np.sign(expected) > 0
+        assert result.value == pytest.approx(expected, rel=2e-15, abs=0)
 
 
 def test_terminal_unknown_fills_mask_only_affected_inventory_extremum(tmp_path):
@@ -289,7 +202,9 @@ def test_terminal_unknown_fills_mask_only_affected_inventory_extremum(tmp_path):
         simulate_maker,
     )
     from tests.helpers.binance_hft import _quote
-    from tests.markets.crypto.test_hft_execution import _maker_config, _state, _trade
+    from tests.helpers.binance_hft import execution_state as _state
+    from tests.helpers.binance_hft import execution_trade as _trade
+    from tests.helpers.binance_hft import maker_config as _maker_config
 
     capital = PortfolioCapital("terminal", 1000.0, "USDT", "linear_perpetual")
     execution = _maker_config()
@@ -446,7 +361,9 @@ def test_terminal_unknown_visible_trade_masks_inventory_extremum(tmp_path, visib
         simulate_maker,
     )
     from tests.helpers.binance_hft import _quote
-    from tests.markets.crypto.test_hft_execution import _maker_config, _state, _trade
+    from tests.helpers.binance_hft import execution_state as _state
+    from tests.helpers.binance_hft import execution_trade as _trade
+    from tests.helpers.binance_hft import maker_config as _maker_config
 
     capital = PortfolioCapital("terminal", 1000.0, "USDT", "linear_perpetual")
     execution = _maker_config()

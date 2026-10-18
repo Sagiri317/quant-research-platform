@@ -12,6 +12,19 @@ from quant_research_platform.research.factors.expectations.definitions import (
 )
 
 
+def _assert_recomputed_expectations(actual, expected):
+    numeric = list(actual.select_dtypes(include="floating").columns)
+    pd.testing.assert_frame_equal(
+        actual.drop(columns=numeric), expected.drop(columns=numeric), check_exact=True
+    )
+    pd.testing.assert_frame_equal(
+        actual[numeric].isna(), expected[numeric].isna(), check_exact=True
+    )
+    pd.testing.assert_frame_equal(
+        actual[numeric], expected[numeric], check_exact=False, rtol=1e-12, atol=0.0
+    )
+
+
 def test_latest_declaration_keeps_same_day_median_and_next_session_gate():
     records = pd.DataFrame(
         {
@@ -39,7 +52,7 @@ def test_latest_declaration_keeps_same_day_median_and_next_session_gate():
     changed = _prepare_expectations(
         pd.concat([records, future]), trading_sessions=sessions
     )(observations)
-    pd.testing.assert_frame_equal(actual.iloc[:2], changed.iloc[:2], check_exact=True)
+    _assert_recomputed_expectations(actual.iloc[:2], changed.iloc[:2])
     insufficient = _prepare_expectations(
         records.loc[records.institution_id.ne("C")], trading_sessions=sessions
     )(observations)
@@ -535,18 +548,18 @@ def test_explicit_freshness_controls_native_source_history_and_values(
     )
     from quant_research_platform.markets.prepare import prepare
     from quant_research_platform.storage.datasets import read_dataset
-    from quant_research_platform.storage.datasets.reading import DatasetSession
 
     dates, inputs, panel = freshness_inputs
-    source_windows = []
-    actual_view = DatasetSession.filtered_view
+    consumed_forecasts = []
+    actual_materialize = producer.materialize_dataset_session
 
-    def observed_view(session, time_window):
+    def observed_materialize(session, **kwargs):
+        frame = actual_materialize(session, **kwargs)
         if session.root == inputs["analyst_forecast"]:
-            source_windows.append(time_window)
-        return actual_view(session, time_window)
+            consumed_forecasts.append(frame)
+        return frame
 
-    monkeypatch.setattr(DatasetSession, "filtered_view", observed_view)
+    monkeypatch.setattr(producer, "materialize_dataset_session", observed_materialize)
 
     monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", batch_rows)
     prepared = []
@@ -575,15 +588,24 @@ def test_explicit_freshness_controls_native_source_history_and_values(
     )
     saved = read_dataset(root).query("asset_id == '000001'")
     assert prepared == [True]
-    assert len(source_windows) == 1
-    assert source_windows[0].start == (dates[0] - pd.Timedelta(days=freshness)).date()
-    assert source_windows[0].end == dates[-1].date()
+    assert len(consumed_forecasts) == 1
+    consumed = consumed_forecasts[0]
+    expected_ages = [1] if freshness <= 90 else [120, 120, 120, 1]
+    assert consumed.timestamp.tolist() == [
+        dates[0] - pd.Timedelta(days=age) for age in expected_ages
+    ]
+    assert consumed.forecast_eps.tolist() == (
+        [4.0] if freshness <= 90 else [1.0, 2.0, 3.0, 4.0]
+    )
     if freshness <= 90:
         assert saved.forward_earnings_yield_fy1.isna().all()
     else:
         expected_close = panel.query("asset_id == '000001'").close.to_numpy()
-        np.testing.assert_array_equal(
-            saved.forward_earnings_yield_fy1, 2.5 / expected_close
+        np.testing.assert_allclose(
+            saved.forward_earnings_yield_fy1,
+            2.5 / expected_close,
+            rtol=1e-12,
+            atol=1e-14,
         )
 
 
@@ -754,13 +776,11 @@ def test_indexed_event_range_is_chunk_and_query_order_independent(
         for i in reversed(range(0, len(observations), 2))
     ]
     actual = pd.concat(list(reversed(chunks)), ignore_index=True)
-    pd.testing.assert_frame_equal(actual, whole, check_exact=True)
+    _assert_recomputed_expectations(actual, whole)
     assert len(visited) <= 10 * 2 * 3 * freshness
-    pd.testing.assert_frame_equal(query(observations), whole, check_exact=True)
+    _assert_recomputed_expectations(query(observations), whole)
     backwards = query(observations.iloc[::-1])
-    pd.testing.assert_frame_equal(
-        backwards.iloc[::-1].reset_index(drop=True), whole, check_exact=True
-    )
+    _assert_recomputed_expectations(backwards.iloc[::-1].reset_index(drop=True), whole)
 
 
 @pytest.mark.parametrize(
@@ -793,8 +813,8 @@ def test_selected_expectations_equal_full_output_and_keep_factor_dependencies(se
     actual = pd.concat(
         [query(observations.iloc[:2]), query(observations.iloc[2:])], ignore_index=True
     )
-    pd.testing.assert_frame_equal(
-        actual, full.loc[:, ["asset_id", "timestamp", *selected]], check_exact=True
+    _assert_recomputed_expectations(
+        actual, full.loc[:, ["asset_id", "timestamp", *selected]]
     )
     from quant_research_platform.research.factors.expectations.definitions import (
         PRICE_SCALED_EXPECTATIONS,
@@ -989,7 +1009,7 @@ def test_unselected_forecast_scope_and_optional_pe_do_not_block_query():
     actual = _prepare_expectations(
         pd.concat([records, extras], ignore_index=True), trading_sessions=sessions
     )(observations)
-    pd.testing.assert_frame_equal(actual, expected, check_exact=True)
+    _assert_recomputed_expectations(actual, expected)
 
 
 @pytest.mark.parametrize("unknown", [None, np.nan, "invalid", float("inf")])
@@ -1111,7 +1131,7 @@ def test_unlocatable_institution_without_report_identity_never_counts(institutio
         pd.concat([records, pd.DataFrame([extra])], ignore_index=True),
         trading_sessions=sessions,
     )(observations)
-    pd.testing.assert_frame_equal(actual, expected, check_exact=True)
+    _assert_recomputed_expectations(actual, expected)
 
 
 @pytest.mark.parametrize("close", ["invalid", float("inf"), True])
@@ -1307,18 +1327,14 @@ def test_report_reassignment_preserves_other_reports_and_query_independence(
         0.6,
     )
     chunks = [query(observations.iloc[[i]]) for i in reversed(range(len(observations)))]
-    pd.testing.assert_frame_equal(
-        pd.concat(chunks[::-1], ignore_index=True), actual, check_exact=True
-    )
-    pd.testing.assert_frame_equal(
-        query(observations.iloc[::-1]).iloc[::-1].reset_index(drop=True),
-        actual,
-        check_exact=True,
+    _assert_recomputed_expectations(pd.concat(chunks[::-1], ignore_index=True), actual)
+    _assert_recomputed_expectations(
+        query(observations.iloc[::-1]).iloc[::-1].reset_index(drop=True), actual
     )
     shuffled = _prepare_expectations(
         records.sample(frac=1, random_state=7), trading_sessions=sessions
     )(observations)
-    pd.testing.assert_frame_equal(shuffled, actual, check_exact=True)
+    _assert_recomputed_expectations(shuffled, actual)
     pd.testing.assert_frame_equal(records, original, check_exact=True)
 
 

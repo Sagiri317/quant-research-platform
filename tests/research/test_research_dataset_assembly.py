@@ -852,11 +852,38 @@ def test_named_feature_recipe_assembles_complete_sessions_and_persists_identity(
     expected = a_share_feature_pipeline(
         frame, factor_columns=("factor",), recipe_id=recipe
     )
-    for column in ("factor", *transform.output_columns):
-        pd.testing.assert_series_equal(
-            saved[column], expected[column], check_exact=True
-        )
-    assert saved.feature_factor.notna().all()
+    pd.testing.assert_series_equal(saved["factor"], frame["factor"], check_exact=True)
+    for column in transform.output_columns:
+        if column == "feature_factor":
+            pd.testing.assert_series_equal(
+                saved[column],
+                expected[column],
+                check_exact=False,
+                rtol=1e-12,
+                atol=1e-14,
+            )
+        else:
+            pd.testing.assert_series_equal(
+                saved[column], expected[column], check_exact=True
+            )
+    feature = saved.feature_factor.to_numpy()
+    assert np.isfinite(feature).all()
+    assert feature.mean() == pytest.approx(0.0, abs=1e-14)
+    assert np.mean(feature**2) == pytest.approx(1.0, rel=1e-12)
+    size = frame.log_total_market_cap.to_numpy()
+    raw = frame.factor.to_numpy()
+    if recipe == "a_share_quantile_1_99":
+        size = np.clip(size, *np.quantile(size, [0.01, 0.99]))
+        clipped = np.clip(raw, *np.quantile(raw, [0.01, 0.99]))
+    else:
+        center = np.median(raw)
+        bound = 3 * 1.4826 * np.median(np.abs(raw - center))
+        clipped = np.clip(raw, center - bound, center + bound)
+    design = np.column_stack([np.ones(len(size)), size])
+    residual = clipped - design @ np.linalg.lstsq(design, clipped, rcond=None)[0]
+    independent = (residual - residual.mean()) / residual.std(ddof=0)
+    np.testing.assert_allclose(feature, independent, rtol=1e-12, atol=1e-14)
+    assert np.mean(feature * (size - size.mean())) == pytest.approx(0.0, abs=1e-14)
     assert data_spec_payload(datasets.get("recipe_case"))["feature_transforms"] == [
         {
             "recipe_id": recipe,

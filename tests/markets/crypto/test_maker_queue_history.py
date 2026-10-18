@@ -16,11 +16,9 @@ from quant_research_platform.markets.implementations.crypto.execution import (
 )
 from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
 from tests.helpers.binance_hft import _coverage, _quote
-from tests.markets.crypto.test_hft_execution import (
-    _maker_config,
-    _persist_execution,
-    _trade,
-)
+from tests.helpers.binance_hft import execution_trade as _trade
+from tests.helpers.binance_hft import maker_config as _maker_config
+from tests.markets.crypto.test_hft_execution import _persist_execution
 from tests.sources.binance.test_known_price_ranges import _delta, _engine
 
 

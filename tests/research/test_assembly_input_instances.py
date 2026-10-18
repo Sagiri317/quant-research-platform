@@ -11,7 +11,9 @@ from quant_research_platform.research.features.transforms import (
 from quant_research_platform.research.models.persisted import load_model
 from quant_research_platform.research.models.production import fit
 from quant_research_platform.storage.datasets import inspect_dataset, read_dataset
-from tests.research.test_direct_assembly_config import _config, _frame, _source
+from tests.helpers.research_processed_inputs import assembly_config as _config
+from tests.helpers.research_processed_inputs import assembly_frame as _frame
+from tests.helpers.research_processed_inputs import assembly_source as _source
 
 
 def test_same_native_identity_supports_complementary_input_instances(tmp_path):

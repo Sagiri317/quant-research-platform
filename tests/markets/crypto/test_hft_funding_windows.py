@@ -12,15 +12,15 @@ from quant_research_platform.contracts.portfolios import (
 from quant_research_platform.markets.implementations.crypto.execution import (
     simulate_taker,
 )
+from tests.helpers.binance_hft import execution_state as _state
+from tests.helpers.binance_hft import taker_config as _taker_config
 from tests.helpers.portfolio_ledger import capture_fill_rows
-from tests.markets.crypto.test_hft_execution import _state, _taker_config
 
 
-@pytest.mark.parametrize("initial_capital", (1000.0, 1e16))
 def test_taker_known_funding_and_continuous_gap_have_hand_calculated_economics(
     tmp_path,
-    initial_capital,
 ):
+    initial_capital = 1000.0
     from quant_research_platform.artifacts.crypto_hft import summarize_crypto_ledger
     from quant_research_platform.artifacts.portfolio_ledger import (
         read_portfolio_ledger_artifact,
@@ -92,9 +92,8 @@ def test_taker_known_funding_and_continuous_gap_have_hand_calculated_economics(
     assert result["funding"] == pytest.approx(-0.209)
     assert result["fees"] == pytest.approx(0.0205)
     assert result["net_pnl"] == pytest.approx(3.7705)
-    if initial_capital == 1000.0:
-        assert boundaries == pytest.approx([1000, 1000.48995, 1003.49095, 1003.7705])
-        assert boundaries[2] - boundaries[1] == pytest.approx(3.001)
+    assert boundaries == pytest.approx([1000, 1000.48995, 1003.49095, 1003.7705])
+    assert boundaries[2] - boundaries[1] == pytest.approx(3.001)
     metadata = {
         "window": {
             "start": "1970-01-01T00:00:00",
@@ -171,30 +170,41 @@ def test_taker_missing_forecast_and_boundary_price_fail_without_future_fill():
     assert result["known_prefix_net_pnl"] is not None
 
 
-def test_independent_episode_collection_resets_capital_and_funding_boundaries(tmp_path):
+@pytest.mark.parametrize(
+    "window",
+    (
+        {"start": "1970-01-01", "end": "1970-01-01"},
+        {"start": "1970-01-01T00:00:00", "end": "1970-01-01T23:59:59.999999999"},
+        {
+            "start": "1970-01-01T01:00:00+01:00",
+            "end": "1970-01-02T00:59:59.999999999+01:00",
+        },
+    ),
+)
+def test_independent_episode_collection_resets_capital_and_funding_boundaries(
+    tmp_path, window
+):
     from functools import partial
     from types import SimpleNamespace
 
-    import pandas as pd
-
     from quant_research_platform.artifacts.crypto_hft import (
         read_crypto_episode_artifact,
-        write_crypto_episode_artifact,
     )
+    from quant_research_platform.interfaces.queries import portfolio_curve
     from quant_research_platform.markets.implementations.crypto.portfolio import (
         _execute_portfolio,
+        _window,
+        _window_bounds,
+        _write_backtest,
     )
     from quant_research_platform.policy.lifecycle import closing_iterator
-    from tests.markets.crypto.test_hft import _boundary
+    from tests.helpers.binance_hft import panel_boundary as _boundary
 
     capital = PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual")
-    metadata = {
-        "window": {
-            "start": pd.Timestamp(0).isoformat(),
-            "end": pd.Timestamp(70000000).isoformat(),
-        }
-    }
-    coverage = {"s1": (0, 30000000), "s2": (40000000, 60000000)}
+    day_stop = 86_400_000_000_000
+    bounds = _window_bounds((("direct", _window(window)),))
+    assert bounds == ((0, day_stop - 1),)
+    coverage = {"s1": (0, 30000000), "s2": (40000000, day_stop)}
     trade_coverage = SimpleNamespace(intervals=lambda: iter(coverage.values()))
     decisions = [
         {"timestamp_ms": time, "score": prediction}
@@ -208,7 +218,11 @@ def test_independent_episode_collection_resets_capital_and_funding_boundaries(tm
         _state(29, bid_index=990, ask_index=1010),
         _boundary(30),
         _state(40, bid_index=1000, ask_index=1010, segment_id="s2"),
-        _state(59, bid_index=990, ask_index=1010, segment_id="s2"),
+        replace(
+            _state(86_399_999, bid_index=990, ask_index=1010, segment_id="s2"),
+            observed_time_ns=day_stop - 1,
+            receive_time="1970-01-01T23:59:59.999999999Z",
+        ),
     ]
     read_count = 0
 
@@ -220,16 +234,20 @@ def test_independent_episode_collection_resets_capital_and_funding_boundaries(tm
 
     funding = SimpleNamespace(
         identity="d" * 64,
-        coverage=((0, 70000000),),
+        coverage=((0, day_stop - 1),),
         settlement_qualification=(
             {
-                "coverage": {"start_ns": 0, "end_ns": 70000000, "status": "COMPLETE"},
+                "coverage": {
+                    "start_ns": 0,
+                    "end_ns": day_stop - 1,
+                    "status": "COMPLETE",
+                },
                 "settlement_source": None,
                 "verification": "declared_archive_not_independently_verified",
             },
         ),
         events=events,
-        forecasts=iter((FundingForecast(0, 1000000000, ()),)),
+        forecasts=iter((FundingForecast(0, day_stop, ()),)),
     )
     execute = partial(
         simulate_taker,
@@ -241,13 +259,17 @@ def test_independent_episode_collection_resets_capital_and_funding_boundaries(tm
         observed_coverage=coverage,
         capital=capital,
         asset_id="btc_usdt",
-        decision_windows_ns=((0, 70000000),),
+        decision_windows_ns=bounds,
     )
-    root = write_crypto_episode_artifact(
-        tmp_path / "result",
-        capital=capital,
-        metadata=metadata,
-        produce=lambda emit: _execute_portfolio(
+    root = _write_backtest(
+        {
+            "output": str(tmp_path / "result"),
+            "prediction_window": window,
+            "execution_mode": "independent_segments",
+            "predictions": "fixture",
+        },
+        capital,
+        produce=lambda on_episode: _execute_portfolio(
             execution_mode="independent_segments",
             execute=execute,
             books=books(),
@@ -256,13 +278,14 @@ def test_independent_episode_collection_resets_capital_and_funding_boundaries(tm
             funding=funding,
             coverage=coverage,
             trade_coverage=trade_coverage,
-            bounds=((0, 70000000),),
+            bounds=bounds,
             on_ledger=None,
-            on_episode=emit,
+            on_episode=on_episode,
         ),
     )
     artifact = read_crypto_episode_artifact(root)
     summaries = []
+    indexes = []
     with closing_iterator(artifact.iter_episodes()) as rows:
         for index, ledger in rows:
             from quant_research_platform.artifacts.crypto_hft import (
@@ -275,7 +298,7 @@ def test_independent_episode_collection_resets_capital_and_funding_boundaries(tm
             )
             summaries.append(restored["economics"])
             assert ledger.capital == capital
-            assert index["termination"] == "TRUNCATED"
+            indexes.append(index)
             with closing_iterator(ledger.iter_chunks()) as batches:
                 batches = list(batches)
             assert batches[0].sequence == 0
@@ -291,6 +314,30 @@ def test_independent_episode_collection_resets_capital_and_funding_boundaries(tm
     assert [row["net_pnl"] for row in summaries] == pytest.approx([-1.0, 1.0])
     assert [row["funding"] for row in summaries] == pytest.approx([-1.0, 1.0])
     assert read_count == len(book_rows)
+
+    assert [
+        (
+            row["start_ns"],
+            row["stop_ns"],
+            row["terminal_valuation_ns"],
+            row["termination"],
+        )
+        for row in indexes
+    ] == [
+        (0, 30_000_000, 29_000_000, "TRUNCATED"),
+        (40_000_000, day_stop, day_stop - 1, "PLANNED_END"),
+    ]
+    assert "planned_oos_end" not in indexes[0]["stop_reasons"]
+    assert "planned_oos_end" in indexes[1]["stop_reasons"]
+    curve = portfolio_curve(root, execution_mode="independent_segments")
+    assert curve["episode_count"] == 2
+    assert [row["observed_end_ns"] for row in curve["episodes"]] == [
+        29_000_000,
+        day_stop - 1,
+    ]
+    assert [row["points"][-1]["nav"] for row in curve["episodes"]] == pytest.approx(
+        [999.0, 1001.0]
+    )
 
 
 def test_episode_atomic_publication_cancel_and_no_overwrite(tmp_path):

@@ -23,7 +23,7 @@ from quant_research_platform.research.models.trial_selection import score
 from quant_research_platform.research.predictions.runner import predict
 from tests.correctness.test_direct_model_operations import data, fit_config, input_spec
 from tests.research.crypto_evaluation_test_support import evaluation_config
-from tests.research.test_prediction_runner_model_selection import candidates
+from tests.research.direct_model_test_support import candidates
 
 
 def test_existing_predictions_score_and_evaluate_without_model_or_trial(tmp_path):

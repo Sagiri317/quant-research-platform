@@ -12,7 +12,7 @@ import pytest
 import quant_research_platform.storage.datasets.reading as dataset_reading
 import quant_research_platform.storage.parquet as dataset_physical
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.storage.datasets import write_dataset
+from quant_research_platform.storage.datasets import read_dataset, write_dataset
 from quant_research_platform.storage.datasets.reading import _prepare_in_filter
 from quant_research_platform.storage.identity import (
     native_filesystem_path,
@@ -262,7 +262,7 @@ def test_session_filter_reuses_prepared_values(tmp_path: Path, monkeypatch) -> N
     write_dataset(
         root, frame, spec=make_processed_dataset_spec("tuple_in_filter_prepared_once")
     )
-    values = ("A", "C", *(f"missing_{position:08d}" for position in range(40000)))
+    values = ("A", "C", "missing")
     calls = []
     prepare = dataset_reading._prepare_in_filter
 
@@ -278,7 +278,11 @@ def test_session_filter_reuses_prepared_values(tmp_path: Path, monkeypatch) -> N
         row_filters=(("asset_id", "in", values), ("asset_id", "in", values)),
     )
     chunks = list(dataset_reading.iter_dataset_chunks(session, batch_rows=1))
-    assert sum(map(len, chunks)) == 2
+    expected = frame.loc[[0, 2], ["timestamp", "value"]].reset_index(drop=True)
+    expected["timestamp"] = expected["timestamp"].astype("datetime64[ns]")
+    pd.testing.assert_frame_equal(
+        pd.concat(chunks, ignore_index=True), expected, check_exact=True
+    )
     assert len(calls) == 2
 
 
@@ -380,11 +384,7 @@ def test_timestamp_membership_normalizes_naive_and_aware_values():
     )
 
 
-@pytest.mark.parametrize("operator", ("==", "in"))
-@pytest.mark.parametrize("selected", (1, 2**63, 2**63 + 1, 2**63 + 2))
-def test_native_uint64_filters_preserve_unsigned_field_type(
-    tmp_path, operator, selected
-):
+def test_native_uint64_filters_preserve_unsigned_field_type(tmp_path):
     root = make_dataset_artifact_root(tmp_path, "unsigned_filter")
     values = [1, 2**63, 2**63 + 1, 2**63 + 2, None]
     frame = pd.DataFrame(
@@ -396,18 +396,31 @@ def test_native_uint64_filters_preserve_unsigned_field_type(
         }
     )
     write_dataset(root, frame, spec=make_processed_dataset_spec("unsigned_filter"))
-    value = selected if operator == "==" else (selected,)
-    session = dataset_reading.open_dataset_session(
-        root, columns=None, time_window=None, row_filters=(("value", operator, value),)
-    )
-    actual = dataset_reading.materialize_dataset_session(session)
-    assert actual.value.tolist() == [selected]
-    for invalid in (-1, 2**64, float(selected), True, None):
-        value = invalid if operator == "==" else (invalid,)
-        with pytest.raises(ValueError, match="invalid_dataset_physical_filter_value"):
-            dataset_reading.open_dataset_session(
+    expected = frame.copy()
+    expected["timestamp"] = expected["timestamp"].astype("datetime64[ns]")
+    for operator in ("==", "in"):
+        for index, selected in enumerate(values[:-1]):
+            value = selected if operator == "==" else (selected,)
+            session = dataset_reading.open_dataset_session(
                 root,
                 columns=None,
                 time_window=None,
                 row_filters=(("value", operator, value),),
             )
+            actual = dataset_reading.materialize_dataset_session(session)
+            pd.testing.assert_frame_equal(
+                actual, expected.iloc[[index]].reset_index(drop=True), check_exact=True
+            )
+        for invalid in (-1, 2**64, float(2**63), True, None):
+            value = invalid if operator == "==" else (invalid,)
+            with pytest.raises(
+                ValueError, match="invalid_dataset_physical_filter_value"
+            ):
+                dataset_reading.open_dataset_session(
+                    root,
+                    columns=None,
+                    time_window=None,
+                    row_filters=(("value", operator, value),),
+                )
+
+    pd.testing.assert_frame_equal(read_dataset(root), expected, check_exact=True)

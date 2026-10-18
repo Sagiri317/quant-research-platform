@@ -88,8 +88,8 @@ def test_csmar_known_members_parse_and_hash_once_before_publication(
         path = raw / f"csmar__trading_calendar__p{shard}__full__export-20260101.csv"
         rows = [
             f"4,{day.date()},4,O"
-            for day in pd.date_range("2019-01-01", periods=500)[
-                shard * 250 : (shard + 1) * 250
+            for day in pd.date_range("2019-01-01", periods=8)[
+                shard * 4 : (shard + 1) * 4
             ]
         ]
         path.write_bytes(
@@ -110,12 +110,15 @@ def test_csmar_known_members_parse_and_hash_once_before_publication(
         raw_root=raw,
         output_roots={"trading_calendar": output},
         data_ids=("trading_calendar",),
-        chunksize=37,
+        chunksize=3,
     )
     assert opened == Counter({path: 1 for path in selected})
     assert counts == Counter({path: path.stat().st_size for path in selected})
     assert handles and all(handle.closed for handle in handles)
-    assert len(read_dataset(output)) == 500
+    assert (
+        read_dataset(output).calendar_date.tolist()
+        == pd.date_range("2019-01-01", periods=8).tolist()
+    )
     assert (
         read_dataset_manifest_evidence(output)["source_evidence"]["content_hash"]
         == expected
@@ -345,7 +348,7 @@ def test_funding_consumption_rejects_boolean_coverage_time(tmp_path):
 def test_digest_reader_counts_every_consumed_byte_through_binary_methods(
     tmp_path, method
 ):
-    payload = ('\ufeff"中文,\r\n引号""",2\r\n' * 1000).encode()
+    payload = ('\ufeff"中文,\r\n引号""",2\r\n' * 2).encode()
     path = tmp_path / "bytes.csv"
     path.write_bytes(payload)
     restored = bytearray()

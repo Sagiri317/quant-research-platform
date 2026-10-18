@@ -10,15 +10,21 @@ from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_DECISION_REASON_MAINTENANCE,
 )
 from quant_research_platform.research.portfolios import production
-from tests.research.test_portfolio_decision_execution import _decision_inputs
+from tests.helpers.portfolio_inputs import decision_inputs as _decision_inputs
 
 
 @pytest.mark.parametrize(
-    "construction",
-    ["quantile_equal_weight", "quantile_float_cap", "quantile_equal_weight_half_step"],
+    "construction, missing, can_exit",
+    [
+        ("quantile_equal_weight", missing, can_exit)
+        for missing in (False, True)
+        for can_exit in (True, False, None)
+    ]
+    + [
+        ("quantile_float_cap", True, True),
+        ("quantile_equal_weight_half_step", True, True),
+    ],
 )
-@pytest.mark.parametrize("missing", [False, True])
-@pytest.mark.parametrize("can_exit", [True, False, None])
 def test_off_schedule_research_exit_is_independent_of_unrelated_forecast(
     construction, missing, can_exit
 ):

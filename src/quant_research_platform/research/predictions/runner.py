@@ -61,7 +61,7 @@ def predict(config: Mapping) -> Path:
         if isinstance(source, Mapping):
             raise ValueError("duplicate_input_spec")
         source = {"path": source, "spec": config["input_spec"]}
-    options = _dataset_input_options(source)
+    options = _dataset_input_options(source, time_window=window)
     selected_columns = options.get("columns")
     options.setdefault("columns", ("timestamp", "asset_id"))
     session = open_dataset_session(**options)
@@ -87,7 +87,6 @@ def predict(config: Mapping) -> Path:
             )
         )
     )
-    session = session.filtered_view(window)
     frames = iter_dataset_chunks(session.projected_view(columns))
     from quant_research_platform.policy.lifecycle import closing_iterator
     from quant_research_platform.runtime.dataframes import iter_complete_time_frames

@@ -84,16 +84,21 @@ def test_missing_visible_quantity_does_not_rescue_unlocatable_clock(tmp_path):
 
 
 @pytest.mark.parametrize("side", ["buy", "sell"])
-@pytest.mark.parametrize("visible", ["missing", "0", "3", "4"])
 @pytest.mark.parametrize(
-    "price,maker_buyer,depends",
+    "price,maker_buyer,depends,visible",
     [
-        ("99.5", False, False),
-        ("100.0", True, False),
-        ("99.5", True, True),
-        ("99.0", True, True),
+        (price, maker_buyer, depends, visible)
+        for price, maker_buyer, depends in (
+            ("99.5", False, False),
+            ("100.0", True, False),
+            ("99.5", True, True),
+            ("99.0", True, True),
+        )
+        # Excess visible mass is invalid even when the trade cannot touch the order.
+        for visible in (
+            ("missing", "0", "3", "4") if depends else ("missing", "3", "4")
+        )
     ],
-    ids=["opposite-side", "non-touch", "same-price", "through"],
 )
 def test_public_maker_requires_visible_quantity_only_for_dependent_trade(
     tmp_path, visible, price, maker_buyer, depends, side

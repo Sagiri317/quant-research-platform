@@ -42,6 +42,17 @@ def test_normalized_original_bytes_nulls_clock_and_hash(tmp_path, monkeypatch):
     )
     assert rows[0]["amount"] == 2.0
     assert rows[0]["timestamp"] < rows[0]["local_timestamp"]
+    manifest_bytes = (root / "manifest.json").read_bytes()
+    with pytest.raises(ValueError, match="^output_already_exists$"):
+        download_dataset(
+            root,
+            exchange="bybit",
+            dataset_type="trades",
+            symbol="BTCUSDT",
+            date="2026-08-01",
+        )
+    assert (root / "data.csv.gz").read_bytes() == raw
+    assert (root / "manifest.json").read_bytes() == manifest_bytes
     (root / "data.csv.gz").write_bytes(raw[:-1] + bytes([raw[-1] ^ 1]))
     with pytest.raises((ValueError, OSError)):
         list(
@@ -53,9 +64,7 @@ def test_normalized_original_bytes_nulls_clock_and_hash(tmp_path, monkeypatch):
         )
 
 
-def test_normalized_rejects_wrong_schema_and_preserves_existing_output(
-    tmp_path, monkeypatch
-):
+def test_normalized_rejects_wrong_schema_without_partial_output(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "urllib.request.urlopen",
         lambda *a, **k: Response(gzip.compress(b"bad,header\n")),

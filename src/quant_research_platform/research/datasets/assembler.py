@@ -708,8 +708,8 @@ def assemble(config: Mapping) -> Path:
     if type(base_input) is not str or base_input not in inputs:
         raise ValueError("assemble_base_input_invalid")
     sessions = {
-        data_id: open_dataset_session(**_dataset_input_options(value)).filtered_view(
-            window
+        data_id: open_dataset_session(
+            **_dataset_input_options(value, time_window=window)
         )
         for data_id, value in inputs.items()
     }

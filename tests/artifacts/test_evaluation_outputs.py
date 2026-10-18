@@ -151,12 +151,16 @@ def test_evaluation_publishes_numeric_members_and_reads_only_requested_summaries
     _, summary = read_evaluation_outputs(
         output, tables=("ic_summary", "group_spread_summary")
     )
-    assert summary["ic_summary"].mean_ic.iloc[0] > 0
+    assert summary["ic_summary"].mean_ic.iloc[0] == pytest.approx(
+        (27 / 28) ** 0.5, rel=1e-13
+    )
     with pytest.raises(ValueError, match="dataset_parquet_footer_invalid"):
         read_evaluation_outputs(output, tables=("metrics",))
     (output / "metrics.parquet").unlink()
     _, selected = read_evaluation_outputs(output, tables=("ic_summary",))
-    pd.testing.assert_frame_equal(selected["ic_summary"], tables["ic_summary"])
+    pd.testing.assert_frame_equal(
+        selected["ic_summary"], tables["ic_summary"], check_exact=True
+    )
     with pytest.raises(ValueError, match="output_member_path_invalid"):
         read_evaluation_outputs(output)
     with pytest.raises(ValueError, match="output_member_path_invalid"):

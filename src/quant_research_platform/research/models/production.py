@@ -20,6 +20,7 @@ from quant_research_platform.contracts.models import (
     validate_model_input_roles,
 )
 from quant_research_platform.contracts.time import (
+    TimeWindow,
     _window_payload,
     time_value_isoformat,
 )
@@ -153,7 +154,11 @@ def fit(config: Mapping) -> Path:
         if isinstance(source, Mapping):
             raise ValueError("duplicate_input_spec")
         source = {"path": source, "spec": config["input_spec"]}
-    options = _dataset_input_options(source)
+    cutoff = strict_timestamp_series(
+        pd.Series([config["fit_cutoff"]]), error="invalid_fit_cutoff"
+    ).iloc[0]
+    windows = _fit_windows(config["fit_windows"], cutoff)
+    options = _dataset_input_options(source, discovery_windows=windows)
     selected_columns = options.get("columns")
     options.setdefault("columns", ("timestamp", "asset_id"))
     session = open_dataset_session(**options)
@@ -184,10 +189,6 @@ def fit(config: Mapping) -> Path:
         )
 
         validate_model_selection([spec])
-    cutoff = strict_timestamp_series(
-        pd.Series([config["fit_cutoff"]]), error="invalid_fit_cutoff"
-    ).iloc[0]
-    windows = _fit_windows(config["fit_windows"], cutoff)
     selection = None
     if "selection" in config:
         from quant_research_platform.research.models.trial_selection import (
@@ -308,7 +309,13 @@ def fit(config: Mapping) -> Path:
 
             calendar = materialize_dataset_session(
                 open_dataset_session(
-                    **_dataset_input_options(config["trading_calendar"])
+                    **_dataset_input_options(
+                        config["trading_calendar"],
+                        time_window=TimeWindow(
+                            pd.Timestamp(windows[0].start).date(),
+                            pd.Timestamp(windows[-1].end).date(),
+                        ),
+                    )
                 )
             )
         result = fit_model(

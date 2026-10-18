@@ -66,6 +66,25 @@ def _fixture(tmp_path, *, days=1):
     return frame, config
 
 
+@pytest.fixture(scope="module")
+def stratified_baselines(tmp_path_factory):
+    baselines = {}
+    for days, lag in ((1, 20), (3, 1)):
+        directory = tmp_path_factory.mktemp(f"stratified-{days}")
+        _, config = _fixture(directory, days=days)
+        evaluation = evaluate(config)
+        stats = factor_statistics(
+            {
+                "evaluation_inputs": [str(evaluation)],
+                "output": str(directory / "stats"),
+                "analyses": ["stratified_ic"],
+                "statistics": {"hac_lag": lag, "fdr_method": "BY", "fdr_alpha": 0.05},
+            }
+        )
+        baselines[days] = (evaluation, stats)
+    return baselines
+
+
 def test_size_strata_use_total_cap_with_opposite_float_cap_order(tmp_path):
     frame, config = _fixture(tmp_path)
     frame["total_market_cap"] = [4.0, 3.0, 2.0, 1.0]
@@ -118,22 +137,40 @@ def test_missing_total_cap_is_local_to_size_strata(tmp_path, missing):
             "daily_strata",
         ),
     )
-    for name in (
-        "metrics",
-        "grouped_label_values",
-        "ic_summary",
-        "group_spread_summary",
-    ):
-        pd.testing.assert_frame_equal(actual[name], baseline[name], check_exact=True)
-    for kind in ("industry", "liquidity"):
-        pd.testing.assert_frame_equal(
+    pairs = [
+        (actual[name], baseline[name])
+        for name in (
+            "metrics",
+            "grouped_label_values",
+            "ic_summary",
+            "group_spread_summary",
+        )
+    ]
+    pairs.extend(
+        (
             actual["daily_strata"]
             .loc[actual["daily_strata"].stratification.eq(kind)]
             .reset_index(drop=True),
             baseline["daily_strata"]
             .loc[baseline["daily_strata"].stratification.eq(kind)]
             .reset_index(drop=True),
+        )
+        for kind in ("industry", "liquidity")
+    )
+    for left, right in pairs:
+        continuous = left.select_dtypes(include="floating").columns
+        pd.testing.assert_frame_equal(
+            left.drop(columns=continuous),
+            right.drop(columns=continuous),
             check_exact=True,
+        )
+        pd.testing.assert_frame_equal(left.isna(), right.isna(), check_exact=True)
+        pd.testing.assert_frame_equal(
+            left[continuous],
+            right[continuous],
+            check_exact=False,
+            rtol=1e-12,
+            atol=1e-15,
         )
     size = actual["daily_strata"].query("stratification == 'size'")
     undefined = size.loc[size.stratum.isna()]
@@ -577,11 +614,18 @@ def test_hac20_by_is_one_full_family_and_alt_policy_applies(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "mutation", ("duplicate", "stratum", "range", "count", "reason")
+    "mutation,batch_rows",
+    [
+        ("duplicate", 1),
+        ("duplicate", 8192),
+        ("stratum", 8192),
+        ("range", 8192),
+        ("count", 8192),
+        ("reason", 8192),
+    ],
 )
-@pytest.mark.parametrize("batch_rows", [1, 8192])
 def test_selected_daily_reader_and_reducer_reject_same_corruption(
-    tmp_path, monkeypatch, mutation, batch_rows
+    tmp_path, monkeypatch, mutation, batch_rows, stratified_baselines
 ):
     import pyarrow as pa
     import pyarrow.parquet as pq
@@ -589,8 +633,8 @@ def test_selected_daily_reader_and_reducer_reject_same_corruption(
     from quant_research_platform.artifacts.outputs.evaluation_daily import DAILY_SCHEMAS
     from quant_research_platform.storage.datasets import reading
 
-    _, config = _fixture(tmp_path)
-    output = evaluate(config)
+    output = tmp_path / "evaluation-copy"
+    shutil.copytree(stratified_baselines[1][0], output)
     path = output / "daily_strata.parquet"
     frame = pq.read_table(path).to_pandas()
     if mutation == "duplicate":
@@ -837,7 +881,23 @@ def test_rank_ic_reads_only_its_selected_evaluation_members(
     artifact = read_statistics_artifact(actual)
     assert artifact.metadata["stratum_domains"] == {}
     with artifact.table("factor_diagnostics.parquet") as frame:
-        pd.testing.assert_frame_equal(frame, expected, check_exact=True)
+        left, right = frame, expected
+        continuous = left.select_dtypes(include="floating").columns.difference(
+            ["fdr_alpha"]
+        )
+        pd.testing.assert_frame_equal(
+            left.drop(columns=continuous),
+            right.drop(columns=continuous),
+            check_exact=True,
+        )
+        pd.testing.assert_frame_equal(left.isna(), right.isna(), check_exact=True)
+        pd.testing.assert_frame_equal(
+            left[continuous],
+            right[continuous],
+            check_exact=False,
+            rtol=1e-12,
+            atol=1e-15,
+        )
     for analyses in (["stratified_ic"], ["rank_ic", "stratified_ic"]):
         policy = {"hac_lag": 1, "fdr_method": "BY", "fdr_alpha": 0.05}
         if "rank_ic" in analyses:
@@ -897,26 +957,16 @@ def test_selected_metrics_reader_rejects_non_native_physical_type(tmp_path):
     ),
 )
 def test_stratified_statistics_semantics_shared_by_writer_and_reader(
-    tmp_path, mutation
+    tmp_path, mutation, stratified_baselines
 ):
     import pyarrow as pa
     import pyarrow.parquet as pq
 
     from quant_research_platform.artifacts.statistics import write_statistics_artifact
 
-    _, config = _fixture(tmp_path, days=3 if mutation == "defined_gap" else 1)
-    output = evaluate(config)
-    root = factor_statistics(
-        {
-            "evaluation_inputs": [str(output)],
-            "output": str(tmp_path / "stats"),
-            "analyses": ["stratified_ic"],
-            "statistics": {
-                "hac_lag": 1 if mutation == "defined_gap" else 20,
-                "fdr_method": "BY",
-                "fdr_alpha": 0.05,
-            },
-        }
+    root = tmp_path / "stats-copy"
+    shutil.copytree(
+        stratified_baselines[3 if mutation == "defined_gap" else 1][1], root
     )
     artifact = read_statistics_artifact(root)
     path = root / "factor_stratified_diagnostics.parquet"

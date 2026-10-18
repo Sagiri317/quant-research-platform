@@ -110,10 +110,7 @@ def test_required_member_bad_cap_keeps_proxy_uncertainty(cap):
 
 
 @pytest.mark.parametrize("shrinkage", [0.0, 0.2, 1.0])
-def test_ordinary_kernels_use_vectorized_paths_and_independent_oracles(shrinkage):
-    from quant_research_platform.compute.dataframe import cross_section
-    from quant_research_platform.research.features import transforms
-    from quant_research_platform.research.models import rank_ensemble
+def test_covariance_shrinkage_matches_independent_oracle(shrinkage):
     from quant_research_platform.research.portfolios import risk
 
     rng = np.random.default_rng(52)
@@ -135,6 +132,16 @@ def test_ordinary_kernels_use_vectorized_paths_and_independent_oracles(shrinkage
     np.testing.assert_array_equal(actual, actual.T)
     np.testing.assert_allclose(actual, expected, rtol=2e-14, atol=1e-17)
     assert np.linalg.eigvalsh(actual).min() >= 0
+
+
+def test_ordinary_kernels_use_vectorized_paths_and_independent_oracles():
+    from quant_research_platform.compute.dataframe import cross_section
+    from quant_research_platform.research.features import transforms
+    from quant_research_platform.research.models import rank_ensemble
+
+    rng = np.random.default_rng(52)
+    values = rng.normal(size=(504, 5)) * 0.01
+    weights = np.exp2(-np.arange(503, -1, -1) / 126)
     correlation, reason = cross_section._pearson_correlation_result(
         values[:, 0], values[:, 1]
     )

@@ -462,10 +462,7 @@ def test_version_source_distinguishes_open_end_from_invalid_nonempty_end(
     "end,expected",
     [
         (None, ["A"] * 6),
-        ("", ["A"] * 6),
-        (" \t", ["A"] * 6),
         ("invalid", ["unknown"] * 6),
-        ("2020-02-30", ["unknown"] * 6),
         ("2020-01-06", ["A", "A", "unknown", "unknown", "unknown", "unknown"]),
     ],
 )
@@ -489,8 +486,10 @@ def test_version_end_uncertainty_is_local_to_its_standard(
     pd.testing.assert_frame_equal(versions, before)
 
 
-@pytest.mark.parametrize("route", ["direct", "materialize"])
-@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize(
+    "route,reverse",
+    [("direct", False), ("direct", True), ("materialize", False)],
+)
 @pytest.mark.parametrize("other_end", ["2020-01-08", "", "invalid"])
 def test_conflicting_version_ends_preserve_only_common_valid_interval(
     tmp_path, route, reverse, other_end

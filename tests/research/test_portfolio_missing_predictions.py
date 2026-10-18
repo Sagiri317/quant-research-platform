@@ -14,8 +14,9 @@ from quant_research_platform.contracts.portfolios import PortfolioCapital
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.portfolios import production
 from quant_research_platform.research.portfolios.accounting import EquityEntitlements
-from tests.research.test_portfolio_decision_execution import _decision_inputs
-from tests.research.test_portfolio_production import _build_producer, _inputs
+from tests.helpers.portfolio_inputs import decision_inputs as _decision_inputs
+from tests.helpers.portfolio_inputs import portfolio_inputs as _inputs
+from tests.research.test_portfolio_production import _build_producer
 
 
 class _Forecasts:
@@ -361,7 +362,7 @@ def _public_prediction_config(tmp_path, *, empty=False, prediction_start="2023-0
         write_prediction_outputs,
     )
     from tests.helpers.output_frames import make_price_volume_prediction_output_frame
-    from tests.research.test_closed_market_portfolios import _native_inputs
+    from tests.helpers.portfolio_inputs import closed_market_inputs as _native_inputs
 
     inputs, _, _, panel = _native_inputs(tmp_path / "market", fault="normal_open")
     window = {"start": "2023-01-02", "end": "2023-01-06"}

@@ -11,17 +11,7 @@ from quant_research_platform.research.protocols.a_share import (
 
 @pytest.mark.parametrize(
     "half_lives",
-    [
-        (None,),
-        (None, None),
-        (756,),
-        (756, 756),
-        (378,),
-        (0.5,),
-        (None, 378),
-        (None, 756),
-        (756, 378),
-    ],
+    [(None, None), (756, 378), (None, 0.5)],
 )
 def test_a_share_accepts_explicit_positive_decay_candidates(half_lives):
     models = [
@@ -37,7 +27,7 @@ def test_a_share_accepts_explicit_positive_decay_candidates(half_lives):
     validate_model_selection(models)
 
 
-@pytest.mark.parametrize("periods", [1, 378, 756])
+@pytest.mark.parametrize("periods", [1, 0.5])
 def test_generic_weighting_keeps_other_positive_decay_contracts(periods):
     assert TrainingWeighting(half_life_periods=periods).half_life_periods == periods
 

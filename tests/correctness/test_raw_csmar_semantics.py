@@ -3754,3 +3754,73 @@ def test_optional_reference_conflicts_preserve_consumed_facts(tmp_path, subtests
                     assert actual.weight.tolist() == (
                         [0.6, 0.4] if data_id == "index_weights" else [1.0]
                     )
+
+
+def test_unconsumed_index_name_conflict_does_not_block_benchmark_publication(tmp_path):
+    from quant_research_platform.markets.prepare import prepare
+    from quant_research_platform.research.portfolios.production import (
+        _iter_benchmark_weights,
+    )
+    from quant_research_platform.storage.datasets import read_dataset
+    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from tests.helpers.a_share_raw import _write_csmar
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    info = dict(Idxinfo11="2014-01-02", Idxinfo02="2013-12-31")
+    _write_csmar(
+        raw,
+        "index_info",
+        [
+            dict(info, Indexcd="000905", Idxinfo01="中证小盘500指数"),
+            dict(info, Indexcd="000852", Idxinfo01="中证1000指数"),
+            dict(info, Indexcd="000852", Idxinfo01="conflicting name"),
+        ],
+    )
+    _write_csmar(
+        raw,
+        "index_weights",
+        [
+            dict(
+                Indexcd="000905",
+                Enddt="2020-01-02",
+                Stkcd=asset,
+                Constdnme="synthetic",
+                Weight=weight,
+            )
+            for asset, weight in (("000001", 25.0), ("000002", 75.0))
+        ],
+    )
+    before = _file_bytes(raw)
+    roots = {name: tmp_path / name for name in ("index_info", "index_weights")}
+    interim.materialize_interim_data(
+        raw_root=raw, output_roots=roots, data_ids=tuple(roots), chunksize=1
+    )
+    saved_info = read_dataset(roots["index_info"]).set_index("source_asset_id")
+    assert set(saved_info.index) == {"000852", "000905"}
+    assert pd.isna(saved_info.loc["000852", "index_name"])
+    assert saved_info.loc["000905", "index_name"] == "中证小盘500指数"
+    counts = read_dataset_manifest_evidence(roots["index_info"])[
+        "producer_diagnostics"
+    ]["source_row_counts"]
+    assert counts["conflicting_index_name_rows"] == 2
+    output = prepare(
+        dict(
+            market_id="a_share",
+            data_id="benchmark_weights",
+            inputs={key: str(root) for key, root in roots.items()},
+            time_window={"start": "2020-01-02", "end": "2020-01-02"},
+            output_root=str(tmp_path / "benchmark"),
+        )
+    )
+    saved = read_dataset(output)
+    assert saved.benchmark_id.tolist() == ["csi500", "csi500"]
+    assert saved.asset_id.tolist() == ["000001", "000002"]
+    assert saved.timestamp.eq(pd.Timestamp("2020-01-02")).all()
+    assert saved.weight.tolist() == [0.25, 0.75]
+    (weights,) = _iter_benchmark_weights(
+        output, "csi500", pd.DatetimeIndex(["2020-01-02"])
+    )
+    assert weights.index.tolist() == ["000001", "000002"]
+    assert weights.tolist() == [0.25, 0.75]
+    assert _file_bytes(raw) == before
