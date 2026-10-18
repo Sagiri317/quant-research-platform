@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cached_property
 
 import numpy as np
@@ -164,8 +164,8 @@ def validate_model_state(predictor: object, metadata: dict[str, object]) -> None
     else:
         if type(predictor) is not ScaledPredictor:
             raise ValueError("model_state_metadata_mismatch")
-        expected = estimators._MODEL_ESTIMATOR_FACTORIES[spec.model_algorithm](
-            spec, dict(metadata["resolved_hyperparameters"])
+        expected = estimators.build_estimator_from_model_spec(
+            replace(spec, hyperparameters=metadata["resolved_hyperparameters"])
         )
         actual = predictor.estimator
         if type(actual) is not type(expected):

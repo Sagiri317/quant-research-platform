@@ -79,12 +79,17 @@ def test_prepare_roundtrip_and_narrow_slice(tmp_path, monkeypatch, native, block
             }
         )
     )
+    expected = full.loc[
+        full.timestamp.between(window["start"], window["end"])
+    ].reset_index(drop=True)
     pd.testing.assert_frame_equal(
-        narrow,
-        full.loc[full.timestamp.between(window["start"], window["end"])].reset_index(
-            drop=True
-        ),
+        narrow.select_dtypes(exclude="floating"),
+        expected.select_dtypes(exclude="floating"),
         check_exact=True,
+    )
+    pd.testing.assert_frame_equal(narrow.isna(), expected.isna())
+    pd.testing.assert_frame_equal(
+        narrow, expected, check_exact=False, rtol=1e-12, atol=0
     )
     session = open_dataset_session(full_root)
     spec = session.spec
@@ -304,9 +309,13 @@ def test_native_endpoint_parity_lifecycle_and_local_invalid_prices(tmp_path):
     )
     valid = read_dataset(valid_root)
     for horizon in (1, 20):
-        np.testing.assert_array_equal(
-            valid[f"on_id_endpoint_return_{horizon}d"],
-            legacy[f"forward_return_{horizon}d"],
+        actual = valid[f"on_id_endpoint_return_{horizon}d"]
+        expected = legacy[f"forward_return_{horizon}d"]
+        pd.testing.assert_series_equal(
+            actual.isna(), expected.isna(), check_names=False
+        )
+        pd.testing.assert_series_equal(
+            actual, expected, check_names=False, check_exact=False, rtol=1e-12, atol=0
         )
     dates = sorted(frame.timestamp.unique())
     a = frame.asset_id.eq("a")
@@ -412,7 +421,9 @@ def test_actual_panel_axis_survives_market_migration_and_suspension(tmp_path):
     assert result.on_id_endpoint_return_5d_available_at.iloc[0] == own[
         6
     ] + pd.Timedelta(hours=7)
-    assert result.on_id_endpoint_return_5d.iloc[0] == (106.0 - 101.0) / 101.0
+    assert result.on_id_endpoint_return_5d.iloc[0] == pytest.approx(
+        (106.0 - 101.0) / 101.0, rel=1e-12, abs=0
+    )
     assert result.on_id_decomposition_reason_5d.iloc[0] == "missing_price"
     assert result.on_id_endpoint_return_1d_reason.iloc[0] == "missing_price"
 

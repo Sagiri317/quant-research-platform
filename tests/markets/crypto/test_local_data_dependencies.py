@@ -807,40 +807,36 @@ def test_native_empty_archive_day_does_not_gate_later_observed_day(tmp_path):
     )
 
 
-def test_panel_unrepresentable_totals_do_not_block_healthy_book_research(tmp_path):
-    from dataclasses import replace
-
-    state = replace(
-        _state(0),
-        bids=tuple((995 - i, 1e308) for i in range(10)),
-        asks=tuple((1005 + i, 1.0) for i in range(10)),
-    )
+def test_panel_unknown_flow_and_depth_do_not_block_healthy_book_research(tmp_path):
+    # Only two native levels are known; the second trade bin is uncovered.
+    state = _state(0)
     panel = pd.concat(
         iter_panel_frames(
             [state],
             [
-                _trade(50, 1e308, maker_buyer=False),
-                _trade(80, 1e308, maker_buyer=False),
+                _trade(50, 0.1, maker_buyer=False),
+                _trade(80, 0.2, maker_buyer=False),
             ],
             market_id="crypto",
             asset_id="btc_usdt",
             start_ms=0,
             end_ms=100,
             book_coverage={"s1": _coverage(0, 200)},
-            trade_coverage=coverage_lookup({"trade-connection-1": _coverage(0, 200)}),
+            trade_coverage=coverage_lookup({"trade-connection-1": _coverage(0, 50)}),
             batch_rows=1,
         ),
         ignore_index=True,
     )
     root = _persist(tmp_path / "panel", panel)
     persisted = read_dataset(root)
-    assert persisted.trade_count_100ms.tolist() == [0, 2]
+    assert persisted.trade_count_100ms.iloc[0] == 0
+    assert pd.isna(persisted.trade_count_100ms.iloc[1])
     assert pd.isna(persisted.trade_volume_100ms.iloc[1])
     assert persisted.bid_depth_5.isna().all()
     assert persisted.bid_depth_10.isna().all()
-    assert persisted.ask_depth_5.eq(5.0).all()
-    assert persisted.ask_depth_10.eq(10.0).all()
-    assert persisted.bid_depth_1.eq(1e308).all()
+    assert persisted.ask_depth_5.isna().all()
+    assert persisted.ask_depth_10.isna().all()
+    assert persisted.bid_depth_1.eq(2.0).all()
     output = prepare(
         {
             "market_id": "crypto",

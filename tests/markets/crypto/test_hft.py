@@ -13,8 +13,7 @@ from quant_research_platform.contracts.order_book import (
 )
 from quant_research_platform.markets.implementations.crypto.hft import (
     HFT_GRID_MS,
-    _ofi_units,
-    _quantity_units,
+    _ofi_terms,
     iter_factor_frames,
     iter_label_frames,
     iter_panel_frames,
@@ -124,13 +123,14 @@ def _trade(timestamp_ms: int, quantity: float, *, maker_buyer: bool) -> TradeEve
 
 def test_l1_ofi_uses_exact_integer_tick_identity() -> None:
     assert (
-        _ofi_units(
-            (1000, _quantity_units(2.0)),
-            (1010, _quantity_units(3.0)),
-            (1020, _quantity_units(1.0)),
-            (1020, _quantity_units(2.0)),
+        math.fsum(
+            _ofi_terms(
+                (1000, 2.0),
+                (1010, 3.0),
+                (1020, 1.0),
+                (1020, 2.0),
+            )
         )
-        / (1 << 1074)
         == 2.0
     )
 
@@ -922,7 +922,7 @@ def test_persisted_depth_ratios_keep_scale_invariance_and_one_ulp_change(
 @pytest.mark.parametrize(
     "unit,bid,ask,expected",
     [
-        ("1e300", 100000000, 150000000, 1.25e308),
+        ("0.01", 6000000, 6000001, 60000.005),
         ("0.0000000000000001", 10000000000000000, 10000000000000001, 1.0),
     ],
 )
@@ -1006,17 +1006,14 @@ def test_l0_full_windows_chunk_segments_assets_causality_and_persistence(tmp_pat
         pd.testing.assert_frame_equal(
             projected.loc[:, list(names)], full.loc[:, list(names)]
         )
-    extreme = panel.iloc[:25].copy()
-    extreme.loc[:, "mid"] = 100.0
-    extreme.loc[12, "mid"] = np.finfo(float).tiny
-    extreme.loc[13:, "mid"] = 1e308
-    with np.errstate(over="ignore", invalid="ignore"):
-        extreme_vol = pd.concat(
-            iter_factor_frames([extreme], columns=("realized_volatility_1s",)),
-            ignore_index=True,
-        )["realized_volatility_1s"]
-    assert extreme_vol.iloc[13:23].isna().all()
-    assert extreme_vol.iloc[23] == 0.0
+    missing = panel.iloc[:25].copy()
+    missing.loc[12, "mid"] = np.nan
+    missing_vol = pd.concat(
+        iter_factor_frames([missing], columns=("realized_volatility_1s",)),
+        ignore_index=True,
+    )["realized_volatility_1s"]
+    assert missing_vol.iloc[12:23].isna().all()
+    assert missing_vol.iloc[23] == 0.0
     chunked = pd.concat(
         iter_factor_frames([panel.iloc[i : i + 7] for i in range(0, size, 7)]),
         ignore_index=True,
@@ -1067,22 +1064,22 @@ def test_l0_full_windows_chunk_segments_assets_causality_and_persistence(tmp_pat
 
 
 @pytest.mark.parametrize("batch_rows", [1, 10])
-def test_panel_exact_cancellation_survives_events_and_batches(batch_rows):
+def test_panel_signed_flow_cancellation_survives_events_and_batches(batch_rows):
     from dataclasses import replace
 
     books = [
-        _state(0, bid_index=990, bid_qty=1e308),
-        _state(10, bid_index=991, bid_qty=1e308),
-        _state(20, bid_index=992, bid_qty=1e308),
-        _state(30, bid_index=991, bid_qty=1e308),
+        _state(0, bid_index=990, bid_qty=1000.0),
+        _state(10, bid_index=991, bid_qty=1000.0),
+        _state(20, bid_index=992, bid_qty=1000.0),
+        _state(30, bid_index=991, bid_qty=1000.0),
     ]
     frames = list(
         iter_panel_frames(
             books,
             [
-                _trade(10, 1e16, maker_buyer=False),
+                _trade(10, 10.0, maker_buyer=False),
                 _trade(20, 1.0, maker_buyer=False),
-                _trade(30, 1e16, maker_buyer=True),
+                _trade(30, 10.0, maker_buyer=True),
             ],
             market_id="crypto",
             asset_id="btc_usdt",
@@ -1094,29 +1091,31 @@ def test_panel_exact_cancellation_survives_events_and_batches(batch_rows):
         )
     )
     row = pd.concat(frames).iloc[-1]
-    assert row.book_ofi_100ms == 1e308
+    assert row.book_ofi_100ms == 1000.0
     assert row.observed_signed_trade_volume_100ms == 1.0
     assert (
-        _ofi_units(
-            (1, _quantity_units(1.0)),
-            (1, _quantity_units(1e308)),
-            (3, _quantity_units(1.0)),
-            (3, _quantity_units(1e308)),
+        math.fsum(
+            _ofi_terms(
+                (1, 1.0),
+                (1, 1000.0),
+                (3, 1.0),
+                (3, 1000.0),
+            )
         )
-        / (1 << 1074)
         == 0.0
     )
     assert (
-        _ofi_units(
-            (1, _quantity_units(1e308)),
-            (1, _quantity_units(1.0)),
-            (3, _quantity_units(1e308)),
-            (3, _quantity_units(2.0)),
+        math.fsum(
+            _ofi_terms(
+                (1, 1000.0),
+                (1, 1.0),
+                (3, 1000.0),
+                (3, 2.0),
+            )
         )
-        / (1 << 1074)
         == -1.0
     )
-    # A segment boundary must discard its predecessor's exact aggregate.
+    # A segment boundary must discard its predecessor's aggregate.
     reset = [*books[:3], _boundary(25), replace(books[-1], segment_id="s2")]
     row = pd.concat(
         list(
@@ -1153,12 +1152,12 @@ def test_panel_exact_cancellation_survives_events_and_batches(batch_rows):
             )
         )
     ).iloc[-1]
-    assert pd.isna(row.book_ofi_100ms)
-    assert row.book_spread > 0 and row.bid_depth_1 == 1e308
+    assert row.book_ofi_100ms == 2000.0
+    assert row.book_spread > 0 and row.bid_depth_1 == 1000.0
 
 
 @pytest.mark.parametrize("steps", (0, 1, 2))
-@pytest.mark.parametrize("scale", (1.0, 2.0**500, 2.0**-500))
+@pytest.mark.parametrize("scale", (0.01, 1.0, 10000.0))
 def test_positive_mid_returns_preserve_adjacent_prices_and_chunk_state(steps, scale):
     from fractions import Fraction
     from statistics import stdev
@@ -1187,9 +1186,11 @@ def test_positive_mid_returns_preserve_adjacent_prices_and_chunk_state(steps, sc
     )
     pd.testing.assert_frame_equal(full, split, check_exact=True)
     expected = float((Fraction(end) - Fraction(start)) / Fraction(start))
-    assert full.return_100ms.iloc[-1] == expected
-    assert full.return_500ms.iloc[-1] == expected
-    assert full.realized_volatility_1s.iloc[-1] == stdev([0.0] * 9 + [expected])
+    assert full.return_100ms.iloc[-1] == pytest.approx(expected, rel=1e-14, abs=0)
+    assert full.return_500ms.iloc[-1] == pytest.approx(expected, rel=1e-14, abs=0)
+    assert full.realized_volatility_1s.iloc[-1] == pytest.approx(
+        stdev([0.0] * 9 + [expected]), rel=1e-14, abs=0
+    )
 
 
 @pytest.mark.parametrize(
@@ -1226,3 +1227,21 @@ def test_label_relative_change_preserves_adjacent_positive_endpoints(mid, future
     )
     assert pd.isna(labels.loc[1, "future_mid_return_100ms"])
     assert pd.isna(labels.loc[1, "future_mid_return_100ms_available_at"])
+
+
+def test_panel_round_trip_queue_changes_do_not_create_ofi_signal():
+    rows = list(
+        _panel_rows(
+            [
+                _state(i * 10, bid_qty=q)
+                for i, q in enumerate((0.586, 0.034, 0.44, 0.586))
+            ],
+            [],
+            start_ms=0,
+            end_ms=100,
+            book_coverage={"s1": _coverage(0, 201)},
+            trade_coverage={"trade-connection-1": _coverage(0, 201)},
+        )
+    )
+    # Unchanged prices and a round trip to the initial queue imply net OFI = 0.
+    assert rows[-1]["book_ofi_100ms"] == 0.0

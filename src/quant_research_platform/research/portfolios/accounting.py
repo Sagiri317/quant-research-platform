@@ -1176,12 +1176,7 @@ def _asset_values(
     result = strict_finite_numeric_series(
         values.reindex(assets), error=error, allow_null=True
     ).astype("float64")
-    present_values = result.dropna()
-    if (
-        present_values.isna().any()
-        or not np.isfinite(present_values.to_numpy()).all()
-        or present_values.lt(0.0).any()
-    ):
+    if result.lt(0.0).any():
         raise ValueError(error)
     return result
 

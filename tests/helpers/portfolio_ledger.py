@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fractions import Fraction
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -23,6 +24,42 @@ from quant_research_platform.contracts.validation import strict_finite_float
 from quant_research_platform.research.portfolios.accounting import (
     execute_continuous_target as _execute_continuous_target,
 )
+
+
+def mark_view(
+    day,
+    opening,
+    closing,
+    *,
+    present=True,
+    life="2020-01-01",
+    trading=True,
+    closed=False,
+    unproved=False,
+):
+    frame = pd.DataFrame(
+        {
+            "asset_id": ["a"],
+            "timestamp": [pd.Timestamp(day)],
+            "listing_date": [pd.Timestamp(life)],
+            "market_type": pd.Series([1], dtype="Int64"),
+            "open": [opening],
+            "close": [closing],
+            "is_trading": pd.Series([trading], dtype="boolean"),
+        }
+    )
+    if not present:
+        frame = frame.iloc[:0].copy()
+    return SimpleNamespace(
+        timestamp=pd.Timestamp(day),
+        panel=frame,
+        valuation=frame.copy(),
+        unproved_lifecycle_assets=frozenset({"a"}) if unproved else frozenset(),
+        confirmed_delisted_lifecycles=frozenset(),
+        rights_events=pd.DataFrame(),
+        corporate_events=pd.DataFrame(),
+        closed_assets=frozenset({"a"}) if closed else frozenset(),
+    )
 
 
 def execute_continuous_target(*args, **kwargs):

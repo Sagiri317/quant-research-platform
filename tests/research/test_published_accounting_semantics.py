@@ -23,8 +23,8 @@ from quant_research_platform.research.portfolios.diagnostics import (
 from quant_research_platform.research.portfolios.production import (
     _ResearchValuationMarks,
 )
+from tests.helpers.portfolio_ledger import mark_view
 from tests.research import test_raw_share_corporate_production as corporate
-from tests.research.test_portfolio_production import _mark_view
 
 
 def _statistics(root, *, analyses=("performance",), holding_inputs=None):
@@ -125,7 +125,7 @@ def test_prepared_nonempty_suspension_carry_replays_raw_share_actions(
 
 def test_raw_quote_anchor_replays_late_earlier_and_consecutive_actions_once():
     marks = _ResearchValuationMarks()
-    marks.project(_mark_view("2023-01-03", 100.0, 100.0))
+    marks.project(mark_view("2023-01-03", 100.0, 100.0))
     base = dict(
         asset_id="a",
         listing_date=pd.Timestamp("2020-01-01"),
@@ -151,7 +151,7 @@ def test_raw_quote_anchor_replays_late_earlier_and_consecutive_actions_once():
         ("2023-01-09", [event("next", "2023-01-09", "2023-01-09")], 12.5),
         ("2023-01-10", [], 12.5),
     ):
-        view = _mark_view(day, np.nan, np.nan)
+        view = mark_view(day, np.nan, np.nan)
         view.rights_events = pd.DataFrame(actions)
         output = marks.project(view)
         assert output.open.iloc[0] == output.close.iloc[0] == expected
@@ -159,10 +159,10 @@ def test_raw_quote_anchor_replays_late_earlier_and_consecutive_actions_once():
         assert marks.last.mark_price.iloc[0] == 100.0
     # A genuine quote can have exactly the original or estimated price. The
     # observed market fact, never a comparison of prices, replaces the anchor.
-    restored = marks.project(_mark_view("2023-01-11", 100.0, 100.0))
+    restored = marks.project(mark_view("2023-01-11", 100.0, 100.0))
     assert restored.open.iloc[0] == 100.0
     assert restored.research_open_mark_at.isna().all()
-    carried = marks.project(_mark_view("2023-01-12", np.nan, np.nan))
+    carried = marks.project(mark_view("2023-01-12", np.nan, np.nan))
     assert carried.open.iloc[0] == 100.0
     assert carried.research_open_mark_at.iloc[0] == pd.Timestamp("2023-01-11")
 
@@ -394,8 +394,8 @@ def test_native_writer_and_reader_enforce_zero_share_receivable_continuity(
 
 def test_observed_same_price_on_ex_date_is_a_genuine_quote():
     marks = _ResearchValuationMarks()
-    marks.project(_mark_view("2023-01-04", 100.0, 100.0))
-    view = _mark_view("2023-01-05", 100.0, 100.0)
+    marks.project(mark_view("2023-01-04", 100.0, 100.0))
+    view = mark_view("2023-01-05", 100.0, 100.0)
     view.corporate_events = pd.DataFrame(
         [
             dict(
@@ -414,7 +414,7 @@ def test_observed_same_price_on_ex_date_is_a_genuine_quote():
     result = marks.project(view)
     assert result.open.iloc[0] == result.close.iloc[0] == 100.0
     assert result.research_open_mark_at.isna().all()
-    assert marks.project(_mark_view("2023-01-06", np.nan, np.nan)).open.iloc[0] == 100.0
+    assert marks.project(mark_view("2023-01-06", np.nan, np.nan)).open.iloc[0] == 100.0
 
 
 def test_paid_zero_share_zero_claim_asset_can_leave_native_ledger(

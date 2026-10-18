@@ -111,7 +111,6 @@ def test_model_statistics_keeps_constant_labels_explicitly_undefined(tmp_path):
         assert pd.isna(diagnostics["mean"]).all()
 
 
-@pytest.mark.parametrize("coverage", ["empty", "unmatured", "constant"])
 @pytest.mark.parametrize(
     "analysis,policy",
     [
@@ -123,18 +122,18 @@ def test_model_statistics_keeps_constant_labels_explicitly_undefined(tmp_path):
         ("prediction_bootstrap", {"bootstrap_block": 1, "bootstrap_repetitions": 1}),
     ],
 )
-def test_invalid_requested_configuration_precedes_data_availability(
-    tmp_path, coverage, analysis, policy
+def test_invalid_requested_configuration_precedes_input_read(
+    tmp_path, analysis, policy
 ):
-    window = (
-        {"start": "2020-01-07", "end": "2020-01-08"}
-        if coverage == "empty"
-        else {"start": "2020-01-04", "end": "2020-01-06"}
-    )
-    config = _config(tmp_path, window, constant=coverage == "constant")
-    config.update(analyses=[analysis], statistics=policy)
-    if coverage == "unmatured":
-        config["label_cutoff"] = "2020-01-03"
+    config = {
+        "dataset": str(tmp_path / "missing-input"),
+        "output": str(tmp_path / "statistics"),
+        "window": {"start": "2020-01-04", "end": "2020-01-06"},
+        "evaluation": {"primary_label": "label"},
+        "analyses": [analysis],
+        "statistics": policy,
+        "periods": [],
+    }
     with pytest.raises(ValueError, match="model_statistics_policy_invalid"):
         statistics_production.model_statistics(config)
     assert not Path(config["output"]).exists()

@@ -255,9 +255,8 @@ def test_derivative_catchup_retains_no_expired_force_orders(monkeypatch, count):
     assert result.observed_force_order_imbalance_30s.isna().all()
 
 
-def test_native_force_windows_preserve_exact_mass_resets_and_early_close(tmp_path):
+def test_native_force_windows_preserve_observed_mass_resets_and_early_close(tmp_path):
     import json
-    from fractions import Fraction
 
     from quant_research_platform.markets.implementations.crypto.processed import catalog
     from quant_research_platform.policy.lifecycle import closing_iterator
@@ -275,8 +274,8 @@ def test_native_force_windows_preserve_exact_mass_resets_and_early_close(tmp_pat
         (200, "BUY", "0.2"),
         (4900, "SELL", "0.1"),
         (5100, "BUY", "0.3"),
-        (8000, "SELL", "1e308"),
-        (8200, "BUY", "1e308"),
+        (8000, "SELL", "1.0"),
+        (8200, "BUY", "1.0"),
         (33000, "SELL", "0.2"),
         (36000, "BUY", "0.4"),
         (36100, "SELL", "0.1"),
@@ -355,17 +354,14 @@ def test_native_force_windows_preserve_exact_mass_resets_and_early_close(tmp_pat
     )
     by_time = whole.set_index("timestamp")
     row = by_time.loc[pd.Timestamp(origin + 8300 * 10**6)]
-    expected = float(
-        (Fraction(0.3) - Fraction(0.1))
-        / (2 * Fraction(1e308) + Fraction(0.3) + Fraction(0.1))
-    )
-    assert row.observed_force_order_imbalance_5s == expected > 0
+    # In (3.3s, 8.3s], SELL 0.1 + 1.0 and BUY 0.3 + 1.0 give 0.2 / 2.4.
+    assert row.observed_force_order_imbalance_5s == pytest.approx(1 / 12, rel=1e-14)
     row = by_time.loc[beginning]
     assert row.forceOrder_observed_at == pd.Timestamp(origin + 8200 * 10**6)
     assert pd.isna(row.observed_force_order_imbalance_5s)
     row = by_time.loc[pd.Timestamp(origin + 69000 * 10**6)]
     assert row.observed_force_order_imbalance_5s == -1
-    assert row.observed_force_order_imbalance_30s == float(Fraction(-1, 3))
+    assert row.observed_force_order_imbalance_30s == pytest.approx(-1 / 3, rel=1e-14)
     assert row.time_since_observed_force_order == 4
     primary = RuntimeError("synthetic_consumer_stop")
     for fail in (False, True):
@@ -572,3 +568,121 @@ def test_native_unknown_force_order_side_is_local_flow_barrier(tmp_path, side):
     assert result.forceOrder_age_ms.iloc[50] == 0
     assert result.observed_force_order_imbalance_5s.iloc[50:100].isna().all()
     assert result.observed_force_order_imbalance_5s.iloc[100] == 1
+
+
+def test_native_constant_liquidation_ratio_has_no_standardized_signal(tmp_path):
+    import json
+
+    from quant_research_platform.contracts.data import DataSpec
+    from quant_research_platform.markets.implementations.crypto.processed import catalog
+    from quant_research_platform.markets.prepare import prepare
+    from quant_research_platform.research.models.scaler import ModelMatrixScaler
+    from quant_research_platform.sources.market import open_market_source
+    from quant_research_platform.sources.tardis.raw import import_slices
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+    from tests.helpers.paths import StorageLayout
+    from tests.helpers.tardis import _slices
+
+    times = pd.date_range("2026-09-01", periods=401, freq="100ms")
+    quantities = (0.01, 0.015, 0.03, 0.035, 0.07, 0.1, 0.15, 0.3, 0.5)
+    native = []
+    for i, stamp in enumerate(times):
+        for side, multiplier in (("BUY", 2), ("SELL", 1)):
+            quantity = str(multiplier * quantities[i % len(quantities)])
+            event_ms = stamp.value // 10**6
+            payload = {
+                "e": "forceOrder",
+                "E": event_ms,
+                "o": {
+                    "s": "BTCUSDT",
+                    "S": side,
+                    "T": event_ms,
+                    "q": quantity,
+                    "l": quantity,
+                    "z": quantity,
+                },
+            }
+            native.append(
+                (
+                    stamp.isoformat()
+                    + "Z "
+                    + json.dumps({"stream": "btcusdt@forceOrder", "data": payload})
+                    + "\n"
+                ).encode()
+            )
+    archive_root = tmp_path / "archive"
+    import_slices(
+        archive_root,
+        date="2026-09-01",
+        slices=_slices(tmp_path / "native", b"".join(native)),
+        channels=("forceOrder",),
+    )
+    panel = pd.DataFrame(
+        {
+            "market_id": "crypto",
+            "asset_id": "btc_usdt",
+            "timestamp": times,
+            "segment_id": "book",
+            "mid": 60000.0,
+        }
+    )
+    spec = catalog.hft_processed_catalog().get(
+        "binance_futures_derivative_factors_100ms"
+    )
+    output = StorageLayout(tmp_path).processed_data_root(
+        spec.market_id, spec.kind, spec.data_id
+    )
+    with open_market_source(archive_root) as source:
+        frames = iter_derivative_factor_frames(
+            (panel.iloc[:53], panel.iloc[53:]),
+            observations=source.iter_state_observations(symbol="BTCUSDT"),
+            max_age_ms={"forceOrder": 10000},
+        )
+        write_dataset(output, frames, spec=spec)
+    result = read_dataset(output)
+    panel_root = tmp_path / "panel"
+    roles = dict.fromkeys(panel.columns, "context")
+    roles.update(market_id="key", asset_id="key", timestamp="timestamp")
+    write_dataset(
+        panel_root,
+        panel,
+        spec=DataSpec(
+            data_id="liquidation_input",
+            frequency="tick",
+            grain="asset_timestamp",
+            column_roles=roles,
+            primary_key=("market_id", "asset_id", "timestamp"),
+            partition_columns=("year",),
+        ),
+    )
+    prepared = read_dataset(
+        prepare(
+            {
+                "market_id": "crypto",
+                "data_id": spec.data_id,
+                "inputs": {"binance_futures_l2_panel_100ms": str(panel_root)},
+                "source": {"root": str(archive_root)},
+                "parameters": {"max_age_ms": {"forceOrder": 10000}},
+                "factor_columns": [
+                    "observed_force_order_imbalance_5s",
+                    "observed_force_order_imbalance_30s",
+                ],
+                "time_window": {
+                    "start": times[0].isoformat(),
+                    "end": times[-1].isoformat(),
+                },
+                "output_root": str(tmp_path / "prepared"),
+            }
+        )
+    )
+    pd.testing.assert_frame_equal(prepared, result[prepared.columns], check_exact=True)
+    for seconds in (5, 30):
+        column = f"observed_force_order_imbalance_{seconds}s"
+        first = seconds * 10 - 1
+        assert prepared[column].iloc[:first].isna().all()
+        mature = prepared[[column]].iloc[first:]
+        # Every pair has BUY = 2 * SELL, hence (BUY-SELL)/(BUY+SELL) = 1/3.
+        assert mature.notna().all().all()
+        assert mature.iloc[:, 0].nunique() == 1
+        assert mature.iloc[0, 0] == pytest.approx(1 / 3, rel=1e-14)
+        assert not ModelMatrixScaler.fit(mature).transform(mature).to_numpy().any()

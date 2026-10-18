@@ -14,7 +14,11 @@ import pandas as pd
 
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
-from quant_research_platform.contracts.time import TimeWindow, is_datetime_window
+from quant_research_platform.contracts.time import (
+    TimeWindow,
+    is_datetime_window,
+    time_window_timestamp_interval,
+)
 from quant_research_platform.markets.implementations.crypto.hft import (
     HFT_GRID_MS,
     iter_cross_asset_factor_frames,
@@ -50,6 +54,7 @@ from quant_research_platform.sources.binance import ids as binance_ids
 from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
     _dataset_input_options,
+    _validated_years,
     iter_dataset_chunks,
     open_dataset_session,
 )
@@ -253,9 +258,7 @@ def produce_hft_processed_data(
                     )
                 )
             )
-            session = _selected_context_session(root, inputs).filtered_view(
-                computation_window
-            )
+            session = _selected_context_session(root, inputs, computation_window)
             metadata["inputs"] = {input_id: str(session.root)}
             data = _panel_frame_producer(
                 session,
@@ -384,10 +387,12 @@ def produce_derivative_processed_data(
             ),
             default=0,
         )
-        session = _selected_context_session(root, required).filtered_view(
+        session = _selected_context_session(
+            root,
+            required,
             _computation_window(
                 time_window, history_ms=history + parameters.get("input_delay_ms", 0)
-            )
+            ),
         )
         metadata = {
             "source_evidence": dict(archive.source_identity),
@@ -436,9 +441,33 @@ def produce_derivative_processed_data(
             yield (data, metadata)
 
 
-def _selected_context_session(root, columns):
-    """Project the chosen definition while leaving absent values locally unknown."""
+def _windowed_input_options(root, time_window):
+    """Intersect input and computation selections before native file discovery."""
     options = _dataset_input_options(root)
+    selected = options.get("time_window")
+    if selected is not None:
+        lower, upper, closed = time_window_timestamp_interval(selected)
+        start = max(pd.Timestamp(lower), pd.Timestamp(time_window.start))
+        end = min(
+            pd.Timestamp(upper)
+            if closed
+            else pd.Timestamp(upper) - pd.Timedelta(1, "ns"),
+            pd.Timestamp(time_window.end),
+        )
+        if start > end:
+            # An empty intersection has no native partitions to discover.
+            # Keep the declared selector validation in the reader.
+            _validated_years(options.get("years"))
+            options["years"] = []
+        else:
+            time_window = TimeWindow(start, end)
+    options["time_window"] = time_window
+    return options
+
+
+def _selected_context_session(root, columns, time_window):
+    """Project the chosen definition while leaving absent values locally unknown."""
+    options = _windowed_input_options(root, time_window)
     session = open_dataset_session(**{**options, "columns": None})
     keys = ("market_id", "asset_id", "timestamp")
     selected = options.get("columns")
@@ -467,11 +496,11 @@ def produce_spot_perp_context(
             spec.required_columns, perpetual=data_id == HFT_PANEL_DATA_ID
         )
         sessions[data_id] = _selected_context_session(
-            root, (*dependencies, *(("segment_id",) if factors else ()))
-        ).filtered_view(
+            root,
+            (*dependencies, *(("segment_id",) if factors else ())),
             _computation_window(time_window, history_ms=500)
             if data_id == HFT_PANEL_DATA_ID
-            else TimeWindow(_EPOCH, time_window.end)
+            else TimeWindow(_EPOCH, time_window.end),
         )
     metadata = {
         "inputs": {key: str(session.root) for key, session in sessions.items()},
@@ -638,16 +667,14 @@ def produce_information_panel(
     identities = {}
     for data_id in spec.processed_input_data_ids:
         root = inputs[data_id]
-        options = _dataset_input_options(root)
+        options = _windowed_input_options(root, time_window)
         if options.get("columns") is not None and not set(
             spec.required_columns
         ).difference({"market_id", "asset_id", "timestamp", "segment_id"}) <= set(
             options["columns"]
         ):
             raise ValueError("data_operation_input_columns_missing")
-        session = open_dataset_session(
-            **{**options, "columns": spec.required_columns}
-        ).filtered_view(time_window)
+        session = open_dataset_session(**{**options, "columns": spec.required_columns})
         sessions.append(session)
         identities[data_id] = str(session.root)
     batch_rows = DEFAULT_BATCH_ROWS
@@ -678,8 +705,12 @@ def produce_cross_asset_context(
         dependencies = (
             () if data_id == target_id else cross_asset_inputs(spec.required_columns)
         )
-        sessions[data_id] = _selected_context_session(root, dependencies).filtered_view(
-            time_window if data_id == target_id else TimeWindow(_EPOCH, time_window.end)
+        sessions[data_id] = _selected_context_session(
+            root,
+            dependencies,
+            time_window
+            if data_id == target_id
+            else TimeWindow(_EPOCH, time_window.end),
         )
         if (
             "segment_id" in dependencies
@@ -790,7 +821,8 @@ def produce_normalized_context(
     session = _selected_context_session(
         root,
         (*(("segment_id",) if needs_history else ()), *(("mid",) if needs_mid else ())),
-    ).filtered_view(computation_window)
+        computation_window,
+    )
     metadata = {
         "source_evidence": {
             "schema_id": source_schema_id,

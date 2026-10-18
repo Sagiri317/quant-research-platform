@@ -388,11 +388,11 @@ def test_stale_reference_quote_adjusts_once_but_current_quote_is_not_readjusted(
     from fractions import Fraction
 
     from quant_research_platform.research.portfolios import production
-    from tests.research.test_portfolio_production import _mark_view
+    from tests.helpers.portfolio_ledger import mark_view
 
     marks = production._ResearchValuationMarks()
-    marks.project(_mark_view("2023-01-04", 100.0, 100.0))
-    ex_view = _mark_view("2023-01-05", float("nan"), float("nan"), trading=False)
+    marks.project(mark_view("2023-01-04", 100.0, 100.0))
+    ex_view = mark_view("2023-01-05", float("nan"), float("nan"), trading=False)
     ex_view.corporate_events = pd.DataFrame(
         [
             dict(
@@ -425,7 +425,7 @@ def test_stale_reference_quote_adjusts_once_but_current_quote_is_not_readjusted(
     )
     ex = marks.project(ex_view)
     later = marks.project(
-        _mark_view("2023-01-06", float("nan"), float("nan"), trading=False)
+        mark_view("2023-01-06", float("nan"), float("nan"), trading=False)
     )
     for view in (ex, later):
         assert float(view.open.iloc[0]) == pytest.approx(expected)

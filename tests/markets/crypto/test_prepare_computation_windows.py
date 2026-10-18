@@ -117,6 +117,8 @@ def test_native_prepare_window_partition_chunk_equivalence(
     )
     inputs = {ids.HFT_PANEL_DATA_ID: panel}
     broad = run_prepare(tmp_path / "broad", inputs, data_id, start, end)
+    add_unconsumed_member(panel, 2010)
+    add_unconsumed_member(panel, 2030)
     original = producer.iter_dataset_chunks
     monkeypatch.setattr(
         producer,
@@ -162,6 +164,8 @@ def test_spot_and_cross_keep_warmup_and_stale_clocks(tmp_path, native_panel):
     broad = run_prepare(
         tmp_path / "spot-broad", inputs, ids.HFT_SPOT_CONTEXT_DATA_ID, start, end
     )
+    add_unconsumed_member(panel, 2030)
+    add_unconsumed_member(spot, 2030)
     narrow = run_prepare(
         tmp_path / "spot-narrow",
         inputs,
@@ -172,11 +176,21 @@ def test_spot_and_cross_keep_warmup_and_stale_clocks(tmp_path, native_panel):
     assert_projection(broad, narrow, narrow_start, end)
     assert narrow.spot_grid_at.notna().all()
     assert narrow.spot_grid_age_ms.max() > 1000
+    add_unconsumed_member(spot, start.year)
+    with pytest.raises(ValueError, match="invalid_dataset_part_files"):
+        run_prepare(
+            tmp_path / "spot-bad",
+            inputs,
+            ids.HFT_SPOT_CONTEXT_DATA_ID,
+            narrow_start,
+            end,
+        )
     info_panel = persist_panel(
         tmp_path / "info-panel",
         frame.loc[frame.timestamp <= cut],
         ids.HFT_INFORMATION_PANEL_DATA_ID,
     )
+    add_unconsumed_member(info_panel, 2030)
     info = prepare(
         {
             "market_id": "crypto",
@@ -195,6 +209,7 @@ def test_spot_and_cross_keep_warmup_and_stale_clocks(tmp_path, native_panel):
     broad = run_prepare(
         tmp_path / "cross-broad", inputs, ids.HFT_CROSS_ASSET_DATA_ID, start, end
     )
+    add_unconsumed_member(info, 2030)
     narrow = run_prepare(
         tmp_path / "cross-narrow",
         inputs,
@@ -204,6 +219,15 @@ def test_spot_and_cross_keep_warmup_and_stale_clocks(tmp_path, native_panel):
     )
     assert_projection(broad, narrow, narrow_start, end)
     assert narrow.btc_grid_at.notna().all()
+    add_unconsumed_member(info, start.year)
+    with pytest.raises(ValueError, match="invalid_dataset_part_files"):
+        run_prepare(
+            tmp_path / "cross-bad",
+            inputs,
+            ids.HFT_CROSS_ASSET_DATA_ID,
+            narrow_start,
+            end,
+        )
 
 
 def test_derivative_five_minute_warmup_is_bounded(tmp_path, monkeypatch, native_panel):
@@ -265,10 +289,15 @@ def test_derivative_five_minute_warmup_is_bounded(tmp_path, monkeypatch, native_
 
     broad = compute(origin)
     start = origin + pd.Timedelta(seconds=305)
+    add_unconsumed_member(panel, 2010)
+    add_unconsumed_member(panel, 2030)
     narrow = compute(start)
     assert_projection(broad, narrow, start, frame.timestamp.iloc[-1])
     assert narrow.open_interest_change_5m.iloc[0] == pytest.approx(0.2)
     assert windows[-1].start == start - pd.Timedelta(seconds=300)
+    add_unconsumed_member(panel, start.year)
+    with pytest.raises(ValueError, match="invalid_dataset_part_files"):
+        compute(start)
 
 
 @pytest.mark.parametrize("missing", [False, True])
@@ -335,6 +364,8 @@ def test_external_prior_day_prefix_and_delayed_warmup(tmp_path, native_panel, mi
 
     broad = compute(start)
     narrow_start = pd.Timestamp("2026-01-01T00:00:00")
+    add_unconsumed_member(panel, 2010)
+    add_unconsumed_member(panel, 2030)
     narrow = compute(narrow_start)
     assert_projection(broad, narrow, narrow_start, end)
     assert all(window.start < quote_time and window.end == end for window in reads)
@@ -344,6 +375,9 @@ def test_external_prior_day_prefix_and_delayed_warmup(tmp_path, native_panel, mi
     else:
         assert narrow.bybit_quote_observed_at.eq(quote_time).all()
         assert narrow.bybit_observed_signed_base_flow_500ms.eq(5).all()
+    add_unconsumed_member(panel, narrow_start.year)
+    with pytest.raises(ValueError, match="invalid_dataset_part_files"):
+        compute(narrow_start)
 
 
 def test_output_projection_closes_upstream_on_early_exit():
@@ -399,3 +433,157 @@ def test_core_reads_only_finite_dependency_interval(
         assert windows[0] == TimeWindow(start, end + pd.Timedelta(milliseconds=horizon))
         assert narrow.future_mid_return_100ms.notna().all()
         assert narrow.future_mid_return_5000ms.isna().all()
+
+
+def add_unconsumed_member(root, year):
+    directory = root / "data" / f"year={year}"
+    directory.mkdir(exist_ok=True)
+    (directory / "unconsumed.parquet").write_bytes(b"invalid native member")
+
+
+@pytest.mark.parametrize("data_id", [ids.HFT_FACTOR_DATA_ID, ids.HFT_LABEL_DATA_ID])
+def test_native_discovery_uses_mathematical_window_before_open(tmp_path, data_id):
+    from tests.markets.crypto.test_local_data_dependencies import _persist
+
+    frame = pd.DataFrame(
+        {
+            "market_id": "crypto",
+            "asset_id": "btc_usdt",
+            "timestamp": pd.date_range(
+                "2025-12-31T23:59:59.900", periods=3, freq="100ms"
+            ),
+            "segment_id": "s",
+            "mid": [100.0, 101.0, 102.0],
+        }
+    )
+    root = _persist(tmp_path / "panel", frame)
+    label = data_id == ids.HFT_LABEL_DATA_ID
+    selected = "future_mid_return_100ms" if label else "return_100ms"
+    stamp = frame.timestamp.iloc[0 if label else 1]
+    config = {
+        "market_id": "crypto",
+        "data_id": data_id,
+        "label_columns" if label else "factor_columns": [selected],
+        "parameters": {"asset_ids": ["btc_usdt"]},
+        "inputs": {ids.HFT_PANEL_DATA_ID: str(root)},
+        "time_window": {"start": stamp.isoformat(), "end": stamp.isoformat()},
+        "output_root": str(tmp_path / "baseline"),
+    }
+    baseline = read_dataset(prepare(config))
+    assert baseline.timestamp.tolist() == [stamp]
+    assert baseline[selected].iloc[0] == pytest.approx(0.01)
+    if label:
+        assert baseline[selected + "_available_at"].iloc[0] == frame.timestamp.iloc[1]
+    add_unconsumed_member(root, 2010)
+    add_unconsumed_member(root, 2030)
+    config["output_root"] = str(tmp_path / "outside")
+    pd.testing.assert_frame_equal(
+        read_dataset(prepare(config)), baseline, check_exact=True
+    )
+    # Previous-year warmup is consumed for factors; labels need the current year.
+    add_unconsumed_member(root, 2026 if label else 2025)
+    config["output_root"] = str(tmp_path / "inside")
+    with pytest.raises(ValueError, match="invalid_dataset_part_files"):
+        prepare(config)
+    assert not (tmp_path / "inside").exists()
+
+
+@pytest.mark.parametrize(
+    "selection", ["narrow", "date", "disjoint", "files_disjoint", "years"]
+)
+def test_native_explicit_input_selection_intersects_computation_window(
+    tmp_path, selection
+):
+    from tests.markets.crypto.test_local_data_dependencies import _persist
+
+    frame = pd.DataFrame(
+        {
+            "market_id": "crypto",
+            "asset_id": "btc_usdt",
+            "timestamp": pd.date_range(
+                "2025-12-31T23:59:59.900", periods=4, freq="100ms"
+            ),
+            "segment_id": "s",
+            "mid": [100.0, 101.0, 102.0, 103.0],
+            "selected": [True, True, False, True],
+        }
+    )
+    root = _persist(tmp_path / "panel", frame)
+    source = {
+        "path": str(root),
+        "row_filters": [["selected", "==", True]],
+        "columns": ["mid"],
+    }
+    if selection == "years":
+        source["years"] = [2026]
+    else:
+        source["time_window"] = {
+            "start": "2026-01-01" if selection == "date" else "2026-01-01T00:00:00",
+            "end": "2026-01-01" if selection == "date" else "2026-01-01T00:00:00.200",
+        }
+        if "disjoint" in selection:
+            source["time_window"] = {"start": "2026-01-02", "end": "2026-01-02"}
+        if selection == "files_disjoint":
+            source["files"] = [
+                str(path.relative_to(root)) for path in root.glob("data/**/*.parquet")
+            ]
+    add_unconsumed_member(root, 2010)
+    # The explicit selector excludes the previous-year warmup, even for date bounds.
+    add_unconsumed_member(root, 2025)
+    config = {
+        "market_id": "crypto",
+        "data_id": ids.HFT_FACTOR_DATA_ID,
+        "factor_columns": ["return_100ms"],
+        "parameters": {"asset_ids": ["btc_usdt"]},
+        "inputs": {ids.HFT_PANEL_DATA_ID: source},
+        "time_window": {
+            "start": "2026-01-01T00:00:00",
+            "end": "2026-01-01T00:00:00.200",
+        },
+        "output_root": str(tmp_path / "result"),
+    }
+    if "disjoint" in selection:
+        # Existing prepare contract does not publish a schema-less empty transform.
+        with pytest.raises(ValueError, match="empty_dataset_schema_missing"):
+            prepare(config)
+        assert not (tmp_path / "result").exists()
+    else:
+        actual = read_dataset(prepare(config))
+        assert actual.timestamp.tolist() == [
+            frame.timestamp.iloc[1],
+            frame.timestamp.iloc[3],
+        ]
+        assert actual.return_100ms.isna().all()
+
+
+def test_information_union_discovery_is_limited_before_native_read(
+    tmp_path, native_panel
+):
+    frame = native_panel.copy()
+    frame["timestamp"] += pd.Timedelta(days=20000)
+    frame["observed_utc"] += pd.Timedelta(days=20000)
+    sol = frame.loc[frame.asset_id == "btc_usdt"].assign(asset_id="sol_usdt")
+    inputs = {
+        ids.HFT_PANEL_DATA_ID: persist_panel(tmp_path / "base", frame),
+        ids.HFT_SOL_PANEL_DATA_ID: persist_panel(
+            tmp_path / "sol", sol, ids.HFT_SOL_PANEL_DATA_ID
+        ),
+    }
+    start, end = frame.timestamp.min(), frame.timestamp.max()
+    baseline = run_prepare(
+        tmp_path / "baseline", inputs, ids.HFT_INFORMATION_PANEL_DATA_ID, start, end
+    )
+    for root in inputs.values():
+        add_unconsumed_member(root, 2010)
+        add_unconsumed_member(root, 2030)
+    actual = run_prepare(
+        tmp_path / "outside", inputs, ids.HFT_INFORMATION_PANEL_DATA_ID, start, end
+    )
+    pd.testing.assert_frame_equal(actual, baseline, check_exact=True)
+    assert set(actual.asset_id) == {"btc_usdt", "eth_usdt", "sol_usdt"}
+    assert len(actual) == len(frame) + len(sol)
+    add_unconsumed_member(inputs[ids.HFT_SOL_PANEL_DATA_ID], start.year)
+    with pytest.raises(ValueError, match="invalid_dataset_part_files"):
+        run_prepare(
+            tmp_path / "inside", inputs, ids.HFT_INFORMATION_PANEL_DATA_ID, start, end
+        )

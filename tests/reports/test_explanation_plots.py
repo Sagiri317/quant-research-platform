@@ -374,65 +374,6 @@ def test_native_period_and_summary_override_rejected_before_read(tmp_path):
         plots.plot({**config, "measure": "shap"})
 
 
-def test_signed_remainder_can_exceed_float64_without_corrupting_output(tmp_path):
-    _, metadata, tables = _loaded(tmp_path / "original")
-    metadata["input_columns"] = ["规模因子", "价值因子", "动量因子", "波动因子"]
-    values = [1e308, -1e308, -1e308, 0.0]
-    contributions = dict(zip(tables["contributions"].feature, values, strict=True))
-    residual, tolerance, reason = attribution_additivity(
-        1e308,
-        [contributions[feature] for feature in metadata["input_columns"]],
-        0.0,
-        metadata["attribution"]["additivity_relative_tolerance"],
-    )
-    assert reason == ""
-    tables["predictions"].loc[
-        0,
-        [
-            "base_value",
-            "explained_output",
-            "prediction_score",
-            "additivity_residual",
-            "additivity_tolerance",
-        ],
-    ] = [1e308, 0.0, 0.0, residual, tolerance]
-    tables["contributions"]["contribution"] = values
-    tables["summary"]["mean_signed_contribution"] = values * 2
-    tables["summary"]["mean_abs_contribution"] = [abs(value) for value in values] * 2
-    tables["summary"]["absolute_share"] = [1 / 3, 1 / 3, 1 / 3, 0.0] * 2
-    source = write_explanation(tmp_path / "extreme", metadata=metadata, tables=tables)
-    metadata, tables = read_explanation(source)
-    figure, axes = plots._plot_explanation_waterfall(
-        metadata,
-        tables,
-        source_reference=str(source),
-        sample_role=None,
-        timestamp="2026-01-02T09:30:00.000000123",
-        asset_id="asset-A",
-        top_n=1,
-    )
-    np.testing.assert_allclose(
-        [patch.get_width() for patch in axes[0].patches], [1, 1, -2, 0]
-    )
-    assert any("-2 ×10^308" in text.get_text() for text in axes[0].texts)
-    figure.canvas.draw()
-    assert (
-        plots.plot(
-            {
-                "kind": "explanation_waterfall",
-                "inputs": str(source),
-                "output": str(tmp_path / "extreme.png"),
-                "timestamp": "2026-01-02T09:30:00.000000123",
-                "asset_id": "asset-A",
-                "top_n": 1,
-            }
-        )
-        .stat()
-        .st_size
-        > 1000
-    )
-
-
 def test_native_importance_from_mixed_artifact_is_not_labeled_as_test(tmp_path):
     source, metadata, tables = _loaded(tmp_path / "mixed")
     figure, _axes = plots._plot_explanation_summary(

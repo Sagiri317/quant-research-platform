@@ -10,6 +10,7 @@ from fractions import Fraction
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.contracts.ids import validate_input_market
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.portfolios import (
     _EXECUTION_COLUMNS,
@@ -108,6 +109,8 @@ def _portfolio_session_evidence(
         **_dataset_input_options(market_bars_root)
     ).projected_view(_MARKET_FACT_COLUMNS)
     panel = open_dataset_session(**_dataset_input_options(panel_root))
+    validate_input_market(bars.spec, "a_share")
+    validate_input_market(panel.spec, "a_share")
     # Preserve preceding membership and valuation evidence, not unrelated future rows.
     if time_window is not None:
         history = TimeWindow(pd.Timestamp.min, pd.Timestamp(time_window.end))
@@ -133,6 +136,7 @@ def _portfolio_session_evidence(
             panel, panel_source=False, include_asset_sessions=True
         )
     stock_source = open_dataset_session(**_dataset_input_options(stock_master_root))
+    validate_input_market(stock_source.spec, "a_share")
     if time_window is not None:
         stock_source = stock_source.filtered_view(history)
     stock_columns = _STOCK_FACT_COLUMNS
@@ -185,6 +189,8 @@ def iter_portfolio_sessions(
         if rights_root is not None
         else None
     )
+    if rights_session is not None:
+        validate_input_market(rights_session.spec, "a_share")
     if rights_session is not None and not {
         "value_per_old_unit",
         "remaining_old_units_per_old_unit",
@@ -214,6 +220,7 @@ def iter_portfolio_sessions(
         corporate_source = open_dataset_session(
             **_dataset_input_options(corporate_actions_root)
         ).filtered_view(time_window)
+        validate_input_market(corporate_source.spec, "a_share")
         if "amount" not in corporate_source.logical_columns:
             raise ValueError("portfolio_input_business_columns_excluded")
         corporate_columns = _CORPORATE_SOURCE_COLUMNS
@@ -257,6 +264,12 @@ def iter_portfolio_sessions(
         for _, day in frame.groupby("timestamp", sort=False):
             yield day
 
+    execution_session = None
+    if execution_root is not None:
+        execution_session = open_dataset_session(
+            **_dataset_input_options(execution_root)
+        ).filtered_view(TimeWindow(pd.Timestamp.min, pd.Timestamp(time_window.end)))
+        validate_input_market(execution_session.spec, "a_share")
     with closing_iterator(ExitStack()) as channels:
         bar_frames = channels.enter_context(closing_iterator(ordered_bars()))
         panel_frames = channels.enter_context(
@@ -266,11 +279,7 @@ def iter_portfolio_sessions(
             channels.enter_context(
                 closing_iterator(
                     _iter_dataset_session_frames(
-                        open_dataset_session(
-                            **_dataset_input_options(execution_root)
-                        ).filtered_view(
-                            TimeWindow(pd.Timestamp.min, pd.Timestamp(time_window.end))
-                        ),
+                        execution_session,
                         _EXECUTION_COLUMNS,
                     )
                 )

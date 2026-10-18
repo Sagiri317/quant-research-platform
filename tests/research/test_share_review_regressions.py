@@ -188,7 +188,7 @@ def test_late_historical_quote_replays_known_actions_from_original_basis(action)
     from quant_research_platform.research.portfolios.production import (
         _ResearchValuationMarks,
     )
-    from tests.research.test_portfolio_production import _mark_view
+    from tests.helpers.portfolio_ledger import mark_view
 
     marks = _ResearchValuationMarks()
     base = dict(
@@ -209,7 +209,7 @@ def test_late_historical_quote_replays_known_actions_from_original_basis(action)
     )
 
     def view(day, *, rights=(), events=()):
-        result = _mark_view(day, float("nan"), float("nan"), trading=False)
+        result = mark_view(day, float("nan"), float("nan"), trading=False)
         result.rights_events = pd.DataFrame(rights)
         result.corporate_events = pd.DataFrame(events)
         return result

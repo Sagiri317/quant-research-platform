@@ -133,7 +133,7 @@ def test_ledger_only_analyses_do_not_open_market_inputs(
         raise AssertionError("unrequested market data read")
 
     monkeypatch.setattr(reading, "read_dataset", unexpected)
-    monkeypatch.setattr(production, "read_dataset", unexpected)
+    monkeypatch.setattr(production, "open_dataset_session", unexpected)
     config = {
         "ledgers": [str(ledger)],
         "window": window,

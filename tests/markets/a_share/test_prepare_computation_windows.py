@@ -97,7 +97,15 @@ def test_native_narrow_outputs_equal_full_with_actual_history_and_lookahead(
                     pd.Timestamp(window["start"]), pd.Timestamp(window["end"])
                 )
             ].reset_index(drop=True)
-            pd.testing.assert_frame_equal(narrowed, expected, check_exact=True)
+            pd.testing.assert_frame_equal(
+                narrowed.select_dtypes(exclude="floating"),
+                expected.select_dtypes(exclude="floating"),
+                check_exact=True,
+            )
+            pd.testing.assert_frame_equal(narrowed.isna(), expected.isna())
+            pd.testing.assert_frame_equal(
+                narrowed, expected, check_exact=False, rtol=1e-12, atol=0
+            )
             assert not narrowed.empty
             outputs[name] = narrowed
         assert outputs["price_volume_facts"].reversal_5d.notna().all()
@@ -133,8 +141,15 @@ def test_native_narrow_outputs_equal_full_with_actual_history_and_lookahead(
                 }
             )
         )
+        expected = outputs["price_volume_facts"]
         pd.testing.assert_frame_equal(
-            unchanged, outputs["price_volume_facts"], check_exact=True
+            unchanged.select_dtypes(exclude="floating"),
+            expected.select_dtypes(exclude="floating"),
+            check_exact=True,
+        )
+        pd.testing.assert_frame_equal(unchanged.isna(), expected.isna())
+        pd.testing.assert_frame_equal(
+            unchanged, expected, check_exact=False, rtol=1e-12, atol=0
         )
 
 

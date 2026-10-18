@@ -25,36 +25,13 @@ from quant_research_platform.research.portfolios.production import (
     _ResearchValuationMarks,
 )
 from tests.helpers.optimizer import with_cash_asset
-
-
-def _view(day, opening, closing, *, life="2020-01-01", unproved=False):
-    frame = pd.DataFrame(
-        {
-            "asset_id": ["a"],
-            "listing_date": [pd.Timestamp(life)],
-            "timestamp": [pd.Timestamp(day)],
-            "market_type": pd.Series([1], dtype="Int64"),
-            "open": [opening],
-            "close": [closing],
-            "is_trading": pd.Series([True], dtype="boolean"),
-        }
-    )
-    return SimpleNamespace(
-        panel=frame,
-        valuation=frame.copy(),
-        timestamp=pd.Timestamp(day),
-        rights_events=pd.DataFrame(),
-        corporate_events=pd.DataFrame(),
-        closed_assets=frozenset(),
-        unproved_lifecycle_assets=frozenset({"a"}) if unproved else frozenset(),
-        confirmed_delisted_lifecycles=frozenset(),
-    )
+from tests.helpers.portfolio_ledger import mark_view
 
 
 def test_ordinary_missing_quote_uses_past_anchor_and_recovers():
     marks = _ResearchValuationMarks()
-    marks.project(_view("2023-01-01", 10.0, 11.0))
-    missing = _view("2023-01-02", np.nan, 12.0)
+    marks.project(mark_view("2023-01-01", 10.0, 11.0))
+    missing = mark_view("2023-01-02", np.nan, 12.0)
     original = missing.panel.copy(deep=True)
     result = marks.project(missing)
     assert result.open.iloc[0] == 11.0
@@ -62,7 +39,7 @@ def test_ordinary_missing_quote_uses_past_anchor_and_recovers():
     assert result.research_open_mark_kind.iloc[0] == "ordinary_missing_quote"
     assert result.research_open_mark_at.iloc[0] == pd.Timestamp("2023-01-01")
     pd.testing.assert_frame_equal(missing.panel, original)
-    recovered = marks.project(_view("2023-01-03", 13.0, 14.0))
+    recovered = marks.project(mark_view("2023-01-03", 13.0, 14.0))
     assert recovered.open.iloc[0] == 13.0
     assert recovered.research_open_mark_at.isna().all()
 
@@ -71,9 +48,9 @@ def test_ordinary_missing_quote_uses_past_anchor_and_recovers():
 def test_no_trusted_same_life_anchor_never_uses_future_close(kind):
     marks = _ResearchValuationMarks()
     if kind != "no_anchor":
-        marks.project(_view("2023-01-01", 10.0, 11.0))
+        marks.project(mark_view("2023-01-01", 10.0, 11.0))
     result = marks.project(
-        _view(
+        mark_view(
             "2023-01-02",
             np.nan,
             12.0,
@@ -313,8 +290,8 @@ def test_unproved_rights_only_block_the_account_that_holds_them(held):
 
 def test_unproved_rights_quote_cannot_create_a_valuation_anchor():
     marks = _ResearchValuationMarks()
-    marks.project(_view("2023-01-01", 10.0, 11.0))
-    view = _view("2023-01-02", np.nan, np.nan)
+    marks.project(mark_view("2023-01-01", 10.0, 11.0))
+    view = mark_view("2023-01-02", np.nan, np.nan)
     view.rights_events = pd.DataFrame(
         [
             dict(

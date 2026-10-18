@@ -111,8 +111,7 @@ def test_actual_estimator_inputs_and_native_roundtrip(
 
         monkeypatch.setattr(np.linalg, "lstsq", spy)
     else:
-        factory = estimators._MODEL_ESTIMATOR_FACTORIES[algorithm]
-        cls = type(factory(spec, dict(spec.hyperparameters)))
+        cls = type(estimators.build_estimator_from_model_spec(spec))
         original = cls.fit
 
         def spy(self, matrix, target, **kwargs):

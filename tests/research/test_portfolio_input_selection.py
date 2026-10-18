@@ -686,3 +686,178 @@ def test_stage_configuration_rejects_non_json_types_before_opening_inputs(
             }
         )
     assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "dataset",
+        "panel",
+        "execution",
+        "calendar",
+        "fees",
+        "market_bars",
+        "stock_master",
+        "corporate_actions",
+    ],
+)
+@pytest.mark.parametrize("market", [None, "a_share", "crypto"])
+def test_public_portfolio_respects_explicit_input_market(tmp_path, name, market):
+    from quant_research_platform.artifacts.portfolio_ledger import (
+        read_portfolio_ledger_artifact,
+    )
+    from tests.research.test_portfolio_missing_predictions import (
+        _public_prediction_config,
+        _replace_public_input,
+    )
+
+    config = _public_prediction_config(tmp_path)
+    _replace_public_input(
+        tmp_path,
+        config,
+        name,
+        lambda frame: (
+            frame
+            if market is None or "market_id" not in frame
+            else frame.assign(market_id=market)
+        ),
+        market=market,
+    )
+    if market == "crypto":
+        with pytest.raises(ValueError, match="^input_market_mismatch$"):
+            production.backtest(config)
+    else:
+        ledger = read_portfolio_ledger_artifact(production.backtest(config))
+        assert len(list(ledger.iter_chunks())) == 3
+
+
+@pytest.mark.parametrize("market", [None, "a_share", "crypto"])
+def test_risk_context_checks_only_consumed_declared_market(tmp_path, market):
+    from contextlib import ExitStack
+
+    from quant_research_platform.contracts.data import ProcessedDataSpec
+    from quant_research_platform.storage.datasets import write_dataset
+
+    fields = dict(
+        data_id="risk",
+        frequency="1d",
+        grain="asset_timestamp",
+        column_roles={"asset_id": "key", "timestamp": "timestamp", "style": "factor"},
+        primary_key=("asset_id", "timestamp"),
+        partition_columns=(),
+    )
+    spec = (
+        DataSpec(**fields)
+        if market is None
+        else ProcessedDataSpec(**fields, market_id=market, kind="factor")
+    )
+    frame = pd.DataFrame(
+        {"asset_id": ["a"], "timestamp": pd.to_datetime(["2023-01-02"]), "style": [1.0]}
+    )
+    root = tmp_path / "risk"
+    write_dataset(root, frame, spec=spec)
+    with ExitStack() as channels:
+        if market == "crypto":
+            with pytest.raises(ValueError, match="^input_market_mismatch$"):
+                production._risk_context_input_sessions(
+                    roots=(root,),
+                    style_columns=("style",),
+                    time_window=TimeWindow("2023-01-02", "2023-01-02"),
+                    retained=channels,
+                )
+        else:
+            inputs = production._risk_context_input_sessions(
+                roots=(root,),
+                style_columns=("style",),
+                time_window=TimeWindow("2023-01-02", "2023-01-02"),
+                retained=channels,
+            )
+            pd.testing.assert_frame_equal(
+                next(inputs[0][1]).reset_index(drop=True),
+                frame.astype({"timestamp": "datetime64[ns]"}).loc[
+                    :, list(inputs[0][0])
+                ],
+            )
+        assert (
+            production._risk_context_input_sessions(
+                roots=(root,),
+                style_columns=(),
+                time_window=TimeWindow("2023-01-02", "2023-01-02"),
+                retained=channels,
+            )
+            == {}
+        )
+
+
+@pytest.mark.parametrize("market", [None, "a_share", "crypto"])
+def test_benchmark_consumption_respects_declared_market(tmp_path, market):
+    from quant_research_platform.contracts.data import ProcessedDataSpec
+    from quant_research_platform.storage.datasets import write_dataset
+
+    fields = dict(
+        data_id="benchmark",
+        frequency="1d",
+        grain="asset_timestamp",
+        column_roles={
+            "asset_id": "key",
+            "timestamp": "timestamp",
+            "benchmark_id": "context",
+            "weight": "context",
+        },
+        primary_key=("asset_id", "timestamp"),
+        partition_columns=(),
+    )
+    spec = (
+        DataSpec(**fields)
+        if market is None
+        else ProcessedDataSpec(**fields, market_id=market, kind="annotation")
+    )
+    frame = pd.DataFrame(
+        {
+            "asset_id": ["a"],
+            "timestamp": pd.to_datetime(["2023-01-02"]),
+            "benchmark_id": ["index"],
+            "weight": [1.0],
+        }
+    )
+    root = tmp_path / "benchmark"
+    write_dataset(root, frame, spec=spec)
+    weights = production._iter_benchmark_weights(
+        root, "index", pd.DatetimeIndex(["2023-01-02"])
+    )
+    if market == "crypto":
+        with pytest.raises(ValueError, match="^input_market_mismatch$"):
+            list(weights)
+    else:
+        assert [row.to_dict() for row in weights] == [{"a": 1.0}]
+
+
+@pytest.mark.parametrize("market", [None, "a_share", "crypto"])
+def test_equity_event_consumption_respects_declared_market(tmp_path, market):
+    from tests.research.test_portfolio_missing_predictions import _replace_public_input
+    from tests.sources.reference.test_equity_events import native_equity_inputs
+
+    inputs, _, calendar = native_equity_inputs(tmp_path / "market")
+    _replace_public_input(
+        tmp_path,
+        {"inputs": inputs},
+        "equity_events",
+        lambda frame: frame,
+        market=market,
+    )
+    views = portfolio_sessions.iter_portfolio_sessions(
+        market_bars_root=inputs["market_bars"],
+        stock_master_root=inputs["stock_master"],
+        equity_events_root=inputs["equity_events"],
+        panel_root=inputs["panel"],
+        panel_columns=production._PANEL_COLUMNS,
+        calendar=calendar,
+        time_window=TimeWindow("2022-12-30", "2023-01-06"),
+    )
+    if market == "crypto":
+        with pytest.raises(ValueError, match="^input_market_mismatch$"):
+            list(views)
+    else:
+        events = pd.concat([view.rights_events for view in views], ignore_index=True)
+        assert events.event_id.tolist() == ["quote-1"]
+        assert events.value_per_old_unit.tolist() == [2.5]

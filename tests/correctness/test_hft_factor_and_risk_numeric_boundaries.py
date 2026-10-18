@@ -20,6 +20,7 @@ from quant_research_platform.research.portfolios.risk import (
 )
 from quant_research_platform.research.protocols.crypto_hft import (
     HFT_DERIVATIVE_CHANNELS,
+    HFT_DERIVATIVE_FACTOR_COLUMNS,
 )
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
 from tests.helpers.binance_hft import _coverage, coverage_lookup
@@ -283,12 +284,15 @@ def test_force_order_ratio_uses_finite_final_mass_and_preserves_epoch_and_age():
 
     wide = compute([panel])
     narrow = compute([panel.loc[panel.timestamp.ge(pd.Timestamp(1100, unit="ms"))]])
+    expected = wide.loc[wide.timestamp.ge(pd.Timestamp(1100, unit="ms"))].reset_index(
+        drop=True
+    )
+    # Event clocks and ages are discrete facts, even when stored as floats.
+    exact = expected.columns.difference(HFT_DERIVATIVE_FACTOR_COLUMNS)
+    pd.testing.assert_frame_equal(expected[exact], narrow[exact], check_exact=True)
+    pd.testing.assert_frame_equal(expected.isna(), narrow.isna())
     pd.testing.assert_frame_equal(
-        wide.loc[wide.timestamp.ge(pd.Timestamp(1100, unit="ms"))].reset_index(
-            drop=True
-        ),
-        narrow,
-        check_exact=True,
+        expected, narrow, check_exact=False, rtol=1e-12, atol=0
     )
     mature = wide.set_index("timestamp").loc[pd.Timestamp(6000, unit="ms")]
     assert mature.observed_force_order_imbalance_5s == 0
@@ -318,7 +322,8 @@ def test_ewma_covariance_is_invariant_to_common_missing_age(half_life):
     )
     first = _ewma_covariance(ages=np.array([2, 1]), **arguments)
     shifted = _ewma_covariance(ages=np.array([2002, 2001]), **arguments)
-    pd.testing.assert_frame_equal(first, shifted, check_exact=True)
+    pd.testing.assert_frame_equal(first.isna(), shifted.isna())
+    pd.testing.assert_frame_equal(first, shifted, check_exact=False, rtol=1e-12, atol=0)
 
 
 def test_nonfinite_risk_fails_explicitly():

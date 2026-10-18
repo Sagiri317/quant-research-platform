@@ -271,7 +271,7 @@ def test_actual_maker_keeps_cashflows_of_all_queued_commands():
     assert gains == pytest.approx([1.5, 0.0, 3.0])
 
 
-def test_many_known_funding_offsets_preserve_selection():
+def test_known_funding_offsets_preserve_selection_at_fill_boundaries():
     state = _state(0, bid_levels=((995, 1.0), (990, 3.0)))
     paths = [
         ([state], [_trade(stamp, price="99.5", quantity=quantity, maker_buyer=True)])
@@ -287,8 +287,17 @@ def test_many_known_funding_offsets_preserve_selection():
         _maker_config().latency_ms,
     )
     model._load()
-    for index in range(2048):
-        elapsed = (5000000, 15000000, 25000000)[index % 3] + index
+    for elapsed, expected_gain in (
+        (5000000, 0.020025),
+        (9999999, 0.020025),
+        (10000000, 0.020025),
+        (10000001, 0.025025),
+        (15000000, 0.025025),
+        (19999999, 0.025025),
+        (20000000, 0.025025),
+        (20000001, 0.030025),
+        (25000000, 0.030025),
+    ):
         keep, quantity, gain = model.select(
             state=state,
             decision_ns=0,
@@ -301,7 +310,9 @@ def test_many_known_funding_offsets_preserve_selection():
             funding=[(elapsed, 0.02)],
         )
         assert not keep and quantity == 0.5
-        assert gain == pytest.approx((0.020025, 0.025025, 0.030025)[index % 3])
+        # Each earlier half-unit fill adds 0.02 * 0.5 / 2 to expected gain.
+        # Settlement at the fill timestamp precedes that fill.
+        assert gain == pytest.approx(expected_gain)
 
 
 @pytest.mark.parametrize("include_zero", (False, True))

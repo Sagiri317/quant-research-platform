@@ -1616,16 +1616,20 @@ def test_late_snapshot_prefix_cursors_are_independent_and_canonical(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "case,batch_rows",
+    "case,quantity,expected,batch_rows",
     [
-        pytest.param("ordinary", 1, id="ordinary-regular-flush"),
-        pytest.param("bucket_cancellation", 1, id="bucket-cancellation"),
-        pytest.param("event_cancellation", 1, id="event-cancellation"),
-        pytest.param("true_overflow", 1, id="true-overflow"),
-        pytest.param("ordinary", 10, id="ordinary-tail-flush"),
+        pytest.param("ordinary", "1", 1.0, 1, id="ordinary-regular-flush"),
+        pytest.param(
+            "bucket_cancellation", "0.586", 0.586, 1, id="bucket-cancellation"
+        ),
+        pytest.param("event_cancellation", "0.034", 0.034, 1, id="event-cancellation"),
+        pytest.param("negative", "0.44", -0.88, 1, id="negative-signed-flow"),
+        pytest.param("ordinary", "1", 1.0, 10, id="ordinary-tail-flush"),
     ],
 )
-def test_native_panel_exact_ofi_publication(tmp_path, case, batch_rows):
+def test_native_panel_signed_ofi_publication(
+    tmp_path, case, quantity, expected, batch_rows
+):
     from quant_research_platform.markets.implementations.crypto.hft import (
         iter_factor_frames,
         iter_panel_frames,
@@ -1637,7 +1641,6 @@ def test_native_panel_exact_ofi_publication(tmp_path, case, batch_rows):
     from tests.helpers.paths import StorageLayout
 
     midnight = pd.Timestamp("2026-09-01T00:00:00Z").value
-    quantity = "1" if case == "ordinary" else "1e308"
 
     def line(ms, channel, payload):
         return (
@@ -1687,10 +1690,14 @@ def test_native_panel_exact_ofi_publication(tmp_path, case, batch_rows):
             [["200", "0"], ["201", quantity]],
         )
         updates.append((20, [["101", "0"], ["100", quantity]], []))
+    elif case == "negative":
+        # Two downward bid moves remove the preceding queue: -q - q.
+        updates[1] = (10, [["100", "0"], ["99", quantity]], [])
+        updates.append((20, [["99", "0"], ["98", quantity]], []))
     else:
+        # Two upward moves and one downward move: +q + q - q.
         updates.append((20, [["101", "0"], ["102", quantity]], []))
-        if case != "true_overflow":
-            updates.append((30, [["102", "0"], ["101", quantity]], []))
+        updates.append((30, [["102", "0"], ["101", quantity]], []))
     updates.append((200, [], []))
     for number, (ms, bids, asks) in enumerate(updates):
         native += line(
@@ -1739,16 +1746,24 @@ def test_native_panel_exact_ofi_publication(tmp_path, case, batch_rows):
         spec = catalog.hft_processed_catalog().get("binance_futures_l2_panel_100ms")
         layout = StorageLayout(tmp_path)
         output = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
-        write_dataset(output, frames, spec=spec)
+        frames = list(frames)
+        produced = pd.concat(frames, ignore_index=True)
+        write_dataset(output, iter(frames), spec=spec)
         panel = read_dataset(output)
         factor = pd.concat(iter_factor_frames([panel], columns=("ofi_100ms", "spread")))
         assert factor.spread.notna().all()
-        if case == "true_overflow":
-            assert pd.isna(panel.book_ofi_100ms.iloc[-1])
-            assert pd.isna(factor.ofi_100ms.iloc[-1])
-        else:
-            assert panel.book_ofi_100ms.iloc[-1] == float(quantity)
-            assert factor.ofi_100ms.iloc[-1] == float(quantity)
+        assert len(panel) == len(factor) == 1
+        assert panel.timestamp.iloc[0] == pd.Timestamp(midnight + 100_000_000)
+        pd.testing.assert_series_equal(
+            panel.book_ofi_100ms, produced.book_ofi_100ms, check_exact=True
+        )
+        assert panel.book_ofi_100ms.iloc[-1] == pytest.approx(
+            expected, rel=1e-14, abs=0
+        )
+        # OFI is copied from the persisted panel, not independently recomputed.
+        pd.testing.assert_series_equal(
+            factor.ofi_100ms, panel.book_ofi_100ms, check_names=False, check_exact=True
+        )
         assert stats.invalid_segments == 0
 
 

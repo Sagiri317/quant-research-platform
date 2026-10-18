@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
+from quant_research_platform.contracts.ids import validate_input_market
 from quant_research_platform.contracts.json_codec import qrp_json_mapping_snapshot
 from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_CASH_ASSET_ID,
@@ -87,12 +88,11 @@ from quant_research_platform.research.portfolios.schedules import (
     holding_intervals,
     is_rebalance_session,
 )
-from quant_research_platform.storage.datasets import DatasetReadMode
 from quant_research_platform.storage.datasets.reading import (
     _dataset_input_options,
     _iter_dataset_session_frames,
+    materialize_dataset_session,
     open_dataset_session,
-    read_dataset,
 )
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 
@@ -1170,7 +1170,9 @@ def _read_materialized(
     ):
         raise ValueError("portfolio_input_business_columns_excluded")
     options["columns"] = columns
-    frame = read_dataset(**options, mode=DatasetReadMode.MATERIALIZED)
+    session = open_dataset_session(**options)
+    validate_input_market(session.spec, "a_share")
+    frame = materialize_dataset_session(session)
     if not isinstance(frame, pd.DataFrame):
         raise ValueError("portfolio_input_reader_not_materialized")
     return frame
@@ -1193,6 +1195,7 @@ def _iter_input_sessions(
     session = (
         open_dataset_session(**options) if session is None else session
     ).filtered_view(time_window)
+    validate_input_market(session.spec, "a_share")
     with closing_iterator(
         _iter_dataset_session_frames(session, columns)
     ) as delegated_chunks:
@@ -1239,6 +1242,7 @@ def _risk_context_input_sessions(
         available.update(columns)
         if not columns:
             continue
+        validate_input_market(session.spec, "a_share")
         projection = (*_SESSION_KEY, *columns)
         inputs[position] = (
             projection,
@@ -3048,8 +3052,11 @@ def backtest(config: Mapping) -> Path:
             window.end is None
             or pd.Timestamp(window.start)
             < pd.Timestamp(metadata["prediction_window"]["start"])
-            or pd.Timestamp(window.end)
-            > pd.Timestamp(metadata["effective_prediction_end"])
+            or (
+                metadata["prediction_window"]["end"] is not None
+                and pd.Timestamp(window.end)
+                > pd.Timestamp(metadata["prediction_window"]["end"])
+            )
         ):
             raise ValueError("portfolio_prediction_window_invalid")
         if facts["market_id"] != "a_share":
@@ -3093,7 +3100,6 @@ def backtest(config: Mapping) -> Path:
             ):
                 raise ValueError("portfolio_prediction_not_causal")
         prediction_facts.append({"window": item["window"], "model_facts": facts})
-        domain_rows = 0
         with closing_iterator(
             _iter_prediction_member(
                 path,
@@ -3115,10 +3121,7 @@ def backtest(config: Mapping) -> Path:
                     retain_values=True,
                 ):
                     raise ValueError("portfolio_prediction_keys_invalid")
-                domain_rows += len(chosen)
                 del chosen, frame
-        if domain_rows == 0:
-            raise ValueError("portfolio_prediction_domain_empty")
         domains.append(window)
     lookup = _PredictionLookup(
         index=index,

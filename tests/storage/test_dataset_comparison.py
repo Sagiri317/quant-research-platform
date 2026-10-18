@@ -263,10 +263,9 @@ def test_compare_float_value_zero_keeps_bit_identity(tmp_path: Path) -> None:
 
 
 def test_aggregate_chunked_and_materialized_reads_match(tmp_path: Path) -> None:
-    chunk_rows = 2000
+    chunk_rows = 2
     chunk_count = 16
     total_rows = chunk_rows * chunk_count
-    asset_suffix = "x" * 512
     chunks: list[pd.DataFrame] = []
     for start in range(0, total_rows, chunk_rows):
         positions = np.arange(start, start + chunk_rows, dtype=np.int64)
@@ -274,9 +273,7 @@ def test_aggregate_chunked_and_materialized_reads_match(tmp_path: Path) -> None:
             pd.DataFrame(
                 {
                     "market_id": ["a_share"] * chunk_rows,
-                    "asset_id": [
-                        f"asset_{value % 8:02d}_{asset_suffix}" for value in positions
-                    ],
+                    "asset_id": [f"asset_{value % 8:02d}" for value in positions],
                     "timestamp": pd.date_range(
                         pd.Timestamp("2020-01-01") + pd.Timedelta(minutes=int(start)),
                         periods=chunk_rows,
@@ -292,9 +289,16 @@ def test_aggregate_chunked_and_materialized_reads_match(tmp_path: Path) -> None:
     for root in (left, right):
         inspection = dataset_writing.write_dataset(root, chunks, spec=spec)
         assert inspection.row_count == total_rows
-    assert (
-        len(dataset_reading.read_dataset(left, mode=DatasetReadMode.MATERIALIZED))
-        == total_rows
+        assert inspection.file_count == chunk_count
+    expected = pd.concat(chunks, ignore_index=True)
+    expected["timestamp"] = expected["timestamp"].astype("datetime64[ns]")
+    materialized = dataset_reading.read_dataset(left, mode=DatasetReadMode.MATERIALIZED)
+    pd.testing.assert_frame_equal(
+        materialized.loc[:, expected.columns]
+        .sort_values("timestamp")
+        .reset_index(drop=True),
+        expected,
+        check_exact=True,
     )
     streamed_rows = 0
     streamed = dataset_reading.read_dataset(left, mode=DatasetReadMode.CHUNKED)

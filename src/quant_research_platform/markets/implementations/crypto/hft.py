@@ -47,23 +47,14 @@ HFT_GRID_MS = 100
 _NANOSECONDS_PER_MILLISECOND = 1_000_000
 
 
-def _quantity_units(value):
-    # Every finite binary64 quantity is an integer multiple of 2**-1074.
-    numerator, denominator = value.as_integer_ratio()
-    return numerator << (1074 - (denominator.bit_length() - 1))
-
-
-def _ofi_units(previous_bid, current_bid, previous_ask, current_ask):
-    result = 0
-    if current_bid[0] >= previous_bid[0]:
-        result += current_bid[1]
-    if current_bid[0] <= previous_bid[0]:
-        result -= previous_bid[1]
-    if current_ask[0] <= previous_ask[0]:
-        result -= current_ask[1]
-    if current_ask[0] >= previous_ask[0]:
-        result += previous_ask[1]
-    return result
+def _ofi_terms(previous_bid, current_bid, previous_ask, current_ask):
+    # Sum once per grid, so a round trip in queue size cannot leave a residual.
+    return (
+        current_bid[1] if current_bid[0] >= previous_bid[0] else 0.0,
+        -previous_bid[1] if current_bid[0] <= previous_bid[0] else 0.0,
+        -current_ask[1] if current_ask[0] <= previous_ask[0] else 0.0,
+        previous_ask[1] if current_ask[0] >= previous_ask[0] else 0.0,
+    )
 
 
 def iter_panel_frames(
@@ -98,7 +89,7 @@ def iter_panel_frames(
         next_book: BookState | BookBoundary | None = None
         next_trade: TradeEvent | TradeBoundary | None = None
         current_state: BookState | None = None
-        previous_bbo: tuple[tuple[int, int], tuple[int, int]] | None = None
+        previous_bbo: tuple[tuple[int, float], tuple[int, float]] | None = None
         previous_book_time: int | None = None
         previous_trade_time: int | None = None
         next_book = next(active_books, None)
@@ -111,13 +102,11 @@ def iter_panel_frames(
             interval_start = max(0, grid_time - HFT_GRID_MS)
             grid_time_ns = grid_time * _NANOSECONDS_PER_MILLISECOND
             interval_start_ns = interval_start * _NANOSECONDS_PER_MILLISECOND
-            book_ofi = 0
+            book_ofi = []
             trade_count = 0
             valid_trade_bin = True
-            trade_volume = 0
-            signed_trade_volume = 0
-            taker_buy_volume = 0
-            taker_sell_volume = 0
+            taker_buy_volume = []
+            taker_sell_volume = []
             trade_source_sequence_min: int | None = None
             trade_source_sequence_max: int | None = None
             # Trade sums consume (start, end], unlike the book baseline at start.
@@ -135,7 +124,7 @@ def iter_panel_frames(
                 if isinstance(event, BookBoundary):
                     current_state = None
                     previous_bbo = None
-                    book_ofi = 0
+                    book_ofi = []
                     continue
                 state = _book_value(event)
                 if (
@@ -143,11 +132,11 @@ def iter_panel_frames(
                     or state.segment_id != current_state.segment_id
                 ):
                     previous_bbo = None
-                    book_ofi = 0
+                    book_ofi = []
                 current_bbo = (
                     (
-                        (state.best_bid[0], _quantity_units(state.best_bid[1])),
-                        (state.best_ask[0], _quantity_units(state.best_ask[1])),
+                        state.best_bid,
+                        state.best_ask,
                     )
                     if state.best_bid is not None and state.best_ask is not None
                     else None
@@ -157,11 +146,13 @@ def iter_panel_frames(
                     and current_bbo is not None
                     and event_time > interval_start_ns
                 ):
-                    book_ofi += _ofi_units(
-                        previous_bbo[0],
-                        current_bbo[0],
-                        previous_bbo[1],
-                        current_bbo[1],
+                    book_ofi.extend(
+                        _ofi_terms(
+                            previous_bbo[0],
+                            current_bbo[0],
+                            previous_bbo[1],
+                            current_bbo[1],
+                        )
                     )
                 current_state = state
                 if current_bbo is not None:
@@ -202,8 +193,6 @@ def iter_panel_frames(
                     and trade.observed_time_ns <= grid_time_ns
                 ):
                     trade_count += 1
-                    quantity = _quantity_units(quantity)
-                    trade_volume += quantity
                     trade_source_sequence_min = (
                         trade.source_sequence
                         if trade_source_sequence_min is None
@@ -215,11 +204,9 @@ def iter_panel_frames(
                         else max(trade_source_sequence_max, trade.source_sequence)
                     )
                     if trade.buyer_is_maker:
-                        signed_trade_volume -= quantity
-                        taker_sell_volume += quantity
+                        taker_sell_volume.append(quantity)
                     else:
-                        signed_trade_volume += quantity
-                        taker_buy_volume += quantity
+                        taker_buy_volume.append(quantity)
             book_bounds = (
                 None
                 if current_state is None
@@ -260,16 +247,20 @@ def iter_panel_frames(
                 trade_source_sequence_max=trade_source_sequence_max
                 if trades_known
                 else None,
-                book_ofi=_quantity_float(book_ofi),
+                book_ofi=math.fsum(book_ofi),
                 trade_count=trade_count if trades_known else None,
-                trade_volume=_quantity_float(trade_volume) if trades_known else np.nan,
-                signed_trade_volume=_quantity_float(signed_trade_volume)
+                trade_volume=math.fsum((*taker_buy_volume, *taker_sell_volume))
                 if trades_known
                 else np.nan,
-                taker_buy_volume=_quantity_float(taker_buy_volume)
+                signed_trade_volume=math.fsum(
+                    (*taker_buy_volume, *(-q for q in taker_sell_volume))
+                )
                 if trades_known
                 else np.nan,
-                taker_sell_volume=_quantity_float(taker_sell_volume)
+                taker_buy_volume=math.fsum(taker_buy_volume)
+                if trades_known
+                else np.nan,
+                taker_sell_volume=math.fsum(taker_sell_volume)
                 if trades_known
                 else np.nan,
             )
@@ -299,14 +290,6 @@ def _book_observed_time(
     event: BookState | BookBoundary,
 ) -> int:
     return event.observed_time_ns
-
-
-def _quantity_float(units):
-    """Only an unrepresentable derived total is unknown, not its source rows."""
-    try:
-        return units / (1 << 1074)
-    except OverflowError:
-        return np.nan
 
 
 def _panel_frame(buffers):
@@ -736,7 +719,8 @@ def iter_derivative_factor_frames(
     active_segment = previous_time = active_epoch = None
     flow_start_ns = None
     states = {}
-    liquidations = deque()
+    liquidations = {seconds: deque() for seconds in (5, 30)}
+    liquidation_totals = dict.fromkeys(liquidations, (Fraction(), Fraction()))
     oi_values = [np.nan] * 3001
     invalid_prefix = [0] * 3001
     count = invalid = 0
@@ -783,7 +767,11 @@ def iter_derivative_factor_frames(
                 decision_ns = int(stamp) * 1_000_000
                 information_ns = decision_ns - input_delay_ms * 1_000_000
                 if boundaries[row]:
-                    liquidations.clear()
+                    for window in liquidations.values():
+                        window.clear()
+                    liquidation_totals = dict.fromkeys(
+                        liquidations, (Fraction(), Fraction())
+                    )
                     count = invalid = 0
                     flow_start_ns = decision_ns - 100_000_000
                 while event is not None and event[0] <= information_ns:
@@ -792,7 +780,11 @@ def iter_derivative_factor_frames(
                         active_epoch is not None or channel is None
                     ):
                         states.clear()
-                        liquidations.clear()
+                        for window in liquidations.values():
+                            window.clear()
+                        liquidation_totals = dict.fromkeys(
+                            liquidations, (Fraction(), Fraction())
+                        )
                         count = invalid = 0
                         flow_start_ns = max(flow_start_ns, observed_ns)
                     active_epoch = epoch
@@ -808,21 +800,31 @@ def iter_derivative_factor_frames(
                             "BUY",
                             "SELL",
                         }:
-                            liquidations.clear()
+                            for window in liquidations.values():
+                                window.clear()
+                            liquidation_totals = dict.fromkeys(
+                                liquidations, (Fraction(), Fraction())
+                            )
                             flow_start_ns = max(flow_start_ns, observed_ns)
                             event = next(events, None)
                             continue
                         if observed_ns > information_ns - 30_000_000_000 and (
                             count or observed_ns > information_ns - 100_000_000
                         ):
-                            liquidations.append(
-                                (
-                                    observed_ns,
-                                    Fraction(
-                                        quantity if order["S"] == "BUY" else -quantity
-                                    ),
-                                )
+                            signed = Fraction(
+                                quantity if order["S"] == "BUY" else -quantity
                             )
+                            for seconds, window in liquidations.items():
+                                if (
+                                    observed_ns
+                                    > information_ns - seconds * 1_000_000_000
+                                ):
+                                    window.append((observed_ns, signed))
+                                    net, total = liquidation_totals[seconds]
+                                    liquidation_totals[seconds] = (
+                                        net + signed,
+                                        total + abs(signed),
+                                    )
                     event = next(events, None)
                 fresh = {}
                 for channel, (observed_ns, payload) in states.items():
@@ -886,26 +888,24 @@ def iter_derivative_factor_frames(
                         values["open_interest_change_" + suffix][row] = (
                             oi - oi_values[old]
                         ) / oi_values[old]
-                while (
-                    liquidations
-                    and liquidations[0][0] <= information_ns - 30_000_000_000
-                ):
-                    liquidations.popleft()
-                for seconds, suffix in ((5, "5s"), (30, "30s")):
+                for seconds, window in liquidations.items():
+                    net, total = liquidation_totals[seconds]
+                    while (
+                        window
+                        and window[0][0] <= information_ns - seconds * 1_000_000_000
+                    ):
+                        _, expired = window.popleft()
+                        net -= expired
+                        total -= abs(expired)
+                    liquidation_totals[seconds] = net, total
                     if (
                         "forceOrder" in fresh
                         and information_ns - flow_start_ns >= seconds * 1_000_000_000
+                        and total > 0
                     ):
-                        window = [
-                            quantity
-                            for observed, quantity in liquidations
-                            if observed > information_ns - seconds * 1_000_000_000
-                        ]
-                        total = sum(abs(quantity) for quantity in window)
-                        if total > 0:
-                            values["observed_force_order_imbalance_" + suffix][row] = (
-                                float(sum(window) / total)
-                            )
+                        values[f"observed_force_order_imbalance_{seconds}s"][row] = (
+                            float(net / total)
+                        )
                 if "forceOrder" in fresh:
                     values["time_since_observed_force_order"][row] = (
                         decision_ns - states["forceOrder"][0]
@@ -1362,11 +1362,7 @@ def iter_external_context_frames(
                     and 0 < bid < ask
                     and row["quote_age_ms"] <= max_age_ms
                 ):
-                    mid = (
-                        (bid + ask) / 2
-                        if ask <= np.finfo(float).max / 2
-                        else bid / 2 + ask / 2
-                    )
+                    mid = (bid + ask) / 2
                     mids.append(mid)
                     binance_mid = (
                         _state_number(frame["mid"].iloc[index], positive=True)
@@ -1379,9 +1375,6 @@ def iter_external_context_frames(
                         price_difference=(mid - binance_mid) / binance_mid,
                         relative_mid_dispersion=(
                             abs(mid - binance_mid) / (mid + binance_mid)
-                            if max(mid, binance_mid) <= np.finfo(float).max / 2
-                            else abs(mid / 2 - binance_mid / 2)
-                            / (mid / 2 + binance_mid / 2)
                         ),
                     )
                     if len(mids) >= 2:

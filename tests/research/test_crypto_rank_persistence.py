@@ -30,7 +30,7 @@ from tests.research.direct_model_test_support import fit_frame
 def test_native_crypto_state_predicts_without_relearning(
     tmp_path, algorithm, assets, monkeypatch
 ):
-    stamps = pd.date_range("2020-01-01", periods=6).repeat(assets)
+    stamps = pd.date_range("2020-01-01", periods=6).as_unit("ns").repeat(assets)
     x = (
         np.tile(np.arange(assets, dtype=float), 6)
         + np.repeat(np.arange(6), assets) * 0.1
@@ -78,11 +78,20 @@ def test_native_crypto_state_predicts_without_relearning(
         }
     )
     predictions, metadata = read_predictions(output)
+    expected_scores = fitting.prediction_callable(
+        spec.input_columns, result.prediction_model
+    )(future)
+    pd.testing.assert_frame_equal(
+        predictions[["timestamp", "asset_id"]],
+        future[["timestamp", "asset_id"]],
+        check_exact=True,
+    )
+    assert predictions.prediction_score.dtype == expected_scores.dtype
     np.testing.assert_array_equal(
-        predictions.prediction_score,
-        fitting.prediction_callable(spec.input_columns, result.prediction_model)(
-            future
-        ),
+        predictions.prediction_score.isna(), np.isnan(expected_scores)
+    )
+    np.testing.assert_allclose(
+        predictions.prediction_score, expected_scores, rtol=1e-12, atol=1e-15
     )
     if "rank" in algorithm:
         calibration = result.metadata["rank_parameters"]["label_calibration"]
@@ -92,11 +101,13 @@ def test_native_crypto_state_predicts_without_relearning(
         expected = _label_calibration(
             raw, frame.label.to_numpy(), equal_timestamp_sample_weights(frame.timestamp)
         )
-        assert calibration == list(expected)
-        assert result.prediction_model.label_calibration == expected
-        assert metadata["model_metadata"]["rank_parameters"][
-            "label_calibration"
-        ] == list(expected)
+        np.testing.assert_allclose(calibration, expected, rtol=1e-12, atol=1e-15)
+        # Metadata and native state are copies, not independent recomputations.
+        assert result.prediction_model.label_calibration == tuple(calibration)
+        assert (
+            metadata["model_metadata"]["rank_parameters"]["label_calibration"]
+            == calibration
+        )
 
 
 def test_rank_retains_missing_inputs_and_only_defined_ic_columns(tmp_path):

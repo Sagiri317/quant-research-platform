@@ -352,3 +352,224 @@ def test_prediction_domain_ignores_original_input_missingness(
     )
     assert result.loc[["a", "b"]].tolist() == [0.0, 1.0]
     assert result.loc["c"] == 2.0
+
+
+def _public_prediction_config(tmp_path, *, empty=False, prediction_start="2023-01-02"):
+    from copy import deepcopy
+
+    from quant_research_platform.artifacts.outputs.prediction import (
+        write_prediction_outputs,
+    )
+    from tests.helpers.output_frames import make_price_volume_prediction_output_frame
+    from tests.research.test_closed_market_portfolios import _native_inputs
+
+    inputs, _, _, panel = _native_inputs(tmp_path / "market", fault="normal_open")
+    window = {"start": "2023-01-02", "end": "2023-01-06"}
+    rows = panel.loc[
+        panel.timestamp.eq(prediction_start), ["timestamp", "asset_id"]
+    ].copy()
+    rows["prediction_score"] = rows.asset_id.str[1:].astype(float)
+    rows["prediction_rank_score"] = rows.prediction_score / 5.0 - 0.5
+    metadata = deepcopy(
+        make_price_volume_prediction_output_frame().attrs["prediction_metadata"]
+    )
+    metadata.update(
+        prediction_window=window, prediction_rows=None, effective_prediction_end=None
+    )
+    predicted = write_prediction_outputs(
+        output_path=tmp_path / "prediction",
+        output_chunks=[rows.iloc[:0] if empty else rows],
+        metadata=metadata,
+    )
+    return {
+        "candidate": {
+            "candidate_id": "missing-score",
+            "selection_group": "global",
+            "construction": "quantile_equal_weight",
+            "prediction_selector": "linear-demo",
+            "rebalance_schedule": "daily",
+            "top_quantile": 0.5,
+            "benchmark_id": None,
+        },
+        "inputs": {
+            key: str(value) for key, value in inputs.items() if key != "risk_context"
+        },
+        "predictions": [{"path": str(predicted), "window": window}],
+        "output": str(tmp_path / "ledger"),
+        "output_window": window,
+        "input_window": {"start": "2022-12-01", "end": "2023-01-06"},
+        "formal_dataset_window": {"start": "2022-12-01", "end": "2023-01-06"},
+        "prediction_window": window,
+        "assumptions": {
+            "initial_nav": 100.0,
+            "slippage_bps": 0.0,
+            "impact_bps": 0.0,
+            "adv_participation": 1.0,
+            "adv_sensitivities": [1.0],
+        },
+    }
+
+
+def _replace_public_input(tmp_path, config, name, transform, *, market=None):
+    from quant_research_platform.contracts.data import DataSpec, ProcessedDataSpec
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+    from quant_research_platform.storage.datasets.reading import open_dataset_session
+
+    source = config["inputs"][name]
+    declaration = open_dataset_session(source).spec
+    fields = {
+        key: declaration[key]
+        for key in (
+            "data_id",
+            "frequency",
+            "grain",
+            "column_roles",
+            "primary_key",
+            "partition_columns",
+        )
+    }
+    fields["primary_key"] = tuple(fields["primary_key"])
+    fields["partition_columns"] = tuple(fields["partition_columns"])
+    spec = (
+        DataSpec(**fields)
+        if market is None
+        else ProcessedDataSpec(**fields, market_id=market, kind="annotation")
+    )
+    root = tmp_path / (name + "-replacement")
+    write_dataset(root, transform(read_dataset(source)), spec=spec)
+    config["inputs"][name] = str(root)
+
+
+@pytest.mark.parametrize(
+    "case", ["empty", "empty_selection", "tail", "dividend", "exit"]
+)
+def test_public_sparse_prediction_continues_native_accounting(tmp_path, case):
+    from quant_research_platform.artifacts.outputs.prediction import read_predictions
+
+    config = _public_prediction_config(tmp_path, empty=case == "empty")
+    if case == "empty_selection":
+        config["predictions"][0]["window"] = {
+            "start": "2023-01-03",
+            "end": "2023-01-06",
+        }
+    _replace_public_input(
+        tmp_path, config, "fees", lambda frame: frame.assign(rate=0.0)
+    )
+    if case == "exit":
+        _replace_public_input(
+            tmp_path,
+            config,
+            "dataset",
+            lambda frame: frame.assign(eligible=frame.timestamp.lt("2023-01-03")),
+        )
+    if case == "dividend":
+
+        def actions(frame):
+            return pd.DataFrame(
+                [
+                    {
+                        "source_asset_id": "a5",
+                        "timestamp": pd.Timestamp("2023-01-04"),
+                        "kind": "CA",
+                        "market_type": 1,
+                        "announcement_date": pd.Timestamp("2023-01-02"),
+                        "settlement_date": pd.Timestamp("2023-01-05"),
+                        "amount": 10.0,
+                        "subscription_price": np.nan,
+                        "settlement_date_unresolved": False,
+                    }
+                ]
+            ).reindex(columns=frame.columns)
+
+        _replace_public_input(tmp_path, config, "corporate_actions", actions)
+    artifact = read_portfolio_ledger_artifact(production.backtest(config))
+    batches = list(artifact.iter_chunks())
+    assert len(batches) == 3
+    assert artifact.capital.valuation_currency == "CNY"
+    rows, metadata = read_predictions(config["predictions"][0]["path"])
+    assert metadata["prediction_window"] == config["prediction_window"]
+    assert metadata["effective_prediction_end"] == (
+        None if case == "empty" else "2023-01-02"
+    )
+    if case in {"empty", "empty_selection"}:
+        assert rows.empty == (case == "empty")
+        assert all(not batch.trades for batch in batches)
+        assert all(
+            row.value == 100.0
+            for batch in batches
+            for row in batch.valuations
+            if row.asset_id == "__cash__"
+        )
+    elif case == "exit":
+        assert batches[0].trades
+        assert any(trade.quantity < 0 for trade in batches[1].trades)
+        assert not any(
+            trade.quantity > 0 for batch in batches[1:] for trade in batch.trades
+        )
+    else:
+        assert batches[0].trades
+        assert all(not batch.trades for batch in batches[1:])
+        bought = {trade.asset_id: trade.quantity for trade in batches[0].trades}
+        assert all(
+            row.quantity == bought[row.asset_id]
+            for batch in batches[1:]
+            for row in batch.valuations
+            if row.asset_id in bought
+        )
+        expected_nav = 100.0 + sum(
+            float(quantity) * 21.0
+            for asset, quantity in bought.items()
+            if asset.startswith("a")
+        )
+        if case == "dividend":
+            expected_nav += float(bought["a5"]) * 10.0
+        assert sum(
+            row.value for row in batches[-1].valuations if row.phase == "end"
+        ) == pytest.approx(expected_nav)
+        if case == "dividend":
+            assert sum(
+                flow.amount
+                for batch in batches
+                for flow in batch.cashflows
+                if flow.kind == "dividend"
+            ) == pytest.approx(float(bought["a5"]) * 10.0)
+    if case != "exit":
+        assert all(
+            _diagnostic(batch, "decision_skip_reason").text == "all_predictions_missing"
+            for batch in batches[1:]
+        )
+
+
+def test_public_prediction_selection_cannot_extend_declaration(tmp_path):
+    config = _public_prediction_config(tmp_path, empty=True)
+    config["predictions"][0]["window"] = {"start": "2023-01-02", "end": "2023-01-09"}
+    with pytest.raises(ValueError, match="portfolio_prediction_window_invalid"):
+        production.backtest(config)
+
+
+@pytest.mark.parametrize("cutoff", ["fit_cutoff", "selection_cutoff"])
+def test_native_empty_prediction_retains_causal_cutoffs(tmp_path, cutoff):
+    from quant_research_platform.artifacts.outputs.prediction import (
+        read_predictions,
+        write_prediction_outputs,
+    )
+
+    config = _public_prediction_config(tmp_path, empty=True)
+    rows, metadata = read_predictions(config["predictions"][0]["path"])
+    metadata["model_facts"][cutoff] = "2023-01-02"
+    if cutoff == "fit_cutoff":
+        metadata["model_facts"]["fit_windows"] = [
+            {"start": "2014-01-02", "end": "2023-01-02"}
+        ]
+    error = (
+        "prediction_must_follow_fit_cutoff"
+        if cutoff == "fit_cutoff"
+        else "model_selection_after_fit_cutoff"
+    )
+    with pytest.raises(ValueError, match=f"^{error}$"):
+        write_prediction_outputs(
+            output_path=tmp_path / "future-prediction",
+            output_chunks=[rows],
+            metadata=metadata,
+        )
+    assert not (tmp_path / "future-prediction").exists()

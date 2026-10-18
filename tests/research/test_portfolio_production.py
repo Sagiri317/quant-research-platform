@@ -45,6 +45,7 @@ from tests.helpers.portfolio_ledger import (
     CONTINUOUS_EXECUTION_COLUMNS,
     execute_continuous_target,
     ledger_frame,
+    mark_view,
     session_frame,
     write_test_sessions,
 )
@@ -380,24 +381,25 @@ def _build_producer(
     def input_session(dataset_root, *, columns=None, time_window=None):
         root = dataset_root
         target = next((key for key, value in roots.items() if value == root))
-        if time_window is None and frames[target].empty:
+        source_frame = fee_frame if target == "fee" else frames[target]
+        if time_window is None and source_frame.empty:
             time_window = TimeWindow("2022-12-01", "2023-01-10")
-        if time_window is None:
+        if time_window is None and target not in {"fee", "calendar"}:
             time_window = TimeWindow(
-                frames[target].timestamp.min(), frames[target].timestamp.max()
+                source_frame.timestamp.min(), source_frame.timestamp.max()
             )
         return SimpleNamespace(
             root=root,
             time_window=time_window,
-            arrow_schema=SimpleNamespace(names=tuple(frames[target].columns)),
-            spec={"column_roles": dict.fromkeys(frames[target].columns, "context")},
+            arrow_schema=SimpleNamespace(names=tuple(source_frame.columns)),
+            spec={"column_roles": dict.fromkeys(source_frame.columns, "context")},
             read_paths=(root / "synthetic.parquet",),
             logical_columns=tuple(columns)
             if columns is not None
-            else tuple(frames[target].columns),
+            else tuple(source_frame.columns),
             physical_columns=tuple(columns)
             if columns is not None
-            else tuple(frames[target].columns),
+            else tuple(source_frame.columns),
             projected_view=lambda selected: input_session(
                 root, columns=selected, time_window=time_window
             ),
@@ -466,7 +468,13 @@ def _build_producer(
     monkeypatch.setattr(market_sessions, "open_dataset_session", input_session)
     monkeypatch.setattr(production, "open_dataset_session", input_session)
     monkeypatch.setattr(dataset_reading, "iter_dataset_file_batches", file_batches)
-    monkeypatch.setattr(production, "read_dataset", fake_read_dataset)
+    monkeypatch.setattr(
+        production,
+        "materialize_dataset_session",
+        lambda session: fake_read_dataset(
+            session.root, columns=session.logical_columns
+        ),
+    )
     assumptions = ExecutionAssumptions(
         initial_nav=initial_nav,
         slippage_bps=0.0,
@@ -1758,51 +1766,16 @@ def test_simple_producer_unknown_held_quote_carries_without_fabricated_trade(
     assert any(row.text == "ordinary_missing_quote" for row in marked)
 
 
-def _mark_view(
-    day,
-    opening,
-    closing,
-    *,
-    present=True,
-    life="2020-01-01",
-    trading=True,
-    closed=False,
-):
-    frame = pd.DataFrame(
-        {
-            "asset_id": ["a"],
-            "timestamp": [pd.Timestamp(day)],
-            "listing_date": [pd.Timestamp(life)],
-            "market_type": pd.Series([1], dtype="Int64"),
-            "open": [opening],
-            "close": [closing],
-            "is_trading": pd.Series([trading], dtype="boolean"),
-        }
-    )
-    if not present:
-        frame = frame.iloc[:0].copy()
-    return SimpleNamespace(
-        timestamp=pd.Timestamp(day),
-        panel=frame,
-        valuation=frame.copy(),
-        unproved_lifecycle_assets=frozenset(),
-        confirmed_delisted_lifecycles=frozenset(),
-        rights_events=pd.DataFrame(),
-        corporate_events=pd.DataFrame(),
-        closed_assets=frozenset({"a"}) if closed else frozenset(),
-    )
-
-
 def test_research_marks_are_phase_ordered_and_preserve_life_and_source():
     marks = production._ResearchValuationMarks()
-    first = marks.project(_mark_view("2023-01-04", 10.0, 11.0))
-    missing = _mark_view("2023-01-05", np.nan, np.nan, trading=False)
+    first = marks.project(mark_view("2023-01-04", 10.0, 11.0))
+    missing = mark_view("2023-01-05", np.nan, np.nan, trading=False)
     original = missing.panel.copy(deep=True)
     gap = marks.project(missing)
     absent = marks.project(
-        _mark_view("2023-01-06", np.nan, np.nan, present=False, closed=True)
+        mark_view("2023-01-06", np.nan, np.nan, present=False, closed=True)
     )
-    restored = marks.project(_mark_view("2023-01-09", 12.0, 12.0))
+    restored = marks.project(mark_view("2023-01-09", 12.0, 12.0))
     pd.testing.assert_frame_equal(missing.panel, original)
     assert first.open.iloc[0] == 10.0
     assert gap.open.iloc[0] == absent.open.iloc[0] == 11.0
@@ -1811,22 +1784,20 @@ def test_research_marks_are_phase_ordered_and_preserve_life_and_source():
     assert restored.open.iloc[0] == 12.0
     assert restored.research_open_mark_at.isna().all()
     assert gap.open.iloc[0] == 11.0
-    new_life = marks.project(
-        _mark_view("2023-01-10", np.nan, np.nan, life="2023-01-10")
-    )
+    new_life = marks.project(mark_view("2023-01-10", np.nan, np.nan, life="2023-01-10"))
     assert new_life.open.isna().all()
     assert marks.last.empty
 
 
 def test_missing_open_cannot_borrow_its_future_close():
     marks = production._ResearchValuationMarks()
-    marks.project(_mark_view("2023-01-04", 10.0, 11.0))
-    output = marks.project(_mark_view("2023-01-05", np.nan, 12.0))
+    marks.project(mark_view("2023-01-04", 10.0, 11.0))
+    output = marks.project(mark_view("2023-01-05", np.nan, 12.0))
     assert output.open.iloc[0] == 11.0
     assert output.close.iloc[0] == 12.0
     assert output.research_open_mark_kind.iloc[0] == "ordinary_missing_quote"
     fresh = production._ResearchValuationMarks().project(
-        _mark_view("2023-01-05", np.nan, 12.0)
+        mark_view("2023-01-05", np.nan, 12.0)
     )
     assert fresh.open.isna().all()
 
@@ -1834,8 +1805,8 @@ def test_missing_open_cannot_borrow_its_future_close():
 @pytest.mark.parametrize("invalid", (0.0, -1.0, np.inf, -np.inf))
 def test_research_marks_treat_invalid_raw_price_as_unavailable(invalid):
     marks = production._ResearchValuationMarks()
-    marks.project(_mark_view("2023-01-04", 10.0, 11.0))
-    view = _mark_view("2023-01-05", invalid, np.nan)
+    marks.project(mark_view("2023-01-04", 10.0, 11.0))
+    view = mark_view("2023-01-05", invalid, np.nan)
     view.valuation.loc[:, ["open", "close"]] = np.nan
     result = marks.project(view)
     assert result.open.iloc[0] == 11.0
@@ -3508,15 +3479,15 @@ def test_adv_history_restarts_for_new_listing_but_survives_same_life_closure():
 
 def test_confirmed_delisting_zero_mark_preserves_reliable_same_life_quote():
     marks = production._ResearchValuationMarks()
-    marks.project(_mark_view("2023-01-04", 10.0, 11.0))
-    unknown = _mark_view("2023-01-05", np.nan, np.nan, present=False)
+    marks.project(mark_view("2023-01-04", 10.0, 11.0))
+    unknown = mark_view("2023-01-05", np.nan, np.nan, present=False)
     unknown.confirmed_delisted_lifecycles = frozenset(
         {("a", pd.Timestamp("2020-01-01"))}
     )
     zero = marks.project(unknown)
     assert zero.open.iloc[0] == zero.close.iloc[0] == 0.0
     assert zero.research_open_mark_kind.iloc[0] == "confirmed_delisting_zero"
-    quote = _mark_view("2023-01-06", 2.0, 3.0)
+    quote = mark_view("2023-01-06", 2.0, 3.0)
     quote.confirmed_delisted_lifecycles = unknown.confirmed_delisted_lifecycles
     observed = marks.project(quote)
     assert observed.open.iloc[0] == 2.0
@@ -3642,8 +3613,8 @@ def test_cancelled_life_stale_quote_cannot_revive_rights_or_execution():
     from fractions import Fraction
 
     marks = production._ResearchValuationMarks()
-    marks.project(_mark_view("2023-01-04", 10.0, 11.0))
-    cancelled = _mark_view("2023-01-05", 12.0, 13.0)
+    marks.project(mark_view("2023-01-04", 10.0, 11.0))
+    cancelled = mark_view("2023-01-05", 12.0, 13.0)
     cancelled.rights_events = pd.DataFrame(
         [
             {
@@ -3658,10 +3629,10 @@ def test_cancelled_life_stale_quote_cannot_revive_rights_or_execution():
         ]
     )
     first = marks.project(cancelled)
-    later = marks.project(_mark_view("2023-01-06", 14.0, 15.0))
+    later = marks.project(mark_view("2023-01-06", 14.0, 15.0))
     assert first.open.iloc[0] == later.open.iloc[0] == 0.0
     assert production._unquoted_assets(later) == frozenset({"a"})
-    new_life = marks.project(_mark_view("2023-01-07", 20.0, 21.0, life="2023-01-07"))
+    new_life = marks.project(mark_view("2023-01-07", 20.0, 21.0, life="2023-01-07"))
     assert new_life.open.iloc[0] == 20.0
     assert not production._unquoted_assets(new_life)
 

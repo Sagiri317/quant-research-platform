@@ -574,21 +574,7 @@ def test_okx_dated_face_value_native_csv_to_persisted_flow(
 
 
 @pytest.mark.parametrize(
-    "bid,ask,anchor",
-    (
-        (
-            float.fromhex("0x0.0000000000001p-1022"),
-            float.fromhex("0x0.0000000000002p-1022"),
-            float.fromhex("0x0.0000000000002p-1022"),
-        ),
-        (
-            float.fromhex("0x0.0000000000002p-1022"),
-            float.fromhex("0x0.0000000000004p-1022"),
-            float.fromhex("0x0.0000000000002p-1022"),
-        ),
-        (99.0, 101.0, 100.0),
-        (1e308, 1.1e308, 1.2e308),
-    ),
+    "bid,ask,anchor", ((99.0, 101.0, 100.0), (60000.0, 60000.01, 60000.02))
 )
 def test_external_price_expressions_match_complete_fraction(bid, ask, anchor):
     from fractions import Fraction

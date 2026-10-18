@@ -92,7 +92,23 @@ def test_selected_hole_equals_full_clock_unknowns(
     expected = expected.loc[
         expected.timestamp.isin(selected_times), actual.columns
     ].reset_index(drop=True)
-    pd.testing.assert_frame_equal(actual, expected, check_dtype=False, check_exact=True)
+    # Native storage uses nanosecond clocks; independent arithmetic may round.
+    expected["timestamp"] = expected.timestamp.astype("datetime64[ns]")
+    continuous = [
+        column
+        for column in expected.select_dtypes(include="floating")
+        if not column.startswith("future_mid_direction_")
+    ]
+    exact = expected.columns.difference(continuous)
+    pd.testing.assert_frame_equal(actual[exact], expected[exact], check_exact=True)
+    pd.testing.assert_frame_equal(actual.isna(), expected.isna(), check_exact=True)
+    pd.testing.assert_frame_equal(
+        actual[continuous],
+        expected[continuous],
+        check_exact=False,
+        rtol=2e-12,
+        atol=1e-14,
+    )
     assert actual.timestamp.is_unique
     assert pd.Timestamp(1000, unit="ms") not in set(actual.timestamp)
     if data_id == HFT_FACTOR_DATA_ID:

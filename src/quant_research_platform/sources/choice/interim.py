@@ -364,7 +364,6 @@ def _raw_index(raw_root, data_ids, start, end, diagnostics=None):
                                     "values": [
                                         day.isoformat() for day in parsed_dates[field]
                                     ],
-                                    "request_identity": root.name,
                                 },
                             )
                         yield _identity_payload_row(
@@ -411,7 +410,6 @@ def _raw_index(raw_root, data_ids, start, end, diagnostics=None):
                                 [*coordinate, field],
                                 {
                                     "values": _values((values[field],))[0],
-                                    "request_identity": root.name,
                                 },
                             )
                     for data_id in targets:
@@ -448,9 +446,6 @@ def _snapshot(index, pair, day, branch, indicators):
         "conflicted": [
             value is not None and value.get("conflicted", False) for value in fields
         ],
-        "request_identities": sorted(
-            {value["request_identity"] for value in fields if value is not None}
-        ),
     }
 
 
