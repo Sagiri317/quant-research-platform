@@ -8,7 +8,7 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from quant_research_platform.contracts.validation import (
-    strict_finite_numeric_series,
+    _finite_numeric_series,
     strict_string_series,
     strict_timestamp_series,
 )
@@ -92,10 +92,10 @@ def validate_compute_panel(
     for column in (*spec.signal_columns, *spec.label_columns):
         if not pd.api.types.is_numeric_dtype(result[column]):
             raise TypeError(f"column {column!r} must be numeric.")
-        result[column] = strict_finite_numeric_series(
+        result[column] = _finite_numeric_series(
             result[column],
             error=f"column {column!r} must contain finite numeric values.",
             allow_null=True,
-        ).astype("float64")
+        )
 
     return result.sort_values(key_columns, kind="mergesort").reset_index(drop=True)

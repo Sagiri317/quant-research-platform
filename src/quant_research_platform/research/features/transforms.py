@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from math import fsum
+
 import numpy as np
 import pandas as pd
 
@@ -65,7 +67,16 @@ def mask_unobserved_features(
         if not observed.isin((0, 1)).all():
             raise ValueError(f"invalid_feature_observation_flag: {flag}")
         column = "feature_" + flag[len("feature_observed_") :]
-        result[column] = frame[column].where(observed.eq(1))
+        values = frame[column]
+        if (
+            isinstance(values.dtype, np.dtype)
+            and values.dtype.kind in "iu"
+            and observed.eq(0).any()
+        ):
+            prefix = "UInt" if values.dtype.kind == "u" else "Int"
+            nullable = f"{prefix}{values.dtype.itemsize * 8}"
+            values = values.astype(nullable)
+        result[column] = values.where(observed.eq(1))
     return result
 
 
@@ -206,36 +217,43 @@ def _mad_winsorize(
 
 def _neutralization_design(industries, sizes):
     """Cache grouped centered size coordinates for a shared valid domain."""
-    codes, groups = pd.factorize(industries, sort=False)
-    counts = np.bincount(codes, minlength=len(groups))
+    codes, _ = pd.factorize(industries, sort=False)
     first = np.unique(codes, return_index=True)[1]
     centered = None
+    xx = None
     with np.errstate(over="ignore", under="ignore", invalid="ignore"):
         if sizes is not None:
             sizes = np.asarray(sizes, dtype="float64")
             centered = sizes - sizes[first[codes]]
-            centered -= (np.bincount(codes, weights=centered) / counts)[codes]
-    return codes, counts, first, centered
+            centered -= (
+                pd.Series(centered)
+                .groupby(codes, sort=False)
+                .transform("mean")
+                .to_numpy()
+            )
+            xx = fsum(pd.Series(centered * centered).groupby(codes, sort=False).sum())
+    return codes, first, centered, xx
 
 
 def _industry_size_residuals(target, industries, sizes, *, rescale, design=None):
     """Project onto industry intercepts and one within-industry size slope."""
     target = np.asarray(target, dtype="float64")
-    codes, counts, first, x = (
+    codes, first, x, xx = (
         _neutralization_design(industries, sizes) if design is None else design
     )
     y = target - target[first[codes]]
-    y -= (np.bincount(codes, weights=y) / counts)[codes]
+    y -= pd.Series(y).groupby(codes, sort=False).transform("mean").to_numpy()
     residual = y
     if x is not None:
-        xx = np.dot(x, x)
         if xx == 0:
             return np.full(len(target), np.nan)
-        residual = y - x * (np.dot(x, y) / xx)
+        xy = fsum(pd.Series(x * y).groupby(codes, sort=False).sum())
+        residual = y - x * (xy / xx)
     magnitude = np.max(np.abs(residual))
-    # A numerically exact fit must not amplify projection roundoff into alpha.
-    tolerance = 8 * counts.max() * np.finfo(float).eps * np.max(np.abs(y))
-    if magnitude <= tolerance:
+    # Compensated group sums keep roundoff independent of group replication.
+    # Judge an exact fit at each industry's own scale, not the largest industry.
+    scale = pd.Series(np.abs(y)).groupby(codes, sort=False).transform("max").to_numpy()
+    if np.all(np.abs(residual) <= 8 * np.finfo(float).eps * scale):
         return np.zeros(len(target))
     return residual / magnitude if rescale else residual
 

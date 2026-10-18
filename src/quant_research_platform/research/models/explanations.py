@@ -775,7 +775,7 @@ def _permutation(
     def score_periods(values):
         per_period = {}
         for timestamp, positions in periods:
-            labels = frame.loc[positions, target].to_numpy(dtype="float64")
+            labels = frame.loc[positions, target].to_numpy()
             scores = values[positions]
             metrics = {}
             for metric in config["metrics"]:
@@ -824,7 +824,8 @@ def _permutation(
                     order = np.concatenate(
                         [blocks[i] for i in rng.permutation(len(blocks))]
                     )
-                shuffled.loc[segment, columns] = frame.loc[order, columns].to_numpy()
+                for column in columns:
+                    shuffled.loc[segment, column] = frame.loc[order, column].array
             outputs = _output(result, shuffled, output_space, intervention=True)[1]
             for timestamp, positions in periods:
                 missing_count = int(np.isnan(outputs[positions]).sum())

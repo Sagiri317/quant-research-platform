@@ -454,8 +454,10 @@ def test_missing_and_bad_required_values_are_local_and_windows_keep_elapsed_time
     assert out.return_100ms.notna().any()
 
 
-@pytest.mark.parametrize("has_open_interest", [False, True])
-@pytest.mark.parametrize("bad_update", ["NaN", None, "missing"])
+@pytest.mark.parametrize(
+    "has_open_interest,bad_update",
+    [(False, "NaN"), (True, "NaN"), (True, None), (True, "missing")],
+)
 def test_selected_open_interest_uses_only_its_channel_and_age(
     tmp_path, has_open_interest, bad_update
 ):

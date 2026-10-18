@@ -518,17 +518,17 @@ def test_native_simple_production_and_ledger_keep_positive_capital_target(
 def test_native_market_model_relisting_resets_beta_and_residual_warmup(tmp_path):
     from quant_research_platform.research.factors.engine import _market_model_frames
 
-    dates = pd.bdate_range("2020-01-02", periods=911)
+    dates = pd.bdate_range("2020-01-02", periods=592)
     assets = [f"a{i:02d}" for i in range(12)]
     panel = _panel(assets, dates)
     panel["listing_date"] = dates[0]
     day = np.repeat(np.arange(len(dates)), len(assets))
     stock = np.tile(np.arange(len(assets)), len(dates))
     panel["period_return"] = 0.01 * np.sin(day / 7) + 0.004 * np.cos(day / 3 + stock)
-    new = panel.asset_id.eq(assets[0]) & panel.timestamp.ge(dates[600])
-    panel.loc[new, "listing_date"] = dates[600]
-    panel.loc[new, "listing_age_trading_days"] = day[new] - 599
-    panel.loc[new, "has_252_trading_sessions"] = day[new] >= 851
+    new = panel.asset_id.eq(assets[0]) & panel.timestamp.ge(dates[296])
+    panel.loc[new, "listing_date"] = dates[296]
+    panel.loc[new, "listing_age_trading_days"] = day[new] - 295
+    panel.loc[new, "has_252_trading_sessions"] = day[new] >= 547
     spec = _processed_specs().get("market_panel_1d")
     root = StorageLayout(tmp_path).processed_data_root(
         spec.market_id, spec.kind, spec.data_id
@@ -553,9 +553,9 @@ def test_native_market_model_relisting_resets_beta_and_residual_warmup(tmp_path)
     split = pd.concat(
         _market_model_frames(
             [
-                saved.iloc[: 600 * len(assets)],
-                saved.iloc[600 * len(assets) : 851 * len(assets)],
-                saved.iloc[851 * len(assets) :],
+                saved.iloc[: 296 * len(assets)],
+                saved.iloc[296 * len(assets) : 547 * len(assets)],
+                saved.iloc[547 * len(assets) :],
             ],
             trading_calendar=None,
             market_history=None,
@@ -579,12 +579,12 @@ def test_native_market_model_relisting_resets_beta_and_residual_warmup(tmp_path)
         atol=1e-14,
     )
     control = saved.copy()
-    new = control.asset_id.eq(assets[0]) & control.timestamp.ge(dates[600])
+    new = control.asset_id.eq(assets[0]) & control.timestamp.ge(dates[296])
     control.loc[new, "asset_id"] = "new_life"
     expected = pd.concat(
         _market_model_frames([control], trading_calendar=None, market_history=None)
     )
-    actual = actual.loc[actual.asset_id.eq(assets[0]) & actual.timestamp.ge(dates[600])]
+    actual = actual.loc[actual.asset_id.eq(assets[0]) & actual.timestamp.ge(dates[296])]
     expected = expected.loc[expected.asset_id.eq("new_life")]
     columns = ["beta_252d", "residual_volatility_60d"]
     # Relabeling changes reduction order, not the lifecycle or missing samples.

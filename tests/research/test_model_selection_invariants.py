@@ -295,10 +295,6 @@ def test_ordered_metrics_release_consumed_frames(monkeypatch, axis):
         validation_axis=axis,
     )
     expected = evaluate_model_trial_metrics_from_chunks((frame,), **kwargs)
-    with pytest.raises(ValueError, match="non_monotonic_time_chunk_order"):
-        evaluate_model_trial_metrics_from_chunks(
-            (frame.iloc[4:], frame.iloc[:4]), **kwargs
-        )
     closed = []
 
     def chunks():

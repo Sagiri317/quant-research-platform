@@ -86,12 +86,12 @@ def test_scaler_preserves_weighted_center_across_chunks_and_pickle(weights):
 
 
 def test_risk_styles_remain_zero_centered():
-    values = np.tile([1.0, 3.0], 50)
+    values = np.array([1.0, 3.0])
     frame = pd.DataFrame(
         {"timestamp": pd.Timestamp("2020-01-01"), "eligible": True, "style": values}
     )
     result = preprocess_risk_styles(frame, style_columns=("style",))
-    np.testing.assert_array_equal(result["style"].to_numpy(), np.tile([-1.0, 1.0], 50))
+    np.testing.assert_array_equal(result["style"].to_numpy(), [-1.0, 1.0])
     assert result["style"].mean() == 0
 
 

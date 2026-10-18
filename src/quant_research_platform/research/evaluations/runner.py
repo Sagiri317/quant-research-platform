@@ -292,7 +292,15 @@ def evaluate(config):
                         availability_column=available,
                         target_column=label,
                     )
-                    frame.loc[~mature, label] = float("nan")
+                    if pd.api.types.is_integer_dtype(frame[label].dtype):
+                        frame[label] = frame[label].astype(
+                            "UInt64"
+                            if pd.api.types.is_unsigned_integer_dtype(
+                                frame[label].dtype
+                            )
+                            else "Int64"
+                        )
+                    frame[label] = frame[label].where(mature)
                 yield frame
 
     with build_evaluation_result_from_frames(
@@ -438,6 +446,8 @@ def _resolved_strata(config, *, spec, declared):
         for kind in kinds
         if kind != "forecast_age"
     ]
+    if "industry" in kinds and "industry_standard_id" in declared["column_roles"]:
+        columns.append("industry_standard_id")
     if "forecast_age" in kinds:
         age = "median_forecast_age_days_fy1"
         freshness = value.get("forecast_freshness_days")

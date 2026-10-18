@@ -252,7 +252,6 @@ def test_request_date_formats_share_semantic_coordinates_and_preserve_raw(
         first != duplicate and first_request.identity() != duplicate_request.identity()
     )
     before = _file_hashes(layout.raw_source_root("choice"))
-    identity = _file_hashes(layout.raw_source_root("choice"))
     frames = _read(
         interim.materialize_interim_data(
             output_roots={
@@ -270,7 +269,6 @@ def test_request_date_formats_share_semantic_coordinates_and_preserve_raw(
     assert frames["financial_balance"].report_period.tolist() == [
         pd.Timestamp("2019-12-31")
     ]
-    assert identity == _file_hashes(layout.raw_source_root("choice"))
     assert _file_hashes(layout.raw_source_root("choice")) == before
 
 

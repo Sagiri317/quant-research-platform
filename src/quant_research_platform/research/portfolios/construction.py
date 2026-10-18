@@ -11,6 +11,7 @@ import pandas as pd
 from quant_research_platform.compute.dataframe.cross_section import _stable_zscore
 from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
 from quant_research_platform.contracts.validation import (
+    _real_numeric_series,
     strict_finite_float,
     strict_real_numeric_series,
 )
@@ -45,7 +46,7 @@ def build_simple_target_weights(
     """Build one target from current eligible signal and capitalization facts."""
 
     assets = _canonical_assets(signal, eligible)
-    values = _numeric_series(signal, assets, "target_signal_invalid")
+    values = _real_numeric_series(signal.reindex(assets), error="target_signal_invalid")
     eligibility = _bool_series(eligible, assets, "target_eligibility_invalid")
     if type(method) is not str or method not in {"equal_weight", "float_cap_weight"}:
         raise ValueError("target_method_invalid")

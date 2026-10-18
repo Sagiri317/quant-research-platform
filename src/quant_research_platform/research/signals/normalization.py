@@ -9,7 +9,7 @@ import pandas as pd
 from quant_research_platform.compute.dataframe.cross_section import _stable_zscore
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.validation import (
-    strict_finite_numeric_series,
+    _finite_numeric_series,
     strict_timestamp_series,
 )
 
@@ -70,11 +70,11 @@ def _normalize_signal_values(
         )
     if not pd.api.types.is_numeric_dtype(frame[signal.source_column]):
         raise ValueError(f"invalid_signal_values: {signal.source_column}")
-    values = strict_finite_numeric_series(
+    values = _finite_numeric_series(
         frame[signal.source_column],
         error=f"invalid_signal_values: {signal.source_column}",
         allow_null=True,
-    ).astype("float64")
+    )
     if signal.transform == "rank":
         values = values.groupby(group_timestamps, sort=False).rank(
             method="average",
@@ -85,7 +85,7 @@ def _normalize_signal_values(
     elif signal.transform != "identity":
         raise ValueError(f"unsupported_signal_transform: {signal.transform}")
     if signal.direction == "lower_is_better":
-        values = -values
+        values = -values.astype("float64")
     elif signal.direction != "higher_is_better":
         raise ValueError(f"unsupported_signal_direction: {signal.direction}")
     return values

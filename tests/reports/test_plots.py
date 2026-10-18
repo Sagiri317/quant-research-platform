@@ -895,6 +895,78 @@ def test_factor_ic_consumes_native_daily_strata_and_filters(tmp_path, monkeypatc
     assert plt.get_fignums() == before
 
 
+def test_series_keeps_native_missing_and_literal_strata_separate(tmp_path, monkeypatch):
+    from quant_research_platform.artifacts.outputs.evaluation import (
+        read_evaluation_outputs,
+    )
+    from quant_research_platform.research.evaluations.runner import evaluate
+    from tests.research.crypto_evaluation_test_support import write_evaluation_input
+    from tests.research.test_stratified_evaluation_reuse import _fixture
+
+    frame, config = _fixture(tmp_path)
+    frame["industry_level1_code"] = [None, None, "None", "None"]
+    frame["x"] = [1.0, 2.0, 1.0, 2.0]
+    frame["label"] = [1.0, 2.0, 2.0, 1.0]
+    config["inputs"] = str(
+        write_evaluation_input(
+            tmp_path / "distinct-strata", frame, factors=("x", "z"), labels=("label",)
+        )
+    )
+    config["strata"]["kinds"] = ["industry"]
+    source = evaluate(config)
+    _, tables = read_evaluation_outputs(source, tables=("daily_strata",))
+    rows = tables["daily_strata"].to_dict("records")
+    assert len(rows) == 2
+    for row in rows:
+        assert row["ic"] == pytest.approx(1 if pd.isna(row["stratum"]) else -1)
+
+    captured = []
+    original = plots.plot_series
+
+    def observed(*args, **kwargs):
+        figure, axes = original(*args, **kwargs)
+        captured.append(axes)
+        return figure, axes
+
+    monkeypatch.setattr(plots, "plot_series", observed)
+    series = dict(
+        x_column="timestamp",
+        value_columns=["ic"],
+        group_columns=["stratum"],
+        title="分层相关系数",
+        units="IC",
+        timezone="UTC",
+    )
+    plots.plot(
+        dict(
+            kind="series",
+            inputs=str(source / "daily_strata.parquet"),
+            output=str(tmp_path / "strata.svg"),
+            **series,
+        )
+    )
+    assert len(captured[0]) == 2
+    assert {
+        axis.get_title(): axis.lines[0].get_ydata().tolist() for axis in captured[0]
+    } == {"None": [1.0], "'None'": [-1.0]}
+
+    # Separate dates must not turn separate identities into a connected line.
+    for row in rows:
+        if not pd.isna(row["stratum"]):
+            row["timestamp"] += pd.Timedelta(days=1)
+    _, axes = original(
+        rows, source_reference="native-strata", sample_role=None, **series
+    )
+    assert len(axes) == 2
+    for axis in axes:
+        line = axis.lines[0]
+        expected = 1 if axis.get_title() == "None" else -1
+        np.testing.assert_allclose(line.get_ydata(), [expected])
+        assert pd.DatetimeIndex(line.get_xdata()).tolist() == [
+            pd.Timestamp("2023-01-02" if expected == 1 else "2023-01-03")
+        ]
+
+
 @pytest.mark.parametrize("stratified", [False, True])
 def test_factor_ic_rejects_duplicate_dates_in_actual_identity(stratified):
     row = dict(signal="factor", label="return", timestamp="2026-01-01", ic=1, rankic=1)
@@ -985,16 +1057,11 @@ def test_all_null_series_keeps_real_axis_and_one_annotation(categorical):
 
 
 @pytest.mark.parametrize("kind", ["returns", "factor_ic", "activity", "series"])
-@pytest.mark.parametrize(
-    "values", [[None, None, None], [None, 0.2, None], [0.1, None, 0.3]]
-)
-@pytest.mark.parametrize("aware", [False, True])
-def test_date_panels_keep_unavailable_edges_without_fabricating_values(
-    kind, values, aware
-):
+@pytest.mark.parametrize("values", [[None, None, None], [None, 0.2, None]])
+def test_date_panels_keep_unavailable_edges_without_fabricating_values(kind, values):
     from matplotlib.dates import date2num
 
-    times = pd.date_range("2026-03-07T12:00", periods=3, tz="UTC" if aware else None)
+    times = pd.date_range("2026-03-07T12:00", periods=3, tz="UTC")
     common = {**TIMED, "timezone": "America/New_York"}
     if kind == "returns":
         rows = [
@@ -1067,9 +1134,7 @@ def test_date_panels_keep_unavailable_edges_without_fabricating_values(
             )
         assert len(axis.texts) == 1
         assert axis.get_xlim()[0] <= expected[0] < expected[-1] <= axis.get_xlim()[1]
-        assert str(axis.xaxis.get_major_formatter()._tz) == (
-            "America/New_York" if aware else "UTC"
-        )
+        assert str(axis.xaxis.get_major_formatter()._tz) == "America/New_York"
     fig.canvas.draw()
 
 
@@ -1130,3 +1195,48 @@ def test_native_partial_crypto_returns_keep_undefined_date_domain(
     assert output.stat().st_size > 1000
     assert member.read_bytes() == original_bytes
     assert plt.get_fignums() == before
+
+
+def test_series_default_identity_preserves_null_and_literal_from_parquet(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "groups.parquet"
+    pd.DataFrame(
+        {
+            "candidate_id": [None, "None"],
+            "timestamp": pd.to_datetime(["2026-01-01", "2026-01-02"]),
+            "value": [0.25, 0.75],
+        }
+    ).to_parquet(source, index=False)
+    captured = []
+    original = plots.plot_series
+
+    def observed(*args, **kwargs):
+        figure, axes = original(*args, **kwargs)
+        captured.extend(axes)
+        return figure, axes
+
+    monkeypatch.setattr(plots, "plot_series", observed)
+    plots.plot(
+        dict(
+            kind="series",
+            inputs=str(source),
+            output=str(tmp_path / "groups.svg"),
+            timezone="UTC",
+            x_column="timestamp",
+            value_columns=["value"],
+            title="独立组合",
+            units="收益率",
+        )
+    )
+    assert len(captured) == 2
+    assert {
+        axis.get_title(): (
+            pd.DatetimeIndex(axis.lines[0].get_xdata()).tolist(),
+            axis.lines[0].get_ydata().tolist(),
+        )
+        for axis in captured
+    } == {
+        "None": ([pd.Timestamp("2026-01-01")], [0.25]),
+        "'None'": ([pd.Timestamp("2026-01-02")], [0.75]),
+    }

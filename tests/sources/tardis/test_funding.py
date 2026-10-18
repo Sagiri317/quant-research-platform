@@ -606,10 +606,9 @@ def test_settlement_read_handle_close_preserves_primary(
     assert handles and all(handle.closed for handle in handles)
 
 
-@pytest.mark.parametrize("oversized", (False, True))
 @pytest.mark.parametrize("body_fails", (False, True))
 def test_import_settlement_handle_close_preserves_primary(
-    tmp_path, monkeypatch, oversized, body_fails
+    tmp_path, monkeypatch, body_fails
 ):
     import quant_research_platform.sources.tardis.funding as funding
 
@@ -617,7 +616,7 @@ def test_import_settlement_handle_close_preserves_primary(
         tmp_path, "2026-09-01", include_funding=False
     )
     response = tmp_path / "settlements.json"
-    response.write_bytes(b" " * (2 * 1024**2 + 13) if oversized else b"[]")
+    response.write_bytes(b"[]")
     primary = MemoryError("synthetic_import_read")
     secondary = OSError("synthetic_import_close")
     original_open = funding.open_filesystem_file

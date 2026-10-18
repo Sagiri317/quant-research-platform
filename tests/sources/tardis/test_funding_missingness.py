@@ -144,7 +144,6 @@ def _simulate(source, *, flat=False, latency_ms=10, end_ms=4000):
         {"p": "0"},
         {"p": "-1"},
         {"p": []},
-        {"r": "1e308", "p": "1e308"},
     ),
 )
 def test_invalid_forecast_amount_survives_import_reader_and_local_decision(

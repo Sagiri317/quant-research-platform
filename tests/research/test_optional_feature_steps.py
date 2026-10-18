@@ -392,3 +392,74 @@ def test_size_collinear_with_industry_keeps_projection_undefined():
         np.sin(np.arange(120)), industry, sizes, rescale=True
     )
     assert np.isnan(actual).all()
+
+
+def test_projection_preserves_residual_under_replication_units_and_group_locality():
+    from fractions import Fraction
+
+    sizes = 15 + np.arange(100) / 16
+    signs = np.tile([1.0, -1.0, -1.0, 1.0], 25)
+    target = 3 + 2 * sizes + 1e-11 * signs
+    exact_x = list(map(Fraction, sizes))
+    exact_y = list(map(Fraction, target))
+    mx, my = sum(exact_x) / 100, sum(exact_y) / 100
+    slope = sum(
+        (x - mx) * (y - my) for x, y in zip(exact_x, exact_y, strict=True)
+    ) / sum((x - mx) ** 2 for x in exact_x)
+    expected = np.array(
+        [
+            float(y - my - slope * (x - mx))
+            for x, y in zip(exact_x, exact_y, strict=True)
+        ]
+    )
+    assert slope == 2
+    assert np.min(np.abs(expected)) > 1e-12
+    # Each change preserves the same projection: equal replication, an unrelated
+    # exactly fitted industry, a unit conversion, or a row permutation.
+    for repeat_a, repeat_b, unit, reverse in (
+        (1, 1, 1, False),
+        (10, 10, 1, False),
+        (1, 10, 1, False),
+        (1, 1, 16, True),
+    ):
+        x = np.concatenate((np.tile(sizes, repeat_a), np.tile(sizes, repeat_b)))
+        y = (
+            np.concatenate(
+                (np.tile(target, repeat_a), np.tile(7 + 2 * sizes, repeat_b))
+            )
+            * unit
+        )
+        industry = np.repeat(["A", "B"], [100 * repeat_a, 100 * repeat_b])
+        oracle = (
+            np.concatenate((np.tile(expected, repeat_a), np.zeros(100 * repeat_b)))
+            * unit
+        )
+        order = np.arange(len(x))[::-1] if reverse else np.arange(len(x))
+        actual = transforms._industry_size_residuals(
+            y[order], industry[order], x[order], rescale=False
+        )
+        np.testing.assert_allclose(actual, oracle[order], rtol=1e-12, atol=2e-14 * unit)
+
+
+def test_non_dyadic_exact_fit_does_not_become_standardized_alpha():
+    sizes = 15 + np.random.default_rng(18).uniform(0, 6, 120)
+    industry = np.arange(120) % 3
+    target = 0.07 + 0.13 * industry + 0.37 * sizes
+    for order in (np.arange(120), np.arange(120)[::-1]):
+        actual = transforms._industry_size_residuals(
+            target[order], industry[order], sizes[order], rescale=True
+        )
+        np.testing.assert_array_equal(actual, np.zeros(120))
+
+
+@pytest.mark.parametrize("dtype", ["int64", "uint64"])
+def test_observation_mask_preserves_integer_order_and_nulls(dtype):
+    start = 2**63 - 4 if dtype == "int64" else 2**63 + 1
+    values = np.arange(4, dtype=dtype) + start
+    frame = pd.DataFrame({"feature_x": values, "feature_observed_x": [1, 0, 1, 1]})
+    result = transforms.mask_unobserved_features(frame, ("feature_x",), frame.columns)
+    assert str(result.feature_x.dtype) == ("Int64" if dtype == "int64" else "UInt64")
+    assert result.feature_x.iloc[[0, 2, 3]].tolist() == values[[0, 2, 3]].tolist()
+    assert result.feature_x.isna().tolist() == [False, True, False, False]
+    assert result.feature_x.rank().tolist()[2:] == [2.0, 3.0]
+    np.testing.assert_array_equal(frame.feature_x, values)

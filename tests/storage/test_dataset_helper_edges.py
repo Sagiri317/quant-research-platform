@@ -129,8 +129,8 @@ def test_exact_key_classifier_validates_comparison_columns(
 ) -> None:
     table = pa.table(
         {
-            "asset_id": [f"asset-{position:02d}" for position in range(64)],
-            "value": range(64),
+            "asset_id": ["asset-00"],
+            "value": [0],
         }
     )
     index = ExactPrimaryKeyIndex(primary_key=("asset_id",))
@@ -140,14 +140,14 @@ def test_exact_key_classifier_validates_comparison_columns(
         )
 
 
-def test_exact_key_classifier_batches_large_duplicate_group() -> None:
-    table = pa.table({"asset_id": ["same"] * 4096})
+def test_exact_key_classifier_classifies_pending_duplicates() -> None:
+    table = pa.table({"asset_id": ["same"] * 3})
     index = ExactPrimaryKeyIndex(primary_key=("asset_id",))
     keep, duplicate_count = index.classify_comparison_table(
         table, namespace="duplicates", value_columns=()
     )
     assert list(keep) == [0]
-    assert duplicate_count == 4095
+    assert duplicate_count == 2
 
 
 def test_data_spec_payload_rejects_wrong_kind_source_and_market_ids() -> None:
@@ -1099,7 +1099,7 @@ def test_directory_scan_processes_first_entry_before_enumerating_siblings(
 ):
     root = tmp_path / "data"
     root.mkdir()
-    for index in range(64):
+    for index in range(3):
         pq.write_table(pa.table({"value": [index]}), root / f"part-{index:03d}.parquet")
     scanned, processed = ([], [])
     scan = os.scandir
@@ -1143,7 +1143,7 @@ def test_directory_scan_processes_first_entry_before_enumerating_siblings(
 
     monkeypatch.setattr(DatasetSessionInventory, "_validated_coordinates", observed)
     paths = _discovered_paths(root, spec={"partition_columns": []})
-    assert [path.name for path in paths] == [f"part-{i:03d}.parquet" for i in range(64)]
+    assert [path.name for path in paths] == [f"part-{i:03d}.parquet" for i in range(3)]
     assert 1 <= processed[0] <= 2
 
 

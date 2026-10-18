@@ -715,15 +715,9 @@ def test_explicit_crypto_direction_reaches_native_metadata_metrics_and_groups(tm
     assert {p.name: p.read_bytes() for p in roots[0].iterdir()} == old_bytes
 
 
-@pytest.mark.parametrize("count", [99999, 100000, 303767, 400000, 500000, 600000])
-def test_evaluation_writer_preserves_counts_without_text_workarounds(
-    tmp_path, monkeypatch, count
-):
+def _write_count_evaluation(tmp_path, count):
     from quant_research_platform.artifacts.outputs.evaluation import (
         write_evaluation_outputs_from_chunks,
-    )
-    from quant_research_platform.artifacts.outputs.manifest import (
-        validate_output_bundle,
     )
     from quant_research_platform.contracts.evaluations import (
         EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
@@ -783,11 +777,29 @@ def test_evaluation_writer_preserves_counts_without_text_workarounds(
         spec=spec,
         output_path=tmp_path / "counts",
     )
+    return root, spec, (metrics, grouped, metadata)
+
+
+@pytest.mark.parametrize("count", [99999, 100000, 303767, 400000, 500000, 600000])
+def test_evaluation_writer_preserves_counts_without_text_workarounds(tmp_path, count):
+    from quant_research_platform.artifacts.outputs.manifest import (
+        validate_output_bundle,
+    )
+
+    root, _, _ = _write_count_evaluation(tmp_path, count)
     manifest, _ = validate_output_bundle(root)
     diagnostics = manifest["metadata"]["evaluation_diagnostics"]
     for field in ("rows_input", "rows_after_filter_mode", "timestamp_count"):
         assert type(diagnostics[field]) is int and diagnostics[field] == count
     assert pd.read_parquet(root / "metrics.parquet").n_obs.tolist() == [count]
+
+
+def test_evaluation_summary_failure_preserves_existing_output(tmp_path):
+    from quant_research_platform.artifacts.outputs.evaluation import (
+        write_evaluation_outputs_from_chunks,
+    )
+
+    root, spec, chunk = _write_count_evaluation(tmp_path, 3)
     old_bytes = {p.name: p.read_bytes() for p in root.iterdir()}
     primary = RuntimeError("injected_report_failure")
 
@@ -796,7 +808,7 @@ def test_evaluation_writer_preserves_counts_without_text_workarounds(
 
     with pytest.raises(RuntimeError) as caught:
         write_evaluation_outputs_from_chunks(
-            [(metrics, grouped, metadata)],
+            [chunk],
             summary_factory=fail_summary,
             spec=spec,
             output_path=tmp_path / "failed_summary",

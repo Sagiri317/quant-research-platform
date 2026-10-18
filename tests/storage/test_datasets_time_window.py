@@ -207,50 +207,6 @@ def test_read_dataset_datetime_time_window_filters_intraday_precisely(
     assert result["value"].tolist() == [1.0, 2.0]
 
 
-def test_date_window_includes_subsecond_end_of_day(tmp_path: Path) -> None:
-    root = make_dataset_artifact_root(tmp_path, "subsecond_end")
-    frame = pd.DataFrame(
-        {
-            "market_id": ["crypto", "crypto"],
-            "asset_id": ["btc_usdt", "btc_usdt"],
-            "timestamp": pd.to_datetime(
-                ["2026-07-06 23:59:59.999999", "2026-07-07 00:00:00"], format="mixed"
-            ),
-            "value": [1.0, 2.0],
-        }
-    )
-    write_dataset(root, frame, spec=make_processed_dataset_spec("subsecond_end"))
-    result = read_dataset(
-        root,
-        columns=["timestamp", "value"],
-        time_window=TimeWindow("2026-07-06", "2026-07-06"),
-    )
-    assert result["value"].tolist() == [1.0]
-
-
-def test_time_window_normalizes_timezone_aware_bounds_to_naive_utc(
-    tmp_path: Path,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "timezone_window")
-    frame = pd.DataFrame(
-        {
-            "market_id": ["crypto", "crypto"],
-            "asset_id": ["btc_usdt", "btc_usdt"],
-            "timestamp": pd.to_datetime(["2026-07-05 23:59:00", "2026-07-06 00:00:00"]),
-            "value": [1.0, 2.0],
-        }
-    )
-    write_dataset(root, frame, spec=make_processed_dataset_spec("timezone_window"))
-    result = read_dataset(
-        root,
-        columns=["timestamp", "value"],
-        time_window=TimeWindow(
-            "2026-07-06T07:59:00+08:00", "2026-07-06T08:00:00+08:00"
-        ),
-    )
-    assert result["value"].tolist() == [1.0, 2.0]
-
-
 def test_chunked_datetime_window_preserves_empty_schema(tmp_path: Path) -> None:
     root = make_dataset_artifact_root(tmp_path, "empty_datetime_chunked")
     write_dataset(

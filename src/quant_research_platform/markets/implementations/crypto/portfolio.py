@@ -31,6 +31,7 @@ from quant_research_platform.contracts.experiments import (
 )
 from quant_research_platform.contracts.ids import validate_input_market
 from quant_research_platform.contracts.json_codec import _strict_config
+from quant_research_platform.contracts.models import _prediction_loss_reason
 from quant_research_platform.contracts.order_book import (
     BookBoundary,
     TradeEvent,
@@ -1284,6 +1285,19 @@ def calibrate_maker(config):
             _metadata, facts = _prediction_metadata(manifest["metadata"], window=window)
             if facts["model"]["target_column"] != target:
                 raise ValueError("crypto_maker_prediction_target_invalid")
+            if role == "price":
+                session, _options = _context_session(
+                    item["inputs"], item.get("input_spec"), window
+                )
+                reason = _prediction_loss_reason(
+                    facts,
+                    target,
+                    session.spec,
+                    session.manifest,
+                    target_unit=facts["label_unit"],
+                )
+                if reason is not None:
+                    raise ValueError(reason)
             model_ids[fold_id].append(facts["model"]["model_id"])
     metadata = {key: value for key, value in config.items() if key != "output"}
     metadata.update(

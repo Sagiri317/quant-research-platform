@@ -321,7 +321,7 @@ def strict_integer_series(
     return pd.Series(output, index=series.index, name=series.name, dtype=dtype)
 
 
-def strict_real_numeric_series(
+def _real_numeric_series(
     values: pd.Series, *, error: str, errors: str = "raise"
 ) -> pd.Series:
     """Parse real observations; optionally retain malformed cells as unavailable."""
@@ -366,7 +366,26 @@ def strict_real_numeric_series(
         raise ValueError(error) from exc
     if errors == "raise" and (numeric.isna() & ~null_mask).any():
         raise ValueError(error)
-    return numeric.astype("float64")
+    return numeric
+
+
+def strict_real_numeric_series(
+    values: pd.Series, *, error: str, errors: str = "raise"
+) -> pd.Series:
+    """Parse observations for continuous floating-point arithmetic."""
+    return _real_numeric_series(values, error=error, errors=errors).astype("float64")
+
+
+def _finite_numeric_series(
+    values: pd.Series, *, error: str, allow_null: bool = False
+) -> pd.Series:
+    """Validate finite observations without changing their ordering or ties."""
+    numeric = _real_numeric_series(values, error=error)
+    if (numeric.isna().any() and not allow_null) or not np.isfinite(
+        numeric.dropna()
+    ).all():
+        raise ValueError(error)
+    return numeric
 
 
 def strict_finite_numeric_series(
@@ -375,11 +394,11 @@ def strict_finite_numeric_series(
     error: str,
     allow_null: bool = False,
 ) -> pd.Series:
-    numeric = strict_real_numeric_series(values, error=error)
-    if (numeric.isna().any() and not allow_null) or not np.isfinite(
-        numeric.dropna()
-    ).all():
-        raise ValueError(error)
+    numeric = _finite_numeric_series(
+        strict_real_numeric_series(values, error=error),
+        error=error,
+        allow_null=allow_null,
+    )
     return numeric.astype("Float64" if allow_null else "float64")
 
 

@@ -1592,3 +1592,94 @@ def test_forecast_age_feature_persists_transform_and_strata(tmp_path, group, reu
         assert result.loc[
             result.stratification.eq("all"), "observation_pairs"
         ].tolist() == [4, 4]
+
+
+def test_native_industry_standards_survive_evaluation_and_statistics(tmp_path):
+    from tests.markets.a_share.test_industry_locality import _panel, _snapshot
+
+    panel = _panel(
+        [
+            _snapshot("000001", "2020-01-02"),
+            _snapshot("000002", "2020-01-02", standard="CAPCO"),
+            _snapshot("000003", "2020-01-02", standard="CAPCO"),
+        ]
+    )
+    frame = (
+        panel.loc[
+            panel.timestamp.eq("2020-01-02"),
+            ["timestamp", "asset_id", "industry_standard_id", "industry_level1_code"],
+        ]
+        .copy()
+        .assign(
+            x=[1.0, 2.0, 3.0],
+            label=[3.0, 2.0, 1.0],
+            eligible=True,
+            label_available_at=pd.Timestamp("2020-01-02"),
+        )
+    )
+    spec = EvaluationSpec(
+        evaluation_id="industry",
+        market_id="a_share",
+        research_dataset_id="fixture",
+        signals=(
+            SignalSpec(signal_id="score", source_kind="factor", source_column="x"),
+        ),
+        label_columns=("label",),
+        label_availability_columns={"label": "label_available_at"},
+        n_groups=2,
+    )
+    overall = None
+    for name in ("known", "unknown"):
+        selected = frame.copy()
+        if name == "unknown":
+            selected.loc[
+                selected.industry_standard_id.eq("CSRC2012"), "industry_standard_id"
+            ] = None
+        inputs = write_evaluation_input(
+            tmp_path / name, selected, factors=("x",), labels=("label",)
+        )
+        config = evaluation_config(
+            inputs,
+            tmp_path / (name + "-eval"),
+            spec,
+            start="2020-01-02",
+            end="2020-01-02",
+            cutoff="2020-01-03",
+        )
+        config["strata"] = {"primary_label": "label", "kinds": ["industry"]}
+        output = evaluate(config)
+        _, tables = read_evaluation_outputs(output, tables=("metrics", "daily_strata"))
+        if overall is None:
+            overall = tables["metrics"]
+        else:
+            pd.testing.assert_frame_equal(overall, tables["metrics"], check_exact=True)
+        daily = tables["daily_strata"]
+        known = daily.loc[daily.stratum.eq("CAPCO:A")]
+        assert known.n_obs.tolist() == [2]
+        assert known.ic.tolist() == pytest.approx([-1.0])
+        other = daily.loc[~daily.stratum.eq("CAPCO:A").fillna(False)]
+        assert other.n_obs.tolist() == [1]
+        assert other.ic.isna().all()
+        assert (
+            other.stratum.tolist() == ["CSRC2012:A"]
+            if name == "known"
+            else other.stratum.isna().all()
+        )
+        reduced = factor_statistics(
+            {
+                "evaluation_inputs": [str(output)],
+                "output": str(tmp_path / (name + "-stats")),
+                "analyses": ["stratified_ic"],
+                "statistics": {"hac_lag": 20},
+            }
+        )
+        with read_statistics_artifact(reduced).table(
+            "factor_stratified_diagnostics.parquet"
+        ) as stats:
+            capco = stats.loc[stats.stratum.eq("CAPCO:A")]
+            assert capco.observation_pairs.tolist() == [2, 2]
+            assert capco["mean"].tolist() == pytest.approx([-1.0, -1.0])
+    # The pre-existing code-only fixture has no declared standard and remains legal.
+    _, legacy = _fixture(tmp_path / "legacy")
+    _, tables = read_evaluation_outputs(evaluate(legacy), tables=("daily_strata",))
+    assert "A" in tables["daily_strata"].stratum.tolist()

@@ -42,12 +42,6 @@ def _case(tmp_path):
 @pytest.mark.parametrize("member", ("metadata", "pickle"))
 def test_native_models_reject_malformed_or_drifting_scaler_moments(tmp_path, member):
     case = _case(tmp_path)
-    metadata = case.result.metadata
-    for bad in [None, True, "0", [0, 1], np.nan, np.inf]:
-        changed = copy.deepcopy(metadata)
-        changed["scaler"]["weighted_mean"][0] = bad
-        with pytest.raises(ValueError, match="invalid_model_metadata"):
-            validate_model_metadata_core(changed)
     if member == "metadata":
         path = case.root / "model.json"
         payload = json.loads(path.read_text())
@@ -70,6 +64,12 @@ def test_native_models_reject_malformed_or_drifting_scaler_moments(tmp_path, mem
 
 def test_native_fit_preserves_frozen_moments_and_nonbinary_center(tmp_path):
     case = _case(tmp_path)
+    metadata = case.result.metadata
+    for bad in [None, True, "0", [0, 1], np.nan, np.inf]:
+        changed = copy.deepcopy(metadata)
+        changed["scaler"]["weighted_mean"][0] = bad
+        with pytest.raises(ValueError, match="invalid_model_metadata"):
+            validate_model_metadata_core(changed)
     predictor = case.result.prediction_model
     scaler = predictor.scaler
     assert scaler.mean_[0] == pytest.approx(1 / 3, rel=1e-14)

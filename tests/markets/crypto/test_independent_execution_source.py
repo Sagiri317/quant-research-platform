@@ -401,3 +401,174 @@ def test_public_calibration_and_frozen_execution_bind_selected_native_source(
     )
     with artifact.table("crypto_maker_calibration.parquet") as summary:
         assert summary.sample_count.tolist() == [2, 2, 2, 2]
+
+
+@pytest.mark.parametrize(
+    "trained_basis,current_basis,reason",
+    [
+        ("mid", "mid", None),
+        ("mid", "mark", "prediction_target_definition_mismatch"),
+        ("mid", None, "prediction_target_definition_missing"),
+        (None, "mid", "prediction_target_definition_missing"),
+        (None, None, None),
+    ],
+)
+def test_native_calibration_residual_preserves_target_meaning(
+    tmp_path, trained_basis, current_basis, reason
+):
+    from pathlib import Path
+
+    from quant_research_platform.artifacts.statistics import read_statistics_artifact
+    from tests.helpers.binance_hft import maker_config
+    from tests.markets.crypto.test_direct_portfolio import _inputs, _window
+
+    original = _inputs(tmp_path)
+    frame = read_dataset(original)
+    spec = portfolio.open_dataset_session(original).spec
+    price = "future_mid_return_500ms"
+    proxy = "maker_bid_sell_pressure_proxy_500ms"
+    paths = {}
+    for name, basis in (("training", trained_basis), ("current", current_basis)):
+        semantics = {proxy: {"source": name}}
+        if basis is not None:
+            semantics[price] = {"price_basis": basis}
+        data = frame.copy()
+        if name == "current":
+            data[price] = 0.02
+        paths[name] = tmp_path / name
+        write_dataset(
+            paths[name],
+            data,
+            spec=DataSpec(
+                data_id=name,
+                frequency="tick",
+                grain="asset_timestamp",
+                primary_key=("timestamp", "asset_id"),
+                partition_columns=("year",),
+                column_roles=spec["column_roles"],
+            ),
+            metadata={"producer_diagnostics": {"label_semantics": semantics}},
+        )
+    observed, execution = _window(2100, 2200), _window(8600, 9000)
+    item = {
+        "fold_id": "observed",
+        "inputs": str(paths["current"]),
+        "window": observed,
+        "cutoff": _window(0, 2700)["end"],
+    }
+    models = []
+    for role, target, unit in (
+        ("price", price, "decimal_return"),
+        ("proxy", proxy, "quantity_ratio"),
+    ):
+        model = fit(
+            {
+                "market_id": "crypto",
+                "inputs": str(paths["training"]),
+                "output": str(tmp_path / (role + "-model")),
+                "model": {
+                    "model_id": role,
+                    "model_algorithm": "linear_regression",
+                    "input_feature_columns": ["x"],
+                    "target_column": target,
+                },
+                "fit_windows": [_window(0, 1000)],
+                "fit_cutoff": _window(0, 2000)["end"],
+                "label_unit": unit,
+            }
+        )
+        for purpose, window in (("calibration", observed), ("execution", execution)):
+            predictions = predict(
+                {
+                    "model": str(model),
+                    "inputs": str(paths["current"]),
+                    "output": str(tmp_path / (role + "-" + purpose)),
+                    "prediction_window": window,
+                }
+            )
+            if purpose == "calibration":
+                item[role + "_predictions"] = str(predictions)
+            else:
+                models.append({"predictions": str(predictions)})
+    raw = tmp_path / "native" / "raw"
+    write_binance_hft_run(raw, count=90, maker_liquidity=True)
+    write_hft_funding_fixture(raw)
+    panel = _panel(tmp_path / "panel", raw, _window(0, 9000))
+    common = {
+        "panel": str(panel),
+        "source": str(raw),
+        "asset_id": "btc_usdt",
+        "symbol": "BTCUSDT",
+    }
+    # Unconsumed years do not become calibration metadata dependencies.
+    unselected = paths["current"] / "data" / "year=1971"
+    unselected.mkdir()
+    (unselected / "part-00000.parquet").write_bytes(b"unselected broken partition")
+    config = {
+        **common,
+        "output": str(tmp_path / "calibration"),
+        "models": [item],
+        "reference": {
+            "order_quantity": 1.0,
+            "latency_ms": 10,
+            "min_calibration_samples": 1,
+        },
+    }
+    if reason is not None:
+        with pytest.raises(ValueError, match=reason):
+            portfolio.calibrate_maker(config)
+        assert not Path(config["output"]).exists()
+        return
+    artifact = read_statistics_artifact(
+        portfolio.calibrate_maker(config),
+        validate_tables=portfolio.validate_maker_calibration,
+    )
+    with artifact.table("crypto_maker_samples.parquet") as samples:
+        assert len(samples) == 4
+        assert samples.price_prediction.tolist() == pytest.approx([0.0] * 4)
+        assert samples.observed_return.tolist() == [0.02] * 4
+        assert samples.forecast_error.tolist() == pytest.approx([0.02] * 4)
+    # Execution consumes signals and the frozen residual, not current label values
+    # or definitions. Drop labels altogether after calibration.
+    labels = [price, proxy, price + "_available_at", proxy + "_available_at"]
+    context = tmp_path / "context"
+    write_dataset(
+        context,
+        frame.drop(columns=labels),
+        spec=DataSpec(
+            data_id="context",
+            frequency="tick",
+            grain="asset_timestamp",
+            primary_key=("timestamp", "asset_id"),
+            partition_columns=("year",),
+            column_roles={
+                k: v for k, v in spec["column_roles"].items() if k not in labels
+            },
+        ),
+    )
+    output = portfolio.backtest_maker(
+        {
+            **common,
+            "output": str(tmp_path / "ledger"),
+            "inputs": str(context),
+            "models": models,
+            "calibration": config["output"],
+            "prediction_window": execution,
+            "execution_mode": "continuous",
+            "capital": asdict(
+                PortfolioCapital("maker", 1000.0, "USDT", "linear_perpetual")
+            ),
+            "execution": asdict(maker_config(calibrated=True)),
+        }
+    )
+    ledger = read_portfolio_ledger_artifact(output)
+    gains = [
+        diagnostic.number
+        for batch in ledger.iter_chunks()
+        for diagnostic in batch.diagnostics
+        if diagnostic.name == "maker_buy_expected_net_gain"
+    ]
+    # One of the two historical buy paths fills. At 8.6s the new mid is
+    # 100.2 and bid 99.7; the maker rebate is 1bp and residual return 2%.
+    expected_gain = (100.2 - 99.7 + 99.7 * 0.0001 + 100.2 * 0.02) / 2
+    assert gains[0] == pytest.approx(expected_gain, rel=1e-12)

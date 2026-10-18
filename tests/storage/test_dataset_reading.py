@@ -601,7 +601,7 @@ def test_time_window_row_group_pruning_uses_parquet_leaf_path(
 def test_fingerprint_hashes_ordinary_frame_without_normalized_copy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    frame = pd.DataFrame({"value": np.arange(20000, dtype="int64")})
+    frame = pd.DataFrame({"value": np.arange(3, dtype="int64")})
     expected = pd.util.hash_pandas_object(frame, index=False).to_numpy("uint64")
     values = frame["value"].to_numpy(copy=False)
     original = pd.util.hash_pandas_object

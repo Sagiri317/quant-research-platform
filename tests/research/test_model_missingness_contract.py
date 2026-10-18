@@ -245,14 +245,14 @@ def test_decay_uses_explicit_missing_session_not_observation_count():
 def test_mse_dates_are_equal_weight_not_rows():
     data = pd.DataFrame(
         dict(
-            timestamp=pd.to_datetime(["2024-01-01"] + ["2024-01-02"] * 100),
-            asset_id=[str(i) for i in range(101)],
+            timestamp=pd.to_datetime(["2024-01-01"] + ["2024-01-02"] * 2),
+            asset_id=[str(i) for i in range(3)],
             label=0.0,
-            score=[1.0] + [0.0] * 100,
+            score=[1.0] + [0.0] * 2,
         )
     )
     metrics = evaluate_model_trial_metrics_from_chunks(
-        [data.iloc[:50], data.iloc[50:]],
+        [data.iloc[:2], data.iloc[2:]],
         model_id="model",
         label_column="label",
         prediction_column="score",

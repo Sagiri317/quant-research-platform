@@ -23,7 +23,20 @@ def compute_ic_and_grouped_label_values(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Compute timestamp-signal IC and grouped label values."""
 
+    return _compute_ic_and_grouped_label_values(frame, spec, n_groups=n_groups)
+
+
+def _compute_ic_and_grouped_label_values(
+    frame, spec, *, n_groups=5, ordinal_signals=None
+):
     panel = validate_compute_panel(frame, spec)
+    if ordinal_signals is not None:
+        keys = [spec.timestamp_column, spec.asset_column]
+        ordinal_signals = (
+            ordinal_signals.set_index(keys)
+            .reindex(pd.MultiIndex.from_frame(panel[keys]))
+            .reset_index(drop=True)
+        )
     if not isinstance(n_groups, int) or isinstance(n_groups, bool):
         raise TypeError("n_groups must be an integer.")
     if n_groups < 2:
@@ -33,13 +46,20 @@ def compute_ic_and_grouped_label_values(
     grouped_records: list[dict[str, object]] = []
     for timestamp, timestamp_frame in panel.groupby(spec.timestamp_column, sort=True):
         for label in spec.label_columns:
-            label_values = timestamp_frame[label].to_numpy(dtype="float64", copy=False)
+            label_source = timestamp_frame[label]
+            label_values = label_source.to_numpy(dtype="float64", na_value=np.nan)
             label_ranks_by_mask = {}
             for signal in spec.signal_columns:
-                signal_values = timestamp_frame[signal].to_numpy(
-                    dtype="float64",
-                    copy=False,
+                signal_source = timestamp_frame[signal]
+                reverse_order = (
+                    ordinal_signals is not None and signal in ordinal_signals
                 )
+                signal_order = (
+                    ordinal_signals.loc[timestamp_frame.index, signal]
+                    if reverse_order
+                    else signal_source
+                )
+                signal_values = signal_source.to_numpy(dtype="float64", na_value=np.nan)
                 valid_mask = np.isfinite(signal_values) & np.isfinite(label_values)
                 signal_valid = signal_values[valid_mask]
                 label_valid = label_values[valid_mask]
@@ -53,18 +73,25 @@ def compute_ic_and_grouped_label_values(
                         signal_valid,
                         label_valid,
                     )
-                    signal_ranks = _average_ranks(signal_valid)
+                    signal_ranks = _average_ranks(
+                        signal_order.loc[valid_mask].to_numpy()
+                    )
+                    if reverse_order:
+                        signal_ranks = -signal_ranks
                     mask_key = valid_mask.tobytes()
                     if mask_key not in label_ranks_by_mask:
-                        label_ranks_by_mask[mask_key] = _average_ranks(label_valid)
+                        label_ranks_by_mask[mask_key] = _average_ranks(
+                            label_source.loc[valid_mask].to_numpy()
+                        )
                     rankic, rankic_reason = _pearson_correlation_result(
                         signal_ranks,
                         label_ranks_by_mask[mask_key],
                     )
                 predicted = np.isfinite(signal_values)
-                groups = _assign_groups_from_ranks(
-                    _average_ranks(signal_values[predicted]), n_groups
-                )
+                predicted_ranks = _average_ranks(signal_order.loc[predicted].to_numpy())
+                if reverse_order:
+                    predicted_ranks = len(predicted_ranks) + 1 - predicted_ranks
+                groups = _assign_groups_from_ranks(predicted_ranks, n_groups)
                 predicted_labels = label_values[predicted]
                 for group in np.unique(groups):
                     group_mask = (groups == group) & np.isfinite(predicted_labels)

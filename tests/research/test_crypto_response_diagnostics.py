@@ -625,3 +625,145 @@ def test_native_time_series_optional_response_preserves_mature_pair_domain(tmp_p
     assert actual["metrics"].iloc[0].ic == pytest.approx(
         _independent_exact_pearson(valid.score, valid.r100), abs=2e-14
     )
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_native_response_pair_domain_and_independent_members(tmp_path, empty):
+    frame = _frame().iloc[:0] if empty else _frame()
+    root = evaluate(_native_config(tmp_path, frame))
+    members = ("response_metrics", "response_groups")
+    _, tables = read_evaluation_outputs(root, tables=members)
+    for name in members:
+        _, selected = read_evaluation_outputs(root, tables=(name,))
+        pd.testing.assert_frame_equal(selected[name], tables[name], check_exact=True)
+    if empty:
+        assert all(table.empty for table in tables.values())
+    else:
+        metrics = tables["response_metrics"]
+        assert _rows(metrics, period="pooled", sample_scope="own").n_obs.tolist() == [
+            6,
+            5,
+        ]
+        assert _rows(
+            metrics, period="pooled", sample_scope="common"
+        ).n_obs.tolist() == [5, 5]
+        assert _rows(
+            tables["response_groups"],
+            period="pooled",
+            sample_scope="common",
+            label="r100",
+        ).n_obs.tolist() == [3, 2]
+
+
+@pytest.mark.parametrize("change", ["empty_metrics", "missing_common"])
+def test_response_pair_contract_at_publication_and_selected_read(tmp_path, change):
+    import json
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from quant_research_platform.artifacts.outputs.evaluation import (
+        write_evaluation_outputs_from_chunks,
+    )
+    from quant_research_platform.artifacts.outputs.evaluation_daily import DAILY_SCHEMAS
+    from quant_research_platform.research.evaluations.engine import (
+        build_evaluation_result_from_frames,
+    )
+
+    root = evaluate(_native_config(tmp_path))
+    members = ("response_metrics", "response_groups")
+    manifest, tables = read_evaluation_outputs(root, tables=members)
+    science = {
+        key: manifest["metadata"][key]
+        for key in (
+            "window",
+            "cutoff",
+            "sample_role",
+            "sample_scope",
+            "input_facts",
+            "comparison_inputs",
+            "strata",
+            "stratum_domains",
+            "optional_member_rows",
+            "response_diagnostics",
+            "common_rule",
+        )
+    }
+    science["optional_member_rows"] = dict.fromkeys(members, 0)
+
+    def altered(name, frame):
+        if change == "empty_metrics":
+            return frame.iloc[:0] if name == "response_metrics" else frame
+        return frame.loc[~(frame.label.eq("r500") & frame.sample_scope.eq("common"))]
+
+    error = (
+        "evaluation_response_group_count_mismatch"
+        if change == "empty_metrics"
+        else "evaluation_response_common_count_mismatch"
+    )
+    unpublished = tmp_path / "invalid"
+    with build_evaluation_result_from_frames(
+        [_frame()],
+        spec=_spec(),
+        asset_column="asset_id",
+        source_columns_by_kind={"feature": ("score",)},
+        response_diagnostics=_response(),
+    ) as result:
+        chunks = [
+            (
+                metrics,
+                grouped,
+                {**facts, **{name: altered(name, facts[name]) for name in members}},
+            )
+            for metrics, grouped, facts in result.output_chunks
+        ]
+        with pytest.raises(ValueError, match=f"^{error}$"):
+            write_evaluation_outputs_from_chunks(
+                chunks,
+                summary_factory=result.summaries,
+                spec=_spec(),
+                output_path=unpublished,
+                metadata=science,
+            )
+    assert not unpublished.exists()
+    # Each member remains locally valid; only their consumed relationship is broken.
+    for name in members:
+        frame = altered(name, tables[name])
+        pq.write_table(
+            pa.Table.from_pandas(
+                frame, schema=DAILY_SCHEMAS[name], preserve_index=False
+            ),
+            root / f"{name}.parquet",
+        )
+        manifest["metadata"]["optional_member_rows"][name] = len(frame)
+    (root / "manifest.json").write_text(json.dumps(manifest))
+    for name in members:
+        read_evaluation_outputs(root, tables=(name,))
+    with pytest.raises(ValueError, match=f"^{error}$"):
+        read_evaluation_outputs(root, tables=members)
+
+
+def test_response_count_owner_distinguishes_unconsumed_empty_and_incomplete_pairs():
+    from quant_research_platform.artifacts.outputs.evaluation_daily import (
+        validate_response_counts,
+    )
+
+    tables = _response_tables(_frame(), spec=_spec(), config=_response())
+    metrics, groups = tables["response_metrics"], tables["response_groups"]
+    science = {"response_diagnostics": _response()}
+    validate_response_counts(None, groups, science=science)
+    validate_response_counts(metrics, None, science=science)
+    with pytest.raises(ValueError, match="^evaluation_response_group_count_mismatch$"):
+        validate_response_counts(metrics, groups.iloc[:0], science=science)
+    for name in tables:
+        tables[name] = tables[name].loc[
+            ~(tables[name].label.eq("r500") & tables[name].sample_scope.eq("own"))
+        ]
+    with pytest.raises(ValueError, match="^evaluation_response_common_count_mismatch$"):
+        validate_response_counts(
+            tables["response_metrics"], tables["response_groups"], science=science
+        )
+    wrong_counts = groups.copy()
+    wrong_counts.loc[0, "n_obs"] += 1
+    with pytest.raises(ValueError, match="^evaluation_response_group_count_mismatch$"):
+        validate_response_counts(metrics, wrong_counts, science=science)

@@ -319,3 +319,100 @@ def test_target_cross_section_is_independent_of_feature_availability():
     actual = _add_a_share_semantic_columns(frame, spec)
     pd.testing.assert_series_equal(actual.model_target, expected.model_target)
     assert actual.model_target_available_at.eq(pd.Timestamp("2020-02-05")).all()
+
+
+def test_projection_feature_and_target_survive_assembly_fit_and_prediction(tmp_path):
+    from fractions import Fraction
+
+    from quant_research_platform.artifacts.outputs.prediction import read_predictions
+    from quant_research_platform.research.models.production import fit
+    from quant_research_platform.research.predictions.runner import predict
+    from quant_research_platform.storage.datasets import read_dataset
+    from tests.helpers.research_processed_inputs import assembly_config, assembly_source
+
+    sizes = 15 + np.arange(100) / 16
+    signs = np.tile([1.0, -1.0, -1.0, 1.0], 25)
+    raw = 3 + 2 * sizes + 1e-11 * signs
+    # These dyadic coordinates make the nuisance slope exactly 2. Fraction
+    # measures the residual of the actual stored floats, not the decimal literal.
+    residual = float(Fraction(raw[0]) - 3 - 2 * Fraction(sizes[0]))
+    frames = []
+    for day, repetitions in (("2024-01-02", 1), ("2024-01-04", 10)):
+        frames.append(
+            pd.DataFrame(
+                {
+                    "market_id": "a_share",
+                    "asset_id": [f"a{i:04d}" for i in range(100 * repetitions)],
+                    "timestamp": pd.Timestamp(day),
+                    "eligible": True,
+                    "momentum_20d": np.tile(raw, repetitions),
+                    "log_total_market_cap": np.tile(sizes, repetitions),
+                    "industry_standard_id": "test",
+                    "industry_level1_code": "A",
+                    "forward_return_20d": np.tile(raw / 64, repetitions),
+                    "forward_return_20d_available_at": pd.Timestamp(day)
+                    + pd.Timedelta(days=1),
+                }
+            )
+        )
+    source, _ = assembly_source(
+        tmp_path,
+        pd.concat(frames, ignore_index=True),
+        units={"forward_return_20d": "decimal_return"},
+        availability={"forward_return_20d": "forward_return_20d_available_at"},
+    )
+    dataset = assemble(
+        assembly_config(
+            tmp_path,
+            source,
+            time_window={"start": "2024-01-02", "end": "2024-01-04"},
+            feature_recipe="a_share_canonical",
+            feature_transform={"clip": "none"},
+            filter_columns=["eligible"],
+            label_columns=["model_target"],
+            target_transform="industry_size_residual",
+            target_clip="none",
+        )
+    )
+    saved = read_dataset(dataset)
+    for day, group in saved.groupby("timestamp"):
+        expected_sign = np.tile(signs, len(group) // 100)
+        np.testing.assert_allclose(
+            group.feature_momentum_20d, expected_sign, rtol=1e-12, atol=1e-12
+        )
+        np.testing.assert_allclose(
+            group.model_target, expected_sign * residual / 64, rtol=1e-12, atol=1e-17
+        )
+        assert group.feature_observed_momentum_20d.eq(1).all()
+        assert group.model_target_available_at.eq(day + pd.Timedelta(days=1)).all()
+    model = fit(
+        {
+            "market_id": "a_share",
+            "inputs": str(dataset),
+            "output": str(tmp_path / "model"),
+            "model": {
+                "model_id": "linear",
+                "model_algorithm": "linear_regression",
+                "input_feature_columns": ["feature_momentum_20d"],
+                "target_column": "model_target",
+            },
+            "fit_windows": [{"start": "2024-01-02", "end": "2024-01-02"}],
+            "fit_cutoff": "2024-01-03",
+        }
+    )
+    output = predict(
+        {
+            "model": str(model),
+            "inputs": str(dataset),
+            "output": str(tmp_path / "prediction"),
+            "prediction_window": {"start": "2024-01-04", "end": "2024-01-04"},
+            "sample_role": "test",
+        }
+    )
+    predictions = read_predictions(output)[0]
+    np.testing.assert_allclose(
+        predictions.prediction_score,
+        np.tile(signs, 10) * residual / 64,
+        rtol=1e-12,
+        atol=1e-17,
+    )

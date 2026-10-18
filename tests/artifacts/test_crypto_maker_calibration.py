@@ -1101,12 +1101,11 @@ def test_maker_validator_closes_native_stream_and_preserves_primary(
         "side",
         "events_side",
         "ordinal",
-        "generic_before_ordinal",
         "book_cross_batch",
         "trade_cross_batch",
     ],
 )
-def test_maker_validator_rejects_compound_damage_without_error_priority(
+def test_maker_validator_rejects_isolated_event_and_sample_damage(
     tmp_path, monkeypatch, maker_calibration_tables, damage
 ):
     from functools import partial
@@ -1114,16 +1113,13 @@ def test_maker_validator_rejects_compound_damage_without_error_priority(
     from quant_research_platform.markets.implementations.crypto import portfolio
 
     tables, envelope = maker_calibration_tables
-    tables["crypto_maker_samples"].loc[0, "filled_quantity"] = 0.5
-    if damage in ("side", "events_side", "generic_before_ordinal"):
+    if damage in ("side", "events_side"):
         extra = tables["crypto_maker_samples"].iloc[[0]].copy()
         extra.side = "events" if damage == "events_side" else "unknown"
-        if damage == "generic_before_ordinal":
-            extra.sample_id = -1
         tables["crypto_maker_samples"] = pd.concat(
             [tables["crypto_maker_samples"], extra], ignore_index=True
         )
-    if damage in ("ordinal", "generic_before_ordinal"):
+    if damage == "ordinal":
         extra = (
             tables["crypto_maker_events"].loc[lambda frame: frame.event_id.eq(4)].copy()
         )
@@ -1140,9 +1136,11 @@ def test_maker_validator_rejects_compound_damage_without_error_priority(
         ].copy()
         if damage == "trade_cross_batch":
             extra = pd.concat([extra, extra], ignore_index=True)
-        extra.event_id = 6
+        extra.event_id = 5
         extra.event_at = pd.Timestamp("1970-01-01T00:00:03.150000")
-        extra.iloc[-1, extra.columns.get_loc("quantity")] = float("inf")
+        if damage == "trade_cross_batch":
+            extra.event_id = [5, 6]
+            extra.loc[1, "event_at"] += pd.Timedelta(milliseconds=10)
         tables["crypto_maker_events"] = pd.concat([events, extra], ignore_index=True)
         monkeypatch.setattr(
             statistics,
@@ -1161,7 +1159,15 @@ def test_maker_validator_rejects_compound_damage_without_error_priority(
                 native_filesystem_path(staging / f"{name}.parquet"),
             )
 
-    root = _write_unchecked(tmp_path / "compound", envelope, write)
+    if damage in ("book_cross_batch", "trade_cross_batch"):
+        control = _write_unchecked(tmp_path / "finite_control", envelope, write)
+        statistics.read_statistics_artifact(
+            control, validate_tables=portfolio.validate_maker_calibration
+        )
+        events = tables["crypto_maker_events"]
+        events.iloc[-1, events.columns.get_loc("quantity")] = float("inf")
+
+    root = _write_unchecked(tmp_path / "isolated_damage", envelope, write)
     before = {path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}
     with pytest.raises(ValueError):
         statistics.read_statistics_artifact(

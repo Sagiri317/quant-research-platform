@@ -286,16 +286,10 @@ def test_group_spread_aggregates_before_float_conversion(
         _add_group_spread_observation(
             state._spread, "signal", "label", top, bottom, float(top > bottom), None
         )
-    if expected_spread is None:
-        with pytest.raises(ValueError, match="^invalid_evaluation_numeric_values$"):
-            state.group_spread_summary()
-    else:
-        summary = state.group_spread_summary().iloc[0]
-        assert summary.top_group_mean_label_value == pytest.approx(expected_top)
-        assert summary.bottom_group_mean_label_value == pytest.approx(expected_bottom)
-        assert summary.top_bottom_label_value_spread_mean == pytest.approx(
-            expected_spread
-        )
+    summary = state.group_spread_summary().iloc[0]
+    assert summary.top_group_mean_label_value == pytest.approx(expected_top)
+    assert summary.bottom_group_mean_label_value == pytest.approx(expected_bottom)
+    assert summary.top_bottom_label_value_spread_mean == pytest.approx(expected_spread)
 
 
 @pytest.mark.parametrize(

@@ -11,9 +11,9 @@ import pandas as pd
 
 from quant_research_platform.compute.dataframe.cross_section import (
     _add_correlation_aggregate,
+    _compute_ic_and_grouped_label_values,
     _pearson_correlation_result,
     _summarize_correlation_aggregates,
-    compute_ic_and_grouped_label_values,
 )
 from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.contracts.evaluations import (
@@ -31,9 +31,13 @@ from quant_research_platform.contracts.filtering import (
     required_filter_columns,
 )
 from quant_research_platform.contracts.time import time_value_isoformat
-from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.contracts.validation import (
+    _finite_numeric_series,
+    strict_timestamp_series,
+)
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.features.transforms import (
+    _industry_group_codes,
     feature_observation_columns,
     mask_unobserved_features,
 )
@@ -406,6 +410,7 @@ def _iter_single_asset_time_series_output_chunks(
 ) -> Iterator[_EvaluationOutputChunk]:
     """Evaluate each pair over the complete selected narrow time-series input."""
     selected_frames = []
+    ordinal_frames = []
     response_dates = {}
     signal_columns = tuple(signal.signal_id for signal in spec.signals)
     label_columns = spec.label_columns
@@ -427,7 +432,7 @@ def _iter_single_asset_time_series_output_chunks(
         declared_columns=declared_columns,
     )
     with closing_iterator(work_frames):
-        for filtered, filter_metadata in work_frames:
+        for filtered, filter_metadata, ordinal_signals in work_frames:
             rows_input += strict_non_negative_count_value(filter_metadata["rows_input"])
             rows_after_filter += strict_non_negative_count_value(
                 filter_metadata["rows_after_filter_mode"]
@@ -477,6 +482,8 @@ def _iter_single_asset_time_series_output_chunks(
                     timestamps.groupby(timestamps.dt.normalize()).max().to_dict()
                 )
             selected_frames.append(filtered.loc[:, ["timestamp", *numeric_columns]])
+            if response_diagnostics is not None and ordinal_signals is not None:
+                ordinal_frames.append(ordinal_signals)
     frame = (
         pd.concat(selected_frames, ignore_index=True)
         if selected_frames
@@ -501,9 +508,16 @@ def _iter_single_asset_time_series_output_chunks(
     if response_diagnostics is not None:
         metadata.update(
             _response_tables(
-                frame, spec=spec, config=response_diagnostics, dates=response_dates
+                frame,
+                spec=spec,
+                config=response_diagnostics,
+                dates=response_dates,
+                ordinal_signals=pd.concat(ordinal_frames, ignore_index=True)
+                if ordinal_frames
+                else None,
             )
         )
+        ordinal_frames.clear()
         pooled = metadata["response_metrics"]
         pooled = pooled.loc[pooled.period.eq("pooled") & pooled.sample_scope.eq("own")]
         metrics = _time_series_metric_records(
@@ -594,12 +608,13 @@ def _iter_evaluation_output_chunks(
         declared_columns=declared_columns,
     )
     with closing_iterator(work_frames):
-        for filtered, filter_metadata in work_frames:
+        for filtered, filter_metadata, ordinal_signals in work_frames:
             output = _evaluate_filtered_frame(
                 filtered,
                 filter_metadata,
                 spec=spec,
                 asset_column=asset_column,
+                ordinal_signals=ordinal_signals,
             )
             if summary_state is not None:
                 summary_state.consume(*output)
@@ -615,6 +630,7 @@ def _evaluate_filtered_frame(
     *,
     spec: EvaluationSpec,
     asset_column: str,
+    ordinal_signals=None,
 ) -> _EvaluationOutputChunk:
     signal_columns = tuple(signal.signal_id for signal in spec.signals)
     label_columns = spec.label_columns
@@ -630,8 +646,11 @@ def _evaluate_filtered_frame(
         asset_column=asset_column,
     )
     columns = ("timestamp", asset_column, *signal_columns, *label_columns)
-    metrics, grouped = compute_ic_and_grouped_label_values(
-        filtered.loc[:, list(columns)], compute_spec, n_groups=n_groups
+    metrics, grouped = _compute_ic_and_grouped_label_values(
+        filtered.loc[:, list(columns)],
+        compute_spec,
+        n_groups=n_groups,
+        ordinal_signals=ordinal_signals,
     )
     absent = timestamps.drop_duplicates().loc[
         ~timestamps.drop_duplicates().isin(metrics.timestamp)
@@ -695,7 +714,7 @@ def _iter_evaluation_work_frames(
     asset_column: str,
     source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
     declared_columns=None,
-) -> Iterator[tuple[pd.DataFrame, dict[str, object]]]:
+) -> Iterator[tuple[pd.DataFrame, dict[str, object], pd.DataFrame | None]]:
     from quant_research_platform.research.filtering import apply_filter_mode
 
     label_columns = spec.label_columns
@@ -744,17 +763,37 @@ def _iter_evaluation_work_frames(
             )
             filter_metadata["timestamps"] = projected.timestamp
             filter_metadata["asset_ids"] = projected[asset_column]
+            observed = mask_unobserved_features(filtered, feature_columns, schema)
             normalized = normalize_signal_frame(
-                mask_unobserved_features(filtered, feature_columns, schema),
+                observed,
                 signals=spec.signals,
                 timestamp_column="timestamp",
                 source_columns_by_kind=source_columns_by_kind,
             )
 
             try:
-                yield normalized, filter_metadata
+                yield (
+                    normalized,
+                    filter_metadata,
+                    _ordinal_signal_frame(observed, spec, asset_column),
+                )
             except GeneratorExit:
                 return
+
+
+def _ordinal_signal_frame(frame, spec, asset_column):
+    """Retain reverse ordering separately from negated economic identity values."""
+    signals = [
+        signal
+        for signal in spec.signals
+        if signal.transform == "identity" and signal.direction == "lower_is_better"
+    ]
+    if not signals:
+        return None
+    result = frame.loc[:, ["timestamp", asset_column]].copy()
+    for signal in signals:
+        result[signal.signal_id] = frame[signal.source_column]
+    return result
 
 
 def build_scoped_evaluation_result(
@@ -823,6 +862,7 @@ def build_scoped_evaluation_result(
                 }
                 # Normalize on the focal eligible population before intersection.
                 normalized = normalize_signal_frame(focal, signals=spec.signals)
+                ordinal_signals = _ordinal_signal_frame(focal, spec, "asset_id")
                 if sample_scope == "common":
                     valid = np.isfinite(
                         focal[sources[0]["signal_columns"]].to_numpy(dtype=float)
@@ -882,7 +922,11 @@ def build_scoped_evaluation_result(
                     "daily_coverage",
                 )
                 metrics, grouped, facts = _evaluate_filtered_frame(
-                    normalized, metadata, spec=spec, asset_column="asset_id"
+                    normalized,
+                    metadata,
+                    spec=spec,
+                    asset_column="asset_id",
+                    ordinal_signals=ordinal_signals,
                 )
                 stratum_records = []
                 if primary is not None:
@@ -913,6 +957,11 @@ def build_scoped_evaluation_result(
                                 metadata,
                                 spec=stratum_spec,
                                 asset_column="asset_id",
+                                ordinal_signals=(
+                                    ordinal_signals.loc[subset.index]
+                                    if ordinal_signals is not None
+                                    else None
+                                ),
                             )
                             daily = daily.assign(
                                 stratification=kind,
@@ -957,14 +1006,20 @@ def _evaluation_strata(frame, strata):
     groups = {}
     for kind in strata["kinds"]:
         if kind == "industry":
-            values = mature.industry_level1_code.astype("string")
+            values = (
+                _industry_group_codes(mature)
+                if "industry_standard_id" in mature
+                else mature.industry_level1_code.astype("string")
+            )
         elif kind in {"size", "liquidity"}:
             column = "total_market_cap" if kind == "size" else "amount"
             numeric = mature[column]
             invalid = numeric.notna() & (~np.isfinite(numeric) | numeric.lt(0))
             quality[kind + "_invalid"] = int(invalid.sum())
-            values = (
-                np.ceil(numeric.mask(invalid).rank(method="average", pct=True) * 3)
+            values = pd.Series(pd.NA, index=mature.index, dtype="string")
+            valid = numeric.notna() & ~invalid
+            values.loc[valid] = (
+                np.ceil(numeric.loc[valid].rank(method="average", pct=True) * 3)
                 .astype("Int64")
                 .astype("string")
             )
@@ -994,22 +1049,24 @@ def training_quantile_cutpoints(scores, *, n_groups=5):
     out-of-sample provenance. If OOS reference scores are chosen, declare that
     different reference design. Values must already use the evaluated direction.
     """
-    values = np.asarray(scores, dtype="float64")
+    values = np.asarray(scores)
     if (
         type(n_groups) is not int
         or not 2 <= n_groups <= 5
         or values.ndim != 1
         or not len(values)
-        or not np.isfinite(values).all()
     ):
         raise ValueError("evaluation_reference_scores_invalid")
+    values = _finite_numeric_series(
+        pd.Series(scores), error="evaluation_reference_scores_invalid"
+    ).to_numpy()
     edges = np.unique(
         np.quantile(values, np.arange(1, n_groups) / n_groups, method="inverted_cdf")
     )
     return edges[edges < values.max()].tolist()
 
 
-def _response_tables(frame, *, spec, config, dates=None):
+def _response_tables(frame, *, spec, config, dates=None, ordinal_signals=None):
     """Calculate both response tables from one selected finite-window cache.
 
     Exact pooled medians retain O(N * selected columns) values. No sampling,
@@ -1032,7 +1089,29 @@ def _response_tables(frame, *, spec, config, dates=None):
     all_values = frame.loc[:, list(spec.label_columns)].to_numpy(dtype="float64")
     all_predicted = np.isfinite(all_scores)
     all_mature = np.isfinite(all_values).all(axis=1)
-    all_groups = np.searchsorted(edges, all_scores, side="left") + 1
+    order = frame[signal]
+    reverse_order = ordinal_signals is not None and signal in ordinal_signals
+    if reverse_order:
+        order = ordinal_signals.set_index("timestamp")[signal].reindex(frame.timestamp)
+    # Native integers compare exactly with integer or float cutpoints in Python;
+    # numpy's mixed numeric coercion can merge the two sides of a boundary.
+    exact_order = pd.api.types.is_integer_dtype(order.dtype) or any(
+        type(edge) is int for edge in edges
+    )
+    ordered_values = order.to_numpy(
+        dtype=object if exact_order else "float64", na_value=np.nan
+    )[all_predicted]
+    if reverse_order:
+        ordered_values = -ordered_values
+    all_groups = np.zeros(len(frame), dtype="int64")
+    all_groups[all_predicted] = (
+        np.searchsorted(
+            np.asarray(edges, dtype=object if exact_order else "float64"),
+            ordered_values,
+            side="left",
+        )
+        + 1
+    )
     timestamps = pd.DatetimeIndex(frame.timestamp)
     by_day = frame.groupby(timestamps.normalize(), sort=False).indices
     dates = dates or {

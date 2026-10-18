@@ -12,7 +12,7 @@ from quant_research_platform.compute.dataframe.cross_section import (
     _pearson_correlation_result,
 )
 from quant_research_platform.contracts.validation import (
-    strict_finite_numeric_series,
+    _finite_numeric_series,
     strict_timestamp_series,
 )
 
@@ -166,7 +166,7 @@ def _centered_rank_frame(
 ) -> pd.DataFrame:
     result = pd.DataFrame(0.0, index=frame.index, columns=columns)
     for column in columns:
-        values = strict_finite_numeric_series(
+        values = _finite_numeric_series(
             frame[column],
             error=f"invalid_rank_ensemble_column: {column}",
             allow_null=True,
@@ -229,22 +229,22 @@ def _training_rank_correlations(frame, columns, label_column, sample_weight):
     )
     label_domains = {}
     for timestamp, indices in groups.items():
-        labels = (
-            frame[label_column]
-            .array.take(indices)
-            .to_numpy(dtype="float64", copy=False)
+        labels = frame[label_column].iloc[indices]
+        label_domains[timestamp] = (
+            labels,
+            np.isfinite(labels).to_numpy(dtype=bool, na_value=False),
         )
-        label_domains[timestamp] = labels, np.isfinite(labels)
     for column in columns:
         correlations, period_weights = [], []
         for timestamp, indices in groups.items():
-            x = frame[column].array.take(indices).to_numpy(dtype="float64", copy=False)
+            x = frame[column].iloc[indices]
             y, label_finite = label_domains[timestamp]
-            valid = np.isfinite(x) & label_finite
+            valid = np.isfinite(x).to_numpy(dtype=bool, na_value=False) & label_finite
             if int(valid.sum()) < 2:
                 continue
             corr, _reason = _pearson_correlation_result(
-                _average_ranks(x[valid]), _average_ranks(y[valid])
+                _average_ranks(x.iloc[valid].to_numpy()),
+                _average_ranks(y.iloc[valid].to_numpy()),
             )
             if corr is not None:
                 correlations.append(corr)

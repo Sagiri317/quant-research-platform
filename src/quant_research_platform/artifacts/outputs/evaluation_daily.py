@@ -388,7 +388,7 @@ def _validate_response_frame(frame, *, name, science):
 
 def validate_response_counts(metrics, groups, *, science):
     """Check concrete paired response rows when both members are consumed."""
-    if metrics is None or groups is None or metrics.empty:
+    if metrics is None or groups is None:
         return
     key = list(_RESPONSE_KEYS)
     sums = groups.groupby(key, dropna=False, sort=False).n_obs.sum()
@@ -414,6 +414,7 @@ def validate_response_counts(metrics, groups, *, science):
         paired = block.pivot(index="label", columns="sample_scope", values="n_obs")
         if (
             set(paired.columns) != {"own", "common"}
+            or paired.isna().any().any()
             or paired.common.gt(paired.own).any()
         ):
             raise ValueError("evaluation_response_common_count_mismatch")

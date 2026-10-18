@@ -505,6 +505,10 @@ def plot_metric_comparison(rows, *, metric_id, units, source_reference, sample_r
     return figure, axes
 
 
+def _group_value(value):
+    return None if pd.isna(value) else value
+
+
 def _groups(rows, sample_role, group_columns=()):
     if (
         not isinstance(group_columns, (list, tuple))
@@ -523,14 +527,20 @@ def _groups(rows, sample_role, group_columns=()):
         ):
             raise ValueError("plot_sample_role_mismatch")
         key = tuple(
-            str(row[name])
+            (name, _group_value(row[name]))
             for name in dict.fromkeys(
                 ("candidate_id", "execution_mode", "episode_id", *group_columns)
             )
             if name in row
         )
         groups[key].append(row)
-    return sorted(groups.items())
+    return sorted(
+        (
+            (tuple(repr(value) for _, value in key), items)
+            for key, items in groups.items()
+        ),
+        key=lambda group: group[0],
+    )
 
 
 @_styled
@@ -609,7 +619,7 @@ def plot_factor_ic(rows, *, source_reference, sample_role, timezone, summary=Fal
                 or not isinstance(row["stratification"], str)
             ):
                 raise ValueError("plot_factor_stratum_identity_invalid")
-            stratum = None if pd.isna(row["stratum"]) else row["stratum"]
+            stratum = _group_value(row["stratum"])
             if stratum is not None and not isinstance(stratum, str):
                 raise ValueError("plot_factor_stratum_identity_invalid")
             key += (

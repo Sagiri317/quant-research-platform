@@ -31,7 +31,10 @@ from quant_research_platform.contracts.models import (
     _prediction_loss_reason,
 )
 from quant_research_platform.contracts.time import _window_payload
-from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.contracts.validation import (
+    _finite_numeric_series,
+    strict_timestamp_series,
+)
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.models.rank_ensemble import _label_predictions
 from quant_research_platform.runtime.dataframes import iter_complete_time_frames
@@ -149,7 +152,9 @@ def evaluate_model_trial_metrics_from_chunks(
 
     def consume(values):
         nonlocal row_count, time_series_result
-        label, prediction, economic = values.T
+        label = values["label"].to_numpy()
+        prediction = values["prediction"].to_numpy()
+        economic = values["economic"].to_numpy(dtype="float64")
         row_count += len(values)
         correlation = _pearson_correlation_result(prediction, label)
         _add_correlation_aggregate(stats, "ic", correlation[0])
@@ -188,14 +193,12 @@ def evaluate_model_trial_metrics_from_chunks(
                         "single_asset_time_series_evaluation_requires_one_asset"
                     )
                 asset = unique_assets.iloc[0]
-                time_series.append(
-                    values[["label", "prediction", "economic"]].to_numpy()
-                )
+                time_series.append(values[["label", "prediction", "economic"]])
             else:
                 for _, group in values.groupby("timestamp_ns", sort=False):
-                    consume(group[["label", "prediction", "economic"]].to_numpy())
+                    consume(group[["label", "prediction", "economic"]])
     if time_series:
-        consume(np.concatenate(time_series))
+        consume(pd.concat(time_series, ignore_index=True))
     if row_count == 0:
         raise ValueError("empty_model_selection_validation_window")
     mse = None if any(value is None for value in losses) else float(np.mean(losses))
@@ -236,7 +239,14 @@ def _mean_squared_error(predictions, labels) -> float | None:
     if not len(labels):
         return None
     with np.errstate(over="ignore", invalid="ignore"):
-        result = float(np.mean(np.square(np.asarray(predictions) - np.asarray(labels))))
+        result = float(
+            np.mean(
+                np.square(
+                    np.asarray(predictions, dtype="float64")
+                    - np.asarray(labels, dtype="float64")
+                )
+            )
+        )
     return result if np.isfinite(result) else None
 
 
@@ -255,19 +265,12 @@ def _metric_chunk(
     labels = frame[label_column]
     predictions = frame[prediction_column]
     for values in (labels, predictions):
-        if not pd.api.types.is_numeric_dtype(values) or pd.api.types.is_bool_dtype(
-            values
-        ):
+        if not pd.api.types.is_numeric_dtype(values):
             raise ValueError("invalid_trial_metric_values")
-    label_values = labels.astype("float64")
-    prediction_values = predictions.astype("float64")
-    if (
-        bool(label_values.isna().any())
-        or bool(prediction_values.isna().any())
-        or (not bool(np.isfinite(label_values).all()))
-        or (not bool(np.isfinite(prediction_values).all()))
-    ):
-        raise ValueError("invalid_trial_metric_values")
+    labels = _finite_numeric_series(labels, error="invalid_trial_metric_values")
+    predictions = _finite_numeric_series(
+        predictions, error="invalid_trial_metric_values"
+    )
     timestamps = strict_timestamp_series(
         frame["timestamp"], error="invalid_trial_metric_timestamp"
     )
@@ -275,8 +278,8 @@ def _metric_chunk(
     return pd.DataFrame(
         {
             "timestamp_ns": timestamp_ns,
-            "label": label_values.to_numpy(dtype="float64", copy=False),
-            "prediction": prediction_values.to_numpy(dtype="float64", copy=False),
+            "label": labels.array,
+            "prediction": predictions.array,
         }
     )
 
