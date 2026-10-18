@@ -279,9 +279,10 @@ def _agg_trade(
     }
 
 
+@pytest.mark.parametrize("cross_hour", (False, True))
 @pytest.mark.parametrize("damage", ("missing", "corrupt", "bad_payload", "none"))
 def test_native_writer_bounded_replay_ignores_future_members(
-    tmp_path, monkeypatch, damage
+    tmp_path, monkeypatch, damage, cross_hour
 ):
     from quant_research_platform.sources.binance.recorder import _RunWriter
 
@@ -292,6 +293,15 @@ def test_native_writer_bounded_replay_ignores_future_members(
         "2026-08-27T00:00:30Z",  # A wall-clock rollback must not stop selection.
         "2026-08-27T09:00:00+08:00",
     ]
+    end = "2026-08-27T00:01:00Z"
+    if cross_hour:
+        stamps = [
+            "2026-08-27T00:59:59.900Z",
+            "2026-08-27T01:00:00.100Z",
+            "2026-08-27T00:59:59.950Z",
+            "2026-08-27T10:00:00+08:00",
+        ]
+        end = "2026-08-27T01:00:00.050Z"
     for sequence, stamp in enumerate(stamps, 1):
         payload = _agg_trade(sequence)["payload"]
         payload.update(a=sequence, f=sequence, l=sequence)
@@ -316,7 +326,7 @@ def test_native_writer_bounded_replay_ignores_future_members(
             "segment_id": None,
             "opened_at": "2026-08-27T00:00:00Z",
             "opened_monotonic_ns": 0,
-            "closed_at": "2026-08-27T02:00:00Z",
+            "closed_at": "2026-08-27T03:00:00Z",
             "closed_monotonic_ns": 10,
             "close_reason": "stop",
         }
@@ -341,7 +351,7 @@ def test_native_writer_bounded_replay_ignores_future_members(
     future = next(
         tmp_path / item["path"]
         for item in manifest["files"]
-        if "hour=01" in item["path"]
+        if f"hour={2 if cross_hour else 1:02d}" in item["path"]
     )
     if damage == "missing":
         future.unlink()
@@ -355,8 +365,16 @@ def test_native_writer_bounded_replay_ignores_future_members(
         return original_open(path, *args, **kwargs)
 
     monkeypatch.setattr(replay, "open_filesystem_file", open_selected)
-    end_ns = pd.Timestamp("2026-08-27T00:01:00Z").value
+    end_ns = pd.Timestamp(end).value
     with open_recorder_run(tmp_path) as run:
+        if cross_hour:
+            assert sorted(
+                (item["capture_seq_min"], item["capture_seq_max"])
+                for item in manifest["files"]
+            ) == [(1, 3), (2, 2), (4, 4)]
+        records = list(run.iter_records(end_ns=end_ns))
+        assert [record["capture_seq"] for record in records] == [1, 3]
+        assert [record["receive_time"] for record in records] == [stamps[0], stamps[2]]
         trades = list(
             iter_agg_trades(run, FUTURES_MARKET_TYPE, symbol="BTCUSDT", end_ns=end_ns)
         )
@@ -1029,7 +1047,17 @@ def test_same_run_replay_is_deterministic(tmp_path: Path) -> None:
         assert first == second
 
 
-@pytest.mark.parametrize("mode", ("complete", "cancel", "same_owner_overlap"))
+@pytest.mark.parametrize(
+    "mode",
+    (
+        "complete",
+        "cancel",
+        "same_owner_overlap",
+        "overlap_cancel",
+        "duplicate",
+        "same_owner_duplicate",
+    ),
+)
 def test_hourly_owner_files_merge_transitive_ranges_with_bounded_handles(
     tmp_path, monkeypatch, mode
 ):
@@ -1075,13 +1103,21 @@ def test_hourly_owner_files_merge_transitive_ranges_with_bounded_handles(
             ),
         ],
     )
+    overlap = mode in {
+        "same_owner_overlap",
+        "overlap_cancel",
+        "duplicate",
+        "same_owner_duplicate",
+    }
+    trade_start = 5 if mode == "same_owner_duplicate" else 4 if overlap else 6
+    depth_start = 6 if mode in {"same_owner_overlap", "overlap_cancel"} else 4
     for kind, stream, rows in (
         (
             "agg_trades",
             "btcusdt@aggTrade",
-            [trade(4 if mode == "same_owner_overlap" else 6, 1), trade(8, 1)],
+            [trade(trade_start, 1), trade(8, 1)],
         ),
-        ("depth", "btcusdt@depth@100ms", [depth(4, 1), depth(7, 1)]),
+        ("depth", "btcusdt@depth@100ms", [depth(depth_start, 1), depth(7, 1)]),
     ):
         item = _write_file(
             tmp_path / "next_hour",
@@ -1125,20 +1161,21 @@ def test_hourly_owner_files_merge_transitive_ranges_with_bounded_handles(
 
     monkeypatch.setattr(replay, "open_filesystem_file", tracked)
     with replay.open_recorder_run(root) as run:
-        if mode == "same_owner_overlap":
+        if mode in {"duplicate", "same_owner_duplicate"}:
             with pytest.raises(
-                ValueError, match="binance_replay_file_capture_ranges_overlap"
+                ValueError,
+                match="binance_replay_capture_seq_duplicate_or_non_monotonic",
             ):
                 list(run.iter_records())
         else:
             assert [
                 row["capture_seq"]
                 for row in run.iter_records(data_kinds=("agg_trades",))
-            ] == [1, 5, 6, 8]
+            ] == sorted([1, 5, trade_start, 8])
             assert [
                 row["capture_seq"] for row in run.iter_records(data_kinds=("depth",))
-            ] == [2, 3, 4, 7]
-            if mode == "cancel":
+            ] == [2, 3, depth_start, 7]
+            if mode in {"cancel", "overlap_cancel"}:
                 primary = KeyboardInterrupt("consumer_cancel")
                 with pytest.raises(KeyboardInterrupt) as caught:
                     with closing_iterator(run.iter_records()) as records:
@@ -1149,12 +1186,29 @@ def test_hourly_owner_files_merge_transitive_ranges_with_bounded_handles(
                 assert [row["capture_seq"] for row in run.iter_records()] == list(
                     range(1, 9)
                 )
-        if mode == "same_owner_overlap":
-            assert not handles  # Conflicting ranges fail before opening raw data.
-        else:
-            assert handles
+        assert handles  # Actual sequence collisions require reading records.
         assert all(handle.closed for handle in handles)
-    assert high_water <= 2
+    assert high_water <= (3 if overlap else 2)
+
+
+@pytest.mark.parametrize("sequences", ((2, 1), (1, 1)))
+def test_raw_file_rejects_actual_capture_order_errors(tmp_path, sequences):
+    _write_run(
+        tmp_path,
+        [
+            (
+                FUTURES_MARKET_TYPE,
+                "agg_trades",
+                "btcusdt@aggTrade",
+                [_agg_trade(sequence) for sequence in sequences],
+            )
+        ],
+    )
+    with open_recorder_run(tmp_path) as run:
+        with pytest.raises(
+            ValueError, match="^binance_replay_capture_seq_non_monotonic$"
+        ):
+            list(run.iter_records())
 
 
 @pytest.mark.parametrize("alias_kind", ("root", "ancestor", "member"))

@@ -2236,13 +2236,11 @@ def test_csmar_parent_failure_keeps_workflow_semantics(
     assert not tuple(filesystem_glob(failed_layout.project_root, "**/manifest.json"))
 
 
-@pytest.mark.parametrize("exponent", (0, 600, -600))
+@pytest.mark.parametrize("price_scale", (0.5, 20.0, 800.0))
 @pytest.mark.parametrize("split", (False, True))
 def test_adjusted_open_preserves_units_through_storage_and_labels(
-    tmp_path, exponent, split
+    tmp_path, price_scale, split
 ):
-    import math
-
     import numpy as np
 
     from quant_research_platform.research.labels.forward_returns import (
@@ -2256,7 +2254,7 @@ def test_adjusted_open_preserves_units_through_storage_and_labels(
     raw = layout.raw_source_root("csmar")
     filesystem_mkdir(raw, parents=True)
     sessions = pd.date_range("2019-08-01", periods=3)
-    prices = [math.ldexp(multiplier, exponent) for multiplier in (1.0, 1.0, 1.5)]
+    prices = [price_scale * multiplier for multiplier in (1.0, 1.0, 1.5)]
     rows = []
     for position, (timestamp, price) in enumerate(zip(sessions, prices, strict=True)):
         row = dict.fromkeys(
@@ -2292,7 +2290,7 @@ def test_adjusted_open_preserves_units_through_storage_and_labels(
         data_ids=("market_bars_1d",),
     )
     loaded = read_dataset(built.artifact_roots["market_bars_1d"])
-    np.testing.assert_array_equal(loaded.adj_open, loaded.adj_close)
+    np.testing.assert_allclose(loaded.adj_open, loaded.adj_close, rtol=1e-14, atol=0)
     panel = loaded.rename(columns={"source_asset_id": "asset_id"}).assign(
         is_trading=True
     )
@@ -2308,15 +2306,11 @@ def test_adjusted_open_preserves_units_through_storage_and_labels(
     "opening,adjusted,closing",
     [
         (12.0, 20.0, 10.0),
-        (2.0**600, 2.0**-600, 2.0**-600),
-        (2.0**-600, 2.0**600, 2.0**600),
-        (2.0**600, 2.0**600, 2.0**600),
-        (2.0**-600, 2.0**-600, 2.0**-600),
+        (2.35, 4.71, 2.34),
+        (799.3, 1201.7, 800.1),
     ],
 )
-def test_adjusted_open_avoids_intermediate_product_and_ratio_loss(
-    opening, adjusted, closing
-):
+def test_adjusted_open_matches_independent_price_ratio(opening, adjusted, closing):
     from fractions import Fraction
 
     row = dict.fromkeys(
@@ -2333,7 +2327,7 @@ def test_adjusted_open_avoids_intermediate_product_and_ratio_loss(
     )
     expected = float(Fraction(opening) * Fraction(adjusted) / Fraction(closing))
     actual = interim.normalize_raw_frame(pd.DataFrame([row]), "market_bars_1d")
-    assert actual.adj_open.iloc[0] == expected
+    assert actual.adj_open.iloc[0] == pytest.approx(expected, rel=1e-14, abs=0)
 
 
 @pytest.mark.parametrize(

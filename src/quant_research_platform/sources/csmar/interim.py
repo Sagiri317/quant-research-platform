@@ -650,18 +650,9 @@ def _normalize_mapped_frame(
         result["period_return"] = result["return_with_dividend"]
         result["adj_close"] = result["comparable_close_with_dividend"]
         close = result["close"]
-        # Keep the adjustment ratio bounded before restoring the price exponent.
-        opening, opening_exponent = np.frexp(
-            result["open"].to_numpy(dtype="float64", na_value=np.nan)
+        result["adj_open"] = (
+            result["open"] * result["adj_close"] / close.where(close.ne(0.0))
         )
-        adjusted, adjusted_exponent = np.frexp(result["adj_close"])
-        closing, closing_exponent = np.frexp(close.where(close.ne(0.0)))
-        result["adj_open"] = np.ldexp(
-            opening * (adjusted / closing),
-            opening_exponent + adjusted_exponent - closing_exponent,
-        )
-        del opening, adjusted, closing
-        del opening_exponent, adjusted_exponent, closing_exponent
         result["float_market_cap"] = result["float_market_cap_thousand"] * 1000.0
         result["total_market_cap"] = result["total_market_cap_thousand"] * 1000.0
         market_type = strict_integer_series(

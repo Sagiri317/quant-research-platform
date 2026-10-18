@@ -86,6 +86,7 @@ def test_independent_episodes_and_sampled_drawdown():
     np.testing.assert_array_equal(axes[0].lines[0].get_ydata(), [1000, 1099])
     np.testing.assert_array_equal(axes[2].lines[0].get_ydata(), [1000, 1048])
     assert not axes[3].lines
+    np.testing.assert_array_equal(axes[3].dataLim.intervalx, axes[2].dataLim.intervalx)
     assert "UNDEFINED" in axes[3].texts[0].get_text()
     fig.canvas.draw()
 
@@ -131,6 +132,7 @@ def test_recovered_market_gap_keeps_complete_sibling_drawdown():
     }
     figure, axes = plots.plot_portfolio_curve(data, sample_role="test", timezone="UTC")
     assert len(axes[1].lines) == 1 and not axes[3].lines
+    np.testing.assert_array_equal(axes[3].dataLim.intervalx, axes[2].dataLim.intervalx)
     np.testing.assert_array_equal(axes[2].lines[0].get_ydata(), [1000, 980, 1005])
     assert axes[2].lines[0].get_linestyle() == "None"
     assert "market_observation" in axes[2].texts[0].get_text()
@@ -865,6 +867,33 @@ def test_factor_ic_consumes_native_daily_strata_and_filters(tmp_path, monkeypatc
         assert "行业甲" in axis.get_title()
         np.testing.assert_allclose(axis.lines[0].get_ydata(), [1, np.nan, 1])
 
+    from matplotlib.dates import date2num
+
+    member = source / "daily_strata.parquet"
+    original_bytes = member.read_bytes()
+    before = plt.get_fignums()
+    unavailable = plots.plot(
+        {
+            **plot_config,
+            "output": str(tmp_path / "undefined-strata.svg"),
+            "row_filters": [["ic_reason", "==", "insufficient_observations"]],
+        }
+    )
+    assert len(captured[2]) == 4
+    expected = date2num(pd.Timestamp("2023-01-03"))
+    for axis in captured[2]:
+        np.testing.assert_array_equal(axis.dataLim.intervalx, [expected, expected])
+        assert pd.DatetimeIndex(axis.lines[0].get_xdata()).tolist() == [
+            pd.Timestamp("2023-01-03")
+        ]
+        assert np.isnan(axis.lines[0].get_ydata()).all()
+        assert "insufficient_observations" in axis.texts[0].get_text()
+        assert "stratification='industry'" in axis.get_title()
+    captured[2][0].figure.savefig(tmp_path / "undefined-strata.png")
+    assert unavailable.stat().st_size > 1000
+    assert member.read_bytes() == original_bytes
+    assert plt.get_fignums() == before
+
 
 @pytest.mark.parametrize("stratified", [False, True])
 def test_factor_ic_rejects_duplicate_dates_in_actual_identity(stratified):
@@ -953,3 +982,151 @@ def test_all_null_series_keeps_real_axis_and_one_annotation(categorical):
         assert first - 1 < axis.get_xlim()[0] <= first
         assert last <= axis.get_xlim()[1] < last + 1
     fig.canvas.draw()
+
+
+@pytest.mark.parametrize("kind", ["returns", "factor_ic", "activity", "series"])
+@pytest.mark.parametrize(
+    "values", [[None, None, None], [None, 0.2, None], [0.1, None, 0.3]]
+)
+@pytest.mark.parametrize("aware", [False, True])
+def test_date_panels_keep_unavailable_edges_without_fabricating_values(
+    kind, values, aware
+):
+    from matplotlib.dates import date2num
+
+    times = pd.date_range("2026-03-07T12:00", periods=3, tz="UTC" if aware else None)
+    common = {**TIMED, "timezone": "America/New_York"}
+    if kind == "returns":
+        rows = [
+            {
+                **daily(
+                    value,
+                    status="UNDEFINED" if value is None else "DEFINED",
+                    reason="missing" if value is None else "",
+                ),
+                "end_at": time,
+            }
+            for time, value in zip(times, values, strict=True)
+        ]
+        fig, axes = plots.plot_returns(rows, **common)
+        assert sum(p.get_height() for p in axes[1].patches) == sum(
+            v is not None for v in values
+        )
+        axes = axes[:1]
+    elif kind == "activity":
+        fig, axes = plots.plot_portfolio_activity(
+            [
+                dict(entry_at=time, cost_drag=value, realized_turnover=value)
+                for time, value in zip(times, values, strict=True)
+            ],
+            **common,
+        )
+    elif kind == "factor_ic":
+        fig, axes = plots.plot_factor_ic(
+            [
+                dict(
+                    timestamp=time,
+                    signal="x",
+                    label="y",
+                    ic=value,
+                    rankic=value,
+                    ic_reason="missing" if value is None else "",
+                    rankic_reason="missing" if value is None else "",
+                )
+                for time, value in zip(times, values, strict=True)
+            ],
+            **common,
+        )
+    else:
+        fig, axes = plots.plot_series(
+            [
+                dict(timestamp=time, value=value)
+                for time, value in zip(times, values, strict=True)
+            ],
+            x_column="timestamp",
+            value_columns=["value"],
+            title="缺失",
+            units="数值",
+            **common,
+        )
+    expected = date2num(times)
+    for axis in axes:
+        np.testing.assert_array_equal(axis.dataLim.intervalx, expected[[0, -1]])
+        if kind in {"returns", "activity"}:
+            offsets = axis.collections[0].get_offsets()
+            np.testing.assert_array_equal(
+                np.ma.getmaskarray(offsets)[:, 1], [v is None for v in values]
+            )
+            np.testing.assert_array_equal(
+                offsets[:, 1].compressed(), [v for v in values if v is not None]
+            )
+        else:
+            np.testing.assert_array_equal(axis.lines[0].get_xdata(orig=False), expected)
+            np.testing.assert_array_equal(
+                axis.lines[0].get_ydata(), [np.nan if v is None else v for v in values]
+            )
+        assert len(axis.texts) == 1
+        assert axis.get_xlim()[0] <= expected[0] < expected[-1] <= axis.get_xlim()[1]
+        assert str(axis.xaxis.get_major_formatter()._tz) == (
+            "America/New_York" if aware else "UTC"
+        )
+    fig.canvas.draw()
+
+
+def test_native_partial_crypto_returns_keep_undefined_date_domain(
+    tmp_path, monkeypatch
+):
+    from matplotlib.dates import date2num
+
+    from quant_research_platform.artifacts.statistics import read_statistics_artifact
+    from quant_research_platform.research.portfolios.diagnostics import (
+        crypto_statistics,
+    )
+    from tests.research.test_portfolio_benchmark_research import _crypto_account
+
+    ledger = tmp_path / "ledger"
+    _crypto_account(ledger, partial=True)
+    source = crypto_statistics(
+        {
+            "ledger": str(ledger),
+            "output": str(tmp_path / "statistics"),
+            "analyses": ["performance"],
+        }
+    )
+    artifact = read_statistics_artifact(source)
+    with artifact.table("crypto_portfolio_daily.parquet") as frame:
+        selected = frame.loc[frame.status.eq("UNDEFINED")].copy()
+    assert len(selected) == 1
+    assert selected.net_return.isna().all()
+    assert selected.reason.tolist() == ["utc_boundary_valuation_missing"]
+    member = source / "crypto_portfolio_daily.parquet"
+    original_bytes = member.read_bytes()
+    original = plots.plot_returns
+
+    def observed(rows, **kwargs):
+        fig, axes = original(rows, **kwargs)
+        expected = date2num(selected.end_at)
+        np.testing.assert_array_equal(
+            axes[0].dataLim.intervalx, [expected[0], expected[0]]
+        )
+        assert axes[0].collections[0].get_offsets().mask.all()
+        assert sum(p.get_height() for p in axes[1].patches) == 0
+        assert "utc_boundary_valuation_missing" in axes[0].texts[0].get_text()
+        fig.savefig(tmp_path / "undefined-returns.png")
+        return fig, axes
+
+    monkeypatch.setattr(plots, "plot_returns", observed)
+    before = plt.get_fignums()
+    output = plots.plot(
+        {
+            "kind": "returns",
+            "inputs": str(member),
+            "output": str(tmp_path / "undefined-returns.svg"),
+            "timezone": "UTC",
+            "sample_role": "test",
+            "row_filters": [["status", "==", "UNDEFINED"]],
+        }
+    )
+    assert output.stat().st_size > 1000
+    assert member.read_bytes() == original_bytes
+    assert plt.get_fignums() == before

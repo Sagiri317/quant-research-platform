@@ -369,11 +369,9 @@ def test_market_exposure_hac_and_regimes_use_intact_axis_and_descriptive_timing(
     assert regime.loc[
         ("above_threshold", "mean_return_difference"), "value"
     ] == pytest.approx((portfolio - market)[market > 0].mean())
-    import statsmodels.regression.linear_model as regression
-
     monkeypatch.setattr(
-        regression,
-        "OLS",
+        comparison,
+        "_hac_linear_regression",
         lambda *_args, **_kwargs: pytest.fail("compressed HAC attempted"),
     )
     broken = portfolio.copy()
@@ -1006,7 +1004,7 @@ def test_native_calendar_evidence_localizes_daily_statistics(tmp_path, cadence):
             assert estimates.status.eq("DEFINED").all()
             assert estimates.value.eq(0).all()
             assert estimates.inference_status.eq("UNDEFINED").all()
-            assert estimates.inference_reason.eq("nonfinite_inference").all()
+            assert estimates.inference_reason.eq("zero_residual_variance").all()
             assert (
                 estimates[["t_statistic", "p_value", "fdr_adjusted_p_value"]]
                 .isna()
@@ -1067,3 +1065,206 @@ def test_comparison_wealth_long_ordinary_path(returns):
     values = np.full(10000, returns)
     expected = math.exp(len(values) * math.log1p(returns))
     assert _wealth(values)[-1] == pytest.approx(expected, rel=2e-12, abs=0)
+
+
+@pytest.mark.parametrize("case", ("identical", "constant", "small_alpha", "small_beta"))
+@pytest.mark.parametrize("unit", (0.001, 1.0, 10.0))
+def test_market_exposure_roundoff_and_small_signals_persist(tmp_path, case, unit):
+    count = 252
+    dates = pd.bdate_range("2024-01-02", periods=count + 1)
+    market = np.resize([0.01, -0.02, 0.03, 0.005, -0.01], count)
+    noise = np.resize([1e-12, -1e-12, 0.0, 2e-12, -2e-12], count)
+    portfolio = {
+        "identical": market,
+        "constant": np.full(count, 0.001),
+        "small_alpha": market + 1e-10 + noise,
+        "small_beta": 0.001 + 1e-8 * market + noise,
+    }[case]
+    reference = reference_input(
+        tmp_path / "market.parquet",
+        [*(market * unit), 0.0],
+        dates=dates,
+        representation="interval_simple_return",
+    )
+    tables, metadata = _compare(
+        _axis(portfolio * unit, dates),
+        [reference],
+        analyses=["market_exposure"],
+        market_exposure={"hac_lag": 1, "confidence": 0.95, "minimum_observations": 60},
+    )
+    artifact = read_statistics_artifact(
+        write_statistics_artifact(
+            tmp_path / "statistics",
+            metadata=metadata,
+            tables=tables,
+            table_group="portfolio",
+        )
+    )
+    with artifact.table("portfolio_market_exposure.parquet") as saved:
+        pd.testing.assert_frame_equal(saved, tables["portfolio_market_exposure"])
+        rows = saved.set_index("coefficient_id").loc[
+            ["market_return_intercept", "beta"]
+        ]
+        assert rows.status.eq("DEFINED").all()
+        assert rows.planned_hypothesis_count.eq(2).all()
+        if case in ("identical", "constant"):
+            expected = [0.0, 1.0] if case == "identical" else [0.001 * unit, 0.0]
+            np.testing.assert_allclose(rows.value, expected, rtol=1e-13, atol=0)
+            assert rows.inference_status.eq("UNDEFINED").all()
+            assert rows.inference_reason.eq("zero_residual_variance").all()
+            assert rows.standard_error.eq(0).all()
+            assert rows.defined_hypothesis_count.eq(0).all()
+            assert (
+                rows[["t_statistic", "p_value", "fdr_adjusted_p_value"]]
+                .isna()
+                .all()
+                .all()
+            )
+        else:
+            assert rows.inference_status.eq("DEFINED").all()
+            assert rows.defined_hypothesis_count.eq(2).all()
+            assert rows.standard_error.gt(0).all()
+            key = "market_return_intercept" if case == "small_alpha" else "beta"
+            expected = 1e-10 * unit if case == "small_alpha" else 1e-8
+            assert rows.loc[key, "value"] == pytest.approx(expected, rel=0.01, abs=0)
+            assert rows.loc[key, "p_value"] < 0.01
+
+
+def test_native_ledger_self_reference_has_no_roundoff_significance(tmp_path):
+    dates = pd.date_range("2024-01-01", periods=253)
+    market = np.resize([0.01, -0.02, 0.03, 0.005, -0.01], 252)
+    prices = np.r_[100.0, 100.0 * np.cumprod(1 + market)]
+    capital = PortfolioCapital("synthetic", "1000", "USDT", "linear_perpetual")
+
+    def produce(emit):
+        account = PortfolioEconomics(capital, "btc_usdt", emit)
+        account.mark(
+            dates[0].value,
+            prices[0],
+            diagnostics=(
+                PortfolioDiagnostic("btc_usdt", None, "oos_window_start", number=0.0),
+            ),
+        )
+        account.fill(
+            timestamp_ns=dates[0].value,
+            order_id="entry",
+            quantity=10.0,
+            price=100.0,
+            mark_price=100.0,
+            fee=0.0,
+        )
+        for index, timestamp in enumerate(dates[1:], start=1):
+            terminal = index == len(dates) - 1
+            account.mark(
+                timestamp.value,
+                prices[index],
+                diagnostics=(
+                    PortfolioDiagnostic(
+                        "btc_usdt",
+                        None,
+                        "oos_window_end" if terminal else "utc_day_boundary",
+                        number=0.0
+                        if terminal
+                        else float(timestamp.value // pd.Timedelta(days=1).value),
+                    ),
+                ),
+            )
+        _record_execution_result(
+            account,
+            {
+                "simulation": "self_reference",
+                "net_pnl": float((prices[-1] - 100) * 10),
+                "created_orders": 1,
+                "filled_orders": 1,
+                "selection_status": "COMPLETE",
+                "account_path_status": "COMPLETE",
+                "account_stop_reason": None,
+                "account_stop_ns": None,
+            },
+            dates[-1].value,
+            prices[-1],
+        )
+
+    ledger = write_portfolio_ledger_artifact(
+        tmp_path / "ledger",
+        capital=capital,
+        metadata={
+            "window": {"start": dates[0].isoformat(), "end": dates[-1].isoformat()},
+            "sample_role": "test",
+            "execution_mode": "continuous",
+            "execution_style": "taker",
+            "execution": {"position_size": 10.0, "taker_fee_bps": 0.0},
+        },
+        produce=produce,
+    )
+    reference = reference_input(
+        tmp_path / "market.parquet", prices, dates=dates, clock="utc", currency="USDT"
+    )
+    config = {
+        "ledger": str(ledger),
+        "output": str(tmp_path / "initial"),
+        "analyses": ["benchmark_comparison"],
+        "comparison_benchmarks": [reference],
+    }
+    initial = crypto_statistics(config)
+    reference = {
+        "reference_id": "actual-persisted-strategy",
+        "input": {
+            "path": str(initial / "portfolio_benchmark_intervals.parquet"),
+            "spec": {
+                "data_id": "actual_native_returns",
+                "frequency": "1d",
+                "grain": "asset_timestamp",
+                "primary_key": ["start_at", "candidate_id"],
+                "partition_columns": [],
+                "column_roles": {
+                    "start_at": "timestamp",
+                    "end_at": "context",
+                    "candidate_id": "key",
+                    "portfolio_return": "context",
+                },
+                "column_units": {"portfolio_return": "decimal"},
+            },
+            "row_filters": [["candidate_id", "==", "synthetic"]],
+        },
+        "representation": "interval_simple_return",
+        "start_column": "start_at",
+        "end_column": "end_at",
+        "value_column": "portfolio_return",
+        "valuation_currency": "USDT",
+        "timestamp_basis": "utc",
+        "return_basis": "strategy_net",
+        "cost_basis": "execution_costs",
+    }
+    artifact = read_statistics_artifact(
+        crypto_statistics(
+            {
+                **config,
+                "output": str(tmp_path / "self-reference"),
+                "analyses": ["market_exposure"],
+                "comparison_benchmarks": [reference],
+                "market_exposure": {
+                    "hac_lag": 1,
+                    "confidence": 0.95,
+                    "minimum_observations": 60,
+                },
+            }
+        )
+    )
+    with artifact.table("portfolio_market_exposure.parquet") as rows:
+        estimates = rows.set_index("coefficient_id").loc[
+            ["market_return_intercept", "beta"]
+        ]
+        np.testing.assert_allclose(estimates.value, [0, 1], rtol=1e-13, atol=0)
+        assert estimates.status.eq("DEFINED").all()
+        assert estimates.inference_status.eq("UNDEFINED").all()
+        assert estimates.inference_reason.eq("zero_residual_variance").all()
+        assert estimates.defined_hypothesis_count.eq(0).all()
+        assert estimates.planned_hypothesis_count.eq(2).all()
+        assert estimates.standard_error.eq(0).all()
+        assert (
+            estimates[["t_statistic", "p_value", "fdr_adjusted_p_value"]]
+            .isna()
+            .all()
+            .all()
+        )

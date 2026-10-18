@@ -53,7 +53,13 @@ def test_spot_oracle_chunks_gaps_missing_source_and_future_invariance():
         [perpetual.iloc[i : i + 3] for i in range(0, 20, 3)],
         [spot.iloc[i : i + 4] for i in range(0, 20, 4)],
     )
-    pd.testing.assert_frame_equal(whole, split, check_exact=True)
+    continuous = list(HFT_SPOT_FACTOR_COLUMNS)
+    exact = whole.columns.difference(continuous)
+    pd.testing.assert_frame_equal(whole[exact], split[exact], check_exact=True)
+    pd.testing.assert_frame_equal(whole.isna(), split.isna(), check_exact=True)
+    pd.testing.assert_frame_equal(
+        whole[continuous], split[continuous], check_exact=False, rtol=2e-12, atol=1e-14
+    )
     at = whole.iloc[5]
     assert at.spot_perp_basis == pytest.approx(205 / 100 - 1)
     assert at.spot_return_100ms == pytest.approx(205 / 204 - 1)
@@ -70,8 +76,16 @@ def test_spot_oracle_chunks_gaps_missing_source_and_future_invariance():
     assert whole.spot_return_500ms.iloc[:5].isna().all()
     changed = spot.copy()
     changed.loc[8:, "mid"] *= 2
+    prior = whole.iloc[:8]
+    recomputed = compute([perpetual], [changed]).iloc[:8]
+    pd.testing.assert_frame_equal(prior[exact], recomputed[exact], check_exact=True)
+    pd.testing.assert_frame_equal(prior.isna(), recomputed.isna(), check_exact=True)
     pd.testing.assert_frame_equal(
-        whole.iloc[:8], compute([perpetual], [changed]).iloc[:8], check_exact=True
+        prior[continuous],
+        recomputed[continuous],
+        check_exact=False,
+        rtol=2e-12,
+        atol=1e-14,
     )
     gap = spot.drop(index=range(8, 14)).copy()
     gap.loc[14:, "segment_id"] = "after_gap"

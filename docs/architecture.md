@@ -339,6 +339,9 @@ trading_day_open/close 的时间列保存午夜会话日期标签，名称说明
 市场回归仅在完整合格配对日轴上计算系数与推断，缺口时保留原因及计数，不把有缺口的日期压紧后套 HAC。
 A 股通过现有 `inputs.calendar` 明确提供交易会话，每个收益区间必须连接相邻会话；仅账本端点相接不能证明日频，周末与节假日按该日历处理。未提供日历或跨过交易会话时，保留区间、财富和环境描述，日年化及相关推断标记 `incomplete_daily_axis`。
 市场暴露的 `status/reason` 描述点估计，`inference_status/inference_reason` 单独描述系数推断；已识别零截距与零 beta 不因 t/p 未定义而抹去。有限标准误与置信区间按实际计算保留，未定义 t/p 不进入有效 BY 假设计数；相关系数及 R² 的推断为 `NOT_APPLICABLE`。
+中心化、按列缩放和系数数值零解析与 Fama–MacBeth 共用数学实现；HAC 与 White/日期聚类推断保持各自语义。
+HAC 完整协方差矩阵还原至原收益坐标（包含截距与斜率交叉项）；操作数尺度内的精确仿射拟合保留点估计、零 SE 和退化区间，
+t/p 为 UNDEFINED，原因 `zero_residual_variance`，不以全局绝对阈值删除可解析的小系数或噪声。
 回归一次以本次候选、参考、episode、fold 的截距与 beta 为 BY 校正家族，保存计划/有效假设数。
 A 股比较按 252 日年化；Crypto 比较默认 365 日、至少 2 个完整 UTC 日，可由现有 statistics 字段覆盖并保存实际参数。
 未提供无风险收益时截距叫 `market_return_intercept`；请求无风险序列但缺失时不能退回零利率，constant_cash 不能冒充无风险输入。

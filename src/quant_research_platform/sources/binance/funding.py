@@ -366,26 +366,20 @@ def read_funding_observations(funding_roots, *, symbol):
         ) as rows:
             for item in rows:
                 if type(item) is FundingEvent:
-                    if events is not None:
-                        events.append(item)
+                    events.append(item)
                 else:
                     try:
                         yield item
                     except GeneratorExit:
                         return
 
-    def forecasts(event_groups=None):
+    def forecasts(event_groups):
         # Settlement intervals stay disjoint; their prior PIT observations may
         # overlap. Merge those ordered streams without discarding older knowledge.
         with ExitStack() as readers:
             streams = [
                 readers.enter_context(
-                    closing_iterator(
-                        source_forecasts(
-                            source,
-                            None if event_groups is None else event_groups[index],
-                        )
-                    )
+                    closing_iterator(source_forecasts(source, event_groups[index]))
                 )
                 for index, source in enumerate(sources)
             ]
@@ -406,11 +400,12 @@ def read_funding_observations(funding_roots, *, symbol):
 
     event_groups = [[] for _ in sources]
     with closing_iterator(forecasts(event_groups)) as rows:
-        for _item in rows:
-            pass
+        decoded_forecasts = tuple(rows)
     events = tuple(item for group in event_groups for item in group)
 
-    with closing_iterator(forecasts()) as source:
+    # The complete scan verifies interleaved settlements and forecast conflicts.
+    # Reuse those immutable observations rather than decoding the CSV again.
+    with closing_iterator(item for item in decoded_forecasts) as source:
         qualification = []
         for _root, _expected, manifest, *_rest in sources:
             metadata = manifest["metadata"]

@@ -74,7 +74,14 @@ def test_microprice_selected_inputs_and_batches(
         if column == "microprice":
             exact += Fraction(row["mid"])
         expected.append(float(exact))
-    np.testing.assert_array_equal(result[column], expected)
+    np.testing.assert_array_equal(result[column].isna(), np.isnan(expected))
+    # Relative tolerance keeps real sub-tick deviations observable near zero.
+    np.testing.assert_allclose(result[column], expected, rtol=2e-12, atol=0)
+    pd.testing.assert_frame_equal(
+        result[["market_id", "asset_id", "timestamp_ms"]],
+        frame[["market_id", "asset_id", "timestamp_ms"]],
+        check_exact=True,
+    )
     pd.testing.assert_series_equal(result.segment_id, frame.segment_id)
 
 

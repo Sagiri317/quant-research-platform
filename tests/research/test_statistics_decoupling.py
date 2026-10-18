@@ -180,6 +180,13 @@ def test_evaluation_science_ignores_unconsumed_transform_and_keeps_borrowed(tmp_
     )
 
 
+@pytest.fixture(scope="module")
+def model_analysis_candidates(tmp_path_factory):
+    from tests.research.test_prediction_runner_model_selection import candidates
+
+    return candidates(tmp_path_factory.mktemp("model-analysis"))[1]
+
+
 @pytest.mark.parametrize(
     "analysis,policy,extra,members,seed_mode",
     [
@@ -218,11 +225,9 @@ def test_evaluation_science_ignores_unconsumed_transform_and_keeps_borrowed(tmp_
     ],
 )
 def test_public_model_analysis_subsets_require_only_used_inputs(
-    tmp_path, analysis, policy, extra, members, seed_mode
+    tmp_path, analysis, policy, extra, members, seed_mode, model_analysis_candidates
 ):
-    from tests.research.test_prediction_runner_model_selection import candidates
-
-    _, scoring = candidates(tmp_path)
+    scoring = deepcopy(model_analysis_candidates)
     config = {
         "dataset": scoring["labels"],
         "input_spec": scoring["label_spec"],
@@ -231,7 +236,7 @@ def test_public_model_analysis_subsets_require_only_used_inputs(
         "label_cutoff": "2020-01-10",
         "family_ids": scoring["candidate_ids"],
         "evaluation": {"primary_label": "label"},
-        "statistics": policy,
+        "statistics": deepcopy(policy),
         "analyses": [analysis],
         **extra,
         "periods": [

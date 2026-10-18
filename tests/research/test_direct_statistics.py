@@ -17,7 +17,7 @@ from quant_research_platform.storage.errors import OutputAlreadyExistsError
 from tests.helpers.research_specs import make_demo_research_dataset_spec
 
 
-def _factor_tables(tmp_path):
+def _factor_input(tmp_path):
     dates = pd.bdate_range("2020-01-02", periods=12)
     frame = pd.DataFrame(
         [
@@ -62,13 +62,21 @@ def _factor_tables(tmp_path):
         },
     }
     window = TimeWindow(dates[0].date(), dates[-1].date())
-    tables = build_a_share_factor_statistics_tables(
-        dataset_path=source, dataset_spec=spec, config=config, time_window=window
-    )
     metadata = {
         "sample_role": "validation",
         "window": {"start": str(window.start), "end": str(window.end)},
     }
+    return spec, config, window, metadata, dates
+
+
+def _factor_tables(tmp_path):
+    spec, config, window, metadata, dates = _factor_input(tmp_path)
+    tables = build_a_share_factor_statistics_tables(
+        dataset_path=tmp_path / "input",
+        dataset_spec=spec,
+        config=config,
+        time_window=window,
+    )
     return tables, metadata, dates
 
 
@@ -147,7 +155,7 @@ def test_public_factor_statistics_projects_custom_native_or_bare_input(
     from quant_research_platform.research.statistics_production import factor_statistics
     from quant_research_platform.storage.datasets import read_dataset
 
-    _, metadata, _ = _factor_tables(tmp_path)
+    _, _, _, metadata, _ = _factor_input(tmp_path)
     frame = read_dataset(tmp_path / "input").rename(
         columns={
             "forward_return_20d": "custom_return",
@@ -321,7 +329,7 @@ def test_failed_family_keeps_planned_inference_members_without_fake_prediction(
         statistics_config,
     )
 
-    _, metadata, dates = _factor_tables(tmp_path)
+    _, _, _, metadata, dates = _factor_input(tmp_path)
     spec = make_demo_research_dataset_spec(
         data_id="direct_factor",
         factor_columns=("factor",),
@@ -404,7 +412,7 @@ def test_factor_statistics_complete_batches_preserve_dates_and_masks(
     from quant_research_platform.research import statistics_production as production
     from quant_research_platform.storage.datasets import read_dataset
 
-    _, _, dates = _factor_tables(tmp_path)
+    _, _, _, _, dates = _factor_input(tmp_path)
     frame = read_dataset(tmp_path / "input").rename(columns={"factor": "feature_x"})
     times = pd.date_range("2020-01-02", periods=len(dates), freq="100ms")
     frame["timestamp"] = frame.timestamp.map(dict(zip(dates, times, strict=True)))
@@ -496,7 +504,7 @@ def test_factor_statistics_complete_batches_preserve_dates_and_masks(
 def test_factor_statistics_empty_selected_window_is_undefined(tmp_path):
     from quant_research_platform.research.statistics_production import factor_statistics
 
-    _factor_tables(tmp_path)
+    _factor_input(tmp_path)
     config = {
         "dataset": str(tmp_path / "input"),
         "output": str(tmp_path / "empty-window"),
@@ -559,7 +567,7 @@ def test_selected_statistics_consumes_saved_predictions_without_historical_x(
         statistics_config,
     )
 
-    _, _, dates = _factor_tables(tmp_path)
+    _, _, _, _, dates = _factor_input(tmp_path)
     session = open_dataset_session(tmp_path / "input")
     spec = make_demo_research_dataset_spec(
         data_id="direct_factor",

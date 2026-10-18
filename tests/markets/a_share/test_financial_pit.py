@@ -220,7 +220,7 @@ def test_choice_disclosure_owner_keeps_the_canonical_three_field_key() -> None:
     assert str(result.report_period.dtype) == "datetime64[ns]"
 
 
-def test_pit_exposes_beginning_quarter_and_prior_year_same_period() -> None:
+def test_pit_exposes_prior_fiscal_year_and_prior_year_same_period() -> None:
     report_periods = pd.to_datetime(
         [
             "2019-03-31",
@@ -256,8 +256,6 @@ def test_pit_exposes_beginning_quarter_and_prior_year_same_period() -> None:
 
     row = result.iloc[0]
     assert row["value"] == 60.0
-    assert row["beginning_report_period"] == pd.Timestamp("2019-06-30")
-    assert row["beginning_value"] == 20.0
     assert row["prior_year_report_period"] == pd.Timestamp("2019-06-30")
     assert row["prior_year_value"] == 20.0
     assert row["prior_fy_report_period"] == pd.Timestamp("2019-12-31")
@@ -334,9 +332,6 @@ def test_old_period_revisions_update_dependencies_without_current_rollback() -> 
     np.testing.assert_allclose(
         result.prior_year_value.to_numpy(dtype=float, na_value=np.nan),
         [np.nan, 50, 50, 50, np.nan, np.nan],
-    )
-    pd.testing.assert_series_equal(
-        result.beginning_value, result.prior_year_value, check_names=False
     )
     assert result.prior_year_report_period.iloc[1:].eq(pd.Timestamp("2019-06-30")).all()
     np.testing.assert_allclose(

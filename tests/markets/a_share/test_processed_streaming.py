@@ -1422,7 +1422,6 @@ def test_fundamental_adapter_reuses_prior_year_for_beginning_balances(
                 "metric_id": metric,
                 "value": 1e308,
                 "prior_year_value": prior,
-                "beginning_value": prior,
             }
             for asset in ("a", "b")
             for metric in ("total_assets", "parent_equity")
@@ -1734,18 +1733,14 @@ def test_native_lifecycle_history_does_not_join_relisting(
     ]
 
 
-def test_native_panel_persists_finite_turnover_at_share_count_boundaries(tmp_path):
+def test_native_panel_persists_turnover_in_share_and_currency_units(tmp_path):
     from fractions import Fraction
 
     cases = {
-        "overflowing-share-count": (1e308, 1e-308, 1e308),
-        "underflowing-share-count": (1e-308, 1e308, 1e-308),
-        "subnormal-rounding": (
-            3 * np.nextafter(0.0, 1.0),
-            2.0,
-            3 * np.nextafter(0.0, 1.0),
-        ),
-        "ordinary": (3.0, 2.0, 3.0),
+        "ordinary": (3e9, 20.0, 3e6),
+        "low-price": (5e8, 2.5, 1e6),
+        "high-price": (8e10, 800.0, 2e5),
+        "zero-volume": (3e9, 20.0, 0.0),
     }
     dates = pd.bdate_range("2020-01-06", periods=3).as_unit("ns")
     source = _synthetic_interim_frames(dates)

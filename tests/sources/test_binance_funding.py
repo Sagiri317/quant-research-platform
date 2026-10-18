@@ -397,3 +397,66 @@ def test_funding_merged_forecasts_reject_conflicting_facts_and_local_order(
     ):
         with read_funding_observations(tuple(roots), symbol="BTCUSDT"):
             pytest.fail("conflicting or out-of-order observations cannot be accepted")
+
+
+@pytest.mark.parametrize("mode", ("complete", "early", "untouched", "primary"))
+def test_interleaved_declared_archive_decodes_once_and_closes(
+    tmp_path, monkeypatch, mode
+):
+    import quant_research_platform.storage.raw_snapshots as snapshots
+    from quant_research_platform.contracts.portfolios import (
+        FundingEvent,
+        FundingForecast,
+    )
+
+    _write(
+        tmp_path / "raw",
+        rows=(
+            ("forecast", 0, 100, None, None, [[80, -1.0]]),
+            ("settlement", 20, None, None, 100.0, None),
+            ("forecast", 30, 100, None, None, [[80, None]]),
+            ("settlement", 80, None, 0.01, 200.0, None),
+            ("forecast", 60, 100, None, None, [[80, -2.0]]),
+        ),
+    )
+    opened = []
+    original_open = snapshots.open_filesystem_file
+
+    def measured_open(path, *args, **kwargs):
+        handle = original_open(path, *args, **kwargs)
+        opened.append(handle)
+        return handle
+
+    monkeypatch.setattr(snapshots, "open_filesystem_file", measured_open)
+    primary = RuntimeError("consumer primary")
+    streams = []
+
+    def consume():
+        with read_funding_observations(
+            (tmp_path / "funding/BTCUSDT",), symbol="BTCUSDT"
+        ) as source:
+            streams.append(source.forecasts)
+            assert source.events == (
+                FundingEvent(20, None, 100.0),
+                FundingEvent(80, 0.01, 200.0),
+            )
+            assert len(opened) == 1 and opened[0].closed
+            if mode == "complete":
+                assert tuple(source.forecasts) == (
+                    FundingForecast(0, 100, ((80, -1.0),)),
+                    FundingForecast(30, 100, ((80, None),)),
+                    FundingForecast(60, 100, ((80, -2.0),)),
+                )
+            elif mode != "untouched":
+                assert next(source.forecasts) == FundingForecast(0, 100, ((80, -1.0),))
+            if mode == "primary":
+                raise primary
+
+    if mode == "primary":
+        with pytest.raises(RuntimeError) as raised:
+            consume()
+        assert raised.value is primary
+    else:
+        consume()
+    assert len(opened) == 1 and opened[0].closed
+    assert list(streams[0]) == []

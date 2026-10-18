@@ -425,15 +425,33 @@ class RecorderRun:
             ]
 
         def owner_records(files):
-            for item in files:
-                with closing_iterator(
-                    _iter_raw_file(
-                        self.root, item, manifest=self.manifest, end_ns=end_ns
+            # UTC rollback can interleave hourly files from the same stream.
+            # Disjoint ranges still close before the next group is opened.
+            for group in _overlapping_capture_groups(files):
+                with ExitStack() as stack:
+                    streams = [
+                        stack.enter_context(
+                            closing_iterator(
+                                _iter_raw_file(
+                                    self.root,
+                                    item,
+                                    manifest=self.manifest,
+                                    end_ns=end_ns,
+                                )
+                            )
+                        )
+                        for item in group
+                    ]
+                    records = stack.enter_context(
+                        closing_iterator(
+                            heapq.merge(
+                                *streams, key=lambda value: value["capture_seq"]
+                            )
+                        )
                     )
-                ) as records:
-                    for _yield_value in records:
+                    for record in records:
                         try:
-                            yield _yield_value
+                            yield record
                         except GeneratorExit:
                             return
 
@@ -808,17 +826,12 @@ def _overlapping_capture_groups(
     ordered = sorted(files, key=lambda item: item["capture_seq_min"])
     group: list[dict[str, Any]] = []
     group_max = -1
-    owner_ends: dict[tuple[str, str, str, str], int] = {}
     for item in ordered:
         start = item["capture_seq_min"]
-        owner = tuple(item[key] for key in _FILE_STREAM_IDENTITY_KEYS)
         if group and start > group_max:
             yield group
             group = []
             group_max = -1
-        if start <= owner_ends.get(owner, -1):
-            raise ValueError("binance_replay_file_capture_ranges_overlap")
-        owner_ends[owner] = item["capture_seq_max"]
         group.append(item)
         group_max = max(group_max, item["capture_seq_max"])
     if group:

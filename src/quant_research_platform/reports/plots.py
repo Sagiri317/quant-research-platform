@@ -156,11 +156,22 @@ def _states(axis, rows, *, status="status", reason="reason"):
         _note(axis, "\n".join(messages))
 
 
-def _time_axis(axis, timezone):
+def _x_domain(axis, coordinates):
+    # Missing y values must not erase known x coordinates or invent y data.
+    if len(coordinates):
+        axis.xaxis.update_units(coordinates)
+        axis.update_datalim(
+            [(value, 0) for value in axis.convert_xunits(coordinates)], updatey=False
+        )
+        axis.autoscale_view(scaley=False)
+
+
+def _time_axis(axis, timezone, times):
     from matplotlib.dates import AutoDateLocator, ConciseDateFormatter
 
     if not timezone:
         raise ValueError("plot_timezone_required")
+    _x_domain(axis, times)
     # Matplotlib carries the timezone of aware coordinates in the axis units.
     # Naive source clocks use UTC numeric coordinates without shifting labels.
     display_timezone = axis.xaxis.get_units() or "UTC"
@@ -396,7 +407,7 @@ def plot_portfolio_curve(curve, *, sample_role, timezone):
                     )
             if indices:
                 axis.legend(fontsize=8, loc="lower left")
-            _time_axis(axis, timezone)
+            _time_axis(axis, timezone, times)
             if "window" in part:
                 from quant_research_platform.contracts.time import (
                     TimeWindow,
@@ -548,9 +559,8 @@ def plot_returns(rows, *, source_reference, sample_role, timezone):
         )
         values = [_value(row, "net_return", status=status) for row in items]
         displayed, scale = _scale(values)
-        timeline.scatter(
-            _times([row["end_at"] for row in items], timezone), displayed, s=15
-        )
+        times = _times([row["end_at"] for row in items], timezone)
+        timeline.scatter(times, displayed, s=15)
         timeline.set_title(" | ".join(key), fontsize=9)
         timeline.set_ylabel(f"净收益率（%{scale}）")
         from matplotlib.ticker import PercentFormatter
@@ -558,7 +568,7 @@ def plot_returns(rows, *, source_reference, sample_role, timezone):
         timeline.yaxis.set_major_formatter(PercentFormatter(1))
         histogram.xaxis.set_major_formatter(PercentFormatter(1))
         _states(timeline, items, status=status, reason=reason)
-        _time_axis(timeline, timezone)
+        _time_axis(timeline, timezone, times)
         defined = [value for value in displayed if math.isfinite(value)]
         bins = 1
         if defined and min(defined) < max(defined):
@@ -678,8 +688,9 @@ def plot_factor_ic(rows, *, source_reference, sample_role, timezone, summary=Fal
                         fontsize=8,
                     )
             else:
+                times = _times([row["timestamp"] for row in items], timezone)
                 axis.plot(
-                    _times([row["timestamp"] for row in items], timezone),
+                    times,
                     values,
                     marker=".",
                     markersize=3,
@@ -695,7 +706,7 @@ def plot_factor_ic(rows, *, source_reference, sample_role, timezone, summary=Fal
                 )
                 if reasons:
                     _note(axis, "UNDEFINED: " + "; ".join(reasons))
-                _time_axis(axis, timezone)
+                _time_axis(axis, timezone, times)
             label = f"{'平均 ' if summary else ''}"
             label += f"{'IC' if metric == 'ic' else 'Rank IC'}（相关系数）"
             if summary:
@@ -731,11 +742,8 @@ def plot_portfolio_activity(rows, *, source_reference, sample_role, timezone):
                     for row in items
                 ]
             )
-            axis.scatter(
-                _times([row["entry_at"] for row in items], timezone),
-                displayed,
-                s=15,
-            )
+            times = _times([row["entry_at"] for row in items], timezone)
+            axis.scatter(times, displayed, s=15)
             axis.set_title(" | ".join(key), fontsize=9)
             axis.set_ylabel(
                 f"成本拖累（基点 bp{scale}）"
@@ -755,7 +763,7 @@ def plot_portfolio_activity(rows, *, source_reference, sample_role, timezone):
             unavailable = sum(pd.isna(row.get(metric)) for row in items)
             if unavailable:
                 _note(axis, f"UNDEFINED：{metric} 缺失值 {unavailable} 个")
-            _time_axis(axis, timezone)
+            _time_axis(axis, timezone, times)
     return figure, axes
 
 
@@ -827,17 +835,13 @@ def plot_series(
                 messages.append(f"{column} 缺失 {missing} 个")
         if messages:
             _note(axis, "UNDEFINED：" + "；".join(messages) + "，不连接缺口")
-        if not any(math.isfinite(value) for value in displayed):
-            axis.update_datalim(
-                [(value, 0) for value in axis.convert_xunits(x)], updatey=False
-            )
-            axis.autoscale_view(scaley=False)
         axis.set_ylabel(units + scale)
         if categorical:
+            _x_domain(axis, x)
             axis.set_xlabel(x_column)
             axis.tick_params(axis="x", labelrotation=45)
         else:
-            _time_axis(axis, timezone)
+            _time_axis(axis, timezone, x)
         if len(value_columns) > 1:
             axis.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0))
         else:

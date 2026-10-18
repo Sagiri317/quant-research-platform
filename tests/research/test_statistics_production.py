@@ -32,6 +32,7 @@ from tests.helpers.research_configuration import (
 from tests.helpers.research_specs import make_demo_research_dataset_spec
 from tests.helpers.statistics_artifacts import (
     model_statistics_inputs,
+    publish_statistics_pair,
     statistics_config,
     statistics_metadata,
 )
@@ -171,26 +172,11 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
     )
     global_tables = {name: table.copy() for name, table in statistics_tables.items()}
     assert global_tables["model_group_comparison"].empty
-    factor_root = write_statistics_artifact(
-        (layout.project_root / "pv_all_global_statistics").with_name(
-            (layout.project_root / "pv_all_global_statistics").name + "_factor"
-        ),
-        metadata=factor_metadata,
-        tables={
-            key: value
-            for key, value in statistics_tables.items()
-            if key + ".parquet" in STATISTICS_TABLE_GROUPS["factor"]
-        },
-        table_group="factor",
-    )
-    root = write_statistics_artifact(
+    factor_root, root = publish_statistics_pair(
         layout.project_root / "pv_all_global_statistics",
-        metadata=metadata,
-        tables={
-            key: value
-            for key, value in statistics_tables.items()
-            if key + ".parquet" in STATISTICS_TABLE_GROUPS["research"]
-        },
+        statistics_tables,
+        research_metadata=metadata,
+        factor_metadata=factor_metadata,
     )
     artifact = read_statistics_artifact(root)
     factor_artifact = read_statistics_artifact(factor_root)
@@ -274,26 +260,11 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
             time_window=TimeWindow(dates[0], cutoff),
         )
     )
-    factor_paired_root = write_statistics_artifact(
-        (layout.project_root / "pv_all_quarterly_statistics").with_name(
-            (layout.project_root / "pv_all_quarterly_statistics").name + "_factor"
-        ),
-        metadata=factor_paired_metadata,
-        tables={
-            key: value
-            for key, value in paired_tables.items()
-            if key + ".parquet" in STATISTICS_TABLE_GROUPS["factor"]
-        },
-        table_group="factor",
-    )
-    paired_root = write_statistics_artifact(
+    factor_paired_root, paired_root = publish_statistics_pair(
         layout.project_root / "pv_all_quarterly_statistics",
-        metadata=paired_metadata,
-        tables={
-            key: value
-            for key, value in paired_tables.items()
-            if key + ".parquet" in STATISTICS_TABLE_GROUPS["research"]
-        },
+        paired_tables,
+        research_metadata=paired_metadata,
+        factor_metadata=factor_paired_metadata,
     )
     paired_artifact = read_statistics_artifact(paired_root)
     read_statistics_artifact(factor_paired_root)
@@ -417,26 +388,11 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
                 .reason.eq("training_weighting_robustness_excluded")
                 .all()
             )
-        factor_robust_root = write_statistics_artifact(
-            (layout.project_root / "pv_all_robust_statistics").with_name(
-                (layout.project_root / "pv_all_robust_statistics").name + "_factor"
-            ),
-            metadata=factor_paired_metadata,
-            tables={
-                key: value
-                for key, value in robustness_tables.items()
-                if key + ".parquet" in STATISTICS_TABLE_GROUPS["factor"]
-            },
-            table_group="factor",
-        )
-        robust_root = write_statistics_artifact(
+        factor_robust_root, robust_root = publish_statistics_pair(
             layout.project_root / "pv_all_robust_statistics",
-            metadata=paired_metadata,
-            tables={
-                key: value
-                for key, value in robustness_tables.items()
-                if key + ".parquet" in STATISTICS_TABLE_GROUPS["research"]
-            },
+            robustness_tables,
+            research_metadata=paired_metadata,
+            factor_metadata=factor_paired_metadata,
         )
         robust_artifact = read_statistics_artifact(robust_root)
         factor_robust_artifact = read_statistics_artifact(factor_robust_root)
@@ -715,24 +671,11 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         "window": {"start": "2023-01-02", "end": str(cutoff.date())},
     }
     factor_metadata = metadata
-    factor_artifact_root = write_statistics_artifact(
-        (tmp_path / "statistics").with_name((tmp_path / "statistics").name + "_factor"),
-        metadata=factor_metadata,
-        tables={
-            key: value
-            for key, value in outputs[0].items()
-            if key + ".parquet" in STATISTICS_TABLE_GROUPS["factor"]
-        },
-        table_group="factor",
-    )
-    artifact_root = write_statistics_artifact(
+    factor_artifact_root, artifact_root = publish_statistics_pair(
         tmp_path / "statistics",
-        metadata=metadata,
-        tables={
-            key: value
-            for key, value in outputs[0].items()
-            if key + ".parquet" in STATISTICS_TABLE_GROUPS["research"]
-        },
+        outputs[0],
+        research_metadata=metadata,
+        factor_metadata=factor_metadata,
     )
     artifact = read_statistics_artifact(artifact_root)
     factor_artifact = read_statistics_artifact(factor_artifact_root)
@@ -840,26 +783,11 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
                 atol=1e-14,
             )
             assert se != pytest.approx(np.std(values, ddof=0) / np.sqrt(20))
-    factor_zero_root = write_statistics_artifact(
-        (tmp_path / "statistics_zero_residual").with_name(
-            (tmp_path / "statistics_zero_residual").name + "_factor"
-        ),
-        metadata=factor_metadata,
-        tables={
-            key: value
-            for key, value in outputs[2].items()
-            if key + ".parquet" in STATISTICS_TABLE_GROUPS["factor"]
-        },
-        table_group="factor",
-    )
-    zero_root = write_statistics_artifact(
+    factor_zero_root, zero_root = publish_statistics_pair(
         tmp_path / "statistics_zero_residual",
-        metadata=metadata,
-        tables={
-            key: value
-            for key, value in outputs[2].items()
-            if key + ".parquet" in STATISTICS_TABLE_GROUPS["research"]
-        },
+        outputs[2],
+        research_metadata=metadata,
+        factor_metadata=factor_metadata,
     )
     zero_artifact = read_statistics_artifact(zero_root)
     factor_zero_artifact = read_statistics_artifact(factor_zero_root)
@@ -890,26 +818,11 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
     empty_period_tables["fama_macbeth_periods"] = empty_period_tables[
         "fama_macbeth_periods"
     ].iloc[:0]
-    factor_empty_root = write_statistics_artifact(
-        (tmp_path / "statistics_empty_periods").with_name(
-            (tmp_path / "statistics_empty_periods").name + "_factor"
-        ),
-        metadata=factor_metadata,
-        tables={
-            key: value
-            for key, value in empty_period_tables.items()
-            if key + ".parquet" in STATISTICS_TABLE_GROUPS["factor"]
-        },
-        table_group="factor",
-    )
-    empty_root = write_statistics_artifact(
+    factor_empty_root, empty_root = publish_statistics_pair(
         tmp_path / "statistics_empty_periods",
-        metadata=metadata,
-        tables={
-            key: value
-            for key, value in empty_period_tables.items()
-            if key + ".parquet" in STATISTICS_TABLE_GROUPS["research"]
-        },
+        empty_period_tables,
+        research_metadata=metadata,
+        factor_metadata=factor_metadata,
     )
     read_statistics_artifact(empty_root)
     factor_empty_artifact = read_statistics_artifact(factor_empty_root)
@@ -1223,26 +1136,11 @@ def test_model_family_names_preserve_factor_statistics_and_native_names(
             )
         )
         members = tuple(statistics_tables)
-        factor_root = write_statistics_artifact(
-            (tmp_path / f"statistics_{position}").with_name(
-                (tmp_path / f"statistics_{position}").name + "_factor"
-            ),
-            metadata=factor_metadata,
-            tables={
-                key: value
-                for key, value in statistics_tables.items()
-                if key + ".parquet" in STATISTICS_TABLE_GROUPS["factor"]
-            },
-            table_group="factor",
-        )
-        root = write_statistics_artifact(
+        factor_root, root = publish_statistics_pair(
             tmp_path / f"statistics_{position}",
-            metadata=metadata,
-            tables={
-                key: value
-                for key, value in statistics_tables.items()
-                if key + ".parquet" in STATISTICS_TABLE_GROUPS["research"]
-            },
+            statistics_tables,
+            research_metadata=metadata,
+            factor_metadata=factor_metadata,
         )
         artifact = read_statistics_artifact(root)
         factor_artifact = read_statistics_artifact(factor_root)
@@ -1305,26 +1203,11 @@ def test_model_family_names_preserve_factor_statistics_and_native_names(
             "model_losses": quarterly_losses,
             "model_group_comparison": paired,
         }
-        factor_paired_root = write_statistics_artifact(
-            (tmp_path / f"paired_statistics_{position}").with_name(
-                (tmp_path / f"paired_statistics_{position}").name + "_factor"
-            ),
-            metadata=factor_metadata,
-            tables={
-                key: value
-                for key, value in paired_tables.items()
-                if key + ".parquet" in STATISTICS_TABLE_GROUPS["factor"]
-            },
-            table_group="factor",
-        )
-        paired_root = write_statistics_artifact(
+        factor_paired_root, paired_root = publish_statistics_pair(
             tmp_path / f"paired_statistics_{position}",
-            metadata=metadata,
-            tables={
-                key: value
-                for key, value in paired_tables.items()
-                if key + ".parquet" in STATISTICS_TABLE_GROUPS["research"]
-            },
+            paired_tables,
+            research_metadata=metadata,
+            factor_metadata=factor_metadata,
         )
         paired_artifact = read_statistics_artifact(paired_root)
         read_statistics_artifact(factor_paired_root)

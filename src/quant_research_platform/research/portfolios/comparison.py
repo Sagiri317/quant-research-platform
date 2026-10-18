@@ -9,6 +9,7 @@ import pandas as pd
 
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.statistics import (
+    _hac_linear_regression,
     _return_sharpes,
     fdr_adjust,
     return_standard_deviation,
@@ -752,9 +753,6 @@ def comparison_tables(
 
 def _exposure(identity, axis, rp, rb, rf, daily, policy):
     """HAC is fitted on the intact paired axis, never on NaN-compressed dates."""
-    from statsmodels.regression.linear_model import OLS
-    from statsmodels.tools.tools import add_constant
-
     x, y = (rb, rp) if rf is None else (rb - rf, rp - rf)
     finite = np.isfinite(x) & np.isfinite(y)
     planned, count = len(x), int(finite.sum())
@@ -777,39 +775,13 @@ def _exposure(identity, axis, rp, rb, rf, daily, policy):
         "r_squared",
     )
     if not reason:
-        x_scale = np.max(np.abs(x))
-        y_scale = np.max(np.abs(y)) or 1.0
-        scaled_x, scaled_y = x / x_scale, y / y_scale
-        design = add_constant(scaled_x, has_constant="add")
         try:
-            if np.linalg.matrix_rank(design) < 2:
-                reason = "regression_not_identified"
-            else:
-                fit = OLS(scaled_y, design).fit(
-                    cov_type="HAC",
-                    cov_kwds={"maxlags": policy["hac_lag"], "use_correction": True},
-                )
-                intervals = fit.conf_int(alpha=1 - policy["confidence"])
-                with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-                    for index, name in enumerate(names[:2]):
-                        scale = y_scale if index == 0 else y_scale / x_scale
-                        values[name] = (
-                            fit.params[index] * scale,
-                            fit.bse[index] * scale,
-                            fit.tvalues[index],
-                            fit.pvalues[index],
-                            *(intervals[index] * scale),
-                        )
-                    values["correlation"] = (
-                        np.corrcoef(scaled_x, scaled_y)[0, 1]
-                        if np.ptp(scaled_y)
-                        else np.nan,
-                        *([np.nan] * 5),
-                    )
-                    values["r_squared"] = (
-                        fit.rsquared if np.ptp(scaled_y) else np.nan,
-                        *([np.nan] * 5),
-                    )
+            estimates, correlation, r_squared = _hac_linear_regression(
+                x, y, max_lags=policy["hac_lag"], confidence=policy["confidence"]
+            )
+            values.update(zip(names[:2], estimates, strict=True))
+            values["correlation"] = (correlation, *([np.nan] * 5))
+            values["r_squared"] = (r_squared, *([np.nan] * 5))
         except np.linalg.LinAlgError:
             reason = "regression_not_identified"
     result = []
@@ -864,7 +836,12 @@ def _exposure(identity, axis, rp, rb, rf, daily, policy):
                     if not hypothesis
                     else ""
                     if inference_defined
-                    else reason or "nonfinite_inference"
+                    else reason
+                    or (
+                        "zero_residual_variance"
+                        if measurements[1] == 0.0
+                        else "nonfinite_inference"
+                    )
                 ),
                 "start_at": axis.start_at.iloc[0],
                 "end_at": axis.end_at.iloc[-1],

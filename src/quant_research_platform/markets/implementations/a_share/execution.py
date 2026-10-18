@@ -108,11 +108,6 @@ class FeeSchedule:
             and _market_matches(rule.market, market)
             and rule.side == side
         )
-        by_code: dict[str, list[FeeRule]] = {}
-        for rule in applicable:
-            by_code.setdefault(rule.fee_code, []).append(rule)
-        if any(len(values) > 1 for values in by_code.values()):
-            raise ValueError("a_share_fee_schedule_ambiguous")
         return tuple(sorted(applicable, key=lambda rule: (rule.fee_code, rule.basis)))
 
 

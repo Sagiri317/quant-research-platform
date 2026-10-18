@@ -32,7 +32,10 @@ from tests.helpers.portfolio_ledger import write_test_sessions
 from tests.research.direct_model_test_support import fit_frame
 
 
-@pytest.mark.parametrize("intercept,noise", ((0.25, 0.0), (0.25, 0.001), (0.01, 0.0)))
+@pytest.mark.parametrize(
+    "intercept,noise",
+    ((0.25, 0.0), (0.25, 0.001), (0.01, 0.0), (0.01, 1e-10), (0.01, 1e-6)),
+)
 def test_rank_and_open_return_roundoff_survives_final_json_and_freeze(
     tmp_path, intercept, noise
 ):
@@ -121,16 +124,11 @@ def test_rank_and_open_return_roundoff_survives_final_json_and_freeze(
         as_of=pd.Timestamp("2023-12-31"),
         scheduled_intervals=intervals,
     )
-    actual = inputs.holding_return.to_numpy()
-    fitted = (
-        calibration.intercept
-        + calibration.slope * inputs.prediction_rank_score.to_numpy()
-    )
-    within_resolution = np.abs(actual - fitted) <= 8 * np.finfo(
-        np.float64
-    ).eps * np.maximum(np.abs(actual), np.abs(fitted))
-    numerical_zero = intercept == 0.25 and noise == 0.0
-    assert bool(within_resolution.all()) == numerical_zero
+    # The generating equation is affine exactly when no noise was injected.
+    # Do not reproduce the owner's floating error-bound formula as the oracle.
+    numerical_zero = noise == 0.0
+    assert calibration.slope == pytest.approx(0.2, abs=max(noise, 1e-14))
+    assert calibration.intercept == pytest.approx(intercept, abs=max(noise, 1e-14))
     assert calibration.status == "DEFINED"
     assert calibration.inference_status == (
         "UNDEFINED" if numerical_zero else "DEFINED"
@@ -192,3 +190,38 @@ def test_rank_and_open_return_roundoff_survives_final_json_and_freeze(
         Path(native_filesystem_path(root / "final_alpha_calibration.json")).read_bytes()
         == before
     )
+
+
+@pytest.mark.parametrize("seed", (2, 25, 76))
+def test_affine_calibration_operand_roundoff_is_independent_of_row_order(seed):
+    dates = pd.date_range("2023-07-07", periods=8, freq="7D")
+    inputs = pd.DataFrame(
+        [
+            {
+                "timestamp": timestamp,
+                "prediction_rank_score": rank,
+                # The price path has its own operation order and cancellation.
+                "holding_return": (1.0 + 0.01 + 0.2 * rank) - 1.0,
+            }
+            for offset, timestamp in enumerate(dates)
+            for rank in (np.arange(1, offset + 4) - (offset + 4) / 2) / (offset + 3)
+        ]
+    ).sample(frac=1.0, random_state=seed)
+    calibration = calibrate_expected_alpha(
+        inputs,
+        trading_sessions=pd.bdate_range("2023-07-01", "2023-12-31"),
+        as_of=pd.Timestamp("2023-12-31"),
+        scheduled_intervals=pd.DataFrame(
+            {
+                "timestamp": dates,
+                "entry_at": dates + pd.Timedelta(days=3),
+                "available_at": dates + pd.Timedelta(days=10),
+            }
+        ),
+    )
+    assert calibration.status == "DEFINED"
+    assert calibration.slope == pytest.approx(0.2, rel=1e-13)
+    assert calibration.intercept == pytest.approx(0.01, rel=1e-13)
+    assert calibration.slope_standard_error == 0.0
+    assert calibration.inference_status == "UNDEFINED"
+    assert calibration.slope_t_statistic is calibration.slope_pvalue is None

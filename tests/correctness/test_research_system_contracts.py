@@ -294,9 +294,6 @@ def test_prepared_training_rows_are_exact_and_cutoff_scoped():
         }
     )
 
-    def chunks(columns, **kwargs):
-        yield frame.loc[:, list(columns)]
-
     for algorithm in ("linear_regression", "ridge_regression"):
         model = ModelSpec(
             model_id=algorithm,

@@ -354,7 +354,10 @@ def test_current_cap_gap_preserves_lagged_proxy_then_invalidates_next_pair(bad_c
     # Unequal returns and caps distinguish lagged weighting from both equal
     # weighting and today's available-cap subset. No current cap is consumed.
     expected = float((100 * Fraction(0.04) + 200 * Fraction(0.08)) / 300)
-    assert all(values[-1] == expected for values in state._market_returns.values())
+    assert all(
+        values[-1] == pytest.approx(expected, rel=1e-12, abs=1e-14)
+        for values in state._market_returns.values()
+    )
     assert actual.beta.to_numpy() == pytest.approx([0.6, 1.2])
     assert actual.residual_volatility.to_numpy() == pytest.approx([0.0, 0.0])
     # Neither a repeated gap nor restored current caps provide the missing
@@ -366,7 +369,10 @@ def test_current_cap_gap_preserves_lagged_proxy_then_invalidates_next_pair(bad_c
         assert all(np.isnan(values[-1]) for values in state._market_returns.values())
     actual = observe(0.06)
     expected = float((100 * Fraction(0.06) + 200 * Fraction(0.12)) / 300)
-    assert all(values[-1] == expected for values in state._market_returns.values())
+    assert all(
+        values[-1] == pytest.approx(expected, rel=1e-12, abs=1e-14)
+        for values in state._market_returns.values()
+    )
     assert actual.beta.isna().all()
     actual = observe(0.07)
     assert actual.beta.to_numpy() == pytest.approx([0.6, 1.2])

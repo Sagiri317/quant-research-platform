@@ -441,7 +441,7 @@ def _query_pit_fundamentals(left, *, streams, right):
         result = left.iloc[:0].copy()
         for column in _PIT_EVENT_COLUMNS.difference({"asset_id"}):
             result[column] = right[column]
-        for prefix in ("beginning", "prior_year", "prior_fy"):
+        for prefix in ("prior_year", "prior_fy"):
             result[f"{prefix}_report_period"] = pd.Series(dtype="datetime64[ns]")
             result[f"{prefix}_value"] = pd.Series(dtype="float64")
         return result
@@ -512,8 +512,6 @@ def _query_pit_fundamentals(left, *, streams, right):
             values[dependency_positions < 0] = np.nan
             frame[f"{prefix}_report_period"] = dependency["report_period"].to_numpy()
             frame[f"{prefix}_value"] = values
-        frame.insert(8, "beginning_report_period", frame["prior_year_report_period"])
-        frame.insert(9, "beginning_value", frame["prior_year_value"])
         frames.append(frame)
     return (
         pd.concat(frames, ignore_index=True)

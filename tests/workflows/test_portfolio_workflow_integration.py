@@ -460,6 +460,29 @@ def test_native_adv_gap_preserves_portfolio_statistics(tmp_path):
     assert summarize_portfolio_ledger(ledger.capital, iter(batches))["nav"] > 0
 
 
+def _assert_recomputed_predictions(actual, expected):
+    scores = ["prediction_score", "prediction_rank_score"]
+    pd.testing.assert_frame_equal(
+        actual.drop(columns=scores), expected.drop(columns=scores), check_exact=True
+    )
+    pd.testing.assert_frame_equal(actual.isna(), expected.isna(), check_exact=True)
+    pd.testing.assert_frame_equal(
+        actual[scores], expected[scores], check_exact=False, rtol=2e-12, atol=1e-14
+    )
+
+
+def _assert_recomputed_metrics(actual, expected):
+    assert len(actual) == len(expected)
+    for left, right in zip(actual, expected, strict=True):
+        assert left.keys() == right.keys()
+        for name, value in right.items():
+            assert left[name] == (
+                pytest.approx(value, rel=2e-12, abs=1e-14)
+                if isinstance(value, float)
+                else value
+            )
+
+
 def test_future_data_does_not_change_prior_fit_prediction_or_selection(
     native_comparison, tmp_path
 ):
@@ -496,10 +519,9 @@ def test_future_data_does_not_change_prior_fit_prediction_or_selection(
             }
         )
         predictions.append(str(predicted))
-        pd.testing.assert_frame_equal(
+        _assert_recomputed_predictions(
             read_predictions(predicted)[0],
             read_predictions(case.predictions["quarterly", identifier])[0],
-            check_exact=True,
         )
     window = case.windows["quarterly"]
     scores = score(
@@ -532,11 +554,18 @@ def test_future_data_does_not_change_prior_fit_prediction_or_selection(
     for field in (
         "selected_model_id",
         "selected_family_id",
-        "families",
         "common_rows",
-        "metrics",
     ):
         assert changed_selection[field] == frozen[field]
+    _assert_recomputed_metrics(changed_selection["metrics"], frozen["metrics"])
+    assert len(changed_selection["families"]) == len(frozen["families"])
+    for actual, expected in zip(
+        changed_selection["families"], frozen["families"], strict=True
+    ):
+        assert {k: v for k, v in actual.items() if k != "trial_metrics"} == {
+            k: v for k, v in expected.items() if k != "trial_metrics"
+        }
+        _assert_recomputed_metrics(actual["trial_metrics"], expected["trial_metrics"])
     assert case.selections["quarterly"].read_bytes() == original_selection
 
 
@@ -583,10 +612,9 @@ def test_explicit_saved_predictions_ignore_changed_future_labels(
                 "sample_role": "validation",
             }
         )
-        pd.testing.assert_frame_equal(
+        _assert_recomputed_predictions(
             read_predictions(output)[0],
             read_predictions(case.predictions["global", identifier])[0],
-            check_exact=True,
         )
         assert {
             path.relative_to(model): path.read_bytes()

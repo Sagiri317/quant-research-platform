@@ -754,7 +754,20 @@ def calibrate_expected_alpha(
     fitted = intercept + slope * left
     residual = right - fitted
     epsilon = np.finfo(np.float64).eps
-    residual_resolution = 8 * epsilon * np.maximum(np.abs(right), np.abs(fitted))
+    # Include affine operands, not just their possibly cancelled final value.
+    # These are the same scaled coordinates used for the centered fit above.
+    residual_resolution = (
+        8
+        * epsilon
+        * (
+            np.abs(right)
+            + abs(right_offset)
+            + abs(right_mean)
+            + abs(intercept)
+            + np.abs(fitted)
+            + abs(slope) * (np.abs(left) + abs(left_offset) + abs(left_mean))
+        )
+    )
     resolved_zero = np.abs(residual) <= residual_resolution
     residual[resolved_zero] = 0.0
     residual_resolution[resolved_zero] = 0.0

@@ -1293,18 +1293,6 @@ def _apply_suspension_semantics(panel: pd.DataFrame) -> pd.DataFrame:
         volume = result.loc[positions, "volume"]
         free_shares = cap.div(close.where(close.gt(0.0)))
         turnover = volume.div(free_shares.where(free_shares.gt(0.0)))
-        unstable = (
-            cap.gt(0)
-            & close.gt(0)
-            & (~np.isfinite(free_shares) | free_shares.lt(np.finfo(float).tiny))
-        )
-        # Scale only the exceptional intermediate; keep ordinary row arithmetic.
-        if unstable.any():
-            vm, ve = np.frexp(volume.loc[unstable].to_numpy(dtype="float64"))
-            pm, pe = np.frexp(close.loc[unstable].to_numpy(dtype="float64"))
-            cm, ce = np.frexp(cap.loc[unstable].to_numpy(dtype="float64"))
-            with np.errstate(over="ignore", under="ignore", invalid="ignore"):
-                turnover.loc[unstable] = np.ldexp(vm * pm / cm, ve + pe - ce)
         result.loc[positions, "turnover"] = turnover.astype("float64")
         result.loc[positions, "turnover"] = result.loc[positions, "turnover"].where(
             ~suspended, 0.0

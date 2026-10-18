@@ -593,6 +593,83 @@ def cscv_pbo(
     )
 
 
+def _centered_linear_fit(values, y, *, weights=None):
+    """Fit affine coordinates once; inference owners keep their covariance policy."""
+    origins = values[0]
+    offsets = np.mean(values - origins, axis=0)
+    centered = values - origins - offsets
+    scales = np.max(np.abs(centered), axis=0)
+    x = add_constant(centered / np.where(scales > 0, scales, 1.0), has_constant="add")
+    if np.linalg.matrix_rank(x) != x.shape[1]:
+        raise np.linalg.LinAlgError("regression_not_identified")
+    target_origin = float(y[0])
+    target_offset = float(np.mean(y - target_origin))
+    target_centered = y - target_origin - target_offset
+    target_scale = float(np.max(np.abs(target_centered))) or 1.0
+    target = target_centered / target_scale
+    fit = (
+        OLS(target, x).fit(method="qr")
+        if weights is None
+        else WLS(target, x, weights=weights).fit(method="qr")
+    )
+    # Resolve numerical zero in the regression's own units, before temporal
+    # inference can treat floating-point cancellation as coefficient variation.
+    roundoff = 32 * np.finfo(float).eps
+    normalized_slopes = fit.params[1:].copy()
+    normalized_slopes[
+        np.abs(normalized_slopes) <= roundoff * np.max(np.abs(target))
+    ] = 0.0
+    slopes = normalized_slopes * target_scale / scales
+    intercept_terms = np.concatenate(
+        (
+            [target_origin, target_offset, float(fit.params[0]) * target_scale],
+            -(origins + offsets) * slopes,
+        )
+    )
+    intercept = float(np.sum(intercept_terms))
+    if abs(intercept) <= roundoff * np.sum(np.abs(intercept_terms)):
+        intercept = 0.0
+    transform = np.diag(np.r_[target_scale, target_scale / scales])
+    transform[0, 1:] = -(origins + offsets) * target_scale / scales
+    return fit, np.r_[intercept, slopes], transform, target_scale
+
+
+def _hac_linear_regression(x, y, *, max_lags, confidence):
+    """Return affine OLS estimates and HAC inference in original return units."""
+    fit, coefficients, transform, _ = _centered_linear_fit(x[:, None], y)
+    # Exact affine data have no residual variation to support t/p inference.
+    # Compare at the operand scale, before sample size shrinks a spurious SE.
+    fitted_terms = np.column_stack(
+        (np.full(len(y), coefficients[0]), x * coefficients[1])
+    )
+    resolution = (
+        32 * np.finfo(float).eps * (np.abs(y) + np.sum(np.abs(fitted_terms), axis=1))
+    )
+    exact = np.all(np.abs(y - fitted_terms.sum(axis=1)) <= resolution)
+    if exact:
+        standard_errors = np.zeros(2)
+    else:
+        robust = fit.get_robustcov_results(
+            cov_type="HAC", maxlags=max_lags, use_correction=True, use_t=False
+        )
+        covariance = transform @ robust.cov_params() @ transform.T
+        standard_errors = np.sqrt(np.diag(covariance))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t_values = np.divide(coefficients, standard_errors)
+    t_values[standard_errors == 0] = np.nan
+    p_values = 2 * norm.sf(np.abs(t_values))
+    critical = norm.ppf((1 + confidence) / 2)
+    intervals = coefficients[:, None] + standard_errors[:, None] * np.array(
+        [-critical, critical]
+    )
+    measurements = np.column_stack(
+        (coefficients, standard_errors, t_values, p_values, intervals)
+    )
+    correlation = np.corrcoef(x, y)[0, 1] if np.ptp(y) else np.nan
+    r_squared = fit.rsquared if np.ptp(y) else np.nan
+    return measurements, correlation, r_squared
+
+
 def fama_macbeth_period(
     frame: pd.DataFrame,
     *,
@@ -638,40 +715,18 @@ def fama_macbeth_period(
     ):
         raise ValueError("fama_macbeth_period_insufficient")
     values = numeric.loc[:, factor_columns].to_numpy(dtype="float64")
-    origins = values[0]
-    offsets = np.mean(values - origins, axis=0)
-    centered = values - origins - offsets
-    scales = np.max(np.abs(centered), axis=0)
-    x = add_constant(centered / np.where(scales > 0, scales, 1.0), has_constant="add")
-    if np.linalg.matrix_rank(x) != x.shape[1]:
-        raise ValueError("fama_macbeth_period_insufficient")
-    target_origin = float(y.iloc[0])
-    target_offset = float(np.mean(y - target_origin))
-    target_centered = y - target_origin - target_offset
-    target_scale = float(np.max(np.abs(target_centered))) or 1.0
-    target = (target_centered / target_scale).to_numpy()
-    fit = (
-        OLS(target, x).fit(method="qr")
-        if weight_column is None
-        else WLS(target, x, weights=numeric[weight_column]).fit(method="qr")
-    )
-    # Resolve numerical zero in the regression's own units, before temporal
-    # inference can treat floating-point cancellation as coefficient variation.
-    roundoff = 32 * np.finfo(float).eps
-    normalized_slopes = fit.params[1:].copy()
-    normalized_slopes[
-        np.abs(normalized_slopes) <= roundoff * np.max(np.abs(target))
-    ] = 0.0
-    slopes = normalized_slopes * target_scale / scales
-    intercept_terms = np.concatenate(
-        (
-            [target_origin, target_offset, float(fit.params[0]) * target_scale],
-            -(origins + offsets) * slopes,
+    try:
+        fit, parameters, _, target_scale = _centered_linear_fit(
+            values,
+            y.to_numpy(),
+            weights=None
+            if weight_column is None
+            else numeric[weight_column].to_numpy(),
         )
-    )
-    intercept = float(np.sum(intercept_terms))
-    if abs(intercept) <= roundoff * np.sum(np.abs(intercept_terms)):
-        intercept = 0.0
+    except np.linalg.LinAlgError as exc:
+        raise ValueError("fama_macbeth_period_insufficient") from exc
+    x = fit.model.exog
+    intercept, slopes = parameters[0], parameters[1:]
     coefficients = pd.Series([intercept, *slopes], index=("intercept", *factor_columns))
     if not np.isfinite(coefficients).all():
         raise ValueError("fama_macbeth_coefficients_unrepresentable")

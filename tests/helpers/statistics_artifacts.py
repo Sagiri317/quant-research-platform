@@ -178,3 +178,32 @@ def portfolio_statistics_config(sample_role="validation", *, configuration=None)
         primary_portfolio_id=configuration["primary_portfolio_id"],
     )
     return candidates, config
+
+
+def publish_statistics_pair(root, tables, *, research_metadata, factor_metadata):
+    """Publish distinct factor and research groups through their native writer."""
+    from quant_research_platform.artifacts.statistics import (
+        STATISTICS_TABLE_GROUPS,
+        write_statistics_artifact,
+    )
+
+    factor_root = write_statistics_artifact(
+        root.with_name(root.name + "_factor"),
+        metadata=factor_metadata,
+        tables={
+            k: v
+            for k, v in tables.items()
+            if k + ".parquet" in STATISTICS_TABLE_GROUPS["factor"]
+        },
+        table_group="factor",
+    )
+    research_root = write_statistics_artifact(
+        root,
+        metadata=research_metadata,
+        tables={
+            k: v
+            for k, v in tables.items()
+            if k + ".parquet" in STATISTICS_TABLE_GROUPS["research"]
+        },
+    )
+    return factor_root, research_root

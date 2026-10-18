@@ -1650,8 +1650,10 @@ slope <= 0 -> benchmark-only logic  # 非正斜率采用仅基准逻辑
 SE/t/p/CI 使用按再平衡日期聚类的稳健推断，置信水平为 95%；
 加权 R2 和覆盖度作为诊断。满秩时斜率可用性与单项诊断定义性独立：
 常量收益的 R2 为 UNDEFINED；零 SE 的 t/p/CI 为 UNDEFINED，SE 保留 0。
-每行拟合残差绝对值不超过 `8 × float64 epsilon × max(abs(本行实际收益), abs(本行拟合收益))` 时，
-按数值精度内的零残差处理；不使用全样本尺度或 SE 阈值，斜率与截距保持等日期权重 OLS。
+每行残差按实际仿射运算的操作数尺度判定数值零；在缩放坐标中，误差界为
+`8 × epsilon × (abs(y) + abs(y_origin) + abs(y_offset_mean) + abs(intercept) + abs(fitted) + abs(slope) × (abs(x) + abs(x_origin) + abs(x_offset_mean)))`。
+此界包含中心化和截距还原时会互相抵消的操作数，不能仅使用最终拟合值；
+不使用全样本最大收益尺度或 SE 阈值，斜率与截距保持等日期权重 OLS。
 校准采用缩放、中心化的浮点归约，按再平衡日期归约聚类方差；数值验收使用对应量纲的容差。
 每日期聚类分数在该日期残差形成及点积求和的浮点误差界内归零。采用同一缩放坐标，
 误差界为未归零残差行的 `sum(abs(x_centered) × row_error_bound)` 加

@@ -316,10 +316,13 @@ def test_native_funding_scope_decodes_once_and_preserves_primary(
 
     csv_open = snapshots.open_filesystem_file
     csv_paths = []
+    csv_handles = []
 
     def measured_csv_open(path, *args, **kwargs):
         csv_paths.append(path)
-        return csv_open(path, *args, **kwargs)
+        handle = csv_open(path, *args, **kwargs)
+        csv_handles.append(handle)
+        return handle
 
     def forbidden_byte_encoding(*args, **kwargs):
         pytest.fail("ordinary funding reads must not re-encode canonical bytes")
@@ -379,7 +382,8 @@ def test_native_funding_scope_decodes_once_and_preserves_primary(
     assert len(decoded) == 1
     assert opened == [root.parent / "settlements.json"]
     assert reads == [-1]
-    assert csv_paths == [root / "response.csv"] * 2
+    assert csv_paths == [root / "response.csv"]
+    assert all(handle.closed for handle in csv_handles)
 
 
 def test_separate_native_funding_archives_cannot_supply_continuous_months(tmp_path):

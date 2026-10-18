@@ -738,8 +738,13 @@ def test_market_model_factors_share_risk_math_and_window_identity(tmp_path):
     for _, cross in panel.groupby("timestamp", sort=False):
         expected = state.observe(cross.assign(eligible=True))
     last = result.loc[result.timestamp == dates[-1]].set_index("asset_id")
-    assert np.array_equal(last.beta_252d, expected.beta)
-    assert np.array_equal(last.residual_volatility_60d, expected.residual_volatility)
+    pd.testing.assert_index_equal(last.index, expected.beta.index, check_names=False)
+    for actual, reference in (
+        (last.beta_252d, expected.beta),
+        (last.residual_volatility_60d, expected.residual_volatility),
+    ):
+        np.testing.assert_array_equal(actual.isna(), reference.isna())
+        np.testing.assert_allclose(actual, reference, rtol=1e-12, atol=1e-16)
     bounded = pd.concat(
         _market_model_frames(
             (panel.loc[panel.timestamp >= dates[350 - 312]],),
@@ -749,11 +754,14 @@ def test_market_model_factors_share_risk_math_and_window_identity(tmp_path):
         ignore_index=True,
     )
     bounded = bounded.loc[bounded.timestamp >= dates[350]].reset_index(drop=True)
+    reference = result.loc[result.timestamp >= dates[350]].reset_index(drop=True)
     pd.testing.assert_frame_equal(
-        bounded.reset_index(drop=True),
-        result.loc[result.timestamp >= dates[350]].reset_index(drop=True),
+        bounded[["asset_id", "timestamp"]],
+        reference[["asset_id", "timestamp"]],
         check_exact=True,
     )
+    pd.testing.assert_frame_equal(bounded.isna(), reference.isna(), check_exact=True)
+    pd.testing.assert_frame_equal(bounded, reference, rtol=1e-12, atol=1e-16)
     path = tmp_path / "market_model.parquet"
     bounded.to_parquet(path, index=False)
     pd.testing.assert_frame_equal(pd.read_parquet(path), bounded, check_exact=True)

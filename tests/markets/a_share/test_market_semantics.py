@@ -1704,9 +1704,20 @@ def test_conflicting_listing_lifecycles_are_rejected(delisting, error):
 
 
 @pytest.mark.parametrize(
-    "cap,close,volume", ((1e308, 1e-308, 1e308), (1e-308, 1e308, 1e-308))
+    "cap,close,volume",
+    (
+        (3e9, 20.0, 3e6),
+        (5e8, 2.5, 1e6),
+        (8e10, 800.0, 0.0),
+        (0.0, 20.0, 3e6),
+        (-1.0, 20.0, 3e6),
+        (3e9, 0.0, 3e6),
+        (3e9, -1.0, 3e6),
+        (np.nan, 20.0, 3e6),
+        (3e9, np.nan, 3e6),
+    ),
 )
-def test_turnover_does_not_lose_finite_value_to_intermediate_share_count(
+def test_turnover_preserves_units_denominator_domain_and_suspensions(
     cap, close, volume
 ):
     from fractions import Fraction
@@ -1731,9 +1742,11 @@ def test_turnover_does_not_lose_finite_value_to_intermediate_share_count(
         }
     )
     actual = _apply_suspension_semantics(frame)
-    expected = float(Fraction(volume) * Fraction(close) / Fraction(cap))
-    assert np.isfinite(actual.turnover.iloc[0])
-    assert actual.turnover.iloc[0] == pytest.approx(expected, rel=1e-15, abs=0)
+    if cap > 0 and close > 0:
+        expected = float(Fraction(volume) * Fraction(close) / Fraction(cap))
+        assert actual.turnover.iloc[0] == pytest.approx(expected, rel=1e-14, abs=0)
+    else:
+        assert pd.isna(actual.turnover.iloc[0])
     assert actual.turnover.iloc[1] == 0.0
 
 

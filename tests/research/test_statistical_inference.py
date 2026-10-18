@@ -875,3 +875,49 @@ def test_fmb_supports_const_factor_and_reserves_only_intercept(weighted):
         label_column="label",
     )
     assert rankic.intercept.iloc[0] == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("unit", (0.001, 1.0, 1000.0))
+@pytest.mark.parametrize("confidence,lag", ((0.9, 0), (0.95, 1), (0.99, 3)))
+def test_market_hac_full_covariance_matches_original_coordinate_sandwich(
+    unit, confidence, lag
+):
+    from scipy.stats import norm
+
+    from quant_research_platform.research.statistics import _hac_linear_regression
+
+    rng = np.random.default_rng(628)
+    x = (0.08 + rng.normal(0, 0.02, 80)) * unit
+    y = 0.002 * unit + 1.2 * x + rng.normal(0, 0.003, len(x)) * unit
+    design = np.column_stack((np.ones(len(x)), x))
+    coefficients = np.linalg.lstsq(design, y, rcond=None)[0]
+    scores = design * (y - design @ coefficients)[:, None]
+    meat = scores.T @ scores
+    for offset in range(1, lag + 1):
+        cross = scores[offset:].T @ scores[:-offset]
+        meat += (1 - offset / (lag + 1)) * (cross + cross.T)
+    bread = np.linalg.inv(design.T @ design)
+    covariance = bread @ meat @ bread * len(x) / (len(x) - 2)
+    standard_errors = np.sqrt(np.diag(covariance))
+    t_values = coefficients / standard_errors
+    intervals = coefficients[:, None] + standard_errors[:, None] * np.array(
+        [-1, 1]
+    ) * norm.ppf((1 + confidence) / 2)
+    expected = np.column_stack(
+        (
+            coefficients,
+            standard_errors,
+            t_values,
+            2 * norm.sf(np.abs(t_values)),
+            intervals,
+        )
+    )
+    actual, correlation, r_squared = _hac_linear_regression(
+        x, y, max_lags=lag, confidence=confidence
+    )
+    np.testing.assert_allclose(actual, expected, rtol=1e-10, atol=1e-14)
+    assert correlation == pytest.approx(np.corrcoef(x, y)[0, 1], rel=1e-13)
+    assert r_squared == pytest.approx(
+        1 - np.sum((y - design @ coefficients) ** 2) / np.sum((y - y.mean()) ** 2),
+        rel=1e-13,
+    )

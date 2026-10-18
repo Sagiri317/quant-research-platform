@@ -207,30 +207,6 @@ def _calculate_values(
             first - size + 1 - shift : stop - size + 1 - shift
         ]
 
-    def complete_window(name: str, condition: str = "finite") -> np.ndarray:
-        key = ("invalid_count", name, condition)
-        if key not in sums:
-            column = values[name]
-            if len(column) >= np.iinfo(np.int64).max:
-                raise ValueError("price_volume_history_too_long")
-            bad = (
-                ~np.isfinite(column)
-                if condition == "finite"
-                else column <= 0
-                if condition == "positive"
-                else column == 0
-            )
-            prefix = np.empty(len(column) + 1, dtype=np.int64)
-            prefix[0] = 0
-            np.cumsum(bad, dtype=np.int64, out=prefix[1:])
-            sums[key] = prefix
-        prefix = sums[key]
-        return (
-            prefix[first + 1 - shift : stop + 1 - shift]
-            == prefix[first + 1 - shift - size : stop + 1 - shift - size]
-        )
-
-    valid = complete_window(source_name)
     extra_names = (
         ("low", "close")
         if factor == "amplitude_20d"
@@ -239,16 +215,10 @@ def _calculate_values(
         or factor in {"signed_amount_flow_20d", "return_amount_imbalance_20d"}
         else ()
     )
-    for name in extra_names:
-        valid &= complete_window(name)
-    if factor == "drawdown_60d":
-        valid &= complete_window(source_name, "positive")
-    if factor == "amplitude_20d":
-        valid &= complete_window("close", "nonzero")
-    if factor.startswith("amihud_"):
-        valid &= complete_window("amount", "positive")
     partial = factor in PRICE_VOLUME_PARTIAL_STATISTICS
     numeric = np.isfinite(source)
+    if factor == "drawdown_60d":
+        numeric &= source > 0
     for name in extra_names:
         numeric &= np.isfinite(values[name])
     if factor == "amplitude_20d":
@@ -266,6 +236,7 @@ def _calculate_values(
         )
 
     counts = window_count(numeric)
+    valid = counts == size
     if partial:
         valid = window_count(numeric & fresh) >= minimum
         math_minimum = (
