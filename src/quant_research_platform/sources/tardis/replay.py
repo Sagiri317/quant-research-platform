@@ -266,8 +266,10 @@ class TardisArchive:
     def _shared_slice(self, member):
         path = member["path"]
         if path not in self._native_slices:
+            # Older cursors own their lag; do not retain every completed slice.
+            self._native_slices.clear()
             self._native_slices[path] = tee(self._decode_slice(member), 1)[0]
-        # Keep the anchor at the start for consumers created later in this owner.
+        # A later consumer can share this slice or decode an older slice again.
         records = tee(self._native_slices[path], 1)[0]
         for row in records:
             if isinstance(row, BaseException):

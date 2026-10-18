@@ -100,6 +100,49 @@ def test_slow_fast_cursors_are_independent_and_close(archive):
     assert slow.gi_frame is None and fast.gi_frame is None
 
 
+def test_completed_slices_release_payloads_and_late_cursor_replays(
+    tmp_path, monkeypatch
+):
+    import gc
+    import gzip
+    import weakref
+
+    from tests.helpers.tardis import _snapshot
+
+    slices = _slices(
+        tmp_path / "native", _snapshot("2026-09-01T00:00:00.000000Z"), count=2
+    )
+    slices[1].write_bytes(
+        gzip.compress(_snapshot("2026-09-01T00:10:00.000000Z"), mtime=0)
+    )
+    root = tmp_path / "published"
+    import_slices(root, date="2026-09-01", slices=slices)
+    original = replay.iter_native_slice
+    payloads = []
+
+    class Payload(dict):
+        pass
+
+    def tracked(*args, **kwargs):
+        with replay.closing_iterator(original(*args, **kwargs)) as rows:
+            for number, timestamp, value in rows:
+                if value is not None:
+                    value = Payload(value)
+                    payloads.append(weakref.ref(value))
+                yield number, timestamp, value
+
+    monkeypatch.setattr(replay, "iter_native_slice", tracked)
+    with open_market_source(root) as source:
+        cursor = _records(source)
+        first, second = next(cursor), next(cursor)
+        gc.collect()
+        assert payloads[0]() is None
+        expected = [first, second, *cursor]
+        assert list(_records(source)) == expected
+    gc.collect()
+    assert all(reference() is None for reference in payloads)
+
+
 @pytest.mark.parametrize(
     "failure", [ValueError, KeyboardInterrupt, GeneratorExit, SystemExit]
 )
