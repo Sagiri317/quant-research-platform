@@ -18,31 +18,8 @@ from quant_research_platform.research.evaluations.runner import (
     evaluate,
 )
 from quant_research_platform.research.statistics import time_series_inference_summary
+from tests.helpers.statistics_artifacts import assert_recomputed_statistics_equal
 from tests.research.test_stratified_evaluation_reuse import _fixture
-
-
-def _assert_recomputed_analysis_equal(left, right):
-    """Compare rerun values with exact settings, domains, and missing masks."""
-    continuous = left.select_dtypes(include="floating").columns.difference(
-        [
-            "fdr_alpha",
-            "confidence",
-            "alpha",
-            "seed",
-            "bootstrap_seed",
-            "bootstrap_block_size",
-            "bootstrap_repetitions",
-            "block_size",
-            "repetitions",
-        ]
-    )
-    pd.testing.assert_frame_equal(
-        left.drop(columns=continuous), right.drop(columns=continuous), check_exact=True
-    )
-    pd.testing.assert_frame_equal(left.isna(), right.isna(), check_exact=True)
-    pd.testing.assert_frame_equal(
-        left[continuous], right[continuous], check_exact=False, rtol=1e-12, atol=1e-15
-    )
 
 
 def test_hac_failure_keeps_mean_and_independent_bootstrap(tmp_path):
@@ -138,7 +115,7 @@ def test_explicit_own_is_identical_to_default_daily_facts(tmp_path):
     )
     assert left_metadata["metadata"] == right_metadata["metadata"]
     for member in left_tables:
-        _assert_recomputed_analysis_equal(left_tables[member], right_tables[member])
+        assert_recomputed_statistics_equal(left_tables[member], right_tables[member])
 
 
 def test_relocated_source_can_reduce_existing_daily_facts(tmp_path):
@@ -475,7 +452,7 @@ def test_native_evaluation_ignores_null_payload_and_dictionary_encoding(
             for column in ("timestamp", "signal", "label", "stratification", "stratum")
             if column in own_tables[name]
         ]
-        _assert_recomputed_analysis_equal(
+        assert_recomputed_statistics_equal(
             own_tables[name].sort_values(keys).reset_index(drop=True),
             alternative_tables[name].sort_values(keys).reset_index(drop=True),
         )
@@ -555,7 +532,7 @@ def test_public_prediction_inference_is_local_to_consumed_family(tmp_path):
         single.table("prediction_diagnostics.parquet") as alone,
     ):
         causal = mixed.loc[mixed.prediction_id.eq(config["family_ids"][0])]
-        _assert_recomputed_analysis_equal(causal.reset_index(drop=True), alone)
+        assert_recomputed_statistics_equal(causal.reset_index(drop=True), alone)
         assert causal.status.tolist() == ["DEFINED"]
         assert causal.bootstrap_status.tolist() == ["DEFINED"]
         retrospective = mixed.loc[mixed.prediction_id.eq(config["family_ids"][1])]

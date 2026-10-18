@@ -2100,7 +2100,14 @@ def test_simple_producer_handles_universe_arrival_and_zero_weight_departure(
         fee_frame=fee_frame,
         output_window=output_window,
     )
-    assert list(output)
+    results = list(output)
+    assert len(results) == 2
+    assert all(set(frame.asset_id) == {"b", "__cash__"} for frame in results)
+    assert [frame.end_notional.sum() for frame in results] == pytest.approx(
+        [100 / 1.0004 * 110 / 108, 100 / 1.0004 * 112 / 108],
+        rel=1e-12,
+        abs=1e-12,
+    )
 
 
 def test_simple_producer_has_no_executable_output_without_two_lookahead_sessions(

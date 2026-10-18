@@ -1673,7 +1673,8 @@ Alpha OLS 校准属于监督学习。本文冻结评价方案使用开发期拟�
 每组在开发最终截止重新计算其实际验证路径的 Alpha 校准，纳入末日新成熟样本；不能仅冻结最后一个交易批次的旧状态。
 开发增强账本保存 `final_alpha_calibration.json`；独立 `calibrate` 也可从明确的
 `observations`、`scheduled_intervals`、`cutoff`、`selection_group`、`calendar` 和
-`rebalance_schedule` 写入新校准 JSON。每条声明区间必须对应真实交易日历上相邻调仓的执行开盘，
+`rebalance_schedule` 写入新校准 JSON。这里的 `cutoff` 与区间 `available_at` 按交易会话日期表示，校准对应截至该日的收盘决策口径。
+每条声明区间必须对应真实交易日历上相邻调仓的执行开盘，
 不能用固定七个日历日冒充周频。calendar 的输入选择器明确拟合日历起点及所需端点范围，
 覆盖率分母来自该日历中截至 cutoff 已成熟的全部计划区间，不能按实际有收益的行反推或缩小。
 直接与开发最终校准均保存 `interval_semantics`，

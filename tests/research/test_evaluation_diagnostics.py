@@ -1040,6 +1040,111 @@ def explicit_evaluation(tmp_path):
     return frame, spec, config
 
 
+def test_prediction_alias_owns_only_unconsumed_input_columns(
+    tmp_path, explicit_evaluation, monkeypatch
+):
+    from copy import deepcopy
+
+    from quant_research_platform.artifacts.outputs.evaluation import (
+        read_evaluation_outputs,
+    )
+    from quant_research_platform.artifacts.outputs.prediction import (
+        read_predictions,
+        write_prediction_outputs,
+    )
+    from quant_research_platform.research.evaluations import runner
+    from tests.research.crypto_evaluation_test_support import write_evaluation_input
+
+    frame, _spec, config = explicit_evaluation
+    frame = frame.loc[frame.x.notna()].copy()
+    frame = frame.assign(
+        feature_x=frame.x, feature_observed_x=1, feature_missing_x=0
+    ).rename(columns={"short_available_at": "settled_clock"})
+    inputs = write_evaluation_input(
+        tmp_path / "features",
+        frame,
+        features=("feature_x", "feature_observed_x", "feature_missing_x"),
+        labels=("short", "long"),
+    )
+    predictions, metadata = read_predictions(Path(config["predictions"]["pred"]))
+    # Valid binary scores would silently change the ordinary feature's mask.
+    predictions["prediction_score"] = [0.0, 1.0, 1.0]
+    prediction_path = write_prediction_outputs(
+        output_path=tmp_path / "binary-predictions",
+        output_chunks=[predictions],
+        metadata=metadata,
+    )
+    config["inputs"] = str(inputs)
+    config["evaluation"]["label_availability_columns"]["short"] = "settled_clock"
+    config["evaluation"]["signals"] = [
+        {
+            "signal_id": "feature",
+            "source_kind": "feature",
+            "source_column": "feature_x",
+        },
+        {
+            "signal_id": "prediction",
+            "source_kind": "prediction",
+            "source_column": "pred",
+        },
+    ]
+    reads = []
+
+    def tracked_read(path, **kwargs):
+        reads.append(kwargs["columns"])
+        return read_predictions(path, **kwargs)
+
+    monkeypatch.setattr(runner, "read_predictions", tracked_read)
+    expected = None
+    for alias in (
+        "pred",
+        "x",
+        "feature_missing_x",
+        "feature_observed_x",
+        "settled_clock",
+    ):
+        case = deepcopy(config)
+        case["output"] = str(tmp_path / ("evaluation-" + alias))
+        case["evaluation"]["signals"][1]["source_column"] = alias
+        case["predictions"] = {alias: str(prediction_path)}
+        if alias in {"feature_observed_x", "settled_clock"}:
+            read_count = len(reads)
+            with pytest.raises(
+                ValueError, match="^evaluation_prediction_input_column_conflict$"
+            ):
+                runner.evaluate(case)
+            assert len(reads) == read_count
+            assert not Path(case["output"]).exists()
+            continue
+        manifest, actual = read_evaluation_outputs(runner.evaluate(case))
+        assert reads[-1] == ("timestamp", "asset_id", "prediction_score")
+        saved_signals = manifest["metadata"]["signals"]
+        assert saved_signals == [
+            {"direction": "higher_is_better", "transform": "identity", **signal}
+            for signal in case["evaluation"]["signals"]
+        ]
+        facts = manifest["metadata"]["input_facts"]
+        assert alias not in facts["columns"]
+        assert facts["observed_columns"] == {"feature_x": ["feature_observed_x"]}
+        if expected is None:
+            expected = actual
+            metrics = actual["metrics"].set_index(["signal", "label"])
+            assert metrics.n_obs.to_dict() == {
+                ("feature", "short"): 2,
+                ("feature", "long"): 3,
+                ("prediction", "short"): 2,
+                ("prediction", "long"): 3,
+            }
+            # Current eligible x are 4, 6, 7; short at x=6 is not mature.
+            assert metrics.loc[("feature", "short"), "ic"] == pytest.approx(1.0)
+            assert metrics.loc[("feature", "long"), "ic"] == pytest.approx(
+                np.corrcoef([4.0, 6.0, 7.0], [16.0, 36.0, 49.0])[0, 1]
+            )
+        else:
+            for name in expected:
+                _assert_recomputed_evaluation_equal(expected[name], actual[name])
+
+
 def test_direct_evaluation_preserves_each_mature_pair_and_late_label_invariance(
     tmp_path,
     explicit_evaluation,

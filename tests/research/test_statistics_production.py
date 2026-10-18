@@ -31,35 +31,12 @@ from tests.helpers.research_configuration import (
 )
 from tests.helpers.research_specs import make_demo_research_dataset_spec
 from tests.helpers.statistics_artifacts import (
+    assert_recomputed_statistics_equal,
     model_statistics_inputs,
     publish_statistics_pair,
     statistics_config,
     statistics_metadata,
 )
-
-
-def _assert_recomputed_statistics_equal(left, right):
-    """Compare rerun values with exact settings, domains, and missing masks."""
-    continuous = left.select_dtypes(include="floating").columns.difference(
-        [
-            "fdr_alpha",
-            "confidence",
-            "alpha",
-            "seed",
-            "bootstrap_seed",
-            "bootstrap_block_size",
-            "bootstrap_repetitions",
-            "block_size",
-            "repetitions",
-        ]
-    )
-    pd.testing.assert_frame_equal(
-        left.drop(columns=continuous), right.drop(columns=continuous), check_exact=True
-    )
-    pd.testing.assert_frame_equal(left.isna(), right.isna(), check_exact=True)
-    pd.testing.assert_frame_equal(
-        left[continuous], right[continuous], check_exact=False, rtol=1e-12, atol=1e-15
-    )
 
 
 class _PredictionLookup:
@@ -386,7 +363,7 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
             )
         )
         for table in ("prediction_diagnostics", "model_comparison"):
-            _assert_recomputed_statistics_equal(
+            assert_recomputed_statistics_equal(
                 robustness_tables[table], paired_tables[table]
             )
         pd.testing.assert_frame_equal(
@@ -638,10 +615,8 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
             {name: table.copy() for name, table in statistics_tables.items()}
         )
     for table in ("factor_diagnostics", "prediction_diagnostics", "fama_macbeth"):
-        _assert_recomputed_statistics_equal(outputs[0][table], outputs[1][table])
-    _assert_recomputed_statistics_equal(
-        evaluation_summaries[0], evaluation_summaries[1]
-    )
+        assert_recomputed_statistics_equal(outputs[0][table], outputs[1][table])
+    assert_recomputed_statistics_equal(evaluation_summaries[0], evaluation_summaries[1])
     evaluation_row = evaluation_summaries[0].iloc[0]
     assert evaluation_row["valid_rankic_count"] == 20
     assert evaluation_row["mean_rankic"] == pytest.approx(0.0, abs=1e-15)
@@ -1258,7 +1233,7 @@ def test_model_family_names_preserve_factor_statistics_and_native_names(
         )
         results.append(tables)
     for member in results[0]:
-        _assert_recomputed_statistics_equal(results[0][member], results[1][member])
+        assert_recomputed_statistics_equal(results[0][member], results[1][member])
 
 
 def test_factor_fmb_weightings_match_independent_weighted_normal_equations():
@@ -1310,7 +1285,7 @@ def test_factor_fmb_weightings_match_independent_weighted_normal_equations():
             )
         )
         equal = actual.regression_id.str.startswith("equal:")
-        _assert_recomputed_statistics_equal(actual.loc[equal], records.loc[equal])
+        assert_recomputed_statistics_equal(actual.loc[equal], records.loc[equal])
         assert actual.loc[~equal, "status"].eq("DEFINED").all()
         assert actual.loc[~equal, "observation_count"].eq(len(frame.dropna()) - 1).all()
 
@@ -1556,7 +1531,7 @@ def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_pat
             with read_statistics_artifact(root / "statistics").table(
                 "model_losses.parquet"
             ) as expected_losses:
-                _assert_recomputed_statistics_equal(actual, expected_losses)
+                assert_recomputed_statistics_equal(actual, expected_losses)
             assert actual.period_id.eq("explicit_horizon").all()
         published = write_statistics_artifact(
             root / "factor_statistics",

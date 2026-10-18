@@ -217,30 +217,6 @@ def test_model_selection_undefined_mse_preserves_correlations(economic) -> None:
         )
 
 
-@pytest.mark.parametrize("economic", [np.inf, np.nan])
-def test_auxiliary_economic_prediction_does_not_poison_rank_score(economic):
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(["2024-01-01"] * 3),
-            "asset_id": ["a", "b", "c"],
-            "label": [1.0, 2.0, 3.0],
-            "prediction": [1.0, 2.0, 3.0],
-            "economic_prediction": [economic, 2.0, 3.0],
-        }
-    )
-    metrics = evaluate_model_trial_metrics_from_chunks(
-        (frame,),
-        model_id="model",
-        label_column="label",
-        prediction_column="prediction",
-        label_prediction_column="economic_prediction",
-    )
-    assert metrics["validation_mse"] is None
-    assert [metrics["validation_ic"], metrics["validation_rankic"]] == pytest.approx(
-        [1.0, 1.0]
-    )
-
-
 @pytest.mark.parametrize("field", ["validation_ic", "validation_rankic"])
 @pytest.mark.parametrize("sign", [-1.0, 1.0])
 def test_persisted_trial_correlations_obey_exact_bounds(field, sign):

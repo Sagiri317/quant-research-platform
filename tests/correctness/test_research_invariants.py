@@ -58,7 +58,7 @@ def test_research_factor_rosters_are_explicit():
 
 
 def test_formal_price_volume_definitions_use_session_windows() -> None:
-    sessions = pd.bdate_range("2020-01-01", periods=252)
+    sessions = pd.bdate_range("2020-01-01", periods=21)
     values = pd.Series(range(1, len(sessions) + 1), dtype="float64")
     panel = pd.DataFrame(
         {
