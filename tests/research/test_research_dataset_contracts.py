@@ -101,7 +101,6 @@ def test_research_dataset_assembler_uses_explicit_base_not_input_order(
             dataset_catalog.get("dummy_dataset").market_id, "dummy_dataset"
         ),
         dataset_catalog=dataset_catalog,
-        processed_catalog=processed_catalog,
         dataset_id="dummy_dataset",
         time_window=TimeWindow("2024-01-02", "2024-01-03"),
     )
@@ -146,7 +145,6 @@ def test_research_dataset_columns_extend_without_assembler_change(
             dataset_catalog.get("dummy_dataset").market_id, "dummy_dataset"
         ),
         dataset_catalog=dataset_catalog,
-        processed_catalog=processed_catalog,
         dataset_id="dummy_dataset",
         time_window=TimeWindow("2024-01-02", "2024-01-03"),
     )
@@ -185,7 +183,6 @@ def test_missing_join_key_fails_closed(tmp_path: Path) -> None:
                 dataset_catalog.get("dummy_dataset").market_id, "dummy_dataset"
             ),
             dataset_catalog=dataset_catalog,
-            processed_catalog=processed_catalog,
             dataset_id="dummy_dataset",
             time_window=TimeWindow("2024-01-02", "2024-01-03"),
         )
@@ -239,7 +236,6 @@ def test_output_row_order_is_stable_sort_by_primary_key(tmp_path: Path) -> None:
             dataset_catalog.get("dummy_dataset").market_id, "dummy_dataset"
         ),
         dataset_catalog=dataset_catalog,
-        processed_catalog=processed_catalog,
         dataset_id="dummy_dataset",
         time_window=TimeWindow("2024-01-02", "2024-01-03"),
     )
@@ -290,7 +286,6 @@ def test_persisted_research_sessions_are_complete_across_small_read_batches(
             datasets.get("demo").market_id, "demo"
         ),
         dataset_catalog=datasets,
-        processed_catalog=processed,
         dataset_id="demo",
         time_window=TimeWindow(dates[0], dates[-1]),
     )
@@ -334,7 +329,6 @@ def test_research_dataset_fails_closed_on_empty_base_sessions(tmp_path: Path) ->
                 dataset_catalog.get("dummy_dataset").market_id, "dummy_dataset"
             ),
             dataset_catalog=dataset_catalog,
-            processed_catalog=processed_catalog,
             dataset_id="dummy_dataset",
             time_window=TimeWindow("2025-01-01", "2025-01-02"),
         )
@@ -365,7 +359,6 @@ def test_strict_research_input_missing_base_key_fails_in_assembler(
                 dataset_catalog.get("dummy_dataset").market_id, "dummy_dataset"
             ),
             dataset_catalog=dataset_catalog,
-            processed_catalog=processed_catalog,
             dataset_id="dummy_dataset",
             time_window=TimeWindow("2024-01-02", "2024-01-03"),
         )
@@ -390,7 +383,6 @@ def test_sparse_research_input_missing_base_key_passes_with_nan(tmp_path: Path) 
             dataset_catalog.get("dummy_dataset").market_id, "dummy_dataset"
         ),
         dataset_catalog=dataset_catalog,
-        processed_catalog=processed_catalog,
         dataset_id="dummy_dataset",
         time_window=TimeWindow("2024-01-02", "2024-01-03"),
     )
@@ -420,7 +412,6 @@ def test_research_dataset_semantic_snapshots_are_persisted_for_all_inputs(
             dataset_catalog.get("dummy_dataset").market_id, "dummy_dataset"
         ),
         dataset_catalog=dataset_catalog,
-        processed_catalog=processed_catalog,
         dataset_id="dummy_dataset",
         time_window=TimeWindow("2024-01-02", "2024-01-03"),
     )
@@ -465,7 +456,6 @@ def test_strict_research_input_value_nan_does_not_count_as_missing_key(
             dataset_catalog.get("dummy_dataset").market_id, "dummy_dataset"
         ),
         dataset_catalog=dataset_catalog,
-        processed_catalog=processed_catalog,
         dataset_id="dummy_dataset",
         time_window=TimeWindow("2024-01-02", "2024-01-03"),
     )
@@ -496,7 +486,6 @@ def test_research_input_extra_key_outside_base_fails_closed(
                 dataset_catalog.get("dummy_dataset").market_id, "dummy_dataset"
             ),
             dataset_catalog=dataset_catalog,
-            processed_catalog=processed_catalog,
             dataset_id="dummy_dataset",
             time_window=TimeWindow("2024-01-02", "2024-01-03"),
         )
@@ -574,7 +563,6 @@ def test_assembler_rejects_requested_column_missing_from_actual_spec(tmp_path):
                 datasets.get("dummy_dataset").market_id, "dummy_dataset"
             ),
             dataset_catalog=datasets,
-            processed_catalog=processed,
             dataset_id="dummy_dataset",
             time_window=TimeWindow("2024-01-02", "2024-01-03"),
         )

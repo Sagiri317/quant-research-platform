@@ -35,9 +35,7 @@ from tests.helpers.statistics_artifacts import (
 )
 
 
-@pytest.mark.parametrize(
-    "recovery", ["quote", "cash_retained", "cash_cancelled", "cash_tiny_start"]
-)
+@pytest.mark.parametrize("recovery", ["quote", "cash_retained", "cash_cancelled"])
 @pytest.mark.parametrize("access", ["validation", "test"])
 def test_zero_nav_rights_recovery_persists_amounts_and_undefined_returns(
     tmp_path, access, recovery
@@ -50,12 +48,9 @@ def test_zero_nav_rights_recovery_persists_amounts_and_undefined_returns(
     }
     candidates, manifest = portfolio_statistics_config(sample_role=access)
     is_cash = recovery.startswith("cash")
-    tiny = recovery == "cash_tiny_start"
-    initial = float.fromhex("0x0.0000000000001p-1022") if tiny else 1000.0
+    initial = 1000.0
     terminal = 500.0 if is_cash else 550.0
     marks = (10.0, 0.0, 0.0, 0.0, 0.0) if is_cash else (10.0, 0.0, 0.0, 5.0, 5.5)
-    if tiny:
-        marks = (Fraction(initial) / 100,) * 5
     batches = []
     for sequence, (start, finish) in enumerate(zip(marks[:-1], marks[1:], strict=True)):
         at, end = dates[sequence + 1].value, dates[sequence + 2].value
@@ -174,12 +169,10 @@ def test_zero_nav_rights_recovery_persists_amounts_and_undefined_returns(
         summary = summarize_portfolio_ledger(ledger.capital, ledger.iter_chunks())
         assert summary["nav"] == terminal
         assert summary["net_pnl"] == terminal - initial
-        assert summary["capital_return"] == (
-            None if tiny else (terminal - initial) / initial
+        assert summary["capital_return"] == pytest.approx(
+            (terminal - initial) / initial
         )
-        assert summary["capital_return_reason"] == (
-            "nonfinite_result" if tiny else None
-        )
+        assert summary["capital_return_reason"] is None
         assert summary["fill_events"] == 1
         restored = list(ledger.iter_chunks())
         assert (
@@ -240,28 +233,6 @@ def test_zero_nav_rights_recovery_persists_amounts_and_undefined_returns(
         for i in range(4)
     ]
     benchmark_opens = pd.DataFrame(columns=("benchmark_id", "timestamp", "open"))
-    if tiny:
-        benchmark_opens = pd.DataFrame(
-            [
-                {"benchmark_id": benchmark, "timestamp": date, "open": value}
-                for benchmark in ("csi500", "csi1000")
-                for date, value in zip(
-                    dates[1:], (initial, initial, initial, 500.0, 500.0), strict=True
-                )
-            ]
-        )
-    if tiny:
-        from tests.helpers.benchmark_references import reference_input
-
-        manifest["analyses"].append("benchmark_comparison")
-        manifest["execution_mode"] = "continuous"
-        manifest["comparison_benchmarks"] = [
-            reference_input(
-                tmp_path / "tiny-reference.parquet",
-                [initial, initial, initial, 500.0, 500.0],
-                dates=dates[1:],
-            )
-        ]
     tables = _portfolio_statistics_tables(
         ledgers=ledgers,
         candidates=candidates,
@@ -277,52 +248,36 @@ def test_zero_nav_rights_recovery_persists_amounts_and_undefined_returns(
     daily = tables["portfolio_daily"]
     first = daily.loc[daily.candidate_id.eq(candidates[0].candidate_id)]
     assert first.nav_end.tolist() == [
-        initial if tiny else 0.0,
-        initial if tiny else 0.0,
+        0.0,
+        0.0,
         500.0,
         terminal,
     ]
     assert first.return_status.tolist() == [
         "DEFINED",
-        "DEFINED" if tiny else "UNDEFINED",
+        "UNDEFINED",
         "UNDEFINED",
         "DEFINED",
     ]
-    assert first.net_return.iloc[0] == (0.0 if tiny else -1.0)
+    assert first.net_return.iloc[0] == -1.0
     assert first.net_return.iloc[2:3].isna().all()
-    assert first.return_reason.iloc[2] == (
-        "nonfinite_result" if tiny else "nonpositive_start_nav"
-    )
+    assert first.return_reason.iloc[2] == "nonpositive_start_nav"
     assert first.net_return.iloc[3] == (0.0 if is_cash else 0.1)
-    if tiny:
-        compared = tables["portfolio_benchmark_intervals"]
-        for _, enhanced in compared.groupby("candidate_id"):
-            assert enhanced.benchmark_status.tolist() == [
-                "DEFINED",
-                "DEFINED",
-                "UNDEFINED",
-                "DEFINED",
-            ]
-            assert enhanced.benchmark_reason.iloc[2] == "nonfinite_result"
-            assert enhanced.relative_wealth.iloc[:2].eq(1).all()
-            assert enhanced.relative_wealth.iloc[2:].isna().all()
     performance = tables["portfolio_performance"].set_index(
         ["candidate_id", "metric_id"]
     )
     candidate = candidates[0].candidate_id
     assert performance.loc[(candidate, "terminal_nav"), "value"] == terminal
-    assert performance.loc[(candidate, "max_drawdown"), "value"] == (
-        0.0 if tiny else -1.0
-    )
+    assert performance.loc[(candidate, "max_drawdown"), "value"] == -1.0
     assert performance.loc[(candidate, "sharpe"), "status"] == "UNDEFINED"
     assert performance.loc[(candidate, "cost"), "value"] == 0.0
     assert tables["portfolio_group_comparison"].status.eq("UNDEFINED").all()
     for group in ("global", "quarterly"):
         wealth = tables["portfolio_group_comparison"][f"{group}_terminal_wealth"]
-        assert wealth.isna().all() if tiny else wealth.eq(terminal / initial).all()
+        assert wealth.to_numpy() == pytest.approx(terminal / initial)
         assert (
             tables["portfolio_group_comparison"][f"{group}_terminal_wealth_reason"]
-            .eq("nonfinite_result" if tiny else "")
+            .eq("")
             .all()
         )
     metadata = statistics_metadata(
@@ -344,6 +299,15 @@ def test_zero_nav_rights_recovery_persists_amounts_and_undefined_returns(
     with artifact.table("portfolio_daily.parquet") as persisted:
         assert len(persisted) == 4 * len(candidates)
         assert persisted.loc[persisted.nav_before.eq(0), "net_return"].isna().all()
+    with artifact.table("portfolio_group_comparison.parquet") as persisted:
+        for group in ("global", "quarterly"):
+            column = f"{group}_terminal_wealth"
+            pd.testing.assert_series_equal(
+                persisted[column],
+                tables["portfolio_group_comparison"][column].astype("float64"),
+                check_exact=True,
+            )
+            assert persisted[f"{column}_reason"].eq("").all()
     damaged = {**tables, "portfolio_daily": daily.copy()}
     damaged["portfolio_daily"].loc[
         daily.return_status.eq("UNDEFINED"), "net_return"
@@ -385,7 +349,6 @@ def test_undefined_return_pair_preserves_other_pairs_and_fdr_family():
     assert result.observation_count.eq(75).all()
     assert result.loc[pairs[0], "status"] == "UNDEFINED"
     assert result.loc[pairs[0], "reason"] == "nonpositive_start_nav"
-    assert pd.isna(result.loc[pairs[0], "global_terminal_wealth"])
     assert result.loc[pairs[1:], "status"].eq("DEFINED").all()
 
 

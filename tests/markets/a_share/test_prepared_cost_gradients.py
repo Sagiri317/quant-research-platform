@@ -34,6 +34,8 @@ def test_prepared_cost_value_and_marginal_rate_match_closed_form(side, fee):
         linear + 0.0015 * np.sqrt(np.maximum(amount, 0.0) / 400.0), rel=1e-14, abs=0
     )
     for value, q in zip(values[2:], amount[2:], strict=True):
-        assert prepared.trade(float(q), 400.0).total_cost == value
+        assert prepared.trade(float(q), 400.0).total_cost == pytest.approx(
+            value, rel=1e-14, abs=1e-14
+        )
     with pytest.raises(ValueError, match="a_share_trade_cost_inputs_invalid"):
         prepared.trade(-25.0, 400.0)

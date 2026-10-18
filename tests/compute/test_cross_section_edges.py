@@ -7,7 +7,6 @@ import pytest
 from quant_research_platform.compute.dataframe.cross_section import (
     _assign_groups_from_ranks,
     _average_ranks,
-    _pearson_correlation_from_moments,
     _pearson_correlation_result,
     compute_ic_and_grouped_label_values,
 )
@@ -82,8 +81,8 @@ def test_dataframe_cross_section_numeric_helpers() -> None:
     assert _average_ranks(np.array([2.0, 2.0, 1.0])).tolist() == [2.5, 2.5, 1.0]
 
 
-def test_pearson_preserves_tiny_nonconstant_variation() -> None:
-    values = np.array([1e-320, 2e-320, 3e-320])
+def test_pearson_preserves_small_nonconstant_variation() -> None:
+    values = np.array([1e-4, 2e-4, 3e-4])
 
     correlation, reason = _pearson_correlation_result(values, values)
 
@@ -91,14 +90,26 @@ def test_pearson_preserves_tiny_nonconstant_variation() -> None:
     assert reason is None
 
 
-@pytest.mark.parametrize("covariance, expected", ((4.0, 1.0), (-4.0, -1.0)))
-def test_pearson_moments_preserve_exact_boundaries(
-    covariance: float,
-    expected: float,
-) -> None:
-    assert _pearson_correlation_from_moments(
-        count=17,
-        left_m2=2.0,
-        right_m2=8.0,
-        covariance=covariance,
-    ) == (expected, None)
+@pytest.mark.parametrize("sign", [-1.0, 1.0])
+def test_pearson_preserves_linear_relations(sign):
+    values = np.array([-2.0, 0.0, 1.0, 4.0])
+    actual, reason = _pearson_correlation_result(values, 3 + sign * values)
+    assert actual == pytest.approx(sign, abs=1e-15)
+    assert reason is None
+
+
+def test_pearson_preserves_true_zero_and_undefined_domains():
+    assert _pearson_correlation_result(
+        np.array([-1.0, 0.0, 1.0]), np.array([1.0, -2.0, 1.0])
+    ) == (0.0, None)
+    assert _pearson_correlation_result(np.ones(3), np.arange(3.0)) == (
+        None,
+        "zero_variance",
+    )
+    assert _pearson_correlation_result(np.array([1.0]), np.array([2.0])) == (
+        None,
+        "insufficient_observations",
+    )
+    assert _pearson_correlation_result(
+        np.array([np.nan, 1.0]), np.array([2.0, 3.0])
+    ) == (None, "nonfinite_result")

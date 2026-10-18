@@ -5,9 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from fractions import Fraction
 from importlib.metadata import version
-from math import fsum
 from pathlib import Path
-from statistics import mean as _mean
 
 import numpy as np
 import pandas as pd
@@ -55,7 +53,7 @@ from quant_research_platform.research.models.rank_ensemble import (
 )
 from quant_research_platform.research.models.scaler import LinearScaledPredictor
 from quant_research_platform.research.models.trial_selection import (
-    _MeanSquaredError,
+    _mean_squared_error,
 )
 from quant_research_platform.research.predictions.outputs import prediction_rows
 from quant_research_platform.research.randomness import derive_seed
@@ -376,39 +374,7 @@ def _attributions(result, context, indices, method, background, output_space):
                 values = matrix.to_numpy(dtype="float64", copy=False)
                 with np.errstate(over="ignore", invalid="ignore", under="ignore"):
                     contributions = values * coefficients
-                if isinstance(predictor, LinearScaledPredictor):
-                    scale = predictor.scaler
-                    inputs = scale.input_matrix(selected.loc[:, columns]).to_numpy(
-                        dtype="float64", copy=False
-                    )
-                    active = coefficients != 0
-                    contributions[:, ~active] = 0.0
-                    displaced = (inputs != np.asarray(scale.origin_)) | np.asarray(
-                        [offset != 0 for offset in scale.offset_]
-                    )
-                    recover = active & (
-                        ~np.isfinite(contributions)
-                        | (
-                            (
-                                (np.abs(values) < np.finfo(float).tiny)
-                                | (np.abs(contributions) < np.finfo(float).tiny)
-                            )
-                            & displaced
-                        )
-                    )
-                    for row, column in zip(*np.nonzero(recover), strict=True):
-                        try:
-                            contributions[row, column] = float(
-                                Fraction(float(coefficients[column]))
-                                * (
-                                    Fraction(float(inputs[row, column]))
-                                    - Fraction(scale.origin_[column])
-                                    - scale.offset_[column]
-                                )
-                                / Fraction(scale.scale_[column])
-                            )
-                        except OverflowError:
-                            contributions[row, column] = np.nan
+                contributions[:, coefficients == 0] = 0.0
                 base = np.full(len(matrix), intercept)
                 method_facts["baseline"] = (
                     "training_scaled_zero"
@@ -627,17 +593,13 @@ def _summaries(rows, period):
     ).astype(str)
     results = []
 
-    def stable_mean(values):
-        values = values.dropna()
-        return float(_mean(map(float, values))) if len(values) else np.nan
-
     for name, block in [("all", work), *work.groupby("period", sort=True)]:
         daily = block.groupby(["timestamp", "feature"])[
             ["contribution", "absolute"]
-        ].agg(stable_mean)
+        ].mean()
         summary = (
             daily.groupby("feature")
-            .agg(stable_mean)
+            .mean()
             .rename(
                 columns={
                     "contribution": "mean_signed_contribution",
@@ -654,14 +616,8 @@ def _summaries(rows, period):
         )
         summary["sample_count"] = block.groupby("feature").size()
         summary["sample_date_count"] = block.groupby("feature").timestamp.nunique()
-        # Normalize at the largest feature magnitude so sum(abs) cannot overflow.
-        largest = summary.mean_abs_contribution.max()
-        scaled = (
-            summary.mean_abs_contribution / largest
-            if largest > 0
-            else summary.mean_abs_contribution * np.nan
-        )
-        summary["absolute_share"] = scaled / scaled.sum()
+        total = summary.mean_abs_contribution.sum()
+        summary["absolute_share"] = summary.mean_abs_contribution / (total or np.nan)
         summary["rank"] = summary.mean_abs_contribution.rank(
             method="min", ascending=False
         ).astype("Int64")
@@ -831,10 +787,7 @@ def _permutation(
                 elif metric == "mse" and loss_reason is not None:
                     metrics[metric] = None
                 elif metric == "mse":
-                    accumulator = _MeanSquaredError()
-                    for score, label in zip(scores, labels, strict=True):
-                        accumulator.add(score, label)
-                    metrics[metric] = accumulator
+                    metrics[metric] = _mean_squared_error(scores, labels)
                 else:
                     left, right = (
                         (_average_ranks(scores), _average_ranks(labels))
@@ -902,18 +855,10 @@ def _permutation(
         common_periods[metric] = common
         count = sum(measured[0][2][period][1] for period in common)
 
-        def aggregate(values, common=common, metric=metric, key=key):
+        def aggregate(values, common=common, key=key):
             if not common:
                 return None
-            if metric != "mse":
-                return float(_mean(float(values[period][0][key]) for period in common))
-            accumulator = _MeanSquaredError()
-            for period in common:
-                accumulator.add_period(values[period][0][key])
-            result = accumulator.result()
-            if result is None:
-                raise ValueError("explanation_mse_unrepresentable")
-            return result
+            return float(np.mean([values[period][0][key] for period in common]))
 
         baseline_value = aggregate(measured[0][2])
         for name, repeat, values in measured[1:]:
@@ -955,16 +900,8 @@ def _permutation(
         mean = deviation = None
         if block.delta.notna().all():
             values = block.delta.to_numpy(dtype="float64")
-            scale = float(np.max(np.abs(values)))
-            normalized = values / scale if scale else values
-            center = fsum(map(float, normalized)) / len(values)
-            mean = float(_mean(map(float, values)))
-            # Population SD cannot exceed max(abs(values)); normalize before
-            # squaring to retain finite large-MSE permutation dispersion.
-            variance = fsum((float(value) - center) ** 2 for value in normalized) / len(
-                values
-            )
-            deviation = scale * min(1.0, variance**0.5)
+            mean = float(values.mean())
+            deviation = float((values - values[0]).std(ddof=0))
         row.update(delta_mean=mean, delta_std=deviation, repeats=len(block))
         summaries.append(row)
     return (

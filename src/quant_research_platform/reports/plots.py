@@ -71,7 +71,7 @@ def _styled(function):
         ):
             try:
                 return function(*args, **kwargs)
-            except Exception:
+            except BaseException:
                 for number in set(plt.get_fignums()) - before:
                     plt.close(number)
                 raise
@@ -170,7 +170,7 @@ def _time_axis(axis, timezone):
         ConciseDateFormatter(
             locator,
             tz=locator.tz,
-            formats=["%Y", "%m月", "%d日", "%H:%M", "%H:%M", "%S秒"],
+            formats=["%Y", "%m月", "%d日", "%H:%M", "%H:%M", "%S.%f"],
             zero_formats=["", "%Y年", "%m月", "%m-%d", "%H:%M", "%H:%M"],
             offset_formats=[
                 "",
@@ -201,8 +201,8 @@ def _times(values, timezone):
 def plot_portfolio_curve(curve, *, sample_role, timezone):
     """Plot query NAV with OOS markers and full-resolution descriptive drawdown.
 
-    Independent episodes stay in separate panels. Sampled curves cannot supply
-    a drawdown path. This plot never estimates the official max-drawdown metric.
+    Independent episodes stay in separate panels. Sampled or incompletely observed
+    curves cannot supply a full drawdown path. Recovered endpoints remain visible.
     """
     if (
         sample_role is not None
@@ -262,10 +262,18 @@ def plot_portfolio_curve(curve, *, sample_role, timezone):
         label = f"{curve['candidate_id']} | {episode}"
         nav_axis.set_title(label, fontsize=9)
         displayed, scale = _scale(values)
+        market_partial = part.get("market_observation_status") == "PARTIAL"
         nav_axis.plot(
-            times, displayed, color="#2F6690", marker=".", markersize=3, linewidth=1
+            times,
+            displayed,
+            color="#2F6690",
+            marker=".",
+            markersize=3,
+            linewidth=1,
+            linestyle="None" if market_partial else "-",
         )
         nav_axis.set_ylabel(f"净值（{curve['valuation_currency']}{scale}）")
+        nav_axis.ticklabel_format(axis="y", style="plain", useOffset=False)
         if not scale and values and max(values) >= 10000:
             from matplotlib.ticker import FuncFormatter
 
@@ -280,8 +288,10 @@ def plot_portfolio_curve(curve, *, sample_role, timezone):
         full_resolution = part["stride"] == 1 and part["source_point_count"] == part[
             "displayed_point_count"
         ] == len(points)
-        partial = part.get("status", curve["status"]) == "PARTIAL"
-        if full_resolution and values:
+        account_partial = part.get("account_path_status") == "PARTIAL" or (
+            part.get("status", curve["status"]) == "PARTIAL" and not market_partial
+        )
+        if full_resolution and values and not market_partial:
             peak = _number(curve["initial_capital"])
             if peak <= 0:
                 raise ValueError("plot_initial_capital_invalid")
@@ -296,13 +306,17 @@ def plot_portfolio_curve(curve, *, sample_role, timezone):
             _note(
                 dd_axis,
                 "已知前缀的局部回撤；全窗回撤未定义"
-                if partial
+                if account_partial
                 else "完整账本派生回撤；正式最大回撤以统计产物为准",
             )
         else:
             _note(
                 dd_axis,
-                "UNDEFINED：需要未抽样完整曲线" if values else "UNDEFINED：没有净值点",
+                "UNDEFINED：市场观测存在缺口，完整路径回撤不可知"
+                if market_partial
+                else "UNDEFINED：需要未抽样完整曲线"
+                if values
+                else "UNDEFINED：没有净值点",
             )
         notes = []
         if not full_resolution:
@@ -310,7 +324,20 @@ def plot_portfolio_curve(curve, *, sample_role, timezone):
                 f"抽样净值：{part['displayed_point_count']}/"
                 f"{part['source_point_count']} 点；步长={part['stride']}"
             )
-        if partial:
+        if market_partial:
+            gap = _times(
+                [
+                    pd.Timestamp(
+                        part["first_market_gap_ns"], unit="ns", tz=epoch_timezone
+                    )
+                ],
+                timezone,
+            )[0]
+            notes.append(
+                f"PARTIAL / market_observation；{part['market_observation_reason']}；"
+                f"首个缺口：{gap.isoformat()}；仅显示已知净值点"
+            )
+        if account_partial:
             stop = _times(
                 [pd.Timestamp(part["account_stop_ns"], unit="ns", tz=epoch_timezone)],
                 timezone,

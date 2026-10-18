@@ -249,7 +249,7 @@ INDUSTRY_CLASSIFICATION_VERSIONS_COLUMNS = (
     "abandon_date_unresolved",
     "institution_name",
 )
-LISTING_STATUS_CHANGE_COLUMNS = (
+STATE_CHANGE_COLUMNS = (
     "source_asset_id",
     "timestamp",
     "announcement_date",
@@ -258,7 +258,6 @@ LISTING_STATUS_CHANGE_COLUMNS = (
     "value_before",
     "value_after",
 )
-STOCK_INFO_CHANGE_COLUMNS = LISTING_STATUS_CHANGE_COLUMNS
 STOCK_INFO_ANNUAL_COLUMNS = (
     "source_asset_id",
     "timestamp",
@@ -328,8 +327,8 @@ INTERIM_COLUMNS_BY_DATA_ID: dict[str, tuple[str, ...]] = {
     "industry_classification_annual": INDUSTRY_CLASSIFICATION_ANNUAL_COLUMNS,
     "industry_classification_sets": INDUSTRY_CLASSIFICATION_SETS_COLUMNS,
     "industry_classification_versions": INDUSTRY_CLASSIFICATION_VERSIONS_COLUMNS,
-    "listing_status_changes": LISTING_STATUS_CHANGE_COLUMNS,
-    "stock_info_changes": STOCK_INFO_CHANGE_COLUMNS,
+    "listing_status_changes": STATE_CHANGE_COLUMNS,
+    "stock_info_changes": STATE_CHANGE_COLUMNS,
     "stock_info_annual": STOCK_INFO_ANNUAL_COLUMNS,
     "trading_no_limit": TRADING_NO_LIMIT_COLUMNS,
     "special_treatment_changes": SPECIAL_TREATMENT_CHANGE_COLUMNS,
@@ -972,29 +971,21 @@ def _normalize_corporate_actions(mapped: pd.DataFrame) -> pd.DataFrame:
 def _normalize_state_change_frame(frame: pd.DataFrame, data_id: str) -> pd.DataFrame:
     result = frame
     result["source_asset_id"] = result["stock_code"]
-    if data_id == "listing_status_changes":
+    if data_id in {"listing_status_changes", "stock_info_changes"}:
         result["announcement_date"] = _parse_optional_csmar_date(
             result["announcement_date"]
         )
         result["effective_date"] = strict_timestamp_series(
-            result["effective_date"], error="invalid_listing_status_date"
+            result["effective_date"],
+            error=(
+                "invalid_listing_status_date"
+                if data_id == "listing_status_changes"
+                else "invalid_stock_info_change_date"
+            ),
         ).dt.normalize()
         result["timestamp"] = result["effective_date"]
         return (
-            result.loc[:, LISTING_STATUS_CHANGE_COLUMNS]
-            .sort_values(["source_asset_id", "timestamp"], kind="mergesort")
-            .reset_index(drop=True)
-        )
-    if data_id == "stock_info_changes":
-        result["announcement_date"] = _parse_optional_csmar_date(
-            result["announcement_date"]
-        )
-        result["effective_date"] = strict_timestamp_series(
-            result["effective_date"], error="invalid_stock_info_change_date"
-        ).dt.normalize()
-        result["timestamp"] = result["effective_date"]
-        return (
-            result.loc[:, STOCK_INFO_CHANGE_COLUMNS]
+            result.loc[:, STATE_CHANGE_COLUMNS]
             .sort_values(["source_asset_id", "timestamp"], kind="mergesort")
             .reset_index(drop=True)
         )

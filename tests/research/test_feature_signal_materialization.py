@@ -81,7 +81,7 @@ def test_winsorization_preserves_positional_groups_and_duplicate_indexes():
                     "2024-01-05",
                 ]
             ),
-            "factor": [0.0, 7.0, -1e308, 10.0, np.nan, 100.0, 1e308, 10.0, np.nan, 5.0],
+            "factor": [0.0, 7.0, -100.0, 10.0, np.nan, 100.0, 100.0, 10.0, np.nan, 5.0],
         },
         index=[3, 3, 1, 1, 3, 7, 3, 7, 1, 1],
     )
@@ -91,7 +91,7 @@ def test_winsorization_preserves_positional_groups_and_duplicate_indexes():
     values = frame["factor"]
     actual = _winsorize(values, values.groupby(frame["timestamp"], sort=False))
     expected = pd.Series(
-        [0.3, 7.0, -9.8e307, 10.0, np.nan, 97.3, 9.8e307, 10.0, np.nan, 5.0],
+        [0.3, 7.0, -98.0, 10.0, np.nan, 97.3, 98.0, 10.0, np.nan, 5.0],
         index=frame.index,
         name="factor",
     )
@@ -114,11 +114,11 @@ def test_zero_variance_zscore_keeps_numeric_output() -> None:
     assert result.tolist() == [0.0, 0.0, 0.0]
 
 
-def test_tiny_nonconstant_zscores_remain_valid() -> None:
+def test_small_nonconstant_zscores_remain_valid() -> None:
     frame = pd.DataFrame(
         {
             "timestamp": [pd.Timestamp("2024-01-02")] * 3,
-            "factor": np.array([1e-320, 2e-320, 3e-320]),
+            "factor": np.array([1e-8, 2e-8, 3e-8]),
         }
     )
     signal = SignalSpec(

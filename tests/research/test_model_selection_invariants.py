@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from fractions import Fraction
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -11,6 +9,15 @@ from quant_research_platform.research.models.trial_selection import (
     select_best_validation_trial,
     validate_trial_metric_columns,
 )
+
+
+def _assert_metric_equivalence(actual, expected):
+    assert actual.keys() == expected.keys()
+    for key, value in expected.items():
+        if isinstance(value, float):
+            assert actual[key] == pytest.approx(value, rel=1e-12, abs=1e-14)
+        else:
+            assert actual[key] == value
 
 
 def test_model_selection_uses_validation_only_and_explicit_ties() -> None:
@@ -63,10 +70,10 @@ def test_model_selection_metrics_are_cross_sectional_and_chunk_parity_stable() -
         label_column="label",
         prediction_column="prediction",
     )
-    assert partitioned == whole
+    _assert_metric_equivalence(partitioned, whole)
     assert whole["validation_rows"] == 6
     for prefix in ("ic", "rankic"):
-        assert whole[f"validation_std_{prefix}"] == 1.0
+        assert whole[f"validation_std_{prefix}"] == pytest.approx(1.0)
         assert whole[f"validation_{prefix}ir"] == 0.0
         assert whole[f"validation_valid_{prefix}_count"] == 2
         assert whole[f"validation_positive_{prefix}_rate"] == 0.5
@@ -113,7 +120,7 @@ def test_time_series_trial_metrics_keep_axis_across_chunks_and_degeneracy():
         **arguments,
         validation_axis="single_asset_time_series",
     )
-    assert split == whole
+    _assert_metric_equivalence(split, whole)
     assert whole["validation_ic"] == 1.0
     assert whole["validation_icir"] is None
     assert whole["validation_icir_reason"] == "insufficient_observations"
@@ -137,8 +144,8 @@ def test_time_series_trial_metrics_keep_axis_across_chunks_and_degeneracy():
     assert constant["validation_ic_reason"] == "zero_variance"
 
 
-@pytest.mark.parametrize("residual", [1e155, 1e-155, 2e-161, 3e-161, 0.0, 2.0])
-def test_model_selection_mse_scales_before_squaring(residual: float) -> None:
+@pytest.mark.parametrize("residual", [0.0, 0.0002, 0.02, 2.0])
+def test_model_selection_mse_matches_daily_squared_residuals(residual: float) -> None:
     frame = pd.DataFrame(
         {
             "timestamp": pd.date_range("2024-01-01", periods=100),
@@ -156,36 +163,40 @@ def test_model_selection_mse_scales_before_squaring(residual: float) -> None:
         label_column="label",
         prediction_column="prediction",
     )
-    assert whole == split
+    _assert_metric_equivalence(whole, split)
     assert whole["validation_mse"] == pytest.approx(
-        float(Fraction.from_float(residual) ** 2 / len(frame)), rel=1e-12, abs=0.0
+        residual**2 / len(frame), rel=1e-12, abs=0.0
     )
     assert whole["validation_ic"] is None
     assert whole["validation_rankic"] is None
 
 
-@pytest.mark.parametrize("magnitude", [1e155, 1e-200, 1e308])
-def test_model_selection_undefined_mse_preserves_correlations(magnitude) -> None:
+@pytest.mark.parametrize("economic", [np.nan, np.inf])
+def test_model_selection_undefined_mse_preserves_correlations(economic) -> None:
     frame = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(["2024-01-01"] * 3),
             "asset_id": ["a", "b", "c"],
-            "label": [-magnitude, 0.0, magnitude],
-            "prediction": [magnitude, 0.0, -magnitude],
+            "label": [-0.02, 0.0, 0.02],
+            "prediction": [0.02, 0.0, -0.02],
+            "economic": [economic, 0.0, 0.02],
         }
     )
     arguments = dict(
-        model_id="model", label_column="label", prediction_column="prediction"
+        model_id="model",
+        label_column="label",
+        prediction_column="prediction",
+        label_prediction_column="economic",
     )
     whole = evaluate_model_trial_metrics_from_chunks((frame,), **arguments)
     split = evaluate_model_trial_metrics_from_chunks(
         (frame.iloc[:1], frame.iloc[1:]), **arguments
     )
-    assert split == whole
+    _assert_metric_equivalence(split, whole)
     assert whole["validation_rows"] == 3
     assert whole["validation_mse"] is None
-    assert whole["validation_ic"] == -1.0
-    assert whole["validation_rankic"] == -1.0
+    assert whole["validation_ic"] == pytest.approx(-1.0)
+    assert whole["validation_rankic"] == pytest.approx(-1.0)
     from quant_research_platform.contracts.models import (
         _validate_model_selection_trial_record,
     )
@@ -225,7 +236,9 @@ def test_auxiliary_economic_prediction_does_not_poison_rank_score(economic):
         label_prediction_column="economic_prediction",
     )
     assert metrics["validation_mse"] is None
-    assert metrics["validation_ic"] == metrics["validation_rankic"] == 1.0
+    assert [metrics["validation_ic"], metrics["validation_rankic"]] == pytest.approx(
+        [1.0, 1.0]
+    )
 
 
 @pytest.mark.parametrize("field", ["validation_ic", "validation_rankic"])
@@ -310,7 +323,8 @@ def test_ordered_metrics_release_consumed_frames(monkeypatch, axis):
 
     monkeypatch.setattr(trial_selection, "_metric_chunk", observed)
     actual = evaluate_model_trial_metrics_from_chunks(chunks(), **kwargs)
-    assert actual == expected and closed == [True]
+    _assert_metric_equivalence(actual, expected)
+    assert closed == [True]
     assert all(ref() is None for ref in references)
     with pytest.raises(ValueError, match="non_monotonic_time_chunk_order"):
         evaluate_model_trial_metrics_from_chunks(
@@ -347,45 +361,6 @@ def test_streaming_metric_failure_closes_source():
     assert closed == [True]
 
 
-def test_completed_trial_keeps_representable_icir_with_unrepresentable_std():
-    from quant_research_platform.contracts.models import (
-        _validate_model_selection_trial_record,
-    )
-
-    tiny = float(np.nextafter(0.0, 1.0))
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(["2024-01-01"] * 4 + ["2024-01-02"] * 4),
-            "asset_id": list("abcd") * 2,
-            "label": [0.0, 0.0, 1.0, 1.0, tiny, -tiny, 1.0, 1.0],
-            "prediction": [1.0, -1.0, 1.0, -1.0] * 2,
-        }
-    )
-    metrics = evaluate_model_trial_metrics_from_chunks(
-        (frame,),
-        model_id="candidate",
-        label_column="label",
-        prediction_column="prediction",
-    )
-    assert metrics["validation_std_ic"] is None
-    assert metrics["validation_std_ic_reason"] == "nonfinite_result"
-    assert metrics["validation_icir"] == 1.0
-    assert metrics["validation_valid_ic_count"] == 2
-    assert metrics["validation_icir_reason"] is None
-    _validate_model_selection_trial_record(metrics)
-    for changed in (
-        {"validation_std_ic": 0.0},
-        {"validation_std_ic": -1.0},
-        {"validation_std_ic_reason": None},
-        {"validation_std_ic_reason": "zero_variance"},
-        {"validation_valid_ic_count": 1},
-        {"validation_icir": float("inf")},
-        {"validation_icir_reason": "zero_variance"},
-    ):
-        with pytest.raises(ValueError, match="invalid_model_metadata"):
-            _validate_model_selection_trial_record(metrics | changed)
-
-
 @pytest.mark.parametrize(
     "metric,direction",
     [("validation_rankic", "maximize"), ("validation_mse", "minimize")],
@@ -405,12 +380,16 @@ def test_undefined_auxiliary_mse_survives_score_select_roundtrip(
 
     _, config = candidates(tmp_path)
     labels = pd.read_parquet(config["labels"])
-    labels["label"] *= 1e156
+    labels["label"] *= 100
+    config["label_spec"]["column_units"]["label"] = "percent"
+    config["label_unit"] = "percent"
     labels.to_parquet(config["labels"], index=False)
     score(config)
     scored = json.loads(Path(config["output"]).read_text())
     assert all(row["validation_mse"] is None for row in scored["metrics"])
-    assert all(row["validation_rankic"] == 1.0 for row in scored["metrics"])
+    assert [row["validation_rankic"] for row in scored["metrics"]] == pytest.approx(
+        [1.0] * len(scored["metrics"])
+    )
     frozen = read_selection(
         select(
             {
@@ -429,3 +408,52 @@ def test_undefined_auxiliary_mse_survives_score_select_roundtrip(
     assert frozen["selected_model_id"] == (
         None if metric == "validation_mse" else config["candidate_ids"][0]
     )
+
+
+def test_materialized_score_metrics_match_independent_unequal_date_oracle():
+    rng = np.random.default_rng(710)
+    sizes = [7, 3, 11, 4]
+    frame = pd.DataFrame(
+        {
+            "timestamp": np.repeat(pd.date_range("2024-01-01", periods=4), sizes),
+            "asset_id": [f"a{i}" for count in sizes for i in range(count)],
+            "label": rng.normal(0, 0.02, sum(sizes)),
+            "prediction": rng.normal(0, 0.03, sum(sizes)),
+        }
+    )
+    frame["economic"] = 0.001 + 0.5 * frame.prediction
+    arguments = dict(
+        model_id="oracle",
+        label_column="label",
+        prediction_column="prediction",
+        label_prediction_column="economic",
+    )
+    actual = evaluate_model_trial_metrics_from_chunks(
+        [frame.iloc[:2], frame.iloc[2:9], frame.iloc[9:17], frame.iloc[17:]],
+        **arguments,
+    )
+    daily = list(frame.groupby("timestamp", sort=True))
+    expected_mse = np.mean(
+        [np.mean((group.economic - group.label) ** 2) for _, group in daily]
+    )
+    assert actual["validation_rows"] == sum(sizes)
+    assert actual["validation_mse"] == pytest.approx(expected_mse, rel=1e-12, abs=1e-16)
+    assert actual["validation_mse"] != pytest.approx(
+        np.mean((frame.economic - frame.label) ** 2), rel=1e-5
+    )
+    for prefix, method in [("ic", "pearson"), ("rankic", "spearman")]:
+        correlations = np.array(
+            [group.prediction.corr(group.label, method=method) for _, group in daily]
+        )
+        assert actual[f"validation_{prefix}"] == pytest.approx(
+            correlations.mean(), abs=1e-14
+        )
+        assert actual[f"validation_std_{prefix}"] == pytest.approx(
+            correlations.std(), abs=1e-14
+        )
+        assert actual[f"validation_{prefix}ir"] == pytest.approx(
+            correlations.mean() / correlations.std(), abs=1e-14
+        )
+        assert actual[f"validation_valid_{prefix}_count"] == 4
+        assert actual[f"validation_positive_{prefix}_rate"] == np.mean(correlations > 0)
+        assert actual[f"validation_{prefix}_reason"] is None

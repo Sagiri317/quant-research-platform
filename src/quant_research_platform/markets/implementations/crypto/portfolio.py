@@ -42,7 +42,11 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioDiagnostic,
     PortfolioTargetBlocked,
 )
-from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.contracts.time import (
+    PredictionWindow,
+    TimeWindow,
+    time_window_timestamp_interval,
+)
 from quant_research_platform.markets.implementations.crypto.execution import (
     MAKER_QUOTE_HORIZON_MS,
     MakerCalibration,
@@ -86,10 +90,19 @@ from quant_research_platform.storage.manifests import read_dataset_manifest_evid
 def _window_bounds(windows):
     if not windows:
         raise PortfolioTargetBlocked("crypto_execution_oos_window_missing")
-    return tuple(
-        (pd.Timestamp(window.start).value, pd.Timestamp(window.end).value)
-        for _fold, window in windows
-    )
+    return tuple(_inclusive_bounds(window) for _fold, window in windows)
+
+
+def _inclusive_bounds(window):
+    start, end, closed = time_window_timestamp_interval(window)
+    return pd.Timestamp(start).value, pd.Timestamp(end).value - (not closed)
+
+
+def _decision_milliseconds(timestamp):
+    milliseconds, remainder = divmod(pd.Timestamp(timestamp).value, 1_000_000)
+    if remainder:
+        raise ValueError("crypto_execution_decision_time_precision_invalid")
+    return milliseconds
 
 
 def _books_until(run, *, reconstruct_depth, symbol, end_ns, stats=None):
@@ -150,11 +163,17 @@ def _prediction_metadata(metadata, *, window):
     cutoff = pd.Timestamp(facts["fit_cutoff"])
     if cutoff >= pd.Timestamp(window.start):
         raise ValueError("crypto_prediction_model_after_decision")
-    declared = TimeWindow(
+    declared = PredictionWindow(
         metadata["prediction_window"]["start"],
-        metadata["prediction_window"]["end"] or metadata["effective_prediction_end"],
+        metadata["prediction_window"]["end"],
     )
-    if window.start < declared.start or window.end > declared.end:
+    start, end = _inclusive_bounds(window)
+    if declared.end is None:
+        declared_start = pd.Timestamp(declared.start).value
+        declared_end = pd.Timestamp(metadata["effective_prediction_end"]).value
+    else:
+        declared_start, declared_end = _inclusive_bounds(declared)
+    if start < declared_start or end > declared_end:
         raise ValueError("crypto_prediction_window_coverage_invalid")
     return (
         prediction_model_metadata(metadata),
@@ -222,7 +241,7 @@ def _fixed_maker_rows(inputs, input_spec, window, asset_id, fold_id):
             ):
                 if all((book, trades, segment)):
                     yield {
-                        "timestamp_ms": stamp // 1_000_000,
+                        "timestamp_ms": _decision_milliseconds(stamp),
                         "asset_id": asset_id,
                         "fold_id": fold_id,
                         "book_segment_id": book,
@@ -336,7 +355,7 @@ def _prediction_rows(
                     pending[int(position)] = row._replace(prediction_score=score)
                 else:
                     pending[int(position)] = {
-                        "timestamp_ms": pd.Timestamp(row.timestamp).value // 1_000_000,
+                        "timestamp_ms": _decision_milliseconds(row.timestamp),
                         "asset_id": asset_id,
                         "fold_id": fold_id,
                         **{
@@ -844,7 +863,7 @@ def _paired_validation(streams, *, asset_id):
                 ):
                     raise ValueError("maker_calibration_context_misaligned")
                 _yield_value = {
-                    "timestamp_ms": pd.Timestamp(price.timestamp).value // 1_000_000,
+                    "timestamp_ms": _decision_milliseconds(price.timestamp),
                     "asset_id": asset_id,
                     "book_segment_id": price.book_segment_id,
                     "trade_observation_id": price.trade_observation_id,
@@ -906,7 +925,7 @@ def _calibration_windows(config):
         window = _window(item["window"]) if "window" in item else validation
         cutoff = item.get("cutoff", validation.end if validation else None)
         cutoff = pd.Timestamp(TimeWindow(cutoff, cutoff).end)
-        if pd.isna(cutoff) or cutoff < pd.Timestamp(window.end):
+        if pd.isna(cutoff) or cutoff.value < _inclusive_bounds(window)[1]:
             raise ValueError("crypto_calibration_window_invalid")
         windows[fold_id] = (window, cutoff)
     return windows
@@ -1270,10 +1289,12 @@ def calibrate_maker(config):
     metadata.update(
         window={
             "start": min(
-                pd.Timestamp(window.start) for window, _ in windows.values()
+                pd.Timestamp(_inclusive_bounds(window)[0])
+                for window, _ in windows.values()
             ).isoformat(),
             "end": max(
-                pd.Timestamp(window.end) for window, _ in windows.values()
+                pd.Timestamp(_inclusive_bounds(window)[1])
+                for window, _ in windows.values()
             ).isoformat(),
         },
         sample_role="calibration",
@@ -1659,9 +1680,9 @@ def validate_maker_calibration(artifact, metadata):
     if type(minimum) is not int or minimum < 1:
         raise ValueError("crypto_calibration_minimum_invalid")
     output = _window(metadata["window"])
-    if output != TimeWindow(
-        min(window.start for window, _ in folds.values()),
-        max(window.end for window, _ in folds.values()),
+    if _inclusive_bounds(output) != (
+        min(_inclusive_bounds(window)[0] for window, _ in folds.values()),
+        max(_inclusive_bounds(window)[1] for window, _ in folds.values()),
     ):
         raise ValueError("crypto_calibration_window_invalid")
     if (
@@ -1701,8 +1722,7 @@ def validate_maker_calibration(artifact, metadata):
         if set(summaries) != {"buy", "sell"}:
             raise ValueError("crypto_calibration_keys_invalid")
         cutoff = cutoff_at.value
-        beginning = pd.Timestamp(sample_window.start).value
-        last_decision = pd.Timestamp(sample_window.end).value
+        beginning, last_decision = _inclusive_bounds(sample_window)
         counts = {side: [0, 0, 0] for side in ("buy", "sell")}
         with closing_iterator(ExitStack()) as reads:
             samples = [

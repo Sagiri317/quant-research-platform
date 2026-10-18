@@ -515,10 +515,12 @@ def _write_file(
     stream: str,
     rows: list[dict],
 ) -> dict:
+    hours = pd.to_datetime([row["receive_time"] for row in rows], utc=True).floor("h")
+    assert hours.nunique() == 1, "synthetic member must fit one native UTC hour"
     path = (
         root
-        / "date=2026-08-27"
-        / "hour=00"
+        / f"date={hours[0]:%Y-%m-%d}"
+        / f"hour={hours[0]:%H}"
         / f"{symbol}_{FUTURES_MARKET_TYPE}_{data_kind}.jsonl.gz"
     )
     filesystem_mkdir(path.parent, parents=True, exist_ok=True)

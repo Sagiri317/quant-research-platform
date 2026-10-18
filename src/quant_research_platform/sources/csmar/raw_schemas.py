@@ -10,6 +10,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.sources.csmar import field_mappings as _field_mappings
 from quant_research_platform.storage.identity import (
     _DigestingReader,
@@ -139,37 +140,15 @@ def iter_export_csv_records(
     *,
     content_hashes: list[str] | None = None,
 ) -> Iterator[list[str]]:
-
-    def activate() -> Iterator[list[str]]:
-        records: _CsvRecords | None = None
-        primary = None
-        try:
-            records = _CsvRecords(
-                Path(path),
-                content_hashes=content_hashes,
-            )
-            for record in records:
-                try:
-                    yield record
-                except GeneratorExit:
-                    return
-                del record
-        except BaseException as body_error:
-            primary = body_error
-            raise
-        finally:
-            if records is not None:
-                try:
-                    records.close()
-                except BaseException as close_error:
-                    if primary is None:
-                        raise
-                    primary.add_note(
-                        "CSMAR CSV record cleanup also failed: "
-                        f"{type(close_error).__name__}"
-                    )
-
-    return activate()
+    with closing_iterator(
+        _CsvRecords(Path(path), content_hashes=content_hashes)
+    ) as records:
+        for record in records:
+            try:
+                yield record
+            except GeneratorExit:
+                return
+            del record
 
 
 def read_export_header(path: str | Path) -> tuple[str, ...]:
@@ -179,25 +158,11 @@ def read_export_header(path: str | Path) -> tuple[str, ...]:
     suffix = export_path.suffix.lower()
     if suffix != ".csv":
         raise ValueError(f"Unsupported CSMAR export extension: {suffix}")
-    rows = iter_export_csv_records(export_path)
-    primary = None
-    try:
+    with closing_iterator(iter_export_csv_records(export_path)) as rows:
         record = next(rows, None)
         columns = tuple(validate_export_header(record)) if record is not None else ()
         if not columns:
             raise ValueError("malformed_csmar_csv_row")
-    except BaseException as body_error:
-        primary = body_error
-        raise
-    finally:
-        try:
-            rows.close()
-        except BaseException as close_error:
-            if primary is None:
-                raise
-            primary.add_note(
-                f"CSMAR CSV row cleanup also failed: {type(close_error).__name__}"
-            )
     return columns
 
 

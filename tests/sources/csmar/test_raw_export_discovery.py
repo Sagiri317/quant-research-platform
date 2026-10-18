@@ -164,3 +164,120 @@ def test_csv_touch_does_not_change_consumed_provenance(tmp_path, exhaust):
         assert list(rows) == [["1"]]
     rows.close()
     assert hashes == ([hashlib.sha256(raw).hexdigest()] if exhaust else [])
+
+
+@pytest.mark.parametrize(
+    "operation", ("early_close", "header", "duplicate_header", "parse")
+)
+def test_csv_closes_once_and_preserves_parse_or_header_failure(
+    tmp_path, monkeypatch, operation
+):
+    from quant_research_platform.sources.csmar import raw_schemas
+
+    path = tmp_path / "source.csv"
+    payload = b'a,b\n"unclosed\n' if operation == "parse" else b"a,a\n1,2\n"
+    if operation == "header":
+        payload = b"a,b\n1,2\n"
+    path.write_bytes(payload)
+    closed = []
+    close = raw_schemas._CsvRecords.close
+
+    def close_then_fail(records):
+        closed.append(records)
+        close(records)
+        raise OSError("close_failed")
+
+    monkeypatch.setattr(raw_schemas._CsvRecords, "close", close_then_fail)
+    primary_error = operation in {"duplicate_header", "parse"}
+    error = (
+        "malformed_csmar_csv_row"
+        if operation == "parse"
+        else "duplicate_csmar_provider_column"
+    )
+    with pytest.raises(
+        ValueError if primary_error else OSError,
+        match=error if primary_error else "close_failed",
+    ) as caught:
+        if operation in {"header", "duplicate_header"}:
+            raw_schemas.read_export_header(path)
+        else:
+            rows = raw_schemas.iter_export_csv_records(path)
+            if operation == "early_close":
+                assert next(rows) == ["a", "a"]
+                rows.close()
+            else:
+                list(rows)
+    assert len(closed) == 1
+    if primary_error:
+        assert caught.value.__notes__ == ["iterator close also failed: OSError"]
+    if operation in {"early_close", "parse"}:
+        rows.close()
+        assert len(closed) == 1
+
+
+@pytest.mark.parametrize(
+    "data_id,columns,error",
+    (
+        (
+            "listing_status_changes",
+            (
+                "Symbol",
+                "DeclareDate",
+                "ChangeDate",
+                "ChangedItem",
+                "ValueBefore",
+                "ValueAfter",
+            ),
+            "invalid_listing_status_date",
+        ),
+        (
+            "stock_info_changes",
+            (
+                "Symbol",
+                "AnnouncementDate",
+                "ImplementDate",
+                "ChangedItem",
+                "Value_Before",
+                "Value_After",
+            ),
+            "invalid_stock_info_change_date",
+        ),
+    ),
+)
+def test_state_change_dates_survive_csv_to_interim(tmp_path, data_id, columns, error):
+    import pandas as pd
+
+    from quant_research_platform.sources.csmar import interim
+    from quant_research_platform.storage.datasets import read_dataset
+
+    source = pd.DataFrame(
+        [
+            ("000001", "", "2020-01-03", "上市状态", "正常", "变更"),
+            ("000001", "2020-01-01", "2020-01-02", "上市状态", "变更", "正常"),
+        ],
+        columns=columns,
+    )
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    table = field_mappings.RAW_TABLE_CONTRACTS[data_id].table_code
+    source.to_csv(raw / f"{table}.csv", index=False)
+    output = tmp_path / "interim"
+    interim.materialize_interim_data(
+        raw_root=raw,
+        output_roots={data_id: output},
+        data_ids=(data_id,),
+        chunksize=1,
+    )
+    actual = read_dataset(output).sort_values("timestamp").reset_index(drop=True)
+    assert actual.source_asset_id.tolist() == ["000001", "000001"]
+    assert actual.timestamp.tolist() == list(
+        pd.to_datetime(["2020-01-02", "2020-01-03"])
+    )
+    assert actual.effective_date.equals(actual.timestamp)
+    assert actual.announcement_date.iloc[0] == pd.Timestamp("2020-01-01")
+    assert pd.isna(actual.announcement_date.iloc[1])
+    assert actual.value_after.tolist() == ["正常", "变更"]
+    mapped = source.rename(columns=field_mappings.COLUMN_MAPPINGS[data_id])
+    mapped.loc[0, "effective_date"] = "bad-date"
+    with pytest.raises(ValueError, match=error):
+        interim._normalize_state_change_frame(mapped, data_id)

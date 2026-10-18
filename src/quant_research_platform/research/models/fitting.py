@@ -5,7 +5,6 @@ from __future__ import annotations
 import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from fractions import Fraction
 from functools import cached_property
 
 import numpy as np
@@ -206,7 +205,6 @@ def validate_model_state(predictor: object, metadata: dict[str, object]) -> None
     if isinstance(predictor, (LinearScaledPredictor, ScaledPredictor)):
         if (
             type(predictor.scaler) is not ModelMatrixScaler
-            or any(type(value) is not Fraction for value in predictor.scaler.offset_)
             or predictor.scaler.scaling != spec.training_scaling
             or predictor.scaler.to_payload() != metadata["scaler"]
         ):
@@ -241,13 +239,8 @@ def _fit_model_result(
             prepared_training, spec, estimator=estimator
         )
     target = prepared_training.training[spec.target_column].to_numpy(dtype="float64")
-    # Normalize before averaging so finite training targets cannot overflow the sum.
-    scale = float(np.max(np.abs(target)))
-    result.metadata["training_target_mean"] = (
-        float(np.average(target / scale, weights=prepared_training.preprocessing[0]))
-        * scale
-        if scale
-        else 0.0
+    result.metadata["training_target_mean"] = float(
+        np.average(target, weights=prepared_training.preprocessing[0])
     )
     return result
 
@@ -266,14 +259,12 @@ def _fit_linear_model_result(
     design = np.column_stack((np.ones(len(transformed)), transformed))
     weighted = np.sqrt(weights)
     target = training[spec.target_column].to_numpy(dtype="float64")
-    _, target_exponent = np.frexp(float(np.max(np.abs(target))))
     design *= weighted[:, None]
     beta = np.linalg.lstsq(
         design,
-        np.ldexp(target, -target_exponent) * weighted,
+        target * weighted,
         rcond=None,
     )[0]
-    beta = np.ldexp(beta, target_exponent)
     predictor = LinearScaledPredictor(
         coefficients=tuple(float(value) for value in beta), scaler=scaler
     )

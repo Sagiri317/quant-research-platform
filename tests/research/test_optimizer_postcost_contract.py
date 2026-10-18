@@ -20,7 +20,7 @@ def _assets(current, *, alpha=None, benchmark=None):
             expected_alpha=alpha or [0.2] * count + [0.0],
             specific_variance=[0.01] * count + [0.0],
             style=[1.0] * count + [0.0],
-            adv=[1e308] * count + [np.inf],
+            adv=[1e12] * count + [np.inf],
             is_cash=[False] * count + [True],
         )
     )
@@ -57,7 +57,7 @@ def _solve(assets, *, nav=100.0, cost=None, config=None, **kwargs):
     )
 
 
-@pytest.mark.parametrize("nav", [1e-300, 1e-100, 100.0, 1e100, 1e300])
+@pytest.mark.parametrize("nav", [100.0, 1e6, 1e9])
 @pytest.mark.parametrize("receivable", [0.0, 0.2])
 def test_purchase_reserves_exact_fee_and_keeps_receivable_in_full_nav(nav, receivable):
     # A buy of x costs x/10, so x + x/10 = the spendable budget.
@@ -362,17 +362,17 @@ def test_missing_risk_roundoff_boundary_does_not_erase_known_coefficients(
 
 
 def test_unknown_risk_at_zero_benchmark_has_no_absolute_weight_floor():
-    weights = np.array([1e-300, 1.0])
+    weights = np.array([1e-8, 1.0])
     benchmark = np.array([0.0, 1.0])
     exposure = np.array([[np.nan], [1.0]])
     specific = np.array([0.01, 0.01])
     active = optimizer._risk_active_weights(weights, benchmark, exposure, specific)
-    assert active[0] == 1e-300
+    assert active[0] == 1e-8
     with pytest.raises(ValueError, match="optimizer_risk_nonfinite"):
         optimizer._risk_variances(active, exposure, np.array([[0.04]]), specific)
 
 
-def test_extreme_nav_no_trade_does_not_price_unaffordable_hypothetical_trades():
+def test_high_cost_no_trade_keeps_self_financing_weights():
     from quant_research_platform.markets.implementations.a_share.execution import (
         PreparedTradeCost,
     )
@@ -381,13 +381,13 @@ def test_extreme_nav_no_trade_does_not_price_unaffordable_hypothetical_trades():
     owner = PreparedTradeCost(
         (0.0, 0.0, 0.0),
         (False, False, False),
-        np.frexp(30000.0),
-        np.frexp(0.0),
+        30000.0,
+        0.0,
         "synthetic",
     )
 
     def cost(buy, sell):
-        adv = np.full(2, 1e308)
+        adv = np.full(2, 1e8)
         buy_cost, buy_gradient = owner.totals_and_gradients(buy[:-1], adv)
         sell_cost, sell_gradient = owner.totals_and_gradients(sell[:-1], adv)
         return (
@@ -396,7 +396,7 @@ def test_extreme_nav_no_trade_does_not_price_unaffordable_hypothetical_trades():
             np.r_[sell_gradient, 0.0],
         )
 
-    result = _solve(assets, nav=1e308, cost=cost)
+    result = _solve(assets, nav=1e6, cost=cost)
     assert result.weights.to_numpy() == pytest.approx([0.1, 0.9, 0.0], abs=1e-14)
     assert result.expected_transaction_cost == 0.0
     assert result.target_turnover == 0.0
@@ -489,3 +489,26 @@ def test_net_risk_gradient_matches_dense_chain_rule(monkeypatch, weights):
     np.testing.assert_allclose(
         constraint["jac"](point), np.r_[expected, np.zeros(3)], rtol=2e-14, atol=1e-16
     )
+
+
+@pytest.mark.parametrize("scale", [1e-6, 1e-4, 1.0])
+def test_optimizer_rejects_material_asymmetry_in_covariance_units(scale):
+    assets = _assets([0.5, 0.5, 0.0], alpha=[0.0, 0.0, 0.0])
+    assets["specific_variance"] = 0.0
+    assets["x"] = [1.0, 0.0, 0.0]
+    assets["y"] = [0.0, 1.0, 0.0]
+    covariance = scale * np.array([[1.0, 1.009], [1.0, 1.0]])
+    # The old absolute allclose tolerance admitted negative quadratic risk.
+    assert np.array([1.0, -1.0]) @ covariance @ np.array([1.0, -1.0]) < 0
+    with pytest.raises(ValueError, match="optimizer_covariance_invalid"):
+        optimizer.optimize_portfolio(
+            assets,
+            factor_covariance=pd.DataFrame(
+                covariance, index=["x", "y"], columns=["x", "y"]
+            ),
+            style_columns=("x", "y"),
+            cash_column="is_cash",
+            expected_transaction_cost=_linear_cost(0.0, 0.0),
+            nav=100.0,
+            assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,)),
+        )

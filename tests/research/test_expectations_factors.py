@@ -365,11 +365,9 @@ def test_fiscal_year_coverage_is_independent_in_persisted_producer(
         assert pd.isna(saved.loc[1, "forward_earnings_yield_fy2"])
 
 
-@pytest.mark.parametrize("scale", (1e308, np.nextafter(0.0, 1.0)))
+@pytest.mark.parametrize("scale", (5.0, 0.01))
 @pytest.mark.parametrize("symmetric", (False, True))
-def test_extreme_finite_eps_medians_and_mad_persist_without_intermediate_overflow(
-    tmp_path, scale, symmetric
-):
+def test_eps_medians_and_mad_persist(tmp_path, scale, symmetric):
     from quant_research_platform.markets.implementations.a_share.processed import (
         producer,
     )
@@ -427,10 +425,8 @@ def test_extreme_finite_eps_medians_and_mad_persist_without_intermediate_overflo
 
 
 @pytest.mark.parametrize("same_institution", (False, True))
-@pytest.mark.parametrize("close", (0.5, np.nextafter(0.0, 1.0)))
-def test_half_subnormal_forecast_centers_survive_both_medians(
-    tmp_path, same_institution, close
-):
+@pytest.mark.parametrize("close", (0.5, 0.01))
+def test_forecast_centers_survive_both_medians(tmp_path, same_institution, close):
     from quant_research_platform.markets.implementations.a_share.processed import (
         producer,
     )
@@ -438,7 +434,7 @@ def test_half_subnormal_forecast_centers_survive_both_medians(
     from tests.helpers.a_share_catalogs import scientific_catalogs
     from tests.helpers.paths import StorageLayout
 
-    small = np.nextafter(0.0, 1.0)
+    small = 0.01
     dates = pd.bdate_range("2020-01-02", periods=2).as_unit("ns")
     records = pd.DataFrame(
         [
@@ -883,7 +879,7 @@ def test_price_independent_expectations_need_no_close_column(close):
     )
 
 
-def test_unrepresentable_expectation_yield_preserves_other_values_and_rows(tmp_path):
+def test_missing_price_preserves_other_expectations_and_rows(tmp_path):
     from quant_research_platform.markets.prepare import _configured_spec
     from quant_research_platform.storage.datasets import read_dataset, write_dataset
     from tests.helpers.a_share_catalogs import scientific_catalogs
@@ -899,14 +895,14 @@ def test_unrepresentable_expectation_yield_preserves_other_values_and_rows(tmp_p
             "declare_date": pd.Timestamp("2024-01-01"),
             "forecast_end_date": pd.Timestamp("2024-12-31"),
             "institution_id": ["i", "j", "k"],
-            "forecast_eps": [1e308] * 3,
+            "forecast_eps": [1.0] * 3,
         }
     )
     observation = pd.DataFrame(
         {
             "asset_id": ["a", "a"],
             "timestamp": pd.to_datetime(["2024-01-02", "2024-01-03"]),
-            "close": [1e-308, 10.0],
+            "close": [np.nan, 10.0],
         }
     )
     actual = _prepare_expectations(
@@ -915,7 +911,7 @@ def test_unrepresentable_expectation_yield_preserves_other_values_and_rows(tmp_p
         selected_columns=selected,
     )(observation)
     assert np.isnan(actual.forward_earnings_yield_fy1.iloc[0])
-    assert actual.forward_earnings_yield_fy1.iloc[1] == pytest.approx(1e307)
+    assert actual.forward_earnings_yield_fy1.iloc[1] == pytest.approx(0.1)
     assert actual.forecast_dispersion_fy1.eq(0.0).all()
     assert actual.log_analyst_coverage.to_numpy() == pytest.approx(np.log(3))
     actual.insert(0, "market_id", "a_share")
@@ -1249,3 +1245,192 @@ def test_datetime_values_cannot_be_numeric_forecasts(values):
     assert pd.isna(result.iloc[0])
     if len(result) > 1:
         assert result.iloc[1] == 2.0
+
+
+@pytest.mark.parametrize("case", ("same_day", "earlier_day", "unresolved"))
+@pytest.mark.parametrize("retained_report_id", ("r2", None))
+def test_report_reassignment_preserves_other_reports_and_query_independence(
+    case, retained_report_id
+):
+    rows = [
+        ("A", "r1", "2025-01-03" if case == "earlier_day" else "2025-01-02", 1.0),
+        ("A", retained_report_id, "2025-01-02", 3.0),
+        ("B", "b", "2025-01-02", 5.0),
+        ("C", "c", "2025-01-02", 7.0),
+    ]
+    if case == "unresolved":
+        rows += [(None, "r1", "2025-01-06", np.nan), ("D", "r1", "2025-01-08", 9.0)]
+    else:
+        rows += [("D", "r1", "2025-01-06", 9.0)]
+    records = pd.DataFrame(
+        rows, columns=["institution_id", "report_id", "declare_date", "forecast_eps"]
+    ).assign(asset_id="a", forecast_end_date=pd.Timestamp("2025-12-31"))
+    stable = records.iloc[[0, 2, 3]].assign(
+        declare_date="2025-01-02", forecast_eps=[4.0, 6.0, 8.0]
+    )
+    # Reused report identities remain independent across assets and periods.
+    records = pd.concat(
+        [
+            records,
+            stable.assign(asset_id="b"),
+            stable.assign(forecast_end_date=pd.Timestamp("2026-12-31")),
+        ],
+        ignore_index=True,
+    )
+    records["declare_date"] = pd.to_datetime(records.declare_date)
+    original = records.copy(deep=True)
+    sessions = pd.bdate_range("2025-01-02", "2025-01-10")
+    observations = pd.DataFrame(
+        [(asset, stamp, 10.0) for stamp in sessions for asset in ("a", "b")],
+        columns=["asset_id", "timestamp", "close"],
+    )
+    query = _prepare_expectations(records, trading_sessions=sessions)
+    actual = query(observations)
+    indexed = actual.set_index(["asset_id", "timestamp"])
+    resolved = pd.Timestamp("2025-01-09" if case == "unresolved" else "2025-01-07")
+    # The surviving A:r2=3 and B=5, C=7, D:r1=9 give median 6 and MAD 2.
+    np.testing.assert_allclose(
+        indexed.loc[("a", resolved), list(ALL_EXPECTATIONS_FACTORS)].to_numpy(float),
+        [0.6, 0.6, 2.0, np.log(4), 0.2, (resolved - sessions[0]).days, 0.25],
+    )
+    if case == "unresolved":
+        for day in ("2025-01-07", "2025-01-08"):
+            assert pd.isna(indexed.loc[("a", day), "forward_earnings_yield_fy1"])
+            assert pd.isna(indexed.loc[("a", day), "log_analyst_coverage"])
+    visible = actual.timestamp.gt(sessions[0])
+    np.testing.assert_allclose(
+        actual.loc[visible & actual.asset_id.eq("a"), "forward_earnings_yield_fy2"],
+        0.6,
+    )
+    np.testing.assert_allclose(
+        actual.loc[visible & actual.asset_id.eq("b"), "forward_earnings_yield_fy1"],
+        0.6,
+    )
+    chunks = [query(observations.iloc[[i]]) for i in reversed(range(len(observations)))]
+    pd.testing.assert_frame_equal(
+        pd.concat(chunks[::-1], ignore_index=True), actual, check_exact=True
+    )
+    pd.testing.assert_frame_equal(
+        query(observations.iloc[::-1]).iloc[::-1].reset_index(drop=True),
+        actual,
+        check_exact=True,
+    )
+    shuffled = _prepare_expectations(
+        records.sample(frac=1, random_state=7), trading_sessions=sessions
+    )(observations)
+    pd.testing.assert_frame_equal(shuffled, actual, check_exact=True)
+    pd.testing.assert_frame_equal(records, original, check_exact=True)
+
+
+@pytest.mark.parametrize("retained_eps", (3.0, np.nan))
+def test_reassigned_report_keeps_survivor_missing_barrier_and_original_freshness(
+    retained_eps,
+):
+    records = pd.DataFrame(
+        {
+            "asset_id": "a",
+            "forecast_end_date": pd.Timestamp("2025-12-31"),
+            "institution_id": ["A", "A", "A", "B", "C", "D"],
+            "report_id": ["older", "r1", "r2", "b", "c", "r1"],
+            "declare_date": pd.to_datetime(
+                ["2025-01-01", "2025-01-02", "2025-01-02"] + ["2025-01-06"] * 3
+            ),
+            "forecast_eps": [2.0, 1.0, retained_eps, 5.0, 7.0, 9.0],
+        }
+    )
+    sessions = pd.bdate_range("2025-01-01", "2025-01-09")
+    actual = _prepare_expectations(
+        records, trading_sessions=sessions, freshness_days=6
+    )(pd.DataFrame({"asset_id": "a", "timestamp": sessions, "close": 10.0}))
+    actual = actual.set_index("timestamp")
+    # The older A report is still fresh on Jan 7 but cannot bypass unknown r2.
+    # Jan 8 is r2's final fresh day; reassignment never resets its own age.
+    for day in ("2025-01-07", "2025-01-08"):
+        assert actual.loc[day, "forward_earnings_yield_fy1"] == pytest.approx(
+            0.6 if pd.notna(retained_eps) else 0.7
+        )
+        assert actual.loc[day, "log_analyst_coverage"] == pytest.approx(
+            np.log(4 if pd.notna(retained_eps) else 3)
+        )
+    assert actual.loc["2025-01-09", "forward_earnings_yield_fy1"] == 0.7
+    assert actual.loc["2025-01-09", "log_analyst_coverage"] == pytest.approx(np.log(3))
+
+
+@pytest.mark.parametrize("batch_rows", (1, 10000))
+def test_raw_report_reassignment_survives_interim_prepare_and_native_read(
+    tmp_path, monkeypatch, batch_rows
+):
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        producer,
+    )
+    from quant_research_platform.sources.csmar.interim import materialize_interim_data
+    from quant_research_platform.storage.datasets import read_dataset
+    from tests.helpers.a_share_raw import _write_csmar
+    from tests.helpers.a_share_sources import (
+        _prepare,
+        _synthetic_interim_frames,
+        _write_inputs,
+    )
+
+    rows = [
+        dict(
+            Stkcd="000001",
+            ReportID=report,
+            AnanmID="author",
+            DeclareDate=declaration,
+            Fenddt="2025-12-31",
+            InstitutionID=institution,
+            Feps=eps,
+            Fpe="",
+        )
+        for institution, report, declaration, eps in [
+            ("A", "r1", "2025-01-02", 1.0),
+            ("A", "r2", "2025-01-02", 3.0),
+            ("B", "b", "2025-01-02", 5.0),
+            ("C", "c", "2025-01-02", 7.0),
+            ("D", "r1", "2025-01-06", 9.0),
+        ]
+    ]
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    _write_csmar(raw, "analyst_forecast", rows[::-1])
+    path = next(raw.glob("*.csv"))
+    before = path.read_bytes()
+    source_root = tmp_path / "analyst"
+    materialize_interim_data(
+        raw_root=raw,
+        data_ids=("analyst_forecast",),
+        output_roots={"analyst_forecast": source_root},
+        chunksize=batch_rows,
+    )
+    source = read_dataset(source_root)
+    assert len(source) == 5
+    assert source.report_id.eq("r1").sum() == 2
+    sessions = pd.bdate_range("2025-01-02", "2025-01-10").as_unit("ns")
+    frames = _synthetic_interim_frames(sessions)
+    frames["market_bars_1d"]["close"] = 10.0
+    inputs = _write_inputs(tmp_path / "inputs", frames)
+    inputs["analyst_forecast"] = source_root
+    inputs["market_panel_1d"] = _prepare(
+        tmp_path / "prepared", "market_panel_1d", inputs, sessions[0], sessions[-1]
+    )
+    monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", batch_rows)
+    root = _prepare(
+        tmp_path / "prepared", "expectations_factors", inputs, sessions[0], sessions[-1]
+    )
+    saved = read_dataset(root).set_index(["asset_id", "timestamp"])
+    row = saved.loc[("000001", "2025-01-07")]
+    np.testing.assert_allclose(
+        row[
+            [
+                "forward_earnings_yield_fy1",
+                "forecast_dispersion_fy1",
+                "log_analyst_coverage",
+            ]
+        ].to_numpy(float),
+        [0.6, 2.0, np.log(4)],
+    )
+    assert saved.loc[("000001", "2025-01-06"), "forward_earnings_yield_fy1"] == 0.5
+    assert saved.loc["000002", list(ALL_EXPECTATIONS_FACTORS)].isna().all().all()
+    pd.testing.assert_frame_equal(read_dataset(source_root), source, check_exact=True)
+    assert path.read_bytes() == before

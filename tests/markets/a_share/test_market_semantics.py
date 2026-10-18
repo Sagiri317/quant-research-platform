@@ -1934,17 +1934,29 @@ def test_industry_frontier_discards_superseded_cross_standard_conflicts(
 
 
 def test_native_forward_returns_declare_units_and_actual_maturity_columns():
+    from quant_research_platform.contracts.columns import ColumnRole
     from quant_research_platform.markets.implementations.a_share.ids import (
         FORWARD_RETURNS_DATA_ID,
     )
     from quant_research_platform.markets.implementations.a_share.processed import (
         catalog,
     )
+    from quant_research_platform.research.protocols.a_share import (
+        research_dataset_specs,
+    )
 
     spec = catalog.processed_catalog().get(FORWARD_RETURNS_DATA_ID)
     for definition in label_definitions():
+        assert spec.column_roles[definition.output_column] is ColumnRole.LABEL
+        assert spec.column_roles[definition.available_at_column] is ColumnRole.CONTEXT
         assert spec.column_units[definition.output_column] == "decimal_return"
         assert (
             spec.label_availability_columns[definition.output_column]
             == definition.available_at_column
         )
+    for dataset in research_dataset_specs():
+        assert len(dataset.label_columns) == len(label_definitions()) + 1
+        for label, clock in dataset.label_availability_columns.items():
+            assert label in dataset.label_columns
+            assert clock in dataset.context_columns
+            assert dataset.column_roles[clock] is ColumnRole.CONTEXT

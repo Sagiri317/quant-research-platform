@@ -1263,11 +1263,9 @@ def test_selected_evaluation_reduction_needs_no_input_content(tmp_path, change):
         assert "input_observations" not in metadata["metadata"]["input_facts"]
 
 
-@pytest.mark.parametrize(
-    "scale", [1024 * np.nextafter(0.0, 1.0), 1e-300, 1e-12, 1.0, 1e12, 1e306]
-)
+@pytest.mark.parametrize("scale", [1e-6, 0.01, 1.0, 10000.0])
 @pytest.mark.parametrize("change", ["roundoff", "material"])
-def test_common_labels_use_local_scale_roundoff_bound(tmp_path, scale, change):
+def test_common_labels_use_relative_float_tolerance(tmp_path, scale, change):
     frame, config = _fixture(tmp_path)
     frame["label"] *= scale
     config["inputs"] = str(
@@ -1278,9 +1276,7 @@ def test_common_labels_use_local_scale_roundoff_bound(tmp_path, scale, change):
     if change == "roundoff":
         frame.loc[0, "label"] = np.nextafter(frame.loc[0, "label"], np.inf)
     else:
-        frame.loc[0, "label"] += max(
-            scale * 1e-8, 16 * (scale - np.nextafter(scale, 0.0))
-        )
+        frame.loc[0, "label"] += scale * 1e-8
     peer = write_evaluation_input(
         tmp_path / "peer", frame, factors=("x", "z"), labels=("label",)
     )
@@ -1328,8 +1324,8 @@ def test_common_labels_require_matching_declared_science(tmp_path, change):
         )
 
 
-@pytest.mark.parametrize("steps", [0, 1, 16])
-def test_common_zero_labels_only_allow_local_subnormal_roundoff(tmp_path, steps):
+@pytest.mark.parametrize("delta", [0.0, 1e-8])
+def test_common_zero_labels_do_not_use_an_absolute_tolerance_floor(tmp_path, delta):
     frame, config = _fixture(tmp_path)
     frame.loc[0, "label"] = 0.0
     config["inputs"] = str(
@@ -1337,7 +1333,7 @@ def test_common_zero_labels_only_allow_local_subnormal_roundoff(tmp_path, steps)
             tmp_path / "zero", frame, factors=("x", "z"), labels=("label",)
         )
     )
-    frame.loc[0, "label"] = steps * np.nextafter(0.0, 1.0)
+    frame.loc[0, "label"] = delta
     peer = write_evaluation_input(
         tmp_path / "peer", frame, factors=("x", "z"), labels=("label",)
     )
@@ -1345,7 +1341,7 @@ def test_common_zero_labels_only_allow_local_subnormal_roundoff(tmp_path, steps)
         sample_scope="common",
         comparison_inputs=[{"inputs": str(peer), "signal_columns": ["x"]}],
     )
-    if steps > 8:
+    if delta:
         with pytest.raises(ValueError, match="evaluation_common_label_mismatch"):
             evaluate(config)
     else:

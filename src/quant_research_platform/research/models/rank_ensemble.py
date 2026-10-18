@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from fractions import Fraction
 
 import numpy as np
 import pandas as pd
@@ -91,11 +90,11 @@ class ICWeightedRankEnsemble:
         for _column, correlation in _training_rank_correlations(
             frame, input_columns, label_column, sample_weight
         ):
-            weights.append(Fraction() if correlation is None else correlation)
+            weights.append(0.0 if correlation is None else correlation)
             defined_count += correlation is not None
         if not defined_count:
             raise ValueError("all_ensemble_correlations_undefined")
-        normalizer = sum(map(abs, weights), Fraction())
+        normalizer = sum(map(abs, weights))
         if normalizer == 0.0:
             raise ValueError("all_ensemble_correlations_zero")
         columns = input_columns
@@ -136,63 +135,16 @@ def _label_calibration(scores, labels, sample_weight) -> tuple[float, float]:
     weights = _weights(sample_weight, len(scores))
     labels = np.asarray(labels, dtype="float64")
     scores = np.asarray(scores, dtype="float64")
-    # Centered weighted reductions handle ordinary training arrays in BLAS.
-    # Preserve exact accumulation for cancellation and unrepresentable products.
-    with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
-        mass = weights / weights.max()
-        mass /= mass.sum()
-        xbar, ybar = np.dot(mass, scores), np.dot(mass, labels)
-        x, y = scores - xbar, labels - ybar
-        variance = np.dot(mass * x, x)
-        covariance = np.dot(mass * x, y)
-        slope = covariance / variance
-        intercept = ybar - slope * xbar
-        bound = 16 * len(scores) * np.finfo(float).eps
-        safe = (
-            np.isfinite((variance, covariance, slope, intercept)).all()
-            and variance >= np.finfo(float).tiny
-            and abs(covariance) >= np.finfo(float).tiny
-            and np.max(np.abs(x))
-            > np.sqrt(np.finfo(float).eps) * np.max(np.abs(scores))
-            and np.max(np.abs(y))
-            > np.sqrt(np.finfo(float).eps) * np.max(np.abs(labels))
-            and abs(covariance) > bound * np.dot(mass * np.abs(x), np.abs(y))
-            and np.all(mass > 0)
-        )
-    if safe:
-        return float(intercept), float(slope)
-    columns = []
-    units = []
-    for values in (scores, labels, weights):
-        ratios = [float(value).as_integer_ratio() for value in values]
-        unit = max((denominator for _, denominator in ratios), default=1)
-        columns.append(
-            [numerator * (unit // denominator) for numerator, denominator in ratios]
-        )
-        units.append(unit)
-    total = sx = sy = xx = xy = 0
-    for x, y, mass in zip(*columns, strict=True):
-        weighted_x = mass * x
-        total += mass
-        sx += weighted_x
-        sy += mass * y
-        xx += weighted_x * x
-        xy += weighted_x * y
-    variance = total * xx - sx * sx
-    slope = (
-        Fraction()
-        if variance == 0
-        else Fraction((total * xy - sx * sy) * units[0], variance * units[1])
-    )
-    sx = Fraction(sx, units[0])
-    sy = Fraction(sy, units[1])
-    try:
-        result = (float((sy - slope * sx) / total), float(slope))
-    except OverflowError:
-        raise ValueError("rank_label_calibration_nonfinite") from None
-    if not all(np.isfinite(value) for value in result):
+    mass = weights / weights.sum()
+    dx, dy = scores - scores[0], labels - labels[0]
+    xbar, ybar = np.dot(mass, dx), np.dot(mass, dy)
+    x, y = dx - xbar, dy - ybar
+    variance = np.dot(mass * x, x)
+    slope = float(np.dot(mass * x, y) / variance) if variance > 0 else 0.0
+    intercept = float(labels[0] + ybar - slope * (scores[0] + xbar))
+    if not np.isfinite((intercept, slope)).all():
         raise ValueError("rank_label_calibration_nonfinite")
-    return result
+    return intercept, slope
 
 
 def _rank_frame_columns(frame: pd.DataFrame, columns: tuple[str, ...]) -> np.ndarray:
@@ -269,9 +221,7 @@ def _training_rank_correlations(frame, columns, label_column, sample_weight):
     )
     masses = (
         {
-            timestamp: sum(
-                (Fraction(float(weights[index])) for index in indices), Fraction()
-            )
+            timestamp: float(weights[indices].sum())
             for timestamp, indices in groups.items()
         }
         if timestamps is not None and sample_weight is not None
@@ -305,18 +255,7 @@ def _training_rank_correlations(frame, columns, label_column, sample_weight):
                 )
         yield (
             column,
-            (
-                sum(
-                    (
-                        Fraction(float(value)) * Fraction(weight)
-                        for value, weight in zip(
-                            correlations, period_weights, strict=True
-                        )
-                    ),
-                    Fraction(),
-                )
-                / sum((Fraction(weight) for weight in period_weights), Fraction())
-                if correlations
-                else None
-            ),
+            float(np.average(correlations, weights=period_weights))
+            if correlations
+            else None,
         )

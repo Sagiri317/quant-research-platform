@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from fractions import Fraction
-from statistics import mean
 
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.contracts.validation import finite_exact_float
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.statistics import (
     _return_sharpes,
@@ -56,32 +53,19 @@ _CLOCKS = {"trading_day_open", "trading_day_close", "utc"}
 
 
 def _nav_return_roundoff(start: object, end: object, returns: object) -> np.ndarray:
-    """Enclose NAV-ratio rounding using adjacent float64 operand values.
-
-    One outward ULP encloses each rounded NAV. Outward division/subtraction
-    bounds cover both (end / start - 1) and ((end - start) / start).
-    """
+    """Bound ordinary NAV-ratio roundoff in dimensionless return units."""
     before = np.asarray(start, dtype="float64")
     after = np.asarray(end, dtype="float64")
+    data = np.asarray(returns, dtype="float64")
     with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
-        lower = np.nextafter(
-            np.nextafter(after, -np.inf)
-            / np.nextafter(before, np.where(after >= 0, np.inf, -np.inf)),
-            -np.inf,
+        tolerance = (
+            4 * np.finfo(float).eps * (np.abs(after / before) + np.abs(data) + 1)
         )
-        upper = np.nextafter(
-            np.nextafter(after, np.inf)
-            / np.nextafter(before, np.where(after >= 0, -np.inf, np.inf)),
-            np.inf,
-        )
-        lower = np.nextafter(lower - 1.0, -np.inf)
-        upper = np.nextafter(upper - 1.0, np.inf)
-        data = np.asarray(returns, dtype="float64")
-        return np.where(
-            (before > 0) & np.isfinite(data),
-            np.maximum(np.abs(data - lower), np.abs(upper - data)),
-            np.inf,
-        )
+    return np.where(
+        (before > 0) & np.isfinite(before) & np.isfinite(after) & np.isfinite(data),
+        tolerance,
+        np.inf,
+    )
 
 
 def selected_portfolio_analyses(config, allowed):
@@ -96,8 +80,8 @@ def endpoint_return(start, end):
         return np.nan, "reference_endpoint_missing"
     if not np.isfinite([start, end]).all() or min(start, end) <= 0:
         return np.nan, "reference_endpoint_invalid"
-    value = finite_exact_float(Fraction(float(end)) / Fraction(float(start)) - 1)
-    return (np.nan, "nonfinite_result") if value is None else (value, "")
+    value = (float(end) - float(start)) / float(start)
+    return (value, "") if np.isfinite(value) else (np.nan, "nonfinite_result")
 
 
 def _descriptor(item):
@@ -343,7 +327,7 @@ def _reference_returns(axis, item, loaded, *, currency, clock):
     by_start = frame.set_index(begin)
     returns = []
     for start, end in zip(axis.start_at, axis.end_at, strict=True):
-        cursor, wealth, reason = start, Fraction(1), ""
+        cursor, total_return, reason = start, 0.0, ""
         while cursor < end:
             if cursor not in by_start.index:
                 reason = "reference_interval_missing"
@@ -360,14 +344,11 @@ def _reference_returns(axis, item, loaded, *, currency, clock):
             ):
                 reason = "reference_return_invalid"
                 break
-            wealth *= 1 + Fraction(float(result))
+            total_return += float(result) * (1 + total_return)
             cursor = following
-        result = None if reason else finite_exact_float(wealth - 1)
+        result = total_return if not reason and np.isfinite(total_return) else np.nan
         returns.append(
-            (
-                np.nan if result is None else result,
-                reason or ("nonfinite_result" if result is None else ""),
-            )
+            (result, reason or ("" if np.isfinite(result) else "nonfinite_result"))
         )
     return returns
 
@@ -397,36 +378,10 @@ def _wealth(returns):
     values = np.asarray(returns, dtype=float)
     missing = np.logical_or.accumulate(~np.isfinite(values))
     zero = np.logical_or.accumulate(values == -1)
-    finite = np.where(np.isfinite(values), values, 0.0)
-    factors = 1 + finite
-    # TwoSum retains the rounding residual in 1 + r, including tiny returns
-    # whose rounded factor is one. Correct the ordinary cumulative product.
-    rounded = factors - 1
-    residual = (1 - (factors - rounded)) + (finite - rounded)
-    correction = np.divide(
-        residual, factors, out=np.zeros_like(values), where=factors != 0
-    )
     with np.errstate(over="ignore", under="ignore", invalid="ignore"):
-        result = np.cumprod(factors) * np.exp(np.cumsum(np.log1p(correction)))
-    active = ~missing & ~zero
-    # Only representation-boundary paths need exact state for later recovery;
-    # ordinary rows never grow Fraction numerators/denominators.
-    limits = np.finfo(float)
-    if np.any(
-        active
-        & (
-            ~np.isfinite(result)
-            | (np.abs(result) <= 2 * limits.tiny)
-            | (np.abs(result) >= limits.max / 2)
-        )
-    ):
-        wealth = Fraction(1)
-        for index in np.flatnonzero(~missing):
-            wealth *= 1 + Fraction(float(values[index]))
-            converted = finite_exact_float(wealth)
-            result[index] = np.nan if converted is None else converted
+        result = np.cumprod(1 + np.where(np.isfinite(values), values, 0.0))
     result[zero] = 0.0
-    result[missing] = np.nan
+    result[missing | ~np.isfinite(result)] = np.nan
     return result
 
 
@@ -596,7 +551,7 @@ def comparison_tables(
                 values = {
                     "portfolio_total_return": wp[-1] - 1,
                     "benchmark_total_return": wb[-1] - 1,
-                    "mean_return_difference": float(mean(differences))
+                    "mean_return_difference": float(np.mean(differences))
                     if complete
                     else np.nan,
                     "relative_wealth": relative[-1],
@@ -646,7 +601,7 @@ def comparison_tables(
                     else np.nan
                 )
                 values.update(
-                    annualized_return_difference=float(mean(differences) * periods)
+                    annualized_return_difference=float(np.mean(differences) * periods)
                     if complete and not annual_reason
                     else np.nan,
                     tracking_error=sd * np.sqrt(periods)
@@ -730,7 +685,7 @@ def comparison_tables(
                         ("mean_return_difference", differences),
                     ):
                         value = (
-                            float(mean(values_array[mask & paired]))
+                            float(np.mean(values_array[mask & paired]))
                             if count
                             else np.nan
                         )

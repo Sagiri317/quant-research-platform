@@ -94,7 +94,7 @@ def write_evaluation_outputs_from_chunks(
     chunks: Iterable[tuple[pd.DataFrame, pd.DataFrame, Mapping[str, object]]],
     *,
     summary_factory: Callable[
-        [], tuple[EvaluationDiagnostics, pd.DataFrame, pd.DataFrame, pd.DataFrame]
+        [], tuple[EvaluationDiagnostics, pd.DataFrame, pd.DataFrame]
     ],
     spec: EvaluationSpec,
     output_path: Path,
@@ -120,9 +120,7 @@ def write_evaluation_outputs_from_chunks(
             spec=spec,
             science=metadata,
         )
-        evaluation_diagnostics, ic_summary, group_spread_summary, coverage_summary = (
-            summary_factory()
-        )
+        evaluation_diagnostics, ic_summary, group_spread_summary = summary_factory()
         validate_output_frame(
             ic_summary,
             required=EVALUATION_IC_SUMMARY_COLUMNS,

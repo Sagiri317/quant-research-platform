@@ -404,6 +404,7 @@ class RecorderRun:
         symbol: str | None = None,
         market_type: str | None = None,
         data_kinds: Sequence[str] | None = None,
+        end_ns: int | None = None,
     ) -> Iterator[dict[str, Any]]:
         kinds = None if data_kinds is None else frozenset(data_kinds)
         selected = [
@@ -415,11 +416,20 @@ class RecorderRun:
         ]
         if not selected:
             raise ValueError("binance_replay_requested_files_missing")
+        if end_ns is not None:
+            selected = [
+                item
+                for item in selected
+                if (start := _native_partition_start_ns(item)) is None
+                or start <= end_ns
+            ]
 
         def owner_records(files):
             for item in files:
                 with closing_iterator(
-                    _iter_raw_file(self.root, item, manifest=self.manifest)
+                    _iter_raw_file(
+                        self.root, item, manifest=self.manifest, end_ns=end_ns
+                    )
                 ) as records:
                     for _yield_value in records:
                         try:
@@ -468,14 +478,15 @@ class RecorderRun:
             records = resources.enter_context(
                 closing_iterator(
                     self.iter_records(
-                        symbol=symbol, market_type=market_type, data_kinds=data_kinds
+                        symbol=symbol,
+                        market_type=market_type,
+                        data_kinds=data_kinds,
+                        end_ns=end_ns,
                     )
                 )
             )
             observe = native_trade_identities() if "agg_trades" in data_kinds else None
             for record in records:
-                if end_ns is not None and record["observed_time_ns"] > end_ns:
-                    continue
                 normalized = normalize_recorder_record(record)
                 if normalized["data_kind"] == "agg_trades":
                     accepted, _previous = observe(
@@ -814,8 +825,30 @@ def _overlapping_capture_groups(
         yield group
 
 
+def _native_partition_start_ns(metadata):
+    """Use only the recorder's native UTC hourly partition convention."""
+    parts = Path(metadata["path"]).parts
+    filename = (
+        f"{metadata['symbol']}_{metadata['market']}_{metadata['data_kind']}.jsonl.gz"
+    )
+    if len(parts) != 3 or parts[2] != filename:
+        return None
+    match = re.fullmatch(r"date=(\d{4}-\d{2}-\d{2})/hour=(\d{2})", "/".join(parts[:2]))
+    if match is None:
+        return None
+    try:
+        start = dt.datetime.fromisoformat(f"{match[1]}T{match[2]}:00:00")
+    except ValueError:
+        return None
+    return (start - dt.datetime(1970, 1, 1)) // dt.timedelta(microseconds=1) * 1000
+
+
 def _iter_raw_file(
-    root: Path, metadata: dict[str, Any], *, manifest: dict[str, Any]
+    root: Path,
+    metadata: dict[str, Any],
+    *,
+    manifest: dict[str, Any],
+    end_ns: int | None = None,
 ) -> Iterator[dict[str, Any]]:
     path = require_unaliased_path(
         root / metadata["path"], error="binance_replay_file_path_invalid"
@@ -844,7 +877,7 @@ def _iter_raw_file(
                 record = parse_qrp_json_object(line)
             except (UnicodeError, ValueError) as exc:
                 raise ValueError("binance_replay_raw_json_invalid") from exc
-            _validate_raw_record(record, metadata=metadata)
+            selected = _validate_raw_record(record, metadata=metadata, end_ns=end_ns)
             capture_seq = record["capture_seq"]
             if previous is not None and capture_seq <= previous:
                 raise ValueError("binance_replay_capture_seq_non_monotonic")
@@ -852,6 +885,10 @@ def _iter_raw_file(
             minimum = capture_seq if minimum is None else min(minimum, capture_seq)
             maximum = capture_seq if maximum is None else max(maximum, capture_seq)
             count += 1
+            # Capture order does not imply monotonic wall clocks. Keep reading
+            # the selected member after future records, without decoding payloads.
+            if not selected:
+                continue
             market_metadata = manifest["market_metadata"][metadata["symbol"]][
                 metadata["market"]
             ]
@@ -878,7 +915,9 @@ def _iter_raw_file(
             raise ValueError("binance_replay_file_manifest_mismatch")
 
 
-def _validate_raw_record(value: object, *, metadata: dict[str, Any]) -> None:
+def _validate_raw_record(
+    value: object, *, metadata: dict[str, Any], end_ns: int | None = None
+) -> bool:
     required = {
         "capture_seq",
         "receive_time",
@@ -908,6 +947,8 @@ def _validate_raw_record(value: object, *, metadata: dict[str, Any]) -> None:
         value["receive_monotonic_ns"],
         error="binance_replay_receive_monotonic_invalid",
     )
+    if end_ns is not None and observed_time_ns > end_ns:
+        return False
     if metadata["data_kind"] in {"depth", "depth_snapshot"}:
         for key in ("connection_id", "segment_id"):
             if not isinstance(value.get(key), str) or not value[key]:
@@ -928,6 +969,7 @@ def _validate_raw_record(value: object, *, metadata: dict[str, Any]) -> None:
             value["payload"],
             validate_values=False,
         )
+    return True
 
 
 def _levels(

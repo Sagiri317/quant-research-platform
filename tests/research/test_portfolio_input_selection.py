@@ -393,7 +393,7 @@ def test_market_axis_reprojections_keep_filter_support_during_migration(tmp_path
             for market in (1, 4)
         ]
     )
-    _, _, membership, _, _, _ = producer._processed_axis(
+    _, _, membership, _, _ = producer._processed_axis(
         session, panel_source=True, calendar=calendar, stock_master=stocks
     )
     assert membership.timestamp.tolist() == [days[0], days[2]]

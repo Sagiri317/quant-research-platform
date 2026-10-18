@@ -84,6 +84,9 @@ def _ledger_curve(batches, *, stride):
                             "account_path_status",
                             "account_stop_reason",
                             "account_stop_ns",
+                            "market_observation_status",
+                            "market_observation_reason",
+                            "first_market_gap_ns",
                         )
                         if name in summary
                     )
@@ -98,16 +101,19 @@ def _ledger_curve(batches, *, stride):
                 )
     if last_points and last_retained_sequence != last_points[-1]["sequence"]:
         points.extend(last_points)
-    partial = execution.get("account_path_status") == "PARTIAL"
+    account_partial = execution.get("account_path_status") == "PARTIAL"
+    market_partial = execution.get("market_observation_status") == "PARTIAL"
     return {
-        "status": "PARTIAL" if partial else "DEFINED",
+        "status": "PARTIAL" if account_partial or market_partial else "DEFINED",
         **execution,
         **(
             {
                 "observed_totals_scope": "known_prefix",
                 "reason": execution["account_stop_reason"],
             }
-            if partial
+            if account_partial
+            else {"reason": execution["market_observation_reason"]}
+            if market_partial
             else {}
         ),
         "observed_start_ns": points[0]["timestamp_ns"] if points else None,

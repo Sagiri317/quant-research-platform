@@ -6,7 +6,6 @@ import argparse
 import datetime as dt
 import errno
 import gzip
-import hashlib
 import json
 import os
 import socket
@@ -31,7 +30,6 @@ from quant_research_platform.contracts.json_codec import (
     parse_qrp_json_object,
 )
 from quant_research_platform.contracts.order_book import BookBoundary
-from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.sources.binance.ids import (
     FUTURES_HFT_RECORDING_SCOPE,
     FUTURES_MARKET_TYPE,
@@ -59,6 +57,7 @@ from quant_research_platform.storage.atomic import (
     atomic_write_json,
 )
 from quant_research_platform.storage.identity import (
+    _hash_file_content,
     filesystem_exists,
     filesystem_mkdir,
     filesystem_stat,
@@ -218,10 +217,12 @@ class _RunWriter:
         connection_id: str | None = None,
         segment_id: str | None = None,
     ) -> int:
-        observed_time_ns = strict_iso_timestamp(
+        observed_time = strict_iso_timestamp(
             receive_time,
             error="binance_recorder_receive_time_invalid",
-        ).value
+        )
+        observed_time_ns = observed_time.value
+        partition_time = observed_time.isoformat()
         strict_non_negative_integer(
             receive_monotonic_ns,
             error="binance_recorder_receive_monotonic_invalid",
@@ -250,7 +251,7 @@ class _RunWriter:
                 + b"\n"
             )
             self._capture_seq = capture_seq
-            hour = receive_time[:13]
+            hour = partition_time[:13]
             for key in tuple(self._handles):
                 if key[0] != hour:
                     self._close_key(key)
@@ -263,7 +264,7 @@ class _RunWriter:
                     market_type=market_type,
                     data_kind=data_kind,
                     stream=stream,
-                    receive_time=receive_time,
+                    receive_time=partition_time,
                 )
             opened.gzip_handle.write(line)
             metadata = self._files[opened.path]
@@ -441,7 +442,7 @@ class _RunWriter:
                 raise RuntimeError("binance_recorder_writer_not_closed")
             assert self._interval_path is not None
             path = self._interval_path
-            digest = _sha256_path(path)
+            digest = _hash_file_content(path)
             return {
                 "path": path.relative_to(self.root).as_posix(),
                 "record_count": self._interval_record_count,
@@ -457,7 +458,7 @@ class _RunWriter:
                 {
                     **self._files[path],
                     "compressed_bytes": filesystem_stat(path).st_size,
-                    "sha256": _sha256_path(path),
+                    "sha256": _hash_file_content(path),
                 }
                 for path in sorted(self._files)
             ]
@@ -469,15 +470,6 @@ class _RunWriter:
     def event_counts(self) -> dict[str, int]:
         with self._lock:
             return dict(sorted(self._event_counts.items()))
-
-
-def _sha256_path(path: Path) -> str:
-    digest = hashlib.sha256()
-    buffer = bytearray(64 * 1024)
-    with closing_iterator(open_filesystem_file(path, "rb")) as handle:
-        while count := handle.readinto(buffer):
-            digest.update(memoryview(buffer)[:count])
-    return digest.hexdigest()
 
 
 @contextmanager

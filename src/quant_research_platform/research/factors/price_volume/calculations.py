@@ -3,17 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from decimal import Decimal, localcontext
-from fractions import Fraction
-from math import ceil, fsum
-from statistics import mean as arithmetic_mean
+from math import ceil
 
 import numpy as np
 import pandas as pd
 from numpy.lib.stride_tricks import sliding_window_view
 
 from quant_research_platform.compute.dataframe.cross_section import (
-    _CorrelationMoments,
+    _centered_values,
+    _pearson_correlations,
 )
 from quant_research_platform.contracts.time import (
     TimeWindow,
@@ -176,13 +174,7 @@ def _calculate_values(
         denominator = source[first - size : stop - size]
         valid = np.isfinite(numerator) & np.isfinite(denominator) & (denominator != 0)
         current = output[first - start :]
-        with np.errstate(over="ignore"):
-            difference = numerator[valid] - denominator[valid]
-            current[valid] = np.where(
-                np.isfinite(difference),
-                difference / denominator[valid],
-                numerator[valid] / denominator[valid] - 1.0,
-            )
+        current[valid] = (numerator[valid] - denominator[valid]) / denominator[valid]
         if factor.startswith("reversal_"):
             current *= -1.0
         return output
@@ -205,45 +197,9 @@ def _calculate_values(
         fresh_pairs = paired & sliding_window_view(fresh[begin:stop], size)
         valid = (fresh_pairs.sum(axis=1) >= minimum) & (counts >= 2)
         left, right, paired = left[valid], right[valid], paired[valid]
-        counts = counts[valid]
-        exceptional = np.zeros(len(left), dtype=bool)
-        centered = []
-        for current in (left, right):
-            anchor = current[np.arange(len(current)), np.argmax(paired, axis=1)]
-            with np.errstate(over="ignore", invalid="ignore"):
-                differences = np.where(paired, current - anchor[:, None], 0.0)
-                scale = np.max(np.abs(differences), axis=1, keepdims=True)
-                normalized = np.divide(
-                    differences, scale, out=np.zeros_like(differences), where=scale > 0
-                )
-            exceptional |= ~np.isfinite(normalized).all(axis=1)
-            exceptional |= ((differences != 0) & (normalized == 0)).any(axis=1)
-            mean = normalized.sum(axis=1) / counts
-            centered.append(np.where(paired, normalized - mean[:, None], 0.0))
-        x, y = centered
-        products = x * y
-        covariance = products.sum(axis=1)
-        denominator = np.sqrt((x * x).sum(axis=1)) * np.sqrt((y * y).sum(axis=1))
-        result = np.divide(
-            covariance,
-            denominator,
-            out=np.full(len(left), np.nan),
-            where=denominator > 0,
+        output[first - start :][valid] = _pearson_correlations(
+            left, right, paired=paired
         )
-        # Cancellation-sensitive and extreme-range windows retain the exact owner.
-        exceptional |= (denominator > 0) & (
-            np.abs(covariance)
-            <= size * np.finfo(float).eps * np.abs(products).sum(axis=1)
-        )
-        for index in np.flatnonzero(exceptional):
-            moments = _CorrelationMoments()
-            for x_value, y_value in zip(
-                left[index][paired[index]], right[index][paired[index]], strict=True
-            ):
-                moments.update(float(x_value), float(y_value))
-            value, _reason = moments.result()
-            result[index] = np.nan if value is None else value
-        output[first - start :][valid] = np.clip(result, -1.0, 1.0)
         return output
 
     def window(column: np.ndarray) -> np.ndarray:
@@ -368,33 +324,11 @@ def _calculate_values(
         return output
     if factor in {"amount_cv_126d", "turnover_cv_126d"}:
         current = window(source)[valid]
-        _, exponent = np.frexp(np.nanmax(np.abs(current), axis=1, keepdims=True))
-        scaled = np.ldexp(current, -exponent)
-        center = np.nanmean(scaled, axis=1)
-        deviation = _sample_standard_deviation(scaled)
+        center = rolling_mean(size)[valid]
+        deviation = _sample_standard_deviation(current)
         result = np.divide(
             deviation, center, out=np.full(len(current), np.nan), where=center > 0
         )
-        # Preserve meaningful extreme cancellation without Decimal on ordinary
-        # positive amount/turnover windows.
-        exceptional = ((current > 0).any(axis=1) & (current < 0).any(axis=1)) | (
-            (current != 0) & (scaled == 0)
-        ).any(axis=1)
-        for index in np.flatnonzero(exceptional):
-            terms = tuple(map(Fraction, current[index][np.isfinite(current[index])]))
-            count = len(terms)
-            mean = sum(terms, Fraction()) / count
-            if mean <= 0:
-                result[index] = np.nan
-                continue
-            squared = sum((value - mean) ** 2 for value in terms) / (
-                (count - 1) * mean * mean
-            )
-            with localcontext() as context:
-                context.prec = 80
-                result[index] = float(
-                    (Decimal(squared.numerator) / Decimal(squared.denominator)).sqrt()
-                )
         output[first - start :][valid] = result
         return output
     if factor == "abnormal_turnover_20_250":
@@ -426,50 +360,28 @@ def _calculate_values(
             if factor.startswith("downside")
             else np.maximum(current, 0.0)
         )
-        scale = np.nanmax(np.abs(clipped), axis=1, keepdims=True)
-        normalized = np.divide(
-            clipped, scale, out=np.zeros_like(clipped), where=scale > 0
-        )
-        result = scale[:, 0] * np.sqrt(
-            np.nansum(normalized * normalized, axis=1) / sample_counts
-        )
+        result = np.sqrt(np.nansum(clipped * clipped, axis=1) / sample_counts)
     elif factor == "max_return_20d":
         result = np.max(current, axis=1)
     elif factor == "top5_return_mean_20d":
         top = np.partition(current, -5, axis=1)[:, -5:]
-        scale = np.max(np.abs(top), axis=1, keepdims=True)
-        normalized = np.divide(top, scale, out=np.zeros_like(top), where=scale > 0)
-        total = normalized.sum(axis=1)
-        result = (total / 5) * scale[:, 0]
-        exceptional = ((top != 0) & (normalized == 0)).any(axis=1) | (
-            np.abs(total) <= 5 * np.finfo(float).eps * np.abs(normalized).sum(axis=1)
-        )
-        for index in np.flatnonzero(exceptional):
-            result[index] = arithmetic_mean(top[index])
+        result = np.mean(top, axis=1)
     elif factor == "min_return_20d":
         result = np.min(current, axis=1)
     elif factor in {"skewness_20d", "skewness_60d", "kurtosis_60d"}:
-        # Binary scaling preserves adjacent values and bounds anchor subtraction.
-        # Center the differences so the original offset cannot round away the mean.
-        _, exponent = np.frexp(np.nanmax(np.abs(current), axis=1, keepdims=True))
-        normalized = np.ldexp(current, -exponent)
-        anchor = normalized[
-            np.arange(len(normalized)), np.argmax(np.isfinite(normalized), axis=1)
-        ]
-        differences = normalized - anchor[:, None]
-        centered = differences - np.nanmean(differences, axis=1, keepdims=True)
-        centered /= np.nanmax(np.abs(centered), axis=1, keepdims=True)
-        moment_2 = np.nanmean(centered * centered, axis=1)
+        centered = _centered_values(current, np.isfinite(current))
+        centered /= np.max(np.abs(centered), axis=1, keepdims=True)
+        moment_2 = np.sum(centered * centered, axis=1) / sample_counts
         size = sample_counts
         if factor == "kurtosis_60d":
-            moment_4 = np.nanmean(centered**4, axis=1)
+            moment_4 = np.sum(centered**4, axis=1) / sample_counts
             result = (
                 (size - 1)
                 / ((size - 2) * (size - 3))
                 * ((size + 1) * (moment_4 / (moment_2 * moment_2) - 3.0) + 6.0)
             )
         else:
-            moment_3 = np.nanmean(centered**3, axis=1)
+            moment_3 = np.sum(centered**3, axis=1) / sample_counts
             result = (
                 np.sqrt(size * (size - 1))
                 / (size - 2)
@@ -482,38 +394,10 @@ def _calculate_values(
             current - extra["low"] if factor == "amplitude_20d" else np.abs(current)
         )
         denominator = extra["close"] if factor == "amplitude_20d" else extra["amount"]
-        return_mantissa, return_exponent = np.frexp(numerator)
-        amount_mantissa, amount_exponent = np.frexp(denominator)
-        quotients = np.divide(
-            return_mantissa,
-            amount_mantissa,
-            out=np.full_like(return_mantissa, np.nan),
-            where=amount_mantissa != 0,
-        )
-        exponents = return_exponent - amount_exponent
-        scale = np.max(
-            np.where(
-                np.isfinite(quotients) & (quotients != 0),
-                exponents,
-                np.iinfo(exponents.dtype).min,
-            ),
-            axis=1,
-            keepdims=True,
-        )
-        scale = np.where(scale == np.iinfo(exponents.dtype).min, 0, scale)
-        normalized = np.ldexp(quotients, exponents - scale)
-        result = np.ldexp(np.nanmean(normalized, axis=1), scale[:, 0])
+        result = np.nanmean(numerator / denominator, axis=1)
     elif factor == "trend_efficiency_60d":
-        _, exponent = np.frexp(np.max(np.abs(current), axis=1, keepdims=True))
-        scaled = np.ldexp(current, -exponent)
-        denominator = np.sum(np.abs(scaled), axis=1)
-        numerator = np.sum(scaled, axis=1)
-        # Only cancellation at the reduction's error scale needs stable summation.
-        near_cancellation = np.abs(numerator) <= (
-            np.finfo("float64").eps * current.shape[1] * denominator
-        )
-        for row in np.flatnonzero(near_cancellation & (denominator != 0)):
-            numerator[row] = fsum(scaled[row])
+        denominator = np.sum(np.abs(current), axis=1)
+        numerator = np.sum(current, axis=1)
         result = np.divide(
             np.abs(numerator),
             denominator,
@@ -523,91 +407,25 @@ def _calculate_values(
     elif factor in {"signed_amount_flow_20d", "return_amount_imbalance_20d"}:
         flow = extra["amount"]
         if factor == "signed_amount_flow_20d":
-            scale = np.max(np.abs(flow), axis=1, keepdims=True)
-            normalized = np.divide(
-                flow, scale, out=np.zeros_like(flow), where=scale > 0
-            )
-            terms = np.sign(current) * normalized
-            numerator = np.sum(terms, axis=1)
-            denominator = np.sum(normalized, axis=1)
+            numerator = np.sum(np.sign(current) * flow, axis=1)
+            denominator = np.sum(flow, axis=1)
         else:
-            return_mantissa, return_exponent = np.frexp(current)
-            flow_mantissa, flow_exponent = np.frexp(flow)
-            products = return_mantissa * flow_mantissa
-            exponents = return_exponent + flow_exponent
-            scale = np.max(
-                np.where(
-                    products != 0,
-                    exponents,
-                    np.min(exponents, axis=1, keepdims=True),
-                ),
-                axis=1,
-                keepdims=True,
-            )
-            normalized = np.ldexp(products, exponents - scale)
-            terms = normalized
-            numerator = np.sum(terms, axis=1)
-            denominator = np.sum(np.abs(normalized) * np.sign(flow), axis=1)
+            numerator = np.sum(current * flow, axis=1)
+            denominator = np.sum(np.abs(current) * flow, axis=1)
         result = np.divide(
             numerator,
             denominator,
             out=np.full(len(current), np.nan),
             where=denominator != 0,
         )
-        # Only ill-conditioned signed sums need exact products and cancellation.
-        denominator_terms = (
-            normalized
-            if factor == "signed_amount_flow_20d"
-            else np.abs(normalized) * np.sign(flow)
-        )
-        cancelled = np.zeros(len(current), dtype=bool)
-        for terms_, totals in ((terms, numerator), (denominator_terms, denominator)):
-            cancelled |= (
-                (terms_ > 0).any(axis=1)
-                & (terms_ < 0).any(axis=1)
-                & (
-                    np.abs(totals)
-                    <= size * np.finfo(float).eps * np.abs(terms_).sum(axis=1)
-                )
-            )
-        for row in np.flatnonzero(cancelled):
-            returns = tuple(map(Fraction, current[row]))
-            amounts = tuple(map(Fraction, flow[row]))
-            if factor == "signed_amount_flow_20d":
-                exact_numerator = sum(
-                    (1 if value > 0 else -1 if value < 0 else 0) * amount
-                    for value, amount in zip(returns, amounts, strict=True)
-                )
-                exact_denominator = sum(amounts)
-            else:
-                exact_numerator = sum(
-                    value * amount
-                    for value, amount in zip(returns, amounts, strict=True)
-                )
-                exact_denominator = sum(
-                    abs(value) * amount
-                    for value, amount in zip(returns, amounts, strict=True)
-                )
-            if exact_denominator:
-                ratio = exact_numerator / exact_denominator
-                try:
-                    result[row] = float(ratio)
-                except OverflowError:
-                    result[row] = np.inf if ratio > 0 else -np.inf
-            else:
-                result[row] = np.nan
     elif factor == "positive_return_fraction_20d":
         result = np.mean(current > 0.0, axis=1)
     elif factor in {"largest_daily_contribution_20d", "path_roughness_20d"}:
-        scale = np.max(np.abs(current), axis=1, keepdims=True)
-        normalized = np.divide(
-            current, scale, out=np.zeros_like(current), where=scale > 0
-        )
-        denominator = np.sum(np.abs(normalized), axis=1)
+        denominator = np.sum(np.abs(current), axis=1)
         numerator = (
-            np.max(np.abs(normalized), axis=1)
+            np.max(np.abs(current), axis=1)
             if factor == "largest_daily_contribution_20d"
-            else np.abs(np.sum(normalized, axis=1))
+            else np.abs(np.sum(current, axis=1))
         )
         result = np.divide(
             numerator,
@@ -627,28 +445,8 @@ def _calculate_values(
 
 def _sample_standard_deviation(windows: np.ndarray) -> np.ndarray:
     finite = np.isfinite(windows)
-    if not finite.all():
-        counts = finite.sum(axis=1)
-        result = np.full(len(windows), np.nan)
-        for count in np.unique(counts[counts >= 2]):
-            selected = counts == count
-            compact = windows[selected][finite[selected]].reshape(-1, count)
-            result[selected] = _sample_standard_deviation(compact)
-        return result
-    # Subtract first to preserve adjacent prices; scale before squaring to keep
-    # representable deviations finite even at extreme economic units.
-    with np.errstate(over="ignore"):
-        differences = windows - windows[:, :1]
-    overflow = ~np.isfinite(differences).all(axis=1)
-    unit = np.max(np.abs(windows[overflow]), axis=1, keepdims=True)
-    differences[overflow] = windows[overflow] / unit
-    spread = np.max(np.abs(differences), axis=1, keepdims=True)
-    normalized = np.divide(
-        differences, spread, out=np.zeros_like(differences), where=spread > 0
-    )
-    result = np.std(normalized, axis=1, ddof=1) * spread[:, 0]
-    result[overflow] *= unit[:, 0]
-    return result
+    centered = _centered_values(windows, finite)
+    return np.sqrt(np.sum(centered * centered, axis=1) / (finite.sum(axis=1) - 1))
 
 
 def _log(values: np.ndarray) -> np.ndarray:

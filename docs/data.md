@@ -130,6 +130,8 @@ Binance Futures 原生历史归档的不可变原始字节保存在
 原生行是供应商 UTC 前缀与 JSON，空行表示供应商断线，因此压缩原件使用
 `tardis__binance-futures__YYYY-MM-DD__minutes-HHHH-HHHH.txt.gz`，不称为 JSONL。
 原生压缩字节不改写，清单、缺口与观察区间旁文件各有精确哈希。
+有结束时间的 Binance 消费按可信 UTC 日期/小时分片排除完整未来成员；所选小时内仍按采集顺序
+读取时钟，保留回拨后的范围内记录。范围外 payload 与 coverage 不参与本次计算，未知分片路径按现有读取规则处理。
 这些哈希属于采集/导入证据；普通回读解析实际消费记录和连续性所需观察区间，
 支持提前关闭游标。清单摘要只描述所选来源。
 行序属于归档身份，不能冒充本机录制的原始 capture_seq。
@@ -447,7 +449,7 @@ score 的显式 `label_unit` 可补充标签输入未声明的单位；若输入
 `prediction_target_definition_missing`、`prediction_target_definition_mismatch`。MSE/R² 设为 NULL，
 训练均值基准误差也为 NULL；零预测基准误差仍按评价目标计算。目标计数、RankIC 和头部描述按各自条件保留。
 普通声明标签两侧均未提供额外 `label_semantics` 时按同源列定义比较；一侧有额外定义而另一侧无则未定义。
-`mse_reason` 还区分 `no_valid_targets` 与 `nonfinite_result`；非零损失下溢不得伪装成完美预测。
+`mse_reason` 区分 `no_valid_targets` 与 `nonfinite_result`，有效损失保留标签的平方单位。
 跨日 MSE 先算每日均方误差再日期等权；跨日 OOS R² 为同一可评价日期域上
 `1−mean(mse)/mean(baseline_mse)`，不平均每日 R²，不按资产行数加权。
 这些重叠 horizon 收益不连乘为日净值。
@@ -469,3 +471,7 @@ score 的显式 `label_unit` 可补充标签输入未声明的单位；若输入
 分析师预期只转换实际年度/时点范围内的 EPS。已识别机构的后续 EPS 未知报告保留为未知屏障，
 不能删行后复活旧预测；有报告身份但机构归属缺失或冲突时，仅该资产/预测期的机构统计未知，
 直到同一报告被明确定位或新鲜度窗口届满。独立资产、其他预测期及不消费 PE 的指标不受影响。
+
+同一 ReportID 的可见新版本仅替换该报告，机构归属修正不删除原机构的其他报告。
+机构中位数在报告修订及新鲜度筛选之后，按该机构最新声明日的报告计算；
+来源未提供 ReportID 时保留独立报告行，不推断跨日报告身份。

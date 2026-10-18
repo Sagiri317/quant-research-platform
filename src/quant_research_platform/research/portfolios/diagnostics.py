@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from contextlib import ExitStack
 from dataclasses import asdict, replace
-from fractions import Fraction
-from statistics import mean
 
 import numpy as np
 import pandas as pd
@@ -13,10 +11,7 @@ import pandas as pd
 from quant_research_platform.compute.portfolio_economics import _LedgerEconomics
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.portfolios import PORTFOLIO_CASH_ASSET_ID
-from quant_research_platform.contracts.validation import (
-    finite_exact_float,
-    strict_finite_float,
-)
+from quant_research_platform.contracts.validation import strict_finite_float
 from quant_research_platform.markets.implementations.a_share import ids as a_share_ids
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.portfolios.accounting import (
@@ -153,15 +148,7 @@ def fixed_turnover_cost_sensitivity(
             spread = strict_finite_float(spread, error="hft_cost_sensitivity_invalid")
             if spread < 0:
                 raise ValueError("hft_cost_sensitivity_invalid")
-            exact_change = (
-                Fraction(turnover)
-                * (Fraction(fee) - Fraction(base_fee_bps) + Fraction(spread))
-                / 10000
-            )
-            try:
-                change = float(exact_change)
-            except OverflowError:
-                change = -np.inf if exact_change < 0 else np.inf
+            change = turnover * ((fee - base_fee_bps + spread) / 10000)
             result.append(
                 {
                     "fee_bps": fee,
@@ -304,10 +291,9 @@ def _crypto_observations(ledger, windows, limit, *, observation_window_ns=None):
                 )
                 net_return = None
                 if not reason:
-                    net_return = finite_exact_float(
-                        Fraction(end_nav) / Fraction(start_nav) - 1
-                    )
-                    if net_return is None:
+                    net_return = (end_nav - start_nav) / start_nav
+                    if not np.isfinite(net_return):
+                        net_return = None
                         reason = "nonfinite_result"
                 daily.append(
                     {
@@ -387,14 +373,9 @@ def _crypto_comparison_axis(
                 if before <= 0
                 else ""
             )
-            value = (
-                None
-                if reason
-                else finite_exact_float(
-                    Fraction(float(after)) / Fraction(float(before)) - 1
-                )
-            )
-            if value is None and not reason:
+            value = None if reason else (float(after) - float(before)) / float(before)
+            if not reason and not np.isfinite(value):
+                value = None
                 reason = "nonfinite_result"
             rows.append(
                 {
@@ -481,8 +462,11 @@ def build_crypto_portfolio_statistics_tables(
             and not (day_count and "annualized" in analyses)
         ):
             return
-        if isinstance(value, Fraction):
-            value = finite_exact_float(value)
+        # Ledger quantities remain exact; statistics publish their float projection.
+        try:
+            value = None if value is None else float(value)
+        except OverflowError:
+            value = None
         defined = value is not None and np.isfinite(value)
         metrics.append(
             {
@@ -779,7 +763,7 @@ def build_crypto_portfolio_statistics_tables(
             )
             metric(
                 "oos_mean_daily_return",
-                float(mean(values)) if count and (not daily_missing) else None,
+                float(np.mean(values)) if count and (not daily_missing) else None,
                 count,
                 day_reason if daily_missing or not count else "",
             )
@@ -1381,13 +1365,9 @@ def build_portfolio_statistics_tables(
             .join(prices)
         )
         required = required.where(np.isfinite(required) & required.gt(0))
-        open_mantissa, open_exponent = np.frexp(required.open.to_numpy())
-        total_mantissa, total_exponent = np.frexp(required.total_close.to_numpy())
-        close_mantissa, close_exponent = np.frexp(required.close.to_numpy())
-        benchmark.loc[missing, "open"] = np.ldexp(
-            open_mantissa * total_mantissa / close_mantissa,
-            open_exponent + total_exponent - close_exponent,
-        )
+        benchmark.loc[missing, "open"] = (
+            required.total_close * (required.open / required.close)
+        ).to_numpy()
     benchmark = benchmark.loc[
         benchmark.source_asset_id.isin(codes.values()),
         ["source_asset_id", "timestamp", "open"],
@@ -1480,8 +1460,8 @@ def _portfolio_statistics_tables(
             adv_unavailable_intervals=0.0,
             adv_unavailable_buy_orders=0.0,
             adv_unavailable_sell_orders=0.0,
-            adv_unavailable_buy_target_notional=Fraction(),
-            adv_unavailable_sell_target_notional=Fraction(),
+            adv_unavailable_buy_target_notional=[],
+            adv_unavailable_sell_target_notional=[],
         )
         for candidate_id in ids
     }
@@ -1748,14 +1728,15 @@ def _portfolio_statistics_tables(
                 )
                 for value in batch.valuations:
                     if value.phase == "after" and value.asset_id in missing_orders:
-                        desired = Fraction(
+                        desired = (
                             facts[value.asset_id, "target_notional"].number
-                        ) - Fraction(value.share_value)
+                            - value.share_value
+                        )
                         side = "buy" if desired > 0 else "sell"
                         adv_gaps[candidate_id][f"adv_unavailable_{side}_orders"] += 1
                         adv_gaps[candidate_id][
                             f"adv_unavailable_{side}_target_notional"
-                        ] += abs(desired)
+                        ].append(abs(desired))
                 if "capacity" in analyses:
                     deltas = {
                         item.asset_id: item.number
@@ -1838,17 +1819,11 @@ def _portfolio_statistics_tables(
             )
         )
         economic = economic_totals[candidate_id].summary()
-        endpoint_return = finite_exact_float(
-            (Fraction(previous_nav) - Fraction(artifact.capital.initial_capital))
-            / Fraction(artifact.capital.initial_capital)
-        )
+        endpoint_return = (
+            previous_nav - artifact.capital.initial_capital
+        ) / artifact.capital.initial_capital
         with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
-            log_growth = (
-                np.log1p(endpoint_return)
-                if endpoint_return is not None and endpoint_return > -1
-                else np.log(previous_nav) - np.log(artifact.capital.initial_capital)
-            )
-            cagr = float(np.expm1(log_growth * (252 / count)))
+            cagr = float(np.expm1(np.log1p(endpoint_return) * (252 / count)))
         if not np.isfinite(cagr):
             cagr = np.nan
         values = {
@@ -1889,8 +1864,7 @@ def _portfolio_statistics_tables(
             "cost": economic["fees"],
         }
         for name, value in adv_gaps[candidate_id].items():
-            number = finite_exact_float(value) if isinstance(value, Fraction) else value
-            values[name] = np.nan if number is None else number
+            values[name] = float(np.sum(value)) if isinstance(value, list) else value
         valuation = pd.DataFrame(valuation_by_candidate[candidate_id])
         if not valuation.empty:
             values.update(
@@ -1920,14 +1894,12 @@ def _portfolio_statistics_tables(
                 values[f"{prefix}_terminal_nav"] = float(
                     valuation[f"nav_{percent}pct"].iloc[-1]
                 )
-                ratio = finite_exact_float(
-                    (
-                        Fraction(float(stressed.iloc[-1]))
-                        - Fraction(artifact.capital.initial_capital)
-                    )
-                    / Fraction(artifact.capital.initial_capital)
+                ratio = (
+                    float(stressed.iloc[-1]) - artifact.capital.initial_capital
+                ) / artifact.capital.initial_capital
+                values[f"{prefix}_capital_return"] = (
+                    ratio if np.isfinite(ratio) else np.nan
                 )
-                values[f"{prefix}_capital_return"] = np.nan if ratio is None else ratio
                 values[f"{prefix}_max_drawdown"] = float(
                     (
                         stressed
@@ -2021,15 +1993,14 @@ def _portfolio_statistics_tables(
                 )
     for group in ("global", "quarterly"):
         paired_comparison[f"{group}_terminal_wealth"] = [
-            finite_exact_float(
-                Fraction(previous[f"{group}_{portfolio_id}"][1])
-                / Fraction(ledgers[f"{group}_{portfolio_id}"].capital.initial_capital)
-            )
+            previous[f"{group}_{portfolio_id}"][1]
+            / ledgers[f"{group}_{portfolio_id}"].capital.initial_capital
             for portfolio_id in paired_comparison.portfolio_id
         ]
-        paired_comparison[f"{group}_terminal_wealth_reason"] = np.where(
-            paired_comparison[f"{group}_terminal_wealth"].isna(), "nonfinite_result", ""
-        )
+        column = f"{group}_terminal_wealth"
+        valid = np.isfinite(paired_comparison[column])
+        paired_comparison.loc[~valid, column] = np.nan
+        paired_comparison[f"{column}_reason"] = np.where(valid, "", "nonfinite_result")
     if {"sharpe_inference", "cscv"} & set(analyses):
         inference_ids = ids
         inference_matrix = matrix.loc[:, list(inference_ids)]
@@ -2381,15 +2352,9 @@ def _group_portfolio_comparison(matrix, config, *, daily_complete):
             else "secondary",
             "sample_role": access,
             "observation_count": len(values),
-            "global_mean": float(mean(matrix[f"global_{candidate}"])),
-            "quarterly_mean": float(mean(matrix[f"quarterly_{candidate}"])),
-            "mean_difference": float(mean(values)),
-            "global_terminal_wealth": float(
-                (1 + matrix[f"global_{candidate}"]).prod(skipna=False)
-            ),
-            "quarterly_terminal_wealth": float(
-                (1 + matrix[f"quarterly_{candidate}"]).prod(skipna=False)
-            ),
+            "global_mean": float(np.mean(matrix[f"global_{candidate}"])),
+            "quarterly_mean": float(np.mean(matrix[f"quarterly_{candidate}"])),
+            "mean_difference": float(np.mean(values)),
             "hac_lag": statistics["hac_lag"],
             "bootstrap_block_size": statistics["bootstrap_block"],
             "bootstrap_repetitions": statistics["bootstrap_repetitions"],
@@ -2451,17 +2416,6 @@ def _group_portfolio_comparison(matrix, config, *, daily_complete):
                 )
             else:
                 row["bootstrap_reason"] = "bootstrap_block_exceeds_observations"
-        for group in ("global", "quarterly"):
-            column = f"{group}_terminal_wealth"
-            row[f"{column}_reason"] = (
-                ""
-                if np.isfinite(row[column])
-                else "nonpositive_start_nav"
-                if matrix[f"{group}_{candidate}"].isna().any()
-                else "nonfinite_result"
-            )
-            if not np.isfinite(row[column]):
-                row[column] = np.nan
         rows.append(row)
     return pd.DataFrame.from_records(
         rows,

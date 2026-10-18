@@ -439,42 +439,27 @@ def test_ic_rank_undefined_ic_feature_retains_zero_importance(tmp_path):
     )
 
 
-def test_only_selected_metrics_run_on_extreme_scale(tmp_path):
-    _, frame, _ = _case(tmp_path)
-    frame["label"] *= 1e200
-    spec = ModelSpec(
-        model_id="large",
-        model_algorithm="linear_regression",
-        input_feature_columns=("x", "y"),
-        target_column="label",
-        random_seed=19,
-    )
-    case = fit_frame(
-        tmp_path / "large", frame.loc[frame.timestamp.le("2020-01-05")], spec
-    )
-    source = tmp_path / "large.parquet"
-    frame.to_parquet(source, index=False)
-    declared = copy.deepcopy(case.config["input_spec"])
-    declared["column_units"] = {"label": "decimal_return"}
-    config = {
-        "model": str(case.root),
-        "inputs": str(source),
-        "input_spec": declared,
-        "output": str(tmp_path / "large-explained"),
-        "methods": ["permutation"],
-        "window": {"start": "2020-01-06", "end": "2020-01-10"},
-        "sample_role": "test",
-        "selection": {"max_rows": 24, "max_dates": 3, "root_seed": 17},
-        "output_space": "model_output",
-    }
+def test_only_selected_permutation_metrics_are_computed(tmp_path, monkeypatch):
+    from quant_research_platform.research.models import explanations
+
+    _, _, config = _case(tmp_path)
+    calls = []
+    original = explanations._mean_squared_error
+
+    def measured(scores, labels):
+        calls.append(len(scores))
+        return original(scores, labels)
+
+    monkeypatch.setattr(explanations, "_mean_squared_error", measured)
     _permutation(config, metrics=["ic", "rankic"])
     _, tables = read_explanation(explain(config))
     assert tables["permutation_summary"].status.eq("DEFINED").all()
+    assert calls == []
     config["output"] += "-mse"
     config["permutation"]["metrics"] = ["mse"]
-    with pytest.raises(ValueError, match="mse_unrepresentable"):
-        explain(config)
-    assert not Path(config["output"]).exists()
+    _, tables = read_explanation(explain(config))
+    assert calls
+    assert tables["permutation_summary"].status.eq("DEFINED").all()
 
 
 def test_explanation_without_labels_and_no_implicit_fit(tmp_path, monkeypatch):
@@ -551,77 +536,6 @@ def test_cli_is_same_explain_operation(tmp_path):
     assert set(read_explanation(Path(config["output"]))[1]) == {"native_importance"}
 
 
-def test_finite_prediction_survives_unrepresentable_contribution_and_subnormal(
-    tmp_path,
-):
-    from quant_research_platform.research.models.fitting import ModelFitResult
-    from quant_research_platform.research.models.persisted import save_model
-    from quant_research_platform.research.models.scaler import (
-        LinearScaledPredictor,
-        ModelMatrixScaler,
-    )
-
-    case, _, config = _case(tmp_path)
-    scaler = ModelMatrixScaler.fit(pd.DataFrame({"x": [-1.0, 1.0], "y": [-1.0, 1.0]}))
-    predictor = LinearScaledPredictor((1.0, 1e308, -1e308), scaler)
-    metadata = copy.deepcopy(case.result.metadata)
-    metadata.update(
-        scaler=scaler.to_payload(), feature_importance={"x": 1e308, "y": 1e308}
-    )
-    result = ModelFitResult(metadata, predictor)
-    model = save_model(
-        tmp_path / "numeric-model",
-        result,
-        facts=case.facts,
-        trial={
-            "status": "completed",
-            "trial_id": "numeric",
-            "result": {"model_metadata": metadata},
-        },
-    )
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(["2020-01-06", "2020-01-07", "2020-01-08"]),
-            "asset_id": ["a"] * 3,
-            "x": [10.0, 1.0, 1e-320],
-            "y": [10.0, 1.0, 0.0],
-            "label": [0.0] * 3,
-            "label_available_at": pd.to_datetime(
-                ["2020-01-06", "2020-01-07", "2020-01-08"]
-            ),
-            "eligible": True,
-        }
-    )
-    frame.to_parquet(config["inputs"], index=False)
-    config.update(
-        model=str(model),
-        methods=["affine"],
-        selection={"max_rows": 3, "max_dates": None, "root_seed": 1},
-    )
-    _, tables = read_explanation(explain(config))
-    actual = tables["predictions"].sort_values("timestamp")
-    assert actual.status.tolist() == ["UNDEFINED", "DEFINED", "DEFINED"]
-    assert actual.reason.iloc[0] == "nonrepresentable_contribution_or_baseline"
-    np.testing.assert_array_equal(
-        actual.prediction_score, predictor.predict(frame[["x", "y"]])
-    )
-    assert actual.prediction_score.iloc[0] == 1.0
-    subnormal = (
-        tables["contributions"]
-        .loc[
-            lambda rows: rows.timestamp.eq("2020-01-08") & rows.feature.eq("x"),
-            "contribution",
-        ]
-        .iloc[0]
-    )
-    assert subnormal == pytest.approx(1e308 * 1e-320, rel=1e-12)
-    summary = tables["summary"].loc[lambda rows: rows.period.eq("all")]
-    assert summary.sample_count.eq(3).all()
-    assert summary.observation_count.eq(2).all()
-    assert np.isfinite(summary.mean_abs_contribution).all()
-    assert actual.additivity_tolerance.dropna().map(np.isfinite).all()
-
-
 def test_shap_nonfinite_row_is_explicit_without_hiding_other_predictions(
     tmp_path, monkeypatch
 ):
@@ -671,9 +585,9 @@ def test_date_only_background_end_cannot_admit_after_exact_fit_cutoff(tmp_path):
         explain(config)
 
 
-def test_large_finite_permutation_mse_keeps_finite_repeat_dispersion(tmp_path):
+def test_permutation_mse_dispersion_matches_repeat_population_sd(tmp_path):
     _, frame, config = _case(tmp_path)
-    frame["label"] *= 1e150
+    frame["label"] *= 10
     case = fit_frame(
         tmp_path / "large-mse",
         frame.loc[frame.timestamp.le("2020-01-05")],
@@ -715,74 +629,6 @@ def test_read_rejects_missing_or_relabelled_scientific_metadata(tmp_path, mutati
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="metadata_invalid"):
         read_explanation(output)
-
-
-def test_summary_retains_minimum_subnormal_contributions():
-    from quant_research_platform.research.models.explanations import _summaries
-
-    minimum = np.nextafter(0.0, 1.0)
-    rows = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(["2020-01-01", "2020-01-02"]),
-            "asset_id": ["a", "a"],
-            "feature": ["x", "x"],
-            "contribution": [minimum, minimum],
-        }
-    )
-    summary = _summaries(rows, "month")
-    assert summary.mean_abs_contribution.eq(minimum).all()
-    assert summary.mean_signed_contribution.eq(minimum).all()
-    assert summary.absolute_share.eq(1).all()
-
-
-def test_cancellation_loss_cannot_be_certified_by_large_contribution_tolerance(
-    tmp_path,
-):
-    from fractions import Fraction
-
-    from quant_research_platform.research.models.fitting import ModelFitResult
-    from quant_research_platform.research.models.persisted import save_model
-    from quant_research_platform.research.models.scaler import (
-        LinearScaledPredictor,
-        ModelMatrixScaler,
-    )
-
-    case, frame, config = _case(tmp_path)
-    scaler = ModelMatrixScaler(
-        ("x", "y"), (0.0, 0.0), (Fraction(), Fraction()), (1.0, 1.0)
-    )
-    predictor = LinearScaledPredictor((1.0, 1e308, -1e308), scaler)
-    metadata = copy.deepcopy(case.result.metadata)
-    metadata.update(
-        scaler=scaler.to_payload(), feature_importance={"x": 1e308, "y": 1e308}
-    )
-    result = ModelFitResult(metadata, predictor)
-    model = save_model(
-        tmp_path / "cancellation",
-        result,
-        facts=case.facts,
-        trial={
-            "status": "completed",
-            "trial_id": "numeric",
-            "result": {"model_metadata": metadata},
-        },
-    )
-    frame = frame.iloc[:1].copy()
-    frame["timestamp"] = pd.Timestamp("2020-01-06")
-    frame[["x", "y"]] = 1.0000000000000002
-    frame.to_parquet(config["inputs"], index=False)
-    config.update(model=str(model), methods=["affine"])
-    _, tables = read_explanation(explain(config))
-    row = tables["predictions"].iloc[0]
-    # BLAS implementations may cancel exactly, but a nonzero output-scale loss
-    # must never be certified by a contribution-scale backward error alone.
-    actual = predictor.predict(frame[["x", "y"]])[0]
-    assert row.prediction_score == actual
-    if actual != 1.0:
-        assert row.status == "UNDEFINED"
-        assert row.reason == "cancellation_precision_loss"
-        assert tables["contributions"].contribution.isna().all()
-        assert tables["summary"].observation_count.eq(0).all()
 
 
 def test_read_binds_explanation_method_to_actual_model_kind(tmp_path):

@@ -42,6 +42,7 @@ from quant_research_platform.research.labels.forward_returns import (
 from quant_research_platform.research.protocols.a_share import (
     LABEL_HORIZONS,
     MARKET_MODEL_FACTORS,
+    forward_label_columns,
 )
 
 PANEL_COLUMNS = (
@@ -118,7 +119,7 @@ FINANCIAL_PIT_COLUMNS = (
     "capex_cash_paid_ttm",
     "has_legal_fundamental_pit",
 )
-LABEL_COLUMNS = tuple(
+FORWARD_RETURN_COLUMNS = tuple(
     column
     for horizon in LABEL_HORIZONS
     for column in (
@@ -227,10 +228,10 @@ def processed_catalog() -> ProcessedDataCatalog:
             _spec(
                 FORWARD_RETURNS_DATA_ID,
                 ProcessedDataKind.LABEL,
-                (*PLATFORM_ASSET_TIME_KEY, *LABEL_COLUMNS),
+                (*PLATFORM_ASSET_TIME_KEY, *FORWARD_RETURN_COLUMNS),
                 processed_input_data_ids=(MARKET_PANEL_ID,),
                 source_input_data_ids=("trading_calendar",),
-                label_columns=LABEL_COLUMNS,
+                label_columns=forward_label_columns(),
             ),
             on_id_decomposition_spec(),
             _spec(

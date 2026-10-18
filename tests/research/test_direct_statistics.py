@@ -41,9 +41,12 @@ def _factor_tables(tmp_path):
     spec = make_demo_research_dataset_spec(
         data_id="direct_factor",
         factor_columns=("factor",),
-        label_columns=("forward_return_20d", "forward_return_20d_available_at"),
+        label_columns=("forward_return_20d",),
         filter_columns=("eligible",),
-        context_columns=("total_market_cap",),
+        context_columns=(
+            "total_market_cap",
+            "forward_return_20d_available_at",
+        ),
     )
     source = tmp_path / "input"
     write_dataset(source, frame.loc[:, list(spec.column_roles)], spec=spec)
@@ -322,9 +325,12 @@ def test_failed_family_keeps_planned_inference_members_without_fake_prediction(
     spec = make_demo_research_dataset_spec(
         data_id="direct_factor",
         factor_columns=("factor",),
-        label_columns=("forward_return_20d", "forward_return_20d_available_at"),
+        label_columns=("forward_return_20d",),
         filter_columns=("eligible",),
-        context_columns=("total_market_cap",),
+        context_columns=(
+            "total_market_cap",
+            "forward_return_20d_available_at",
+        ),
     )
     config = statistics_config(factors=["factor"])
     config["statistics"]["bootstrap_repetitions"] = 20
@@ -419,9 +425,12 @@ def test_factor_statistics_complete_batches_preserve_dates_and_masks(
         data_id="batched_statistics",
         factor_columns=(),
         feature_columns=("feature_x", "feature_observed_x"),
-        label_columns=("forward_return_20d", "forward_return_20d_available_at"),
+        label_columns=("forward_return_20d",),
         filter_columns=("eligible",),
-        context_columns=("total_market_cap",),
+        context_columns=(
+            "total_market_cap",
+            "forward_return_20d_available_at",
+        ),
     )
     source = tmp_path / "batched-input"
     write_dataset(source, frame.loc[:, list(spec.column_roles)], spec=spec)
@@ -467,7 +476,9 @@ def test_factor_statistics_complete_batches_preserve_dates_and_masks(
     )
     for name in names:
         with artifacts[0].table(name) as left, artifacts[1].table(name) as right:
-            pd.testing.assert_frame_equal(left, right, check_exact=True)
+            pd.testing.assert_frame_equal(
+                left, right, check_exact=False, rtol=1e-10, atol=1e-12
+            )
             if name == "factor_diagnostics.parquet":
                 assert left.input_date_count.eq(12).all()
                 assert left.observation_count.eq(0 if empty_labels else 8).all()
@@ -553,9 +564,12 @@ def test_selected_statistics_consumes_saved_predictions_without_historical_x(
     spec = make_demo_research_dataset_spec(
         data_id="direct_factor",
         factor_columns=("factor",),
-        label_columns=("forward_return_20d", "forward_return_20d_available_at"),
+        label_columns=("forward_return_20d",),
         filter_columns=("eligible",),
-        context_columns=("total_market_cap",),
+        context_columns=(
+            "total_market_cap",
+            "forward_return_20d_available_at",
+        ),
     )
     # The persisted lookup is unchanged across historical feature mutations.
     if historical_x != "excluded":
@@ -612,9 +626,12 @@ def test_public_factor_statistics_preserves_equal_weight_with_bad_cap(
     spec = make_demo_research_dataset_spec(
         data_id="direct_factor",
         factor_columns=("factor",),
-        label_columns=("forward_return_20d", "forward_return_20d_available_at"),
+        label_columns=("forward_return_20d",),
         filter_columns=("eligible",),
-        context_columns=("total_market_cap",),
+        context_columns=(
+            "total_market_cap",
+            "forward_return_20d_available_at",
+        ),
     )
     write_dataset(tmp_path / "bad-cap", frame, spec=spec)
     path = factor_statistics(

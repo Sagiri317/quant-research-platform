@@ -39,3 +39,19 @@ def test_fold_rejects_mixed_day_and_intraday_clocks():
             train=TimeWindow("2020-01-01", "2020-01-03"),
             validation=TimeWindow("2020-01-04T01:00:00", "2020-01-06T01:00:00"),
         )
+
+
+@pytest.mark.parametrize("offset", ("+08:00", "Z"))
+def test_fold_compares_normalized_intraday_boundaries(offset):
+    train = TimeWindow("2020-01-01T08:00:00+08:00", "2020-01-03T08:00:00+08:00")
+    start = (
+        "2020-01-03T08:00:00+08:00" if offset == "+08:00" else "2020-01-03T00:00:00Z"
+    )
+    with pytest.raises(ValueError, match="experiment_fold_windows_overlap"):
+        ExperimentFold(fold_id="fold", train=train, validation=TimeWindow(start, start))
+    fold = ExperimentFold(
+        fold_id="fold",
+        train=train,
+        validation=TimeWindow("2020-01-03T00:00:01", "2020-01-04T00:00:00"),
+    )
+    assert fold.train.end < fold.validation.start

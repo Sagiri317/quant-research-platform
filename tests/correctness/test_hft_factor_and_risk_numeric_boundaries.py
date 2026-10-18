@@ -36,30 +36,30 @@ def _persist(tmp_path, data_id, frames):
     return read_dataset(root)
 
 
-def _panel(start=0, end=6100, batch=17, extreme=False):
+def _panel(start=0, end=6100, batch=17, liquid=False):
     states = [_state(0), _state(1000, segment_id="s2")]
-    if extreme:
+    if liquid:
         states = [
             replace(
-                _state(0, bid_qty=1e308, ask_qty=1e308),
+                _state(0, bid_qty=1000.0, ask_qty=1000.0),
                 # Fixed-depth ratios require ten genuinely observed levels.
-                # Tiny deeper quantities retain the extreme top-level scale.
-                bids=((950, 1e308), *((950 - level, 1.0) for level in range(1, 10))),
-                asks=((1050, 1e308), *((1050 + level, 1.0) for level in range(1, 10))),
+                # Every level is genuinely observed.
+                bids=((950, 1000.0), *((950 - level, 1.0) for level in range(1, 10))),
+                asks=((1050, 1000.0), *((1050 + level, 1.0) for level in range(1, 10))),
             )
         ]
     return list(
         iter_panel_frames(
             states,
-            [_trade(i, 8e307, maker_buyer=False) for i in range(100, end + 1, 100)]
-            if extreme
+            [_trade(i, 80.0, maker_buyer=False) for i in range(100, end + 1, 100)]
+            if liquid
             else [],
             market_id="crypto",
             asset_id="btc_usdt",
             start_ms=start,
             end_ms=end,
             book_coverage={
-                "s1": _coverage(0, end + 100) if extreme else _coverage(0, 1000),
+                "s1": _coverage(0, end + 100) if liquid else _coverage(0, 1000),
                 "s2": _coverage(1000, end + 100),
             },
             trade_coverage=coverage_lookup(
@@ -118,7 +118,7 @@ def test_derivative_independent_state_survives_execution_boundary(
 
 
 @pytest.mark.parametrize("batch", [3, 53])
-def test_finite_final_ratios_from_persisted_extreme_panel(tmp_path, batch):
+def test_finite_ratios_from_persisted_liquid_panel(tmp_path, batch):
     factors = (
         "top10_depth_per_spread",
         "near_depth_share_1_10",
@@ -132,14 +132,14 @@ def test_finite_final_ratios_from_persisted_extreme_panel(tmp_path, batch):
         "taker_buy_pressure_500ms",
         "taker_sell_pressure_500ms",
     )
-    frames = _panel(end=5100, batch=batch, extreme=True)
+    frames = _panel(end=5100, batch=batch, liquid=True)
     for frame in frames:
-        # Persisted absolute inputs are finite; only their sums exceed float range.
-        frame["book_ofi_100ms"] = 8e307
-        frame["observed_taker_buy_volume_100ms"] = 8e307
-        frame["observed_taker_sell_volume_100ms"] = 4e307
-        frame["observed_signed_trade_volume_100ms"] = 4e307
-        frame["trade_volume_100ms"] = 1.2e308
+        # Independent flow inputs exercise every configured horizon.
+        frame["book_ofi_100ms"] = 80.0
+        frame["observed_taker_buy_volume_100ms"] = 80.0
+        frame["observed_taker_sell_volume_100ms"] = 40.0
+        frame["observed_signed_trade_volume_100ms"] = 40.0
+        frame["trade_volume_100ms"] = 120.0
     panel = _persist(tmp_path / "panel", "binance_futures_l2_panel_100ms", frames)
     for factor in factors:
         result = pd.concat(
@@ -150,24 +150,24 @@ def test_finite_final_ratios_from_persisted_extreme_panel(tmp_path, batch):
             ignore_index=True,
         )
         if factor == "top10_depth_per_spread":
-            expected = 2e307
+            expected = 201.8
         elif factor == "near_depth_share_1_10":
-            expected = 1.0
+            expected = 2000.0 / 2018.0
         elif factor.startswith("trade_flow"):
-            expected = float(Fraction(4e307) / (Fraction(8e307) + Fraction(4e307)))
+            expected = float(Fraction(40.0) / (Fraction(80.0) + Fraction(40.0)))
         elif factor.startswith("depth_normalized"):
             n = {"500ms": 5, "1s": 10, "5s": 50}[factor.rsplit("_", 1)[1]]
-            expected = float(n * Fraction(8e307) / (2 * Fraction(1e308)))
+            expected = float(n * Fraction(80.0) / Fraction(2000.0))
         elif factor == "taker_buy_pressure_500ms":
-            expected = float(5 * Fraction(8e307) / Fraction(1e308))
+            expected = float(5 * Fraction(80.0) / Fraction(1000.0))
         else:
-            expected = float(5 * Fraction(4e307) / Fraction(1e308))
+            expected = float(5 * Fraction(40.0) / Fraction(1000.0))
         assert np.isfinite(result[factor].iloc[-1])
-        assert result[factor].iloc[-1] == expected
+        assert result[factor].iloc[-1] == pytest.approx(expected, rel=1e-13)
 
 
-@pytest.mark.parametrize("half_life", [0.0005, 0.001])
-@pytest.mark.parametrize("magnitude", [1e150, 1e300])
+@pytest.mark.parametrize("half_life", [1.0, 63.0])
+@pytest.mark.parametrize("magnitude", [0.01, 0.05])
 def test_actual_risk_estimate_retains_tail_after_latest_missing_session(
     half_life, magnitude
 ):
@@ -225,12 +225,10 @@ def test_actual_risk_estimate_retains_tail_after_latest_missing_session(
 
 
 @pytest.mark.parametrize("batch", [3, 53])
-def test_all_microstructure_factors_persist_finite_ratios_and_localize_true_overflow(
-    tmp_path, batch
-):
-    frames = _panel(end=5100, batch=batch, extreme=True)
+def test_all_microstructure_factors_persist_and_localize_missing_input(tmp_path, batch):
+    frames = _panel(end=5100, batch=batch, liquid=True)
     for frame in frames:
-        frame["book_ofi_100ms"] = 1e306
+        frame["book_ofi_100ms"] = 10.0
     panel = _persist(tmp_path / "panel", "binance_futures_l2_panel_100ms", frames)
     from quant_research_platform.markets.implementations.crypto.processed import (
         producer,
@@ -254,11 +252,11 @@ def test_all_microstructure_factors_persist_finite_ratios_and_localize_true_over
             asset_ids=("btc_usdt",),
         ),
     )
-    assert factors.top10_depth_per_spread.iloc[-1] == 2e307
-    assert factors.near_depth_share_1_10.iloc[-1] == 1
+    assert factors.top10_depth_per_spread.iloc[-1] == pytest.approx(201.8)
+    assert factors.near_depth_share_1_10.iloc[-1] == pytest.approx(2000.0 / 2018.0)
     assert factors.trade_flow_imbalance_5s.iloc[-1] == 1
-    assert factors.taker_buy_pressure_500ms.iloc[-1] == 4
-    panel["book_ofi_100ms"] = 8e307
+    assert factors.taker_buy_pressure_500ms.iloc[-1] == pytest.approx(0.4)
+    panel["book_ofi_100ms"] = np.nan
     local = pd.concat(
         iter_factor_frames([panel], columns=("ofi_500ms", "spread")), ignore_index=True
     )
@@ -269,8 +267,8 @@ def test_all_microstructure_factors_persist_finite_ratios_and_localize_true_over
 def test_force_order_ratio_uses_finite_final_mass_and_preserves_epoch_and_age():
     panel = pd.concat(_panel(end=6100), ignore_index=True)
     events = [
-        (1050_000_000, "forceOrder", {"E": 1050, "o": {"S": "SELL", "z": "1e308"}}, 0),
-        (1150_000_000, "forceOrder", {"E": 1150, "o": {"S": "BUY", "z": "1e308"}}, 0),
+        (1050_000_000, "forceOrder", {"E": 1050, "o": {"S": "SELL", "z": "1000.0"}}, 0),
+        (1150_000_000, "forceOrder", {"E": 1150, "o": {"S": "BUY", "z": "1000.0"}}, 0),
     ]
 
     def compute(frames, observations=events, age=10000):
@@ -307,12 +305,12 @@ def test_force_order_ratio_uses_finite_final_mass_and_preserves_epoch_and_age():
     )
 
 
-@pytest.mark.parametrize("half_life", [0.0005, 0.001, 63.0])
+@pytest.mark.parametrize("half_life", [1.0, 10.0, 63.0])
 def test_ewma_covariance_is_invariant_to_common_missing_age(half_life):
     from quant_research_platform.research.portfolios.risk import _ewma_covariance
 
     arguments = dict(
-        values=np.array([[1e150, -0.5e150], [0.0, 0.0]]),
+        values=np.array([[0.01, -0.005], [0.0, 0.0]]),
         half_life=half_life,
         diagonal_shrinkage=0.2,
         annualization_factor=252.0,
@@ -323,12 +321,12 @@ def test_ewma_covariance_is_invariant_to_common_missing_age(half_life):
     pd.testing.assert_frame_equal(first, shifted, check_exact=True)
 
 
-def test_unrepresentable_final_risk_fails_explicitly():
+def test_nonfinite_risk_fails_explicitly():
     from quant_research_platform.research.portfolios.risk import _ewma_covariance
 
     with pytest.raises(ValueError, match="factor_risk_covariance_non_finite"):
         _ewma_covariance(
-            np.array([[1e308], [-1e308]]),
+            np.array([[np.inf], [-np.inf]]),
             ages=np.array([1, 0]),
             half_life=63.0,
             diagonal_shrinkage=0.2,

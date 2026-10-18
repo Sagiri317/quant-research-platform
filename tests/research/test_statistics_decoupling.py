@@ -564,9 +564,12 @@ def test_selected_prediction_checks_only_its_selection_path(tmp_path, retrospect
     spec = make_demo_research_dataset_spec(
         data_id="direct_factor",
         factor_columns=("factor",),
-        label_columns=("forward_return_20d", "forward_return_20d_available_at"),
+        label_columns=("forward_return_20d",),
         filter_columns=("eligible",),
-        context_columns=("total_market_cap",),
+        context_columns=(
+            "total_market_cap",
+            "forward_return_20d_available_at",
+        ),
     )
     config = statistics_config(factors=["factor"])
     config["statistics"] = {

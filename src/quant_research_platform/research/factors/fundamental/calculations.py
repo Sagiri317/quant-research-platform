@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from fractions import Fraction
 from math import fsum
 
 import numpy as np
@@ -51,18 +50,8 @@ def calculate_fundamental_factors(
             numerator = (numerator[0].where(numerator[0].ge(0.0)),)
         divisor = values[denominator]
         if adjustment:
-            terms = (numerator[0], adjustment * divisor)
-            with np.errstate(over="ignore"):
-                difference = terms[0] + terms[1]
-            ratio = _ratio(difference, divisor)
-            overflow = np.isinf(difference)
-            if overflow.any():
-                ratio.loc[overflow] = _ratio(
-                    tuple(term.loc[overflow] for term in terms),
-                    divisor.loc[overflow],
-                )
-        else:
-            ratio = _ratio(numerator[0] if len(numerator) == 1 else numerator, divisor)
+            numerator = (*numerator, adjustment * divisor)
+        ratio = _ratio(numerator[0] if len(numerator) == 1 else numerator, divisor)
         result[column] = ratio.replace([np.inf, -np.inf], np.nan).astype("float64")
     return result
 
@@ -82,34 +71,10 @@ def _ratio(
             totals, divisors, out=np.full(len(divisors), np.nan), where=valid
         )
     mixed = (terms > 0).any(axis=1) & (terms < 0).any(axis=1)
-    exceptional = valid & (
-        ~np.isfinite(totals)
-        | ~np.isfinite(result)
-        | (mixed & (terms.shape[1] > 2))
-        | (
-            (
-                (np.abs(totals) < np.finfo(float).tiny)
-                | (np.abs(result) < np.finfo(float).tiny)
-                | (np.abs(result) >= np.finfo(float).max / 2)
-            )
-            & (terms != 0).any(axis=1)
-        )
-    )
-    for index in np.flatnonzero(exceptional):
-        try:
-            total = fsum(terms[index])
-            if abs(total) >= np.finfo(float).tiny:
-                value = total / float(divisors[index])
-                if np.finfo(float).tiny <= abs(value) < np.finfo(float).max / 2:
-                    result[index] = value
-                    continue
-        except OverflowError:
-            pass
-        # Only the representability boundaries need an exact ratio; normal multi-term
-        # cancellation uses the standard library's compensated sum.
-        ratio = sum(map(Fraction, terms[index]), Fraction()) / Fraction(divisors[index])
-        try:
-            result[index] = float(ratio)
-        except OverflowError:
-            result[index] = np.nan
+    if terms.shape[1] > 2:
+        for index in np.flatnonzero(valid & mixed):
+            try:
+                result[index] = fsum(terms[index]) / divisors[index]
+            except OverflowError:
+                result[index] = np.nan
     return pd.Series(result, index=denominator.index)

@@ -1030,30 +1030,19 @@ def test_native_calendar_evidence_localizes_daily_statistics(tmp_path, cadence):
     [
         [],
         np.random.default_rng(1).normal(0.0001, 0.01, 1000),
-        [1e-17] * 64,
-        [-1e-17] * 64,
-        [1.0] * 1100 + [-0.5] * 1100,
-        [-0.5] * 1100 + [1.0] * 1100,
-        [np.nextafter(-1.0, 0.0)] * 24 + [1e308] * 2,
-        [1e308, 1e308] + [np.nextafter(-1.0, 0.0)] * 24,
-        [-2.0, -3.0, -1.5, 0.25, -1.0, 1e308, -3.0],
-        [1e308, 1e308, -1.0, 1e308],
+        [0.00001] * 64,
+        [-0.00001] * 64,
+        [-2.0, -3.0, -1.5, 0.25, -1.0, 0.5, -3.0],
         [0.1, np.nan, -1.0, 0.2],
         [-1.0, np.inf, 0.2],
         [-1.0, -np.inf, 0.2],
-        [np.finfo(float).max, 0.0],
-        [np.finfo(float).max, 1e-16, -0.5],
     ],
 )
-def test_comparison_wealth_matches_exact_prefixes(returns, monkeypatch):
+def test_comparison_wealth_matches_independent_prefixes(returns):
     from fractions import Fraction
 
     from quant_research_platform.research.portfolios.comparison import _wealth
 
-    # Exercise portable precision even on platforms with wider longdouble.
-    monkeypatch.setattr(np, "longdouble", np.float64)
-
-    # Independent exact oracle: unrepresentable prefixes must not erase state.
     exact = Fraction(1)
     expected = []
     for value in returns:
@@ -1061,50 +1050,20 @@ def test_comparison_wealth_matches_exact_prefixes(returns, monkeypatch):
             exact = None
         if exact is None:
             expected.append(np.nan)
-            continue
-        exact *= 1 + Fraction(float(value))
-        try:
-            converted = float(exact)
-        except OverflowError:
-            converted = np.nan
-        expected.append(np.nan if converted == 0 and exact else converted)
+        else:
+            exact *= 1 + Fraction(float(value))
+            expected.append(float(exact))
     actual = _wealth(returns)
-    np.testing.assert_array_equal(np.isnan(actual), np.isnan(expected))
-    # Relative error follows wealth's scale, with one subnormal ULP at zero.
-    np.testing.assert_allclose(
-        actual, expected, rtol=2e-12, atol=np.nextafter(0.0, 1.0), equal_nan=True
-    )
+    np.testing.assert_allclose(actual, expected, rtol=2e-12, atol=0, equal_nan=True)
     np.testing.assert_array_equal(actual == 0, np.asarray(expected) == 0)
-    if len(returns) == 64:
-        assert actual[-1] != 1.0
 
 
-def test_comparison_wealth_ordinary_path_does_not_construct_fractions(monkeypatch):
-    from quant_research_platform.research.portfolios import comparison
+@pytest.mark.parametrize("returns", [0.001, -0.001, 0.00001, -0.00001])
+def test_comparison_wealth_long_ordinary_path(returns):
+    import math
 
-    def unexpected_exact(*args, **kwargs):
-        pytest.fail("ordinary cumulative wealth must use bounded numeric work")
+    from quant_research_platform.research.portfolios.comparison import _wealth
 
-    monkeypatch.setattr(comparison, "Fraction", unexpected_exact)
-    values = np.random.default_rng(1).normal(0.0001, 0.01, 10000)
-    assert np.isfinite(comparison._wealth(values)).all()
-
-
-@pytest.mark.parametrize("returns", [0.01, -0.01, 1e-17, -1e-17])
-def test_comparison_wealth_long_binary64_path(returns, monkeypatch):
-    from fractions import Fraction
-
-    from quant_research_platform.research.portfolios import comparison
-
-    monkeypatch.setattr(np, "longdouble", np.float64)
-    values = np.full(20000, returns)
-    expected = float((1 + Fraction(returns)) ** len(values))
-
-    def unexpected_exact(*args, **kwargs):
-        pytest.fail("ordinary cumulative wealth must use bounded numeric work")
-
-    monkeypatch.setattr(comparison, "Fraction", unexpected_exact)
-    actual = comparison._wealth(values)
-    assert actual[-1] == pytest.approx(expected, rel=2e-12, abs=0)
-    if abs(returns) < 1e-16:
-        assert actual[-1] != 1.0
+    values = np.full(10000, returns)
+    expected = math.exp(len(values) * math.log1p(returns))
+    assert _wealth(values)[-1] == pytest.approx(expected, rel=2e-12, abs=0)

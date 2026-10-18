@@ -201,7 +201,7 @@ def _dataset_spec() -> ResearchDatasetSpec:
             "label": ColumnRole.LABEL,
             "label_available_at": ColumnRole.CONTEXT,
             "forward_return_20d": ColumnRole.LABEL,
-            "forward_return_20d_available_at": ColumnRole.LABEL,
+            "forward_return_20d_available_at": ColumnRole.CONTEXT,
             "eligible": ColumnRole.MASK,
             "float_market_cap": ColumnRole.CONTEXT,
             "total_market_cap": ColumnRole.CONTEXT,
@@ -215,10 +215,14 @@ def _dataset_spec() -> ResearchDatasetSpec:
         label_columns=(
             "label",
             "forward_return_20d",
-            "forward_return_20d_available_at",
         ),
         filter_columns=("eligible",),
-        context_columns=("float_market_cap", "total_market_cap", "label_available_at"),
+        context_columns=(
+            "float_market_cap",
+            "total_market_cap",
+            "label_available_at",
+            "forward_return_20d_available_at",
+        ),
     )
 
 

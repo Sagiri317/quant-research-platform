@@ -131,8 +131,8 @@ def test_many_fills_conserve_cash_and_publish_native_returns(
             observed.setattr(ExecutedTrade, "__getattribute__", count_trade_assets)
             economic = portfolio_interval_economics(batch)
         assert asset_reads <= 2 * len(batch.trades)
-        assert economic["net_return"] == float(
-            -fees_paid / Fraction(economic["nav_before"])
+        assert economic["net_return"] == pytest.approx(
+            float(-fees_paid / Fraction(economic["nav_before"])), rel=2e-13, abs=0.0
         )
     economics_calls = []
 

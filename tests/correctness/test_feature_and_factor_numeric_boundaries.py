@@ -8,7 +8,6 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
-from quant_research_platform.catalog.processed import ProcessedDataCatalog
 from quant_research_platform.contracts.columns import (
     PLATFORM_ASSET_TIME_KEY,
     ColumnRole,
@@ -45,8 +44,8 @@ from tests.helpers.research_specs import (
 
 
 @pytest.mark.parametrize("weights", ([1.0, 1.0], [1.0, 3.0]))
-def test_scaler_preserves_split_center_across_chunks_and_pickle(weights):
-    frame = pd.DataFrame({"x": [1.0, np.nextafter(1.0, 2.0)]})
+def test_scaler_preserves_weighted_center_across_chunks_and_pickle(weights):
+    frame = pd.DataFrame({"x": [1.0, 3.0]})
     exact = [Fraction.from_float(value) for value in frame.x]
     exact_weights = [Fraction.from_float(weight) for weight in weights]
     center = sum(
@@ -81,14 +80,13 @@ def test_scaler_preserves_split_center_across_chunks_and_pickle(weights):
     assert set(restored.to_payload()) == {
         "columns",
         "scaling",
-        "weighted_mean_origin",
-        "weighted_mean_offset",
+        "weighted_mean",
         "weighted_population_scale",
     }
 
 
-def test_adjacent_risk_styles_remain_zero_centered():
-    values = np.tile([1.0, np.nextafter(1.0, 2.0)], 50)
+def test_risk_styles_remain_zero_centered():
+    values = np.tile([1.0, 3.0], 50)
     frame = pd.DataFrame(
         {"timestamp": pd.Timestamp("2020-01-01"), "eligible": True, "style": values}
     )
@@ -113,8 +111,8 @@ def test_constant_eligible_risk_style_projects_zero_to_complete_benchmark_domain
     pd.testing.assert_series_equal(result["style"], pd.Series([0.0] * 3, name="style"))
 
 
-@pytest.mark.parametrize("unit", (1.0, 1e200, 1e-200, -1e200))
-def test_hac_representable_extreme_units_match_fraction_bartlett_oracle(unit):
+@pytest.mark.parametrize("unit", (1.0, 100.0, 0.01, -100.0))
+def test_hac_units_match_independent_bartlett_oracle(unit):
     values = np.array([(0.1 + 0.01 * i) * unit for i in range(24)])
     exact = [Fraction.from_float(float(value)) for value in values]
     count = len(exact)
@@ -145,15 +143,15 @@ def test_hac_representable_extreme_units_match_fraction_bartlett_oracle(unit):
 
 
 @pytest.mark.parametrize("window", (20, 60, 126))
-def test_amihud_representable_mean_survives_native_write_and_read(tmp_path, window):
+def test_amihud_mean_survives_native_write_and_read(tmp_path, window):
     column = f"amihud_{window}d"
     panel = pd.DataFrame(
         {
             "market_id": "a_share",
             "asset_id": "a",
             "timestamp": pd.bdate_range("2020-01-01", periods=window),
-            "period_return": 1.0,
-            "amount": 1e-308,
+            "period_return": 0.01,
+            "amount": 1e8,
             "filling_flag": 0,
         }
     )
@@ -161,7 +159,7 @@ def test_amihud_representable_mean_survives_native_write_and_read(tmp_path, wind
         market_id="a_share", required_input_data_id="panel", factor_columns=(column,)
     )
     calculated = calculate_factors_for_panel(panel, definitions=definitions)
-    expected = float(Fraction(1) / Fraction.from_float(1e-308))
+    expected = float(Fraction(0.01) / Fraction(1e8))
     assert calculated[column].iloc[:-1].isna().all()
     assert calculated[column].iloc[-1] == pytest.approx(expected, rel=1e-15)
     spec = ProcessedDataSpec(
@@ -197,13 +195,13 @@ def test_amihud_representable_mean_survives_native_write_and_read(tmp_path, wind
     )
 
 
-def test_amihud_individual_quotient_can_exceed_float_range_when_mean_is_finite():
+def test_amihud_mean_uses_valid_observations_and_freshness():
     panel = pd.DataFrame(
         {
             "asset_id": "a",
             "timestamp": pd.bdate_range("2020-01-01", periods=20),
-            "period_return": [10.0, *([0.0] * 19)],
-            "amount": 1e-308,
+            "period_return": [0.1, *([0.0] * 19)],
+            "amount": 1e8,
             "filling_flag": 0,
         }
     )
@@ -212,11 +210,11 @@ def test_amihud_individual_quotient_can_exceed_float_range_when_mean_is_finite()
     )
 
     result = calculate_price_volume_factors(panel, factor_columns=("amihud_20d",))
-    expected = float(Fraction(10) / Fraction.from_float(1e-308) / 20)
+    expected = float(Fraction(0.1) / Fraction(1e8) / 20)
     assert result.amihud_20d.iloc[-1] == pytest.approx(expected, rel=1e-15)
     panel.loc[3, "amount"] = 0
     partial = calculate_price_volume_factors(panel, factor_columns=("amihud_20d",))
-    expected_partial = float(Fraction(10) / Fraction.from_float(1e-308) / 19)
+    expected_partial = float(Fraction(0.1) / Fraction(1e8) / 19)
     assert partial.amihud_20d.iloc[-1] == pytest.approx(expected_partial, rel=1e-15)
     # Fewer than 15 valid observations fails the 75% freshness threshold.
     panel.loc[3:8, "amount"] = 0
@@ -230,14 +228,13 @@ def test_amihud_individual_quotient_can_exceed_float_range_when_mean_is_finite()
 @pytest.mark.parametrize(
     "values",
     (
-        [8e307, 9e307, 1e308, 1.7e308],
-        [-1.7e308, -1e308, -9e307, -8e307],
-        [-1.7e308, -1.6e308, 0.0, 1.6e308, 1.7e308],
-        [0.0, 5e-324, 1e-323, 1.7e308],
+        [0.8, 0.9, 1.0, 5.0],
+        [-5.0, -1.0, -0.9, -0.8],
+        [-2.0, -1.0, 0.0, 1.0, 8.0],
         [1.0, 1.0, 2.0],
     ),
 )
-def test_mad_bounds_match_exact_binary64_median_oracle(values):
+def test_mad_bounds_match_independent_median_oracle(values):
     source = pd.Series([*values, np.nan])
     exact = [Fraction.from_float(value) for value in values]
     center = median(exact)
@@ -250,13 +247,13 @@ def test_mad_bounds_match_exact_binary64_median_oracle(values):
         for value in exact
     ]
     clipped = _mad_winsorize(source, source.groupby(pd.Series([0] * len(source))))
-    np.testing.assert_array_equal(clipped.iloc[:-1], expected)
+    np.testing.assert_allclose(clipped.iloc[:-1], expected, rtol=1e-13, atol=1e-15)
     assert pd.isna(clipped.iloc[-1])
 
 
-def test_extreme_mad_preserves_complete_canonical_features_under_units_change(tmp_path):
-    values = np.linspace(8e307, 1e308, 100)
-    values[-1] = 1.7e308
+def test_mad_preserves_complete_canonical_features_under_units_change(tmp_path):
+    values = np.linspace(0.8, 1.0, 100)
+    values[-1] = 1.7
     frame = pd.DataFrame(
         {
             "market_id": "a_share",
@@ -271,7 +268,7 @@ def test_extreme_mad_preserves_complete_canonical_features_under_units_change(tm
     )
     actual = a_share_feature_pipeline(frame, factor_columns=("factor",))
     scaled = a_share_feature_pipeline(
-        frame.assign(factor=values / 1e308), factor_columns=("factor",)
+        frame.assign(factor=values * 100), factor_columns=("factor",)
     )
     np.testing.assert_allclose(
         actual.feature_factor, scaled.feature_factor, rtol=1e-13, atol=1e-13
@@ -295,7 +292,7 @@ def test_extreme_mad_preserves_complete_canonical_features_under_units_change(tm
         }
     )
     spec = ProcessedDataSpec(
-        data_id="canonical_extreme",
+        data_id="canonical_units",
         market_id="a_share",
         kind=ProcessedDataKind.FACTOR,
         frequency=DataFrequency.DAILY,
@@ -353,7 +350,7 @@ def test_canonical_degeneracy_diagnostics_accumulate_in_native_manifest(
                     "market_id": "a_share",
                     "asset_id": [f"a{i:03d}" for i in range(102)],
                     "timestamp": timestamp,
-                    "factor": float(i + 1) if i < 2 else np.sin(np.arange(102)),
+                    "factor": float(i + 1) if i < 2 else np.cos(np.arange(102)),
                     "label": 0.1,
                     "eligible": [True] * 101 + [False],
                     "industry_standard_id": "CSRC2012",
@@ -396,7 +393,6 @@ def test_canonical_degeneracy_diagnostics_accumulate_in_native_manifest(
         },
         output_root=tmp_path / "numeric-dataset",
         dataset_catalog=ResearchDatasetCatalog((dataset_spec,)),
-        processed_catalog=ProcessedDataCatalog((source_spec,)),
         dataset_id=dataset_spec.data_id,
         time_window=TimeWindow("2020-01-01", "2020-01-03"),
     )

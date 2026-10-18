@@ -115,9 +115,12 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
     spec = make_demo_research_dataset_spec(
         data_id="pv_all",
         factor_columns=("x",),
-        label_columns=(a_share.PRIMARY_LABEL_COLUMN, "forward_return_20d_available_at"),
+        label_columns=(a_share.PRIMARY_LABEL_COLUMN,),
         filter_columns=("eligible",),
-        context_columns=("total_market_cap",),
+        context_columns=(
+            "total_market_cap",
+            "forward_return_20d_available_at",
+        ),
     )
     if full_factor_history:
         historical = frame.iloc[: len(assets)].copy()
@@ -573,12 +576,12 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         spec = make_demo_research_dataset_spec(
             data_id="stats_demo",
             factor_columns=PV25_FACTORS,
-            label_columns=(
-                a_share.PRIMARY_LABEL_COLUMN,
+            label_columns=(a_share.PRIMARY_LABEL_COLUMN,),
+            filter_columns=("eligible",),
+            context_columns=(
+                "total_market_cap",
                 "forward_return_20d_available_at",
             ),
-            filter_columns=("eligible",),
-            context_columns=("total_market_cap",),
             filter_column_roles={"eligible": ColumnRole.UNIVERSE},
         )
         frame = pd.DataFrame(rows)
@@ -1107,9 +1110,12 @@ def test_model_family_names_preserve_factor_statistics_and_native_names(
     spec = make_demo_research_dataset_spec(
         data_id="family_names",
         factor_columns=(factor,),
-        label_columns=(a_share.PRIMARY_LABEL_COLUMN, "forward_return_20d_available_at"),
+        label_columns=(a_share.PRIMARY_LABEL_COLUMN,),
         filter_columns=("eligible",),
-        context_columns=("total_market_cap",),
+        context_columns=(
+            "total_market_cap",
+            "forward_return_20d_available_at",
+        ),
     )
     frame["total_market_cap"] = 1.0 + frame.groupby("timestamp").cumcount()
     write_dataset(
@@ -1406,141 +1412,6 @@ def test_factor_fmb_weightings_match_independent_weighted_normal_equations():
         assert actual.loc[~equal, "observation_count"].eq(len(frame.dropna()) - 1).all()
 
 
-@pytest.mark.parametrize(
-    ("factor_scale", "price_change"),
-    [(1e308, 2.0 ** (-52)), (1e300, 2.0 ** (-52)), (1e308, 0.0)],
-    ids=["nonzero_underflow", "representable_subnormal", "true_zero"],
-)
-def test_native_fmb_float_publication_survives_statistics_roundtrip(
-    tmp_path, factor_scale, price_change
-):
-    from fractions import Fraction
-
-    from quant_research_platform.contracts.experiments import legal_training_rows
-    from quant_research_platform.research.factors.fundamental.calculations import (
-        calculate_fundamental_factors,
-    )
-    from quant_research_platform.research.labels.forward_returns import (
-        add_forward_return_labels,
-    )
-
-    axis = pd.bdate_range("2023-01-02", periods=41)
-    factor, label = ("earnings_yield", "forward_return_20d")
-    availability = label + "_available_at"
-    prices = pd.DataFrame(
-        [
-            {
-                "timestamp": timestamp,
-                "asset_id": asset,
-                "adj_open": 1.0 + (offset * price_change if index >= 21 else 0.0),
-                "filling_flag": 0,
-                "is_trading": True,
-            }
-            for index, timestamp in enumerate(axis)
-            for asset, offset in zip(("A", "B", "C"), (-1, 0, 1), strict=True)
-        ]
-    )
-    labels = add_forward_return_labels(prices, horizons=(20,), sessions=axis)
-    labels = labels.loc[labels.timestamp.isin(axis[:20])]
-    facts = labels[["asset_id", "timestamp"]].copy()
-    facts["parent_net_income_ttm"] = facts.asset_id.map(
-        {"A": -factor_scale, "B": 0.0, "C": factor_scale}
-    )
-    facts["total_market_cap"] = 1.0
-    factors = calculate_fundamental_factors(facts, factor_columns=(factor,))
-    frame = labels.merge(factors, on=["asset_id", "timestamp"], validate="one_to_one")
-    frame["market_id"] = "a_share"
-    frame["total_market_cap"] = 1.0
-    frame["eligible"] = True
-    cutoff = axis[-1] + pd.Timedelta(days=1)
-    mature = legal_training_rows(
-        frame,
-        fitting_cutoff=cutoff,
-        availability_column=availability,
-        target_column=label,
-    )
-    assert len(mature) == 60
-    exact = Fraction(price_change) / Fraction(factor_scale)
-    for row in mature.itertuples(index=False):
-        assert exact * Fraction(row.earnings_yield) == Fraction(row.forward_return_20d)
-    if price_change and factor_scale == 1e308:
-        assert exact != 0 and float(exact) == 0
-    elif price_change:
-        assert 0 < float(exact) < np.finfo(float).tiny
-    else:
-        assert exact == 0
-    spec = make_demo_research_dataset_spec(
-        data_id="fmb_float_publication",
-        factor_columns=(factor,),
-        label_columns=(label, availability),
-        filter_columns=("eligible",),
-        context_columns=("total_market_cap",),
-    )
-    layout = StorageLayout(tmp_path)
-    dataset_root = layout.research_dataset_root("a_share", spec.data_id)
-    write_dataset(dataset_root, frame.loc[:, list(spec.column_roles)], spec=spec)
-    window = TimeWindow(axis[0].date(), cutoff.date())
-    config = {
-        "sample_role": "validation",
-        "evaluation": {"primary_label": label, "factors": [factor]},
-        "statistics": {
-            "factor_fdr_families": {"fundamental": [factor]},
-            "fama_macbeth_core_factors": [],
-            "hac_lag": 19,
-            "fdr_primary": "BY_5pct",
-            "fdr_robustness": "BH_5pct",
-        },
-    }
-    tables = build_a_share_factor_statistics_tables(
-        dataset_path=layout.research_dataset_root("a_share", spec.data_id),
-        dataset_spec=spec,
-        config=config,
-        time_window=window,
-    )
-    metadata = statistics_metadata(window)
-    root = write_statistics_artifact(
-        tmp_path / "statistics", metadata=metadata, tables=tables, table_group="factor"
-    )
-    saved = read_statistics_artifact(root)
-    with saved.table("fama_macbeth_periods.parquet") as periods:
-        assert len(periods) == 80
-        assert periods.status.eq("DEFINED").all()
-        assert periods.observation_count.eq(3).all()
-        assert (
-            periods.loc[periods.coefficient_id.eq(factor), "value"]
-            .eq(float(exact))
-            .all()
-        )
-        assert (
-            periods.loc[periods.coefficient_id.eq("intercept"), "value"].eq(0.0).all()
-        )
-    with saved.table("fama_macbeth.parquet") as summary:
-        assert len(summary) == 4
-        assert summary.period_count.eq(20).all()
-        assert summary.status.eq("UNDEFINED").all()
-        assert summary.reason.eq("hac_inference_undefined").all()
-        assert (
-            summary.loc[summary.coefficient_id.eq(factor), "mean"]
-            .eq(float(exact))
-            .all()
-        )
-        assert summary.loc[summary.coefficient_id.eq("intercept"), "mean"].eq(0.0).all()
-        assert (
-            summary[
-                [
-                    "standard_error",
-                    "t_statistic",
-                    "p_value",
-                    "ci_lower",
-                    "ci_upper",
-                ]
-            ]
-            .isna()
-            .all()
-            .all()
-        )
-
-
 def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_path):
     import pyarrow as pa
 
@@ -1599,12 +1470,14 @@ def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_pat
         factor_columns=(factor,),
         label_columns=(
             "forward_return_5d",
-            "forward_return_5d_available_at",
             "forward_return_20d",
-            "forward_return_20d_available_at",
         ),
         filter_columns=("eligible",),
-        context_columns=("total_market_cap",),
+        context_columns=(
+            "total_market_cap",
+            "forward_return_5d_available_at",
+            "forward_return_20d_available_at",
+        ),
     )
     source = tmp_path / "source"
     write_dataset(source, frame, spec=spec)

@@ -195,6 +195,56 @@ def test_actual_label_clock_and_units_survive_selection(tmp_path):
     assert actual.matured_at.eq(pd.Timestamp("2024-01-03")).all()
 
 
+def test_native_prepared_label_clock_remains_context_through_assembly(tmp_path):
+    from tests.markets.a_share.test_calendar_dependency_scope import (
+        _calendar,
+        _panel,
+        _prepare,
+    )
+
+    dates = pd.bdate_range("2024-01-02", periods=5).as_unit("ns")
+    panel = _panel(dates)
+    label = "forward_return_1d"
+    clock = f"{label}_available_at"
+    labels = _prepare(
+        tmp_path / "prepared",
+        panel,
+        _calendar({1: dates}),
+        "forward_returns",
+        label_columns=[label],
+    )
+    label_root = tmp_path / "prepared" / "output"
+    prepared = inspect_dataset(label_root).spec
+    assert prepared["column_roles"][clock] == "context"
+    factors, _ = _source(
+        tmp_path,
+        panel[list(PLATFORM_ASSET_TIME_KEY)].assign(momentum_20d=np.arange(5.0)),
+    )
+    output = assembler.assemble(
+        _config(
+            tmp_path,
+            factors,
+            inputs={factors.name: str(factors), "forward_returns": str(label_root)},
+            label_columns=[label],
+            time_window={"start": "2024-01-02", "end": "2024-01-08"},
+        )
+    )
+    spec = inspect_dataset(output).spec
+    assert spec["label_columns"] == [label]
+    assert spec["context_columns"] == [clock]
+    assert spec["column_roles"][clock] == "context"
+    assert spec["column_units"][label] == "decimal_return"
+    assert spec["label_availability_columns"] == {label: clock}
+    actual = read_dataset(output)
+    pd.testing.assert_frame_equal(actual[labels.columns], labels, check_exact=True)
+    np.testing.assert_allclose(actual[label].iloc[:3], 1 / np.arange(101.0, 104.0))
+    assert actual[label].iloc[-2:].isna().all()
+    assert (
+        actual[clock].iloc[:3].tolist() == (dates[2:] + pd.Timedelta(hours=7)).tolist()
+    )
+    assert actual[clock].iloc[-2:].isna().all()
+
+
 def test_bare_input_uses_supplied_actual_semantics_without_catalog_membership(tmp_path):
     frame = _frame(3)
     path = tmp_path / "source.parquet"

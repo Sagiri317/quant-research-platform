@@ -2,11 +2,6 @@
 
 from __future__ import annotations
 
-from decimal import Decimal, localcontext
-from fractions import Fraction
-from math import isfinite, ulp
-from statistics import mean
-
 import numpy as np
 import pandas as pd
 
@@ -80,7 +75,7 @@ def compute_ic_and_grouped_label_values(
                             "label": label,
                             "group": group,
                             "mean_label_value": float(
-                                mean(predicted_labels[group_mask])
+                                np.mean(predicted_labels[group_mask])
                             )
                             if group_mask.any()
                             else np.nan,
@@ -121,109 +116,37 @@ def compute_ic_and_grouped_label_values(
     return metrics, grouped
 
 
-class _CorrelationMoments:
-    """Exact sufficient statistics for finite binary floating-point observations."""
-
-    __slots__ = (
-        "count",
-        "exponent",
-        "left_sum",
-        "right_sum",
-        "left_square",
-        "right_square",
-        "product",
-    )
-
-    def __init__(self) -> None:
-        self.count = 0
-        self.exponent = 0
-        self.left_sum = self.right_sum = 0
-        self.left_square = self.right_square = self.product = 0
-
-    def update(self, left: float, right: float) -> None:
-        # Use only the binary scale actually observed. Fixed subnormal scaling
-        # adds thousands of zero bits to ordinary prices and every product.
-        left_numerator, left_denominator = left.as_integer_ratio()
-        right_numerator, right_denominator = right.as_integer_ratio()
-        left_exponent = left_denominator.bit_length() - 1
-        right_exponent = right_denominator.bit_length() - 1
-        exponent = max(self.exponent, left_exponent, right_exponent)
-        shift = exponent - self.exponent
-        if shift:
-            self.left_sum <<= shift
-            self.right_sum <<= shift
-            self.left_square <<= 2 * shift
-            self.right_square <<= 2 * shift
-            self.product <<= 2 * shift
-            self.exponent = exponent
-        x = left_numerator << (exponent - left_exponent)
-        y = right_numerator << (exponent - right_exponent)
-        self.count += 1
-        self.left_sum += x
-        self.right_sum += y
-        self.left_square += x * x
-        self.right_square += y * y
-        self.product += x * y
-
-    def result(self) -> tuple[float | None, str | None]:
-        # Multiplying centered moments by count avoids division until the ratio.
-        return _pearson_correlation_from_moments(
-            count=self.count,
-            left_m2=self.count * self.left_square - self.left_sum * self.left_sum,
-            right_m2=self.count * self.right_square - self.right_sum * self.right_sum,
-            covariance=self.count * self.product - self.left_sum * self.right_sum,
-        )
-
-
-def _pearson_correlation_from_moments(
-    *,
-    count: int,
-    left_m2: float | int | Fraction,
-    right_m2: float | int | Fraction,
-    covariance: float | int | Fraction,
-) -> tuple[float | None, str | None]:
-    if count < 2:
-        return None, "insufficient_observations"
-    if left_m2 <= 0 or right_m2 <= 0:
-        return None, "zero_variance"
-    if any(
-        isinstance(value, float) and not isfinite(value)
-        for value in (left_m2, right_m2, covariance)
-    ):
-        return None, "nonfinite_result"
-    squared = Fraction(covariance) ** 2 / (Fraction(left_m2) * Fraction(right_m2))
-    # Decimal avoids intermediate float underflow/overflow; only the result is
-    # rounded to binary64. Invalid moments remain outside the correlation domain.
-    with localcontext() as context:
-        context.prec = 80
-        value = float(
-            (Decimal(squared.numerator) / Decimal(squared.denominator)).sqrt()
-        )
-    if covariance < 0:
-        value = -value
-    if not np.isfinite(value):
-        return None, "nonfinite_result"
-    return value, None
-
-
-def _scaled_centered_values(values: np.ndarray) -> np.ndarray | None:
+def _centered_values(
+    values: np.ndarray, paired: np.ndarray | None = None
+) -> np.ndarray:
+    """Center each observation row relative to an observed origin."""
     values = np.asarray(values, dtype="float64")
-    reference = values[0]
-    with np.errstate(over="ignore"):
-        differences = values - reference
-    if np.isfinite(differences).all():
-        scale = float(np.max(np.abs(differences)))
-        if scale == 0:
-            return None
-        normalized = differences / scale
-    else:
-        scale = float(np.max(np.abs(values)))
-        normalized = values / scale
-    centered = normalized - normalized.mean()
-    scale = float(np.max(np.abs(centered)))
-    if scale == 0:
-        return None
-    return centered / scale
+    if paired is None:
+        differences = values - values[..., :1]
+        return differences - differences.mean(axis=-1, keepdims=True)
+    origin = np.take_along_axis(values, paired.argmax(axis=-1, keepdims=True), axis=-1)
+    differences = np.where(paired, values - origin, 0.0)
+    mean = differences.sum(axis=-1, keepdims=True) / np.maximum(
+        paired.sum(axis=-1, keepdims=True), 1
+    )
+    return np.where(paired, differences - mean, 0.0)
+
+
+def _pearson_correlations(left, right, *, paired=None):
+    """Reduce complete or explicitly paired arrays along their last axis."""
+    left, right = _centered_values(left, paired), _centered_values(right, paired)
+    covariance = np.sum(left * right, axis=-1)
+    denominator = np.sqrt(np.sum(left * left, axis=-1) * np.sum(right * right, axis=-1))
+    return np.clip(
+        np.divide(
+            covariance,
+            denominator,
+            out=np.full_like(covariance, np.nan),
+            where=denominator > 0,
+        ),
+        -1.0,
+        1.0,
+    )
 
 
 def _stable_zscore(values: pd.Series) -> pd.Series:
@@ -232,10 +155,7 @@ def _stable_zscore(values: pd.Series) -> pd.Series:
     valid = np.isfinite(source)
     if int(valid.sum()) < 2:
         return pd.Series(output, index=values.index)
-    centered = _scaled_centered_values(source[valid])
-    if centered is None:
-        output[valid] = 0.0
-        return pd.Series(output, index=values.index)
+    centered = _centered_values(source[valid])
     std = float(np.sqrt(np.dot(centered, centered) / len(centered)))
     if std == 0:
         output[valid] = 0.0
@@ -271,8 +191,8 @@ def _average_ranks(values: np.ndarray) -> np.ndarray:
 def _summarize_correlation_aggregates(
     *,
     count: int,
-    mean: Fraction,
-    m2: Fraction,
+    mean: float,
+    m2: float,
     positive_count: int,
 ) -> dict[str, float | int | str | None]:
     if count == 0:
@@ -286,20 +206,9 @@ def _summarize_correlation_aggregates(
             "std_reason": "no_valid_observations",
             "ratio_reason": "no_valid_observations",
         }
-    variance = m2 / count
-    with localcontext() as context:
-        context.prec = 80
-        deviation = (Decimal(variance.numerator) / Decimal(variance.denominator)).sqrt()
-        std = float(deviation)
-        ratio = (
-            float(Decimal(mean.numerator) / Decimal(mean.denominator) / deviation)
-            if count >= 2 and deviation > 0
-            else np.nan
-        )
-    # A nonzero scale that rounds to zero is unrepresentable, not constant.
-    if 0 < variance <= (Fraction(ulp(0.0)) / 2) ** 2:
-        std = np.nan
+    std = float(np.sqrt(m2 / count))
     mean = float(mean)
+    ratio = mean / std if count >= 2 and std > 0 else np.nan
     return {
         "mean": mean,
         "std": std if np.isfinite(std) else np.nan,
@@ -318,7 +227,7 @@ def _summarize_correlation_aggregates(
 
 
 def _add_correlation_aggregate(
-    stats: dict[str, int | Fraction],
+    stats: dict[str, int | float],
     prefix: str,
     value: object,
 ) -> None:
@@ -328,8 +237,7 @@ def _add_correlation_aggregate(
     count = int(stats[f"{prefix}_count"]) + 1
     mean_key = f"{prefix}_mean"
     m2_key = f"{prefix}_m2"
-    # Exact updates preserve adjacent binary64 values and tiny variances.
-    value = Fraction(numeric)
+    value = numeric
     delta = value - stats[mean_key]
     mean = stats[mean_key] + delta / count
     stats[mean_key] = mean
@@ -360,11 +268,7 @@ def _pearson_correlation_result(
     left_values: np.ndarray,
     right_values: np.ndarray,
 ) -> tuple[float | None, str | None]:
-    """Compute bounded-array Pearson using shared stable centering.
-
-    The exact streaming accumulator remains the owner for incremental updates;
-    this batch path avoids per-row Python arithmetic for already materialized data.
-    """
+    """Compute Pearson with vectorized centered moments and explicit reasons."""
     left = np.asarray(left_values, dtype="float64")
     right = np.asarray(right_values, dtype="float64")
     if left.ndim != 1 or right.shape != left.shape:
@@ -373,29 +277,9 @@ def _pearson_correlation_result(
         return None, "insufficient_observations"
     if not np.isfinite(left).all() or not np.isfinite(right).all():
         return None, "nonfinite_result"
-    left = _scaled_centered_values(left)
-    right = _scaled_centered_values(right)
-    if left is None or right is None:
+    if np.all(left == left[0]) or np.all(right == right[0]):
         return None, "zero_variance"
-    covariance = float(np.dot(left, right))
-    # Near cancellation, the sign and tiny nonzero result can matter. Retain
-    # exact streaming moments there, rather than rounding the correlation to 0.
-    bound = (
-        8 * len(left) * np.finfo(float).eps * float(np.dot(np.abs(left), np.abs(right)))
-    )
-    if abs(covariance) <= bound:
-        moments = _CorrelationMoments()
-        for x, y in zip(left_values, right_values, strict=True):
-            moments.update(float(x), float(y))
-        return moments.result()
-    value, reason = _pearson_correlation_from_moments(
-        count=len(left),
-        left_m2=float(np.dot(left, left)),
-        right_m2=float(np.dot(right, right)),
-        covariance=covariance,
-    )
-    return (
-        (float(np.clip(value, -1.0, 1.0)), reason)
-        if value is not None
-        else (value, reason)
-    )
+    value = float(_pearson_correlations(left, right))
+    if not np.isfinite(value):
+        return None, "nonfinite_result"
+    return value, None

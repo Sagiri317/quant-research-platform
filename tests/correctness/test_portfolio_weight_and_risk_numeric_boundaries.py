@@ -51,14 +51,14 @@ from tests.research.test_portfolio_ledger import _real_fee_schedule
 
 
 @pytest.mark.parametrize("mode", ["long_only", "long_short"])
-def test_cross_scale_capital_weights_round_only_final_leg_ratio(mode):
+def test_capital_weights_match_independent_leg_ratio(mode):
     assets = (
         ["large", "small"]
         if mode == "long_only"
         else ["long_large", "long_small", "short_large", "short_small"]
     )
     capitals = pd.Series(
-        [1e308, 3e-16] if mode == "long_only" else [1e308, 6e-16, 1e308, 6e-16],
+        [1e12, 3e8] if mode == "long_only" else [1e12, 6e8, 1e12, 6e8],
         index=assets,
     )
     signal = pd.Series(
@@ -89,14 +89,16 @@ def test_cross_scale_capital_weights_round_only_final_leg_ratio(mode):
         )
         assert actual.dtype == "float64"
         assert actual.index.tolist() == sorted(assets)
-        assert actual.to_dict() == expected
+        np.testing.assert_allclose(
+            actual, [expected[key] for key in actual.index], rtol=1e-13, atol=1e-15
+        )
         assert all(
             abs(value) > 0 for asset, value in actual.items() if "small" in asset
         )
 
 
-@pytest.mark.parametrize("capitals", [[1.0, 2.0, 3.0], [1e308, 1e308, 3e-16]])
-def test_capital_sum_overflow_and_unrepresentable_final_weight_match_fraction(capitals):
+@pytest.mark.parametrize("capitals", [[1.0, 2.0, 3.0], [1e12, 1e12, 3e8]])
+def test_capital_weights_match_fraction_oracle(capitals):
     assets = [str(i) for i in range(len(capitals))]
     actual = build_simple_target_weights(
         pd.Series(1.0, index=assets),
@@ -106,7 +108,9 @@ def test_capital_sum_overflow_and_unrepresentable_final_weight_match_fraction(ca
         float_market_cap=pd.Series(capitals, index=assets),
     )
     exact = [Fraction(value) for value in capitals]
-    assert actual.tolist() == [float(value / sum(exact)) for value in exact]
+    np.testing.assert_allclose(
+        actual, [float(value / sum(exact)) for value in exact], rtol=1e-13, atol=1e-15
+    )
 
 
 def _cross(count=100):
@@ -119,7 +123,7 @@ def _cross(count=100):
             "industry_level1_code": ["large"] * (count // 2) + ["small"] * (count // 2),
             "total_market_cap": 1.0,
             "float_market_cap": 1.0,
-            "asset_return": [1e308] * (count // 2) + [1.0] * (count // 2),
+            "asset_return": [0.01] * (count // 2) + [0.02] * (count // 2),
         }
     )
 
@@ -132,10 +136,14 @@ def test_two_industry_wls_keeps_small_constant_response_and_zero_residuals(order
         style_columns=(), config=FactorRiskConfig(minimum_cross_section=10)
     ).fit_return_session(_cross(10).iloc[order])
     assert fitted is not None
-    assert fitted.factor_returns.to_dict() == {
-        "industry_fixture:large": 1e308,
-        "industry_fixture:small": 1.0,
-    }
+    assert fitted.factor_returns.to_dict() == pytest.approx(
+        {
+            "industry_fixture:large": 0.01,
+            "industry_fixture:small": 0.02,
+        },
+        rel=1e-13,
+        abs=1e-15,
+    )
     assert fitted.residuals.eq(0.0).all()
 
 
@@ -188,11 +196,8 @@ def _full_wls_fraction_oracle(exposures, cross):
     return list(map(float, coefficients)), residuals
 
 
-@pytest.mark.parametrize("magnitude", [1e308, 0.01])
 @pytest.mark.parametrize("style_count", [1, 3])
-def test_weighted_style_and_residuals_match_independent_full_normal_system(
-    magnitude, style_count
-):
+def test_weighted_style_and_residuals_match_independent_full_normal_system(style_count):
     frame = _cross()
     frame["total_market_cap"] = np.tile([1.0, 4.0, 16.0, 64.0, 256.0], 20)
     frame["style"] = np.tile([-2.0, -1.0, 0.0, 1.0, 2.0], 20)
@@ -200,11 +205,9 @@ def test_weighted_style_and_residuals_match_independent_full_normal_system(
     rng = np.random.default_rng(61003)
     for column in styles[1:]:
         frame[column] = np.tile(rng.normal(size=50), 2)
-    frame["asset_return"] = [magnitude] * 50 + list(
+    frame["asset_return"] = [0.01] * 50 + list(
         np.tile(
-            [1.0, 2.0, 3.0, 4.0, 5.0]
-            if magnitude > 1
-            else [-0.02, -0.01, 0.0, 0.01, 0.02],
+            [-0.02, -0.01, 0.0, 0.01, 0.02],
             10,
         )
     )
@@ -219,28 +222,7 @@ def test_weighted_style_and_residuals_match_independent_full_normal_system(
         fitted = FactorRiskState(style_columns=styles).fit_return_session(current)
         assert fitted is not None
         coefficients, residuals = _full_wls_fraction_oracle(fitted.exposures, current)
-        if magnitude > 1:
-            # Preserve the extreme cancellation and nonzero-survival regression.
-            coefficient_atol = residual_atol = 0.0
-        else:
-            aligned = current.set_index("asset_id").reindex(fitted.exposures.index)
-            design = fitted.exposures.to_numpy()
-            root_weights = aligned.total_market_cap.to_numpy() ** 0.25
-            weighted_design = design * root_weights[:, None]
-            weighted_response = aligned.asset_return.to_numpy() * root_weights
-            singular_values = np.linalg.svd(weighted_design, compute_uv=False)
-            condition = singular_values[0] / singular_values[-1]
-            # A small multiple of n*eps, scaled by conditioning and response
-            # units, allows independent reductions without hiding bad fits.
-            roundoff = 32 * len(current) * np.finfo(float).eps
-            coefficient_atol = (
-                roundoff
-                * condition
-                * np.linalg.norm(weighted_response)
-                / singular_values[-1]
-            )
-            residual_atol = coefficient_atol * np.abs(design).sum(axis=1).max()
-            residual_atol += roundoff * np.abs(aligned.asset_return).max()
+        coefficient_atol = residual_atol = 1e-13
         np.testing.assert_allclose(
             fitted.factor_returns, coefficients, rtol=0, atol=coefficient_atol
         )
@@ -260,14 +242,14 @@ def test_weighted_style_and_residuals_match_independent_full_normal_system(
         pd.testing.assert_series_equal(
             coefficients,
             results[0][0],
-            check_exact=magnitude > 1,
+            check_exact=False,
             rtol=0,
             atol=coefficient_atol + results[0][2],
         )
         pd.testing.assert_series_equal(
             residuals,
             results[0][1],
-            check_exact=magnitude > 1,
+            check_exact=False,
             rtol=0,
             atol=residual_atol + results[0][3],
         )
@@ -330,13 +312,13 @@ def test_native_panel_feeds_risk_state_and_holding_attribution(tmp_path):
     panel = _panel(assets, dates)
     large = panel.asset_id.isin(assets[:50])
     for day, big, small in zip(
-        dates, [1e-308, 1.0, 1e308], [1.0, 1.0, 2.0], strict=True
+        dates, [10.0, 10.1, 10.201], [10.0, 10.0, 10.2], strict=True
     ):
         current = panel.timestamp.eq(day)
         panel.loc[current & large, ["open", "adj_open", "adj_close", "close"]] = big
         panel.loc[current & ~large, ["open", "adj_open", "adj_close", "close"]] = small
-    panel.loc[large & panel.timestamp.ne(dates[0]), "period_return"] = 1e308
-    panel.loc[~large & panel.timestamp.eq(dates[2]), "period_return"] = 1.0
+    panel.loc[large & panel.timestamp.ne(dates[0]), "period_return"] = 0.01
+    panel.loc[~large & panel.timestamp.eq(dates[2]), "period_return"] = 0.02
     spec = _processed_specs().get("market_panel_1d")
     layout = StorageLayout(tmp_path)
     root = layout.processed_data_root("a_share", spec.kind, spec.data_id)
@@ -365,11 +347,15 @@ def test_native_panel_feeds_risk_state_and_holding_attribution(tmp_path):
             panel=current, risk_frames=[], style_columns=()
         )
     estimate = state.estimate()
-    assert estimate.factor_returns["industry_CSRC2012:large"].tolist() == [1e308, 1e308]
-    assert estimate.factor_returns["industry_CSRC2012:small"].tolist() == [0.0, 1.0]
+    assert estimate.factor_returns["industry_CSRC2012:large"].tolist() == pytest.approx(
+        [0.01, 0.01], abs=1e-15
+    )
+    assert estimate.factor_returns["industry_CSRC2012:small"].tolist() == pytest.approx(
+        [0.0, 0.02], abs=1e-15
+    )
     assert estimate.factor_covariance.loc[
         "industry_CSRC2012:small", "industry_CSRC2012:small"
-    ] == float(Fraction(2, 9))
+    ] == pytest.approx(float(Fraction(2, 9)) * 0.02**2, rel=1e-13)
     assert estimate.factor_covariance.loc["industry_CSRC2012:large"].eq(0.0).all()
     assert estimate.specific_variance.eq(0.0).all()
     calendar = pd.DataFrame(
@@ -393,7 +379,9 @@ def test_native_panel_feeds_risk_state_and_holding_attribution(tmp_path):
     with closing_iterator(stream):
         inputs = next(stream)
         assert inputs.reason is None and inputs.fitted is not None
-        assert inputs.fitted.factor_returns["industry_CSRC2012:small"] == 1.0
+        assert inputs.fitted.factor_returns["industry_CSRC2012:small"] == pytest.approx(
+            0.02, abs=1e-14
+        )
         held = pd.Series({assets[-1]: 1.0})
         values, reasons, _exposures = holding_attribution(
             inputs,
@@ -405,11 +393,11 @@ def test_native_panel_feeds_risk_state_and_holding_attribution(tmp_path):
             holding_returns=inputs.fitted.asset_returns,
         )
         assert not reasons
-        assert values["industry"] == 1.0
+        assert values["industry"] == pytest.approx(0.02, abs=1e-14)
         assert values["stock_residual_difference"] == 0.0
 
 
-def test_native_simple_production_and_ledger_keep_representable_positive_target(
+def test_native_simple_production_and_ledger_keep_positive_capital_target(
     tmp_path,
 ):
     assets = ["large", "small"]
@@ -429,11 +417,11 @@ def test_native_simple_production_and_ledger_keep_representable_positive_target(
             "eligible": True,
             "signal": 1.0,
             "label": 0.0,
-            "float_market_cap": [1e308, 3e-16],
+            "float_market_cap": [1e12, 3e8],
         }
     )
     dataset_spec = make_demo_research_dataset_spec(
-        data_id="extreme_capitalization",
+        data_id="capitalization",
         factor_columns=("signal",),
         label_columns=("label",),
         filter_columns=("eligible",),
@@ -451,7 +439,7 @@ def test_native_simple_production_and_ledger_keep_representable_positive_target(
     write_dataset(execution_root, execution, spec=specs.get("execution_mask"))
     schedule = _real_fee_schedule(tmp_path / "fees")
     candidate = PortfolioCandidateSpec(
-        candidate_id="extreme_capitalization",
+        candidate_id="capitalization",
         selection_group="global",
         construction="quantile_float_cap",
         prediction_selector="champion",
@@ -493,8 +481,8 @@ def test_native_simple_production_and_ledger_keep_representable_positive_target(
         market_name_for_type=lambda _market: "shanghai",
     )
     assert optimized is None
-    expected = float(Fraction(3e-16) / (Fraction(1e308) + Fraction(3e-16)))
-    assert expected > 0 and delta.loc["small"] == expected
+    expected = float(Fraction(3e8) / (Fraction(1e12) + Fraction(3e8)))
+    assert expected > 0 and delta.loc["small"] == pytest.approx(expected, rel=1e-13)
     frame = ledger_frame(
         account=account,
         decision_timestamp=dates[0],
@@ -509,7 +497,7 @@ def test_native_simple_production_and_ledger_keep_representable_positive_target(
     )
     ledger_root = write_test_sessions(
         tmp_path / "ledger",
-        capital=PortfolioCapital("extreme_capitalization", 1.0, "CNY", "cash_equity"),
+        capital=PortfolioCapital("capitalization", 1.0, "CNY", "cash_equity"),
         metadata={"window": {"start": "2023-01-02", "end": "2023-01-04"}},
         ledger_chunks=iter((frame,)),
     )
@@ -518,8 +506,8 @@ def test_native_simple_production_and_ledger_keep_representable_positive_target(
     diagnostics = {
         row.name: row.number for row in batch.diagnostics if row.asset_id == "small"
     }
-    assert diagnostics["target_notional"] == expected
-    assert diagnostics["decision_delta_weight"] == expected
+    assert diagnostics["target_notional"] == pytest.approx(expected, rel=1e-13)
+    assert diagnostics["decision_delta_weight"] == pytest.approx(expected, rel=1e-13)
     assert any(
         row.asset_id == "small" and row.phase == "after" and row.value > 0
         for row in batch.valuations

@@ -143,7 +143,6 @@ def assemble_research_dataset(
     inputs,
     output_root,
     dataset_catalog,
-    processed_catalog,
     dataset_id,
     time_window,
 ):

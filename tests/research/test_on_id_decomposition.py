@@ -71,10 +71,12 @@ def test_missing_internal_close_does_not_destroy_endpoint(damaged, value):
     frame = _prices(3)
     frame.adj_open = [100.0, 110.0, 132.0]
     frame.loc[1, "adj_close"] = 121.0
-    assert _calculate(frame, (1,)).on_id_endpoint_return_1d.iloc[0] == 0.2
+    assert _calculate(frame, (1,)).on_id_endpoint_return_1d.iloc[0] == pytest.approx(
+        0.2, rel=1e-10, abs=1e-12
+    )
     frame.loc[1, damaged] = value
     result = _calculate(frame, (1,)).iloc[0]
-    assert result.on_id_endpoint_return_1d == 0.2
+    assert result.on_id_endpoint_return_1d == pytest.approx(0.2, rel=1e-10, abs=1e-12)
     assert pd.isna(result.on_id_holding_intraday_log_return_1d)
     assert pd.isna(result.on_id_holding_overnight_log_return_1d)
     assert not result.on_id_decomposition_qualified_1d

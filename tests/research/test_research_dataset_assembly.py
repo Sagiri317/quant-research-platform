@@ -59,7 +59,6 @@ def test_research_dataset_assembles_from_processed_inputs(tmp_path: Path) -> Non
             dataset_catalog.get("demo").market_id, "demo"
         ),
         dataset_catalog=dataset_catalog,
-        processed_catalog=processed_catalog,
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-03"),
     )
@@ -124,7 +123,6 @@ def test_non_a_share_named_scenario_keeps_input_semantics_and_requires_real_colu
             ResearchDatasetCatalog((spec,)).get(scenario).market_id, scenario
         ),
         dataset_catalog=ResearchDatasetCatalog((spec,)),
-        processed_catalog=processed,
         dataset_id=scenario,
         time_window=TimeWindow("2024-01-02", "2024-01-03"),
     )
@@ -241,7 +239,6 @@ def test_research_dataset_assembles_intraday_timestamp_window(tmp_path: Path) ->
             dataset_catalog.get("minute_research").market_id, "minute_research"
         ),
         dataset_catalog=dataset_catalog,
-        processed_catalog=processed_catalog,
         dataset_id="minute_research",
         time_window=TimeWindow("2026-07-06T00:01:00", "2026-07-06T00:02:00"),
     )
@@ -317,7 +314,6 @@ def test_assembly_keeps_nanosecond_windows_through_persisted_inputs(
             dataset.get("nanosecond_research").market_id, "nanosecond_research"
         ),
         dataset_catalog=dataset,
-        processed_catalog=ProcessedDataCatalog((source,)),
         dataset_id="nanosecond_research",
         time_window=window,
     )
@@ -390,7 +386,6 @@ def test_research_dataset_session_complete_chunks_preserve_output(
             dataset_catalog.get("demo").market_id, "demo"
         ),
         dataset_catalog=dataset_catalog,
-        processed_catalog=processed_catalog,
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
     )
@@ -418,7 +413,6 @@ def test_research_dataset_session_complete_chunks_preserve_output(
             dataset_catalog.get("demo").market_id, "demo"
         ),
         dataset_catalog=dataset_catalog,
-        processed_catalog=processed_catalog,
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
     )
@@ -500,7 +494,6 @@ def test_sparse_research_dataset_left_joins_missing_non_base_input_key(
             dataset_catalog.get("demo").market_id, "demo"
         ),
         dataset_catalog=dataset_catalog,
-        processed_catalog=processed_catalog,
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-03"),
     )
@@ -562,7 +555,6 @@ def test_research_dataset_role_validation_rejects_wrong_factor_source(
                 dataset_catalog.get("bad_demo").market_id, "bad_demo"
             ),
             dataset_catalog=dataset_catalog,
-            processed_catalog=processed_catalog,
             dataset_id="bad_demo",
             time_window=TimeWindow("2014-01-02", "2014-01-03"),
         )
@@ -648,7 +640,6 @@ def test_full_request_key_domain_is_independent_of_base_file_boundaries(
                 spec.data_id,
             ),
             dataset_catalog=ResearchDatasetCatalog((spec,)),
-            processed_catalog=processed,
             dataset_id=spec.data_id,
             time_window=TimeWindow("2023-12-31", "2024-01-04"),
         )
@@ -729,10 +720,12 @@ def test_model_target_uses_last_participating_label_maturity_and_keeps_raw_clock
         factor_columns=("momentum_20d",),
         feature_columns=(),
         feature_transforms=(),
-        context_columns=("model_target_available_at",),
+        context_columns=(
+            "model_target_available_at",
+            "forward_return_20d_available_at",
+        ),
         label_columns=(
             "forward_return_20d",
-            "forward_return_20d_available_at",
             "model_target",
         ),
         column_roles={key: base.column_roles[key] for key in columns},
@@ -845,7 +838,6 @@ def test_named_feature_recipe_assembles_complete_sessions_and_persists_identity(
             datasets.get("recipe_case").market_id, "recipe_case"
         ),
         dataset_catalog=datasets,
-        processed_catalog=ProcessedDataCatalog((source,)),
         dataset_id="recipe_case",
         time_window=window,
     )
@@ -943,7 +935,6 @@ def test_join_closes_every_open_input_on_coverage_failure(tmp_path, monkeypatch)
             },
             output_root=tmp_path / "failed-output",
             dataset_catalog=dataset,
-            processed_catalog=processed,
             dataset_id="demo",
             time_window=TimeWindow("2014-01-02", "2014-01-08"),
         )

@@ -129,7 +129,7 @@ def _portfolio_session_evidence(
         raise ValueError("portfolio_input_business_columns_excluded")
     asset_sessions = {}
     if include_asset_sessions:
-        _, _, _, asset_sessions, _, _ = _processed_axis(
+        _, _, _, asset_sessions, _ = _processed_axis(
             panel, panel_source=False, include_asset_sessions=True
         )
     stock_source = open_dataset_session(**_dataset_input_options(stock_master_root))
@@ -141,7 +141,7 @@ def _portfolio_session_evidence(
     stocks = panels._canonical_stock_master(
         materialize_dataset_session(stock_source.projected_view(stock_columns))
     )
-    _, _, membership, _, _, _ = _processed_axis(
+    _, _, membership, _, _ = _processed_axis(
         bars, panel_source=True, calendar=calendar, stock_master=stocks
     )
     return bars, panel, membership, asset_sessions, stocks

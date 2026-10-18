@@ -361,3 +361,34 @@ def test_size_default_does_not_change_raw_factor_or_market_model_dependencies():
     for column in MARKET_MODEL_FACTORS:
         assert "float_market_cap" in catalog.get(column).input_columns
         assert "total_market_cap" not in catalog.get(column).input_columns
+
+
+@pytest.mark.parametrize("variation", [0.0, 1e-8])
+def test_neutralization_keeps_true_zero_and_resolvable_small_signal(variation):
+    axis = np.arange(120, dtype=float)
+    industry = pd.Series(np.arange(120) % 3)
+    sizes = 15 + axis / 16
+    target = 3 + industry.to_numpy() * 4 + 2 * sizes + variation * np.sin(axis)
+    actual = transforms._industry_size_residuals(target, industry, sizes, rescale=False)
+    if not variation:
+        np.testing.assert_array_equal(actual, np.zeros(120))
+    else:
+        design = np.column_stack(
+            (pd.get_dummies(industry).to_numpy(dtype=float), sizes)
+        )
+        expected = target - design @ np.linalg.lstsq(design, target, rcond=None)[0]
+        np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=2e-13)
+        assert np.max(np.abs(actual)) > 1e-9
+        standardized = transforms._industry_size_residuals(
+            target, industry, sizes, rescale=True
+        )
+        assert np.max(np.abs(standardized)) == pytest.approx(1.0)
+
+
+def test_size_collinear_with_industry_keeps_projection_undefined():
+    industry = pd.Series(["a", "b"] * 60)
+    sizes = np.tile([15.0, 20.0], 60)
+    actual = transforms._industry_size_residuals(
+        np.sin(np.arange(120)), industry, sizes, rescale=True
+    )
+    assert np.isnan(actual).all()

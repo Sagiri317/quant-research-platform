@@ -127,22 +127,22 @@ def _native_performance(tmp_path, *, prices, positions, capital, hours=None):
     return metrics, daily
 
 
-def test_complete_daily_return_mean_does_not_overflow_intermediate_sum(tmp_path):
+def test_complete_daily_return_mean_uses_all_defined_days(tmp_path):
     metrics, daily = _native_performance(
         tmp_path,
-        prices=[1.0, 1e308, 1.0, 1e308, 1.0],
+        prices=[100.0, 110.0, 100.0, 110.0, 100.0],
         positions=[1.0] * 5,
-        capital=1.0,
+        capital=100.0,
     )
     assert daily.status.eq("DEFINED").all()
     assert daily.reason.eq("").all()
-    assert daily.net_return.to_numpy() == pytest.approx([1e308, -1.0, 1e308, -1.0])
+    assert daily.net_return.to_numpy() == pytest.approx([0.1, -1 / 11, 0.1, -1 / 11])
     for name in ("planned_complete_utc_days", "defined_complete_utc_days"):
         assert metrics.loc[name, "value"] == 4
     result = metrics.loc["oos_mean_daily_return"]
     assert result.observation_count == 4
     assert result.status == "DEFINED" and result.reason == ""
-    assert result.value == pytest.approx(5e307, rel=2e-15, abs=0)
+    assert result.value == pytest.approx((0.1 - 1 / 11) / 2, rel=1e-13, abs=0)
 
 
 @pytest.mark.parametrize("scale", [1.0, 1e150, 1e300])

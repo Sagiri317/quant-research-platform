@@ -336,6 +336,10 @@ def test_group_comparison_integral_counts_round_trip(tmp_path, tables, metadata,
         ("factor_diagnostics", "fdr_adjusted_p_value", -0.1),
         ("factor_diagnostics", "fdr_alpha", 0.0),
         ("prediction_diagnostics", "standard_error", -1.0),
+        ("prediction_diagnostics", "standard_error", 0.0),
+        ("model_comparison", "standard_error", 0.0),
+        ("factor_diagnostics", "standard_error", 0.0),
+        ("fama_macbeth", "standard_error", 0.0),
         ("prediction_diagnostics", "ci_lower", 1.0),
         ("prediction_diagnostics", "bootstrap_lower", 1.0),
         ("fama_macbeth_periods", "white_p_value", 1.1),
@@ -635,6 +639,7 @@ def test_undefined_model_inference_rejects_inferential_values_and_false_means(
         "mean_difference",
         "observation_count",
         "sample_role",
+        "standard_error",
     ),
 )
 @pytest.mark.parametrize("fdr_method", ("BH", "BY", "NOT_APPLICABLE"))
@@ -649,7 +654,9 @@ def test_defined_group_comparison_requires_descriptive_facts(
     if corruption == "sample_role":
         row[corruption] = "validation"
     elif corruption != "none":
-        row[corruption] = 0 if corruption == "observation_count" else float("nan")
+        row[corruption] = (
+            0 if corruption in {"observation_count", "standard_error"} else float("nan")
+        )
     tables["model_group_comparison"] = pd.DataFrame([row])
     if corruption != "none":
         _assert_rejected_at_write_and_read(
@@ -976,8 +983,9 @@ def test_paired_rankic_and_champion_diagnostics_reach_native_artifacts(
         assert rows[0]["status"] == ("UNDEFINED" if group == "global" else "DEFINED")
 
 
+@pytest.mark.parametrize("varying_ic", (False, True))
 def test_native_model_persistence_preserves_std_reason_in_statistics(
-    tmp_path, tables, metadata
+    tmp_path, tables, metadata, varying_ic
 ):
     import numpy as np
 
@@ -1008,7 +1016,7 @@ def test_native_model_persistence_preserves_std_reason_in_statistics(
         frame.groupby("timestamp", sort=False).ngroup().mod(2).eq(1)
         & frame.asset_id.eq("asset_2"),
         "label",
-    ] = np.nextafter(0.0, 1.0)
+    ] = 0.1 if varying_ic else 0.0
     spec = ModelSpec(
         model_id="rank",
         model_algorithm="equal_weight_rank_ensemble",
@@ -1070,11 +1078,28 @@ def test_native_model_persistence_preserves_std_reason_in_statistics(
         "model_trials.parquet"
     ) as persisted:
         rows = persisted.set_index("metric_id")
-    assert rows.loc["validation_std_ic", "status"] == "UNDEFINED"
-    assert rows.loc["validation_std_ic", "reason"] == "nonfinite_result"
-    assert rows.loc["validation_icir", "status"] == "DEFINED"
-    assert rows.loc["validation_icir", "value"] == 1.0
-    assert rows.loc["validation_icir", "reason"] == ""
+    daily_ic = np.array(
+        [
+            np.corrcoef(group.x, group.label)[0, 1]
+            for _, group in frame.loc[frame.timestamp.isin(dates[1:])].groupby(
+                "timestamp"
+            )
+        ]
+    )
+    expected_std = float(np.std(daily_ic))
+    assert rows.loc["validation_std_ic", "status"] == "DEFINED"
+    assert rows.loc["validation_std_ic", "value"] == pytest.approx(expected_std)
+    assert rows.loc["validation_std_ic", "reason"] == ""
+    if varying_ic:
+        assert rows.loc["validation_icir", "status"] == "DEFINED"
+        assert rows.loc["validation_icir", "value"] == pytest.approx(
+            daily_ic.mean() / expected_std
+        )
+        assert rows.loc["validation_icir", "reason"] == ""
+    else:
+        assert rows.loc["validation_icir", "status"] == "UNDEFINED"
+        assert pd.isna(rows.loc["validation_icir", "value"])
+        assert rows.loc["validation_icir", "reason"] == "zero_variance"
 
 
 @pytest.mark.parametrize(

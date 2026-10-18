@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from decimal import Decimal, localcontext
-from fractions import Fraction
-
 import numpy as np
 import pandas as pd
 
@@ -169,31 +166,12 @@ def _winsorize(
 
 
 def _quantile(values: pd.Series, *quantiles: float) -> tuple[float, ...]:
-    """Interpolate shared finite order statistics before rounding to binary64."""
-    ordered = values.dropna().sort_values().to_numpy()
-    if not len(ordered):
-        return (np.nan,) * len(quantiles)
-    result = []
-    for quantile in quantiles:
-        position = (len(ordered) - 1) * quantile
-        lower = int(position)
-        weight = Fraction(position - lower)
-        result.append(
-            float(
-                (1 - weight) * Fraction(float(ordered[lower]))
-                + weight * Fraction(float(ordered[min(lower + 1, len(ordered) - 1)]))
-            )
-        )
-    return tuple(result)
-
-
-def _integer_coordinates(values):
-    """Represent finite binary64 values on one exact dyadic integer scale."""
-    ratios = [float(value).as_integer_ratio() for value in values]
-    scale = max((denominator for _, denominator in ratios), default=1)
-    return [
-        numerator * (scale // denominator) for numerator, denominator in ratios
-    ], scale
+    observed = values.dropna().to_numpy(dtype="float64")
+    return (
+        tuple(np.quantile(observed, quantiles))
+        if len(observed)
+        else (np.nan,) * len(quantiles)
+    )
 
 
 def _mad_winsorize(
@@ -209,25 +187,17 @@ def _mad_winsorize(
     for positions in (
         grouped.indices if hasattr(grouped, "indices") else grouped
     ).values():
-        exact, scale = _integer_coordinates(source.iloc[positions].dropna())
-        if not exact:
+        observed = source.iloc[positions].dropna().to_numpy(dtype="float64")
+        if not len(observed):
             continue
-        exact.sort()
-        middle = len(exact) // 2
-        twice_center = exact[middle] + exact[-middle - 1]
-        distances = sorted(abs(2 * value - twice_center) for value in exact)
-        mad = Fraction(distances[middle] + distances[-middle - 1], 4 * scale)
+        center = np.median(observed)
+        mad = np.median(np.abs(observed - center))
         if mad == 0:
             if zero_counts is not None:
                 zero_counts[column] += 1
             continue
-        center = Fraction(twice_center, 2 * scale)
-        bound = 3 * Fraction(1.4826) * mad
-        for output, threshold in ((lower, center - bound), (upper, center + bound)):
-            try:
-                output[positions] = float(threshold)
-            except OverflowError:
-                output[positions] = -np.inf if threshold < 0 else np.inf
+        bound = 3 * 1.4826 * mad
+        lower[positions], upper[positions] = center - bound, center + bound
     return values.clip(
         lower=pd.Series(lower, index=values.index),
         upper=pd.Series(upper, index=values.index),
@@ -249,95 +219,25 @@ def _neutralization_design(industries, sizes):
 
 
 def _industry_size_residuals(target, industries, sizes, *, rescale, design=None):
-    """Grouped centered OLS, retaining exact residuals for severe cancellation."""
+    """Project onto industry intercepts and one within-industry size slope."""
     target = np.asarray(target, dtype="float64")
     codes, counts, first, x = (
         _neutralization_design(industries, sizes) if design is None else design
     )
-    with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
-        y = target - target[first[codes]]
-        y -= (np.bincount(codes, weights=y) / counts)[codes]
-        residual = y
-        valid = np.isfinite(y).all() and np.max(np.abs(y)) >= np.finfo(float).tiny
-        if x is not None:
-            xx = np.dot(x, x)
-            valid = valid and np.isfinite(xx) and xx >= np.finfo(float).tiny
-            residual = y - x * (np.dot(x, y) / xx)
-        magnitude = np.max(np.abs(residual))
-        # Rescaling almost perfectly explained targets can amplify roundoff
-        # into a fabricated factor. Resolve that domain with the exact owner.
-        valid = (
-            valid
-            and np.isfinite(residual).all()
-            and (
-                magnitude
-                > 8 * counts.max() * np.finfo(float).eps * np.max(np.abs(target))
-            )
-        )
-        if valid:
-            return residual / magnitude if rescale else residual
-    return _exact_industry_size_residuals(target, industries, sizes, rescale=rescale)
-
-
-def _exact_neutralization_design(industries, sizes):
-    """Prepare exact design moments once for targets with the same valid domain."""
-    counts = industries.value_counts(sort=False)
-    x_values = (
-        (0,) * len(industries) if sizes is None else _integer_coordinates(sizes)[0]
-    )
-    sums = {group: [0, 0] for group in counts.index}
-    for group, x in zip(industries, x_values, strict=True):
-        sums[group][0] += x
-        sums[group][1] += x * x
-    xx = sum(
-        (
-            Fraction(int(counts[group]) * v[1] - v[0] ** 2, int(counts[group]))
-            for group, v in sums.items()
-        ),
-        Fraction(),
-    )
-    return counts, x_values, sums, xx
-
-
-def _exact_industry_size_residuals(target, industries, sizes, *, rescale):
-    """Project binary64 inputs exactly onto industry intercepts and one size slope."""
-    counts, x_values, x_sums, xx = _exact_neutralization_design(industries, sizes)
-    y_values, y_scale = _integer_coordinates(target)
-    sums = {group: [0, 0] for group in counts.index}
-    for group, y, x in zip(industries, y_values, x_values, strict=True):
-        sums[group][0] += y
-        sums[group][1] += x * y
-    slope = Fraction()
-    if sizes is not None:
-        xy = sum(
-            (
-                Fraction(
-                    int(counts[group]) * v[1] - v[0] * x_sums[group][0],
-                    int(counts[group]),
-                )
-                for group, v in sums.items()
-            ),
-            Fraction(),
-        )
+    y = target - target[first[codes]]
+    y -= (np.bincount(codes, weights=y) / counts)[codes]
+    residual = y
+    if x is not None:
+        xx = np.dot(x, x)
         if xx == 0:
             return np.full(len(target), np.nan)
-        slope = xy / xx
-
-    def residuals():
-        for group, y, x in zip(industries, y_values, x_values, strict=True):
-            count = int(counts[group])
-            y = y * count - sums[group][0]
-            x = x * count - x_sums[group][0]
-            yield (y - slope * x) / (count * y_scale)
-
-    if rescale:
-        exact = list(residuals())
-        scale = max(map(abs, exact))
-        return np.array(
-            [float(value / scale) for value in exact] if scale else [0.0] * len(target),
-            dtype="float64",
-        )
-    return np.fromiter(map(float, residuals()), dtype="float64", count=len(target))
+        residual = y - x * (np.dot(x, y) / xx)
+    magnitude = np.max(np.abs(residual))
+    # A numerically exact fit must not amplify projection roundoff into alpha.
+    tolerance = 8 * counts.max() * np.finfo(float).eps * np.max(np.abs(y))
+    if magnitude <= tolerance:
+        return np.zeros(len(target))
+    return residual / magnitude if rescale else residual
 
 
 def _neutralize_cross_section(
@@ -439,25 +339,15 @@ def _center_scale(values, *, center, scale):
     output = pd.Series(np.nan, index=values.index, dtype="float64")
     if not len(observed) or (scale and len(observed) < 2):
         return output
-    integers, unit = _integer_coordinates(observed)
-    count = len(integers)
-    mean = Fraction(sum(integers), count)
-    targets = [
-        Fraction(value) - mean if center else Fraction(value) for value in integers
-    ]
-    if not scale:
-        output.loc[observed.index] = [float(value / unit) for value in targets]
-        return output
-    variance = sum((Fraction(value) - mean) ** 2 for value in integers) / count
-    if not variance:
-        return output
-    with localcontext() as context:
-        context.prec = 80
-        std = (Decimal(variance.numerator) / Decimal(variance.denominator)).sqrt()
-        output.loc[observed.index] = [
-            float(Decimal(value.numerator) / Decimal(value.denominator) / std)
-            for value in targets
-        ]
+    shifted = observed - observed.iloc[0]
+    centered = shifted - shifted.mean()
+    targets = centered if center else observed
+    if scale:
+        std = centered.std(ddof=0)
+        if std == 0:
+            return output
+        targets = targets / std
+    output.loc[observed.index] = targets
     return output
 
 

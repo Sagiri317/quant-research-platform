@@ -1144,7 +1144,7 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
         for column in ("p_value", "fdr_adjusted_p_value", "white_p_value"):
             if column in result and (not result[column].dropna().between(0, 1).all()):
                 raise ValueError("statistics_table_probability_invalid")
-        if "standard_error" in result and result.standard_error.lt(0).any():
+        if "standard_error" in result and (defined & result.standard_error.le(0)).any():
             raise ValueError("statistics_table_standard_error_invalid")
         for lower, upper in (
             ("ci_lower", "ci_upper"),
@@ -1276,7 +1276,7 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
             or (not result.fdr_alpha.between(0, 1, inclusive="neither").all())
             or (not result.confidence.between(0, 1, inclusive="neither").all())
             or (not result.fdr_family_size.eq(len(result)).all())
-            or result.standard_error.lt(0).any()
+            or (defined & result.standard_error.le(0)).any()
             or result.ci_lower.gt(result.ci_upper).any()
             or result.bootstrap_lower.gt(result.bootstrap_upper).any()
             or (not result.p_value.dropna().between(0, 1).all())
@@ -1839,7 +1839,6 @@ def _validate_factor_stratified(frame, metadata):
     incomplete = frame.observation_count.lt(frame.input_date_count)
     if (
         (defined & incomplete).any()
-        or (defined & frame.standard_error.le(0)).any()
         or (defined & frame.fdr_adjusted_p_value.lt(frame.p_value)).any()
         or frame.loc[incomplete, "reason"].ne("incomplete_session_clock").any()
         or frame.loc[~defined & ~incomplete & sufficient, "reason"]

@@ -1481,7 +1481,7 @@ def test_writer_lifecycle_preserves_first_cleanup_or_body_failure(
     if failure_at == "close":
         monkeypatch.setattr(writer, "close", fail_close)
     else:
-        monkeypatch.setattr(recorder, "_sha256_path", fail_hash)
+        monkeypatch.setattr(recorder, "_hash_file_content", fail_hash)
     with pytest.raises(BaseException) as caught:
         with recorder._writer_lifecycle(writer, [], capture_stats=stats):
             if body_fails:
@@ -1627,7 +1627,9 @@ def test_hash_path_preserves_read_failure_and_closes_native_handle(
     data = b"synthetic-digest\x00" * 8192
     path = tmp_path / "member.bin"
     path.write_bytes(data)
-    original = recorder.open_filesystem_file
+    from quant_research_platform.storage import identity
+
+    original = identity.open_filesystem_file
     primary = OSError("synthetic_read")
     secondary = RuntimeError("synthetic_close")
     opened = []
@@ -1643,10 +1645,10 @@ def test_hash_path_preserves_read_failure_and_closes_native_handle(
         def __exit__(self, *_args):
             self.close()
 
-        def readinto(self, buffer):
+        def read(self, size):
             if failure in {"read", "both"}:
                 raise primary
-            return self.native.readinto(buffer)
+            return self.native.read(size)
 
         def close(self):
             self.close_calls += 1
@@ -1659,12 +1661,12 @@ def test_hash_path_preserves_read_failure_and_closes_native_handle(
         opened.append(handle)
         return handle
 
-    monkeypatch.setattr(recorder, "open_filesystem_file", observed_open)
+    monkeypatch.setattr(identity, "open_filesystem_file", observed_open)
     if failure == "none":
-        assert recorder._sha256_path(path) == hashlib.sha256(data).hexdigest()
+        assert recorder._hash_file_content(path) == hashlib.sha256(data).hexdigest()
     else:
         with pytest.raises(BaseException) as caught:
-            recorder._sha256_path(path)
+            recorder._hash_file_content(path)
         assert caught.value is (primary if failure in {"read", "both"} else secondary)
         if failure == "both":
             assert primary.__notes__ == ["iterator close also failed: RuntimeError"]
@@ -1677,7 +1679,9 @@ def test_hash_path_preserves_read_failure_and_closes_native_handle(
 def test_recorder_hash_read_and_close_failure_aborts_native_atomic_publish(
     tmp_path, monkeypatch
 ):
-    original = recorder.open_filesystem_file
+    from quant_research_platform.storage import identity
+
+    original = identity.open_filesystem_file
     primary = OSError("synthetic_hash_read")
     secondary = RuntimeError("synthetic_hash_close")
     handles = []
@@ -1692,7 +1696,7 @@ def test_recorder_hash_read_and_close_failure_aborts_native_atomic_publish(
         def __exit__(self, *_args):
             self.close()
 
-        def readinto(self, _buffer):
+        def read(self, _size):
             raise primary
 
         def close(self):
@@ -1713,7 +1717,7 @@ def test_recorder_hash_read_and_close_failure_aborts_native_atomic_publish(
         with recorder._writer_lifecycle(writer, [], capture_stats=stats):
             pass
 
-    monkeypatch.setattr(recorder, "open_filesystem_file", observed_open)
+    monkeypatch.setattr(identity, "open_filesystem_file", observed_open)
     with pytest.raises(OSError) as caught:
         recorder.atomic_write_directory(tmp_path / "capture", write)
     assert caught.value is primary

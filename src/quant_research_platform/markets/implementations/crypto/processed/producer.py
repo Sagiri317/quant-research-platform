@@ -304,27 +304,30 @@ def _panel_frame_producer(
     transform: Callable[[Iterable[pd.DataFrame]], Iterable[pd.DataFrame]],
     columns: tuple[str, ...],
     asset_ids: tuple[str, ...],
-) -> Iterator[object]:
+) -> Iterator[pd.DataFrame]:
+    def frames(asset) -> Iterator[pd.DataFrame]:
+        asset_session = replace(
+            session,
+            parquet_filters=(
+                *(session.parquet_filters or ()),
+                ("asset_id", "==", asset),
+            ),
+        )
+        with closing_iterator(
+            iter_dataset_chunks(asset_session, batch_rows=DEFAULT_BATCH_ROWS)
+        ) as chunks:
+            with closing_iterator(iter(transform(chunks))) as transformed:
+                for frame in transformed:
+                    try:
+                        yield frame.loc[:, list(columns)]
+                    except GeneratorExit:
+                        return
 
-    def frames() -> Iterator[pd.DataFrame]:
-        for asset in asset_ids:
-            asset_filter = ("asset_id", "==", asset)
-            asset_session = replace(
-                session,
-                parquet_filters=(*(session.parquet_filters or ()), asset_filter),
-            )
-            chunks = iter_dataset_chunks(asset_session, batch_rows=DEFAULT_BATCH_ROWS)
-            with closing_iterator(chunks):
-                with closing_iterator(iter(transform(chunks))) as transformed:
-                    for frame in transformed:
-                        _yield_value = frame.loc[:, list(columns)]
-                        try:
-                            yield _yield_value
-                        except GeneratorExit:
-                            return
-
-    with closing_iterator(frames()) as active:
-        yield from active
+    yield from _union_panel_frames(
+        (frames(asset) for asset in asset_ids),
+        columns=columns,
+        batch_rows=DEFAULT_BATCH_ROWS,
+    )
 
 
 @contextmanager
@@ -482,52 +485,55 @@ def produce_spot_perp_context(
     }
     batch_rows = DEFAULT_BATCH_ROWS
 
-    def frames():
-        for symbol in binance_ids.RESEARCH_SYMBOLS:
-            asset = canonical_crypto_asset_id(symbol)
-            asset_sessions = {
-                key: replace(
-                    session,
-                    parquet_filters=(
-                        *(session.parquet_filters or ()),
-                        ("asset_id", "==", asset),
-                    ),
-                )
-                for key, session in sessions.items()
-            }
+    def frames(symbol):
+        asset = canonical_crypto_asset_id(symbol)
+        asset_sessions = {
+            key: replace(
+                session,
+                parquet_filters=(
+                    *(session.parquet_filters or ()),
+                    ("asset_id", "==", asset),
+                ),
+            )
+            for key, session in sessions.items()
+        }
+        with closing_iterator(
+            iter_dataset_chunks(
+                asset_sessions[HFT_PANEL_DATA_ID], batch_rows=DEFAULT_BATCH_ROWS
+            )
+        ) as perpetual:
             with closing_iterator(
                 iter_dataset_chunks(
-                    asset_sessions[HFT_PANEL_DATA_ID], batch_rows=DEFAULT_BATCH_ROWS
+                    asset_sessions[HFT_SPOT_PANEL_DATA_ID],
+                    batch_rows=DEFAULT_BATCH_ROWS,
                 )
-            ) as perpetual:
+            ) as spot:
                 with closing_iterator(
-                    iter_dataset_chunks(
-                        asset_sessions[HFT_SPOT_PANEL_DATA_ID],
-                        batch_rows=DEFAULT_BATCH_ROWS,
+                    iter_spot_perp_factor_frames(
+                        perpetual,
+                        spot_frames=spot,
+                        columns=spec.required_columns,
+                        max_age_ms=max_age_ms,
+                        input_delay_ms=json.loads(spec.parameters_json).get(
+                            "input_delay_ms", 0
+                        ),
+                        batch_rows=batch_rows,
                     )
-                ) as spot:
-                    with closing_iterator(
-                        iter_spot_perp_factor_frames(
-                            perpetual,
-                            spot_frames=spot,
-                            columns=spec.required_columns,
-                            max_age_ms=max_age_ms,
-                            input_delay_ms=json.loads(spec.parameters_json).get(
-                                "input_delay_ms", 0
-                            ),
-                            batch_rows=batch_rows,
-                        )
-                    ) as aligned:
-                        for frame in aligned:
-                            frame["market_id"] = str(MARKET_ID)
-                            frame["asset_id"] = asset
-                            _yield_value = frame.loc[:, list(spec.required_columns)]
-                            try:
-                                yield _yield_value
-                            except GeneratorExit:
-                                return
+                ) as aligned:
+                    for frame in aligned:
+                        frame["market_id"] = str(MARKET_ID)
+                        frame["asset_id"] = asset
+                        _yield_value = frame.loc[:, list(spec.required_columns)]
+                        try:
+                            yield _yield_value
+                        except GeneratorExit:
+                            return
 
-    data = frames()
+    data = _union_panel_frames(
+        (frames(symbol) for symbol in binance_ids.RESEARCH_SYMBOLS),
+        columns=spec.required_columns,
+        batch_rows=batch_rows,
+    )
 
     data = _output_frames(data, time_window)
     with closing_iterator(data):

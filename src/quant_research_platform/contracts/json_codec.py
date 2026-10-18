@@ -65,26 +65,6 @@ def qrp_json_mapping_snapshot(value: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("qrp_json_recursion_limit") from exc
 
 
-def freeze_json_value(value: object) -> object:
-    """Freeze an already validated native JSON snapshot."""
-    if type(value) is dict:
-        return MappingProxyType(
-            {key: freeze_json_value(child) for key, child in value.items()}
-        )
-    if type(value) is list:
-        return tuple(freeze_json_value(child) for child in value)
-    return value
-
-
-def plain_json_value(value: object) -> object:
-    """Return fresh native containers from a validated frozen JSON value."""
-    if isinstance(value, Mapping):
-        return {key: plain_json_value(child) for key, child in value.items()}
-    if type(value) in {tuple, list}:
-        return [plain_json_value(child) for child in value]
-    return value
-
-
 def _qrp_json_snapshot_text(value: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
     payload = qrp_json_object_snapshot(value)
     return payload, _render_native_json(payload)

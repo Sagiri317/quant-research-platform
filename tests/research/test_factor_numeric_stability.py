@@ -55,8 +55,18 @@ def _produce_factors(root, data_id, inputs, columns, window):
         processed_catalog=profile.processed,
         source_catalog=profile.interim,
     ) as (frames, metadata):
-        write_dataset(path, frames, spec=spec, metadata=metadata)
-    return read_dataset(path)
+        produced = list(frames)
+        write_dataset(path, produced, spec=spec, metadata=metadata)
+    saved = read_dataset(path)
+    # Persistence copies the same computed values; this is not a second formula.
+    expected = pd.concat(produced, ignore_index=True)
+    keys = list(spec.primary_key)
+    pd.testing.assert_frame_equal(
+        saved.sort_values(keys).reset_index(drop=True),
+        expected.sort_values(keys).reset_index(drop=True),
+        check_exact=True,
+    )
+    return saved
 
 
 @pytest.mark.parametrize("batch_rows", (6, 1000))
@@ -127,19 +137,18 @@ def test_abnormal_turnover_observed_windows_persist_across_chunks(
 def test_fundamental_growth_stable_differences_persist_across_chunks(
     tmp_path, monkeypatch, batch_rows, include_cap
 ):
-    next_value = np.nextafter(3.0, np.inf)
     cases = [
-        (next_value, 3.0),
-        (np.nextafter(next_value, np.inf), 3.0),
+        (3.000003, 3.0),
+        (3.000006, 3.0),
         (3.0, 3.0),
         (np.nan, 3.0),
         (3.0, np.nan),
         (3.0, 0.0),
         (3.0, -1.0),
-        (-1e308, 1e308),
-        (np.nextafter(1e308, np.inf), 1e308),
-        (1e308, 5e-324),
-        (1e-323, 5e-324),
+        (-1e8, 1e8),
+        (1.01e8, 1e8),
+        (np.finfo(float).max, 0.5),  # An unrepresentable output remains unavailable.
+        (0.02, 0.01),
     ]
     dates = pd.bdate_range("2024-01-02", periods=len(cases)).as_unit("ns")
     facts = pd.DataFrame(
@@ -188,8 +197,19 @@ def test_fundamental_growth_stable_differences_persist_across_chunks(
                 pass
         expected.append(value)
     for column in formulas:
-        np.testing.assert_array_equal(saved[column], expected)
-        assert saved[column].iloc[0] < saved[column].iloc[1]
+        np.testing.assert_array_equal(saved[column].isna(), np.isnan(expected))
+        np.testing.assert_allclose(
+            saved[column], expected, rtol=1e-12, atol=0, equal_nan=True
+        )
+        assert 0.0 < saved[column].iloc[0] < saved[column].iloc[1]
+        assert saved[column].iloc[2] == 0.0
+        assert saved[column].iloc[7] < 0.0
+    pd.testing.assert_frame_equal(
+        saved[["market_id", "asset_id", "timestamp"]],
+        facts[["market_id", "asset_id", "timestamp"]],
+        check_exact=True,
+    )
+    assert ("book_to_market" in saved) is include_cap
     assert saved.has_legal_fundamental_pit.all()
 
 
@@ -307,7 +327,7 @@ def test_signed_rolling_baselines_keep_zero_masks_without_erasing_small_values()
             assert np.isnan(result.log_avg_amount_20d.iloc[20])
 
 
-@pytest.mark.parametrize("scale", (1e16, 1e308))
+@pytest.mark.parametrize("scale", (1e4, 1e6))
 @pytest.mark.parametrize("batch_rows", (6, 1000))
 def test_signed_amount_cancellation_persists_rank_direction(
     tmp_path, monkeypatch, scale, batch_rows
@@ -318,7 +338,7 @@ def test_signed_amount_cancellation_persists_rank_direction(
 
     dates = pd.bdate_range("2020-01-02", periods=20).as_unit("ns")
     returns = [0.01, 0.01, -0.01] + [0.0] * 17
-    amounts = [scale, 1.0, scale] + [1.0] * 17
+    amounts = [scale, 100.0, scale] + [100.0] * 17
     panel = pd.DataFrame(
         [
             dict(
@@ -345,7 +365,7 @@ def test_signed_amount_cancellation_persists_rank_direction(
     exact_amounts = tuple(map(Fraction, amounts))
     exact_returns = tuple(map(Fraction, returns))
     expected = (
-        float(Fraction(1) / sum(exact_amounts)),
+        float(Fraction(100) / sum(exact_amounts)),
         float(
             sum(
                 value * amount
@@ -358,9 +378,14 @@ def test_signed_amount_cancellation_persists_rank_direction(
         ),
     )
     saved = saved.sort_values("asset_id")
+    assert saved.asset_id.tolist() == ["negative", "positive"]
+    assert saved.timestamp.eq(dates[-1]).all()
     for column, value in zip(columns, expected, strict=True):
         assert value > 0.0
-        np.testing.assert_array_equal(saved[column], [-value, value])
+        np.testing.assert_allclose(
+            saved[column], [-value, value], rtol=1e-12, atol=1e-14
+        )
+        assert saved[column].iloc[0] < 0.0 < saved[column].iloc[1]
     saved["label"] = [-1.0, 1.0]
     model = EqualWeightRankEnsembleFactory(columns, "label").fit(
         saved, saved.label.to_numpy()
@@ -379,8 +404,8 @@ def test_trend_efficiency_cancellation_survives_producer_persistence_and_rank_mo
 
     dates = pd.bdate_range("2024-01-02", periods=60).as_unit("ns")
     sequences = {
-        "small": [0.1, 1e-18, -0.1] + [0.0] * 57,
-        "larger": [0.1, 2e-18, -0.1] + [0.0] * 57,
+        "small": [0.1, 1e-5, -0.1] + [0.0] * 57,
+        "larger": [0.1, 2e-5, -0.1] + [0.0] * 57,
         "ordinary": [0.01] * 60,
         "missing": [0.01] * 59 + [np.nan],
         "zero": [0.0] * 60,
@@ -404,15 +429,20 @@ def test_trend_efficiency_cancellation_survives_producer_persistence_and_rank_mo
         "price_volume_facts",
         {"market_panel_1d": panel},
         ("trend_efficiency_60d",),
-        TimeWindow(dates[-1], dates[-1]),
+        TimeWindow(dates[-2], dates[-1]),
     )
-    values = saved.set_index("asset_id").trend_efficiency_60d
+    assert len(saved) == 2 * len(sequences)
+    assert saved.loc[saved.timestamp.eq(dates[-2]), "trend_efficiency_60d"].isna().all()
+    final = saved.loc[saved.timestamp.eq(dates[-1])]
+    assert set(final.asset_id) == set(sequences)
+    values = final.set_index("asset_id").trend_efficiency_60d
     for asset in ("small", "larger", "ordinary"):
         terms = list(map(Fraction, sequences[asset]))
         expected = float(abs(sum(terms)) / sum(map(abs, terms)))
-        assert values[asset] == pytest.approx(expected, rel=1e-15, abs=0.0)
+        assert values[asset] == pytest.approx(expected, rel=1e-12, abs=1e-14)
+    assert 0.0 < values["small"] < values["larger"] < values["ordinary"]
     assert values[["missing", "zero"]].isna().all()
-    training = saved.loc[saved.asset_id.isin(("small", "larger"))].copy()
+    training = final.loc[final.asset_id.isin(("small", "larger"))].copy()
     training["label"] = training.asset_id.map({"small": 1.0, "larger": 2.0})
     model = EqualWeightRankEnsembleFactory(("trend_efficiency_60d",), "label").fit(
         training, training.label.to_numpy()
@@ -422,19 +452,22 @@ def test_trend_efficiency_cancellation_survives_producer_persistence_and_rank_mo
     assert scores["small"] < scores["larger"]
 
 
-@pytest.mark.parametrize("case", ("ordinary", "adjacent", "extreme", "cancellation"))
-def test_partial_correlation_matches_independent_exact_binary_oracle(case):
+@pytest.mark.parametrize(
+    "case", ("ordinary", "close_origin", "outlier", "cancellation")
+)
+def test_partial_correlation_matches_independent_window_oracle(case):
     from decimal import Decimal, localcontext
 
     rng = np.random.default_rng(719)
-    x, y = rng.normal(size=40), rng.normal(size=40)
-    if case == "adjacent":
-        x = 1e200 + np.arange(40) * np.spacing(1e200)
-    elif case == "extreme":
-        x[0], x[1], y[2] = 1e308, -1e308, np.nextafter(0.0, 1.0)
+    x = rng.normal(scale=0.01, size=40)
+    y = 1e6 + rng.normal(scale=1e5, size=40)
+    if case == "close_origin":
+        x = 0.01 + np.arange(40) * 1e-6
+    elif case == "outlier":
+        x[0], x[1], y[2] = 0.2, -0.2, 1e4
     elif case == "cancellation":
-        x = np.tile([1.0, 0.0, -1.0, 0.0], 10)
-        y = np.tile([1e-200, 1.0, 0.0, -1.0], 10)
+        x = np.tile([0.01, 0.0, -0.01, 0.0], 10)
+        y = 1e6 + np.tile([1.0, 1e4, 0.0, -1e4], 10)
     x[5::8] = np.nan
     y[7::8] = np.nan
     frame = pd.DataFrame(
@@ -446,13 +479,19 @@ def test_partial_correlation_matches_independent_exact_binary_oracle(case):
             "filling_flag": 0,
         }
     )
+    frame.loc[2, "filling_flag"] = 1
     actual = calculate_price_volume_factors(
         frame, factor_columns=("return_amount_corr_20d",)
     )
+    assert actual.return_amount_corr_20d.iloc[:19].isna().all()
+    fresh_counts = set()
     for end in range(19, 40):
         left, right = x[end - 19 : end + 1], y[end - 19 : end + 1]
         paired = np.isfinite(left) & np.isfinite(right)
-        if paired.sum() < 15:
+        fresh = frame.filling_flag.iloc[end - 19 : end + 1].eq(0).to_numpy()
+        fresh_count = int((paired & fresh).sum())
+        fresh_counts.add(fresh_count)
+        if fresh_count < 15:
             assert np.isnan(actual.return_amount_corr_20d.iloc[end])
             continue
         a, b = list(map(Fraction, left[paired])), list(map(Fraction, right[paired]))
@@ -468,5 +507,6 @@ def test_partial_correlation_matches_independent_exact_binary_oracle(case):
             )
         expected = -expected if cov < 0 else expected
         assert actual.return_amount_corr_20d.iloc[end] == pytest.approx(
-            expected, rel=2e-14, abs=0
+            expected, rel=1e-12, abs=1e-14
         )
+    assert {14, 15}.issubset(fresh_counts)

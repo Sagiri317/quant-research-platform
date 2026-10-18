@@ -53,7 +53,7 @@ def test_native_prediction_preserves_raw_units_rank_and_family(tmp_path: Path) -
     assert output == tmp_path / "future" / "prediction"
 
 
-@pytest.mark.parametrize("tree_values", [(1.0, 2.0, 3.0), (1e16, -1e16, 1.0)])
+@pytest.mark.parametrize("tree_values", [(1.0, 2.0, 3.0), (0.1, -0.1, 0.001)])
 def test_forest_parallel_prediction_respects_error_bound_and_fitted_state(
     monkeypatch, tree_values
 ):
@@ -133,15 +133,27 @@ def test_a_share_model_ladder_fits_and_predicts_each_retained_algorithm() -> Non
     )
     for spec in specs:
         for column in spec.input_columns:
-            frame[column] = [
-                float((date_index + asset_index) % 7 + 1)
-                for date_index in range(len(dates))
-                for asset_index in range(3)
-            ]
+            if column.startswith("feature_missing_"):
+                frame[column] = 0
+            elif column.startswith("feature_observed_"):
+                frame[column] = 1
+            else:
+                frame[column] = [
+                    float((date_index + asset_index) % 7 + 1)
+                    for date_index in range(len(dates))
+                    for asset_index in range(3)
+                ]
+                if column.startswith("feature_"):
+                    suffix = column.removeprefix("feature_")
+                    frame[f"feature_missing_{suffix}"] = 0
+                    frame[f"feature_observed_{suffix}"] = 1
     for spec in specs:
         result = model_fitting._fit_model_result(
             model_fitting._collect_training_frame(
-                (frame,), spec, fitting_cutoff="2020-02-12"
+                (frame,),
+                spec,
+                fitting_cutoff="2020-02-12",
+                declared_columns=tuple(frame.columns),
             ),
             spec,
             estimator=build_estimator_from_model_spec(spec),

@@ -113,6 +113,31 @@ def test_partial_episode_keeps_other_complete_episode_drawdown():
     figure.canvas.draw()
 
 
+def test_recovered_market_gap_keeps_complete_sibling_drawdown():
+    recovered = {
+        **curve((1000, 980, 1005)),
+        "episode_id": "recovered",
+        "status": "PARTIAL",
+        "account_path_status": "COMPLETE",
+        "market_observation_status": "PARTIAL",
+        "market_observation_reason": "crypto_execution_book_coverage_incomplete",
+        "first_market_gap_ns": pd.Timestamp("2026-01-01T00:00:00.5").value,
+    }
+    data = {
+        **curve((1000, 1099)),
+        "status": "PARTIAL",
+        "execution_mode": "independent_segments",
+        "episodes": [{**curve((1000, 1099)), "episode_id": "complete"}, recovered],
+    }
+    figure, axes = plots.plot_portfolio_curve(data, sample_role="test", timezone="UTC")
+    assert len(axes[1].lines) == 1 and not axes[3].lines
+    np.testing.assert_array_equal(axes[2].lines[0].get_ydata(), [1000, 980, 1005])
+    assert axes[2].lines[0].get_linestyle() == "None"
+    assert "market_observation" in axes[2].texts[0].get_text()
+    assert "known_prefix" not in axes[2].texts[0].get_text()
+    figure.canvas.draw()
+
+
 def test_blocked_curve_and_metric_availability():
     _, axes = plots.plot_portfolio_curve(
         dict(candidate_id="blocked", status="BLOCKED", reason="missing_source"),
@@ -281,6 +306,28 @@ def test_missing_chinese_font_fails_explicitly(monkeypatch):
     monkeypatch.setattr(font_manager, "findfont", unavailable)
     with pytest.raises(ValueError, match="plot_chinese_font_unavailable"):
         plots.plot_returns([], **TIMED)
+
+
+@pytest.mark.parametrize("error_type", [RuntimeError, KeyboardInterrupt, SystemExit])
+def test_failed_plot_closes_only_its_new_figures(monkeypatch, error_type):
+    from matplotlib.axes import Axes
+
+    existing = plt.figure()
+    before = set(plt.get_fignums())
+    font_size = matplotlib.rcParams["font.size"]
+    error = error_type("render_cancelled")
+
+    def fail_plot(*args, **kwargs):
+        assert set(plt.get_fignums()) - before
+        raise error
+
+    monkeypatch.setattr(Axes, "plot", fail_plot)
+    with pytest.raises(error_type) as raised:
+        plots.plot_portfolio_curve(curve(), sample_role="test", timezone="UTC")
+    assert raised.value is error
+    assert set(plt.get_fignums()) == before
+    assert plt.fignum_exists(existing.number)
+    assert matplotlib.rcParams["font.size"] == font_size
 
 
 def test_long_source_footer_present_and_inside_every_figure():

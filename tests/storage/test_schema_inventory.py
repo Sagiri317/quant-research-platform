@@ -296,9 +296,7 @@ def test_schema_inventory_keeps_all_explicit_dataset_paths(
     reason="Windows junction capability required",
 )
 @pytest.mark.parametrize("name", ("nested", ".a-0123456789ab"))
-def test_schema_inventory_does_not_descend_nested_junction(
-    tmp_path: Path, name: str
-) -> None:
+def test_schema_inventory_rejects_nested_junction(tmp_path: Path, name: str) -> None:
     layer_root = tmp_path / "data" / "processed"
     filesystem_mkdir(layer_root, parents=True)
     external = tmp_path / "external"
@@ -312,7 +310,8 @@ def test_schema_inventory_does_not_descend_nested_junction(
     if created.returncode != 0:
         pytest.skip("junction_not_available")
 
-    assert tuple(schema_inventory._iter_dataset_artifact_roots(tmp_path)) == ()
+    with pytest.raises(ValueError, match="schema_inventory_dataset_invalid"):
+        tuple(schema_inventory._iter_dataset_artifact_roots(tmp_path))
 
 
 @pytest.mark.skipif(

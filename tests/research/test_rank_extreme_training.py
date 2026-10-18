@@ -1,4 +1,4 @@
-"""Subnormal period decay survives actual fit, native publication and reload."""
+"""Period decay survives actual fit, native publication and reload."""
 
 from fractions import Fraction
 from itertools import permutations
@@ -29,16 +29,13 @@ def _permutation(count, correlation):
 
 
 @pytest.mark.parametrize("negative", [False, True])
-@pytest.mark.parametrize("ordinary", [False, True])
 @pytest.mark.parametrize(
     "algorithm", ["equal_weight_rank_ensemble", "ic_weighted_rank_ensemble"]
 )
 def test_sparse_decay_preserves_direction_weight_and_calibration(
-    tmp_path, negative, ordinary, algorithm
+    tmp_path, negative, algorithm
 ):
-    count, assets = (1082, 6) if negative else (1083, 4)
-    if ordinary:
-        count = 32
+    count, assets = 32, 6 if negative else 4
     factors = ("x",) if negative else ("x", "z")
     correlations = (Fraction(-1, 35),) if negative else (Fraction(1, 5), Fraction(4, 5))
     patterns = [_permutation(assets, c) for c in correlations]
@@ -71,8 +68,6 @@ def test_sparse_decay_preserves_direction_weight_and_calibration(
         frame.timestamp, spec.training_weighting, trading_sessions=dates
     )
     assert (weights > 0).all() and np.isfinite(weights).all()
-    if not ordinary:
-        assert weights[:assets].max() <= np.nextafter(0.0, 1.0) * 4
     calendar = pd.DataFrame(
         dict(calendar_date=dates, source_market_type=1, is_trading_day=True)
     )

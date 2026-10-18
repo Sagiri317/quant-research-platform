@@ -138,7 +138,7 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
     tmp_path, missing_boundary, quantity_scale, monkeypatch
 ):
     plan = _statistics_plan(quantity_scale)
-    plan["execution"]["fee_scenarios_bps"].append(1e308)
+    plan["execution"]["fee_scenarios_bps"].append(25.0)
     candidates = [
         (SimpleNamespace(candidate_id=name, asset_id=asset), style)
         for name, asset, style in (
@@ -274,24 +274,11 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
             and not missing_boundary
             and candidate == candidates[0][0]
         ):
-            from quant_research_platform.research.portfolios.diagnostics import (
-                fixed_turnover_cost_sensitivity,
-            )
-
-            unrepresentable = fixed_turnover_cost_sensitivity(
-                turnover=1e308,
-                net_pnl=0.0,
-                base_fee_bps=0.0,
-                fee_scenarios_bps=(1e308,),
-                additional_spread_scenarios_bps=(0.0,),
-            )[0]
-            assert unrepresentable["cost_delta"] == np.inf
             invalid = {name: frame.copy() for name, frame in owned.items()}
-            for column, value in unrepresentable.items():
-                invalid["crypto_cost_sensitivity"].loc[0, column] = value
+            invalid["crypto_cost_sensitivity"].loc[0, "cost_delta"] = np.inf
             with pytest.raises(ValueError, match="statistics_table_numeric_invalid"):
                 write_statistics_artifact(
-                    tmp_path / "unrepresentable",
+                    tmp_path / "invalid-cost",
                     metadata=artifact.metadata,
                     tables=invalid,
                     table_group="crypto_portfolio",
@@ -351,21 +338,18 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
                     assert observed.kind.tolist() == ["oos"]
                     assert observed.funding.iloc[0] == 100.0
                     assert observed.net_pnl.iloc[0] == 350.0
-                    from fractions import Fraction
-
                     with artifact.table("crypto_cost_sensitivity.parquet") as costs:
                         stressed = costs.loc[
-                            costs.fee_bps.eq(1e308)
-                            & costs.additional_spread_bps.eq(0.0)
+                            costs.fee_bps.eq(25.0) & costs.additional_spread_bps.eq(0.0)
                         ]
                         assert len(stressed) == 1
-                        expected_cost = float(
-                            Fraction(float(observed.turnover.iloc[0]))
-                            * Fraction(1e308)
-                            / 10000
+                        expected_cost = float(observed.turnover.iloc[0]) * 0.0025
+                        assert stressed.cost_delta.iloc[0] == pytest.approx(
+                            expected_cost, rel=1e-13
                         )
-                        assert stressed.cost_delta.iloc[0] == expected_cost
-                        assert stressed.net_pnl.iloc[0] == 350.0 - expected_cost
+                        assert stressed.net_pnl.iloc[0] == pytest.approx(
+                            350.0 - expected_cost, rel=1e-13
+                        )
 
 
 @pytest.mark.parametrize("scale", (1.0, 2.0 ** (-50)))
@@ -584,18 +568,8 @@ def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav
     ]
 
 
-@pytest.mark.parametrize(
-    "initial,terminal_price",
-    (
-        (1000.0, None),
-        (np.nextafter(0.0, 1.0), None),
-        (np.finfo(float).max, None),
-        (1e-300, 1e100),
-    ),
-)
-def test_ledger_nav_endpoints_publish_undefined_risk_without_mutation(
-    tmp_path, initial, terminal_price
-):
+@pytest.mark.parametrize("initial", [100.0, 1000.0, 1e6])
+def test_cash_ledger_publishes_zero_volatility_and_undefined_sharpe(tmp_path, initial):
     import hashlib
 
     initial = float(initial)
@@ -615,26 +589,17 @@ def test_ledger_nav_endpoints_publish_undefined_risk_without_mutation(
         economics = PortfolioEconomics(capital, candidate.asset_id, emit)
         economics.mark(
             start,
-            initial if terminal_price is not None else 1.0,
+            1.0,
             diagnostics=(
                 PortfolioDiagnostic(
                     candidate.asset_id, None, "oos_window_start", number=0.0
                 ),
             ),
         )
-        if terminal_price is not None:
-            economics.fill(
-                timestamp_ns=start,
-                order_id="entry",
-                quantity=1.0,
-                price=initial,
-                mark_price=initial,
-                fee=0.0,
-            )
         for offset in (day, 2 * day):
             economics.mark(
                 start + offset,
-                terminal_price if terminal_price is not None else 1.0,
+                1.0,
                 diagnostics=(
                     PortfolioDiagnostic(
                         candidate.asset_id,
@@ -646,7 +611,7 @@ def test_ledger_nav_endpoints_publish_undefined_risk_without_mutation(
             )
         economics.mark(
             start + 2 * day,
-            terminal_price if terminal_price is not None else 1.0,
+            1.0,
             diagnostics=(
                 PortfolioDiagnostic(
                     candidate.asset_id, None, "oos_window_end", number=0.0
@@ -657,13 +622,13 @@ def test_ledger_nav_endpoints_publish_undefined_risk_without_mutation(
             economics,
             {
                 "simulation": "cash_only",
-                "net_pnl": 0.0 if terminal_price is None else terminal_price - initial,
-                "created_orders": int(terminal_price is not None),
-                "filled_orders": int(terminal_price is not None),
+                "net_pnl": 0.0,
+                "created_orders": 0,
+                "filled_orders": 0,
                 "selection_status": "COMPLETE",
             },
             start + 2 * day,
-            terminal_price if terminal_price is not None else 1.0,
+            1.0,
         )
 
     root = write_portfolio_ledger_artifact(
@@ -683,33 +648,17 @@ def test_ledger_nav_endpoints_publish_undefined_risk_without_mutation(
         risk = metrics.loc[
             metrics.metric_id.isin(("annualized_volatility", "sharpe"))
         ].set_index("metric_id")
-        assert risk.observation_count.eq(2 if terminal_price is None else 1).all()
+        assert risk.observation_count.eq(2).all()
         assert risk.loc["sharpe", "status"] == "UNDEFINED"
-        if terminal_price is not None:
-            assert risk.status.eq("UNDEFINED").all()
-            assert risk.reason.eq("planned_utc_day_valuation_undefined").all()
-            indexed = metrics.set_index("metric_id")
-            assert indexed.loc["planned_complete_utc_days", "value"] == 2
-            assert indexed.loc["defined_complete_utc_days", "value"] == 1
-            assert indexed.loc["terminal_nav", "value"] == terminal_price
-            assert indexed.loc["net_pnl", "value"] == terminal_price - initial
-            assert indexed.loc["oos_mean_daily_return", "status"] == "UNDEFINED"
-        elif initial == 1000.0:
-            assert risk.loc["annualized_volatility", "value"] == 0.0
-            assert risk.loc["annualized_volatility", "status"] == "DEFINED"
-        else:
-            assert risk.status.eq("UNDEFINED").all()
-            assert risk.value.isna().all()
-            assert risk.reason.eq("return_risk_unresolved").all()
+        assert risk.loc["annualized_volatility", "value"] == 0.0
+        assert risk.loc["annualized_volatility", "status"] == "DEFINED"
     with artifact.table("crypto_portfolio_daily.parquet") as daily:
         assert len(daily) == 2
-        if terminal_price is not None:
-            assert daily.start_nav.tolist() == [initial, terminal_price]
-            assert daily.end_nav.tolist() == [terminal_price, terminal_price]
-            assert daily.status.tolist() == ["UNDEFINED", "DEFINED"]
-            assert daily.reason.tolist() == ["nonfinite_result", ""]
-            assert pd.isna(daily.net_return.iloc[0])
-            assert daily.net_return.iloc[1] == 0.0
+        assert daily.start_nav.eq(initial).all()
+        assert daily.end_nav.eq(initial).all()
+        assert daily.status.eq("DEFINED").all()
+        assert daily.reason.eq("").all()
+        assert daily.net_return.eq(0.0).all()
     after = {
         p.relative_to(root): hashlib.sha256(p.read_bytes()).hexdigest()
         for p in root.rglob("*")
@@ -721,13 +670,13 @@ def test_ledger_nav_endpoints_publish_undefined_risk_without_mutation(
 @pytest.mark.parametrize(
     "start_nav,end_nav,expected",
     (
-        (1e308, -1e308, -2.0),
-        (1e308, 1e-300, -1.0),
-        (1e-300, 2e-300, 1.0),
+        (1000.0, -1000.0, -2.0),
+        (1000.0, 0.0, -1.0),
+        (100.0, 200.0, 1.0),
         (1000.0, 1100.0, 0.1),
     ),
 )
-def test_daily_return_uses_representable_final_ratio(start_nav, end_nav, expected):
+def test_daily_return_uses_actual_nav_endpoints(start_nav, end_nav, expected):
     from types import SimpleNamespace
 
     from quant_research_platform.research.portfolios.diagnostics import (

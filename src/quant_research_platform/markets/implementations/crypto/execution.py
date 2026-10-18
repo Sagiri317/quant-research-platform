@@ -1061,105 +1061,91 @@ def simulate_taker(
             apply_funding(effective_time_ns)
             requested = abs(signed_quantity)
             remaining = requested
-            current_mid = None
-            if (
-                latest_state is not None
-                and latest_state.segment_id == segment
-                and _covered(observed_coverage, segment, effective_time_ns)
-            ):
-                current_mid = _mid(latest_state)
-                levels = latest_state.asks if signed_quantity > 0 else latest_state.bids
-                takes = []
-                exact_remaining = False
-                for price_index, available in levels:
-                    quantity = min(remaining, available)
-                    if quantity <= 0:
-                        continue
-                    price = index_to_price(price_index, latest_state.price_unit)
-                    takes.append((quantity, price))
-                    rest = remaining - quantity
-                    # FastTwoSum preserves lost residuals before consuming later depth.
-                    if not exact_remaining and (remaining - rest) - quantity != 0:
-                        rest = Fraction(remaining) - Fraction(quantity)
-                        exact_remaining = True
-                    remaining = rest
-                    if remaining <= 0:
-                        break
-                levels_consumed = len(takes)
-                if takes:
-                    exact_filled = sum(
-                        (Fraction(quantity) for quantity, _ in takes), Fraction()
-                    )
-                    exact_notional = sum(
-                        (
-                            Fraction(quantity) * Fraction(price)
-                            for quantity, price in takes
-                        ),
-                        Fraction(),
-                    )
-                    execution_price = exact_notional / exact_filled
-                    try:
-                        filled = float(exact_filled)
-                        notional = float(exact_notional)
-                        fill_price = float(execution_price)
-                    except OverflowError:
-                        raise ValueError("portfolio_execution_fill_invalid") from None
-                    filled_orders += 1
-                    try:
-                        fee = float(
-                            _execution_fee(
-                                exact_notional,
-                                1.0,
-                                config.taker_fee_bps,
-                            )
+            current_mid = _mid(latest_state)
+            levels = latest_state.asks if signed_quantity > 0 else latest_state.bids
+            takes = []
+            exact_remaining = False
+            for price_index, available in levels:
+                quantity = min(remaining, available)
+                if quantity <= 0:
+                    continue
+                price = index_to_price(price_index, latest_state.price_unit)
+                takes.append((quantity, price))
+                rest = remaining - quantity
+                # FastTwoSum preserves lost residuals before consuming later depth.
+                if not exact_remaining and (remaining - rest) - quantity != 0:
+                    rest = Fraction(remaining) - Fraction(quantity)
+                    exact_remaining = True
+                remaining = rest
+                if remaining <= 0:
+                    break
+            levels_consumed = len(takes)
+            if takes:
+                exact_filled = sum(
+                    (Fraction(quantity) for quantity, _ in takes), Fraction()
+                )
+                exact_notional = sum(
+                    (Fraction(quantity) * Fraction(price) for quantity, price in takes),
+                    Fraction(),
+                )
+                execution_price = exact_notional / exact_filled
+                try:
+                    filled = float(exact_filled)
+                    notional = float(exact_notional)
+                    fill_price = float(execution_price)
+                except OverflowError:
+                    raise ValueError("portfolio_execution_fill_invalid") from None
+                filled_orders += 1
+                try:
+                    fee = float(
+                        _execution_fee(
+                            exact_notional,
+                            1.0,
+                            config.taker_fee_bps,
                         )
-                    except OverflowError:
-                        raise ValueError("hft_execution_fee_unrepresentable") from None
-                    signed = 1 if signed_quantity > 0 else -1
-                    fill_id = economics.fill(
-                        timestamp_ns=effective_time_ns,
-                        order_id=str(order_id),
-                        quantity=signed * exact_filled,
-                        price=execution_price,
-                        mark_price=current_mid,
-                        fee=fee,
                     )
-                    fill = dict(
-                        fill_id=fill_id,
-                        order_id=order_id,
-                        timestamp_ms=effective_time,
-                        decision_time_ms=decision_time,
-                        effective_time_ms=effective_time,
-                        state_observed_time_ms=latest_state.observed_time_ms,
-                        segment_id=segment,
-                        side="buy" if signed_quantity > 0 else "sell",
-                        fill_price=fill_price,
-                        fill_qty=filled,
-                        requested_quantity=requested,
-                        decision_mid=decision_mid,
-                        expected_net_gain=gain,
-                        levels_consumed=levels_consumed,
-                        notional=notional,
-                        fee=fee,
-                        slippage_bps=signed
-                        * (fill_price - current_mid)
-                        / current_mid
-                        * 10_000.0,
-                        markout_target_time_ms=effective_time
-                        + config.markout_horizon_ms,
-                        markout_target_time_ns=effective_time_ns
-                        + config.markout_horizon_ms * _NANOSECONDS_PER_MILLISECOND,
-                    )
-                    metrics.observe_fill(fill)
-                    pending.add(fill)
+                except OverflowError:
+                    raise ValueError("hft_execution_fee_unrepresentable") from None
+                signed = 1 if signed_quantity > 0 else -1
+                fill_id = economics.fill(
+                    timestamp_ns=effective_time_ns,
+                    order_id=str(order_id),
+                    quantity=signed * exact_filled,
+                    price=execution_price,
+                    mark_price=current_mid,
+                    fee=fee,
+                )
+                fill = dict(
+                    fill_id=fill_id,
+                    order_id=order_id,
+                    timestamp_ms=effective_time,
+                    decision_time_ms=decision_time,
+                    effective_time_ms=effective_time,
+                    state_observed_time_ms=latest_state.observed_time_ms,
+                    segment_id=segment,
+                    side="buy" if signed_quantity > 0 else "sell",
+                    fill_price=fill_price,
+                    fill_qty=filled,
+                    requested_quantity=requested,
+                    decision_mid=decision_mid,
+                    expected_net_gain=gain,
+                    levels_consumed=levels_consumed,
+                    notional=notional,
+                    fee=fee,
+                    slippage_bps=signed
+                    * (fill_price - current_mid)
+                    / current_mid
+                    * 10_000.0,
+                    markout_target_time_ms=effective_time + config.markout_horizon_ms,
+                    markout_target_time_ns=effective_time_ns
+                    + config.markout_horizon_ms * _NANOSECONDS_PER_MILLISECOND,
+                )
+                metrics.observe_fill(fill)
+                pending.add(fill)
             unfilled_quantity += float(remaining)
-            marked = (
-                None
-                if current_mid is None
-                else economics.mark(effective_time_ns, current_mid)
-            )
-            last_gross = None if marked is None else marked["gross_pnl"]
-            last_net = None if marked is None else marked["net_pnl"]
+            marked = economics.mark(effective_time_ns, current_mid)
+            last_gross = marked["gross_pnl"]
+            last_net = marked["net_pnl"]
             max_abs_position = max(max_abs_position, abs(economics.quantity))
 
         def advance_events(target_ns):

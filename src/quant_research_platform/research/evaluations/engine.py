@@ -5,7 +5,6 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from fractions import Fraction
 
 import numpy as np
 import pandas as pd
@@ -60,9 +59,8 @@ class _EvaluationStreamingState:
         self._min_timestamp: pd.Timestamp | None = None
         self._max_timestamp: pd.Timestamp | None = None
         self._skipped_timestamp_count = 0
-        self._ic: dict[tuple[str, str], dict[str, int | Fraction]] = {}
-        self._coverage: dict[tuple[str, str], dict[str, float | int]] = {}
-        self._spread: dict[tuple[str, str], dict[str, float | int | Fraction]] = {}
+        self._ic: dict[tuple[str, str], dict[str, int | float]] = {}
+        self._spread: dict[tuple[str, str], dict[str, float | int]] = {}
 
     def consume(
         self,
@@ -110,29 +108,16 @@ class _EvaluationStreamingState:
                 count = int(count)
                 self._rows_after_signal_label_dropna += count
                 key = (str(signal), str(label))
-                coverage = self._coverage.get(key)
-                if coverage is None:
-                    coverage = {
-                        "rows": 0,
-                        "n_obs_sum": 0,
-                        "n_obs_min": math.inf,
-                        "non_empty": 0,
-                    }
-                    self._coverage[key] = coverage
-                coverage["rows"] += 1
-                coverage["n_obs_sum"] += count
-                coverage["n_obs_min"] = min(coverage["n_obs_min"], count)
-                coverage["non_empty"] += int(count > 0)
                 stats = self._ic.get(key)
                 if stats is None:
                     stats = {
                         "ic_count": 0,
-                        "ic_mean": Fraction(),
-                        "ic_m2": Fraction(),
+                        "ic_mean": 0.0,
+                        "ic_m2": 0.0,
                         "ic_positive": 0,
                         "rankic_count": 0,
-                        "rankic_mean": Fraction(),
-                        "rankic_m2": Fraction(),
+                        "rankic_mean": 0.0,
+                        "rankic_m2": 0.0,
                         "rankic_positive": 0,
                     }
                     self._ic[key] = stats
@@ -194,8 +179,6 @@ class _EvaluationStreamingState:
                     previous_value = None
                     continue
                 value = float(mean_label_value)
-                if first_value is None:
-                    first_value = value
                 if previous_value is not None:
                     monotonicity_sum += float(
                         (value > previous_value) - (value < previous_value)
@@ -250,10 +233,7 @@ class _EvaluationStreamingState:
         for (signal, label), stats in sorted(self._spread.items()):
             count = int(stats["count"])
             monotonicity_count = int(stats["monotonicity_count"])
-            try:
-                spread_mean = float((stats["top_sum"] - stats["bottom_sum"]) / count)
-            except OverflowError as error:
-                raise ValueError("invalid_evaluation_numeric_values") from error
+            spread_mean = (stats["top_sum"] - stats["bottom_sum"]) / count
             records.append(
                 {
                     "signal": signal,
@@ -273,28 +253,6 @@ class _EvaluationStreamingState:
             )
         return pd.DataFrame.from_records(
             records, columns=EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS
-        )
-
-    def coverage_summary(self) -> pd.DataFrame:
-        records = [
-            {
-                "signal": signal,
-                "label": label,
-                "mean_n_obs": float(stats["n_obs_sum"]) / int(stats["rows"]),
-                "min_n_obs": int(stats["n_obs_min"]),
-                "non_empty_period_count": int(stats["non_empty"]),
-            }
-            for (signal, label), stats in sorted(self._coverage.items())
-        ]
-        return pd.DataFrame.from_records(
-            records,
-            columns=[
-                "signal",
-                "label",
-                "mean_n_obs",
-                "min_n_obs",
-                "non_empty_period_count",
-            ],
         )
 
     def diagnostics(self) -> EvaluationDiagnostics:
@@ -387,14 +345,13 @@ def build_evaluation_result_from_frames(
             state.diagnostics(),
             state.ic_summary(),
             state.group_spread_summary(),
-            state.coverage_summary(),
         )
 
     return EvaluationResult(output_chunks, summaries, output_chunks.close)
 
 
 def _correlation_summary(
-    stats: Mapping[str, int | Fraction], prefix: str
+    stats: Mapping[str, int | float], prefix: str
 ) -> dict[str, float | int | str | None]:
     count = int(stats[f"{prefix}_count"])
     result = _summarize_correlation_aggregates(
@@ -408,7 +365,7 @@ def _correlation_summary(
 
 
 def _add_group_spread_observation(
-    spread_state: dict[tuple[str, str], dict[str, float | int | Fraction]],
+    spread_state: dict[tuple[str, str], dict[str, float | int]],
     signal: str,
     label: str,
     top: float,
@@ -421,16 +378,16 @@ def _add_group_spread_observation(
     if spread is None:
         spread = {
             "count": 0,
-            "top_sum": Fraction(),
-            "bottom_sum": Fraction(),
+            "top_sum": 0.0,
+            "bottom_sum": 0.0,
             "hit_sum": 0.0,
             "monotonicity_sum": 0.0,
             "monotonicity_count": 0,
         }
         spread_state[key] = spread
     spread["count"] += 1
-    spread["top_sum"] += Fraction(top)
-    spread["bottom_sum"] += Fraction(bottom)
+    spread["top_sum"] += top
+    spread["bottom_sum"] += bottom
     spread["hit_sum"] += hit_rate
     if monotonicity is not None:
         spread["monotonicity_sum"] += monotonicity
@@ -902,14 +859,7 @@ def build_scoped_evaluation_result(
                             if integral:
                                 matches = np.equal(left, right)
                             else:
-                                # Allow eight local float64 steps in label units,
-                                # including subnormals, without an absolute floor.
-                                # Stepping toward zero keeps the bound finite even
-                                # at the largest float; exact zeros have zero scale.
-                                scale = np.maximum(np.abs(left), np.abs(right))
-                                tolerance = 8 * (scale - np.nextafter(scale, 0.0))
-                                with np.errstate(over="ignore"):
-                                    matches = np.abs(left - right) <= tolerance
+                                matches = np.isclose(left, right, rtol=1e-12, atol=0.0)
                             if not matches.all():
                                 raise ValueError("evaluation_common_label_mismatch")
                         normalized[label] = normalized[label].where(domain)
@@ -985,7 +935,6 @@ def build_scoped_evaluation_result(
             state.diagnostics(),
             state.ic_summary(),
             state.group_spread_summary(),
-            state.coverage_summary(),
         ),
         chunks.close,
     )
@@ -1066,37 +1015,16 @@ def _response_tables(frame, *, spec, config, dates=None):
     Exact pooled medians retain O(N * selected columns) values. No sampling,
     synthetic anchors, implicit fitting, inference, or cross-asset pooling occurs.
     """
-    from statistics import mean, stdev
-
     from quant_research_platform.artifacts.outputs.evaluation_daily import daily_frame
 
     def finite(value):
-        try:
-            value = float(value)
-        except OverflowError:
-            return np.nan
-        return value if math.isfinite(value) else np.nan
+        return float(value) if np.isfinite(value) else np.nan
 
     def mean_bp(values):
-        if not len(values):
-            return np.nan
-        try:
-            total = Fraction(math.fsum(values))
-        except OverflowError:
-            total = sum(Fraction(float(value)) for value in values)
-        return finite(total * 10000 / len(values))
+        return finite(np.mean(values) * 10000) if len(values) else np.nan
 
     def median_bp(values):
-        if not len(values):
-            return np.nan
-        middle = len(values) // 2
-        selected = np.partition(values, (max(0, middle - 1), middle))
-        central = (
-            selected[middle : middle + 1]
-            if len(values) % 2
-            else selected[middle - 1 : middle + 1]
-        )
-        return mean_bp(central)
+        return finite(np.median(values) * 10000) if len(values) else np.nan
 
     signal, edges = next(iter(config["cutpoints"].items()))
     n_groups = len(edges) + 1
@@ -1178,9 +1106,7 @@ def _response_tables(frame, *, spec, config, dates=None):
                     else None
                 )
                 spread = (
-                    finite(Fraction(means[-1]) - Fraction(means[0]))
-                    if spread_reason is None
-                    else np.nan
+                    finite(means[-1] - means[0]) if spread_reason is None else np.nan
                 )
                 if spread_reason is None and not math.isfinite(spread):
                     spread_reason = "nonfinite_result"
@@ -1218,11 +1144,10 @@ def _response_tables(frame, *, spec, config, dates=None):
                     n_obs=int(block.n_obs.sum()),
                 )
                 values = block[value].dropna().tolist()
-                row[value] = finite(mean(values)) if values else None
-                try:
-                    row[dispersion] = finite(stdev(values)) if len(values) > 1 else None
-                except OverflowError:
-                    row[dispersion] = None
+                row[value] = finite(np.mean(values)) if values else None
+                row[dispersion] = (
+                    finite(np.std(values, ddof=1)) if len(values) > 1 else None
+                )
                 row["valid_day_count"] = len(values)
                 if value == "ic":
                     row["ic_reason"] = None if values else "no_valid_observations"
@@ -1234,7 +1159,7 @@ def _response_tables(frame, *, spec, config, dates=None):
                     )
                     spreads = block.top_bottom_mean_bp.dropna().tolist()
                     row["top_bottom_mean_bp"] = (
-                        finite(mean(spreads)) if spreads else None
+                        finite(np.mean(spreads)) if spreads else None
                     )
                     row["spread_reason"] = (
                         None

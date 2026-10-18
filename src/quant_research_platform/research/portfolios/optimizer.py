@@ -17,7 +17,7 @@ from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_real_numeric_series,
 )
-from quant_research_platform.research.portfolios.risk import _covariance_is_psd
+from quant_research_platform.research.portfolios.risk import _validated_covariance
 
 
 @dataclass(frozen=True)
@@ -112,10 +112,7 @@ def optimize_portfolio(
     covariance = factor_covariance.apply(
         strict_finite_numeric_series, error="optimizer_covariance_invalid"
     ).to_numpy(dtype="float64")
-    if not np.isfinite(covariance).all() or not np.allclose(covariance, covariance.T):
-        raise ValueError("optimizer_covariance_invalid")
-    if not _covariance_is_psd(covariance):
-        raise ValueError("optimizer_covariance_not_psd")
+    covariance = _validated_covariance(covariance, error_prefix="optimizer_covariance")
     data = assets.copy().reset_index(drop=True)
     if data["asset_id"].duplicated().any():
         raise ValueError("optimizer_asset_duplicate")
@@ -185,32 +182,14 @@ def optimize_portfolio(
     expected_alpha = data["expected_alpha"].to_numpy(dtype="float64")
     specific = data["specific_variance"].to_numpy(dtype="float64")
     adv = data["adv"].to_numpy(dtype="float64")
-    # Scale before multiplying so representable capacity survives tiny ADV/NAV.
-    participation_mantissa, participation_exponent = np.frexp(
-        assumptions.adv_participation
-    )
-    adv_mantissa, adv_exponent = np.frexp(adv)
-    nav_mantissa, nav_exponent = np.frexp(nav)
-    with np.errstate(over="ignore", under="ignore"):
-        capacity = np.ldexp(
-            participation_mantissa * adv_mantissa / nav_mantissa,
-            participation_exponent + adv_exponent - nav_exponent,
-        )
-    # Monotone side costs at individual maximum trades bound every feasible fee.
-    # This only proves necessary box infeasibility; actual constraints below use
-    # the exact net trades, never a fee margin or the objective's epigraph slack.
-    try:
-        with np.errstate(over="raise"):
-            maximum_cost = expected_transaction_cost(
-                np.where(cash, 0.0, np.minimum(1.0 - current, capacity)) * nav,
-                np.where(cash, 0.0, np.minimum(current, capacity)) * nav,
-            )[0]
-    except (FloatingPointError, OverflowError):
-        # An unrepresentable hypothetical fee cannot rule out a finite trade.
-        # Cash funds actual fees, so c <= cash <= 1 - receivable_weight.
-        minimum_nav_ratio = receivable_weight
-    else:
-        minimum_nav_ratio = max(receivable_weight, 1.0 - maximum_cost / nav)
+    capacity = assumptions.adv_participation * adv / nav
+    # Side costs at the maximum trades bound every feasible fee. Actual
+    # self-financing constraints below still price each candidate's net trades.
+    maximum_cost = expected_transaction_cost(
+        np.where(cash, 0.0, np.minimum(1.0 - current, capacity)) * nav,
+        np.where(cash, 0.0, np.minimum(current, capacity)) * nav,
+    )[0]
+    minimum_nav_ratio = max(receivable_weight, 1.0 - maximum_cost / nav)
     bounds, net_bounds = _bounds(
         data,
         benchmark=benchmark,

@@ -177,12 +177,9 @@ def research_dataset_specs() -> tuple[ResearchDatasetSpec, ...]:
                 f"feature_observed_{factor}",
             )
         )
-        labels = (
-            *forward_label_columns(),
-            *forward_label_available_columns(),
-            MODEL_TARGET_COLUMN,
-        )
+        labels = (*forward_label_columns(), MODEL_TARGET_COLUMN)
         context = (
+            *forward_label_available_columns(),
             "model_target_available_at",
             "is_a_share_scope",
             "is_trading",

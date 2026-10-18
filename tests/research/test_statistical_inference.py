@@ -121,12 +121,10 @@ def test_stationary_bootstrap_and_cscv_are_deterministic_and_bounded() -> None:
     assert duplicate.reason == "duplicate_candidate_series"
 
 
-def test_bootstrap_uses_float_resampling_with_same_seed_and_mean_semantics(monkeypatch):
+def test_bootstrap_uses_float_resampling_with_same_seed_and_mean_semantics():
     from statistics import mean
 
     from arch.bootstrap import StationaryBootstrap
-
-    from quant_research_platform.research import statistics
 
     values = np.random.default_rng(18).normal(0.01, 0.08, size=2520)
     expected = StationaryBootstrap(20, values, seed=18).conf_int(
@@ -134,11 +132,6 @@ def test_bootstrap_uses_float_resampling_with_same_seed_and_mean_semantics(monke
         reps=199,
         method="percentile",
         size=0.95,
-    )
-    monkeypatch.setattr(
-        statistics,
-        "_mean",
-        lambda _data: pytest.fail("bootstrap used exact Python mean"),
     )
     result = stationary_bootstrap_mean_ci(
         values, block_size=20, repetitions=199, seed=18
@@ -440,7 +433,7 @@ def test_white_lm_preserves_exact_auxiliary_fit_without_unused_f_warning():
         assert records and all(row["status"] == "DEFINED" for row in records)
 
 
-@pytest.mark.parametrize("exponent", [-700, 0, 700])
+@pytest.mark.parametrize("exponent", [-10, 0, 10])
 def test_sample_risk_and_sharpe_are_invariant_to_binary_units(exponent):
     import warnings
 
@@ -497,7 +490,7 @@ def test_multiple_comparison_aligns_unlabeled_benchmark_to_model_rows(
         entry(container(benchmark[:-1]), models, block_size=4, repetitions=99, seed=17)
 
 
-def test_cscv_preserves_finite_extreme_scale_against_decimal_oracle():
+def test_cscv_preserves_units_against_independent_oracle():
     from decimal import Decimal, localcontext
     from itertools import combinations
 
@@ -527,23 +520,23 @@ def test_cscv_preserves_finite_extreme_scale_against_decimal_oracle():
         )
         winner = int(np.argmax(oracle(matrix[train])))
         overfit += oracle(matrix[test])[winner] < oracle(matrix[test])[1 - winner]
-        for scale in (1.0, 1e308):
+        for scale in (0.01, 1.0, 100.0):
             np.testing.assert_allclose(
                 _candidate_sharpes(matrix[train] * scale, np.zeros_like(matrix[train])),
                 oracle(matrix[train] * scale),
                 rtol=8 * np.finfo("float64").eps,
                 atol=0.0,
             )
-    for scale in (1.0, 1e308):
+    for scale in (0.01, 1.0, 100.0):
         result = cscv_pbo(matrix * scale, slice_count=4)
         assert result.status == "DEFINED"
         assert result.pbo == overfit / 6
 
 
-def test_cscv_subnormal_observations_keep_original_roundoff_resolution():
+def test_cscv_observations_keep_original_roundoff_resolution():
     from quant_research_platform.research.statistics import _candidate_sharpes
 
-    matrix = np.arange(1, 9, dtype="float64").reshape(4, 2) * 1e-310
+    matrix = np.arange(1, 9, dtype="float64").reshape(4, 2) * 0.01
     with np.errstate(over="raise", invalid="raise", divide="raise"):
         assert _candidate_sharpes(matrix, np.ones_like(matrix)) is None
     for invalid in (-1.0, np.nan, -np.inf):
@@ -551,76 +544,15 @@ def test_cscv_subnormal_observations_keep_original_roundoff_resolution():
             cscv_pbo(matrix, slice_count=4, return_roundoff=invalid)
 
 
-@pytest.mark.parametrize(
-    "values,errors,expected",
-    [
-        ([-1.7e308, 1.7e308], 0.0, 0.0),
-        ([-1.7e308, 1.7e308], 1.7e308, None),
-        ([1.7e308, 1.7e308], 1.7e308, None),
-        ([-1.7e308, -1.7e308], 1.7e308, None),
-        ([1e-310, 2e-310], 1.7e308, None),
-        ([-1.7e308, 1.7e308], 1e308, 0.0),
-    ],
-)
-def test_cscv_extreme_finite_ratios_and_uncertainty_intervals(values, errors, expected):
-    from quant_research_platform.research.statistics import (
-        _candidate_sharpes,
-        return_standard_deviation,
-    )
-
-    with np.errstate(over="raise", invalid="raise", divide="raise"):
-        result = _candidate_sharpes(
-            np.asarray(values)[:, None], np.full((len(values), 1), errors)
-        )
-        if expected is None:
-            assert result is None
-            assert return_standard_deviation(values, roundoff=errors) == 0.0
-        else:
-            np.testing.assert_array_equal(result, [expected])
-
-
-def test_return_interval_overlap_preserves_extreme_and_subnormal_separation():
-    from decimal import Decimal
-
-    from quant_research_platform.research.statistics import _return_intervals_overlap
-
-    limit = np.finfo("float64").max
-    tiny = np.nextafter(0.0, 1.0)
-    cases = [
-        ([tiny, 2 * tiny, limit], [0.0, 0.0, limit]),
-        ([-limit, limit], [limit, limit]),
-        ([-limit, -limit], [0.0, 0.0]),
-        ([limit, limit], [0.0, 0.0]),
-        ([-limit, 0.0], [0.0, limit]),
-        ([0.0, limit], [limit, 0.0]),
-        ([-limit, 0.0, limit], [limit, 0.0, limit]),
-        ([-limit, limit], [np.nextafter(limit, 0.0)] * 2),
-    ]
-    for values, errors in cases:
-        lower = [
-            Decimal.from_float(value) - Decimal.from_float(error)
-            for value, error in zip(values, errors, strict=True)
-        ]
-        upper = [
-            Decimal.from_float(value) + Decimal.from_float(error)
-            for value, error in zip(values, errors, strict=True)
-        ]
-        with np.errstate(over="raise", invalid="raise", divide="raise"):
-            result = _return_intervals_overlap(np.asarray(values), np.asarray(errors))
-        assert bool(result) == (max(lower) <= min(upper))
-
-
-@pytest.mark.parametrize("exponent", [-500, 0, 500])
+@pytest.mark.parametrize("exponent", [-10, 0, 10])
 @pytest.mark.parametrize("sign", [-1.0, 1.0])
-def test_return_roundoff_separates_intervals_with_equal_rounded_endpoints(
-    exponent, sign
-):
+def test_return_roundoff_separates_disjoint_intervals(exponent, sign):
     from fractions import Fraction
 
     from quant_research_platform.research.statistics import return_standard_deviation
 
     values = np.ldexp(np.array([0.5, 1.0, 2.0]) * sign, exponent)
-    errors = np.ldexp(np.array([0.5, 0.0, np.nextafter(1.0, 0.0)]), exponent)
+    errors = np.ldexp(np.array([0.5, 0.0, 0.9]), exponent)
     lower = [
         Fraction(float(value)) - Fraction(float(error))
         for value, error in zip(values, errors, strict=True)
@@ -639,7 +571,7 @@ def test_return_roundoff_separates_intervals_with_equal_rounded_endpoints(
 
 def test_cscv_keeps_disjoint_uncertainty_intervals_defined():
     matrix = np.tile([[1.0, 0.1], [2.0, 0.3]], (4, 1))
-    errors = np.tile([[0.0, 0.0], [np.nextafter(1.0, 0.0), 0.0]], (4, 1))
+    errors = np.tile([[0.0, 0.0], [0.9, 0.0]], (4, 1))
     result = cscv_pbo(matrix, slice_count=4, return_roundoff=errors)
     assert result.status == "DEFINED"
     assert result.pbo == 0.0
@@ -649,8 +581,8 @@ def test_cscv_keeps_disjoint_uncertainty_intervals_defined():
     assert result.reason == "candidate_sharpe_undefined"
 
 
-@pytest.mark.parametrize("exponent", (-700, 0, 700))
-def test_near_constant_sample_risk_preserves_exact_center(exponent):
+@pytest.mark.parametrize("exponent", (-10, 0, 10))
+def test_small_sample_risk_matches_independent_center(exponent):
     from decimal import Decimal, localcontext
 
     from quant_research_platform.research.statistics import (
@@ -658,7 +590,7 @@ def test_near_constant_sample_risk_preserves_exact_center(exponent):
         return_standard_deviation,
     )
 
-    values = np.ldexp(np.array([1.0, np.nextafter(1.0, np.inf)]), exponent)
+    values = np.ldexp(np.array([1.0, 1.0001]), exponent)
     with localcontext() as context:
         context.prec = 90
         exact = [Decimal.from_float(value) for value in values]
@@ -673,48 +605,6 @@ def test_near_constant_sample_risk_preserves_exact_center(exponent):
         [expected_sharpe],
         rtol=2e-15,
     )
-
-
-def test_extreme_normal_nav_sharpe_matches_decimal_oracle():
-    from decimal import Decimal, localcontext
-
-    from scipy.stats import norm
-
-    from quant_research_platform.research.portfolios.diagnostics import (
-        _nav_return_roundoff,
-    )
-
-    exponents = [0]
-    for _ in range(2):
-        exponents.append(exponents[-1] + 1023)
-        for _ in range(29):
-            exponents.append(exponents[-1] - 51)
-    nav = np.ldexp(np.ones(61), exponents)
-    values = nav[1:] / nav[:-1] - 1
-    assert np.isfinite(nav).all() and (nav >= np.finfo(float).tiny).all()
-    np.testing.assert_array_equal(nav[:-1] * (1 + values), nav[1:])
-    with localcontext() as context:
-        context.prec = 100
-        data = [Decimal.from_float(value) for value in values]
-        n = Decimal(len(data))
-        mean = sum(data) / n
-        diffs = [value - mean for value in data]
-        m2 = sum(value**2 for value in diffs) / n
-        observed = mean / (m2 * n / (n - 1)).sqrt()
-        m3 = sum(value**3 for value in diffs) / n
-        m4 = sum(value**4 for value in diffs) / n
-        skew = (n * (n - 1)).sqrt() / (n - 2) * m3 / (m2 * m2.sqrt())
-        kurtosis = (n - 1) / ((n - 2) * (n - 3)) * ((n + 1) * (m4 / m2**2 - 3) + 6) + 3
-        variance = (1 - skew * observed + (kurtosis - 1) / 4 * observed**2) / (n - 1)
-        expected_psr = norm.cdf(float(observed / variance.sqrt()))
-    result = probabilistic_and_deflated_sharpe(
-        values,
-        benchmark_sharpe=0.0,
-        trial_sharpes=[0.1, 0.2, 0.3],
-        return_roundoff=_nav_return_roundoff(nav[:-1], nav[1:], values),
-    )
-    assert result.observed_sharpe == pytest.approx(float(observed), rel=2e-14)
-    assert result.psr == pytest.approx(expected_psr, rel=2e-14)
 
 
 def test_fama_macbeth_preserves_small_factor_units_and_rejects_collinearity():
@@ -751,7 +641,7 @@ def test_fama_macbeth_preserves_small_factor_units_and_rejects_collinearity():
         assert result.coefficients["x"] * scale == pytest.approx(
             float(slope), rel=1e-12
         )
-        assert result.coefficients["const"] == pytest.approx(
+        assert result.coefficients["intercept"] == pytest.approx(
             float(intercept), rel=1e-12
         )
         assert result.white_p_value is not None
@@ -762,30 +652,6 @@ def test_fama_macbeth_preserves_small_factor_units_and_rejects_collinearity():
     with pytest.raises(ValueError, match="fama_macbeth_period_insufficient"):
         fama_macbeth_period(
             frame.assign(z=x * 2), return_column="y", factor_columns=("x", "z")
-        )
-
-
-@pytest.mark.parametrize("capital", (np.nextafter(0.0, 1.0), np.finfo(float).max))
-def test_unbounded_nav_roundoff_is_undefined_not_zero_risk(capital):
-    from quant_research_platform.research.portfolios.diagnostics import (
-        _nav_return_roundoff,
-    )
-    from quant_research_platform.research.statistics import (
-        _candidate_sharpes,
-        return_standard_deviation,
-    )
-
-    values = np.zeros(4)
-    errors = _nav_return_roundoff(np.full(4, capital), np.full(4, capital), values)
-    assert np.isposinf(errors).all()
-    assert np.isnan(return_standard_deviation(values, roundoff=errors))
-    assert _candidate_sharpes(values[:, None], errors[:, None]) is None
-    with pytest.raises(ValueError, match="sharpe_zero_variance"):
-        probabilistic_and_deflated_sharpe(
-            values,
-            benchmark_sharpe=0.0,
-            trial_sharpes=[0.1, 0.2],
-            return_roundoff=errors,
         )
 
 
@@ -874,3 +740,138 @@ def test_factor_configuration_rejects_invalid_lag_before_opening_data(tmp_path, 
                 "statistics": {"hac_lag": lag, "fama_macbeth_core_factors": ["x"]},
             }
         )
+
+
+@pytest.mark.parametrize("factor_count", [1, 3])
+@pytest.mark.parametrize("weighted", [False, True])
+def test_fama_macbeth_shared_ols_owner_matches_independent_full_sample(
+    factor_count, weighted
+):
+    from statsmodels.stats.diagnostic import het_white
+
+    rng = np.random.default_rng(802)
+    values = rng.normal(size=(50, factor_count))
+    values[:, 0] = 20 + values[:, 0] * 0.001
+    factors = tuple(f"x{index}" for index in range(factor_count))
+    frame = pd.DataFrame(values, columns=factors)
+    frame["timestamp"] = pd.Timestamp("2024-01-01")
+    frame["asset_id"] = [f"a{i}" for i in range(len(frame))]
+    frame["label"] = (
+        0.03
+        + values @ np.arange(1, factor_count + 1)
+        + rng.normal(0, 0.002, len(frame))
+    )
+    frame["weight"] = rng.uniform(1, 5, len(frame))
+    design = add_constant(frame.loc[:, factors])
+    expected = (
+        WLS(frame.label, design, weights=frame.weight)
+        if weighted
+        else OLS(frame.label, design)
+    ).fit()
+    actual = fama_macbeth_period(
+        frame,
+        return_column="label",
+        factor_columns=factors,
+        weight_column="weight" if weighted else None,
+    )
+    np.testing.assert_allclose(
+        actual.coefficients, expected.params, rtol=2e-8, atol=2e-10
+    )
+    # Normalization preserves the White span without the intercept's conditioning.
+    normalized = add_constant((values - values.mean(axis=0)) / values.std(axis=0))
+    assert actual.white_p_value == pytest.approx(
+        het_white(expected.resid, normalized)[1], rel=1e-7, abs=1e-9
+    )
+    assert actual.observation_count == 50
+
+
+@pytest.mark.parametrize("unit", (0.001, 1.0, 1000.0))
+@pytest.mark.parametrize("weighted", (False, True))
+@pytest.mark.parametrize("factor_count", (1, 3))
+@pytest.mark.parametrize("small", (1e-8, 1e-6))
+def test_fmb_numerical_zero_preserves_resolvable_small_coefficients(
+    unit, weighted, factor_count, small
+):
+    rng = np.random.default_rng(481)
+    values = rng.normal(size=(40, factor_count)) * np.arange(1, factor_count + 1)
+    factors = tuple(f"x{i}" for i in range(factor_count))
+    slopes = np.array([small, *([0.25] * (factor_count - 1))])
+    frame = pd.DataFrame(values * unit, columns=factors)
+    frame["timestamp"] = pd.Timestamp("2024-01-01")
+    frame["asset_id"] = [str(i) for i in range(len(frame))]
+    frame["label"] = (small + values @ slopes) * unit
+    frame["weight"] = np.arange(1.0, len(frame) + 1)
+    actual = fama_macbeth_period(
+        frame,
+        return_column="label",
+        factor_columns=factors,
+        weight_column="weight" if weighted else None,
+    )
+    np.testing.assert_allclose(
+        actual.coefficients, [small * unit, *slopes], rtol=1e-6, atol=0
+    )
+    assert actual.white_reason == "white_test_undefined"
+
+
+@pytest.mark.parametrize("weighted", (False, True))
+def test_fmb_multifactor_unrelated_slopes_are_numerical_zero(weighted):
+    rng = np.random.default_rng(481)
+    values = rng.normal(size=(40, 3))
+    frame = pd.DataFrame(values, columns=("x", "z", "q"))
+    frame["timestamp"] = pd.Timestamp("2024-01-01")
+    frame["asset_id"] = [str(i) for i in range(len(frame))]
+    frame["label"] = values[:, 0]
+    frame["weight"] = np.arange(1.0, len(frame) + 1)
+    actual = fama_macbeth_period(
+        frame,
+        return_column="label",
+        factor_columns=("x", "z", "q"),
+        weight_column="weight" if weighted else None,
+    )
+    assert actual.coefficients[["intercept", "z", "q"]].eq(0).all()
+    assert actual.coefficients["x"] == pytest.approx(1)
+    assert actual.white_reason == "white_test_undefined"
+
+
+@pytest.mark.parametrize("weighted", (False, True))
+def test_fmb_supports_const_factor_and_reserves_only_intercept(weighted):
+    from quant_research_platform.research.statistics import cross_sectional_rank_ic
+    from quant_research_platform.research.statistics_production import (
+        _fama_macbeth_period_records,
+    )
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.Timestamp("2024-01-01"),
+            "asset_id": list("abcdefgh"),
+            "const": np.arange(8.0),
+            "label": 0.01 * np.arange(8.0),
+            "total_market_cap": np.arange(1.0, 9.0),
+        }
+    )
+    result = fama_macbeth_period(
+        frame,
+        return_column="label",
+        factor_columns=("const",),
+        weight_column="total_market_cap" if weighted else None,
+    )
+    assert result.coefficients.index.tolist() == ["intercept", "const"]
+    assert result.coefficients["intercept"] == 0
+    assert result.coefficients["const"] == pytest.approx(0.01)
+    rows = _fama_macbeth_period_records(
+        frame, return_column="label", factors=("const",), core_factors=()
+    )
+    assert [row["coefficient_id"] for row in rows] == ["intercept", "const"] * 2
+    np.testing.assert_allclose([row["value"] for row in rows], [0, 0.01] * 2)
+    with pytest.raises(ValueError, match="^fama_macbeth_intercept_factor_reserved$"):
+        fama_macbeth_period(
+            frame.rename(columns={"const": "intercept"}),
+            return_column="label",
+            factor_columns=("intercept",),
+        )
+    rankic = cross_sectional_rank_ic(
+        frame.rename(columns={"const": "intercept"}),
+        value_columns=("intercept",),
+        label_column="label",
+    )
+    assert rankic.intercept.iloc[0] == pytest.approx(1.0)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from fractions import Fraction
 from math import floor
 from typing import Literal
 
@@ -100,7 +99,6 @@ def build_simple_target_weights(
         raise ValueError("target_long_short_boundary_overlap")
     capitals = _selected_capitals(
         float_market_cap,
-        assets,
         selected=top.union(bottom),
         method=method,
     )
@@ -184,7 +182,6 @@ def _select_boundary(
 
 def _selected_capitals(
     values: pd.Series | None,
-    assets: pd.Index,
     *,
     selected: pd.Index,
     method: TargetMethod,
@@ -226,15 +223,8 @@ def _assign_leg(
         )
     else:
         assert capitals is not None
-        selected_capitals = [
-            Fraction(float(value)) for value in capitals.reindex(selected)
-        ]
-        scale = Fraction(gross) / sum(selected_capitals)
-        weights = pd.Series(
-            [float(scale * value) for value in selected_capitals],
-            index=selected,
-            dtype="float64",
-        )
+        selected_capitals = capitals.reindex(selected)
+        weights = gross * selected_capitals / selected_capitals.sum()
     result.loc[selected] = sign * weights
 
 
@@ -272,10 +262,8 @@ def _neutrality_context(
             float_market_cap, assets, "target_float_market_cap_invalid"
         )
         domain = eligible & capitals.gt(0) & np.isfinite(capitals)
-        benchmark_total = sum(Fraction(float(value)) for value in capitals.loc[domain])
-        weights = capitals.loc[domain].map(
-            lambda value: float(Fraction(float(value)) / benchmark_total)
-        )
+        weights = capitals.loc[domain]
+        weights = weights / weights.sum()
     else:
         if (
             not isinstance(benchmark_weights, pd.Series)

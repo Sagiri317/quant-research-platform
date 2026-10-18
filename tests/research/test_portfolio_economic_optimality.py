@@ -27,8 +27,8 @@ def _owner(rate, *, impact=0.0):
     return PreparedTradeCost(
         (rate, 0.0, 0.0),
         (False, False, False),
-        np.frexp(1.0),
-        np.frexp(impact),
+        1.0,
+        impact,
         "synthetic",
     )
 
@@ -62,7 +62,7 @@ def test_prepared_cost_gradient_matches_its_economic_amount_formula(amount):
 
 
 @pytest.mark.parametrize("seed", range(30))
-@pytest.mark.parametrize("scale", ["normal", "capacity", "tiny_money"])
+@pytest.mark.parametrize("scale", ["normal", "capacity", "small_account"])
 def test_side_aware_cost_reaches_independent_lp_optimum(seed, scale):
     rng = np.random.default_rng(seed)
     n = 12
@@ -70,7 +70,7 @@ def test_side_aware_cost_reaches_independent_lp_optimum(seed, scale):
     alpha = rng.normal(0.0, 0.002, n)
     style = rng.normal(size=n)
     style -= benchmark @ style
-    nav = 1e-300 if scale == "tiny_money" else 1e9
+    nav = 1e4 if scale == "small_account" else 1e9
     capacity = (
         rng.uniform(0.0001, 0.001, n) if scale == "capacity" else np.full(n, 0.05)
     )
@@ -155,7 +155,7 @@ def test_seed18_real_cost_improves_over_the_proven_no_trade_kink(shift):
     style = rng.normal(size=12)
     style -= benchmark @ style
     owner = PreparedTradeCost(
-        (0.001, 0.0, 0.0), (False, False, False), (0.0, 0), (0.0, 0), "synthetic"
+        (0.001, 0.0, 0.0), (False, False, False), 0.0, 0.0, "synthetic"
     )
     adv = np.full(12, 1e12)
     assets = pd.DataFrame(
@@ -336,7 +336,7 @@ def test_impact_cost_reaches_independent_two_asset_stationary_optimum():
     fee, impact = 0.001, 0.001
     alpha_spread, nav, adv = 0.0025, 100.0, np.full(2, 10.0)
     owner = PreparedTradeCost(
-        (fee, 0.0, 0.0), (False, False, False), (0.0, 0), np.frexp(10.0), "synthetic"
+        (fee, 0.0, 0.0), (False, False, False), 0.0, 10.0, "synthetic"
     )
     optimum = ((alpha_spread - 2 * fee) / (3 * impact)) ** 2 * adv[0] / nav
     assert 0.0 < optimum < 0.005

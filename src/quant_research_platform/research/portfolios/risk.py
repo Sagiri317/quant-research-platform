@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from array import array
 from dataclasses import dataclass
-from decimal import Decimal, localcontext
-from fractions import Fraction
-from math import ceil, lcm
+from math import ceil
 
 import numpy as np
 import pandas as pd
@@ -18,7 +16,6 @@ from quant_research_platform.contracts.validation import (
 )
 from quant_research_platform.research.features.transforms import (
     _industry_group_codes,
-    _integer_coordinates,
     _mad_winsorize,
 )
 from quant_research_platform.research.models.scaler import ModelMatrixScaler
@@ -437,124 +434,17 @@ class FactorRiskState:
         if design.shape[1] != len(exposure_columns):
             raise ValueError("factor_risk_exposure_columns_invalid")
         p = design.shape[1]
-        if (
-            len(frame) < max(self.config.minimum_cross_section, 5 * p)
-            or np.linalg.matrix_rank(design) != p
-        ):
+        if len(frame) < max(self.config.minimum_cross_section, 5 * p):
             return None, tuple(current_industries)
         returns = frame["asset_return"].to_numpy(dtype="float64")
-        ordinary = _ordinary_weighted_fit(
+        fitted = _weighted_fit(
             design,
             returns,
             np.sqrt(frame[self.config.weight_column].to_numpy(dtype="float64")),
         )
-        if ordinary is not None:
-            coefficients, residuals = ordinary
-            exact_coefficients = None
-        else:
-            weights, _ = _integer_coordinates(
-                np.sqrt(frame[self.config.weight_column].to_numpy(dtype="float64"))
-            )
-            weights = np.asarray(weights, dtype=object)
-            responses, response_scale = _integer_coordinates(returns)
-            responses = np.asarray(responses, dtype=object)
-            dimension = len(self.style_columns)
-            styles, style_scale = _integer_coordinates(
-                design[:, len(industry_columns) :].flat
-            )
-            styles = np.asarray(styles, dtype=object).reshape(len(frame), dimension)
-            gram = np.zeros((dimension, dimension), dtype=object)
-            response = np.zeros(dimension, dtype=object)
-            summaries = {}
-            # Eliminate industry intercepts in exact weighted coordinates.
-            for code, selected in group_codes.groupby(
-                group_codes, sort=True
-            ).indices.items():
-                x, y, w = styles[selected], responses[selected], weights[selected]
-                total = int(sum(w))
-                first_x, first_y = w @ x, w @ y
-                second_x = x.T @ (x * w[:, None])
-                second_xy = x.T @ (y * w)
-                for left in range(dimension):
-                    response[left] += Fraction(
-                        int(total * second_xy[left] - first_x[left] * first_y), total
-                    )
-                    for right in range(dimension):
-                        gram[left, right] += Fraction(
-                            int(
-                                total * second_x[left, right]
-                                - first_x[left] * first_x[right]
-                            ),
-                            total,
-                        )
-                summaries[code] = (total, first_x, first_y)
-            system = np.column_stack((gram, response))
-            system_scale = lcm(*(value.denominator for value in system.flat))
-            system = np.asarray(
-                [
-                    value.numerator * (system_scale // value.denominator)
-                    for value in system.flat
-                ],
-                dtype=object,
-            ).reshape(dimension, dimension + 1)
-            previous = 1
-            for column in range(dimension - 1):
-                pivot = system[column, column]
-                system[column + 1 :, column + 1 :] = (
-                    pivot * system[column + 1 :, column + 1 :]
-                    - system[column + 1 :, column, None]
-                    * system[None, column, column + 1 :]
-                ) // previous
-                previous = pivot
-            slopes = [Fraction()] * dimension
-            for column in range(dimension - 1, -1, -1):
-                slopes[column] = (
-                    Fraction(int(system[column, -1]))
-                    - sum(
-                        system[column, right] * slopes[right]
-                        for right in range(column + 1, dimension)
-                    )
-                ) / int(system[column, column])
-            slope_scale = lcm(*(slope.denominator for slope in slopes))
-            slopes = np.asarray(
-                [
-                    slope.numerator * (slope_scale // slope.denominator)
-                    for slope in slopes
-                ],
-                dtype=object,
-            )
-            intercepts = {
-                code: (total, int(first_y * slope_scale - first_x @ slopes))
-                for code, (total, first_x, first_y) in summaries.items()
-            }
-            scale = slope_scale * response_scale
-            try:
-                coefficients = np.asarray(
-                    [
-                        intercepts[code][1] / (intercepts[code][0] * scale)
-                        for code in current_industries
-                    ]
-                    + [int(slope * style_scale) / scale for slope in slopes],
-                    dtype="float64",
-                )
-                residuals = np.empty(len(frame), dtype="float64")
-                for position, (code, value) in enumerate(
-                    zip(
-                        group_codes,
-                        responses * slope_scale - styles @ slopes,
-                        strict=True,
-                    )
-                ):
-                    total, intercept = intercepts[code]
-                    residuals[position] = int(total * value - intercept) / (
-                        total * scale
-                    )
-            except OverflowError:
-                raise ValueError("factor_risk_fit_non_finite") from None
-            exact_coefficients = [
-                Fraction(intercepts[code][1], intercepts[code][0] * scale)
-                for code in current_industries
-            ] + [Fraction(int(slope * style_scale), scale) for slope in slopes]
+        if fitted is None:
+            return None, tuple(current_industries)
+        coefficients, residuals = fitted
         if not np.isfinite(coefficients).all() or not np.isfinite(residuals).all():
             raise ValueError("factor_risk_fit_non_finite")
         assets = pd.Index(frame["asset_id"].astype(str), name="asset_id")
@@ -574,26 +464,8 @@ class FactorRiskState:
                 )
             )
             projected_returns = projection.asset_return.to_numpy(dtype="float64")
-            if exact_coefficients is None:
-                exact_coefficients = [Fraction(float(value)) for value in coefficients]
             # Project with the eligible fit; these rows never enter risk history.
-            projected_residuals = np.asarray(
-                [
-                    float(
-                        Fraction.from_float(value)
-                        - sum(
-                            Fraction.from_float(float(exposure)) * coefficient
-                            for exposure, coefficient in zip(
-                                row, exact_coefficients, strict=True
-                            )
-                        )
-                    )
-                    for row, value in zip(
-                        projected_design, projected_returns, strict=True
-                    )
-                ],
-                dtype="float64",
-            )
+            projected_residuals = projected_returns - projected_design @ coefficients
             if not np.isfinite(projected_residuals).all():
                 raise ValueError("factor_risk_fit_non_finite")
             assets = assets.append(
@@ -774,8 +646,6 @@ class FactorRiskState:
             columns=columns,
         )
         specific: dict[str, float] = {}
-        maximum_magnitude = np.sqrt(np.finfo(np.float64).max)
-        minimum_magnitude = np.sqrt(np.finfo(np.float64).tiny)
         for asset, values in self._residuals.items():
             if (
                 self._specific_session_counts[asset] >= self.config.specific_window
@@ -783,35 +653,13 @@ class FactorRiskState:
                 >= self.config.minimum_specific_dates
             ):
                 values = np.asarray(values)
-                absolute_values = np.abs(values)
                 ages = self._specific_session_counts[asset] - np.asarray(
                     self._residual_sessions[asset]
                 )
                 weights = _ewma_weights(ages, self.config.specific_half_life)
-                if (
-                    weights.dtype == object
-                    or np.any(absolute_values > maximum_magnitude)
-                    or np.any(
-                        (values != 0)
-                        & (absolute_values * np.sqrt(weights) < minimum_magnitude)
-                    )
-                ):
-                    with localcontext() as context:
-                        context.prec = 80
-                        variance = sum(
-                            (
-                                weight
-                                if isinstance(weight, Decimal)
-                                else Decimal.from_float(float(weight))
-                            )
-                            * Decimal.from_float(value) ** 2
-                            for weight, value in zip(weights, values, strict=True)
-                        ) * Decimal.from_float(float(self.config.annualization))
-                else:
-                    variance = (
-                        np.dot(weights, np.square(values)) * self.config.annualization
-                    )
-                specific[asset] = float(variance)
+                specific[asset] = float(
+                    np.dot(weights, np.square(values)) * self.config.annualization
+                )
                 if not np.isfinite(specific[asset]):
                     raise ValueError("factor_risk_specific_variance_non_finite")
         return FactorRiskEstimate(
@@ -829,120 +677,38 @@ class FactorRiskState:
         )
 
 
-def _covariance_is_psd(covariance: np.ndarray) -> bool:
-    """Test the lower triangle against the existing absolute PSD bound."""
-
-    # Most matrices are far from the admission boundary. LAPACK's symmetric
-    # eigensolver resolves those within a norm-scaled backward-error bound.
-    symmetric = np.tril(covariance) + np.tril(covariance, -1).T
-    with np.errstate(over="ignore", invalid="ignore"):
-        error = (
-            8
-            * len(covariance)
-            * np.finfo(float).eps
-            * np.linalg.norm(symmetric, ord=np.inf)
-        )
-    if np.isfinite(error):
-        minimum = np.linalg.eigvalsh(symmetric)[0]
-        if minimum > -1e-12 + error:
-            return True
-        if minimum < -1e-12 - error:
-            return False
-    coordinates, _scale = _integer_coordinates([*covariance.flat, 1e-12])
-    matrix = np.asarray(coordinates[:-1], dtype=object).reshape(covariance.shape)
-    upper = np.triu_indices(len(matrix), 1)
-    matrix[upper] = matrix.T[upper]
-    matrix[np.diag_indices(len(matrix))] += coordinates[-1]
-    # An invertible congruence with exact diagonal dominance certifies PSD.
-    symmetric = np.tril(covariance) + np.tril(covariance, -1).T
-    symmetric[np.diag_indices(len(matrix))] += 1e-12
-    try:
-        inverse = np.tril(np.linalg.inv(np.linalg.cholesky(symmetric)))
-    except np.linalg.LinAlgError:
-        pass
-    else:
-        if np.isfinite(inverse).all() and np.all(inverse.diagonal() != 0):
-            transform, _scale = _integer_coordinates(inverse.flat)
-            transform = np.asarray(transform, dtype=object).reshape(matrix.shape)
-            congruence = transform @ matrix @ transform.T
-            if all(
-                congruence[row, row]
-                >= sum(
-                    abs(value)
-                    for column, value in enumerate(congruence[row])
-                    if column != row
-                )
-                for row in range(len(matrix))
-            ):
-                return True
-    # Fraction-free elimination decides cases without that certificate.
-    previous = 1
-    for column in range(len(matrix)):
-        pivot = matrix[column, column]
-        if pivot < 0:
-            return False
-        trailing = matrix[column + 1 :, column]
-        if pivot == 0:
-            if any(trailing):
-                return False
-            continue
-        remainder = matrix[column + 1 :, column + 1 :]
-        matrix[column + 1 :, column + 1 :] = (
-            pivot * remainder - trailing[:, None] * trailing[None, :]
-        ) // previous
-        previous = pivot
-    return True
+def _validated_covariance(covariance: np.ndarray, *, error_prefix: str) -> np.ndarray:
+    """Validate and symmetrize once, in the covariance's actual units."""
+    if not np.isfinite(covariance).all():
+        raise ValueError(f"{error_prefix}_invalid")
+    tolerance = (
+        8
+        * len(covariance)
+        * np.finfo(float).eps
+        * np.linalg.norm(covariance, ord=np.inf)
+    )
+    if np.max(np.abs(covariance - covariance.T)) > tolerance:
+        raise ValueError(f"{error_prefix}_invalid")
+    covariance = (covariance + covariance.T) / 2
+    if np.linalg.eigvalsh(covariance)[0] < -tolerance:
+        raise ValueError(f"{error_prefix}_not_psd")
+    return covariance
 
 
-def _ordinary_weighted_fit(
+def _weighted_fit(
     design: np.ndarray, returns: np.ndarray, weights: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray] | None:
-    """Stable sqrt(cap)-objective WLS, with narrow numerical fallbacks.
-
-    Normalizing the objective weights leaves the fit unchanged. SVD avoids
-    squaring the design condition number as normal equations would. Extreme
-    response ranges, ill conditioning and unresolved residual cancellation
-    keep the existing exact industry-elimination path.
-    """
-    nonzero = np.abs(returns[returns != 0])
-    if len(nonzero) and (
-        nonzero.min() < np.sqrt(np.finfo(float).tiny)
-        or nonzero.max() > np.sqrt(np.finfo(float).max)
-        or nonzero.min() < np.finfo(float).eps * nonzero.max()
-    ):
-        return None
+    """Solve the sqrt(cap)-weighted objective without normal equations."""
     root_weights = np.sqrt(weights / weights.max())
-    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
-        weighted_design = design * root_weights[:, None]
-        weighted_response = returns * root_weights
-    if not np.isfinite(weighted_design).all() or np.any(root_weights == 0):
-        return None
-    coefficients, _, rank, singular = np.linalg.lstsq(
-        weighted_design, weighted_response, rcond=None
+    coefficients, _, rank, _ = np.linalg.lstsq(
+        design * root_weights[:, None], returns * root_weights, rcond=None
     )
-    if (
-        rank != design.shape[1]
-        or singular[-1] <= np.sqrt(np.finfo(float).eps) * singular[0]
-    ):
+    if rank != design.shape[1]:
         return None
-    with np.errstate(over="ignore", invalid="ignore"):
-        fitted = design @ coefficients
-        residuals = returns - fitted
-        # Backward error in the solve can dominate an almost-exact fit. Keep
-        # genuine tiny residuals and exact zeros through the exceptional path.
-        error = (
-            16
-            * max(design.shape)
-            * np.finfo(float).eps
-            * (singular[0] / singular[-1])
-            * max(np.max(np.abs(returns)), np.max(np.abs(fitted)))
-        )
-    if (
-        not np.isfinite(coefficients).all()
-        or not np.isfinite(residuals).all()
-        or np.any(np.abs(residuals) <= error)
-    ):
-        return None
+    residuals = returns - design @ coefficients
+    # An exactly explained ordinary return should not create specific risk.
+    tolerance = 1e-12 * float(np.max(np.abs(returns)))
+    residuals[np.abs(residuals) <= tolerance] = 0.0
     return coefficients, residuals
 
 
@@ -956,101 +722,27 @@ def _ewma_covariance(
     columns: tuple[str, ...],
 ) -> pd.DataFrame:
     weights = _ewma_weights(ages, half_life)
-    if weights.dtype != object:
-        # Center before the weighted Gram product. Only exceptional range or
-        # cancellation needs the existing exact accumulation below.
-        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
-            centered = values - np.average(values, axis=0, weights=weights)
-            weighted = centered * np.sqrt(weights[:, None])
-            gram = weighted.T @ weighted
-            absolute_products = np.abs(weighted).T @ np.abs(weighted)
-            cancellation = (absolute_products > 0) & (
-                np.abs(gram)
-                <= 8 * len(values) * np.finfo(float).eps * absolute_products
-            )
-            if diagonal_shrinkage == 1:
-                cancellation = np.diag(cancellation)
-            covariance = gram * annualization_factor
-            covariance *= 1 - diagonal_shrinkage
-            np.fill_diagonal(covariance, np.diag(gram) * annualization_factor)
-            scale = np.max(np.abs(values), axis=0)
-            spread = np.max(np.abs(centered), axis=0)
-            small = np.abs(weighted[(weighted != 0)])
-            safe_range = (
-                not np.any((weighted == 0) & (centered != 0))
-                and (not len(small) or small.min() >= np.sqrt(np.finfo(float).tiny))
-            ) and np.all(
-                np.abs(
-                    np.diag(covariance)[np.diag(gram) != 0]
-                    if diagonal_shrinkage == 1
-                    else covariance[gram != 0]
-                )
-                >= np.finfo(float).tiny
-            )
-            conditioned = np.all(
-                (scale == 0) | (spread > np.sqrt(np.finfo(float).eps) * scale)
-            )
-        if (
-            safe_range
-            and conditioned
-            and not cancellation.any()
-            and np.isfinite(covariance).all()
-        ):
-            if not _covariance_is_psd(covariance):
-                raise ValueError("factor_risk_covariance_not_psd")
-            return pd.DataFrame(covariance, index=columns, columns=columns)
-    coordinates, scale = _integer_coordinates(values.flat)
-    coordinates = np.asarray(coordinates, dtype=object).reshape(values.shape)
-    ratios = [weight.as_integer_ratio() for weight in weights]
-    weight_scale = lcm(*(denominator for _, denominator in ratios))
-    weights = np.asarray(
-        [
-            numerator * (weight_scale // denominator)
-            for numerator, denominator in ratios
-        ],
-        dtype=object,
-    )
-    total = sum(weights)
-    first = weights @ coordinates
-    weighted = coordinates * weights[:, None]
-    denominator = int(total**2 * scale**2)
-    shrinkage = Fraction(float(diagonal_shrinkage))
-    annualization = Fraction(float(annualization_factor))
-    covariance = np.empty((values.shape[1], values.shape[1]), dtype="float64")
-    try:
-        for left in range(values.shape[1]):
-            for right in range(left, values.shape[1]):
-                numerator = (
-                    total * (coordinates[:, left] @ weighted[:, right])
-                    - first[left] * first[right]
-                )
-                covariance[left, right] = covariance[right, left] = float(
-                    Fraction(int(numerator), denominator)
-                    * (1 if left == right else 1 - shrinkage)
-                    * annualization
-                )
-    except OverflowError:
-        raise ValueError("factor_risk_covariance_non_finite") from None
+    # Anchor before centering so a constant column retains exact zero variance.
+    centered = values - values[0]
+    centered -= np.average(centered, axis=0, weights=weights)
+    weighted = centered * np.sqrt(weights[:, None])
+    if diagonal_shrinkage == 1:
+        covariance = np.diag(np.sum(weighted * weighted, axis=0))
+    else:
+        covariance = weighted.T @ weighted
+        covariance = (
+            1 - diagonal_shrinkage
+        ) * covariance + diagonal_shrinkage * np.diag(np.diag(covariance))
+    covariance *= annualization_factor
     if not np.isfinite(covariance).all():
         raise ValueError("factor_risk_covariance_non_finite")
-    if not _covariance_is_psd(covariance):
-        raise ValueError("factor_risk_covariance_not_psd")
+    covariance = _validated_covariance(
+        covariance, error_prefix="factor_risk_covariance"
+    )
     return pd.DataFrame(covariance, index=columns, columns=columns)
 
 
 def _ewma_weights(ages: np.ndarray, half_life: float) -> np.ndarray:
-    relative_ages = ages - ages.min()
-    with np.errstate(over="ignore"):
-        exponents = relative_ages / half_life
-    if np.any(exponents > -np.finfo(np.float64).minexp):
-        # Keep tail mass until it has multiplied the returns or residual squares.
-        with localcontext() as context:
-            context.prec = 80
-            half = Decimal.from_float(float(half_life))
-            values = np.array(
-                [Decimal(2) ** (-Decimal(int(age)) / half) for age in relative_ages],
-                dtype=object,
-            )
-            return values / sum(values)
-    values = np.exp2(-exponents)
+    ages = np.asarray(ages, dtype="float64")
+    values = np.exp2(-(ages - ages.min()) / half_life)
     return values / values.sum()

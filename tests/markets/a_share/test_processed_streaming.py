@@ -1795,7 +1795,7 @@ def test_native_panel_persists_finite_turnover_at_share_count_boundaries(tmp_pat
         )
 
 
-def test_processed_axis_keeps_raw_dates_and_assets_before_membership_filter(tmp_path):
+def test_processed_axis_filters_unusable_dates_and_market_membership(tmp_path):
     dates = pd.bdate_range("2020-01-06", periods=3).as_unit("ns")
     source = _synthetic_interim_frames(dates)
     extra_date = dates[-1] + pd.offsets.BDay()
@@ -1819,12 +1819,8 @@ def test_processed_axis_keeps_raw_dates_and_assets_before_membership_filter(tmp_
     panel_axis = producer._processed_axis(
         session, panel_source=True, calendar=calendar, stock_master=stocks
     )
-    raw = producer._processed_axis(
-        session, panel_source=False, asset_column="source_asset_id"
-    )
-    assert panel_axis[5] == (raw[0], frozenset(raw[1].index))
-    assert extra_date in panel_axis[5][0] and extra_date not in panel_axis[0]
-    assert "999999" in panel_axis[5][1] and "999999" not in set(panel_axis[2].asset_id)
+    assert extra_date not in panel_axis[0]
+    assert "999999" not in set(panel_axis[2].asset_id)
 
 
 @pytest.mark.parametrize("calendar_state", ("unknown", "closed", "open"))

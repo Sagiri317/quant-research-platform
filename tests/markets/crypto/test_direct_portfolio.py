@@ -37,6 +37,168 @@ def _window(start, end):
     }
 
 
+@pytest.mark.parametrize("open_end", [False, True])
+def test_native_prediction_date_windows_and_precise_consumption(tmp_path, open_end):
+    from quant_research_platform.artifacts.outputs.prediction import (
+        write_prediction_outputs,
+    )
+    from tests.helpers.output_frames import _price_volume_prediction_metadata
+
+    metadata = _price_volume_prediction_metadata()
+    metadata["model_facts"]["market_id"] = "crypto"
+    metadata["model_facts"]["model"]["target_column"] = "future_mid_return_500ms"
+    metadata["model_metadata"]["label_availability_column"] = (
+        "future_mid_return_500ms_available_at"
+    )
+    metadata.update(prediction_rows=None, effective_prediction_end=None)
+    if open_end:
+        metadata["prediction_window"]["end"] = None
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                ["2014-01-03T12:00:00", "2014-01-03T23:59:59.999"], format="ISO8601"
+            ).astype("datetime64[ns]"),
+            "asset_id": "btc_usdt",
+            "prediction_score": 0.01,
+            "prediction_rank_score": 0.0,
+        }
+    )
+    path = write_prediction_outputs(
+        output_path=tmp_path / "prediction", output_chunks=[frame], metadata=metadata
+    )
+    day = TimeWindow("2014-01-03", "2014-01-03")
+    bounds = portfolio._window_bounds((("direct", day),))[0]
+    assert bounds == (
+        pd.Timestamp("2014-01-03").value,
+        pd.Timestamp("2014-01-04").value - 1,
+    )
+    selected = TimeWindow(frame.timestamp.iloc[0], frame.timestamp.iloc[-1])
+    evidence = portfolio._prediction_evidence(path, window=selected)
+    pd.testing.assert_frame_equal(
+        evidence[2], frame.drop(columns="prediction_rank_score"), check_exact=True
+    )
+    precise = TimeWindow(selected.start + pd.Timedelta(nanoseconds=1), selected.end)
+    assert portfolio._window_bounds((("direct", precise),))[0] == (
+        frame.timestamp.iloc[0].value + 1,
+        frame.timestamp.iloc[-1].value,
+    )
+    assert portfolio._prediction_evidence(path, window=precise)[
+        2
+    ].timestamp.tolist() == [frame.timestamp.iloc[-1]]
+    if open_end:
+        with pytest.raises(
+            ValueError, match="crypto_prediction_window_coverage_invalid"
+        ):
+            portfolio._prediction_evidence(path, window=day)
+    else:
+        assert len(portfolio._prediction_evidence(path, window=day)[2]) == 2
+
+    context = frame[["timestamp", "asset_id"]].copy()
+    for column in portfolio.HFT_EXECUTION_CONTEXT_COLUMNS:
+        context[column] = column
+    context_path = tmp_path / "context"
+    write_dataset(
+        context_path,
+        context,
+        spec=DataSpec(
+            data_id="clock_context",
+            frequency="tick",
+            grain="asset_timestamp",
+            column_roles={
+                "timestamp": "timestamp",
+                "asset_id": "key",
+                **{name: "context" for name in portfolio.HFT_EXECUTION_CONTEXT_COLUMNS},
+            },
+            primary_key=("timestamp", "asset_id"),
+            partition_columns=("year",),
+        ),
+    )
+    decisions = list(
+        portfolio._prediction_rows(
+            inputs=context_path,
+            evidence=evidence,
+            window=selected,
+            fold_id="direct",
+            asset_id="btc_usdt",
+        )
+    )
+    assert [row["timestamp_ms"] for row in decisions] == [
+        stamp.value // 1_000_000 for stamp in frame.timestamp
+    ]
+    # The exact input selector and date request remain an intersection.
+    rows = list(
+        portfolio._fixed_maker_rows(
+            {
+                "path": str(context_path),
+                "time_window": {
+                    "start": frame.timestamp.iloc[-1].isoformat(),
+                    "end": frame.timestamp.iloc[-1].isoformat(),
+                },
+            },
+            None,
+            day,
+            "btc_usdt",
+            "fixed",
+        )
+    )
+    assert [row["timestamp_ms"] for row in rows] == [decisions[-1]["timestamp_ms"]]
+
+
+@pytest.mark.parametrize("consumer", ["fixed", "prediction", "calibration"])
+@pytest.mark.parametrize("offset_ns", [1, 999_999])
+def test_decision_consumers_reject_submillisecond_times(tmp_path, consumer, offset_ns):
+    stamp = pd.Timestamp("1970-01-01T00:00:08.600") + pd.Timedelta(
+        nanoseconds=offset_ns
+    )
+    context = _inputs(tmp_path)
+    from quant_research_platform.storage.datasets.reading import read_dataset
+
+    frame = read_dataset(context).iloc[[-3]].copy()
+    frame["timestamp"] = stamp
+    path = tmp_path / "submillisecond"
+    spec = portfolio.open_dataset_session(context).spec
+    write_dataset(
+        path,
+        frame,
+        spec=DataSpec(
+            data_id="submillisecond",
+            frequency="tick",
+            grain="asset_timestamp",
+            column_roles=spec["column_roles"],
+            primary_key=("timestamp", "asset_id"),
+            partition_columns=("year",),
+        ),
+    )
+    window = TimeWindow(stamp, stamp)
+    if consumer == "fixed":
+        rows = portfolio._fixed_maker_rows(path, None, window, "btc_usdt", "direct")
+    elif consumer == "prediction":
+        rows = portfolio._prediction_rows(
+            inputs=path,
+            evidence=(
+                {"model_algorithm": "linear_regression"},
+                {"model": {"target_column": "future_mid_return_500ms"}},
+                frame[["timestamp", "asset_id"]].assign(prediction_score=0.01),
+            ),
+            window=window,
+            fold_id="direct",
+            asset_id="btc_usdt",
+        )
+    else:
+        row = next(
+            frame.assign(
+                prediction_score=0.01,
+                label=0.0,
+                label_available_at=stamp + pd.Timedelta(milliseconds=500),
+            ).itertuples(index=False)
+        )
+        rows = portfolio._paired_validation(([row], [row]), asset_id="btc_usdt")
+    with pytest.raises(
+        ValueError, match="crypto_execution_decision_time_precision_invalid"
+    ):
+        list(rows)
+
+
 def _inputs(tmp_path, *, ineligible_at=None, distinct_domains=False):
     stamps = [*range(0, 1100, 100), 2100, 2200, 8600, 8800, 9000]
     times = pd.to_datetime(stamps, unit="ms")
@@ -202,7 +364,7 @@ def explicit_price_models(tmp_path):
     return _explicit_models(tmp_path, roles=("price",))
 
 
-def _market(monkeypatch):
+def _market(monkeypatch, *, offset_ms=0):
     class Coverage(dict):
         def covering(self, *_):
             return tuple(self)
@@ -210,11 +372,10 @@ def _market(monkeypatch):
         def intervals(self):
             return iter(self.values())
 
+    bounds = (offset_ms * 1_000_000, (offset_ms + 10_000) * 1_000_000)
     source = SimpleNamespace(
         market_metadata=lambda *_: {"price_unit": "0.1", "snapshot_limit": 10},
-        observation_coverage=lambda **_: Coverage(
-            {"trade-connection-1": (0, 10_000_000_000)}
-        ),
+        observation_coverage=lambda **_: Coverage({"trade-connection-1": bounds}),
         funding_roots=lambda *_args, **_kwargs: (),
     )
     monkeypatch.setattr(
@@ -223,22 +384,24 @@ def _market(monkeypatch):
 
     def books(*_args, stats=None, **_kwargs):
         if stats is not None:
-            stats.coverage_segments["s1"] = (0, 10_000_000_000)
-        yield from (_state(t) for t in (2100, 2150, 2650, 2700, 8600, 8800, 9000))
+            stats.coverage_segments["s1"] = bounds
+        yield from (
+            _state(t + offset_ms) for t in (2100, 2150, 2650, 2700, 8600, 8800, 9000)
+        )
 
     monkeypatch.setattr(portfolio, "iter_reconstructed_depth", books)
     monkeypatch.setattr(
         portfolio,
         "iter_agg_trades",
         lambda *_args, **_kwargs: iter(
-            _trade(t, price="99.5", quantity="3", maker_buyer=True)
+            _trade(t + offset_ms, price="99.5", quantity="3", maker_buyer=True)
             for t in (2180, 2400, 8700, 8900)
         ),
     )
     funding = SimpleNamespace(
-        coverage=((0, 10_000_000_000),),
+        coverage=(bounds,),
         events=(),
-        forecasts=(FundingForecast(0, 11_000_000_000, ()),),
+        forecasts=(FundingForecast(bounds[0], bounds[1] + 1_000_000_000, ()),),
         settlement_qualification=(),
     )
     monkeypatch.setattr(
@@ -656,6 +819,121 @@ def _independent_maker_case(
 @pytest.fixture
 def independent_maker(tmp_path, monkeypatch):
     return _independent_maker_case(tmp_path, monkeypatch)
+
+
+@pytest.mark.parametrize("open_predictions", [False, True])
+def test_public_calibration_date_and_precise_windows_roundtrip(
+    tmp_path, monkeypatch, independent_maker, open_predictions
+):
+    from quant_research_platform.storage.datasets.reading import read_dataset
+
+    config, _ = independent_maker
+    item = config["models"][0]
+    original = Path(item["inputs"]["path"])
+    session = portfolio.open_dataset_session(original)
+    frame = read_dataset(original)
+    offset = pd.Timedelta(days=1, hours=12)
+    later = frame.timestamp.ge(pd.Timestamp(2100, unit="ms"))
+    clocks = ["timestamp", *(name for name in frame if name.endswith("_available_at"))]
+    for name in clocks:
+        frame[name] = frame[name].astype("datetime64[ns]")
+        frame.loc[later, name] += offset
+    day_start = pd.Timestamp("1970-01-02")
+    day_end = pd.Timestamp("1970-01-03") - pd.Timedelta(nanoseconds=1)
+    # Open predictions reach the actual day endpoint; this immature row cannot
+    # become a calibration quote, including when its decision is submillisecond.
+    tail = frame.iloc[[-1]].copy()
+    tail["timestamp"] = day_end
+    for name in clocks[1:]:
+        tail[name] = day_end + pd.Timedelta(milliseconds=500)
+    context = tmp_path / "date-context"
+    write_dataset(
+        context,
+        pd.concat([frame, tail], ignore_index=True),
+        spec=DataSpec(
+            data_id="date_context",
+            frequency="tick",
+            grain="asset_timestamp",
+            column_roles=session.spec["column_roles"],
+            primary_key=("timestamp", "asset_id"),
+            partition_columns=("year",),
+        ),
+    )
+    item["inputs"]["path"] = str(context)
+    day = {"start": "1970-01-02", "end": "1970-01-02"}
+    precise = {"start": day_start.isoformat(), "end": day_end.isoformat()}
+    for role in ("price", "proxy"):
+        item[role + "_predictions"] = str(
+            predict(
+                {
+                    "model": str(tmp_path / ("unused-" + role + "-model")),
+                    "inputs": str(context),
+                    "prediction_window": {
+                        **day,
+                        "end": None if open_predictions else day["end"],
+                    },
+                    "output": str(tmp_path / (role + "-day-predictions")),
+                }
+            )
+        )
+    _market(monkeypatch, offset_ms=offset.value // 1_000_000)
+    item["cutoff"] = day_end.isoformat()
+    outputs = []
+    for index, window in enumerate((day, precise)):
+        item["window"] = window
+        config["output"] = str(tmp_path / f"date-calibration-{index}")
+        artifact = read_statistics_artifact(
+            portfolio.calibrate_maker(config),
+            validate_tables=portfolio.validate_maker_calibration,
+        )
+        assert artifact.metadata["window"] == precise
+        assert artifact.metadata["models"][0]["window"] == window
+        assert artifact.metadata["models"][0]["cutoff"] == day_end.isoformat()
+        with artifact.table("crypto_maker_samples.parquet") as samples:
+            assert len(samples) == 10
+            assert samples.decision_at.min() > day_start + pd.Timedelta(hours=12)
+            assert samples.label_available_at.max() < day_end
+            outputs.append(samples)
+        with artifact.table("crypto_maker_calibration.parquet") as summary:
+            assert summary.sample_count.tolist() == [5, 5]
+    continuous = ["price_prediction", "observed_return", "forecast_error"]
+    pd.testing.assert_frame_equal(outputs[0].isna(), outputs[1].isna())
+    pd.testing.assert_frame_equal(
+        outputs[0].drop(columns=continuous),
+        outputs[1].drop(columns=continuous),
+        check_exact=True,
+    )
+    pd.testing.assert_frame_equal(
+        outputs[0][continuous], outputs[1][continuous], rtol=2e-12, atol=1e-14
+    )
+    item["window"] = day
+    for cutoff in ("1970-01-02", "1970-01-02T12:00:00"):
+        item["cutoff"] = cutoff
+        config["output"] = str(tmp_path / "early-cutoff")
+        with pytest.raises(ValueError, match="crypto_calibration_window_invalid"):
+            portfolio.calibrate_maker(config)
+        assert not Path(config["output"]).exists()
+
+
+def test_calibration_chronology_defaults_keep_intraday_contract(independent_maker):
+    config, _ = independent_maker
+    config["models"][0].pop("window")
+    config["models"][0].pop("cutoff")
+    config["chronology"] = {
+        "folds": [
+            {
+                "fold_id": "observed",
+                "train": {"start": "1970-01-01", "end": "1970-01-01"},
+                "validation": {"start": "1970-01-02", "end": "1970-01-02"},
+            }
+        ],
+        "test": {"start": "1970-01-03", "end": "1970-01-03"},
+    }
+    with pytest.raises(
+        ValueError, match="crypto_research_plan_requires_intraday_window"
+    ):
+        portfolio.calibrate_maker(config)
+    assert not Path(config["output"]).exists()
 
 
 @pytest.mark.parametrize("maker_buyer", (False, True))

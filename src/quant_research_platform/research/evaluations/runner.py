@@ -26,7 +26,10 @@ from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.ids import validate_input_market
 from quant_research_platform.contracts.json_codec import _strict_config
 from quant_research_platform.contracts.signals import SignalSpec
-from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.contracts.time import (
+    TimeWindow,
+    time_window_timestamp_interval,
+)
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.evaluations.engine import (
@@ -38,6 +41,7 @@ from quant_research_platform.research.features.transforms import (
 from quant_research_platform.storage.atomic import reject_if_exists
 from quant_research_platform.storage.datasets.reading import (
     _dataset_input_options,
+    _validated_years,
     iter_dataset_chunks,
     open_dataset_session,
 )
@@ -65,6 +69,28 @@ def _input_roles(declared, spec, selected_columns):
             raise ValueError("evaluation_signal_role_mismatch")
     if any(roles.get(label) != "label" for label in spec.label_columns):
         raise ValueError("evaluation_label_role_mismatch")
+
+
+def _evaluation_input_options(source, window):
+    """Intersect input and operation windows before discovering native members."""
+    options = _dataset_input_options(source)
+    selected_window = options.get("time_window")
+    options["time_window"] = window
+    if selected_window is not None:
+        bounds = [
+            time_window_timestamp_interval(item) for item in (window, selected_window)
+        ]
+        start = max(pd.Timestamp(lower) for lower, _, _ in bounds)
+        end = min(
+            pd.Timestamp(upper) - (pd.Timedelta(0) if closed else pd.Timedelta(1, "ns"))
+            for _, upper, closed in bounds
+        )
+        if start > end:
+            _validated_years(options.get("years"))
+            options["years"] = ()
+        else:
+            options["time_window"] = TimeWindow(start, end)
+    return options
 
 
 def evaluate(config):
@@ -104,7 +130,7 @@ def evaluate(config):
         if isinstance(source, Mapping):
             raise ValueError("duplicate_input_spec")
         source = {"path": source, "spec": config["input_spec"]}
-    options = _dataset_input_options(source)
+    options = _evaluation_input_options(source, window)
     selected_columns = options.get("columns")
     options.setdefault("columns", ("timestamp", "asset_id"))
     session = open_dataset_session(**options)
@@ -252,7 +278,7 @@ def evaluate(config):
         # Acquire the input in its consuming generator. A rejected destination or
         # failed initialization cannot leave an unstarted input session open.
         with closing_iterator(
-            iter_dataset_chunks(session.filtered_view(window).projected_view(columns))
+            iter_dataset_chunks(session.projected_view(columns))
         ) as source:
             for frame in source:
                 if seen is not None and seen.add_table(
@@ -466,7 +492,7 @@ def _resolved_strata(config, *, spec, declared):
     return resolved, tuple(columns)
 
 
-def _scoped_evaluation_frames(sources, *, window):
+def _scoped_evaluation_frames(sources):
     from contextlib import ExitStack
     from dataclasses import replace
 
@@ -487,10 +513,8 @@ def _scoped_evaluation_frames(sources, *, window):
         grouped[key]["allow_infinite"].extend(source.get("classification_columns", ()))
 
     def scan(entry):
-        session = (
-            entry["session"]
-            .filtered_view(window)
-            .projected_view(tuple(dict.fromkeys(entry["columns"])))
+        session = entry["session"].projected_view(
+            tuple(dict.fromkeys(entry["columns"]))
         )
         session = replace(
             session,
@@ -592,7 +616,7 @@ def _scoped_evaluate(config, *, spec, session, source, columns, cutoff, window, 
             or len(set(signals)) != len(signals)
         ):
             raise ValueError("evaluation_comparison_signals_invalid")
-        options = _dataset_input_options(peer["inputs"])
+        options = _evaluation_input_options(peer["inputs"], window)
         selected = options.get("columns")
         options.setdefault("columns", ("timestamp", "asset_id"))
         peer_session = open_dataset_session(**options)
@@ -668,7 +692,7 @@ def _scoped_evaluate(config, *, spec, session, source, columns, cutoff, window, 
         common_rule="mask_only_no_retransform",
     )
     with build_scoped_evaluation_result(
-        _scoped_evaluation_frames(sources, window=window),
+        _scoped_evaluation_frames(sources),
         spec=spec,
         sources=sources,
         cutoff=cutoff,

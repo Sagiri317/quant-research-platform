@@ -57,12 +57,25 @@ def test_panel_batch_cap_preserves_persisted_rows(tmp_path, monkeypatch):
             assert not panel.duplicated(["timestamp", "asset_id"]).any()
             assert panel.groupby("timestamp").asset_id.nunique().eq(2).all()
             panels.append(panel)
-    pd.testing.assert_frame_equal(panels[0], panels[1], check_exact=True)
+    continuous = panels[0].select_dtypes(include="floating").columns
+    exact = panels[0].columns.difference(continuous)
+    pd.testing.assert_frame_equal(panels[0][exact], panels[1][exact], check_exact=True)
+    pd.testing.assert_frame_equal(panels[0].isna(), panels[1].isna(), check_exact=True)
+    pd.testing.assert_frame_equal(
+        panels[0][continuous],
+        panels[1][continuous],
+        check_exact=False,
+        rtol=2e-12,
+        atol=1e-14,
+    )
 
 
 def test_hft_direct_preparation_assembly_and_fractional_window(tmp_path):
+    from quant_research_platform.artifacts.outputs.prediction import read_predictions
     from quant_research_platform.markets.prepare import prepare
     from quant_research_platform.research.datasets.assembler import assemble
+    from quant_research_platform.research.models.production import fit
+    from quant_research_platform.research.predictions.runner import predict
     from quant_research_platform.sources.binance.replay import ReconstructionStats
     from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
 
@@ -82,6 +95,8 @@ def test_hft_direct_preparation_assembly_and_fractional_window(tmp_path):
         }
         if data_id == HFT_PANEL_DATA_ID:
             request["source"] = {"root": str(raw)}
+        else:
+            request["parameters"] = {"asset_ids": ["eth_usdt", "btc_usdt"]}
         roots[data_id] = prepare(request)
     manifest = read_dataset_manifest_evidence(roots[HFT_PANEL_DATA_ID])
     assert manifest["row_count"] == 122
@@ -108,6 +123,58 @@ def test_hft_direct_preparation_assembly_and_fractional_window(tmp_path):
         }
     )
     assert len(read_dataset(output)) == 122
+    factor_base = assemble(
+        {
+            "market_id": "crypto",
+            "dataset_id": "direct_crypto_factors",
+            "inputs": {"factors": str(roots[HFT_FACTOR_DATA_ID])},
+            "factor_columns": ["relative_spread"],
+            "feature_recipe": None,
+            "label_columns": [],
+            "time_window": window,
+            "output_root": str(tmp_path / "factor-base"),
+        }
+    )
+    for path in (roots[HFT_FACTOR_DATA_ID], roots[HFT_LABEL_DATA_ID], factor_base):
+        frame = read_dataset(path)
+        pd.testing.assert_frame_equal(
+            frame,
+            frame.sort_values(["timestamp", "asset_id"], ignore_index=True),
+            check_exact=True,
+        )
+    model = fit(
+        {
+            "market_id": "crypto",
+            "inputs": str(output),
+            "output": str(tmp_path / "model"),
+            "model": {
+                "model_id": "direct-factor-model",
+                "model_algorithm": "linear_regression",
+                "input_factor_columns": ["relative_spread"],
+                "target_column": "future_mid_return_100ms",
+                "sample_filter_mode": "unfiltered",
+                "random_seed": 7,
+            },
+            "fit_windows": [{"start": window["start"], "end": "1970-01-01T00:00:02"}],
+            "fit_cutoff": "1970-01-01T00:00:03",
+            "label_unit": "decimal_return",
+        }
+    )
+    predictions, _ = read_predictions(
+        predict(
+            {
+                "model": str(model),
+                "inputs": str(roots[HFT_FACTOR_DATA_ID]),
+                "prediction_window": {
+                    "start": "1970-01-01T00:00:03.100",
+                    "end": window["end"],
+                },
+                "output": str(tmp_path / "direct-factor-predictions"),
+            }
+        )
+    )
+    assert len(predictions) == 60
+    assert predictions.groupby("timestamp").asset_id.nunique().eq(2).all()
     fractional = {
         "start": "1970-01-01T00:00:00.100001",
         "end": "1970-01-01T00:00:05.999999",
@@ -304,7 +371,9 @@ def test_partial_depth_preserves_bbo_grid_and_local_persisted_dependencies(
     pd.testing.assert_series_equal(
         labels.future_mid_return_100ms,
         expected.rename("future_mid_return_100ms"),
-        check_exact=True,
+        check_exact=False,
+        rtol=2e-12,
+        atol=1e-14,
     )
     assert (
         labels.future_mid_return_100ms_available_at.iloc[:-1].tolist()

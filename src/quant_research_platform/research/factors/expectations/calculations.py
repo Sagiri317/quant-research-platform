@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from fractions import Fraction
 from functools import partial
 from statistics import median
 
@@ -93,37 +92,14 @@ def _prepare_expectations(
         lambda value: _next_session(sessions, value)
     )
     forecast = forecast.dropna(subset=["available_at"])
-    # A report whose institution is disputed cannot be counted as an additional
-    # institution, nor can it disappear and revive an old consensus.
-    unresolved = forecast.loc[forecast["institution_id"].isna()].copy()
-    forecast = (
-        forecast.loc[forecast["institution_id"].notna()]
-        .groupby(
-            [
-                "asset_id",
-                "forecast_end_date",
-                "institution_id",
-                "declare_date",
-                "available_at",
-            ],
-            as_index=False,
-            sort=False,
-        )
-        .agg(
-            forecast_eps=("forecast_eps", _finite_median),
-            report_ids=(
-                "report_id",
-                lambda values: tuple(sorted(set(values.dropna()))),
-            ),
-        )
+    # Preserve each report until its latest visible revision is known. Sources
+    # without report IDs still contribute independent rows to institution medians;
+    # their positional keys are internal only and never infer report identity.
+    forecast["report_key"] = (
+        forecast["report_id"]
+        .astype(object)
+        .where(forecast["report_id"].notna(), np.arange(len(forecast)))
     )
-    if not unresolved.empty:
-        unresolved["forecast_eps"] = np.nan
-        unresolved["report_ids"] = unresolved["report_id"].map(lambda value: (value,))
-        forecast = pd.concat(
-            [forecast, unresolved.loc[:, forecast.columns].drop_duplicates()],
-            ignore_index=True,
-        )
     forecast = forecast.sort_values(
         ["asset_id", "available_at", "declare_date"], kind="mergesort"
     )
@@ -189,19 +165,7 @@ def _expectations_for_observations(
         for position in positions:
             timestamp = observation_times[position]
             while event is not None and event.available_at <= timestamp:
-                if len(event.report_ids):
-                    # A later observation of this actual provider report replaces
-                    # its previous known or unresolved institutional attribution.
-                    for key, prior in tuple(active.items()):
-                        if prior.forecast_end_date == event.forecast_end_date and set(
-                            prior.report_ids
-                        ).intersection(event.report_ids):
-                            del active[key]
-                key = (
-                    (event.forecast_end_date, None, event.report_ids[0])
-                    if pd.isna(event.institution_id)
-                    else (event.forecast_end_date, event.institution_id)
-                )
+                key = (event.forecast_end_date, event.report_key)
                 active[key] = event
                 event = next(events, None)
             oldest = timestamp - pd.Timedelta(days=freshness_days)
@@ -239,8 +203,22 @@ def _features_for_observation(
         **{factor: float("nan") for factor in selected_columns},
     }
     valid_price = pd.notna(close) and close > 0.0
-    by_period = {}
+    # Report attribution can change independently of other reports from its old
+    # institution. Reduce only after applying report revisions and freshness.
+    latest = {}
     for event in forecast:
+        institution = None if pd.isna(event.institution_id) else event.institution_id
+        key = (event.forecast_end_date, institution)
+        reports = latest.get(key)
+        if reports is None or event.declare_date > reports[0].declare_date:
+            latest[key] = [event]
+        elif event.declare_date == reports[0].declare_date:
+            reports.append(event)
+    by_period = {}
+    for reports in latest.values():
+        event = reports[0]._replace(
+            forecast_eps=_finite_median([report.forecast_eps for report in reports])
+        )
         by_period.setdefault(event.forecast_end_date, []).append(event)
     if not by_period:
         return base
@@ -266,7 +244,7 @@ def _features_for_observation(
             center = median(eps_values)
             if "forward_earnings_yield_fy1" in selected_columns and valid_price:
                 base["forward_earnings_yield_fy1"] = _finite_float(
-                    center / Fraction(float(close))
+                    center / float(close)
                 )
             if any(
                 column in selected_columns
@@ -283,7 +261,7 @@ def _features_for_observation(
                     and valid_price
                 ):
                     base["forecast_dispersion_price_scaled_fy1"] = _finite_float(
-                        mad / Fraction(float(close))
+                        mad / float(close)
                     )
         if "log_analyst_coverage" in selected_columns:
             base["log_analyst_coverage"] = float(np.log(len(eps_values)))
@@ -311,17 +289,15 @@ def _features_for_observation(
         )
         if len(fy2) >= minimum_institutions:
             base["forward_earnings_yield_fy2"] = _finite_float(
-                _finite_median(fy2) / Fraction(float(close))
+                _finite_median(fy2) / float(close)
             )
     return base
 
 
 def _finite_float(value):
     """Keep an unrepresentable derived value local to its own factor."""
-    try:
-        return float(value)
-    except OverflowError:
-        return np.nan
+    value = float(value)
+    return value if np.isfinite(value) else np.nan
 
 
 def _local_finite_numeric(values):
@@ -331,13 +307,12 @@ def _local_finite_numeric(values):
     return numeric.where(np.isfinite(numeric))
 
 
-def _finite_median(values) -> Fraction | float:
+def _finite_median(values) -> float:
     # Unknown reports on the same institutional declaration day make its median
     # unavailable; later known declarations can resolve that local barrier.
     if any(pd.isna(value) for value in values):
         return np.nan
-    # Exact dyadic values preserve even centers without overflow or underflow.
-    return median(Fraction(value) for value in values)
+    return float(np.median(values))
 
 
 def _next_session(

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import datetime
 from typing import Final
 
 import pandas as pd
@@ -30,18 +30,11 @@ class ExperimentFold:
             isinstance(window, TimeWindow) for window in (self.train, self.validation)
         ):
             raise TypeError("experiment_fold_window_required")
-        if (
-            len(
-                {
-                    isinstance(bound, datetime)
-                    for window in (self.train, self.validation)
-                    for bound in (window.start, window.end)
-                }
-            )
-            != 1
+        if isinstance(self.train.start, datetime) != isinstance(
+            self.validation.start, datetime
         ):
             raise ValueError("experiment_time_kind_mismatch")
-        if not _strictly_before(self.train.end, self.validation.start):
+        if self.train.end >= self.validation.start:
             raise ValueError("experiment_fold_windows_overlap")
 
 
@@ -150,13 +143,3 @@ def training_availability_columns(label_column: str) -> tuple[str, ...]:
     ):
         return (f"{label_column}_available_at",)
     return ("label_available_at",)
-
-
-def _strictly_before(left: date | datetime, right: date | datetime) -> bool:
-    left_value = (
-        left if isinstance(left, datetime) else datetime.combine(left, time.min)
-    )
-    right_value = (
-        right if isinstance(right, datetime) else datetime.combine(right, time.min)
-    )
-    return left_value < right_value

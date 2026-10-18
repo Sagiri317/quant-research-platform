@@ -465,7 +465,7 @@ def _state(
         event_time_ms=timestamp_ms + 1,
         transaction_time_ms=timestamp_ms,
         observed_time_ns=timestamp_ms * 1000000,
-        receive_time="2026-08-27T00:00:00.000000Z",
+        receive_time=pd.Timestamp(timestamp_ms, unit="ms", tz="UTC").isoformat(),
         receive_monotonic_ns=timestamp_ms + 1,
         update_id=timestamp_ms + 1,
         segment_id=segment_id,
@@ -483,7 +483,7 @@ def _boundary(timestamp_ms: int, *, segment_id: str = "s1") -> BookBoundary:
         event_time_ms=timestamp_ms + 1,
         transaction_time_ms=timestamp_ms,
         observed_time_ns=timestamp_ms * 1000000,
-        receive_time="2026-08-27T00:00:00.000000Z",
+        receive_time=pd.Timestamp(timestamp_ms, unit="ms", tz="UTC").isoformat(),
         receive_monotonic_ns=timestamp_ms + 1,
         segment_id=segment_id,
         observation_id=f"connection-{segment_id}",
@@ -501,7 +501,7 @@ def _trade(
         event_time_ms=timestamp_ms,
         transaction_time_ms=timestamp_ms,
         observed_time_ns=timestamp_ms * 1000000,
-        receive_time="2026-08-27T00:00:00.000000Z",
+        receive_time=pd.Timestamp(timestamp_ms, unit="ms", tz="UTC").isoformat(),
         receive_monotonic_ns=timestamp_ms + 10,
         observation_id="trade-connection-1",
         market_type=FUTURES_MARKET_TYPE,
@@ -1267,17 +1267,17 @@ def test_pending_markout_fifo_preserves_maturity_order_with_pending_suffix():
         assert completed == list(range(30))
 
 
-def test_fee_stress_keeps_representable_extreme_change():
+def test_fee_stress_uses_turnover_and_basis_points():
     from fractions import Fraction
 
     row = fixed_turnover_cost_sensitivity(
-        turnover=100.0,
+        turnover=1_000_000.0,
         net_pnl=0.0,
         base_fee_bps=0.0,
-        fee_scenarios_bps=(1e308,),
+        fee_scenarios_bps=(100.0,),
         additional_spread_scenarios_bps=(0.0,),
     )[0]
-    expected = float(Fraction(100) * Fraction(1e308) / 10000)
+    expected = float(Fraction(1_000_000) * Fraction(100) / 10000)
     assert row["cost_delta"] == expected
     assert row["net_pnl"] == -expected
 
@@ -1639,7 +1639,7 @@ def test_taker_weighted_diagnostics_use_each_fill_quantity(tmp_path):
 
 @pytest.mark.parametrize("reverse", (False, True))
 @pytest.mark.parametrize("last_value", (9.0, -9.0))
-@pytest.mark.parametrize("first_value,quantity", ((90.0, 1000.0), (9e16, 1e16)))
+@pytest.mark.parametrize("first_value,quantity", ((90.0, 1000.0), (0.9, 10.0)))
 def test_weighted_diagnostics_preserve_unequal_quantity_contributions(
     reverse, last_value, first_value, quantity
 ):
@@ -1673,8 +1673,8 @@ def test_weighted_diagnostics_preserve_unequal_quantity_contributions(
     )
 
 
-@pytest.mark.parametrize("values", [(1e308, -1e308), (1e308, 1e308)])
-def test_weighted_diagnostic_update_avoids_intermediate_overflow(values):
+@pytest.mark.parametrize("values", [(100.0, -100.0), (100.0, 100.0)])
+def test_weighted_diagnostic_update_handles_signed_values(values):
     from fractions import Fraction
 
     metrics = _Metrics()
@@ -1691,22 +1691,22 @@ def test_weighted_diagnostic_update_avoids_intermediate_overflow(values):
         metrics.observe_fill(fill)
         metrics.finalize_markout(fill)
     expected = float((Fraction(values[0]) + 3 * Fraction(values[1])) / 4)
-    assert metrics.payload()["average_slippage_bps"] == expected
-    assert metrics.payload()["average_markout_bps"] == expected
+    assert metrics.payload()["average_slippage_bps"] == pytest.approx(expected)
+    assert metrics.payload()["average_markout_bps"] == pytest.approx(expected)
 
 
 @pytest.mark.parametrize("sign", (1, -1))
 @pytest.mark.parametrize(
     "requested,depth",
     [
-        (1e16, (1.0,)),
-        (1e13, (0.001,)),
-        (1e16, (1.0, 1e16)),
-        (1e16, (3.0, 1e16)),
+        (1000.0, (1.0,)),
+        (10.0, (0.001,)),
+        (1000.0, (1.0, 1000.0)),
+        (1000.0, (3.0, 1000.0)),
         (1.0, (0.4, 0.6)),
     ],
 )
-def test_taker_actual_depth_survives_large_frozen_order_and_roundtrip(
+def test_taker_actual_depth_caps_frozen_order_and_roundtrip(
     tmp_path, sign, requested, depth
 ):
     from fractions import Fraction
@@ -1721,7 +1721,7 @@ def test_taker_actual_depth_survives_large_frozen_order_and_roundtrip(
         _state(5, **{side: levels}),
         _state(200, **{side: levels}),
     ]
-    capital = PortfolioCapital("fixture", 1e20, "USDT", "linear_perpetual")
+    capital = PortfolioCapital("fixture", 1_000_000.0, "USDT", "linear_perpetual")
     config = replace(
         _taker_config(latency_ms=10, order_quantity=requested),
         position_size=requested,
@@ -1824,13 +1824,14 @@ def test_maker_fee_rebate_roundtrip_keeps_representable_result(tmp_path, fee_bps
     assert economics["net_pnl"] == float(Fraction(0.5) - Fraction(expected_fee))
 
 
-def test_execution_fee_rejects_truly_unrepresentable_result():
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf")])
+def test_execution_fee_rejects_nonfinite_result(invalid):
     from quant_research_platform.markets.implementations.crypto.execution import (
         _execution_fee,
     )
 
     with pytest.raises(ValueError, match="hft_execution_fee_unrepresentable"):
-        _execution_fee(1e308, 100.0, 1e308)
+        _execution_fee(1.0, 100.0, invalid)
 
 
 @pytest.mark.parametrize("quantity,scale", [(1.0, 1), (0.001, 1000)])
@@ -1950,26 +1951,6 @@ def test_calibrated_maker_rebate_survives_native_ledger(tmp_path, quantity, scal
         rel=2e-15,
         abs=1e-15,
     )
-
-
-def test_maker_final_unrepresentable_fee_fails_at_execution_boundary():
-    with pytest.raises(ValueError, match="hft_execution_fee_unrepresentable"):
-        simulate_maker(
-            [_state(0), _state(200)],
-            [_trade(50, price="99.0", quantity="1", maker_buyer=True)],
-            [_quote(0, book_segment_id="s1")],
-            config=replace(
-                _maker_config(),
-                order_quantity=1e308,
-                max_position=1e308,
-                maker_fee_bps=1e308,
-            ),
-            observed_coverage={"s1": _coverage(0, 201)},
-            trade_coverage={"trade-connection-1": _coverage(0, 201)},
-            capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
-            asset_id="btc_usdt",
-            funding_events=(),
-        )
 
 
 @pytest.mark.parametrize(

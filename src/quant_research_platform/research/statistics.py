@@ -3,11 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from fractions import Fraction
-from functools import cmp_to_key
 from itertools import combinations
-from math import comb, e, lcm
-from statistics import mean as _mean
+from math import comb, e
 from typing import Literal
 
 import numpy as np
@@ -26,7 +23,6 @@ from quant_research_platform.contracts.validation import (
     strict_real_numeric_series,
     strict_timestamp_series,
 )
-from quant_research_platform.research.features.transforms import _integer_coordinates
 
 
 @dataclass(frozen=True)
@@ -186,7 +182,7 @@ def hac_mean(
     fit = OLS(normalized, np.ones((len(data), 1))).fit(
         cov_type="HAC", cov_kwds={"maxlags": max_lags}
     )
-    mean = float(_mean(data))
+    mean = float(np.mean(data))
     with np.errstate(over="ignore", under="ignore"):
         standard_error = float(np.ldexp(fit.bse[0], int(exponent)))
     t_statistic = mean / standard_error if standard_error > 0 else np.nan
@@ -614,6 +610,8 @@ def fama_macbeth_period(
         or (len(set(factor_columns)) != len(factor_columns))
     ):
         raise ValueError("fama_macbeth_columns_invalid")
+    if "intercept" in factor_columns:
+        raise ValueError("fama_macbeth_intercept_factor_reserved")
     timestamps = strict_timestamp_series(
         frame["timestamp"], error="fama_macbeth_timestamp_invalid"
     )
@@ -640,176 +638,60 @@ def fama_macbeth_period(
     ):
         raise ValueError("fama_macbeth_period_insufficient")
     values = numeric.loc[:, factor_columns].to_numpy(dtype="float64")
-    _, exponents = np.frexp(np.max(np.abs(values), axis=0))
-    scaled = np.ldexp(values, -exponents)
-    differences = scaled - scaled[0]
-    offsets = np.mean(differences, axis=0)
-    centered = differences - offsets
+    origins = values[0]
+    offsets = np.mean(values - origins, axis=0)
+    centered = values - origins - offsets
     scales = np.max(np.abs(centered), axis=0)
-    x = add_constant(
-        pd.DataFrame(
-            centered / np.where(scales > 0, scales, 1.0),
-            index=numeric.index,
-            columns=factor_columns,
-        ),
-        has_constant="add",
-    )
-    if np.linalg.matrix_rank(x.to_numpy(dtype="float64")) != x.shape[1]:
+    x = add_constant(centered / np.where(scales > 0, scales, 1.0), has_constant="add")
+    if np.linalg.matrix_rank(x) != x.shape[1]:
         raise ValueError("fama_macbeth_period_insufficient")
-    weights = None if weight_column is None else numeric[weight_column]
-    white_residuals = None
-    try:
-        if len(factor_columns) == 1:
-            left, left_scale = _integer_coordinates(values[:, 0])
-            right, right_scale = _integer_coordinates(y)
-            w = (
-                np.ones(len(numeric), dtype=object)
-                if weights is None
-                else np.asarray(_integer_coordinates(weights)[0], dtype=object)
-            )
-            left, right = (
-                np.asarray(left, dtype=object),
-                np.asarray(right, dtype=object),
-            )
-            total, sx, sy = int(sum(w)), int(w @ left), int(w @ right)
-            xx, xy = int(left @ (w * left)), int(left @ (w * right))
-            slope = Fraction(total * xy - sx * sy, total * xx - sx * sx) * Fraction(
-                left_scale, right_scale
-            )
-            intercept = (
-                Fraction(sy, right_scale) - slope * Fraction(sx, left_scale)
-            ) / total
-            coefficients = pd.Series([float(intercept), float(slope)], index=x.columns)
-            # Reuse exact residuals; diagnostic normalization cannot overflow.
-            denominator = lcm(
-                right_scale, intercept.denominator, slope.denominator * left_scale
-            )
-            fitted = intercept.numerator * (
-                denominator // intercept.denominator
-            ) + left * (
-                slope.numerator * (denominator // (slope.denominator * left_scale))
-            )
-            observed = right * (denominator // right_scale)
-            residual = observed - fitted
-            residual_scale = int(max(abs(residual)))
-            fit_scale = int(max(max(abs(observed)), max(abs(fitted))))
-            if residual_scale * (1 << 47) > fit_scale:
-                white_residuals = np.array(
-                    [int(value) / residual_scale for value in residual]
-                )
-        else:
-            _, target_exponent = np.frexp(float(np.max(np.abs(y))))
-            target_values = np.ldexp(y, -target_exponent)
-            target_differences = target_values - target_values.iloc[0]
-            target_offset = float(np.mean(target_differences))
-            target_centered = target_differences - target_offset
-            target_scale = float(np.max(np.abs(target_centered))) or 1.0
-            target = target_centered / target_scale
-            fit = (
-                OLS(target, x).fit()
-                if weights is None
-                else WLS(target, x, weights=weights).fit()
-            )
-            params = fit.params
-            residual_scale = float(np.max(np.abs(fit.resid)))
-            fit_scale = max(
-                float(np.max(np.abs(target_values))),
-                float(
-                    np.max(
-                        np.abs(
-                            fit.fittedvalues * target_scale
-                            + target_offset
-                            + target_values.iloc[0]
-                        )
-                    )
-                ),
-            )
-            if residual_scale * target_scale > 32 * np.finfo("float64").eps * fit_scale:
-                white_residuals = fit.resid / residual_scale
-            unit = Fraction(2) ** int(target_exponent)
-            slopes = [
-                Fraction(float(value)) * Fraction(target_scale) / Fraction(float(scale))
-                for value, scale in zip(
-                    params.loc[list(factor_columns)], scales, strict=True
-                )
-            ]
-            restored_slopes = [
-                slope * unit / (Fraction(2) ** int(exponent))
-                for slope, exponent in zip(slopes, exponents, strict=True)
-            ]
-            restored_intercept = (
-                Fraction(float(target_values.iloc[0]))
-                + Fraction(target_offset)
-                + Fraction(float(params["const"])) * Fraction(target_scale)
-                - sum(
-                    (
-                        (Fraction(float(origin)) + Fraction(float(offset))) * slope
-                        for origin, offset, slope in zip(
-                            scaled[0], offsets, slopes, strict=True
-                        )
-                    ),
-                    Fraction(),
-                )
-            ) * unit
-            nonzero_target = np.abs(y.to_numpy()[y.to_numpy() != 0])
-            restoration_scale = max(
-                float(np.max(np.abs(y))),
-                max(
-                    abs(slope * Fraction(float(value)))
-                    for slope, value in zip(
-                        restored_slopes,
-                        np.max(np.abs(values), axis=0),
-                        strict=True,
-                    )
-                ),
-            )
-            unresolved = (
-                len(nonzero_target)
-                and nonzero_target.min()
-                <= 64 * np.finfo(float).eps * nonzero_target.max()
-            ) or (
-                white_residuals is not None
-                and (
-                    np.any(np.abs(params.iloc[1:]) <= 64 * np.finfo(float).eps)
-                    or abs(restored_intercept)
-                    <= Fraction(64 * np.finfo(float).eps) * restoration_scale
-                )
-            )
-            restored_coefficients = [restored_intercept, *restored_slopes]
-            if unresolved:
-                restored_coefficients, residuals = _exact_period_regression(
-                    values,
-                    y.to_numpy(),
-                    None if weights is None else weights.to_numpy(),
-                )
-                residual_scale = max(map(abs, residuals))
-                fit_scale = max(
-                    max(abs(Fraction(float(value))) for value in y),
-                    max(
-                        abs(Fraction(float(value)) - residual)
-                        for value, residual in zip(y, residuals, strict=True)
-                    ),
-                )
-                white_residuals = (
-                    np.array([float(value / residual_scale) for value in residuals])
-                    if residual_scale * (1 << 47) > fit_scale
-                    else None
-                )
-            coefficients = pd.Series(
-                [float(value) for value in restored_coefficients], index=x.columns
-            )
-    except OverflowError:
-        raise ValueError("fama_macbeth_coefficients_unrepresentable") from None
+    target_origin = float(y.iloc[0])
+    target_offset = float(np.mean(y - target_origin))
+    target_centered = y - target_origin - target_offset
+    target_scale = float(np.max(np.abs(target_centered))) or 1.0
+    target = (target_centered / target_scale).to_numpy()
+    fit = (
+        OLS(target, x).fit(method="qr")
+        if weight_column is None
+        else WLS(target, x, weights=numeric[weight_column]).fit(method="qr")
+    )
+    # Resolve numerical zero in the regression's own units, before temporal
+    # inference can treat floating-point cancellation as coefficient variation.
+    roundoff = 32 * np.finfo(float).eps
+    normalized_slopes = fit.params[1:].copy()
+    normalized_slopes[
+        np.abs(normalized_slopes) <= roundoff * np.max(np.abs(target))
+    ] = 0.0
+    slopes = normalized_slopes * target_scale / scales
+    intercept_terms = np.concatenate(
+        (
+            [target_origin, target_offset, float(fit.params[0]) * target_scale],
+            -(origins + offsets) * slopes,
+        )
+    )
+    intercept = float(np.sum(intercept_terms))
+    if abs(intercept) <= roundoff * np.sum(np.abs(intercept_terms)):
+        intercept = 0.0
+    coefficients = pd.Series([intercept, *slopes], index=("intercept", *factor_columns))
+    if not np.isfinite(coefficients).all():
+        raise ValueError("fama_macbeth_coefficients_unrepresentable")
+    residual_scale = float(np.max(np.abs(fit.resid)))
+    # A numerically exact fit has no estimable residual-variance diagnostic.
+    white_residuals = (
+        fit.resid / residual_scale
+        if residual_scale * target_scale
+        > 32 * np.finfo(float).eps * float(np.max(np.abs(y)))
+        else None
+    )
     white_p_value = None
     white_response = None if white_residuals is None else np.square(white_residuals)
-    if white_response is not None and np.ptp(white_response) > 0:
+    if white_response is not None and np.ptp(white_response) > 64 * np.finfo(float).eps:
         try:
             # White LM needs the auxiliary R-squared, not its unused F statistic.
             left, right = np.triu_indices(x.shape[1])
-            regressors = x.to_numpy(dtype="float64", copy=False)
             auxiliary = OLS(
                 white_response,
-                regressors[:, left] * regressors[:, right],
+                x[:, left] * x[:, right],
             ).fit()
             white_p_value = float(
                 chi2.sf(len(numeric) * auxiliary.rsquared, auxiliary.df_model)
@@ -824,56 +706,6 @@ def fama_macbeth_period(
         white_reason=None if white_p_value is not None else "white_test_undefined",
         observation_count=len(numeric),
     )
-
-
-def _exact_period_regression(values, target, weights):
-    """Resolve cancellation from original observations in the small normal system."""
-    columns, scales = zip(
-        *(_integer_coordinates(column) for column in values.T), strict=True
-    )
-    design = np.array([[1] * len(target), *columns], dtype=object).T
-    response, response_scale = _integer_coordinates(target)
-    response = np.asarray(response, dtype=object)
-    weight = (
-        np.ones(len(target), dtype=object)
-        if weights is None
-        else np.asarray(_integer_coordinates(weights)[0], dtype=object)
-    )
-    system = np.column_stack(
-        (design.T @ (weight[:, None] * design), design.T @ (weight * response))
-    )
-    dimension = design.shape[1]
-    previous = 1
-    for column in range(dimension - 1):
-        pivot = system[column, column]
-        system[column + 1 :, column + 1 :] = (
-            pivot * system[column + 1 :, column + 1 :]
-            - system[column + 1 :, column, None] * system[None, column, column + 1 :]
-        ) // previous
-        previous = pivot
-    coefficients = [Fraction()] * dimension
-    for column in range(dimension - 1, -1, -1):
-        coefficients[column] = (
-            Fraction(int(system[column, -1]))
-            - sum(
-                system[column, right] * coefficients[right]
-                for right in range(column + 1, dimension)
-            )
-        ) / int(system[column, column])
-    coefficients = [
-        value * Fraction(scale, response_scale)
-        for value, scale in zip(coefficients, (1, *scales), strict=True)
-    ]
-    residuals = [
-        Fraction(float(value))
-        - coefficients[0]
-        - sum(
-            coefficient * Fraction(float(factor))
-            for coefficient, factor in zip(coefficients[1:], row, strict=True)
-        )
-        for value, row in zip(target, values, strict=True)
-    ]
-    return coefficients, residuals
 
 
 def cross_sectional_rank_ic(
@@ -986,7 +818,7 @@ def time_series_inference_summary(
                     "reason": "incomplete_session_clock"
                     if count != len(values)
                     else "hac_lag_exceeds_observations",
-                    "mean": float(_mean(values.loc[valid])) if count else np.nan,
+                    "mean": float(values.loc[valid].mean()) if count else np.nan,
                     "standard_error": np.nan,
                     "t_statistic": np.nan,
                     "p_value": np.nan,
@@ -1008,7 +840,7 @@ def time_series_inference_summary(
                     "observation_count": count,
                     "status": "UNDEFINED",
                     "reason": "hac_inference_undefined",
-                    "mean": float(_mean(values.loc[valid])) if count else np.nan,
+                    "mean": float(values.loc[valid].mean()) if count else np.nan,
                     "standard_error": np.nan,
                     "t_statistic": np.nan,
                     "p_value": np.nan,
@@ -1150,28 +982,9 @@ def _return_roundoff(values: np.ndarray, roundoff: object) -> np.ndarray:
 
 
 def _return_intervals_overlap(data: np.ndarray, errors: np.ndarray) -> np.ndarray:
-    with np.errstate(over="ignore"):
-        lower = np.max(data - errors, axis=0)
-        upper = np.min(data + errors, axis=0)
-    overlap = np.asarray(lower <= upper)
-    for column in np.ndindex(overlap.shape):
-        selected = (slice(None), *column)
-        if lower[column] != upper[column] or not errors[selected].any():
-            continue
-        finite = np.isfinite(errors[selected])
-        values, bounds = (data[selected][finite], errors[selected][finite])
-        overlap[column] = max(
-            (
-                Fraction(float(value)) - Fraction(float(error))
-                for value, error in zip(values, bounds, strict=True)
-            )
-        ) <= min(
-            (
-                Fraction(float(value)) + Fraction(float(error))
-                for value, error in zip(values, bounds, strict=True)
-            )
-        )
-    return overlap
+    lower = np.max(data - errors, axis=0)
+    upper = np.min(data + errors, axis=0)
+    return np.asarray(lower <= upper)
 
 
 def return_standard_deviation(values: object, *, roundoff: object = 0.0) -> np.ndarray:
@@ -1208,9 +1021,7 @@ def _return_sharpes(values: object, *, roundoff: object = 0.0) -> np.ndarray:
     differences = scaled - scaled[0]
     deviation = np.std(differences, axis=0, ddof=1)
     return np.divide(
-        np.asarray([float(_mean(column)) for column in scaled.T])
-        if scaled.ndim == 2
-        else float(_mean(scaled)),
+        np.mean(scaled, axis=0),
         deviation,
         out=np.full(data.shape[1:], np.nan),
         where=(deviation > 0) & ~unresolved & np.isfinite(errors).all(axis=0),
@@ -1221,40 +1032,7 @@ def _candidate_ranks(values: np.ndarray, errors: np.ndarray) -> np.ndarray | Non
     scores = _candidate_sharpes(values, errors)
     if scores is None:
         return None
-    exact = {}
-
-    def compare(left, right):
-        difference = scores[left] - scores[right]
-        if abs(difference) > 64 * np.finfo(float).eps * max(
-            1.0, abs(scores[left]), abs(scores[right])
-        ):
-            return 1 if difference > 0 else -1
-        # Certify only unresolved rankings, never merge them with an epsilon.
-        for column in (left, right):
-            if column not in exact:
-                coordinates, _ = _integer_coordinates(values[:, column])
-                total = sum(coordinates)
-                variance = len(coordinates) * sum(v * v for v in coordinates) - total**2
-                exact[column] = (
-                    (total > 0) - (total < 0),
-                    Fraction(total**2, variance),
-                )
-        left_sign, left_squared = exact[left]
-        right_sign, right_squared = exact[right]
-        if left_sign != right_sign:
-            return 1 if left_sign > right_sign else -1
-        return left_sign * (
-            (left_squared > right_squared) - (left_squared < right_squared)
-        )
-
-    order = sorted(range(len(scores)), key=cmp_to_key(compare))
-    ranks = np.empty(len(scores), dtype="int64")
-    rank = 0
-    for index, column in enumerate(order):
-        if index and compare(order[index - 1], column):
-            rank += 1
-        ranks[column] = rank
-    return ranks
+    return np.unique(scores, return_inverse=True)[1]
 
 
 def _candidate_sharpes(values: np.ndarray, errors: np.ndarray) -> np.ndarray | None:

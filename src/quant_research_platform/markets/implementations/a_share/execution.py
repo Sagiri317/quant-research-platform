@@ -225,8 +225,8 @@ class PreparedTradeCost:
 
     rates: tuple[float, float, float]
     face_value: tuple[bool, bool, bool]
-    slippage: tuple[float, int]
-    impact: tuple[float, int]
+    slippage_bps: float
+    impact_bps: float
     source_identity: str
 
     def components(self, notional, adv20, *, face_value_notional=None):
@@ -265,18 +265,12 @@ class PreparedTradeCost:
             (face if basis else amount_values) * rate
             for basis, rate in zip(self.face_value, self.rates, strict=True)
         )
-        amount, amount_exponent = np.frexp(amount_values)
-        adv_amount, adv_exponent = np.frexp(adv_values)
-        slippage_rate, slippage_exponent = self.slippage
-        impact_rate, impact_exponent = self.impact
-        root_exponent, odd_exponent = np.divmod(amount_exponent - adv_exponent, 2)
-        participation_root = np.sqrt(np.ldexp(amount / adv_amount, odd_exponent))
-        slippage = np.ldexp(
-            amount * slippage_rate / 10_000.0, amount_exponent + slippage_exponent
-        )
-        impact = np.ldexp(
-            amount * impact_rate / 10_000.0 * participation_root,
-            amount_exponent + impact_exponent + root_exponent,
+        slippage = amount_values * self.slippage_bps / 10_000.0
+        impact = (
+            amount_values
+            * self.impact_bps
+            / 10_000.0
+            * np.sqrt(amount_values / adv_values)
         )
         result = (*fees, slippage, impact)
         if any(not np.isfinite(value).all() or (value < 0).any() for value in result):
@@ -304,20 +298,8 @@ class PreparedTradeCost:
             raise ValueError("a_share_trade_cost_inputs_invalid")
         positive = np.maximum(amounts, 0.0)
         totals = self.totals(positive, adv20)
-        amount, amount_exponent = np.frexp(positive)
-        adv, adv_exponent = np.frexp(adv20)
-        root_exponent, odd_exponent = np.divmod(amount_exponent - adv_exponent, 2)
-        impact_rate, impact_exponent = self.impact
-        marginal_impact = np.ldexp(
-            1.5
-            * impact_rate
-            / 10_000.0
-            * np.sqrt(np.ldexp(amount / adv, odd_exponent)),
-            impact_exponent + root_exponent,
-        )
-        linear = sum(self.rates) + np.ldexp(
-            self.slippage[0] / 10_000.0, self.slippage[1]
-        )
+        marginal_impact = 1.5 * self.impact_bps / 10_000.0 * np.sqrt(positive / adv20)
+        linear = sum(self.rates) + self.slippage_bps / 10_000.0
         gradient = linear + marginal_impact
         extended = totals + np.minimum(amounts, 0.0) * linear
         if not np.isfinite(gradient).all() or not np.isfinite(extended).all():
@@ -352,8 +334,8 @@ def prepare_trade_cost(execution_date, market, side, schedule, assumptions):
             rules[code].basis == "face_value" if code in required else False
             for code in codes
         ),
-        np.frexp(assumptions.slippage_bps),
-        np.frexp(assumptions.impact_bps),
+        assumptions.slippage_bps,
+        assumptions.impact_bps,
         schedule.content_identity,
     )
 

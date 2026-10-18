@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from fractions import Fraction
 from functools import partial
+from math import fsum
 
 import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.validation import (
-    finite_exact_float,
     strict_bool_series,
     strict_finite_numeric_series,
     strict_real_numeric_series,
@@ -357,9 +356,11 @@ def _ttm_value(known, report_period: pd.Timestamp) -> float | None:
     prior_ytd = known.get(_prior_year_report_period(report_period))
     if prior_fy is None or prior_ytd is None:
         return None
-    return finite_exact_float(
-        Fraction(current) + Fraction(prior_fy) - Fraction(prior_ytd)
-    )
+    try:
+        value = fsum((current, prior_fy, -prior_ytd))
+    except OverflowError:
+        return None
+    return value if np.isfinite(value) else None
 
 
 _PIT_EVENT_COLUMNS = {

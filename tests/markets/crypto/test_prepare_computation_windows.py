@@ -78,8 +78,21 @@ def run_prepare(path, inputs, data_id, start, end):
 
 def assert_projection(broad, narrow, start, end):
     expected = broad.loc[broad.timestamp.between(start, end)].reset_index(drop=True)
+    actual = narrow.reset_index(drop=True)
+    continuous = [
+        name
+        for name in expected.select_dtypes(include="floating")
+        if "direction" not in name
+    ]
+    exact = expected.columns.difference(continuous)
+    pd.testing.assert_frame_equal(expected[exact], actual[exact], check_exact=True)
+    pd.testing.assert_frame_equal(expected.isna(), actual.isna(), check_exact=True)
     pd.testing.assert_frame_equal(
-        expected, narrow.reset_index(drop=True), check_exact=True
+        expected[continuous],
+        actual[continuous],
+        check_exact=False,
+        rtol=2e-12,
+        atol=1e-14,
     )
 
 

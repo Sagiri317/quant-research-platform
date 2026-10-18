@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Collection, Iterable, Mapping
-from fractions import Fraction
 
 import numpy as np
 import pandas as pd
 
 from quant_research_platform.compute.dataframe.cross_section import (
     _add_correlation_aggregate,
-    _CorrelationMoments,
+    _average_ranks,
+    _pearson_correlation_result,
     _summarize_correlation_aggregates,
 )
 from quant_research_platform.contracts.columns import _validate_asset_time_key
@@ -136,114 +136,70 @@ def evaluate_model_trial_metrics_from_chunks(
     if type(validation_axis) is not str or validation_axis not in EVALUATION_AXES:
         raise ValueError("model_validation_axis_invalid")
 
-    def metric_chunks():
-        asset = None
-        with closing_iterator(
-            iter_complete_time_frames(iter(chunks), timestamp_column="timestamp")
-        ) as source:
-            for frame in source:
-                if frame.empty:
-                    continue
-                values = _metric_chunk(
-                    frame,
-                    label_column=label_column,
-                    prediction_column=prediction_column,
-                )
-                if validation_axis == "single_asset_time_series":
-                    assets = frame["asset_id"]
-                    unique_assets = assets.drop_duplicates()
-                    if (
-                        len(unique_assets) != 1
-                        or assets.isna().any()
-                        or (asset is not None and unique_assets.iloc[0] != asset)
-                    ):
-                        raise ValueError(
-                            "single_asset_time_series_evaluation_requires_one_asset"
-                        )
-                    asset = unique_assets.iloc[0]
-                if validation_axis == "cross_sectional":
-                    ranks = values.groupby("timestamp_ns", sort=False)[
-                        ["label", "prediction"]
-                    ].rank(method="average")
-                    values["label_rank"] = ranks["label"]
-                    values["prediction_rank"] = ranks["prediction"]
-                else:
-                    values["label_rank"] = values["prediction_rank"] = 0.0
-                if label_prediction_column is not None:
-                    values["label_prediction"] = frame[
-                        label_prediction_column
-                    ].to_numpy(dtype="float64")
-                yield values
-
-    with closing_iterator(metric_chunks()) as source:
-        summary = _cross_sectional_metric_summary(
-            (
-                row
-                for values in source
-                for row in values.itertuples(index=False, name=None)
-            ),
-            validation_axis=validation_axis,
-            label_calibration=label_calibration,
-        )
-    if summary["validation_rows"] == 0:
-        raise ValueError("empty_model_selection_validation_window")
-    return {"model_id": model_id, **summary}
-
-
-def _cross_sectional_metric_summary(
-    rows,
-    *,
-    validation_axis: EvaluationAxis,
-    label_calibration: tuple[float, float] | None = None,
-) -> dict[str, object]:
-    stats: dict[str, int | Fraction] = {
-        "ic_count": 0,
-        "ic_mean": Fraction(),
-        "ic_m2": Fraction(),
-        "ic_positive": 0,
-        "rankic_count": 0,
-        "rankic_mean": Fraction(),
-        "rankic_m2": Fraction(),
-        "rankic_positive": 0,
+    stats = {
+        f"{prefix}_{suffix}": 0.0 if suffix in ("mean", "m2") else 0
+        for prefix in ("ic", "rankic")
+        for suffix in ("count", "mean", "m2", "positive")
     }
     row_count = 0
-    squared_errors = _MeanSquaredError()
-    date_errors = _MeanSquaredError()
-    current_timestamp: int | None = None
-    timestamp_state: _TimestampMetricState | None = None
-    for row in rows:
-        timestamp_ns, label, prediction, label_rank, prediction_rank, *economic = row
-        timestamp_ns = int(timestamp_ns) if validation_axis == "cross_sectional" else 0
-        if current_timestamp != timestamp_ns:
-            if timestamp_state is not None:
-                squared_errors.add_period(date_errors)
-                date_errors = _MeanSquaredError()
-                row_count += timestamp_state.ic.count
-                _add_correlation_aggregate(stats, "ic", timestamp_state.ic.result()[0])
-                _add_correlation_aggregate(
-                    stats, "rankic", timestamp_state.rank.result()[0]
-                )
-            current_timestamp = timestamp_ns
-            timestamp_state = _TimestampMetricState()
-        assert timestamp_state is not None
-        label = float(label)
-        prediction = float(prediction)
-        label_prediction = (
-            economic[0]
-            if economic
-            else _label_predictions(prediction, label_calibration)
-        )
-        timestamp_state.ic.update(label, prediction)
+    losses = []
+    time_series = []
+    asset = None
+    time_series_result = (None, "no_valid_observations")
+
+    def consume(values):
+        nonlocal row_count, time_series_result
+        label, prediction, economic = values.T
+        row_count += len(values)
+        correlation = _pearson_correlation_result(prediction, label)
+        _add_correlation_aggregate(stats, "ic", correlation[0])
         if validation_axis == "cross_sectional":
-            timestamp_state.rank.update(float(label_rank), float(prediction_rank))
-        date_errors.add(label_prediction, label)
-    if timestamp_state is not None:
-        squared_errors.add_period(date_errors)
-        row_count += timestamp_state.ic.count
-        _add_correlation_aggregate(stats, "ic", timestamp_state.ic.result()[0])
-        _add_correlation_aggregate(stats, "rankic", timestamp_state.rank.result()[0])
-    mse = squared_errors.result()
-    result = {"validation_rows": row_count, "validation_mse": mse}
+            rankic, _ = _pearson_correlation_result(
+                _average_ranks(prediction), _average_ranks(label)
+            )
+            _add_correlation_aggregate(stats, "rankic", rankic)
+        elif len(values) >= 2:
+            time_series_result = correlation
+        losses.append(_mean_squared_error(economic, label))
+
+    with closing_iterator(
+        iter_complete_time_frames(iter(chunks), timestamp_column="timestamp")
+    ) as source:
+        for frame in source:
+            if frame.empty:
+                continue
+            values = _metric_chunk(
+                frame, label_column=label_column, prediction_column=prediction_column
+            )
+            values["economic"] = (
+                frame[label_prediction_column].to_numpy(dtype="float64")
+                if label_prediction_column is not None
+                else _label_predictions(values["prediction"], label_calibration)
+            )
+            if validation_axis == "single_asset_time_series":
+                assets = frame["asset_id"]
+                unique_assets = assets.drop_duplicates()
+                if (
+                    len(unique_assets) != 1
+                    or assets.isna().any()
+                    or (asset is not None and unique_assets.iloc[0] != asset)
+                ):
+                    raise ValueError(
+                        "single_asset_time_series_evaluation_requires_one_asset"
+                    )
+                asset = unique_assets.iloc[0]
+                time_series.append(
+                    values[["label", "prediction", "economic"]].to_numpy()
+                )
+            else:
+                for _, group in values.groupby("timestamp_ns", sort=False):
+                    consume(group[["label", "prediction", "economic"]].to_numpy())
+    if time_series:
+        consume(np.concatenate(time_series))
+    if row_count == 0:
+        raise ValueError("empty_model_selection_validation_window")
+    mse = None if any(value is None for value in losses) else float(np.mean(losses))
+    result = {"model_id": model_id, "validation_rows": row_count, "validation_mse": mse}
     for prefix in ("ic", "rankic"):
         summary = _summarize_correlation_aggregates(
             count=int(stats[f"{prefix}_count"]),
@@ -253,11 +209,7 @@ def _cross_sectional_metric_summary(
         )
         if validation_axis == "single_asset_time_series":
             if prefix == "ic":
-                summary["mean"], summary["reason"] = (
-                    timestamp_state.ic.result()
-                    if row_count >= 2
-                    else (None, "no_valid_observations")
-                )
+                summary["mean"], summary["reason"] = time_series_result
             else:
                 summary["mean"], summary["reason"] = None, "not_applicable"
                 summary["ratio_reason"] = "not_applicable"
@@ -279,58 +231,13 @@ def _cross_sectional_metric_summary(
     return result
 
 
-class _TimestampMetricState:
-    __slots__ = ("ic", "rank")
-
-    def __init__(self) -> None:
-        self.ic = _CorrelationMoments()
-        self.rank = _CorrelationMoments()
-
-
-class _MeanSquaredError:
-    """Accumulate exact daily losses and their equally weighted period means."""
-
-    __slots__ = ("moments", "total", "count")
-
-    def __init__(self) -> None:
-        self.moments = _CorrelationMoments()
-        self.total = Fraction()
-        self.count = 0
-
-    def add(self, prediction: float, label: float) -> None:
-        self.count += 1
-        if self.total is not None:
-            if np.isfinite(prediction) and np.isfinite(label):
-                self.moments.update(float(prediction), float(label))
-            else:
-                self.total = None
-
-    def add_period(self, errors: _MeanSquaredError) -> None:
-        self.count += 1
-        value = errors.mean()
-        self.total = (
-            self.total + value if self.total is not None and value is not None else None
-        )
-
-    def mean(self) -> Fraction | None:
-        if not self.count or self.total is None:
-            return None
-        moments = self.moments
-        squared_error = Fraction(
-            moments.left_square + moments.right_square - 2 * moments.product,
-            1 << (2 * moments.exponent),
-        )
-        return (self.total + squared_error) / self.count
-
-    def result(self) -> float | None:
-        value = self.mean()
-        if value is None:
-            return None
-        try:
-            result = float(value)
-        except OverflowError:
-            return None
-        return result if np.isfinite(result) and (result != 0 or value == 0) else None
+def _mean_squared_error(predictions, labels) -> float | None:
+    """Reduce a complete paired sample in the label's economic units."""
+    if not len(labels):
+        return None
+    with np.errstate(over="ignore", invalid="ignore"):
+        result = float(np.mean(np.square(np.asarray(predictions) - np.asarray(labels))))
+    return result if np.isfinite(result) else None
 
 
 def _metric_chunk(

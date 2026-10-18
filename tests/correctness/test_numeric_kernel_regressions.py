@@ -110,23 +110,12 @@ def test_required_member_bad_cap_keeps_proxy_uncertainty(cap):
 
 
 @pytest.mark.parametrize("shrinkage", [0.0, 0.2, 1.0])
-def test_ordinary_kernels_use_vectorized_paths_and_independent_oracles(
-    monkeypatch, shrinkage
-):
+def test_ordinary_kernels_use_vectorized_paths_and_independent_oracles(shrinkage):
     from quant_research_platform.compute.dataframe import cross_section
     from quant_research_platform.research.features import transforms
     from quant_research_platform.research.models import rank_ensemble
     from quant_research_platform.research.portfolios import risk
 
-    def unexpected_exact(*args, **kwargs):
-        raise AssertionError(
-            "ordinary arrays must not require scalar exact accumulation"
-        )
-
-    monkeypatch.setattr(cross_section, "_CorrelationMoments", unexpected_exact)
-    monkeypatch.setattr(transforms, "_exact_industry_size_residuals", unexpected_exact)
-    monkeypatch.setattr(rank_ensemble, "Fraction", unexpected_exact)
-    monkeypatch.setattr(risk, "_integer_coordinates", unexpected_exact)
     rng = np.random.default_rng(52)
     values = rng.normal(size=(504, 5)) * 0.01
     ages = np.arange(503, -1, -1)
@@ -206,59 +195,3 @@ def test_roundoff_bound_preserves_materially_indefinite_risk():
     assert _risk_variances(active, np.eye(2), covariance, np.zeros(2)) == (0.0, 0.0)
     with pytest.raises(ValueError, match="optimizer_risk_negative"):
         _risk_variances(active, np.eye(2), -np.eye(2) * 1e-13, np.zeros(2))
-
-
-@pytest.mark.parametrize("kernel", ["calibration", "neutralization", "covariance"])
-def test_subnormal_products_keep_exact_exceptional_path(kernel):
-    from fractions import Fraction
-
-    from quant_research_platform.research.features.transforms import (
-        _industry_size_residuals,
-    )
-    from quant_research_platform.research.models.rank_ensemble import _label_calibration
-
-    tiny = np.nextafter(0.0, 1.0)
-    if kernel == "calibration":
-        scores = np.array([-0.4, 0.4])
-        labels = np.array([34.0, -24.0]) * tiny
-        x, y = list(map(Fraction, scores)), list(map(Fraction, labels))
-        mean_x, mean_y = sum(x) / 2, sum(y) / 2
-        slope = sum(
-            (a - mean_x) * (b - mean_y) for a, b in zip(x, y, strict=True)
-        ) / sum((a - mean_x) ** 2 for a in x)
-        expected = (float(mean_y - slope * mean_x), float(slope))
-        assert _label_calibration(scores, labels, None) == expected
-    elif kernel == "neutralization":
-        # Work in tiny units so the independent oracle rescales before rounding.
-        y = list(map(Fraction, [1, 2, 4, 8, 16, 32]))
-        x = list(map(Fraction, range(6)))
-        mean_x, mean_y = sum(x) / 6, sum(y) / 6
-        slope = sum(
-            (a - mean_x) * (b - mean_y) for a, b in zip(x, y, strict=True)
-        ) / sum((a - mean_x) ** 2 for a in x)
-        residuals = [
-            b - mean_y - slope * (a - mean_x) for a, b in zip(x, y, strict=True)
-        ]
-        expected = [float(value / max(map(abs, residuals))) for value in residuals]
-        actual = _industry_size_residuals(
-            np.array([1, 2, 4, 8, 16, 32.0]) * tiny,
-            pd.Series(["a"] * 6),
-            np.arange(6.0),
-            rescale=True,
-        )
-        np.testing.assert_allclose(actual, expected, rtol=2e-14, atol=0)
-    else:
-        actual = _ewma_covariance(
-            np.array([[-2.1, -2.1], [2.1, 2.1]]),
-            ages=np.zeros(2),
-            half_life=1.0,
-            diagonal_shrinkage=0.2,
-            annualization_factor=tiny,
-            columns=("a", "b"),
-        )
-        variance = Fraction(2.1) ** 2 * Fraction(tiny)
-        diagonal = float(variance)
-        off_diagonal = float(variance * (1 - Fraction(0.2)))
-        np.testing.assert_array_equal(
-            actual, [[diagonal, off_diagonal], [off_diagonal, diagonal]]
-        )

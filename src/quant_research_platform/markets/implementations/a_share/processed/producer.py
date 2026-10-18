@@ -8,7 +8,6 @@ from contextlib import contextmanager
 from dataclasses import replace
 from datetime import date, timedelta
 from itertools import chain
-from statistics import mean
 
 import numpy as np
 import pandas as pd
@@ -405,7 +404,6 @@ def _processed_frames(
         market_history,
         asset_sessions,
         observed_sessions,
-        _raw_axis,
     ) = _processed_axis(
         reference,
         panel_source=panel_source,
@@ -517,7 +515,6 @@ def _processed_frames(
             market_history,
             _asset_sessions,
             _observed_sessions,
-            _raw_axis,
         ) = _processed_axis(
             source_sessions["market_bars_1d"],
             panel_source=True,
@@ -934,7 +931,6 @@ def _benchmark_frames(source, session):
         _market_history,
         _asset_sessions,
         _observed_sessions,
-        _raw_axis,
     ) = _processed_axis(
         session, panel_source=False, asset_column="constituent_asset_id"
     )
@@ -1005,7 +1001,6 @@ def _processed_axis(
 
     dates = set()
     assets = {}
-    raw_dates, raw_assets = set(), set()
     first_market_events = {}
     observed_market_sessions = {}
     asset_session_masks = {}
@@ -1015,8 +1010,6 @@ def _processed_axis(
     ) as chunks:
         for frame in chunks:
             if panel_source:
-                raw_dates.update(frame.timestamp.unique())
-                raw_assets.update(frame[asset_column].unique())
                 frame["market_type"] = strict_integer_series(
                     frame["market_type"], error="invalid_market_type", allow_null=True
                 )
@@ -1139,14 +1132,6 @@ def _processed_axis(
         )
         for mask in set(asset_session_masks.values())
     }
-    raw_axis = (
-        (
-            tuple(sorted(pd.Timestamp(value) for value in raw_dates)),
-            frozenset(raw_assets),
-        )
-        if panel_source
-        else (sessions, frozenset(asset_types.index))
-    )
     return (
         sessions,
         asset_types,
@@ -1156,7 +1141,6 @@ def _processed_axis(
             market: pd.DatetimeIndex(sorted(dates))
             for market, dates in observed_market_sessions.items()
         },
-        raw_axis,
     )
 
 
@@ -1427,10 +1411,9 @@ def _fundamental_pit_frame(
                 allow_null=True,
             ).astype("float64")
     for column in ("total_assets", "parent_equity"):
-        output[f"average_{column}"] = [
-            mean(pair)
-            for pair in zip(output[column], output[f"beginning_{column}"], strict=True)
-        ]
+        output[f"average_{column}"] = (
+            output[column] * 0.5 + output[f"beginning_{column}"] * 0.5
+        )
     for column in FLOW_METRIC_IDS:
         output[f"{column}_ttm"] = output[column]
     output["has_legal_fundamental_pit"] = (

@@ -51,9 +51,12 @@ def native_comparison(tmp_path_factory):
     spec = make_demo_research_dataset_spec(
         data_id="pv_all",
         factor_columns=(factor,),
-        label_columns=("forward_return_20d", "forward_return_20d_available_at"),
+        label_columns=("forward_return_20d",),
         filter_columns=("eligible",),
-        context_columns=("total_market_cap",),
+        context_columns=(
+            "total_market_cap",
+            "forward_return_20d_available_at",
+        ),
     )
     write_dataset(root / "dataset", frame, spec=spec)
     dataset = root / "dataset"

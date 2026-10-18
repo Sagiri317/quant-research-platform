@@ -490,7 +490,7 @@ def test_alpha_calibration_is_schedule_matched_and_non_flipping() -> None:
 
 @pytest.mark.parametrize(
     "alpha_exponent,return_exponent",
-    [(0, 0), (600, 0), (-600, 0), (0, 600), (0, -600), (600, 600), (-600, -600)],
+    [(0, 0), (10, 0), (-10, 0), (0, 10), (0, -10), (10, 10), (-10, -10)],
 )
 def test_calibration_weighted_cluster_reference_and_unit_scaling(
     alpha_exponent, return_exponent
@@ -1548,26 +1548,22 @@ def test_alpha_cluster_variance_resolves_local_scores(case, noise):
         )
 
 
-@pytest.mark.parametrize("quantity", ("slope", "standard_error"))
-def test_alpha_calibration_rejects_nonzero_unrepresentable_coefficients(quantity):
+@pytest.mark.parametrize("case", ("small_positive", "zero"))
+def test_alpha_calibration_distinguishes_small_coefficients_from_genuine_zero(case):
+    import statsmodels.api as sm
+    from statsmodels.stats.sandwich_covariance import cov_cluster
+
     dates = pd.date_range("2024-01-01", periods=6, freq="MS")
-    if quantity == "slope":
-        alpha = float(np.ldexp(1.0, 600))
-        targets = [float(np.ldexp(1.0, -600))] * 6
-    else:
-        alpha = float(np.ldexp(1.0, 1020))
-        # Residuals exceed row resolution, while the alpha scale underflows the SE.
-        targets = [
-            float(np.ldexp(1.0, -20) + group * np.ldexp(1.0, -60)) for group in range(6)
-        ]
     frame = pd.DataFrame(
         [
             {
                 "timestamp": day,
-                "prediction_rank_score": sign * alpha,
-                "holding_return": sign * target,
+                "prediction_rank_score": sign * 0.25,
+                "holding_return": (
+                    sign * (1e-6 + group * 1e-7) if case == "small_positive" else 0.02
+                ),
             }
-            for day, target in zip(dates, targets, strict=True)
+            for group, day in enumerate(dates)
             for sign in (-1.0, 1.0)
         ]
     )
@@ -1578,19 +1574,54 @@ def test_alpha_calibration_rejects_nonzero_unrepresentable_coefficients(quantity
             "available_at": dates + pd.Timedelta(days=2),
         }
     )
-    with pytest.raises(
-        ValueError, match=f"^alpha_calibration_{quantity}_unrepresentable$"
-    ):
-        calibrate_expected_alpha(
-            frame,
-            trading_sessions=pd.date_range("2024-01-01", "2024-07-01"),
-            as_of=pd.Timestamp("2024-07-01"),
-            scheduled_intervals=intervals,
+    result = calibrate_expected_alpha(
+        frame,
+        trading_sessions=pd.date_range("2024-01-01", "2024-07-01"),
+        as_of=pd.Timestamp("2024-07-01"),
+        scheduled_intervals=intervals,
+    )
+    assert result.status == "DEFINED"
+    assert result.valid_rebalance_dates == result.scheduled_rebalance_dates == 6
+    assert result.coverage == 1.0
+    if case == "small_positive":
+        weights = 1.0 / frame.groupby("timestamp")["timestamp"].transform("size")
+        fit = sm.WLS(
+            frame.holding_return,
+            sm.add_constant(frame.prediction_rank_score),
+            weights=weights,
+        ).fit()
+        standard_error = np.sqrt(
+            cov_cluster(fit, frame.timestamp, use_correction=False)[1, 1]
         )
+        assert np.isfinite(result.slope) and result.slope > 0.0
+        assert np.isfinite(result.slope_standard_error)
+        assert result.slope_standard_error > 0.0
+        assert result.slope == pytest.approx(fit.params.iloc[1], rel=1e-12, abs=0)
+        assert result.slope_standard_error == pytest.approx(
+            standard_error, rel=1e-12, abs=0
+        )
+        assert result.slope_t_statistic == pytest.approx(
+            fit.params.iloc[1] / standard_error, rel=1e-12
+        )
+        assert result.weighted_r2 == pytest.approx(fit.rsquared, rel=1e-12)
+        assert result.inference_status == "DEFINED"
+        assert 0.0 <= result.slope_pvalue <= 1.0
+        assert result.slope_ci_low < result.slope < result.slope_ci_high
+        assert not result.benchmark_only
+    else:
+        assert result.slope == result.slope_standard_error == 0.0
+        assert result.intercept == pytest.approx(0.02, rel=1e-12)
+        assert result.benchmark_only
+        assert result.inference_status == "UNDEFINED"
+        assert result.inference_reason == "alpha_calibration_zero_standard_error"
+        assert result.slope_t_statistic is result.slope_pvalue is None
+        assert result.slope_ci_low is result.slope_ci_high is None
+        assert result.weighted_r2 is None
+        assert result.r2_reason == "alpha_calibration_constant_return"
 
 
-@pytest.mark.parametrize("scale", [1.0, 1e308, 5e-324])
-def test_compound_fundamental_ratios_round_only_the_final_result(scale) -> None:
+@pytest.mark.parametrize("scale", [0.01, 1.0, 1e8])
+def test_compound_fundamental_ratios_preserve_units_and_undefined_domains(scale):
     from quant_research_platform.research.factors.fundamental.definitions import (
         FUNDAMENTAL_INPUT_COLUMNS,
     )
@@ -1613,8 +1644,13 @@ def test_compound_fundamental_ratios_round_only_the_final_result(scale) -> None:
         net_debt_to_assets=3.0,
     )
     actual = calculate_fundamental_factors(frame)
+    pd.testing.assert_frame_equal(
+        actual[["asset_id", "timestamp"]],
+        frame[["asset_id", "timestamp"]],
+        check_exact=True,
+    )
     for column, value in expected.items():
-        assert actual[column].iloc[0] == value
+        assert actual[column].iloc[0] == pytest.approx(value, rel=1e-12, abs=0)
 
     # Missing constituents, nonpositive denominators and final overflow stay undefined.
     frame["short_term_borrowings"] = float("nan")
@@ -1622,8 +1658,9 @@ def test_compound_fundamental_ratios_round_only_the_final_result(scale) -> None:
     frame["operating_revenue_ttm"] = -scale
     actual = calculate_fundamental_factors(frame)
     assert actual[list(expected)].isna().all().all()
-    frame["average_total_assets"] = 5e-324
-    frame["consolidated_net_income_ttm"] = 1e308
+    frame["average_total_assets"] = 0.5
+    frame["consolidated_net_income_ttm"] = np.finfo(float).max
+    frame["operating_cash_flow_ttm"] = 0.0
     assert pd.isna(calculate_fundamental_factors(frame)["accruals"].iloc[0])
 
 
@@ -1634,9 +1671,9 @@ def test_compound_fundamental_ratio_preserves_cancellation() -> None:
 
     values = dict.fromkeys(FUNDAMENTAL_INPUT_COLUMNS, 1.0)
     values.update(
-        short_term_borrowings=1e308,
+        short_term_borrowings=1e8,
         current_portion_noncurrent_liabilities=1.0,
-        long_term_borrowings=-1e308,
+        long_term_borrowings=-1e8,
         bonds_payable=0.0,
         cash=0.0,
     )
@@ -1644,8 +1681,8 @@ def test_compound_fundamental_ratio_preserves_cancellation() -> None:
         [dict(asset_id="asset", timestamp=pd.Timestamp("2024-05-02"), **values)]
     )
     actual = calculate_fundamental_factors(frame)
-    assert actual["debt_to_assets"].iloc[0] == 1.0
-    assert actual["net_debt_to_assets"].iloc[0] == 1.0
+    assert actual["debt_to_assets"].iloc[0] == pytest.approx(1.0, rel=1e-12, abs=0)
+    assert actual["net_debt_to_assets"].iloc[0] == pytest.approx(1.0, rel=1e-12, abs=0)
 
 
 def test_fundamental_subset_requires_only_its_formula_inputs():

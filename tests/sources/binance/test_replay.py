@@ -279,6 +279,115 @@ def _agg_trade(
     }
 
 
+@pytest.mark.parametrize("damage", ("missing", "corrupt", "bad_payload", "none"))
+def test_native_writer_bounded_replay_ignores_future_members(
+    tmp_path, monkeypatch, damage
+):
+    from quant_research_platform.sources.binance.recorder import _RunWriter
+
+    writer = _RunWriter(tmp_path)
+    stamps = [
+        "2026-08-27T00:00:00.123456789Z",
+        "2026-08-27T00:02:00Z",
+        "2026-08-27T00:00:30Z",  # A wall-clock rollback must not stop selection.
+        "2026-08-27T09:00:00+08:00",
+    ]
+    for sequence, stamp in enumerate(stamps, 1):
+        payload = _agg_trade(sequence)["payload"]
+        payload.update(a=sequence, f=sequence, l=sequence)
+        if sequence == 2 and damage == "bad_payload":
+            payload = {"invalid_future_payload": True}
+        writer.write(
+            symbol="BTCUSDT",
+            market_type=FUTURES_MARKET_TYPE,
+            data_kind="agg_trades",
+            stream="btcusdt@aggTrade",
+            payload=payload,
+            receive_time=stamp,
+            receive_monotonic_ns=sequence,
+            connection_id="trade-connection-1",
+        )
+    writer.write_connection_interval(
+        {
+            "market": FUTURES_MARKET_TYPE,
+            "data_kind": "agg_trades",
+            "stream": "btcusdt@aggTrade",
+            "connection_id": "trade-connection-1",
+            "segment_id": None,
+            "opened_at": "2026-08-27T00:00:00Z",
+            "opened_monotonic_ns": 0,
+            "closed_at": "2026-08-27T02:00:00Z",
+            "closed_monotonic_ns": 10,
+            "close_reason": "stop",
+        }
+    )
+    writer.close()
+    manifest = {
+        "schema_id": "qrp-binance-recorder",
+        "run_id": "bounded-native",
+        "recording_scope": FUTURES_HFT_RECORDING_SCOPE,
+        "venue": "binance",
+        "symbols": ["BTCUSDT"],
+        "market_types": [FUTURES_MARKET_TYPE],
+        "market_metadata": {
+            "BTCUSDT": {
+                FUTURES_MARKET_TYPE: {"tick_size": "0.1", "snapshot_limit": 1000}
+            }
+        },
+        "files": writer.file_manifests(),
+        "capture": {"connection_intervals": writer.connection_interval_manifest()},
+    }
+    (tmp_path / "run.json").write_text(json.dumps(manifest))
+    future = next(
+        tmp_path / item["path"]
+        for item in manifest["files"]
+        if "hour=01" in item["path"]
+    )
+    if damage == "missing":
+        future.unlink()
+    elif damage == "corrupt":
+        future.write_bytes(b"invalid gzip")
+    original_open = replay.open_filesystem_file
+    opened = []
+
+    def open_selected(path, *args, **kwargs):
+        opened.append(Path(path))
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(replay, "open_filesystem_file", open_selected)
+    end_ns = pd.Timestamp("2026-08-27T00:01:00Z").value
+    with open_recorder_run(tmp_path) as run:
+        trades = list(
+            iter_agg_trades(run, FUTURES_MARKET_TYPE, symbol="BTCUSDT", end_ns=end_ns)
+        )
+        assert [trade.observed_time_ns for trade in trades] == [
+            pd.Timestamp(stamps[index]).value for index in (0, 2)
+        ]
+        assert [trade.source_sequence for trade in trades] == [1, 3]
+        assert future not in opened
+        opened.clear()
+        assert (
+            list(
+                run.iter_records(end_ns=pd.Timestamp("2026-08-27T00:00:00Z").value - 1)
+            )
+            == []
+        )
+        assert opened == []
+        if damage == "none":
+            # Unbounded replay still rejects the actual nonmonotonic observation.
+            with pytest.raises(ValueError, match="trade_order_non_monotonic"):
+                list(iter_agg_trades(run, FUTURES_MARKET_TYPE, symbol="BTCUSDT"))
+        elif damage == "missing":
+            with pytest.raises(ValueError, match="binance_replay_raw_file_open_failed"):
+                list(run.iter_records())
+        elif damage == "corrupt":
+            with pytest.raises(gzip.BadGzipFile):
+                list(run.iter_records())
+        else:
+            with pytest.raises(ValueError, match="market_payload"):
+                list(run.iter_records())
+
+
 def _write_file(
     root: Path,
     *,

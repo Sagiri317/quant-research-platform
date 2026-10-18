@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from fractions import Fraction
 from pathlib import Path
-from statistics import mean
 
 import numpy as np
 import pandas as pd
@@ -29,7 +27,7 @@ from quant_research_platform.research.features.transforms import (
     mask_unobserved_features,
 )
 from quant_research_platform.research.models.rank_ensemble import _label_predictions
-from quant_research_platform.research.models.trial_selection import _MeanSquaredError
+from quant_research_platform.research.models.trial_selection import _mean_squared_error
 from quant_research_platform.research.protocols.a_share import (
     _inference_blocker,
 )
@@ -779,29 +777,20 @@ def _prediction_quality(
     predictions = (
         scores if label_predictions is None else label_predictions.reindex(scores.index)
     )
-    errors, baseline_errors = _MeanSquaredError(), _MeanSquaredError()
-    for label, prediction in zip(
-        paired.loc[valid], predictions.loc[valid], strict=True
-    ):
-        if loss_reason is None:
-            errors.add(prediction, label)
-        if baseline_prediction is not None:
-            baseline_errors.add(baseline_prediction, label)
     count = int(valid.sum())
-
-    def represent(value):
-        try:
-            result = float(value)
-        except OverflowError:
-            return np.nan
-        return result if np.isfinite(result) else np.nan
-
-    error, baseline = errors.mean(), baseline_errors.mean()
-    mse = errors.result()
-    baseline_mse = baseline_errors.result()
+    mse = (
+        _mean_squared_error(predictions.loc[valid], paired.loc[valid])
+        if loss_reason is None
+        else None
+    )
+    baseline_mse = (
+        _mean_squared_error(baseline_prediction, paired.loc[valid])
+        if baseline_prediction is not None
+        else None
+    )
     r2 = (
-        represent(1 - error / baseline)
-        if loss_reason is None and error is not None and baseline
+        1 - mse / baseline_mse
+        if mse is not None and baseline_mse is not None and baseline_mse > 0
         else np.nan
     )
     head = scores.iloc[:0]
@@ -811,13 +800,9 @@ def _prediction_quality(
     returns = raw_returns.reindex(head.index)
     observed = returns.loc[np.isfinite(returns)]
     pool = raw_returns.loc[np.isfinite(raw_returns)]
-    head_mean = float(mean(observed)) if len(observed) else np.nan
-    pool_mean = float(mean(pool)) if len(pool) else np.nan
-    excess = (
-        represent(Fraction(head_mean) - Fraction(pool_mean))
-        if len(observed) and len(pool)
-        else np.nan
-    )
+    head_mean = float(observed.mean()) if len(observed) else np.nan
+    pool_mean = float(pool.mean()) if len(pool) else np.nan
+    excess = head_mean - pool_mean if len(observed) and len(pool) else np.nan
     return {
         "prediction_count": len(scores),
         "target_count": count,
@@ -834,7 +819,7 @@ def _prediction_quality(
         else "no_valid_targets"
         if not count
         else "zero_baseline_error"
-        if not baseline
+        if baseline_mse == 0
         else "nonfinite_result",
         "head_selected_count": len(head),
         "head_evaluable_count": len(observed),
@@ -1162,7 +1147,7 @@ def _prediction_summary(
         "status": "UNDEFINED",
         "reason": inference_blocker
         or ("not_requested" if max_lags is None else "hac_lag_exceeds_observations"),
-        "mean": float(mean(values)) if count else np.nan,
+        "mean": float(np.mean(values)) if count else np.nan,
         "standard_error": np.nan,
         "t_statistic": np.nan,
         "p_value": np.nan,
@@ -1470,7 +1455,6 @@ def _fama_macbeth_period_records(
                 for coefficient_id in coefficient_ids
             )
             continue
-        coefficients = result.coefficients.rename(index={"const": "intercept"})
         rows.extend(
             {
                 "regression_id": regression_id,
@@ -1479,7 +1463,7 @@ def _fama_macbeth_period_records(
                 "status": "DEFINED",
                 "reason": None,
                 "observation_count": result.observation_count,
-                "value": float(coefficients[coefficient_id]),
+                "value": float(result.coefficients[coefficient_id]),
                 "white_p_value": result.white_p_value
                 if result.white_p_value is not None
                 else np.nan,
@@ -1527,7 +1511,7 @@ def _fama_macbeth_summary(
             "reason": "incomplete_session_clock"
             if count != input_date_count
             else "hac_lag_exceeds_observations",
-            "mean": float(mean(values)) if count else np.nan,
+            "mean": float(np.mean(values)) if count else np.nan,
             "standard_error": np.nan,
             "t_statistic": np.nan,
             "p_value": np.nan,

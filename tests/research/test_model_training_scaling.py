@@ -246,7 +246,7 @@ def test_native_all_missing_column_scaling_roundtrip(tmp_path, algorithm, scalin
     assert scaler.native_missing
     assert scaler.medians == ()
     assert scaler.transform(data[["x", "z"]]).z.isna().all()
-    assert scaler.origin_[1] == 0 and scaler.scale_[1] == 1
+    assert scaler.mean_[1] == 0 and scaler.scale_[1] == 1
     assert case.result.metadata["rows_after_input_label_dropna"] == 4
     future = data[["x", "z"]].copy()
     future.loc[0] = [np.nan, np.nan]

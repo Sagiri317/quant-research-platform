@@ -182,7 +182,6 @@ def test_sparse_assembler_preserves_object_text_after_null_prefix(tmp_path, chun
             for spec in catalog.list()
         },
         output_root=tmp_path / "assembled",
-        processed_catalog=catalog,
         dataset_catalog=make_research_dataset_catalog(
             make_dummy_research_dataset_spec(key_coverage={"context": "sparse"})
         ),

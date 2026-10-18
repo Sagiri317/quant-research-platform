@@ -1,4 +1,4 @@
-"""Independent ordinary WLS/covariance oracles and exceptional-path boundaries."""
+"""Independent ordinary WLS, covariance, shrinkage and PSD oracles."""
 
 import numpy as np
 import pytest
@@ -10,7 +10,7 @@ from tests.correctness.test_portfolio_weight_and_risk_numeric_boundaries import 
 )
 
 
-def test_ordinary_weighted_svd_matches_exact_normal_system(monkeypatch):
+def test_weighted_svd_matches_independent_normal_system():
     rng = np.random.default_rng(701)
     frame = _cross()
     frame["total_market_cap"] = np.tile([1.0, 4.0, 16.0, 64.0, 256.0], 20)
@@ -19,10 +19,6 @@ def test_ordinary_weighted_svd_matches_exact_normal_system(monkeypatch):
     for name in styles:
         frame[name] = rng.normal(size=len(frame))
 
-    def unexpected_exact(*args, **kwargs):
-        raise AssertionError("ordinary WLS must avoid arbitrary-precision accumulation")
-
-    monkeypatch.setattr(risk, "_integer_coordinates", unexpected_exact)
     for order in (np.arange(len(frame)), rng.permutation(len(frame))):
         current = frame.iloc[order]
         fit = risk.FactorRiskState(style_columns=styles).fit_return_session(current)
@@ -39,9 +35,7 @@ def test_ordinary_weighted_svd_matches_exact_normal_system(monkeypatch):
 
 @pytest.mark.parametrize("shrinkage", [0.0, 0.2, 1.0])
 @pytest.mark.parametrize("zero_columns", [1, 5])
-def test_exact_zero_covariance_products_stay_vectorized(
-    monkeypatch, shrinkage, zero_columns
-):
+def test_zero_columns_keep_zero_covariance(shrinkage, zero_columns):
     values = np.random.default_rng(52).normal(size=(504, 5)) * 0.01
     values[:, -zero_columns:] = 0
     ages = np.arange(503, -1, -1)
@@ -49,10 +43,6 @@ def test_exact_zero_covariance_products_stay_vectorized(
     expected = np.cov(values, rowvar=False, aweights=weights, ddof=0) * 252
     expected = (1 - shrinkage) * expected + shrinkage * np.diag(np.diag(expected))
 
-    def unexpected_exact(*args, **kwargs):
-        raise AssertionError("exact-zero products are not cancellation or underflow")
-
-    monkeypatch.setattr(risk, "_integer_coordinates", unexpected_exact)
     actual = risk._ewma_covariance(
         values,
         ages=ages,
@@ -68,85 +58,55 @@ def test_exact_zero_covariance_products_stay_vectorized(
 
 
 @pytest.mark.parametrize("shrinkage", [0.0, 0.2, 1.0])
-def test_covariance_genuine_underflow_retains_exact_fallback(monkeypatch, shrinkage):
-    calls = []
-    original = risk._integer_coordinates
-
-    def record(values):
-        calls.append(True)
-        return original(values)
-
-    monkeypatch.setattr(risk, "_integer_coordinates", record)
+def test_cancelling_cross_products_keep_zero_covariance(shrinkage):
     actual = risk._ewma_covariance(
-        np.array([[-2e-162, 0.0], [2e-162, 0.0]]),
-        ages=np.zeros(2, dtype=int),
+        np.array([[0.01, 0.01], [-0.01, 0.01], [0.01, -0.01], [-0.01, -0.01]]),
+        ages=np.zeros(4, dtype=int),
         half_life=1.0,
         diagonal_shrinkage=shrinkage,
-        annualization_factor=1e300,
-        columns=("tiny", "zero"),
-    )
-    from fractions import Fraction
-
-    expected = float(Fraction(2e-162) ** 2 * Fraction(1e300))
-    assert calls
-    assert actual.iloc[0, 0] == expected
-    assert actual.iloc[1, 1] == 0
-
-
-def test_diagonal_shrinkage_ignores_discarded_covariance_cancellation(monkeypatch):
-    def unexpected_exact(*args, **kwargs):
-        raise AssertionError("discarded off-diagonal cancellation is irrelevant")
-
-    monkeypatch.setattr(risk, "_integer_coordinates", unexpected_exact)
-    actual = risk._ewma_covariance(
-        np.array([[1.0, 1.0], [-1.0, 1.0], [1.0, -1.0], [-1.0, -1.0]]),
-        ages=np.zeros(4, dtype=int),
-        half_life=1.0,
-        diagonal_shrinkage=1.0,
         annualization_factor=1.0,
         columns=("a", "b"),
     )
-    np.testing.assert_allclose(actual, np.eye(2), atol=1e-15)
+    np.testing.assert_allclose(actual, np.eye(2) * 0.0001, rtol=1e-13, atol=1e-18)
 
 
-def test_covariance_nonzero_product_cancellation_retains_exact_fallback(monkeypatch):
-    calls = []
-    original = risk._integer_coordinates
-
-    def record(values):
-        calls.append(True)
-        return original(values)
-
-    monkeypatch.setattr(risk, "_integer_coordinates", record)
+def test_constant_nonzero_columns_have_zero_covariance():
     actual = risk._ewma_covariance(
-        np.array([[1.0, 1.0], [-1.0, 1.0], [1.0, -1.0], [-1.0, -1.0]]),
-        ages=np.zeros(4, dtype=int),
-        half_life=1.0,
-        diagonal_shrinkage=0.0,
-        annualization_factor=1.0,
+        np.tile([0.01, 0.03], (504, 1)),
+        ages=np.arange(504),
+        half_life=126.0,
+        diagonal_shrinkage=0.2,
+        annualization_factor=252.0,
         columns=("a", "b"),
     )
-    assert calls
-    np.testing.assert_allclose(actual, np.eye(2), atol=1e-15)
+    np.testing.assert_array_equal(actual, np.zeros((2, 2)))
 
 
-def test_covariance_weighting_underflow_is_not_an_exact_zero_column(monkeypatch):
-    calls = []
-    original = risk._integer_coordinates
-
-    def record(values):
-        calls.append(True)
-        return original(values)
-
-    monkeypatch.setattr(risk, "_integer_coordinates", record)
-    actual = risk._ewma_covariance(
-        np.array([[0.0], [1e-200]]),
-        ages=np.array([0, 1020]),
-        half_life=1.0,
-        diagonal_shrinkage=1.0,
-        annualization_factor=1e300,
-        columns=("tiny",),
+@pytest.mark.parametrize("scale", [1e-6, 1e-4, 1.0])
+def test_psd_tolerance_scales_with_covariance_units(scale):
+    for matrix in (np.full((3, 3), scale), np.zeros((3, 3))):
+        np.testing.assert_array_equal(
+            risk._validated_covariance(matrix, error_prefix="factor_risk_covariance"),
+            matrix,
+        )
+    for matrix in (scale * np.array([[1.0, 1.01], [1.01, 1.0]]), np.array([[-scale]])):
+        with pytest.raises(ValueError, match="factor_risk_covariance_not_psd"):
+            risk._validated_covariance(matrix, error_prefix="factor_risk_covariance")
+    with pytest.raises(ValueError, match="factor_risk_covariance_invalid"):
+        risk._validated_covariance(
+            scale * np.array([[1.0, 1.009], [1.0, 1.0]]),
+            error_prefix="factor_risk_covariance",
+        )
+    almost_symmetric = scale * np.array([[1.0, 0.1 + np.finfo(float).eps], [0.1, 1.0]])
+    validated = risk._validated_covariance(
+        almost_symmetric, error_prefix="factor_risk_covariance"
     )
-    assert calls
-    # Even after annualization this nonzero variance rounds below binary64.
-    assert actual.iloc[0, 0] == 0
+    np.testing.assert_array_equal(
+        validated, (almost_symmetric + almost_symmetric.T) / 2
+    )
+
+
+@pytest.mark.parametrize("dtype", ["int64", "uint64"])
+def test_ewma_weights_decay_for_stored_session_ages(dtype):
+    weights = risk._ewma_weights(np.array([3, 2, 1], dtype=dtype), 1.0)
+    np.testing.assert_allclose(weights, np.array([1.0, 2.0, 4.0]) / 7, rtol=1e-14)

@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from fractions import Fraction
-from math import gcd, isfinite
+from math import isfinite
 from types import MappingProxyType
 
 import numpy as np
@@ -459,8 +458,7 @@ def validate_model_metadata_core(
             != {
                 "columns",
                 "scaling",
-                "weighted_mean_origin",
-                "weighted_mean_offset",
+                "weighted_mean",
                 "weighted_population_scale",
             }
             or type(scaler.get("scaling")) is not bool
@@ -492,16 +490,14 @@ def validate_model_metadata_core(
                     + [f"{column}__missing" for column in metadata["input_columns"]]
                 )
             )
-            or type(scaler["weighted_mean_origin"]) is not list
-            or type(scaler["weighted_mean_offset"]) is not list
+            or type(scaler["weighted_mean"]) is not list
             or type(scaler["weighted_population_scale"]) is not list
-            or len(scaler["columns"]) != len(scaler["weighted_mean_origin"])
-            or len(scaler["columns"]) != len(scaler["weighted_mean_offset"])
+            or len(scaler["columns"]) != len(scaler["weighted_mean"])
             or len(scaler["columns"]) != len(scaler["weighted_population_scale"])
             or any(
                 type(number) not in {int, float} or not np.isfinite(float(number))
                 for number in (
-                    *scaler["weighted_mean_origin"],
+                    *scaler["weighted_mean"],
                     *scaler["weighted_population_scale"],
                 )
             )
@@ -511,33 +507,13 @@ def validate_model_metadata_core(
                 or float(number) <= 0.0
                 for number in scaler["weighted_population_scale"]
             )
-            or any(
-                type(ratio) is not list
-                or len(ratio) != 2
-                or any(type(value) is not int for value in ratio)
-                or ratio[1] <= 0
-                or gcd(*ratio) != 1
-                for ratio in scaler["weighted_mean_offset"]
-            )
         ):
             raise ValueError("invalid_model_metadata")
         if not scaler["scaling"] and (
-            any(value != 0 for value in scaler["weighted_mean_origin"])
-            or any(value != [0, 1] for value in scaler["weighted_mean_offset"])
+            any(value != 0 for value in scaler["weighted_mean"])
             or any(value != 1 for value in scaler["weighted_population_scale"])
         ):
             raise ValueError("invalid_model_metadata")
-        try:
-            for origin, ratio in zip(
-                scaler["weighted_mean_origin"],
-                scaler["weighted_mean_offset"],
-                strict=True,
-            ):
-                offset = Fraction(*ratio)
-                float(offset)
-                float(Fraction(float(origin)) + offset)
-        except OverflowError:
-            raise ValueError("invalid_model_metadata") from None
     rank_algorithms = {
         "equal_weight_rank_ensemble",
         "ic_weighted_rank_ensemble",

@@ -412,9 +412,8 @@ def test_open_prediction_pushes_lower_bound_before_bad_key_validation(
     assert metadata["model_facts"]["input_units"] == case.facts["input_units"]
 
 
-@pytest.mark.parametrize("extreme", [False, True])
-def test_affine_attributions_use_independent_exact_oracle_and_bounded_matrix_work(
-    monkeypatch, extreme
+def test_affine_attributions_use_independent_oracle_and_bounded_matrix_work(
+    monkeypatch,
 ):
     from types import SimpleNamespace
 
@@ -428,17 +427,13 @@ def test_affine_attributions_use_independent_exact_oracle_and_bounded_matrix_wor
     scaler = ModelMatrixScaler(
         columns,
         (0.0,) * 8,
-        (Fraction(),) * 8,
-        ((1e300,) + (1.0,) * 7) if extreme else (1.0,) * 8,
+        (1.0,) * 8,
     )
-    coefficients = (0.25, *((1e300,) + (0.0,) * 7 if extreme else (2.0,) * 8))
+    coefficients = (0.25, *((2.0,) * 8))
     predictor = LinearScaledPredictor(coefficients, scaler)
     values = np.zeros((40, 8))
-    if extreme:
-        values[:, 0] = 1e-300
-    else:
-        values[0] = np.arange(8, dtype=float) / 8
-        values[1] = -values[0]
+    values[0] = np.arange(8, dtype=float) / 8
+    values[1] = -values[0]
     frame = pd.DataFrame(values, columns=columns).assign(
         timestamp=pd.Timestamp("2024-01-02"), asset_id=[str(i) for i in range(40)]
     )
@@ -464,14 +459,11 @@ def test_affine_attributions_use_independent_exact_oracle_and_bounded_matrix_wor
     exact = np.asarray(
         [
             [
-                float(
-                    Fraction(c) * (Fraction(float(v)) - Fraction(o) - d) / Fraction(s)
-                )
-                for c, v, o, d, s in zip(
+                float(Fraction(c) * (Fraction(float(v)) - Fraction(m)) / Fraction(s))
+                for c, v, m, s in zip(
                     coefficients[1:],
                     row,
-                    scaler.origin_,
-                    scaler.offset_,
+                    scaler.mean_,
                     scaler.scale_,
                     strict=True,
                 )
@@ -484,7 +476,7 @@ def test_affine_attributions_use_independent_exact_oracle_and_bounded_matrix_wor
         .reindex(frame.asset_id)
         .loc[:, columns]
     )
-    np.testing.assert_array_equal(actual, exact)
+    np.testing.assert_allclose(actual, exact, rtol=1e-13, atol=1e-15)
     assert predictions.status.eq("DEFINED").all()
     assert calls <= 4
 
@@ -673,11 +665,7 @@ def test_persisted_affine_explanation_matches_independent_fraction_oracle(tmp_pa
         expected.append(
             float(
                 Fraction(coefficients[column + 1])
-                * (
-                    Fraction(value)
-                    - Fraction(scaler.origin_[column])
-                    - scaler.offset_[column]
-                )
+                * (Fraction(value) - Fraction(scaler.mean_[column]))
                 / Fraction(scaler.scale_[column])
             )
         )

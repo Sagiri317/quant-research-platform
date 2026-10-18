@@ -60,7 +60,7 @@ def test_published_ledgers_preserve_ordinary_group_bootstrap(tmp_path):
         portfolio_interval_economics,
     )
     from quant_research_platform.research.portfolios.diagnostics import (
-        _group_portfolio_comparison,
+        _portfolio_statistics_tables,
     )
     from tests.helpers.portfolio_ledger import (
         CONTINUOUS_EXECUTION_COLUMNS,
@@ -71,6 +71,7 @@ def test_published_ledgers_preserve_ordinary_group_bootstrap(tmp_path):
     gross = 1 + returns
     dates = pd.bdate_range("2024-01-01", periods=len(gross) + 1)
     columns = {}
+    ledgers = {}
     for group in ("global", "quarterly"):
         candidate = f"{group}_ordinary"
         capital = PortfolioCapital(
@@ -82,19 +83,8 @@ def test_published_ledgers_preserve_ordinary_group_bootstrap(tmp_path):
             }
         )
         metadata = {
-            "sample_role": {
-                "start": str(dates[0].date()),
-                "end": str(dates[-1].date()),
-                "access": "test",
-            }["access"],
-            "window": {
-                key: {
-                    "start": str(dates[0].date()),
-                    "end": str(dates[-1].date()),
-                    "access": "test",
-                }[key]
-                for key in ("start", "end")
-            },
+            "sample_role": "test",
+            "window": {"start": str(dates[0].date()), "end": str(dates[-1].date())},
         }
         frames = []
         nav = capital.initial_capital
@@ -147,6 +137,7 @@ def test_published_ledgers_preserve_ordinary_group_bootstrap(tmp_path):
             capital=capital,
         )
         artifact = read_portfolio_ledger_artifact(root)
+        ledgers[candidate] = artifact
         with closing_iterator(artifact.iter_chunks()) as batches:
             intervals = pd.DataFrame(
                 [portfolio_interval_economics(batch) for batch in batches]
@@ -168,9 +159,31 @@ def test_published_ledgers_preserve_ordinary_group_bootstrap(tmp_path):
         method="percentile",
         size=0.95,
     )
-    result = _group_portfolio_comparison(
-        matrix,
-        {
+    from quant_research_platform.contracts.portfolios import PortfolioCandidateSpec
+    from quant_research_platform.contracts.time import TimeWindow
+
+    candidates = tuple(
+        PortfolioCandidateSpec(
+            candidate_id=f"{group}_ordinary",
+            selection_group=group,
+            construction="quantile_equal_weight",
+            prediction_selector="champion",
+            rebalance_schedule="daily",
+            top_quantile=1.0,
+            benchmark_id=None,
+        )
+        for group in ("global", "quarterly")
+    )
+    result = _portfolio_statistics_tables(
+        ledgers=ledgers,
+        candidates=candidates,
+        time_window=TimeWindow(dates[0], dates[-1]),
+        benchmark_opens=pd.DataFrame(),
+        calendar=pd.DataFrame({"timestamp": dates}),
+        unified_trading_sessions=lambda _: dates,
+        holding_inputs={},
+        config={
+            "analyses": ["group_comparison"],
             "sample_role": "test",
             "statistics": {
                 "hac_lag": 19,
@@ -186,8 +199,7 @@ def test_published_ledgers_preserve_ordinary_group_bootstrap(tmp_path):
                 },
             },
         },
-        daily_complete=True,
-    )
+    )["portfolio_group_comparison"]
     row = result.iloc[0]
     assert row.status == row.bootstrap_status == "DEFINED"
     assert row.observation_count == len(returns)
@@ -220,6 +232,8 @@ def test_published_ledgers_preserve_ordinary_group_bootstrap(tmp_path):
             "standard_error",
             "bootstrap_lower",
             "bootstrap_upper",
+            "global_terminal_wealth",
+            "quarterly_terminal_wealth",
         ]
         np.testing.assert_array_equal(saved[measurements], result[measurements])
 
@@ -364,19 +378,8 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
             }
         )
         metadata = {
-            "sample_role": {
-                "start": "2023-01-02",
-                "end": "2023-01-06",
-                "access": "validation",
-            }["access"],
-            "window": {
-                key: {
-                    "start": "2023-01-02",
-                    "end": "2023-01-06",
-                    "access": "validation",
-                }[key]
-                for key in ("start", "end")
-            },
+            "sample_role": "validation",
+            "window": {"start": "2023-01-02", "end": "2023-01-06"},
         }
         root = write_test_sessions(
             tmp_path / candidate.candidate_id,
@@ -386,17 +389,8 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
         )
         artifacts[candidate.candidate_id] = read_portfolio_ledger_artifact(root)
     metadata = {
-        "sample_role": {
-            "start": "2023-01-02",
-            "end": "2023-01-06",
-            "access": "validation",
-        }["access"],
-        "window": {
-            key: {"start": "2023-01-02", "end": "2023-01-06", "access": "validation"}[
-                key
-            ]
-            for key in ("start", "end")
-        },
+        "sample_role": "validation",
+        "window": {"start": "2023-01-02", "end": "2023-01-06"},
     }
     metadata = {
         **metadata,
@@ -1556,9 +1550,7 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
     for case, mutations, expected_status in cases:
         source = market.copy(deep=True)
         if case in {"scale_small", "scale_large"}:
-            source.loc[:, ["open", "close"]] *= (
-                1e-200 if case == "scale_small" else 1e200
-            )
+            source.loc[:, ["open", "close"]] *= 0.01 if case == "scale_small" else 100.0
         for code, field, value in mutations:
             source.loc[
                 source.source_asset_id.eq(code) & source.timestamp.eq(dates[1]), field

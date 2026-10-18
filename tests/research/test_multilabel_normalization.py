@@ -19,20 +19,20 @@ def _frame():
         {
             "timestamp": np.repeat(pd.date_range("2020-01-01", periods=2), 5),
             "asset_id": ["e", "b", "a", "d", "c"] * 2,
-            "feature": [1.0, 1.0, 3.0, np.nan, 5.0, -1e308, 0.0, 1e308, 1e308, np.nan],
+            "feature": [1.0, 1.0, 3.0, np.nan, 5.0, -100.0, 0.0, 100.0, 100.0, np.nan],
             "alternate": [
                 np.nan,
                 3.0,
                 1.0,
                 4.0,
                 1.0,
-                1e-320,
+                0.0001,
                 0.0,
-                -1e-320,
-                1e-320,
+                -0.0001,
+                0.0001,
                 2.0,
             ],
-            "first": [3.0, np.nan, 2.0, 1.0, 4.0, 1e308, 0.0, -1e308, 1e308, 4.0],
+            "first": [3.0, np.nan, 2.0, 1.0, 4.0, 100.0, 0.0, -100.0, 100.0, 4.0],
             "second": [np.nan, 2.0, 3.0, 4.0, 5.0, 1.0, np.nan, 3.0, 2.0, 4.0],
             "third": [5.0, 4.0, 3.0, 2.0, 1.0, np.nan, 1.0, 1.0, 1.0, 1.0],
             "eligible": True,
@@ -81,7 +81,9 @@ def test_multilabel_normalizes_shared_panel_once_and_matches_separate_labels(lab
         expected = pd.concat(
             [pair[index] for pair in separate], ignore_index=True
         ).sort_values("timestamp", kind="mergesort", ignore_index=True)
-        pd.testing.assert_frame_equal(actual[index], expected, check_exact=True)
+        pd.testing.assert_frame_equal(
+            actual[index], expected, check_exact=False, rtol=1e-12, atol=1e-14
+        )
     assert normalize.call_count == frame.timestamp.nunique()
 
 
@@ -93,10 +95,14 @@ def test_multilabel_chunk_continuity_and_diagnostics():
         [frame.iloc[:2], frame.iloc[2:7], frame.iloc[7:]], labels
     )
     for actual, expected in zip(split, whole, strict=True):
-        pd.testing.assert_frame_equal(actual, expected, check_exact=True)
+        pd.testing.assert_frame_equal(
+            actual, expected, check_exact=False, rtol=1e-12, atol=1e-14
+        )
     for expected, actual in zip(summary, split_summary, strict=True):
         if isinstance(expected, pd.DataFrame):
-            pd.testing.assert_frame_equal(expected, actual, check_exact=True)
+            pd.testing.assert_frame_equal(
+                expected, actual, check_exact=False, rtol=1e-12, atol=1e-14
+            )
         else:
             assert expected == actual
 

@@ -136,3 +136,103 @@ def test_native_curve_preserves_known_prefix_and_planned_plot_range(
         figure.canvas.draw()
     finally:
         plt.close(figure)
+
+
+@pytest.mark.parametrize("position", [False, True])
+@pytest.mark.parametrize("stride", [1, 5])
+def test_recovered_book_gap_keeps_endpoint_without_fabricating_observed_path(
+    tmp_path, position, stride
+):
+    from dataclasses import asdict
+
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    from quant_research_platform.contracts.portfolios import FundingForecast
+    from quant_research_platform.markets.implementations.crypto.execution import (
+        TakerConfig,
+        simulate_taker,
+    )
+    from quant_research_platform.reports.plots import plot_portfolio_curve
+    from tests.markets.crypto.test_hft import _boundary
+    from tests.markets.crypto.test_hft_execution import _state
+    from tests.research.test_crypto_execution_partial import CAPITAL, WINDOW
+
+    config = TakerConfig(1.0, 2.0, 0, 0.0, 100)
+    results = []
+
+    def produce(emit):
+        results.append(
+            simulate_taker(
+                [
+                    _state(0),
+                    _state(300),
+                    _boundary(400),
+                    _state(600, segment_id="s2"),
+                    _state(1000, segment_id="s2"),
+                ],
+                [{"timestamp_ms": 0, "prediction": 0.02}] if position else [],
+                prediction_column="prediction",
+                prediction_horizon_ms=100,
+                config=config,
+                observed_coverage={
+                    "s1": (0, 400_000_000),
+                    "s2": (600_000_000, 1_000_000_001),
+                },
+                capital=CAPITAL,
+                asset_id="btc_usdt",
+                funding_events=(),
+                funding_forecasts=(FundingForecast(0, 2_000_000_000, ()),),
+                funding_coverage=((0, 1_000_000_001),) if position else (),
+                decision_windows_ns=((0, 1_000_000_000),),
+                on_ledger=emit,
+            )
+        )
+
+    root = write_portfolio_ledger_artifact(
+        tmp_path / "ledger",
+        capital=CAPITAL,
+        metadata={
+            "window": WINDOW,
+            "sample_role": "prediction",
+            "execution_mode": "continuous",
+            "execution_style": "taker",
+            "asset_id": "btc_usdt",
+            "symbol": "BTCUSDT",
+            "execution": asdict(config),
+        },
+        produce=produce,
+    )
+    curve = portfolio_curve(root, stride=stride)
+    assert curve["account_path_status"] == "COMPLETE"
+    assert curve["market_observation_status"] == ("PARTIAL" if position else "COMPLETE")
+    assert curve["status"] == ("PARTIAL" if position else "DEFINED")
+    assert "observed_totals_scope" not in curve
+    assert results[0]["net_pnl"] == (-0.5 if position else 0.0)
+    assert curve["points"][-1]["nav"] == CAPITAL.initial_capital + results[0]["net_pnl"]
+    figure, axes = plot_portfolio_curve(curve, sample_role="prediction", timezone="UTC")
+    try:
+        np.testing.assert_array_equal(
+            axes[0].lines[0].get_ydata(), [row["nav"] for row in curve["points"]]
+        )
+        notes = " ".join(text.get_text() for axis in axes for text in axis.texts)
+        if position:
+            assert curve["first_market_gap_ns"] == 400_000_000
+            assert (
+                curve["market_observation_reason"]
+                == "crypto_execution_book_coverage_incomplete"
+            )
+            assert axes[0].lines[0].get_linestyle() == "None"
+            assert not axes[1].lines
+            assert "market_observation" in notes and "known_prefix" not in notes
+            assert "完整账本派生回撤" not in notes
+        else:
+            assert axes[0].lines[0].get_linestyle() == "-"
+            assert len(axes[1].lines) == (1 if stride == 1 else 0)
+        figure.canvas.draw()
+        ticks = [label.get_text() for label in axes[0].get_xticklabels()]
+        assert len(ticks) == len(set(ticks))
+        assert axes[0].yaxis.get_offset_text().get_text() == ""
+        figure.savefig(tmp_path / "recovered-gap.png")
+    finally:
+        plt.close(figure)

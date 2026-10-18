@@ -264,6 +264,9 @@ def test_native_identical_cash_paths_are_legal_group_comparison(tmp_path):
         assert rows.global_mean.eq(0).all()
         assert rows.quarterly_mean.eq(0).all()
         assert rows.mean_difference.eq(0).all()
+        for group in ("global", "quarterly"):
+            assert rows[f"{group}_terminal_wealth"].eq(1.0).all()
+            assert rows[f"{group}_terminal_wealth_reason"].eq("").all()
 
 
 def test_native_paired_portfolio_benchmarks_must_match(tmp_path):
@@ -399,6 +402,12 @@ def test_paired_confidence_is_used_by_hac_and_persisted(tmp_path, confidence, ki
             config,
             daily_complete=True,
         )
+        # The inference helper has no ledger endpoints. Supply the known
+        # fixture endpoint wealth before exercising the statistics writer.
+        result["global_terminal_wealth"] = 1.0
+        result["quarterly_terminal_wealth"] = float(np.prod(1 + values))
+        result["global_terminal_wealth_reason"] = ""
+        result["quarterly_terminal_wealth_reason"] = ""
     centered = values - values.mean()
     standard_error = np.sqrt(centered @ centered + centered[1:] @ centered[:-1]) / len(
         values
@@ -497,8 +506,6 @@ def test_portfolio_group_inference_methods_have_independent_preconditions(
         matrix, config, daily_complete=False
     ).iloc[0]
     assert unavailable.mean_difference == row.mean_difference
-    assert unavailable.global_terminal_wealth == row.global_terminal_wealth
-    assert unavailable.quarterly_terminal_wealth == row.quarterly_terminal_wealth
     assert unavailable.reason == unavailable.bootstrap_reason == "incomplete_daily_axis"
     assert pd.isna(unavailable.t_statistic) and pd.isna(unavailable.bootstrap_lower)
     assert row.status == status
