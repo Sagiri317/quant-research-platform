@@ -1718,7 +1718,7 @@ def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_pat
         )
         try:
             projected = predicted.assign(family_id=family)
-            lookup.row_count += index.add_float_value_table(
+            index.add_float_value_table(
                 pa.Table.from_pandas(projected, preserve_index=False),
                 namespace="prediction",
                 value_column="prediction_score",

@@ -25,9 +25,8 @@ from quant_research_platform.contracts.filtering import (
 )
 from quant_research_platform.contracts.ids import validate_input_market
 from quant_research_platform.contracts.json_codec import (
+    _json_native_object,
     canonical_identity_bytes,
-    parse_qrp_json_object,
-    render_qrp_json_object,
 )
 from quant_research_platform.contracts.time import (
     TimeWindow,
@@ -299,7 +298,7 @@ def validate_model_metadata_core(
     if type(value) is not dict:
         raise ValueError("invalid_model_metadata")
     try:
-        metadata = parse_qrp_json_object(render_qrp_json_object(value).encode("utf-8"))
+        metadata = _json_native_object(value)
     except (TypeError, ValueError) as exc:
         raise ValueError("invalid_model_metadata") from exc
     required = {

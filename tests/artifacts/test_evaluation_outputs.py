@@ -47,8 +47,9 @@ def _frame():
 
 
 @pytest.mark.parametrize("duplicate", ["metrics", "grouped_label_values"])
-def test_evaluation_rejects_cross_chunk_duplicate_keys_before_publication(
-    tmp_path: Path, duplicate
+@pytest.mark.parametrize("across_chunks", [False, True])
+def test_evaluation_rejects_duplicate_keys_before_publication(
+    tmp_path: Path, duplicate, across_chunks
 ):
     spec = _spec()
     with build_evaluation_result_from_frames(
@@ -65,10 +66,21 @@ def test_evaluation_rejects_cross_chunk_duplicate_keys_before_publication(
             grouped if duplicate == "grouped_label_values" else grouped.iloc[:0],
             metadata,
         )
+        chunks = (
+            (*original, repeated)
+            if across_chunks
+            else [
+                (
+                    pd.concat([metrics, repeated[0]], ignore_index=True),
+                    pd.concat([grouped, repeated[1]], ignore_index=True),
+                    metadata,
+                )
+            ]
+        )
         output = tmp_path / "evaluation"
         with pytest.raises(ValueError, match=f"duplicate_evaluation_{duplicate}_keys"):
             write_evaluation_outputs_from_chunks(
-                (*original, repeated),
+                chunks,
                 summary_factory=result.summaries,
                 spec=spec,
                 output_path=output,
@@ -160,3 +172,38 @@ def test_evaluation_publishes_numeric_members_and_reads_only_requested_summaries
     (output / "manifest.json").write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="output_manifest_metadata_invalid"):
         read_evaluation_outputs(output, tables=("ic_summary",))
+
+
+@pytest.mark.parametrize("member", ["ic_summary", "group_spread_summary"])
+def test_evaluation_summary_uniqueness_at_publication_and_read(tmp_path, member):
+    spec = _spec()
+    with build_evaluation_result_from_frames(
+        (_frame(),),
+        spec=spec,
+        asset_column="asset_id",
+        source_columns_by_kind={"feature": ("feature",)},
+    ) as result:
+        chunks = list(result.output_chunks)
+        summaries = result.summaries()
+        position = 1 if member == "ic_summary" else 2
+        duplicated = pd.concat([summaries[position]] * 2, ignore_index=True)
+        broken = list(summaries)
+        broken[position] = duplicated
+        output = tmp_path / "invalid"
+        with pytest.raises(ValueError, match=f"duplicate_evaluation_{member}_keys"):
+            write_evaluation_outputs_from_chunks(
+                chunks,
+                summary_factory=lambda: tuple(broken),
+                spec=spec,
+                output_path=output,
+            )
+        assert not output.exists()
+        valid = write_evaluation_outputs_from_chunks(
+            chunks,
+            summary_factory=lambda: summaries,
+            spec=spec,
+            output_path=tmp_path / "valid",
+        )
+    duplicated.to_parquet(valid / f"{member}.parquet", index=False)
+    with pytest.raises(ValueError, match=f"duplicate_evaluation_{member}_keys"):
+        read_evaluation_outputs(valid, tables=(member,))

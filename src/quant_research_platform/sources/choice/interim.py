@@ -43,7 +43,6 @@ from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
     filesystem_scandir,
-    open_filesystem_file,
     require_unaliased_path,
 )
 from quant_research_platform.storage.manifests import read_qrp_json_file
@@ -301,7 +300,10 @@ def _raw_index(raw_root, data_ids, start, end, diagnostics=None):
                     continue
                 if snapshot and "reporttype" in options:
                     raise ValueError("choice_financial_css_reporttype_unsupported")
-                response = read_choice_response(root, request, manifest=manifest)
+                content_hashes = []
+                response = read_choice_response(
+                    root, request, manifest=manifest, content_hashes=content_hashes
+                )
                 fields = set(response["Indicators"])
                 targets = {
                     data_id
@@ -310,8 +312,7 @@ def _raw_index(raw_root, data_ids, start, end, diagnostics=None):
                     or snapshot
                     and fields.intersection(FINANCIAL_FIELDS.get(data_id, {}))
                 }
-                with open_filesystem_file(root / "response.csv") as handle:
-                    source_hash = hashlib.file_digest(handle, "sha256").hexdigest()
+                source_hash = content_hashes[0]
                 for data_id in targets:
                     hashes[data_id].extend(
                         (

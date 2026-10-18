@@ -745,26 +745,21 @@ def test_raw_export_discovery_contract_keeps_csv_only(
     filesystem_write_text(txt_description, "Clddt\tcalendar date\n", encoding="utf-8")
 
     assert raw_exports.SUPPORTED_RAW_EXPORT_SUFFIXES == {".csv"}
-    assert [
-        path
-        for _dataset, path, _identity in raw_exports.dataset_files_with_identity_by_id(
-            tmp_path
-        )
-    ] == [csv_export]
-    selection = list(raw_exports.dataset_files_with_identity_by_id(tmp_path))
+    assert [path for _dataset, path in raw_exports.dataset_files_by_id(tmp_path)] == [
+        csv_export
+    ]
+    selection = list(raw_exports.dataset_files_by_id(tmp_path))
     expected = _collect_raw_export(csv_export, "trading_calendar")
     sidecar = csv_export.with_suffix(".metadata.json")
     for payload in ("{}", "changed metadata"):
         filesystem_write_text(sidecar, payload, encoding="utf-8")
-        assert (
-            list(raw_exports.dataset_files_with_identity_by_id(tmp_path)) == selection
-        )
+        assert list(raw_exports.dataset_files_by_id(tmp_path)) == selection
         pd.testing.assert_frame_equal(
             _collect_raw_export(csv_export, "trading_calendar"), expected
         )
     sidecar.unlink()
     sidecar.mkdir()
-    assert list(raw_exports.dataset_files_with_identity_by_id(tmp_path)) == selection
+    assert list(raw_exports.dataset_files_by_id(tmp_path)) == selection
     pd.testing.assert_frame_equal(
         _collect_raw_export(csv_export, "trading_calendar"), expected
     )
@@ -969,14 +964,14 @@ def test_csmar_materialization_replays_each_dataset_from_one_inventory(
         )
         expected[data_id] = read_dataset(result.artifact_roots[data_id])
     inventory_calls = 0
-    original_inventory = interim.dataset_files_with_identity_by_id
+    original_inventory = interim.dataset_files_by_id
 
     def counted_inventory(*args, **kwargs):
         nonlocal inventory_calls
         inventory_calls += 1
         return original_inventory(*args, **kwargs)
 
-    monkeypatch.setattr(interim, "dataset_files_with_identity_by_id", counted_inventory)
+    monkeypatch.setattr(interim, "dataset_files_by_id", counted_inventory)
     result = interim.materialize_interim_data(
         output_roots={
             key: combined.interim_data_root("csmar", key) for key in data_ids
@@ -1072,8 +1067,8 @@ def test_provider_header_accepts_extra_optional_fields(
         path = tmp_path / f"provider-{width}.csv"
         filesystem_write_text(path, ",".join(columns) + "\n", encoding="utf-8")
         assert tuple(raw_schemas.read_export_header(path)) == columns
-        selected = list(raw_exports.dataset_files_with_identity_by_id(tmp_path))
-        assert all(dataset == "trading_calendar" for dataset, _, _ in selected)
+        selected = list(raw_exports.dataset_files_by_id(tmp_path))
+        assert all(dataset == "trading_calendar" for dataset, _ in selected)
         assert _collect_raw_export(path, "trading_calendar").empty
 
 
@@ -2384,9 +2379,7 @@ def test_raw_table_identity_ignores_parent_directory_and_rejects_conflict(tmp_pa
         filesystem_mkdir(root)
         path = root / "unknown.csv"
         filesystem_write_text(path, payload, encoding="utf-8")
-        [(dataset, selected_path, _identity)] = list(
-            raw_exports.dataset_files_with_identity_by_id(root)
-        )
+        [(dataset, selected_path)] = list(raw_exports.dataset_files_by_id(root))
         assert selected_path == path
         outputs.append(dataset)
         frame = _collect_raw_export(path, dataset)
@@ -2395,9 +2388,7 @@ def test_raw_table_identity_ignores_parent_directory_and_rejects_conflict(tmp_pa
     conflict = tmp_path / "TRDNEW_Co.csv"
     filesystem_write_text(conflict, payload, encoding="utf-8")
     with pytest.raises(ValueError, match="table_identity_conflict"):
-        for dataset, path, _identity in raw_exports.dataset_files_with_identity_by_id(
-            tmp_path
-        ):
+        for dataset, path in raw_exports.dataset_files_by_id(tmp_path):
             _collect_raw_export(path, dataset)
 
 

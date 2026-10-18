@@ -237,7 +237,12 @@ class ChoiceRawSession:
 
 
 def read_choice_response(
-    root: Path, request: ChoiceRequest, *, manifest=None, verify_bytes: bool = False
+    root: Path,
+    request: ChoiceRequest,
+    *,
+    manifest=None,
+    verify_bytes: bool = False,
+    content_hashes: list[str] | None = None,
 ) -> dict[str, object]:
     """Restore typed provider observations; byte auditing is explicit and optional."""
     request.payload()
@@ -249,7 +254,12 @@ def read_choice_response(
     metadata = manifest["metadata"]
     with closing_iterator(
         _validated_rows(
-            root, request, metadata, manifest=manifest, verify_bytes=verify_bytes
+            root,
+            request,
+            metadata,
+            manifest=manifest,
+            verify_bytes=verify_bytes,
+            content_hashes=content_hashes,
         )
     ) as rows:
         for count, row in enumerate(rows):
@@ -398,6 +408,7 @@ def _validated_rows(
     require_complete: bool = True,
     manifest=None,
     verify_bytes: bool = False,
+    content_hashes: list[str] | None = None,
 ) -> Iterator[tuple[object, ...]]:
     required = {"request", "response", "data_container", "units", "types"}
     diagnostics = {"collected_at", "status", "scope"}
@@ -442,7 +453,12 @@ def _validated_rows(
     scope = _empty_scope()
     count = 0
     with closing_iterator(
-        iter_csv_snapshot(root, expected_manifest=manifest, verify_bytes=verify_bytes)
+        iter_csv_snapshot(
+            root,
+            expected_manifest=manifest,
+            verify_bytes=verify_bytes,
+            content_hashes=content_hashes,
+        )
     ) as rows:
         for row in rows:
             if len(row) != len(response["Indicators"]) + 2 or type(row[0]) is not str:

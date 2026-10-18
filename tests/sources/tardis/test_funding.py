@@ -602,87 +602,6 @@ def test_settlement_read_handle_close_preserves_primary(
     assert handles and all(handle.closed for handle in handles)
 
 
-@pytest.mark.parametrize("case", ("identity", "long", "short"))
-def test_import_rejects_changed_settlement_before_decode(tmp_path, monkeypatch, case):
-    from dataclasses import replace
-
-    import quant_research_platform.sources.tardis.funding as funding
-
-    destination = _publish_funding_archive(
-        tmp_path, "2026-09-01", include_funding=False
-    )
-    response = tmp_path / "settlements.json"
-    size = 2 * 1024**2 + 13
-    response.write_bytes(b" " * size)
-    expected = funding.dataset_file_identity(response)
-    identity_calls = 0
-
-    def identity(_path):
-        nonlocal identity_calls
-        identity_calls += 1
-        return (
-            replace(expected, modified_ns=expected.modified_ns + 1)
-            if case == "identity" and identity_calls > 1
-            else expected
-        )
-
-    monkeypatch.setattr(funding, "dataset_file_identity", identity)
-    original_open = funding.open_filesystem_file
-    requests = []
-    returned = []
-    handles = []
-
-    class Handle:
-        def __init__(self, handle):
-            self.handle = handle
-
-        def read(self, count):
-            requests.append(count)
-            value = self.handle.read(count)
-            returned.append(len(value))
-            return value
-
-        def close(self):
-            self.handle.close()
-
-    def open_handle(path, *args, **kwargs):
-        if case == "long":
-            with path.open("ab") as handle:
-                handle.write(b" ")
-        elif case == "short":
-            with path.open("r+b") as handle:
-                handle.truncate(size - 1)
-        handle = original_open(path, *args, **kwargs)
-        handles.append(handle)
-        return Handle(handle)
-
-    def no_decode(*_args, **_kwargs):
-        pytest.fail("a changed source must not reach its decoder")
-
-    monkeypatch.setattr(funding, "open_filesystem_file", open_handle)
-    monkeypatch.setattr(funding, "_settlement_response", no_decode)
-    start = pd.Timestamp("2026-09-01").value // 1000000
-    reason = "tardis_funding_source_changed"
-    with open_tardis_archive(destination) as archive:
-        with pytest.raises(ValueError, match="^" + reason + "$"):
-            funding.import_funding_history(
-                archive,
-                symbol="BTCUSDT",
-                source_id="binance",
-                request_limit=1000,
-                response_path=response,
-                http_status=200,
-                start_ms=start,
-                end_ms=start + 600000 - 1,
-            )
-    assert identity_calls == 2
-    assert requests == [size + 1]
-    assert sum(returned) <= size + 1
-    assert sum(returned) == size + {"long": 1, "short": -1}.get(case, 0)
-    assert handles and all(handle.closed for handle in handles)
-    assert not (destination / "funding/BTCUSDT").exists()
-
-
 @pytest.mark.parametrize("oversized", (False, True))
 @pytest.mark.parametrize("body_fails", (False, True))
 def test_import_settlement_handle_close_preserves_primary(
@@ -704,7 +623,7 @@ def test_import_settlement_handle_close_preserves_primary(
         def __init__(self, handle):
             self.handle = handle
 
-        def read(self, count):
+        def read(self, count=-1):
             if body_fails:
                 raise primary
             return self.handle.read(count)
@@ -892,3 +811,30 @@ def test_funding_import_still_checks_projected_csv_bytes(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="raw_csv_record_not_canonical"):
         _publish_funding_archive(tmp_path, "2026-09-01")
     assert not (tmp_path / "archive-2026-09-01/funding/BTCUSDT").exists()
+
+
+def test_import_touch_uses_consumed_settlement_bytes(tmp_path, monkeypatch):
+    import hashlib
+    import os
+
+    import quant_research_platform.sources.tardis.funding as funding
+
+    original = funding._settlement_response
+    response = tmp_path / "2026-09-01-settlements.json"
+
+    def decode_then_touch(raw, **kwargs):
+        result = original(raw, **kwargs)
+        before = response.stat()
+        os.utime(response, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
+        return result
+
+    monkeypatch.setattr(funding, "_settlement_response", decode_then_touch)
+    destination = _publish_funding_archive(tmp_path, "2026-09-01")
+    root = destination / "funding/BTCUSDT"
+    consumed = (root / "settlements.json").read_bytes()
+    evidence = json.loads((root / "observations/response.metadata.json").read_text())[
+        "metadata"
+    ]["settlement_source"]
+    assert consumed == response.read_bytes()
+    assert evidence["sha256"] == hashlib.sha256(consumed).hexdigest()
+    assert evidence["byte_count"] == len(consumed)

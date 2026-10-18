@@ -513,7 +513,7 @@ def validate_evaluation_artifact_structure(
     science: dict | None = None,
     timestamp_count: int | None = None,
 ) -> None:
-    for frame in (metrics, grouped_label_values, ic_summary, group_spread_summary):
+    for frame in (grouped_label_values, ic_summary, group_spread_summary):
         _validate_signal_label_membership(frame, spec=spec)
     for frame in (metrics, grouped_label_values):
         if frame.empty:
@@ -546,18 +546,6 @@ def validate_evaluation_artifact_structure(
             or not metrics["rankic_reason"].eq("not_applicable").all()
         ):
             raise ValueError("single_asset_time_series_evaluation_artifact_invalid")
-    _reject_duplicate_keys(metrics, ("timestamp", "signal", "label"), "metrics")
-    _reject_duplicate_keys(
-        grouped_label_values,
-        ("timestamp", "signal", "label", "group"),
-        "grouped_label_values",
-    )
-    _reject_duplicate_keys(ic_summary, ("signal", "label"), "ic_summary")
-    _reject_duplicate_keys(
-        group_spread_summary,
-        ("signal", "label"),
-        "group_spread_summary",
-    )
     _validate_correlation_metrics(metrics, spec=spec)
     strict_non_negative_count_series(grouped_label_values["n_obs"])
     if (
@@ -759,15 +747,6 @@ def _validate_correlation_metrics(metrics, *, spec):
                     raise ValueError("invalid_evaluation_statistic_reason")
             elif insufficient:
                 raise ValueError("invalid_evaluation_statistic_reason")
-
-
-def _reject_duplicate_keys(
-    frame: pd.DataFrame,
-    keys: tuple[str, ...],
-    artifact_name: str,
-) -> None:
-    if bool(frame.duplicated(list(keys)).any()):
-        raise ValueError(f"duplicate_evaluation_{artifact_name}_keys")
 
 
 def _validate_signal_label_membership(

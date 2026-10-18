@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import csv
 import io
-import os
 import re
 import sys
 from collections.abc import Iterator
@@ -13,10 +12,7 @@ from pathlib import Path
 
 from quant_research_platform.sources.csmar import field_mappings as _field_mappings
 from quant_research_platform.storage.identity import (
-    DatasetFileIdentity,
     _DigestingReader,
-    dataset_file_identity,
-    dataset_file_identity_from_stat,
     open_filesystem_file,
 )
 
@@ -98,24 +94,11 @@ def _infer_dataset_from_header(columns: tuple[str, ...]) -> str:
 
 
 class _CsvRecords:
-    """Parse strict provider CSV records with source identity checks."""
+    """Parse strict provider CSV records and hash the consumed bytes."""
 
-    def __init__(self, path, *, expected_identity=None, content_hashes=None):
-        try:
-            identity = dataset_file_identity(path)
-        except ValueError as exc:
-            raise ValueError("csmar_raw_export_identity_changed") from exc
-        if expected_identity is not None and identity != expected_identity:
-            raise ValueError("csmar_raw_export_identity_changed")
+    def __init__(self, path, *, content_hashes=None):
         self._handle = open_filesystem_file(path, "rb")
         try:
-            if (
-                dataset_file_identity_from_stat(os.fstat(self._handle.fileno()))
-                != identity
-            ):
-                raise ValueError("csmar_raw_export_identity_changed")
-            self._identity = identity
-            self._path = path
             self._content_hashes = content_hashes
             self._exhausted = False
             self._bytes = _DigestingReader(self._handle)
@@ -146,27 +129,7 @@ class _CsvRecords:
         return fields
 
     def close(self):
-        failure = None
-        try:
-            if (
-                dataset_file_identity_from_stat(os.fstat(self._handle.fileno()))
-                != self._identity
-                or dataset_file_identity(self._path) != self._identity
-            ):
-                raise ValueError("csmar_raw_export_identity_changed")
-        except BaseException as error:
-            failure = error
-        try:
-            self._text.close()
-        except BaseException as error:
-            if failure is not None:
-                failure.add_note(
-                    "CSMAR source close also failed: " + type(error).__name__
-                )
-            else:
-                failure = error
-        if failure is not None:
-            raise failure
+        self._text.close()
         if self._exhausted and self._content_hashes is not None:
             self._content_hashes.append(self._bytes.hexdigest())
 
@@ -174,7 +137,6 @@ class _CsvRecords:
 def iter_export_csv_records(
     path: str | Path,
     *,
-    expected_identity: DatasetFileIdentity | None = None,
     content_hashes: list[str] | None = None,
 ) -> Iterator[list[str]]:
 
@@ -184,7 +146,6 @@ def iter_export_csv_records(
         try:
             records = _CsvRecords(
                 Path(path),
-                expected_identity=expected_identity,
                 content_hashes=content_hashes,
             )
             for record in records:
@@ -211,16 +172,14 @@ def iter_export_csv_records(
     return activate()
 
 
-def read_export_header(
-    path: str | Path, *, expected_identity: DatasetFileIdentity | None = None
-) -> tuple[str, ...]:
+def read_export_header(path: str | Path) -> tuple[str, ...]:
     """Read the header row from a supported CSV raw export."""
 
     export_path = Path(path)
     suffix = export_path.suffix.lower()
     if suffix != ".csv":
         raise ValueError(f"Unsupported CSMAR export extension: {suffix}")
-    rows = iter_export_csv_records(export_path, expected_identity=expected_identity)
+    rows = iter_export_csv_records(export_path)
     primary = None
     try:
         record = next(rows, None)
@@ -249,10 +208,3 @@ def validate_export_header(record: list[str]) -> list[str]:
     if len(columns) != len(set(columns)):
         raise ValueError("duplicate_csmar_provider_column")
     return columns
-
-
-def raw_export_file_identity(path: Path) -> DatasetFileIdentity:
-    try:
-        return dataset_file_identity(path)
-    except ValueError as exc:
-        raise ValueError("csmar_raw_export_identity_changed") from exc

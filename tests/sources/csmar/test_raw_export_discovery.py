@@ -22,7 +22,7 @@ def test_requested_dataset_rejects_ambiguous_header(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="Cannot infer CSMAR dataset from raw header"):
         tuple(
-            raw_exports.dataset_files_with_identity_by_id(
+            raw_exports.dataset_files_by_id(
                 tmp_path, requested_datasets=("market_cap",)
             )
         )
@@ -112,17 +112,16 @@ def test_canonical_three_dataset_root_ignores_sibling_archive(tmp_path):
             writer = csv.DictWriter(stream, fieldnames=list(row))
             writer.writeheader()
             writer.writerow(row)
-    members = tuple(raw_exports.dataset_files_with_identity_by_id(raw))
-    assert {dataset for dataset, _, _ in members} == set(rows)
+    members = tuple(raw_exports.dataset_files_by_id(raw))
+    assert {dataset for dataset, _ in members} == set(rows)
     assert len(members) == 3
-    for dataset, path, identity in members:
+    for dataset, path in members:
         assert path.is_relative_to(raw)
         chunks = list(
             raw_exports.iter_private_export_chunks(
                 path,
                 dataset=dataset,
                 chunksize=1,
-                expected_identity=identity,
             )
         )
         actual = interim.normalize_raw_frame(pd.concat(chunks), dataset)
@@ -142,3 +141,26 @@ def test_canonical_three_dataset_root_ignores_sibling_archive(tmp_path):
             assert set(chunks[0]) == {"Symbol", "Chgtype", "Annoudt", "Execudt"}
             assert actual["change_type"].tolist() == ["ST"]
             assert actual["effective_date"].tolist() == [pd.Timestamp("2020-01-03")]
+
+
+@pytest.mark.parametrize("exhaust", [False, True])
+def test_csv_touch_does_not_change_consumed_provenance(tmp_path, exhaust):
+    import hashlib
+    import os
+
+    from quant_research_platform.sources.csmar.raw_schemas import (
+        iter_export_csv_records,
+    )
+
+    path = tmp_path / "source.csv"
+    raw = b"value\n1\n"
+    path.write_bytes(raw)
+    hashes = []
+    rows = iter_export_csv_records(path, content_hashes=hashes)
+    assert next(rows) == ["value"]
+    before = path.stat()
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
+    if exhaust:
+        assert list(rows) == [["1"]]
+    rows.close()
+    assert hashes == ([hashlib.sha256(raw).hexdigest()] if exhaust else [])

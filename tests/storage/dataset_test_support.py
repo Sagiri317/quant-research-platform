@@ -84,19 +84,6 @@ _ARROW_TIMESTAMP_LOGICAL_DTYPE_CASES = tuple(
 )
 
 
-def _input_dataset_identity_payload(
-    data_id: str = "demo_input", *, extra: dict[str, object] | None = None
-) -> dict[str, object]:
-    payload: dict[str, object] = {
-        "data_id": data_id,
-        "spec_hash": "d" * 64,
-        "manifest_hash": "e" * 64,
-    }
-    if extra:
-        payload.update(extra)
-    return payload
-
-
 def _persisted_table(frame: pd.DataFrame) -> pa.Table:
     return pa.Table.from_pandas(frame, preserve_index=False).replace_schema_metadata(
         {

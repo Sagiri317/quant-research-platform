@@ -431,7 +431,12 @@ def test_fixed_maker_inventory_controls_change_real_fill_quantity():
             [_trade(50, price="99.5", quantity="4", maker_buyer=True)],
             [_quote(0, book_segment_id="s1")],
             config=replace(
-                _maker_config(), inventory_target=target, inventory_skew=skew
+                _maker_config(),
+                order_quantity="1.0",
+                max_position=str(_maker_config().max_position),
+                maker_fee_bps=str(_maker_config().maker_fee_bps),
+                inventory_target=str(target),
+                inventory_skew=str(skew),
             ),
             observed_coverage={"s1": _coverage(0, 201)},
             trade_coverage={"trade-connection-1": _coverage(0, 201)},
@@ -599,7 +604,12 @@ def test_taker_uses_latest_actual_state_at_effective_time() -> None:
         funding_forecasts=KNOWN_NO_FUNDING,
         prediction_horizon_ms=500,
         prediction_column="prediction",
-        config=_taker_config(latency_ms=10),
+        config=replace(
+            _taker_config(latency_ms=10),
+            order_quantity="1.0",
+            position_size=str(_taker_config().position_size),
+            taker_fee_bps="1.0",
+        ),
         observed_coverage={"s1": _coverage(0, 15)},
         on_ledger=capture_fill_rows(fills.append),
         capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),

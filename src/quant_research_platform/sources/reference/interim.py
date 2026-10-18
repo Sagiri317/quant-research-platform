@@ -40,7 +40,6 @@ from quant_research_platform.sources.reference.a_share_fees import (
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.identity import (
     _hash_file_content,
-    dataset_file_identity,
     filesystem_exists,
     filesystem_is_dir,
     filesystem_is_file,
@@ -286,7 +285,6 @@ def _snapshot_date(value):
 def _industry_source(reference_root):
     root = Path(reference_root) / A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
     path = root / _INDUSTRY_MANIFEST_NAME
-    dataset_file_identity(path)
     raw, metadata = read_qrp_json_file(path)
     if (
         set(metadata) != {"schema_id", "files", "snapshots"}
@@ -311,19 +309,13 @@ def _industry_source(reference_root):
             or re.fullmatch(r"[0-9a-f]{64}", expected_hash) is None
         ):
             raise ValueError("industry_snapshot_member_invalid")
-        member = root / name
-        identity = dataset_file_identity(member)
+        member = require_unaliased_path(root / name, error="invalid_dataset_part_files")
         if name in candidates:
             candidate_raw, candidate = read_qrp_json_file(member)
             digest = hashlib.sha256(candidate_raw).hexdigest()
             members[name] = candidate
         else:
-            digest = _hash_file_content(
-                member,
-                identity,
-                "reference_raw_identity_changed",
-                chunk_size=1024 * 1024,
-            )
+            digest = _hash_file_content(member)
             members[name] = None
         if digest != expected_hash:
             raise ValueError("industry_snapshot_member_hash_mismatch")
@@ -490,7 +482,6 @@ def _equity_source(reference_root):
     """Admit official facts stated per actual share and lifecycle."""
     root = Path(reference_root) / A_SHARE_EQUITY_EVENTS_DATA_ID
     path = root / "metadata.json"
-    dataset_file_identity(path)
     raw, metadata = read_qrp_json_file(path)
     if (
         set(metadata) != {"schema_id", "files", "events"}
@@ -511,19 +502,10 @@ def _equity_source(reference_root):
             or re.fullmatch(r"[0-9a-f]{64}", digest) is None
         ):
             raise ValueError("equity_event_member_invalid")
-        member = root / name
-        identity = dataset_file_identity(member)
-        if (
-            _hash_file_content(
-                member,
-                identity,
-                "reference_raw_identity_changed",
-                chunk_size=1024 * 1024,
-            )
-            != digest
-        ):
+        member = require_unaliased_path(root / name, error="invalid_dataset_part_files")
+        if _hash_file_content(member) != digest:
             raise ValueError("equity_event_member_hash_mismatch")
-        members[name] = (member, identity)
+        members[name] = member
     rows, seen = [], set()
     keys = {
         "event_id",

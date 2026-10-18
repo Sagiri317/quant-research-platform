@@ -15,7 +15,6 @@ from quant_research_platform.artifacts.outputs.prediction_validation import (
     validate_prediction_frame,
 )
 from quant_research_platform.contracts.time import time_value_isoformat
-from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.atomic import (
     atomic_write_directory,
@@ -258,13 +257,9 @@ def write_parquet_chunks(
                 for frame in active_frames:
                     if not isinstance(frame, pd.DataFrame):
                         raise TypeError("invalid_artifact_output_frame")
-                    validate_prediction_frame(frame, metadata)
+                    timestamps = validate_prediction_frame(frame, metadata)
                     if frame.empty:
                         continue
-                    timestamps = strict_timestamp_series(
-                        frame["timestamp"],
-                        error="prediction_metadata_inconsistent",
-                    )
                     selected = frame.assign(timestamp=timestamps)
                     current_end = time_value_isoformat(pd.Timestamp(timestamps.max()))
                     if effective_prediction_end is None or pd.Timestamp(
@@ -300,7 +295,6 @@ class _PredictionLookup:
         self._index = index
         self.primary_key = primary_key
         self.prediction_column = prediction_column
-        self.row_count = 0
 
     def close(self) -> None:
         self._index = None

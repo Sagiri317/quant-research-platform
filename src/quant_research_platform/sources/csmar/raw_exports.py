@@ -10,7 +10,6 @@ import pandas as pd
 
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.identity import (
-    DatasetFileIdentity,
     filesystem_stat,
     filesystem_walk,
     require_unaliased_path,
@@ -22,7 +21,6 @@ from .raw_schemas import (
     infer_dataset_from_native_export,
     iter_export_csv_records,
     parse_raw_filename,
-    raw_export_file_identity,
     read_export_header,
     validate_export_header,
 )
@@ -157,7 +155,6 @@ def iter_private_export_chunks(
     *,
     dataset: str,
     chunksize: int,
-    expected_identity: DatasetFileIdentity | None = None,
     content_hashes: list[str] | None = None,
 ) -> Iterator[pd.DataFrame]:
     if type(dataset) is not str or dataset not in RAW_TABLE_CONTRACTS:
@@ -168,7 +165,6 @@ def iter_private_export_chunks(
     rows = _iter_csv_records(
         export_path,
         dataset=dataset,
-        expected_identity=expected_identity,
         content_hashes=content_hashes,
     )
     emitted = False
@@ -201,14 +197,9 @@ def _iter_csv_records(
     path: Path,
     *,
     dataset: str,
-    expected_identity: DatasetFileIdentity | None = None,
     content_hashes: list[str] | None = None,
 ) -> Iterator[tuple[list[str], list[str] | None]]:
-    rows = iter(
-        iter_export_csv_records(
-            path, expected_identity=expected_identity, content_hashes=content_hashes
-        )
-    )
+    rows = iter(iter_export_csv_records(path, content_hashes=content_hashes))
     with closing_iterator(rows):
         header = physical_header = row = record = None
         header_record = next(rows, None)
@@ -274,26 +265,28 @@ def _raw_frame(
     return frame
 
 
-def dataset_files_with_identity_by_id(
+def dataset_files_by_id(
     raw_root: Path,
     *,
     requested_datasets: Iterable[str] | None = None,
-) -> Iterator[tuple[str, Path, DatasetFileIdentity]]:
+) -> Iterator[tuple[str, Path]]:
     """Select source members; validate schema during actual CSV consumption."""
     root = Path(raw_root)
     requested = _requested_raw_datasets(requested_datasets)
     records, physical_members = [], set()
     with closing_iterator(_iter_raw_export_paths(root)) as paths:
         for path in paths:
-            identity = raw_export_file_identity(path)
-            dataset = _raw_dataset_candidate(path, expected_identity=identity)
+            metadata = filesystem_stat(path, follow_symlinks=False)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ValueError("csmar_raw_export_identity_changed")
+            dataset = _raw_dataset_candidate(path)
             if dataset is None or requested is not None and dataset not in requested:
                 continue
-            physical_key = (identity.device, identity.inode)
+            physical_key = (metadata.st_dev, metadata.st_ino)
             if physical_key in physical_members:
                 raise ValueError("csmar_raw_export_identity_changed")
             physical_members.add(physical_key)
-            records.append((dataset, path, identity))
+            records.append((dataset, path))
     yield from sorted(
         records, key=lambda item: (item[0], item[1].relative_to(root).as_posix())
     )
@@ -310,9 +303,7 @@ def _requested_raw_datasets(
     return requested
 
 
-def _raw_dataset_candidate(
-    path: Path, *, expected_identity: DatasetFileIdentity
-) -> str | None:
+def _raw_dataset_candidate(path: Path) -> str | None:
     try:
         return parse_raw_filename(path).dataset
     except ValueError:
@@ -322,10 +313,8 @@ def _raw_dataset_candidate(
     except ValueError:
         pass
     try:
-        columns = read_export_header(path, expected_identity=expected_identity)
-    except ValueError as exc:
-        if str(exc) == "csmar_raw_export_identity_changed":
-            raise
+        columns = read_export_header(path)
+    except ValueError:
         return None
     if all(
         missing_raw_column_names(columns, dataset) for dataset in RAW_TABLE_CONTRACTS

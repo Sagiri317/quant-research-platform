@@ -33,7 +33,7 @@
 ## 显式计算示例
 
 下面代码只展示步骤，路径、模型、窗口由本次研究明确给出。
-先完成原有 `assemble`，得到包含本次所需信息列的共享数据集；稀疏信息保留缺失。
+先完成 `assemble`，得到包含本次所需信息列的共享数据集；稀疏信息保留缺失。
 例子只计算 mask，不训练或运行研究。
 
 ```python
@@ -107,8 +107,8 @@ write_dataset(
 )
 ```
 
-用原有 `assemble` 把 `source_selection` 与 mask_path 作为两个输入，基表仍为原输入。
-保留原有 factor/feature/label/context 选择，在 `filter_columns` 中加入
+用 `assemble` 把 `source_selection` 与 mask_path 作为两个输入，基表仍为原输入。
+保留 factor/feature/label/context 选择，在 `filter_columns` 中加入
 `common_train`、`common_eval`；两个输入使用相同 PK 和原窗口，不重做已有特征变换。
 原表标签成熟映射、单位和标签语义继续由 assemble 保留。下面的 inputs 对象可直接用于
 现有 `fit`、`predict`、`score.labels` 和 `evaluate.inputs`：

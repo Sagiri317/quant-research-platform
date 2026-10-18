@@ -58,7 +58,7 @@ walk-forward 明确每次拟合、决策、预测与评价窗口，样本不永�
 [持久化日表归约](configs/statistics-stratified-a-share.json)分别调用现有 prepare、evaluate、statistics-factors；
 own 评价需另选新输出、sample_scope=own 并移除 comparison_inputs。两份评价的焦点信号、输入和分层规格应保持一致。
 [冻结模型解释](configs/explain-model.json)的背景必须落在该模型实际拟合域内；
-[组合基准比较](configs/statistics-benchmark-a-share.json)需替换真实指数代码、时钟、币种及价格/全收益口径，不能只改显示名称。
+[组合基准比较](configs/statistics-benchmark-a-share.json)需替换真实指数代码、时钟、币种及价格/全收益口径，并通过 inputs.calendar 提供覆盖收益区间的完整交易日历。
 组合统计默认只计算绩效，额外分析通过 analyses 显式选择。
 [科研选择参考](docs/research-rosters/) 保留有序模型、参数候选、因子、资产与研究窗口；
 它们供研究者选用，不是运行默认值、配置模板或自动编排入口。

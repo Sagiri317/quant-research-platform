@@ -298,10 +298,22 @@ class TakerConfig:
     markout_horizon_ms: int
 
     def __post_init__(self) -> None:
-        _positive(self.order_quantity, "hft_taker_order_quantity_invalid")
-        _positive(self.position_size, "hft_taker_position_size_invalid")
+        object.__setattr__(
+            self,
+            "order_quantity",
+            _positive(self.order_quantity, "hft_taker_order_quantity_invalid"),
+        )
+        object.__setattr__(
+            self,
+            "position_size",
+            _positive(self.position_size, "hft_taker_position_size_invalid"),
+        )
         _nonnegative_integer(self.latency_ms, "hft_taker_latency_invalid")
-        _nonnegative(self.taker_fee_bps, "hft_taker_fee_invalid")
+        object.__setattr__(
+            self,
+            "taker_fee_bps",
+            _nonnegative(self.taker_fee_bps, "hft_taker_fee_invalid"),
+        )
         _positive_integer(
             self.markout_horizon_ms,
             "hft_markout_horizon_invalid",
@@ -319,18 +331,35 @@ class MakerConfig:
     latency_ms: int
 
     def __post_init__(self) -> None:
-        _positive(self.order_quantity, "hft_maker_order_quantity_invalid")
-        _positive(self.max_position, "hft_maker_position_size_invalid")
-        strict_finite_float(self.maker_fee_bps, error="hft_maker_fee_invalid")
+        object.__setattr__(
+            self,
+            "order_quantity",
+            _positive(self.order_quantity, "hft_maker_order_quantity_invalid"),
+        )
+        object.__setattr__(
+            self,
+            "max_position",
+            _positive(self.max_position, "hft_maker_position_size_invalid"),
+        )
+        object.__setattr__(
+            self,
+            "maker_fee_bps",
+            strict_finite_float(self.maker_fee_bps, error="hft_maker_fee_invalid"),
+        )
         if self.inventory_target is not None:
             target = strict_finite_float(
                 self.inventory_target,
                 error="hft_maker_inventory_target_invalid",
             )
+            object.__setattr__(self, "inventory_target", target)
             if abs(target) > self.max_position:
                 raise ValueError("hft_maker_inventory_target_invalid")
         if self.inventory_skew is not None:
-            _nonnegative(self.inventory_skew, "hft_maker_inventory_skew_invalid")
+            object.__setattr__(
+                self,
+                "inventory_skew",
+                _nonnegative(self.inventory_skew, "hft_maker_inventory_skew_invalid"),
+            )
         _positive_integer(
             self.markout_horizon_ms,
             "hft_markout_horizon_invalid",

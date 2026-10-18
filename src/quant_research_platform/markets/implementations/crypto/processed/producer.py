@@ -327,7 +327,7 @@ def _panel_frame_producer(
                 session,
                 parquet_filters=(*(session.parquet_filters or ()), asset_filter),
             )
-            chunks = iter_dataset_chunks(asset_session, batch_rows=65536)
+            chunks = iter_dataset_chunks(asset_session, batch_rows=DEFAULT_BATCH_ROWS)
             with closing_iterator(chunks):
                 with closing_iterator(iter(transform(chunks))) as transformed:
                     for frame in transformed:
@@ -510,11 +510,14 @@ def produce_spot_perp_context(
                 for key, session in sessions.items()
             }
             with closing_iterator(
-                iter_dataset_chunks(asset_sessions[HFT_PANEL_DATA_ID], batch_rows=65536)
+                iter_dataset_chunks(
+                    asset_sessions[HFT_PANEL_DATA_ID], batch_rows=DEFAULT_BATCH_ROWS
+                )
             ) as perpetual:
                 with closing_iterator(
                     iter_dataset_chunks(
-                        asset_sessions[HFT_SPOT_PANEL_DATA_ID], batch_rows=65536
+                        asset_sessions[HFT_SPOT_PANEL_DATA_ID],
+                        batch_rows=DEFAULT_BATCH_ROWS,
                     )
                 ) as spot:
                     with closing_iterator(
@@ -657,7 +660,10 @@ def produce_information_panel(
         identities[data_id] = str(session.root)
     batch_rows = DEFAULT_BATCH_ROWS
     frames = _union_panel_frames(
-        (iter_dataset_chunks(session, batch_rows=65536) for session in sessions),
+        (
+            iter_dataset_chunks(session, batch_rows=DEFAULT_BATCH_ROWS)
+            for session in sessions
+        ),
         columns=spec.required_columns,
         batch_rows=batch_rows,
     )
@@ -708,7 +714,7 @@ def produce_cross_asset_context(
                 ("asset_id", "==", asset),
             ),
         )
-        yield from iter_dataset_chunks(view, batch_rows=65536)
+        yield from iter_dataset_chunks(view, batch_rows=DEFAULT_BATCH_ROWS)
 
     def frames():
         for asset in parameters["target_assets"]:

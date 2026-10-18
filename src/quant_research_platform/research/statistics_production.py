@@ -2424,7 +2424,7 @@ def model_statistics(config):
                     for frame in frames:
                         frame = frame.copy()
                         frame["family_id"] = family
-                        lookup.row_count += index.add_float_value_table(
+                        index.add_float_value_table(
                             pa.Table.from_pandas(frame, preserve_index=False),
                             namespace="prediction",
                             value_column="prediction_score",
@@ -2489,7 +2489,6 @@ def model_statistics(config):
                         )
                         if duplicates:
                             raise ValueError("statistics_prediction_keys_duplicate")
-                        reference_lookup.row_count += len(frame)
         session, spec = _statistics_input_session(config, window)
         validate_input_market(session.spec, market)
         tables = build_a_share_statistics_tables(

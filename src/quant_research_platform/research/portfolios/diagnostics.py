@@ -72,16 +72,10 @@ _CRYPTO_ANALYSES = (
 
 def _research_valuation_observation(batch, economics):
     """Summarize explicit research marks without changing the execution path."""
-    from quant_research_platform.contracts.portfolios import (
-        RESEARCH_VALUATION_POLICY,
-    )
-
     facts = {(item.asset_id, item.name): item for item in batch.diagnostics}
     policy = facts.get((PORTFOLIO_CASH_ASSET_ID, "research_valuation_policy"))
     if policy is None:
         return None
-    if policy.text != RESEARCH_VALUATION_POLICY:
-        raise ValueError("portfolio_research_valuation_policy_invalid")
     values = {
         phase: {
             row.asset_id: row.share_value

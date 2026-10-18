@@ -447,11 +447,16 @@ def test_backtest_uses_actual_fitting_facts_without_model_registration(
 @pytest.mark.parametrize(
     "field,value", (("price_unit", "0.01"), ("snapshot_limit", 100))
 )
-def test_panel_and_replay_must_share_actual_coordinate_spec(field, value):
+def test_panel_and_replay_share_price_units_but_own_depth(field, value):
     recorded = {"price_unit": "0.1", "snapshot_limit": 10}
     source = SimpleNamespace(market_metadata=lambda *_: {**recorded, field: value})
     panel = {"source_evidence": {"market_metadata": {"BTCUSDT": recorded}}}
-    with pytest.raises(ValueError, match="source_coordinates_mismatch"):
+    expected = (
+        pytest.raises(ValueError, match="source_coordinates_mismatch")
+        if field == "price_unit"
+        else nullcontext()
+    )
+    with expected:
         portfolio._source_coordinates(source, panel, "BTCUSDT")
 
 

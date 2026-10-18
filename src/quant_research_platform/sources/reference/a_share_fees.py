@@ -7,7 +7,6 @@ import hashlib
 import io
 import json
 import math
-import os
 import re
 import sys
 from dataclasses import dataclass
@@ -17,9 +16,8 @@ from pathlib import Path
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.identity import (
     _DigestingReader,
-    dataset_file_identity,
-    dataset_file_identity_from_stat,
     open_filesystem_file,
+    require_unaliased_path,
 )
 
 A_SHARE_FEE_CSV_NAME = "chatgpt_compiled_a_share_fee_schedule_2014_2025.csv"
@@ -98,15 +96,13 @@ def load_a_share_fee_source(
     sidecar_path = (
         root / A_SHARE_FEE_SIDECAR_NAME if fee_sidecar is None else Path(fee_sidecar)
     )
-    csv_identity = _file_identity(csv_path)
-    sidecar_identity = _file_identity(sidecar_path)
-    metadata, sidecar_sha256 = _read_sidecar(sidecar_path, sidecar_identity)
-    rows, data_row_count, csv_sha256 = _read_rows(csv_path, csv_identity)
-    _validate_sidecar(metadata, csv_sha256, csv_bytes=csv_identity.size)
+    require_unaliased_path(csv_path, error="a_share_fee_source_unavailable")
+    require_unaliased_path(sidecar_path, error="a_share_fee_source_unavailable")
+    metadata, sidecar_sha256 = _read_sidecar(sidecar_path)
+    rows, data_row_count, csv_sha256, csv_bytes = _read_rows(csv_path)
+    _validate_sidecar(metadata, csv_sha256, csv_bytes=csv_bytes)
     if metadata.get("row_count") != data_row_count:
         raise ValueError("a_share_fee_source_row_count_mismatch")
-    if _file_identity(sidecar_path) != sidecar_identity:
-        raise ValueError("a_share_fee_source_identity_changed")
     digest = hashlib.sha256()
     for name, member_hash in sorted(
         (
@@ -126,24 +122,12 @@ def load_a_share_fee_source(
     )
 
 
-def _file_identity(path: Path):
-    try:
-        return dataset_file_identity(path)
-    except ValueError as exc:
-        raise ValueError("a_share_fee_source_unavailable") from exc
-
-
-def _read_sidecar(path: Path, expected) -> tuple[dict[str, object], str]:
+def _read_sidecar(path: Path) -> tuple[dict[str, object], str]:
     try:
         with closing_iterator(open_filesystem_file(path)) as handle:
-            if dataset_file_identity_from_stat(os.fstat(handle.fileno())) != expected:
-                raise ValueError("a_share_fee_source_identity_changed")
             raw = handle.read()
-            final = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("a_share_fee_source_unavailable") from exc
-    if final != expected or _file_identity(path) != expected:
-        raise ValueError("a_share_fee_source_identity_changed")
     try:
         value = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -170,7 +154,7 @@ def _validate_sidecar(
         raise ValueError("a_share_fee_source_metadata_invalid")
 
 
-def _read_rows(path: Path, expected) -> tuple[tuple[FeeSourceRow, ...], int, str]:
+def _read_rows(path: Path) -> tuple[tuple[FeeSourceRow, ...], int, str, int]:
     rows: list[FeeSourceRow] = []
     seen: set[tuple[object, ...]] = set()
     data_row_count = 0
@@ -180,11 +164,6 @@ def _read_rows(path: Path, expected) -> tuple[tuple[FeeSourceRow, ...], int, str
             with closing_iterator(
                 io.TextIOWrapper(hashed, encoding="utf-8-sig", newline="")
             ) as text:
-                if (
-                    dataset_file_identity_from_stat(os.fstat(binary.fileno()))
-                    != expected
-                ):
-                    raise ValueError("a_share_fee_source_identity_changed")
                 csv.field_size_limit(sys.maxsize)
                 reader = csv.DictReader(text, strict=True)
                 if tuple(reader.fieldnames or ()) != FEE_CSV_COLUMNS:
@@ -249,16 +228,13 @@ def _read_rows(path: Path, expected) -> tuple[tuple[FeeSourceRow, ...], int, str
                             )
                         )
                     row = values = value = None
-                final = dataset_file_identity_from_stat(os.fstat(binary.fileno()))
     except csv.Error as exc:
         raise ValueError("a_share_fee_source_schema_invalid") from exc
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("a_share_fee_source_unavailable") from exc
-    if final != expected or _file_identity(path) != expected:
-        raise ValueError("a_share_fee_source_identity_changed")
     if not rows:
         raise ValueError("a_share_fee_source_empty")
-    return tuple(rows), data_row_count, hashed.hexdigest()
+    return tuple(rows), data_row_count, hashed.hexdigest(), hashed.bytes_read
 
 
 def _parse_date(value: str) -> date:

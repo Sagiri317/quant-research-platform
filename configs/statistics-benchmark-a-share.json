@@ -1,6 +1,7 @@
 {
   "ledgers": ["results/portfolio-ledger"],
   "output": "results/portfolio-comparison",
+  "inputs": {"calendar": "data/interim/trading_calendar"},
   "window": {"start": "2025-01-01", "end": "2025-12-31"},
   "analyses": ["performance", "benchmark_comparison", "market_exposure", "regime_comparison"],
   "comparison_benchmarks": [

@@ -1006,7 +1006,9 @@ def _processed_axis(
     observed_market_sessions = {}
     asset_session_masks = {}
     session_positions = {}
-    with closing_iterator(iter_dataset_chunks(view, batch_rows=65536)) as chunks:
+    with closing_iterator(
+        iter_dataset_chunks(view, batch_rows=resources.DEFAULT_BATCH_ROWS)
+    ) as chunks:
         for frame in chunks:
             if panel_source:
                 raw_dates.update(frame.timestamp.unique())

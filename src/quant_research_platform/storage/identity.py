@@ -6,32 +6,21 @@ import gzip
 import hashlib
 import os
 import shutil
-import stat
-from collections.abc import Iterator
-from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
 
 from quant_research_platform.policy.lifecycle import closing_iterator
-
-
-@dataclass(frozen=True, slots=True)
-class DatasetFileIdentity:
-    device: int
-    inode: int
-    size: int
-    modified_ns: int
 
 
 class _DigestingReader:
     def __init__(self, handle) -> None:
         self._handle = handle
         self._digest = hashlib.sha256()
+        self.bytes_read = 0
 
     def read(self, size: int = -1) -> bytes:
         chunk = self._handle.read(size)
         self._digest.update(chunk)
+        self.bytes_read += len(chunk)
         return chunk
 
     def __getattr__(self, name):
@@ -41,6 +30,7 @@ class _DigestingReader:
         read = getattr(self._handle, "read1", self._handle.read)
         chunk = read(size)
         self._digest.update(chunk)
+        self.bytes_read += len(chunk)
         return chunk
 
     def readinto(self, buffer) -> int:
@@ -61,83 +51,11 @@ class _DigestingReader:
         return self._digest.hexdigest()
 
 
-def dataset_file_identity_from_stat(value: os.stat_result) -> DatasetFileIdentity:
-    return DatasetFileIdentity(
-        device=int(value.st_dev),
-        inode=int(value.st_ino),
-        size=int(value.st_size),
-        modified_ns=int(value.st_mtime_ns),
-    )
-
-
-def dataset_file_identity(path: Path) -> DatasetFileIdentity:
-    candidate = require_unaliased_path(Path(path), error="invalid_dataset_part_files")
-    try:
-        before = filesystem_stat(candidate, follow_symlinks=False)
-    except (FileNotFoundError, NotADirectoryError) as exc:
-        raise ValueError("invalid_dataset_part_files") from exc
-    if not stat.S_ISREG(before.st_mode) or int(before.st_ino) <= 0:
-        raise ValueError("invalid_dataset_part_files")
-    return dataset_file_identity_from_stat(before)
-
-
-@contextmanager
-def verified_file_handle(
-    path: Path,
-    handle: BinaryIO,
-    *,
-    expected_identity: DatasetFileIdentity,
-    error: str = "dataset_file_identity_changed",
-) -> Iterator[BinaryIO]:
-    """Borrow one handle, binding its bytes to the captured published identity."""
-
-    def verify() -> None:
-        if (
-            dataset_file_identity_from_stat(os.fstat(handle.fileno()))
-            != expected_identity
-            or dataset_file_identity(path) != expected_identity
-        ):
-            raise ValueError(error)
-
-    verify()
-    primary = None
-    try:
-        yield handle
-    except BaseException as body_error:
-        primary = body_error
-        raise
-    finally:
-        try:
-            verify()
-        except BaseException as verification_error:
-            if primary is None:
-                raise
-            primary.add_note(
-                "file identity verification also failed: "
-                f"{type(verification_error).__name__}"
-            )
-
-
-def _hash_file_content(
-    path: Path,
-    expected: DatasetFileIdentity,
-    error: str,
-    *,
-    chunk_size: int = 1024 * 1024,
-) -> str:
-    if chunk_size <= 0:
-        raise ValueError(error)
+def _hash_file_content(path: Path) -> str:
     digest = hashlib.sha256()
-    with closing_iterator(open_filesystem_file(path, "rb", buffering=0)) as handle:
-        with verified_file_handle(
-            path, handle, expected_identity=expected, error=error
-        ):
-            while True:
-                chunk = handle.read(chunk_size)
-                if not chunk:
-                    break
-                digest.update(chunk)
-                del chunk
+    with closing_iterator(open_filesystem_file(path, "rb")) as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
     return digest.hexdigest()
 
 

@@ -1087,7 +1087,7 @@ def _response_tables(frame, *, spec, config, dates=None):
 
     from quant_research_platform.artifacts.outputs.evaluation_daily import daily_frame
     from quant_research_platform.compute.dataframe.cross_section import (
-        _batch_pearson_correlation_result,
+        _pearson_correlation_result,
     )
 
     def finite(value):
@@ -1151,7 +1151,7 @@ def _response_tables(frame, *, spec, config, dates=None):
                     all_labels if scope == "common" else np.isfinite(labels[:, index])
                 )
                 count = int(valid.sum())
-                ic, reason = _batch_pearson_correlation_result(
+                ic, reason = _pearson_correlation_result(
                     scores[valid], labels[valid, index]
                 )
                 key = dict(

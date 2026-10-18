@@ -127,25 +127,6 @@ def test_fee_source_publishes_explicit_path_and_records_source_evidence(tmp_path
     assert _file_bytes(output) == before
 
 
-def test_fee_identity_rechecks_sidecar_after_rows(tmp_path, monkeypatch):
-    from quant_research_platform.sources.reference import a_share_fees
-
-    root = _write_reference_root(tmp_path / "raw") / "reference"
-    sidecar = next(filesystem_glob(root, "**/*.metadata.json"))
-    original = a_share_fees._read_rows
-
-    def read_then_change(*args):
-        rows = original(*args)
-        filesystem_write_bytes(
-            sidecar, Path(native_filesystem_path(sidecar)).read_bytes() + b" "
-        )
-        return rows
-
-    monkeypatch.setattr(a_share_fees, "_read_rows", read_then_change)
-    with pytest.raises(ValueError, match="identity"):
-        load_a_share_fee_source(reference_root=root)
-
-
 def test_fee_reader_cleanup_preserves_primary(tmp_path, monkeypatch):
     import io
 
@@ -174,35 +155,6 @@ def test_fee_reader_cleanup_preserves_primary(tmp_path, monkeypatch):
         load_a_share_fee_source(reference_root=root)
     assert caught.value is primary
     assert handle.closed
-
-
-def test_fee_reader_rejects_early_eof_after_real_truncation(tmp_path, monkeypatch):
-    import io
-
-    from quant_research_platform.sources.reference import a_share_fees
-    from quant_research_platform.storage.identity import dataset_file_identity
-
-    root = _write_reference_root(tmp_path / "raw") / "reference"
-    path = next(filesystem_glob(root, "**/*.csv"))
-    expected = dataset_file_identity(path)
-    assert a_share_fees._read_rows(path, expected)[1] > 0
-
-    class Handle(io.FileIO):
-        reads = 0
-
-        def read(self, *args):
-            raw = super().read(*args)
-            self.reads += 1
-            if self.reads == 1:
-                with open(native_filesystem_path(path), "r+b") as writer:
-                    writer.truncate(0)
-            return raw
-
-    handle = Handle(native_filesystem_path(path), "rb")
-    monkeypatch.setattr(a_share_fees, "open_filesystem_file", lambda _: handle)
-    with pytest.raises(ValueError, match="a_share_fee_source_identity_changed"):
-        a_share_fees._read_rows(path, expected)
-    assert handle.closed and handle.reads == 2
 
 
 def _industry_observations():
@@ -765,3 +717,25 @@ def test_fee_csv_native_newlines_and_unrestricted_metadata(tmp_path, terminator)
     assert result.csv_sha256 == metadata["file_sha256"]
     assert result.rows[0].rate == 0.0003
     assert path.read_bytes() == payload
+
+
+def test_fee_source_touch_preserves_consumed_hash_and_byte_count(tmp_path, monkeypatch):
+    import os
+
+    from quant_research_platform.sources.reference import a_share_fees
+
+    root = _write_reference_root(tmp_path / "raw") / "reference"
+    expected = load_a_share_fee_source(reference_root=root)
+    original = a_share_fees._read_rows
+
+    def read_then_touch(path):
+        result = original(path)
+        for member in path.parent.iterdir():
+            before = member.stat()
+            os.utime(
+                member, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000)
+            )
+        return result
+
+    monkeypatch.setattr(a_share_fees, "_read_rows", read_then_touch)
+    assert load_a_share_fee_source(reference_root=root) == expected

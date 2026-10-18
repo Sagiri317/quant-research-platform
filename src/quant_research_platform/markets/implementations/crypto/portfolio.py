@@ -674,10 +674,8 @@ def _source_coordinates(run, panel, symbol):
     try:
         declared = panel["source_evidence"]["market_metadata"][symbol]
         actual = run.market_metadata(binance_ids.FUTURES_MARKET_TYPE, symbol)
-        if (
-            Fraction(validate_price_unit(declared["price_unit"]))
-            != Fraction(validate_price_unit(actual["price_unit"]))
-            or declared["snapshot_limit"] != actual["snapshot_limit"]
+        if Fraction(validate_price_unit(declared["price_unit"])) != Fraction(
+            validate_price_unit(actual["price_unit"])
         ):
             raise ValueError("crypto_execution_source_coordinates_mismatch")
     except (KeyError, TypeError) as error:

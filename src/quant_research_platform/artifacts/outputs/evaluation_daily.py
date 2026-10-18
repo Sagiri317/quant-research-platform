@@ -133,10 +133,7 @@ def validate_daily_frame(frame, *, name, spec, science, check_domains=True):
         timestamps.ge(start) & (timestamps.le(stop) if closed else timestamps.lt(stop))
     ).all():
         raise ValueError("evaluation_daily_window_mismatch")
-    if (
-        not frame.label.isin(spec.label_columns).all()
-        or frame.duplicated(list(DAILY_KEYS[name])).any()
-    ):
+    if not frame.label.isin(spec.label_columns).all():
         raise ValueError("evaluation_daily_domain_or_keys_invalid")
     if name.startswith("response_"):
         _validate_response_frame(frame, name=name, science=science)

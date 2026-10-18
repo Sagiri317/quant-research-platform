@@ -154,6 +154,7 @@ def _validate_prediction_training_facts(facts, realized):
 
 
 def validate_prediction_frame(frame, metadata, *, columns=None):
+    """Validate rows and return timestamps; the stream index owns uniqueness."""
     expected = columns or (
         "timestamp",
         "asset_id",
@@ -170,10 +171,7 @@ def validate_prediction_frame(frame, metadata, *, columns=None):
     timestamps = strict_timestamp_series(
         frame.timestamp, error="invalid_prediction_timestamp"
     )
-    if (
-        frame.loc[:, ["timestamp", "asset_id"]].isna().any(axis=None)
-        or frame.duplicated(["timestamp", "asset_id"]).any()
-    ):
+    if frame.loc[:, ["timestamp", "asset_id"]].isna().any(axis=None):
         raise ValueError("prediction_coverage_invalid")
     if any(type(asset) is not str or not asset for asset in frame.asset_id):
         raise ValueError("invalid_prediction_keys")
@@ -192,3 +190,4 @@ def validate_prediction_frame(frame, metadata, *, columns=None):
     window = PredictionWindow(**metadata["prediction_window"])
     if not prediction_window_mask(timestamps, window).all():
         raise ValueError("prediction_window_invalid")
+    return timestamps

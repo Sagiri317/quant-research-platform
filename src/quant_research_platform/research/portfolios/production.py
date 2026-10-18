@@ -87,7 +87,6 @@ from quant_research_platform.research.portfolios.schedules import (
     holding_intervals,
     is_rebalance_session,
 )
-from quant_research_platform.runtime.execution_metrics import record_run_observations
 from quant_research_platform.storage.datasets import DatasetReadMode
 from quant_research_platform.storage.datasets.reading import (
     _dataset_input_options,
@@ -1132,14 +1131,12 @@ def backtest_a_share(
         if enhanced and frozen_calibration is None:
             if on_final_calibration is None:
                 raise ValueError("portfolio_final_calibration_sink_required")
-            observation = {}
-            with record_run_observations(observation):
-                calibration = _calibration_fact(
-                    calibration_rows,
-                    calibration_intervals,
-                    as_of=pd.Timestamp(output_window.end),
-                    trading_sessions=trading_sessions,
-                )
+            calibration = _calibration_fact(
+                calibration_rows,
+                calibration_intervals,
+                as_of=pd.Timestamp(output_window.end),
+                trading_sessions=trading_sessions,
+            )
             on_final_calibration(
                 {
                     "schema_id": "qrp-final-alpha-calibration",
@@ -3030,7 +3027,6 @@ def backtest(config: Mapping) -> Path:
     domains = []
     prediction_facts = []
     index = ExactPrimaryKeyIndex(primary_key=("timestamp", "asset_id"))
-    prediction_rows = 0
     if not isinstance(config["predictions"], list) or not config["predictions"]:
         raise ValueError("portfolio_prediction_inputs_required")
     for item in config["predictions"]:
@@ -3123,14 +3119,12 @@ def backtest(config: Mapping) -> Path:
                 del chosen, frame
         if domain_rows == 0:
             raise ValueError("portfolio_prediction_domain_empty")
-        prediction_rows += domain_rows
         domains.append(window)
     lookup = _PredictionLookup(
         index=index,
         primary_key=("timestamp", "asset_id"),
         prediction_column="prediction_rank_score",
     )
-    lookup.row_count = prediction_rows
     frozen = None
     if "calibration" in config:
         payload = read_qrp_json_file(Path(config["calibration"]))[1]

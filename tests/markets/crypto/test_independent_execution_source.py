@@ -1,5 +1,6 @@
 """Public native execution binds independent source UUIDs without changing economics."""
 
+import copy
 import datetime as dt
 import gzip
 import hashlib
@@ -140,7 +141,9 @@ def _ledger(output):
 @pytest.mark.parametrize(
     "change", ["identity", "closed", "price_unit", "opposite", "future"]
 )
-def test_public_maker_uses_independent_source_context_and_real_events(tmp_path, change):
+def test_public_maker_uses_independent_source_context_and_real_events(
+    tmp_path, change, monkeypatch
+):
     first, second = tmp_path / "first" / "raw", tmp_path / "second" / "raw"
     write_binance_hft_run(first, count=10, maker_liquidity=True)
     write_binance_hft_run(second, count=10, maker_liquidity=True)
@@ -152,6 +155,20 @@ def test_public_maker_uses_independent_source_context_and_real_events(tmp_path, 
     baseline, baseline_fills = _maker(tmp_path / "baseline", new_panel, second)
     assert baseline["execution"]["filled_orders"] == 6
     selected = second
+    if change == "identity":
+        read_evidence = portfolio.read_dataset_manifest_evidence
+
+        def independent_panel_depth(path):
+            evidence = copy.deepcopy(read_evidence(path))
+            if path == old_panel:
+                evidence["source_evidence"]["market_metadata"]["BTCUSDT"][
+                    "snapshot_limit"
+                ] = 100
+            return evidence
+
+        monkeypatch.setattr(
+            portfolio, "read_dataset_manifest_evidence", independent_panel_depth
+        )
     if change != "identity":
         selected = tmp_path / "changed" / "raw"
         shutil.copytree(second.parent, selected.parent)

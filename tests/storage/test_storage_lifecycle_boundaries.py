@@ -55,9 +55,7 @@ def test_content_hash_close_preserves_primary_and_closes_file(
     )
     try:
         with pytest.raises(primary_type) as raised:
-            identity._hash_file_content(
-                path, identity.dataset_file_identity(path), "identity_changed"
-            )
+            identity._hash_file_content(path)
         assert raised.value is primary
         assert raw.closed and closed == [True]
         assert raised.value.__notes__ == ["iterator close also failed: OSError"]
@@ -495,37 +493,6 @@ def test_artifact_root_ordinary_chain_preserves_candidate_spelling(
     assert identity.require_artifact_root(root) == root
 
 
-def test_dataset_file_identity_accepts_single_external_hardlink(tmp_path: Path) -> None:
-    source = tmp_path / "source.bin"
-    alias = tmp_path / "alias.bin"
-    identity.filesystem_write_bytes(source, b"payload")
-    try:
-        os.link(
-            identity.native_filesystem_path(source),
-            identity.native_filesystem_path(alias),
-        )
-    except OSError as exc:
-        pytest.skip(f"hardlink_not_available: {exc}")
-    assert identity.dataset_file_identity(alias) == identity.dataset_file_identity(
-        source
-    )
-
-
-def test_dataset_file_identity_rejects_ancestor_alias(tmp_path: Path) -> None:
-    target = tmp_path / "target"
-    identity.filesystem_mkdir(target)
-    identity.filesystem_write_bytes(target / "part.bin", b"payload")
-    alias = tmp_path / "alias"
-    try:
-        Path(identity.native_filesystem_path(alias)).symlink_to(
-            identity.native_filesystem_path(target), target_is_directory=True
-        )
-    except OSError as exc:
-        pytest.skip(f"directory_symlink_not_available: {exc}")
-    with pytest.raises(ValueError, match="^invalid_dataset_part_files$"):
-        identity.dataset_file_identity(alias / "part.bin")
-
-
 def test_bounded_metadata_reader_rejects_ancestor_alias(tmp_path: Path) -> None:
     target = tmp_path / "target"
     identity.filesystem_mkdir(target)
@@ -724,11 +691,8 @@ def test_shared_scratch_removes_only_exact_owned_paths(tmp_path: Path) -> None:
     assert not identity.filesystem_exists(owned_directory)
 
 
-@pytest.mark.parametrize("boundary", ("stat", "open"))
 @pytest.mark.parametrize("failure", ("missing", "memory", "io", "interrupt"))
-def test_content_identity_distinguishes_invalid_from_fatal(
-    tmp_path, monkeypatch, boundary, failure
-):
+def test_content_hash_preserves_open_errors(tmp_path, monkeypatch, failure):
     import errno
 
     path = tmp_path / "member"
@@ -744,22 +708,17 @@ def test_content_identity_distinguishes_invalid_from_fatal(
         raise primary
 
     with monkeypatch.context() as patch:
-        if boundary == "stat":
-            patch.setattr(identity.os, "stat", fail)
-        else:
-            patch.setattr(identity, "open_filesystem_file", fail)
-        with pytest.raises(
-            ValueError if failure == "missing" and boundary == "stat" else type(primary)
-        ) as caught:
-            identity._hash_file_content(
-                path, identity.dataset_file_identity(path), "changed"
-            )
+        patch.setattr(identity, "open_filesystem_file", fail)
+        with pytest.raises(type(primary)) as caught:
+            identity._hash_file_content(path)
         if failure != "missing":
             assert caught.value is primary
 
 
-@pytest.mark.parametrize("source", ("choice", "csmar", "reference"))
-@pytest.mark.parametrize("boundary", ("stat", "open"))
+@pytest.mark.parametrize(
+    "source,boundary",
+    [("choice", "stat"), ("choice", "open"), ("csmar", "open"), ("reference", "open")],
+)
 def test_source_identity_preserves_serious_io(tmp_path, monkeypatch, source, boundary):
     import errno
 
@@ -904,69 +863,26 @@ def test_public_parquet_footer_preserves_system_io(
     assert opened and all(handle.closed for handle in opened)
 
 
-@pytest.mark.parametrize("phase", ("before", "after", "primary"))
-def test_verified_file_handle_binds_decoder_and_preserves_primary(tmp_path, phase):
-    from quant_research_platform.storage.identity import (
-        dataset_file_identity,
-        verified_file_handle,
-    )
-
-    path = tmp_path / "member.bin"
-    replacement = tmp_path / "replacement.bin"
-    identity.filesystem_write_bytes(path, b"trusted")
-    identity.filesystem_write_bytes(replacement, b"changed")
-    expected = dataset_file_identity(path)
-    opened = replacement if phase == "before" else path
-    primary = RuntimeError("decode failed")
-    with identity.open_filesystem_file(opened, "rb") as handle:
-        if phase == "before":
-            with pytest.raises(ValueError, match="dataset_file_identity_changed"):
-                with verified_file_handle(path, handle, expected_identity=expected):
-                    pytest.fail("unverified handle reached decoder")
-        else:
-            with pytest.raises(
-                RuntimeError if phase == "primary" else ValueError
-            ) as caught:
-                with verified_file_handle(path, handle, expected_identity=expected):
-                    assert handle.read() == b"trusted"
-                    with identity.open_filesystem_file(path, "r+b") as mutating:
-                        mutating.write(b"changed-content")
-                        mutating.truncate()
-                    if phase == "primary":
-                        raise primary
-            if phase == "primary":
-                assert caught.value is primary
-                assert any(
-                    "identity verification" in note for note in primary.__notes__
-                )
-        assert not handle.closed
-
-
-@pytest.mark.parametrize("operation", ["file_identity", "csv_records", "choice_logout"])
-def test_cleanup_scope_ignores_handled_outer(tmp_path, operation):
+@pytest.mark.parametrize("operation", ["csv_records", "choice_logout"])
+def test_cleanup_scope_ignores_handled_outer(tmp_path, monkeypatch, operation):
     path = tmp_path / "member.csv"
     identity.filesystem_write_bytes(path, b"value\n1\n")
     try:
         raise RuntimeError("handled_outer")
     except RuntimeError as outer:
-        if operation == "file_identity":
-            expected = identity.dataset_file_identity(path)
-            with identity.open_filesystem_file(path, "rb") as handle:
-                with pytest.raises(ValueError, match="dataset_file_identity_changed"):
-                    with identity.verified_file_handle(
-                        path, handle, expected_identity=expected
-                    ):
-                        identity.filesystem_write_bytes(path, b"changed-content\n")
-                assert not handle.closed
-        elif operation == "csv_records":
-            from quant_research_platform.sources.csmar.raw_schemas import (
-                iter_export_csv_records,
-            )
+        if operation == "csv_records":
+            from quant_research_platform.sources.csmar import raw_schemas
 
-            records = iter_export_csv_records(path)
+            original = raw_schemas._CsvRecords.close
+
+            def close_then_fail(records):
+                original(records)
+                raise OSError("close_failed")
+
+            monkeypatch.setattr(raw_schemas._CsvRecords, "close", close_then_fail)
+            records = raw_schemas.iter_export_csv_records(path)
             assert next(records) == ["value"]
-            identity.filesystem_write_bytes(path, b"changed-content\n")
-            with pytest.raises(ValueError, match="csmar_raw_export_identity_changed"):
+            with pytest.raises(OSError, match="close_failed"):
                 records.close()
         elif operation == "choice_logout":
             from quant_research_platform.sources.choice.raw_exports import (

@@ -32,7 +32,6 @@ from quant_research_platform.sources.binance.validation import (
 from quant_research_platform.sources.tardis.raw import iter_native_slice
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.identity import (
-    dataset_file_identity,
     filesystem_write_bytes,
     open_filesystem_file,
     require_unaliased_path,
@@ -86,12 +85,9 @@ def import_funding_history(
     path = require_unaliased_path(
         Path(response_path), error="tardis_funding_source_invalid"
     )
-    identity = dataset_file_identity(path)
     raw = events = metadata = native = None
     with closing_iterator(open_filesystem_file(path, "rb")) as handle:
-        raw = handle.read(identity.size + 1)
-    if identity != dataset_file_identity(path) or len(raw) != identity.size:
-        raise ValueError("tardis_funding_source_changed")
+        raw = handle.read()
     events, proof = _settlement_response(
         raw,
         source_id=source_id,
@@ -225,10 +221,6 @@ def import_funding_history(
             root, checked, settlements=settlements, verify_bytes=True
         ):
             pass
-        with closing_iterator(open_filesystem_file(path, "rb")) as handle:
-            digest = hashlib.file_digest(handle, "sha256").hexdigest()
-        if identity != dataset_file_identity(path) or digest != native["sha256"]:
-            raise ValueError("tardis_funding_source_changed")
 
     def publish(staging):
         filesystem_write_bytes(staging / "settlements.json", raw)

@@ -126,7 +126,11 @@ def write_csv_snapshot(
 
 
 def iter_csv_snapshot(
-    root: Path, *, expected_manifest: dict[str, object], verify_bytes: bool = True
+    root: Path,
+    *,
+    expected_manifest: dict[str, object],
+    verify_bytes: bool = True,
+    content_hashes: list[str] | None = None,
 ) -> Iterator[tuple[object, ...]]:
     """Decode typed rows, with canonical byte verification for source acceptance."""
     root = require_unaliased_path(root, error="raw_csv_path_invalid")
@@ -156,7 +160,7 @@ def iter_csv_snapshot(
         handle = open_filesystem_file(path)
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("raw_csv_content_invalid") from exc
-    digest = hashlib.sha256() if verify_bytes else None
+    digest = hashlib.sha256() if verify_bytes or content_hashes is not None else None
     count = 0
     with closing_iterator(handle):
 
@@ -198,10 +202,12 @@ def iter_csv_snapshot(
                 except GeneratorExit:
                     return
         if count != manifest["row_count"] or (
-            digest is not None
+            verify_bytes
             and (
                 digest.hexdigest() != manifest["sha256"]
                 or handle.tell() != manifest["byte_count"]
             )
         ):
             raise ValueError("raw_csv_content_invalid")
+        if content_hashes is not None:
+            content_hashes.append(digest.hexdigest())

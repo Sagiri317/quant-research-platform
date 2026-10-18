@@ -307,7 +307,6 @@ def test_information_union_persists_complete_ordered_panel_for_research_windows(
             root, (frame.iloc[:1].copy(), frame.iloc[1:].copy()), spec=source_spec
         )
         expected_parts.append(read_dataset(root))
-        session = open_dataset_session(root, columns=None, time_window=None)
         expected_identities[data_id] = str(root)
     expected = pd.concat(expected_parts, ignore_index=True).sort_values(
         ["timestamp", "asset_id"], ignore_index=True

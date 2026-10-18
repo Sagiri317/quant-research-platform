@@ -914,11 +914,23 @@ def test_bulk_import_shares_selected_reads_and_preserves_table_evidence(
         return original(root, *args, **kwargs)
 
     monkeypatch.setattr(interim, "read_choice_response", counted)
+    import builtins
+
+    csv_reads = Counter()
+    original_open = builtins.open
+
+    def counted_open(file, *args, **kwargs):
+        if isinstance(file, (str, Path)) and Path(file).name == "response.csv":
+            csv_reads[Path(file)] += 1
+        return original_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", counted_open)
     roots = {data_id: tmp_path / "bulk" / data_id for data_id in data_ids}
     result = interim.materialize_interim_data(
         raw_root=layout.raw_source_root("choice"), output_roots=roots, data_ids=data_ids
     )
     assert len(reads) == 2 and set(reads.values()) == {1}
+    assert len(csv_reads) == 2 and set(csv_reads.values()) == {1}
     assert set(result.artifact_roots) == set(data_ids)
     for data_id, root in roots.items():
         frame, evidence, hashes = expected[data_id]

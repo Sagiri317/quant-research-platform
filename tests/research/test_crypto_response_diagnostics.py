@@ -8,7 +8,7 @@ import pytest
 
 from quant_research_platform.artifacts.outputs.evaluation import read_evaluation_outputs
 from quant_research_platform.compute.dataframe.cross_section import (
-    _batch_pearson_correlation_result,
+    _pearson_correlation_result,
 )
 from quant_research_platform.contracts.data import DataSpec
 from quant_research_platform.contracts.evaluations import EvaluationSpec
@@ -164,20 +164,20 @@ def test_batch_pearson_against_independent_exact_hand_moments_and_permutation(ca
         )
     expected = _independent_exact_pearson(x, y)
     for order in [np.arange(5), np.arange(4, -1, -1), [3, 1, 0, 4, 2]]:
-        value, reason = _batch_pearson_correlation_result(x[order], y[order])
+        value, reason = _pearson_correlation_result(x[order], y[order])
         assert reason is None and value == pytest.approx(expected, abs=2e-14)
 
 
 def test_batch_pearson_undefined_reasons_and_local_pair_masks():
-    assert _batch_pearson_correlation_result([1.0], [2.0]) == (
+    assert _pearson_correlation_result([1.0], [2.0]) == (
         None,
         "insufficient_observations",
     )
-    assert _batch_pearson_correlation_result([1.0, 1.0], [2.0, 3.0]) == (
+    assert _pearson_correlation_result([1.0, 1.0], [2.0, 3.0]) == (
         None,
         "zero_variance",
     )
-    assert _batch_pearson_correlation_result([1.0, np.inf], [2.0, 3.0]) == (
+    assert _pearson_correlation_result([1.0, np.inf], [2.0, 3.0]) == (
         None,
         "nonfinite_result",
     )

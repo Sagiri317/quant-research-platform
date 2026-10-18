@@ -143,6 +143,12 @@ def write_evaluation_outputs_from_chunks(
             spec=spec,
             timestamp_count=evaluation_diagnostics.timestamp_count,
         )
+        for name, frame in (
+            ("ic_summary", ic_summary),
+            ("group_spread_summary", group_spread_summary),
+        ):
+            if frame.duplicated(["signal", "label"]).any():
+                raise ValueError(f"duplicate_evaluation_{name}_keys")
         facts["ic_summary_rows"] = len(ic_summary)
         facts["group_spread_summary_rows"] = len(group_spread_summary)
         validate_evaluation_diagnostics_consistency(

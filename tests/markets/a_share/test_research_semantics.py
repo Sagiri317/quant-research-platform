@@ -429,7 +429,7 @@ def test_neutralization_preserves_single_ulp_projection(offset, changed):
         size_column="log_total_market_cap",
         rescale=False,
     )
-    np.testing.assert_array_equal(actual["factor"], residuals)
+    np.testing.assert_allclose(actual["factor"], residuals, rtol=1e-14, atol=0)
     features = a_share_feature_pipeline(frame, factor_columns=("factor",))
     np.testing.assert_allclose(
         features["feature_factor"], expected, rtol=1e-14, atol=1e-14

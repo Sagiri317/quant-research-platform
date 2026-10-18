@@ -579,8 +579,9 @@ def test_hac20_by_is_one_full_family_and_alt_policy_applies(tmp_path):
 @pytest.mark.parametrize(
     "mutation", ("duplicate", "stratum", "range", "count", "reason")
 )
+@pytest.mark.parametrize("batch_rows", [1, 8192])
 def test_selected_daily_reader_and_reducer_reject_same_corruption(
-    tmp_path, monkeypatch, mutation
+    tmp_path, monkeypatch, mutation, batch_rows
 ):
     import pyarrow as pa
     import pyarrow.parquet as pq
@@ -612,7 +613,7 @@ def test_selected_daily_reader_and_reducer_reject_same_corruption(
     original = reading.iter_declared_parquet_member_batches
 
     def batches(*args, **kwargs):
-        kwargs["batch_rows"] = 1
+        kwargs["batch_rows"] = batch_rows
         yield from original(*args, **kwargs)
 
     monkeypatch.setattr(reading, "iter_declared_parquet_member_batches", batches)

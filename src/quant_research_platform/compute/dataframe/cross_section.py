@@ -199,13 +199,6 @@ class _CorrelationMoments:
         )
 
 
-def _pearson_correlation_result(
-    left_values: np.ndarray,
-    right_values: np.ndarray,
-) -> tuple[float | None, str | None]:
-    return _batch_pearson_correlation_result(left_values, right_values)
-
-
 def _pearson_correlation_from_moments(
     *,
     count: int,
@@ -387,7 +380,10 @@ def _correlation_ratio_reason(
     return "nonfinite_result"
 
 
-def _batch_pearson_correlation_result(left_values, right_values):
+def _pearson_correlation_result(
+    left_values: np.ndarray,
+    right_values: np.ndarray,
+) -> tuple[float | None, str | None]:
     """Compute bounded-array Pearson using shared stable centering.
 
     The exact streaming accumulator remains the owner for incremental updates;

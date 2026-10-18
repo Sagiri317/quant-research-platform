@@ -40,13 +40,12 @@ from quant_research_platform.sources.csmar.raw_exports import (
     INDEX_INFO_SOURCE_CODE_COLUMNS,
     INDEX_INFO_SOURCE_CODE_ENUMS,
     STRING_CODE_DTYPES,
-    dataset_files_with_identity_by_id,
+    dataset_files_by_id,
     iter_private_export_chunks,
 )
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
-    DatasetFileIdentity,
     filesystem_stat,
     require_unaliased_path,
 )
@@ -1119,13 +1118,11 @@ def materialize_interim_data(
         source_raw_root,
         error="csmar_raw_export_identity_changed",
     )
-    indexed_files = dataset_files_with_identity_by_id(
-        source_raw_root, requested_datasets=data_ids
-    )
+    indexed_files = dataset_files_by_id(source_raw_root, requested_datasets=data_ids)
 
     with closing_iterator(indexed_files):
         for data_id, group in groupby(indexed_files, key=lambda item: item[0]):
-            input_files = ((item[1], item[2]) for item in group)
+            input_files = (item[1] for item in group)
             source_evidence = {"source_id": str(SOURCE_ID)}
             pending.discard(data_id)
             spec = interim_catalog().get(data_id)
@@ -1174,7 +1171,7 @@ def materialize_interim_data(
 def _iter_normalized_interim_frames(
     *,
     data_id: str,
-    input_files: Iterable[tuple[Path, DatasetFileIdentity]],
+    input_files: Iterable[Path],
     start_date: str | None,
     end_date: str | None,
     chunksize: int,
@@ -1212,7 +1209,7 @@ def _iter_normalized_interim_frames(
         "analyst_forecast",
     }
     pending = []
-    for input_file, expected_identity in input_files:
+    for input_file in input_files:
         parent = require_unaliased_path(
             input_file.parent, error="csmar_interim_source_parent_invalid"
         )
@@ -1227,7 +1224,6 @@ def _iter_normalized_interim_frames(
             input_file,
             dataset=data_id,
             chunksize=chunksize,
-            expected_identity=expected_identity,
             content_hashes=content_hashes,
         )
         with closing_iterator(chunks):
