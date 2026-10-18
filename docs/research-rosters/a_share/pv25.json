@@ -67,7 +67,6 @@
       "sample_filter_mode": "eligible",
       "hyperparameters": {},
       "random_seed": 42,
-      "max_train_rows": null,
       "target_column": "model_target"
     },
     {
@@ -104,7 +103,6 @@
       "sample_filter_mode": "eligible",
       "hyperparameters": {},
       "random_seed": 42,
-      "max_train_rows": null,
       "target_column": "model_target"
     },
     {
@@ -166,7 +164,6 @@
       "sample_filter_mode": "eligible",
       "hyperparameters": {},
       "random_seed": 42,
-      "max_train_rows": null,
       "target_column": "model_target"
     },
     {
@@ -227,7 +224,6 @@
       ],
       "sample_filter_mode": "eligible",
       "random_seed": 42,
-      "max_train_rows": null,
       "parameter_candidates": [
         {
           "epsilon": 1.35,
@@ -318,7 +314,6 @@
       ],
       "sample_filter_mode": "eligible",
       "random_seed": 42,
-      "max_train_rows": null,
       "parameter_candidates": [
         {
           "regularization_strength": 10.0
@@ -393,7 +388,6 @@
       ],
       "sample_filter_mode": "eligible",
       "random_seed": 42,
-      "max_train_rows": null,
       "parameter_candidates": [
         {
           "alpha": 0.03,
@@ -488,7 +482,6 @@
       ],
       "sample_filter_mode": "eligible",
       "random_seed": 42,
-      "max_train_rows": null,
       "parameter_candidates": [
         {
           "max_depth": 6,
@@ -578,7 +571,6 @@
       ],
       "sample_filter_mode": "eligible",
       "random_seed": 42,
-      "max_train_rows": null,
       "parameter_candidates": [
         {
           "max_depth": 3,
@@ -693,7 +685,6 @@
         "min_samples_leaf": 0.001
       },
       "random_seed": 42,
-      "max_train_rows": null,
       "target_column": "model_target"
     },
     {
@@ -762,7 +753,6 @@
         "n_jobs": -1
       },
       "random_seed": 42,
-      "max_train_rows": null,
       "target_column": "model_target"
     },
     {
@@ -830,7 +820,6 @@
         "loss": "squared_error"
       },
       "random_seed": 42,
-      "max_train_rows": null,
       "target_column": "model_target"
     }
   ],

@@ -66,6 +66,12 @@ def test_zero_nav_duplicate_times_and_full_drawdown(tmp_path):
     assert (tmp_path / "nav.png").stat().st_size > 1000
 
 
+def test_retrospective_curve_discloses_selection_mode():
+    data = {**curve(), "selection_mode": "retrospective"}
+    fig, _ = plots.plot_portfolio_curve(data, sample_role="validation", timezone="UTC")
+    assert "回顾性选择（描述性曲线）" in fig._suptitle.get_text()
+
+
 def test_independent_episodes_and_sampled_drawdown():
     data = curve((1000, 1099))
     data.update(

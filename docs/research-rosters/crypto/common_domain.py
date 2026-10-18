@@ -31,8 +31,6 @@ def common_domain_chunks(
         raise ValueError("common_domain_models_must_be_nonempty_unique")
     if len({model.target_column for model in models}) != 1:
         raise ValueError("common_domain_requires_same_target")
-    if any(model.max_train_rows is not None for model in models):
-        raise ValueError("common_domain_requires_all_legal_training_rows")
     if type(asset_id) is not str or not asset_id:
         raise ValueError("common_domain_requires_one_asset")
     cutoffs = strict_timestamp_series(

@@ -26,7 +26,7 @@ from quant_research_platform.markets.implementations.crypto.portfolio import (
 )
 from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
 from quant_research_platform.sources.tardis.raw import import_slices
-from tests.artifacts.test_crypto_maker_calibration import maker_calibration_tables
+from tests.artifacts.test_crypto_maker_calibration import _maker_calibration_tables
 from tests.helpers.binance_hft import _quote, hft_research_plan
 from tests.helpers.tardis import _slices
 from tests.markets.crypto.test_hft_execution import _maker_config, _state
@@ -97,7 +97,7 @@ def _publish(root, date, *, fine):
 def test_explicit_source_collection_and_persisted_maker_units(
     tmp_path, asset, unit, current_unit
 ):
-    tables, metadata = maker_calibration_tables.__wrapped__()
+    tables, metadata = _maker_calibration_tables()
     tables["crypto_maker_calibration"]["price_unit"] = unit
     shift = pd.Timedelta(pd.Timestamp("2026-08-01").value, unit="ns")
     for column in ("decision_at", "prediction_end", "label_available_at"):
@@ -289,7 +289,7 @@ def test_final_maker_gate_uses_only_required_fold_but_validates_full_artifact(
     import quant_research_platform.markets.implementations.crypto.portfolio as portfolio
     from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
 
-    original_tables, metadata = maker_calibration_tables.__wrapped__()
+    original_tables, metadata = _maker_calibration_tables()
     plan = hft_research_plan()
     plan["folds"][0] = metadata["chronology"]["folds"][0]
     metadata["chronology"] = {"folds": plan["folds"], "test": plan["test"]}

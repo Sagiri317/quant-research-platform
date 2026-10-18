@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize
+from scipy.optimize import linprog, minimize
 
 from quant_research_platform.contracts.portfolios import (
     ExecutionAssumptions,
@@ -724,6 +724,11 @@ def _project_neutral_target(target, context, *, industry_limit=0.02, size_limit=
     bands = limits[limits > 0]
     matrix = np.vstack((np.ones(len(b)), exact))
     right_hand_side = np.concatenate(([1.0], exact @ b))
+    eligible = context.attrs.get("eligible")
+    if eligible is not None:
+        eligible = eligible.reindex(context.index, fill_value=False)
+        # Fixed-zero reference names must not inflate the equality rank.
+        matrix[:, ~eligible.to_numpy(dtype=bool)] = 0.0
     # Remove only algebraically redundant equalities; retain their residual checks.
     left, singular, vectors = np.linalg.svd(matrix, full_matrices=False)
     rank = np.count_nonzero(
@@ -752,12 +757,33 @@ def _project_neutral_target(target, context, *, industry_limit=0.02, size_limit=
                 "jac": lambda w: np.vstack((-bounded, bounded)),
             }
         )
+    bounds = [(0.0, None)] * len(b)
+    initial = q if eligible is not None else b / b.sum()
+    if eligible is not None:
+        # Reference-only constituents contribute exposures, never buyable weights.
+        bounds = [(0.0, None if value else 0.0) for value in eligible]
+        feasible = linprog(
+            np.zeros(len(b)),
+            A_ub=np.vstack((bounded, -bounded)) if len(bands) else None,
+            b_ub=np.concatenate((bands + bounded @ b, bands - bounded @ b))
+            if len(bands)
+            else None,
+            A_eq=constraints,
+            b_eq=values,
+            bounds=bounds,
+            method="highs",
+        )
+        if feasible.status == 2:
+            raise PortfolioTargetBlocked("target_neutrality_infeasible")
+        if not feasible.success:
+            raise PortfolioTargetBlocked("target_neutrality_solver_failed")
+        initial = feasible.x
     solved = minimize(
         lambda w: float(0.5 * np.dot(w - q, w - q)),
-        b / b.sum(),
+        initial,
         jac=lambda w: w - q,
         method="SLSQP",
-        bounds=[(0.0, None)] * len(b),
+        bounds=bounds,
         constraints=optimizer_constraints,
         options={"ftol": 1e-12, "maxiter": 1000},
     )

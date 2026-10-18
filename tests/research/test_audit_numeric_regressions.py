@@ -1,4 +1,4 @@
-"""Native numeric boundaries from the HEAD270 audit."""
+"""Native numerical boundaries for statistics, models and portfolio execution."""
 
 from contextlib import closing, nullcontext
 from fractions import Fraction

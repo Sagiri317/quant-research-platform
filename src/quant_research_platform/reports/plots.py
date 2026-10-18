@@ -223,7 +223,12 @@ def plot_portfolio_curve(curve, *, sample_role, timezone):
             "UNDEFINED": "未定义",
             "BLOCKED": "受阻",
             "FAILED": "失败",
-        }.get(curve["status"], curve["status"]),
+        }.get(curve["status"], curve["status"])
+        + (
+            " | 回顾性选择（描述性曲线）"
+            if curve.get("selection_mode") == "retrospective"
+            else ""
+        ),
         source_reference=curve.get(
             "source_reference", f"候选 {curve['candidate_id']}（无产物）"
         ),

@@ -189,10 +189,8 @@ def test_declared_observed_flags_must_exist_and_be_binary(bad):
         masks(frame, models, plan)
 
 
-def test_cap_target_and_overlapping_windows_are_not_silent_changes():
+def test_target_and_overlapping_windows_are_not_silent_changes():
     frame, _, models, plan = inputs()
-    with pytest.raises(ValueError, match="all_legal_training_rows"):
-        masks(frame, (replace(models[0], max_train_rows=1), models[1]), plan)
     with pytest.raises(ValueError, match="same_target"):
         masks(frame, (replace(models[0], target_column="other"), models[1]), plan)
     with pytest.raises(ValueError, match="training_evaluation_overlap"):
@@ -364,7 +362,6 @@ def test_native_mask_assembly_fit_predict_score_and_evaluation(tmp_path):
         )
         assert load_model(own)[0].metadata["rows_after_input_label_dropna"] == 3
         assert load_model(common)[0].metadata["rows_after_input_label_dropna"] == 2
-        assert load_model(common)[0].metadata["max_train_rows"] is None
         pred = predict(
             {
                 "model": str(common),

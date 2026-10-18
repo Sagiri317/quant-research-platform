@@ -36,6 +36,110 @@ def _delta(second, first, last, previous, quantity="3"):
     )
 
 
+@pytest.mark.parametrize("with_snapshot", [False, True])
+@pytest.mark.parametrize("empty_day", [None, "2026-08-31", "2026-09-02"])
+def test_native_trade_reads_require_no_depth_and_preserve_known_day_facts(
+    tmp_path, with_snapshot, empty_day
+):
+    from quant_research_platform.contracts.order_book import TradeEvent
+    from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
+    from quant_research_platform.sources.binance.replay import iter_agg_trades
+
+    native = b""
+    if with_snapshot:
+        native += _line(
+            0,
+            "depthSnapshot",
+            {
+                "lastUpdateId": 100,
+                "bids": [[str(100 - i), "2"] for i in range(12)],
+                "asks": [[str(101 + i), "2"] for i in range(12)],
+            },
+        ) + _delta(1, 100, 101, 99)
+    for second in (2, 3):
+        native += _line(
+            second,
+            "aggTrade",
+            {
+                "e": "aggTrade",
+                "E": 1788220800000 + second * 1000,
+                "T": 1788220800000 + second * 1000,
+                "s": "BTCUSDT",
+                "st": 1,
+                "a": second,
+                "f": second,
+                "l": second,
+                "p": "100.5",
+                "q": "2",
+                "nq": "2",
+                "m": False,
+            },
+        )
+    channels = (
+        ("depth", "depthSnapshot", "aggTrade") if with_snapshot else ("aggTrade",)
+    )
+    root = tmp_path / "trades"
+    manifest = import_slices(
+        root,
+        date="2026-09-01",
+        slices=_slices(tmp_path / "native", native),
+        channels=channels,
+    )
+    assert manifest["snapshot_limits"] == ({"BTCUSDT": 12} if with_snapshot else {})
+    paths = None
+    if empty_day:
+        import_slices(
+            tmp_path / "empty",
+            date=empty_day,
+            slices=_slices(tmp_path / "empty-native"),
+            channels=channels,
+        )
+        root = tmp_path
+        paths = ("trades", "empty")
+    with open_market_source(root, archive_paths=paths) as source:
+        expected = {
+            "price_unit": "0.1",
+            "snapshot_limit": 12 if with_snapshot else None,
+        }
+        assert source.market_metadata(FUTURES_MARKET_TYPE, "BTCUSDT") == expected
+        observed = next(
+            archive for archive in source.archives if archive.root.name == "trades"
+        )
+        assert observed.market_metadata(FUTURES_MARKET_TYPE, "BTCUSDT") == expected
+        assert (
+            len(list(iter_agg_trades(observed, FUTURES_MARKET_TYPE, symbol="BTCUSDT")))
+            == 2
+        )
+        records = list(
+            source.iter_market_records(
+                symbol="BTCUSDT",
+                market_type=FUTURES_MARKET_TYPE,
+                data_kinds=("agg_trades",),
+            )
+        )
+        assert [record["payload"]["a"] for record in records] == [2, 3]
+        assert {record["price_unit"] for record in records} == {"0.1"}
+        trades = list(iter_agg_trades(source, FUTURES_MARKET_TYPE, symbol="BTCUSDT"))
+        assert len(trades) == 2
+        assert all(isinstance(trade, TradeEvent) for trade in trades)
+        assert [trade.price_index for trade in trades] == [1005, 1005]
+        if with_snapshot:
+            books = list(
+                iter_reconstructed_depth(source, FUTURES_MARKET_TYPE, symbol="BTCUSDT")
+            )
+            assert sum(isinstance(book, BookState) for book in books) == 1
+        else:
+            for reader in (source, observed):
+                with pytest.raises(
+                    PortfolioTargetBlocked, match="depth_snapshot_missing"
+                ):
+                    list(
+                        iter_reconstructed_depth(
+                            reader, FUTURES_MARKET_TYPE, symbol="BTCUSDT"
+                        )
+                    )
+
+
 @pytest.mark.parametrize("bridge", [True, False])
 def test_late_snapshot_has_no_early_book_or_coverage(tmp_path, bridge):
     first = 99 if bridge else 101

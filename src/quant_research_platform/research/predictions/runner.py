@@ -162,6 +162,10 @@ def predict(config: Mapping) -> Path:
         "input_spec": config.get("input_spec"),
         "asset_ids": assets,
     }
+    if "training_target_mean" in result.metadata:
+        metadata["model_metadata"]["training_target_mean"] = result.metadata[
+            "training_target_mean"
+        ]
     calibration = result.metadata.get("rank_parameters", {}).get("label_calibration")
     if calibration is not None:
         metadata["model_metadata"]["rank_parameters"] = {

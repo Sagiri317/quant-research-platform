@@ -27,7 +27,6 @@ def test_native_prediction_preserves_raw_units_rank_and_family(tmp_path: Path) -
         model_algorithm="linear_regression",
         input_factor_columns=("momentum_20d",),
         target_column="instant_target",
-        max_train_rows=len(frame),
     )
     case = fit_frame(
         tmp_path / "fit",
@@ -174,7 +173,6 @@ def test_native_prediction_binds_backend_package_to_actual_model_owner(
         model_algorithm=model_algorithm,
         input_factor_columns=("momentum_20d",),
         target_column="instant_target",
-        max_train_rows=len(frame),
     )
     import json
 

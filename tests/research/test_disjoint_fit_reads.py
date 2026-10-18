@@ -115,24 +115,18 @@ def test_fit_windows_are_effectively_disjoint(first, second, valid):
             _fit_windows(windows, pd.Timestamp("2020-01-05"))
 
 
-@pytest.mark.parametrize("cap,expected", [(None, 6), (4, 3)])
-def test_fit_keeps_complete_cross_sections_across_reader_batches(
-    tmp_path, monkeypatch, cap, expected
-):
+def test_fit_keeps_complete_cross_sections_across_reader_batches(tmp_path, monkeypatch):
     from quant_research_platform.research.models import production
 
     _, config = request(tmp_path)
-    config["model"]["max_train_rows"] = cap
     reader = production.iter_dataset_chunks
     monkeypatch.setattr(
         production, "iter_dataset_chunks", lambda session: reader(session, batch_rows=2)
     )
     result, _ = load_model(fit(config))
-    assert result.metadata["rows_after_input_label_dropna"] == expected
+    assert result.metadata["rows_after_input_label_dropna"] == 6
     assert result.metadata["training_asset_ids"] == ["a", "b", "c"]
-    assert result.metadata["train_start"] == (
-        "2020-01-01" if cap is None else "2020-01-05"
-    )
+    assert result.metadata["train_start"] == "2020-01-01"
     assert result.metadata["train_end"] == "2020-01-05"
 
 

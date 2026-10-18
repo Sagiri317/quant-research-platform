@@ -147,7 +147,6 @@ _MUTATIONS = [
     "input_factor_columns",
     "sample_filter_mode",
     "training_weighting",
-    "max_train_rows",
 ]
 
 
@@ -167,7 +166,6 @@ def _mutate(facts, name):
             "input_factor_columns": ["other", "x"],
             "sample_filter_mode": "unfiltered",
             "training_weighting": {"method": "equal_timestamp", "half_life_periods": 3},
-            "max_train_rows": 6,
         }[name]
 
 

@@ -129,7 +129,7 @@ def produce_hft_processed_data(
                 except PortfolioTargetBlocked as error:
                     if str(error) not in {
                         "tardis_price_observations_missing",
-                        "tardis_depth_snapshot_missing",
+                        "depth_snapshot_missing",
                     }:
                         raise
                     unavailable[symbol] = str(error)

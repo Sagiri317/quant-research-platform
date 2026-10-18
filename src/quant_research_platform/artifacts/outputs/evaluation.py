@@ -24,6 +24,7 @@ from quant_research_platform.artifacts.outputs.evaluation_validation import (
     EVALUATION_ARTIFACTS,
     validate_evaluation_artifact_structure,
     validate_evaluation_diagnostics_consistency,
+    validate_metric_group_counts,
     validate_output_frame,
 )
 from quant_research_platform.artifacts.outputs.manifest import (
@@ -288,8 +289,8 @@ def _write_evaluation_artifact_chunks(
                     ),
                     spec=spec,
                     science=science,
-                    validate_pairs=True,
                 )
+                validate_metric_group_counts(metrics, grouped, spec=spec)
                 for name in optional:
                     frame = metadata[name]
                     validate_daily_frame(
@@ -604,17 +605,12 @@ def read_evaluation_outputs(
             if name in DAILY_SCHEMAS
             else pd.DataFrame(columns=_EVALUATION_COLUMNS[name])
         )
-    validate_evaluation_artifact_structure(
-        **{
-            name: result.get(name, pd.DataFrame(columns=columns))
-            for name, columns in _EVALUATION_COLUMNS.items()
-            if name not in DAILY_SCHEMAS
-        },
-        spec=_evaluation_spec(metadata),
-        science=metadata,
-        validate_pairs={"metrics", "grouped_label_values"} <= set(result),
-        timestamp_count=metadata["evaluation_diagnostics"]["timestamp_count"],
-    )
+    if {"metrics", "grouped_label_values"} <= result.keys():
+        validate_metric_group_counts(
+            result["metrics"],
+            result["grouped_label_values"],
+            spec=_evaluation_spec(metadata),
+        )
     validate_daily_counts(
         result.get("metrics"),
         result.get("daily_coverage"),

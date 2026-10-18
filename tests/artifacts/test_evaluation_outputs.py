@@ -79,6 +79,7 @@ def test_evaluation_rejects_cross_chunk_duplicate_keys_before_publication(
 
 def test_evaluation_publishes_numeric_members_and_reads_only_requested_summaries(
     tmp_path,
+    monkeypatch,
 ):
     spec = _spec()
     output = tmp_path / "evaluation"
@@ -99,6 +100,34 @@ def test_evaluation_publishes_numeric_members_and_reads_only_requested_summaries
     assert len(tables["metrics"]) == 1
     assert len(tables["ic_summary"]) == 1
     assert manifest["metadata"]["evaluation_diagnostics"]["metric_rows"] == 1
+    from quant_research_platform.artifacts.outputs import evaluation
+
+    validate_structure = evaluation.validate_evaluation_artifact_structure
+    validated_summary_rows = []
+
+    def record_validation(**kwargs):
+        validated_summary_rows.extend(kwargs["ic_summary"].index)
+        return validate_structure(**kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            evaluation, "validate_evaluation_artifact_structure", record_validation
+        )
+        read_evaluation_outputs(output, tables=("ic_summary",))
+    assert len(validated_summary_rows) == len(tables["ic_summary"])
+
+    grouped = tables["grouped_label_values"].copy()
+    grouped.loc[0, "n_obs"] += 1
+    grouped.to_parquet(output / "grouped_label_values.parquet", index=False)
+    read_evaluation_outputs(output, tables=("metrics",))
+    read_evaluation_outputs(output, tables=("grouped_label_values",))
+    with pytest.raises(
+        ValueError, match="evaluation_metric_group_observations_mismatch"
+    ):
+        read_evaluation_outputs(output, tables=("metrics", "grouped_label_values"))
+    tables["grouped_label_values"].to_parquet(
+        output / "grouped_label_values.parquet", index=False
+    )
     for scope in ("LOCAL_ONLY", "shared"):
         manifest["metadata"]["scope"] = scope
         (output / "manifest.json").write_text(json.dumps(manifest))

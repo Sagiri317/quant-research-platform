@@ -2,7 +2,6 @@
 
 import tracemalloc
 import weakref
-from collections import deque
 from fractions import Fraction
 from types import SimpleNamespace
 
@@ -333,63 +332,39 @@ def test_linear_lstsq_receives_the_fresh_design_without_an_extra_copy(monkeypatc
     assert len(captured) == 1
 
 
-@pytest.mark.parametrize("cap", [None, 4, 2])
 @pytest.mark.parametrize("chunk_size", [1, 2, 6])
 def test_collected_training_releases_chunks_and_preserves_source(
-    cap, chunk_size, monkeypatch
+    chunk_size, monkeypatch
 ):
-    from dataclasses import replace
-
     from tests.research.test_model_missingness_contract import frame, spec
 
     source = frame().astype({"x": "Float64", "z": "Float64"})
     before = source.copy(deep=True)
     references = []
     original_concat = pd.concat
-    original_controls = fitting._apply_training_controls
 
     def concat(objects, *args, **kwargs):
-        if isinstance(objects, deque):
+        if isinstance(objects, list):
             references.extend(weakref.ref(chunk) for chunk in objects)
         return original_concat(objects, *args, **kwargs)
 
-    def controls(training, model_spec):
-        assert all(reference() is None for reference in references)
-        result = original_controls(training, model_spec)
-        if cap is None:
-            assert np.shares_memory(result.label.to_numpy(), training.label.to_numpy())
-        return result
-
     monkeypatch.setattr(pd, "concat", concat)
-    monkeypatch.setattr(fitting, "_apply_training_controls", controls)
     prepared = fitting._collect_training_frame(
         (
             source.iloc[start : start + chunk_size]
             for start in range(0, len(source), chunk_size)
         ),
-        replace(spec(), max_train_rows=cap),
+        spec(),
         fitting_cutoff="2024-01-03",
     )
+    assert all(reference() is None for reference in references)
     expected = (
-        source if cap is None else source.iloc[3:] if cap == 4 else source.iloc[:0]
-    )
-    expected = (
-        expected[
-            [
-                "timestamp",
-                "asset_id",
-                "x",
-                "z",
-                "label",
-                *(["label_available_at"] if cap == 2 else []),
-            ]
-        ]
+        source[["timestamp", "asset_id", "x", "z", "label"]]
         .astype({"timestamp": "datetime64[ns]"})
         .reset_index(drop=True)
     )
     pd.testing.assert_frame_equal(prepared.training, expected, check_exact=True)
     assert prepared.row_counts["rows_input"] == len(source)
     assert prepared.row_counts["rows_after_input_label_dropna"] == len(expected)
-    if not prepared.training.empty:
-        prepared.training.loc[0, "x"] = -999.0
+    prepared.training.loc[0, "x"] = -999.0
     pd.testing.assert_frame_equal(source, before, check_exact=True)

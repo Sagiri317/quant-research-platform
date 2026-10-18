@@ -35,6 +35,7 @@ def build_simple_target_weights(
     float_market_cap: pd.Series | None = None,
     neutrality: Literal["none", "industry", "size", "industry_size"] = "none",
     industry: pd.Series | None = None,
+    benchmark_weights: pd.Series | None = None,
     total_market_cap: pd.Series | None = None,
     size_cap_column: Literal[
         "total_market_cap", "float_market_cap"
@@ -75,6 +76,7 @@ def build_simple_target_weights(
             float_market_cap,
             industry,
             neutrality,
+            benchmark_weights=benchmark_weights,
             size_market_cap=(
                 total_market_cap
                 if size_cap_column == "total_market_cap"
@@ -244,7 +246,13 @@ def _validate_quantile(value: float, error: str) -> float:
 
 
 def _neutrality_context(
-    eligible, float_market_cap, industry, neutrality, *, size_market_cap=None
+    eligible,
+    float_market_cap,
+    industry,
+    neutrality,
+    *,
+    size_market_cap=None,
+    benchmark_weights=None,
 ):
     """Use the full lawful benchmark domain, including assets without scores."""
     if type(neutrality) is not str or neutrality not in {
@@ -254,16 +262,40 @@ def _neutrality_context(
     }:
         raise ValueError("target_neutrality_invalid")
     assets = eligible.index
-    if (
-        not isinstance(float_market_cap, pd.Series)
-        or not float_market_cap.index.is_unique
-    ):
-        raise ValueError("target_float_market_cap_required")
-    capitals = _numeric_series(
-        float_market_cap, assets, "target_float_market_cap_invalid"
-    )
-    domain = eligible & capitals.gt(0) & np.isfinite(capitals)
-    benchmark_total = sum(Fraction(float(value)) for value in capitals.loc[domain])
+    if benchmark_weights is None:
+        if (
+            not isinstance(float_market_cap, pd.Series)
+            or not float_market_cap.index.is_unique
+        ):
+            raise ValueError("target_float_market_cap_required")
+        capitals = _numeric_series(
+            float_market_cap, assets, "target_float_market_cap_invalid"
+        )
+        domain = eligible & capitals.gt(0) & np.isfinite(capitals)
+        benchmark_total = sum(Fraction(float(value)) for value in capitals.loc[domain])
+        weights = capitals.loc[domain].map(
+            lambda value: float(Fraction(float(value)) / benchmark_total)
+        )
+    else:
+        if (
+            not isinstance(benchmark_weights, pd.Series)
+            or not benchmark_weights.index.is_unique
+        ):
+            raise ValueError("portfolio_benchmark_weights_invalid")
+        if benchmark_weights.empty:
+            raise PortfolioTargetBlocked("target_neutrality_benchmark_empty")
+        weights = _numeric_series(
+            benchmark_weights,
+            benchmark_weights.index,
+            "portfolio_benchmark_weights_invalid",
+        )
+        if not (np.isfinite(weights) & weights.gt(0)).all() or not np.isclose(
+            weights.sum(), 1.0, rtol=0.0, atol=1e-8
+        ):
+            raise ValueError("portfolio_benchmark_weights_invalid")
+        assets = eligible.index[eligible].union(weights.index)
+        domain = pd.Series(True, index=assets)
+    weights = weights.reindex(assets, fill_value=0.0)
     if neutrality in {"industry", "industry_size"}:
         if not isinstance(industry, pd.Series) or not industry.index.is_unique:
             raise ValueError("target_industry_required")
@@ -271,17 +303,13 @@ def _neutrality_context(
         if any(type(value) is not str or not value for value in industry.dropna()):
             raise ValueError("target_industry_invalid")
         domain &= industry.notna()
-    capitals = capitals.loc[domain]
-    if capitals.empty:
+    if not domain.any():
         raise PortfolioTargetBlocked("target_neutrality_benchmark_empty")
-    exact = [Fraction(float(value)) for value in capitals]
-    total = benchmark_total
-    context = pd.DataFrame(
-        {"benchmark_weight": [float(value / total) for value in exact]},
-        index=capitals.index,
-    )
+    context = pd.DataFrame({"benchmark_weight": weights.loc[domain]})
+    if benchmark_weights is not None:
+        context.attrs["eligible"] = eligible.reindex(context.index, fill_value=False)
     if neutrality in {"industry", "industry_size"}:
-        context.attrs["unknown_industry_weight"] = float((total - sum(exact)) / total)
+        context.attrs["unknown_industry_weight"] = float(weights.loc[~domain].sum())
         codes = industry.reindex(context.index)
         for code in sorted(codes.unique()):
             context[f"industry:{code}"] = codes.eq(code).astype(float)

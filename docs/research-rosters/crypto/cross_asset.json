@@ -79,7 +79,6 @@
         "alpha": 1.0
       },
       "random_seed": 42,
-      "max_train_rows": null,
       "training_asset_ids": [
         "btc_usdt"
       ],
@@ -105,7 +104,6 @@
         "alpha": 1.0
       },
       "random_seed": 42,
-      "max_train_rows": null,
       "training_asset_ids": [
         "eth_usdt"
       ],
@@ -131,7 +129,6 @@
         "alpha": 1.0
       },
       "random_seed": 42,
-      "max_train_rows": null,
       "training_asset_ids": [
         "sol_usdt"
       ],
@@ -157,7 +154,6 @@
         "alpha": 1.0
       },
       "random_seed": 42,
-      "max_train_rows": null,
       "training_asset_ids": [
         "btc_usdt",
         "eth_usdt"
@@ -225,7 +221,6 @@
         "n_jobs": -1
       },
       "random_seed": 42,
-      "max_train_rows": null,
       "training_asset_ids": [
         "btc_usdt",
         "eth_usdt"
@@ -246,7 +241,6 @@
       "sample_filter_mode": "eligible",
       "hyperparameters": {},
       "random_seed": 42,
-      "max_train_rows": null,
       "training_asset_ids": [
         "btc_usdt",
         "eth_usdt"
@@ -280,7 +274,6 @@
       "sample_filter_mode": "eligible",
       "hyperparameters": {},
       "random_seed": 42,
-      "max_train_rows": null,
       "training_asset_ids": [
         "btc_usdt",
         "eth_usdt"
@@ -308,7 +301,6 @@
         "alpha": 1.0
       },
       "random_seed": 42,
-      "max_train_rows": null,
       "training_asset_ids": [
         "btc_usdt",
         "eth_usdt"
@@ -377,7 +369,6 @@
         "n_jobs": -1
       },
       "random_seed": 42,
-      "max_train_rows": null,
       "training_asset_ids": [
         "btc_usdt",
         "eth_usdt"
@@ -447,7 +438,6 @@
         "min_samples_leaf": 0.001
       },
       "random_seed": 42,
-      "max_train_rows": null,
       "training_asset_ids": [
         "btc_usdt",
         "eth_usdt"

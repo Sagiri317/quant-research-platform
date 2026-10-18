@@ -78,7 +78,7 @@ CSMAR `index_weights.Weight` 与 `index_market.Idxtrd08` 的原始缺失值在�
 ### Choice
 
 Choice 是现有正式财务 PIT 的来源绑定；原生响应先不可变保存，再由已有 owner 离线处理。
-Raw 响应状态以 `status` 为唯一事实，不再持久化重复布尔状态；原始请求、响应字节及哈希保留。
+Raw 响应状态以 `status` 为唯一事实；原始请求、响应字节及哈希保留。
 资产负债表、利润表和现金流量表分别接纳，只阻塞实际依赖缺失表的因子。
 绑定配置按已选因子和组合风险暴露的字段依赖裁剪报表输入；仍要求真实披露与日历，
 不造空表、不以零填补缺失财务值。Raw CTR 接受官方 `IndexCode` 选项，
@@ -88,8 +88,7 @@ Raw 响应状态以 `status` 为唯一事实，不再持久化重复布尔状态
 3 为调整后的合并报表，4 为调整后的母公司报表。现有正式消费者只接受 `Type=1/3`。
 CTR 财务报表的 `ReportType` 则按 1、2、3、4 分别表示合并、调整合并、母公司、
 调整母公司，不能将其数字直接用于 CSS。Raw 原样保留请求；已知财务 CSS 指标若带
-`ReportType`，正式来源准备与 interim 消费明确拒绝，不默认为 `Type=1`，
-不增加 CTR 到 CSS 的兼容映射。
+`ReportType`，正式来源准备与 interim 消费明确拒绝，不默认为 `Type=1`。
 
 `sources/choice/fields.py` 是三张报表共 14 项一般企业指标的唯一字段映射。
 官方指标资料将这些数值列声明为元。按 CNY 消费的依据是境内上市一般企业的
@@ -147,8 +146,9 @@ Tardis native continuity 保留原字节，包括 depth 重复/过期更新。
 下载校验只推进 depth update-id 高水位，旧更新不倒退高水位、不制造新的连续性；
 既有 Binance book engine 负责丢弃不适用的更新。
 断连关闭观察区间，后续更新使用新的观察身份；前向 sequence gap 仍形成 gap。
-aggTrade ID 非单调仍明确失败，并保存频道、slice offset、行号和前后 ID 的诊断注记，
-不输出原始价格、数量或完整 payload。
+Tardis aggTrade ID 非单调时关闭受影响的成交观察区间，记录
+`native_sequence_non_monotonic` gap 并保留原生归档。诊断保存频道、slice offset、
+行号和前后 ID，不输出原始价格、数量或完整 payload。
 前向 ID 跳号按来源 adapter 合同处理：Tardis 原生导入记录 gap，官方录制 reader
 仅验证单调性。[Binance 聚合成交流说明](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/ws-streams/market#aggregate-trade-streams)
 定义聚合 ID；该定义本身不证明订阅消息逐 ID 加一；[Tardis 来源说明](https://docs.tardis.dev/historical-data-details/binance-futures)
@@ -232,7 +232,7 @@ PANEL 在真实交易日轴上实施可用日规则。分类词典、历史资�
 人民币金额 `amount_per_share` 按当时实际原股计，转换比例
 `successor_shares_per_old_share` 为每原股换得的后继实际股份数。
 账本的 `value_per_old_unit`、`remaining_old_units_per_old_unit` 等字段中的 unit
-均指实际股份，不再换算为复权价格单位，也不接纳旧 `shares_per_old_unit` 证明结构。
+均指实际股份。
 实际证券生命周期和经济日期必须匹配。金额与数量比例共用规范精确有理数编码，避免中间溢出丢失最终
 可表示的金额；原始 PANEL 行情类型保持不变。每个事件有独立身份；同一旧权益在同一
 确认会话的多个事件若缺少可证明顺序则拒绝，不以事件 ID 排序冒充经济先后。
@@ -295,18 +295,17 @@ CSMAR `prepare_source` 省略起止日期时消费明确输入中的完整历史
 reference 可以在一个请求中明确多个 outputs，各表独立发布与报告缺源，不提供跨表事务。
 非空 start_date 明确拒绝，避免假装已经裁剪历史；end_date 只限制行业/权益的知识时点，
 费率有效区间保留。需要选择其他合法费率文件时，成对给出 `fee_csv` 与 `fee_sidecar`，
-路径直接解释，不再与 raw_root 拼接；省略时沿用已有参考目录默认。内容、哈希、字节数、
+路径直接解释；省略时使用参考目录默认。内容、哈希、字节数、
 行数、单位与覆盖证明仍由来源 owner 检查，改文件名不能制造新年代的合法覆盖。
 
 产物根可以命名为 data，实际结构及来源声明决定其含义。单独的数据子目录缺少必需结构
-仍不是完整产物。schema inventory 仅诊断旧项目 data/{interim,processed,research} 布局，
-不把该布局当作独立计算的通行条件。
+仍不是完整产物。schema inventory 诊断 data/{interim,processed,research} 布局；
+独立计算按实际选择的输入结构读取。
 
 ## 字段字典与阶段输入输出
 
 本节是通用字段语义及 schema 的唯一导航，不另列一份会漂移的全仓列清单。
-已批准但未实现的默认与当前代码差距见 [规则状态索引](specifications.md)；以下链接指向实际合同，
-不能把字段已经存在当作整条研究链已经验证发布。
+研究合同导航见 [研究合同索引](specifications.md)；以下链接定位字段及其计算 owner。
 
 ### 通用结构、主键和时钟
 
@@ -328,8 +327,7 @@ Crypto 数量须证明基础资产/合约数/报价金额及乘数；资金费�
 
 NULL/NaN 只表示该字段没有数值，不能单独区分未采集、源缺失、结构不可计算、损坏、缺行、未知或不适用。
 真实 0 不等于缺失，未知也不等于 False；来源诊断、状态和观测伴随列保存原因。
-标签不可插补；训练期填补的已批准方向见规则索引，不能把现有 `impute_missing` 布尔开关
-当作训练中位数及缺失标志已实现的证明。`feature_`、`feature_missing_`、`feature_observed_`
+标签不可插补；模型缺失处理按 [拟合与预处理合同](a-share.md#514-正式模型层级与预处理)在合法训练域估计并冻结。`feature_`、`feature_missing_`、`feature_observed_`
 的现有输出关系由 [FeatureTransformSpec](../src/quant_research_platform/contracts/features.py) 定义，
 特征支持列不自动成为模型 X，模型列序由拟合合同保存。
 
@@ -338,7 +336,7 @@ NULL/NaN 只表示该字段没有数值，不能单独区分未采集、源缺�
 `FN_FN046` 的同一证券、报告期、报表类型可以有多个来源和科目。
 INTERIM 主键为 `source_asset_id, timestamp, report_type, data_source, subject_code`，
 后两列分别原样映射 `DataSources` 和 `SubjectCode`，按字符串保留前导零。
-不得以旧三列粗键去重，也不得把不同来源、科目合并成一条权益变动。
+主键须保留来源与科目，不能合并不同权益变动。
 报告期不是公告可用时点；这些身份字段本身不证明每股口径或公司行动已经对齐。
 
 ### CSMAR corporate_actions：规范事实与结算未知状态
@@ -366,11 +364,11 @@ INTERIM 主键为 `source_asset_id, timestamp, report_type, data_source, subject
 同一经济事件争议字段保留未知与诊断，共同事实保留；未知金额不能当成零，实际依赖者权益无法确认。未知事件是否阻塞由实际持有人权益依赖裁定，
 不是在 source 层删除整段来源。
 
-本轮原股账本直接消费该表；内部事件投影的 `record_at`、`effective_at`、`settlement_at`、
+原股账本直接消费该表；内部事件投影的 `record_at`、`effective_at`、`settlement_at`、
 `available_at`、`cash_per_share`、`additional_shares_per_share`、`entitlement_proved`
 由 [portfolio_sessions.py](../src/quant_research_platform/markets/implementations/a_share/portfolio_sessions.py)
-定义，只是既有 owner 的计算输入，不新建一份公共事件表或准入框架。
-原股账本与旧复权单位账本不可混用；退市后参考权益须按实际原股及生命周期解释。
+定义，为原股账本的计算输入。
+原股账本的价格、股数与分配须使用同一原股单位；退市后参考权益须按实际原股及生命周期解释。
 
 ### 输入选择器：只解释本次明确选择
 
@@ -393,7 +391,7 @@ INTERIM 主键为 `source_asset_id, timestamp, report_type, data_source, subject
 | assemble | 明确基表、因子批次/已有特征、标签、列投影及特征配方 | 可复用研究数据集；[ResearchDatasetSpec](../src/quant_research_platform/contracts/datasets.py)，保留列角色、成熟映射和 join 覆盖 |
 | fit | 数据、列序、目标、拟合窗/截止、算法参数及 seed | 冻结 predictor 与 model.json/trial；[contracts/models.py](../src/quant_research_platform/contracts/models.py)、[production.py](../src/quant_research_platform/research/models/production.py) |
 | predict | 明确已存模型及新特征窗口 | PRED 键、prediction_score、prediction_rank_score；[prediction.py](../src/quant_research_platform/artifacts/outputs/prediction.py)，不附带未来标签、不重新拟合 |
-| score / select | 有序完整候选、验证窗与成熟截止；选择另声明规则和最终拟合窗 | 各自 JSON；[trial_selection.py](../src/quant_research_platform/research/models/trial_selection.py)，不自动最终重训；新批准的默认见状态索引 |
+| score / select | 有序完整候选、验证窗与成熟截止；选择另声明规则和最终拟合窗 | 各自 JSON；[trial_selection.py](../src/quant_research_platform/research/models/trial_selection.py)，最终重新拟合通过显式 fit 执行 |
 | explain | 冻结模型、明确样本、方法和合法背景 | 独立解释数值与元数据；[explanations.py](../src/quant_research_platform/artifacts/explanations.py)，绘图无需加载模型 |
 | evaluate | 明确信号、标签、窗口、成熟截止、比较/分层选择 | EVAL 日表和摘要；[contracts/evaluations.py](../src/quant_research_platform/contracts/evaluations.py)、[evaluation.py](../src/quant_research_platform/artifacts/outputs/evaluation.py) |
 | calibrate / backtest | 显式预测、账户/执行/来源、历史校准输入与回测窗口 | 校准产物或 PORT；[contracts/portfolios.py](../src/quant_research_platform/contracts/portfolios.py)、[portfolio_ledger.py](../src/quant_research_platform/artifacts/portfolio_ledger.py) |
@@ -421,7 +419,7 @@ NAV 量纲的浮点舍入容差；精确股数、生命周期、应收和锁定�
 | 字段 | 单位与定义 |
 | --- | --- |
 | prediction_count / target_count | 有限预测数 / 预测与成熟主目标成对有效数 |
-| mse / mse_reason / baseline_mse | 当日成对域等权平方误差及未定义原因 / 零预测基准平方误差，单位为主目标单位的平方 |
+| mse / mse_reason / baseline_mse | 当日成对域等权平方误差及未定义原因 / 所选预测基准的平方误差，单位为主目标单位的平方 |
 | oos_r2 / oos_r2_reason | `1−mse/baseline_mse`；零基准误差、无目标或不可表示结果为 NULL 并说明原因 |
 | head_selected_count / head_evaluable_count | 仅由预测确定的头部人数 / 固定头部中原始收益已成熟人数 |
 | head_coverage | 可评价人数除以选中人数；无选中人为 NULL，不以覆盖硬门槛过滤 |
@@ -440,13 +438,20 @@ MSE 使用标签尺度预测：rank 模型使用各次训练冻结的 `label_cal
 score 的显式 `label_unit` 可补充标签输入未声明的单位；若输入已有单位，两者仍须一致。该声明保存在评分/选择记录中，不从训练单位猜测评价单位。
 只有目标定义和两侧明确单位相同，才计算 MSE 和 OOS R²；`model_target` 的 raw/none 与同源原始标签可比较。
 目标不同、单位缺失或不同分别记为 `prediction_target_mismatch`、`target_unit_missing`、
-`prediction_target_unit_mismatch`；冻结定义未知（含旧模型未保存定义）、对侧缺必需定义或定义不同分别记
-`prediction_target_definition_missing`、`prediction_target_definition_mismatch`。仅将 MSE/R² 设为 NULL，
-保留目标计数、零预测基准、RankIC 和头部描述；不猜测单位换算。普通声明标签两侧均未提供额外 `label_semantics` 时按同源列定义比较；一侧有额外定义而另一侧无则未定义。
+`prediction_target_unit_mismatch`；冻结定义未知、对侧缺必需定义或定义不同分别记
+`prediction_target_definition_missing`、`prediction_target_definition_mismatch`。MSE/R² 设为 NULL，
+训练均值基准误差也为 NULL；零预测基准误差仍按评价目标计算。目标计数、RankIC 和头部描述按各自条件保留。
+普通声明标签两侧均未提供额外 `label_semantics` 时按同源列定义比较；一侧有额外定义而另一侧无则未定义。
 `mse_reason` 还区分 `no_valid_targets` 与 `nonfinite_result`；非零损失下溢不得伪装成完美预测。
 跨日 MSE 先算每日均方误差再日期等权；跨日 OOS R² 为同一可评价日期域上
 `1−mean(mse)/mean(baseline_mse)`，不平均每日 R²，不按资产行数加权。
-这些重叠 horizon 收益不连乘为日净值。训练均值基准尚无训练域来源证明，当前不提供该选项。
+这些重叠 horizon 收益不连乘为日净值。
+
+`evaluation.baseline` 为 `zero_prediction`（默认）或 `training_mean`。后者使用各 PRED
+携带的 `training_target_mean`，由对应实际 fit/refit 的最终合法目标及训练权重估计，
+包含显式时间衰减并随模型冻结。缺少冻结均值时明确失败，不从评价目标估计或回读训练源。
+`prediction_metrics` 保存实际 baseline；训练均值模式的 baseline_weighting 为
+`frozen_model_training_weighting`。每日及跨日误差使用同一成对样本与日期等权口径。
 
 行业版本的 `abandon_date_unresolved` 区分真实空白（开放有效期）与非空非法或冲突终止日期。
 冲突的已知终止日期仅在共同可确定的较早区间保持有效，之后该标准的行业归属未知；

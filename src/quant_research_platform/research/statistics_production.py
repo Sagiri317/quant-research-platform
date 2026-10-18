@@ -490,6 +490,16 @@ def build_a_share_statistics_tables(
                                         ),
                                     ),
                                     loss_reason=loss_reason,
+                                    baseline_prediction=(
+                                        (
+                                            metadata["training_target_mean"]
+                                            if loss_reason is None
+                                            else None
+                                        )
+                                        if config["evaluation"].get("baseline")
+                                        == "training_mean"
+                                        else 0.0
+                                    ),
                                 ),
                             )
                         )
@@ -760,6 +770,7 @@ def _prediction_quality(
     head_fraction,
     label_predictions=None,
     loss_reason=None,
+    baseline_prediction=0.0,
 ):
     """Keep raw-score cohorts fixed and compute losses only in the target scale."""
     scores = scores.loc[np.isfinite(scores)]
@@ -774,7 +785,8 @@ def _prediction_quality(
     ):
         if loss_reason is None:
             errors.add(prediction, label)
-        baseline_errors.add(0.0, label)
+        if baseline_prediction is not None:
+            baseline_errors.add(baseline_prediction, label)
     count = int(valid.sum())
 
     def represent(value):
@@ -862,7 +874,12 @@ def _model_target_metadata(config, spec, window):
                 if "forward_return_20d" in spec.column_roles
                 else None,
             ),
-            "baseline": "zero_prediction",
+            "baseline": config["evaluation"].get("baseline", "zero_prediction"),
+            **(
+                {"baseline_weighting": "frozen_model_training_weighting"}
+                if config["evaluation"].get("baseline") == "training_mean"
+                else {}
+            ),
             "aggregation": "date_equal_mse; oos_r2=1-mean(mse)/mean(baseline_mse)",
             "head_selection": (
                 "finite_predictions_before_labels; ceil_fraction_cutoff_including_ties"
@@ -2178,10 +2195,14 @@ def model_statistics(config):
             "label_availability_columns",
             "head_fraction",
             "raw_return_label",
+            "baseline",
         }
         or "primary_label" not in evaluation
     ):
         raise ValueError("model_statistics_evaluation_invalid")
+    baseline = evaluation.get("baseline", "zero_prediction")
+    if baseline not in ("zero_prediction", "training_mean"):
+        raise ValueError("model_statistics_baseline_invalid")
     if not isinstance(policy, dict):
         raise ValueError("model_statistics_policy_invalid")
     needed = set()
@@ -2375,6 +2396,12 @@ def model_statistics(config):
                     validate_model_facts(facts, expected=selected)
                 supplied.add(family)
                 model_metadata = prediction_model_metadata(metadata)
+                if (
+                    "model_losses" in analyses
+                    and baseline == "training_mean"
+                    and "training_target_mean" not in model_metadata
+                ):
+                    raise ValueError("statistics_training_target_mean_missing")
                 if (
                     selection is not None
                     and model_metadata["target_column"] != selection["target_column"]

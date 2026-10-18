@@ -511,7 +511,6 @@ def validate_evaluation_artifact_structure(
     group_spread_summary: pd.DataFrame,
     spec: EvaluationSpec,
     science: dict | None = None,
-    validate_pairs: bool = False,
     timestamp_count: int | None = None,
 ) -> None:
     for frame in (metrics, grouped_label_values, ic_summary, group_spread_summary):
@@ -697,7 +696,11 @@ def validate_evaluation_artifact_structure(
         group_spread_summary["group_monotonicity_score_reason"],
         allowed=GROUP_SPREAD_REASON_CODES,
     )
-    if validate_pairs and spec.evaluation_axis == "cross_sectional":
+
+
+def validate_metric_group_counts(metrics, grouped_label_values, *, spec):
+    """Check cross-member counts after each member has been validated."""
+    if spec.evaluation_axis == "cross_sectional":
         expected = {
             (row.timestamp, row.signal, row.label): int(row.n_obs)
             for row in metrics.itertuples(index=False)

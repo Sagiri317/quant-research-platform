@@ -21,6 +21,7 @@ from quant_research_platform.contracts.experiments import (
     label_maturity_mask,
     training_availability_columns,
 )
+from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.ids import validate_input_market
 from quant_research_platform.contracts.json_codec import _strict_config
@@ -358,6 +359,19 @@ def evaluate(config):
         )
 
 
+def _selected_transform_sources(transform, columns):
+    selected = set(columns)
+    parameters = dict(transform)
+    if "output_groups" in parameters:
+        parameters["output_groups"] = tuple(parameters["output_groups"])
+    for source_column in transform["source_columns"]:
+        outputs = FeatureTransformSpec(
+            **{**parameters, "source_columns": (source_column,)}
+        ).output_columns
+        if selected.intersection(outputs):
+            yield source_column
+
+
 def _evaluation_source_facts(source, session, *, columns, signals, availability):
     from quant_research_platform.contracts.json_codec import qrp_json_mapping_snapshot
 
@@ -377,14 +391,10 @@ def _evaluation_source_facts(source, session, *, columns, signals, availability)
             *declared.get("feature_transforms", []),
             *([reused[signal]] if signal in reused else []),
         ]:
-            for source_column in transform["source_columns"]:
-                if signal in {
-                    prefix + source_column
-                    for prefix in ("feature_", "feature_missing_", "feature_observed_")
-                }:
-                    fact = {**transform, "source_columns": [source_column]}
-                    if fact not in transforms:
-                        transforms.append(fact)
+            for source_column in _selected_transform_sources(transform, (signal,)):
+                fact = {**transform, "source_columns": [source_column]}
+                if fact not in transforms:
+                    transforms.append(fact)
     return qrp_json_mapping_snapshot(
         {
             "selector": selector,
@@ -452,7 +462,7 @@ def _resolved_strata(config, *, spec, declared):
         selected = {signal.source_column for signal in spec.signals}
         actual = age in selected and declared["column_roles"].get(age) == "factor"
         for recipe in declared.get("feature_transforms", []):
-            if age in recipe["source_columns"] and "feature_" + age in selected:
+            if age in _selected_transform_sources(recipe, selected):
                 actual = True
         if not actual or declared.get("column_units", {}).get(age) != "days":
             raise ValueError("evaluation_forecast_age_source_invalid")

@@ -147,6 +147,7 @@ def portfolio_curve(path: Path, *, stride: int = 1, execution_mode="continuous")
                 else {}
             ),
             "episode_id": "continuous",
+            "selection_mode": artifact.metadata.get("selection_mode"),
             "valuation_method": artifact.capital.valuation_method,
             "candidate_id": artifact.capital.candidate_id,
             "valuation_currency": artifact.capital.valuation_currency,

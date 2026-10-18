@@ -1831,7 +1831,7 @@ def validate_maker_calibration(artifact, metadata):
                         expiry,
                         decision + reference["latency_ms"] * 1000000,
                     )
-                    remaining = row.quote_quantity
+                    remaining = Fraction(row.quote_quantity)
                     with closing_iterator(
                         model._response(
                             sample,
@@ -1854,7 +1854,8 @@ def validate_maker_calibration(artifact, metadata):
                                 break
                             remaining -= quantity
                     if (
-                        row.filled_quantity != row.quote_quantity - remaining
+                        row.filled_quantity
+                        != float(Fraction(row.quote_quantity) - remaining)
                         or row.terminal_reason != reason
                     ):
                         raise ValueError(

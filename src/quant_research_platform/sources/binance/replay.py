@@ -33,6 +33,7 @@ from quant_research_platform.contracts.order_book import (
     price_to_index,
     validate_price_unit,
 )
+from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.sources.binance.ids import (
     FUTURES_HFT_RECORDING_SCOPE,
@@ -1404,6 +1405,8 @@ def iter_reconstructed_depth(
     """Replay one venue book with one capture-ordered snapshot/delta pass."""
 
     metadata = run.market_metadata(market_type, symbol)
+    if metadata["snapshot_limit"] is None:
+        raise PortfolioTargetBlocked("depth_snapshot_missing")
     active_stats = stats if stats is not None else ReconstructionStats()
     reconstructor: DepthReconstructor | None = None
     active_segment: str | None = None

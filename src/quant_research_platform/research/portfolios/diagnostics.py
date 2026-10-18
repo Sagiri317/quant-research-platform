@@ -1289,9 +1289,14 @@ def build_portfolio_statistics_tables(
                         "neutrality",
                         "risk_style_columns",
                     )
-                ) or (
-                    pair[0].neutrality in {"size", "industry_size"}
-                    and pair[0].size_cap_column != pair[1].size_cap_column
+                ) or any(
+                    getattr(pair[0], field) != getattr(pair[1], field)
+                    for field, modes in (
+                        ("size_cap_column", {"size", "industry_size"}),
+                        ("size_neutrality_limit", {"size", "industry_size"}),
+                        ("industry_neutrality_limit", {"industry", "industry_size"}),
+                    )
+                    if pair[0].neutrality in modes
                 ):
                     raise ValueError("portfolio_group_comparison_strategy_mismatch")
     pieces = []
@@ -2635,6 +2640,10 @@ def portfolio_statistics(config):
     metadata["analyses"] = list(analyses)
     metadata["execution_mode"] = "continuous"
     metadata["candidate_ids"] = list(ledgers)
+    metadata["selection_modes"] = {
+        candidate_id: ledger.metadata.get("selection_mode")
+        for candidate_id, ledger in ledgers.items()
+    }
     metadata["comparison_portfolio_ids"] = policy.get("group_comparison", {}).get(
         "portfolio_ids", []
     )

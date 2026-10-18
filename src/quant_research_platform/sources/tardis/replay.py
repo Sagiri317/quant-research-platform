@@ -395,11 +395,9 @@ class TardisArchive:
             raise ValueError("tardis_market_identity_invalid")
         if symbol not in self.manifest["price_units"]:
             raise PortfolioTargetBlocked("tardis_price_observations_missing")
-        if symbol not in self.manifest["snapshot_limits"]:
-            raise PortfolioTargetBlocked("tardis_depth_snapshot_missing")
         return {
             "price_unit": self.manifest["price_units"][symbol],
-            "snapshot_limit": self.manifest["snapshot_limits"][symbol],
+            "snapshot_limit": self.manifest["snapshot_limits"].get(symbol),
         }
 
     def observation_coverage(self, *, market_type, data_kind, symbol):
@@ -638,9 +636,10 @@ class _TardisArchives:
                 limits.append(limit)
         if not units:
             raise PortfolioTargetBlocked("tardis_price_observations_missing")
-        if not limits:
-            raise PortfolioTargetBlocked("tardis_depth_snapshot_missing")
-        return {"price_unit": min(units, key=Fraction), "snapshot_limit": max(limits)}
+        return {
+            "price_unit": min(units, key=Fraction),
+            "snapshot_limit": max(limits, default=None),
+        }
 
     def observation_coverage(self, **scope):
         return _ArchiveCoverage(
@@ -660,7 +659,13 @@ class _TardisArchives:
         )
 
     def _iter_market_records(self, *, symbol, market_type, data_kinds, end_ns=None):
-        price_unit = self.market_metadata(market_type, symbol)["price_unit"]
+        metadata = self.market_metadata(market_type, symbol)
+        if (
+            tuple(data_kinds) == ("depth_snapshot", "depth")
+            and metadata["snapshot_limit"] is None
+        ):
+            raise PortfolioTargetBlocked("depth_snapshot_missing")
+        price_unit = metadata["price_unit"]
         for archive in self.archives:
             with closing_iterator(
                 archive.iter_market_records(

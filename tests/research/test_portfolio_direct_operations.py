@@ -381,8 +381,9 @@ def test_consumed_ledger_rejects_unsupported_research_valuation_policy(
 
 
 @pytest.mark.parametrize("selected_inputs", [False, True])
+@pytest.mark.parametrize("selection_mode", ["causal", "retrospective"])
 def test_explicit_native_fit_prediction_and_backtest_roundtrip(
-    tmp_path, monkeypatch, selected_inputs
+    tmp_path, monkeypatch, selected_inputs, selection_mode
 ):
     from quant_research_platform.contracts.models import ModelSpec
     from quant_research_platform.research.portfolios.production import backtest
@@ -449,6 +450,85 @@ def test_explicit_native_fit_prediction_and_backtest_roundtrip(
     }
     if not selected_inputs:
         config.pop("sample_role")
+    if selection_mode == "retrospective":
+        from quant_research_platform.artifacts.outputs.prediction import (
+            read_predictions,
+        )
+        from quant_research_platform.research.models.trial_selection import (
+            evaluate_model_trial_metrics_from_chunks,
+            select,
+        )
+        from quant_research_platform.storage.atomic import atomic_write_json
+
+        predictions, prediction_metadata = read_predictions(predicted)
+        metrics = evaluate_model_trial_metrics_from_chunks(
+            [predictions.assign(label=predictions.prediction_score)],
+            model_id="ridge",
+            label_column="label",
+            prediction_column="prediction_score",
+        )
+        scores = atomic_write_json(
+            tmp_path / "scores.json",
+            {
+                "market_id": "a_share",
+                "target_column": "label",
+                "cutoff": "2023-12-31",
+                "candidate_ids": ["ridge"],
+                "candidates": [{**fitted.facts, "model_id": "ridge"}],
+                "metrics": [metrics],
+            },
+        )
+        selection = select(
+            {
+                "scores": str(scores),
+                "output": str(tmp_path / "selection.json"),
+                "selection_metric": "validation_mse",
+                "selection_direction": "minimize",
+                "tie_break_order": ["ridge"],
+                "refit_windows": fitted.facts["fit_windows"],
+                "refit_cutoff": "2023-12-31",
+            }
+        )
+        config["selection"] = str(selection)
+        with pytest.raises(ValueError, match="portfolio_prediction_not_causal"):
+            backtest(config)
+        assert not (tmp_path / "ledger").exists()
+        config["selection_mode"] = "retrospective"
+        if selected_inputs:
+            config["candidate"]["selection_group"] = "quarterly"
+        from copy import deepcopy
+
+        from quant_research_platform.artifacts.outputs import manifest
+
+        original_validation = manifest.validate_output_bundle
+
+        def future_fit(*args, **kwargs):
+            result = deepcopy(original_validation(*args, **kwargs))
+            result[0]["metadata"]["model_facts"]["fit_cutoff"] = window["start"]
+            return result
+
+        with monkeypatch.context() as patch:
+            patch.setattr(manifest, "validate_output_bundle", future_fit)
+            with pytest.raises(ValueError, match="portfolio_prediction_not_causal"):
+                backtest(config)
+
+        def wrong_recipe(*args, **kwargs):
+            result = deepcopy(original_validation(*args, **kwargs))
+            result[0]["metadata"]["model_facts"]["model"]["random_seed"] = 43
+            return result
+
+        with monkeypatch.context() as patch:
+            patch.setattr(manifest, "validate_output_bundle", wrong_recipe)
+            with pytest.raises(ValueError, match="model_scientific_facts_mismatch"):
+                backtest(config)
+        with pytest.raises(
+            ValueError, match="portfolio_retrospective_selection_required"
+        ):
+            backtest(
+                {key: value for key, value in config.items() if key != "selection"}
+            )
+        with pytest.raises(ValueError, match="portfolio_selection_mode_invalid"):
+            backtest({**config, "selection_mode": "unknown"})
     if selected_inputs:
         from quant_research_platform.storage.datasets.reading import (
             open_dataset_session,
@@ -536,6 +616,36 @@ def test_explicit_native_fit_prediction_and_backtest_roundtrip(
     assert ledger.metadata.get("sample_role") == (
         "custom-backtest-label" if selected_inputs else None
     )
+    assert ledger.metadata["selection_mode"] == selection_mode
+    if selection_mode == "retrospective":
+        from quant_research_platform.artifacts.statistics import (
+            read_statistics_artifact,
+        )
+        from quant_research_platform.interfaces.queries import portfolio_curve
+        from quant_research_platform.research.portfolios.diagnostics import (
+            portfolio_statistics,
+        )
+
+        assert ledger.metadata["selection_cutoff"] == "2023-12-31"
+        facts = ledger.metadata["prediction_facts"][0]["model_facts"]
+        assert facts == prediction_metadata["model_facts"]
+        assert facts["selection_cutoff"] is None
+        assert pd.Timestamp(facts["fit_cutoff"]) < pd.Timestamp(window["start"])
+        assert portfolio_curve(root)["selection_mode"] == "retrospective"
+        stats = read_statistics_artifact(
+            portfolio_statistics(
+                {
+                    "ledgers": [str(root)],
+                    "window": window,
+                    "analyses": ["sharpe_inference"],
+                    "output": str(tmp_path / "statistics"),
+                }
+            )
+        )
+        assert stats.metadata["selection_modes"] == {"native": "retrospective"}
+        assert stats.metadata["inference_scope"] == "exploratory"
+        with stats.table("portfolio_robustness.parquet") as rows:
+            assert rows.candidate_count.eq(1).all()
     if selected_inputs:
         assert scans
         assert all("float_market_cap" not in columns for columns in scans)

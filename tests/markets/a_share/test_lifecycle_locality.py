@@ -1,6 +1,7 @@
 """Unknown lifecycle bounds never become open-ended admission or erase prices."""
 
 import pandas as pd
+import pytest
 
 from quant_research_platform.markets.implementations.a_share.processed import (
     panels,
@@ -66,6 +67,53 @@ def test_unknown_listing_date_preserves_observed_prices_and_other_assets():
     assert actual.loc[affected, "listing_age_trading_days"].isna().all()
     assert actual.loc[~affected, "listing_date"].notna().all()
     assert not actual.loc[~affected, "delisting_date_unresolved"].any()
+
+
+@pytest.mark.parametrize("missing", ["listing_date", "stock_master"])
+def test_production_axis_keeps_observed_assets_without_lifecycle(monkeypatch, missing):
+    dates = pd.bdate_range("2020-01-02", periods=6).as_unit("ns")
+    source = _synthetic_interim_frames(dates)
+    stocks = source["stock_master"].copy()
+    stocks["timestamp"] = stocks["listing_date"]
+    affected = stocks.source_asset_id.eq("000001")
+    if missing == "listing_date":
+        stocks.loc[affected, "timestamp"] = dates[0]
+        stocks.loc[affected, "listing_date"] = pd.NaT
+    else:
+        stocks = stocks.loc[~affected]
+    stocks = panels._canonical_stock_master(stocks)
+    bars = source["market_bars_1d"]
+    bars = bars.loc[~(bars.source_asset_id.eq("000001") & bars.timestamp.eq(dates[2]))]
+
+    class Session:
+        def projected_view(self, columns):
+            return self
+
+    monkeypatch.setattr(producer, "iter_dataset_chunks", lambda *_a, **_k: iter([bars]))
+    sessions, assets, history, *_ = producer._processed_axis(
+        Session(),
+        panel_source=True,
+        calendar=source["trading_calendar"],
+        stock_master=stocks,
+    )
+    assert set(assets.index) == set(bars.source_asset_id)
+    actual = panels.compute_market_panel(
+        bars,
+        **panels._prepare_market_panel_inputs(
+            stocks=stocks,
+            market_cap=source["market_cap"],
+            trading_calendar=source["trading_calendar"],
+        ),
+        session_window=pd.DatetimeIndex(sessions),
+        asset_market_types=assets,
+        market_history=history,
+    )
+    unknown = actual.loc[actual.asset_id.eq("000001")]
+    assert set(unknown.timestamp) == set(dates) - {dates[2]}
+    assert unknown.close.notna().all()
+    assert unknown.listing_date.isna().all()
+    assert unknown.listing_age_trading_days.isna().all()
+    assert len(actual.loc[~actual.asset_id.eq("000001")]) == 12
 
 
 def test_unknown_lifecycle_axis_keeps_only_observed_days_and_breaks_fill():

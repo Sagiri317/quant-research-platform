@@ -1,8 +1,4 @@
-"""Crypto scientific regressions through explicit datasets and native ledgers.
-
-The former research DAG fixture is retired. This file keeps its uncovered local
-science; the detailed old-to-new assertion map lives with migration evidence.
-"""
+"""Crypto scientific regressions through explicit datasets and native ledgers."""
 
 import json
 from contextlib import nullcontext

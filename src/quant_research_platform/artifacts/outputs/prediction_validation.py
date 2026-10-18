@@ -122,6 +122,13 @@ def _validate_prediction_training_facts(facts, realized):
     }
     if is_rank:
         fields.add("rank_parameters")
+    if type(realized) is dict and "training_target_mean" in realized:
+        fields.add("training_target_mean")
+        if type(realized["training_target_mean"]) not in {
+            int,
+            float,
+        } or not np.isfinite(realized["training_target_mean"]):
+            raise ValueError("prediction_training_target_mean_invalid")
     if type(realized) is not dict or set(realized) != fields:
         raise ValueError("prediction_training_facts_invalid")
     if (

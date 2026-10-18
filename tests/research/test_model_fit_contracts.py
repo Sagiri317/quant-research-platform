@@ -1,4 +1,4 @@
-"""Preserved fitting invariants after removing automatic quarterly workflow fixtures."""
+"""Model fitting, legal sample retention and shared preprocessing contracts."""
 
 import pickle
 import warnings
@@ -93,15 +93,13 @@ def test_convergence_warning_is_a_model_fit_failure() -> None:
         )
 
 
-@pytest.mark.parametrize("cap", (None, 13))
 @pytest.mark.parametrize("chunk_rows", (5, 17))
-def test_training_retention_preserves_trailing_rows_and_same_day_order(cap, chunk_rows):
+def test_training_retention_preserves_all_legal_rows_and_same_day_order(chunk_rows):
     spec = ModelSpec(
         model_id="linear",
         model_algorithm="linear_regression",
         input_factor_columns=("x",),
         target_column="label",
-        max_train_rows=cap,
     )
     frame = pd.DataFrame(
         {
@@ -118,9 +116,6 @@ def test_training_retention_preserves_trailing_rows_and_same_day_order(cap, chun
         frame.index % 7 != 0, ["timestamp", "asset_id", "x", "label"]
     ].copy()
     expected["timestamp"] = expected["timestamp"].dt.as_unit("ns")
-    if cap is not None:
-        counts = expected.groupby("timestamp", sort=True).size().iloc[::-1].cumsum()
-        expected = expected.loc[expected.timestamp.isin(counts.index[counts <= cap])]
     prepared = fitting._collect_training_frame(
         (frame.iloc[start : start + chunk_rows] for start in range(0, 32, chunk_rows)),
         spec,

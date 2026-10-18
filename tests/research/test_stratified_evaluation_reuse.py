@@ -1323,3 +1323,165 @@ def test_common_integer_labels_remain_exact_through_masking(tmp_path, domain, de
     else:
         _, tables = read_evaluation_outputs(evaluate(config), tables=("metrics",))
         assert tables["metrics"].n_obs.tolist() == [4 if domain == "all_mature" else 3]
+
+
+@pytest.mark.parametrize("reused", [False, True])
+@pytest.mark.parametrize(
+    "groups", [("processed",), ("pre_neutral",), ("processed", "pre_neutral")]
+)
+def test_transform_provenance_uses_only_declared_outputs(groups, reused):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from quant_research_platform.contracts.features import FeatureTransformSpec
+    from quant_research_platform.research.evaluations.runner import (
+        _evaluation_source_facts,
+    )
+    from quant_research_platform.storage.datasets.schema import (
+        _feature_transform_payload,
+    )
+
+    recipe = FeatureTransformSpec("a_share_canonical", ("x", "z"), output_groups=groups)
+    payload = _feature_transform_payload(recipe)
+    all_outputs = replace(
+        recipe, output_groups=("processed", "pre_neutral")
+    ).output_columns
+    roles = dict.fromkeys(all_outputs, "feature")
+    session = SimpleNamespace(
+        spec={"column_roles": roles, "feature_transforms": [] if reused else [payload]},
+        manifest={
+            "producer_diagnostics": {
+                "reused_feature_transforms": dict.fromkeys(all_outputs, payload)
+            }
+        }
+        if reused
+        else {},
+    )
+    for source in recipe.source_columns:
+        source_recipe = replace(recipe, source_columns=(source,))
+        expected = _feature_transform_payload(source_recipe)
+        for signal in replace(
+            source_recipe, output_groups=("processed", "pre_neutral")
+        ).output_columns:
+            facts = _evaluation_source_facts(
+                "synthetic",
+                session,
+                columns=tuple(roles),
+                signals=(signal,),
+                availability={},
+            )
+            assert facts["feature_transforms"] == (
+                [expected] if signal in source_recipe.output_columns else []
+            )
+        facts = _evaluation_source_facts(
+            "synthetic",
+            session,
+            columns=tuple(roles),
+            signals=source_recipe.output_columns,
+            availability={},
+        )
+        assert facts["feature_transforms"] == [expected]
+
+
+@pytest.mark.parametrize("reused", [False, True])
+@pytest.mark.parametrize("group", ["processed", "pre_neutral"])
+def test_forecast_age_feature_persists_transform_and_strata(tmp_path, group, reused):
+    from quant_research_platform.contracts.datasets import ResearchDatasetSpec
+    from quant_research_platform.contracts.features import FeatureTransformSpec
+    from quant_research_platform.research.features.transforms import (
+        apply_feature_transforms,
+    )
+    from quant_research_platform.storage.datasets import write_dataset
+    from quant_research_platform.storage.datasets.schema import (
+        _feature_transform_payload,
+    )
+
+    frame, config = _fixture(tmp_path)
+    age = "median_forecast_age_days_fy1"
+    frame[age] = [1.0, 8.0, 31.0, 61.0]
+    recipe = FeatureTransformSpec(
+        "a_share_canonical",
+        (age,),
+        industry_neutralize=False,
+        size_neutralize=False,
+        output_groups=(group,),
+    )
+    frame = apply_feature_transforms(frame, (recipe,))
+    roles = dict.fromkeys(frame.columns, "context")
+    roles.update(timestamp="timestamp", asset_id="key", eligible="mask", label="label")
+    roles[age] = "factor"
+    roles.update(dict.fromkeys(recipe.output_columns, "feature"))
+    payload = _feature_transform_payload(recipe)
+    root = tmp_path / "feature-age"
+    write_dataset(
+        root,
+        frame,
+        spec=ResearchDatasetSpec(
+            data_id="feature-age",
+            frequency="1d",
+            grain="asset_timestamp",
+            primary_key=("timestamp", "asset_id"),
+            partition_columns=("year",),
+            column_roles=roles,
+            market_id="a_share",
+            input_data_ids=("source",),
+            base_input_data_id="source",
+            factor_columns=(age,),
+            feature_columns=recipe.output_columns,
+            feature_transforms=() if reused else (recipe,),
+            label_columns=("label",),
+            column_units={age: "days"},
+            label_availability_columns={"label": "label_available_at"},
+        ),
+        metadata={
+            "producer_diagnostics": {
+                "reused_feature_transforms": dict.fromkeys(
+                    recipe.output_columns, payload
+                )
+            }
+        }
+        if reused
+        else None,
+    )
+    config["inputs"] = str(root)
+    config["evaluation"]["signals"] = [
+        {
+            "signal_id": "age",
+            "source_kind": "feature",
+            "source_column": recipe.output_columns[0],
+        }
+    ]
+    config["strata"] = {
+        "primary_label": "label",
+        "kinds": ["forecast_age"],
+        "forecast_freshness_days": 90,
+    }
+    output = evaluate(config)
+    manifest, tables = read_evaluation_outputs(
+        output, tables=("metrics", "daily_strata")
+    )
+    assert manifest["metadata"]["input_facts"]["feature_transforms"] == [payload]
+    assert manifest["metadata"]["strata"]["age_column"] == age
+    assert tables["metrics"].n_obs.tolist() == [4]
+    strata = tables["daily_strata"].query("stratification == 'forecast_age'")
+    assert strata.set_index("stratum").stratum_rows.to_dict() == {
+        "0-7": 1,
+        "8-30": 1,
+        "31-60": 1,
+        "61-90": 1,
+    }
+    shutil.rmtree(root)
+    reduced = factor_statistics(
+        {
+            "evaluation_inputs": [str(output)],
+            "output": str(tmp_path / "feature-age-statistics"),
+            "analyses": ["stratified_ic"],
+            "statistics": {"hac_lag": 20},
+        }
+    )
+    with read_statistics_artifact(reduced).table(
+        "factor_stratified_diagnostics.parquet"
+    ) as result:
+        assert result.loc[
+            result.stratification.eq("all"), "observation_pairs"
+        ].tolist() == [4, 4]

@@ -978,6 +978,7 @@ def _processed_axis(
     if panel_source:
         boundaries = (
             stock_master.loc[:, ["asset_id", "listing_date"]]
+            .dropna(subset=["listing_date"])
             .drop_duplicates()
             .rename(columns={"asset_id": asset_column, "listing_date": "_listing_date"})
             .sort_values("_listing_date", kind="mergesort")
@@ -1039,7 +1040,9 @@ def _processed_axis(
                 frame = with_lifecycles(frame)
                 first = (
                     frame.groupby(
-                        [asset_column, "_listing_date", "market_type"], sort=False
+                        [asset_column, "_listing_date", "market_type"],
+                        sort=False,
+                        dropna=False,
                     )["timestamp"]
                     .min()
                     .reset_index()
@@ -1114,7 +1117,7 @@ def _processed_axis(
             ].sort_values(["asset_id", "timestamp"], kind="mergesort")
             changed = history.market_type.ne(
                 history.groupby(
-                    ["asset_id", "_listing_date"], sort=False
+                    ["asset_id", "_listing_date"], sort=False, dropna=False
                 ).market_type.shift()
             ).fillna(True)
             market_history = pd.concat(

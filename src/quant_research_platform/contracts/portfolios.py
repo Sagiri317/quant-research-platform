@@ -1087,7 +1087,9 @@ class PortfolioCandidateSpec:
             if not self.risk_style_columns:
                 raise ValueError("portfolio_candidate_risk_styles_invalid")
         else:
-            if self.top_quantile is None or self.benchmark_id is not None:
+            if self.top_quantile is None or (
+                self.benchmark_id is not None and self.neutrality == "none"
+            ):
                 raise ValueError("portfolio_candidate_construction_invalid")
             if isinstance(self.top_quantile, bool) or not isinstance(
                 self.top_quantile, int | float

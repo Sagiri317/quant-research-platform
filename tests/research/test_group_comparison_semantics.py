@@ -308,13 +308,23 @@ def test_native_portfolio_slot_and_fixed_strategy_are_bound(tmp_path, change):
 
 
 @pytest.mark.parametrize("neutrality", ["none", "industry", "size", "industry_size"])
-def test_native_paired_size_basis_matches_only_when_consumed(tmp_path, neutrality):
+@pytest.mark.parametrize(
+    "field,value,modes",
+    [
+        ("size_cap_column", "float_market_cap", {"size", "industry_size"}),
+        ("size_neutrality_limit", 0.9, {"size", "industry_size"}),
+        ("industry_neutrality_limit", 0.9, {"industry", "industry_size"}),
+    ],
+)
+def test_native_paired_neutrality_matches_only_when_consumed(
+    tmp_path, neutrality, field, value, modes
+):
     config = _portfolio_pair(
         tmp_path,
         base_changes={"neutrality": neutrality},
-        change={"size_cap_column": "float_market_cap"},
+        change={field: value},
     )
-    if neutrality in {"size", "industry_size"}:
+    if neutrality in modes:
         with pytest.raises(
             ValueError, match="portfolio_group_comparison_strategy_mismatch"
         ):

@@ -194,7 +194,6 @@ def test_independent_episode_collection_resets_capital_and_funding_boundaries(tm
             "end": pd.Timestamp(70000000).isoformat(),
         }
     }
-    capital = capital
     coverage = {"s1": (0, 30000000), "s2": (40000000, 60000000)}
     trade_coverage = SimpleNamespace(intervals=lambda: iter(coverage.values()))
     decisions = [
@@ -217,10 +216,7 @@ def test_independent_episode_collection_resets_capital_and_funding_boundaries(tm
         nonlocal read_count
         for value in book_rows:
             read_count += 1
-            if hasattr(value, "bids"):
-                yield value
-            else:
-                yield value
+            yield value
 
     funding = SimpleNamespace(
         identity="d" * 64,

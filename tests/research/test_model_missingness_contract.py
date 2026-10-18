@@ -226,21 +226,6 @@ def test_rank_all_missing_column_keeps_declared_zero_weight(tmp_path):
     assert weights["z"] == 0.0
 
 
-def test_row_cap_keeps_complete_dates_and_never_reuses_old_date():
-    data = frame()
-    prepared = _collect_training_frame(
-        [data.iloc[:2], data.iloc[2:4], data.iloc[4:]],
-        replace(spec(), max_train_rows=4),
-        fitting_cutoff="2024-01-03",
-    )
-    assert len(prepared.training) == 3
-    assert prepared.training.timestamp.eq(pd.Timestamp("2024-01-03")).all()
-    prepared = _collect_training_frame(
-        [data], replace(spec(), max_train_rows=2), fitting_cutoff="2024-01-03"
-    )
-    assert prepared.training.empty
-
-
 def test_decay_uses_explicit_missing_session_not_observation_count():
     dates = pd.to_datetime(["2024-01-01", "2024-01-03"])
     weights = equal_timestamp_sample_weights(

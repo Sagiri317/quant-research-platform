@@ -214,7 +214,6 @@ class ModelSpec:
     sample_filter_mode: SampleFilterMode = "eligible"
     hyperparameters: Mapping[str, object] = field(default_factory=dict)
     random_seed: int = DEFAULT_ROOT_SEED
-    max_train_rows: int | None = None
     training_scaling: bool | None = None
     training_weighting: TrainingWeighting = field(default_factory=TrainingWeighting)
 
@@ -283,13 +282,6 @@ class ModelSpec:
             and hyperparameters["random_state"] != self.random_seed
         ):
             raise ValueError("model_random_seed_conflicts_with_random_state")
-        if self.max_train_rows is not None and (
-            type(self.max_train_rows) is not int
-            or isinstance(self.max_train_rows, bool)
-        ):
-            raise TypeError("max_train_rows must be an integer or None")
-        if self.max_train_rows is not None and self.max_train_rows <= 0:
-            raise ValueError("max_train_rows_must_be_positive")
         object.__setattr__(self, "hyperparameters", hyperparameters)
 
     @property
@@ -321,7 +313,6 @@ def validate_model_metadata_core(
         "hyperparameters",
         "resolved_hyperparameters",
         "random_seed",
-        "max_train_rows",
         "dependency_status",
         "rows_input",
         "rows_after_filter_mode",
@@ -358,9 +349,15 @@ def validate_model_metadata_core(
         "feature_importance",
         "feature_importance_status",
         "rank_parameters",
+        "training_target_mean",
     }
     if set(metadata).difference(allowed):
         raise ValueError("invalid_model_metadata")
+    if "training_target_mean" in metadata and (
+        type(metadata["training_target_mean"]) not in {int, float}
+        or not np.isfinite(metadata["training_target_mean"])
+    ):
+        raise ValueError("invalid_model_training_target_mean")
     for key in (
         "rows_input",
         "rows_after_filter_mode",
@@ -448,7 +445,6 @@ def validate_model_metadata_core(
             sample_filter_mode=metadata["sample_filter_mode"],
             hyperparameters=metadata["hyperparameters"],
             random_seed=metadata["random_seed"],
-            max_train_rows=metadata["max_train_rows"],
             training_weighting=metadata["training_weighting"],
             training_scaling=metadata["training_scaling"],
         )
@@ -775,7 +771,6 @@ def model_spec_payload(spec: object) -> dict[str, object]:
         "sample_filter_mode": spec.sample_filter_mode,
         "hyperparameters": _thaw_model_hyperparameters(spec.hyperparameters),
         "random_seed": spec.random_seed,
-        "max_train_rows": spec.max_train_rows,
         "training_weighting": spec.training_weighting.payload(),
         "training_scaling": spec.training_scaling,
     }
@@ -911,7 +906,6 @@ def validate_model_facts(facts, metadata=None, *, expected=None):
             "target_column",
             "sample_filter_mode",
             "random_seed",
-            "max_train_rows",
             "training_scaling",
         ):
             if getattr(spec, key) != metadata[key]:

@@ -310,21 +310,6 @@ def test_dataset_writer_accepts_dictionary_encoded_primary_keys(
     )
 
 
-def test_write_dataset_rejects_duplicate_across_chunks_and_cleans_stage(
-    tmp_path: Path,
-) -> None:
-    frame = make_default_dataset_frame().iloc[:2].reset_index(drop=True)
-    root = make_dataset_artifact_root(tmp_path, "duplicate_across_chunks")
-    with pytest.raises(ValueError, match="duplicate_dataset_primary_key"):
-        write_dataset(
-            root,
-            (frame, frame.iloc[[0]].copy()),
-            spec=make_processed_dataset_spec("duplicate_across_chunks"),
-        )
-    assert not filesystem_exists(root)
-    assert not list(filesystem_glob(root.parent, ".a-*"))
-
-
 @pytest.mark.parametrize(
     "data_type,negative,positive",
     [

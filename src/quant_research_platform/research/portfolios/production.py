@@ -567,11 +567,16 @@ def backtest_a_share(
     dataset_business_columns = (
         ("float_market_cap",)
         if candidate.construction == "quantile_float_cap"
-        or (candidate.neutrality != "none" and "float_market_cap" in declared_columns)
+        or (
+            candidate.neutrality != "none"
+            and candidate.benchmark_id is None
+            and "float_market_cap" in declared_columns
+        )
         else ()
     )
     if (
         candidate.neutrality in {"size", "industry_size"}
+        and candidate.benchmark_id is None
         and candidate.size_cap_column in declared_columns
     ):
         dataset_business_columns = tuple(
@@ -596,7 +601,7 @@ def backtest_a_share(
     dataset_root = inputs["dataset"]
     panel_root = inputs["panel"]
     execution_root = inputs["execution"]
-    benchmark_root = inputs["benchmark"] if enhanced else None
+    benchmark_root = inputs["benchmark"] if candidate.benchmark_id is not None else None
     holdings = pd.Series(dtype="float64")
     entitlements = EquityEntitlements()
     persisted_endpoint_events = set()
@@ -633,6 +638,13 @@ def backtest_a_share(
                 dict.fromkeys(
                     (*panel_columns, "industry_standard_id", "industry_level1_code")
                 )
+            )
+        if candidate.benchmark_id is not None and candidate.neutrality in {
+            "size",
+            "industry_size",
+        }:
+            panel_columns = tuple(
+                dict.fromkeys((*panel_columns, candidate.size_cap_column))
             )
         panel_frames = input_channels.enter_context(
             closing_iterator(
@@ -695,7 +707,7 @@ def backtest_a_share(
                     )
                 )
             )
-            if enhanced
+            if benchmark_root is not None
             else None
         )
         for position, decision_timestamp in enumerate(sessions):
@@ -836,7 +848,7 @@ def backtest_a_share(
                             names=("asset_id", "listing_date"),
                         )
                         waiting_alpha = (calibration_alpha, decision_timestamp)
-                assert benchmark_frames is not None
+            if benchmark_frames is not None:
                 benchmark_weights = next(benchmark_frames)
             if decision_timestamp < output_start:
                 continue
@@ -1020,6 +1032,9 @@ def backtest_a_share(
                 amount_history=amount_history,
                 alpha=alpha,
                 enhanced_decision=enhanced_decision,
+                benchmark_weights=benchmark_weights
+                if candidate.benchmark_id is not None
+                else None,
                 target_override=target_override,
                 decision_reason=decision_reason,
                 decision_skip_reason=decision_skip_reason,
@@ -1055,7 +1070,9 @@ def backtest_a_share(
                 prediction_rank_score=alpha,
                 adv20=adv,
                 enhanced_decision=enhanced_decision,
-                benchmark_weights=benchmark_weights if enhanced else None,
+                benchmark_weights=benchmark_weights
+                if candidate.benchmark_id is not None
+                else None,
                 optimization_result=_optimization,
                 decision_reason=decision_reason,
                 decision_delta=decision_delta,
@@ -1569,6 +1586,7 @@ def _build_session(
     market_name_for_type: Callable[[object], str],
     unquoted_assets: frozenset[str] = frozenset(),
     initializing: bool = False,
+    benchmark_weights: pd.Series | None = None,
 ) -> tuple[
     ExecutionAccounting,
     pd.Series,
@@ -1616,6 +1634,8 @@ def _build_session(
         )
     )
     if candidate.neutrality != "none" and nav > 0:
+        if candidate.benchmark_id is not None and benchmark_weights is None:
+            raise ValueError("portfolio_neutrality_benchmark_required")
         industry = (
             _industry_group_codes(
                 panel.set_index("asset_id").reindex(
@@ -1632,7 +1652,12 @@ def _build_session(
                 dataset.get("float_market_cap", pd.Series(np.nan, index=dataset.index)),
                 industry,
                 candidate.neutrality,
-                size_market_cap=dataset.get(candidate.size_cap_column),
+                size_market_cap=(
+                    panel.set_index("asset_id").get(candidate.size_cap_column)
+                    if candidate.benchmark_id is not None
+                    else dataset.get(candidate.size_cap_column)
+                ),
+                benchmark_weights=benchmark_weights,
             )
         except PortfolioTargetBlocked as exc:
             if str(exc) not in {
@@ -2710,8 +2735,8 @@ def _ledger_batch(
                 "expected_alpha": enhanced_decision.expected_alpha.get(asset)
                 if enhanced_decision is not None
                 else None,
-                "benchmark_weight": benchmark_weights.get(asset)
-                if benchmark_weights is not None
+                "benchmark_weight": benchmark_weights.get(asset, 0.0)
+                if benchmark_weights is not None and not benchmark_weights.empty
                 else getattr(row, "benchmark_weight", None),
                 "asset_specific_variance": enhanced_decision.risk.specific_variance.get(
                     asset
@@ -2917,7 +2942,14 @@ def backtest(config: Mapping) -> Path:
         "prediction_window",
         "assumptions",
     }
-    optional = {"risk_config", "optimizer_config", "calibration", "sample_role"}
+    optional = {
+        "risk_config",
+        "optimizer_config",
+        "calibration",
+        "sample_role",
+        "selection_mode",
+        "selection",
+    }
     if (
         not isinstance(config, Mapping)
         or not required <= set(config)
@@ -2928,6 +2960,18 @@ def backtest(config: Mapping) -> Path:
         not isinstance(config["sample_role"], str) or not config["sample_role"].strip()
     ):
         raise ValueError("portfolio_sample_role_invalid")
+    selection_mode = config.get("selection_mode", "causal")
+    if selection_mode not in ("causal", "retrospective"):
+        raise ValueError("portfolio_selection_mode_invalid")
+    selection = None
+    if "selection" in config:
+        from quant_research_platform.research.models.trial_selection import (
+            read_selection,
+        )
+
+        selection = read_selection(Path(config["selection"]))
+    if selection_mode == "retrospective" and selection is None:
+        raise ValueError("portfolio_retrospective_selection_required")
     candidate_values = dict(config["candidate"])
     if "risk_style_columns" in candidate_values:
         candidate_values["risk_style_columns"] = tuple(
@@ -2959,7 +3003,9 @@ def backtest(config: Mapping) -> Path:
         for source in value if key == "risk_context" else (value,):
             _dataset_input_options(source)
     enhanced = candidate.construction == "benchmark_enhanced"
-    if enhanced != ("benchmark" in inputs) or enhanced != ("risk_context" in inputs):
+    if (candidate.benchmark_id is not None) != ("benchmark" in inputs) or enhanced != (
+        "risk_context" in inputs
+    ):
         raise ValueError("portfolio_enhanced_inputs_invalid")
     if not enhanced and (
         "risk_config" in config
@@ -2982,6 +3028,7 @@ def backtest(config: Mapping) -> Path:
         )
     }
     domains = []
+    prediction_facts = []
     index = ExactPrimaryKeyIndex(primary_key=("timestamp", "asset_id"))
     prediction_rows = 0
     if not isinstance(config["predictions"], list) or not config["predictions"]:
@@ -3013,11 +3060,43 @@ def backtest(config: Mapping) -> Path:
             raise ValueError("portfolio_model_market_mismatch")
         if candidate.prediction_selector not in {"champion", metadata["family_id"]}:
             raise ValueError("portfolio_prediction_selector_mismatch")
-        for cutoff in (facts["fit_cutoff"], facts.get("selection_cutoff")):
+        if selection is not None:
+            from quant_research_platform.contracts.models import validate_model_facts
+
+            selected_id = (
+                selection["selected_model_id"]
+                if candidate.prediction_selector == "champion"
+                else next(
+                    (
+                        row["selected_config_id"]
+                        for row in selection["families"]
+                        if row["family_id"] == candidate.prediction_selector
+                    ),
+                    None,
+                )
+            )
+            expected = next(
+                (
+                    row
+                    for row in selection["candidates"]
+                    if row["model_id"] == selected_id
+                ),
+                None,
+            )
+            if expected is None:
+                raise ValueError("portfolio_prediction_selection_mismatch")
+            validate_model_facts(facts, expected=expected)
+        cutoffs = [facts["fit_cutoff"]]
+        if selection_mode == "causal":
+            cutoffs.append(facts.get("selection_cutoff"))
+            if selection is not None:
+                cutoffs.append(selection["cutoff"])
+        for cutoff in cutoffs:
             if cutoff is not None and pd.Timestamp(cutoff) >= pd.Timestamp(
                 window.start
             ):
                 raise ValueError("portfolio_prediction_not_causal")
+        prediction_facts.append({"window": item["window"], "model_facts": facts})
         domain_rows = 0
         with closing_iterator(
             _iter_prediction_member(
@@ -3092,6 +3171,9 @@ def backtest(config: Mapping) -> Path:
 
     metadata = {
         **dict(config),
+        "selection_mode": selection_mode,
+        "prediction_facts": prediction_facts,
+        **({"selection_cutoff": selection["cutoff"]} if selection is not None else {}),
         "candidate": asdict(candidate),
         **(
             {

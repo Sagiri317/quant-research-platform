@@ -1,6 +1,6 @@
 # 信息配方的共同训练／共同评价对照
 
-主实验仍让每个配方使用声明训练窗口内的全部合法样本，`max_train_rows=null`。
+主实验让每个配方使用声明训练窗口内的全部合法样本。
 额外对照只改变样本域：同一币、同一目标期限、同一折、预先选定的有限配方集合，
 分别取合法训练键和合法评价键的交集。BTC、ETH 分开运行；不要把多个币的时间和资产分别
 做 `in` 筛选，因为那会产生并不存在于共同域的键组合。
@@ -25,7 +25,7 @@
   不按标签正负、大小、预测表现或费用后收益筛行。离散窗口之间的空档不填平。
 - 每折另存 mask 表。之后折的截止前已成熟的历史行可正常进入后来训练窗；
   数据没有永久的 train/test 身份。只给 train/dev 操作传实际指定的数据，
-  不把独立最终评价数据传给调参或选择。不新增查看记录、注册或审批步骤。
+  不把独立最终评价数据传给调参或选择。
 - mask 产物保存每个配方的 own_rows 和共同域 common_rows。空共同域如实保留零覆盖，
   不自动退回 own 或删掉困难配方。mask 必须通过原生 writer 发布；主键空值和
   包括跨批次在内的主键唯一性由 writer 统一检查，配方不去重或丢弃无效键。
@@ -34,7 +34,7 @@
 
 下面代码只展示步骤，路径、模型、窗口由本次研究明确给出。
 先完成原有 `assemble`，得到包含本次所需信息列的共享数据集；稀疏信息保留缺失。
-例子只计算 mask，不训练或运行研究。每个所选模型的 `max_train_rows` 保持 None。
+例子只计算 mask，不训练或运行研究。
 
 ```python
 from pathlib import Path
@@ -55,10 +55,10 @@ source_selection = {"path": ".run/research/shared_inputs"}
 models = (
     ModelSpec(model_id="ofi", model_algorithm="linear_regression",
               input_factor_columns=("ofi_100ms",),
-              target_column="future_mid_return_500ms", max_train_rows=None),
+              target_column="future_mid_return_500ms"),
     ModelSpec(model_id="microstructure", model_algorithm="ridge_regression",
               input_factor_columns=("ofi_100ms", "relative_spread", "imbalance_1"),
-              target_column="future_mid_return_500ms", max_train_rows=None),
+              target_column="future_mid_return_500ms"),
 )
 plan = dict(
     asset_id="btc_usdt",
@@ -122,8 +122,8 @@ eval_inputs = {"path": ".run/research/btc_fold_1_with_masks",
 
 主实验的 fit 继续使用原 inputs。对照 fit 使用 train_inputs 与相同模型、窗口、截止、
 权重和 seed。分别保存到新位置。common_eval 是事后可评价域，不是实盘预测域；
-对照用的 PRED 从相同 eval_inputs 生成，随后 EVAL 也读 eval_inputs。
-不能只裁 EVAL 标签输入却传入额外键的 own PRED，已有覆盖检查会拒绝。
+对照可保存相同 eval_inputs 的 PRED，也可直接复用覆盖更广的已保存预测。
+EVAL 以 eval_inputs 的实际键对齐预测并披露缺失，预测中的域外键不参与本次评价。
 执行/经济回测继续使用原 own-domain PRED，不能因未来标签缺失而删掉决策时点。
 
 同币、同 horizon 的完整候选列表交给现有 `score`，其本来就在合法验证 PK 交集计算指标。

@@ -615,8 +615,6 @@ def test_maker_quote_schedule_has_no_prediction_surface() -> None:
 def test_hft_grid_is_the_only_model_and_label_step_owner() -> None:
     assert HFT_GRID_MS == 100
     config = research_configuration("crypto", "baseline")
-    for item in config["models"]:
-        item["max_train_rows"] = 1
     models = model_specs(config["models"])
     assert all(not hasattr(model, "purge_gap_steps") for model in models)
     rows = [

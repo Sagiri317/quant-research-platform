@@ -67,7 +67,11 @@ def _producer_config(metadata):
 
 
 @pytest.fixture
-def maker_calibration_tables():
+def maker_calibration_tables(request):
+    return _maker_calibration_tables(fractional=getattr(request, "param", False))
+
+
+def _maker_calibration_tables(*, fractional=False):
     from quant_research_platform.markets.implementations.crypto.execution import (
         replay_maker_calibration,
     )
@@ -115,9 +119,20 @@ def maker_calibration_tables():
         )
 
     replay_maker_calibration(
-        [_state(stamp) for stamp in (2100, 2150, 2650, 2700)],
         [
-            _trade(stamp, price="99.5", quantity="3", maker_buyer=True)
+            _state(
+                stamp,
+                **({"bid_levels": ((995, 0.1), (990, 3.0))} if fractional else {}),
+            )
+            for stamp in (2100, 2150, 2650, 2700)
+        ],
+        [
+            _trade(
+                stamp,
+                price="99.5",
+                quantity="0.2" if fractional else "3",
+                maker_buyer=True,
+            )
             for stamp in (2180, 2400)
         ],
         [
@@ -179,7 +194,7 @@ def maker_calibration_tables():
     assert len(frames["crypto_maker_samples"]) == 4
     assert frames["crypto_maker_samples"].loc[
         lambda frame: frame.side.eq("buy"), "filled_quantity"
-    ].tolist() == [1.0, 1.0]
+    ].tolist() == pytest.approx([0.3, 0.1] if fractional else [1.0, 1.0])
     envelope = {
         "window": plan["folds"][0]["validation"],
         "sample_role": "validation",
@@ -190,6 +205,31 @@ def maker_calibration_tables():
         "symbol": "BTCUSDT",
     }
     return (frames, envelope)
+
+
+@pytest.mark.parametrize("maker_calibration_tables", [True], indirect=True)
+def test_fractional_maker_fills_publish_and_read_back(
+    tmp_path, maker_calibration_tables
+):
+    from quant_research_platform.markets.implementations.crypto.portfolio import (
+        validate_maker_calibration,
+    )
+
+    tables, metadata = maker_calibration_tables
+    root = statistics.write_statistics_artifact(
+        tmp_path / "calibration",
+        metadata=metadata,
+        tables=lambda on_table: [
+            on_table(name, frame) for name, frame in tables.items()
+        ],
+        table_group="crypto_maker_calibration",
+        validate_tables=validate_maker_calibration,
+    )
+    artifact = statistics.read_statistics_artifact(
+        root, validate_tables=validate_maker_calibration
+    )
+    with artifact.table("crypto_maker_samples.parquet") as actual:
+        pd.testing.assert_frame_equal(actual, tables["crypto_maker_samples"])
 
 
 @pytest.mark.parametrize(

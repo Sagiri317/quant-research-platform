@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import warnings
-from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from fractions import Fraction
@@ -120,7 +119,6 @@ def validate_model_state(predictor: object, metadata: dict[str, object]) -> None
         sample_filter_mode=metadata["sample_filter_mode"],
         hyperparameters=metadata["hyperparameters"],
         random_seed=metadata["random_seed"],
-        max_train_rows=metadata["max_train_rows"],
         training_weighting=metadata["training_weighting"],
         training_scaling=metadata["training_scaling"],
     )
@@ -235,12 +233,21 @@ def _fit_model_result(
     estimator: object,
 ) -> ModelFitResult:
     if spec.model_algorithm == "linear_regression":
-        return _fit_linear_model_result(prepared_training, spec)
-    return _fit_estimator_model_result(
-        prepared_training,
-        spec,
-        estimator=estimator,
+        result = _fit_linear_model_result(prepared_training, spec)
+    else:
+        result = _fit_estimator_model_result(
+            prepared_training, spec, estimator=estimator
+        )
+    target = prepared_training.training[spec.target_column].to_numpy(dtype="float64")
+    # Normalize before averaging so finite training targets cannot overflow the sum.
+    scale = float(np.max(np.abs(target)))
+    result.metadata["training_target_mean"] = (
+        float(np.average(target / scale, weights=prepared_training.preprocessing[0]))
+        * scale
+        if scale
+        else 0.0
     )
+    return result
 
 
 def _fit_linear_model_result(
@@ -317,7 +324,6 @@ def model_metadata(
         if resolved_hyperparameters is None
         else _thaw_model_hyperparameters(resolved_hyperparameters),
         "random_seed": spec.random_seed,
-        "max_train_rows": spec.max_train_rows,
         "dependency_status": estimators.require_model_dependency(spec.model_algorithm),
         "training_weighting": spec.training_weighting.payload(),
         "training_scaling": spec.training_scaling,
@@ -378,7 +384,7 @@ def _legal_training_rows(
     availability_column: str,
     declared_columns=(),
 ):
-    """Select legal rows without learning preprocessing or applying a row cap."""
+    """Select all legal rows without learning preprocessing."""
     validity = model_input_validity_columns(
         spec.input_columns, spec.model_algorithm, declared_columns
     )
@@ -449,8 +455,7 @@ def _collect_training_frame(
     rows_after_filter = 0
     filter_columns_used: list[str] = []
     filter_definition = ""
-    retained: deque[pd.DataFrame] = deque()
-    retained_rows = 0
+    retained: list[pd.DataFrame] = []
     with closing_iterator(
         iter(
             iter_model_work_frames(frames, required=required, work_columns=work_columns)
@@ -484,18 +489,8 @@ def _collect_training_frame(
             if usable.empty:
                 del usable
                 continue
-            blocks = (
-                (usable,)
-                if spec.max_train_rows is None
-                else (block for _, block in usable.groupby("timestamp", sort=False))
-            )
-            for block in blocks:
-                retained.append(block)
-                retained_rows += len(block)
-                if spec.max_train_rows is not None:
-                    while retained_rows > spec.max_train_rows and len(retained) > 1:
-                        retained_rows -= len(retained.popleft())
-            del usable, blocks, block
+            retained.append(usable)
+            del usable
     training = (
         retained[0]
         if len(retained) == 1
@@ -504,12 +499,13 @@ def _collect_training_frame(
         else pd.DataFrame()
     )
     retained.clear()
-    training = _apply_training_controls(training, spec)
+    training.index = pd.RangeIndex(len(training))
     train_start = train_end = None
     if not training.empty:
         timestamps = strict_timestamp_series(
             training["timestamp"], error="invalid_model_training_timestamp"
         )
+        training["timestamp"] = timestamps
         train_start = time_value_isoformat(pd.Timestamp(timestamps.min()))
         train_end = time_value_isoformat(pd.Timestamp(timestamps.max()))
     row_counts = {
@@ -686,22 +682,6 @@ def _strict_non_negative_count_value(value: object) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise ValueError("invalid_model_metadata_count")
     return value
-
-
-def _apply_training_controls(frame: pd.DataFrame, spec: ModelSpec) -> pd.DataFrame:
-    """Apply only the generic, explicitly requested row cap."""
-    if frame.empty:
-        return frame
-    result = frame.copy(deep=False)
-    result["timestamp"] = strict_timestamp_series(
-        result["timestamp"], error="invalid_model_training_timestamp"
-    )
-    if spec.max_train_rows is not None:
-        counts = result.groupby("timestamp", sort=True).size()
-        retained = counts.iloc[::-1].cumsum() <= spec.max_train_rows
-        result = result.loc[result.timestamp.isin(retained.index[retained])]
-    result.index = pd.RangeIndex(len(result))
-    return result
 
 
 def _native_missing(spec):

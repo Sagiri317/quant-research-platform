@@ -37,15 +37,12 @@ def test_hft_catalog_has_one_panel_factor_label_and_research_path() -> None:
     assert research.base_input_data_id == HFT_PANEL_DATA_ID
 
 
-def test_hft_models_use_generic_specs_with_exact_training_admission_bound() -> None:
+def test_hft_models_use_generic_specs() -> None:
     config = research_configuration("crypto", "baseline")
-    for item in config["models"]:
-        item["max_train_rows"] = 100
     models = model_specs(config["models"])
     assert {model.model_algorithm for model in models} == {
         item["model_algorithm"] for item in config["models"]
     }
-    assert all(model.max_train_rows == 100 for model in models)
     assert all(not hasattr(model, "purge_gap_steps") for model in models)
 
 
