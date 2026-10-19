@@ -2366,6 +2366,22 @@ alpha = 5%
 
 Hansen SPA 与 StepM 是正式诊断；MCS 仅用于稳健性。
 
+SPA 对每个候选的「基准损失减候选损失」估计平稳自助法长期方差；观察均值差和
+三种零假设中心化后的重采样均值差，均除以同一份长期标准差。
+长期方差使用包含循环边界项的平稳自助法协方差核，所有候选共享同一组重采样行。
+下界、一致性和上界分别保留各自的中心化规则；正统计量的 p 值使用严格大于观察值的
+重采样比例。当所有候选的样本平均损失都不优于基准时，三种 p 值均记为 1，不拒绝单侧零假设。
+StepM 复用一致性版本的联合重采样分布，在剩余候选上重新计算临界值，直至没有新增拒绝
+或候选已全部剔除；被剔除候选按原输入顺序发布。
+MCS 使用 [Hansen、Lunde 与 Nason（2011）](https://www.kevinsheppard.com/files/teaching/mfe/advanced-econometrics/Hansen_Lunde_Nason.pdf)
+的 R 方法成对标准化范围统计量；每轮剔除最大行，并列时取当前输入顺序中的首行。
+其 bootstrap 尾概率计入等于观察值的重采样，逐轮 p 值取累计最大值，最终单模型 p 值为 1；
+p 值大于或等于 alpha 的模型纳入置信集。
+
+SPA/StepM 的学生化和中心化遵循 [Hansen（2005）](https://bashtage.github.io/kevinsheppard.com/files/teaching/mfe/advanced-econometrics/Hansen.pdf)
+第 2、3 节。其理论保证要求损失差序列满足相应平稳性和依赖条件；逐季扩窗、递归估计
+不自动满足这些假设，此类研究中的检验只能作为有条件的探索性证据，不能据此宣称正式错误率保证。
+
 #### 5.27.4 Fama-MacBeth
 
 因变量：

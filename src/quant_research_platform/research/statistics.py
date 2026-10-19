@@ -1,4 +1,4 @@
-"""QRP input/status contracts delegating numerical inference to dependencies."""
+"""QRP inference contracts and scientific calculations using numerical dependencies."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from typing import Literal
 
 import numpy as np
 import pandas as pd
+from scipy.fft import irfft, next_fast_len, rfft
 from scipy.stats import chi2, kurtosis, norm, skew
 from statsmodels.regression.linear_model import OLS, WLS
 from statsmodels.stats.multitest import multipletests
@@ -276,18 +277,10 @@ def spa_reality_check(
         return SpaResult(
             None, None, None, aligned.observation_count, "UNDEFINED", reason
         )
-    benchmark = aligned.values[:, 0]
-    models = pd.DataFrame(
-        aligned.values[:, 1:], index=aligned.index, columns=aligned.candidate_ids[1:]
+    bootstrap = _studentized_loss_bootstrap(
+        aligned.values, block_size=block_size, repetitions=repetitions, seed=seed
     )
-    from arch.bootstrap import SPA
-
-    test = SPA(benchmark, models, block_size=block_size, reps=repetitions, seed=seed)
-    test.compute()
-    values = test.pvalues
-    if not _positive_finite_variances(test._loss_diff_var) or not _valid_p_values(
-        values.to_numpy()
-    ):
+    if bootstrap is None:
         return SpaResult(
             None,
             None,
@@ -296,10 +289,18 @@ def spa_reality_check(
             "UNDEFINED",
             "loss_differential_variance_undefined",
         )
+    observed, simulated = bootstrap
+    observed_max = max(0.0, float(observed.max()))
+    # Hansen's one-sided null cannot be rejected when no sample mean improves.
+    values = (
+        (np.maximum(0.0, simulated.max(axis=1)) > observed_max).mean(axis=0)
+        if observed_max > 0.0
+        else np.ones(3)
+    )
     return SpaResult(
-        lower_p_value=float(values["lower"]),
-        consistent_p_value=float(values["consistent"]),
-        upper_p_value=float(values["upper"]),
+        lower_p_value=float(values[0]),
+        consistent_p_value=float(values[1]),
+        upper_p_value=float(values[2]),
         observation_count=aligned.observation_count,
         status="DEFINED",
         reason=None,
@@ -321,36 +322,79 @@ def stepm_superior_models(
     reason = aligned.reason or _loss_differential_reason(aligned.values, pairwise=False)
     if reason is not None:
         return StepMResult((), aligned.observation_count, "UNDEFINED", reason)
-    benchmark = aligned.values[:, 0]
-    models = pd.DataFrame(
-        aligned.values[:, 1:], index=aligned.index, columns=aligned.candidate_ids[1:]
-    )
-    from arch.bootstrap import StepM
-
-    test = StepM(
-        benchmark,
-        models,
-        size=alpha,
+    bootstrap = _studentized_loss_bootstrap(
+        aligned.values,
         block_size=block_size,
-        reps=repetitions,
+        repetitions=repetitions,
         seed=seed,
     )
-    test.compute()
-    if not _positive_finite_variances(test.spa._loss_diff_var) or not _valid_p_values(
-        test.spa.pvalues.to_numpy()
-    ):
+    if bootstrap is None:
         return StepMResult(
             (),
             aligned.observation_count,
             "UNDEFINED",
             "loss_differential_variance_undefined",
         )
+    observed, simulated = bootstrap
+    remaining = np.ones(len(observed), dtype=bool)
+    while remaining.any():
+        maxima = np.maximum(0.0, simulated[:, remaining, 1].max(axis=1))
+        critical = np.quantile(maxima, 1.0 - alpha)
+        rejected = remaining & (observed > critical)
+        if not rejected.any():
+            break
+        remaining[rejected] = False
     return StepMResult(
-        tuple(str(value) for value in test.superior_models),
+        tuple(
+            name
+            for name, keep in zip(aligned.candidate_ids[1:], remaining, strict=True)
+            if not keep
+        ),
         aligned.observation_count,
         "DEFINED",
         None,
     )
+
+
+def _studentized_loss_bootstrap(
+    values: np.ndarray, *, block_size: int, repetitions: int, seed: int
+) -> tuple[np.ndarray, np.ndarray] | None:
+    from arch.bootstrap import StationaryBootstrap
+
+    scale = np.maximum(np.abs(values[:, 0]).max(), np.abs(values[:, 1:]).max(axis=0))
+    _, exponent = np.frexp(scale)
+    # Power-of-two rescaling avoids overflow without changing the studentized test.
+    differences = np.ldexp(values[:, [0]], -exponent) - np.ldexp(
+        values[:, 1:], -exponent
+    )
+    n = len(differences)
+    means = differences.mean(axis=0)
+    centered = differences - means
+    length = next_fast_len(2 * n - 1)
+    spectrum = rfft(centered, n=length, axis=0)
+    covariances = irfft(spectrum * spectrum.conj(), n=length, axis=0)[:n] / n
+    lags = np.arange(1, n)
+    continuation = 1.0 - 1.0 / block_size
+    weights = (1 - lags / n) * continuation**lags + (lags / n) * continuation ** (
+        n - lags
+    )
+    variances = covariances[0] + 2 * (weights @ covariances[1:])
+    if not _positive_finite_variances(variances):
+        return None
+    standardizer = np.sqrt(n) / np.sqrt(variances)
+    observed = means * standardizer
+    centers = np.column_stack(
+        (
+            np.maximum(means, 0.0),
+            np.where(observed >= -np.sqrt(2 * np.log(np.log(n))), means, 0.0),
+            means,
+        )
+    )
+    means_star = StationaryBootstrap(block_size, differences, seed=seed).apply(
+        lambda sample: sample.mean(axis=0), reps=repetitions
+    )
+    simulated = (means_star[:, :, None] - centers) * standardizer[None, :, None]
+    return observed, simulated
 
 
 def model_confidence_set(
@@ -369,19 +413,17 @@ def model_confidence_set(
         return ModelConfidenceSetResult(
             None, (), (), aligned.observation_count, "UNDEFINED", reason
         )
-    frame = pd.DataFrame(
-        aligned.values, index=aligned.index, columns=aligned.candidate_ids
-    )
-    from arch.bootstrap import MCS
+    from arch.bootstrap import StationaryBootstrap
 
-    test = MCS(frame, size=alpha, reps=repetitions, block_size=block_size, seed=seed)
-    try:
-        test.compute()
-    except IndexError:
-        if _positive_finite_variances(
-            test._variances[~np.eye(frame.shape[1], dtype=bool)]
-        ):
-            raise
+    means = aligned.values.mean(axis=0)
+    differences = means[:, None] - means[None, :]
+    means_star = StationaryBootstrap(block_size, aligned.values, seed=seed).apply(
+        lambda sample: sample.mean(axis=0), reps=repetitions
+    )
+    centered = means_star[:, :, None] - means_star[:, None, :] - differences
+    variances = np.mean(centered**2, axis=0)
+    diagonal = np.eye(len(means), dtype=bool)
+    if not _positive_finite_variances(variances[~diagonal]):
         return ModelConfidenceSetResult(
             None,
             (),
@@ -390,21 +432,31 @@ def model_confidence_set(
             "UNDEFINED",
             "pairwise_loss_variance_undefined",
         )
-    if not _positive_finite_variances(
-        test._variances[~np.eye(frame.shape[1], dtype=bool)]
-    ) or not _valid_p_values(test.pvalues.to_numpy()):
-        return ModelConfidenceSetResult(
-            None,
-            (),
-            (),
-            aligned.observation_count,
-            "UNDEFINED",
-            "pairwise_loss_variance_undefined",
+    variances[diagonal] = 1.0
+    observed = differences / np.sqrt(variances)
+    simulated = centered / np.sqrt(variances)
+    remaining = list(range(len(means)))
+    eliminated = []
+    adjusted_p_value = 0.0
+    while len(remaining) > 1:
+        row_maxima = observed[np.ix_(remaining, remaining)].max(axis=1)
+        observed_range = row_maxima.max()
+        simulated_ranges = simulated[:, remaining][:, :, remaining].max(axis=(1, 2))
+        adjusted_p_value = max(
+            adjusted_p_value, float(np.mean(simulated_ranges >= observed_range))
         )
+        # Eliminate one first-maximizing row, including when multiple pairs tie.
+        worst = remaining.pop(int(np.argmax(row_maxima)))
+        eliminated.append((aligned.candidate_ids[worst], adjusted_p_value))
+    eliminated.append((aligned.candidate_ids[remaining[0]], 1.0))
+    p_values = pd.DataFrame(
+        {"Pvalue": [value for _, value in eliminated]},
+        index=pd.Index([name for name, _ in eliminated], name="Model name"),
+    )
     return ModelConfidenceSetResult(
-        test.pvalues.copy(),
-        tuple(str(value) for value in test.included),
-        tuple(str(value) for value in test.excluded),
+        p_values,
+        tuple(sorted(name for name, value in eliminated if value >= alpha)),
+        tuple(sorted(name for name, value in eliminated if value < alpha)),
         aligned.observation_count,
         "DEFINED",
         None,
@@ -414,27 +466,26 @@ def model_confidence_set(
 def _loss_differential_reason(values: np.ndarray, *, pairwise: bool) -> str | None:
     if values.shape[1] < 2:
         return "insufficient_candidate_count"
-    scale = float(np.max(np.abs(values)))
     pairs = (
         combinations(range(values.shape[1]), 2)
         if pairwise
         else ((0, index) for index in range(1, values.shape[1]))
     )
     for left, right in pairs:
-        difference = values[:, left] - values[:, right]
-        if float(np.ptp(difference)) <= np.finfo("float64").eps * scale:
+        scale = np.max(np.abs(values[:, [left, right]]))
+        _, exponent = np.frexp(scale)
+        difference = np.ldexp(values[:, left], -exponent) - np.ldexp(
+            values[:, right], -exponent
+        )
+        if float(np.ptp(difference)) <= np.finfo("float64").eps * np.ldexp(
+            scale, -exponent
+        ):
             return "constant_loss_differential"
     return None
 
 
 def _positive_finite_variances(values: np.ndarray) -> bool:
     return bool(np.isfinite(values).all() and (values > 0).all())
-
-
-def _valid_p_values(values: np.ndarray) -> bool:
-    return bool(
-        np.isfinite(values).all() and (values >= 0).all() and (values <= 1).all()
-    )
 
 
 def probabilistic_and_deflated_sharpe(
