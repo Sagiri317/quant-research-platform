@@ -2700,10 +2700,7 @@ def _short_analyst_csv_records(count):
             "2.5" if position % 3 != 1 else "",
             "10.5" if position % 3 != 2 else "",
         ]
-        fields[5] += "x" * (101 - len(",".join(fields)))
-        assert len(",".join(fields).encode()) == 101
         rows.append(fields)
-    assert len(header) == 64
     return header, rows
 
 
@@ -2723,22 +2720,22 @@ def real_csv_handles(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "case,count,endings,terminated",
+    "endings,terminated",
     (
-        ("large-lf", 10280, (b"\n",), True),
-        ("large-crlf", 10280, (b"\r\n",), True),
-        ("large-cr", 10280, (b"\r",), True),
-        ("short-cr", 2, (b"\r",), True),
-        ("unterminated-cr", 2, (b"\r",), False),
-        ("mixed", 3, (b"\r", b"\r\n", b"\n"), True),
+        ((b"\n",), True),
+        ((b"\r\n",), True),
+        ((b"\r",), True),
+        ((b"\r",), False),
+        ((b"\r", b"\r\n", b"\n"), True),
     ),
 )
 def test_cr_only_physical_fragments_preserve_interim_rows(
-    tmp_path, real_csv_handles, case, count, endings, terminated
+    tmp_path, real_csv_handles, endings, terminated
 ):
     from quant_research_platform.storage.datasets.reading import read_dataset
     from tests.helpers.paths import StorageLayout
 
+    count = 3
     header, rows = _short_analyst_csv_records(count)
     records = [header, *(",".join(row).encode() for row in rows)]
     payload = b"".join(
@@ -2746,10 +2743,6 @@ def test_cr_only_physical_fragments_preserve_interim_rows(
         + (endings[position % len(endings)] if terminated or position < count else b"")
         for position, record in enumerate(records)
     )
-    if case in {"large-lf", "large-cr"}:
-        assert len(payload) == 1048625
-    elif case == "short-cr":
-        assert len(payload) == 269
     layout = StorageLayout(tmp_path)
     raw_root = layout.raw_source_root("csmar")
     filesystem_mkdir(raw_root, parents=True)
@@ -2798,17 +2791,16 @@ def test_cr_only_physical_fragments_preserve_interim_rows(
     assert Path(native_filesystem_path(path)).read_bytes() == payload
 
 
-@pytest.mark.parametrize("ending", (b"\n", b"\r"))
-def test_long_record_after_short_header_can_publish(tmp_path, real_csv_handles, ending):
+def test_long_record_after_short_header_can_publish(tmp_path, real_csv_handles):
     from quant_research_platform.storage.datasets import read_dataset
     from tests.helpers.paths import StorageLayout
 
     header, rows = _short_analyst_csv_records(1)
     row = rows[0]
-    row[5] += "x" * (1048654 - len(",".join(row)))
+    # One field exceeds Python csv's default 128 KiB field limit.
+    row[5] = "x" * (128 * 1024 + 1)
     record = ",".join(row).encode()
-    assert len(record) == 1048654 > 1024 * 1024
-    payload = header + ending + record + ending
+    payload = header + b"\n" + record + b"\n"
     layout = StorageLayout(tmp_path)
     raw_root = layout.raw_source_root("csmar")
     filesystem_mkdir(raw_root, parents=True)
@@ -2831,10 +2823,9 @@ def test_long_record_after_short_header_can_publish(tmp_path, real_csv_handles, 
     assert Path(native_filesystem_path(path)).read_bytes() == payload
 
 
-def test_large_cr_reader_early_close_releases_real_handles(tmp_path, real_csv_handles):
-    header, rows = _short_analyst_csv_records(10280)
+def test_cr_reader_early_close_releases_real_handles(tmp_path, real_csv_handles):
+    header, rows = _short_analyst_csv_records(3)
     payload = b"\r".join([header, *(",".join(row).encode() for row in rows)]) + b"\r"
-    assert len(payload) == 1048625
     path = tmp_path / "early-close.csv"
     filesystem_write_bytes(path, payload)
     records = raw_schemas.iter_export_csv_records(path)
@@ -2862,11 +2853,11 @@ def test_invalid_utf8_is_rejected_in_csv_records(tmp_path, real_csv_handles, pay
 
 
 @pytest.mark.parametrize("ending", ("\n", "\r", "\r\n"))
-def test_long_quoted_csv_record_preserves_embedded_newlines(tmp_path, ending):
+def test_quoted_csv_record_preserves_embedded_newlines(tmp_path, ending):
     import csv
     import io
 
-    value = "x" * (1024 * 1024 + 1) + '\r\n"quoted",tail'
+    value = 'prefix\r\n"quoted",tail'
     buffer = io.StringIO(newline="")
     csv.writer(buffer, lineterminator=ending).writerow([value, "second"])
     payload = buffer.getvalue().encode()

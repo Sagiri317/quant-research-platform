@@ -4,6 +4,7 @@ import csv
 
 import pytest
 
+from quant_research_platform.sources.csmar.field_mappings import RAW_TABLE_CONTRACTS
 from quant_research_platform.sources.csmar.interim import materialize_interim_data
 from quant_research_platform.sources.prepare import prepare_source
 from quant_research_platform.storage.datasets import read_dataset
@@ -66,15 +67,48 @@ def test_absent_requested_table_is_not_an_empty_present_table(tmp_path):
     assert path.read_bytes() == before
 
 
-def test_present_source_with_missing_header_still_fails_structurally(tmp_path):
+@pytest.mark.parametrize("dataset", ("trading_calendar", "equity_changes"))
+def test_present_source_with_missing_header_still_fails_structurally(tmp_path, dataset):
     raw = tmp_path / "raw"
     raw.mkdir()
-    (raw / "TRDNEW_Cale.csv").write_text("Markettype,Clddt,Daywk\n4,2024-01-02,2\n")
-    output = tmp_path / "calendar"
+    contract = RAW_TABLE_CONTRACTS[dataset]
+    with (raw / f"{contract.table_code}.csv").open("w", newline="") as handle:
+        csv.writer(handle).writerow(contract.required_columns[:-1])
+    output = tmp_path / "interim"
     with pytest.raises(ValueError, match="missing CSMAR columns"):
-        materialize_interim_data(
-            raw_root=raw,
-            output_roots={"trading_calendar": output},
-            data_ids=("trading_calendar",),
+        prepare_source(
+            {
+                "source_id": "csmar",
+                "raw_root": str(raw),
+                "outputs": {dataset: str(output)},
+            }
         )
     assert not output.exists()
+
+
+def test_native_table_identity_is_not_replaced_by_another_tables_header(tmp_path):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    (raw / "FN_FN046.csv").write_text(
+        "Markettype,Clddt,Daywk,State\n4,2024-01-02,2,O\n"
+    )
+    calendar = tmp_path / "calendar"
+    result = prepare_source(
+        {
+            "source_id": "csmar",
+            "raw_root": str(raw),
+            "outputs": {"trading_calendar": str(calendar)},
+        }
+    )
+    assert result.skipped == ("trading_calendar",)
+    assert not calendar.exists()
+    equity = tmp_path / "equity"
+    with pytest.raises(ValueError, match="csmar_raw_export_table_identity_conflict"):
+        prepare_source(
+            {
+                "source_id": "csmar",
+                "raw_root": str(raw),
+                "outputs": {"equity_changes": str(equity)},
+            }
+        )
+    assert not equity.exists()

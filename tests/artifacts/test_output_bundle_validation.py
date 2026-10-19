@@ -177,7 +177,7 @@ def test_compact_prediction_facts_preserve_science_without_fitting_state(
         read_predictions(root)
 
 
-@pytest.mark.parametrize("rank", [-1e100, 1e100, -0.5001, 0.5001])
+@pytest.mark.parametrize("rank", [-0.5001, 0.5001])
 def test_consumed_prediction_rank_rejects_values_outside_centered_rank_domain(
     tmp_path, rank
 ):

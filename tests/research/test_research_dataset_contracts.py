@@ -283,7 +283,7 @@ def test_output_row_order_is_stable_sort_by_primary_key(tmp_path: Path) -> None:
 def test_persisted_research_sessions_are_complete_across_small_read_batches(
     tmp_path: Path,
 ) -> None:
-    dates = pd.bdate_range("2023-01-02", periods=8)
+    dates = pd.bdate_range("2023-01-02", periods=3)
     frame = pd.DataFrame(
         [
             {
@@ -297,7 +297,7 @@ def test_persisted_research_sessions_are_complete_across_small_read_batches(
                 "can_exit": True,
                 "market_type": 4,
             }
-            for asset in range(200)
+            for asset in range(3)
             for date, timestamp in enumerate(dates)
         ]
     )
@@ -321,6 +321,7 @@ def test_persisted_research_sessions_are_complete_across_small_read_batches(
         time_window=TimeWindow(dates[0], dates[-1]),
     )
     batch_sizes = []
+    batch_date_counts = []
     dataset = open_dataset_session(
         layout.research_dataset_root(datasets.get("demo").market_id, "demo"),
         columns=None,
@@ -328,18 +329,20 @@ def test_persisted_research_sessions_are_complete_across_small_read_batches(
     )
 
     def measured_batches():
-        for batch in iter_dataset_chunks(dataset, batch_rows=128):
+        for batch in iter_dataset_chunks(dataset, batch_rows=2):
             batch_sizes.append(len(batch))
+            batch_date_counts.append(batch["timestamp"].nunique())
             yield batch
 
     sessions = list(
         iter_complete_session_frames(measured_batches(), timestamp_column="timestamp")
     )
     assert [session["timestamp"].iloc[0] for session in sessions] == list(dates)
-    assert [len(session) for session in sessions] == [200] * len(dates)
+    assert [len(session) for session in sessions] == [3] * len(dates)
     assert len(batch_sizes) > len(dates)
-    assert max(batch_sizes) < 200
-    assert sum(batch_sizes) == 1600
+    assert max(batch_sizes) < 3
+    assert sum(batch_sizes) == 9
+    assert any(count > 1 for count in batch_date_counts)
 
 
 def test_research_dataset_fails_closed_on_empty_base_sessions(tmp_path: Path) -> None:

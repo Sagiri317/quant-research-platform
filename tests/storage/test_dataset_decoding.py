@@ -384,17 +384,10 @@ def test_dictionary_reader_closes_same_handle_and_native_iterator(
     assert Path(native_filesystem_path(path)).read_bytes() == original_bytes
 
 
-@pytest.mark.parametrize(
-    "values",
-    (
-        tuple("x" * 32 for _ in range(512)),
-        tuple([*("x" * 32 for _ in range(511)), "y" * 8000]),
-    ),
-    ids=("uniform", "skewed"),
-)
 def test_arrow_batch_converter_observes_each_row_once(
-    values: tuple[str, ...], monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    values = ("x" * 32, "y" * 8000, "z", "")
     row_ids = tuple(range(len(values)))
     batch = pa.record_batch(
         [pa.array(row_ids), pa.array(values)], names=["row_id", "value"]

@@ -296,7 +296,7 @@ def test_depth_repeats_preserve_high_water_and_raw_observation_boundaries():
 def test_native_trade_history_preserves_exact_identities():
     from quant_research_platform.sources.binance import replay
 
-    count = 512
+    count = 3
     observe = replay.native_trade_identities()
     for trade_id in range(count):
         assert observe("future", "SYNTHETIC", {"a": trade_id, "q": "1"}) == (

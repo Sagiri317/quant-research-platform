@@ -955,6 +955,19 @@ def _state_number(value, *, positive=False, nonnegative=False):
     )
 
 
+def _context_timestamps(frame, previous_time):
+    timestamps = (
+        pd.to_datetime(frame["timestamp"])
+        .to_numpy(dtype="datetime64[ns]")
+        .astype("int64")
+    )
+    if np.any(timestamps[1:] <= timestamps[:-1]) or (
+        previous_time is not None and timestamps[0] <= previous_time
+    ):
+        raise ValueError("hft_grid_time_non_monotonic")
+    return timestamps
+
+
 def _microstructure_context_rows(frames, *, factors=None):
     """Reuse the microstructure owner; retain only rows needed for causal context."""
     with closing_iterator(iter(frames)) as source:
@@ -973,13 +986,17 @@ def _microstructure_context_rows(frames, *, factors=None):
         calculated_frames = (
             iter_factor_frames(inputs, columns=selected) if selected else inputs
         )
+        previous_time = None
         with closing_iterator(calculated_frames) as factors:
             for panel, calculated in zip(panels, factors, strict=True):
                 times = (
                     pd.to_datetime(panel["timestamp"])
                     .to_numpy(dtype="datetime64[ns]")
                     .astype("int64")
+                    if selected
+                    else _context_timestamps(panel, previous_time)
                 )
+                previous_time = int(times[-1])
                 observed = (
                     pd.to_datetime(panel["observed_utc"], utc=True)
                     .to_numpy(dtype="datetime64[ns]")
@@ -1126,8 +1143,13 @@ def iter_cross_asset_factor_frames(
     """Share causal information states across the ordered union of target keys."""
 
     def rows(frames):
+        previous_time = None
         with closing_iterator(iter(frames)) as source:
             for frame in source:
+                if frame.empty:
+                    continue
+                timestamps = _context_timestamps(frame, previous_time)
+                previous_time = int(timestamps[-1])
                 values = [
                     _nullable_numeric_column(frame, name)
                     for name in (
@@ -1138,8 +1160,8 @@ def iter_cross_asset_factor_frames(
                     )
                 ]
                 segments = frame.get("segment_id", [None] * len(frame))
-                for row in zip(frame["timestamp"], *values, segments, strict=True):
-                    yield (pd.Timestamp(row[0]).value, *row[1:])
+                for row in zip(timestamps, *values, segments, strict=True):
+                    yield (int(row[0]), *row[1:])
 
     records = []
     previous_stamp = None

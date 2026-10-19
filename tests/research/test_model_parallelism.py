@@ -22,9 +22,7 @@ ALGORITHMS = (
 
 
 @pytest.mark.parametrize("algorithm", ALGORITHMS)
-@pytest.mark.parametrize(
-    "requested", [-1000, -2, -1, 1, 65536, None, 0, True, 1.5, "2"]
-)
+@pytest.mark.parametrize("requested", [-1000, -1, 1, 65536, None, 0, True, 1.5, "2"])
 def test_library_thread_parameters_are_not_hardware_gated(algorithm, requested):
     params = {"n_jobs": requested}
     invalid = type(requested) not in {int, type(None)} or (

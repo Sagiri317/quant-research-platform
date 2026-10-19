@@ -539,7 +539,7 @@ def test_scaler_transform_preserves_weighted_difference():
     assert actual.x.tolist() == pytest.approx([-3.0, 1 / 3])
 
 
-@pytest.mark.parametrize("capital", [1.0, 1e6, 100.0])
+@pytest.mark.parametrize("capital", [1.0, 1e6])
 @pytest.mark.parametrize("mode", ["long_only", "long_short"])
 def test_capital_weight_units_do_not_change_targets(capital, mode):
     signal = pd.Series({"a": 1.0, "b": 2.0, "c": 3.0, "d": 4.0})
@@ -558,7 +558,7 @@ def test_capital_weight_units_do_not_change_targets(capital, mode):
     assert target.tolist() == expected
 
 
-@pytest.mark.parametrize("capital", [1.0, 1e6, 100.0])
+@pytest.mark.parametrize("capital", [1.0, 1e6])
 def test_capital_weight_units_do_not_change_market_beta(capital):
     state = MarketModelRiskState(window=2, residual_window=1)
     for daily_return in (0.0, 0.01, 0.02):

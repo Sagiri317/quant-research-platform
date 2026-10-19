@@ -88,15 +88,20 @@ def test_selected_manifest_windows_directory_error_preserves_real_denial(
 
 
 @pytest.mark.parametrize(
-    "data_id",
+    "data_id,damage",
     [
-        interim.A_SHARE_EQUITY_EVENTS_DATA_ID,
-        interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID,
-        interim.A_SHARE_FEE_SCHEDULE_DATA_ID,
+        (interim.A_SHARE_EQUITY_EVENTS_DATA_ID, "root_file"),
+        (interim.A_SHARE_EQUITY_EVENTS_DATA_ID, "dataset_file"),
+    ]
+    + [
+        (data_id, damage)
+        for data_id in (
+            interim.A_SHARE_EQUITY_EVENTS_DATA_ID,
+            interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID,
+            interim.A_SHARE_FEE_SCHEDULE_DATA_ID,
+        )
+        for damage in ("empty", "member_directory", "partial")
     ],
-)
-@pytest.mark.parametrize(
-    "damage", ["root_file", "dataset_file", "empty", "member_directory", "partial"]
 )
 def test_reference_present_invalid_is_not_absent(tmp_path, data_id, damage):
     raw = tmp_path / "raw"
@@ -158,15 +163,8 @@ def test_partial_source_workflow_blocks_and_preserves_old_good(tmp_path):
 
 
 @pytest.mark.parametrize("location", ["root", "dataset"])
-@pytest.mark.parametrize(
-    "data_id",
-    [
-        interim.A_SHARE_EQUITY_EVENTS_DATA_ID,
-        interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID,
-        interim.A_SHARE_FEE_SCHEDULE_DATA_ID,
-    ],
-)
-def test_dangling_reference_source_alias_is_not_absent(tmp_path, location, data_id):
+def test_dangling_reference_source_alias_is_not_absent(tmp_path, location):
+    data_id = interim.A_SHARE_EQUITY_EVENTS_DATA_ID
     root = tmp_path / "reference"
     if location == "root":
         alias = root

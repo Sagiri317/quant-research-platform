@@ -167,7 +167,7 @@ def test_selected_asset_clock_does_not_require_unrelated_market(tmp_path, native
     pd.testing.assert_frame_equal(actual, expected)
 
 
-def test_noncontiguous_year_selection_keeps_sessions_unknown(tmp_path):
+def test_selected_year_limits_output_and_keeps_endpoint_maturity(tmp_path):
     frame, inputs = _inputs(tmp_path)
     inputs["market_panel_1d"]["years"] = [2024]
     result = read_dataset(

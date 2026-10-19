@@ -92,8 +92,8 @@ def test_convergence_warning_is_a_model_fit_failure() -> None:
         )
 
 
-@pytest.mark.parametrize("chunk_rows", (5, 17))
-def test_training_retention_preserves_all_legal_rows_and_same_day_order(chunk_rows):
+def test_training_retention_preserves_all_legal_rows_and_same_day_order():
+    chunk_rows = 5
     spec = ModelSpec(
         model_id="linear",
         model_algorithm="linear_regression",

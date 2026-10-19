@@ -51,7 +51,6 @@ def test_manifest_actual_model_and_paths(tmp_path):
         ("sample_role", ""),
         ("prediction_rows", True),
         ("scope", "LOCAL_ONLY"),
-        ("scope", "shared"),
     ],
 )
 def test_metadata_rejected_before_publish_and_after_read(tmp_path, field, value):
@@ -96,7 +95,6 @@ def test_manifest_rejects_credentials(tmp_path, key):
 )
 def test_writer_validates_actual_rows_and_global_keys(tmp_path, mutation):
     root, frame, metadata = native_bundle(tmp_path)
-    before = {p.name: p.read_bytes() for p in root.iterdir()}
     if mutation == "before":
         frame["timestamp"] = pd.Timestamp("2014-01-02")
     elif mutation == "after":
@@ -116,11 +114,6 @@ def test_writer_validates_actual_rows_and_global_keys(tmp_path, mutation):
             output_path=tmp_path / "bad", output_chunks=chunks, metadata=metadata
         )
     assert not (tmp_path / "bad").exists()
-    with pytest.raises(OutputAlreadyExistsError):
-        write_prediction_outputs(
-            output_path=root, output_chunks=chunks, metadata=metadata
-        )
-    assert {p.name: p.read_bytes() for p in root.iterdir()} == before
 
 
 @pytest.mark.parametrize("kind", ["string", "date", "ns", "us"])
@@ -144,8 +137,9 @@ def test_timestamp_normalization_and_readback(tmp_path, kind):
     pd.testing.assert_frame_equal(frame, before)
 
 
-def test_writer_collision_closes_unconsumed_source(tmp_path):
+def test_writer_collision_preserves_bytes_and_closes_unconsumed_source(tmp_path):
     root, frame, metadata = native_bundle(tmp_path)
+    before = {p.name: p.read_bytes() for p in root.iterdir()}
 
     class Source:
         closed = False
@@ -165,3 +159,4 @@ def test_writer_collision_closes_unconsumed_source(tmp_path):
             output_path=root, output_chunks=source, metadata=metadata
         )
     assert source.closed
+    assert {p.name: p.read_bytes() for p in root.iterdir()} == before

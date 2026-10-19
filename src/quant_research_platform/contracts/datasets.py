@@ -82,11 +82,6 @@ class ResearchDatasetSpec(DataSpec):
             for transform in self.feature_transforms
         ):
             raise ValueError("feature_transforms_invalid")
-        object.__setattr__(
-            self,
-            "column_roles",
-            MappingProxyType(dict(self.column_roles)),
-        )
         if not isinstance(self.key_coverage, Mapping) or any(
             type(data_id) is not str or not data_id for data_id in self.key_coverage
         ):
@@ -105,7 +100,7 @@ class ResearchDatasetSpec(DataSpec):
         invalid_policies = sorted(
             f"{data_id}={policy}"
             for data_id, policy in self.key_coverage.items()
-            if type(policy) is not str or policy not in {"strict", "sparse"}
+            if policy not in {"strict", "sparse"}
         )
         if invalid_policies:
             raise ValueError(
