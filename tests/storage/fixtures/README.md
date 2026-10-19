@@ -1,6 +1,6 @@
-`mixed_dictionary_row_groups.parquet` 仅包含合成字符串，使用 DuckDB 1.5.3
-单线程一次生成；测试直接读取此夹具，无需 DuckDB 依赖。
-第一个 2,048 行的行组使用 PLAIN，第二个使用 PLAIN_DICTIONARY。
+`mixed_dictionary_row_groups.parquet` 是只含合成字符串的测试文件，使用 DuckDB 1.5.3
+单线程生成。测试直接读取这个已保存文件，不需要安装 DuckDB。
+第一个含 2,048 行的行组使用普通编码（PLAIN），第二个使用字典编码（PLAIN_DICTIONARY）。
 
 ```sql
 COPY (SELECT CASE WHEN i < 2048 THEN repeat(lpad(i::VARCHAR, 8, '0'), 16)
