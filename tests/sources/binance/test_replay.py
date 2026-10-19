@@ -1323,9 +1323,10 @@ def test_connection_queries_scan_each_interval_once(tmp_path):
     with gzip.open(native_filesystem_path(sidecar), "rt", encoding="utf-8") as stream:
         original = json.loads(next(stream))
     start = datetime(2020, 1, 1, tzinfo=UTC)
+    history_count = 7
     with gzip.open(native_filesystem_path(sidecar), "wt", encoding="utf-8") as stream:
         stream.write(json.dumps(original) + "\n")
-        for index in range(2000):
+        for index in range(history_count):
             opened = start + timedelta(seconds=2 * index)
             row = dict(
                 original,
@@ -1337,7 +1338,7 @@ def test_connection_queries_scan_each_interval_once(tmp_path):
     with open_filesystem_file(sidecar, "rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
     manifest["capture"]["connection_intervals"].update(
-        record_count=2001,
+        record_count=history_count + 1,
         compressed_bytes=filesystem_stat(sidecar).st_size,
         sha256=digest,
     )

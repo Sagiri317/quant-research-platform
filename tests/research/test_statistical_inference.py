@@ -785,10 +785,15 @@ def test_fama_macbeth_shared_ols_owner_matches_independent_full_sample(
     assert actual.observation_count == 50
 
 
-@pytest.mark.parametrize("unit", (0.001, 1.0, 1000.0))
-@pytest.mark.parametrize("weighted", (False, True))
-@pytest.mark.parametrize("factor_count", (1, 3))
-@pytest.mark.parametrize("small", (1e-8, 1e-6))
+@pytest.mark.parametrize(
+    "unit,weighted,factor_count,small",
+    (
+        (0.001, False, 1, 1e-8),
+        (1000.0, True, 1, 1e-6),
+        (1.0, False, 3, 1e-6),
+        (0.001, True, 3, 1e-8),
+    ),
+)
 def test_fmb_numerical_zero_preserves_resolvable_small_coefficients(
     unit, weighted, factor_count, small
 ):

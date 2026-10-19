@@ -457,10 +457,12 @@ def iter_factor_frames(
         "taker_buy_volume_100ms",
         "taker_sell_volume_100ms",
     }
+    plain_imbalances = selected & {"imbalance_1", "imbalance_5", "imbalance_10"}
     scalar_definitions = {
         name: dependencies
         for name, dependencies in definitions.items()
         if name not in copied
+        and name not in plain_imbalances
         and name not in {"relative_spread", "microprice", "microprice_deviation"}
     }
     scalar_columns = {
@@ -537,9 +539,15 @@ def iter_factor_frames(
                 ratio = inputs["book_spread"] / inputs["mid"]
             ratio[~np.isfinite(ratio)] = np.nan
             calculated["relative_spread"] = ratio
+        for name in plain_imbalances:
+            bid, ask = definitions[name]
+            calculated[name] = _depth_ratio_values(inputs[bid], inputs[ask])
         for name in selected & {"microprice", "microprice_deviation"}:
-            calculated[name] = _microprice_values(
-                inputs, include_mid=name == "microprice"
+            calculated[name] = _depth_ratio_values(
+                inputs["bid_depth_1"],
+                inputs["ask_depth_1"],
+                spread=inputs["book_spread"],
+                mid=inputs["mid"] if name == "microprice" else None,
             )
         for index in range(len(frame)) if scalar_definitions else ():
             if boundaries[index]:
@@ -611,16 +619,11 @@ def iter_factor_frames(
                         if exact[depth] > 0:
                             result = sums[volume] / exact[depth]
                 elif name.startswith("imbalance_"):
-                    bid, ask = values[:2]
-                    if bid + ask > 0:
-                        result = (bid - ask) / (bid + ask)
-                        if "minus" in name:
-                            bid10, ask10 = values[2:]
-                            result = (
-                                result - (bid10 - ask10) / (bid10 + ask10)
-                                if bid10 + ask10 > 0
-                                else np.nan
-                            )
+                    bid, ask, bid10, ask10 = values
+                    if bid + ask > 0 and bid10 + ask10 > 0:
+                        result = (bid - ask) / (bid + ask) - (bid10 - ask10) / (
+                            bid10 + ask10
+                        )
                 elif name == "top10_depth_per_spread":
                     result = (values[0] + values[1]) / values[2]
                 elif name == "near_depth_share_1_10":
@@ -651,23 +654,31 @@ def iter_factor_frames(
         previous_time = int(timestamps[-1])
 
 
-def _microprice_values(inputs, *, include_mid):
-    # Extended intermediates cover the exponent range of every binary64 input.
-    bid, ask, spread = (
-        inputs[name].astype(np.longdouble)
-        for name in ("bid_depth_1", "ask_depth_1", "book_spread")
-    )
-    mid = inputs["mid"].astype(np.longdouble) if include_mid else 0
+def _depth_ratio_values(bid, ask, *, spread=None, mid=None):
+    bid, ask = bid.astype(np.longdouble), ask.astype(np.longdouble)
+    if spread is not None:
+        spread = spread.astype(np.longdouble)
+    if mid is not None:
+        mid = mid.astype(np.longdouble)
     with np.errstate(over="ignore", invalid="ignore", divide="ignore", under="ignore"):
-        deviation = (bid - ask) / (bid + ask) * spread / 2
-        result = deviation + mid
+        deviation = (bid - ask) / (bid + ask)
+        if spread is not None:
+            deviation = deviation * spread / 2
+        result = deviation if mid is None else deviation + mid
         values = result.astype(float)
-        valid = np.isfinite(bid) & np.isfinite(ask) & np.isfinite(spread)
-        valid &= (bid + ask > 0) & np.isfinite(mid)
+        valid = np.isfinite(bid) & np.isfinite(ask) & (bid + ask > 0)
+        if spread is not None:
+            valid &= np.isfinite(spread)
+        if mid is not None:
+            valid &= np.isfinite(mid)
         # Avoid rounding noise becoming a spurious standardized factor signal.
-        # Bound five rounded operations, then certify the binary64 rounding cell.
-        # Extended precision represents adjacent binary64 midpoints exactly.
-        error = 8 * np.finfo(np.longdouble).eps * (np.abs(mid) + np.abs(deviation))
+        # Bound at most five rounded operations for ordinary financial inputs.
+        # Certify the output rounding cell; ambiguous cases use the exact expression.
+        error = (
+            8
+            * np.finfo(np.longdouble).eps
+            * ((0 if mid is None else np.abs(mid)) + np.abs(deviation))
+        )
         rounded = values.astype(np.longdouble)
         lower = (np.nextafter(values, -np.inf).astype(np.longdouble) + rounded) / 2
         upper = (np.nextafter(values, np.inf).astype(np.longdouble) + rounded) / 2
@@ -680,9 +691,11 @@ def _microprice_values(inputs, *, include_mid):
     if np.finfo(np.longdouble).nmant < 63 or np.finfo(np.longdouble).maxexp < 4096:
         fallback = valid
     for index in np.flatnonzero(fallback):
-        b, a, s = (Fraction(float(v[index])) for v in (bid, ask, spread))
-        exact = (b - a) / (b + a) * s / 2
-        if include_mid:
+        b, a = (Fraction(float(v[index])) for v in (bid, ask))
+        exact = (b - a) / (b + a)
+        if spread is not None:
+            exact = exact * Fraction(float(spread[index])) / 2
+        if mid is not None:
             exact += Fraction(float(mid[index]))
         try:
             values[index] = float(exact)

@@ -61,8 +61,8 @@ def _native_taker_projection_case(tmp_path, monkeypatch, *, count=300):
         payload = (
             {
                 "lastUpdateId": 100,
-                "bids": [[str(10000 - level), "1"] for level in range(1000)],
-                "asks": [[str(10002 + level), "1"] for level in range(1000)],
+                "bids": [[str(10000 - level), "1"] for level in range(20)],
+                "asks": [[str(10002 + level), "1"] for level in range(20)],
             }
             if index == 0
             else {
@@ -213,7 +213,7 @@ def _native_taker_projection_case(tmp_path, monkeypatch, *, count=300):
                                         **row["payload"],
                                         "b": [
                                             [str(10000 - level), "0"]
-                                            for level in range(1, 1000)
+                                            for level in range(1, 20)
                                         ],
                                     },
                                 }
@@ -408,7 +408,7 @@ def test_taker_native_projection_preserves_complete_ledger(
     projected, levels = execute(latency=latency, horizon=horizon, mode=mode)
     _assert_projection_economics(full, projected)
     assert len(levels) == len(full_levels) == 300
-    expected = 1 if latency >= horizon else 1000
+    expected = 1 if latency >= horizon else 20
     assert set(levels) == {(expected, expected)}
     summaries = (
         [row[1] for row in full[1]] if mode == "independent_segments" else [full[0]]

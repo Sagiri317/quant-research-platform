@@ -828,7 +828,7 @@ def test_selected_expectations_equal_full_output_and_keep_factor_dependencies(se
         )
 
 
-def test_coverage_query_does_not_compute_medians(monkeypatch):
+def test_coverage_query_skips_cross_institution_medians(monkeypatch):
     from quant_research_platform.research.factors.expectations import calculations
 
     records = pd.DataFrame(
@@ -846,7 +846,7 @@ def test_coverage_query_does_not_compute_medians(monkeypatch):
     )
 
     def forbidden(*args, **kwargs):
-        raise AssertionError("unused median")
+        raise AssertionError("unused cross-institution median")
 
     monkeypatch.setattr(calculations, "median", forbidden)
     actual = query(

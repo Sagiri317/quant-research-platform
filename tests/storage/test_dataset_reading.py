@@ -500,7 +500,7 @@ def test_time_window_filter_is_applied_before_arrow_to_pandas_conversion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "physical_time_filter")
-    row_count = 1024
+    row_count = 3
     frame = pd.DataFrame(
         {
             "market_id": ["a_share"] * row_count,
@@ -519,12 +519,14 @@ def test_time_window_filter_is_applied_before_arrow_to_pandas_conversion(
         yield from original(batch, **kwargs)
 
     monkeypatch.setattr(dataset_reading, "_arrow_batch_to_bounded_pandas", record_rows)
-    target = frame.loc[900, "timestamp"]
+    target = frame.loc[1, "timestamp"]
     result = read_dataset(
         root, time_window=TimeWindow(target.to_pydatetime(), target.to_pydatetime())
     )
     assert len(result) == 1
-    assert converted_rows <= 2
+    assert converted_rows == 1
+    assert result["timestamp"].iloc[0] == target
+    assert result["value"].tolist() == [1.0]
 
 
 def test_time_window_row_group_pruning_uses_parquet_leaf_path(

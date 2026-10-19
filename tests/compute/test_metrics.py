@@ -111,8 +111,16 @@ def test_grouped_label_values_keep_tie_classes_and_real_tiny_variation() -> None
 
 
 @pytest.mark.parametrize(
-    "labels", [(), ("label", "label"), ("",), ("factor",), ("timestamp",), ("asset",)]
+    "labels, expected_error",
+    [
+        ((), "at least one column"),
+        (("label", "label"), "must not contain duplicates"),
+        (("",), "non-empty strings"),
+        (("factor",), "must not also be signal columns"),
+        (("timestamp",), "must not reuse timestamp or asset columns"),
+        (("asset",), "must not reuse timestamp or asset columns"),
+    ],
 )
-def test_compute_panel_rejects_invalid_label_columns(labels):
-    with pytest.raises(ValueError):
+def test_compute_panel_rejects_invalid_label_columns(labels, expected_error):
+    with pytest.raises(ValueError, match=expected_error):
         ComputePanelSpec(signal_columns=("factor",), label_columns=labels)

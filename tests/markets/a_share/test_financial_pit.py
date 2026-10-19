@@ -956,7 +956,7 @@ def test_ttm_annual_revisions_keep_latest_known_period_state(size, monkeypatch):
 
 
 @pytest.mark.parametrize("damage", ("source", "observation", "schema"))
-def test_pit_preparation_preserves_full_source_error_priority(damage):
+def test_pit_preparation_localizes_unknown_numeric_and_validates_observations(damage):
     observations = pd.DataFrame(
         {"asset_id": ["observed"], "timestamp": pd.to_datetime(["2025-01-02"])}
     )
@@ -971,7 +971,6 @@ def test_pit_preparation_preserves_full_source_error_priority(damage):
             "value": [float("inf")],
         }
     )
-    error = "pit_value_invalid"
     if damage == "observation":
         observations = pd.concat([observations, observations], ignore_index=True)
         error = "pit_observation_key_duplicate"

@@ -669,11 +669,15 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
                 owned = produce()
                 assert owned["portfolio_capacity"].status.eq("UNDEFINED").all()
                 assert owned["portfolio_capacity_summary"].status.eq("UNDEFINED").all()
+            elif mode == "interrupt":
+                with pytest.raises(KeyboardInterrupt):
+                    produce()
             else:
-                expected_error = (
-                    KeyboardInterrupt if mode == "interrupt" else ValueError
-                )
-                with pytest.raises(expected_error):
+                expected_error = {
+                    "missing_first": "portfolio_statistics_window_incomplete",
+                    "missing_last": "portfolio_statistics_candidate_dates_misaligned",
+                }[mode]
+                with pytest.raises(ValueError, match=f"^{expected_error}$"):
                     produce()
         assert started
         assert sorted(closed) == sorted(started)

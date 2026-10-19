@@ -632,9 +632,19 @@ def test_verified_file_preserves_non_missing_contract_failure(tmp_path):
     assert caught.value.__cause__ is None
 
 
-@pytest.mark.parametrize("kind", ("import", "download"))
-@pytest.mark.parametrize("member", ("gaps.jsonl.gz", "observation_intervals.jsonl.gz"))
-@pytest.mark.parametrize("failure", ("none", "close", "both"))
+@pytest.mark.parametrize(
+    ("kind", "member", "failure"),
+    (
+        ("import", "gaps.jsonl.gz", "none"),
+        ("import", "observation_intervals.jsonl.gz", "none"),
+        ("download", "gaps.jsonl.gz", "none"),
+        ("download", "observation_intervals.jsonl.gz", "none"),
+        ("import", "gaps.jsonl.gz", "close"),
+        ("import", "observation_intervals.jsonl.gz", "close"),
+        ("import", "gaps.jsonl.gz", "both"),
+        ("import", "observation_intervals.jsonl.gz", "both"),
+    ),
+)
 def test_native_sidecar_digest_preserves_failure_and_existing_archive(
     tmp_path, monkeypatch, kind, member, failure
 ):

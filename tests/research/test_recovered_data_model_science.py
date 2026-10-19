@@ -556,8 +556,16 @@ def test_native_group_validator_rejects_forged_observations(tmp_path, mutation):
         groups.loc[0, "mean_label_value"] = 4.0
     else:
         groups.loc[0, "timestamp"] = pd.Timestamp("2024-01-05")
+    groups = groups.sort_values(["timestamp", "signal", "label", "group"]).reset_index(
+        drop=True
+    )
     groups.to_parquet(path, index=False)
-    with pytest.raises(ValueError):
+    expected_error = {
+        "count": "evaluation_metric_group_observations_mismatch",
+        "empty_mean": "evaluation_group_observations_invalid",
+        "foreign_pair": "evaluation_metric_group_observations_mismatch",
+    }[mutation]
+    with pytest.raises(ValueError, match=f"^{expected_error}$"):
         read_evaluation_outputs(output)
 
 

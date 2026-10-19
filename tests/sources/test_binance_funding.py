@@ -109,9 +109,7 @@ def test_funding_unproven_coverage_never_becomes_zero(tmp_path, changes):
         ),
     ),
 )
-def test_funding_malformed_calendar_rejected_with_resources_released(
-    tmp_path, rows, error
-):
+def test_funding_malformed_calendar_rejected_before_yield(tmp_path, rows, error):
     raw = tmp_path / "raw"
     _write(raw, rows=rows)
     with pytest.raises(ValueError, match=f"^{error}$"):

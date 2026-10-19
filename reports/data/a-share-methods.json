@@ -1,0 +1,2913 @@
+[
+  {
+    "case": "core6",
+    "access": "development",
+    "scenario": "pv_all",
+    "factors": [
+      "momentum_252_20",
+      "reversal_5d",
+      "volatility_20d",
+      "amihud_20d",
+      "turnover_20d",
+      "log_float_market_cap"
+    ],
+    "execution": {
+      "adv_participation": 0.05,
+      "adv_sensitivities": [
+        0.01,
+        0.02,
+        0.05,
+        0.1
+      ],
+      "impact_bps": 25.0,
+      "initial_nav": 1000000000.0,
+      "slippage_bps": 5.0,
+      "valuation_currency": "CNY"
+    },
+    "recipe": {
+      "recipe_id": "a_share_canonical",
+      "role": "primary"
+    },
+    "chronology": {
+      "scoring_lookback_months": 12,
+      "warmup_window": {
+        "end": "2018-12-31",
+        "start": "2018-01-01"
+      }
+    },
+    "model_algorithms": [
+      "equal_weight_rank_ensemble",
+      "ic_weighted_rank_ensemble",
+      "linear_regression",
+      "huber_regression",
+      "ridge_regression",
+      "lasso_regression",
+      "xgboost_regressor",
+      "decision_tree_regressor",
+      "lightgbm_regressor"
+    ],
+    "input_counts": [
+      {
+        "algorithm": "equal_weight_rank_ensemble",
+        "features": 6,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "ic_weighted_rank_ensemble",
+        "features": 6,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "linear_regression",
+        "features": 12,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "huber_regression",
+        "features": 12,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "ridge_regression",
+        "features": 12,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "lasso_regression",
+        "features": 12,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "xgboost_regressor",
+        "features": 12,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "decision_tree_regressor",
+        "features": 12,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "lightgbm_regressor",
+        "features": 12,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      }
+    ],
+    "selection": {
+      "global": {
+        "development_curve": "retrospective",
+        "scoring": "all_formal_validation"
+      },
+      "quarterly": {
+        "development_curve": "causal",
+        "scoring": "past_12_months"
+      }
+    },
+    "models": [
+      {
+        "hyperparameters": {},
+        "model_algorithm": "equal_weight_rank_ensemble",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {},
+        "model_algorithm": "ic_weighted_rank_ensemble",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {},
+        "model_algorithm": "linear_regression",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "alpha": 1.0,
+          "epsilon": 1.35,
+          "max_iter": 1000,
+          "tol": 1e-05,
+          "warm_start": false
+        },
+        "model_algorithm": "huber_regression",
+        "parameter_candidates": [
+          {
+            "epsilon": 1.35,
+            "max_iter": 1000,
+            "regularization_strength": 10.0,
+            "tol": 1e-05,
+            "warm_start": false
+          },
+          {
+            "epsilon": 1.35,
+            "max_iter": 1000,
+            "regularization_strength": 1.0,
+            "tol": 1e-05,
+            "warm_start": false
+          },
+          {
+            "epsilon": 1.35,
+            "max_iter": 1000,
+            "regularization_strength": 0.1,
+            "tol": 1e-05,
+            "warm_start": false
+          },
+          {
+            "epsilon": 1.35,
+            "max_iter": 1000,
+            "regularization_strength": 0.01,
+            "tol": 1e-05,
+            "warm_start": false
+          }
+        ],
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "alpha": 1.0
+        },
+        "model_algorithm": "ridge_regression",
+        "parameter_candidates": [
+          {
+            "regularization_strength": 10.0
+          },
+          {
+            "regularization_strength": 1.0
+          },
+          {
+            "regularization_strength": 0.1
+          },
+          {
+            "regularization_strength": 0.01
+          }
+        ],
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "alpha": 0.001,
+          "fit_intercept": true,
+          "max_iter": 20000,
+          "positive": false,
+          "selection": "cyclic",
+          "tol": 1e-05
+        },
+        "model_algorithm": "lasso_regression",
+        "parameter_candidates": [
+          {
+            "alpha": 0.03,
+            "fit_intercept": true,
+            "max_iter": 20000,
+            "positive": false,
+            "selection": "cyclic",
+            "tol": 1e-05
+          },
+          {
+            "alpha": 0.01,
+            "fit_intercept": true,
+            "max_iter": 20000,
+            "positive": false,
+            "selection": "cyclic",
+            "tol": 1e-05
+          },
+          {
+            "alpha": 0.003,
+            "fit_intercept": true,
+            "max_iter": 20000,
+            "positive": false,
+            "selection": "cyclic",
+            "tol": 1e-05
+          },
+          {
+            "alpha": 0.001,
+            "fit_intercept": true,
+            "max_iter": 20000,
+            "positive": false,
+            "selection": "cyclic",
+            "tol": 1e-05
+          }
+        ],
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "colsample_bytree": 0.8,
+          "device": "cpu",
+          "gamma": 0.0,
+          "learning_rate": 0.05,
+          "max_bin": 256,
+          "max_depth": 3,
+          "min_child_weight": 1.0,
+          "n_estimators": 400,
+          "n_jobs": -1,
+          "objective": "reg:squarederror",
+          "reg_alpha": 0.0,
+          "reg_lambda": 0.0,
+          "subsample": 0.8,
+          "tree_method": "hist"
+        },
+        "model_algorithm": "xgboost_regressor",
+        "parameter_candidates": [
+          {
+            "colsample_bytree": 0.8,
+            "device": "cpu",
+            "gamma": 0.0,
+            "learning_rate": 0.05,
+            "max_bin": 256,
+            "max_depth": 3,
+            "min_child_weight_fraction": 0.001,
+            "n_estimators": 400,
+            "n_jobs": -1,
+            "objective": "reg:squarederror",
+            "reg_alpha": 0.0,
+            "reg_lambda": 0.0,
+            "subsample": 0.8,
+            "tree_method": "hist"
+          },
+          {
+            "colsample_bytree": 0.8,
+            "device": "cpu",
+            "gamma": 0.0,
+            "learning_rate": 0.05,
+            "max_bin": 256,
+            "max_depth": 5,
+            "min_child_weight_fraction": 0.0003,
+            "n_estimators": 400,
+            "n_jobs": -1,
+            "objective": "reg:squarederror",
+            "reg_alpha": 0.0,
+            "reg_lambda": 0.0,
+            "subsample": 0.8,
+            "tree_method": "hist"
+          },
+          {
+            "colsample_bytree": 0.8,
+            "device": "cpu",
+            "gamma": 0.0,
+            "learning_rate": 0.05,
+            "max_bin": 256,
+            "max_depth": 7,
+            "min_child_weight_fraction": 0.0001,
+            "n_estimators": 400,
+            "n_jobs": -1,
+            "objective": "reg:squarederror",
+            "reg_alpha": 0.0,
+            "reg_lambda": 0.0,
+            "subsample": 0.8,
+            "tree_method": "hist"
+          }
+        ],
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "max_depth": 3,
+          "min_samples_leaf": 0.001
+        },
+        "model_algorithm": "decision_tree_regressor",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "learning_rate": 0.05,
+          "min_child_samples": 20,
+          "n_estimators": 400,
+          "n_jobs": -1,
+          "num_leaves": 31,
+          "verbosity": -1
+        },
+        "model_algorithm": "lightgbm_regressor",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      }
+    ]
+  },
+  {
+    "case": "pv25",
+    "access": "development",
+    "scenario": "pv_all",
+    "factors": [
+      "reversal_1d",
+      "reversal_5d",
+      "reversal_20d",
+      "momentum_60_20",
+      "momentum_120_20",
+      "momentum_252_20",
+      "volatility_20d",
+      "volatility_60d",
+      "downside_volatility_20d",
+      "downside_volatility_60d",
+      "max_return_20d",
+      "skewness_60d",
+      "drawdown_60d",
+      "amplitude_20d",
+      "log_avg_amount_20d",
+      "turnover_20d",
+      "turnover_60d",
+      "turnover_volatility_20d",
+      "amihud_20d",
+      "amihud_60d",
+      "amount_shock_20d",
+      "return_amount_corr_20d",
+      "trend_efficiency_60d",
+      "signed_amount_flow_20d",
+      "log_float_market_cap"
+    ],
+    "execution": {
+      "adv_participation": 0.05,
+      "adv_sensitivities": [
+        0.01,
+        0.02,
+        0.05,
+        0.1
+      ],
+      "impact_bps": 25.0,
+      "initial_nav": 1000000000.0,
+      "slippage_bps": 5.0,
+      "valuation_currency": "CNY"
+    },
+    "recipe": {
+      "recipe_id": "a_share_canonical",
+      "role": "primary"
+    },
+    "chronology": {
+      "scoring_lookback_months": 12,
+      "warmup_window": {
+        "end": "2018-12-31",
+        "start": "2018-01-01"
+      }
+    },
+    "model_algorithms": [
+      "equal_weight_rank_ensemble",
+      "ic_weighted_rank_ensemble",
+      "linear_regression",
+      "huber_regression",
+      "ridge_regression",
+      "lasso_regression",
+      "xgboost_regressor",
+      "decision_tree_regressor",
+      "lightgbm_regressor"
+    ],
+    "input_counts": [
+      {
+        "algorithm": "equal_weight_rank_ensemble",
+        "features": 25,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "ic_weighted_rank_ensemble",
+        "features": 25,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "linear_regression",
+        "features": 50,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "huber_regression",
+        "features": 50,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "ridge_regression",
+        "features": 50,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "lasso_regression",
+        "features": 50,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "xgboost_regressor",
+        "features": 50,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "decision_tree_regressor",
+        "features": 50,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "lightgbm_regressor",
+        "features": 50,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      }
+    ],
+    "selection": {
+      "global": {
+        "development_curve": "retrospective",
+        "scoring": "all_formal_validation"
+      },
+      "quarterly": {
+        "development_curve": "causal",
+        "scoring": "past_12_months"
+      }
+    },
+    "models": [
+      {
+        "hyperparameters": {},
+        "model_algorithm": "equal_weight_rank_ensemble",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {},
+        "model_algorithm": "ic_weighted_rank_ensemble",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {},
+        "model_algorithm": "linear_regression",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "alpha": 1.0,
+          "epsilon": 1.35,
+          "max_iter": 1000,
+          "tol": 1e-05,
+          "warm_start": false
+        },
+        "model_algorithm": "huber_regression",
+        "parameter_candidates": [
+          {
+            "epsilon": 1.35,
+            "max_iter": 1000,
+            "regularization_strength": 10.0,
+            "tol": 1e-05,
+            "warm_start": false
+          },
+          {
+            "epsilon": 1.35,
+            "max_iter": 1000,
+            "regularization_strength": 1.0,
+            "tol": 1e-05,
+            "warm_start": false
+          },
+          {
+            "epsilon": 1.35,
+            "max_iter": 1000,
+            "regularization_strength": 0.1,
+            "tol": 1e-05,
+            "warm_start": false
+          },
+          {
+            "epsilon": 1.35,
+            "max_iter": 1000,
+            "regularization_strength": 0.01,
+            "tol": 1e-05,
+            "warm_start": false
+          }
+        ],
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "alpha": 1.0
+        },
+        "model_algorithm": "ridge_regression",
+        "parameter_candidates": [
+          {
+            "regularization_strength": 10.0
+          },
+          {
+            "regularization_strength": 1.0
+          },
+          {
+            "regularization_strength": 0.1
+          },
+          {
+            "regularization_strength": 0.01
+          }
+        ],
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "alpha": 0.001,
+          "fit_intercept": true,
+          "max_iter": 20000,
+          "positive": false,
+          "selection": "cyclic",
+          "tol": 1e-05
+        },
+        "model_algorithm": "lasso_regression",
+        "parameter_candidates": [
+          {
+            "alpha": 0.03,
+            "fit_intercept": true,
+            "max_iter": 20000,
+            "positive": false,
+            "selection": "cyclic",
+            "tol": 1e-05
+          },
+          {
+            "alpha": 0.01,
+            "fit_intercept": true,
+            "max_iter": 20000,
+            "positive": false,
+            "selection": "cyclic",
+            "tol": 1e-05
+          },
+          {
+            "alpha": 0.003,
+            "fit_intercept": true,
+            "max_iter": 20000,
+            "positive": false,
+            "selection": "cyclic",
+            "tol": 1e-05
+          },
+          {
+            "alpha": 0.001,
+            "fit_intercept": true,
+            "max_iter": 20000,
+            "positive": false,
+            "selection": "cyclic",
+            "tol": 1e-05
+          }
+        ],
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "colsample_bytree": 0.8,
+          "device": "cpu",
+          "gamma": 0.0,
+          "learning_rate": 0.05,
+          "max_bin": 256,
+          "max_depth": 3,
+          "min_child_weight": 1.0,
+          "n_estimators": 400,
+          "n_jobs": -1,
+          "objective": "reg:squarederror",
+          "reg_alpha": 0.0,
+          "reg_lambda": 0.0,
+          "subsample": 0.8,
+          "tree_method": "hist"
+        },
+        "model_algorithm": "xgboost_regressor",
+        "parameter_candidates": [
+          {
+            "colsample_bytree": 0.8,
+            "device": "cpu",
+            "gamma": 0.0,
+            "learning_rate": 0.05,
+            "max_bin": 256,
+            "max_depth": 3,
+            "min_child_weight_fraction": 0.001,
+            "n_estimators": 400,
+            "n_jobs": -1,
+            "objective": "reg:squarederror",
+            "reg_alpha": 0.0,
+            "reg_lambda": 0.0,
+            "subsample": 0.8,
+            "tree_method": "hist"
+          },
+          {
+            "colsample_bytree": 0.8,
+            "device": "cpu",
+            "gamma": 0.0,
+            "learning_rate": 0.05,
+            "max_bin": 256,
+            "max_depth": 5,
+            "min_child_weight_fraction": 0.0003,
+            "n_estimators": 400,
+            "n_jobs": -1,
+            "objective": "reg:squarederror",
+            "reg_alpha": 0.0,
+            "reg_lambda": 0.0,
+            "subsample": 0.8,
+            "tree_method": "hist"
+          },
+          {
+            "colsample_bytree": 0.8,
+            "device": "cpu",
+            "gamma": 0.0,
+            "learning_rate": 0.05,
+            "max_bin": 256,
+            "max_depth": 7,
+            "min_child_weight_fraction": 0.0001,
+            "n_estimators": 400,
+            "n_jobs": -1,
+            "objective": "reg:squarederror",
+            "reg_alpha": 0.0,
+            "reg_lambda": 0.0,
+            "subsample": 0.8,
+            "tree_method": "hist"
+          }
+        ],
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "max_depth": 3,
+          "min_samples_leaf": 0.001
+        },
+        "model_algorithm": "decision_tree_regressor",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "learning_rate": 0.05,
+          "min_child_samples": 20,
+          "n_estimators": 400,
+          "n_jobs": -1,
+          "num_leaves": 31,
+          "verbosity": -1
+        },
+        "model_algorithm": "lightgbm_regressor",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      }
+    ]
+  },
+  {
+    "case": "pv52",
+    "access": "development",
+    "scenario": "pv_expanded",
+    "factors": [
+      "reversal_1d",
+      "reversal_5d",
+      "reversal_20d",
+      "momentum_60_20",
+      "momentum_120_20",
+      "momentum_252_20",
+      "volatility_20d",
+      "volatility_60d",
+      "downside_volatility_20d",
+      "downside_volatility_60d",
+      "max_return_20d",
+      "skewness_60d",
+      "drawdown_60d",
+      "amplitude_20d",
+      "log_avg_amount_20d",
+      "turnover_20d",
+      "turnover_60d",
+      "turnover_volatility_20d",
+      "amihud_20d",
+      "amihud_60d",
+      "amount_shock_20d",
+      "return_amount_corr_20d",
+      "trend_efficiency_60d",
+      "signed_amount_flow_20d",
+      "log_float_market_cap",
+      "momentum_20d",
+      "momentum_60d",
+      "upside_volatility_20d",
+      "min_return_20d",
+      "kurtosis_60d",
+      "avg_amount_20d",
+      "amount_change_20d",
+      "volume_change_20d",
+      "turnover_change_20d",
+      "amount_volatility_20d",
+      "volume_shock_20d",
+      "return_volume_corr_20d",
+      "return_turnover_corr_20d",
+      "return_amount_imbalance_20d",
+      "zero_amount_ratio_20d",
+      "log_total_market_cap",
+      "share_price",
+      "avg_amount_126d",
+      "amount_cv_126d",
+      "turnover_cv_126d",
+      "amihud_126d",
+      "skewness_20d",
+      "top5_return_mean_20d",
+      "turnover_250d",
+      "abnormal_turnover_20_250",
+      "beta_252d",
+      "residual_volatility_60d"
+    ],
+    "execution": {
+      "adv_participation": 0.05,
+      "adv_sensitivities": [
+        0.01,
+        0.02,
+        0.05,
+        0.1
+      ],
+      "impact_bps": 25.0,
+      "initial_nav": 1000000000.0,
+      "slippage_bps": 5.0,
+      "valuation_currency": "CNY"
+    },
+    "recipe": {
+      "recipe_id": "a_share_canonical",
+      "role": "primary"
+    },
+    "chronology": {
+      "scoring_lookback_months": 12,
+      "warmup_window": {
+        "end": "2018-12-31",
+        "start": "2018-01-01"
+      }
+    },
+    "model_algorithms": [
+      "equal_weight_rank_ensemble",
+      "ic_weighted_rank_ensemble",
+      "linear_regression",
+      "huber_regression",
+      "ridge_regression",
+      "lasso_regression",
+      "xgboost_regressor",
+      "lightgbm_regressor",
+      "decision_tree_regressor"
+    ],
+    "input_counts": [
+      {
+        "algorithm": "equal_weight_rank_ensemble",
+        "features": 52,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "ic_weighted_rank_ensemble",
+        "features": 52,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "linear_regression",
+        "features": 104,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "huber_regression",
+        "features": 104,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "ridge_regression",
+        "features": 104,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "lasso_regression",
+        "features": 104,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "xgboost_regressor",
+        "features": 104,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "lightgbm_regressor",
+        "features": 104,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "decision_tree_regressor",
+        "features": 104,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      }
+    ],
+    "selection": {
+      "global": {
+        "development_curve": "retrospective",
+        "scoring": "all_formal_validation"
+      },
+      "quarterly": {
+        "development_curve": "causal",
+        "scoring": "past_12_months"
+      }
+    },
+    "models": [
+      {
+        "hyperparameters": {},
+        "model_algorithm": "equal_weight_rank_ensemble",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {},
+        "model_algorithm": "ic_weighted_rank_ensemble",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {},
+        "model_algorithm": "linear_regression",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {},
+        "model_algorithm": "huber_regression",
+        "parameter_candidates": [
+          {
+            "epsilon": 1.35,
+            "max_iter": 1000,
+            "regularization_strength": 10.0,
+            "tol": 1e-05,
+            "warm_start": false
+          },
+          {
+            "epsilon": 1.35,
+            "max_iter": 1000,
+            "regularization_strength": 1.0,
+            "tol": 1e-05,
+            "warm_start": false
+          },
+          {
+            "epsilon": 1.35,
+            "max_iter": 1000,
+            "regularization_strength": 0.1,
+            "tol": 1e-05,
+            "warm_start": false
+          },
+          {
+            "epsilon": 1.35,
+            "max_iter": 1000,
+            "regularization_strength": 0.01,
+            "tol": 1e-05,
+            "warm_start": false
+          }
+        ],
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {},
+        "model_algorithm": "ridge_regression",
+        "parameter_candidates": [
+          {
+            "regularization_strength": 10.0
+          },
+          {
+            "regularization_strength": 1.0
+          },
+          {
+            "regularization_strength": 0.1
+          },
+          {
+            "regularization_strength": 0.01
+          }
+        ],
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {},
+        "model_algorithm": "lasso_regression",
+        "parameter_candidates": [
+          {
+            "alpha": 0.03,
+            "fit_intercept": true,
+            "max_iter": 20000,
+            "positive": false,
+            "selection": "cyclic",
+            "tol": 1e-05
+          },
+          {
+            "alpha": 0.01,
+            "fit_intercept": true,
+            "max_iter": 20000,
+            "positive": false,
+            "selection": "cyclic",
+            "tol": 1e-05
+          },
+          {
+            "alpha": 0.003,
+            "fit_intercept": true,
+            "max_iter": 20000,
+            "positive": false,
+            "selection": "cyclic",
+            "tol": 1e-05
+          },
+          {
+            "alpha": 0.001,
+            "fit_intercept": true,
+            "max_iter": 20000,
+            "positive": false,
+            "selection": "cyclic",
+            "tol": 1e-05
+          }
+        ],
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {},
+        "model_algorithm": "xgboost_regressor",
+        "parameter_candidates": [
+          {
+            "colsample_bytree": 0.8,
+            "device": "cpu",
+            "gamma": 0.0,
+            "learning_rate": 0.05,
+            "max_bin": 256,
+            "max_depth": 3,
+            "min_child_weight_fraction": 0.001,
+            "n_estimators": 400,
+            "n_jobs": -1,
+            "objective": "reg:squarederror",
+            "reg_alpha": 0.0,
+            "reg_lambda": 0.0,
+            "subsample": 0.8,
+            "tree_method": "hist"
+          },
+          {
+            "colsample_bytree": 0.8,
+            "device": "cpu",
+            "gamma": 0.0,
+            "learning_rate": 0.05,
+            "max_bin": 256,
+            "max_depth": 5,
+            "min_child_weight_fraction": 0.0003,
+            "n_estimators": 400,
+            "n_jobs": -1,
+            "objective": "reg:squarederror",
+            "reg_alpha": 0.0,
+            "reg_lambda": 0.0,
+            "subsample": 0.8,
+            "tree_method": "hist"
+          },
+          {
+            "colsample_bytree": 0.8,
+            "device": "cpu",
+            "gamma": 0.0,
+            "learning_rate": 0.05,
+            "max_bin": 256,
+            "max_depth": 7,
+            "min_child_weight_fraction": 0.0001,
+            "n_estimators": 400,
+            "n_jobs": -1,
+            "objective": "reg:squarederror",
+            "reg_alpha": 0.0,
+            "reg_lambda": 0.0,
+            "subsample": 0.8,
+            "tree_method": "hist"
+          }
+        ],
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "learning_rate": 0.05,
+          "min_child_samples": 20,
+          "n_estimators": 400,
+          "n_jobs": -1,
+          "num_leaves": 31,
+          "verbosity": -1
+        },
+        "model_algorithm": "lightgbm_regressor",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "max_depth": 3,
+          "min_samples_leaf": 0.001
+        },
+        "model_algorithm": "decision_tree_regressor",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      }
+    ]
+  },
+  {
+    "case": "without-size",
+    "access": "development",
+    "scenario": "pv_expanded",
+    "factors": [
+      "reversal_1d",
+      "reversal_5d",
+      "reversal_20d",
+      "momentum_60_20",
+      "momentum_120_20",
+      "momentum_252_20",
+      "volatility_20d",
+      "volatility_60d",
+      "downside_volatility_20d",
+      "downside_volatility_60d",
+      "max_return_20d",
+      "skewness_60d",
+      "drawdown_60d",
+      "amplitude_20d",
+      "log_avg_amount_20d",
+      "turnover_20d",
+      "turnover_60d",
+      "turnover_volatility_20d",
+      "amihud_20d",
+      "amihud_60d",
+      "amount_shock_20d",
+      "return_amount_corr_20d",
+      "trend_efficiency_60d",
+      "signed_amount_flow_20d",
+      "momentum_20d",
+      "momentum_60d",
+      "upside_volatility_20d",
+      "min_return_20d",
+      "kurtosis_60d",
+      "avg_amount_20d",
+      "amount_change_20d",
+      "volume_change_20d",
+      "turnover_change_20d",
+      "amount_volatility_20d",
+      "volume_shock_20d",
+      "return_volume_corr_20d",
+      "return_turnover_corr_20d",
+      "return_amount_imbalance_20d",
+      "zero_amount_ratio_20d",
+      "avg_amount_126d",
+      "amount_cv_126d",
+      "turnover_cv_126d",
+      "amihud_126d",
+      "skewness_20d",
+      "top5_return_mean_20d",
+      "turnover_250d",
+      "abnormal_turnover_20_250",
+      "beta_252d",
+      "residual_volatility_60d"
+    ],
+    "execution": {
+      "adv_participation": 0.05,
+      "adv_sensitivities": [
+        0.01,
+        0.02,
+        0.05,
+        0.1
+      ],
+      "impact_bps": 25.0,
+      "initial_nav": 1000000000.0,
+      "slippage_bps": 5.0,
+      "valuation_currency": "CNY"
+    },
+    "recipe": {
+      "recipe_id": "a_share_canonical",
+      "role": "primary"
+    },
+    "chronology": {
+      "scoring_lookback_months": 12,
+      "warmup_window": {
+        "end": "2018-12-31",
+        "start": "2018-01-01"
+      }
+    },
+    "model_algorithms": [
+      "equal_weight_rank_ensemble",
+      "ic_weighted_rank_ensemble",
+      "linear_regression",
+      "huber_regression",
+      "ridge_regression",
+      "lasso_regression",
+      "xgboost_regressor",
+      "lightgbm_regressor",
+      "decision_tree_regressor"
+    ],
+    "input_counts": [
+      {
+        "algorithm": "equal_weight_rank_ensemble",
+        "features": 49,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "ic_weighted_rank_ensemble",
+        "features": 49,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "linear_regression",
+        "features": 98,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "huber_regression",
+        "features": 98,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "ridge_regression",
+        "features": 98,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "lasso_regression",
+        "features": 98,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "xgboost_regressor",
+        "features": 98,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "lightgbm_regressor",
+        "features": 98,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "decision_tree_regressor",
+        "features": 98,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      }
+    ],
+    "selection": {
+      "global": {
+        "development_curve": "retrospective",
+        "scoring": "all_formal_validation"
+      },
+      "quarterly": {
+        "development_curve": "causal",
+        "scoring": "past_12_months"
+      }
+    },
+    "models": [
+      {
+        "hyperparameters": {},
+        "model_algorithm": "equal_weight_rank_ensemble",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {},
+        "model_algorithm": "ic_weighted_rank_ensemble",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {},
+        "model_algorithm": "linear_regression",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "alpha": 1.0,
+          "epsilon": 1.35,
+          "max_iter": 1000,
+          "tol": 1e-05,
+          "warm_start": false
+        },
+        "model_algorithm": "huber_regression",
+        "parameter_candidates": [
+          {
+            "epsilon": 1.35,
+            "max_iter": 1000,
+            "regularization_strength": 10.0,
+            "tol": 1e-05,
+            "warm_start": false
+          },
+          {
+            "epsilon": 1.35,
+            "max_iter": 1000,
+            "regularization_strength": 1.0,
+            "tol": 1e-05,
+            "warm_start": false
+          },
+          {
+            "epsilon": 1.35,
+            "max_iter": 1000,
+            "regularization_strength": 0.1,
+            "tol": 1e-05,
+            "warm_start": false
+          },
+          {
+            "epsilon": 1.35,
+            "max_iter": 1000,
+            "regularization_strength": 0.01,
+            "tol": 1e-05,
+            "warm_start": false
+          }
+        ],
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "alpha": 1.0
+        },
+        "model_algorithm": "ridge_regression",
+        "parameter_candidates": [
+          {
+            "regularization_strength": 10.0
+          },
+          {
+            "regularization_strength": 1.0
+          },
+          {
+            "regularization_strength": 0.1
+          },
+          {
+            "regularization_strength": 0.01
+          }
+        ],
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "alpha": 0.001,
+          "fit_intercept": true,
+          "max_iter": 20000,
+          "positive": false,
+          "selection": "cyclic",
+          "tol": 1e-05
+        },
+        "model_algorithm": "lasso_regression",
+        "parameter_candidates": [
+          {
+            "alpha": 0.03,
+            "fit_intercept": true,
+            "max_iter": 20000,
+            "positive": false,
+            "selection": "cyclic",
+            "tol": 1e-05
+          },
+          {
+            "alpha": 0.01,
+            "fit_intercept": true,
+            "max_iter": 20000,
+            "positive": false,
+            "selection": "cyclic",
+            "tol": 1e-05
+          },
+          {
+            "alpha": 0.003,
+            "fit_intercept": true,
+            "max_iter": 20000,
+            "positive": false,
+            "selection": "cyclic",
+            "tol": 1e-05
+          },
+          {
+            "alpha": 0.001,
+            "fit_intercept": true,
+            "max_iter": 20000,
+            "positive": false,
+            "selection": "cyclic",
+            "tol": 1e-05
+          }
+        ],
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "colsample_bytree": 0.8,
+          "device": "cpu",
+          "gamma": 0.0,
+          "learning_rate": 0.05,
+          "max_bin": 256,
+          "max_depth": 3,
+          "min_child_weight": 1.0,
+          "n_estimators": 400,
+          "n_jobs": -1,
+          "objective": "reg:squarederror",
+          "reg_alpha": 0.0,
+          "reg_lambda": 0.0,
+          "subsample": 0.8,
+          "tree_method": "hist"
+        },
+        "model_algorithm": "xgboost_regressor",
+        "parameter_candidates": [
+          {
+            "colsample_bytree": 0.8,
+            "device": "cpu",
+            "gamma": 0.0,
+            "learning_rate": 0.05,
+            "max_bin": 256,
+            "max_depth": 3,
+            "min_child_weight_fraction": 0.001,
+            "n_estimators": 400,
+            "n_jobs": -1,
+            "objective": "reg:squarederror",
+            "reg_alpha": 0.0,
+            "reg_lambda": 0.0,
+            "subsample": 0.8,
+            "tree_method": "hist"
+          },
+          {
+            "colsample_bytree": 0.8,
+            "device": "cpu",
+            "gamma": 0.0,
+            "learning_rate": 0.05,
+            "max_bin": 256,
+            "max_depth": 5,
+            "min_child_weight_fraction": 0.0003,
+            "n_estimators": 400,
+            "n_jobs": -1,
+            "objective": "reg:squarederror",
+            "reg_alpha": 0.0,
+            "reg_lambda": 0.0,
+            "subsample": 0.8,
+            "tree_method": "hist"
+          },
+          {
+            "colsample_bytree": 0.8,
+            "device": "cpu",
+            "gamma": 0.0,
+            "learning_rate": 0.05,
+            "max_bin": 256,
+            "max_depth": 7,
+            "min_child_weight_fraction": 0.0001,
+            "n_estimators": 400,
+            "n_jobs": -1,
+            "objective": "reg:squarederror",
+            "reg_alpha": 0.0,
+            "reg_lambda": 0.0,
+            "subsample": 0.8,
+            "tree_method": "hist"
+          }
+        ],
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "learning_rate": 0.05,
+          "min_child_samples": 20,
+          "n_estimators": 400,
+          "n_jobs": -1,
+          "num_leaves": 31,
+          "verbosity": -1
+        },
+        "model_algorithm": "lightgbm_regressor",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "max_depth": 3,
+          "min_samples_leaf": 0.001
+        },
+        "model_algorithm": "decision_tree_regressor",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      }
+    ]
+  },
+  {
+    "case": "without-risk",
+    "access": "development",
+    "scenario": "pv_expanded",
+    "factors": [
+      "reversal_1d",
+      "reversal_5d",
+      "reversal_20d",
+      "momentum_60_20",
+      "momentum_120_20",
+      "momentum_252_20",
+      "log_avg_amount_20d",
+      "turnover_20d",
+      "turnover_60d",
+      "amihud_20d",
+      "amihud_60d",
+      "amount_shock_20d",
+      "return_amount_corr_20d",
+      "trend_efficiency_60d",
+      "signed_amount_flow_20d",
+      "log_float_market_cap",
+      "momentum_20d",
+      "momentum_60d",
+      "avg_amount_20d",
+      "amount_change_20d",
+      "volume_change_20d",
+      "turnover_change_20d",
+      "volume_shock_20d",
+      "return_volume_corr_20d",
+      "return_turnover_corr_20d",
+      "return_amount_imbalance_20d",
+      "zero_amount_ratio_20d",
+      "log_total_market_cap",
+      "share_price",
+      "avg_amount_126d",
+      "amount_cv_126d",
+      "turnover_cv_126d",
+      "amihud_126d",
+      "turnover_250d",
+      "abnormal_turnover_20_250"
+    ],
+    "execution": {
+      "adv_participation": 0.05,
+      "adv_sensitivities": [
+        0.01,
+        0.02,
+        0.05,
+        0.1
+      ],
+      "impact_bps": 25.0,
+      "initial_nav": 1000000000.0,
+      "slippage_bps": 5.0,
+      "valuation_currency": "CNY"
+    },
+    "recipe": {
+      "recipe_id": "a_share_canonical",
+      "role": "primary"
+    },
+    "chronology": {
+      "scoring_lookback_months": 12,
+      "warmup_window": {
+        "end": "2018-12-31",
+        "start": "2018-01-01"
+      }
+    },
+    "model_algorithms": [
+      "equal_weight_rank_ensemble",
+      "ic_weighted_rank_ensemble",
+      "linear_regression",
+      "huber_regression",
+      "ridge_regression",
+      "lasso_regression",
+      "xgboost_regressor",
+      "lightgbm_regressor",
+      "decision_tree_regressor"
+    ],
+    "input_counts": [
+      {
+        "algorithm": "equal_weight_rank_ensemble",
+        "features": 35,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "ic_weighted_rank_ensemble",
+        "features": 35,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "linear_regression",
+        "features": 70,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "huber_regression",
+        "features": 70,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "ridge_regression",
+        "features": 70,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "lasso_regression",
+        "features": 70,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "xgboost_regressor",
+        "features": 70,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "lightgbm_regressor",
+        "features": 70,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "decision_tree_regressor",
+        "features": 70,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      }
+    ],
+    "selection": {
+      "global": {
+        "development_curve": "retrospective",
+        "scoring": "all_formal_validation"
+      },
+      "quarterly": {
+        "development_curve": "causal",
+        "scoring": "past_12_months"
+      }
+    },
+    "models": [
+      {
+        "hyperparameters": {},
+        "model_algorithm": "equal_weight_rank_ensemble",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {},
+        "model_algorithm": "ic_weighted_rank_ensemble",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {},
+        "model_algorithm": "linear_regression",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "alpha": 1.0,
+          "epsilon": 1.35,
+          "max_iter": 1000,
+          "tol": 1e-05,
+          "warm_start": false
+        },
+        "model_algorithm": "huber_regression",
+        "parameter_candidates": [
+          {
+            "epsilon": 1.35,
+            "max_iter": 1000,
+            "regularization_strength": 10.0,
+            "tol": 1e-05,
+            "warm_start": false
+          },
+          {
+            "epsilon": 1.35,
+            "max_iter": 1000,
+            "regularization_strength": 1.0,
+            "tol": 1e-05,
+            "warm_start": false
+          },
+          {
+            "epsilon": 1.35,
+            "max_iter": 1000,
+            "regularization_strength": 0.1,
+            "tol": 1e-05,
+            "warm_start": false
+          },
+          {
+            "epsilon": 1.35,
+            "max_iter": 1000,
+            "regularization_strength": 0.01,
+            "tol": 1e-05,
+            "warm_start": false
+          }
+        ],
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "alpha": 1.0
+        },
+        "model_algorithm": "ridge_regression",
+        "parameter_candidates": [
+          {
+            "regularization_strength": 10.0
+          },
+          {
+            "regularization_strength": 1.0
+          },
+          {
+            "regularization_strength": 0.1
+          },
+          {
+            "regularization_strength": 0.01
+          }
+        ],
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "alpha": 0.001,
+          "fit_intercept": true,
+          "max_iter": 20000,
+          "positive": false,
+          "selection": "cyclic",
+          "tol": 1e-05
+        },
+        "model_algorithm": "lasso_regression",
+        "parameter_candidates": [
+          {
+            "alpha": 0.03,
+            "fit_intercept": true,
+            "max_iter": 20000,
+            "positive": false,
+            "selection": "cyclic",
+            "tol": 1e-05
+          },
+          {
+            "alpha": 0.01,
+            "fit_intercept": true,
+            "max_iter": 20000,
+            "positive": false,
+            "selection": "cyclic",
+            "tol": 1e-05
+          },
+          {
+            "alpha": 0.003,
+            "fit_intercept": true,
+            "max_iter": 20000,
+            "positive": false,
+            "selection": "cyclic",
+            "tol": 1e-05
+          },
+          {
+            "alpha": 0.001,
+            "fit_intercept": true,
+            "max_iter": 20000,
+            "positive": false,
+            "selection": "cyclic",
+            "tol": 1e-05
+          }
+        ],
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "colsample_bytree": 0.8,
+          "device": "cpu",
+          "gamma": 0.0,
+          "learning_rate": 0.05,
+          "max_bin": 256,
+          "max_depth": 3,
+          "min_child_weight": 1.0,
+          "n_estimators": 400,
+          "n_jobs": -1,
+          "objective": "reg:squarederror",
+          "reg_alpha": 0.0,
+          "reg_lambda": 0.0,
+          "subsample": 0.8,
+          "tree_method": "hist"
+        },
+        "model_algorithm": "xgboost_regressor",
+        "parameter_candidates": [
+          {
+            "colsample_bytree": 0.8,
+            "device": "cpu",
+            "gamma": 0.0,
+            "learning_rate": 0.05,
+            "max_bin": 256,
+            "max_depth": 3,
+            "min_child_weight_fraction": 0.001,
+            "n_estimators": 400,
+            "n_jobs": -1,
+            "objective": "reg:squarederror",
+            "reg_alpha": 0.0,
+            "reg_lambda": 0.0,
+            "subsample": 0.8,
+            "tree_method": "hist"
+          },
+          {
+            "colsample_bytree": 0.8,
+            "device": "cpu",
+            "gamma": 0.0,
+            "learning_rate": 0.05,
+            "max_bin": 256,
+            "max_depth": 5,
+            "min_child_weight_fraction": 0.0003,
+            "n_estimators": 400,
+            "n_jobs": -1,
+            "objective": "reg:squarederror",
+            "reg_alpha": 0.0,
+            "reg_lambda": 0.0,
+            "subsample": 0.8,
+            "tree_method": "hist"
+          },
+          {
+            "colsample_bytree": 0.8,
+            "device": "cpu",
+            "gamma": 0.0,
+            "learning_rate": 0.05,
+            "max_bin": 256,
+            "max_depth": 7,
+            "min_child_weight_fraction": 0.0001,
+            "n_estimators": 400,
+            "n_jobs": -1,
+            "objective": "reg:squarederror",
+            "reg_alpha": 0.0,
+            "reg_lambda": 0.0,
+            "subsample": 0.8,
+            "tree_method": "hist"
+          }
+        ],
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "learning_rate": 0.05,
+          "min_child_samples": 20,
+          "n_estimators": 400,
+          "n_jobs": -1,
+          "num_leaves": 31,
+          "verbosity": -1
+        },
+        "model_algorithm": "lightgbm_regressor",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "max_depth": 3,
+          "min_samples_leaf": 0.001
+        },
+        "model_algorithm": "decision_tree_regressor",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      }
+    ]
+  },
+  {
+    "case": "without-activity",
+    "access": "development",
+    "scenario": "pv_expanded",
+    "factors": [
+      "reversal_1d",
+      "reversal_5d",
+      "reversal_20d",
+      "momentum_60_20",
+      "momentum_120_20",
+      "momentum_252_20",
+      "volatility_20d",
+      "volatility_60d",
+      "downside_volatility_20d",
+      "downside_volatility_60d",
+      "max_return_20d",
+      "skewness_60d",
+      "drawdown_60d",
+      "amplitude_20d",
+      "turnover_volatility_20d",
+      "trend_efficiency_60d",
+      "log_float_market_cap",
+      "momentum_20d",
+      "momentum_60d",
+      "upside_volatility_20d",
+      "min_return_20d",
+      "kurtosis_60d",
+      "amount_volatility_20d",
+      "log_total_market_cap",
+      "share_price",
+      "skewness_20d",
+      "top5_return_mean_20d",
+      "beta_252d",
+      "residual_volatility_60d"
+    ],
+    "execution": {
+      "adv_participation": 0.05,
+      "adv_sensitivities": [
+        0.01,
+        0.02,
+        0.05,
+        0.1
+      ],
+      "impact_bps": 25.0,
+      "initial_nav": 1000000000.0,
+      "slippage_bps": 5.0,
+      "valuation_currency": "CNY"
+    },
+    "recipe": {
+      "recipe_id": "a_share_canonical",
+      "role": "primary"
+    },
+    "chronology": {
+      "scoring_lookback_months": 12,
+      "warmup_window": {
+        "end": "2018-12-31",
+        "start": "2018-01-01"
+      }
+    },
+    "model_algorithms": [
+      "equal_weight_rank_ensemble",
+      "ic_weighted_rank_ensemble",
+      "linear_regression",
+      "huber_regression",
+      "ridge_regression",
+      "lasso_regression",
+      "xgboost_regressor",
+      "lightgbm_regressor",
+      "decision_tree_regressor"
+    ],
+    "input_counts": [
+      {
+        "algorithm": "equal_weight_rank_ensemble",
+        "features": 29,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "ic_weighted_rank_ensemble",
+        "features": 29,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "linear_regression",
+        "features": 58,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "huber_regression",
+        "features": 58,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "ridge_regression",
+        "features": 58,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "lasso_regression",
+        "features": 58,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "xgboost_regressor",
+        "features": 58,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "lightgbm_regressor",
+        "features": 58,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "decision_tree_regressor",
+        "features": 58,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      }
+    ],
+    "selection": {
+      "global": {
+        "development_curve": "retrospective",
+        "scoring": "all_formal_validation"
+      },
+      "quarterly": {
+        "development_curve": "causal",
+        "scoring": "past_12_months"
+      }
+    },
+    "models": [
+      {
+        "hyperparameters": {},
+        "model_algorithm": "equal_weight_rank_ensemble",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {},
+        "model_algorithm": "ic_weighted_rank_ensemble",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {},
+        "model_algorithm": "linear_regression",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "alpha": 1.0,
+          "epsilon": 1.35,
+          "max_iter": 1000,
+          "tol": 1e-05,
+          "warm_start": false
+        },
+        "model_algorithm": "huber_regression",
+        "parameter_candidates": [
+          {
+            "epsilon": 1.35,
+            "max_iter": 1000,
+            "regularization_strength": 10.0,
+            "tol": 1e-05,
+            "warm_start": false
+          },
+          {
+            "epsilon": 1.35,
+            "max_iter": 1000,
+            "regularization_strength": 1.0,
+            "tol": 1e-05,
+            "warm_start": false
+          },
+          {
+            "epsilon": 1.35,
+            "max_iter": 1000,
+            "regularization_strength": 0.1,
+            "tol": 1e-05,
+            "warm_start": false
+          },
+          {
+            "epsilon": 1.35,
+            "max_iter": 1000,
+            "regularization_strength": 0.01,
+            "tol": 1e-05,
+            "warm_start": false
+          }
+        ],
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "alpha": 1.0
+        },
+        "model_algorithm": "ridge_regression",
+        "parameter_candidates": [
+          {
+            "regularization_strength": 10.0
+          },
+          {
+            "regularization_strength": 1.0
+          },
+          {
+            "regularization_strength": 0.1
+          },
+          {
+            "regularization_strength": 0.01
+          }
+        ],
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "alpha": 0.001,
+          "fit_intercept": true,
+          "max_iter": 20000,
+          "positive": false,
+          "selection": "cyclic",
+          "tol": 1e-05
+        },
+        "model_algorithm": "lasso_regression",
+        "parameter_candidates": [
+          {
+            "alpha": 0.03,
+            "fit_intercept": true,
+            "max_iter": 20000,
+            "positive": false,
+            "selection": "cyclic",
+            "tol": 1e-05
+          },
+          {
+            "alpha": 0.01,
+            "fit_intercept": true,
+            "max_iter": 20000,
+            "positive": false,
+            "selection": "cyclic",
+            "tol": 1e-05
+          },
+          {
+            "alpha": 0.003,
+            "fit_intercept": true,
+            "max_iter": 20000,
+            "positive": false,
+            "selection": "cyclic",
+            "tol": 1e-05
+          },
+          {
+            "alpha": 0.001,
+            "fit_intercept": true,
+            "max_iter": 20000,
+            "positive": false,
+            "selection": "cyclic",
+            "tol": 1e-05
+          }
+        ],
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "colsample_bytree": 0.8,
+          "device": "cpu",
+          "gamma": 0.0,
+          "learning_rate": 0.05,
+          "max_bin": 256,
+          "max_depth": 3,
+          "min_child_weight": 1.0,
+          "n_estimators": 400,
+          "n_jobs": -1,
+          "objective": "reg:squarederror",
+          "reg_alpha": 0.0,
+          "reg_lambda": 0.0,
+          "subsample": 0.8,
+          "tree_method": "hist"
+        },
+        "model_algorithm": "xgboost_regressor",
+        "parameter_candidates": [
+          {
+            "colsample_bytree": 0.8,
+            "device": "cpu",
+            "gamma": 0.0,
+            "learning_rate": 0.05,
+            "max_bin": 256,
+            "max_depth": 3,
+            "min_child_weight_fraction": 0.001,
+            "n_estimators": 400,
+            "n_jobs": -1,
+            "objective": "reg:squarederror",
+            "reg_alpha": 0.0,
+            "reg_lambda": 0.0,
+            "subsample": 0.8,
+            "tree_method": "hist"
+          },
+          {
+            "colsample_bytree": 0.8,
+            "device": "cpu",
+            "gamma": 0.0,
+            "learning_rate": 0.05,
+            "max_bin": 256,
+            "max_depth": 5,
+            "min_child_weight_fraction": 0.0003,
+            "n_estimators": 400,
+            "n_jobs": -1,
+            "objective": "reg:squarederror",
+            "reg_alpha": 0.0,
+            "reg_lambda": 0.0,
+            "subsample": 0.8,
+            "tree_method": "hist"
+          },
+          {
+            "colsample_bytree": 0.8,
+            "device": "cpu",
+            "gamma": 0.0,
+            "learning_rate": 0.05,
+            "max_bin": 256,
+            "max_depth": 7,
+            "min_child_weight_fraction": 0.0001,
+            "n_estimators": 400,
+            "n_jobs": -1,
+            "objective": "reg:squarederror",
+            "reg_alpha": 0.0,
+            "reg_lambda": 0.0,
+            "subsample": 0.8,
+            "tree_method": "hist"
+          }
+        ],
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "learning_rate": 0.05,
+          "min_child_samples": 20,
+          "n_estimators": 400,
+          "n_jobs": -1,
+          "num_leaves": 31,
+          "verbosity": -1
+        },
+        "model_algorithm": "lightgbm_regressor",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "max_depth": 3,
+          "min_samples_leaf": 0.001
+        },
+        "model_algorithm": "decision_tree_regressor",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      }
+    ]
+  },
+  {
+    "case": "without-trend",
+    "access": "development",
+    "scenario": "pv_expanded",
+    "factors": [
+      "volatility_20d",
+      "volatility_60d",
+      "downside_volatility_20d",
+      "downside_volatility_60d",
+      "max_return_20d",
+      "skewness_60d",
+      "drawdown_60d",
+      "amplitude_20d",
+      "log_avg_amount_20d",
+      "turnover_20d",
+      "turnover_60d",
+      "turnover_volatility_20d",
+      "amihud_20d",
+      "amihud_60d",
+      "amount_shock_20d",
+      "return_amount_corr_20d",
+      "signed_amount_flow_20d",
+      "log_float_market_cap",
+      "upside_volatility_20d",
+      "min_return_20d",
+      "kurtosis_60d",
+      "avg_amount_20d",
+      "amount_change_20d",
+      "volume_change_20d",
+      "turnover_change_20d",
+      "amount_volatility_20d",
+      "volume_shock_20d",
+      "return_volume_corr_20d",
+      "return_turnover_corr_20d",
+      "return_amount_imbalance_20d",
+      "zero_amount_ratio_20d",
+      "log_total_market_cap",
+      "share_price",
+      "avg_amount_126d",
+      "amount_cv_126d",
+      "turnover_cv_126d",
+      "amihud_126d",
+      "skewness_20d",
+      "top5_return_mean_20d",
+      "turnover_250d",
+      "abnormal_turnover_20_250",
+      "beta_252d",
+      "residual_volatility_60d"
+    ],
+    "execution": {
+      "adv_participation": 0.05,
+      "adv_sensitivities": [
+        0.01,
+        0.02,
+        0.05,
+        0.1
+      ],
+      "impact_bps": 25.0,
+      "initial_nav": 1000000000.0,
+      "slippage_bps": 5.0,
+      "valuation_currency": "CNY"
+    },
+    "recipe": {
+      "recipe_id": "a_share_canonical",
+      "role": "primary"
+    },
+    "chronology": {
+      "scoring_lookback_months": 12,
+      "warmup_window": {
+        "end": "2018-12-31",
+        "start": "2018-01-01"
+      }
+    },
+    "model_algorithms": [
+      "equal_weight_rank_ensemble",
+      "ic_weighted_rank_ensemble",
+      "linear_regression",
+      "huber_regression",
+      "ridge_regression",
+      "lasso_regression",
+      "xgboost_regressor",
+      "lightgbm_regressor",
+      "decision_tree_regressor"
+    ],
+    "input_counts": [
+      {
+        "algorithm": "equal_weight_rank_ensemble",
+        "features": 43,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "ic_weighted_rank_ensemble",
+        "features": 43,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "linear_regression",
+        "features": 86,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "huber_regression",
+        "features": 86,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "ridge_regression",
+        "features": 86,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "lasso_regression",
+        "features": 86,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "xgboost_regressor",
+        "features": 86,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "lightgbm_regressor",
+        "features": 86,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "algorithm": "decision_tree_regressor",
+        "features": 86,
+        "factors": 0,
+        "weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      }
+    ],
+    "selection": {
+      "global": {
+        "development_curve": "retrospective",
+        "scoring": "all_formal_validation"
+      },
+      "quarterly": {
+        "development_curve": "causal",
+        "scoring": "past_12_months"
+      }
+    },
+    "models": [
+      {
+        "hyperparameters": {},
+        "model_algorithm": "equal_weight_rank_ensemble",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {},
+        "model_algorithm": "ic_weighted_rank_ensemble",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {},
+        "model_algorithm": "linear_regression",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "alpha": 1.0,
+          "epsilon": 1.35,
+          "max_iter": 1000,
+          "tol": 1e-05,
+          "warm_start": false
+        },
+        "model_algorithm": "huber_regression",
+        "parameter_candidates": [
+          {
+            "epsilon": 1.35,
+            "max_iter": 1000,
+            "regularization_strength": 10.0,
+            "tol": 1e-05,
+            "warm_start": false
+          },
+          {
+            "epsilon": 1.35,
+            "max_iter": 1000,
+            "regularization_strength": 1.0,
+            "tol": 1e-05,
+            "warm_start": false
+          },
+          {
+            "epsilon": 1.35,
+            "max_iter": 1000,
+            "regularization_strength": 0.1,
+            "tol": 1e-05,
+            "warm_start": false
+          },
+          {
+            "epsilon": 1.35,
+            "max_iter": 1000,
+            "regularization_strength": 0.01,
+            "tol": 1e-05,
+            "warm_start": false
+          }
+        ],
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "alpha": 1.0
+        },
+        "model_algorithm": "ridge_regression",
+        "parameter_candidates": [
+          {
+            "regularization_strength": 10.0
+          },
+          {
+            "regularization_strength": 1.0
+          },
+          {
+            "regularization_strength": 0.1
+          },
+          {
+            "regularization_strength": 0.01
+          }
+        ],
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "alpha": 0.001,
+          "fit_intercept": true,
+          "max_iter": 20000,
+          "positive": false,
+          "selection": "cyclic",
+          "tol": 1e-05
+        },
+        "model_algorithm": "lasso_regression",
+        "parameter_candidates": [
+          {
+            "alpha": 0.03,
+            "fit_intercept": true,
+            "max_iter": 20000,
+            "positive": false,
+            "selection": "cyclic",
+            "tol": 1e-05
+          },
+          {
+            "alpha": 0.01,
+            "fit_intercept": true,
+            "max_iter": 20000,
+            "positive": false,
+            "selection": "cyclic",
+            "tol": 1e-05
+          },
+          {
+            "alpha": 0.003,
+            "fit_intercept": true,
+            "max_iter": 20000,
+            "positive": false,
+            "selection": "cyclic",
+            "tol": 1e-05
+          },
+          {
+            "alpha": 0.001,
+            "fit_intercept": true,
+            "max_iter": 20000,
+            "positive": false,
+            "selection": "cyclic",
+            "tol": 1e-05
+          }
+        ],
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "colsample_bytree": 0.8,
+          "device": "cpu",
+          "gamma": 0.0,
+          "learning_rate": 0.05,
+          "max_bin": 256,
+          "max_depth": 3,
+          "min_child_weight": 1.0,
+          "n_estimators": 400,
+          "n_jobs": -1,
+          "objective": "reg:squarederror",
+          "reg_alpha": 0.0,
+          "reg_lambda": 0.0,
+          "subsample": 0.8,
+          "tree_method": "hist"
+        },
+        "model_algorithm": "xgboost_regressor",
+        "parameter_candidates": [
+          {
+            "colsample_bytree": 0.8,
+            "device": "cpu",
+            "gamma": 0.0,
+            "learning_rate": 0.05,
+            "max_bin": 256,
+            "max_depth": 3,
+            "min_child_weight_fraction": 0.001,
+            "n_estimators": 400,
+            "n_jobs": -1,
+            "objective": "reg:squarederror",
+            "reg_alpha": 0.0,
+            "reg_lambda": 0.0,
+            "subsample": 0.8,
+            "tree_method": "hist"
+          },
+          {
+            "colsample_bytree": 0.8,
+            "device": "cpu",
+            "gamma": 0.0,
+            "learning_rate": 0.05,
+            "max_bin": 256,
+            "max_depth": 5,
+            "min_child_weight_fraction": 0.0003,
+            "n_estimators": 400,
+            "n_jobs": -1,
+            "objective": "reg:squarederror",
+            "reg_alpha": 0.0,
+            "reg_lambda": 0.0,
+            "subsample": 0.8,
+            "tree_method": "hist"
+          },
+          {
+            "colsample_bytree": 0.8,
+            "device": "cpu",
+            "gamma": 0.0,
+            "learning_rate": 0.05,
+            "max_bin": 256,
+            "max_depth": 7,
+            "min_child_weight_fraction": 0.0001,
+            "n_estimators": 400,
+            "n_jobs": -1,
+            "objective": "reg:squarederror",
+            "reg_alpha": 0.0,
+            "reg_lambda": 0.0,
+            "subsample": 0.8,
+            "tree_method": "hist"
+          }
+        ],
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "learning_rate": 0.05,
+          "min_child_samples": 20,
+          "n_estimators": 400,
+          "n_jobs": -1,
+          "num_leaves": 31,
+          "verbosity": -1
+        },
+        "model_algorithm": "lightgbm_regressor",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      },
+      {
+        "hyperparameters": {
+          "max_depth": 3,
+          "min_samples_leaf": 0.001
+        },
+        "model_algorithm": "decision_tree_regressor",
+        "random_seed": 42,
+        "training_weighting": {
+          "half_life": null,
+          "method": "equal_timestamp"
+        }
+      }
+    ]
+  }
+]

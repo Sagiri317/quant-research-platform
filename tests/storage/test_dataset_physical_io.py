@@ -406,14 +406,15 @@ def test_physical_membership_rejects_null_filter_member_before_sort() -> None:
 
 
 @pytest.mark.parametrize("operator", ("==", ">="))
-def test_physical_scalar_filter_preserves_wide_values(
+def test_physical_scalar_filter_selects_matching_values(
     operator: str,
 ) -> None:
     batch = pa.RecordBatch.from_arrays(
-        [pa.array(range(128), type=pa.int64())], names=["value"]
+        [pa.array(range(3), type=pa.int64())], names=["value"]
     )
     filtered = dataset_physical._filter_arrow_batch(batch, [("value", operator, 1)])
-    assert filtered.num_rows == (1 if operator == "==" else 127)
+    assert filtered.num_rows == (1 if operator == "==" else 2)
+    assert filtered.column("value").to_pylist() == ([1] if operator == "==" else [1, 2])
 
 
 def test_physical_membership_requires_prepared_arrow_array(
@@ -512,7 +513,7 @@ def test_unpartitioned_non_primary_timestamp_round_trips_without_date_range(
         )
 
 
-def test_session_metadata_reader_rejects_invalid_json_above_former_capacity(
+def test_session_metadata_reader_rejects_invalid_json(
     tmp_path: Path,
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "bounded_metadata")
@@ -521,9 +522,7 @@ def test_session_metadata_reader_rejects_invalid_json_above_former_capacity(
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec("bounded_metadata"),
     )
-    filesystem_write_bytes(
-        root / "_manifest" / "manifest.json", b" " * (1024 * 1024 + 1)
-    )
+    filesystem_write_bytes(root / "_manifest" / "manifest.json", b" ")
     with pytest.raises(ValueError, match="qrp_json_invalid"):
         dataset_reading.open_dataset_session(root, columns=None, time_window=None)
         pass

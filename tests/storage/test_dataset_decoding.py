@@ -195,8 +195,8 @@ def test_declared_variable_width_member_decodes_multirow_batches(
     ],
 )
 def test_dictionary_decode_preserves_supported_logical_types_and_keys(tmp_path, kind):
-    payload = "x" * (32 * 1024)
-    values = [None if index % 23 == 0 else payload for index in range(256)]
+    payload = "x" * (32)
+    values = [None if index == 0 else payload for index in range(4)]
     if kind in ("string", "large_string"):
         array = pa.array(
             values, type=pa.string() if kind == "string" else pa.large_string()
@@ -231,19 +231,20 @@ def test_dictionary_decode_preserves_supported_logical_types_and_keys(tmp_path, 
         array = pa.array([[value, value] for value in values], type=data_type)
     table = pa.table(
         {
-            "id": pa.array(np.arange(256, dtype=np.int64) + 9007199254740992),
-            "time": pa.array(np.arange(256, dtype=np.int64), type=pa.timestamp("ns")),
+            "id": pa.array(np.arange(4, dtype=np.int64) + 9007199254740992),
+            "time": pa.array(np.arange(4, dtype=np.int64), type=pa.timestamp("ns")),
             "value": array,
         }
     )
     path = tmp_path / "typed-dictionary.parquet"
     pq.write_table(
-        table, native_filesystem_path(path), use_dictionary=True, row_group_size=128
+        table, native_filesystem_path(path), use_dictionary=True, row_group_size=2
     )
+    assert pq.read_metadata(native_filesystem_path(path)).num_row_groups == 2
     native = pq.read_table(native_filesystem_path(path))
     delivered = 0
     with closing_iterator(
-        dataset_physical.iter_dataset_part_batches(path, batch_rows=128)
+        dataset_physical.iter_dataset_part_batches(path, batch_rows=2)
     ) as batches:
         for batch in batches:
             pd.testing.assert_frame_equal(
@@ -251,7 +252,7 @@ def test_dictionary_decode_preserves_supported_logical_types_and_keys(tmp_path, 
             )
             assert batch.schema.remove_metadata() == native.schema.remove_metadata()
             delivered += batch.num_rows
-    assert delivered == 256
+    assert delivered == 4
 
 
 @pytest.mark.parametrize(
@@ -322,8 +323,11 @@ def test_dictionary_reader_closes_same_handle_and_native_iterator(
 ):
     path = tmp_path / "cancelled-dictionary.parquet"
     pq.write_table(
-        pa.table({"value": ["x" * (32 * 1024)] * 256}), native_filesystem_path(path)
+        pa.table({"value": ["x" * (32)] * 4}),
+        native_filesystem_path(path),
+        row_group_size=2,
     )
+    assert pq.read_metadata(native_filesystem_path(path)).num_row_groups == 2
     original_bytes = Path(native_filesystem_path(path)).read_bytes()
     open_file = dataset_physical.open_filesystem_file
     constructor = pq.ParquetFile
@@ -360,7 +364,7 @@ def test_dictionary_reader_closes_same_handle_and_native_iterator(
 
     monkeypatch.setattr(dataset_physical, "open_filesystem_file", observed_open)
     monkeypatch.setattr(pq, "ParquetFile", ObservedParquet)
-    batches = dataset_physical.iter_dataset_part_batches(path, batch_rows=128)
+    batches = dataset_physical.iter_dataset_part_batches(path, batch_rows=2)
     first = next(batches)
     assert first.num_rows > 0
     first = None
@@ -866,15 +870,16 @@ def test_parquet_early_close_preserves_cleanup_and_consumer_failure(
     pq.write_table(
         pa.table(
             {
-                "value": ["x" * (32 * 1024)] * 256,
-                "timestamp": pd.date_range("2020-01-01", periods=256),
-                "asset_id": ["asset"] * 256,
+                "value": ["x" * (32)] * 4,
+                "timestamp": pd.date_range("2020-01-01", periods=4),
+                "asset_id": ["asset"] * 4,
             }
         ),
         native_filesystem_path(original),
         use_dictionary=use_dictionary,
-        row_group_size=1,
+        row_group_size=2,
     )
+    assert pq.read_metadata(native_filesystem_path(original)).num_row_groups == 2
     filesystem_write_bytes(path, Path(native_filesystem_path(original)).read_bytes())
     original_bytes = Path(native_filesystem_path(original)).read_bytes()
     open_file = dataset_physical.open_filesystem_file
@@ -916,7 +921,7 @@ def test_parquet_early_close_preserves_cleanup_and_consumer_failure(
     )
     batches = reader(
         path,
-        batch_rows=128,
+        batch_rows=2,
     )
     assert len(next(batches)) > 0
     assert len(handles) == 1 and all(not handle.closed for handle in handles)

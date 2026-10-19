@@ -3667,7 +3667,7 @@ def test_cancelled_life_stale_quote_cannot_revive_rights_or_execution():
 
 
 @pytest.mark.parametrize("corruption", ("known_adv", "complete_window", "fee", "trade"))
-def test_persisted_adv_unavailable_rejects_fabricated_evidence(
+def test_persisted_adv_evidence_and_ledger_prerequisites_reject_fabrication(
     tmp_path, monkeypatch, corruption
 ):
     from fractions import Fraction
@@ -3702,42 +3702,42 @@ def test_persisted_adv_unavailable_rejects_fabricated_evidence(
     timestamp = next(
         row.timestamp_ns for row in batch.valuations if row.phase == "after"
     )
-    with pytest.raises(ValueError):
-        if corruption == "known_adv":
-            batch = replace(
-                batch,
-                diagnostics=(
-                    *batch.diagnostics,
-                    PortfolioDiagnostic("b", None, "adv20", number=1000.0),
+    if corruption == "known_adv":
+        changes = dict(
+            diagnostics=(
+                *batch.diagnostics,
+                PortfolioDiagnostic("b", None, "adv20", number=1000.0),
+            ),
+        )
+    elif corruption == "complete_window":
+        changes = dict(
+            diagnostics=tuple(
+                replace(row, number=0.0)
+                if row.asset_id == "b" and row.name == "adv20_missing_observations"
+                else row
+                for row in batch.diagnostics
+            ),
+        )
+    elif corruption == "fee":
+        changes = dict(
+            cashflows=(
+                PortfolioCashFlow(
+                    "fake_fee", timestamp, "b", None, "commission_cost", -1.0
                 ),
-            )
-        elif corruption == "complete_window":
-            batch = replace(
-                batch,
-                diagnostics=tuple(
-                    replace(row, number=0.0)
-                    if row.asset_id == "b" and row.name == "adv20_missing_observations"
-                    else row
-                    for row in batch.diagnostics
-                ),
-            )
-        elif corruption == "fee":
-            batch = replace(
-                batch,
-                cashflows=(
-                    PortfolioCashFlow(
-                        "fake_fee", timestamp, "b", None, "commission_cost", -1.0
-                    ),
-                ),
-            )
-        else:
-            batch = replace(
-                batch,
-                trades=(
-                    ExecutedTrade("fake", "fake", timestamp, "b", Fraction(1), 1.0),
-                ),
-            )
-        validate_portfolio_transition(batch, capital, None)
+            ),
+        )
+    else:
+        changes = dict(
+            trades=(ExecutedTrade("fake", "fake", timestamp, "b", Fraction(1), 1.0),),
+        )
+    expected_error = {
+        "known_adv": "portfolio_ledger_adv_unavailable_invalid",
+        "complete_window": "portfolio_ledger_adv_history_invalid",
+        "fee": "portfolio_ledger_cashflow_invalid",
+        "trade": "portfolio_ledger_position_reconciliation_invalid",
+    }[corruption]
+    with pytest.raises(ValueError, match=f"^{expected_error}$"):
+        validate_portfolio_transition(replace(batch, **changes), capital, None)
 
 
 @pytest.mark.parametrize("cash", (0.0, 1e-15, 10.0))

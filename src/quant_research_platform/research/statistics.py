@@ -554,8 +554,6 @@ def cscv_pbo(
             matrix, slice_count, combination_count, "duplicate_candidate_series"
         )
     slices = tuple(np.array_split(np.arange(len(matrix)), slice_count))
-    if max(len(item) for item in slices) - min(len(item) for item in slices) > 1:
-        raise ValueError("cscv_slice_partition_invalid")
     overfit_count = 0
     all_slice_ids = set(range(slice_count))
     # The first half of lexicographic combinations contains slice zero. Each

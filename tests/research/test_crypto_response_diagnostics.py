@@ -272,8 +272,15 @@ def test_bad_response_request_is_rejected_before_publication(tmp_path, change):
         data = json.loads(spec_path.read_text())
         data["column_units"]["r100"] = "percent"
         spec_path.write_text(json.dumps(data))
-    with pytest.raises(ValueError):
+    expected_error = {
+        "duplicate_edges": "evaluation_response_cutpoints_invalid",
+        "bool_edge": "evaluation_response_cutpoints_invalid",
+        "unit": "evaluation_response_domain_invalid",
+    }[change]
+    with pytest.raises(ValueError, match=f"^{expected_error}$"):
         evaluate(config)
+
+    assert not (tmp_path / "evaluation").exists()
 
 
 def test_label_maturity_remains_horizon_local_and_no_anchors_are_created(tmp_path):

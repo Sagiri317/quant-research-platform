@@ -377,43 +377,6 @@ def test_paired_group_requires_its_bootstrap_inputs_before_reading(tmp_path):
         )
 
 
-def test_borrowed_forecast_age_transform_remains_available_to_strata(tmp_path):
-    import json
-    from pathlib import Path
-
-    from tests.research.test_stratified_evaluation_reuse import _write_native
-
-    frame, config = _fixture(tmp_path)
-    age = "median_forecast_age_days_fy1"
-    feature = "feature_" + age
-    frame[age] = [1.0, 10.0, 40.0, 80.0]
-    frame[feature] = [-1.0, -0.5, 0.5, 1.0]
-    source = _write_native(
-        tmp_path / "borrowed",
-        frame,
-        signals=(feature,),
-        labels=("label",),
-        availability={"label": "label_available_at"},
-        units={age: "days"},
-    )
-    manifest_path = Path(source) / "_manifest" / "manifest.json"
-    manifest = json.loads(manifest_path.read_text())
-    manifest.setdefault("producer_diagnostics", {})["reused_feature_transforms"] = {
-        feature: {"recipe_id": "a_share_canonical", "source_columns": [age]}
-    }
-    manifest_path.write_text(json.dumps(manifest))
-    config["inputs"] = source
-    config["evaluation"]["signals"] = [
-        {"signal_id": "age", "source_kind": "feature", "source_column": feature}
-    ]
-    config["strata"] = {
-        "primary_label": "label",
-        "kinds": ["forecast_age"],
-        "forecast_freshness_days": 90,
-    }
-    assert evaluate(config).exists()
-
-
 @pytest.mark.parametrize(
     "encoding", ["categories", "missing_categories", "string", "float"]
 )

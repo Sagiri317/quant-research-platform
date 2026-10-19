@@ -629,7 +629,7 @@ def test_compare_maps_ancestor_alias_before_public_exists_probe(
 
 
 @pytest.mark.parametrize("alias_side", ("left", "right"))
-def test_compare_internal_recheck_blocks_new_ancestor_alias_before_exists(
+def test_compare_rechecks_native_reader_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, alias_side: str
 ) -> None:
     from tests.storage.low_level_fixtures import (

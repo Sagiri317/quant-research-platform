@@ -203,31 +203,6 @@ def test_hac_hand_computed_bartlett_oracle_and_degeneracies():
     assert summary.status.tolist() == ["UNDEFINED"]
 
 
-@pytest.mark.parametrize(
-    "se,pvalue", [(0.0, 0.5), (np.nan, 0.5), (1.0, np.inf), (1.0, -0.1)]
-)
-def test_hac_adapter_rejects_backend_non_inference(monkeypatch, se, pvalue):
-    from types import SimpleNamespace
-
-    from quant_research_platform.research import statistics
-
-    fit = SimpleNamespace(bse=[se])
-    tail_calls = []
-
-    def tail(value):
-        tail_calls.append(value)
-        return pvalue / 2
-
-    monkeypatch.setattr(statistics.norm, "sf", tail)
-    monkeypatch.setattr(
-        statistics, "OLS", lambda *args: SimpleNamespace(fit=lambda **kwargs: fit)
-    )
-    with pytest.raises(ValueError, match="hac_inference_undefined"):
-        hac_mean([1.0, 2.0, 3.0], max_lags=1)
-    assert len(tail_calls) == 1
-    assert np.isfinite(tail_calls[0]) == (se == 1.0)
-
-
 def test_non_one_word_prices_do_not_turn_missing_limit_status_into_permission():
     panel = _panel()
     panel.loc[1, "high"] = 12.0

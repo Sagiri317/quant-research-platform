@@ -230,11 +230,19 @@ def test_persisted_boolean_numeric_cells_are_unknown_not_one(tmp_path, dtype):
     assert read_dataset(output).spread.isna().all()
 
 
-@pytest.mark.parametrize("columns", [["book_spraed_typo"], ["mid"]])
-def test_explicit_bad_projection_is_configuration_error(tmp_path, columns):
+@pytest.mark.parametrize(
+    "columns, expected_error",
+    [
+        (["book_spraed_typo"], "dataset_column_not_found"),
+        (["mid"], "data_operation_input_columns_missing"),
+    ],
+)
+def test_explicit_bad_projection_is_configuration_error(
+    tmp_path, columns, expected_error
+):
     frame = panel()
     root = _persist(tmp_path / "source", frame)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=f"^{expected_error}$"):
         prepare(
             {
                 "market_id": "crypto",

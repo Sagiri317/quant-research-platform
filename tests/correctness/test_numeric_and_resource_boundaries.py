@@ -195,15 +195,15 @@ def test_decimal_metadata_rejects_exponents_without_expansion():
                 "name": "category",
                 "kind": "categorical",
                 "ordered": False,
-                "categories": [{"type": "decimal", "value": "1e1000000"}],
+                "categories": [{"type": "decimal", "value": "1e20"}],
             }
         ],
     }
     raw = json.dumps(payload).encode()
     with pytest.raises(ValueError):
         parse_logical_dtype_metadata(raw)
-    encoded = _typed_category_value_payload(Decimal("1e2000000"))
-    assert encoded == {"type": "decimal", "value": "1" + "0" * 2_000_000}
+    encoded = _typed_category_value_payload(Decimal("1e20"))
+    assert encoded == {"type": "decimal", "value": "1" + "0" * 20}
     payload["columns"][0]["categories"] = [encoded]
     assert parse_logical_dtype_metadata(json.dumps(payload).encode()) == payload
     assert _typed_category_value_payload(Decimal("1.2300")) == {

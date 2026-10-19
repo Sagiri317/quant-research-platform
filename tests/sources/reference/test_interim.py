@@ -645,7 +645,7 @@ def test_industry_unreadable_future_json_remains_a_source_boundary(tmp_path):
         root / "metadata.json", json.dumps(metadata), encoding="utf-8"
     )
     raw_before = _file_bytes(root)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="^qrp_json_invalid$"):
         interim.materialize_interim_data(
             raw_root=root.parent,
             output_roots={data_id: output},

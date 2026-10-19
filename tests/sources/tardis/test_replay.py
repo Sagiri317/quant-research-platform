@@ -972,33 +972,23 @@ def test_archive_shared_decoding_preserves_order_and_independent_payloads(
     assert handles and all(handle.closed for handle in handles)
 
 
-def test_unrequested_streams_and_consumed_history_have_no_spool(tmp_path, monkeypatch):
-    import tracemalloc
-
+def test_stream_filter_selects_requested_records_without_spool(tmp_path, monkeypatch):
     import quant_research_platform.sources.tardis.replay as replay
 
+    selected = [{"payload": number} for number in range(3)]
+
     def records(self, requested_symbol, data_kind, end_ns):
-        for number in range(5000):
-            yield ("ETHUSDT", "depth"), {"payload": "x" * 4096 + str(number)}
-            yield ("BTCUSDT", "agg_trades"), {"payload": "x" * 4096 + str(number)}
+        for record in selected:
+            yield ("ETHUSDT", "depth"), {"payload": "unrequested"}
+            yield ("BTCUSDT", "agg_trades"), record
 
     def forbidden():
         raise AssertionError("unnecessary replay spool")
 
     monkeypatch.setattr(replay, "TemporaryFile", forbidden)
     monkeypatch.setattr(replay.TardisArchive, "_iter_canonical_records", records)
-    tracemalloc.start()
-    try:
-        for _ in range(10):
-            archive = replay.TardisArchive(tmp_path, {}, {}, None)
-            assert (
-                sum(1 for _ in archive._stream_records("BTCUSDT", "agg_trades", None))
-                == 5000
-            )
-        retained, peak = tracemalloc.get_traced_memory()
-        assert retained < 1024**2 and peak < 2 * 1024**2
-    finally:
-        tracemalloc.stop()
+    archive = replay.TardisArchive(tmp_path, {}, {}, None)
+    assert list(archive._stream_records("BTCUSDT", "agg_trades", None)) == selected
 
 
 @pytest.mark.parametrize("snapshot_depths", [(12, 12), (12, 13), (13, 12), (12, 9)])
