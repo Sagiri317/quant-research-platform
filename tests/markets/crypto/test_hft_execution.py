@@ -133,7 +133,9 @@ def _native_taker_projection_case(tmp_path, monkeypatch, *, count=300):
         ),
     )
 
-    def execute(*, latency, horizon, mode, projection="native", fault=None):
+    def execute(
+        *, latency, horizon, mode, projection="native", fault=None, policy=None
+    ):
         closed = []
         stats = ReconstructionStats()
         emitted_levels = []
@@ -268,6 +270,7 @@ def _native_taker_projection_case(tmp_path, monkeypatch, *, count=300):
                 "markout_horizon_ms": 100,
                 "order_quantity": 3.0,
                 "position_size": 6.0,
+                **({"position_policy": policy} if policy is not None else {}),
             },
         }
         monkeypatch.setattr(portfolio, "open_market_source", open_run)
@@ -300,6 +303,26 @@ def _native_taker_projection_case(tmp_path, monkeypatch, *, count=300):
         return (result, summaries, batches, asdict(stats)), emitted_levels
 
     return execute
+
+
+def test_round_trip_public_backtest_uses_optional_policy_and_complete_depth(
+    tmp_path, monkeypatch
+):
+    execute = _native_taker_projection_case(tmp_path, monkeypatch)
+    full, _ = execute(
+        latency=100,
+        horizon=500,
+        mode="continuous",
+        projection="full",
+        policy="round_trip",
+    )
+    projected, _ = execute(
+        latency=100, horizon=500, mode="continuous", policy="round_trip"
+    )
+    _assert_projection_economics(full, projected)
+    assert full[0]["position_policy"] == "round_trip"
+    assert full[0]["completed_round_trips"] > 0
+    assert full[0]["exit_unfilled_quantity"] == 0.0
 
 
 def _assert_projection_economics(full, projected):

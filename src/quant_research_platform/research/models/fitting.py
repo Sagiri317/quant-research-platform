@@ -119,6 +119,7 @@ def validate_model_state(predictor: object, metadata: dict[str, object]) -> None
         random_seed=metadata["random_seed"],
         training_weighting=metadata["training_weighting"],
         training_scaling=metadata["training_scaling"],
+        huber_target_scale=metadata.get("huber_target_scale", 1.0),
     )
     if spec.model_algorithm == "linear_regression":
         if type(predictor) is not LinearScaledPredictor:
@@ -169,6 +170,8 @@ def validate_model_state(predictor: object, metadata: dict[str, object]) -> None
         )
         actual = predictor.estimator
         if type(actual) is not type(expected):
+            raise ValueError("model_state_metadata_mismatch")
+        if getattr(actual, "qrp_huber_target_scale_", 1.0) != spec.huber_target_scale:
             raise ValueError("model_state_metadata_mismatch")
         actual_parameters, expected_parameters = (
             actual.get_params(deep=False),
@@ -319,6 +322,11 @@ def model_metadata(
         "dependency_status": estimators.require_model_dependency(spec.model_algorithm),
         "training_weighting": spec.training_weighting.payload(),
         "training_scaling": spec.training_scaling,
+        **(
+            {"huber_target_scale": spec.huber_target_scale}
+            if spec.huber_target_scale != 1.0
+            else {}
+        ),
         "scaler": None if scaler is None else scaler.to_payload(),
     }
     if feature_importance is not None:
@@ -590,12 +598,36 @@ def _fit_predictor(
     from sklearn.exceptions import ConvergenceWarning
 
     scaled_matrix = matrix.copy(deep=True)
+    target_scale = spec.huber_target_scale
+    if target_scale != 1.0:
+        alpha = estimator.alpha
+        scaled_alpha = alpha / target_scale
+        with np.errstate(over="ignore", invalid="ignore", under="ignore"):
+            y *= target_scale
+        if (
+            not np.isfinite(y).all()
+            or not np.isfinite(scaled_alpha)
+            or (alpha != 0 and scaled_alpha == 0)
+        ):
+            raise ValueError("model_huber_target_scale_unrepresentable")
+        estimator.set_params(alpha=scaled_alpha)
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", ConvergenceWarning)
             estimator.fit(scaled_matrix, y, sample_weight=weights)
     except ConvergenceWarning:
         raise ValueError("model_fit_non_converged") from None
+    if target_scale != 1.0:
+        # H(s*y, s*beta, s*sigma; alpha/s) = s*H(y, beta, sigma; alpha).
+        estimator.coef_ /= target_scale
+        estimator.intercept_ /= target_scale
+        estimator.scale_ /= target_scale
+        estimator.set_params(alpha=alpha)
+        estimator.qrp_huber_target_scale_ = target_scale
+        if not np.isfinite(
+            np.r_[estimator.coef_, estimator.intercept_, estimator.scale_]
+        ).all():
+            raise ValueError("model_huber_target_scale_unrepresentable")
     return ScaledPredictor(estimator, scaler)
 
 

@@ -753,7 +753,11 @@ def backtest_taker(config):
     )
     window, windows, capital, panel = _backtest_inputs(config)
     execution = TakerConfig(
-        **_strict_config(config["execution"], TakerConfig.__dataclass_fields__)
+        **_strict_config(
+            config["execution"],
+            TakerConfig.__dataclass_fields__.keys() - {"position_policy"},
+            {"position_policy"},
+        )
     )
     evidence = _prediction_evidence(
         config["predictions"],
@@ -1345,7 +1349,11 @@ def backtest_maker(config):
     )
     window, windows, capital, panel = _backtest_inputs(config)
     execution = MakerConfig(
-        **_strict_config(config["execution"], MakerConfig.__dataclass_fields__)
+        **_strict_config(
+            config["execution"],
+            MakerConfig.__dataclass_fields__.keys() - {"inventory_penalty_bps"},
+            {"inventory_penalty_bps"},
+        )
     )
     calibrated = config["calibration"] is not None
     if type(config["models"]) is not list or len(config["models"]) != (

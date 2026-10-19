@@ -191,6 +191,7 @@ class ModelSpec:
     random_seed: int = DEFAULT_ROOT_SEED
     training_scaling: bool | None = None
     training_weighting: TrainingWeighting = field(default_factory=TrainingWeighting)
+    huber_target_scale: float = 1.0
 
     def __post_init__(self) -> None:
         hyperparameters = _freeze_model_hyperparameters(self.hyperparameters)
@@ -229,6 +230,16 @@ class ModelSpec:
         }:
             raise ValueError("rank_model_training_scaling_not_supported")
         object.__setattr__(self, "training_scaling", scaling)
+        if (
+            type(self.huber_target_scale) not in {int, float}
+            or not isfinite(self.huber_target_scale)
+            or self.huber_target_scale <= 0
+            or (
+                self.huber_target_scale != 1.0
+                and self.model_algorithm != "huber_regression"
+            )
+        ):
+            raise ValueError("model_huber_target_scale_invalid")
         if hyperparameters and self.model_algorithm in {
             "linear_regression",
             "equal_weight_rank_ensemble",
@@ -335,6 +346,7 @@ def validate_model_metadata_core(
         "feature_importance_status",
         "rank_parameters",
         "training_target_mean",
+        "huber_target_scale",
     }
     if set(metadata).difference(allowed):
         raise ValueError("invalid_model_metadata")
@@ -432,6 +444,7 @@ def validate_model_metadata_core(
             random_seed=metadata["random_seed"],
             training_weighting=metadata["training_weighting"],
             training_scaling=metadata["training_scaling"],
+            huber_target_scale=metadata.get("huber_target_scale", 1.0),
         )
     except (TypeError, ValueError) as exc:
         raise ValueError("invalid_model_metadata") from exc
@@ -735,6 +748,11 @@ def model_spec_payload(spec: object) -> dict[str, object]:
         "random_seed": spec.random_seed,
         "training_weighting": spec.training_weighting.payload(),
         "training_scaling": spec.training_scaling,
+        **(
+            {"huber_target_scale": spec.huber_target_scale}
+            if spec.huber_target_scale != 1.0
+            else {}
+        ),
     }
 
 
@@ -874,6 +892,7 @@ def validate_model_facts(facts, metadata=None, *, expected=None):
                 raise ValueError("model_facts_metadata_mismatch")
         if (
             spec.training_weighting.payload() != metadata["training_weighting"]
+            or spec.huber_target_scale != metadata.get("huber_target_scale", 1.0)
             or list(spec.input_columns) != metadata["input_columns"]
         ):
             raise ValueError("model_facts_metadata_mismatch")

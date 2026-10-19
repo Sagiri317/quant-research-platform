@@ -296,6 +296,7 @@ class TakerConfig:
     latency_ms: int
     taker_fee_bps: float
     markout_horizon_ms: int
+    position_policy: str = "inventory"
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -318,6 +319,8 @@ class TakerConfig:
             self.markout_horizon_ms,
             "hft_markout_horizon_invalid",
         )
+        if self.position_policy not in ("inventory", "round_trip"):
+            raise ValueError("hft_taker_position_policy_invalid")
 
 
 @dataclass(frozen=True)
@@ -329,6 +332,7 @@ class MakerConfig:
     inventory_skew: float | None
     markout_horizon_ms: int
     latency_ms: int
+    inventory_penalty_bps: float = 0.0
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -365,6 +369,13 @@ class MakerConfig:
             "hft_markout_horizon_invalid",
         )
         _nonnegative_integer(self.latency_ms, "hft_maker_latency_invalid")
+        object.__setattr__(
+            self,
+            "inventory_penalty_bps",
+            _nonnegative(
+                self.inventory_penalty_bps, "hft_maker_inventory_penalty_invalid"
+            ),
+        )
 
 
 def _positive(value: object, error: str) -> float:
@@ -769,13 +780,49 @@ def _taker_order_quantity(
         budget = Fraction(min(config.order_quantity, limit))
         quantity = Fraction()
         gain = 0.0
-        for tick, available in levels:
+
+        def depth_gains(sign=sign, levels=levels):
+            exits = iter(state.bids if sign > 0 else state.asks)
+            exit_remaining = Fraction()
+            for tick, available in levels:
+                price = index_to_price(tick, state.price_unit)
+                fee = price * config.taker_fee_bps / 10_000.0
+                if config.position_policy == "inventory":
+                    yield (
+                        Fraction(available),
+                        sign * (forecast - price + funding_per_unit) - fee,
+                    )
+                    continue
+                entry_remaining = Fraction(available)
+                while entry_remaining:
+                    if not exit_remaining:
+                        exit_level = next(exits, None)
+                        if exit_level is None:
+                            return
+                        exit_tick, exit_size = exit_level
+                        exit_remaining = Fraction(exit_size)
+                        exit_price = _positive(
+                            forecast
+                            + index_to_price(exit_tick, state.price_unit)
+                            - mid,
+                            "hft_prediction_exit_price_invalid",
+                        )
+                    size = min(entry_remaining, exit_remaining)
+                    yield (
+                        size,
+                        (
+                            sign * (exit_price - price + funding_per_unit)
+                            - fee
+                            - exit_price * config.taker_fee_bps / 10_000.0
+                        ),
+                    )
+                    entry_remaining -= size
+                    exit_remaining -= size
+
+        for available, unit_gain in depth_gains():
             size = min(budget - quantity, Fraction(available))
             if size <= 0:
                 continue
-            price = index_to_price(tick, state.price_unit)
-            fee_per_unit = price * config.taker_fee_bps / 10_000.0
-            unit_gain = sign * (forecast - price + funding_per_unit) - fee_per_unit
             endpoint = quantity + size
             candidate = _position_headroom(endpoint, 0)
             # Evaluate the representable order, not the unrounded depth endpoint.
@@ -895,6 +942,11 @@ def simulate_taker(
     censored_count = censored_pending = censored_zero_fill = 0
     censored_quantity = 0.0
     _positive_integer(prediction_horizon_ms, "hft_prediction_horizon_invalid")
+    if (
+        config.position_policy == "round_trip"
+        and 2 * config.latency_ms >= prediction_horizon_ms
+    ):
+        raise ValueError("hft_taker_round_trip_horizon_too_short")
     if decision_windows_ns is not None:
         previous_end = -1
         if type(decision_windows_ns) is not tuple or not decision_windows_ns:
@@ -939,6 +991,8 @@ def simulate_taker(
     reserved_buy = reserved_sell = Fraction()
     created_orders = 0
     filled_orders = 0
+    completed_round_trips = 0
+    exit_unfilled_quantity = 0.0
     unfilled_quantity = 0.0
     equity_rows = 0
     max_abs_position = 0.0
@@ -1045,6 +1099,7 @@ def simulate_taker(
         def execute_order(order):
             nonlocal reserved_buy, reserved_sell, filled_orders, unfilled_quantity
             nonlocal equity_rows, max_abs_position, last_gross, last_net
+            nonlocal created_orders, completed_round_trips, exit_unfilled_quantity
             (
                 order_id,
                 decision_time,
@@ -1053,6 +1108,7 @@ def simulate_taker(
                 signed_quantity,
                 gain,
                 decision_mid,
+                is_exit,
             ) = order
             effective_time_ns = effective_time * _NANOSECONDS_PER_MILLISECOND
             if (
@@ -1073,7 +1129,7 @@ def simulate_taker(
             current_mid = _mid(latest_state)
             levels = latest_state.asks if signed_quantity > 0 else latest_state.bids
             takes = []
-            exact_remaining = False
+            exact_remaining = isinstance(remaining, Fraction)
             for price_index, available in levels:
                 quantity = min(remaining, available)
                 if quantity <= 0:
@@ -1134,9 +1190,14 @@ def simulate_taker(
                     side="buy" if signed_quantity > 0 else "sell",
                     fill_price=fill_price,
                     fill_qty=filled,
-                    requested_quantity=requested,
+                    requested_quantity=float(requested),
                     decision_mid=decision_mid,
                     expected_net_gain=gain,
+                    **(
+                        {"order_role": "horizon_exit" if is_exit else "entry"}
+                        if config.position_policy == "round_trip"
+                        else {}
+                    ),
                     levels_consumed=levels_consumed,
                     notional=notional,
                     fee=fee,
@@ -1150,6 +1211,30 @@ def simulate_taker(
                 )
                 metrics.observe_fill(fill)
                 pending.add(fill)
+                if config.position_policy == "round_trip" and not is_exit:
+                    # Precommit the exit; its quantity is the actual exact entry fill.
+                    deadline = decision_time + prediction_horizon_ms
+                    exit_quantity = -signed * exact_filled
+                    created_orders += 1
+                    orders.append(
+                        (
+                            created_orders,
+                            deadline - config.latency_ms,
+                            deadline,
+                            segment,
+                            exit_quantity,
+                            None,
+                            None,
+                            True,
+                        )
+                    )
+                    if exit_quantity > 0:
+                        reserved_buy += exit_quantity
+                    else:
+                        reserved_sell -= exit_quantity
+            if is_exit:
+                exit_unfilled_quantity += float(remaining)
+                completed_round_trips += economics.quantity == 0
             unfilled_quantity += float(remaining)
             marked = economics.mark(effective_time_ns, current_mid)
             last_gross = marked["gross_pnl"]
@@ -1183,7 +1268,7 @@ def simulate_taker(
             advance(timestamp_ns)
             cancelled_count = len(orders) if closing else 0
             cancelled_quantity = (
-                sum(abs(order[4]) for order in orders) if closing else 0.0
+                float(sum(abs(order[4]) for order in orders)) if closing else 0.0
             )
             if closing:
                 cancelled_orders += len(orders)
@@ -1313,7 +1398,24 @@ def simulate_taker(
                 # Input segment IDs describe sample lineage, not this execution source.
                 segment = latest_state.segment_id
                 reason = "forecast_expired_before_execution"
-                if config.latency_ms < prediction_horizon_ms:
+                round_trip_busy = config.position_policy == "round_trip" and (
+                    orders or economics.quantity
+                )
+                round_trip_outside_window = (
+                    config.position_policy == "round_trip"
+                    and decision_windows_ns is not None
+                    and (decision_time + prediction_horizon_ms)
+                    * _NANOSECONDS_PER_MILLISECOND
+                    > decision_windows_ns[window_index][1]
+                )
+                if round_trip_busy or round_trip_outside_window:
+                    gain = 0.0
+                    reason = (
+                        "round_trip_position_active"
+                        if round_trip_busy
+                        else "round_trip_exit_outside_oos_window"
+                    )
+                elif config.latency_ms < prediction_horizon_ms:
                     forecast_end = (
                         decision_time + prediction_horizon_ms
                     ) * _NANOSECONDS_PER_MILLISECOND
@@ -1408,6 +1510,7 @@ def simulate_taker(
                         selected,
                         gain,
                         decision_mid,
+                        False,
                     )
                 )
                 if selected > 0:
@@ -1430,7 +1533,7 @@ def simulate_taker(
         if truncated:
             advance(observation_stop - 1)
             censored_count = censored_pending = censored_zero_fill = len(orders)
-            censored_quantity = sum(abs(order[4]) for order in orders)
+            censored_quantity = float(sum(abs(order[4]) for order in orders))
             end_timestamp = max(terminal_timestamp, economics.last_timestamp)
         elif decision_windows_ns is None:
             while orders:
@@ -1470,7 +1573,7 @@ def simulate_taker(
         end_timestamp, terminal_mid = economics.last_timestamp, economics.last_mark
         last_gross = last_net = None
         censored_count = censored_pending = censored_zero_fill = len(orders)
-        censored_quantity = sum(abs(order[4]) for order in orders)
+        censored_quantity = float(sum(abs(order[4]) for order in orders))
     result = {
         "market_observation_status": "PARTIAL"
         if first_market_gap_ns is not None
@@ -1526,13 +1629,25 @@ def simulate_taker(
         ),
         "undefined_decisions": undefined_decisions,
         "expected_gain_basis": (
-            "decision_forecast_mark_minus_l2_entry_and_fee_plus_known_funding"
+            "decision_forecast_with_current_relative_exit_depth_minus_both_fees_plus_known_funding"
+            if config.position_policy == "round_trip"
+            else "decision_forecast_mark_minus_l2_entry_and_fee_plus_known_funding"
         ),
         "quantity_domain": "continuous_l2_depth_with_order_and_pending_position_bounds",
         "latency_ms": config.latency_ms,
         "taker_fee_bps": config.taker_fee_bps,
         "order_quantity": config.order_quantity,
         "position_size": config.position_size,
+        "position_policy": config.position_policy,
+        **(
+            {
+                "completed_round_trips": completed_round_trips,
+                "exit_unfilled_quantity": exit_unfilled_quantity,
+                "exit_policy": "one_precommitted_market_order_at_prediction_deadline",
+            }
+            if config.position_policy == "round_trip"
+            else {}
+        ),
         "markout_horizon_ms": config.markout_horizon_ms,
         "latency_fidelity": "full_l2_observed_event",
         "assumption": "historical_book_zero_market_impact",
@@ -1924,6 +2039,7 @@ class MakerCalibration:
         prediction,
         fee_bps,
         funding,
+        inventory_charge_per_unit=0.0,
     ):
         choices = set()
         curves = {}
@@ -1985,7 +2101,10 @@ class MakerCalibration:
                                 cash for stamp, cash in funding if elapsed < stamp
                             )
                             gain = quantity * (
-                                sign * (forecast - price) - fee + sign * mid * error
+                                sign * (forecast - price)
+                                - fee
+                                + sign * mid * error
+                                - sign * inventory_charge_per_unit
                             )
                             gain += quantity * sign * cash
                             if not math.isfinite(gain):
@@ -2015,7 +2134,9 @@ class MakerCalibration:
                     error_sum += error
                 yield (quantity, count, error_sum)
 
-        edge = sign * (forecast - price) - fee_per_unit
+        edge = (
+            sign * (forecast - price) - fee_per_unit - sign * inventory_charge_per_unit
+        )
 
         def responses(namespace, *, with_error):
 
@@ -2406,6 +2527,8 @@ def simulate_maker(
         config.inventory_target is None or config.inventory_skew is None
     ):
         raise ValueError("hft_maker_inventory_parameters_required")
+    if calibrations is None and config.inventory_penalty_bps:
+        raise ValueError("hft_maker_inventory_penalty_requires_calibration")
     if calibrations is not None and (
         config.inventory_target is not None or config.inventory_skew is not None
     ):
@@ -3022,6 +3145,15 @@ def simulate_maker(
                                 prediction=row["price_prediction"],
                                 fee_bps=config.maker_fee_bps,
                                 funding=funding,
+                                inventory_charge_per_unit=(
+                                    mid
+                                    * config.inventory_penalty_bps
+                                    / 10_000.0
+                                    * float(
+                                        economics.quantity
+                                        / Fraction(config.max_position)
+                                    )
+                                ),
                             )
                         except PortfolioTargetBlocked as error:
                             if str(error) not in {
@@ -3093,14 +3225,20 @@ def simulate_maker(
                         PortfolioDiagnostic(
                             diagnostic_asset,
                             None,
-                            f"maker_{side}_expected_net_gain",
+                            f"maker_{side}_inventory_adjusted_gain"
+                            if config.inventory_penalty_bps
+                            else f"maker_{side}_expected_net_gain",
                             number=gain,
                         ),
                         PortfolioDiagnostic(
                             diagnostic_asset,
                             None,
                             f"maker_{side}_selection_reason",
-                            text=reason,
+                            text=reason.replace(
+                                "expected_net_gain", "inventory_adjusted_gain"
+                            )
+                            if config.inventory_penalty_bps
+                            else reason,
                         ),
                     )
                 )
@@ -3230,6 +3368,7 @@ def simulate_maker(
         "maker_fee_bps": config.maker_fee_bps,
         "order_quantity": config.order_quantity,
         "max_position": config.max_position,
+        "inventory_penalty_bps": config.inventory_penalty_bps,
         **(
             {
                 "inventory_target": config.inventory_target,

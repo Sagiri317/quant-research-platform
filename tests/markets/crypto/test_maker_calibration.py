@@ -1,4 +1,5 @@
 from dataclasses import replace
+from fractions import Fraction
 
 import pytest
 
@@ -23,7 +24,7 @@ from tests.markets.crypto.calibration_test_support import (
 )
 
 
-def _run_calibrated(paths, errors, *, books, trades, quotes, latency):
+def _run_calibrated(paths, errors, *, books, trades, quotes, latency, penalty=0.0):
     fills, batches = ([], [])
     model = calibration_from_paths(paths, errors)
     result = simulate_maker(
@@ -43,6 +44,7 @@ def _run_calibrated(paths, errors, *, books, trades, quotes, latency):
             max_position=3.0,
             maker_fee_bps=0.0,
             latency_ms=latency,
+            inventory_penalty_bps=penalty,
         ),
         observed_coverage={"s1": (0, 2000000000)},
         trade_coverage={"trade-connection-1": (0, 2000000000)},
@@ -60,6 +62,130 @@ def _run_calibrated(paths, errors, *, books, trades, quotes, latency):
         if row.name == "maker_buy_expected_net_gain"
     ]
     return (result, fills, gains, batches)
+
+
+def test_inventory_penalty_reduces_new_risk_without_charging_the_cash_account():
+    book = _state(0, bid_levels=((995, 1.0), (990, 3.0)))
+    paths = [([book], [_trade(100, price="99.5", quantity="2", maker_buyer=True)])]
+    kwargs = dict(
+        books=[
+            replace(book, observed_time_ns=stamp * 1_000_000)
+            for stamp in (0, 200, 1000)
+        ],
+        trades=[
+            _trade(stamp, price="99.5", quantity="2", maker_buyer=True)
+            for stamp in (100, 300)
+        ],
+        quotes=[(0, 0.0, 1.0), (200, 0.0, 1.0)],
+        latency=0,
+    )
+    baseline, fills, _, _ = _run_calibrated(paths, [0.0], **kwargs)
+    penalized, risk_fills, _, batches = _run_calibrated(
+        paths, [0.0], **kwargs, penalty=600.0
+    )
+    assert [row["fill_qty"] for row in fills] == [1.0, 1.0]
+    assert [row["fill_qty"] for row in risk_fills] == [1.0]
+    assert baseline["net_pnl"] == 1.0
+    assert penalized["net_pnl"] == 0.5
+    assert penalized["fees"] == 0.0
+    assert penalized["inventory_penalty_bps"] == 600.0
+    assert any(
+        d.name == "maker_buy_inventory_adjusted_gain"
+        for batch in batches
+        for d in batch.diagnostics
+    )
+
+
+@pytest.mark.parametrize(
+    "side,charge,quantity,gain",
+    [
+        ("buy", 1.0, 0.0, 0.0),
+        ("buy", -1.0, 1.0, 1.5),
+        ("sell", 1.0, 1.0, 1.5),
+        ("sell", -1.0, 0.0, 0.0),
+    ],
+)
+def test_inventory_charge_has_opposite_sign_for_inventory_reducing_fills(
+    side, charge, quantity, gain
+):
+    state = _state(0, bid_levels=((995, 1.0),), ask_levels=((1005, 1.0),))
+    model = calibration_from_paths(
+        [
+            (
+                [state],
+                [
+                    _trade(
+                        100,
+                        price="99.5" if side == "buy" else "100.5",
+                        quantity="2",
+                        maker_buyer=side == "buy",
+                    )
+                ],
+            )
+        ],
+        [0.0],
+    )
+    order = _maker_new_order(0, side, 1.0, state, _quote(0, book_segment_id="s1"), 0)
+    answer = model.select(
+        state=state,
+        decision_ns=0,
+        new_order=order,
+        active_order=None,
+        commands=(),
+        lifetime_ns=500_000_000,
+        prediction=0.0,
+        fee_bps=0.0,
+        funding=[],
+        inventory_charge_per_unit=charge,
+    )
+    assert answer[:2] == (False, quantity)
+    assert answer[2] == pytest.approx(gain)
+
+
+@pytest.mark.parametrize(
+    "elapsed,expected", [(50, (True, 0.0, -0.5)), (200, (False, 0.0, 0.0))]
+)
+def test_inventory_charge_covers_keep_and_fill_before_cancel_latency(elapsed, expected):
+    state = _state(0)
+    model = calibration_from_paths(
+        [([state], [_trade(elapsed, price="99.5", quantity="1", maker_buyer=True)])],
+        [0.0],
+    )
+    active = _maker_new_order(1, "buy", 1.0, state, _quote(0, book_segment_id="s1"), 0)
+    active.queue_ahead = Fraction()
+    proposed = _maker_new_order(
+        2, "buy", 0.0, state, _quote(100, book_segment_id="s1"), 100
+    )
+    answer = model.select(
+        state=state,
+        decision_ns=100_000_000,
+        new_order=proposed,
+        active_order=active,
+        commands=(),
+        lifetime_ns=500_000_000,
+        prediction=0.0,
+        fee_bps=0.0,
+        funding=[],
+        inventory_charge_per_unit=1.0,
+    )
+    assert answer == expected
+
+
+def test_fixed_maker_does_not_ignore_an_inapplicable_inventory_penalty():
+    with pytest.raises(
+        ValueError, match="hft_maker_inventory_penalty_requires_calibration"
+    ):
+        simulate_maker(
+            [],
+            [],
+            [],
+            config=replace(_maker_config(), inventory_penalty_bps=1.0),
+            observed_coverage={},
+            trade_coverage={},
+            capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
+            asset_id="btc_usdt",
+            funding_events=(),
+        )
 
 
 def test_action_quantity_stays_inside_limit_after_float_fill_accumulation():
