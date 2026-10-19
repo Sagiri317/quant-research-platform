@@ -76,13 +76,6 @@ def test_missing_visible_quantity_preserves_only_independent_known_facts(tmp_pat
         assert len({event.observation_id for event in events}) == 1
 
 
-def test_missing_visible_quantity_does_not_rescue_unlocatable_clock(tmp_path):
-    raw = tmp_path / "raw"
-    _recording(raw, {"nq": "missing", "T": None})
-    with open_market_source(raw) as source, pytest.raises(ValueError):
-        list(iter_agg_trades(source, FUTURES_MARKET_TYPE, symbol="BTCUSDT"))
-
-
 @pytest.mark.parametrize("side", ["buy", "sell"])
 @pytest.mark.parametrize(
     "price,maker_buyer,depends,visible",

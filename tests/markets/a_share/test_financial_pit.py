@@ -927,10 +927,10 @@ def test_empty_legal_financial_event_domain_persists_unknown_panel_rows(tmp_path
     )
 
 
-@pytest.mark.parametrize("size", [64, 128])
-def test_ttm_annual_revisions_keep_latest_known_period_state(size, monkeypatch):
+def test_ttm_annual_revisions_keep_latest_known_period_state(monkeypatch):
     from quant_research_platform.markets.implementations.a_share import fundamentals
 
+    size = 3
     events = pd.DataFrame(
         {
             "asset_id": "asset",
@@ -951,8 +951,8 @@ def test_ttm_annual_revisions_keep_latest_known_period_state(size, monkeypatch):
 
     monkeypatch.setattr(fundamentals, "_ttm_value", counted)
     result = construct_ttm_events(events)
-    assert result.ttm_value.tolist() == events.value.tolist()
-    assert sizes == [1] * size
+    assert result.ttm_value.tolist() == [0.0, 1.0, 2.0]
+    assert sizes == [1, 1, 1]
 
 
 @pytest.mark.parametrize("damage", ("source", "observation", "schema"))

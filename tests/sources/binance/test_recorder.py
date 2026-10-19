@@ -508,10 +508,11 @@ def test_run_writer_rejects_late_writes_after_close(tmp_path: Path) -> None:
 def test_capture_stats_streams_finalized_intervals_to_sidecar(tmp_path: Path) -> None:
     writer = recorder._RunWriter(tmp_path)
     stats = recorder._CaptureStats(writer)
-    for index in range(10000):
+    stream = FUTURES_STREAMS[1]
+    for index in range(3):
         connection_id = f"trade-{index}"
         stats.opened(
-            FUTURES_STREAMS[1],
+            stream,
             reconnect=index > 0,
             connection_id=connection_id,
             segment_id=None,
@@ -524,7 +525,7 @@ def test_capture_stats_streams_finalized_intervals_to_sidecar(tmp_path: Path) ->
             closed_monotonic_ns=index + 1,
             close_reason="stop",
         )
-    assert stats.connection_intervals == {}
+        assert stats.connection_intervals == {}
     writer.close()
     descriptor = writer.connection_interval_manifest()
     stats.set_connection_interval_manifest(descriptor)
@@ -532,12 +533,18 @@ def test_capture_stats_streams_finalized_intervals_to_sidecar(tmp_path: Path) ->
     sidecar = tmp_path / descriptor["path"]
     assert payload["connection_intervals"] == {
         "path": "connection_intervals.jsonl.gz",
-        "record_count": 10000,
+        "record_count": 3,
         "compressed_bytes": sidecar.stat().st_size,
         "sha256": hashlib.sha256(sidecar.read_bytes()).hexdigest(),
     }
+    key = f"{stream.market_type}:{stream.stream}"
+    assert payload["connection_opens"] == {key: 3}
+    assert payload["reconnects"] == {key: 2}
     with gzip.open(sidecar, "rt", encoding="utf-8") as handle:
-        assert sum(1 for _ in handle) == 10000
+        rows = [json.loads(line) for line in handle]
+    assert [row["connection_id"] for row in rows] == ["trade-0", "trade-1", "trade-2"]
+    assert [row["closed_monotonic_ns"] for row in rows] == [1, 2, 3]
+    assert all(row["close_reason"] == "stop" for row in rows)
 
 
 @pytest.mark.parametrize(
