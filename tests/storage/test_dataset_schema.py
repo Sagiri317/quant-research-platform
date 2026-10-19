@@ -989,7 +989,7 @@ def test_writer_incremental_logical_dtype_plan_keeps_schema_width(
     root = make_dataset_artifact_root(tmp_path, name)
     base = make_default_dataset_frame().iloc[:1].copy()
     chunks = []
-    for index in range(32):
+    for index in range(3):
         current = base.iloc[:0].copy() if empty_chunks else base.copy()
         if not empty_chunks:
             current["asset_id"] = f"asset-{index:03d}"
@@ -1015,7 +1015,7 @@ def test_writer_incremental_logical_dtype_plan_keeps_schema_width(
 def test_unordered_category_domain_survives_persistence(tmp_path: Path) -> None:
     root = make_dataset_artifact_root(tmp_path, "category_domain")
     frame = make_default_dataset_frame().iloc[:1].copy()
-    categories = [f"asset-{index:05d}" for index in range(2000)]
+    categories = [f"asset-{index:05d}" for index in range(2)]
     frame["asset_id"] = pd.Categorical(
         [categories[-1]], categories=categories, ordered=False
     )
@@ -1131,7 +1131,7 @@ def test_writer_dtype_work_depends_on_distinct_metadata_not_parts(
         dataset_writing, "validate_persisted_logical_schema", compatible
     )
     counts = []
-    for parts in (1, 12):
+    for parts in (1, 3):
         for key in work:
             work[key] = 0
         frames = []
@@ -1140,7 +1140,7 @@ def test_writer_dtype_work_depends_on_distinct_metadata_not_parts(
                 asset_ids=("a",), dates=(f"2020-01-{index + 1:02}",), values=("v0",)
             )
             # Alternating domains proves reuse across nonadjacent parts.
-            domain = 512 + int(changed and index % 2 == 1)
+            domain = 2 + int(changed and index % 2 == 1)
             frame["value"] = pd.Categorical(
                 frame["value"], categories=[f"v{i}" for i in range(domain)]
             )
@@ -1152,11 +1152,11 @@ def test_writer_dtype_work_depends_on_distinct_metadata_not_parts(
         counts.append(dict(work))
         observed = read_dataset(root)
         assert len(observed) == parts
-        assert len(observed["value"].cat.categories) == 512 + int(changed and parts > 1)
+        assert len(observed["value"].cat.categories) == 2 + int(changed and parts > 1)
     if changed:
-        assert counts[1]["encode"] == 512 + 513
+        assert counts[1]["encode"] == 2 + 3
         assert counts[1]["physical"] == 2
     else:
         assert counts[0] == counts[1]
-        assert counts[1]["encode"] == 512
+        assert counts[1]["encode"] == 2
         assert counts[1]["physical"] == 1

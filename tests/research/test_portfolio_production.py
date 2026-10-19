@@ -1613,12 +1613,8 @@ def test_simple_producer_terminal_sessions_are_truncated_after_prediction_lookup
     ) <= pd.Timestamp("2023-01-04")
 
 
-@pytest.mark.parametrize(
-    ("lookup", "error"),
-    ((_PredictionLookup(extra=True), "misaligned_persisted_prediction_keys"),),
-)
 def test_simple_producer_prediction_coverage_fails_closed(
-    tmp_path: Path, monkeypatch, lookup: _PredictionLookup, error: str
+    tmp_path: Path, monkeypatch
 ) -> None:
     frames, fee_frame, output_window = _inputs()
     output, _calls = _build_producer(
@@ -1627,9 +1623,9 @@ def test_simple_producer_prediction_coverage_fails_closed(
         frames=frames,
         fee_frame=fee_frame,
         output_window=output_window,
-        prediction_lookup=lookup,
+        prediction_lookup=_PredictionLookup(extra=True),
     )
-    with pytest.raises(ValueError, match=error):
+    with pytest.raises(ValueError, match="misaligned_persisted_prediction_keys"):
         list(output)
 
 
@@ -1673,6 +1669,24 @@ def test_simple_producer_unknown_held_quote_carries_without_fabricated_trade(
         if row.name.endswith("mark_kind")
     ]
     assert any(row.text == "ordinary_missing_quote" for row in marked)
+    missing_at = pd.Timestamp("2023-01-05").value
+    held = [
+        row
+        for batch in batches
+        for row in batch.valuations
+        if row.asset_id == "b" and row.timestamp_ns == missing_at
+    ]
+    assert held and all(row.quantity > 0 for row in held)
+    assert all(
+        trade.asset_id != "b" or trade.timestamp_ns != missing_at
+        for batch in batches
+        for trade in batch.trades
+    )
+    assert all(
+        flow.asset_id != "b" or flow.timestamp_ns != missing_at
+        for batch in batches
+        for flow in batch.cashflows
+    )
 
 
 def test_research_marks_are_phase_ordered_and_preserve_life_and_source():

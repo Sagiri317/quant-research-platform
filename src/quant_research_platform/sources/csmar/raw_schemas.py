@@ -71,14 +71,17 @@ def infer_dataset_from_native_export(path: str | Path) -> str:
         r"raw__(?P<table>[A-Za-z0-9_]+)__part-\d+__observed-\d{8}\.csv",
         export_path.name,
     )
-    stem = (
-        raw_only.group("table")
-        if raw_only is not None
-        else re.sub(r"\d+$", "", export_path.stem)
-    )
+    stem = raw_only.group("table") if raw_only is not None else export_path.stem
     for dataset, contract in _field_mappings.RAW_TABLE_CONTRACTS.items():
         if contract.table_code == stem:
             return dataset
+    if raw_only is None:
+        for dataset, contract in _field_mappings.RAW_TABLE_CONTRACTS.items():
+            if (
+                stem.startswith(contract.table_code)
+                and stem[len(contract.table_code) :].isdecimal()
+            ):
+                return dataset
 
     raise ValueError(f"Cannot infer CSMAR dataset from native filename: {export_path}")
 

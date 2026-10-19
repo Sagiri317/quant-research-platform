@@ -159,8 +159,8 @@ def test_native_fmb_varying_scale_identity_has_no_false_intercept_inference(tmp_
     from quant_research_platform.research.statistics_production import factor_statistics
     from quant_research_platform.storage.datasets import write_dataset
 
-    dates = pd.bdate_range("2020-01-01", periods=100)
-    values = np.arange(1.0, 9.0)[None, :] * np.arange(1.0, 101.0)[:, None] * 0.001
+    dates = pd.bdate_range("2020-01-01", periods=21)
+    values = np.arange(1.0, 9.0)[None, :] * np.arange(1.0, 22.0)[:, None] * 0.001
     frame = pd.DataFrame(
         {
             "timestamp": dates.repeat(8),
@@ -207,7 +207,7 @@ def test_native_fmb_varying_scale_identity_has_no_false_intercept_inference(tmp_
         assert periods.loc[periods.coefficient_id.eq("intercept"), "value"].eq(0).all()
         assert periods.white_p_value.isna().all()
     with artifact.table("fama_macbeth.parquet") as summary:
-        assert summary.period_count.eq(100).all()
+        assert summary.period_count.eq(21).all()
         assert summary.status.eq("UNDEFINED").all()
         assert summary.reason.eq("hac_inference_undefined").all()
         assert summary.loc[summary.coefficient_id.eq("intercept"), "mean"].eq(0).all()

@@ -50,6 +50,7 @@ from quant_research_platform.research.protocols.crypto_hft import (
 )
 from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
 from quant_research_platform.sources.binance import ids as binance_ids
+from quant_research_platform.storage.datasets.inventory import DatasetSessionInventory
 from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
     _dataset_input_options,
@@ -439,6 +440,17 @@ def produce_derivative_processed_data(
             yield (data, metadata)
 
 
+def _ordered_native_session(session):
+    """Restore selected native production order without widening the selection."""
+    if not session.native:
+        return session
+    inventory = DatasetSessionInventory(data_root=session.data_root)
+    for path in session.read_paths:
+        inventory.add(path)
+    inventory.sort_parts()
+    return replace(session, read_paths=inventory.paths)
+
+
 def _selected_context_session(root, columns, time_window):
     """Project the chosen definition while leaving absent values locally unknown."""
     options = _dataset_input_options(root, time_window=time_window)
@@ -454,7 +466,9 @@ def _selected_context_session(root, columns, time_window):
             raise ValueError("data_operation_input_columns_missing")
     available = tuple(name for name in columns if name in session.arrow_schema.names)
 
-    return session.projected_view(tuple(dict.fromkeys((*keys, *available))))
+    return _ordered_native_session(
+        session.projected_view(tuple(dict.fromkeys((*keys, *available))))
+    )
 
 
 @contextmanager
@@ -553,8 +567,16 @@ def _union_panel_frames(
     columns = list(columns)
 
     def source_frames(frames):
+        previous = None
         with closing_iterator(iter(frames)) as active:
             for frame in active:
+                if not frame.empty:
+                    keys = pd.MultiIndex.from_frame(frame[["timestamp", "asset_id"]])
+                    if not keys.is_monotonic_increasing or (
+                        previous is not None and keys[0] < previous
+                    ):
+                        raise ValueError("hft_panel_keys_non_monotonic")
+                    previous = keys[-1]
                 try:
                     yield frame
                 except GeneratorExit:
@@ -649,7 +671,7 @@ def produce_information_panel(
         ):
             raise ValueError("data_operation_input_columns_missing")
         session = open_dataset_session(**{**options, "columns": spec.required_columns})
-        sessions.append(session)
+        sessions.append(_ordered_native_session(session))
         identities[data_id] = str(session.root)
     batch_rows = DEFAULT_BATCH_ROWS
     frames = _union_panel_frames(

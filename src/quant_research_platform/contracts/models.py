@@ -158,7 +158,7 @@ def _resolved_model_hyperparameters_match(
 
 @dataclass(frozen=True)
 class TrainingWeighting:
-    """Equal timestamp mass, optionally decayed in observed training periods."""
+    """Equal timestamp mass, optionally decayed over market-calendar sessions."""
 
     method: str = "equal_timestamp"
     half_life_periods: float | None = None

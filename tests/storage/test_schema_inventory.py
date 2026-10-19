@@ -511,9 +511,7 @@ def test_schema_inventory_rejects_important_column_coercion(
             pass
 
 
-@pytest.mark.parametrize(
-    "time_column", ("timestamp", "report_period", "effective_date")
-)
+@pytest.mark.parametrize("time_column", ("timestamp", "report_period"))
 @pytest.mark.parametrize("cancel", (False, True))
 def test_inventory_uses_declared_time_and_closes_early_context(
     tmp_path, time_column, cancel

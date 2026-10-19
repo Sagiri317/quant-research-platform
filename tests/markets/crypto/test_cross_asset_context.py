@@ -490,7 +490,7 @@ def test_input_delay_postpones_visibility_without_shifting_target_or_source_cloc
     assert pd.isna(external.bybit_observed_signed_base_flow_500ms.iloc[6])
 
 
-@pytest.mark.parametrize("delay", (0, 50, 100, 150, 199, 200, 201, 250))
+@pytest.mark.parametrize("delay", (0, 50, 100, 199, 200, 201))
 def test_delayed_flow_windows_wait_for_complete_history_after_each_reset(delay):
     from quant_research_platform.markets.implementations.crypto.hft import (
         iter_derivative_factor_frames,

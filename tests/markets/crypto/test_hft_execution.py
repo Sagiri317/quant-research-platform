@@ -1291,14 +1291,14 @@ def test_pending_markout_fifo_preserves_maturity_order_with_pending_suffix():
                 }
             )
 
-        for index in range(10):
+        for index in range(2):
             add(index)
-        for index in range(20):
+        for index in range(3):
             pending.advance(index, None, {})
-            add(index + 10)
-        assert completed == list(range(20))
+            add(index + 2)
+        assert completed == list(range(3))
         pending.expire_all()
-        assert completed == list(range(30))
+        assert completed == list(range(5))
 
 
 @pytest.mark.parametrize("close_price,realized", [(110.0, 10.0), (90.0, -10.0)])

@@ -1693,7 +1693,7 @@ def test_compound_fundamental_ratio_preserves_cancellation() -> None:
         income_report_period=pd.Timestamp("2023-12-31"),
         cashflow_report_period=pd.Timestamp("2023-12-31"),
         short_term_borrowings=1e8,
-        current_portion_noncurrent_liabilities=1.0,
+        current_portion_noncurrent_liabilities=0.01,
         long_term_borrowings=-1e8,
         bonds_payable=0.0,
         cash=0.0,
@@ -1702,8 +1702,8 @@ def test_compound_fundamental_ratio_preserves_cancellation() -> None:
         [dict(asset_id="asset", timestamp=pd.Timestamp("2024-05-02"), **values)]
     )
     actual = calculate_fundamental_factors(frame)
-    assert actual["debt_to_assets"].iloc[0] == pytest.approx(1.0, rel=1e-12, abs=0)
-    assert actual["net_debt_to_assets"].iloc[0] == pytest.approx(1.0, rel=1e-12, abs=0)
+    assert actual["debt_to_assets"].iloc[0] == pytest.approx(0.01, rel=1e-12, abs=0)
+    assert actual["net_debt_to_assets"].iloc[0] == pytest.approx(0.01, rel=1e-12, abs=0)
 
 
 def test_fundamental_subset_requires_only_its_formula_inputs():

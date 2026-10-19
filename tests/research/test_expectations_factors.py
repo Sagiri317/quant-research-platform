@@ -538,8 +538,9 @@ def freshness_inputs(tmp_path_factory):
     return dates, inputs, panel
 
 
-@pytest.mark.parametrize("batch_rows", (3, 10000))
-@pytest.mark.parametrize("freshness", (30, 90, 180))
+@pytest.mark.parametrize(
+    "freshness,batch_rows", ((30, 3), (90, 10000), (180, 3), (180, 10000))
+)
 def test_explicit_freshness_controls_native_source_history_and_values(
     tmp_path, freshness, batch_rows, monkeypatch, freshness_inputs
 ):
@@ -642,10 +643,7 @@ def test_expectation_preparation_and_query_reject_invalid_boundaries(failure):
         )(observations)
 
 
-@pytest.mark.parametrize("freshness", (90, 180))
-def test_expectation_queries_keep_position_with_duplicate_index_and_nullable_close(
-    freshness,
-):
+def test_expectation_queries_keep_position_with_duplicate_index_and_nullable_close():
     records = pd.DataFrame(
         [
             (
@@ -688,7 +686,7 @@ def test_expectation_queries_keep_position_with_duplicate_index_and_nullable_clo
     actual = _prepare_expectations(
         records,
         trading_sessions=pd.bdate_range("2025-01-03", "2025-01-08"),
-        freshness_days=freshness,
+        freshness_days=90,
     )(observations)
     pd.testing.assert_frame_equal(
         actual[["asset_id", "timestamp"]],

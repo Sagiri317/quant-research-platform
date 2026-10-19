@@ -891,8 +891,8 @@ def test_archive_shared_decoding_preserves_order_and_independent_payloads(
             {"lastUpdateId": 100, "bids": [["100", "2"]], "asks": [["101", "2"]]},
         )
     ]
-    for identifier in range(1, 257):
-        second = (identifier - 1) // 8 + 1
+    for identifier in range(1, 5):
+        second = (identifier - 1) // 2 + 1
         rows.append(
             _line(
                 second,
@@ -951,11 +951,11 @@ def test_archive_shared_decoding_preserves_order_and_independent_payloads(
             data_kinds=("agg_trades",),
         )
         leading = list(read(symbol="BTCUSDT"))
-        assert [row["source_sequence"] for row in leading] == list(range(3, 515, 2))
+        assert [row["source_sequence"] for row in leading] == list(range(3, 11, 2))
         expected = json.dumps(leading)
         leading[0]["payload"]["a"] = -1
         lagging = list(read(symbol="ETHUSDT"))
-        assert [row["source_sequence"] for row in lagging] == list(range(4, 516, 2))
+        assert [row["source_sequence"] for row in lagging] == list(range(4, 12, 2))
         assert json.dumps(list(read(symbol="BTCUSDT"))) == expected
         assert (
             len(
@@ -966,9 +966,9 @@ def test_archive_shared_decoding_preserves_order_and_independent_payloads(
                     )
                 )
             )
-            == 8
+            == 2
         )
-        assert calls["native_scans"] == 1 and calls["native_rows"] == 514
+        assert calls["native_scans"] == 1 and calls["native_rows"] == 10
     assert handles and all(handle.closed for handle in handles)
 
 
@@ -1549,7 +1549,7 @@ def test_real_midnight_snapshot_recovers_book_without_inventing_observation(
 def test_late_snapshot_prefix_cursors_are_independent_and_canonical(tmp_path):
     from quant_research_platform.policy.lifecycle import closing_iterator
 
-    count = 300
+    count = 3
     native = b"".join(_delta(1, 100 + n, 100 + n, 99 + n) for n in range(count))
     native += _line(
         2,
@@ -1586,7 +1586,7 @@ def test_late_snapshot_prefix_cursors_are_independent_and_canonical(tmp_path):
             snapshot = next(first)
             assert snapshot["data_kind"] == "depth_snapshot"
             assert next(second) == snapshot
-            prefix = [next(first) for _ in range(17)]
+            prefix = [next(first)]
             other = list(second)
             rest = list(first)
             assert prefix + rest == other

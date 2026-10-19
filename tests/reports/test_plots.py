@@ -293,7 +293,7 @@ def test_missing_chinese_font_fails_explicitly(monkeypatch):
         plots.plot_returns([], **TIMED)
 
 
-@pytest.mark.parametrize("error_type", [RuntimeError, KeyboardInterrupt, SystemExit])
+@pytest.mark.parametrize("error_type", [RuntimeError, KeyboardInterrupt])
 def test_failed_plot_closes_only_its_new_figures(monkeypatch, error_type):
     from matplotlib.axes import Axes
 

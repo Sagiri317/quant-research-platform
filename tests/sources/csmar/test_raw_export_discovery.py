@@ -7,6 +7,29 @@ import pytest
 from quant_research_platform.sources.csmar import field_mappings, raw_exports
 
 
+@pytest.mark.parametrize(
+    "filename,dataset",
+    (
+        ("FN_FN046.csv", "equity_changes"),
+        ("FN_FN0461.csv", "equity_changes"),
+        ("TRDNEW_Cale1.csv", "trading_calendar"),
+        ("raw__FN_FN046__part-01__observed-20261019.csv", "equity_changes"),
+        ("FN_FN0461extra.csv", None),
+        ("raw__FN_FN0461__part-01__observed-20261019.csv", None),
+    ),
+)
+def test_native_filename_preserves_complete_registered_table_code(filename, dataset):
+    from quant_research_platform.sources.csmar.raw_schemas import (
+        infer_dataset_from_native_export,
+    )
+
+    if dataset is None:
+        with pytest.raises(ValueError, match="Cannot infer CSMAR dataset"):
+            infer_dataset_from_native_export(filename)
+    else:
+        assert infer_dataset_from_native_export(filename) == dataset
+
+
 def test_requested_dataset_rejects_ambiguous_header(tmp_path: Path) -> None:
     columns = tuple(
         dict.fromkeys(

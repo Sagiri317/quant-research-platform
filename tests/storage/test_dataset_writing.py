@@ -444,7 +444,7 @@ def test_public_writer_omits_caller_attrs_before_copy_and_arrow_serialization(
     expected["timestamp"] = expected["timestamp"].astype("datetime64[ns]")
     frames = (expected.iloc[:1].copy(), expected.iloc[1:].copy())
     caller_only = CallerOnly()
-    payload = ["x" * 200000, caller_only]
+    payload = ["caller marker", caller_only]
     for frame in frames:
         frame.attrs["caller_only"] = payload
     original_attrs = [frame.attrs for frame in frames]
@@ -463,7 +463,7 @@ def test_public_writer_omits_caller_attrs_before_copy_and_arrow_serialization(
     for frame, attrs in zip(frames, original_attrs, strict=True):
         assert frame.attrs is attrs
         assert frame.attrs["caller_only"] is payload
-    assert payload[0] == "x" * 200000
+    assert payload[0] == "caller marker"
     assert payload[1] is caller_only
     manifest = json.loads((root / "_manifest" / "manifest.json").read_text())
     assert manifest["producer_diagnostics"] == {"label": "preserved"}

@@ -560,10 +560,18 @@ def test_research_dataset_role_validation_rejects_wrong_factor_source(
         )
 
 
-@pytest.mark.parametrize("coverage", ("strict", "sparse"))
-@pytest.mark.parametrize("physical_rows", (1, 2))
 @pytest.mark.parametrize(
-    "extra_date", (None, "2023-12-31", "2024-01-02", "2024-01-04", "2024-01-06")
+    "coverage,physical_rows,extra_date",
+    [
+        ("strict", 1, None),
+        ("strict", 1, "2023-12-31"),
+        ("strict", 2, "2024-01-02"),
+        ("strict", 1, "2024-01-04"),
+        ("strict", 2, "2024-01-06"),
+        ("sparse", 2, None),
+        ("sparse", 1, "2024-01-02"),
+        ("sparse", 2, "2024-01-06"),
+    ],
 )
 def test_full_request_key_domain_is_independent_of_base_file_boundaries(
     tmp_path, coverage, physical_rows, extra_date

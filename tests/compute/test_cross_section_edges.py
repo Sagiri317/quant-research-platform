@@ -14,26 +14,9 @@ from quant_research_platform.compute.panels import ComputePanelSpec
 from tests.helpers.compute_inputs import make_cross_section_compute_panel
 
 
-def test_dataframe_cross_section_metrics() -> None:
-    spec = ComputePanelSpec(
-        signal_columns=("factor", "factor_alt"),
-        label_columns=("forward_return",),
-    )
-    frame = make_cross_section_compute_panel()
-
-    ic, grouped = _compute_ic_and_grouped_label_values(
-        frame,
-        spec,
-        n_groups=3,
-    )
-    assert len(ic) == 4
-    assert set(ic["signal"]) == {"factor", "factor_alt"}
-    assert not grouped.empty
-
-
 def test_dataframe_cross_section_accepts_ignored_extra_columns() -> None:
     spec = ComputePanelSpec(
-        signal_columns=("factor",), label_columns=("forward_return",)
+        signal_columns=("factor", "factor_alt"), label_columns=("forward_return",)
     )
     frame = make_cross_section_compute_panel().assign(
         segment=["a", "a", "a", "b", "b", "b"]
@@ -42,11 +25,14 @@ def test_dataframe_cross_section_accepts_ignored_extra_columns() -> None:
     ic, grouped = _compute_ic_and_grouped_label_values(
         frame,
         spec,
-        n_groups=2,
+        n_groups=3,
     )
     expected_ic, expected_grouped = _compute_ic_and_grouped_label_values(
-        frame.drop(columns="segment"), spec, n_groups=2
+        frame.drop(columns="segment"), spec, n_groups=3
     )
+    assert len(ic) == 4
+    assert set(ic["signal"]) == {"factor", "factor_alt"}
+    assert not grouped.empty
     pd.testing.assert_frame_equal(ic, expected_ic)
     pd.testing.assert_frame_equal(grouped, expected_grouped)
 

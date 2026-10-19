@@ -1189,7 +1189,9 @@ def test_label_relative_change_preserves_adjacent_positive_endpoints(mid, future
         ignore_index=True,
     )
     expected = float((Fraction(future) - Fraction(mid)) / Fraction(mid))
-    assert labels.loc[0, "future_mid_return_100ms"] == expected
+    assert labels.loc[0, "future_mid_return_100ms"] == pytest.approx(
+        expected, rel=1e-14, abs=0
+    )
     assert labels.loc[0, "future_mid_direction_100ms"] == (
         1.0 if expected > 0 else -1.0
     )

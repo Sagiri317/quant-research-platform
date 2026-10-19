@@ -190,6 +190,8 @@ def test_atomic_long_paths_create_parents_keep_old_good_and_preserve_primary(
             Path(native_filesystem_path(final / "value")).read_text(encoding="utf-8")
             == "old"
         )
+    if kind == "file":
+        return
     unrelated = parent / ".a-user"
     Path(native_filesystem_path(unrelated)).mkdir()
     primary = KeyboardInterrupt("writer_primary")

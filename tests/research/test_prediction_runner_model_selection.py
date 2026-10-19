@@ -40,7 +40,9 @@ def test_candidate_domains_survive_new_common_comparison(tmp_path):
         }
     )
     config["predictions"][1] = str(scoped)
-    frames = [read_predictions(path)[0] for path in config["predictions"]]
+    restored = [read_predictions(path) for path in config["predictions"]]
+    frames = [frame for frame, _metadata in restored]
+    assert restored[1][1]["asset_ids"] == ["c"]
     assert [len(frame) for frame in frames] == [6, 3]
     assert [set(frame.asset_id) for frame in frames] == [{"b", "c"}, {"c"}]
     before = [
@@ -57,6 +59,13 @@ def test_candidate_domains_survive_new_common_comparison(tmp_path):
         "output": str(tmp_path / "single.json"),
     }
     assert json.loads(score(single).read_text())["common_rows"] == 6
+    scoped_single = {
+        **single,
+        "predictions": config["predictions"][1:],
+        "candidate_ids": config["candidate_ids"][1:],
+        "output": str(tmp_path / "scoped-single.json"),
+    }
+    assert json.loads(score(scoped_single).read_text())["common_rows"] == 3
     assert before == [
         (Path(path) / "prediction.parquet").read_bytes()
         for path in config["predictions"]
@@ -384,26 +393,6 @@ def test_each_frozen_family_winner_can_refit_but_family_change_cannot(tmp_path):
                     "family_id": "wrong",
                 }
             )
-
-
-def test_explicit_prediction_asset_scope_is_preserved_at_score(tmp_path):
-    cases, config = candidates(tmp_path, algorithms=("linear_regression",))
-    case = cases[0]
-    path = predict(
-        {
-            "model": str(case.root),
-            "inputs": str(tmp_path / "linear_regression" / "future.parquet"),
-            "input_spec": case.config["input_spec"],
-            "output": str(tmp_path / "scoped-pred"),
-            "prediction_window": config["validation_windows"][0],
-            "sample_role": "validation",
-            "asset_ids": ["b"],
-        }
-    )
-    frame, metadata = read_predictions(path)
-    assert set(frame.asset_id) == {"b"} and metadata["asset_ids"] == ["b"]
-    config.update(predictions=[str(path)])
-    assert json.loads(score(config).read_text())["common_rows"] == 3
 
 
 @pytest.mark.parametrize(

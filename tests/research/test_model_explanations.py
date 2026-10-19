@@ -364,17 +364,39 @@ def test_linear_shap_uses_exact_explicit_historical_mean(tmp_path, algorithm):
     ],
 )
 def test_real_tree_interventional_shap(tmp_path, algorithm):
-    _, _, config = _case(tmp_path, algorithm)
+    case, frame, config = _case(tmp_path, algorithm)
     config["methods"] = ["tree_shap_interventional"]
     config["background"] = {
         "inputs": config["inputs"],
         "input_spec": config["input_spec"],
         "window": {"start": "2020-01-01", "end": "2020-01-05"},
-        "max_rows": 20,
+        "max_rows": 40,
         "root_seed": 1,
     }
     metadata, tables = read_explanation(explain(config))
-    assert metadata["attribution"]["background"]["row_count"] == 20
+    background = frame.loc[frame.timestamp.le("2020-01-05"), ["x", "y"]]
+    assert metadata["attribution"]["background"]["row_count"] == len(background)
+    predictor = case.result.prediction_model
+    baseline = predictor.predict(background).mean()
+    predictions = tables["predictions"].set_index(["timestamp", "asset_id"])
+    contributions = (
+        tables["contributions"]
+        .set_index(["timestamp", "asset_id", "feature"])
+        .contribution.unstack("feature")
+    )
+    selected = frame.set_index(["timestamp", "asset_id"]).loc[predictions.index]
+    np.testing.assert_allclose(predictions.base_value, baseline, rtol=1e-12, atol=1e-14)
+    for key, row in selected.iterrows():
+        only_x = predictor.predict(background.assign(x=row.x)).mean()
+        only_y = predictor.predict(background.assign(y=row.y)).mean()
+        both = predictor.predict(pd.DataFrame({"x": [row.x], "y": [row.y]}))[0]
+        expected = [
+            ((only_x - baseline) + (both - only_y)) / 2,
+            ((only_y - baseline) + (both - only_x)) / 2,
+        ]
+        np.testing.assert_allclose(
+            contributions.loc[key, ["x", "y"]], expected, rtol=1e-6, atol=1e-9
+        )
     assert (
         tables["predictions"]
         .additivity_residual.abs()
@@ -1005,6 +1027,7 @@ def test_background_seed_default_matches_explicit_and_rejects_null(tmp_path):
     }
     metadata, first = read_explanation(explain(config))
     assert metadata["attribution"]["background"]["root_seed"] == 42
+    assert metadata["attribution"]["background"]["row_count"] == 10
     config["output"] += "-explicit"
     config["background"]["root_seed"] = 42
     _, second = read_explanation(explain(config))
