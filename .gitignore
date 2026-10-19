@@ -18,7 +18,7 @@ env/
 # Notebook
 .ipynb_checkpoints/
 
-# 构建和报告输出
+# 构建和本地运行输出；reports/ 保留在版本管理中
 build/
 dist/
 .run/
