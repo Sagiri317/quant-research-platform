@@ -694,7 +694,7 @@ class FundingForecast:
 
 
 def portfolio_notional_tolerance(nav: float) -> float:
-    return min(ulp(nav) * 512.0, abs(nav) * (ulp(1.0) * 512.0))
+    return abs(nav) * (ulp(1.0) * 512.0)
 
 
 def _quantity_tolerance(*quantities: float | Fraction) -> float:

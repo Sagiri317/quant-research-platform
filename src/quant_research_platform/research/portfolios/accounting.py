@@ -861,7 +861,7 @@ def execute_continuous_target(
     target = _weight_values(target_weights, assets, "target_weights_invalid")
     if current.lt(0.0).any() or target.lt(0.0).any():
         raise ValueError("execution_weights_invalid")
-    weight_bound = 1.0 + 512.0 * np.finfo(float).eps
+    weight_bound = 1.0 + portfolio_notional_tolerance(1.0)
     if (
         sum(map(float, current)) > weight_bound
         or sum(map(float, target)) > weight_bound

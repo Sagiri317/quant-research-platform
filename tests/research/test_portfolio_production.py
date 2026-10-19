@@ -2561,7 +2561,7 @@ def test_final_alpha_includes_last_mature_session_and_persists_without_fake_trad
 @pytest.mark.parametrize("nav", [100.0, 1000000000.0])
 @pytest.mark.parametrize(
     "weight,material",
-    [(1e-15, False), (5e-14, False), (7.5e-14, True), (1e-08, True)],
+    [(1e-15, False), (5e-14, False), (2e-13, True), (1e-08, True)],
 )
 @pytest.mark.parametrize("blocked", ["market", "adv"])
 def test_tiny_blocked_orders_keep_reason_consistent_through_real_writer(
@@ -2584,6 +2584,30 @@ def test_tiny_blocked_orders_keep_reason_consistent_through_real_writer(
         expected_delta=0.0,
         expected_reason=expected_reason,
     )
+
+
+@pytest.mark.parametrize("nav", (100.0, 128.0))
+@pytest.mark.parametrize("excess_ulps", (384, 1024))
+def test_budget_roundoff_has_the_same_scope_before_and_after_nav_conversion(
+    tmp_path, nav, excess_ulps
+):
+    def execute_and_roundtrip():
+        _assert_execution_endpoints_roundtrip(
+            tmp_path,
+            nav=nav,
+            current=0.0,
+            target=1.0 + excess_ulps * np.finfo(float).eps,
+            can_enter=True,
+            adv=nav,
+            expected_delta=nav,
+            expected_reason=None,
+        )
+
+    if excess_ulps > 512:
+        with pytest.raises(ValueError, match="execution_weights_sum_invalid"):
+            execute_and_roundtrip()
+    else:
+        execute_and_roundtrip()
 
 
 @pytest.mark.parametrize(
