@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
-from arch.bootstrap import MCS, SPA, StepM
+from arch.bootstrap import MCS
 from statsmodels.api import OLS, WLS, add_constant
 from statsmodels.stats.multitest import multipletests
 
@@ -20,6 +20,7 @@ from quant_research_platform.research.statistics import (
     stepm_superior_models,
     time_series_inference_summary,
 )
+from tests.helpers.statistical_inference import hansen_spa_stepm_reference
 
 
 def test_common_candidate_coverage_is_intersection_without_imputation() -> None:
@@ -158,7 +159,7 @@ def test_psr_dsr_fixed_oracle() -> None:
     assert more_dispersed.dsr < result.dsr
 
 
-def test_arch_multiple_comparison_adapters_keep_native_meanings() -> None:
+def test_multiple_comparison_matches_hansen_reference_and_native_mcs() -> None:
     rng = np.random.default_rng(17)
     benchmark = rng.normal(0.0, 0.01, 64)
     models = pd.DataFrame(
@@ -172,10 +173,9 @@ def test_arch_multiple_comparison_adapters_keep_native_meanings() -> None:
         benchmark, models, block_size=20, repetitions=199, seed=17
     )
     mcs = model_confidence_set(models, block_size=20, repetitions=199, seed=17)
-    direct_spa = SPA(benchmark, models, block_size=20, reps=199, seed=17)
-    direct_spa.compute()
-    direct_stepm = StepM(benchmark, models, block_size=20, reps=199, seed=17)
-    direct_stepm.compute()
+    expected_pvalues, expected_superior = hansen_spa_stepm_reference(
+        benchmark, models, block_size=20, repetitions=199, seed=17
+    )
     direct_mcs = MCS(models, size=0.05, block_size=20, reps=199, seed=17)
     direct_mcs.compute()
     assert (
@@ -183,9 +183,9 @@ def test_arch_multiple_comparison_adapters_keep_native_meanings() -> None:
     )
     np.testing.assert_allclose(
         [spa.lower_p_value, spa.consistent_p_value, spa.upper_p_value],
-        direct_spa.pvalues[["lower", "consistent", "upper"]],
+        expected_pvalues,
     )
-    assert superior.superior_models == tuple(direct_stepm.superior_models)
+    assert superior.superior_models == expected_superior
     assert mcs.included == tuple(direct_mcs.included)
     assert mcs.excluded == tuple(direct_mcs.excluded)
     pd.testing.assert_frame_equal(mcs.p_values, direct_mcs.pvalues)
@@ -238,6 +238,39 @@ def test_arch_multiple_comparison_adapters_keep_native_meanings() -> None:
         ).status
         == "UNDEFINED"
     )
+
+
+def test_spa_and_stepm_are_invariant_to_each_candidate_loss_unit() -> None:
+    differences = np.random.default_rng(20261019).normal(size=(256, 2)) + [0.3, 0.1]
+    benchmark = np.zeros(256)
+    models = pd.DataFrame(-differences, columns=["a", "b"])
+    options = dict(block_size=20, repetitions=1999, seed=42)
+    pvalues, superior = hansen_spa_stepm_reference(benchmark, models, **options)
+    assert superior == ("a", "b")
+    for scale in (1.0, 20.0, 1e-20, 1e20):
+        scaled = models.mul([1.0, scale])
+        spa = spa_reality_check(benchmark, scaled, **options)
+        step = stepm_superior_models(benchmark, scaled, **options)
+        assert spa.status == step.status == "DEFINED"
+        np.testing.assert_array_equal(
+            [spa.lower_p_value, spa.consistent_p_value, spa.upper_p_value], pvalues
+        )
+        assert step.superior_models == superior
+
+
+def test_spa_and_stepm_do_not_reject_when_all_candidate_means_are_worse() -> None:
+    differences = np.random.default_rng(43).normal(size=(64, 2)) - [3.0, 4.0]
+    benchmark = np.zeros(64)
+    models = pd.DataFrame(-differences, columns=["worse", "also_worse"])
+    options = dict(block_size=4, repetitions=99, seed=17)
+    result = spa_reality_check(benchmark, models, **options)
+    assert result.status == "DEFINED"
+    assert (result.lower_p_value, result.consistent_p_value, result.upper_p_value) == (
+        1.0,
+        1.0,
+        1.0,
+    )
+    assert stepm_superior_models(benchmark, models, **options).superior_models == ()
 
 
 def test_multiple_comparison_rejects_disjoint_time_indexes() -> None:
@@ -458,13 +491,9 @@ def test_sample_risk_and_sharpe_are_invariant_to_binary_units(exponent):
     assert result.dsr == pytest.approx(0.7859405033926591)
 
 
-@pytest.mark.parametrize(
-    "entry,native", [(spa_reality_check, SPA), (stepm_superior_models, StepM)]
-)
+@pytest.mark.parametrize("entry", [spa_reality_check, stepm_superior_models])
 @pytest.mark.parametrize("container", [np.asarray, list])
-def test_multiple_comparison_aligns_unlabeled_benchmark_to_model_rows(
-    entry, native, container
-):
+def test_multiple_comparison_aligns_unlabeled_benchmark_to_model_rows(entry, container):
     rng = np.random.default_rng(17)
     benchmark = rng.normal(0.0, 0.01, 32)
     models = pd.DataFrame(
@@ -474,18 +503,17 @@ def test_multiple_comparison_aligns_unlabeled_benchmark_to_model_rows(
         },
         index=pd.date_range("2020-01-01", periods=32),
     )
-    expected = native(benchmark, models, block_size=4, reps=99, seed=17)
-    expected.compute()
+    expected = entry(
+        pd.Series(benchmark, index=models.index),
+        models,
+        block_size=4,
+        repetitions=99,
+        seed=17,
+    )
     result = entry(container(benchmark), models, block_size=4, repetitions=99, seed=17)
     assert result.status == "DEFINED"
     assert result.observation_count == 32
-    if entry is spa_reality_check:
-        np.testing.assert_array_equal(
-            [result.lower_p_value, result.consistent_p_value, result.upper_p_value],
-            expected.pvalues[["lower", "consistent", "upper"]],
-        )
-    else:
-        assert result.superior_models == tuple(expected.superior_models)
+    assert result == expected
     with pytest.raises(ValueError, match="^loss_matrix_length_mismatch$"):
         entry(container(benchmark[:-1]), models, block_size=4, repetitions=99, seed=17)
 

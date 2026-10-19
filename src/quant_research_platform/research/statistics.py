@@ -1,4 +1,4 @@
-"""QRP input/status contracts delegating numerical inference to dependencies."""
+"""QRP inference contracts and scientific calculations using numerical dependencies."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from typing import Literal
 
 import numpy as np
 import pandas as pd
+from scipy.fft import irfft, next_fast_len, rfft
 from scipy.stats import chi2, kurtosis, norm, skew
 from statsmodels.regression.linear_model import OLS, WLS
 from statsmodels.stats.multitest import multipletests
@@ -276,18 +277,10 @@ def spa_reality_check(
         return SpaResult(
             None, None, None, aligned.observation_count, "UNDEFINED", reason
         )
-    benchmark = aligned.values[:, 0]
-    models = pd.DataFrame(
-        aligned.values[:, 1:], index=aligned.index, columns=aligned.candidate_ids[1:]
+    bootstrap = _studentized_loss_bootstrap(
+        aligned.values, block_size=block_size, repetitions=repetitions, seed=seed
     )
-    from arch.bootstrap import SPA
-
-    test = SPA(benchmark, models, block_size=block_size, reps=repetitions, seed=seed)
-    test.compute()
-    values = test.pvalues
-    if not _positive_finite_variances(test._loss_diff_var) or not _valid_p_values(
-        values.to_numpy()
-    ):
+    if bootstrap is None:
         return SpaResult(
             None,
             None,
@@ -296,10 +289,18 @@ def spa_reality_check(
             "UNDEFINED",
             "loss_differential_variance_undefined",
         )
+    observed, simulated = bootstrap
+    observed_max = max(0.0, float(observed.max()))
+    # Hansen's one-sided null cannot be rejected when no sample mean improves.
+    values = (
+        (np.maximum(0.0, simulated.max(axis=1)) > observed_max).mean(axis=0)
+        if observed_max > 0.0
+        else np.ones(3)
+    )
     return SpaResult(
-        lower_p_value=float(values["lower"]),
-        consistent_p_value=float(values["consistent"]),
-        upper_p_value=float(values["upper"]),
+        lower_p_value=float(values[0]),
+        consistent_p_value=float(values[1]),
+        upper_p_value=float(values[2]),
         observation_count=aligned.observation_count,
         status="DEFINED",
         reason=None,
@@ -321,36 +322,79 @@ def stepm_superior_models(
     reason = aligned.reason or _loss_differential_reason(aligned.values, pairwise=False)
     if reason is not None:
         return StepMResult((), aligned.observation_count, "UNDEFINED", reason)
-    benchmark = aligned.values[:, 0]
-    models = pd.DataFrame(
-        aligned.values[:, 1:], index=aligned.index, columns=aligned.candidate_ids[1:]
-    )
-    from arch.bootstrap import StepM
-
-    test = StepM(
-        benchmark,
-        models,
-        size=alpha,
+    bootstrap = _studentized_loss_bootstrap(
+        aligned.values,
         block_size=block_size,
-        reps=repetitions,
+        repetitions=repetitions,
         seed=seed,
     )
-    test.compute()
-    if not _positive_finite_variances(test.spa._loss_diff_var) or not _valid_p_values(
-        test.spa.pvalues.to_numpy()
-    ):
+    if bootstrap is None:
         return StepMResult(
             (),
             aligned.observation_count,
             "UNDEFINED",
             "loss_differential_variance_undefined",
         )
+    observed, simulated = bootstrap
+    remaining = np.ones(len(observed), dtype=bool)
+    while remaining.any():
+        maxima = np.maximum(0.0, simulated[:, remaining, 1].max(axis=1))
+        critical = np.quantile(maxima, 1.0 - alpha)
+        rejected = remaining & (observed > critical)
+        if not rejected.any():
+            break
+        remaining[rejected] = False
     return StepMResult(
-        tuple(str(value) for value in test.superior_models),
+        tuple(
+            name
+            for name, keep in zip(aligned.candidate_ids[1:], remaining, strict=True)
+            if not keep
+        ),
         aligned.observation_count,
         "DEFINED",
         None,
     )
+
+
+def _studentized_loss_bootstrap(
+    values: np.ndarray, *, block_size: int, repetitions: int, seed: int
+) -> tuple[np.ndarray, np.ndarray] | None:
+    from arch.bootstrap import StationaryBootstrap
+
+    scale = np.maximum(np.abs(values[:, 0]).max(), np.abs(values[:, 1:]).max(axis=0))
+    _, exponent = np.frexp(scale)
+    # Power-of-two rescaling avoids overflow without changing the studentized test.
+    differences = np.ldexp(values[:, [0]], -exponent) - np.ldexp(
+        values[:, 1:], -exponent
+    )
+    n = len(differences)
+    means = differences.mean(axis=0)
+    centered = differences - means
+    length = next_fast_len(2 * n - 1)
+    spectrum = rfft(centered, n=length, axis=0)
+    covariances = irfft(spectrum * spectrum.conj(), n=length, axis=0)[:n] / n
+    lags = np.arange(1, n)
+    continuation = 1.0 - 1.0 / block_size
+    weights = (1 - lags / n) * continuation**lags + (lags / n) * continuation ** (
+        n - lags
+    )
+    variances = covariances[0] + 2 * (weights @ covariances[1:])
+    if not _positive_finite_variances(variances):
+        return None
+    standardizer = np.sqrt(n) / np.sqrt(variances)
+    observed = means * standardizer
+    centers = np.column_stack(
+        (
+            np.maximum(means, 0.0),
+            np.where(observed >= -np.sqrt(2 * np.log(np.log(n))), means, 0.0),
+            means,
+        )
+    )
+    means_star = StationaryBootstrap(block_size, differences, seed=seed).apply(
+        lambda sample: sample.mean(axis=0), reps=repetitions
+    )
+    simulated = (means_star[:, :, None] - centers) * standardizer[None, :, None]
+    return observed, simulated
 
 
 def model_confidence_set(
@@ -414,15 +458,20 @@ def model_confidence_set(
 def _loss_differential_reason(values: np.ndarray, *, pairwise: bool) -> str | None:
     if values.shape[1] < 2:
         return "insufficient_candidate_count"
-    scale = float(np.max(np.abs(values)))
     pairs = (
         combinations(range(values.shape[1]), 2)
         if pairwise
         else ((0, index) for index in range(1, values.shape[1]))
     )
     for left, right in pairs:
-        difference = values[:, left] - values[:, right]
-        if float(np.ptp(difference)) <= np.finfo("float64").eps * scale:
+        scale = np.max(np.abs(values[:, [left, right]]))
+        _, exponent = np.frexp(scale)
+        difference = np.ldexp(values[:, left], -exponent) - np.ldexp(
+            values[:, right], -exponent
+        )
+        if float(np.ptp(difference)) <= np.finfo("float64").eps * np.ldexp(
+            scale, -exponent
+        ):
             return "constant_loss_differential"
     return None
 

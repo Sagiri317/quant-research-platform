@@ -30,6 +30,7 @@ from tests.helpers.research_configuration import (
     PV25_FACTORS,
 )
 from tests.helpers.research_specs import make_demo_research_dataset_spec
+from tests.helpers.statistical_inference import hansen_spa_stepm_reference
 from tests.helpers.statistics_artifacts import (
     model_statistics_inputs,
     publish_statistics_pair,
@@ -75,15 +76,15 @@ class _PredictionLookup:
 
 
 @pytest.mark.parametrize("full_factor_history", (False, True))
-def test_family_comparison_production_matches_arch_on_persisted_common_date_losses(
+def test_family_comparison_production_matches_oracles_on_persisted_common_date_losses(
     tmp_path: Path, full_factor_history: bool
 ):
-    from arch.bootstrap import MCS, SPA, StepM
+    from arch.bootstrap import MCS
 
     layout = StorageLayout(tmp_path)
     config = statistics_config()
     config["statistics"]["factor_fdr_families"] = {"fixture": ["x"]}
-    # Native-backend parity needs reproducible draws, not a research-sized run.
+    # Reference parity needs reproducible draws, not a research-sized run.
     config["statistics"]["bootstrap_repetitions"] = 32 if full_factor_history else 199
     config["statistics"]["fama_macbeth_core_factors"] = ["x"]
     families = tuple(f"pv_all_{algorithm}" for algorithm in A_SHARE_MODEL_ALGORITHMS)
@@ -296,42 +297,46 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
         assert checks.status.eq("DEFINED").all()
         assert checks.observation_count.eq(64).all()
         if not full_factor_history:
-            for test_id, constructor in (
-                ("spa_reality_check", SPA),
-                ("stepm_superior_models", StepM),
-                ("model_confidence_set", MCS),
+            for test_id in (
+                "spa_reality_check",
+                "stepm_superior_models",
+                "model_confidence_set",
             ):
                 seed = derive_seed(
                     42, "a_share_model_reality_check", "pv_all", "validation", test_id
                 )
                 options = dict(
                     block_size=20,
-                    reps=config["statistics"]["bootstrap_repetitions"],
+                    repetitions=config["statistics"]["bootstrap_repetitions"],
                     seed=seed,
                 )
-                native = (
-                    constructor(losses, size=0.05, **options)
-                    if constructor is MCS
-                    else constructor(benchmark, challengers, size=0.05, **options)
-                    if constructor is StepM
-                    else constructor(benchmark, challengers, **options)
-                )
-                native.compute()
                 rows = checks.loc[checks.test_id.eq(test_id)]
                 assert rows.seed.eq(seed).all()
-                if constructor is SPA:
-                    for label in ("lower", "consistent", "upper"):
+                if test_id != "model_confidence_set":
+                    pvalues, superior = hansen_spa_stepm_reference(
+                        benchmark, challengers, **options
+                    )
+                if test_id == "spa_reality_check":
+                    for label, expected in zip(
+                        ("lower", "consistent", "upper"), pvalues, strict=True
+                    ):
                         assert (
                             rows.loc[
                                 rows.statistic_id.eq(label + "_p_value"), "value"
                             ].iloc[0]
-                            == native.pvalues[label]
+                            == expected
                         )
-                elif constructor is StepM:
-                    assert set(rows.loc[rows.value.eq(1), "family_id"]) == set(
-                        native.superior_models
-                    )
+                elif test_id == "stepm_superior_models":
+                    assert set(rows.loc[rows.value.eq(1), "family_id"]) == set(superior)
                 else:
+                    native = MCS(
+                        losses,
+                        size=0.05,
+                        block_size=options["block_size"],
+                        reps=options["repetitions"],
+                        seed=seed,
+                    )
+                    native.compute()
                     for family in families:
                         assert (
                             rows.loc[
