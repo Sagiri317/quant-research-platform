@@ -5,25 +5,11 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.compute.panels import (
-    ComputePanelSpec,
-    validate_compute_panel,
-)
+from quant_research_platform.compute.panels import validate_compute_panel
 from quant_research_platform.contracts.evaluations import (
     EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
     EVALUATION_METRICS_COLUMNS,
 )
-
-
-def compute_ic_and_grouped_label_values(
-    frame: pd.DataFrame,
-    spec: ComputePanelSpec,
-    *,
-    n_groups: int = 5,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Compute timestamp-signal IC and grouped label values."""
-
-    return _compute_ic_and_grouped_label_values(frame, spec, n_groups=n_groups)
 
 
 def _compute_ic_and_grouped_label_values(

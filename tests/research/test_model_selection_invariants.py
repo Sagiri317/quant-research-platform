@@ -20,6 +20,148 @@ def _assert_metric_equivalence(actual, expected):
             assert actual[key] == value
 
 
+@pytest.mark.parametrize(
+    "target", ["label", "prediction_score", "prediction_label_value"]
+)
+def test_native_score_selection_is_invariant_to_label_name(tmp_path, target):
+    import json
+
+    from quant_research_platform.contracts.data import ProcessedDataSpec
+    from quant_research_platform.research.models.production import fit
+    from quant_research_platform.research.models.trial_selection import (
+        read_selection,
+        score,
+        select,
+    )
+    from quant_research_platform.research.predictions.runner import predict
+    from quant_research_platform.storage.datasets import write_dataset
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2020-01-01", periods=5).repeat(3),
+            "asset_id": list("abc") * 5,
+            "x": [1.0, 2.0, 3.0] * 5,
+            target: [0.1, 0.2, 0.3] * 3 + [0.3, 0.2, 0.1] * 2,
+            "eligible": True,
+        }
+    )
+    frame["mature"] = frame.timestamp
+    # One prediction is valid but its label is not yet mature at scoring cutoff.
+    frame.loc[12, "mature"] = pd.Timestamp("2020-01-06")
+    spec = ProcessedDataSpec(
+        data_id="input",
+        market_id="crypto",
+        kind="panel",
+        frequency="1d",
+        grain="asset_timestamp",
+        primary_key=("timestamp", "asset_id"),
+        partition_columns=("year",),
+        column_roles={
+            "timestamp": "timestamp",
+            "asset_id": "key",
+            "x": "factor",
+            target: "label",
+            "eligible": "mask",
+            "mature": "context",
+        },
+        column_units={"x": "dimensionless", target: "decimal_return"},
+        label_availability_columns={target: "mature"},
+    )
+    inputs = tmp_path / "input"
+    write_dataset(inputs, frame, spec=spec)
+    window = {"start": "2020-01-04", "end": "2020-01-05"}
+    predictions = []
+    for model_id in ("wrong", "correct"):
+        training = frame.copy()
+        if model_id == "correct":
+            training[target] = 0.4 - training[target]
+        train_path = tmp_path / f"{model_id}-input"
+        write_dataset(train_path, training, spec=spec)
+        model = fit(
+            {
+                "inputs": str(train_path),
+                "output": str(tmp_path / f"{model_id}-model"),
+                "market_id": "crypto",
+                "model": {
+                    "model_id": model_id,
+                    "model_algorithm": "linear_regression",
+                    "input_factor_columns": ["x"],
+                    "target_column": target,
+                },
+                "fit_windows": [{"start": "2020-01-01", "end": "2020-01-03"}],
+                "fit_cutoff": "2020-01-03",
+            }
+        )
+        predictions.append(
+            str(
+                predict(
+                    {
+                        "model": str(model),
+                        "inputs": str(inputs),
+                        "output": str(tmp_path / f"{model_id}-prediction"),
+                        "prediction_window": window,
+                    }
+                )
+            )
+        )
+    scored_path = score(
+        {
+            "predictions": predictions,
+            "candidate_ids": ["wrong", "correct"],
+            "labels": str(inputs),
+            "validation_windows": [window],
+            "scoring_window": window,
+            "cutoff": "2020-01-05",
+            "selection_group": "global",
+            "validation_axis": "cross_sectional",
+            "output": str(tmp_path / "score.json"),
+        }
+    )
+    scored = json.loads(scored_path.read_text())
+    assert scored["target_column"] == target
+    assert scored["common_rows"] == 5
+    for candidate, metrics, sign, mse in zip(
+        scored["candidates"],
+        scored["metrics"],
+        [-1.0, 1.0],
+        [7 / 300, 0.0],
+        strict=True,
+    ):
+        assert candidate["model"]["target_column"] == target
+        assert candidate["coverage"] == {
+            "current_mature_label_rows": 5,
+            "paired_prediction_rows": 5,
+            "mature_label_rows_without_prediction": 0,
+            "prediction_rows_without_label": 0,
+        }
+        assert metrics["validation_rows"] == 5
+        assert metrics["validation_ic"] == pytest.approx(sign)
+        assert metrics["validation_rankic"] == pytest.approx(sign)
+        # Equal date weights: mean((.04 + 0 + .04) / 3, (0 + .04) / 2).
+        assert metrics["validation_mse"] == pytest.approx(mse, abs=1e-16)
+    for metric, direction in [
+        ("validation_rankic", "maximize"),
+        ("validation_mse", "minimize"),
+    ]:
+        selected = read_selection(
+            select(
+                {
+                    "scores": str(scored_path),
+                    "output": str(tmp_path / f"{metric}-selection.json"),
+                    "selection_metric": metric,
+                    "selection_direction": direction,
+                    "tie_break_order": ["wrong", "correct"],
+                    "refit_windows": [{"start": "2020-01-01", "end": "2020-01-05"}],
+                    "refit_cutoff": "2020-01-05",
+                }
+            )
+        )
+        assert selected["selected_model_id"] == "correct"
+        assert selected["target_column"] == target
+        assert selected["metrics"] == scored["metrics"]
+        assert selected["common_rows"] == 5
+
+
 def test_model_selection_uses_validation_only_and_explicit_ties() -> None:
     validate_trial_metric_columns(
         selection_metric="validation_rankic",

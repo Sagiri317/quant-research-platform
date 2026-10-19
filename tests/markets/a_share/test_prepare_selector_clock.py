@@ -238,10 +238,13 @@ def test_market_model_suspended_asset_is_local_and_recovers():
     np.testing.assert_allclose(recovered.residual_volatility, 0.0, atol=1e-15)
 
 
+@pytest.mark.parametrize("exclusion", ("one_day", "whole_asset"))
 def test_native_market_model_selection_preserves_declared_composition_and_recovers(
-    tmp_path,
+    tmp_path, exclusion
 ):
-    dates = pd.bdate_range("2020-01-02", periods=637).as_unit("ns")
+    dates = pd.bdate_range(
+        "2020-01-02", periods=637 if exclusion == "one_day" else 315
+    ).as_unit("ns")
     frames = _synthetic_interim_frames(dates)
     source_ids = processed_catalog().get("market_model_factors").source_input_data_ids
     sources = _write_inputs(
@@ -261,9 +264,10 @@ def test_native_market_model_selection_preserves_declared_composition_and_recove
         period_return=np.sin(np.arange(len(bars)) * 0.23) * 0.01,
     )
     gap = 320
-    panel.loc[
-        panel.asset_id.eq("000001") & panel.timestamp.eq(dates[gap]), "selected"
-    ] = False
+    omitted = panel.asset_id.eq("000001")
+    if exclusion == "one_day":
+        omitted &= panel.timestamp.eq(dates[gap])
+    panel.loc[omitted, "selected"] = False
     source = _save(tmp_path, "market_panel_1d", panel)
     source["row_filters"] = [["selected", "==", True]]
     result = _run(
@@ -275,8 +279,17 @@ def test_native_market_model_selection_preserves_declared_composition_and_recove
             "market_panel_1d": source,
         },
     )
-    assert len(result) == len(panel) - 1
+    keys = ["market_id", "asset_id", "timestamp"]
+    pd.testing.assert_frame_equal(
+        result[keys].sort_values(keys).reset_index(drop=True),
+        panel.loc[panel.selected, keys].sort_values(keys).reset_index(drop=True),
+        check_dtype=False,
+    )
     styles = ["beta_252d", "residual_volatility_60d"]
+    if exclusion == "whole_asset":
+        # An excluded market member is unknown, not absent from the proxy.
+        assert result[styles].isna().all().all()
+        return
     assert result.loc[result.timestamp.eq(dates[gap - 1]), styles].notna().all().all()
     # The omitted observation and subsequent weight gap advance calendar time;
     # sufficient valid pairs and residuals remain inside the nominal windows.

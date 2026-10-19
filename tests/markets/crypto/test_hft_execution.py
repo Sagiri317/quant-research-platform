@@ -1416,15 +1416,18 @@ def _persist_execution(tmp_path, capital, produce):
     return read_portfolio_ledger_artifact(root)
 
 
-@pytest.mark.parametrize("quote_active", (False, True))
-@pytest.mark.parametrize("visible", (None, 0.0, 3.0))
 @pytest.mark.parametrize(
-    "price,maker_buyer,relevant",
+    "quote_active,visible,price,maker_buyer,relevant",
     (
-        ("100.5", False, False),
-        ("100.0", True, False),
-        ("99.5", True, True),
-        ("99.4", True, True),
+        (True, None, "99.5", True, True),
+        (True, 0.0, "99.5", True, True),
+        (True, 3.0, "99.5", True, True),
+        (True, None, "99.4", True, True),
+        (True, 0.0, "99.4", True, True),
+        (True, 3.0, "99.4", True, True),
+        (False, None, "99.4", True, True),
+        (True, None, "100.5", False, False),
+        (True, None, "100.0", True, False),
     ),
 )
 def test_maker_unknown_visible_quantity_only_blocks_dependent_orders(

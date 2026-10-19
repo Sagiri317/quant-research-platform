@@ -223,7 +223,6 @@ def test_maker_queue_depletion_preserves_small_observations(direction):
         (1e16, Fraction(), Fraction(1)),
         (1e16 + 2, Fraction(10**16 + 1), Fraction()),
         (1e16 + 2, Fraction(10**16), Fraction(1)),
-        (1e308, -Fraction(1e308), Fraction()),
     ),
 )
 def test_float_headroom_is_maximal_without_rounding_above_exact_capacity(

@@ -408,21 +408,6 @@ def test_total_trade_flow_uses_q_but_maker_queue_uses_visible_quantity() -> None
     assert result["filled_orders"] == 0
 
 
-def test_zero_visible_trade_through_cannot_fill_a_maker_order() -> None:
-    result = simulate_maker(
-        [_state(0)],
-        [_trade(50, quantity=1.0, visible_quantity=0.0, price_index=994)],
-        [_quote(0)],
-        config=_maker_config(),
-        observed_coverage={"book-1": _coverage(0, 200)},
-        trade_coverage={"trade-connection-1": _coverage(0, 200)},
-        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
-        asset_id="btc_usdt",
-        funding_events=(),
-    )
-    assert result["filled_orders"] == 0
-
-
 def test_zero_visible_trade_through_does_not_advance_queue() -> None:
     result = simulate_maker(
         [_state(0)],

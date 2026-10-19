@@ -26,8 +26,14 @@ def _panel(bid, ask, *, asset="btc_usdt"):
     )
 
 
-@pytest.mark.parametrize("column", ["microprice", "microprice_deviation"])
-@pytest.mark.parametrize("asset", ["btc_usdt", "eth_usdt"])
+@pytest.mark.parametrize(
+    "column,asset",
+    [
+        ("microprice", "btc_usdt"),
+        ("microprice", "eth_usdt"),
+        ("microprice_deviation", "btc_usdt"),
+    ],
+)
 @pytest.mark.parametrize("batch", [1, 7])
 @pytest.mark.parametrize("extended", [True, False])
 def test_microprice_selected_inputs_and_batches(

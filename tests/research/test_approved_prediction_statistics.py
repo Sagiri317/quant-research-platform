@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.compute.dataframe.cross_section import (
-    compute_ic_and_grouped_label_values,
+    _compute_ic_and_grouped_label_values,
 )
 from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.research.statistics import time_series_inference_summary
@@ -147,7 +147,7 @@ def test_group_assignments_do_not_replace_missing_top_label():
             "label": [0.0, 0.1, 0.2, 0.3, np.nan],
         }
     )
-    metrics, groups = compute_ic_and_grouped_label_values(
+    metrics, groups = _compute_ic_and_grouped_label_values(
         frame,
         ComputePanelSpec(
             signal_columns=("score",), label_columns=("label",), asset_column="asset_id"

@@ -10,9 +10,9 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.compute.dataframe.cross_section import (
+    _compute_ic_and_grouped_label_values,
     _pearson_correlation_result,
     _stable_zscore,
-    compute_ic_and_grouped_label_values,
 )
 from quant_research_platform.compute.market_model import MarketModelRiskState
 from quant_research_platform.compute.panels import ComputePanelSpec
@@ -241,7 +241,7 @@ def test_grouped_label_mean_preserves_finite_results(labels, expected):
             "label": labels,
         }
     )
-    _, grouped = compute_ic_and_grouped_label_values(
+    _, grouped = _compute_ic_and_grouped_label_values(
         frame,
         ComputePanelSpec(
             signal_columns=("signal",),

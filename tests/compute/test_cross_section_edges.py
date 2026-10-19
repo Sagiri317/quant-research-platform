@@ -7,8 +7,8 @@ import pytest
 from quant_research_platform.compute.dataframe.cross_section import (
     _assign_groups_from_ranks,
     _average_ranks,
+    _compute_ic_and_grouped_label_values,
     _pearson_correlation_result,
-    compute_ic_and_grouped_label_values,
 )
 from quant_research_platform.compute.panels import ComputePanelSpec
 from tests.helpers.compute_inputs import make_cross_section_compute_panel
@@ -21,7 +21,7 @@ def test_dataframe_cross_section_metrics() -> None:
     )
     frame = make_cross_section_compute_panel()
 
-    ic, grouped = compute_ic_and_grouped_label_values(
+    ic, grouped = _compute_ic_and_grouped_label_values(
         frame,
         spec,
         n_groups=3,
@@ -39,12 +39,12 @@ def test_dataframe_cross_section_accepts_ignored_extra_columns() -> None:
         segment=["a", "a", "a", "b", "b", "b"]
     )
 
-    ic, grouped = compute_ic_and_grouped_label_values(
+    ic, grouped = _compute_ic_and_grouped_label_values(
         frame,
         spec,
         n_groups=2,
     )
-    expected_ic, expected_grouped = compute_ic_and_grouped_label_values(
+    expected_ic, expected_grouped = _compute_ic_and_grouped_label_values(
         frame.drop(columns="segment"), spec, n_groups=2
     )
     pd.testing.assert_frame_equal(ic, expected_ic)
@@ -57,19 +57,19 @@ def test_dataframe_cross_section_rejects_invalid_group_counts_and_columns() -> N
     )
 
     with pytest.raises(ValueError, match="panel is missing columns"):
-        compute_ic_and_grouped_label_values(
+        _compute_ic_and_grouped_label_values(
             make_cross_section_compute_panel().drop(columns=["asset"]),
             spec,
             n_groups=True,
         )
     with pytest.raises(TypeError, match="n_groups must be an integer"):
-        compute_ic_and_grouped_label_values(
+        _compute_ic_and_grouped_label_values(
             make_cross_section_compute_panel(),
             spec,
             n_groups=True,
         )
     with pytest.raises(ValueError, match="n_groups must be at least 2"):
-        compute_ic_and_grouped_label_values(
+        _compute_ic_and_grouped_label_values(
             make_cross_section_compute_panel(),
             spec,
             n_groups=1,

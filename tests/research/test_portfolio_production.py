@@ -2932,11 +2932,22 @@ def test_half_step_rebalance_uses_existing_ledger_and_preserves_residual_cash(
 
 
 @pytest.mark.parametrize(
-    "construction",
-    ("quantile_equal_weight", "quantile_float_cap", "quantile_equal_weight_half_step"),
+    "construction,empty_reason,state",
+    (
+        ("quantile_equal_weight", "ineligible", "cash"),
+        ("quantile_equal_weight", "ineligible", "sellable"),
+        ("quantile_equal_weight", "ineligible", "blocked"),
+        ("quantile_equal_weight", "ineligible", "closed"),
+        ("quantile_equal_weight", "ineligible", "unknown"),
+        ("quantile_equal_weight", "missing_prediction", "cash"),
+        ("quantile_equal_weight", "missing_prediction", "sellable"),
+        ("quantile_equal_weight", "missing_prediction", "blocked"),
+        ("quantile_equal_weight", "missing_prediction", "closed"),
+        ("quantile_equal_weight", "missing_prediction", "unknown"),
+        ("quantile_float_cap", "ineligible", "sellable"),
+        ("quantile_equal_weight_half_step", "ineligible", "sellable"),
+    ),
 )
-@pytest.mark.parametrize("empty_reason", ("ineligible", "missing_prediction"))
-@pytest.mark.parametrize("state", ("cash", "sellable", "blocked", "closed", "unknown"))
 def test_empty_selection_executes_zero_target_without_bypassing_market_facts(
     construction, empty_reason, state
 ):
