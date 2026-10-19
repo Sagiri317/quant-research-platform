@@ -11,6 +11,7 @@ from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.datasets.paths import parse_year_partition_label
 from quant_research_platform.storage.identity import (
     filesystem_scandir,
+    native_filesystem_path,
     path_is_filesystem_alias,
     require_unaliased_path,
 )
@@ -152,7 +153,7 @@ class DatasetSessionInventory:
         candidate = Path(path)
         relative = candidate.relative_to(self.data_root)
         require_unaliased_path(candidate, error="invalid_dataset_part_files")
-        if not candidate.is_file():
+        if not Path(native_filesystem_path(candidate)).is_file():
             raise ValueError("invalid_dataset_part_files")
         match = _PART_FILE_PATTERN.fullmatch(candidate.name)
         if match is None:

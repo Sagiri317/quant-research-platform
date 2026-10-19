@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.compute.dataframe.cross_section import (
-    compute_ic_and_grouped_label_values,
+    _compute_ic_and_grouped_label_values,
 )
 from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.research.statistics import time_series_inference_summary
@@ -23,20 +23,9 @@ def test_no_selected_family_retains_undefined_statistics(tmp_path):
     from quant_research_platform.research.statistics_production import (
         build_a_share_statistics_tables,
     )
-    from tests.helpers.research_specs import make_demo_research_dataset_spec
-    from tests.research.test_direct_statistics import _factor_tables
+    from tests.research.test_direct_statistics import _factor_input
 
-    _, _, dates = _factor_tables(tmp_path)
-    spec = make_demo_research_dataset_spec(
-        data_id="direct_factor",
-        factor_columns=("factor",),
-        label_columns=("forward_return_20d",),
-        filter_columns=("eligible",),
-        context_columns=(
-            "total_market_cap",
-            "forward_return_20d_available_at",
-        ),
-    )
+    spec, _, _, _, dates = _factor_input(tmp_path)
     window = TimeWindow(dates[0], dates[-1])
     tables = build_a_share_statistics_tables(
         dataset_path=tmp_path / "input",
@@ -147,7 +136,7 @@ def test_group_assignments_do_not_replace_missing_top_label():
             "label": [0.0, 0.1, 0.2, 0.3, np.nan],
         }
     )
-    metrics, groups = compute_ic_and_grouped_label_values(
+    metrics, groups = _compute_ic_and_grouped_label_values(
         frame,
         ComputePanelSpec(
             signal_columns=("score",), label_columns=("label",), asset_column="asset_id"

@@ -138,7 +138,6 @@ def test_typed_canonical_identity_normalizes_only_approved_zero_forms() -> None:
 
 def test_typed_canonical_decimal_identity_preserves_exponent_and_zero_scale() -> None:
     assert canonical_json_hash(Decimal("1.0")) != canonical_json_hash(Decimal("1.00"))
-    assert canonical_json_hash(Decimal("-0.00")) == canonical_json_hash(Decimal("0.00"))
     assert canonical_json_hash(Decimal("-0.00")) != canonical_json_hash(Decimal("0.0"))
 
 

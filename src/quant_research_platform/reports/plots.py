@@ -465,12 +465,19 @@ def plot_metric_comparison(rows, *, metric_id, units, source_reference, sample_r
     )
     figure.set_figheight(max(3.5, 0.5 * len(selected) + 2))
     axis = axes[0]
-    labels = [
-        " | ".join(str(row[key]) for key in _COMPARISON_IDENTITY if key in row)
+    identities = [
+        tuple(
+            (key, _group_value(row[key])) for key in _COMPARISON_IDENTITY if key in row
+        )
         for row in selected
     ]
-    if len(labels) != len(set(labels)):
+    if len(identities) != len(set(identities)):
         raise ValueError("plot_duplicate_metric_identity")
+    labels = [" | ".join(str(value) for _, value in key) for key in identities]
+    if len(labels) != len(set(labels)):
+        labels = [
+            " | ".join(f"{name}={value!r}" for name, value in key) for key in identities
+        ]
     displayed, scale = _scale([_value(row, "value") for row in selected])
     axis.barh(
         range(len(selected)),
@@ -820,11 +827,7 @@ def plot_series(
             raise ValueError("plot_columns_missing")
         if frame[x_column].isna().any() or frame[x_column].duplicated().any():
             raise ValueError("plot_axis_invalid")
-        x = (
-            frame[x_column].astype(str).tolist()
-            if categorical
-            else _times(frame[x_column], timezone)
-        )
+        x = range(len(frame)) if categorical else _times(frame[x_column], timezone)
         if not categorical and not x.is_monotonic_increasing:
             raise ValueError("plot_timestamp_order_invalid")
         if key:
@@ -848,6 +851,10 @@ def plot_series(
         axis.set_ylabel(units + scale)
         if categorical:
             _x_domain(axis, x)
+            labels = frame[x_column].astype(str).tolist()
+            if len(labels) != len(set(labels)):
+                labels = [repr(value) for value in frame[x_column]]
+            axis.set_xticks(x, labels)
             axis.set_xlabel(x_column)
             axis.tick_params(axis="x", labelrotation=45)
         else:

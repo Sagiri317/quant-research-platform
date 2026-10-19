@@ -184,7 +184,7 @@ def materialize_interim_data(
                     else "reference_source_required_member_invalid"
                 )
         if data_id == A_SHARE_EQUITY_EVENTS_DATA_ID:
-            equity_frame, identity = _equity_source(root)
+            equity_frame, identity = _equity_source(root, end_date=end_date)
         elif data_id == A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID:
             source_metadata, members, identity = _industry_source(root)
         else:
@@ -194,8 +194,6 @@ def materialize_interim_data(
             identity = source.source_identity
         if data_id == A_SHARE_EQUITY_EVENTS_DATA_ID:
             frame = equity_frame
-            if end_date is not None:
-                frame = frame.loc[frame["timestamp"].le(pd.Timestamp(end_date))].copy()
             spec = _equity_events_spec()
         elif data_id == A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID:
             frame = _industry_frame(source_metadata, members, end_date=end_date)
@@ -478,7 +476,7 @@ def _equity_events_spec():
     )
 
 
-def _equity_source(reference_root):
+def _equity_source(reference_root, *, end_date=None):
     """Admit official facts stated per actual share and lifecycle."""
     root = Path(reference_root) / A_SHARE_EQUITY_EVENTS_DATA_ID
     path = root / "metadata.json"
@@ -539,6 +537,18 @@ def _equity_source(reference_root):
     for event in metadata["events"]:
         if type(event) is not dict or set(event) != keys:
             raise ValueError("equity_event_row_invalid")
+        for key in ("document_file",):
+            if type(event[key]) is not str or event[key] not in members:
+                raise ValueError("equity_event_member_invalid")
+        try:
+            effective = pd.Timestamp(_snapshot_date(event["effective_date"]))
+            published = pd.Timestamp(_snapshot_date(event["publication_date"]))
+            available = published + pd.Timedelta(days=1)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("equity_event_date_invalid") from exc
+        timestamp = max(effective, available)
+        if end_date is not None and not timestamp <= pd.Timestamp(end_date):
+            continue
         if any(
             type(event[key]) is not str or not event[key].strip()
             for key in (
@@ -580,13 +590,8 @@ def _equity_source(reference_root):
             )
         ):
             raise ValueError("equity_event_source_invalid")
-        for key in ("document_file",):
-            if type(event[key]) is not str or event[key] not in members:
-                raise ValueError("equity_event_member_invalid")
         try:
             listed = pd.Timestamp(_snapshot_date(event["listing_date"]))
-            effective = pd.Timestamp(_snapshot_date(event["effective_date"]))
-            published = pd.Timestamp(_snapshot_date(event["publication_date"]))
             if type(event["observed_at"]) is not str:
                 raise ValueError("invalid_observation_timestamp")
             observed = pd.Timestamp(event["observed_at"])
@@ -635,7 +640,6 @@ def _equity_source(reference_root):
             ratio = shares
         elif any(event[key] is not None for key in successor_keys):
             raise ValueError("equity_event_kind_fields_invalid")
-        available = published + pd.Timedelta(days=1)
         evidence = canonical_json_hash(
             {
                 "event": event,
@@ -649,7 +653,7 @@ def _equity_source(reference_root):
                 event["asset_id"],
                 event["asset_id"],
                 listed,
-                max(effective, available),
+                timestamp,
                 event["event_id"],
                 kind,
                 effective,

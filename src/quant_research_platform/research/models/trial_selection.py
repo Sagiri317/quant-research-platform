@@ -617,14 +617,14 @@ def score(config):
             rows.append(metrics)
             continue
         comparable = frame.loc[common]
-        comparable[target] = labels.reindex(comparable.index)
+        comparable["label"] = labels.reindex(comparable.index)
         comparable = comparable.reset_index().sort_values(
             ["timestamp", "asset_id"], kind="stable"
         )
         metrics = evaluate_model_trial_metrics_from_chunks(
             [comparable],
             model_id=candidate["model_id"],
-            label_column=target,
+            label_column="label",
             prediction_column="prediction_score",
             validation_axis=config["validation_axis"],
             label_prediction_column="prediction_label_value",

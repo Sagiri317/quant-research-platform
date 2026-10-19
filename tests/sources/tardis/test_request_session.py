@@ -110,10 +110,17 @@ def test_completed_slices_release_payloads_and_late_cursor_replays(
     from tests.helpers.tardis import _snapshot
 
     slices = _slices(
-        tmp_path / "native", _snapshot("2026-09-01T00:00:00.000000Z"), count=2
+        tmp_path / "native",
+        _snapshot("2026-09-01T00:00:00.000000Z")
+        + _snapshot("2026-09-01T00:00:01.000000Z"),
+        count=2,
     )
     slices[1].write_bytes(
-        gzip.compress(_snapshot("2026-09-01T00:10:00.000000Z"), mtime=0)
+        gzip.compress(
+            _snapshot("2026-09-01T00:10:00.000000Z")
+            + _snapshot("2026-09-01T00:10:01.000000Z"),
+            mtime=0,
+        )
     )
     root = tmp_path / "published"
     import_slices(root, date="2026-09-01", slices=slices)
@@ -134,11 +141,19 @@ def test_completed_slices_release_payloads_and_late_cursor_replays(
     monkeypatch.setattr(replay, "iter_native_slice", tracked)
     with open_market_source(root) as source:
         cursor = _records(source)
-        first, second = next(cursor), next(cursor)
+        first, middle, second = next(cursor), next(cursor), next(cursor)
         gc.collect()
         assert payloads[0]() is None
-        expected = [first, second, *cursor]
+        expected = [first, middle, second, *cursor]
         assert list(_records(source)) == expected
+        slow, fast = _records(source), _records(source)
+        assert next(slow) == first
+        assert [next(fast), next(fast), next(fast)] == expected[:3]
+        late = _records(source)
+        assert next(late) == first
+        late.close()
+        assert list(slow) == expected[1:]
+        assert list(fast) == expected[3:]
     gc.collect()
     assert all(reference() is None for reference in payloads)
 

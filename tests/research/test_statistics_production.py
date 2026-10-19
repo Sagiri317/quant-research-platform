@@ -30,37 +30,17 @@ from tests.helpers.research_configuration import (
     PV25_FACTORS,
 )
 from tests.helpers.research_specs import make_demo_research_dataset_spec
-from tests.helpers.statistical_inference import hansen_spa_stepm_reference
+from tests.helpers.statistical_inference import (
+    hansen_spa_stepm_reference,
+    mcs_r_reference,
+)
 from tests.helpers.statistics_artifacts import (
+    assert_recomputed_statistics_equal,
     model_statistics_inputs,
     publish_statistics_pair,
     statistics_config,
     statistics_metadata,
 )
-
-
-def _assert_recomputed_statistics_equal(left, right):
-    """Compare rerun values with exact settings, domains, and missing masks."""
-    continuous = left.select_dtypes(include="floating").columns.difference(
-        [
-            "fdr_alpha",
-            "confidence",
-            "alpha",
-            "seed",
-            "bootstrap_seed",
-            "bootstrap_block_size",
-            "bootstrap_repetitions",
-            "block_size",
-            "repetitions",
-        ]
-    )
-    pd.testing.assert_frame_equal(
-        left.drop(columns=continuous), right.drop(columns=continuous), check_exact=True
-    )
-    pd.testing.assert_frame_equal(left.isna(), right.isna(), check_exact=True)
-    pd.testing.assert_frame_equal(
-        left[continuous], right[continuous], check_exact=False, rtol=1e-12, atol=1e-15
-    )
 
 
 class _PredictionLookup:
@@ -79,8 +59,6 @@ class _PredictionLookup:
 def test_family_comparison_production_matches_oracles_on_persisted_common_date_losses(
     tmp_path: Path, full_factor_history: bool
 ):
-    from arch.bootstrap import MCS
-
     layout = StorageLayout(tmp_path)
     config = statistics_config()
     config["statistics"]["factor_fdr_families"] = {"fixture": ["x"]}
@@ -329,14 +307,7 @@ def test_family_comparison_production_matches_oracles_on_persisted_common_date_l
                 elif test_id == "stepm_superior_models":
                     assert set(rows.loc[rows.value.eq(1), "family_id"]) == set(superior)
                 else:
-                    native = MCS(
-                        losses,
-                        size=0.05,
-                        block_size=options["block_size"],
-                        reps=options["repetitions"],
-                        seed=seed,
-                    )
-                    native.compute()
+                    expected_mcs, included, _ = mcs_r_reference(losses, **options)
                     for family in families:
                         assert (
                             rows.loc[
@@ -344,14 +315,14 @@ def test_family_comparison_production_matches_oracles_on_persisted_common_date_l
                                 & rows.statistic_id.eq("p_value"),
                                 "value",
                             ].iloc[0]
-                            == native.pvalues.loc[family].iloc[0]
+                            == expected_mcs.loc[family].iloc[0]
                         )
                     assert set(
                         rows.loc[
                             rows.statistic_id.eq("included") & rows.value.eq(1),
                             "family_id",
                         ]
-                    ) == set(native.included)
+                    ) == set(included)
     with artifact.table("model_comparison.parquet") as table:
         assert len(table) == len(families) - 1
         assert table.observation_count.eq(64).all()
@@ -391,7 +362,7 @@ def test_family_comparison_production_matches_oracles_on_persisted_common_date_l
             )
         )
         for table in ("prediction_diagnostics", "model_comparison"):
-            _assert_recomputed_statistics_equal(
+            assert_recomputed_statistics_equal(
                 robustness_tables[table], paired_tables[table]
             )
         pd.testing.assert_frame_equal(
@@ -643,10 +614,8 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
             {name: table.copy() for name, table in statistics_tables.items()}
         )
     for table in ("factor_diagnostics", "prediction_diagnostics", "fama_macbeth"):
-        _assert_recomputed_statistics_equal(outputs[0][table], outputs[1][table])
-    _assert_recomputed_statistics_equal(
-        evaluation_summaries[0], evaluation_summaries[1]
-    )
+        assert_recomputed_statistics_equal(outputs[0][table], outputs[1][table])
+    assert_recomputed_statistics_equal(evaluation_summaries[0], evaluation_summaries[1])
     evaluation_row = evaluation_summaries[0].iloc[0]
     assert evaluation_row["valid_rankic_count"] == 20
     assert evaluation_row["mean_rankic"] == pytest.approx(0.0, abs=1e-15)
@@ -1263,7 +1232,7 @@ def test_model_family_names_preserve_factor_statistics_and_native_names(
         )
         results.append(tables)
     for member in results[0]:
-        _assert_recomputed_statistics_equal(results[0][member], results[1][member])
+        assert_recomputed_statistics_equal(results[0][member], results[1][member])
 
 
 def test_factor_fmb_weightings_match_independent_weighted_normal_equations():
@@ -1315,7 +1284,7 @@ def test_factor_fmb_weightings_match_independent_weighted_normal_equations():
             )
         )
         equal = actual.regression_id.str.startswith("equal:")
-        _assert_recomputed_statistics_equal(actual.loc[equal], records.loc[equal])
+        assert_recomputed_statistics_equal(actual.loc[equal], records.loc[equal])
         assert actual.loc[~equal, "status"].eq("DEFINED").all()
         assert actual.loc[~equal, "observation_count"].eq(len(frame.dropna()) - 1).all()
 
@@ -1561,7 +1530,7 @@ def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_pat
             with read_statistics_artifact(root / "statistics").table(
                 "model_losses.parquet"
             ) as expected_losses:
-                _assert_recomputed_statistics_equal(actual, expected_losses)
+                assert_recomputed_statistics_equal(actual, expected_losses)
             assert actual.period_id.eq("explicit_horizon").all()
         published = write_statistics_artifact(
             root / "factor_statistics",

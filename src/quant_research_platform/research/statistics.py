@@ -413,19 +413,17 @@ def model_confidence_set(
         return ModelConfidenceSetResult(
             None, (), (), aligned.observation_count, "UNDEFINED", reason
         )
-    frame = pd.DataFrame(
-        aligned.values, index=aligned.index, columns=aligned.candidate_ids
-    )
-    from arch.bootstrap import MCS
+    from arch.bootstrap import StationaryBootstrap
 
-    test = MCS(frame, size=alpha, reps=repetitions, block_size=block_size, seed=seed)
-    try:
-        test.compute()
-    except IndexError:
-        if _positive_finite_variances(
-            test._variances[~np.eye(frame.shape[1], dtype=bool)]
-        ):
-            raise
+    means = aligned.values.mean(axis=0)
+    differences = means[:, None] - means[None, :]
+    means_star = StationaryBootstrap(block_size, aligned.values, seed=seed).apply(
+        lambda sample: sample.mean(axis=0), reps=repetitions
+    )
+    centered = means_star[:, :, None] - means_star[:, None, :] - differences
+    variances = np.mean(centered**2, axis=0)
+    diagonal = np.eye(len(means), dtype=bool)
+    if not _positive_finite_variances(variances[~diagonal]):
         return ModelConfidenceSetResult(
             None,
             (),
@@ -434,21 +432,31 @@ def model_confidence_set(
             "UNDEFINED",
             "pairwise_loss_variance_undefined",
         )
-    if not _positive_finite_variances(
-        test._variances[~np.eye(frame.shape[1], dtype=bool)]
-    ) or not _valid_p_values(test.pvalues.to_numpy()):
-        return ModelConfidenceSetResult(
-            None,
-            (),
-            (),
-            aligned.observation_count,
-            "UNDEFINED",
-            "pairwise_loss_variance_undefined",
+    variances[diagonal] = 1.0
+    observed = differences / np.sqrt(variances)
+    simulated = centered / np.sqrt(variances)
+    remaining = list(range(len(means)))
+    eliminated = []
+    adjusted_p_value = 0.0
+    while len(remaining) > 1:
+        row_maxima = observed[np.ix_(remaining, remaining)].max(axis=1)
+        observed_range = row_maxima.max()
+        simulated_ranges = simulated[:, remaining][:, :, remaining].max(axis=(1, 2))
+        adjusted_p_value = max(
+            adjusted_p_value, float(np.mean(simulated_ranges >= observed_range))
         )
+        # Eliminate one first-maximizing row, including when multiple pairs tie.
+        worst = remaining.pop(int(np.argmax(row_maxima)))
+        eliminated.append((aligned.candidate_ids[worst], adjusted_p_value))
+    eliminated.append((aligned.candidate_ids[remaining[0]], 1.0))
+    p_values = pd.DataFrame(
+        {"Pvalue": [value for _, value in eliminated]},
+        index=pd.Index([name for name, _ in eliminated], name="Model name"),
+    )
     return ModelConfidenceSetResult(
-        test.pvalues.copy(),
-        tuple(str(value) for value in test.included),
-        tuple(str(value) for value in test.excluded),
+        p_values,
+        tuple(sorted(name for name, value in eliminated if value >= alpha)),
+        tuple(sorted(name for name, value in eliminated if value < alpha)),
         aligned.observation_count,
         "DEFINED",
         None,
@@ -478,12 +486,6 @@ def _loss_differential_reason(values: np.ndarray, *, pairwise: bool) -> str | No
 
 def _positive_finite_variances(values: np.ndarray) -> bool:
     return bool(np.isfinite(values).all() and (values > 0).all())
-
-
-def _valid_p_values(values: np.ndarray) -> bool:
-    return bool(
-        np.isfinite(values).all() and (values >= 0).all() and (values <= 1).all()
-    )
 
 
 def probabilistic_and_deflated_sharpe(
@@ -570,22 +572,22 @@ def _selected_analyses(config, allowed):
     return tuple(value for value in allowed if value in values)
 
 
+def _validate_cscv_slice_count(slice_count):
+    if type(slice_count) is not int or slice_count < 4 or slice_count % 2:
+        raise ValueError("cscv_slice_count_invalid")
+
+
 def cscv_pbo(
     returns: object,
     *,
     slice_count: int,
     return_roundoff: object = 0.0,
 ) -> PboResult:
+    _validate_cscv_slice_count(slice_count)
     shape = getattr(returns, "shape", None)
     if shape is None:
         shape = np.shape(returns)
-    if (
-        len(shape) != 2
-        or type(slice_count) is not int
-        or slice_count < 4
-        or slice_count % 2
-        or (shape[0] < slice_count)
-    ):
+    if len(shape) != 2 or shape[0] < slice_count:
         raise ValueError("cscv_slice_count_invalid")
     combination_count = comb(slice_count, slice_count // 2)
     matrix = _finite_matrix(returns, minimum_rows=4, minimum_columns=1)
@@ -603,8 +605,6 @@ def cscv_pbo(
             matrix, slice_count, combination_count, "duplicate_candidate_series"
         )
     slices = tuple(np.array_split(np.arange(len(matrix)), slice_count))
-    if max(len(item) for item in slices) - min(len(item) for item in slices) > 1:
-        raise ValueError("cscv_slice_partition_invalid")
     overfit_count = 0
     all_slice_ids = set(range(slice_count))
     # The first half of lexicographic combinations contains slice zero. Each

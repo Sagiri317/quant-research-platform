@@ -9,6 +9,7 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import decode_exact_numeric
 from quant_research_platform.markets.implementations.a_share import portfolio_sessions
 from quant_research_platform.research.portfolios import production
+from quant_research_platform.sources.prepare import prepare_source
 from quant_research_platform.sources.reference import interim
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
 from tests.helpers.paths import StorageLayout
@@ -348,23 +349,113 @@ def test_observation_timezone_does_not_confuse_chinese_publication_date(tmp_path
     assert row.available_at == pd.Timestamp("2023-01-04")
 
 
-def test_present_future_only_source_materializes_empty_window_without_fake_history(
-    tmp_path,
+@pytest.mark.parametrize(
+    "future_date,damage,error",
+    [
+        ("publication_date", {"amount_per_share": -1}, "numeric"),
+        ("effective_date", {"listing_date": "invalid"}, "date"),
+        ("publication_date", {"observed_at": "invalid"}, "date"),
+        (
+            "effective_date",
+            {
+                "kind": "conversion",
+                "amount_per_share": None,
+                "remaining_old_units_per_old_unit": 0,
+                "successor_asset_id": "000001",
+                "successor_listing_date": "2022-12-01",
+                "successor_shares_per_old_share": 1,
+            },
+            "successor",
+        ),
+    ],
+)
+def test_equity_window_selects_before_business_interpretation(
+    tmp_path, future_date, damage, error
 ):
     raw = tmp_path / "raw"
     write_equity_source(raw)
-    imported = interim.materialize_interim_data(
-        output_roots={
-            key: StorageLayout(tmp_path).interim_data_root("reference", key)
-            for key in ("a_share_equity_events",)
-        },
-        raw_root=raw,
-        data_ids=("a_share_equity_events",),
-        end_date="2023-01-02",
+    config = {
+        "source_id": "reference",
+        "raw_root": str(raw),
+        "outputs": {"a_share_equity_events": str(tmp_path / "baseline")},
+        "end_date": "2023-12-31",
+    }
+    baseline = read_dataset(
+        prepare_source(config).artifact_roots["a_share_equity_events"]
+    )
+    assert baseline.event_id.tolist() == ["quote-1"]
+    assert baseline.timestamp.tolist() == [pd.Timestamp("2023-01-04")]
+    assert baseline.observed_at.tolist() == [pd.Timestamp("2026-10-13")]
+    assert decode_exact_numeric(baseline.value_per_old_unit.iloc[0]) == 2.5
+
+    root = write_equity_source(
+        raw,
+        events=lambda base: [
+            base,
+            dict(base, event_id="future", **{future_date: "2025-01-03"}, **damage),
+        ],
+    )
+    config["outputs"] = {"a_share_equity_events": str(tmp_path / "selected")}
+    selected = prepare_source(config).artifact_roots["a_share_equity_events"]
+    pd.testing.assert_frame_equal(baseline, read_dataset(selected))
+
+    path = root / "metadata.json"
+    metadata = json.loads(path.read_text())
+    metadata["events"][1][future_date] = "2023-01-03"
+    path.write_text(json.dumps(metadata))
+    with pytest.raises(ValueError, match=f"equity_event_{error}_invalid"):
+        prepare_source(config)
+    pd.testing.assert_frame_equal(baseline, read_dataset(selected))
+
+
+@pytest.mark.parametrize("damage", ["date", "member", "hash"])
+def test_equity_window_preserves_selection_dates_and_source_integrity(tmp_path, damage):
+    raw = tmp_path / "raw"
+    root = write_equity_source(
+        raw, events=lambda base: [dict(base, effective_date="2025-01-03")]
+    )
+    path = root / "metadata.json"
+    metadata = json.loads(path.read_text())
+    if damage == "date":
+        metadata["events"][0]["publication_date"] = "unknown"
+    elif damage == "member":
+        metadata["events"][0]["document_file"] = "missing.txt"
+    else:
+        metadata["files"]["evidence.txt"] = "0" * 64
+    path.write_text(json.dumps(metadata))
+    output = tmp_path / "selected"
+    with pytest.raises(ValueError, match="equity_event"):
+        prepare_source(
+            {
+                "source_id": "reference",
+                "raw_root": str(raw),
+                "outputs": {"a_share_equity_events": str(output)},
+                "end_date": "2023-12-31",
+            }
+        )
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    "end_date,expected_rows",
+    [("2023-01-02", 0), ("NaT", 0), ("", 0), ("2023-01-04", 1), (None, 1)],
+)
+def test_equity_source_window_preserves_inclusive_membership(
+    tmp_path, end_date, expected_rows
+):
+    raw = tmp_path / "raw"
+    write_equity_source(raw)
+    imported = prepare_source(
+        {
+            "source_id": "reference",
+            "raw_root": str(raw),
+            "outputs": {"a_share_equity_events": str(tmp_path / "rights")},
+            "end_date": end_date,
+        }
     )
     assert prepared_source_evidence(interim, raw, "a_share_equity_events") is not None
     frame = read_dataset(imported.artifact_roots["a_share_equity_events"])
-    assert frame.empty and tuple(frame.columns) == EQUITY_EVENT_COLUMNS
+    assert len(frame) == expected_rows and tuple(frame.columns) == EQUITY_EVENT_COLUMNS
 
 
 def test_absent_source_is_distinct_from_partial_present_source(tmp_path):

@@ -344,31 +344,11 @@ class _LedgerValidation:
         )
         if inserted != len(batch.trades):
             raise ValueError("portfolio_ledger_duplicate_fill")
-        self.key_index.add_identity_payloads(
-            namespace="fill_orders",
-            payloads=(
-                (row.fill_id.encode("utf-8"), row.order_id.encode("utf-8"))
-                for row in batch.trades
-            ),
-        )
         for diagnostic in batch.diagnostics:
             if diagnostic.fill_id is not None and self.key_index.identity_payload_value(
                 namespace="fills", payload=diagnostic.fill_id.encode("utf-8")
             ) != diagnostic.asset_id.encode("utf-8"):
                 raise ValueError("portfolio_ledger_diagnostic_fill_mismatch")
-            if diagnostic.fill_id is not None and diagnostic.name == "order_id":
-                if diagnostic.text is None and diagnostic.number is None:
-                    raise ValueError("portfolio_ledger_diagnostic_order_mismatch")
-                order_id = (
-                    diagnostic.text
-                    if diagnostic.text is not None
-                    else format(diagnostic.number, "g")
-                )
-                if self.key_index.identity_payload_value(
-                    namespace="fill_orders",
-                    payload=diagnostic.fill_id.encode("utf-8"),
-                ) != order_id.encode("utf-8"):
-                    raise ValueError("portfolio_ledger_diagnostic_order_mismatch")
         for event in batch.rights_adjustments:
             if event.kind == "recovery":
                 continue

@@ -107,10 +107,10 @@ def filesystem_scandir(path: Path):
 def filesystem_walk(path: Path, *, follow_symlinks: bool = False, on_error=None):
     logical_root = Path(path)
     native_root = Path(native_filesystem_path(logical_root))
-    for parent, directories, files in native_root.walk(
-        follow_symlinks=follow_symlinks, on_error=on_error
+    for parent, directories, files in os.walk(
+        native_root, followlinks=follow_symlinks, onerror=on_error
     ):
-        yield (logical_root / parent.relative_to(native_root), directories, files)
+        yield (logical_root / Path(parent).relative_to(native_root), directories, files)
 
 
 def filesystem_mkdir(

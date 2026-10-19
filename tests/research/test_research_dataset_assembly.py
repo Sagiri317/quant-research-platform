@@ -1046,3 +1046,130 @@ def test_auxiliary_timestamp_units_preserve_nanosecond_window(
         pd.Series(times[:count].astype("datetime64[ns]"), name="timestamp"),
     )
     assert result.label.tolist() == [1.0, 2.0, 3.0][:count]
+
+
+@pytest.mark.parametrize(
+    "base_id, auxiliary_id, clock_offset, sparse, matches",
+    [
+        (1, 1.0, 0, False, True),
+        (True, 1, 0, False, True),
+        (2**53 + 1, float(2**53), 0, False, False),
+        (2**53 + 1, float(2**53), 0, True, False),
+        ("1", 1, 0, False, False),
+        (1, 1, 1, False, False),
+    ],
+)
+def test_native_assembly_uses_exact_scalar_key_identity(
+    tmp_path, base_id, auxiliary_id, clock_offset, sparse, matches
+):
+    from tests.storage.low_level_fixtures import make_processed_dataset_spec
+
+    timestamp = pd.Timestamp("2024-01-02")
+    for name, asset, column, offset in (
+        ("base", base_id, "factor", 0),
+        ("auxiliary", auxiliary_id, "other", clock_offset),
+    ):
+        write_dataset(
+            tmp_path / name,
+            pd.DataFrame(
+                {
+                    "market_id": ["custom"],
+                    "asset_id": [asset],
+                    "timestamp": [timestamp + pd.Timedelta(offset, "ns")],
+                    column: [7.0],
+                }
+            ),
+            spec=make_processed_dataset_spec(
+                name, market_id="custom", value_column=column
+            ),
+        )
+    config = {
+        "market_id": "custom",
+        "dataset_id": "joined",
+        "inputs": {name: str(tmp_path / name) for name in ("base", "auxiliary")},
+        "base_input_data_id": "base",
+        "factor_columns": ["factor", "other"],
+        "label_columns": [],
+        "feature_recipe": None,
+        "sparse_input_data_ids": ["auxiliary"] if sparse else [],
+        "time_window": {"start": "2024-01-02", "end": "2024-01-02"},
+        "output_root": str(tmp_path / "joined"),
+    }
+    if matches:
+        result = read_dataset(assembler_module.assemble(config))
+        pd.testing.assert_series_equal(
+            result.asset_id, read_dataset(tmp_path / "base").asset_id
+        )
+        assert result.other.tolist() == [7.0]
+    else:
+        with pytest.raises(ValueError, match="extra_research_input_keys: auxiliary: 1"):
+            assembler_module.assemble(config)
+        assert not (tmp_path / "joined").exists()
+
+
+def test_sparse_native_alignment_preserves_observed_discrete_payload(tmp_path):
+    from dataclasses import replace
+
+    from tests.storage.low_level_fixtures import make_processed_dataset_spec
+
+    keys = pd.DataFrame(
+        {
+            "market_id": ["custom"] * 3,
+            "asset_id": ["c", "a", "b"],
+            "timestamp": [pd.Timestamp("2024-01-02")] * 3,
+        }
+    )
+    base = make_processed_dataset_spec(
+        "base", market_id="custom", value_column="factor"
+    )
+    write_dataset(tmp_path / "base", keys.assign(factor=1.0), spec=base)
+    columns = {
+        "signed": "int64",
+        "unsigned": "uint64",
+        "nullable": "Int64",
+        "flag": "bool",
+    }
+    auxiliary = keys.iloc[[2, 0]].reset_index(drop=True)
+    for name, dtype in columns.items():
+        auxiliary[name] = pd.Series(
+            [True, False] if name == "flag" else [2**53 + 1, 2**53 + 3], dtype=dtype
+        )
+    spec = replace(
+        base,
+        data_id="auxiliary",
+        column_roles={
+            **{key: base.column_roles[key] for key in base.primary_key},
+            **{name: ColumnRole.CONTEXT for name in columns},
+        },
+    )
+    write_dataset(tmp_path / "auxiliary", auxiliary, spec=spec)
+    result = read_dataset(
+        assembler_module.assemble(
+            {
+                "market_id": "custom",
+                "dataset_id": "joined",
+                "inputs": {
+                    name: str(tmp_path / name) for name in ("base", "auxiliary")
+                },
+                "base_input_data_id": "base",
+                "factor_columns": ["factor"],
+                "label_columns": [],
+                "context_columns": list(columns),
+                "feature_recipe": None,
+                "sparse_input_data_ids": ["auxiliary"],
+                "time_window": {"start": "2024-01-02", "end": "2024-01-02"},
+                "output_root": str(tmp_path / "joined"),
+            }
+        )
+    ).set_index("asset_id")
+    assert result.index.tolist() == ["a", "b", "c"]
+    assert result.loc["a", list(columns)].isna().all()
+    for name in ("signed", "unsigned", "nullable"):
+        assert result[name].loc[["b", "c"]].tolist() == [2**53 + 1, 2**53 + 3]
+    assert result.flag.loc[["b", "c"]].tolist() == [True, False]
+    assert result[list(columns)].dtypes.astype(str).tolist() == [
+        "Int64",
+        "UInt64",
+        "Int64",
+        "boolean",
+    ]

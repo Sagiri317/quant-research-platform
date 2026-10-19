@@ -2889,9 +2889,8 @@ def test_long_quoted_csv_record_preserves_embedded_newlines(tmp_path, ending):
         "Idxinfo10",
     ),
 )
-@pytest.mark.parametrize("reordered", (False, True))
 def test_index_info_projects_extra_text_and_persists_optional_columns(
-    tmp_path, omitted, reordered
+    tmp_path, omitted
 ):
     from quant_research_platform.sources.csmar.field_mappings import COLUMN_MAPPINGS
     from quant_research_platform.storage.datasets import read_dataset
@@ -2924,8 +2923,7 @@ def test_index_info_projects_extra_text_and_persists_optional_columns(
         row.pop(omitted)
     row["VendorDescription"] = "unused provider text"
     fields = list(row)
-    if reordered:
-        fields.reverse()
+    fields.reverse()
     path = raw / "csmar__index_info__synthetic__full__export-20260101.csv"
     with path.open("w", encoding="utf-8-sig", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields)

@@ -14,13 +14,6 @@ import numpy as np
 import pandas as pd
 
 
-def validate_financial_disclosure_chronology(
-    report_period: pd.Series, first_disclosure_date: pd.Series
-) -> None:
-    if first_disclosure_date.lt(report_period).any():
-        raise ValueError("financial_disclosure_before_report_period")
-
-
 def _validate_column_tuple(
     columns: tuple[str, ...],
     field_name: str,

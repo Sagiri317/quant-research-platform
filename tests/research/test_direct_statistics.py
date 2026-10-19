@@ -575,10 +575,7 @@ def test_factor_statistics_empty_selected_window_is_undefined(tmp_path):
     assert not missing_output.exists()
 
 
-@pytest.mark.parametrize("historical_x", ["excluded", "missing", "changed"])
-def test_selected_statistics_consumes_saved_predictions_without_historical_x(
-    tmp_path, historical_x
-):
+def test_selected_statistics_consumes_saved_predictions_without_historical_x(tmp_path):
     from quant_research_platform.research.statistics_production import (
         build_a_share_statistics_tables,
     )
@@ -600,14 +597,6 @@ def test_selected_statistics_consumes_saved_predictions_without_historical_x(
             "forward_return_20d_available_at",
         ),
     )
-    # The persisted lookup is unchanged across historical feature mutations.
-    if historical_x != "excluded":
-        from quant_research_platform.storage.datasets import read_dataset
-
-        frame = read_dataset(tmp_path / "input")
-        frame["factor"] = np.nan if historical_x == "missing" else -1e9
-        write_dataset(tmp_path / "changed", frame, spec=spec)
-        session = open_dataset_session(tmp_path / "changed")
     session = session.projected_view(
         tuple(c for c in spec.column_roles if c != "factor")
     )

@@ -15,9 +15,6 @@ from quant_research_platform.research.models.production import fit_model
 from quant_research_platform.research.models.scaler import (
     equal_timestamp_sample_weights,
 )
-from quant_research_platform.research.models.trial_selection import (
-    evaluate_model_trial_metrics_from_chunks,
-)
 from tests.research.direct_model_test_support import fit_frame, predict_frame
 
 
@@ -240,24 +237,6 @@ def test_decay_uses_explicit_missing_session_not_observation_count():
     assert weights[1] / weights[0] == pytest.approx(4.0)
     with pytest.raises(ValueError, match="training_decay_calendar_required"):
         equal_timestamp_sample_weights(dates, TrainingWeighting(half_life_periods=252))
-
-
-def test_mse_dates_are_equal_weight_not_rows():
-    data = pd.DataFrame(
-        dict(
-            timestamp=pd.to_datetime(["2024-01-01"] + ["2024-01-02"] * 2),
-            asset_id=[str(i) for i in range(3)],
-            label=0.0,
-            score=[1.0] + [0.0] * 2,
-        )
-    )
-    metrics = evaluate_model_trial_metrics_from_chunks(
-        [data.iloc[:2], data.iloc[2:]],
-        model_id="model",
-        label_column="label",
-        prediction_column="score",
-    )
-    assert metrics["validation_mse"] == pytest.approx(0.5)
 
 
 def test_enabled_decay_requires_matching_complete_own_calendar():

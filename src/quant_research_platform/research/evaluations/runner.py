@@ -228,6 +228,8 @@ def evaluate(config):
             window=window,
             strata=strata,
         )
+    if prediction_sources.intersection(columns):
+        raise ValueError("evaluation_prediction_input_column_conflict")
     predictions = {}
     for column, path in supplied_predictions.items():
         frame, metadata = read_predictions(

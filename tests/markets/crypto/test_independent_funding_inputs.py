@@ -167,8 +167,11 @@ def test_selected_corrupt_funding_never_falls_back(
     assert not (tmp_path / "ledger").exists()
 
 
-@pytest.mark.parametrize("roots", [None, [], "one-root", [1], [""], ["a", "a"]])
-@pytest.mark.parametrize("kind", ["maker", "taker"])
+@pytest.mark.parametrize(
+    "kind,roots",
+    [("maker", roots) for roots in (None, [], "one-root", [1], [""], ["a", "a"])]
+    + [("taker", None)],
+)
 def test_explicit_funding_roots_are_strict_json_lists(tmp_path, roots, kind):
     config = dict.fromkeys(portfolio._BACKTEST_KEYS)
     config.update(asset_id="btc_usdt", symbol="BTCUSDT", funding_roots=roots)

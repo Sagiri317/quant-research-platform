@@ -319,39 +319,11 @@ def test_strict_timestamp_series_accepts_equivalent_timezone_representations(
     assert result.iloc[0] == result.iloc[1]
 
 
-def test_strict_timestamp_series_falls_back_when_vectorized_parse_loses_value(
-    monkeypatch,
-) -> None:
-    values = pd.Series(
-        ["2024-01-01T00:00:00", "2024-01-02T00:00:00"],
-        index=["first", "second"],
-    )
-    original_to_datetime = validation.pd.to_datetime
-    calls: list[object] = []
-
-    def lossy_vectorized_parse(values, *args, **kwargs):
-        calls.append(values)
-        if len(calls) == 1:
-            return pd.Series(
-                [pd.NaT, pd.Timestamp("2024-01-02T00:00:00")],
-                index=values.index,
-            )
-        return original_to_datetime(values, *args, **kwargs)
-
-    monkeypatch.setattr(validation.pd, "to_datetime", lossy_vectorized_parse)
-
-    result = validation.strict_timestamp_series(
-        values,
-        error="invalid_contract_timestamp",
-    )
-
-    assert len(calls) == 3
-    assert isinstance(calls[0], pd.Series)
-    assert result.index.tolist() == ["first", "second"]
-    assert result.tolist() == [
-        pd.Timestamp("2024-01-01T00:00:00"),
-        pd.Timestamp("2024-01-02T00:00:00"),
-    ]
+@pytest.mark.parametrize("token", ("NaT", "nan", "None", ""))
+def test_strict_timestamp_series_rejects_missing_string_tokens(token) -> None:
+    values = pd.Series(["2024-01-01T00:00:00", token])
+    with pytest.raises(ValueError, match="^invalid_contract_timestamp$"):
+        validation.strict_timestamp_series(values, error="invalid_contract_timestamp")
 
 
 @pytest.mark.parametrize(
@@ -373,10 +345,10 @@ def test_strict_timestamp_series_rejects_mixed_timezone_inputs_without_warnings(
             )
 
 
-def test_strict_timestamp_series_uses_vectorized_parse_for_large_string_input(
+def test_strict_timestamp_series_uses_vectorized_parse_for_string_input(
     monkeypatch,
 ) -> None:
-    values = pd.Series(["2024-01-01T00:00:00"] * 2048)
+    values = pd.Series(["2024-01-01T00:00:00"] * 3)
     original_to_datetime = validation.pd.to_datetime
     calls: list[object] = []
 

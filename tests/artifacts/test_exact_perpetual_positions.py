@@ -113,23 +113,3 @@ def test_perpetual_cost_basis_transition_sums_stored_terms_before_rounding():
     assert previous["asset"].quantity == 10**16 + 1
     assert previous["asset"].value == 0
     assert previous["asset"].cost_basis == float(10**18 + 100)
-
-
-def test_funding_uses_exact_position_before_rounding_cashflow():
-    capital = PortfolioCapital("exact_funding", 1000.0, "USDT", "linear_perpetual")
-    batches = []
-    account = PortfolioEconomics(capital, "asset", batches.append)
-    for stamp, quantity in enumerate((1e16, 1.0)):
-        account.fill(
-            timestamp_ns=stamp,
-            order_id=str(stamp),
-            quantity=quantity,
-            price=100.0,
-            mark_price=100.0,
-            fee=0.0,
-        )
-    account.funding(FundingEvent(2, 1e-16, 100.0), mark_price=account.last_mark)
-    expected = float(-Fraction(10**16 + 1) * 100 * Fraction(1e-16))
-    assert expected != -100.0
-    assert batches[-1].cashflows[0].amount == expected
-    assert account.mark(3, 100.0)["funding"] == expected

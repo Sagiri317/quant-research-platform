@@ -256,11 +256,16 @@ def test_selected_feature_cannot_collide_with_new_transform(tmp_path):
         )
 
 
-@pytest.mark.parametrize("reverse", [False, True])
-@pytest.mark.parametrize("source_unit", ["fraction", None])
-@pytest.mark.parametrize("scale", [False, True, "default"])
 @pytest.mark.parametrize(
-    "groups", [["raw", "processed"], ["processed"], ["processed", "pre_neutral"]]
+    "reverse,source_unit,scale,groups",
+    [
+        (False, "fraction", False, ["raw", "processed"]),
+        (True, "fraction", False, ["raw", "processed"]),
+        (False, None, False, ["processed", "pre_neutral"]),
+        (True, None, True, ["raw", "processed"]),
+        (False, "fraction", "default", ["processed", "pre_neutral"]),
+        (True, "fraction", True, ["processed"]),
+    ],
 )
 def test_projection_preserves_selected_units_and_label_clock_authority(
     tmp_path, reverse, source_unit, scale, groups

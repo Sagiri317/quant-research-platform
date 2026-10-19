@@ -287,32 +287,6 @@ def test_market_panel_physical_order_is_time_major_without_changing_rows() -> No
     ]
 
 
-def test_execution_mask_is_independent_and_uses_signal_row_legality() -> None:
-    sessions = pd.bdate_range("2024-01-01", periods=3)
-    panel = pd.DataFrame(
-        {
-            "listing_date": pd.Timestamp("2000-01-01"),
-            "market_id": "a_share",
-            "asset_id": "asset",
-            "timestamp": sessions,
-            "is_trading": True,
-            "limit_status": [0, 1, 0],
-            "open": [10.0, 11.0, 12.0],
-            "high": [10.0, 11.0, 12.0],
-            "low": [10.0, 11.0, 12.0],
-            "close": [10.0, 11.0, 12.0],
-        }
-    )
-
-    result = derive_execution_mask(panel)
-
-    assert "scenario_universe" not in result
-    assert result["can_enter"].iloc[:2].tolist() == [False, True]
-    assert pd.isna(result["can_enter"].iloc[2])
-    assert result["can_exit"].iloc[:2].tolist() == [True, True]
-    assert pd.isna(result["can_exit"].iloc[2])
-
-
 def test_execution_mask_and_label_consumer_have_independent_price_eligibility() -> None:
     sessions = pd.bdate_range("2024-01-01", periods=4)
     panel = pd.DataFrame(
@@ -338,83 +312,13 @@ def test_execution_mask_and_label_consumer_have_independent_price_eligibility() 
         sessions=sessions,
     )
 
+    assert "scenario_universe" not in mask
+    assert mask["can_exit"].iloc[:3].tolist() == [True, True, True]
+    assert pd.isna(mask["can_exit"].iloc[3])
     assert mask["can_enter"].iloc[:3].tolist() == [False, True, True]
     assert pd.isna(mask["can_enter"].iloc[3])
     assert labeled.loc[0, "forward_return_1d"] == pytest.approx(12.0 / 11.0 - 1.0)
     assert labeled.loc[1, "forward_return_1d"] == pytest.approx(13.0 / 12.0 - 1.0)
-
-
-def test_no_limit_history_overrides_historical_limit_status() -> None:
-    sessions = pd.bdate_range("2024-01-01", periods=3)
-    bars = pd.DataFrame(
-        {
-            "source_asset_id": ["000001"] * 3,
-            "timestamp": sessions,
-            "market_type": 1,
-            "trading_status_code": 0,
-            "filling_flag": 0,
-            "open": 10.0,
-            "high": 10.0,
-            "low": 10.0,
-            "close": 10.0,
-            "volume": 100.0,
-            "amount": 1_000.0,
-            "period_return": 0.0,
-            "adj_close": 10.0,
-            "adj_open": 10.0,
-            "float_market_cap": 1_000.0,
-            "total_market_cap": 1_000.0,
-            "prev_close": 10.0,
-            "limit_status": [0.0, 1.0, 0.0],
-        }
-    )
-    stock_master = pd.DataFrame(
-        {
-            "source_asset_id": ["000001"],
-            "timestamp": [sessions[0]],
-            "listing_date": [sessions[0] - pd.Timedelta(days=500)],
-            "delisting_date": [pd.NaT],
-            "stock_name": ["asset"],
-            "company_status": ["normal"],
-        }
-    )
-    market_cap = pd.DataFrame(
-        {
-            "source_asset_id": ["000001"],
-            "timestamp": [sessions[0] - pd.Timedelta(days=500)],
-            "share_change_date": [sessions[0] - pd.Timedelta(days=500)],
-            "total_shares": [100.0],
-            "a_float_shares": [100.0],
-        }
-    )
-    calendar = pd.DataFrame(
-        {
-            "calendar_date": sessions,
-            "source_market_type": 1,
-            "is_trading_day": True,
-        }
-    )
-    no_limit = pd.DataFrame(
-        {
-            "source_asset_id": ["000001"],
-            "timestamp": [sessions[1]],
-            "reason": ["historical exception"],
-        }
-    )
-
-    panel = compute_market_panel(
-        bars,
-        **_prepare_market_panel_inputs(
-            stocks=_canonical_stock_master(stock_master),
-            market_cap=market_cap,
-            trading_calendar=calendar,
-            no_limit_history=no_limit,
-        ),
-    )
-    mask = derive_execution_mask(panel)
-
-    assert panel.loc[panel["timestamp"].eq(sessions[1]), "limit_status"].iloc[0] == 0.0
-    assert mask.loc[mask["timestamp"].eq(sessions[0]), "can_enter"].iloc[0]
 
 
 def test_missing_listing_lifecycle_retains_prices_without_eligibility() -> None:

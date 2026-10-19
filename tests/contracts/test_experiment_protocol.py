@@ -1,4 +1,4 @@
-"""Scientific fold chronology, with final test frozen by explicit selection records."""
+"""Scientific train/validation fold chronology."""
 
 import pytest
 

@@ -1,5 +1,7 @@
 """Small explicit scientific inputs shared by native statistics regression tests."""
 
+import pandas as pd
+
 from quant_research_platform.contracts.models import _target_definition
 from quant_research_platform.research.statistics_production import _selection_trial_rows
 from quant_research_platform.storage.datasets.schema import data_spec_payload
@@ -7,6 +9,30 @@ from tests.helpers.research_configuration import (
     A_SHARE_MODEL_ALGORITHMS,
     research_configuration,
 )
+
+
+def assert_recomputed_statistics_equal(left, right):
+    """Compare rerun values with exact settings, domains, and missing masks."""
+    continuous = left.select_dtypes(include="floating").columns.difference(
+        [
+            "fdr_alpha",
+            "confidence",
+            "alpha",
+            "seed",
+            "bootstrap_seed",
+            "bootstrap_block_size",
+            "bootstrap_repetitions",
+            "block_size",
+            "repetitions",
+        ]
+    )
+    pd.testing.assert_frame_equal(
+        left.drop(columns=continuous), right.drop(columns=continuous), check_exact=True
+    )
+    pd.testing.assert_frame_equal(left.isna(), right.isna(), check_exact=True)
+    pd.testing.assert_frame_equal(
+        left[continuous], right[continuous], check_exact=False, rtol=1e-12, atol=1e-15
+    )
 
 
 def statistics_config(

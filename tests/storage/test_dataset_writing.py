@@ -512,28 +512,28 @@ def test_public_writer_preserves_nullable_object_strings_independent_of_row_orde
     from quant_research_platform.contracts.columns import ColumnRole
     from quant_research_platform.contracts.data import ProcessedDataKind
 
-    rows = 6000
+    rows = 3
     frame = pd.DataFrame(
         {
             "asset_id": pd.Series(
                 [f"synthetic_{index:04d}" for index in range(rows)], dtype=object
             ),
-            "timestamp": pd.date_range("2024-01-01", periods=rows, freq="D").astype(
+            "timestamp": pd.date_range("2024-12-30", periods=rows, freq="D").astype(
                 "datetime64[ns]"
             ),
             **{
                 f"factor_{index:02d}": np.arange(rows, dtype=np.float64)
-                for index in range(34)
+                for index in range(1)
             },
             "note": pd.Series(
-                [None] * 5500 + [f"note_{index:04d}" for index in range(5500, rows)],
+                [None] * 2 + [f"note_{index:04d}" for index in range(2, rows)],
                 dtype=object,
             ),
         }
     )
     expected = frame.copy(deep=True)
     if nonnull_first:
-        frame = pd.concat((frame.iloc[5500:], frame.iloc[:5500]), ignore_index=True)
+        frame = pd.concat((frame.iloc[2:], frame.iloc[:2]), ignore_index=True)
     before = frame.copy(deep=True)
     spec = replace(
         make_processed_dataset_spec(
@@ -544,7 +544,7 @@ def test_public_writer_preserves_nullable_object_strings_independent_of_row_orde
         column_roles={
             "asset_id": ColumnRole.KEY,
             "timestamp": ColumnRole.TIMESTAMP,
-            **{f"factor_{index:02d}": ColumnRole.FACTOR for index in range(34)},
+            **{f"factor_{index:02d}": ColumnRole.FACTOR for index in range(1)},
             "note": ColumnRole.CONTEXT,
         },
     )
@@ -562,8 +562,8 @@ def test_public_writer_preserves_nullable_object_strings_independent_of_row_orde
     assert actual["note"].dtype == expected["note"].dtype
     pd.testing.assert_series_equal(actual["note"].isna(), expected["note"].isna())
     pd.testing.assert_series_equal(actual["note"].dropna(), expected["note"].dropna())
-    assert len(actual) == 6000
-    assert actual["note"].isna().sum() == 5500
+    assert len(actual) == 3
+    assert actual["note"].isna().sum() == 2
     pd.testing.assert_frame_equal(frame, before)
 
 

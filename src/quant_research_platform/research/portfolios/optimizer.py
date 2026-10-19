@@ -304,12 +304,6 @@ def optimize_portfolio(
         relative_exposure[:, len(industry_columns) :], config.style_active_limit
     )
 
-    # Fixed weights also have fixed absolute trades. Leaving their auxiliaries
-    # free can create a zero-row budget Jacobian when all weights are fixed.
-    trade_upper = np.where(
-        lower == upper, np.minimum(capacity, abs(lower - current)), capacity
-    )
-    trade_lower = np.where(lower == upper, trade_upper, 0.0)
     turnover_jacobian = np.r_[np.zeros(count), np.full(count, -0.5)]
     trade_jacobian = np.block(
         [[-np.eye(count), np.eye(count)], [np.eye(count), np.eye(count)]]
@@ -390,7 +384,7 @@ def optimize_portfolio(
         np.r_[current, np.zeros(count)],
         jac=True,
         method="SLSQP",
-        bounds=(*bounds, *zip(trade_lower, trade_upper, strict=True)),
+        bounds=(*bounds, *((0.0, limit) for limit in capacity)),
         constraints=constraints,
         options={"ftol": config.solver_ftol, "maxiter": config.solver_maxiter},
     )

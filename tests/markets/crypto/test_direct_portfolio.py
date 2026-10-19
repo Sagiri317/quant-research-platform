@@ -150,11 +150,8 @@ def test_native_prediction_date_windows_and_precise_consumption(tmp_path, open_e
 
 
 @pytest.mark.parametrize("consumer", ["fixed", "prediction", "calibration"])
-@pytest.mark.parametrize("offset_ns", [1, 999_999])
-def test_decision_consumers_reject_submillisecond_times(tmp_path, consumer, offset_ns):
-    stamp = pd.Timestamp("1970-01-01T00:00:08.600") + pd.Timedelta(
-        nanoseconds=offset_ns
-    )
+def test_decision_consumers_reject_submillisecond_times(tmp_path, consumer):
+    stamp = pd.Timestamp("1970-01-01T00:00:08.600") + pd.Timedelta(nanoseconds=999_999)
     context = _inputs(tmp_path)
     from quant_research_platform.storage.datasets.reading import read_dataset
 

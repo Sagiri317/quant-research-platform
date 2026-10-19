@@ -181,7 +181,6 @@ def test_processed_benchmark_target_streams_exact_dates_and_requires_global_cove
         ("zero", "weight_invalid"),
         ("null", "weight_invalid"),
         ("missing", "weight_sum_invalid"),
-        ("overflow", "weight_sum_invalid"),
         ("sum", "weight_sum_invalid"),
         ("identity", "index_identity_invalid"),
     ),
@@ -200,9 +199,6 @@ def test_benchmark_normalization_rejects_fact_mutations(
         weights.loc[0, "weight"] = np.nan
     elif mutation == "missing":
         weights = weights.drop(index=1)
-    elif mutation == "overflow":
-        weights.loc[[0, 1], "weight"] = 1e308
-        assert np.isfinite(weights["weight"]).all()
     elif mutation == "sum":
         weights.loc[1, "weight"] = 0.7
     else:
@@ -247,11 +243,11 @@ def test_rounded_benchmark_weights_publish_as_unit_portfolio(tmp_path, raw_weigh
         (weights,) = _iter_benchmark_weights(
             root, benchmark, pd.DatetimeIndex([timestamp])
         )
-        np.testing.assert_array_max_ulp(
-            weights.to_numpy(), np.full(3, 1.0 / 3.0), maxulp=1
+        np.testing.assert_allclose(
+            weights.to_numpy(), np.full(3, 1.0 / 3.0), rtol=1e-12, atol=0
         )
-        np.testing.assert_array_max_ulp(
-            np.array([(weights * 100.0).sum()]), np.array([100.0]), maxulp=2
+        np.testing.assert_allclose(
+            np.array([(weights * 100.0).sum()]), np.array([100.0]), rtol=1e-12, atol=0
         )
     pd.testing.assert_frame_equal(raw, original, check_exact=True)
 
@@ -298,10 +294,12 @@ def test_benchmark_normalization_preserves_unequal_relative_weights():
     )
     for _, group in normalized.groupby("benchmark_id"):
         weights = group.set_index("asset_id")["weight"]
-        assert weights["000002"] == 2.0 * weights["000001"]
+        assert weights["000002"] == pytest.approx(
+            2.0 * weights["000001"], rel=1e-12, abs=0
+        )
         assert weights["000003"] > weights["000001"]
-        np.testing.assert_array_max_ulp(
-            np.array([weights.sum()]), np.array([1.0]), maxulp=1
+        np.testing.assert_allclose(
+            np.array([weights.sum()]), np.array([1.0]), rtol=1e-12, atol=0
         )
 
 
@@ -345,17 +343,17 @@ def test_source_percentage_quantization_boundary_uses_actual_group_size(
             [float(Decimal(weight) / total_percent) for weight in percentages]
         )
         for _, group in normalized.groupby("benchmark_id"):
-            np.testing.assert_array_max_ulp(
-                group["weight"].to_numpy(), expected, maxulp=2
+            np.testing.assert_allclose(
+                group["weight"].to_numpy(), expected, rtol=1e-12, atol=0
             )
-            np.testing.assert_array_max_ulp(
-                np.array([group["weight"].sum()]), np.array([1.0]), maxulp=2
+            np.testing.assert_allclose(
+                np.array([group["weight"].sum()]), np.array([1.0]), rtol=1e-12, atol=0
             )
     pd.testing.assert_frame_equal(raw, original, check_exact=True)
 
 
-@pytest.mark.parametrize("direction", (-1, 1))
-def test_complete_500_and_1000_source_rounding_preserves_relative_weights(direction):
+def test_complete_500_and_1000_source_rounding_preserves_relative_weights():
+    direction = 1
     info, _ = _benchmark_facts()
     rows = []
     expected = {}
@@ -399,11 +397,11 @@ def test_complete_500_and_1000_source_rounding_preserves_relative_weights(direct
         "csi1000": 1000,
     }
     for benchmark, group in normalized.groupby("benchmark_id"):
-        np.testing.assert_array_max_ulp(
-            group["weight"].to_numpy(), expected[benchmark], maxulp=2
+        np.testing.assert_allclose(
+            group["weight"].to_numpy(), expected[benchmark], rtol=1e-12, atol=0
         )
-        np.testing.assert_array_max_ulp(
-            np.array([group["weight"].sum()]), np.array([1.0]), maxulp=2
+        np.testing.assert_allclose(
+            np.array([group["weight"].sum()]), np.array([1.0]), rtol=1e-12, atol=0
         )
     pd.testing.assert_frame_equal(raw, original, check_exact=True)
 

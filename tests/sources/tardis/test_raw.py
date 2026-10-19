@@ -4,6 +4,7 @@ import gzip
 import hashlib
 import io
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -626,15 +627,30 @@ def test_native_manifest_is_read_once_without_reproving_selection(
 def test_verified_file_preserves_non_missing_contract_failure(tmp_path):
     from quant_research_platform.sources.tardis.raw import _verified_file
 
-    with pytest.raises(ValueError, match="^tardis_source_file_invalid$") as caught:
+    error, match = (
+        (PermissionError, r"\[Errno 13\]")
+        if sys.platform == "win32"
+        else (ValueError, "^tardis_source_file_invalid$")
+    )
+    with pytest.raises(error, match=match) as caught:
         with _verified_file(tmp_path):
             pass
     assert caught.value.__cause__ is None
 
 
-@pytest.mark.parametrize("kind", ("import", "download"))
-@pytest.mark.parametrize("member", ("gaps.jsonl.gz", "observation_intervals.jsonl.gz"))
-@pytest.mark.parametrize("failure", ("none", "close", "both"))
+@pytest.mark.parametrize(
+    ("kind", "member", "failure"),
+    (
+        ("import", "gaps.jsonl.gz", "none"),
+        ("import", "observation_intervals.jsonl.gz", "none"),
+        ("download", "gaps.jsonl.gz", "none"),
+        ("download", "observation_intervals.jsonl.gz", "none"),
+        ("import", "gaps.jsonl.gz", "close"),
+        ("import", "observation_intervals.jsonl.gz", "close"),
+        ("import", "gaps.jsonl.gz", "both"),
+        ("import", "observation_intervals.jsonl.gz", "both"),
+    ),
+)
 def test_native_sidecar_digest_preserves_failure_and_existing_archive(
     tmp_path, monkeypatch, kind, member, failure
 ):

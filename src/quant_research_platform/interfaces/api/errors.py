@@ -8,34 +8,26 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from quant_research_platform.interfaces.api.models import (
-    ApiErrorDetails,
-    ApiErrorEnvelope,
-    ApiErrorPayload,
-    ApiValidationError,
-)
-
 
 @dataclass(frozen=True)
 class ApiError(Exception):
     error_code: str
     status_code: int = 422
     field: str | None = None
-    details: ApiErrorDetails | None = None
+    details: dict[str, object] | None = None
 
 
 def api_error_response(error: ApiError) -> JSONResponse:
-    envelope = ApiErrorEnvelope(
-        error=ApiErrorPayload(
-            error_code=error.error_code,
-            message=error.error_code,
-            field=error.field,
-            details=error.details if error.details is not None else ApiErrorDetails(),
-        )
-    )
     return JSONResponse(
         status_code=error.status_code,
-        content=envelope.model_dump(),
+        content={
+            "error": {
+                "error_code": error.error_code,
+                "message": error.error_code,
+                "field": error.field,
+                "details": error.details if error.details is not None else {},
+            }
+        },
     )
 
 
@@ -70,8 +62,8 @@ def register_api_error_handlers(app: FastAPI) -> None:
         )
 
 
-def _validation_error_details(exc: RequestValidationError) -> ApiErrorDetails:
-    errors: list[ApiValidationError] = []
+def _validation_error_details(exc: RequestValidationError) -> dict[str, object]:
+    errors: list[dict[str, object]] = []
     for item in exc.errors():
         raw_loc = item.get("loc", ())
         loc = (
@@ -80,9 +72,10 @@ def _validation_error_details(exc: RequestValidationError) -> ApiErrorDetails:
             else ()
         )
         errors.append(
-            ApiValidationError(
-                type=str(item.get("type", ""))[:128],
-                loc=loc,
-            )
+            {
+                "type": str(item.get("type", ""))[:128],
+                "loc": loc,
+                "msg": "validation_error",
+            }
         )
-    return ApiErrorDetails(errors=errors)
+    return {"errors": errors} if errors else {}

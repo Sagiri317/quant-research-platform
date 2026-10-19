@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.compute.dataframe.cross_section import (
-    compute_ic_and_grouped_label_values,
+    _compute_ic_and_grouped_label_values,
 )
 from quant_research_platform.compute.panels import (
     ComputePanelSpec,
@@ -67,7 +67,7 @@ def test_compute_ic_and_groups_have_independent_nonperfect_oracles() -> None:
         4.0,
         2.0,
     ]
-    metrics, groups = compute_ic_and_grouped_label_values(panel, spec, n_groups=3)
+    metrics, groups = _compute_ic_and_grouped_label_values(panel, spec, n_groups=3)
 
     assert metrics["timestamp"].nunique() == 2
     assert metrics["signal"].tolist() == ["factor", "factor"]
@@ -92,13 +92,13 @@ def test_grouped_label_values_keep_tie_classes_and_real_tiny_variation() -> None
         }
     )
 
-    _, grouped = compute_ic_and_grouped_label_values(frame, spec, n_groups=4)
-    _, permuted = compute_ic_and_grouped_label_values(
+    _, grouped = _compute_ic_and_grouped_label_values(frame, spec, n_groups=4)
+    _, permuted = _compute_ic_and_grouped_label_values(
         frame.iloc[::-1].assign(asset=["w", "x", "y", "z"]),
         spec,
         n_groups=4,
     )
-    _, tiny = compute_ic_and_grouped_label_values(
+    _, tiny = _compute_ic_and_grouped_label_values(
         frame.iloc[:2].assign(factor=[0.0, np.nextafter(0.0, 1.0)]),
         spec,
         n_groups=2,
@@ -111,8 +111,16 @@ def test_grouped_label_values_keep_tie_classes_and_real_tiny_variation() -> None
 
 
 @pytest.mark.parametrize(
-    "labels", [(), ("label", "label"), ("",), ("factor",), ("timestamp",), ("asset",)]
+    "labels, expected_error",
+    [
+        ((), "at least one column"),
+        (("label", "label"), "must not contain duplicates"),
+        (("",), "non-empty strings"),
+        (("factor",), "must not also be signal columns"),
+        (("timestamp",), "must not reuse timestamp or asset columns"),
+        (("asset",), "must not reuse timestamp or asset columns"),
+    ],
 )
-def test_compute_panel_rejects_invalid_label_columns(labels):
-    with pytest.raises(ValueError):
+def test_compute_panel_rejects_invalid_label_columns(labels, expected_error):
+    with pytest.raises(ValueError, match=expected_error):
         ComputePanelSpec(signal_columns=("factor",), label_columns=labels)

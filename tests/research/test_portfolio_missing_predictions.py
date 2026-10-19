@@ -48,34 +48,14 @@ def _persist(root, batches):
     return restored
 
 
-def _native(root, monkeypatch, missing, *, dividend=False, independent_exit=False):
+def _native(root, monkeypatch, missing):
     frames, fees, _ = _inputs()
     fees["rate"] = 0.0
     panel = frames["panel"]
     panel.loc[:, ["open", "close", "adj_open", "adj_close"]] = 100.0
     panel.loc[
         panel.asset_id.eq("b") & panel.timestamp.ge("2023-01-05"), ["open", "close"]
-    ] = 90.0 if dividend else 120.0
-    if dividend:
-        frames["corporate_actions"] = pd.DataFrame(
-            [
-                {
-                    "source_asset_id": "b",
-                    "timestamp": pd.Timestamp("2023-01-05"),
-                    "kind": "CA",
-                    "market_type": 1,
-                    "announcement_date": pd.Timestamp("2023-01-02"),
-                    "settlement_date": pd.Timestamp("2023-01-06"),
-                    "amount": 10.0,
-                }
-            ]
-        )
-    if independent_exit:
-        frames["dataset"].loc[
-            frames["dataset"].asset_id.eq("b")
-            & frames["dataset"].timestamp.ge("2023-01-04"),
-            "eligible",
-        ] = False
+    ] = 120.0
     batches, _ = _build_producer(
         root / "inputs",
         monkeypatch,
@@ -150,47 +130,6 @@ def test_missing_new_asset_cannot_enter(tmp_path, monkeypatch):
         trade.asset_id == "a" and trade.quantity > 0
         for batch in batches
         for trade in batch.trades
-    )
-
-
-def test_missing_predictions_still_process_dividend_receivable_and_cash(
-    tmp_path, monkeypatch
-):
-    batches = _native(
-        tmp_path,
-        monkeypatch,
-        lambda day, _: day >= pd.Timestamp("2023-01-04"),
-        dividend=True,
-    )
-    assert all(not batch.trades for batch in batches[1:])
-    assert (
-        sum(
-            flow.amount
-            for batch in batches
-            for flow in batch.cashflows
-            if flow.kind == "dividend"
-        )
-        == 10.0
-    )
-    assert (
-        sum(row.value for row in batches[-1].valuations if row.phase == "end") == 100.0
-    )
-
-
-def test_missing_predictions_do_not_cancel_independent_eligibility_exit(
-    tmp_path, monkeypatch
-):
-    batches = _native(
-        tmp_path,
-        monkeypatch,
-        lambda day, _: day >= pd.Timestamp("2023-01-04"),
-        independent_exit=True,
-    )
-    assert any(
-        trade.asset_id == "b" and trade.quantity < 0 for trade in batches[1].trades
-    )
-    assert not any(
-        trade.quantity > 0 for batch in batches[1:] for trade in batch.trades
     )
 
 

@@ -444,22 +444,23 @@ def _processed_frames(
                     (frame.timestamp.max() for frame in chunks if not frame.empty),
                     default=None,
                 )
-        # Only selected assets need a clock, but their full listing history and
-        # missing observation sessions remain independent of price/date filters.
-        panel_axis = replace(
-            panel_axis,
-            parquet_filters=(
-                *(panel_axis.parquet_filters or ()),
-                (
-                    "asset_id",
-                    "in",
-                    _prepare_in_filter(
-                        panel_axis.arrow_schema.field("asset_id"),
-                        tuple(asset_types.index),
+        # Independent asset calculations need only selected assets' clocks.
+        # Market-model completeness instead needs the full declared membership.
+        if not any(definition.family == "market_model" for definition in definitions):
+            panel_axis = replace(
+                panel_axis,
+                parquet_filters=(
+                    *(panel_axis.parquet_filters or ()),
+                    (
+                        "asset_id",
+                        "in",
+                        _prepare_in_filter(
+                            panel_axis.arrow_schema.field("asset_id"),
+                            tuple(asset_types.index),
+                        ),
                     ),
                 ),
-            ),
-        )
+            )
         declared_axis = _calendar_panel_axis(
             materialize_dataset_session(panel_axis),
             calendar,

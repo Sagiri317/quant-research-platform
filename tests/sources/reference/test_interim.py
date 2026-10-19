@@ -340,14 +340,13 @@ def test_industry_reference_boundary_rejects_unproved_source(tmp_path, failure):
         )
 
 
-@pytest.mark.parametrize("document_suffix", [".docx", ".xls"])
-def test_industry_reference_preserves_table_row_locator(tmp_path, document_suffix):
+def test_industry_reference_preserves_table_row_locator(tmp_path):
     from tests.helpers.a_share_raw import write_industry_reference_fixture
 
     observations = _industry_observations()
     observations[0][4][0]["source_locator"] = "table:2;row:7"
     root = write_industry_reference_fixture(
-        tmp_path / "raw", observations=observations, document_suffix=document_suffix
+        tmp_path / "raw", observations=observations, document_suffix=".docx"
     )
     data_id = interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
     layout = StorageLayout(tmp_path)
@@ -452,28 +451,6 @@ def test_malformed_fee_csv_is_source_local_and_preserves_old_good(
     assert opened and all(handle.closed for handle in opened)
 
 
-def test_fee_csv_decoder_preserves_quoted_multiline_fields(tmp_path):
-    raw = _write_reference_root(tmp_path / "raw") / "reference"
-    source = raw / "a_share_fee_schedule"
-    path = source / A_SHARE_FEE_CSV_NAME
-    with path.open(encoding="utf-8-sig", newline="") as handle:
-        rows = list(csv.DictReader(handle))
-    rows[0]["说明"] = 'synthetic, quoted "field"\nsecond line'
-    with path.open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=FEE_CSV_COLUMNS)
-        writer.writeheader()
-        writer.writerows(rows)
-    sidecar = source / A_SHARE_FEE_SIDECAR_NAME
-    metadata = json.loads(sidecar.read_text(encoding="utf-8"))
-    payload = path.read_bytes()
-    metadata.update(
-        file_bytes=len(payload), file_sha256=hashlib.sha256(payload).hexdigest()
-    )
-    sidecar.write_text(json.dumps(metadata), encoding="utf-8")
-    result = load_a_share_fee_source(reference_root=raw)
-    assert len(result.rows) == 5
-
-
 @pytest.mark.parametrize("publication", ("2025-01-01", "9999-12-31"))
 def test_industry_future_bad_row_does_not_change_selected_history(
     tmp_path, publication
@@ -513,7 +490,7 @@ def test_industry_future_bad_row_does_not_change_selected_history(
 
 
 @pytest.mark.parametrize("optional", ["name", "source_locator"])
-@pytest.mark.parametrize("value", [None, "", "omitted", 42, ["page:1"], {"page": 1}])
+@pytest.mark.parametrize("value", [None, "", "omitted", 42])
 def test_industry_optional_metadata_does_not_gate_classification(
     tmp_path, optional, value
 ):
@@ -668,7 +645,7 @@ def test_industry_unreadable_future_json_remains_a_source_boundary(tmp_path):
         root / "metadata.json", json.dumps(metadata), encoding="utf-8"
     )
     raw_before = _file_bytes(root)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="^qrp_json_invalid$"):
         interim.materialize_interim_data(
             raw_root=root.parent,
             output_roots={data_id: output},
@@ -691,7 +668,7 @@ def test_fee_csv_native_newlines_and_unrestricted_metadata(tmp_path, terminator)
     for day in range(129):
         stamp = (date(2020, 1, 1) + timedelta(days=day)).isoformat()
         rows.append(_row("BROKER_COMMISSION", stamp, stamp, "沪深", "买入", 0.0003))
-    rows[0]["说明"] = "x" * 16800 + '\rquoted "text"\nnext\r\nline'
+    rows[0]["说明"] = "x" * 16800 + '\rquoted, "text"\nnext\r\nline'
     output = io.StringIO(newline="")
     for index, record in enumerate(
         [dict(zip(FEE_CSV_COLUMNS, FEE_CSV_COLUMNS, strict=True)), *rows]

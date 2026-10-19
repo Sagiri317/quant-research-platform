@@ -808,7 +808,6 @@ def test_portfolio_ledger_primary_error_survives_writer_close_failure(
     (
         ("negative_adv", "portfolio_ledger_adv_invalid"),
         ("zero_trade_adv", "portfolio_ledger_adv_invalid"),
-        ("bool_numeric", "portfolio_ledger_numeric_invalid"),
         ("block_reason", "portfolio_ledger_block_reason_invalid"),
         ("decision_reason", "portfolio_ledger_decision_reason_invalid"),
     ),
@@ -831,9 +830,6 @@ def test_portfolio_ledger_trust_boundary_mutations_fail_closed(
         frame.loc[asset, "adv20"] = -1.0
     elif mutation == "zero_trade_adv":
         frame.loc[asset, "adv20"] = 0.0
-    elif mutation == "bool_numeric":
-        frame["adv20"] = frame["adv20"].astype(object)
-        frame.loc[asset, "adv20"] = True
     elif mutation == "block_reason":
         frame.loc[asset, "block_reason"] = "unknown_reason"
     else:
@@ -1555,3 +1551,26 @@ def test_repeated_partial_fills_preserve_registered_rights_through_native_roundt
     )
     assert final.quantity == registered * Fraction(3, 2)
     assert final.locked_quantity == final.receivable == 0
+
+
+def test_typed_portfolio_ledger_rejects_boolean_numeric():
+    from tests.helpers.portfolio_ledger import continuous_ledger_batch
+
+    frame = _session(
+        "2019-01-01",
+        "2019-01-02",
+        pre_asset=0.0,
+        target_asset=100.0,
+        post_asset=100.0,
+        pre_cash=100.0,
+        target_cash=0.0,
+        post_cash=0.0,
+    )
+    batch = continuous_ledger_batch(frame, 0, end_timestamp=pd.Timestamp("2019-01-02"))
+    assert any(row.name == "adv20" for row in batch.diagnostics)
+    diagnostics = tuple(
+        replace(row, number=True) if row.name == "adv20" else row
+        for row in batch.diagnostics
+    )
+    with pytest.raises(ValueError, match="portfolio_ledger_numeric_invalid"):
+        replace(batch, diagnostics=diagnostics)

@@ -57,7 +57,14 @@ def test_model_reader_rejects_wrong_learning_evidence_without_changing_good_mode
     else:
         model["facts"]["fit_windows"][0]["start"] = "2020-01-02"
     (bad / "model.json").write_text(json.dumps(model))
-    with pytest.raises((ValueError, TypeError)):
+    expected_error = {
+        "wrong_predictor": "model_state_metadata_mismatch",
+        "seed": "model_facts_metadata_mismatch",
+        "parameters": "model_sample_scaled_parameters_mismatch",
+        "fit_window": "model_training_window_outside_declared_fit",
+        "input_unit_whitespace": "model_input_units_invalid",
+    }[mutation]
+    with pytest.raises(ValueError, match=f"^{expected_error}$"):
         load_model(bad)
     assert all(path.read_bytes() == original for path, original in protected.items())
     assert load_model(good)[0].metadata["rows_after_input_label_dropna"] == 9

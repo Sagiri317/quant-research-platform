@@ -121,3 +121,65 @@ async def test_http_inspection_redacts_private_paths_without_changing_artifact(
         response = await client.get("/api/inspect", params={"path": "output"})
         assert response.status_code == 422
         assert "sensitive-value" not in response.text
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_error_handlers_preserve_envelope_and_redact_payload(anyio_backend):
+    import json
+
+    from fastapi.exceptions import RequestValidationError
+
+    app = create_app()
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        response = await client.get(
+            "/api/portfolio-curve", params={"path": "unused", "stride": "private-input"}
+        )
+    assert response.status_code == 422
+    assert response.json() == {
+        "error": {
+            "error_code": "request_validation_error",
+            "message": "request_validation_error",
+            "field": None,
+            "details": {
+                "errors": [
+                    {
+                        "type": "int_parsing",
+                        "loc": ["query", "stride"],
+                        "msg": "validation_error",
+                    }
+                ]
+            },
+        }
+    }
+    response = await app.exception_handlers[RequestValidationError](
+        None,
+        RequestValidationError(
+            [
+                {
+                    "type": "x" * 129,
+                    "loc": [True, None, *range(20)],
+                    "msg": "private-msg",
+                    "input": "private-input",
+                    "ctx": {"private": 1},
+                }
+            ]
+        ),
+    )
+    assert json.loads(response.body)["error"]["details"] == {
+        "errors": [
+            {"type": "x" * 128, "loc": list(range(16)), "msg": "validation_error"}
+        ]
+    }
+    response = await app.exception_handlers[Exception](None, RuntimeError("private"))
+    assert response.status_code == 500
+    assert json.loads(response.body) == {
+        "error": {
+            "error_code": "internal_error",
+            "message": "internal_error",
+            "field": None,
+            "details": {},
+        }
+    }

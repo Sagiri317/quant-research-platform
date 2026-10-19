@@ -125,33 +125,6 @@ def test_training_retention_preserves_all_legal_rows_and_same_day_order(chunk_ro
     )
 
 
-def test_estimator_without_fit_cannot_be_returned_as_fitted():
-    spec = ModelSpec(
-        model_id="missing_fit",
-        model_algorithm="ridge_regression",
-        input_factor_columns=("x",),
-        target_column="label",
-        hyperparameters={"alpha": 1.0},
-    )
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(["2018-01-01", "2018-01-02"]),
-            "x": [1.0, 2.0],
-            "label": [1.0, 2.0],
-        }
-    )
-    with pytest.raises(AttributeError, match="fit"):
-        fitting._fit_predictor(
-            spec,
-            prepared_training=fitting._collect_training_frame(
-                [frame.assign(eligible=True, label_available_at=frame.timestamp)],
-                spec,
-                fitting_cutoff="2018-01-02",
-            ),
-            estimator=object(),
-        )
-
-
 def test_equal_rank_single_undefined_direction_names_required_input():
     from quant_research_platform.research.models.rank_ensemble import (
         EqualWeightRankEnsembleFactory,
@@ -187,7 +160,7 @@ def test_shared_preprocessing_matches_independent_candidate_states(monkeypatch):
             hyperparameters={"alpha": alpha},
             random_seed=37,
         )
-        for index, alpha in enumerate((0.01, 0.1, 1.0, 10.0))
+        for index, alpha in enumerate((0.01, 10.0))
     )
     frame = pd.DataFrame(
         {

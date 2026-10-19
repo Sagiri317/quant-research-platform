@@ -197,26 +197,37 @@ def _join_processed_inputs(
     diagnostics: dict | None = None,
 ) -> pd.DataFrame:
     base = dataset_spec.base_input_data_id
-    assembled = base_frame
+    assembled = base_frame.reset_index(drop=True)
     validate_research_dataset(assembled, dataset_spec, require_all_columns=False)
-    base_keys = assembled.loc[:, list(dataset_spec.primary_key)].copy()
+    base_keys = _scalar_keys(assembled, dataset_spec.primary_key)
     for input_data_id in dataset_spec.input_data_ids:
         if input_data_id == base:
             continue
         input_frame = input_frames[input_data_id]
         validate_research_dataset(input_frame, dataset_spec, require_all_columns=False)
-        _validate_input_key_coverage(
+        positions = _input_key_positions(
             base_keys,
             input_frame,
             dataset_spec=dataset_spec,
             input_data_id=input_data_id,
         )
-        assembled = assembled.merge(
-            input_frame,
-            on=list(dataset_spec.primary_key),
-            how="left",
-            validate="one_to_one",
-        )
+        payload = input_frame.drop(columns=list(dataset_spec.primary_key))
+        if -1 in positions:
+            # Adding a missing row must not round observed discrete values.
+            payload = payload.copy()
+            for column, dtype in payload.dtypes.items():
+                if isinstance(dtype, np.dtype) and dtype.kind in "iub":
+                    prefix = "UInt" if dtype.kind == "u" else "Int"
+                    nullable = (
+                        "boolean"
+                        if dtype.kind == "b"
+                        else f"{prefix}{dtype.itemsize * 8}"
+                    )
+                    payload[column] = payload[column].astype(nullable)
+            payload = payload.reset_index(drop=True).reindex(positions)
+        else:
+            payload = payload.iloc[positions]
+        assembled = pd.concat([assembled, payload.reset_index(drop=True)], axis=1)
     assembled = _add_a_share_semantic_columns(assembled, dataset_spec)
     if dataset_spec.feature_transforms:
         assembled = apply_feature_transforms(
@@ -235,34 +246,50 @@ def _ordered_input_data_ids(
     )
 
 
-def _validate_input_key_coverage(
-    base_keys: pd.DataFrame,
+def _scalar_keys(frame: pd.DataFrame, columns: tuple[str, ...]) -> list[tuple]:
+    # Extract columns independently; NumPy row coercion can change key identity.
+    return list(
+        zip(
+            *(
+                [
+                    value.item()
+                    if isinstance(value, (np.integer, np.floating, np.bool_))
+                    else value
+                    for value in frame[column].tolist()
+                ]
+                for column in columns
+            ),
+            strict=True,
+        )
+    )
+
+
+def _input_key_positions(
+    base_keys: list[tuple],
     input_frame: pd.DataFrame,
     *,
     dataset_spec: ResearchDatasetSpec,
     input_data_id: str,
-) -> None:
-    key_columns = list(dataset_spec.primary_key)
-    input_keys = input_frame.loc[:, key_columns]
-    policy = dataset_spec.key_coverage.get(input_data_id, "strict")
-    if input_keys.equals(base_keys) and policy in {"strict", "sparse"}:
-        return
-    base_index = pd.MultiIndex.from_frame(base_keys)
-    input_index = pd.MultiIndex.from_frame(input_keys)
-    extra = ~input_index.isin(base_index)
-    if bool(extra.any()):
-        raise ValueError(
-            f"extra_research_input_keys: {input_data_id}: {int(extra.sum())}"
+) -> list[int]:
+    input_positions = {
+        key: position
+        for position, key in enumerate(
+            _scalar_keys(input_frame, dataset_spec.primary_key)
         )
+    }
+    extra = input_positions.keys() - set(base_keys)
+    if extra:
+        raise ValueError(f"extra_research_input_keys: {input_data_id}: {len(extra)}")
+    positions = [input_positions.get(key, -1) for key in base_keys]
+    policy = dataset_spec.key_coverage.get(input_data_id, "strict")
     if policy == "sparse":
-        return
+        return positions
     if policy != "strict":
         raise ValueError(f"invalid_research_key_coverage: {input_data_id}={policy}")
-    missing = ~base_index.isin(input_index)
-    if bool(missing.any()):
-        raise ValueError(
-            f"missing_research_input_keys: {input_data_id}: {int(missing.sum())}"
-        )
+    missing = positions.count(-1)
+    if missing:
+        raise ValueError(f"missing_research_input_keys: {input_data_id}: {missing}")
+    return positions
 
 
 def _required_input_columns(spec: ResearchDatasetSpec) -> tuple[str, ...]:

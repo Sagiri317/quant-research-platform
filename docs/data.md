@@ -165,7 +165,7 @@ Tardis aggTrade ID 非单调时关闭受影响的成交观察区间，记录
 前向 ID 跳号按来源适配器约定处理：Tardis 原生导入记录缺口，官方录制读取器
 仅验证单调性。[Binance 聚合成交流说明](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/ws-streams/market#aggregate-trade-streams)
 定义聚合 ID；该定义本身不证明订阅消息逐 ID 加一；[Tardis 来源说明](https://docs.tardis.dev/historical-data-details/binance-futures)
-也不能替代该保证。适配器的检查差异需要结合原始消息核对，现有缺口判定规则保持一致。
+也不能替代该保证。适配器的检查差异需要结合原始消息核对，各适配器沿用自身的缺口判定规则。
 
 来源适用域按 [Tardis 历史频道说明](https://docs.tardis.dev/historical-data-details/binance-futures)
 和原件清单中的频道/频率共同决定。只给出变更日期而没有精确时刻的深度、markPrice

@@ -292,7 +292,7 @@ def test_bounded_asset_axes_preserve_missing_future_reasons_and_lifecycles(monke
 
 
 def test_terminal_asset_preserves_full_axis_missing_value_dtypes():
-    axis = pd.bdate_range("2020-01-01", periods=5000).as_unit("ns")
+    axis = pd.bdate_range("2020-01-01", periods=6).as_unit("ns")
     frame = _prices(5)
     frame["timestamp"] = axis[-5:]
     result = add_on_id_decomposition(frame, horizons=(1,), sessions=axis)

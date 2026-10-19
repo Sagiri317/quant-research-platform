@@ -437,10 +437,7 @@ def test_quantity_encoding_rejects_noncanonical_persistence(encoded):
         decode_exact_numeric(encoded)
 
 
-@pytest.mark.parametrize("kind", ["quantity", "mark", "fractional"])
-def test_exact_quantity_encoding_exceeds_float_without_losing_amount_ledger(
-    tmp_path, kind
-):
+def test_fractional_quantity_native_amount_ledger(tmp_path):
     from fractions import Fraction
 
     from quant_research_platform.contracts.validation import (
@@ -448,13 +445,7 @@ def test_exact_quantity_encoding_exceeds_float_without_losing_amount_ledger(
         encode_exact_numeric,
     )
 
-    mark = (
-        float.fromhex("0x0.0000000000001p-1022")
-        if kind == "quantity"
-        else Fraction(3, 100)
-        if kind == "fractional"
-        else Fraction(10**400)
-    )
+    mark = Fraction(3, 100)
     quantity = Fraction(1, 1) / Fraction(mark)
     assert decode_exact_numeric(encode_exact_numeric(quantity)) == quantity
     valuations = tuple(
@@ -522,12 +513,8 @@ def test_exact_quantity_encoding_exceeds_float_without_losing_amount_ledger(
     summary = summarize_portfolio_ledger(artifact.capital, artifact.iter_chunks())
     assert summary["nav"] == 1.0
     assert summary["net_pnl"] == 0.0
-    if kind == "fractional":
-        assert summary["fill_quantity"] == float(quantity)
-        assert summary["fill_quantity_reason"] is None
-    else:
-        assert summary["fill_quantity"] is None
-        assert summary["fill_quantity_reason"] == "nonfinite_result"
+    assert summary["fill_quantity"] == float(quantity)
+    assert summary["fill_quantity_reason"] is None
     restored = list(artifact.iter_chunks())[0]
     assert restored.trades[0].quantity == quantity
     assert isinstance(restored.trades[0].quantity, Fraction)

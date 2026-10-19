@@ -139,7 +139,9 @@ def test_weighted_scaler_finite_population_bound(half_life):
         trading_sessions=pd.date_range("2024-01-02", "2024-01-03"),
     )
     scaler = ModelMatrixScaler.fit(frame, sample_weight=weights)
-    assert scaler.mean_ == (0.0,)
+    np.testing.assert_allclose(
+        scaler.mean_, [0.0], rtol=0, atol=np.finfo(float).eps * magnitude
+    )
     assert scaler.scale_[0] == pytest.approx(magnitude, rel=1e-15)
     np.testing.assert_allclose(scaler.transform(frame).x, [-1, 1, -1, 1], rtol=1e-15)
 

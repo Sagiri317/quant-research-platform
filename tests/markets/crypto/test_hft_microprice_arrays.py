@@ -26,8 +26,14 @@ def _panel(bid, ask, *, asset="btc_usdt"):
     )
 
 
-@pytest.mark.parametrize("column", ["microprice", "microprice_deviation"])
-@pytest.mark.parametrize("asset", ["btc_usdt", "eth_usdt"])
+@pytest.mark.parametrize(
+    "column,asset",
+    [
+        ("microprice", "btc_usdt"),
+        ("microprice", "eth_usdt"),
+        ("microprice_deviation", "btc_usdt"),
+    ],
+)
 @pytest.mark.parametrize("batch", [1, 7])
 @pytest.mark.parametrize("extended", [True, False])
 def test_microprice_selected_inputs_and_batches(
@@ -99,3 +105,59 @@ def test_microprice_constant_books_do_not_create_standardized_signals(boundary_p
     assert result.microprice_deviation.nunique() == 1
     scaler = ModelMatrixScaler.fit(result)
     assert not scaler.transform(result).to_numpy().any()
+
+
+@pytest.mark.parametrize("depth", [1, 5, 10])
+def test_plain_depth_projection_preserves_ties_and_real_changes(depth):
+    from quant_research_platform.contracts.signals import SignalSpec
+    from quant_research_platform.research.signals.normalization import (
+        normalize_signal_frame,
+    )
+
+    bid = np.array([0.2, 0.6, 2.2, 0.6 + 1e-12, 0, np.nan, -1])
+    ask = np.array([0.1, 0.3, 1.1, 0.3, 0, 1, 1])
+    frame = _panel(bid, ask).drop(columns=["mid", "book_spread"])
+    frame = frame.rename(
+        columns={
+            "bid_depth_1": f"bid_depth_{depth}",
+            "ask_depth_1": f"ask_depth_{depth}",
+        }
+    )
+    frame.loc[3:, "timestamp_ms"] += 100
+    frame.loc[5:, "segment_id"] = "b"
+    column = f"imbalance_{depth}"
+    result = pd.concat(
+        iter_factor_frames(
+            (frame.iloc[i : i + 2] for i in range(0, len(frame), 2)),
+            columns=(column,),
+        ),
+        ignore_index=True,
+    )
+    expected = [
+        float((Fraction(b) - Fraction(a)) / (Fraction(b) + Fraction(a)))
+        for b, a in zip(bid[:4], ask[:4], strict=True)
+    ]
+    np.testing.assert_allclose(result[column].iloc[:4], expected, rtol=2e-12, atol=0)
+    assert result[column].iloc[4:].isna().all()
+    assert result[column].iloc[:3].nunique() == 1
+    assert result[column].iloc[3] > result[column].iloc[0]
+    identity = ["market_id", "asset_id", "timestamp_ms", "segment_id"]
+    pd.testing.assert_frame_equal(result[identity], frame[identity], check_exact=True)
+    signals = result.iloc[:4].assign(timestamp=pd.Timestamp("2024-01-01"))
+    for transform in ("rank", "zscore"):
+        normalized = normalize_signal_frame(
+            signals,
+            (
+                SignalSpec(
+                    signal_id="signal",
+                    source_kind="factor",
+                    source_column=column,
+                    transform=transform,
+                ),
+            ),
+        ).signal
+        assert normalized.iloc[:3].nunique() == 1
+        assert normalized.iloc[3] > normalized.iloc[0]
+    scaler = ModelMatrixScaler.fit(result.loc[:2, [column]])
+    assert not scaler.transform(result.loc[:2, [column]]).to_numpy().any()
+    assert scaler.transform(result.loc[3:3, [column]]).iloc[0, 0] > 0

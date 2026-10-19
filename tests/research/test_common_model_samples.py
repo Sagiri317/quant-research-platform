@@ -143,7 +143,7 @@ def test_crypto_comparison_intersects_exact_keys_without_mutating_full_outputs(
         assert scored["common_rows"] == 2
         assert [row["validation_rows"] for row in scored["metrics"]] == [2, 2]
         assert [row["validation_mse"] for row in scored["metrics"]] == pytest.approx(
-            [0.0, 0.25], abs=1e-25
+            [0.0, 0.25], rel=1e-14, abs=1e-25
         )
     assert before == [(path / "prediction.parquet").read_bytes() for path in paths]
 

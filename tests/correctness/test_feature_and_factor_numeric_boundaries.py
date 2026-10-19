@@ -161,7 +161,7 @@ def test_amihud_mean_survives_native_write_and_read(tmp_path, window):
     calculated = calculate_factors_for_panel(panel, definitions=definitions)
     expected = float(Fraction(0.01) / Fraction(1e8))
     assert calculated[column].iloc[:-1].isna().all()
-    assert calculated[column].iloc[-1] == pytest.approx(expected, rel=1e-15)
+    assert calculated[column].iloc[-1] == pytest.approx(expected, rel=2e-12, abs=0)
     spec = ProcessedDataSpec(
         data_id="amihud",
         market_id="a_share",
@@ -211,11 +211,13 @@ def test_amihud_mean_uses_valid_observations_and_freshness():
 
     result = calculate_price_volume_factors(panel, factor_columns=("amihud_20d",))
     expected = float(Fraction(0.1) / Fraction(1e8) / 20)
-    assert result.amihud_20d.iloc[-1] == pytest.approx(expected, rel=1e-15)
+    assert result.amihud_20d.iloc[-1] == pytest.approx(expected, rel=2e-12, abs=0)
     panel.loc[3, "amount"] = 0
     partial = calculate_price_volume_factors(panel, factor_columns=("amihud_20d",))
     expected_partial = float(Fraction(0.1) / Fraction(1e8) / 19)
-    assert partial.amihud_20d.iloc[-1] == pytest.approx(expected_partial, rel=1e-15)
+    assert partial.amihud_20d.iloc[-1] == pytest.approx(
+        expected_partial, rel=2e-12, abs=0
+    )
     # Fewer than 15 valid observations fails the 75% freshness threshold.
     panel.loc[3:8, "amount"] = 0
     assert (

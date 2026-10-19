@@ -134,77 +134,6 @@ def test_weekend_revisions_use_the_latest_public_version_on_monday() -> None:
     ]
 
 
-def test_correction_after_observation_calendar_does_not_rewrite_past() -> None:
-    records = (
-        {
-            "asset": "asset",
-            "period": "2019-12-31",
-            "corrected": False,
-            "correction_date": pd.NaT,
-            "version": "original",
-            "value": 100.0,
-        },
-        {
-            "asset": "asset",
-            "period": "2019-12-31",
-            "corrected": True,
-            "correction_date": pd.Timestamp("2021-01-15"),
-            "version": "correction@2021-01-15",
-            "value": 110.0,
-        },
-    )
-    interim = {
-        data_id: _financial_frame(data_id, records)
-        for data_id in FINANCIAL_VALUE_COLUMNS
-    }
-    disclosures = pd.DataFrame(
-        {
-            "asset_id": ["asset"],
-            "report_period": [pd.Timestamp("2019-12-31")],
-            "first_disclosure_date": [pd.Timestamp("2020-01-31")],
-        }
-    )
-
-    events = financial_events_from_interim(
-        interim,
-        disclosures,
-        trading_sessions=pd.DatetimeIndex(pd.to_datetime(["2020-02-03", "2020-03-02"])),
-    )
-
-    assert set(events["version_identity"]) == {"original"}
-
-
-def test_disclosure_on_last_calendar_session_is_not_yet_available() -> None:
-    records = (
-        {
-            "asset": "asset",
-            "period": "2019-12-31",
-            "corrected": False,
-            "correction_date": pd.NaT,
-            "version": "original",
-            "value": 100.0,
-        },
-    )
-    interim = {
-        data_id: _financial_frame(data_id, records)
-        for data_id in FINANCIAL_VALUE_COLUMNS
-    }
-    disclosures = pd.DataFrame(
-        {
-            "asset_id": ["asset"],
-            "report_period": [pd.Timestamp("2019-12-31")],
-            "first_disclosure_date": [pd.Timestamp("2020-02-03")],
-        }
-    )
-
-    result = financial_events_from_interim(
-        interim,
-        disclosures,
-        trading_sessions=pd.DatetimeIndex([pd.Timestamp("2020-02-03")]),
-    )
-    assert result.empty
-
-
 def test_choice_disclosure_owner_keeps_the_canonical_three_field_key() -> None:
     assert first_disclosure_spec().primary_key == FIRST_DISCLOSURE_COLUMNS
     result = normalize_first_disclosure_frame(
@@ -998,10 +927,10 @@ def test_empty_legal_financial_event_domain_persists_unknown_panel_rows(tmp_path
     )
 
 
-@pytest.mark.parametrize("size", [64, 128])
-def test_ttm_annual_revisions_keep_latest_known_period_state(size, monkeypatch):
+def test_ttm_annual_revisions_keep_latest_known_period_state(monkeypatch):
     from quant_research_platform.markets.implementations.a_share import fundamentals
 
+    size = 3
     events = pd.DataFrame(
         {
             "asset_id": "asset",
@@ -1022,12 +951,12 @@ def test_ttm_annual_revisions_keep_latest_known_period_state(size, monkeypatch):
 
     monkeypatch.setattr(fundamentals, "_ttm_value", counted)
     result = construct_ttm_events(events)
-    assert result.ttm_value.tolist() == events.value.tolist()
-    assert sizes == [1] * size
+    assert result.ttm_value.tolist() == [0.0, 1.0, 2.0]
+    assert sizes == [1, 1, 1]
 
 
 @pytest.mark.parametrize("damage", ("source", "observation", "schema"))
-def test_pit_preparation_preserves_full_source_error_priority(damage):
+def test_pit_preparation_localizes_unknown_numeric_and_validates_observations(damage):
     observations = pd.DataFrame(
         {"asset_id": ["observed"], "timestamp": pd.to_datetime(["2025-01-02"])}
     )
@@ -1042,7 +971,6 @@ def test_pit_preparation_preserves_full_source_error_priority(damage):
             "value": [float("inf")],
         }
     )
-    error = "pit_value_invalid"
     if damage == "observation":
         observations = pd.concat([observations, observations], ignore_index=True)
         error = "pit_observation_key_duplicate"

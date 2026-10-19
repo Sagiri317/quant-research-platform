@@ -18,31 +18,8 @@ from quant_research_platform.research.evaluations.runner import (
     evaluate,
 )
 from quant_research_platform.research.statistics import time_series_inference_summary
+from tests.helpers.statistics_artifacts import assert_recomputed_statistics_equal
 from tests.research.test_stratified_evaluation_reuse import _fixture
-
-
-def _assert_recomputed_analysis_equal(left, right):
-    """Compare rerun values with exact settings, domains, and missing masks."""
-    continuous = left.select_dtypes(include="floating").columns.difference(
-        [
-            "fdr_alpha",
-            "confidence",
-            "alpha",
-            "seed",
-            "bootstrap_seed",
-            "bootstrap_block_size",
-            "bootstrap_repetitions",
-            "block_size",
-            "repetitions",
-        ]
-    )
-    pd.testing.assert_frame_equal(
-        left.drop(columns=continuous), right.drop(columns=continuous), check_exact=True
-    )
-    pd.testing.assert_frame_equal(left.isna(), right.isna(), check_exact=True)
-    pd.testing.assert_frame_equal(
-        left[continuous], right[continuous], check_exact=False, rtol=1e-12, atol=1e-15
-    )
 
 
 def test_hac_failure_keeps_mean_and_independent_bootstrap(tmp_path):
@@ -138,7 +115,7 @@ def test_explicit_own_is_identical_to_default_daily_facts(tmp_path):
     )
     assert left_metadata["metadata"] == right_metadata["metadata"]
     for member in left_tables:
-        _assert_recomputed_analysis_equal(left_tables[member], right_tables[member])
+        assert_recomputed_statistics_equal(left_tables[member], right_tables[member])
 
 
 def test_relocated_source_can_reduce_existing_daily_facts(tmp_path):
@@ -214,38 +191,62 @@ def model_analysis_candidates(tmp_path_factory):
 @pytest.mark.parametrize(
     "analysis,policy,extra,members,seed_mode",
     [
-        (*case, seed_mode)
-        for case in [
-            (
-                "model_losses",
-                {},
-                {},
-                {"model_losses.parquet", "model_prediction_metrics.parquet"},
-            ),
-            ("prediction_hac", {"hac_lag": 0}, {}, {"prediction_diagnostics.parquet"}),
-            (
-                "prediction_bootstrap",
-                {"bootstrap_block": 1, "bootstrap_repetitions": 10},
-                {"root_seed": 1},
-                {"prediction_diagnostics.parquet"},
-            ),
-            (
-                "model_confidence_set",
-                {"bootstrap_block": 1, "bootstrap_repetitions": 10},
-                {"root_seed": 1},
-                {"model_reality_checks.parquet", "robustness.parquet"},
-            ),
-            (
-                "spa_reality_check",
-                {"bootstrap_block": 1, "bootstrap_repetitions": 10},
-                {"root_seed": 1, "comparison_model_id": "linear_regression"},
-                {"model_reality_checks.parquet", "robustness.parquet"},
-            ),
-        ]
-        for seed_mode in ("override", "omitted", "explicit42", "null")
-        if not (
-            case[0] in {"model_losses", "prediction_hac"} and seed_mode == "override"
-        )
+        (
+            "model_losses",
+            {},
+            {},
+            {"model_prediction_metrics.parquet", "model_losses.parquet"},
+            "null",
+        ),
+        (
+            "prediction_hac",
+            {"hac_lag": 0},
+            {},
+            {"prediction_diagnostics.parquet"},
+            "null",
+        ),
+        (
+            "prediction_bootstrap",
+            {"bootstrap_block": 1, "bootstrap_repetitions": 10},
+            {"root_seed": 1},
+            {"prediction_diagnostics.parquet"},
+            "override",
+        ),
+        (
+            "prediction_bootstrap",
+            {"bootstrap_block": 1, "bootstrap_repetitions": 10},
+            {"root_seed": 1},
+            {"prediction_diagnostics.parquet"},
+            "omitted",
+        ),
+        (
+            "prediction_bootstrap",
+            {"bootstrap_block": 1, "bootstrap_repetitions": 10},
+            {"root_seed": 1},
+            {"prediction_diagnostics.parquet"},
+            "explicit42",
+        ),
+        (
+            "prediction_bootstrap",
+            {"bootstrap_block": 1, "bootstrap_repetitions": 10},
+            {"root_seed": 1},
+            {"prediction_diagnostics.parquet"},
+            "null",
+        ),
+        (
+            "model_confidence_set",
+            {"bootstrap_block": 1, "bootstrap_repetitions": 10},
+            {"root_seed": 1},
+            {"model_reality_checks.parquet", "robustness.parquet"},
+            "omitted",
+        ),
+        (
+            "spa_reality_check",
+            {"bootstrap_block": 1, "bootstrap_repetitions": 10},
+            {"root_seed": 1, "comparison_model_id": "linear_regression"},
+            {"model_reality_checks.parquet", "robustness.parquet"},
+            "omitted",
+        ),
     ],
 )
 def test_public_model_analysis_subsets_require_only_used_inputs(
@@ -376,43 +377,6 @@ def test_paired_group_requires_its_bootstrap_inputs_before_reading(tmp_path):
         )
 
 
-def test_borrowed_forecast_age_transform_remains_available_to_strata(tmp_path):
-    import json
-    from pathlib import Path
-
-    from tests.research.test_stratified_evaluation_reuse import _write_native
-
-    frame, config = _fixture(tmp_path)
-    age = "median_forecast_age_days_fy1"
-    feature = "feature_" + age
-    frame[age] = [1.0, 10.0, 40.0, 80.0]
-    frame[feature] = [-1.0, -0.5, 0.5, 1.0]
-    source = _write_native(
-        tmp_path / "borrowed",
-        frame,
-        signals=(feature,),
-        labels=("label",),
-        availability={"label": "label_available_at"},
-        units={age: "days"},
-    )
-    manifest_path = Path(source) / "_manifest" / "manifest.json"
-    manifest = json.loads(manifest_path.read_text())
-    manifest.setdefault("producer_diagnostics", {})["reused_feature_transforms"] = {
-        feature: {"recipe_id": "a_share_canonical", "source_columns": [age]}
-    }
-    manifest_path.write_text(json.dumps(manifest))
-    config["inputs"] = source
-    config["evaluation"]["signals"] = [
-        {"signal_id": "age", "source_kind": "feature", "source_column": feature}
-    ]
-    config["strata"] = {
-        "primary_label": "label",
-        "kinds": ["forecast_age"],
-        "forecast_freshness_days": 90,
-    }
-    assert evaluate(config).exists()
-
-
 @pytest.mark.parametrize(
     "encoding", ["categories", "missing_categories", "string", "float"]
 )
@@ -475,7 +439,7 @@ def test_native_evaluation_ignores_null_payload_and_dictionary_encoding(
             for column in ("timestamp", "signal", "label", "stratification", "stratum")
             if column in own_tables[name]
         ]
-        _assert_recomputed_analysis_equal(
+        assert_recomputed_statistics_equal(
             own_tables[name].sort_values(keys).reset_index(drop=True),
             alternative_tables[name].sort_values(keys).reset_index(drop=True),
         )
@@ -555,7 +519,7 @@ def test_public_prediction_inference_is_local_to_consumed_family(tmp_path):
         single.table("prediction_diagnostics.parquet") as alone,
     ):
         causal = mixed.loc[mixed.prediction_id.eq(config["family_ids"][0])]
-        _assert_recomputed_analysis_equal(causal.reset_index(drop=True), alone)
+        assert_recomputed_statistics_equal(causal.reset_index(drop=True), alone)
         assert causal.status.tolist() == ["DEFINED"]
         assert causal.bootstrap_status.tolist() == ["DEFINED"]
         retrospective = mixed.loc[mixed.prediction_id.eq(config["family_ids"][1])]

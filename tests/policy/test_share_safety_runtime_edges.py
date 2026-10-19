@@ -299,7 +299,7 @@ def test_leading_separator_credentials_match_structured_keys(key):
         ".run/private/s1/summary.json",
         "source_asset_id",
         "exact_runtime_payload",
-        "x" * 100_000,
+        pytest.param("x" * 100_000, id="long_research_text"),
     ),
 )
 def test_research_content_is_allowed_without_redaction(text):

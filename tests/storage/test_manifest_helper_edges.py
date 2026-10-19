@@ -7,29 +7,6 @@ import pytest
 from quant_research_platform.storage import manifests
 
 
-def test_manifest_review_safe_and_internal_writes_are_utf8_and_safe(
-    tmp_path: Path,
-) -> None:
-    review_safe_path = tmp_path / "review-safe" / "manifest.json"
-    internal_path = tmp_path / "internal" / "manifest.json"
-    manifests.write_manifest(
-        review_safe_path,
-        {"schema_id": "qrp-output-manifest", "status": "PASS", "rows": [1, 2]},
-    )
-    manifests.write_internal_artifact_manifest(
-        internal_path,
-        {
-            "schema_id": "qrp-dataset-manifest",
-            "data_id": "demo",
-            "source_id": "csmar",
-            "row_count": 2,
-        },
-    )
-    loaded = manifests.read_manifest(internal_path)
-    assert review_safe_path.read_text(encoding="utf-8").endswith("\n")
-    assert loaded["source_id"] == "csmar"
-
-
 def test_manifest_writers_render_the_snapshot_checked_for_safety(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

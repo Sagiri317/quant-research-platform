@@ -40,6 +40,7 @@ from quant_research_platform.research.protocols.a_share import _inference_blocke
 from quant_research_platform.research.statistics import (
     _return_sharpes,
     _validate_bootstrap_configuration,
+    _validate_cscv_slice_count,
     cscv_pbo,
     probabilistic_and_deflated_sharpe,
     return_standard_deviation,
@@ -2500,6 +2501,8 @@ def portfolio_statistics(config):
         raise ValueError("portfolio_statistics_comparison_policy_required")
     if not isinstance(policy, dict) or expected - set(policy) or set(policy) - known:
         raise ValueError("portfolio_statistics_policy_invalid")
+    if "cscv" in analyses:
+        _validate_cscv_slice_count(policy["cscv_blocks"])
     if (
         paired
         and "group_comparison" in analyses

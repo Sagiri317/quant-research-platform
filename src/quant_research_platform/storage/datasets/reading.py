@@ -50,6 +50,7 @@ from quant_research_platform.storage.datasets.types import DatasetReadMode
 from quant_research_platform.storage.identity import (
     filesystem_is_dir,
     filesystem_is_file,
+    native_filesystem_path,
     require_artifact_root,
     require_unaliased_path,
 )
@@ -376,7 +377,8 @@ def _bare_dataset_session(
 ):
     if spec is None:
         raise ValueError("parquet_semantic_spec_required")
-    if path.is_file():
+    is_file = Path(native_filesystem_path(path)).is_file()
+    if is_file:
         if files is not None:
             raise ValueError("dataset_files_require_directory")
         require_unaliased_path(path, error="invalid_dataset_part_files")
@@ -412,7 +414,7 @@ def _bare_dataset_session(
     )
     return DatasetSession(
         root=path,
-        data_root=path.parent if path.is_file() else path,
+        data_root=path.parent if is_file else path,
         _spec=payload,
         _manifest={},
         logical_columns=requested,
@@ -466,9 +468,12 @@ def open_dataset_session(
 ) -> DatasetSession:
     years = _validated_years(years)
     path = Path(dataset_root)
-    if not path.exists():
+    native_path = Path(native_filesystem_path(path))
+    if not native_path.exists():
         raise FileNotFoundError(path)
-    if path.is_file() or (spec is not None and not (path / "spec.json").is_file()):
+    if native_path.is_file() or (
+        spec is not None and not (native_path / "spec.json").is_file()
+    ):
         return _bare_dataset_session(
             path,
             columns=columns,

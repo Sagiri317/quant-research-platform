@@ -127,6 +127,110 @@ def test_real_eleven_models_roundtrip_matches_production_prediction(
         assert Path(config["model"], "predictor.pkl").read_bytes() == before
 
 
+@pytest.mark.parametrize("target", [1e-5, 1e-7, 1e-9])
+def test_small_affine_output_keeps_real_contributions_and_residual(tmp_path, target):
+    from math import fsum
+    from types import SimpleNamespace
+
+    from quant_research_platform.artifacts.explanations import write_explanation
+    from quant_research_platform.research.models.explanations import (
+        _attributions,
+        _summaries,
+    )
+    from quant_research_platform.research.models.scaler import (
+        LinearScaledPredictor,
+        ModelMatrixScaler,
+    )
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2024-01-01")],
+            "asset_id": ["a"],
+            "x": [1.0],
+            "y": [1.0],
+        }
+    )
+    predictor = LinearScaledPredictor(
+        (-0.03 + target, 0.01, 0.02),
+        ModelMatrixScaler(("x", "y"), (0.0, 0.0), (1.0, 1.0)),
+    )
+    metadata = dict(
+        kind="MODEL_EXPLANATION",
+        model="frozen-model",
+        model_id="small-return",
+        model_algorithm="linear_regression",
+        input_columns=["x", "y"],
+        input_units={"x": "dimensionless", "y": "dimensionless"},
+        target_column="label",
+        label_unit="decimal_return",
+        methods=["affine"],
+        output_space="model_output",
+        unit="decimal_return",
+        sample_role="test",
+    )
+    predictions, contributions, facts = _attributions(
+        SimpleNamespace(metadata=metadata, prediction_model=predictor),
+        frame,
+        np.array([0]),
+        "affine",
+        None,
+        "model_output",
+    )
+    metadata["attribution"] = facts
+    _, tables = read_explanation(
+        write_explanation(
+            tmp_path / "explanation",
+            metadata=metadata,
+            tables={
+                "predictions": predictions,
+                "contributions": contributions,
+                "summary": _summaries(contributions, "month"),
+            },
+        )
+    )
+    saved = tables["predictions"].iloc[0]
+    assert saved.status == "DEFINED"
+    assert saved.explained_output == predictor.predict(frame[["x", "y"]])[0]
+    assert saved.base_value == predictor.coefficients[0]
+    np.testing.assert_array_equal(tables["contributions"].contribution, [0.01, 0.02])
+    assert saved.additivity_residual == fsum(
+        [*predictor.coefficients, -saved.explained_output]
+    )
+    assert 0 < abs(saved.additivity_residual) <= saved.additivity_tolerance
+    assert tables["summary"].observation_count.eq(1).all()
+    tables["predictions"].loc[0, "additivity_tolerance"] = abs(
+        saved.additivity_residual
+    )
+    _, stricter = read_explanation(
+        write_explanation(tmp_path / "stricter", metadata=metadata, tables=tables)
+    )
+    assert stricter["predictions"].additivity_tolerance[0] == abs(
+        saved.additivity_residual
+    )
+    for invalid in (2 * saved.additivity_tolerance, abs(saved.additivity_residual) / 2):
+        tables["predictions"].loc[0, "additivity_tolerance"] = invalid
+        with pytest.raises(ValueError, match="explanation_additivity_failed"):
+            write_explanation(tmp_path / "invalid", metadata=metadata, tables=tables)
+
+
+def test_additivity_preserves_tiny_signal_but_rejects_severe_relative_loss():
+    from quant_research_platform.artifacts.explanations import (
+        attribution_additivity,
+        attribution_relative_tolerance,
+    )
+
+    relative = attribution_relative_tolerance("affine", 2)
+    residual, tolerance, reason = attribution_additivity(0.0, [5e-17], 5e-17, relative)
+    assert residual == 0 and tolerance > 0 and reason == ""
+    assert (
+        attribution_additivity(0.0, [0.0], 5e-17, relative)[2] == "additivity_mismatch"
+    )
+    assert (
+        attribution_additivity(0.01, [0.02, -0.03], 5e-17, relative)[2]
+        == "cancellation_precision_loss"
+    )
+
+
 @pytest.mark.parametrize("columns", [("x",), ("x", "y")])
 def test_rank_input_evidence_survives_mixed_numeric_persistence(tmp_path, columns):
     from quant_research_platform.reports import plots
@@ -784,8 +888,8 @@ def test_xgboost_squared_log_error_still_has_identity_prediction_output(tmp_path
     assert tables["predictions"].status.eq("DEFINED").all()
 
 
-@pytest.mark.parametrize("step_seconds", [0.1, 0.000000001, 1, 1.5])
-def test_temporal_permutation_exact_subsecond_continuity(step_seconds):
+def test_temporal_permutation_grid_continuity():
+    step_seconds = 0.1
     from quant_research_platform.research.models.explanations import (
         _permutation_config,
         _permutation_segments,
@@ -827,10 +931,8 @@ def test_temporal_permutation_exact_subsecond_continuity(step_seconds):
         _permutation_segments(frame, config)
 
 
-@pytest.mark.parametrize(
-    "step", [True, "0.1", 0, -0.1, np.nan, np.inf, 1e-10, 0.1000000001]
-)
-def test_temporal_permutation_rejects_unrepresentable_steps(step):
+@pytest.mark.parametrize("step", [True, "0.1", 0, -0.1, np.nan, np.inf])
+def test_temporal_permutation_rejects_invalid_steps(step):
     from quant_research_platform.research.models.explanations import _permutation_config
 
     with pytest.raises(

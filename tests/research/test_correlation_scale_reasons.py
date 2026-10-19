@@ -70,7 +70,7 @@ def test_native_evaluation_persists_independent_std_reason(tmp_path):
         broken = summary.copy()
         broken.loc[0, ["std_ic", "std_ic_reason"]] = [value, reason]
         broken.to_parquet(root / "ic_summary.parquet", index=False)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="^invalid_evaluation_statistic_reason$"):
             validate_evaluation_artifact_structure(
                 metrics=pd.read_parquet(root / "metrics.parquet"),
                 grouped_label_values=pd.read_parquet(

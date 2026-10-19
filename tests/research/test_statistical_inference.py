@@ -3,7 +3,6 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
-from arch.bootstrap import MCS
 from statsmodels.api import OLS, WLS, add_constant
 from statsmodels.stats.multitest import multipletests
 
@@ -20,7 +19,10 @@ from quant_research_platform.research.statistics import (
     stepm_superior_models,
     time_series_inference_summary,
 )
-from tests.helpers.statistical_inference import hansen_spa_stepm_reference
+from tests.helpers.statistical_inference import (
+    hansen_spa_stepm_reference,
+    mcs_r_reference,
+)
 
 
 def test_common_candidate_coverage_is_intersection_without_imputation() -> None:
@@ -159,7 +161,7 @@ def test_psr_dsr_fixed_oracle() -> None:
     assert more_dispersed.dsr < result.dsr
 
 
-def test_multiple_comparison_matches_hansen_reference_and_native_mcs() -> None:
+def test_multiple_comparison_matches_independent_references() -> None:
     rng = np.random.default_rng(17)
     benchmark = rng.normal(0.0, 0.01, 64)
     models = pd.DataFrame(
@@ -176,8 +178,9 @@ def test_multiple_comparison_matches_hansen_reference_and_native_mcs() -> None:
     expected_pvalues, expected_superior = hansen_spa_stepm_reference(
         benchmark, models, block_size=20, repetitions=199, seed=17
     )
-    direct_mcs = MCS(models, size=0.05, block_size=20, reps=199, seed=17)
-    direct_mcs.compute()
+    expected_mcs, included, excluded = mcs_r_reference(
+        models, block_size=20, repetitions=199, seed=17
+    )
     assert (
         0.0 <= spa.lower_p_value <= spa.consistent_p_value <= spa.upper_p_value <= 1.0
     )
@@ -186,9 +189,9 @@ def test_multiple_comparison_matches_hansen_reference_and_native_mcs() -> None:
         expected_pvalues,
     )
     assert superior.superior_models == expected_superior
-    assert mcs.included == tuple(direct_mcs.included)
-    assert mcs.excluded == tuple(direct_mcs.excluded)
-    pd.testing.assert_frame_equal(mcs.p_values, direct_mcs.pvalues)
+    assert mcs.included == included
+    assert mcs.excluded == excluded
+    pd.testing.assert_frame_equal(mcs.p_values, expected_mcs)
     scaled = spa_reality_check(
         benchmark * 1e-20, models * 1e-20, block_size=20, repetitions=199, seed=17
     )
@@ -240,8 +243,44 @@ def test_multiple_comparison_matches_hansen_reference_and_native_mcs() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("losses", "alpha", "expected_p", "included"),
+    [
+        ({"a": [4, 2, 5, 1], "b": [2, 4, 1, 5]}, 0.05, [1, 1], ("a", "b")),
+        (
+            {"a": [11, 13, 10, 14], "b": [9, 13, 7, 15], "c": [7, 13, 4, 16]},
+            9 / 99,
+            [9 / 99, 9 / 99, 1],
+            ("a", "b", "c"),
+        ),
+        (
+            {"a": [11, 13, 10, 14], "b": [9, 13, 7, 15], "c": [7, 13, 4, 16]},
+            0.1,
+            [9 / 99, 9 / 99, 1],
+            ("c",),
+        ),
+    ],
+)
+def test_mcs_ties_use_single_elimination_and_inclusive_tail(
+    losses, alpha, expected_p, included
+):
+    frame = pd.DataFrame(losses)
+    options = dict(block_size=2, repetitions=99, seed=17, alpha=alpha)
+    result = model_confidence_set(frame, **options)
+    reference, reference_included, reference_excluded = mcs_r_reference(
+        frame, **options
+    )
+    assert result.status == "DEFINED" and result.reason is None
+    assert result.observation_count == 4
+    assert result.p_values.index.tolist() == list(losses)
+    np.testing.assert_array_equal(result.p_values["Pvalue"], expected_p)
+    pd.testing.assert_frame_equal(result.p_values, reference)
+    assert result.included == reference_included == included
+    assert result.excluded == reference_excluded
+
+
 def test_spa_and_stepm_are_invariant_to_each_candidate_loss_unit() -> None:
-    differences = np.random.default_rng(20261019).normal(size=(256, 2)) + [0.3, 0.1]
+    differences = np.random.default_rng(20261019).normal(size=(256, 2)) + [0.3, 0.09]
     benchmark = np.zeros(256)
     models = pd.DataFrame(-differences, columns=["a", "b"])
     options = dict(block_size=20, repetitions=1999, seed=42)
@@ -813,10 +852,15 @@ def test_fama_macbeth_shared_ols_owner_matches_independent_full_sample(
     assert actual.observation_count == 50
 
 
-@pytest.mark.parametrize("unit", (0.001, 1.0, 1000.0))
-@pytest.mark.parametrize("weighted", (False, True))
-@pytest.mark.parametrize("factor_count", (1, 3))
-@pytest.mark.parametrize("small", (1e-8, 1e-6))
+@pytest.mark.parametrize(
+    "unit,weighted,factor_count,small",
+    (
+        (0.001, False, 1, 1e-8),
+        (1000.0, True, 1, 1e-6),
+        (1.0, False, 3, 1e-6),
+        (0.001, True, 3, 1e-8),
+    ),
+)
 def test_fmb_numerical_zero_preserves_resolvable_small_coefficients(
     unit, weighted, factor_count, small
 ):

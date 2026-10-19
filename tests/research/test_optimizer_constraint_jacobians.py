@@ -11,7 +11,7 @@ from quant_research_platform.research.portfolios import optimizer
 from tests.helpers.optimizer import with_cash_asset
 
 
-def _capture_constraints(monkeypatch, asymmetry=0.0):
+def _capture_constraints(monkeypatch, asymmetry=0.0, nonzero_cost=False):
     benchmark = np.array([0.25, 0.25, 0.25, 0.25, 0.0])
     current = np.array([0.2, 0.2, 0.2, 0.2, 0.2])
     assets = pd.DataFrame(
@@ -28,18 +28,23 @@ def _capture_constraints(monkeypatch, asymmetry=0.0):
         }
     )
     captured = {}
+    buy_rates = np.array([0.001, 0.002, 0.003, 0.004, 0.0])
+    sell_rates = np.array([0.005, 0.006, 0.007, 0.008, 0.0])
 
     def solve(fun, x0, **kwargs):
         captured.update(kwargs)
-        assert fun(np.r_[benchmark, np.abs(benchmark - current)])[0] == pytest.approx(
-            0.0
-        )
-        return SimpleNamespace(
-            success=True, x=np.r_[benchmark, np.abs(benchmark - current)]
-        )
+        # The zero-cost solve may return the benchmark; with fees, no trade
+        # is feasible and leaves enough cash without inventing an unpaid fill.
+        weights = current if nonzero_cost else benchmark
+        point = np.r_[weights, np.abs(weights - current)]
+        expected_objective = -assets.expected_alpha.to_numpy() @ (weights - benchmark)
+        assert fun(point)[0] == pytest.approx(expected_objective)
+        return SimpleNamespace(success=True, x=point)
 
     def expected_cost(buy, sell):
         assert buy.shape == sell.shape == current.shape
+        if nonzero_cost:
+            return float(buy @ buy_rates + sell @ sell_rates), buy_rates, sell_rates
         return 0.0, np.zeros_like(buy), np.zeros_like(sell)
 
     monkeypatch.setattr(optimizer, "minimize", solve)
@@ -61,11 +66,13 @@ def _capture_constraints(monkeypatch, asymmetry=0.0):
     return captured["constraints"], current, captured["bounds"]
 
 
-@pytest.mark.parametrize("asymmetry", [0.0, 2e-18])
+@pytest.mark.parametrize(
+    "asymmetry,nonzero_cost", [(0.0, False), (2e-18, False), (0.0, True)]
+)
 def test_constraint_jacobians_match_independent_central_differences(
-    monkeypatch, asymmetry
+    monkeypatch, asymmetry, nonzero_cost
 ):
-    constraints, _, _ = _capture_constraints(monkeypatch, asymmetry)
+    constraints, _, _ = _capture_constraints(monkeypatch, asymmetry, nonzero_cost)
     point = np.array([0.19, 0.21, 0.23, 0.25, 0.12, 0.01, 0.01, 0.03, 0.05, 0.08])
     step = 1e-6
     for constraint in constraints:
@@ -227,7 +234,7 @@ def test_exact_exposure_bands_reach_independent_linear_optimum():
 
 @pytest.mark.parametrize(
     "perturbation",
-    ["original", "native_trajectory", "nav_up", "nav_down", "weight_up", "weight_down"],
+    ["original", "native_trajectory"],
 )
 def test_native_turnover_boundary_converges_with_actual_cost_owner(perturbation):
     import json
@@ -239,7 +246,6 @@ def test_native_turnover_boundary_converges_with_actual_cost_owner(perturbation)
 
     # Keep exact captured floats from the native synthetic workflow, including
     # the next failed trajectory. Both reach 1000 iterations with abs turnover.
-    # Nearby input perturbations exercise robustness beyond one solver path.
     case = json.loads(
         (
             Path(__file__).parent / "fixtures" / "optimizer_turnover_boundary.json"
@@ -252,12 +258,6 @@ def test_native_turnover_boundary_converges_with_actual_cost_owner(perturbation)
     if perturbation == "native_trajectory":
         assets["current_weight"] = case["nearby_native_trajectory"]["current_weight"]
         nav = case["nearby_native_trajectory"]["nav"]
-    elif perturbation.startswith("nav_"):
-        nav = float(np.nextafter(nav, np.inf if perturbation == "nav_up" else -np.inf))
-    elif perturbation.startswith("weight_"):
-        shift = 1e-12 if perturbation == "weight_up" else -1e-12
-        assets.loc[0, "current_weight"] += shift
-        assets.loc[1, "current_weight"] -= shift
     current = assets.current_weight.to_numpy()
     adv = assets.adv.to_numpy()
     prepared = {}

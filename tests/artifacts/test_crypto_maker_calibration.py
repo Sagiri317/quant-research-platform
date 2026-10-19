@@ -1169,7 +1169,14 @@ def test_maker_validator_rejects_isolated_event_and_sample_damage(
 
     root = _write_unchecked(tmp_path / "isolated_damage", envelope, write)
     before = {path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}
-    with pytest.raises(ValueError):
+    expected_error = {
+        "side": "crypto_calibration_keys_invalid",
+        "events_side": "crypto_calibration_keys_invalid",
+        "ordinal": "crypto_calibration_event_order_invalid",
+        "book_cross_batch": "statistics_table_numeric_invalid",
+        "trade_cross_batch": "statistics_table_numeric_invalid",
+    }[damage]
+    with pytest.raises(ValueError, match=f"^{expected_error}$"):
         statistics.read_statistics_artifact(
             root,
             validate_tables=portfolio.validate_maker_calibration,

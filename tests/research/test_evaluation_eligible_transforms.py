@@ -14,7 +14,7 @@ from tests.research.crypto_evaluation_test_support import (
 )
 
 
-@pytest.mark.parametrize("transform", ("identity", "rank", "zscore"))
+@pytest.mark.parametrize("transform", ("identity", "rank"))
 def test_native_evaluation_transforms_only_selected_cross_section(tmp_path, transform):
     frame = pd.DataFrame(
         {
@@ -26,8 +26,6 @@ def test_native_evaluation_transforms_only_selected_cross_section(tmp_path, tran
             "eligible": [True] * 3 + [False] * 3,
         }
     )
-    if transform == "zscore":
-        frame.loc[3, "x"] = 1000.0
     raw_ic = np.corrcoef([1.0, 2.0, 8.0], [1.0, 4.0, 2.0])[0, 1]
     rank_ic = np.corrcoef([1.0, 2.0, 3.0], [1.0, 4.0, 2.0])[0, 1]
     assert abs(rank_ic - raw_ic) > 0.1

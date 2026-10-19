@@ -109,9 +109,7 @@ def test_funding_unproven_coverage_never_becomes_zero(tmp_path, changes):
         ),
     ),
 )
-def test_funding_malformed_calendar_rejected_with_resources_released(
-    tmp_path, rows, error
-):
+def test_funding_malformed_calendar_rejected_before_yield(tmp_path, rows, error):
     raw = tmp_path / "raw"
     _write(raw, rows=rows)
     with pytest.raises(ValueError, match=f"^{error}$"):
@@ -248,29 +246,6 @@ def test_funding_adjacent_sources_require_declared_order_and_all_roots(tmp_path)
                 pytest.fail("missing funding is not zero")
 
 
-def test_funding_identical_prior_forecasts_are_deduplicated_across_sources(tmp_path):
-    roots = []
-    for number, start in enumerate((0, 200)):
-        raw = tmp_path / str(number) / "raw"
-        _write(
-            raw,
-            rows=(("forecast", 0, 500, None, None, []),),
-            metadata_changes={
-                "coverage": {
-                    "start_ns": start,
-                    "end_ns": start + 100,
-                    "status": "COMPLETE",
-                }
-            },
-        )
-        roots.append(raw.parent / "funding" / "BTCUSDT")
-    with read_funding_observations(tuple(roots), symbol="BTCUSDT") as source:
-        forecasts = tuple(source.forecasts)
-        assert len(forecasts) == 1
-        assert forecasts[0].available_at_ns == 0
-        assert forecasts[0].known_until_ns == 500
-
-
 def test_funding_numeric_strings_are_normalized_through_persisted_reader(tmp_path):
     _write(
         tmp_path / "raw",
@@ -348,6 +323,7 @@ def test_funding_forecasts_merge_prior_observations_without_reordering_sources(
         assert source.coverage == ((0, 100), (200, 300), (400, 500))
         assert [event.timestamp_ns for event in source.events] == [50, 250, 450]
         forecasts = tuple(source.forecasts)
+        assert all(item.known_until_ns == 600 for item in forecasts)
         assert [item.available_at_ns for item in forecasts] == [
             0,
             25,

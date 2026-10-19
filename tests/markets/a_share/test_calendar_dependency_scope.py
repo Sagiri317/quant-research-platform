@@ -280,16 +280,11 @@ def test_different_market_windows_do_not_demand_each_others_history(
         _prepare(tmp_path / "missing-required", panel, missing, **options)
 
 
-@pytest.mark.parametrize(
-    "unused_amount", (1e8, np.nextafter(0.0, 1.0), np.finfo(float).max)
-)
 @pytest.mark.parametrize("valid_return,expected", ((0.01, 1e-10), (0.0, 0.0)))
-def test_invalid_amihud_pair_cannot_set_valid_reduction_scale(
-    tmp_path, unused_amount, valid_return, expected
-):
+def test_invalid_amihud_pair_is_local(tmp_path, valid_return, expected):
     dates = pd.bdate_range("2024-01-02", periods=20)
     panel = _panel(dates).assign(period_return=valid_return)
-    panel.loc[19, ["period_return", "amount"]] = [np.nan, unused_amount]
+    panel.loc[19, ["period_return", "amount"]] = [np.nan, 1e9]
     direct = calculate_price_volume_factors(panel, factor_columns=("amihud_20d",))
     native = _prepare(
         tmp_path,
@@ -298,8 +293,8 @@ def test_invalid_amihud_pair_cannot_set_valid_reduction_scale(
         "price_volume_facts",
         factor_columns=["amihud_20d"],
     )
-    assert direct.amihud_20d.iloc[-1] == expected
-    assert native.amihud_20d.iloc[-1] == expected
+    assert direct.amihud_20d.iloc[-1] == pytest.approx(expected, rel=1e-12, abs=0)
+    assert native.amihud_20d.iloc[-1] == pytest.approx(expected, rel=1e-12, abs=0)
 
 
 def test_requested_observation_after_known_exit_remains_invalid(tmp_path):

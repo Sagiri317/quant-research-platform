@@ -50,20 +50,24 @@ from tests.helpers.research_specs import make_demo_research_dataset_spec
 from tests.research.test_portfolio_ledger import _real_fee_schedule
 
 
-@pytest.mark.parametrize("mode", ["long_only", "long_short"])
-def test_capital_weights_match_independent_leg_ratio(mode):
-    assets = (
-        ["large", "small"]
-        if mode == "long_only"
-        else ["long_large", "long_small", "short_large", "short_small"]
-    )
-    capitals = pd.Series(
-        [1e12, 3e8] if mode == "long_only" else [1e12, 6e8, 1e12, 6e8],
-        index=assets,
-    )
-    signal = pd.Series(
-        [1.0, 1.0] if mode == "long_only" else [1.0, 1.0, -1.0, -1.0], index=assets
-    )
+@pytest.mark.parametrize(
+    ("mode", "assets", "capital_values", "signals"),
+    (
+        ("long_only", ["large", "small"], [1e12, 3e8], [1.0, 1.0]),
+        ("long_only", ["a", "b", "c"], [1.0, 2.0, 3.0], [1.0, 1.0, 1.0]),
+        (
+            "long_short",
+            ["long_large", "long_small", "short_large", "short_small"],
+            [1e12, 6e8, 1e12, 6e8],
+            [1.0, 1.0, -1.0, -1.0],
+        ),
+    ),
+)
+def test_capital_weights_match_independent_leg_ratio(
+    mode, assets, capital_values, signals
+):
+    capitals = pd.Series(capital_values, index=assets)
+    signal = pd.Series(signals, index=assets)
     expected = {}
     for selected, gross in (
         ((assets, Fraction(1)),)
@@ -95,22 +99,6 @@ def test_capital_weights_match_independent_leg_ratio(mode):
         assert all(
             abs(value) > 0 for asset, value in actual.items() if "small" in asset
         )
-
-
-@pytest.mark.parametrize("capitals", [[1.0, 2.0, 3.0], [1e12, 1e12, 3e8]])
-def test_capital_weights_match_fraction_oracle(capitals):
-    assets = [str(i) for i in range(len(capitals))]
-    actual = build_simple_target_weights(
-        pd.Series(1.0, index=assets),
-        eligible=pd.Series(True, index=assets),
-        method="float_cap_weight",
-        top_quantile=1.0,
-        float_market_cap=pd.Series(capitals, index=assets),
-    )
-    exact = [Fraction(value) for value in capitals]
-    np.testing.assert_allclose(
-        actual, [float(value / sum(exact)) for value in exact], rtol=1e-13, atol=1e-15
-    )
 
 
 def _cross(count=100):

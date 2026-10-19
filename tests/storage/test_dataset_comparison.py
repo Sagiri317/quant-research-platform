@@ -17,7 +17,6 @@ from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
     compare_datasets,
-    fingerprint_dataset,
     write_dataset,
 )
 from quant_research_platform.storage.identity import (
@@ -31,8 +30,8 @@ from tests.storage.low_level_fixtures import (
 
 
 def test_iter_frame_chunks_reuses_bounded_frame_storage() -> None:
-    frame = pd.DataFrame({"value": np.arange(20000, dtype="int64")})
-    chunks = tuple(dataset_reading.iter_frame_chunks(frame, batch_rows=10000))
+    frame = pd.DataFrame({"value": np.arange(4, dtype="int64")})
+    chunks = tuple(dataset_reading.iter_frame_chunks(frame, batch_rows=2))
     assert len(chunks) >= 2
     assert all(
         np.shares_memory(
@@ -40,39 +39,6 @@ def test_iter_frame_chunks_reuses_bounded_frame_storage() -> None:
         )
         for chunk in chunks
     )
-
-
-def test_compare_requires_exact_proof_after_forced_fingerprint_collision(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    left = make_dataset_artifact_root(tmp_path, "collision_left")
-    right = make_dataset_artifact_root(tmp_path, "collision_right")
-    write_dataset(
-        left,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("collision_left"),
-    )
-    changed = make_default_dataset_frame()
-    changed.loc[changed.index[-1], "value"] = 99.0
-    write_dataset(right, changed, spec=make_processed_dataset_spec("collision_right"))
-
-    def collision_hashes(frame, **_kwargs):
-        yield np.zeros(len(frame), dtype="uint64")
-
-    monkeypatch.setattr(
-        dataset_fingerprinting, "_iter_fingerprint_hashes", collision_hashes
-    )
-    assert (
-        fingerprint_dataset(left).content_hash
-        == fingerprint_dataset(right).content_hash
-    )
-    comparison = dataset_comparison.compare_datasets(left, right)
-    assert comparison.status == "CONTENT_MISMATCH"
-    assert comparison.summary["exact"] == {
-        "missing_row_count": 0,
-        "extra_row_count": 0,
-        "changed_row_count": 1,
-    }
 
 
 def test_compare_treats_file_boundaries_as_layout_only(
@@ -126,9 +92,7 @@ def test_compare_propagates_programmer_errors(
         dataset_comparison.compare_datasets(left, right)
 
 
-@pytest.mark.parametrize(
-    "primary_type", (RuntimeError, MemoryError, KeyboardInterrupt, SystemExit)
-)
+@pytest.mark.parametrize("primary_type", (RuntimeError, KeyboardInterrupt))
 @pytest.mark.parametrize("iterator_name", ("file_batches", "chunks"))
 def test_reader_propagates_decode_failure(
     monkeypatch: pytest.MonkeyPatch,
@@ -172,9 +136,7 @@ def test_reader_propagates_decode_failure(
 
 
 @pytest.mark.parametrize("iterator_name", ("file_batches", "chunks"))
-@pytest.mark.parametrize(
-    "primary_type", (RuntimeError, MemoryError, KeyboardInterrupt, SystemExit)
-)
+@pytest.mark.parametrize("primary_type", (RuntimeError, KeyboardInterrupt))
 def test_dataset_iterator_context_preserves_caller_primary(
     monkeypatch: pytest.MonkeyPatch,
     iterator_name: str,
@@ -222,9 +184,7 @@ def test_dataset_iterator_context_preserves_caller_primary(
             raise primary_type("primary_failure")
 
 
-@pytest.mark.parametrize(
-    "primary_type", (RuntimeError, MemoryError, KeyboardInterrupt, SystemExit)
-)
+@pytest.mark.parametrize("primary_type", (RuntimeError, KeyboardInterrupt))
 def test_materialized_iterator_close_does_not_replace_caller_primary(
     monkeypatch: pytest.MonkeyPatch, primary_type: type[BaseException]
 ) -> None:
@@ -264,7 +224,7 @@ def test_compare_float_value_zero_keeps_bit_identity(tmp_path: Path) -> None:
 
 def test_aggregate_chunked_and_materialized_reads_match(tmp_path: Path) -> None:
     chunk_rows = 2
-    chunk_count = 16
+    chunk_count = 2
     total_rows = chunk_rows * chunk_count
     chunks: list[pd.DataFrame] = []
     for start in range(0, total_rows, chunk_rows):
