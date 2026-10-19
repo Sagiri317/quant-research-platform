@@ -2198,6 +2198,7 @@ def test_depth_price_index_tracks_insert_delete_promotion_and_reset(output_level
         output_levels=output_levels,
     )
     randomizer = random.Random(81)
+    retained_states = []
     for _reset in range(2):
         engine.bootstrap(snapshot())
         bids = {p: 1.0 for p in range(100, 201, 5)}
@@ -2249,6 +2250,16 @@ def test_depth_price_index_tracks_insert_delete_promotion_and_reset(output_level
             assert states[0].asks == tuple(sorted(asks.items())[:output_levels])
             assert len(engine._bid_prices) == len(bids)
             assert len(engine._ask_prices) == len(asks)
+            retained_states.append(
+                (
+                    states[0],
+                    tuple(sorted(bids.items(), reverse=True)[:output_levels]),
+                    tuple(sorted(asks.items())[:output_levels]),
+                )
+            )
+    for state, bids, asks in retained_states:
+        assert state.bids == bids
+        assert state.asks == asks
 
 
 @pytest.mark.parametrize(

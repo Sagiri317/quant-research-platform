@@ -1048,8 +1048,8 @@ class DepthReconstructor:
         self.output_levels = output_levels
         self.connection_close_ns = connection_close_ns
         self.stats = stats
-        self._bids: dict[int, float] = {}
-        self._asks: dict[int, float] = {}
+        self._bids: dict[int, tuple[int, float]] = {}
+        self._asks: dict[int, tuple[int, float]] = {}
         self._pending_bids: dict[int, float] = {}
         self._pending_asks: dict[int, float] = {}
         self._segment_id: str | None = None
@@ -1105,8 +1105,9 @@ class DepthReconstructor:
         reason = self._invalid_reason(bid_prices, ask_prices)
         if reason is not None:
             raise ValueError(f"binance_replay_snapshot_{reason}")
-        self._bids = bids
-        self._asks = asks
+        # Unchanged immutable levels can be shared by successive book states.
+        self._bids = {price: (price, quantity) for price, quantity in bids.items()}
+        self._asks = {price: (price, quantity) for price, quantity in asks.items()}
         self._bid_prices = bid_prices
         self._ask_prices = ask_prices
         self._pending_bids.clear()
@@ -1292,12 +1293,9 @@ class DepthReconstructor:
             market_type=self.market_type,
             price_unit=self.price_unit,
             bids=tuple(
-                (price, self._bids[price])
-                for price in islice(reversed(self._bid_prices), limit)
+                map(self._bids.__getitem__, islice(reversed(self._bid_prices), limit))
             ),
-            asks=tuple(
-                (price, self._asks[price]) for price in islice(self._ask_prices, limit)
-            ),
+            asks=tuple(map(self._asks.__getitem__, islice(self._ask_prices, limit))),
             known_bid_floor_tick=(
                 self._known_bid_floor_tick
                 if limit is None or limit >= len(self._bid_prices)
@@ -1435,7 +1433,7 @@ def _record_times(
 
 
 def _apply_levels(
-    target: dict[int, float], prices: list[int], updates: dict[int, float]
+    target: dict[int, tuple[int, float]], prices: list[int], updates: dict[int, float]
 ) -> None:
     for price_index, quantity in updates.items():
         if quantity == 0:
@@ -1445,7 +1443,7 @@ def _apply_levels(
         else:
             if price_index not in target:
                 insort(prices, price_index)
-            target[price_index] = quantity
+            target[price_index] = (price_index, quantity)
 
 
 def iter_reconstructed_depth(
