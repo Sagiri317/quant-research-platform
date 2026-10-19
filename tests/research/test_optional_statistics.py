@@ -168,9 +168,74 @@ def test_ledger_only_analyses_do_not_open_market_inputs(
         assert artifact.metadata["formal_selection_qualification"] == "not_established"
         with artifact.table("portfolio_robustness.parquet") as values:
             assert values.status.eq("UNDEFINED").all()
+            if "cscv" in analyses:
+                assert values.reason.eq("incomplete_daily_axis").all()
             assert not values.reason.isin(
                 ["test_excluded", "global_validation_selection_reuses_validation"]
             ).any()
+
+
+@pytest.mark.parametrize("blocks", ["4", True, 3, 2])
+def test_selected_cscv_rejects_invalid_blocks_before_missing_daily_axis(
+    tmp_path, blocks
+):
+    from quant_research_platform.artifacts.portfolio_ledger import (
+        read_portfolio_ledger_artifact,
+    )
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.markets.implementations.a_share.calendar import (
+        unified_trading_sessions,
+    )
+    from quant_research_platform.research.portfolios.diagnostics import (
+        build_portfolio_statistics_tables,
+    )
+
+    ledger = tmp_path / "ledger"
+    window = _cash_ledger(ledger)
+    config = {
+        "ledgers": [str(ledger)],
+        "window": window,
+        "analyses": ["cscv"],
+        "statistics": {"cscv_blocks": blocks},
+        "output": str(tmp_path / "statistics"),
+    }
+    with pytest.raises(ValueError, match="cscv_slice_count_invalid"):
+        portfolio_statistics(config)
+    assert not (tmp_path / "statistics").exists()
+    artifact = read_portfolio_ledger_artifact(ledger)
+    candidate = PortfolioCandidateSpec(
+        **{**artifact.metadata["candidate"], "risk_style_columns": ()}
+    )
+    with pytest.raises(ValueError, match="cscv_slice_count_invalid"):
+        build_portfolio_statistics_tables(
+            ledgers={candidate.candidate_id: artifact},
+            candidates=(candidate,),
+            config={**config, "sample_role": "exploratory"},
+            time_window=TimeWindow(**window),
+            unified_trading_sessions=unified_trading_sessions,
+            inputs={},
+            iter_portfolio_sessions=None,
+        )
+    with pytest.raises(ValueError, match="cscv_slice_count_invalid"):
+        statistics.cscv_pbo(np.ones((4, 2)), slice_count=blocks)
+
+
+def test_unselected_cscv_does_not_validate_unused_blocks(tmp_path):
+    ledger = tmp_path / "ledger"
+    window = _cash_ledger(ledger)
+    artifact = read_statistics_artifact(
+        portfolio_statistics(
+            {
+                "ledgers": [str(ledger)],
+                "window": window,
+                "analyses": ["performance"],
+                "statistics": {"cscv_blocks": "unused"},
+                "output": str(tmp_path / "statistics"),
+            }
+        )
+    )
+    with artifact.table("portfolio_performance.parquet") as values:
+        assert values.set_index("metric_id").loc["terminal_nav", "value"] == 1000.0
 
 
 @pytest.mark.parametrize("sample_role", [None, "walk_forward_oos"])

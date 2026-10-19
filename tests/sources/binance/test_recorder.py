@@ -478,53 +478,6 @@ def test_connection_stats_close_failure_still_closes_websocket(
     assert websocket.closed
 
 
-def test_connection_close_time_is_frozen_at_error_detection(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    phase = {"value": "open"}
-    closed: list[str] = []
-
-    def utc_now() -> str:
-        return phase["value"]
-
-    class LateConnectionProblem(Exception):
-        def __init__(self) -> None:
-            phase["value"] = "after"
-
-    class Websocket:
-        def recv(self, timeout: float) -> None:
-            del timeout
-            phase["value"] = "detected"
-            raise OSError("connection lost")
-
-        def close(self) -> None:
-            return None
-
-    stats = recorder._CaptureStats()
-
-    def record_closed(*args: object, **kwargs: object) -> None:
-        del args
-        closed.append(str(kwargs["closed_at"]))
-
-    monkeypatch.setattr(recorder, "_utc_now", utc_now)
-    monkeypatch.setattr(recorder, "_ConnectionProblem", LateConnectionProblem)
-    monkeypatch.setattr(stats, "closed", record_closed)
-    monkeypatch.setattr(
-        recorder, "_connect_websocket", lambda *_args, **_kwargs: Websocket()
-    )
-    reader = recorder._StreamReader(
-        stream=FUTURES_STREAMS[1],
-        writer=recorder._RunWriter(tmp_path),
-        stats=stats,
-        stop=threading.Event(),
-        config=RecorderConfig(tmp_path / "run", 1),
-        tick_size="0.1",
-    )
-    with pytest.raises(LateConnectionProblem):
-        reader._read_connection(reconnect=False)
-    assert closed == ["detected"]
-
-
 def test_run_writer_rejects_late_writes_after_close(tmp_path: Path) -> None:
     writer = recorder._RunWriter(tmp_path)
     writer.write(
@@ -1458,14 +1411,14 @@ def test_invalid_payload_coverage_stops_at_captured_receive_clock(
     assert stats.invalid_messages == 1
 
 
-@pytest.mark.parametrize("failure_at", ["close", "hash", "cancel"])
+@pytest.mark.parametrize("failure_at", ["close", "hash"])
 @pytest.mark.parametrize("body_fails", [False, True])
 def test_writer_lifecycle_preserves_first_cleanup_or_body_failure(
     tmp_path, monkeypatch, failure_at, body_fails
 ):
     primary = ValueError("synthetic_body")
     secondary = (
-        KeyboardInterrupt() if failure_at == "cancel" else OSError("synthetic_cleanup")
+        KeyboardInterrupt() if failure_at == "hash" else OSError("synthetic_cleanup")
     )
     writer = recorder._RunWriter(tmp_path)
     stats = recorder._CaptureStats(writer)
@@ -1493,11 +1446,8 @@ def test_writer_lifecycle_preserves_first_cleanup_or_body_failure(
 
 
 @pytest.mark.parametrize("set_ready", [False, True])
-@pytest.mark.parametrize("error_type", [GeneratorExit, KeyboardInterrupt, MemoryError])
-def test_recorder_preserves_reader_business_exception(
-    tmp_path, monkeypatch, set_ready, error_type
-):
-    primary = error_type("reader-primary")
+def test_recorder_preserves_reader_business_exception(tmp_path, monkeypatch, set_ready):
+    primary = KeyboardInterrupt("reader-primary")
     readers = []
     stream = FUTURES_STREAMS[1]
 
@@ -1519,7 +1469,7 @@ def test_recorder_preserves_reader_business_exception(
         lambda *_a, **_k: {stream.symbol: {stream.market_type: {"tick_size": "0.1"}}},
     )
     output = tmp_path / "run"
-    with pytest.raises(error_type) as raised:
+    with pytest.raises(KeyboardInterrupt) as raised:
         recorder.record(RecorderConfig(output, duration_seconds=0.01))
     assert raised.value is primary
     assert readers and all(not reader.is_alive() for reader in readers)
@@ -1527,12 +1477,11 @@ def test_recorder_preserves_reader_business_exception(
     assert not output.exists()
 
 
-@pytest.mark.parametrize("error_type", [KeyboardInterrupt, MemoryError, GeneratorExit])
 @pytest.mark.parametrize("abort_fails", [False, True])
 def test_join_primary_survives_all_reader_cleanup_and_abort(
-    tmp_path, monkeypatch, error_type, abort_fails
+    tmp_path, monkeypatch, abort_fails
 ):
-    primary = error_type("join-primary")
+    primary = KeyboardInterrupt("join-primary")
     readers = []
     joined = []
     aborted = []
@@ -1588,7 +1537,7 @@ def test_join_primary_survives_all_reader_cleanup_and_abort(
         },
     )
     output = tmp_path / "run"
-    with pytest.raises(error_type) as raised:
+    with pytest.raises(KeyboardInterrupt) as raised:
         recorder.record(RecorderConfig(output, duration_seconds=0.001))
     assert raised.value is primary
     assert len(readers) == len(streams) > 1

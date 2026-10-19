@@ -521,22 +521,22 @@ def _selected_analyses(config, allowed):
     return tuple(value for value in allowed if value in values)
 
 
+def _validate_cscv_slice_count(slice_count):
+    if type(slice_count) is not int or slice_count < 4 or slice_count % 2:
+        raise ValueError("cscv_slice_count_invalid")
+
+
 def cscv_pbo(
     returns: object,
     *,
     slice_count: int,
     return_roundoff: object = 0.0,
 ) -> PboResult:
+    _validate_cscv_slice_count(slice_count)
     shape = getattr(returns, "shape", None)
     if shape is None:
         shape = np.shape(returns)
-    if (
-        len(shape) != 2
-        or type(slice_count) is not int
-        or slice_count < 4
-        or slice_count % 2
-        or (shape[0] < slice_count)
-    ):
+    if len(shape) != 2 or shape[0] < slice_count:
         raise ValueError("cscv_slice_count_invalid")
     combination_count = comb(slice_count, slice_count // 2)
     matrix = _finite_matrix(returns, minimum_rows=4, minimum_columns=1)

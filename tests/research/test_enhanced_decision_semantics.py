@@ -716,10 +716,14 @@ def test_invalid_float_cap_blocks_only_dependent_target(invalid):
     assert account.post_trade_cash == 50.0
 
 
-@pytest.mark.parametrize("holdings", [(0.0, 0.0), (0.5, 0.5)])
-@pytest.mark.parametrize("neutrality", ["industry", "size", "industry_size"])
 @pytest.mark.parametrize(
-    "construction", ["quantile_equal_weight_half_step", "quantile_float_cap"]
+    "holdings,neutrality,construction",
+    [
+        ((0.0, 0.0), "industry", "quantile_equal_weight_half_step"),
+        ((0.5, 0.5), "industry_size", "quantile_equal_weight_half_step"),
+        ((0.0, 0.0), "size", "quantile_float_cap"),
+        ((0.5, 0.5), "industry", "quantile_float_cap"),
+    ],
 )
 def test_empty_lawful_stock_domain_preserves_cash_and_proven_exits(
     holdings, neutrality, construction

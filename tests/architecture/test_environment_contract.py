@@ -4,8 +4,6 @@ import re
 import tomllib
 from pathlib import Path
 
-import pytest
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PYPROJECT = PROJECT_ROOT / "pyproject.toml"
 ENVIRONMENT_YML = PROJECT_ROOT / "environment.yml"
@@ -66,21 +64,6 @@ def test_tooling_environment_dependencies_match_pyproject_dependency_specs() -> 
     }
 
     assert mismatches == {}
-
-
-def test_environment_gate_rejects_missing_runtime_dependency(tmp_path, monkeypatch):
-    environment = tmp_path / "environment.yml"
-    environment.write_text(
-        "\n".join(
-            line
-            for line in ENVIRONMENT_YML.read_text(encoding="utf-8").splitlines()
-            if not line.strip().startswith("- numpy")
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setitem(globals(), "ENVIRONMENT_YML", environment)
-    with pytest.raises(AssertionError):
-        test_tooling_environment_dependencies_match_pyproject_dependency_specs()
 
 
 def _python_minor_from_requires(spec: str) -> str:

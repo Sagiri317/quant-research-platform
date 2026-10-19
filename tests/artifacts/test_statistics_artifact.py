@@ -318,8 +318,8 @@ def test_research_table_counts_reject_lossy_coercion(tables, metadata, member):
         statistics._validated_frame(tables[name], member=member, metadata=metadata)
 
 
-@pytest.mark.parametrize("count", (32, 64))
-def test_group_comparison_integral_counts_round_trip(tmp_path, tables, metadata, count):
+def test_group_comparison_integral_counts_round_trip(tmp_path, tables, metadata):
+    count = 32
     metadata = _test_statistics_metadata(metadata, tables)
     tables["model_group_comparison"] = pd.DataFrame([_defined_group_comparison_row()])
     tables["model_group_comparison"]["observation_count"] = pd.Series(

@@ -458,6 +458,7 @@ def capture_fill_rows(emit, on_batch=None):
         for trade in batch.trades:
             pending[trade.fill_id] = {
                 "fill_id": trade.fill_id,
+                "order_id": trade.order_id,
                 "fill_qty": abs(trade.quantity),
                 "fill_price": abs(trade.notional / trade.quantity),
                 "notional": abs(trade.notional),

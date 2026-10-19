@@ -1575,7 +1575,7 @@ N_train
 | `prediction_selector` | 已持久化模型的 `family_id`，或保留选择器 `champion`，不借组合名称推断算法 |
 | `top_quantile` | 简单组合的最高分位比例，须满足 `0 < top_quantile <= 1`；增强组合为 `null` |
 | `rebalance_schedule` | `daily`、`weekly-last-trading-day` 或 `monthly-last-trading-day` |
-| `benchmark_id` | 增强组合的 CSI500/CSI1000 基准；简单组合为 `null` |
+| `benchmark_id` | 增强组合的 CSI500/CSI1000 基准；简单中性组合可指定指数基准，非中性简单组合为 `null` |
 
 `prediction_selector` 精确区分大小写。调用者显式提供已经选定的预测路径；`champion`
 消费该明确选择，具名 selector 额外核对所声明的模型家族；回顾模式另读取显式选择产物核对候选。
@@ -1657,14 +1657,9 @@ slope <= 0 -> benchmark-only logic  # 非正斜率采用仅基准逻辑
 SE/t/p/CI 使用按再平衡日期聚类的稳健推断，置信水平为 95%；
 加权 R2 和覆盖度作为诊断。满秩时斜率可用性与单项诊断定义性独立：
 常量收益的 R2 为 UNDEFINED；零 SE 的 t/p/CI 为 UNDEFINED，SE 保留 0。
-每行残差按实际仿射运算的操作数尺度判定数值零；在缩放坐标中，误差界为
-`8 × epsilon × (abs(y) + abs(y_origin) + abs(y_offset_mean) + abs(intercept) + abs(fitted) + abs(slope) × (abs(x) + abs(x_origin) + abs(x_offset_mean)))`。
-此界包含中心化和截距还原时会互相抵消的操作数，不能仅使用最终拟合值；
-不使用全样本最大收益尺度或 SE 阈值，斜率与截距保持等日期权重 OLS。
-校准采用缩放、中心化的浮点归约，按再平衡日期归约聚类方差；数值验收使用对应量纲的容差。
-每日期聚类分数在该日期残差形成及点积求和的浮点误差界内归零。采用同一缩放坐标，
-误差界为未归零残差行的 `sum(abs(x_centered) × row_error_bound)` 加
-`γ_n × sum(abs(score_terms))`，其中 `γ_n = n×epsilon/(1−n×epsilon)`。
+校准采用缩放、中心化的浮点归约，斜率与截距保持等日期权重 OLS，
+聚类方差按再平衡日期归约。残差和日期聚类分数按各自运算的操作数尺度识别舍入零，
+数值验收使用对应量纲的容差，不以全样本最大收益或 SE 阈值抹去真实差异。
 诊断状态和原因随账本保存，冻结读取验证它们；
 合法零斜率仍执行仅基准，不用伪造显著性或区间满足冻结要求。
 

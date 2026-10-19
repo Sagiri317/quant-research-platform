@@ -37,15 +37,6 @@ def test_hft_catalog_has_one_panel_factor_label_and_research_path() -> None:
     assert research.base_input_data_id == HFT_PANEL_DATA_ID
 
 
-def test_hft_models_use_generic_specs() -> None:
-    config = research_configuration("crypto", "baseline")
-    models = model_specs(config["models"])
-    assert {model.model_algorithm for model in models} == {
-        item["model_algorithm"] for item in config["models"]
-    }
-    assert all(not hasattr(model, "purge_gap_steps") for model in models)
-
-
 def test_hft_roster_preserves_explicit_model_inputs_and_targets():
     from quant_research_platform.research.protocols.crypto_hft import (
         HFT_FACTOR_COLUMNS,
@@ -58,6 +49,7 @@ def test_hft_roster_preserves_explicit_model_inputs_and_targets():
     labels = {item.output_column for item in label_catalog().list()}
     assert models
     for model, declared in zip(models, config["models"], strict=True):
+        assert model.model_algorithm == declared["model_algorithm"]
         assert model.input_columns == tuple(
             declared.get("input_factor_columns", [])
             + declared.get("input_feature_columns", [])

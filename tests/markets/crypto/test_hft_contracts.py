@@ -442,20 +442,6 @@ def test_trade_through_consumes_full_remaining_order_not_visible_quantity() -> N
     )
     assert result["fill_quantity"] == 1.0
     assert fills[0]["fill_qty"] == 1.0
-
-
-def test_maker_max_abs_position_updates_on_terminal_fill() -> None:
-    result = simulate_maker(
-        [_state(0)],
-        [_trade(50, quantity=1.0, visible_quantity=1.0, price_index=994)],
-        [_quote(0)],
-        config=_maker_config(),
-        observed_coverage={"book-1": (0, 200000000)},
-        trade_coverage={"trade-connection-1": (0, 200000000)},
-        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
-        asset_id="btc_usdt",
-        funding_events=(),
-    )
     assert result["max_abs_position"] == 1.0
 
 

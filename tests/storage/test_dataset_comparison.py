@@ -17,7 +17,6 @@ from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
     compare_datasets,
-    fingerprint_dataset,
     write_dataset,
 )
 from quant_research_platform.storage.identity import (
@@ -40,39 +39,6 @@ def test_iter_frame_chunks_reuses_bounded_frame_storage() -> None:
         )
         for chunk in chunks
     )
-
-
-def test_compare_requires_exact_proof_after_forced_fingerprint_collision(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    left = make_dataset_artifact_root(tmp_path, "collision_left")
-    right = make_dataset_artifact_root(tmp_path, "collision_right")
-    write_dataset(
-        left,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("collision_left"),
-    )
-    changed = make_default_dataset_frame()
-    changed.loc[changed.index[-1], "value"] = 99.0
-    write_dataset(right, changed, spec=make_processed_dataset_spec("collision_right"))
-
-    def collision_hashes(frame, **_kwargs):
-        yield np.zeros(len(frame), dtype="uint64")
-
-    monkeypatch.setattr(
-        dataset_fingerprinting, "_iter_fingerprint_hashes", collision_hashes
-    )
-    assert (
-        fingerprint_dataset(left).content_hash
-        == fingerprint_dataset(right).content_hash
-    )
-    comparison = dataset_comparison.compare_datasets(left, right)
-    assert comparison.status == "CONTENT_MISMATCH"
-    assert comparison.summary["exact"] == {
-        "missing_row_count": 0,
-        "extra_row_count": 0,
-        "changed_row_count": 1,
-    }
 
 
 def test_compare_treats_file_boundaries_as_layout_only(

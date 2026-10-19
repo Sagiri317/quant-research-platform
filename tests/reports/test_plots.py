@@ -443,7 +443,9 @@ def test_plot_rejects_invalid_text_fields_before_read(tmp_path, field, value):
     assert not (tmp_path / "result.png").exists()
 
 
-def test_categorical_series_does_not_require_an_unused_timezone(tmp_path):
+def test_categorical_series_does_not_require_an_unused_timezone(tmp_path, monkeypatch):
+    import json
+
     source = tmp_path / "exposure.parquet"
     pd.DataFrame({"style": ["size", "value"], "exposure": [0.2, -0.3]}).to_parquet(
         source, index=False
@@ -459,6 +461,24 @@ def test_categorical_series_does_not_require_an_unused_timezone(tmp_path):
         "units": "无量纲",
         "categorical": True,
     }
+    assert plots.plot(config).is_file()
+    source = tmp_path / "mixed.json"
+    source.write_text(
+        json.dumps(
+            {"rows": [{"style": 1, "exposure": 0.2}, {"style": "1", "exposure": -0.3}]}
+        )
+    )
+    original = plots.plot_series
+
+    def render(rows, **kwargs):
+        figure, axes = original(rows, **kwargs)
+        np.testing.assert_array_equal(axes[0].lines[0].get_xdata(), [0, 1])
+        np.testing.assert_array_equal(axes[0].lines[0].get_ydata(), [0.2, -0.3])
+        assert [tick.get_text() for tick in axes[0].get_xticklabels()] == ["1", "'1'"]
+        return figure, axes
+
+    monkeypatch.setattr(plots, "plot_series", render)
+    config.update(inputs=str(source), output=str(tmp_path / "mixed.png"))
     assert plots.plot(config).is_file()
     config.update(output=str(tmp_path / "unused.png"), timezone="UTC")
     with pytest.raises(ValueError, match="plot_config_fields_invalid"):
@@ -718,7 +738,9 @@ def test_plot_risk_example_consumes_native_comparisons_and_unavailable_reason(tm
     assert member.read_bytes() == before
 
 
-@pytest.mark.parametrize("identity", ["reference_id", "reference_kind", "fold_id"])
+@pytest.mark.parametrize(
+    "identity", ["reference_id", "reference_kind", "fold_id", "joined_label"]
+)
 def test_native_metric_plot_preserves_each_comparison_identity(
     tmp_path, monkeypatch, identity
 ):
@@ -742,11 +764,16 @@ def test_native_metric_plot_preserves_each_comparison_identity(
         "status": "DEFINED",
         "reason": "",
     }
-    other = {
+    changes = {
         "reference_id": "reference-two",
         "reference_kind": "control",
         "fold_id": "fold-two",
-    }[identity]
+    }
+    if identity == "joined_label":
+        row.update(fold_id="2024 | Q1", reference_id="CSI300")
+        other = {"fold_id": "2024", "reference_id": "Q1 | CSI300"}
+    else:
+        other = {identity: changes[identity]}
     member = "portfolio_benchmark_metrics.parquet"
     source = write_statistics_artifact(
         tmp_path / "statistics",
@@ -759,7 +786,7 @@ def test_native_metric_plot_preserves_each_comparison_identity(
         table_group="portfolio",
         tables={
             member.removesuffix(".parquet"): pd.DataFrame(
-                [row, {**row, identity: other, "value": 0.2}],
+                [row, {**row, **other, "value": 0.2}],
                 columns=STATISTICS_TABLE_COLUMNS[member],
             )
         },
@@ -772,6 +799,7 @@ def test_native_metric_plot_preserves_each_comparison_identity(
         labels.extend(
             label.get_text().replace("\n", "") for label in axes[0].get_yticklabels()
         )
+        assert [patch.get_width() for patch in axes[0].patches] == [0.1, 0.2]
         return figure, axes
 
     monkeypatch.setattr(plots, "plot_metric_comparison", render)
@@ -786,7 +814,12 @@ def test_native_metric_plot_preserves_each_comparison_identity(
     )
     assert output.is_file()
     assert len(set(labels)) == 2
-    assert row[identity] in labels[0] and other in labels[1]
+    if identity != "joined_label":
+        assert row[identity] in labels[0] and other[identity] in labels[1]
+    with pytest.raises(ValueError, match="plot_duplicate_metric_identity"):
+        original(
+            [row, dict(row)], metric_id="tracking_error", units="比例", **PROVENANCE
+        )
 
 
 def test_factor_ic_consumes_native_daily_strata_and_filters(tmp_path, monkeypatch):

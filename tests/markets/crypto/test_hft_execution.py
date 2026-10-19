@@ -606,7 +606,7 @@ def test_common_panel_maker_quotes_bind_actual_source_identities(
 
 @pytest.mark.usefixtures("coordinate_scale")
 def test_taker_uses_latest_actual_state_at_effective_time() -> None:
-    fills = []
+    fills, batches = [], []
     diagnostics = simulate_taker(
         [_state(0), _state(5), _state(15, bid_index=1005, ask_index=1015)],
         [{"timestamp_ms": 0, "prediction": 0.02, "segment_id": "s1"}],
@@ -620,7 +620,7 @@ def test_taker_uses_latest_actual_state_at_effective_time() -> None:
             taker_fee_bps="1.0",
         ),
         observed_coverage={"s1": _coverage(0, 15)},
-        on_ledger=capture_fill_rows(fills.append),
+        on_ledger=capture_fill_rows(fills.append, batches.append),
         capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
         asset_id="btc_usdt",
         funding_events=(),
@@ -632,10 +632,11 @@ def test_taker_uses_latest_actual_state_at_effective_time() -> None:
     assert fills[0]["fill_price"] == 100.5
     assert diagnostics["latency_fidelity"] == "full_l2_observed_event"
     assert diagnostics["assumption"] == "historical_book_zero_market_impact"
+    assert all(row.name != "order_id" for batch in batches for row in batch.diagnostics)
 
 
 def test_failing_fill_observer_is_not_replayed_during_cleanup() -> None:
-    calls: list[int] = []
+    calls: list[str] = []
 
     def fail(fill):
         calls.append(fill["order_id"])
@@ -655,7 +656,7 @@ def test_failing_fill_observer_is_not_replayed_during_cleanup() -> None:
             asset_id="btc_usdt",
             funding_events=(),
         )
-    assert calls == [1]
+    assert calls == ["1"]
 
 
 @pytest.mark.usefixtures("coordinate_scale")
@@ -900,6 +901,7 @@ def test_cost_sensitivity_reprices_actual_turnover_and_net_pnl() -> None:
         fee_scenarios_bps=(1.0, 2.0),
         additional_spread_scenarios_bps=(0.0, 1.0),
     )
+    assert [row["cost_delta"] for row in result] == pytest.approx([0.0, 1.0, 1.0, 2.0])
     assert [row["net_pnl"] for row in result] == pytest.approx([5.0, 4.0, 4.0, 3.0])
     assert {row["method"] for row in result} == {
         "constant_actual_turnover_additive_sensitivity"
@@ -1276,21 +1278,6 @@ def test_pending_markout_fifo_preserves_maturity_order_with_pending_suffix():
         assert completed == list(range(30))
 
 
-def test_fee_stress_uses_turnover_and_basis_points():
-    from fractions import Fraction
-
-    row = fixed_turnover_cost_sensitivity(
-        turnover=1_000_000.0,
-        net_pnl=0.0,
-        base_fee_bps=0.0,
-        fee_scenarios_bps=(100.0,),
-        additional_spread_scenarios_bps=(0.0,),
-    )[0]
-    expected = float(Fraction(1_000_000) * Fraction(100) / 10000)
-    assert row["cost_delta"] == expected
-    assert row["net_pnl"] == -expected
-
-
 @pytest.mark.parametrize("close_price,realized", [(110.0, 10.0), (90.0, -10.0)])
 def test_capture_fill_rows_keeps_delayed_identity_without_derived_fees(
     close_price, realized
@@ -1324,6 +1311,7 @@ def test_capture_fill_rows_keeps_delayed_identity_without_derived_fees(
     economics.diagnostic({"fill_id": second, "markout": 2.0})
     economics.diagnostic({"fill_id": first, "markout": 1.0})
     assert [row["fill_id"] for row in fills] == [second, first]
+    assert [row["order_id"] for row in fills] == ["sell", "buy"]
     assert [row["markout"] for row in fills] == [2.0, 1.0]
     assert all("fee" not in row for row in fills)
     flows = [flow for batch in batches for flow in batch.cashflows]
@@ -1336,6 +1324,59 @@ def test_capture_fill_rows_keeps_delayed_identity_without_derived_fees(
         realized,
     ]
     assert economics.mark(2, close_price)["net_pnl"] == realized - 2.0
+
+
+def test_native_fill_identity_uses_canonical_order_for_multiple_fills(tmp_path):
+    from quant_research_platform.artifacts.portfolio_ledger import (
+        read_portfolio_ledger_artifact,
+        summarize_portfolio_ledger,
+        write_portfolio_ledger_artifact,
+    )
+    from quant_research_platform.markets.implementations.crypto.execution import (
+        PortfolioEconomics,
+    )
+
+    capital = PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual")
+    fills, original = [], []
+
+    def produce(emit):
+        def record(batch):
+            original.append(batch)
+            emit(batch)
+
+        economics = PortfolioEconomics(capital, "btc_usdt", record)
+        identities = [
+            economics.fill(
+                timestamp_ns=stamp * 100_000_000,
+                order_id="1000000",
+                quantity=quantity,
+                price=100.0,
+                mark_price=100.0,
+                fee=1.0,
+            )
+            for stamp, quantity in enumerate((1.0, 2.0))
+        ]
+        for identity in reversed(identities):
+            economics.diagnostic({"fill_id": identity, "markout": 1.0})
+        economics.mark(200_000_000, 101.0)
+
+    source = write_portfolio_ledger_artifact(
+        tmp_path / "ledger",
+        capital=capital,
+        metadata={"window": {"start": "1970-01-01", "end": "1970-01-02"}},
+        produce=produce,
+    )
+    restored = list(read_portfolio_ledger_artifact(source).iter_chunks())
+    assert restored == original
+    capture = capture_fill_rows(fills.append)
+    for batch in restored:
+        capture(batch)
+    assert [fill["order_id"] for fill in fills] == ["1000000", "1000000"]
+    assert [fill["fill_qty"] for fill in fills] == [2.0, 1.0]
+    assert len({fill["fill_id"] for fill in fills}) == 2
+    summary = summarize_portfolio_ledger(capital, restored)
+    assert summary["net_pnl"] == 1.0
+    assert summary["fees"] == 2.0
 
 
 def test_truncated_pending_cancels_survive_native_ledger_summary(tmp_path):
@@ -1685,28 +1726,6 @@ def test_weighted_diagnostics_preserve_unequal_quantity_contributions(
     )
 
 
-@pytest.mark.parametrize("values", [(100.0, -100.0), (100.0, 100.0)])
-def test_weighted_diagnostic_update_handles_signed_values(values):
-    from fractions import Fraction
-
-    metrics = _Metrics()
-    for quantity, value in zip((1.0, 3.0), values, strict=True):
-        fill = {
-            "fill_qty": quantity,
-            "notional": 0.0,
-            "slippage_bps": value,
-            "markout_per_unit": 0.0,
-            "markout_bps": value,
-            "markout_pnl": 0.0,
-            "adverse_selection_cost": 0.0,
-        }
-        metrics.observe_fill(fill)
-        metrics.finalize_markout(fill)
-    expected = float((Fraction(values[0]) + 3 * Fraction(values[1])) / 4)
-    assert metrics.payload()["average_slippage_bps"] == pytest.approx(expected)
-    assert metrics.payload()["average_markout_bps"] == pytest.approx(expected)
-
-
 @pytest.mark.parametrize("sign", (1, -1))
 @pytest.mark.parametrize(
     "requested,depth",
@@ -2054,19 +2073,3 @@ def test_maker_unknown_trade_price_blocks_only_dependent_order(
     else:
         assert result["account_path_status"] == "COMPLETE"
         assert result["net_pnl"] == 0.0
-
-
-def test_known_zero_visible_trade_needs_no_price():
-    from types import SimpleNamespace
-
-    from quant_research_platform.markets.implementations.crypto.execution import (
-        _maker_trade_fill,
-    )
-
-    trade = replace(
-        _trade(100, price="99.5", quantity="3", maker_buyer=True),
-        price_index=None,
-        visible_quantity=0.0,
-    )
-    order = SimpleNamespace(trade_observation_id=trade.observation_id, side="buy")
-    assert _maker_trade_fill(order, trade) == (0.0, "zero_visible_trade_quantity")

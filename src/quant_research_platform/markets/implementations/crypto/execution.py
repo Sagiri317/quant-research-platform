@@ -1126,7 +1126,6 @@ def simulate_taker(
                 )
                 fill = dict(
                     fill_id=fill_id,
-                    order_id=order_id,
                     timestamp_ms=effective_time,
                     decision_time_ms=decision_time,
                     effective_time_ms=effective_time,
@@ -2634,7 +2633,6 @@ def simulate_maker(
                     raise ValueError("hft_execution_fee_unrepresentable") from None
                 mid = _mid(latest_state)
                 fill = {
-                    "order_id": order.order_id,
                     "timestamp_ms": trade.observed_time_ns
                     // _NANOSECONDS_PER_MILLISECOND,
                     "segment_id": order.segment_id,

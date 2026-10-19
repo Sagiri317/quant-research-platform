@@ -143,11 +143,13 @@ def test_selection_requires_full_declared_validation_science(tmp_path, mutation)
         )
     else:
         path = score(config)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="selection_metric_direction_invalid"):
             select(
                 {
                     "scores": str(path),
                     "output": str(tmp_path / "selection.json"),
+                    "refit_windows": [{"start": "2020-01-01", "end": "2020-01-06"}],
+                    "refit_cutoff": "2020-01-06",
                     "selection_metric": "test_rankic",
                     "selection_direction": "maximize",
                     "tie_break_order": config["candidate_ids"],

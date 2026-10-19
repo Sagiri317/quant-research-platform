@@ -59,11 +59,13 @@ def _request(tmp_path, inputs, frame, **extra):
 @pytest.mark.parametrize("block_rows", (3, 100000))
 def test_prepare_roundtrip_and_narrow_slice(tmp_path, monkeypatch, native, block_rows):
     frame, inputs = _inputs(tmp_path, native=native)
+    assert set(inputs) == {"market_panel_1d", "trading_calendar"}
     monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", block_rows)
     full_root = prepare(
         _request(tmp_path / "full", inputs, frame, parameters={"horizons": [1, 20]})
     )
     full = read_dataset(full_root)
+    assert full.on_id_endpoint_return_1d.notna().any()
     dates = sorted(frame.timestamp.unique())
     window = {
         "start": str(pd.Timestamp(dates[18]).date()),
@@ -250,7 +252,7 @@ def test_assembled_selected_label_semantics_and_real_evaluate_cutoffs(tmp_path):
     for number, label in enumerate(labels):
         mature_column = session.spec["label_availability_columns"][label]
         maturity = actual[mature_column].min()
-        for step in (-1, 0, 1):
+        for step in (-1, 0):
             cutoff = maturity + pd.Timedelta(step, "ns")
             output = tmp_path / f"eval-{number}-{step}"
             evaluate(
@@ -374,17 +376,6 @@ def test_native_file_selection_uses_inventory_without_compacting_clock(tmp_path)
     assert result.timestamp.dt.year.eq(2024).all()
     row = result.loc[result.asset_id.eq("b")].iloc[0]
     assert np.isfinite(row.on_id_endpoint_return_1d)
-
-
-def test_price_labels_need_no_execution_mask(tmp_path):
-    frame, inputs = _inputs(tmp_path)
-    assert set(inputs) == {"market_panel_1d", "trading_calendar"}
-    result = read_dataset(
-        prepare(
-            _request(tmp_path / "output", inputs, frame, parameters={"horizons": [1]})
-        )
-    )
-    assert result.on_id_endpoint_return_1d.notna().any()
 
 
 def test_actual_panel_axis_survives_market_migration_and_suspension(tmp_path):

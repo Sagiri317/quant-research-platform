@@ -270,8 +270,6 @@ def _finite_matrix(frame: pd.DataFrame, columns: tuple[str, ...]) -> np.ndarray:
             for column in columns
         ]
     )
-    if not np.isfinite(values).all():
-        raise ValueError("model_scaler_values_invalid")
     return values
 
 

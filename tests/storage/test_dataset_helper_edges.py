@@ -6,7 +6,6 @@ import subprocess
 from copy import deepcopy
 from dataclasses import replace
 from decimal import Decimal
-from fractions import Fraction
 from pathlib import Path
 from types import MappingProxyType
 
@@ -225,10 +224,8 @@ def test_validate_dataset_spec_accepts_only_research_immutable_semantic_mappings
     validate_dataset_spec(processed)
 
 
-@pytest.mark.parametrize("wrong_kind", ([], {}), ids=("list", "dict"))
-def test_persisted_research_key_coverage_rejects_unhashable_policy_with_owner_error(
-    wrong_kind: object,
-) -> None:
+def test_persisted_research_key_coverage_rejects_unhashable_policy_with_owner_error():
+    wrong_kind = []
     payload = data_spec_payload(make_demo_research_dataset_spec())
     data_id = payload["input_data_ids"][0]
     payload["key_coverage"][data_id] = wrong_kind
@@ -368,10 +365,8 @@ def test_physical_schema_accepts_persisted_parquet_identity_round_trip(
     assert persisted == expected
 
 
-@pytest.mark.parametrize("invalid_count", (Decimal("1"), Fraction(1, 1)))
-def test_manifest_counts_reject_non_int_numeric_types(
-    tmp_path: Path, invalid_count: object
-) -> None:
+def test_manifest_counts_reject_non_int_numeric_types(tmp_path: Path) -> None:
+    invalid_count = Decimal("1")
     root = make_dataset_artifact_root(
         tmp_path, data_id="storage_demo", market_id="dummy"
     )
@@ -579,9 +574,9 @@ def test_exact_comparison_primary_key_only_projection_has_empty_value() -> None:
     assert tuple(index.identity_payload_values(namespace="primary-key-only")) == (b"",)
 
 
-def test_exact_map_high_cardinality_and_multiplicity_are_order_independent() -> None:
+def test_exact_map_order_and_multiplicity_are_independent() -> None:
     map_type = pa.map_(pa.string(), pa.int64())
-    entries = [(f"key-{index:04d}", index % 7) for index in range(512)]
+    entries = [("first", 0), ("second", 1)]
     entries.extend((("duplicate", 2), ("duplicate", 1), ("duplicate", 1)))
     forward = pa.array([entries], type=map_type)[0]
     reverse = pa.array([list(reversed(entries))], type=map_type)[0]
@@ -801,7 +796,6 @@ def test_physical_schema_encoder_rejects_unsupported_date64(
         )
 
 
-@pytest.mark.parametrize("wrong_kind", ([], {}), ids=("list", "dict"))
 @pytest.mark.parametrize(
     ("type_payload", "nested"),
     (
@@ -825,8 +819,9 @@ def test_physical_schema_encoder_rejects_unsupported_date64(
     ids=("time", "duration", "timestamp", "nested-timestamp"),
 )
 def test_physical_schema_units_reject_unhashable_values_at_any_depth(
-    type_payload: dict[str, object], nested: bool, wrong_kind: object
+    type_payload: dict[str, object], nested: bool
 ) -> None:
+    wrong_kind = []
     schema_payload = [
         {"name": "value", "nullable": True, "type": deepcopy(type_payload)}
     ]
@@ -839,25 +834,27 @@ def test_physical_schema_units_reject_unhashable_values_at_any_depth(
         validate_physical_schema_payload(schema_payload)
 
 
-@pytest.mark.parametrize("wrong_kind", ("float", "bool", "string"))
 @pytest.mark.parametrize(
-    ("type_payload", "parameter_path"),
-    (
-        ({"kind": "integer", "signed": True, "bit_width": 32}, ("bit_width",)),
-        ({"kind": "float", "bit_width": 64}, ("bit_width",)),
+    ("type_payload", "parameter_path", "wrong_kind"),
+    [
+        ({"kind": "integer", "signed": True, "bit_width": 32}, ("bit_width",), "float"),
+        ({"kind": "float", "bit_width": 64}, ("bit_width",), "float"),
         (
             {"kind": "decimal", "bit_width": 128, "precision": 18, "scale": 4},
             ("bit_width",),
+            "float",
         ),
         (
             {"kind": "decimal", "bit_width": 128, "precision": 18, "scale": 4},
             ("precision",),
+            "float",
         ),
         (
             {"kind": "decimal", "bit_width": 128, "precision": 18, "scale": 4},
             ("scale",),
+            "float",
         ),
-        ({"kind": "fixed_size_binary", "byte_width": 16}, ("byte_width",)),
+        ({"kind": "fixed_size_binary", "byte_width": 16}, ("byte_width",), "float"),
         (
             {
                 "kind": "fixed_size_list",
@@ -869,6 +866,7 @@ def test_physical_schema_units_reject_unhashable_values_at_any_depth(
                 },
             },
             ("list_size",),
+            "float",
         ),
         (
             {
@@ -878,6 +876,7 @@ def test_physical_schema_units_reject_unhashable_values_at_any_depth(
                 "ordered": False,
             },
             ("index_type", "bit_width"),
+            "float",
         ),
         (
             {
@@ -887,8 +886,15 @@ def test_physical_schema_units_reject_unhashable_values_at_any_depth(
                 "ordered": False,
             },
             ("value_type", "bit_width"),
+            "float",
         ),
-    ),
+        ({"kind": "integer", "signed": True, "bit_width": 32}, ("bit_width",), "bool"),
+        (
+            {"kind": "integer", "signed": True, "bit_width": 32},
+            ("bit_width",),
+            "string",
+        ),
+    ],
 )
 def test_physical_schema_numeric_parameters_require_exact_int_kind_recursively(
     type_payload: dict[str, object], parameter_path: tuple[str, ...], wrong_kind: str

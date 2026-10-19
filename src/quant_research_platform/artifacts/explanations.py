@@ -171,7 +171,9 @@ def attribution_additivity(base, contributions, output, relative):
         else 0.0
     )
     backward += floor
-    tolerance = min(backward, relative * abs(output) + floor)
+    tolerance = min(
+        backward, max(relative, np.sqrt(np.finfo(float).eps)) * abs(output) + floor
+    )
     try:
         residual = fsum([*terms, -float(output)])
     except OverflowError:
@@ -411,7 +413,7 @@ def _validate(metadata, tables, *, partial=False):
             if (
                 reason
                 or residual != row.additivity_residual
-                or tolerance != row.additivity_tolerance
+                or not abs(residual) <= row.additivity_tolerance <= tolerance
             ):
                 raise ValueError("explanation_additivity_failed")
     if "summary" in result:

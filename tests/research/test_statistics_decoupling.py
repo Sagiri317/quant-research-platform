@@ -191,38 +191,62 @@ def model_analysis_candidates(tmp_path_factory):
 @pytest.mark.parametrize(
     "analysis,policy,extra,members,seed_mode",
     [
-        (*case, seed_mode)
-        for case in [
-            (
-                "model_losses",
-                {},
-                {},
-                {"model_losses.parquet", "model_prediction_metrics.parquet"},
-            ),
-            ("prediction_hac", {"hac_lag": 0}, {}, {"prediction_diagnostics.parquet"}),
-            (
-                "prediction_bootstrap",
-                {"bootstrap_block": 1, "bootstrap_repetitions": 10},
-                {"root_seed": 1},
-                {"prediction_diagnostics.parquet"},
-            ),
-            (
-                "model_confidence_set",
-                {"bootstrap_block": 1, "bootstrap_repetitions": 10},
-                {"root_seed": 1},
-                {"model_reality_checks.parquet", "robustness.parquet"},
-            ),
-            (
-                "spa_reality_check",
-                {"bootstrap_block": 1, "bootstrap_repetitions": 10},
-                {"root_seed": 1, "comparison_model_id": "linear_regression"},
-                {"model_reality_checks.parquet", "robustness.parquet"},
-            ),
-        ]
-        for seed_mode in ("override", "omitted", "explicit42", "null")
-        if not (
-            case[0] in {"model_losses", "prediction_hac"} and seed_mode == "override"
-        )
+        (
+            "model_losses",
+            {},
+            {},
+            {"model_prediction_metrics.parquet", "model_losses.parquet"},
+            "null",
+        ),
+        (
+            "prediction_hac",
+            {"hac_lag": 0},
+            {},
+            {"prediction_diagnostics.parquet"},
+            "null",
+        ),
+        (
+            "prediction_bootstrap",
+            {"bootstrap_block": 1, "bootstrap_repetitions": 10},
+            {"root_seed": 1},
+            {"prediction_diagnostics.parquet"},
+            "override",
+        ),
+        (
+            "prediction_bootstrap",
+            {"bootstrap_block": 1, "bootstrap_repetitions": 10},
+            {"root_seed": 1},
+            {"prediction_diagnostics.parquet"},
+            "omitted",
+        ),
+        (
+            "prediction_bootstrap",
+            {"bootstrap_block": 1, "bootstrap_repetitions": 10},
+            {"root_seed": 1},
+            {"prediction_diagnostics.parquet"},
+            "explicit42",
+        ),
+        (
+            "prediction_bootstrap",
+            {"bootstrap_block": 1, "bootstrap_repetitions": 10},
+            {"root_seed": 1},
+            {"prediction_diagnostics.parquet"},
+            "null",
+        ),
+        (
+            "model_confidence_set",
+            {"bootstrap_block": 1, "bootstrap_repetitions": 10},
+            {"root_seed": 1},
+            {"model_reality_checks.parquet", "robustness.parquet"},
+            "omitted",
+        ),
+        (
+            "spa_reality_check",
+            {"bootstrap_block": 1, "bootstrap_repetitions": 10},
+            {"root_seed": 1, "comparison_model_id": "linear_regression"},
+            {"model_reality_checks.parquet", "robustness.parquet"},
+            "omitted",
+        ),
     ],
 )
 def test_public_model_analysis_subsets_require_only_used_inputs(

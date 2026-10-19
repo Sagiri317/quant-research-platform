@@ -438,29 +438,23 @@ def _raw_index(raw_root, data_ids, start, end, diagnostics=None):
 
 def _snapshot(index, pair, day, branch, indicators):
     coordinate = [*pair, day.isoformat(), branch]
-    fields = [_get(index, "snapshot", [*coordinate, field]) for field in indicators]
-    if all(value is None for value in fields):
-        return None
-    return {
-        "values": [None if value is None else value["values"] for value in fields],
-        "conflicted": [
-            value is not None and value.get("conflicted", False) for value in fields
-        ],
-    }
+    return [_get(index, "snapshot", [*coordinate, field]) for field in indicators]
 
 
 def _report_versions(index, pair, first, end, indicators):
     initial = _snapshot(index, pair, first, "1", indicators)
-    current = [None] * len(indicators) if initial is None else initial["values"].copy()
     adjusted = _snapshot(index, pair, first, "3", indicators)
-    if initial is not None and adjusted is not None:
-        for position, value in enumerate(adjusted["values"]):
-            if initial["conflicted"][position] or adjusted["conflicted"][position]:
-                current[position] = None
-            elif value is not None:
-                current[position] = (
-                    value if current[position] in (None, value) else None
-                )
+    current = [None if field is None else field["values"] for field in initial]
+    for position, (original, adjustment) in enumerate(
+        zip(initial, adjusted, strict=True)
+    ):
+        if original is None or adjustment is None:
+            continue
+        if original.get("conflicted", False) or adjustment.get("conflicted", False):
+            current[position] = None
+        elif adjustment["values"] is not None:
+            value = adjustment["values"]
+            current[position] = value if current[position] in (None, value) else None
     yield first, False, current.copy()
     branches = {"1": initial, "3": adjusted}
     events = index.identity_payload_values(namespace=f"events:{pair[0]}:{pair[1]}")
@@ -476,16 +470,23 @@ def _report_versions(index, pair, first, end, indicators):
                     index, pair, event - timedelta(days=1), branch, indicators
                 )
                 previous = branches[branch]
-                if before is None:
-                    before = previous
-                for position in range(len(indicators)):
-                    if after is None or before is None:
+                for position, (prior_field, after_field, previous_field) in enumerate(
+                    zip(before, after, previous, strict=True)
+                ):
+                    if prior_field is None:
+                        prior_field = previous_field
+                    if after_field is None or prior_field is None:
                         changed.setdefault(position, set()).add(None)
                         continue
-                    prior, value = before["values"][position], after["values"][position]
-                    if after["conflicted"][position] or before["conflicted"][position]:
+                    prior, value = prior_field["values"], after_field["values"]
+                    if after_field.get("conflicted", False) or prior_field.get(
+                        "conflicted", False
+                    ):
                         changed.setdefault(position, set()).add(None)
-                    elif previous is not None and prior != previous["values"][position]:
+                    elif previous_field is not None and (
+                        previous_field.get("conflicted", False)
+                        or prior != previous_field["values"]
+                    ):
                         changed.setdefault(position, set()).add(None)
                     elif value != prior:
                         changed.setdefault(position, set()).add(value)

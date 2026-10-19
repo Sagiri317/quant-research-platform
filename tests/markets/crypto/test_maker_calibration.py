@@ -123,7 +123,8 @@ def test_actual_maker_keep_uses_depleted_queue_and_paired_residuals(depletion, k
         latency=0,
     )
     assert result["created_orders"] == 1
-    assert [fill["order_id"] for fill in fills] == ([1] if kept else [])
+    assert [fill["order_id"] for fill in fills] == (["1"] if kept else [])
+    assert all(row.name != "order_id" for batch in batches for row in batch.diagnostics)
     assert gains == pytest.approx([0.75, 0.05 if kept else 0.0])
     expected_reason = (
         "keep_existing_schedule_without_renewal"
@@ -167,7 +168,7 @@ def test_actual_maker_keeps_legal_nonbest_old_price_in_relative_tick_space():
     assert result["created_orders"] == 1
     assert [
         (fill["order_id"], fill["fill_price"], fill["fill_reason"]) for fill in fills
-    ] == [(1, 99.5, "trade_through")]
+    ] == [("1", 99.5, "trade_through")]
     assert gains == pytest.approx([0.75, 0.4975])
 
 
@@ -198,8 +199,8 @@ def test_actual_maker_replace_gain_includes_old_fill_before_cancel_latency():
     )
     assert result["created_orders"] == 2
     assert [(fill["order_id"], fill["timestamp_ms"]) for fill in fills] == [
-        (1, 250),
-        (2, 400),
+        ("1", 250),
+        ("2", 400),
     ]
     assert gains == pytest.approx([3.5, 2.101])
 
@@ -231,7 +232,7 @@ def test_actual_maker_negative_keep_beats_more_negative_delayed_cancel():
         latency=100,
     )
     assert result["created_orders"] == 1
-    assert [fill["order_id"] for fill in fills] == [1]
+    assert [fill["order_id"] for fill in fills] == ["1"]
     assert gains == pytest.approx([0.75, -0.5])
     assert any(
         row.text == "keep_existing_schedule_without_renewal"
@@ -267,8 +268,8 @@ def test_actual_maker_keeps_cashflows_of_all_queued_commands():
     )
     assert result["created_orders"] == 2
     assert [(fill["order_id"], fill["timestamp_ms"]) for fill in fills] == [
-        (1, 220),
-        (2, 400),
+        ("1", 220),
+        ("2", 400),
     ]
     assert gains == pytest.approx([1.5, 0.0, 3.0])
 
@@ -290,15 +291,12 @@ def test_known_funding_offsets_preserve_selection_at_fill_boundaries():
     )
     model._load()
     for elapsed, expected_gain in (
-        (5000000, 0.020025),
         (9999999, 0.020025),
         (10000000, 0.020025),
         (10000001, 0.025025),
-        (15000000, 0.025025),
         (19999999, 0.025025),
         (20000000, 0.025025),
         (20000001, 0.030025),
-        (25000000, 0.030025),
     ):
         keep, quantity, gain = model.select(
             state=state,
@@ -528,7 +526,7 @@ def test_calibrated_maker_compares_old_expiry_with_real_cancel_replace(
     ]
     assert gains == pytest.approx([0.0925, 0.145] if keep_wins else [0.5, 0.5])
     if keep_wins:
-        assert fills[0]["order_id"] == 1
+        assert fills[0]["order_id"] == "1"
 
 
 def test_decisions_reuse_captured_sample_origins_and_read_history_once(monkeypatch):

@@ -31,10 +31,16 @@ from tests.helpers.research_specs import (
 )
 
 
-def test_research_dataset_spec_requires_base_input_in_inputs() -> None:
-    with pytest.raises(ValueError, match="base_input_data_id_not_in_inputs: base"):
+@pytest.mark.parametrize(
+    "input_data_ids,base_input_data_id",
+    [(("factors", "labels"), "base"), ((), "")],
+)
+def test_research_dataset_spec_requires_base_input_in_inputs(
+    input_data_ids, base_input_data_id
+) -> None:
+    with pytest.raises(ValueError, match="base_input_data_id_not_in_inputs"):
         make_dummy_research_dataset_spec(
-            input_data_ids=("factors", "labels"), base_input_data_id="base"
+            input_data_ids=input_data_ids, base_input_data_id=base_input_data_id
         )
 
 
@@ -357,11 +363,6 @@ def test_research_dataset_fails_closed_on_empty_base_sessions(tmp_path: Path) ->
             dataset_id="dummy_dataset",
             time_window=TimeWindow("2025-01-01", "2025-01-02"),
         )
-
-
-def test_research_dataset_fails_closed_on_empty_inputs() -> None:
-    with pytest.raises(ValueError, match="base_input_data_id_not_in_inputs"):
-        make_dummy_research_dataset_spec(input_data_ids=(), base_input_data_id="")
 
 
 def test_strict_research_input_missing_base_key_fails_in_assembler(

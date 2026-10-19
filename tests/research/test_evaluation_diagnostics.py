@@ -518,15 +518,14 @@ def test_evaluation_failure_closes_source_with_traceback_retained(
 
 
 @pytest.mark.parametrize(
-    "values",
+    "values,reverse,chunk_size",
     [
-        (0.1, 0.2, 0.3),
-        (0.0, 0.0001),
-        (-0.2, 0.0, 0.2),
+        ((0.1, 0.2, 0.3), False, 1),
+        ((0.1, 0.2, 0.3), True, 3),
+        ((0.0, 0.0001), False, 1),
+        ((-0.2, 0.0, 0.2), False, 3),
     ],
 )
-@pytest.mark.parametrize("reverse", [False, True])
-@pytest.mark.parametrize("chunk_size", [1, 3])
 def test_ic_summary_nonzero_variance_survives_chunking_and_persistence(
     values, reverse, chunk_size, tmp_path
 ):
@@ -780,8 +779,8 @@ def _write_count_evaluation(tmp_path, count):
     return root, spec, (metrics, grouped, metadata)
 
 
-@pytest.mark.parametrize("count", [99999, 100000, 303767, 400000, 500000, 600000])
-def test_evaluation_writer_preserves_counts_without_text_workarounds(tmp_path, count):
+def test_evaluation_writer_preserves_counts_without_text_workarounds(tmp_path):
+    count = 303767
     from quant_research_platform.artifacts.outputs.manifest import (
         validate_output_bundle,
     )

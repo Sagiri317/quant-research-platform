@@ -403,7 +403,7 @@ def test_unfetched_field_is_unknown_and_other_coordinates_cannot_fill_it(
                 end_date="2025-01-01" if foreign == "end_date" else day,
                 branch="3" if foreign == "branch" else "1",
                 indicators=fields[-1:],
-                data={CODE: values[-1:]},
+                data={CODE: [110.0] if financial else values[-1:]},
             )
     before = _file_hashes(layout.raw_source_root("choice"))
     result = interim.materialize_interim_data(
@@ -419,6 +419,17 @@ def test_unfetched_field_is_unknown_and_other_coordinates_cannot_fill_it(
         assert frame.empty
         assert str(frame.report_period.dtype) == "datetime64[ns]"
     assert _file_hashes(layout.raw_source_root("choice")) == before
+    if financial and foreign == "branch":
+        with choice_session(SDK(response())) as session:
+            _snapshot(session, layout, day, [None], fields=fields[-1:])
+        repaired = _read(
+            interim.materialize_interim_data(
+                output_roots={data_id: tmp_path / "initial-null"},
+                raw_root=layout.raw_source_root("choice"),
+                data_ids=(data_id,),
+            )
+        )[data_id]
+        assert repaired[FINANCIAL_FIELDS[data_id][fields[-1]]].tolist() == [110.0]
     if foreign is None:
         with choice_session(SDK(response())) as session:
             write_css(
@@ -535,13 +546,20 @@ def test_explicit_predecessor_must_match_known_branch_history(tmp_path, after):
     assert frame.correction_disclosure_date.iloc[1] == pd.Timestamp("2020-02-01")
 
 
-def test_missing_predecessor_is_not_a_proven_all_null_snapshot(tmp_path):
+@pytest.mark.parametrize("sibling_predecessor", [False, True])
+def test_missing_predecessor_is_not_a_proven_all_null_snapshot(
+    tmp_path, sibling_predecessor
+):
     layout = StorageLayout(tmp_path)
     with choice_session(SDK(response())) as session:
         _disclosure(session, layout, events="2020-02-01")
         _snapshot(session, layout, "2020-01-30", [100.0] * 14)
         _snapshot(session, layout, "2020-02-01", [100.0] * 14)
         _snapshot(session, layout, "2020-02-01", [110.0] * 14, branch="3")
+        if sibling_predecessor:
+            _snapshot(
+                session, layout, "2020-01-31", [None], branch="3", fields=FIELDS[1:2]
+            )
     result = interim.materialize_interim_data(
         output_roots={
             key: layout.interim_data_root("choice", key)
@@ -553,6 +571,27 @@ def test_missing_predecessor_is_not_a_proven_all_null_snapshot(tmp_path):
     unknown = _read(result)["financial_balance"]
     assert unknown.total_assets.iloc[0] == 100.0
     assert pd.isna(unknown.total_assets.iloc[1])
+    sessions = pd.DatetimeIndex(["2020-01-31", "2020-02-03"])
+    disclosure = pd.DataFrame(
+        {
+            "asset_id": ["000001"],
+            "report_period": [pd.Timestamp("2019-12-31")],
+            "first_disclosure_date": [pd.Timestamp("2020-01-30")],
+        }
+    )
+    events = construct_ttm_events(
+        financial_events_from_interim(
+            {"financial_balance": unknown}, disclosure, trading_sessions=sessions
+        )
+    )
+    pit = _prepare_pit_fundamentals(events.loc[events.metric_id.eq("total_assets")])(
+        _pit_observations(
+            pd.DataFrame({"asset_id": ["000001"] * 2, "timestamp": sessions})
+        )
+    )
+    assert pit.value.iloc[0] == 100.0 and pd.isna(pit.value.iloc[1])
+    if sibling_predecessor:
+        assert unknown.total_liabilities.tolist() == [100.0, 110.0]
     with choice_session(SDK(response())) as session:
         _snapshot(session, layout, "2020-01-31", [None] * 14, branch="3")
     frame = _read(
@@ -1315,3 +1354,39 @@ def test_numeric_disclosure_dates_never_fabricate_epoch_coordinates(bad):
     actual = interim.normalize_first_disclosure_frame(frame)
     assert actual.asset_id.tolist() == ["good"]
     assert actual.attrs["source_row_counts"]["excluded_invalid_disclosure_rows"] == 1
+
+
+@pytest.mark.parametrize("predecessor", ["absent", "sibling", "null"])
+def test_sparse_predecessor_falls_back_only_for_unfetched_fields(tmp_path, predecessor):
+    layout = StorageLayout(tmp_path)
+    with choice_session(SDK(response())) as session:
+        _disclosure(session, layout, events="2020-02-01")
+        for branch in ("1", "3"):
+            _snapshot(
+                session, layout, "2020-01-30", [100.0] * len(FIELDS), branch=branch
+            )
+            _snapshot(
+                session, layout, "2020-02-01", [110.0] * len(FIELDS), branch=branch
+            )
+            if predecessor != "absent":
+                _snapshot(
+                    session,
+                    layout,
+                    "2020-01-31",
+                    [None] if predecessor == "null" else [100.0],
+                    branch=branch,
+                    fields=FIELDS[:1] if predecessor == "null" else FIELDS[1:2],
+                )
+    frame = _read(
+        interim.materialize_interim_data(
+            output_roots={"financial_balance": tmp_path / "balance"},
+            raw_root=layout.raw_source_root("choice"),
+            data_ids=("financial_balance",),
+        )
+    )["financial_balance"]
+    assert frame.total_assets.iloc[0] == 100.0
+    if predecessor == "null":
+        assert pd.isna(frame.total_assets.iloc[1])
+    else:
+        assert frame.total_assets.tolist() == [100.0, 110.0]
+    assert frame.parent_equity.tolist() == [100.0, 110.0]

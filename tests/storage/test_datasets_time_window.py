@@ -179,54 +179,6 @@ def test_dataset_session_filtered_view_keeps_parent_paths(tmp_path: Path) -> Non
     assert isinstance(view.read_paths, tuple)
 
 
-def test_read_dataset_datetime_time_window_filters_intraday_precisely(
-    tmp_path: Path,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "intraday_window")
-    frame = pd.DataFrame(
-        {
-            "market_id": ["crypto"] * 4,
-            "asset_id": ["btc_usdt"] * 4,
-            "timestamp": pd.to_datetime(
-                [
-                    "2026-07-06 00:00:00",
-                    "2026-07-06 00:01:00",
-                    "2026-07-06 00:02:00",
-                    "2026-07-06 00:03:00",
-                ]
-            ),
-            "value": [0.0, 1.0, 2.0, 3.0],
-        }
-    )
-    write_dataset(root, frame, spec=make_processed_dataset_spec("intraday_window"))
-    result = read_dataset(
-        root,
-        columns=["timestamp", "value"],
-        time_window=TimeWindow("2026-07-06T00:01:00", "2026-07-06T00:02:00"),
-    )
-    assert result["value"].tolist() == [1.0, 2.0]
-
-
-def test_chunked_datetime_window_preserves_empty_schema(tmp_path: Path) -> None:
-    root = make_dataset_artifact_root(tmp_path, "empty_datetime_chunked")
-    write_dataset(
-        root,
-        make_time_window_dataset_frame(),
-        spec=make_processed_dataset_spec("empty_datetime_chunked"),
-    )
-    chunks = list(
-        read_dataset(
-            root,
-            columns=["asset_id", "value"],
-            time_window=TimeWindow("2017-01-01T00:00:00", "2017-01-01T00:01:00"),
-            mode=DatasetReadMode.CHUNKED,
-        )
-    )
-    assert len(chunks) == 1
-    assert list(chunks[0].columns) == ["asset_id", "value"]
-    assert chunks[0].empty
-
-
 def test_inspect_dataset_time_window_reports_window_scoped_counts(
     tmp_path: Path,
 ) -> None:

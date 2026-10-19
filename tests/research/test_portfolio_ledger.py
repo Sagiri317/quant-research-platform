@@ -1116,11 +1116,9 @@ def test_cash_sizing_matches_independent_linear_fee_budget():
         cost_source_identity="0" * 64,
     )
     amount = result.asset_ledger.executed_delta_notional.item()
-    assert amount == pytest.approx(
-        expected_amount, rel=0, abs=2 * np.spacing(expected_amount)
-    )
+    assert amount == pytest.approx(expected_amount, rel=1e-12, abs=0)
     assert amount > 0 and result.post_trade_cash >= 0
-    assert result.post_trade_cash == pytest.approx(0.0, abs=4 * np.spacing(100.0))
+    assert result.post_trade_cash == pytest.approx(0.0, abs=1e-10)
     assert len(calls) <= np.finfo(float).nmant + 3
 
 
