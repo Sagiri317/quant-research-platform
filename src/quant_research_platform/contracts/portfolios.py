@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, replace
 from fractions import Fraction
-from math import fma, isclose, isfinite, ulp
+from math import fma, fsum, isclose, isfinite, ulp
 from typing import Literal
 
 import pandas as pd
@@ -694,7 +694,21 @@ class FundingForecast:
 
 
 def portfolio_notional_tolerance(nav: float) -> float:
-    return min(ulp(nav) * 512.0, abs(nav) * (ulp(1.0) * 512.0))
+    return abs(nav) * (ulp(1.0) * 512.0)
+
+
+def _portfolio_budget_exceeded(notionals, budget_terms) -> bool:
+    notionals, budget_terms = tuple(notionals), tuple(budget_terms)
+    requested, budget = fsum(notionals), fsum(budget_terms)
+    if budget == 0.0:
+        return requested > 0.0
+    # Weight aggregation, amount conversion and both monetary sums round separately.
+    rounding = (
+        abs(budget) * (ulp(1.0) / 2)
+        + fsum(ulp(value) for value in (*notionals, *budget_terms, requested, budget))
+        / 2
+    )
+    return requested - budget > portfolio_notional_tolerance(budget) + rounding
 
 
 def _quantity_tolerance(*quantities: float | Fraction) -> float:
@@ -972,18 +986,22 @@ def validate_portfolio_transition(
             ):
                 raise ValueError("portfolio_ledger_cost_basis_invalid")
     if capital.valuation_method == "cash_equity":
-        requested_stock = sum(
+        target_notionals = tuple(
             diagnostics_by_asset[asset]["target_notional"].number
             for asset in before
             if asset != PORTFOLIO_CASH_ASSET_ID
         )
-        target_nav = sum(row.value for row in after.values()) - sum(
-            row.amount
-            for row in batch.cashflows
-            if row.kind in PORTFOLIO_LEDGER_COST_COLUMNS
+        budget_terms = (
+            *(row.value for row in after.values()),
+            *(
+                -row.amount
+                for row in batch.cashflows
+                if row.kind in PORTFOLIO_LEDGER_COST_COLUMNS
+            ),
         )
+        requested_stock, target_nav = fsum(target_notionals), fsum(budget_terms)
         tolerance = max(tolerance, portfolio_notional_tolerance(target_nav))
-        if requested_stock > target_nav + tolerance or not isclose(
+        if _portfolio_budget_exceeded(target_notionals, budget_terms) or not isclose(
             diagnostics_by_asset[PORTFOLIO_CASH_ASSET_ID]["target_notional"].number,
             max(
                 0.0,

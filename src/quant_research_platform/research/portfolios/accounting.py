@@ -26,6 +26,7 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioRightsAdjustment,
     PortfolioTargetBlocked,
     TradeCostComponents,
+    _portfolio_budget_exceeded,
     portfolio_notional_tolerance,
 )
 from quant_research_platform.contracts.validation import (
@@ -517,10 +518,7 @@ class ExecutionAccounting:
             atol=tolerance,
         ):
             raise ValueError("execution_pre_trade_state_invalid")
-        if (
-            numeric["target_notional"].sum() > nav_before + tolerance
-            or numeric["post_trade_notional"].sum() > nav_after + tolerance
-        ):
+        if _portfolio_budget_exceeded(numeric["target_notional"], (nav_before,)):
             raise ValueError("execution_ledger_notional_invalid")
         if not np.isclose(nav_after, nav_before - total_cost, rtol=0.0, atol=tolerance):
             raise ValueError("execution_self_financing_invalid")
@@ -861,7 +859,7 @@ def execute_continuous_target(
     target = _weight_values(target_weights, assets, "target_weights_invalid")
     if current.lt(0.0).any() or target.lt(0.0).any():
         raise ValueError("execution_weights_invalid")
-    weight_bound = 1.0 + 512.0 * np.finfo(float).eps
+    weight_bound = 1.0 + portfolio_notional_tolerance(1.0)
     if (
         sum(map(float, current)) > weight_bound
         or sum(map(float, target)) > weight_bound

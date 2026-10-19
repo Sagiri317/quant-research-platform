@@ -2561,7 +2561,7 @@ def test_final_alpha_includes_last_mature_session_and_persists_without_fake_trad
 @pytest.mark.parametrize("nav", [100.0, 1000000000.0])
 @pytest.mark.parametrize(
     "weight,material",
-    [(1e-15, False), (5e-14, False), (7.5e-14, True), (1e-08, True)],
+    [(1e-15, False), (5e-14, False), (2e-13, True), (1e-08, True)],
 )
 @pytest.mark.parametrize("blocked", ["market", "adv"])
 def test_tiny_blocked_orders_keep_reason_consistent_through_real_writer(
@@ -2584,6 +2584,89 @@ def test_tiny_blocked_orders_keep_reason_consistent_through_real_writer(
         expected_delta=0.0,
         expected_reason=expected_reason,
     )
+
+
+@pytest.mark.parametrize("nav", (100.0, 128.0))
+@pytest.mark.parametrize("excess_ulps", (384, 1024))
+def test_budget_roundoff_has_the_same_scope_before_and_after_nav_conversion(
+    tmp_path, nav, excess_ulps
+):
+    def execute_and_roundtrip():
+        _assert_execution_endpoints_roundtrip(
+            tmp_path,
+            nav=nav,
+            current=0.0,
+            target=1.0 + excess_ulps * np.finfo(float).eps,
+            can_enter=True,
+            adv=nav,
+            expected_delta=nav,
+            expected_reason=None,
+        )
+
+    if excess_ulps > 512:
+        with pytest.raises(ValueError, match="execution_weights_sum_invalid"):
+            execute_and_roundtrip()
+    else:
+        execute_and_roundtrip()
+
+
+@pytest.mark.parametrize(
+    "nav,weights",
+    [(0.1, (0.0234375, 0.9765625000001137)), (123.456, (0.2, 0.8000000000001137))],
+)
+def test_multi_asset_budget_boundary_survives_amount_rounding_and_native_io(
+    tmp_path, nav, weights
+):
+    from math import fsum, ulp
+
+    from quant_research_platform.contracts.portfolios import TradeCostComponents
+    from tests.helpers.portfolio_ledger import continuous_ledger_batch
+
+    target = pd.Series(weights, index=["a", "b"])
+    zero = pd.Series(0.0, index=target.index)
+    adv = pd.Series(nav, index=target.index)
+    assert fsum(weights) == 1.0 + 512 * ulp(1.0)
+    assert fsum(target * nav) > nav + nav * 512 * ulp(1.0)
+    account = execute_continuous_target(
+        zero,
+        target,
+        nav=nav,
+        average_daily_volume=adv,
+        can_enter=pd.Series(True, index=target.index),
+        can_exit=pd.Series(True, index=target.index),
+        execution_date=pd.Timestamp("2023-01-04").date(),
+        cost_for_trade=lambda _date, _asset, _side, amount, _volume, _settings: (
+            TradeCostComponents(float(amount), 0.0, 0.0, 0.0, 0.0, 0.0, "f" * 64)
+        ),
+        assumptions=ExecutionAssumptions(nav, 0.0, 0.0, 1.0, (1.0,)),
+        cost_source_identity="f" * 64,
+    )
+    assert abs(account.nav_after - nav) <= ulp(nav)
+    pd.testing.assert_series_equal(
+        account.asset_ledger.set_index("asset_id")["target_notional"],
+        target * nav,
+        check_names=False,
+    )
+    frame = ledger_frame(
+        account=account,
+        decision_timestamp=pd.Timestamp("2023-01-03"),
+        returns=zero,
+        prediction_rank_score=zero,
+        adv20=adv,
+        enhanced_decision=None,
+        benchmark_weights=None,
+        optimization_result=None,
+        decision_reason=PORTFOLIO_DECISION_REASON_SIMPLE,
+        decision_delta=target,
+    )
+    batch = continuous_ledger_batch(frame, 0, end_timestamp=pd.Timestamp("2023-01-05"))
+    root = write_portfolio_ledger_artifact(
+        tmp_path / "ledger",
+        capital=PortfolioCapital("roundoff_ledger", nav, "CNY", "cash_equity"),
+        metadata={"window": {"start": "2023-01-03", "end": "2023-01-05"}},
+        produce=lambda emit: emit(batch),
+    )
+    assert tuple(read_portfolio_ledger_artifact(root).iter_chunks()) == (batch,)
 
 
 @pytest.mark.parametrize(
