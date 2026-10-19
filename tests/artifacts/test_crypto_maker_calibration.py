@@ -1187,6 +1187,8 @@ def test_maker_validator_rejects_isolated_event_and_sample_damage(
 
 
 def test_nullable_trade_price_full_table_and_batches_preserve_exact_integer(tmp_path):
+    from quant_research_platform.markets.implementations.crypto import portfolio
+
     member = "crypto_maker_events.parquet"
     exact_price = 2**53 + 1
     rows = [
@@ -1214,3 +1216,7 @@ def test_nullable_trade_price_full_table_and_batches_preserve_exact_integer(tmp_
         assert pd.isna(frame.price_index.iloc[1])
         streamed = pd.concat(artifact._batches(member), ignore_index=True)
         pd.testing.assert_frame_equal(frame, streamed, check_exact=True)
+    events = list(portfolio._calibration_events(artifact, "f"))
+    assert [event.event_at for event in events] == [0, 1]
+    assert [event.price_index for event in events] == [exact_price, None]
+    assert [event.visible_quantity for event in events] == [1.0, 1.0]

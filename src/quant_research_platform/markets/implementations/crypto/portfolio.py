@@ -1550,7 +1550,7 @@ def backtest_maker(config):
 def _calibration_rows(artifact, member, filters=()):
     with closing_iterator(artifact._batches(member, filters=list(filters))) as batches:
         for frame in batches:
-            for _yield_value in frame.itertuples(index=False):
+            for _yield_value in frame.astype(object).itertuples(index=False):
                 try:
                     yield _yield_value
                 except GeneratorExit:
