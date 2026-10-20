@@ -1,5 +1,6 @@
 """Behavioral checks for factual, independent research plots."""
 
+import json
 import math
 import os
 import subprocess
@@ -533,27 +534,39 @@ def test_curve_clock_distinguishes_crypto_epoch_from_daily_civil_dates(
 
 
 @pytest.mark.parametrize(
-    "timestamps,local_hours",
+    "timestamps,epoch_seconds,local_hours",
     [
         (
-            ["2026-11-01T05:30:00Z", "2026-11-01T06:00:00Z", "2026-11-01T06:30:00Z"],
+            [
+                "2026-11-01T01:30:00-04:00",
+                "2026-11-01T01:00:00-05:00",
+                "2026-11-01T01:30:00-05:00",
+            ],
+            [1793511000, 1793512800, 1793514600],
             [1, 1, 1],
         ),
         (
-            ["2026-03-08T06:30:00Z", "2026-03-08T07:00:00Z", "2026-03-08T07:30:00Z"],
+            [
+                "2026-03-08T01:30:00-05:00",
+                "2026-03-08T03:00:00-04:00",
+                "2026-03-08T03:30:00-04:00",
+            ],
+            [1772951400, 1772953200, 1772955000],
             [1, 3, 3],
         ),
     ],
 )
 @pytest.mark.parametrize("aware", [True, False])
 def test_plot_clocks_preserve_dst_instants_and_naive_wall_time(
-    timestamps, local_hours, aware
+    tmp_path, monkeypatch, timestamps, epoch_seconds, local_hours, aware
 ):
     from matplotlib.dates import num2date
 
-    times = pd.to_datetime(timestamps)
+    # Absolute instants are independent Unix-second oracles, not parser output.
+    times = pd.to_datetime(epoch_seconds, unit="s", utc=True)
     if not aware:
         times = times.tz_localize(None)
+        timestamps = times.astype(str).tolist()
     data = curve((100, 110, 105))
     data["valuation_method"] = "linear_perpetual" if aware else "cash_equity"
     for point, timestamp in zip(data["points"], times, strict=True):
@@ -561,17 +574,45 @@ def test_plot_clocks_preserve_dst_instants_and_naive_wall_time(
     _, curve_axes = plots.plot_portfolio_curve(
         data, sample_role="test", timezone="America/New_York"
     )
-    _, series_axes = plots.plot_series(
-        [
-            dict(timestamp=timestamp, value=value)
-            for timestamp, value in zip(times, (100, 110, 105), strict=True)
-        ],
-        x_column="timestamp",
-        value_columns=["value"],
-        title="时间",
-        units="数值",
-        **{**TIMED, "timezone": "America/New_York"},
+    series_axes = []
+    original = plots.plot_series
+
+    def observed(*args, **kwargs):
+        figure, axes = original(*args, **kwargs)
+        series_axes.extend(axes)
+        return figure, axes
+
+    monkeypatch.setattr(plots, "plot_series", observed)
+    source = tmp_path / "clocks.json"
+    source.write_text(
+        json.dumps(
+            {
+                "rows": [
+                    dict(timestamp=timestamp, value=value)
+                    for timestamp, value in zip(
+                        timestamps, (100, 110, 105), strict=True
+                    )
+                ]
+            }
+        )
     )
+    before = plt.get_fignums()
+    output = plots.plot(
+        dict(
+            kind="series",
+            inputs=str(source),
+            output=str(tmp_path / "clocks.png"),
+            x_column="timestamp",
+            value_columns=["value"],
+            title="时间",
+            units="数值",
+            sample_role="test",
+            timezone="America/New_York",
+        )
+    )
+    assert output.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    assert output.stat().st_size > 1000
+    assert plt.get_fignums() == before
     for axis in [*curve_axes, *series_axes]:
         line = axis.lines[0]
         coordinates = line.get_xdata(orig=False)
@@ -579,6 +620,9 @@ def test_plot_clocks_preserve_dst_instants_and_naive_wall_time(
             np.diff(coordinates) * 86400, [1800, 1800], atol=1e-6
         )
         displayed = pd.DatetimeIndex(line.get_xdata())
+        np.testing.assert_array_equal(
+            displayed.as_unit("ns").asi8, np.array(epoch_seconds) * 10**9
+        )
         assert displayed.is_monotonic_increasing and displayed.is_unique
         assert displayed.hour.tolist() == (
             local_hours if aware else times.hour.tolist()
@@ -589,6 +633,47 @@ def test_plot_clocks_preserve_dst_instants_and_naive_wall_time(
         assert axis.xaxis.get_major_locator().tz == formatter._tz
         if aware and timestamps[0].startswith("2026-11"):
             assert [value.fold for value in labels] == [0, 1, 1]
+
+
+@pytest.mark.parametrize(
+    "second,error",
+    [
+        ("2026-11-01T06:30:00", None),
+        ("2026-11-01T05:30:00+00:00", "plot_axis_invalid"),
+    ],
+    ids=["mixed-awareness", "same-instant"],
+)
+def test_native_series_rejects_ambiguous_or_duplicate_clocks(tmp_path, second, error):
+    source = tmp_path / "invalid.json"
+    source.write_text(
+        json.dumps(
+            {
+                "rows": [
+                    dict(timestamp=timestamp, value=value)
+                    for timestamp, value in zip(
+                        ["2026-11-01T05:30:00Z", second], [1.0, 2.0], strict=True
+                    )
+                ]
+            }
+        )
+    )
+    output = tmp_path / "invalid.png"
+    before = plt.get_fignums()
+    with pytest.raises(ValueError, match=error):
+        plots.plot(
+            dict(
+                kind="series",
+                inputs=str(source),
+                output=str(output),
+                timezone="America/New_York",
+                x_column="timestamp",
+                value_columns=["value"],
+                title="时间",
+                units="数值",
+            )
+        )
+    assert not output.exists()
+    assert plt.get_fignums() == before
 
 
 def test_series_long_table_group_filter_and_physical_projection(tmp_path, monkeypatch):
@@ -1075,9 +1160,11 @@ def test_all_null_series_keeps_real_axis_and_one_annotation(categorical):
 @pytest.mark.parametrize("kind", ["returns", "factor_ic", "activity", "series"])
 @pytest.mark.parametrize("values", [[None, None, None], [None, 0.2, None]])
 def test_date_panels_keep_unavailable_edges_without_fabricating_values(kind, values):
-    from matplotlib.dates import date2num
-
-    times = pd.date_range("2026-03-07T12:00", periods=3, tz="UTC")
+    times = [
+        "2026-03-07T07:00:00-05:00",
+        "2026-03-08T08:00:00-04:00",
+        "2026-03-09T08:00:00-04:00",
+    ]
     common = {**TIMED, "timezone": "America/New_York"}
     if kind == "returns":
         rows = [
@@ -1132,7 +1219,7 @@ def test_date_panels_keep_unavailable_edges_without_fabricating_values(kind, val
             units="数值",
             **common,
         )
-    expected = date2num(times)
+    expected = np.array([1772884800, 1772971200, 1773057600]) / 86400
     for axis in axes:
         np.testing.assert_array_equal(axis.dataLim.intervalx, expected[[0, -1]])
         if kind in {"returns", "activity"}:
