@@ -15,6 +15,7 @@ from textwrap import fill
 import pandas as pd
 
 from quant_research_platform.artifacts.statistics import _COMPARISON_IDENTITY
+from quant_research_platform.contracts.validation import strict_timestamp_series
 
 
 def _styled(function):
@@ -200,7 +201,15 @@ def _time_axis(axis, timezone, times):
 def _times(values, timezone):
     if not timezone:
         raise ValueError("plot_timezone_required")
-    times = pd.DatetimeIndex(pd.to_datetime(values))
+    try:
+        times = pd.DatetimeIndex(pd.to_datetime(values))
+    except (TypeError, ValueError, OverflowError):
+        values = pd.Series(values)
+        times = pd.DatetimeIndex(
+            strict_timestamp_series(values, error="plot_timestamp_invalid")
+        )
+        if pd.Timestamp(values.iloc[0]).utcoffset() is not None:
+            times = times.tz_localize("UTC")
     if times.hasnans:
         raise ValueError("plot_timestamp_invalid")
     if times.tz is not None:
@@ -825,9 +834,12 @@ def plot_series(
         frame = pd.DataFrame(items)
         if set([x_column, *value_columns]) - set(frame):
             raise ValueError("plot_columns_missing")
-        if frame[x_column].isna().any() or frame[x_column].duplicated().any():
+        if frame[x_column].isna().any():
             raise ValueError("plot_axis_invalid")
-        x = range(len(frame)) if categorical else _times(frame[x_column], timezone)
+        x = frame[x_column] if categorical else _times(frame[x_column], timezone)
+        if x.duplicated().any():
+            raise ValueError("plot_axis_invalid")
+        x = range(len(frame)) if categorical else x
         if not categorical and not x.is_monotonic_increasing:
             raise ValueError("plot_timestamp_order_invalid")
         if key:

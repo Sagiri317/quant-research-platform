@@ -34,8 +34,10 @@ def test_numeric_and_timedelta_dtype_cannot_be_dates(values):
 
 
 def test_datetime_fast_path_keeps_utc_nanoseconds_and_index():
-    values = pd.Series(pd.to_datetime(["2025-01-01", None], utc=True), index=[3, 7])
+    values = pd.Series(
+        pd.to_datetime(["2025-01-01T00:00:00.123456789", None], utc=True), index=[3, 7]
+    )
     result = strict_timestamp_series(values, error="date_invalid", errors="coerce")
     assert result.index.equals(values.index)
-    assert result.iloc[0] == pd.Timestamp("2025-01-01")
+    assert result.iloc[0] == pd.Timestamp("2025-01-01T00:00:00.123456789")
     assert pd.isna(result.iloc[1])
