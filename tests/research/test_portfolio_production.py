@@ -1079,6 +1079,64 @@ def test_enhanced_calibration_excludes_research_marks(tmp_path, monkeypatch):
     assert all(checked.values())
 
 
+def test_enhanced_calibration_keeps_suspended_weekly_endpoints(tmp_path, monkeypatch):
+    frames, fees, window, candidate = _enhanced_inputs(monkeypatch)
+    panel = frames["panel"]
+    dates = pd.date_range(panel.timestamp.min(), panel.timestamp.max())
+    frames["calendar"] = pd.DataFrame(
+        {
+            "calendar_date": dates,
+            "source_market_type": 1,
+            "is_trading_day": dates.dayofweek < 5,
+        }
+    )
+    suspended = (
+        panel.asset_id.eq("b")
+        & panel.timestamp.dt.dayofweek.eq(0)
+        & panel.timestamp.gt(panel.timestamp.min())
+    )
+    for column, prior in (
+        ("open", "close"),
+        ("close", "close"),
+        ("adj_open", "adj_close"),
+        ("adj_close", "adj_close"),
+    ):
+        panel.loc[suspended, column] = panel.groupby("asset_id")[prior].shift()[
+            suspended
+        ]
+    panel.loc[suspended, "is_trading"] = False
+    panel.loc[suspended, "amount"] = 0.0
+    completed = []
+    original = production._completed_calibration_rows
+
+    def observe(pending, endpoint):
+        rows = original(pending, endpoint)
+        completed.extend(rows)
+        return rows
+
+    monkeypatch.setattr(production, "_completed_calibration_rows", observe)
+    final = []
+    chunks, _ = _build_producer(
+        tmp_path,
+        monkeypatch,
+        frames=frames,
+        fee_frame=fees,
+        output_window=window,
+        candidate=candidate,
+        input_window=TimeWindow("2022-11-14", "2023-01-10"),
+        formal_dataset_window=TimeWindow("2022-11-14", "2023-01-10"),
+        prediction_window=TimeWindow("2022-11-14", "2023-01-10"),
+        final_calibrations=final,
+    )
+    assert list(chunks)
+    assert len(completed) == 14
+    calibration = final[0]["calibration"]
+    assert calibration["coverage"] == 1.0
+    assert calibration["valid_rebalance_dates"] == 7
+    # Both consecutive Monday carries use Fridays: five compounding sessions.
+    assert calibration["slope"] == pytest.approx(1.003**5 - 1.001**5, rel=1e-12)
+
+
 def test_enhanced_initial_allocation_cannot_create_unquoted_rights(
     tmp_path, monkeypatch
 ):

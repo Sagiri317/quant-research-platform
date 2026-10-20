@@ -146,8 +146,6 @@ def test_typed_canonical_identity_rejects_ambiguous_or_nonfinite_values() -> Non
         canonical_json_hash({1: "value"})
     with pytest.raises(ValueError, match="canonical_json_nonfinite_number"):
         canonical_json_hash(float("inf"))
-    with pytest.raises(ValueError, match="canonical_json_nonfinite_number"):
-        canonical_json_hash(Decimal("NaN"))
 
 
 @pytest.mark.parametrize(

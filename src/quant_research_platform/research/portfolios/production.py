@@ -734,9 +734,16 @@ def backtest_a_share(
             current_cross: pd.DataFrame | None = None
             if enhanced:
                 assert factor_risk is not None
-                observed_valuation = view.valuation.loc[
-                    view.valuation.research_open_mark_at.isna()
+                # The mark producer distinguishes normal carries from accounting-only marks.
+                calibration_valuation = view.valuation.loc[
+                    view.valuation.open.gt(0)
                     & view.valuation.adj_open.notna()
+                    & (
+                        view.valuation.research_open_mark_at.isna()
+                        | view.valuation.research_open_mark_kind.isin(
+                            ("open", "close", "corporate_action_carry")
+                        )
+                    )
                 ]
                 risk_frames = []
                 for columns, context_frames in (
@@ -790,7 +797,7 @@ def backtest_a_share(
                 ):
                     calibration_rows.extend(
                         _completed_calibration_rows(
-                            pending_calibration, observed_valuation
+                            pending_calibration, calibration_valuation
                         )
                     )
                     pending_calibration = None
@@ -801,7 +808,7 @@ def backtest_a_share(
                 ):
                     pending_calibration = (
                         waiting_alpha[0],
-                        observed_valuation.set_index(["asset_id", "listing_date"])[
+                        calibration_valuation.set_index(["asset_id", "listing_date"])[
                             "adj_open"
                         ].astype("float64"),
                         waiting_alpha[1],

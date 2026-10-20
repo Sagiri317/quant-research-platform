@@ -638,3 +638,141 @@ def test_empty_research_valuation_keeps_boolean_lifecycle_masks():
     assert actual.empty
     assert {"asset_id", "open", "close"}.issubset(actual.columns)
     assert marks.last.empty
+
+
+@pytest.mark.parametrize(
+    "fault,rights_proved",
+    [(None, True), ("confirmed_suspension", True), ("confirmed_suspension", False)],
+)
+def test_alpha_uses_native_normal_carry_endpoints(
+    tmp_path, monkeypatch, fault, rights_proved
+):
+    from quant_research_platform.research.portfolios.accounting import (
+        frozen_alpha_calibration,
+    )
+    from tests.helpers.portfolio_inputs import _interim_specs, _processed_specs
+
+    layout, _, _, panel = _native_inputs(tmp_path / "inputs", fault=fault)
+    # Raw shares have a different scale/path; alpha must use adjusted endpoints.
+    panel.loc[:, ["open", "close"]] = 50.0
+    specs = _processed_specs()
+    layout["panel"] = tmp_path / "raw-scale-panel"
+    write_dataset(layout["panel"], panel, spec=specs.get("market_panel_1d"))
+    layout["benchmark"] = tmp_path / "benchmark"
+    weights = panel.loc[
+        panel.asset_id.str.startswith("b"), ["market_id", "asset_id", "timestamp"]
+    ].assign(benchmark_id="csi500", weight=1 / 6)
+    write_dataset(layout["benchmark"], weights, spec=specs.get("benchmark_weights"))
+    risk_root = tmp_path / "risk"
+    write_dataset(
+        risk_root,
+        panel[["market_id", "asset_id", "timestamp"]].assign(
+            beta_252d=1.0, residual_volatility_60d=0.1
+        ),
+        spec=specs.get("market_model_factors"),
+    )
+    layout["risk_context"] = (risk_root,)
+    if fault == "confirmed_suspension":
+        action_spec = _interim_specs().get("corporate_actions")
+        layout["corporate_actions"] = tmp_path / "dividend"
+        write_dataset(
+            layout["corporate_actions"],
+            pd.DataFrame(
+                [
+                    dict(
+                        source_asset_id="a0",
+                        timestamp=pd.Timestamp("2023-01-03"),
+                        kind="CA",
+                        market_type=1,
+                        announcement_date=pd.Timestamp("2022-12-30"),
+                        settlement_date=pd.Timestamp("2023-01-05"),
+                        amount=10.0,
+                        settlement_date_unresolved=not rights_proved,
+                    )
+                ]
+            ).reindex(columns=action_spec.required_columns),
+            spec=action_spec,
+        )
+    candidate = PortfolioCandidateSpec(
+        selection_group="global",
+        prediction_selector="champion",
+        candidate_id="native_carry_alpha",
+        construction="benchmark_enhanced",
+        rebalance_schedule="daily",
+        top_quantile=None,
+        benchmark_id="csi500",
+        risk_style_columns=("beta_252d",),
+    )
+
+    class Predictions:
+        def values_for_frame(self, frame, **kwargs):
+            return [float(asset.startswith("a")) for asset in frame.asset_id], [
+                True
+            ] * len(frame)
+
+        def coverage_counts(self):
+            return 0, 0
+
+    completed = {}
+    original = production._completed_calibration_rows
+
+    def observe(pending, endpoint):
+        if (
+            fault == "confirmed_suspension"
+            and endpoint.timestamp.eq("2023-01-03").any()
+        ):
+            if rights_proved:
+                carried = endpoint.set_index("asset_id").loc["a0"]
+                assert carried.research_open_mark_kind == "corporate_action_carry"
+                assert carried.open == 40.0
+                assert carried.adj_open == 110.0
+            else:
+                assert "a0" not in set(endpoint.asset_id)
+        rows = original(pending, endpoint)
+        completed[pending[2]] = rows
+        return rows
+
+    monkeypatch.setattr(production, "_completed_calibration_rows", observe)
+    final = []
+
+    def produce(emit):
+        for batch in production.backtest_a_share(
+            candidate=candidate,
+            inputs=layout,
+            output_window=TimeWindow("2022-12-30", "2023-01-06"),
+            input_window=TimeWindow("2022-12-01", "2023-01-06"),
+            formal_dataset_window=TimeWindow("2022-12-01", "2023-01-06"),
+            prediction_lookup=Predictions(),
+            assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,)),
+            on_final_calibration=final.append,
+        ):
+            emit(batch)
+
+    root = write_portfolio_ledger_artifact(
+        tmp_path / "ledger",
+        capital=PortfolioCapital(candidate.candidate_id, 100.0, "CNY", "cash_equity"),
+        metadata={"window": {"start": "2022-12-30", "end": "2023-01-06"}},
+        produce=produce,
+        final_calibration=lambda: final[0],
+    )
+    # Jan 2 open 100 -> Jan 3 carried 110; then carried 110 -> 110.
+    # The latter interval requires a permitted carry at both entry and maturity.
+    for signal, expected in (("2022-12-30", 0.1), ("2023-01-02", 0.0)):
+        rows = completed[pd.Timestamp(signal)]
+        assert len(rows) == (12 if rights_proved else 11)
+        assert [
+            row["holding_return"] for row in rows if row["prediction_rank_score"] == 1.0
+        ] == pytest.approx(
+            [expected] * (6 if rights_proved else 5), rel=1e-12, abs=1e-14
+        )
+    saved = read_portfolio_ledger_artifact(root)
+    assert len(list(saved.iter_chunks())) == 4
+    restored, cutoff = frozen_alpha_calibration(
+        saved.final_alpha_calibration,
+        cutoff="2023-01-06",
+        selection_group="global",
+        rebalance_schedule="daily",
+    )
+    assert restored.status == "DEFINED"
+    assert cutoff == "2023-01-06"
+    assert saved.final_alpha_calibration == final[0]
