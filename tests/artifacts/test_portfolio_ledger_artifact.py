@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import asdict, replace
+from dataclasses import asdict, fields, replace
+from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -1553,7 +1554,8 @@ def test_repeated_partial_fills_preserve_registered_rights_through_native_roundt
     assert final.locked_quantity == final.receivable == 0
 
 
-def test_typed_portfolio_ledger_rejects_boolean_numeric():
+@pytest.mark.parametrize("invalid", [True, None, np.nan, np.inf, "1.0", Fraction(1, 2)])
+def test_typed_portfolio_ledger_rejects_invalid_numeric_fields(invalid):
     from tests.helpers.portfolio_ledger import continuous_ledger_batch
 
     frame = _session(
@@ -1567,10 +1569,16 @@ def test_typed_portfolio_ledger_rejects_boolean_numeric():
         post_cash=0.0,
     )
     batch = continuous_ledger_batch(frame, 0, end_timestamp=pd.Timestamp("2019-01-02"))
-    assert any(row.name == "adv20" for row in batch.diagnostics)
-    diagnostics = tuple(
-        replace(row, number=True) if row.name == "adv20" else row
-        for row in batch.diagnostics
-    )
-    with pytest.raises(ValueError, match="portfolio_ledger_numeric_invalid"):
-        replace(batch, diagnostics=diagnostics)
+    for table in ("trades", "cashflows", "valuations", "diagnostics"):
+        rows = getattr(batch, table)
+        assert rows
+        for field in fields(rows[0]):
+            if field.type not in ("float", "float | Fraction", "float | None"):
+                continue
+            if invalid is None and field.type == "float | None":
+                continue
+            if isinstance(invalid, Fraction) and field.type == "float | Fraction":
+                continue
+            changed = replace(rows[0], **{field.name: invalid})
+            with pytest.raises(ValueError, match="portfolio_ledger_numeric_invalid"):
+                replace(batch, **{table: (changed, *rows[1:])})

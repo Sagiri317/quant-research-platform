@@ -214,44 +214,48 @@ class PortfolioLedgerBatch:
     def __post_init__(self) -> None:
         if type(self.sequence) is not int or self.sequence < 0:
             raise ValueError("portfolio_ledger_sequence_invalid")
-        for rows, kind in (
-            (self.trades, ExecutedTrade),
-            (self.cashflows, PortfolioCashFlow),
-            (self.valuations, PortfolioValuation),
-            (self.diagnostics, PortfolioDiagnostic),
-            (self.rights_adjustments, PortfolioRightsAdjustment),
+        for rows, kind, numeric_fields in (
+            (self.trades, ExecutedTrade, ("quantity", "notional")),
+            (self.cashflows, PortfolioCashFlow, ("amount",)),
+            (
+                self.valuations,
+                PortfolioValuation,
+                (
+                    "quantity",
+                    "value",
+                    "mark_price",
+                    "cost_basis",
+                    "receivable",
+                    "locked_quantity",
+                ),
+            ),
+            (self.diagnostics, PortfolioDiagnostic, ("number",)),
+            (
+                self.rights_adjustments,
+                PortfolioRightsAdjustment,
+                (
+                    "quantity_before",
+                    "quantity_after",
+                    "cash_amount",
+                    "target_quantity",
+                    "receivable_before",
+                    "receivable_after",
+                    "locked_quantity_before",
+                    "locked_quantity_after",
+                    "entitlement_quantity",
+                ),
+            ),
         ):
             if type(rows) is not tuple or any(type(row) is not kind for row in rows):
                 raise ValueError("portfolio_ledger_table_invalid")
             if any(type(row.asset_id) is not str or not row.asset_id for row in rows):
                 raise ValueError("portfolio_ledger_asset_invalid")
             for row in rows:
-                for name in (
-                    "quantity",
-                    "notional",
-                    "amount",
-                    "value",
-                    "mark_price",
-                    "cost_basis",
-                    "number",
-                    "quantity_before",
-                    "quantity_after",
-                    "cash_amount",
-                    "target_quantity",
-                    "receivable",
-                    "receivable_before",
-                    "receivable_after",
-                    "locked_quantity",
-                    "locked_quantity_before",
-                    "locked_quantity_after",
-                    "entitlement_quantity",
-                ):
-                    if not hasattr(row, name):
-                        continue
+                for name in numeric_fields:
                     value = getattr(row, name)
                     if value is None and name != "number":
                         raise ValueError("portfolio_ledger_numeric_invalid")
-                    if isinstance(value, Fraction) and name in {
+                    if name in {
                         "quantity",
                         "quantity_before",
                         "quantity_after",
@@ -261,7 +265,7 @@ class PortfolioLedgerBatch:
                         "locked_quantity_before",
                         "locked_quantity_after",
                         "entitlement_quantity",
-                    }:
+                    } and isinstance(value, Fraction):
                         continue
                     if value is not None and (
                         isinstance(value, bool)

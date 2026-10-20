@@ -1,5 +1,8 @@
 """Publication validates cross-batch identities without replaying child ledgers."""
 
+from dataclasses import fields, replace
+from fractions import Fraction
+
 import pandas as pd
 import pytest
 
@@ -50,6 +53,24 @@ def _batch(sequence, *, repeated):
         if repeated == "rights_adjustment"
         else (),
     )
+
+
+@pytest.mark.parametrize(
+    "invalid", [True, None, float("nan"), float("inf"), "1.0", Fraction(1, 2)]
+)
+def test_rights_adjustment_rejects_invalid_numeric_fields(invalid):
+    batch = _batch(0, repeated="rights_adjustment")
+    event = batch.rights_adjustments[0]
+    for field in fields(event):
+        if field.type not in ("float", "float | Fraction"):
+            continue
+        if isinstance(invalid, Fraction) and field.type == "float | Fraction":
+            continue
+        with pytest.raises(ValueError, match="portfolio_ledger_numeric_invalid"):
+            replace(
+                batch,
+                rights_adjustments=(replace(event, **{field.name: invalid}),),
+            )
 
 
 @pytest.mark.parametrize("kind", ["cashflow", "rights_adjustment"])
