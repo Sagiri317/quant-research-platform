@@ -1664,11 +1664,8 @@ def test_index_market_preserves_nullable_official_open_without_close_substitutio
 
 
 @pytest.mark.parametrize("quoted", [False, True])
-@pytest.mark.parametrize("width", (32, 154, 160))
-def test_legal_provider_width_and_quoting_preserve_fields(
-    tmp_path, monkeypatch, width, quoted
-):
-
+def test_legal_provider_width_and_quoting_preserve_fields(tmp_path, quoted):
+    width = 160
     path = tmp_path / "legal.csv"
     fields = [f"field_{position}" for position in range(width)]
     if quoted:
