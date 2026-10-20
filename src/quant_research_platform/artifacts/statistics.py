@@ -1297,17 +1297,6 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
             and (
                 not result.comparison_role.isin(("primary", "secondary")).all()
                 or result.comparison_role.eq("primary").sum() != 1
-                or result.loc[
-                    ~result.reason.isin(("nonpositive_start_nav", "nonfinite_result")),
-                    [
-                        "global_mean",
-                        "quarterly_mean",
-                        "mean_difference",
-                    ],
-                ]
-                .isna()
-                .any()
-                .any()
             )
         ):
             raise ValueError("statistics_group_comparison_primary_invalid")

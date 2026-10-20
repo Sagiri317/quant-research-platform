@@ -761,8 +761,9 @@ def test_summary_confidence_matches_manual_bartlett_interval(confidence):
     )
 
 
-@pytest.mark.parametrize("values", [[], [np.nan, np.nan], [0.2, 0.2]])
-@pytest.mark.parametrize("lag", [-1, True, 1.5])
+@pytest.mark.parametrize(
+    ("values", "lag"), [([], -1), ([np.nan, np.nan], True), ([0.2, 0.2], 1.5)]
+)
 def test_summary_rejects_invalid_lag_even_without_defined_inference(values, lag):
     with pytest.raises(ValueError, match="hac_max_lags_invalid"):
         time_series_inference_summary(

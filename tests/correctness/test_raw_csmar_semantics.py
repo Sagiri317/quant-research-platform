@@ -3219,13 +3219,21 @@ def test_index_info_unusable_dates_are_local_to_timed_rows(
 
 
 @pytest.mark.parametrize(
-    "dates",
+    ("dates", "expected_dates"),
     (
-        ("2020-01-02", "2020/01/03", "20200104", "", None),
-        ("2020-01-02T08:00:00+08:00", "2020-01-03T00:00:00Z", "", None),
+        (
+            ("2020-01-02", "2020/01/03", "20200104", "", None),
+            ("2020-01-02", "2020-01-03", "2020-01-04", None, None),
+        ),
+        (
+            ("2020-01-02T08:00:00+08:00", "2020-01-03T00:00:00Z", "", None),
+            ("2020-01-02", "2020-01-03", None, None),
+        ),
     ),
 )
-def test_index_date_vectorized_valid_values_match_existing_owner(dates):
+def test_index_date_vectorization_preserves_dates_and_missingness(
+    dates, expected_dates
+):
     values = pd.Series(dates, dtype="string")
     frame = pd.DataFrame(
         {
@@ -3236,7 +3244,7 @@ def test_index_date_vectorized_valid_values_match_existing_owner(dates):
         }
     )
     normalized = interim.normalize_raw_frame(frame, "index_info")
-    expected = interim._parse_optional_csmar_date(values)
+    expected = pd.Series(expected_dates, dtype="datetime64[ns]")
     pd.testing.assert_series_equal(normalized.start_date, expected, check_names=False)
     assert normalized.attrs["source_row_counts"]["invalid_start_date_rows"] == 0
 

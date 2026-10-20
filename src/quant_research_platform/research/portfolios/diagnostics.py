@@ -2346,6 +2346,9 @@ def _group_portfolio_comparison(matrix, config, *, daily_complete):
     rows = []
     for index, candidate in enumerate(candidate_ids):
         values = differences[index].to_numpy(dtype="float64")
+        pair = matrix[[f"global_{candidate}", f"quarterly_{candidate}"]]
+        paired = np.isfinite(pair).all(axis=1)
+        pair = pair.loc[paired]
         row = {
             "portfolio_id": candidate,
             "comparison_role": "primary"
@@ -2353,9 +2356,9 @@ def _group_portfolio_comparison(matrix, config, *, daily_complete):
             else "secondary",
             "sample_role": access,
             "observation_count": len(values),
-            "global_mean": float(np.mean(matrix[f"global_{candidate}"])),
-            "quarterly_mean": float(np.mean(matrix[f"quarterly_{candidate}"])),
-            "mean_difference": float(np.mean(values)),
+            "global_mean": float(pair.iloc[:, 0].mean()),
+            "quarterly_mean": float(pair.iloc[:, 1].mean()),
+            "mean_difference": float(values[paired].mean()) if paired.any() else np.nan,
             "hac_lag": statistics["hac_lag"],
             "bootstrap_block_size": statistics["bootstrap_block"],
             "bootstrap_repetitions": statistics["bootstrap_repetitions"],
