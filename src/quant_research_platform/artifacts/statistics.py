@@ -761,6 +761,11 @@ _TIMESTAMP_COLUMNS = {
 STATISTICS_TABLE_COLUMNS = _TABLE_COLUMNS
 
 
+def _validate_table_schema(schema, member):
+    if schema != _ARROW_SCHEMAS[member]:
+        raise ValueError("statistics_table_schema_invalid")
+
+
 @dataclass(frozen=True, slots=True)
 class StatisticsArtifact:
     metadata: dict
@@ -773,7 +778,11 @@ class StatisticsArtifact:
             raise ValueError("statistics_table_member_invalid")
         with closing_iterator(
             iter_declared_parquet_member_batches(
-                self.root / member, parquet_filters=filters
+                self.root / member,
+                parquet_filters=filters,
+                metadata_observer=lambda metadata: _validate_table_schema(
+                    metadata.schema, member
+                ),
             )
         ) as frames:
             for frame in frames:
@@ -784,8 +793,7 @@ class StatisticsArtifact:
         if member not in self._members:
             raise ValueError("statistics_table_member_invalid")
         with _opened_parquet(self.root / member) as (parquet, _handle):
-            if parquet.schema_arrow != _ARROW_SCHEMAS[member]:
-                raise ValueError("statistics_table_schema_invalid")
+            _validate_table_schema(parquet.schema_arrow, member)
             frame = parquet.read().to_pandas(integer_object_nulls=True)
         yield _validated_frame(frame, member=member, metadata=self.metadata)
 

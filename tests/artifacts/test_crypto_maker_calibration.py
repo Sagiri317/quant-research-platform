@@ -394,6 +394,73 @@ def test_mature_shared_maker_tape_round_trip_and_rejects_corruption(
 
 
 @pytest.mark.parametrize(
+    "name,column,empty",
+    [
+        ("samples", "quote_quantity", False),
+        ("events", "quantity", False),
+        ("events", "quantity", True),
+    ],
+)
+def test_maker_native_schema_is_checked_before_stream_filtering(
+    tmp_path, maker_calibration_tables, name, column, empty
+):
+    from quant_research_platform.markets.implementations.crypto.portfolio import (
+        validate_maker_calibration,
+    )
+
+    tables, metadata = maker_calibration_tables
+    table_name = f"crypto_maker_{name}"
+    member = f"{table_name}.parquet"
+    tables[table_name][column] = tables[table_name][column].astype("float32")
+    if empty:
+        for tape in ("crypto_maker_samples", "crypto_maker_events"):
+            tables[tape] = tables[tape].iloc[:0]
+        summary = tables["crypto_maker_calibration"]
+        summary[["sample_count", "zero_fill_count", "post_only_rejection_count"]] = 0
+        summary["status"] = "UNDEFINED"
+        summary["reason"] = "insufficient_calibration_samples"
+    root = statistics.write_statistics_artifact(
+        tmp_path / "calibration",
+        metadata=metadata,
+        tables=tables,
+        table_group="crypto_maker_calibration",
+        validate_tables=validate_maker_calibration,
+    )
+    artifact = statistics.read_statistics_artifact(
+        root, validate_tables=validate_maker_calibration
+    )
+    with artifact.table(member) as frame:
+        assert len(frame) == len(tables[table_name])
+    assert sum(len(frame) for frame in artifact._batches(member)) == len(
+        tables[table_name]
+    )
+    absent_fold = [("fold_id", "==", "absent")]
+    assert list(artifact._batches(member, filters=absent_fold)) == []
+
+    # The writer normalizes input; only an external physical rewrite is invalid.
+    native = pq.read_table(root / member)
+    assert native.schema.field(column).type == pa.float64()
+    index = native.schema.get_field_index(column)
+    changed_schema = native.schema.set(
+        index, native.schema.field(column).with_type(pa.float32())
+    )
+    rewritten = native.cast(changed_schema)
+    assert rewritten.to_pylist() == native.to_pylist()
+    pq.write_table(rewritten, root / member)
+
+    with pytest.raises(ValueError, match="^statistics_table_schema_invalid$"):
+        with artifact.table(member):
+            pass
+    for filters in (None, absent_fold):
+        with pytest.raises(ValueError, match="^statistics_table_schema_invalid$"):
+            list(artifact._batches(member, filters=filters))
+    with pytest.raises(ValueError, match="^statistics_table_schema_invalid$"):
+        statistics.read_statistics_artifact(
+            root, validate_tables=validate_maker_calibration
+        )
+
+
+@pytest.mark.parametrize(
     "finish", ["normal", "writer_failure", "trade_gap", "book_gap", "visible_gap"]
 )
 def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
