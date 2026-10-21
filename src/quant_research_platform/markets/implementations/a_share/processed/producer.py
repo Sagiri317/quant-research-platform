@@ -1041,14 +1041,15 @@ def _processed_axis(
                     )
                 frame = frame.loc[frame["filling_flag"].ne(2)]
             if include_asset_sessions:
-                for asset, group in frame.groupby(asset_column, sort=False):
-                    mask = asset_session_masks.get(asset, 0)
-                    for timestamp in group.timestamp:
-                        position = session_positions.setdefault(
-                            timestamp, len(session_positions)
-                        )
-                        mask |= 1 << position
-                    asset_session_masks[asset] = mask
+                for asset, timestamp in frame[[asset_column, "timestamp"]].itertuples(
+                    index=False, name=None
+                ):
+                    position = session_positions.setdefault(
+                        timestamp, len(session_positions)
+                    )
+                    asset_session_masks[asset] = asset_session_masks.get(asset, 0) | (
+                        1 << position
+                    )
             new_dates = set(pd.to_datetime(frame["timestamp"]).unique()) - dates
             first = frame.drop_duplicates(asset_column)
             new_assets = first.loc[~first[asset_column].isin(assets)]

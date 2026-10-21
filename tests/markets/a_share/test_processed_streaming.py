@@ -1842,6 +1842,40 @@ def test_native_panel_persists_turnover_in_share_and_currency_units(tmp_path):
         )
 
 
+@pytest.mark.parametrize("batch_rows", (2, 100))
+def test_processed_axis_preserves_each_assets_observed_sessions(
+    tmp_path, monkeypatch, batch_rows
+):
+    dates = pd.DatetimeIndex(["2019-12-30", "2019-12-31", "2020-01-02", "2020-01-03"])
+    source = _synthetic_interim_frames(dates)["market_bars_1d"]
+    rows = pd.concat(
+        [
+            source.iloc[[0]].assign(source_asset_id=asset, timestamp=dates[position])
+            for asset, position in (("c", 3), ("a", 2), ("b", 1), ("a", 0), ("c", 1))
+        ],
+        ignore_index=True,
+    )
+    spec = _source_catalog().get("market_bars_1d")
+    root = StorageLayout(tmp_path).interim_data_root(spec.source_id, spec.data_id)
+    write_dataset(root, rows, spec=spec)
+    session = open_dataset_session(root, columns=None, time_window=None)
+    monkeypatch.setattr(producer.resources, "DEFAULT_BATCH_ROWS", batch_rows)
+    sessions, assets, membership, observed, market_sessions = producer._processed_axis(
+        session,
+        panel_source=False,
+        asset_column="source_asset_id",
+        include_asset_sessions=True,
+    )
+    assert sessions == tuple(dates)
+    assert assets.to_dict() == {"a": 0, "b": 0, "c": 0}
+    assert membership is None and market_sessions == {}
+    assert observed == {
+        "a": (dates[0], dates[2]),
+        "b": (dates[1],),
+        "c": (dates[1], dates[3]),
+    }
+
+
 def test_processed_axis_filters_unusable_dates_and_market_membership(tmp_path):
     dates = pd.bdate_range("2020-01-06", periods=3).as_unit("ns")
     source = _synthetic_interim_frames(dates)
