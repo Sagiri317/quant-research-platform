@@ -109,6 +109,19 @@ G 在开发期结束后，依据整段开发期表现选择参数，因此其开
 
 G 开发期使用同一段结果选模型，原生统计因此将其推断标为未定义，保留均值而不报告显著性。表中各方案自己的区间也不能代替方案差值的配对检验。预定 540 项跨方案比较及联合校正尚未齐备，当前不能据此断言 PV25 显著优于 Core6。完整[预测统计](assets/a-share-full-20261021/core6-pv25-prediction-diagnostics.csv)、[家族比较](assets/a-share-full-20261021/core6-pv25-model-comparison.csv)、[联合检验](assets/a-share-full-20261021/core6-pv25-model-reality-checks.csv)及[G/Q 配对结果](assets/a-share-full-20261021/core6-pv25-model-group-comparison.csv)保留各自状态与原因；不同检验的零假设不能互换。
 
+## 非金融 PV25 的基线结果
+
+非金融 PV25 的 480 次季度拟合与预测、22 次 G/Q 选择、12 个最终模型及四组原生统计已经完成。它仍使用 25 个量价因子，尚未加入预期或财务因子；这里的作用是为同一非金融资格下的预期增量检验提供基线。G 最终选择 LightGBM，Q 最终选择 XGBoost。
+
+| 选择规则 | 2019—2023 年日均 RankIC | 2024—2025 年日均 RankIC |
+|---|---:|---:|
+| G | 0.1255，仅描述 | 0.1186（0.0745，0.1627） |
+| Q | 0.1227（0.0997，0.1458） | 0.1222（0.0752，0.1692） |
+
+括号为按完整交易日时钟、Bartlett 滞后 20 复算的 HAC 95% 区间，两期分别有 1,193 和 464 个成熟标签日期。G 开发期仍因重复使用选择窗口而不作显著性推断。非金融资格改变了股票域，不能直接把本表与全 A 股 PV25 的均值差解释为增量收益或预测改善。完整[预测统计](assets/a-share-full-20261021/pv-nf25-prediction-diagnostics.csv)、[家族比较](assets/a-share-full-20261021/pv-nf25-model-comparison.csv)、[联合检验](assets/a-share-full-20261021/pv-nf25-model-reality-checks.csv)与[G/Q 配对结果](assets/a-share-full-20261021/pv-nf25-model-group-comparison.csv)保留原生状态。
+
+24 份解释也已全部完成，另有 16,000 行季度系数。24,576 条“模型×抽样资产日”记录中，24,569 条贡献已定义；XGBoost 的开发期 3 行、固定检验期 4 行因加性抵消精度不足而未定义，其他 22 份解释没有这种未定义。完整[系数](assets/a-share-full-20261021/pv-nf25-coefficients.csv)、[贡献汇总](assets/a-share-full-20261021/pv-nf25-summary.csv)、[同组置换](assets/a-share-full-20261021/pv-nf25-permutation-summary.csv)和[原生重要性](assets/a-share-full-20261021/pv-nf25-native-importance.csv)可与后续同域预期模型对照；它们不替代尚未完成的配对增量检验和账户结果。
+
 ## 系数、贡献与置换分别说明什么
 
 Core6 的 20 份、PV25 的 24 份解释产物均已通过原生完整读取，季度系数分别导出 3,840 行与 16,000 行。系数表保留连续因子、显式缺失标记、模型插补标记、训练均值和尺度，不能把这些行数当作独立经济因子数。按“模型×抽样资产日”计，共 45,056 条解释记录，其中 45,047 条贡献已定义，9 条因加性抵消精度不足而未定义；该计数不是不重复的资产日数。
