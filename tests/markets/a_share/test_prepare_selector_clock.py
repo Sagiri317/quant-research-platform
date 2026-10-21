@@ -1,6 +1,7 @@
 """Observation selectors preserve clocks without restoring excluded signals."""
 
 from dataclasses import replace
+from math import fsum, prod
 
 import numpy as np
 import pandas as pd
@@ -294,6 +295,93 @@ def test_native_market_model_selection_preserves_declared_composition_and_recove
     # The omitted observation and subsequent weight gap advance calendar time;
     # sufficient valid pairs and residuals remain inside the nominal windows.
     assert result.loc[result.timestamp.ge(dates[gap]), styles].notna().all().all()
+
+
+@pytest.mark.parametrize("history", ("delisted", "suspended"))
+def test_market_model_output_window_preserves_historical_market_state(
+    tmp_path, history
+):
+    dates = pd.bdate_range("2020-01-02", periods=650).as_unit("ns")
+    frames = _synthetic_interim_frames(dates)
+    source_ids = processed_catalog().get("market_model_factors").source_input_data_ids
+    sources = _write_inputs(
+        tmp_path / "source", {name: frames[name] for name in source_ids}
+    )
+    values = np.arange(len(dates))
+    returns = (np.sin(values * 0.2) * 0.01, np.cos(values * 0.3) * 0.03)
+    pieces = []
+    for asset, observations in zip(("000001", "000002"), returns, strict=True):
+        panel = _panel(dates).assign(
+            asset_id=asset,
+            period_return=observations,
+            float_market_cap=1.0,
+            is_a_share_scope=True,
+            is_st=False,
+            is_pt=False,
+            has_252_trading_sessions=True,
+            delisting_date=pd.NaT,
+            delisting_date_unresolved=False,
+        )
+        if asset == "000002":
+            if history == "delisted":
+                panel = panel.iloc[:350].assign(delisting_date=dates[349])
+            else:
+                panel.loc[40:349, "filling_flag"] = 1
+                panel.loc[40:349, "is_trading"] = False
+                panel.loc[40:349, "period_return"] = 0.0
+        pieces.append(panel)
+    panel = pd.concat(pieces, ignore_index=True)
+    inputs = {
+        **{name: str(path) for name, path in sources.items()},
+        "market_panel_1d": _save(tmp_path, "market_panel_1d", panel),
+    }
+    results = []
+    for start in (0, 380):
+        result = read_dataset(
+            prepare(
+                {
+                    "market_id": "a_share",
+                    "data_id": "market_model_factors",
+                    "inputs": inputs,
+                    "time_window": {
+                        "start": str(dates[start].date()),
+                        "end": str(dates[-1].date()),
+                    },
+                    "output_root": str(tmp_path / f"result-{start}"),
+                }
+            )
+        )
+        results.append(
+            result.loc[result.timestamp.ge(dates[380])]
+            .sort_values(["timestamp", "asset_id"])
+            .reset_index(drop=True)
+        )
+    # Independent equal-cap OLS includes extinct members and compounded pauses.
+    market = [
+        float((returns[0][i] + returns[1][i]) / 2)
+        if i < 350 or history == "suspended"
+        else float(returns[0][i])
+        for i in range(len(dates))
+    ]
+    if history == "delisted":
+        end, asset = 419, "000001"
+        x, y = market[end - 251 : end + 1], returns[0][end - 251 : end + 1]
+    else:
+        for i in range(40, 350):
+            market[i] = float(returns[0][i] / 2)
+        end, asset = 538, "000002"
+        x = [prod(1 + value for value in market[40:351]) - 1, *market[351:539]]
+        y = returns[1][350:539]
+    mx, my = fsum(x) / len(x), fsum(y) / len(y)
+    expected = fsum((a - mx) * (b - my) for a, b in zip(x, y, strict=True)) / fsum(
+        (a - mx) ** 2 for a in x
+    )
+    for result in results:
+        actual = result.loc[
+            result.timestamp.eq(dates[end]) & result.asset_id.eq(asset), "beta_252d"
+        ].item()
+        assert actual == pytest.approx(expected, rel=1e-12, abs=1e-14)
+    pd.testing.assert_frame_equal(results[0], results[1], rtol=1e-12, atol=1e-14)
 
 
 def test_market_model_unknown_closed_interval_does_not_abort_open_market():

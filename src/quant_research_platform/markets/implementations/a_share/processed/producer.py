@@ -412,6 +412,9 @@ def _processed_frames(
         else ()
     )
     lookback = factor_engine.factor_lookback_bars(definitions)
+    market_model = any(
+        definition.family == "market_model" for definition in definitions
+    )
     lookahead = (
         label_engine.label_lookahead_bars(
             tuple(
@@ -446,7 +449,7 @@ def _processed_frames(
                 )
         # Independent asset calculations need only selected assets' clocks.
         # Market-model completeness instead needs the full declared membership.
-        if not any(definition.family == "market_model" for definition in definitions):
+        if not market_model:
             panel_axis = replace(
                 panel_axis,
                 parquet_filters=(
@@ -465,7 +468,10 @@ def _processed_frames(
             materialize_dataset_session(panel_axis),
             calendar,
             panel_end=panel_end,
-            time_window=time_window,
+            # Past members and suspended return carry belong to the market state.
+            time_window=_preceding_input_window(time_window)
+            if market_model
+            else time_window,
             lookback=lookback,
             lookahead=lookahead,
         )
@@ -494,7 +500,7 @@ def _processed_frames(
         )
     asset_count = max(1, len(asset_types))
     block_sessions = max(1, DEFAULT_BATCH_ROWS // asset_count)
-    if any(definition.family == "market_model" for definition in definitions):
+    if market_model:
         (
             _source_dates,
             _source_assets,
