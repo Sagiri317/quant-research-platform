@@ -179,8 +179,12 @@ def test_missing_total_cap_is_local_to_size_strata(tmp_path, missing):
     assert size.stratum_rows.sum() == len(frame)
 
 
-def test_native_own_common_strata_and_persisted_reduction(tmp_path, monkeypatch):
+@pytest.mark.parametrize("workers", [1, 2])
+def test_native_own_common_strata_and_persisted_reduction(
+    tmp_path, monkeypatch, workers
+):
     _, config = _fixture(tmp_path)
+    config["workers"] = workers
     own = evaluate(config)
     common = evaluate(
         {
@@ -1403,6 +1407,7 @@ def test_common_zero_labels_do_not_use_an_absolute_tolerance_floor(tmp_path, del
 @pytest.mark.parametrize("delta", [0, 1])
 def test_common_integer_labels_remain_exact_through_masking(tmp_path, domain, delta):
     frame, config = _fixture(tmp_path)
+    config["workers"] = 2
     frame["x"] = [1.0, 2.0, 4.0, 5.0]
     frame["label"] = np.array(
         [2**60, 2**60 + 512, 2**60 + 256, 2**60 + 768], dtype="int64"
@@ -1427,9 +1432,79 @@ def test_common_integer_labels_remain_exact_through_masking(tmp_path, domain, de
     if delta:
         with pytest.raises(ValueError, match="evaluation_common_label_mismatch"):
             evaluate(config)
+        assert not (tmp_path / "own").exists()
     else:
         _, tables = read_evaluation_outputs(evaluate(config), tables=("metrics",))
         assert tables["metrics"].n_obs.tolist() == [4 if domain == "all_mature" else 3]
+
+
+@pytest.mark.parametrize("scope", ["own", "common"])
+def test_parallel_dates_preserve_native_tables_and_empty_domains(tmp_path, scope):
+    import multiprocessing
+
+    frame, config = _fixture(tmp_path, days=5)
+    dates = frame.timestamp.drop_duplicates().tolist()
+    frame.loc[frame.timestamp.eq(dates[1]), "eligible"] = False
+    frame.loc[frame.timestamp.eq(dates[2]), "label_available_at"] = pd.Timestamp(
+        "2025-01-01"
+    )
+    config["inputs"] = str(
+        write_evaluation_input(
+            tmp_path / "mixed", frame, factors=("x", "z"), labels=("label",)
+        )
+    )
+    config["sample_scope"] = scope
+    if scope == "common":
+        peer = write_evaluation_input(
+            tmp_path / "peer",
+            frame.loc[~frame.timestamp.eq(dates[3])],
+            factors=("z",),
+            labels=("label",),
+        )
+        config["comparison_inputs"] = [{"inputs": str(peer), "signal_columns": ["z"]}]
+    names = (
+        "metrics",
+        "grouped_label_values",
+        "ic_summary",
+        "group_spread_summary",
+        "daily_coverage",
+        "daily_strata",
+    )
+    manifest, baseline = read_evaluation_outputs(evaluate(config), tables=names)
+    children = {child.pid for child in multiprocessing.active_children()}
+    actual_manifest, actual = read_evaluation_outputs(
+        evaluate({**config, "output": str(tmp_path / "parallel"), "workers": 2}),
+        tables=names,
+    )
+    assert {child.pid for child in multiprocessing.active_children()} == children
+    assert manifest["metadata"] == actual_manifest["metadata"]
+    expected = [3, 0, 0, 3, 3] if scope == "own" else [2, 0, 0, 0, 2]
+    assert actual["metrics"].n_obs.tolist() == expected
+    assert actual["metrics"].timestamp.tolist() == dates
+    for name in names:
+        left, right = actual[name], baseline[name]
+        continuous = left.select_dtypes(include="floating").columns
+        pd.testing.assert_frame_equal(
+            left.drop(columns=continuous),
+            right.drop(columns=continuous),
+            check_exact=True,
+        )
+        pd.testing.assert_frame_equal(left.isna(), right.isna(), check_exact=True)
+        pd.testing.assert_frame_equal(
+            left[continuous],
+            right[continuous],
+            check_exact=False,
+            rtol=1e-12,
+            atol=1e-15,
+        )
+
+
+@pytest.mark.parametrize("workers", [0, -1, True, 1.5])
+def test_parallel_worker_count_rejects_invalid_config(tmp_path, workers):
+    _, config = _fixture(tmp_path)
+    with pytest.raises(ValueError, match="evaluation_workers_invalid"):
+        evaluate({**config, "workers": workers})
+    assert not (tmp_path / "own").exists()
 
 
 @pytest.mark.parametrize("reused", [False, True])

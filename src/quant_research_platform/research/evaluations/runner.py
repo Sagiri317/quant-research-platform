@@ -80,6 +80,7 @@ def evaluate(config):
             "comparison_inputs",
             "strata",
             "response_diagnostics",
+            "workers",
         },
     )
     reject_if_exists(Path(config["output"]))
@@ -228,6 +229,8 @@ def evaluate(config):
             window=window,
             strata=strata,
         )
+    if "workers" in config:
+        raise ValueError("evaluation_workers_requires_a_share_factors")
     if prediction_sources.intersection(columns):
         raise ValueError("evaluation_prediction_input_column_conflict")
     predictions = {}
@@ -684,6 +687,7 @@ def _scoped_evaluate(config, *, spec, session, source, columns, cutoff, window, 
         cutoff=cutoff,
         sample_scope=config["sample_scope"],
         strata=strata,
+        workers=config.get("workers", 1),
     ) as result:
         return write_evaluation_outputs_from_chunks(
             result.output_chunks,

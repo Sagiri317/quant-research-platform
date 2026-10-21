@@ -796,186 +796,229 @@ def _ordinal_signal_frame(frame, spec, asset_column):
     return result
 
 
-def build_scoped_evaluation_result(
-    frames, *, spec, sources, cutoff, sample_scope, strata
-):
-    """Evaluate complete focal dates using unchanged own-domain signal transforms."""
-    from dataclasses import replace
-
-    from quant_research_platform.artifacts.outputs.evaluation_daily import daily_frame
+def _prepare_scoped_frame(raw, source, *, spec, cutoff):
     from quant_research_platform.contracts.experiments import label_maturity_mask
     from quant_research_platform.research.filtering import apply_filter_mode
 
-    state = _EvaluationStreamingState(spec=spec)
-    primary = strata.get("primary_label")
-
-    def prepare(raw, source):
-        selected, metadata = apply_filter_mode(
-            raw, mode=spec.filter_mode, metadata_key="filter_mode"
+    selected, metadata = apply_filter_mode(
+        raw, mode=spec.filter_mode, metadata_key="filter_mode"
+    )
+    selected = mask_unobserved_features(
+        selected, source["signal_columns"], source["declared"]["column_roles"]
+    ).copy()
+    for column in source["signal_columns"]:
+        selected[column] = selected[column].where(np.isfinite(selected[column]))
+    for label, availability in source["availability"].items():
+        if pd.api.types.is_integer_dtype(selected[label].dtype):
+            # Keep exact integer targets through maturity masking and
+            # peer reindexing instead of filling missing rows with float.
+            selected[label] = selected[label].astype(
+                "UInt64"
+                if pd.api.types.is_unsigned_integer_dtype(selected[label].dtype)
+                else "Int64"
+            )
+        mature = label_maturity_mask(
+            selected,
+            fitting_cutoff=cutoff,
+            availability_column=availability,
+            target_column=label,
         )
-        selected = mask_unobserved_features(
-            selected, source["signal_columns"], source["declared"]["column_roles"]
-        ).copy()
-        for column in source["signal_columns"]:
-            selected[column] = selected[column].where(np.isfinite(selected[column]))
-        for label, availability in source["availability"].items():
-            if pd.api.types.is_integer_dtype(selected[label].dtype):
-                # Keep exact integer targets through maturity masking and
-                # peer reindexing instead of filling missing rows with float.
-                selected[label] = selected[label].astype(
-                    "UInt64"
-                    if pd.api.types.is_unsigned_integer_dtype(selected[label].dtype)
-                    else "Int64"
+        selected[label] = selected[label].where(mature & np.isfinite(selected[label]))
+    return selected, metadata
+
+
+def _evaluate_scoped_day(pair, *, spec_values, sources, cutoff, sample_scope, strata):
+    from dataclasses import replace
+
+    from quant_research_platform.artifacts.outputs.evaluation_daily import daily_frame
+
+    raw, raw_peers = pair
+    spec = EvaluationSpec(**spec_values)
+    primary = strata.get("primary_label")
+    if raw.empty:
+        return None
+    focal, metadata = _prepare_scoped_frame(raw, sources[0], spec=spec, cutoff=cutoff)
+    metadata["timestamps"] = raw.timestamp
+    metadata["asset_ids"] = raw.asset_id
+    timestamp = raw.timestamp.iloc[0]
+    classification = focal.copy()
+    for column in (
+        "total_market_cap",
+        "amount",
+        "median_forecast_age_days_fy1",
+    ):
+        if column in raw:
+            classification[column] = raw.loc[focal.index, column]
+    groups, quality = _evaluation_strata(classification, strata)
+    mature_counts = {
+        label: int(focal[label].notna().sum()) for label in spec.label_columns
+    }
+    # Normalize on the focal eligible population before intersection.
+    normalized = normalize_signal_frame(focal, signals=spec.signals)
+    ordinal_signals = _ordinal_signal_frame(focal, spec, "asset_id")
+    if sample_scope == "common":
+        valid = np.isfinite(
+            focal[sources[0]["signal_columns"]].to_numpy(dtype=float)
+        ).all(axis=1)
+        keys = pd.MultiIndex.from_frame(focal[["timestamp", "asset_id"]])
+        aligned_peers = []
+        for raw_peer, source in zip(raw_peers, sources[1:], strict=True):
+            if raw_peer is None:
+                valid[:] = False
+                continue
+            peer, _ = _prepare_scoped_frame(raw_peer, source, spec=spec, cutoff=cutoff)
+            aligned = peer.set_index(["timestamp", "asset_id"]).reindex(keys)
+            valid &= np.isfinite(
+                aligned[source["signal_columns"]].to_numpy(dtype=float)
+            ).all(axis=1)
+            aligned_peers.append(aligned)
+        for label in spec.label_columns:
+            domain = valid & focal[label].notna().to_numpy()
+            for peer in aligned_peers:
+                domain &= peer[label].notna().to_numpy()
+            for peer in aligned_peers:
+                integral = any(
+                    pd.api.types.is_integer_dtype(values.dtype)
+                    for values in (focal[label], peer[label])
                 )
-            mature = label_maturity_mask(
-                selected,
-                fitting_cutoff=cutoff,
-                availability_column=availability,
-                target_column=label,
+                left = focal[label].to_numpy(dtype=object if integral else float)[
+                    domain
+                ]
+                right = peer[label].to_numpy(dtype=object if integral else float)[
+                    domain
+                ]
+                if integral:
+                    matches = np.equal(left, right)
+                else:
+                    matches = np.isclose(left, right, rtol=1e-12, atol=0.0)
+                if not matches.all():
+                    raise ValueError("evaluation_common_label_mismatch")
+            normalized[label] = normalized[label].where(domain)
+    coverage = daily_frame(
+        [
+            {
+                "timestamp": timestamp,
+                "label": label,
+                "dataset_rows": len(raw),
+                "eligible_rows": len(focal),
+                "mature_rows": mature_counts[label],
+                "domain_rows": int(normalized[label].notna().sum()),
+                **{
+                    key: value if label == primary else None
+                    for key, value in quality.items()
+                },
+            }
+            for label in spec.label_columns
+        ],
+        "daily_coverage",
+    )
+    metrics, grouped, facts = _evaluate_filtered_frame(
+        normalized,
+        metadata,
+        spec=spec,
+        asset_column="asset_id",
+        ordinal_signals=ordinal_signals,
+    )
+    stratum_records = []
+    if primary is not None:
+        stratum_spec = replace(
+            spec,
+            label_columns=(primary,),
+            label_availability_columns={
+                primary: spec.label_availability_columns[primary]
+            },
+        )
+        for kind, assignments in groups.items():
+            labels = (
+                [item[0] for item in strata["age_bounds"]]
+                if kind == "forecast_age"
+                else list(assignments.drop_duplicates())
             )
-            selected[label] = selected[label].where(
-                mature & np.isfinite(selected[label])
-            )
-        return selected, metadata
+            if kind == "forecast_age" and assignments.isna().any():
+                labels.append(pd.NA)
+            for label in labels:
+                keep = (
+                    assignments.isna()
+                    if pd.isna(label)
+                    else assignments.eq(label).fillna(False)
+                )
+                subset = normalized.loc[assignments.index[keep]]
+                daily, _, _ = _evaluate_filtered_frame(
+                    subset,
+                    metadata,
+                    spec=stratum_spec,
+                    asset_column="asset_id",
+                    ordinal_signals=(
+                        ordinal_signals.loc[subset.index]
+                        if ordinal_signals is not None
+                        else None
+                    ),
+                )
+                daily = daily.assign(
+                    stratification=kind,
+                    stratum=label,
+                    stratum_rows=int(keep.sum()),
+                )
+                stratum_records.extend(daily.to_dict("records"))
+    daily = daily_frame(stratum_records, "daily_strata")
+    facts.update(
+        daily_coverage=coverage,
+        daily_strata=daily,
+    )
+    return metrics, grouped, facts
+
+
+def build_scoped_evaluation_result(
+    frames, *, spec, sources, cutoff, sample_scope, strata, workers=1
+):
+    """Evaluate independent focal dates and consume them in their original order."""
+    from concurrent.futures import ProcessPoolExecutor
+    from contextlib import nullcontext
+    from dataclasses import fields
+    from functools import partial
+    from itertools import batched
+    from multiprocessing import get_context
+
+    if type(workers) is not int or workers < 1:
+        raise ValueError("evaluation_workers_invalid")
+    state = _EvaluationStreamingState(spec=spec)
+    values = {item.name: getattr(spec, item.name) for item in fields(spec)}
+    values["label_availability_columns"] = dict(spec.label_availability_columns)
+    task = partial(
+        _evaluate_scoped_day,
+        spec_values=values,
+        sources=[
+            {
+                "signal_columns": source["signal_columns"],
+                "availability": source["availability"],
+                "declared": {"column_roles": dict(source["declared"]["column_roles"])},
+            }
+            for source in sources
+        ],
+        cutoff=cutoff,
+        sample_scope=sample_scope,
+        strata=strata,
+    )
 
     def outputs():
         with closing_iterator(iter(frames)) as active:
-            for raw, raw_peers in active:
-                if raw.empty:
-                    continue
-                focal, metadata = prepare(raw, sources[0])
-                metadata["timestamps"] = raw.timestamp
-                metadata["asset_ids"] = raw.asset_id
-                timestamp = raw.timestamp.iloc[0]
-                classification = focal.copy()
-                for column in (
-                    "total_market_cap",
-                    "amount",
-                    "median_forecast_age_days_fy1",
-                ):
-                    if column in raw:
-                        classification[column] = raw.loc[focal.index, column]
-                groups, quality = _evaluation_strata(classification, strata)
-                mature_counts = {
-                    label: int(focal[label].notna().sum())
-                    for label in spec.label_columns
-                }
-                # Normalize on the focal eligible population before intersection.
-                normalized = normalize_signal_frame(focal, signals=spec.signals)
-                ordinal_signals = _ordinal_signal_frame(focal, spec, "asset_id")
-                if sample_scope == "common":
-                    valid = np.isfinite(
-                        focal[sources[0]["signal_columns"]].to_numpy(dtype=float)
-                    ).all(axis=1)
-                    keys = pd.MultiIndex.from_frame(focal[["timestamp", "asset_id"]])
-                    aligned_peers = []
-                    for raw_peer, source in zip(raw_peers, sources[1:], strict=True):
-                        if raw_peer is None:
-                            valid[:] = False
-                            continue
-                        peer, _ = prepare(raw_peer, source)
-                        aligned = peer.set_index(["timestamp", "asset_id"]).reindex(
-                            keys
-                        )
-                        valid &= np.isfinite(
-                            aligned[source["signal_columns"]].to_numpy(dtype=float)
-                        ).all(axis=1)
-                        aligned_peers.append(aligned)
-                    for label in spec.label_columns:
-                        domain = valid & focal[label].notna().to_numpy()
-                        for peer in aligned_peers:
-                            domain &= peer[label].notna().to_numpy()
-                        for peer in aligned_peers:
-                            integral = any(
-                                pd.api.types.is_integer_dtype(values.dtype)
-                                for values in (focal[label], peer[label])
-                            )
-                            left = focal[label].to_numpy(
-                                dtype=object if integral else float
-                            )[domain]
-                            right = peer[label].to_numpy(
-                                dtype=object if integral else float
-                            )[domain]
-                            if integral:
-                                matches = np.equal(left, right)
-                            else:
-                                matches = np.isclose(left, right, rtol=1e-12, atol=0.0)
-                            if not matches.all():
-                                raise ValueError("evaluation_common_label_mismatch")
-                        normalized[label] = normalized[label].where(domain)
-                coverage = daily_frame(
-                    [
-                        {
-                            "timestamp": timestamp,
-                            "label": label,
-                            "dataset_rows": len(raw),
-                            "eligible_rows": len(focal),
-                            "mature_rows": mature_counts[label],
-                            "domain_rows": int(normalized[label].notna().sum()),
-                            **{
-                                key: value if label == primary else None
-                                for key, value in quality.items()
-                            },
-                        }
-                        for label in spec.label_columns
-                    ],
-                    "daily_coverage",
+            with (
+                ProcessPoolExecutor(
+                    max_workers=workers, mp_context=get_context("spawn")
                 )
-                metrics, grouped, facts = _evaluate_filtered_frame(
-                    normalized,
-                    metadata,
-                    spec=spec,
-                    asset_column="asset_id",
-                    ordinal_signals=ordinal_signals,
-                )
-                stratum_records = []
-                if primary is not None:
-                    stratum_spec = replace(
-                        spec,
-                        label_columns=(primary,),
-                        label_availability_columns={
-                            primary: spec.label_availability_columns[primary]
-                        },
+                if workers > 1
+                else nullcontext()
+            ) as pool:
+                for batch in batched(active, workers, strict=False):
+                    results = (
+                        pool.map(task, batch) if pool is not None else map(task, batch)
                     )
-                    for kind, assignments in groups.items():
-                        labels = (
-                            [item[0] for item in strata["age_bounds"]]
-                            if kind == "forecast_age"
-                            else list(assignments.drop_duplicates())
-                        )
-                        if kind == "forecast_age" and assignments.isna().any():
-                            labels.append(pd.NA)
-                        for label in labels:
-                            keep = (
-                                assignments.isna()
-                                if pd.isna(label)
-                                else assignments.eq(label).fillna(False)
-                            )
-                            subset = normalized.loc[assignments.index[keep]]
-                            daily, _, _ = _evaluate_filtered_frame(
-                                subset,
-                                metadata,
-                                spec=stratum_spec,
-                                asset_column="asset_id",
-                                ordinal_signals=(
-                                    ordinal_signals.loc[subset.index]
-                                    if ordinal_signals is not None
-                                    else None
-                                ),
-                            )
-                            daily = daily.assign(
-                                stratification=kind,
-                                stratum=label,
-                                stratum_rows=int(keep.sum()),
-                            )
-                            stratum_records.extend(daily.to_dict("records"))
-                daily = daily_frame(stratum_records, "daily_strata")
-                state.consume(metrics, grouped, facts)
-                facts.update(
-                    daily_coverage=coverage,
-                    daily_strata=daily,
-                )
-                yield metrics, grouped, facts
+                    for result in results:
+                        if result is None:
+                            continue
+                        metrics, grouped, facts = result
+                        state.consume(metrics, grouped, facts)
+                        yield metrics, grouped, facts
 
     chunks = outputs()
     return EvaluationResult(
