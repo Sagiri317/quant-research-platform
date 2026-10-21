@@ -142,6 +142,7 @@ _ENHANCED_PANEL_COLUMNS = (
 )
 _BENCHMARK_COLUMNS = ("benchmark_id", "asset_id", "timestamp", "weight")
 _SESSION_KEY = ("timestamp", "asset_id")
+_NEUTRALITY_REFERENCE_DOMAIN = "context_available_research_pool"
 _ALPHA_DIAGNOSTICS = {
     "alpha_status": "status",
     "alpha_undefined_reason": "undefined_reason",
@@ -1615,6 +1616,51 @@ def _build_session(
     ):
         raise ValueError("portfolio_state_invalid")
     eligible = _bool_series(dataset["eligible"], "portfolio_eligibility_invalid")
+    industry = (
+        _industry_group_codes(
+            panel.set_index("asset_id").reindex(
+                columns=["industry_standard_id", "industry_level1_code"]
+            ),
+            "industry_level1_code",
+        )
+        if candidate.neutrality in {"industry", "industry_size"}
+        else None
+    )
+    domain_diagnostics = {}
+    if candidate.neutrality != "none" and candidate.benchmark_id is None:
+        original_eligible = eligible
+        capitals = strict_real_numeric_series(
+            dataset.get("float_market_cap", pd.Series(np.nan, index=dataset.index)),
+            error="target_float_market_cap_invalid",
+        )
+        known_cap = original_eligible & capitals.gt(0) & np.isfinite(capitals)
+        eligible = known_cap
+        if industry is not None:
+            eligible = eligible & industry.reindex(eligible.index).notna()
+        if candidate.neutrality in {"size", "industry_size"}:
+            size = (
+                capitals
+                if candidate.size_cap_column == "float_market_cap"
+                else strict_real_numeric_series(
+                    dataset.get(
+                        candidate.size_cap_column,
+                        pd.Series(np.nan, index=dataset.index),
+                    ),
+                    error="target_size_market_cap_invalid",
+                )
+            )
+            eligible = eligible & size.gt(0) & np.isfinite(size)
+        reference_cap = float(capitals.loc[known_cap].sum())
+        domain_diagnostics = {
+            "neutrality_reference_domain": _NEUTRALITY_REFERENCE_DOMAIN,
+            "neutrality_reference_eligible_count": float(original_eligible.sum()),
+            "neutrality_reference_calculable_count": float(eligible.sum()),
+            "neutrality_reference_excluded_known_float_cap_weight": (
+                float(capitals.loc[known_cap & ~eligible].sum()) / reference_cap
+                if reference_cap > 0
+                else None
+            ),
+        }
     alpha = alpha.reindex(dataset.index)
     prediction_eligible = eligible & alpha.notna()
     # Research exits and proved index-removal maintenance are independent of
@@ -1648,16 +1694,6 @@ def _build_session(
     if candidate.neutrality != "none" and nav > 0:
         if candidate.benchmark_id is not None and benchmark_weights is None:
             raise ValueError("portfolio_neutrality_benchmark_required")
-        industry = (
-            _industry_group_codes(
-                panel.set_index("asset_id").reindex(
-                    columns=["industry_standard_id", "industry_level1_code"]
-                ),
-                "industry_level1_code",
-            )
-            if candidate.neutrality in {"industry", "industry_size"}
-            else None
-        )
         try:
             neutrality = _neutrality_context(
                 eligible,
@@ -2332,6 +2368,8 @@ def _build_session(
             asset_ledger[name] = (
                 asset_ledger.asset_id.map(weights) if nav > 0 else np.nan
             )
+    if domain_diagnostics:
+        asset_ledger.attrs["neutrality_exposures"].update(domain_diagnostics)
     return (account, adv, optimization, decision_delta, asset_ledger)
 
 
@@ -3195,6 +3233,11 @@ def backtest(config: Mapping) -> Path:
         "corporate_action_policy": portfolio_sessions.CORPORATE_ACTION_POLICY,
         "initial_holding_convention": "cash",
         "initial_turnover_policy": "first_actual_buy_exempt_fees_and_capacity_apply",
+        **(
+            {"neutrality_reference_domain": _NEUTRALITY_REFERENCE_DOMAIN}
+            if candidate.neutrality != "none" and candidate.benchmark_id is None
+            else {}
+        ),
     }
     metadata.pop("output")
     return write_portfolio_ledger_artifact(

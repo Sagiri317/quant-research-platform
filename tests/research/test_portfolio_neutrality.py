@@ -267,7 +267,7 @@ def test_neutral_projection_satisfies_kkt_on_active_and_boundary_assets():
 
 
 @pytest.mark.parametrize("missing", ["absent", "null", "zero", "negative", "industry"])
-def test_missing_neutral_context_carries_account_and_skips_new_target(
+def test_empty_calculable_neutral_pool_exits_to_cash(
     missing,
 ):
     from quant_research_platform.research.portfolios.production import _build_session
@@ -294,9 +294,9 @@ def test_missing_neutral_context_carries_account_and_skips_new_target(
         }[missing]
     account, _, _, _, ledger = _build_session(**inputs)
     assert account.nav_after == 100.0
-    assert account.post_trade_cash == 0.0
-    assert ledger.executed_delta_notional.tolist() == [0.0, 0.0]
-    assert ledger.post_trade_notional.tolist() == [50.0, 50.0]
+    assert account.post_trade_cash == 100.0
+    assert ledger.executed_delta_notional.tolist() == [-50.0, -50.0]
+    assert ledger.post_trade_notional.tolist() == [0.0, 0.0]
     diagnostics = ledger.attrs["neutrality_exposures"]
     for kind in ("target", "realized"):
         assert diagnostics[f"{kind}_exposure_status"] == "UNDEFINED"
@@ -310,11 +310,8 @@ def test_missing_neutral_context_carries_account_and_skips_new_target(
     account, _, optimized, _, ledger = _build_session(**inputs)
     assert optimized is None
     assert account.nav_after == 100.0
-    assert ledger.executed_delta_notional.eq(0.0).all()
-    assert (
-        ledger.attrs["decision_availability"]["decision_skip_reason"]
-        == "target_neutrality_benchmark_empty"
-    )
+    assert ledger.executed_delta_notional.eq(-50.0).all()
+    assert ledger.attrs["decision_availability"]["decision_skip_reason"] is None
     assert (
         ledger.attrs["neutrality_exposures"]["realized_exposure_status"] == "UNDEFINED"
     )
@@ -421,9 +418,7 @@ def test_unheld_missing_cap_does_not_make_known_exposures_undefined(schedule):
     assert not ledger.loc[ledger.asset_id.eq("c"), "post_trade_notional"].any()
 
 
-def test_absent_cap_column_is_local_to_actual_scheduled_neutral_target(
-    tmp_path, monkeypatch
-):
+def test_absent_cap_column_keeps_empty_calculable_pool_in_cash(tmp_path, monkeypatch):
     from tests.helpers.portfolio_inputs import portfolio_inputs as _inputs
     from tests.research.test_portfolio_production import _build_producer
 
@@ -472,9 +467,12 @@ def test_absent_cap_column_is_local_to_actual_scheduled_neutral_target(
     remaining = list(longer)
     assert remaining
     assert all(not batch.trades for batch in remaining)
-    assert any(
-        row.name == "decision_skip_reason"
-        and row.text == "target_neutrality_benchmark_empty"
-        for batch in remaining
-        for row in batch.diagnostics
-    )
+    for batch in remaining:
+        facts = {
+            row.name: row.number if row.number is not None else row.text
+            for row in batch.diagnostics
+            if row.asset_id == "__cash__"
+        }
+        assert facts["decision_status"] == "AVAILABLE"
+        assert "decision_skip_reason" not in facts
+        assert facts["neutrality_reference_calculable_count"] == 0.0
