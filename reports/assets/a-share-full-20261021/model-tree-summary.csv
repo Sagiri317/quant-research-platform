@@ -1,0 +1,10 @@
+case,model_id,algorithm,trees,split_nodes,leaves,maximum_depth,model_scaling,leaf_assignment_checks
+core6,core6__xgboost_regressor__c0,xgboost_regressor,400,2637,3037,3,False,2800
+core6,core6__decision_tree_regressor__c0,decision_tree_regressor,1,7,8,3,False,6
+core6,core6__lightgbm_regressor__c0,lightgbm_regressor,400,12000,12400,17,False,2800
+pv25,pv25__xgboost_regressor__c0,xgboost_regressor,400,2602,3002,3,False,2800
+pv25,pv25__decision_tree_regressor__c0,decision_tree_regressor,1,7,8,3,False,6
+pv25,pv25__lightgbm_regressor__c0,lightgbm_regressor,400,12000,12400,20,False,2800
+pv_nf25,pv_nf25__xgboost_regressor__c0,xgboost_regressor,400,2605,3005,3,False,2800
+pv_nf25,pv_nf25__decision_tree_regressor__c0,decision_tree_regressor,1,7,8,3,False,6
+pv_nf25,pv_nf25__lightgbm_regressor__c0,lightgbm_regressor,400,12000,12400,17,False,2800

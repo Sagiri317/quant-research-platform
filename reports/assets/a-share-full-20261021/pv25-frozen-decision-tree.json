@@ -1,0 +1,96 @@
+{
+  "id": 0,
+  "count": 7420120,
+  "feature": "feature_turnover_volatility_20d",
+  "threshold": 0.1633516550064087,
+  "operator": "<=",
+  "gain": 25896.658257663716,
+  "left": {
+    "id": 1,
+    "count": 4867539,
+    "feature": "feature_log_float_market_cap",
+    "threshold": -0.5330503582954407,
+    "operator": "<=",
+    "gain": 9292.325023403857,
+    "left": {
+      "id": 2,
+      "count": 1450703,
+      "feature": "feature_reversal_5d",
+      "threshold": -1.3546763062477112,
+      "operator": "<=",
+      "gain": 1053.1903441990726,
+      "left": {
+        "id": 3,
+        "count": 64279,
+        "leaf": -0.011565998803475096
+      },
+      "right": {
+        "id": 4,
+        "count": 1386424,
+        "leaf": 0.11672067379637081
+      }
+    },
+    "right": {
+      "id": 5,
+      "count": 3416836,
+      "feature": "feature_turnover_volatility_20d",
+      "threshold": -0.8056617379188538,
+      "operator": "<=",
+      "gain": 1570.8930154084228,
+      "left": {
+        "id": 6,
+        "count": 916306,
+        "leaf": 0.050007854709992576
+      },
+      "right": {
+        "id": 7,
+        "count": 2500530,
+        "leaf": 0.0017403613405360498
+      }
+    }
+  },
+  "right": {
+    "id": 8,
+    "count": 2552581,
+    "feature": "feature_log_avg_amount_20d",
+    "threshold": 1.5741116404533386,
+    "operator": "<=",
+    "gain": 8447.522438427783,
+    "left": {
+      "id": 9,
+      "count": 2075577,
+      "feature": "feature_log_float_market_cap",
+      "threshold": -0.75129833817482,
+      "operator": "<=",
+      "gain": 5810.830040133093,
+      "left": {
+        "id": 10,
+        "count": 560720,
+        "leaf": 0.03250334522777099
+      },
+      "right": {
+        "id": 11,
+        "count": 1514857,
+        "leaf": -0.08592433614472812
+      }
+    },
+    "right": {
+      "id": 12,
+      "count": 477004,
+      "feature": "feature_reversal_20d",
+      "threshold": -2.140643358230591,
+      "operator": "<=",
+      "gain": 2969.553262309055,
+      "left": {
+        "id": 13,
+        "count": 89343,
+        "leaf": -0.36859978474818694
+      },
+      "right": {
+        "id": 14,
+        "count": 387661,
+        "leaf": -0.1641637407074873
+      }
+    }
+  }
+}
