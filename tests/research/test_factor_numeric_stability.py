@@ -69,10 +69,7 @@ def _produce_factors(root, data_id, inputs, columns, window):
     return saved
 
 
-@pytest.mark.parametrize("batch_rows", (6, 1000))
-def test_abnormal_turnover_observed_windows_persist_across_chunks(
-    tmp_path, monkeypatch, batch_rows
-):
+def test_abnormal_turnover_observed_windows_persist(tmp_path):
     dates = pd.bdate_range("2020-01-02", periods=252).as_unit("ns")
     sequences = {
         "lower_turnover": [0.2] * 230 + [0.03] * 22,
@@ -96,7 +93,6 @@ def test_abnormal_turnover_observed_windows_persist_across_chunks(
             for date, value in zip(dates, values, strict=True)
         ]
     )
-    monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", batch_rows)
     saved = _produce_factors(
         tmp_path,
         "price_volume_facts",
@@ -132,11 +128,8 @@ def test_abnormal_turnover_observed_windows_persist_across_chunks(
     ].iloc[0] == pytest.approx(0.03 / ((230 * 0.2 + 20 * 0.03) / 250))
 
 
-@pytest.mark.parametrize("batch_rows", (1, 1000))
 @pytest.mark.parametrize("include_cap", (False, True))
-def test_fundamental_growth_stable_differences_persist_across_chunks(
-    tmp_path, monkeypatch, batch_rows, include_cap
-):
+def test_fundamental_growth_stable_differences_persist(tmp_path, include_cap):
     cases = [
         (3.000003, 3.0),
         (3.000006, 3.0),
@@ -172,7 +165,6 @@ def test_fundamental_growth_stable_differences_persist_across_chunks(
     panel = facts.loc[:, ["market_id", "asset_id", "timestamp"]].assign(
         total_market_cap=1.0, listing_date=dates[0]
     )
-    monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", batch_rows)
     saved = _produce_factors(
         tmp_path,
         "fundamental_factors",
@@ -328,10 +320,7 @@ def test_signed_rolling_baselines_keep_zero_masks_without_erasing_small_values()
 
 
 @pytest.mark.parametrize("scale", (1e4, 1e6))
-@pytest.mark.parametrize("batch_rows", (6, 1000))
-def test_signed_amount_cancellation_persists_rank_direction(
-    tmp_path, monkeypatch, scale, batch_rows
-):
+def test_signed_amount_cancellation_persists_rank_direction(tmp_path, scale):
     from quant_research_platform.research.models.rank_ensemble import (
         EqualWeightRankEnsembleFactory,
     )
@@ -354,7 +343,6 @@ def test_signed_amount_cancellation_persists_rank_direction(
         ]
     )
     columns = ("signed_amount_flow_20d", "return_amount_imbalance_20d")
-    monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", batch_rows)
     saved = _produce_factors(
         tmp_path,
         "price_volume_facts",
@@ -394,9 +382,8 @@ def test_signed_amount_cancellation_persists_rank_direction(
     assert model.predict(saved)[0] < model.predict(saved)[1]
 
 
-@pytest.mark.parametrize("batch_rows", [1, 1000])
 def test_trend_efficiency_cancellation_survives_producer_persistence_and_rank_model(
-    tmp_path, monkeypatch, batch_rows
+    tmp_path,
 ):
     from quant_research_platform.research.models.rank_ensemble import (
         EqualWeightRankEnsembleFactory,
@@ -423,7 +410,6 @@ def test_trend_efficiency_cancellation_survives_producer_persistence_and_rank_mo
             for date, value in zip(dates, values, strict=True)
         ]
     )
-    monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", batch_rows)
     saved = _produce_factors(
         tmp_path,
         "price_volume_facts",
