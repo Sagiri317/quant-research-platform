@@ -203,15 +203,25 @@ def prepare(config: Mapping) -> Path:
     if not required <= set(inputs) or not set(inputs) <= allowed:
         raise ValueError("data_operation_input_paths_mismatch")
     output = Path(config["output_root"])
-    with producer(
-        spec, inputs=inputs, time_window=window, processed_catalog=catalog, **kwargs
-    ) as (data, metadata):
-        metadata["inputs"] = dict(config["inputs"])
-        metadata["parameters"] = {
-            "time_window": dict(config["time_window"]),
-            **json.loads(spec.parameters_json),
-        }
-        write_dataset(output, data, spec=spec, metadata=metadata)
+    metadata = {}
+
+    def frames():
+        with producer(
+            spec, inputs=inputs, time_window=window, processed_catalog=catalog, **kwargs
+        ) as (data, producer_metadata):
+            producer_metadata["inputs"] = dict(config["inputs"])
+            producer_metadata["parameters"] = {
+                "time_window": dict(config["time_window"]),
+                **json.loads(spec.parameters_json),
+            }
+            for frame in data:
+                try:
+                    yield frame
+                except GeneratorExit:
+                    return
+        metadata.update(producer_metadata)
+
+    write_dataset(output, frames(), spec=spec, metadata=metadata)
     return output
 
 

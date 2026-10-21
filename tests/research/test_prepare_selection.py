@@ -173,6 +173,7 @@ def test_cross_statement_selection_consumes_only_required_periods(tmp_path, nati
     assert result.has_legal_fundamental_pit.all()
     # Explicit projection cannot discard the dates required by this formula.
     source["columns"].remove("income_report_period")
+    request["output_root"] = str(tmp_path / "missing_projection")
     with pytest.raises(ValueError, match="data_operation_input_columns_missing"):
         prepare(request)
     (tmp_path / "legacy").mkdir()
@@ -183,6 +184,7 @@ def test_cross_statement_selection_consumes_only_required_periods(tmp_path, nati
         native=native,
     )
     request["inputs"] = {"fundamental_pit": legacy}
+    request["output_root"] = str(tmp_path / "missing_source_columns")
     with pytest.raises(ValueError, match=".*column.*"):
         prepare(request)
 

@@ -103,7 +103,7 @@ def produce_hft_processed_data(
     symbols=binance_ids.RESEARCH_SYMBOLS,
     panel_id=HFT_PANEL_DATA_ID,
 ):
-    """Keep readers alive until the shared writer's prepublication validator."""
+    """Own readers for the lifetime of the yielded frame stream."""
     if not is_datetime_window(time_window):
         raise ValueError("hft_materialization_requires_intraday_window")
     metadata = {}

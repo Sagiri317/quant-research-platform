@@ -737,7 +737,7 @@ def backtest_a_share(
             current_cross: pd.DataFrame | None = None
             if enhanced:
                 assert factor_risk is not None
-                # The mark producer distinguishes normal carries from accounting-only marks.
+                # The mark producer separates normal carries from accounting-only marks.
                 calibration_valuation = view.valuation.loc[
                     view.valuation.open.gt(0)
                     & view.valuation.adj_open.notna()

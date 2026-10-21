@@ -162,7 +162,7 @@ def test_zero_nav_rights_recovery_persists_amounts_and_undefined_returns(
             tmp_path / candidate.candidate_id,
             capital=capital,
             metadata=metadata,
-            produce=lambda emit: [emit(batch) for batch in batches],
+            produce=lambda emit, batches=batches: [emit(batch) for batch in batches],
         )
         ledger = read_portfolio_ledger_artifact(root)
         ledgers[candidate.candidate_id] = ledger
@@ -326,13 +326,13 @@ def test_zero_nav_rights_recovery_persists_amounts_and_undefined_returns(
 def test_undefined_return_pair_preserves_other_pairs_and_fdr_family(
     tmp_path, daily_complete, empty_pair
 ):
+    from math import erfc, sqrt
+
     import numpy as np
 
     from quant_research_platform.research.portfolios.diagnostics import (
         _group_portfolio_comparison,
     )
-
-    from math import erfc, sqrt
 
     pairs = ["affected", "ordinary"]
     manifest = {
@@ -674,7 +674,9 @@ def test_native_group_descriptions_share_finite_days(tmp_path, with_calendar):
                         "sample_role": "exploratory",
                         "candidate": asdict(candidate),
                     },
-                    produce=lambda emit: [emit(batch) for batch in batches],
+                    produce=lambda emit, batches=batches: [
+                        emit(batch) for batch in batches
+                    ],
                 )
             )
         )
