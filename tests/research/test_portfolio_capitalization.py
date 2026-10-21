@@ -160,7 +160,7 @@ def test_simple_size_neutrality_preserves_float_reference_and_can_select_float()
 
 
 @pytest.mark.parametrize("missing", [None, np.nan, 0.0, -1.0])
-def test_missing_total_blocks_only_size_without_reweighting_reference(missing):
+def test_missing_total_only_excludes_unusable_research_size_names(missing):
     assets = pd.Index(list("abcd"))
     floating = pd.Series([1.0, 2.0, 1.0, 2.0], index=assets)
     total = (
@@ -173,8 +173,19 @@ def test_missing_total_blocks_only_size_without_reweighting_reference(missing):
         total_market_cap=total,
         industry=pd.Series("A", index=assets),
     )
-    with pytest.raises(PortfolioTargetBlocked, match="target_neutrality_size_missing"):
-        build_simple_target_weights(**kwargs, neutrality="size")
+    if missing is None:
+        with pytest.raises(
+            PortfolioTargetBlocked, match="target_neutrality_benchmark_empty"
+        ):
+            build_simple_target_weights(**kwargs, neutrality="size")
+    else:
+        result = build_simple_target_weights(**kwargs, neutrality="size")
+        assert result.index.tolist() == ["a", "b", "d"]
+        context = _neutrality_context(
+            kwargs["eligible"], floating, None, "size", size_market_cap=total
+        )
+        assert context.benchmark_weight.tolist() == pytest.approx([0.2, 0.4, 0.4])
+        assert abs(context["size"] @ (result - context.benchmark_weight)) <= 0.2 + 1e-8
     for mode in ("none", "industry"):
         result = build_simple_target_weights(**kwargs, neutrality=mode)
         assert result.sum() == pytest.approx(1.0)
@@ -331,13 +342,15 @@ def test_missing_size_nonrebalance_marks_undefined_and_preserves_account():
         inputs["candidate"],
         construction="quantile_equal_weight",
         top_quantile=0.5,
-        benchmark_id=None,
+        benchmark_id="csi500",
         risk_style_columns=(),
         rebalance_schedule="weekly-last-trading-day",
         neutrality="size",
     )
     inputs["enhanced_decision"] = None
-    inputs["dataset"]["total_market_cap"] = np.nan
+    # Fixed-index size missingness does not remove otherwise eligible holdings.
+    inputs["benchmark_weights"] = pd.Series({"a": 0.5, "b": 0.5})
+    inputs["panel"]["total_market_cap"] = np.nan
     account, _, _, _, ledger = _build_session(**inputs)
     assert account.nav_after == 100.0
     assert ledger.post_trade_notional.tolist() == [50.0, 50.0]

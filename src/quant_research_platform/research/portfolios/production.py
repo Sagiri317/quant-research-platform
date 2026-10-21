@@ -67,6 +67,7 @@ from quant_research_platform.research.portfolios.accounting import (
 )
 from quant_research_platform.research.portfolios.construction import (
     _neutrality_context,
+    _research_neutrality_domain,
     build_simple_target_weights,
 )
 from quant_research_platform.research.portfolios.optimizer import (
@@ -142,7 +143,8 @@ _ENHANCED_PANEL_COLUMNS = (
 )
 _BENCHMARK_COLUMNS = ("benchmark_id", "asset_id", "timestamp", "weight")
 _SESSION_KEY = ("timestamp", "asset_id")
-_NEUTRALITY_REFERENCE_DOMAIN = "context_available_research_pool"
+_NEUTRALITY_REFERENCE_DOMAIN = "capitalization_available_research_pool"
+_INDUSTRY_NEUTRALITY_DOMAIN = "known_industry_subportfolio"
 _ALPHA_DIAGNOSTICS = {
     "alpha_status": "status",
     "alpha_undefined_reason": "undefined_reason",
@@ -1629,27 +1631,13 @@ def _build_session(
     domain_diagnostics = {}
     if candidate.neutrality != "none" and candidate.benchmark_id is None:
         original_eligible = eligible
-        capitals = strict_real_numeric_series(
+        eligible, capitals = _research_neutrality_domain(
+            original_eligible,
             dataset.get("float_market_cap", pd.Series(np.nan, index=dataset.index)),
-            error="target_float_market_cap_invalid",
+            dataset.get(candidate.size_cap_column),
+            candidate.neutrality,
         )
         known_cap = original_eligible & capitals.gt(0) & np.isfinite(capitals)
-        eligible = known_cap
-        if industry is not None:
-            eligible = eligible & industry.reindex(eligible.index).notna()
-        if candidate.neutrality in {"size", "industry_size"}:
-            size = (
-                capitals
-                if candidate.size_cap_column == "float_market_cap"
-                else strict_real_numeric_series(
-                    dataset.get(
-                        candidate.size_cap_column,
-                        pd.Series(np.nan, index=dataset.index),
-                    ),
-                    error="target_size_market_cap_invalid",
-                )
-            )
-            eligible = eligible & size.gt(0) & np.isfinite(size)
         reference_cap = float(capitals.loc[known_cap].sum())
         domain_diagnostics = {
             "neutrality_reference_domain": _NEUTRALITY_REFERENCE_DOMAIN,
@@ -1679,8 +1667,6 @@ def _build_session(
     decision_skip_reason = (
         "all_predictions_missing"
         if missing_scores.any() and not prediction_eligible.any()
-        else "partial_predictions_missing_neutrality"
-        if missing_scores.any() and candidate.neutrality != "none"
         else decision_skip_reason
     )
     neutrality = None
@@ -1792,6 +1778,8 @@ def _build_session(
                     neutrality,
                     industry_limit=candidate.industry_neutrality_limit,
                     size_limit=candidate.size_neutrality_limit,
+                    fixed_weights=target.reindex(missing_assets, fill_value=0.0)
+                    / stock_gross,
                 )
                 * stock_gross
             )
@@ -2283,17 +2271,17 @@ def _build_session(
             )
     if neutrality is not None:
         realized = asset_ledger.set_index("asset_id").post_trade_notional
-        unknown_industry_weight = float(
-            neutrality.attrs.get("unknown_industry_weight", 0.0)
-        )
-        exposure_diagnostics = {
-            "benchmark_unknown_industry_weight": unknown_industry_weight,
-        }
+        exposure_diagnostics = {}
         exposure_weights = {"benchmark": neutrality.benchmark_weight}
         if target.sum() > 0:
             exposure_weights["target"] = target / target.sum()
         if realized.sum() > 0:
             exposure_weights["realized"] = realized / realized.sum()
+        if industry is not None:
+            for kind, weights in exposure_weights.items():
+                exposure_diagnostics[f"{kind}_unknown_industry_weight"] = float(
+                    weights.loc[industry.reindex(weights.index).isna()].sum()
+                )
         for kind in ("target", "realized"):
             weights = exposure_weights.get(kind)
             outside = (
@@ -2301,11 +2289,7 @@ def _build_session(
                 if weights is not None
                 else None
             )
-            complete = (
-                weights is not None
-                and outside == 0.0
-                and unknown_industry_weight == 0.0
-            )
+            complete = weights is not None and outside == 0.0
             exposure_diagnostics[f"{kind}_exposure_status"] = (
                 "DEFINED" if complete else "UNDEFINED"
             )
@@ -2314,19 +2298,32 @@ def _build_session(
                 if complete
                 else "nonpositive_stock_value"
                 if weights is None
-                else "benchmark_unknown_industry"
-                if unknown_industry_weight > 0.0
                 else "outside_benchmark_domain"
             )
             exposure_diagnostics[f"{kind}_exposure_excluded_weight"] = outside
             if not complete:
                 exposure_weights.pop(kind, None)
-        for factor in neutrality.columns.drop("benchmark_weight"):
-            exposure = neutrality[factor]
-            for kind, weights in exposure_weights.items():
-                exposure_diagnostics[f"{kind}_exposure:{factor}"] = float(
-                    exposure @ weights.reindex(exposure.index, fill_value=0.0)
+        known = neutrality.attrs.get("industry_known")
+        if known is not None:
+            exposure_diagnostics["industry_neutrality_domain"] = (
+                _INDUSTRY_NEUTRALITY_DOMAIN
+            )
+        for kind, weights in exposure_weights.items():
+            weights = weights.reindex(neutrality.index, fill_value=0.0)
+            known_weight = float(weights.loc[known].sum()) if known is not None else 0.0
+            if known is not None:
+                exposure_diagnostics[f"{kind}_industry_exposure_status"] = (
+                    "DEFINED" if known_weight > 0 else "UNDEFINED"
                 )
+                exposure_diagnostics[f"{kind}_industry_exposure_reason"] = (
+                    None if known_weight > 0 else "no_known_industry_weight"
+                )
+            for factor in neutrality.columns.drop("benchmark_weight"):
+                if factor.startswith("industry:") and known_weight <= 0:
+                    continue
+                exposure_diagnostics[f"{kind}_exposure:{factor}"] = float(
+                    neutrality[factor] @ weights
+                ) / (known_weight if factor.startswith("industry:") else 1.0)
         asset_ledger.attrs["neutrality_exposures"] = exposure_diagnostics
         for name, weights in (
             ("raw_target_weight", raw_target),
@@ -3236,6 +3233,11 @@ def backtest(config: Mapping) -> Path:
         **(
             {"neutrality_reference_domain": _NEUTRALITY_REFERENCE_DOMAIN}
             if candidate.neutrality != "none" and candidate.benchmark_id is None
+            else {}
+        ),
+        **(
+            {"industry_neutrality_domain": _INDUSTRY_NEUTRALITY_DOMAIN}
+            if candidate.neutrality in {"industry", "industry_size"}
             else {}
         ),
     }

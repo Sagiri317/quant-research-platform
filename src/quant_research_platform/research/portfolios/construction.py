@@ -236,6 +236,34 @@ def _validate_quantile(value: float, error: str) -> float:
     return numeric
 
 
+def _research_neutrality_domain(
+    eligible, float_market_cap, size_market_cap, neutrality
+):
+    """Keep usable capitalization facts; industry availability never removes a name."""
+    if (
+        not isinstance(float_market_cap, pd.Series)
+        or not float_market_cap.index.is_unique
+    ):
+        raise ValueError("target_float_market_cap_required")
+    capitals = _numeric_series(
+        float_market_cap, eligible.index, "target_float_market_cap_invalid"
+    )
+    domain = eligible & capitals.gt(0) & np.isfinite(capitals)
+    if neutrality in {"size", "industry_size"}:
+        if size_market_cap is None:
+            size_market_cap = pd.Series(np.nan, index=eligible.index)
+        if (
+            not isinstance(size_market_cap, pd.Series)
+            or not size_market_cap.index.is_unique
+        ):
+            raise ValueError("target_size_market_cap_invalid")
+        sizes = _numeric_series(
+            size_market_cap, eligible.index, "target_size_market_cap_invalid"
+        )
+        domain &= sizes.gt(0) & np.isfinite(sizes)
+    return domain, capitals
+
+
 def _neutrality_context(
     eligible,
     float_market_cap,
@@ -254,15 +282,9 @@ def _neutrality_context(
         raise ValueError("target_neutrality_invalid")
     assets = eligible.index
     if benchmark_weights is None:
-        if (
-            not isinstance(float_market_cap, pd.Series)
-            or not float_market_cap.index.is_unique
-        ):
-            raise ValueError("target_float_market_cap_required")
-        capitals = _numeric_series(
-            float_market_cap, assets, "target_float_market_cap_invalid"
+        domain, capitals = _research_neutrality_domain(
+            eligible, float_market_cap, size_market_cap, neutrality
         )
-        domain = eligible & capitals.gt(0) & np.isfinite(capitals)
         weights = capitals.loc[domain]
         weights = weights / weights.sum()
     else:
@@ -291,17 +313,16 @@ def _neutrality_context(
         industry = industry.reindex(assets)
         if any(type(value) is not str or not value for value in industry.dropna()):
             raise ValueError("target_industry_invalid")
-        domain &= industry.notna()
     if not domain.any():
         raise PortfolioTargetBlocked("target_neutrality_benchmark_empty")
     context = pd.DataFrame({"benchmark_weight": weights.loc[domain]})
     if benchmark_weights is not None:
         context.attrs["eligible"] = eligible.reindex(context.index, fill_value=False)
     if neutrality in {"industry", "industry_size"}:
-        context.attrs["unknown_industry_weight"] = float(weights.loc[~domain].sum())
         codes = industry.reindex(context.index)
-        for code in sorted(codes.unique()):
-            context[f"industry:{code}"] = codes.eq(code).astype(float)
+        context.attrs["industry_known"] = codes.notna()
+        for code in sorted(codes.dropna().unique()):
+            context[f"industry:{code}"] = codes.eq(code).fillna(False).astype(float)
     if neutrality in {"size", "industry_size"}:
         if size_market_cap is None:
             raise PortfolioTargetBlocked("target_neutrality_size_missing")

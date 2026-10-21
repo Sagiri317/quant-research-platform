@@ -189,7 +189,7 @@ def test_numerical_or_input_failure_is_never_a_skipped_decision(monkeypatch, err
         production._build_session(**_decision_inputs())
 
 
-def test_partial_missing_neutral_decision_holds_without_new_projection():
+def test_partial_missing_neutral_decision_projects_with_fixed_missing_weight():
     args = _decision_inputs()
     args["candidate"] = replace(
         args["candidate"],
@@ -203,10 +203,8 @@ def test_partial_missing_neutral_decision_holds_without_new_projection():
     args["alpha"].loc["a"] = np.nan
     result = production._build_session(**args)
     assert result[0].asset_ledger.executed_delta_notional.eq(0.0).all()
-    assert (
-        result[4].attrs["decision_availability"]["decision_skip_reason"]
-        == "partial_predictions_missing_neutrality"
-    )
+    assert result[4].attrs["decision_availability"]["decision_skip_reason"] is None
+    assert result[4].attrs["decision_availability"]["decision_status"] == "PARTIAL"
 
 
 @pytest.mark.parametrize(
@@ -230,10 +228,8 @@ def test_proven_economic_bounds_skip_without_solver_relaxation(
     assert ledger.attrs["decision_availability"]["decision_skip_reason"] == reason
 
 
-@pytest.mark.parametrize("unknown_weight", [0.0, 0.05])
-def test_neutrality_diagnostics_use_stock_leg_and_disclose_unknown_reference(
-    monkeypatch, unknown_weight
-):
+@pytest.mark.parametrize("unknown", [False, True])
+def test_neutrality_diagnostics_use_stock_leg_and_disclose_unknown_reference(unknown):
     args = _decision_inputs(holdings=(0.25, 0.25))
     args["cash"] = 50.0
     args["candidate"] = replace(
@@ -242,29 +238,33 @@ def test_neutrality_diagnostics_use_stock_leg_and_disclose_unknown_reference(
         top_quantile=0.5,
         benchmark_id=None,
         risk_style_columns=(),
-        neutrality="size",
+        neutrality="industry_size",
     )
     args["enhanced_decision"] = None
     args["alpha"].loc[:] = np.nan
-    context = pd.DataFrame(
-        {"benchmark_weight": (1.0 - unknown_weight) / 2.0, "size": 1.0},
-        index=["a", "b"],
+    args["dataset"] = args["dataset"].assign(
+        float_market_cap=[1000.0, 3000.0], total_market_cap=[1000.0, 3000.0]
     )
-    context.attrs["unknown_industry_weight"] = unknown_weight
-    monkeypatch.setattr(production, "_neutrality_context", lambda *a, **k: context)
+    args["panel"] = args["panel"].assign(
+        industry_standard_id="fixture",
+        industry_level1_code=["A", None if unknown else "B"],
+    )
     account, _, _, _, ledger = production._build_session(**args)
     assert account.post_trade_cash == 50.0
     diagnostics = ledger.attrs["neutrality_exposures"]
-    assert diagnostics["benchmark_unknown_industry_weight"] == unknown_weight
-    assert diagnostics["benchmark_exposure:size"] == 1.0 - unknown_weight
+    assert diagnostics["benchmark_unknown_industry_weight"] == (
+        0.75 if unknown else 0.0
+    )
+    assert diagnostics["benchmark_exposure:size"] == pytest.approx(0.5)
     for phase in ("target", "realized"):
-        if unknown_weight:
-            assert diagnostics[f"{phase}_exposure_status"] == "UNDEFINED"
-            assert (
-                diagnostics[f"{phase}_exposure_reason"] == "benchmark_unknown_industry"
-            )
-        else:
-            assert diagnostics[f"{phase}_exposure:size"] == 1.0
+        assert diagnostics[f"{phase}_exposure_status"] == "DEFINED"
+        assert diagnostics[f"{phase}_unknown_industry_weight"] == (
+            0.5 if unknown else 0.0
+        )
+        assert diagnostics[f"{phase}_exposure:industry:fixture:A"] == (
+            1.0 if unknown else 0.5
+        )
+        assert diagnostics[f"{phase}_exposure:size"] == pytest.approx(0.0, abs=1e-14)
 
 
 @pytest.mark.parametrize("technical_fill", [False, True])

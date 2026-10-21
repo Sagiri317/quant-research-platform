@@ -55,8 +55,9 @@ def test_index_industry_unknown_keeps_original_known_weights():
         "industry",
         benchmark_weights=pd.Series({"a": 0.5, "b": 0.45, "outside": 0.05}),
     )
-    assert context.benchmark_weight.to_dict() == {"a": 0.5, "b": 0.45}
-    assert context.attrs["unknown_industry_weight"] == pytest.approx(0.05)
+    assert context.benchmark_weight.to_dict() == {"a": 0.5, "b": 0.45, "outside": 0.05}
+    assert not context.attrs["industry_known"]["outside"]
+    assert not context.attrs["eligible"]["outside"]
 
 
 def test_index_reference_cannot_buy_outside_pool_to_satisfy_exposure():
@@ -217,8 +218,9 @@ def test_unknown_index_industry_does_not_disable_feasible_known_industries():
         neutrality="industry",
         industry_neutrality_limit=0.03,
     )
-    assert weights["a"] == pytest.approx(0.53)
-    assert weights["b"] == pytest.approx(0.47)
+    assert weights["a"] == pytest.approx(50 / 95 + 0.03)
+    assert weights["b"] == pytest.approx(45 / 95 - 0.03)
+    assert weights["outside"] == 0.0
     assert weights.sum() == pytest.approx(1.0)
 
 

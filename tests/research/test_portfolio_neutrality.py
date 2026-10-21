@@ -222,6 +222,7 @@ def test_nonrebalance_blocked_exit_keeps_realized_exposure_unknown(
             assert facts["realized_exposure_status"] == "UNDEFINED"
             assert facts["realized_exposure_reason"] == "outside_benchmark_domain"
             assert facts["realized_exposure_excluded_weight"] > 0.0
+            assert facts["realized_unknown_industry_weight"] == 0.0
             assert not any(key.startswith("realized_exposure:") for key in facts)
             held = {row.phase: row for row in batch.valuations if row.asset_id == "b"}
             assert held["before"].quantity > 0
@@ -266,7 +267,7 @@ def test_neutral_projection_satisfies_kkt_on_active_and_boundary_assets():
     assert (weights >= 0.0).all()
 
 
-@pytest.mark.parametrize("missing", ["absent", "null", "zero", "negative", "industry"])
+@pytest.mark.parametrize("missing", ["absent", "null", "zero", "negative", "size"])
 def test_empty_calculable_neutral_pool_exits_to_cash(
     missing,
 ):
@@ -281,12 +282,14 @@ def test_empty_calculable_neutral_pool_exits_to_cash(
         benchmark_id=None,
         risk_style_columns=(),
         rebalance_schedule="weekly-last-trading-day",
-        neutrality="industry" if missing == "industry" else "size",
+        neutrality="size",
     )
     inputs["enhanced_decision"] = None
     if missing == "absent":
         inputs["dataset"] = inputs["dataset"].drop(columns="float_market_cap")
-    elif missing != "industry":
+    elif missing == "size":
+        inputs["dataset"]["total_market_cap"] = np.nan
+    else:
         inputs["dataset"]["float_market_cap"] = {
             "null": np.nan,
             "zero": 0.0,

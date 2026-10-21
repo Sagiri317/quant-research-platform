@@ -660,7 +660,9 @@ def _validate_config(config: OptimizerConfig) -> None:
         raise ValueError("optimizer_config_invalid")
 
 
-def _project_neutral_target(target, context, *, industry_limit=0.02, size_limit=0.2):
+def _project_neutral_target(
+    target, context, *, industry_limit=0.02, size_limit=0.2, fixed_weights=None
+):
     """Project stock-leg weights within explicit benchmark exposure bands."""
     for limit in (industry_limit, size_limit):
         if (
@@ -674,7 +676,9 @@ def _project_neutral_target(target, context, *, industry_limit=0.02, size_limit=
     if not np.isfinite(q).all() or np.any(q < 0):
         raise ValueError("target_weights_invalid")
     b = context.benchmark_weight.to_numpy(dtype="float64")
-    exposures = context.drop(columns="benchmark_weight").to_numpy(dtype="float64").T
+    exposures = (
+        context.drop(columns="benchmark_weight").to_numpy(dtype="float64", copy=True).T
+    )
     limits = np.array(
         [
             industry_limit if name.startswith("industry:") else size_limit
@@ -682,67 +686,111 @@ def _project_neutral_target(target, context, *, industry_limit=0.02, size_limit=
         ],
         dtype="float64",
     )
-    exact = exposures[limits == 0]
     industry_rows = np.array(
         [
             name.startswith("industry:")
             for name in context.columns.drop("benchmark_weight")
-        ]
+        ],
+        dtype=bool,
     )
-    if industry_rows.any() and np.all(exposures[industry_rows].sum(axis=0) == 1):
-        reference_coverage = float((exposures[industry_rows] @ b).sum())
-        if abs(1.0 - reference_coverage) > limits[industry_rows].sum() + 1e-8:
-            raise PortfolioTargetBlocked("target_neutrality_infeasible")
+    reference = exposures @ b
+    denominators = np.ones_like(exposures)
+    if industry_rows.any():
+        known = exposures[industry_rows].sum(axis=0)
+        known_reference = float(known @ b)
+        if known_reference > 0:
+            # Industry bands are proportions of each known-industry stock leg.
+            exposures[industry_rows] -= (
+                reference[industry_rows, None] / known_reference * known
+            )
+            reference[industry_rows] = 0.0
+            denominators[industry_rows] = known
+        else:
+            exposures = exposures[~industry_rows]
+            reference = reference[~industry_rows]
+            denominators = denominators[~industry_rows]
+            limits = limits[~industry_rows]
+    exact = exposures[limits == 0]
     bounded = exposures[limits > 0]
     bands = limits[limits > 0]
+    upper_matrix = np.vstack((bounded, -bounded)) - np.tile(
+        bands[:, None] * denominators[limits > 0], (2, 1)
+    )
+    upper_values = np.concatenate((reference[limits > 0], -reference[limits > 0]))
     matrix = np.vstack((np.ones(len(b)), exact))
-    right_hand_side = np.concatenate(([1.0], exact @ b))
+    right_hand_side = np.concatenate(([1.0], reference[limits == 0]))
     eligible = context.attrs.get("eligible")
+    bounds = [(0.0, None)] * len(b)
     if eligible is not None:
         eligible = eligible.reindex(context.index, fill_value=False)
-        # Fixed-zero reference names must not inflate the equality rank.
-        matrix[:, ~eligible.to_numpy(dtype=bool)] = 0.0
+        bounds = [(0.0, None if value else 0.0) for value in eligible]
+    if fixed_weights is not None:
+        for asset, value in fixed_weights.items():
+            position = context.index.get_loc(asset)
+            if bounds[position][1] == 0.0 and value != 0.0:
+                raise PortfolioTargetBlocked("target_neutrality_infeasible")
+            bounds[position] = (float(value), float(value))
+
+    def valid_weights(weights):
+        return (
+            np.isfinite(weights).all()
+            and np.allclose(matrix @ weights, right_hand_side, rtol=0.0, atol=1e-8)
+            and not np.any(
+                np.abs(exposures @ weights - reference)
+                > (limits + 1e-8) * (denominators @ weights)
+            )
+            and all(
+                value >= lower - 1e-8 and (upper is None or value <= upper + 1e-8)
+                for value, (lower, upper) in zip(weights, bounds, strict=True)
+            )
+        )
+
+    # A feasible raw target is the exact minimizer; avoid inventing tiny positions.
+    if valid_weights(q):
+        return pd.Series(q, index=context.index, dtype="float64", name="target_weight")
+    fixed = np.array([lower == upper for lower, upper in bounds])
+    fixed_values = np.array([lower for lower, _ in bounds])[fixed]
+    free_matrix = matrix.copy()
+    free_matrix[:, fixed] = 0.0
+    free_rhs = right_hand_side - matrix[:, fixed] @ fixed_values
     # Remove only algebraically redundant equalities; retain their residual checks.
-    left, singular, vectors = np.linalg.svd(matrix, full_matrices=False)
+    left, singular, vectors = np.linalg.svd(free_matrix, full_matrices=False)
     rank = np.count_nonzero(
         singular > singular[0] * max(matrix.shape) * np.finfo(float).eps
     )
     constraints = vectors[:rank]
-    values = (left[:, :rank].T @ right_hand_side) / singular[:rank]
+    values = (left[:, :rank].T @ free_rhs) / singular[:rank]
     if not np.allclose(
-        matrix @ (constraints.T @ values), right_hand_side, rtol=0.0, atol=1e-8
+        free_matrix @ (constraints.T @ values), free_rhs, rtol=0.0, atol=1e-8
     ):
         raise PortfolioTargetBlocked("target_neutrality_infeasible")
-    optimizer_constraints = [
-        {
-            "type": "eq",
-            "fun": lambda w: constraints @ w - values,
-            "jac": lambda w: constraints,
-        }
-    ]
+    optimizer_constraints = (
+        [
+            {
+                "type": "eq",
+                "fun": lambda w: constraints @ w - values,
+                "jac": lambda w: constraints,
+            }
+        ]
+        if rank
+        else []
+    )
     if len(bands):
         optimizer_constraints.append(
             {
                 "type": "ineq",
-                "fun": lambda w: np.concatenate(
-                    (bands - bounded @ (w - b), bands + bounded @ (w - b))
-                ),
-                "jac": lambda w: np.vstack((-bounded, bounded)),
+                "fun": lambda w: upper_values - upper_matrix @ w,
+                "jac": lambda w: -upper_matrix,
             }
         )
-    bounds = [(0.0, None)] * len(b)
-    initial = q if eligible is not None else b / b.sum()
-    if eligible is not None:
-        # Reference-only constituents contribute exposures, never buyable weights.
-        bounds = [(0.0, None if value else 0.0) for value in eligible]
+    initial = b / b.sum()
+    if fixed.any():
         feasible = linprog(
             np.zeros(len(b)),
-            A_ub=np.vstack((bounded, -bounded)) if len(bands) else None,
-            b_ub=np.concatenate((bands + bounded @ b, bands - bounded @ b))
-            if len(bands)
-            else None,
-            A_eq=constraints,
-            b_eq=values,
+            A_ub=upper_matrix if len(bands) else None,
+            b_ub=upper_values if len(bands) else None,
+            A_eq=constraints if rank else None,
+            b_eq=values if rank else None,
             bounds=bounds,
             method="highs",
         )
@@ -763,11 +811,7 @@ def _project_neutral_target(target, context, *, industry_limit=0.02, size_limit=
     if not solved.success:
         raise PortfolioTargetBlocked("target_neutrality_solver_failed")
     weights = np.maximum(solved.x, 0.0)
-    if (
-        not np.isfinite(weights).all()
-        or not np.allclose(matrix @ weights, right_hand_side, rtol=0.0, atol=1e-8)
-        or np.any(np.abs(exposures @ (weights - b)) > limits + 1e-8)
-    ):
+    if not valid_weights(weights):
         raise PortfolioTargetBlocked("target_neutrality_solution_invalid")
     return pd.Series(
         weights, index=context.index, dtype="float64", name="target_weight"

@@ -6,7 +6,6 @@ import pytest
 
 from quant_research_platform.contracts.portfolios import (
     ExecutionAssumptions,
-    PortfolioTargetBlocked,
 )
 from quant_research_platform.research.portfolios.construction import (
     _neutrality_context,
@@ -52,21 +51,35 @@ def test_size_band_uses_standardized_log_cap_not_currency_or_log_units():
     assert abs(context["size"] @ active) <= 0.2 + 1e-8
 
 
-def test_unknown_industry_does_not_renormalize_known_reference_weight():
+def test_unknown_industry_remains_buyable_and_known_ratios_use_the_known_leg():
     caps = pd.Series({"a": 50.0, "b": 45.0, "unknown": 5.0})
     eligible = pd.Series(True, index=caps.index)
     industry = pd.Series({"a": "A", "b": "B", "unknown": None})
     context = _neutrality_context(eligible, caps, industry, "industry")
-    assert context.benchmark_weight.to_dict() == {"a": 0.5, "b": 0.45}
-    assert context.attrs["unknown_industry_weight"] == pytest.approx(0.05)
-    with pytest.raises(PortfolioTargetBlocked, match="target_neutrality_infeasible"):
-        build_simple_target_weights(
-            pd.Series({"a": 3.0, "b": 2.0, "unknown": 1.0}),
-            eligible=eligible,
-            float_market_cap=caps,
-            industry=industry,
-            neutrality="industry",
-        )
+    assert context.benchmark_weight.to_dict() == {"a": 0.5, "b": 0.45, "unknown": 0.05}
+    assert context.attrs["industry_known"].to_dict() == {
+        "a": True,
+        "b": True,
+        "unknown": False,
+    }
+    weights = build_simple_target_weights(
+        pd.Series({"a": 3.0, "b": 2.0, "unknown": 1.0}),
+        eligible=eligible,
+        float_market_cap=caps,
+        industry=industry,
+        neutrality="industry",
+    )
+    assert weights["a"] / weights.loc[["a", "b"]].sum() == pytest.approx(50 / 95 + 0.02)
+    unknown = build_simple_target_weights(
+        pd.Series({"a": 1.0, "b": 2.0, "unknown": 3.0}),
+        eligible=eligible,
+        float_market_cap=caps,
+        industry=industry,
+        neutrality="industry",
+    )
+    assert unknown.to_dict() == pytest.approx(
+        {"a": 0.0, "b": 0.0, "unknown": 1.0}, abs=1e-8
+    )
 
 
 def test_enhanced_cash_does_not_change_stock_leg_industry_neutrality():

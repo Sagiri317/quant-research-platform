@@ -429,16 +429,20 @@ def test_missing_prediction_independent_exit_needs_no_neutrality_context(neutral
     args["candidate"] = replace(
         args["candidate"],
         construction="quantile_equal_weight",
-        benchmark_id=None,
+        benchmark_id="csi500",
         top_quantile=0.5,
         neutrality=neutrality,
     )
+    # A fixed index preserves eligibility when neutrality context is missing.
+    args["benchmark_weights"] = pd.Series({"a": 1.0})
     args["enhanced_decision"] = None
     args["alpha"][:] = np.nan
     args["dataset"].loc[args["dataset"].asset_id.eq("b"), "eligible"] = False
     args["dataset"][["float_market_cap", "total_market_cap"]] = np.nan
     args["panel"]["industry_standard_id"] = pd.NA
     args["panel"]["industry_level1_code"] = pd.NA
+    # Index size facts come from PANEL, not the research-pool dataset.
+    args["panel"]["total_market_cap"] = args["dataset"]["total_market_cap"]
     account, _, _, _, ledger = production._build_session(**args)
     assert ledger.executed_delta_notional.tolist() == [0.0, -50.0]
     assert account.post_trade_cash == 50.0
@@ -516,7 +520,7 @@ def test_optimizer_rejects_invalid_reserved_receivable_weight(receivable_weight)
 @pytest.mark.parametrize(
     "kind,reason",
     [
-        ("industry", "target_neutrality_benchmark_empty"),
+        ("industry", None),
         ("size", "target_neutrality_size_missing"),
         ("single_size", "target_neutrality_size_undefined"),
     ],
@@ -526,10 +530,12 @@ def test_missing_new_target_context_does_not_cancel_independent_exit(kind, reaso
     args["candidate"] = replace(
         args["candidate"],
         construction="quantile_equal_weight",
-        benchmark_id=None,
+        benchmark_id="csi500",
         top_quantile=0.5,
         neutrality="industry" if kind == "industry" else "size",
     )
+    # A fixed index preserves eligibility when neutrality context is missing.
+    args["benchmark_weights"] = pd.Series({"a": 1.0})
     args["enhanced_decision"] = None
     args["dataset"].loc[args["dataset"].asset_id.eq("b"), "eligible"] = False
     if kind == "industry":
@@ -537,10 +543,15 @@ def test_missing_new_target_context_does_not_cancel_independent_exit(kind, reaso
         args["panel"]["industry_level1_code"] = pd.NA
     elif kind == "size":
         args["dataset"]["total_market_cap"] = np.nan
+    # Index size facts come from PANEL, not the research-pool dataset.
+    args["panel"]["total_market_cap"] = args["dataset"]["total_market_cap"]
     account, _, optimized, _, ledger = production._build_session(**args)
     assert optimized is None
-    assert ledger.executed_delta_notional.tolist() == [0.0, -50.0]
-    assert account.post_trade_cash == 50.0
+    assert ledger.executed_delta_notional.tolist() == [
+        50.0 if kind == "industry" else 0.0,
+        -50.0,
+    ]
+    assert account.post_trade_cash == (0.0 if kind == "industry" else 50.0)
     assert ledger.attrs["decision_availability"]["decision_skip_reason"] == reason
 
 

@@ -1710,12 +1710,20 @@ def _portfolio_statistics_tables(
                         )
                         for item in batch.diagnostics
                         if item.asset_id == PORTFOLIO_CASH_ASSET_ID
-                        and item.name.startswith(
-                            (
-                                "target_exposure:",
-                                "realized_exposure:",
-                                "benchmark_exposure:",
+                        and (
+                            item.name.startswith(
+                                (
+                                    "target_exposure:",
+                                    "realized_exposure:",
+                                    "benchmark_exposure:",
+                                )
                             )
+                            or item.name
+                            in {
+                                "target_unknown_industry_weight",
+                                "realized_unknown_industry_weight",
+                                "benchmark_unknown_industry_weight",
+                            }
                         )
                         and item.number is not None
                     )
@@ -2600,6 +2608,13 @@ def portfolio_statistics(config):
         candidate_id: ledger.metadata.get("selection_mode")
         for candidate_id, ledger in ledgers.items()
     }
+    industry_domains = {
+        candidate_id: ledger.metadata["industry_neutrality_domain"]
+        for candidate_id, ledger in ledgers.items()
+        if "industry_neutrality_domain" in ledger.metadata
+    }
+    if industry_domains:
+        metadata["industry_neutrality_domains"] = industry_domains
     metadata["comparison_portfolio_ids"] = policy.get("group_comparison", {}).get(
         "portfolio_ids", []
     )
