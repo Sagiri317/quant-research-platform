@@ -168,6 +168,41 @@ def test_exact_primary_key_index_retains_exact_native_semantics():
     assert numeric.add_table(pa.table({"value": [0.0]})) == 1
 
 
+@pytest.mark.parametrize("string_type", (pa.string(), pa.large_string()))
+def test_chunked_repeated_keys_preserve_canonical_bytes_and_batch_identity(string_type):
+    module = importlib.import_module("quant_research_platform.storage.exact_keys")
+    timestamp_type = pa.timestamp("ns", tz="UTC")
+    table = pa.table(
+        {
+            "asset_id": pa.chunked_array([["甲", "b"], ["甲", "甲"]], type=string_type),
+            "timestamp": pa.chunked_array([[1], [2, 1, 2]], type=timestamp_type),
+        }
+    )
+    index = module.ExactPrimaryKeyIndex(primary_key=table.column_names)
+    assert index.add_table(table) == 1
+
+    def frame(kind, payload):
+        tag = str(kind).encode("utf-8")
+        value = b"1" + payload
+        return struct.pack(">Q", len(tag)) + tag + struct.pack(">Q", len(value)) + value
+
+    expected = {
+        frame(string_type, asset.encode("utf-8"))
+        + frame(timestamp_type, struct.pack(">q", timestamp))
+        for asset, timestamp in (("甲", 1), ("b", 2), ("甲", 2))
+    }
+    assert set(index._namespaces["dataset"]) == expected
+    reversed_table = table.take(pa.array([3, 2, 1, 0]))
+    assert index.add_table(reversed_table) == 4
+    assert (
+        index.add_comparison_table(
+            reversed_table, namespace="comparison", value_columns=()
+        )
+        == 1
+    )
+    assert set(index._namespaces["comparison"]) == expected
+
+
 def test_exact_key_index_inserts_unique_rows_from_duplicate_chunk() -> None:
     module = importlib.import_module("quant_research_platform.storage.exact_keys")
     index = module.ExactPrimaryKeyIndex(primary_key=("key",))

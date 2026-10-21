@@ -288,38 +288,34 @@ class ExactPrimaryKeyIndex:
 
     def _payload_rows(
         self, keys: pa.Table, *, namespace: str
-    ) -> Iterator[tuple[str, bytearray, None]]:
-        fields = tuple(keys.schema.field(column) for column in self._primary_key)
-        columns = tuple(keys.column(column) for column in self._primary_key)
-        for row_index in range(keys.num_rows):
-            payload = bytearray()
-            for column, field in zip(columns, fields, strict=True):
-                _append_arrow_scalar_payload(
-                    payload,
-                    column[row_index],
-                    field.type,
-                    normalize_float_zero=True,
-                )
-            yield (namespace, payload, None)
+    ) -> Iterator[tuple[str, bytes, None]]:
+        columns = []
+        for name in self._primary_key:
+            column = keys.column(name)
+            kind = column.type
+            if (
+                pa.types.is_string(kind)
+                or pa.types.is_large_string(kind)
+                or pa.types.is_timestamp(kind)
+            ):
+                encoded = column.combine_chunks().dictionary_encode()
+                payloads = list(_key_column_payloads(encoded.dictionary))
+                columns.append(map(payloads.__getitem__, encoded.indices.to_numpy()))
+            else:
+                columns.append(_key_column_payloads(column))
+        for _ in range(keys.num_rows):
+            yield (namespace, b"".join(next(column) for column in columns), None)
 
     def _comparison_payload_rows(
         self, keys: pa.Table, values: pa.Table, *, namespace: str
-    ) -> Iterator[tuple[str, bytearray, bytearray]]:
-        key_fields = tuple(keys.schema.field(column) for column in self._primary_key)
-        key_columns = tuple(keys.column(column) for column in self._primary_key)
+    ) -> Iterator[tuple[str, bytes, bytearray]]:
         value_fields = tuple(
             values.schema.field(column) for column in values.column_names
         )
         value_arrays = tuple(values.column(column) for column in values.column_names)
-        for row_index in range(keys.num_rows):
-            key_payload = bytearray()
-            for column, field in zip(key_columns, key_fields, strict=True):
-                _append_arrow_scalar_payload(
-                    key_payload,
-                    column[row_index],
-                    field.type,
-                    normalize_float_zero=True,
-                )
+        for row_index, (_, key_payload, _) in enumerate(
+            self._payload_rows(keys, namespace=namespace)
+        ):
             value_payload = bytearray()
             for column, field in zip(value_arrays, value_fields, strict=True):
                 _append_arrow_scalar_payload(
@@ -330,6 +326,15 @@ class ExactPrimaryKeyIndex:
                     allow_nonfinite=True,
                 )
             yield (namespace, key_payload, value_payload)
+
+
+def _key_column_payloads(column: pa.Array | pa.ChunkedArray) -> Iterator[bytes]:
+    for value in column:
+        payload = bytearray()
+        _append_arrow_scalar_payload(
+            payload, value, column.type, normalize_float_zero=True
+        )
+        yield bytes(payload)
 
 
 def _float_value_payload(scalar: pa.Scalar, *, retain: bool) -> bytes | None:
