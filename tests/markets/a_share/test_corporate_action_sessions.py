@@ -100,11 +100,31 @@ def test_cash_missing_payment_date_uses_declared_ex_open_assumption():
     assert events.entitlement_proved.iloc[0]
 
 
-def test_before_ex_cash_payment_is_unproved_not_silently_shifted():
-    events = portfolio_sessions._corporate_action_events(
-        *_facts(lambda base: [dict(base, settlement_date=pd.Timestamp("2023-01-03"))])
+def test_before_ex_cash_payment_uses_declared_ex_open_without_mutating_source():
+    source, stocks, calendar = _facts(
+        lambda base: [dict(base, settlement_date=pd.Timestamp("2023-01-03"))]
     )
-    assert events.settlement_at.iloc[0] == pd.Timestamp("2023-01-03")
+    original = source.copy(deep=True)
+    events = portfolio_sessions._corporate_action_events(source, stocks, calendar)
+    assert events.settlement_at.iloc[0] == pd.Timestamp("2023-01-06")
+    assert events.entitlement_proved.iloc[0]
+    assert events.attrs["corporate_action_policy"]["before_ex_cash_payment_date"] == (
+        "ex_date_open"
+    )
+    pd.testing.assert_frame_equal(source, original)
+
+
+@pytest.mark.parametrize(
+    "unknown", [{"settlement_date_unresolved": True}, {"amount": float("nan")}]
+)
+def test_ex_open_assumption_does_not_prove_unresolved_dates_or_unknown_amounts(unknown):
+    events = portfolio_sessions._corporate_action_events(
+        *_facts(
+            lambda base: [
+                dict(base, settlement_date=pd.Timestamp("2023-01-03"), **unknown)
+            ]
+        )
+    )
     assert not events.entitlement_proved.iloc[0]
 
 

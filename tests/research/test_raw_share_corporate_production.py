@@ -211,12 +211,12 @@ def test_future_close_cannot_change_raw_open_sale_or_final_cash(tmp_path, monkey
 
 
 @pytest.mark.parametrize(
-    "payment",
-    ["2023-01-06", None],
-    ids=["delayed-payment", "approved-ex-date-assumption"],
+    ("payment", "delayed"),
+    [("2023-01-06", True), (None, False), ("2023-01-04", False)],
+    ids=["delayed-payment", "missing-ex-date-assumption", "before-ex-date-assumption"],
 )
 def test_dividend_receivable_survives_sale_and_only_settlement_is_cash(
-    tmp_path, monkeypatch, payment
+    tmp_path, monkeypatch, payment, delayed
 ):
     batches = _distribution_batches(tmp_path, monkeypatch, payment=payment)
     sale_batch = next(
@@ -226,13 +226,25 @@ def test_dividend_receivable_survives_sale_and_only_settlement_is_cash(
     )
     after = [row for row in sale_batch.valuations if row.phase == "after"]
     assert sum(row.value for row in after) == pytest.approx(100.0)
-    assert _cash(sale_batch, "after") == pytest.approx(90.0 if payment else 100.0)
-    if payment:
+    assert _cash(sale_batch, "after") == pytest.approx(90.0 if delayed else 100.0)
+    if delayed:
         claim = next(row for row in after if row.asset_id == "b")
         assert float(claim.quantity) == 0.0
         assert claim.receivable == pytest.approx(10.0)
         assert claim.value == pytest.approx(10.0)
     assert _cash(batches[-1], "end") == pytest.approx(100.0)
+    dividends = [
+        flow for batch in batches for flow in batch.cashflows if flow.kind == "dividend"
+    ]
+    assert len(dividends) == 1
+    assert dividends[0].amount == pytest.approx(10.0)
+    assert (
+        dividends[0].timestamp_ns
+        == pd.Timestamp("2023-01-06" if delayed else "2023-01-05").value
+    )
+    artifact = read_portfolio_ledger_artifact(tmp_path / "ledger")
+    policy = artifact.metadata["corporate_action_policy"]
+    assert policy["before_ex_cash_payment_date"] == "ex_date_open"
 
 
 def test_cash_and_stock_distribution_share_record_base_and_stock_stays_locked(

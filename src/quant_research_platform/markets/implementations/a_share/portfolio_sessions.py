@@ -76,6 +76,7 @@ CORPORATE_ACTION_POLICY = {
     "record_date": "previous_own_market_session_for_ordinary_CA_SD",
     "late_disclosure": "retain_actual_record_shares_confirm_only_when_available",
     "missing_cash_payment_date": "ex_date_open",
+    "before_ex_cash_payment_date": "ex_date_open",
     "voluntary_subscription": "none",
     "stock_distribution_availability": "source_settlement_date_or_locked",
 }
@@ -691,7 +692,10 @@ def _corporate_action_events(source, stocks, calendar):
         cash, shares = None, None
         if event.kind == "CA":
             cash = Fraction(amount) if finite else None
-            if pd.isna(settlement) and not settlement_unresolved:
+            # shortcut: Use ex-open until missing/pre-ex payment dates are verified.
+            if not settlement_unresolved and (
+                pd.isna(settlement) or settlement < effective
+            ):
                 settlement = effective
             proved &= pd.notna(settlement) and settlement >= effective
         elif event.kind == "SD":
