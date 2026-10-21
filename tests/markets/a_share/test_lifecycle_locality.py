@@ -10,6 +10,32 @@ from quant_research_platform.markets.implementations.a_share.processed import (
 from tests.helpers.a_share_sources import _synthetic_interim_frames
 
 
+def test_empty_stock_master_preserves_only_real_observations():
+    dates = pd.bdate_range("2020-01-02", periods=6).as_unit("ns")
+    source = _synthetic_interim_frames(dates)
+    bars = source["market_bars_1d"]
+    bars = bars.loc[~(bars.source_asset_id.eq("000001") & bars.timestamp.eq(dates[2]))]
+    actual = panels.compute_market_panel(
+        bars,
+        **panels._prepare_market_panel_inputs(
+            stocks=panels._canonical_stock_master(source["stock_master"].iloc[:0]),
+            market_cap=source["market_cap"],
+            trading_calendar=source["trading_calendar"],
+        ),
+    )
+    expected = bars.rename(columns={"source_asset_id": "asset_id"})
+    columns = ["asset_id", "timestamp", "close"]
+    pd.testing.assert_frame_equal(
+        actual.loc[:, columns].sort_values(columns[:2]).reset_index(drop=True),
+        expected.loc[:, columns].sort_values(columns[:2]).reset_index(drop=True),
+        check_dtype=False,
+    )
+    assert len(actual) == 17
+    assert actual.delisting_date_unresolved.all()
+    assert actual.listing_date.isna().all()
+    assert actual.listing_age_trading_days.isna().all()
+
+
 def test_later_unknown_delisting_is_a_local_barrier_without_rewriting_history():
     dates = pd.bdate_range("2020-01-02", periods=6).as_unit("ns")
     source = _synthetic_interim_frames(dates)

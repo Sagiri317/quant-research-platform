@@ -362,51 +362,43 @@ def _dense_lifecycle_panel(
             "market_type"
         ]
     assets = tuple(sorted(asset_market_types.index))
-    rows: list[pd.DataFrame] = []
-    stock_groups = stocks.groupby("asset_id", sort=False).indices
-    bar_groups = bars.groupby("asset_id", sort=False).indices
-    market_groups = market_history.groupby("asset_id", sort=False).indices
-    for asset_id in assets:
-        stock = stocks.iloc[stock_groups.get(asset_id, [])]
-        first_listing = stock["listing_date"].min()
-        dates = (
-            sessions if pd.isna(first_listing) else sessions[sessions >= first_listing]
-        )
-        if dates.empty:
-            continue
-        base = pd.DataFrame({"asset_id": asset_id, "timestamp": dates})
-        raw = bars.iloc[bar_groups.get(asset_id, [])].assign(_source_bar_observed=True)
-        base = base.merge(
-            raw.drop(
-                columns=[
-                    "market_id",
-                    "session_date",
-                    "available_at",
-                ],
-                errors="ignore",
-            ),
-            on=["asset_id", "timestamp"],
-            how="left",
-            validate="one_to_one",
-        )
-        base["asset_id"] = base["asset_id"].astype(stocks["asset_id"].dtype)
-        base = _asof_join_stock_master(base, stock)
-        membership = market_history.iloc[market_groups.get(asset_id, [])]
-        positions = membership.timestamp.searchsorted(dates, side="right") - 1
-        base["market_type"] = pd.Series(pd.NA, index=base.index, dtype="Int64")
-        known = positions >= 0
-        known[known] &= base.loc[known, "listing_date"].isna().to_numpy() | (
-            membership.timestamp.iloc[positions[known]].to_numpy()
-            >= base.loc[known, "listing_date"].to_numpy()
-        )
-        base.loc[known, "market_type"] = membership.market_type.iloc[
-            positions[known]
-        ].to_numpy()
-        rows.append(base)
-    if not rows:
+    base = pd.DataFrame(
+        {"asset_id": pd.Series(assets, dtype=stocks.asset_id.dtype)}
+    ).merge(pd.DataFrame({"timestamp": sessions}), how="cross")
+    first_listing = stocks.groupby("asset_id").listing_date.min().reindex(base.asset_id)
+    first_listing.index = base.index
+    base = base.loc[first_listing.isna() | base.timestamp.ge(first_listing)]
+    if base.empty:
         return bars.iloc[0:0].copy()
-    result = pd.concat(rows, ignore_index=True)
-    result["asset_id"] = result["asset_id"].astype(stocks["asset_id"].dtype)
+    base = base.merge(
+        bars.drop(
+            columns=["market_id", "session_date", "available_at"], errors="ignore"
+        ).assign(_source_bar_observed=True),
+        on=["asset_id", "timestamp"],
+        how="left",
+        validate="one_to_one",
+    )
+    base = _asof_join_stock_master(base, stocks)
+    membership = market_history.loc[:, ["asset_id", "timestamp", "market_type"]].rename(
+        columns={
+            "timestamp": "_market_observed_at",
+            "market_type": "_known_market_type",
+        }
+    )
+    membership["asset_id"] = membership.asset_id.astype(stocks.asset_id.dtype)
+    result = pd.merge_asof(
+        base.sort_values("timestamp", kind="stable"),
+        membership.sort_values("_market_observed_at", kind="stable"),
+        left_on="timestamp",
+        right_on="_market_observed_at",
+        by="asset_id",
+        direction="backward",
+    )
+    known = result._market_observed_at.notna() & (
+        result.listing_date.isna() | result._market_observed_at.ge(result.listing_date)
+    )
+    result["market_type"] = result._known_market_type.astype("Int64").where(known)
+    result = result.drop(columns=["_market_observed_at", "_known_market_type"])
     result["market_id"] = str(MARKET_ID)
     result["session_date"] = result["timestamp"]
     result["available_at"] = result["timestamp"]
@@ -429,7 +421,6 @@ def _dense_lifecycle_panel(
 
 
 def _asof_join_stock_master(panel: pd.DataFrame, stocks: pd.DataFrame) -> pd.DataFrame:
-    output: list[pd.DataFrame] = []
     columns = (
         "stock_name",
         "listing_date",
@@ -437,61 +428,37 @@ def _asof_join_stock_master(panel: pd.DataFrame, stocks: pd.DataFrame) -> pd.Dat
         "delisting_date_unresolved",
         "company_status",
     )
-    stock_groups = stocks.groupby("asset_id", sort=False).indices
-    for asset_id, group in panel.groupby("asset_id", sort=False):
-        right = stocks.iloc[stock_groups.get(asset_id, [])]
-        if right.empty:
-            current = group.copy()
-            for column in columns:
-                current[column] = (
-                    pd.NA
-                    if column
-                    in {
-                        "stock_name",
-                        "company_status",
-                        "industry_standard_id",
-                        "industry_level1_code",
-                        "industry_level1_name",
-                    }
-                    else pd.NaT
-                )
-            current["delisting_date_unresolved"] = True
-        else:
-            # Listing is a life fact; a later status cannot erase or backfill it.
-            lives = right.drop_duplicates("listing_date", keep="first").loc[
-                :,
-                [
-                    "asset_id",
-                    "listing_date",
-                    "delisting_date",
-                    "delisting_date_unresolved",
-                ],
-            ]
-            lives = lives.loc[lives["listing_date"].notna()].copy()
-            lives["stock_effective_date"] = lives["listing_date"]
-            lives = lives.loc[
-                ~lives["stock_effective_date"].isin(right["stock_effective_date"])
-            ]
-            right = pd.concat([lives, right], ignore_index=True)
-            current = pd.merge_asof(
-                group.sort_values("timestamp"),
-                right.loc[
-                    :, ["asset_id", "stock_effective_date", *columns]
-                ].sort_values("stock_effective_date"),
-                left_on="timestamp",
-                right_on="stock_effective_date",
-                by="asset_id",
-                direction="backward",
-                allow_exact_matches=True,
-                suffixes=("", "_stock_master"),
-            ).drop(columns=["stock_effective_date"])
-            for column in columns:
-                joined = f"{column}_stock_master"
-                if joined in current:
-                    current[column] = current[joined]
-                    current.drop(columns=joined, inplace=True)
-        output.append(current)
-    result = pd.concat(output, ignore_index=True)
+    right = stocks.loc[stocks.asset_id.isin(panel.asset_id)]
+    # Listing is a life fact; a later status cannot erase or backfill it.
+    lives = right.drop_duplicates(["asset_id", "listing_date"], keep="first").loc[
+        :, ["asset_id", "listing_date", "delisting_date", "delisting_date_unresolved"]
+    ]
+    lives = lives.loc[lives.listing_date.notna()].copy()
+    lives["stock_effective_date"] = lives.listing_date
+    key = ["asset_id", "stock_effective_date"]
+    lives = lives.loc[
+        ~pd.MultiIndex.from_frame(lives[key]).isin(pd.MultiIndex.from_frame(right[key]))
+    ]
+    right = pd.concat([lives, right], ignore_index=True)
+    result = pd.merge_asof(
+        panel.sort_values("timestamp", kind="stable"),
+        right.loc[:, ["asset_id", "stock_effective_date", *columns]].sort_values(
+            "stock_effective_date", kind="stable"
+        ),
+        left_on="timestamp",
+        right_on="stock_effective_date",
+        by="asset_id",
+        direction="backward",
+        allow_exact_matches=True,
+        suffixes=("", "_stock_master"),
+    ).drop(columns="stock_effective_date")
+    for column in columns:
+        joined = f"{column}_stock_master"
+        if joined in result:
+            result[column] = result.pop(joined)
+    result.loc[~result.asset_id.isin(stocks.asset_id), "delisting_date_unresolved"] = (
+        True
+    )
     for column in (
         "stock_name",
         "company_status",
@@ -518,36 +485,24 @@ def _asof_market_cap(panel: pd.DataFrame, caps: pd.DataFrame) -> pd.DataFrame:
     panel["asset_id"] = strict_string_series(
         panel["asset_id"], error="invalid_market_cap_asset_id"
     )
-    outputs: list[pd.DataFrame] = []
-    cap_groups = caps.groupby("asset_id", sort=False).indices
-    for asset_id, group in panel.groupby("asset_id", sort=False):
-        right = caps.iloc[cap_groups.get(asset_id, [])]
-        if right.empty:
-            current = group.copy()
-            current["share_change_date"] = pd.NaT
-            current["total_shares"] = np.nan
-            current["a_float_shares"] = np.nan
-        else:
-            current = pd.merge_asof(
-                group.sort_values("timestamp"),
-                right.loc[
-                    :,
-                    [
-                        "asset_id",
-                        "timestamp",
-                        "share_change_date",
-                        "total_shares",
-                        "a_float_shares",
-                    ],
-                ].sort_values("timestamp"),
-                on="timestamp",
-                by="asset_id",
-                direction="backward",
-                allow_exact_matches=True,
-                suffixes=("", "_cap"),
-            )
-        outputs.append(current)
-    return pd.concat(outputs, ignore_index=True)
+    return pd.merge_asof(
+        panel.sort_values("timestamp", kind="stable"),
+        caps.loc[
+            :,
+            [
+                "asset_id",
+                "timestamp",
+                "share_change_date",
+                "total_shares",
+                "a_float_shares",
+            ],
+        ].sort_values("timestamp", kind="stable"),
+        on="timestamp",
+        by="asset_id",
+        direction="backward",
+        allow_exact_matches=True,
+        suffixes=("", "_cap"),
+    )
 
 
 def _prepare_industry_inputs(
@@ -1253,57 +1208,51 @@ def _apply_suspension_semantics(panel: pd.DataFrame) -> pd.DataFrame:
         .astype("boolean")
         .where(result["filling_flag"].isin((0, 1)))
     )
-    for _, positions in result.groupby(
+    lives = result.groupby(
         ["asset_id", "listing_date"], sort=False, dropna=False
-    ).groups.items():
-        values = result.loc[positions]
-        trading = result.loc[positions, "is_trading"].fillna(False)
-        suspended = values["filling_flag"].eq(1).fillna(False)
-        unknown = ~(trading | suspended)
-        for close_column, price_columns in (
-            ("close", ("close", "open", "high", "low")),
-            ("adj_close", ("adj_close", "adj_open")),
-        ):
-            missing_baseline = unknown | (trading & values[close_column].isna())
-            last_close = (
-                values[close_column]
-                .where(trading)
-                .groupby(missing_baseline.cumsum())
-                .ffill()
+    ).ngroup()
+    trading = result["is_trading"].fillna(False)
+    suspended = result["filling_flag"].eq(1).fillna(False)
+    unknown = ~(trading | suspended)
+    for close_column, price_columns in (
+        ("close", ("close", "open", "high", "low")),
+        ("adj_close", ("adj_close", "adj_open")),
+    ):
+        missing_baseline = unknown | (trading & result[close_column].isna())
+        last_close = (
+            result[close_column]
+            .where(trading)
+            .groupby(
+                [lives, missing_baseline.groupby(lives, sort=False).cumsum()],
+                sort=False,
             )
-            for column in price_columns:
-                result.loc[positions, column] = values[column].where(
-                    ~suspended, last_close
-                )
-        result.loc[positions, "period_return"] = result.loc[
-            positions, "period_return"
-        ].where(~suspended, 0.0)
-        result.loc[positions, "volume"] = result.loc[positions, "volume"].where(
-            ~suspended, 0.0
+            .ffill()
         )
-        result.loc[positions, "amount"] = result.loc[positions, "amount"].where(
-            ~suspended, 0.0
-        )
-        for column in ("after_hours_volume", "after_hours_amount"):
-            if column not in result:
-                result[column] = np.nan
-            result.loc[positions, column] = result.loc[positions, column].where(
-                ~suspended, 0.0
-            )
-        cap = result.loc[positions, "float_market_cap"]
-        close = result.loc[positions, "close"]
-        volume = result.loc[positions, "volume"]
-        free_shares = cap.div(close.where(close.gt(0.0)))
-        turnover = volume.div(free_shares.where(free_shares.gt(0.0)))
-        result.loc[positions, "turnover"] = turnover.astype("float64")
-        result.loc[positions, "turnover"] = result.loc[positions, "turnover"].where(
-            ~suspended, 0.0
-        )
-        reopening = trading & suspended.shift(1, fill_value=False)
-        prior_close = result.loc[positions, "adj_close"].shift(1)
-        reopening_return = result.loc[positions, "adj_close"].div(prior_close) - 1.0
-        result.loc[positions, "period_return"] = result.loc[
-            positions, "period_return"
-        ].where(~reopening | reopening_return.isna(), reopening_return)
+        for column in price_columns:
+            result[column] = result[column].where(~suspended, last_close)
+    for column in ("after_hours_volume", "after_hours_amount"):
+        if column not in result:
+            result[column] = np.nan
+    for column in (
+        "period_return",
+        "volume",
+        "amount",
+        "after_hours_volume",
+        "after_hours_amount",
+    ):
+        result[column] = result[column].where(~suspended, 0.0)
+    free_shares = result["float_market_cap"].div(
+        result["close"].where(result["close"].gt(0.0))
+    )
+    turnover = result["volume"].div(free_shares.where(free_shares.gt(0.0)))
+    result["turnover"] = turnover.astype("float64").where(~suspended, 0.0)
+    reopening = trading & suspended.groupby(lives, sort=False).shift(
+        1, fill_value=False
+    )
+    prior_close = result["adj_close"].groupby(lives, sort=False).shift(1)
+    reopening_return = result["adj_close"].div(prior_close) - 1.0
+    result["period_return"] = result["period_return"].where(
+        ~reopening | reopening_return.isna(), reopening_return
+    )
     result["is_a_share_scope"] = result["market_type"].isin(CURRENT_MARKET_TYPES)
     return result
