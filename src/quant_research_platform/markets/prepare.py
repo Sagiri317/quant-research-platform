@@ -459,7 +459,15 @@ def _configured_spec(spec, config):
                 }
             # Scientific input order is explicit; supporting keys never become factors.
             roles.update((name, ColumnRole.FACTOR) for name in factors)
-            spec = replace(spec, column_roles=roles)
+            spec = replace(
+                spec,
+                column_roles=roles,
+                column_units={
+                    name: unit
+                    for name, unit in spec.column_units.items()
+                    if name in roles
+                },
+            )
             if spec.data_id == "fundamental_factors":
                 from quant_research_platform.research.factors.fundamental.definitions import (  # noqa: E501
                     fundamental_inputs,

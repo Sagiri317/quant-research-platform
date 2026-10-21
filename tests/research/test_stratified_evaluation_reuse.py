@@ -1495,6 +1495,9 @@ def test_transform_provenance_uses_only_declared_outputs(groups, reused):
 def test_forecast_age_feature_persists_transform_and_strata(tmp_path, group, reused):
     from quant_research_platform.contracts.datasets import ResearchDatasetSpec
     from quant_research_platform.contracts.features import FeatureTransformSpec
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        catalog,
+    )
     from quant_research_platform.research.features.transforms import (
         apply_feature_transforms,
     )
@@ -1537,7 +1540,9 @@ def test_forecast_age_feature_persists_transform_and_strata(tmp_path, group, reu
             feature_columns=recipe.output_columns,
             feature_transforms=() if reused else (recipe,),
             label_columns=("label",),
-            column_units={age: "days"},
+            column_units=catalog.processed_catalog()
+            .get("expectations_factors")
+            .column_units,
             label_availability_columns={"label": "label_available_at"},
         ),
         metadata={

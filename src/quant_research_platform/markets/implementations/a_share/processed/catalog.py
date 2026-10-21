@@ -277,8 +277,11 @@ def _spec(
         for horizon in LABEL_HORIZONS
         if forward_return_label_column(horizon) in label_columns
     }
+    units = {column: "decimal_return" for column in availability}
+    if "median_forecast_age_days_fy1" in roles:
+        units["median_forecast_age_days_fy1"] = "days"
     return ProcessedDataSpec(
-        column_units={column: "decimal_return" for column in availability},
+        column_units=units,
         label_availability_columns=availability,
         data_id=data_id,
         market_id=MARKET_ID,
