@@ -181,6 +181,106 @@ def test_fractional_raw_price_never_oversells_locked_actual_shares(
                 assert value.quantity >= value.locked_quantity
 
 
+@pytest.mark.parametrize("locked", [Fraction(), Fraction(1, 10**17)])
+def test_rounded_zero_notional_preserves_locked_distribution(tmp_path, locked):
+    from quant_research_platform.artifacts.portfolio_ledger import (
+        read_portfolio_ledger_artifact,
+        write_portfolio_ledger_artifact,
+    )
+    from quant_research_platform.contracts.portfolios import (
+        ExecutionAssumptions,
+        TradeCostComponents,
+    )
+    from quant_research_platform.research.portfolios import production
+    from tests.helpers.portfolio_ledger import execute_continuous_target
+
+    # A tiny earlier distribution can remain locked after a larger purchase.
+    quantity = Fraction(1) + Fraction(1, 10**16)
+    units = pd.Series({"a": quantity}, dtype=object)
+    entry, endpoint = pd.Timestamp("2024-01-03"), pd.Timestamp("2024-01-04")
+    life = pd.Timestamp("2000-01-01")
+    account = execute_continuous_target(
+        pd.Series({"a": 1.0}),
+        pd.Series({"a": 0.0}),
+        nav=1.0,
+        average_daily_volume=pd.Series({"a": 100.0}),
+        can_enter=pd.Series({"a": True}),
+        can_exit=pd.Series({"a": True}),
+        execution_date=entry.date(),
+        cost_for_trade=lambda _date, _asset, _side, amount, _volume, _settings: (
+            TradeCostComponents(float(amount), 0.0, 0.0, 0.0, 0.0, 0.0, "f" * 64)
+        ),
+        assumptions=ExecutionAssumptions(1.0, 0.0, 0.0, 1.0, (1.0,)),
+        cost_source_identity="f" * 64,
+        locked_notional=pd.Series({"a": float(locked)}),
+        share_quantities=units,
+        locked_share_quantities=pd.Series({"a": locked}, dtype=object),
+        execution_prices=pd.Series({"a": 1.0}),
+    )
+    assert account.asset_ledger.post_trade_notional.iloc[0] == 0.0
+    assert account.asset_ledger.executed_delta_notional.iloc[0] == -1.0
+    marks = pd.DataFrame(
+        {
+            "asset_id": ["a"],
+            "timestamp": [entry],
+            "open": [1.0],
+            "listing_date": [life],
+            "research_open_mark_at": [pd.NaT],
+        }
+    )
+    prior = PortfolioValuation(
+        entry.value,
+        "a",
+        "end",
+        quantity,
+        1.0,
+        1.0,
+        lifecycle_id="2000-01-01",
+        locked_quantity=locked,
+    )
+    entitlements = production.EquityEntitlements()
+    entitlements.locked_quantities["a"] = locked
+    batch = production._ledger_batch(
+        account=account,
+        asset_ledger=account.asset_ledger,
+        sequence=0,
+        end_timestamp=endpoint,
+        decision_timestamp=entry - pd.Timedelta(days=1),
+        held_units=units,
+        execution_units=units,
+        previous_values={"a": prior},
+        rights_adjustments=(),
+        prediction_rank_score=pd.Series({"a": 0.0}),
+        adv20=pd.Series({"a": 100.0}),
+        enhanced_decision=None,
+        benchmark_weights=None,
+        optimization_result=None,
+        decision_reason="simple_rule",
+        decision_delta=pd.Series({"a": -1.0}),
+        next_panel=marks,
+        endpoint_panel=marks.assign(timestamp=endpoint),
+        endpoint_events=pd.DataFrame(),
+        corporate_events=pd.DataFrame(),
+        endpoint_corporate_events=pd.DataFrame(),
+        entitlements=entitlements,
+        execution_lives=pd.Series({"a": life}),
+    )
+    expected = Fraction(1, 10**16) if locked else Fraction()
+    for value in batch.valuations:
+        if value.asset_id == "a" and value.phase in {"after", "end"}:
+            assert value.quantity == expected
+            assert value.locked_quantity == locked
+    assert batch.trades[0].quantity == expected - quantity
+    assert batch.trades[0].notional == -1.0
+    root = write_portfolio_ledger_artifact(
+        tmp_path / "ledger",
+        capital=PortfolioCapital("locked", 1.0, "CNY", "cash_equity"),
+        metadata={"window": {"start": "2024-01-03", "end": "2024-01-04"}},
+        produce=lambda emit: emit(batch),
+    )
+    assert tuple(read_portfolio_ledger_artifact(root).iter_chunks()) == (batch,)
+
+
 @pytest.mark.parametrize(
     "action", ["share_change", "cash_dividend", "late_earlier_split"]
 )

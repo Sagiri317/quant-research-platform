@@ -2524,7 +2524,9 @@ def _ledger_batch(
         if delta:
             quantity = (
                 -Fraction(after_units.get(row.asset_id, 0))
-                if row.post_trade_notional == 0 and delta < 0
+                if row.post_trade_notional == 0
+                and delta < 0
+                and not entitlements.locked_quantities.get(row.asset_id, 0)
                 else Fraction(delta)
                 / Fraction(mark_frames["entry"].loc[row.asset_id, "open"])
             )
