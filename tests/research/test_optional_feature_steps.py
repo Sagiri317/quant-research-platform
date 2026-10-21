@@ -235,6 +235,32 @@ def test_observation_mask_excludes_fill_without_masking_indicator_signals():
 
 
 @pytest.mark.parametrize(
+    "columns",
+    [("feature_x", "feature_y"), ("feature_missing_x", "feature_observed_y")],
+)
+def test_observed_mask_distinguishes_fill_missing_and_structural_unavailability(
+    columns,
+):
+    frame = pd.DataFrame(
+        {
+            "feature_x": pd.array([100, 10, None, 100, 0, 100], dtype="Int64"),
+            "feature_observed_x": [0, 1, 0, 0, 0, 0],
+            "feature_missing_x": [1, 0, 1, 0, 1, 1],
+            "feature_y": pd.array([5, 100, 8, 7, 0, None], dtype="Int64"),
+            "feature_observed_y": [1, 0, 1, 1, 0, 1],
+            "feature_missing_y": [0, 1, 0, 0, 1, 0],
+        },
+        index=[8, 3, 9, 4, 1, 2],
+    )
+    original = frame.copy()
+    result = transforms.model_observed_input_mask(frame, columns, frame.columns)
+    pd.testing.assert_series_equal(
+        result, pd.Series([True, True, True, False, False, False], index=frame.index)
+    )
+    pd.testing.assert_frame_equal(frame, original)
+
+
+@pytest.mark.parametrize(
     "center,scale,defined",
     [(True, True, True), (False, True, False), (True, False, True)],
 )

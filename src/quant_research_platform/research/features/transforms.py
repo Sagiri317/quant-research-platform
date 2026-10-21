@@ -50,14 +50,7 @@ def feature_observation_columns(columns, declared_columns):
     )
 
 
-def mask_unobserved_features(
-    frame: pd.DataFrame, columns, declared_columns
-) -> pd.DataFrame:
-    """Exclude technical fill values using the full declared input schema."""
-    flags = feature_observation_columns(columns, declared_columns)
-    if not flags:
-        return frame
-    result = frame.copy()
+def _feature_observation_masks(frame, flags):
     for flag in flags:
         if flag not in frame:
             raise ValueError(f"feature_observation_column_missing: {flag}")
@@ -67,16 +60,28 @@ def mask_unobserved_features(
         if not observed.isin((0, 1)).all():
             raise ValueError(f"invalid_feature_observation_flag: {flag}")
         column = "feature_" + flag[len("feature_observed_") :]
+        yield column, observed.eq(1)
+
+
+def mask_unobserved_features(
+    frame: pd.DataFrame, columns, declared_columns
+) -> pd.DataFrame:
+    """Exclude technical fill values using the full declared input schema."""
+    flags = feature_observation_columns(columns, declared_columns)
+    if not flags:
+        return frame
+    result = frame.copy()
+    for column, observed in _feature_observation_masks(frame, flags):
         values = frame[column]
         if (
             isinstance(values.dtype, np.dtype)
             and values.dtype.kind in "iu"
-            and observed.eq(0).any()
+            and (~observed).any()
         ):
             prefix = "UInt" if values.dtype.kind == "u" else "Int"
             nullable = f"{prefix}{values.dtype.itemsize * 8}"
             values = values.astype(nullable)
-        result[column] = values.where(observed.eq(1))
+        result[column] = values.where(observed)
     return result
 
 
@@ -109,13 +114,24 @@ def model_observed_input_mask(frame, input_columns, declared_columns):
             for column in input_columns
         )
     )
-    observed = mask_unobserved_features(frame, originals, declared_columns)
-    keep = observed.loc[:, originals].notna().any(axis=1)
+    flags = feature_observation_columns(originals, declared_columns)
+    observed = {
+        column: frame[column].notna() & flag
+        for column, flag in _feature_observation_masks(frame, flags)
+    }
+    observed = pd.DataFrame(
+        {
+            column: observed[column] if column in observed else frame[column].notna()
+            for column in originals
+        },
+        index=frame.index,
+    )
+    keep = observed.any(axis=1)
     canonical = canonical_feature_validity_columns(input_columns, declared_columns)
     for column in originals:
         if column not in canonical:
             continue
-        usable = observed[column].notna()
+        usable = observed[column].copy()
         missing = "feature_missing_" + column[len("feature_") :]
         if missing in canonical:
             ordinary_missing = strict_finite_numeric_series(

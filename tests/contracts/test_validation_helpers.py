@@ -134,6 +134,29 @@ def test_strict_finite_numeric_series_rejects_invalid_values(value: object) -> N
         )
 
 
+@pytest.mark.parametrize("dtype", ["Float64", "float64", "string", "string[pyarrow]"])
+@pytest.mark.parametrize("allow_null", [False, True])
+def test_strict_finite_numeric_series_preserves_values_and_identity(dtype, allow_null):
+    source = pd.Series(
+        [1.25, None if allow_null else -2.5, 3.0],
+        index=[7, 2, 9],
+        name="feature",
+        dtype=dtype,
+    )
+    original = source.copy()
+    expected = pd.Series(
+        [1.25, None if allow_null else -2.5, 3.0],
+        index=source.index,
+        name="feature",
+        dtype="Float64" if allow_null else "float64",
+    )
+    result = validation.strict_finite_numeric_series(
+        source, error="invalid_contract_numeric", allow_null=allow_null
+    )
+    pd.testing.assert_series_equal(result, expected)
+    pd.testing.assert_series_equal(source, original)
+
+
 @pytest.mark.parametrize("value", [[], {}, set(), "missing", None])
 def test_strict_membership_series_rejects_invalid_members(value: object) -> None:
     with pytest.raises(ValueError, match="invalid_contract_membership"):

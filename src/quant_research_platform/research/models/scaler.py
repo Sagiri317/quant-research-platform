@@ -43,23 +43,23 @@ class ModelMatrixScaler:
         if frame.empty or not columns or frame.columns.has_duplicates:
             raise ValueError("model_scaler_columns_invalid")
         if missing is not None:
-            values = np.column_stack(
-                [
-                    strict_finite_numeric_series(
-                        frame[column],
-                        error=f"invalid_model_scaler_column: {column}",
-                        allow_null=True,
-                    ).to_numpy(dtype="float64")
-                    for column in columns
-                ]
-            )
+            values = []
+            for column in columns:
+                parsed = strict_finite_numeric_series(
+                    frame[column],
+                    error=f"invalid_model_scaler_column: {column}",
+                    allow_null=True,
+                )
+                if missing != "native" or scaling:
+                    values.append(parsed.to_numpy(dtype="float64"))
             if missing == "native":
                 means = [0.0] * len(columns)
                 scales = [1.0] * len(columns)
                 weights = _weights(sample_weight, len(frame))
                 if scaling:
-                    for index, column in enumerate(columns):
-                        observed = ~np.isnan(values[:, index])
+                    for index, column_values in enumerate(values):
+                        column = columns[index]
+                        observed = ~np.isnan(column_values)
                         # An all-missing native column has no fitted moments.
                         if observed.any():
                             fitted = cls.fit(
@@ -75,6 +75,7 @@ class ModelMatrixScaler:
                     native_missing=True,
                     scaling=scaling,
                 )
+            values = np.column_stack(values)
             if np.isnan(values).all(axis=0).any():
                 raise ValueError("model_training_feature_all_missing")
             medians = tuple(float(value) for value in np.nanmedian(values, axis=0))

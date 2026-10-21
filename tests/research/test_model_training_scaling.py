@@ -311,3 +311,29 @@ def test_imputation_preserves_strict_numeric_validation(value, stage):
             ModelMatrixScaler.fit(invalid, missing="impute")
         else:
             ModelMatrixScaler.fit(valid, missing="impute").transform(invalid)
+
+
+@pytest.mark.parametrize("scaling", [False, True])
+def test_native_scaler_validates_values_and_weights_without_mutating_inputs(scaling):
+    frame = pd.DataFrame({"x": pd.array([1, None, 3], dtype="Int64"), "y": np.nan})
+    original = frame.copy()
+    scaler = ModelMatrixScaler.fit(
+        frame, sample_weight=[1, 1, 3], missing="native", scaling=scaling
+    )
+    assert scaler.mean_ == ((2.5, 0.0) if scaling else (0.0, 0.0))
+    np.testing.assert_allclose(
+        scaler.scale_, (np.sqrt(0.75), 1.0) if scaling else (1.0, 1.0)
+    )
+    assert scaler.native_missing and scaler.scaling is scaling
+    pd.testing.assert_frame_equal(frame, original)
+    for value in (True, 1 + 2j, np.inf, "invalid", pd.Timestamp("2024-01-01")):
+        with pytest.raises(ValueError, match="invalid_model_scaler_column"):
+            ModelMatrixScaler.fit(
+                frame.assign(x=pd.Series([1, None, value], dtype=object)),
+                missing="native",
+                scaling=scaling,
+            )
+    with pytest.raises(ValueError, match="sample_weights_invalid"):
+        ModelMatrixScaler.fit(
+            frame, sample_weight=[1, 0, 1], missing="native", scaling=scaling
+        )

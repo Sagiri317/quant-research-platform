@@ -373,7 +373,14 @@ def _finite_numeric_series(
     values: pd.Series, *, error: str, allow_null: bool = False
 ) -> pd.Series:
     """Validate finite observations without changing their ordering or ties."""
-    numeric = _real_numeric_series(values, error=error)
+    return _validated_finite_series(
+        _real_numeric_series(values, error=error), error=error, allow_null=allow_null
+    )
+
+
+def _validated_finite_series(
+    numeric: pd.Series, *, error: str, allow_null: bool
+) -> pd.Series:
     if (numeric.isna().any() and not allow_null) or not np.isfinite(
         numeric.dropna()
     ).all():
@@ -387,7 +394,7 @@ def strict_finite_numeric_series(
     error: str,
     allow_null: bool = False,
 ) -> pd.Series:
-    numeric = _finite_numeric_series(
+    numeric = _validated_finite_series(
         strict_real_numeric_series(values, error=error),
         error=error,
         allow_null=allow_null,
