@@ -331,13 +331,15 @@ def test_missing_size_nonrebalance_marks_undefined_and_preserves_account():
         inputs["candidate"],
         construction="quantile_equal_weight",
         top_quantile=0.5,
-        benchmark_id=None,
+        benchmark_id="csi500",
         risk_style_columns=(),
         rebalance_schedule="weekly-last-trading-day",
         neutrality="size",
     )
     inputs["enhanced_decision"] = None
-    inputs["dataset"]["total_market_cap"] = np.nan
+    # Fixed-index size missingness does not remove otherwise eligible holdings.
+    inputs["benchmark_weights"] = pd.Series({"a": 0.5, "b": 0.5})
+    inputs["panel"]["total_market_cap"] = np.nan
     account, _, _, _, ledger = _build_session(**inputs)
     assert account.nav_after == 100.0
     assert ledger.post_trade_notional.tolist() == [50.0, 50.0]
