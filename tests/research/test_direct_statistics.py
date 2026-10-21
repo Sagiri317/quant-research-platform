@@ -324,8 +324,10 @@ def test_public_statistics_rejects_unused_nested_options_before_reading(
     assert not (tmp_path / "unpublished").exists()
 
 
-def test_failed_family_keeps_planned_inference_members_without_fake_prediction(
+@pytest.mark.parametrize("selection_reason", ["fit_failed", "no_valid_observations"])
+def test_unselected_family_keeps_planned_inference_members_without_fake_prediction(
     tmp_path,
+    selection_reason,
 ):
     from quant_research_platform.research.statistics_production import (
         _selection_trial_rows,
@@ -360,7 +362,7 @@ def test_failed_family_keeps_planned_inference_members_without_fake_prediction(
     for key in tuple(metrics):
         if key.startswith("validation_"):
             metrics[key] = (
-                "fit_failed"
+                selection_reason
                 if key.endswith("_reason")
                 else 0
                 if key.endswith("_count") or key == "validation_rows"
@@ -395,10 +397,18 @@ def test_failed_family_keeps_planned_inference_members_without_fake_prediction(
     lost = tables["model_losses"].loc[lambda frame: frame.family_id.eq("failed")]
     assert len(lost) == len(dates)
     assert lost.status.eq("UNDEFINED").all()
-    assert lost.reason.eq("family_training_failed").all()
+    assert lost.reason.eq("family_selection_undefined").all()
     assert lost.asset_coverage_id.eq(canonical_json_hash([])).all()
     assert lost.config_id.eq("").all()
     assert set(tables["model_trials"].family_id) == {"working", "failed"}
+    unselected_trials = tables["model_trials"].loc[
+        lambda frame: (
+            frame.family_id.eq("failed") & frame.metric_id.eq("validation_rankic")
+        )
+    ]
+    assert len(unselected_trials) == 1
+    assert unselected_trials.reason.eq(selection_reason).all()
+    assert unselected_trials.status.eq("UNDEFINED").all()
     assert tables["model_comparison"].prediction_id.tolist() == ["failed"]
     assert tables["model_comparison"].status.eq("UNDEFINED").all()
     assert tables["model_reality_checks"].status.eq("UNDEFINED").all()
@@ -407,6 +417,11 @@ def test_failed_family_keeps_planned_inference_members_without_fake_prediction(
     )
     with read_statistics_artifact(root).table("model_losses.parquet") as actual:
         assert set(actual.family_id) == {"working", "failed"}
+        assert (
+            actual.loc[actual.family_id.eq("failed"), "reason"]
+            .eq("family_selection_undefined")
+            .all()
+        )
 
 
 @pytest.mark.parametrize(

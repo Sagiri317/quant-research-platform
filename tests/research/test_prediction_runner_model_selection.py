@@ -315,7 +315,7 @@ def test_failed_attempt_stays_in_complete_candidate_score(tmp_path, failed_famil
             failed_losses = losses.loc[losses.family_id.eq("failed_family")]
             assert not failed_losses.empty
             assert failed_losses.status.eq("UNDEFINED").all()
-            assert failed_losses.reason.eq("family_training_failed").all()
+            assert failed_losses.reason.eq("family_selection_undefined").all()
             assert (
                 losses.loc[losses.family_id.eq("linear_regression"), "status"]
                 .eq("DEFINED")

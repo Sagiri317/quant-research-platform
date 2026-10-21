@@ -629,7 +629,7 @@ def build_a_share_statistics_tables(
                             "status": "DEFINED" if defined else "UNDEFINED",
                             "reason": None
                             if defined
-                            else "family_training_failed"
+                            else "family_selection_undefined"
                             if model_entries[period_id, family_id]["model_metadata"]
                             is None
                             else "cross_sectional_rankic_undefined",
