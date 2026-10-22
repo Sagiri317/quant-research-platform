@@ -348,6 +348,21 @@ def test_linear_shap_uses_exact_explicit_historical_mean(tmp_path, algorithm):
     np.testing.assert_allclose(
         tables["predictions"].base_value, expected_baseline, rtol=1e-12, atol=1e-14
     )
+    selected = tables["predictions"][["timestamp", "asset_id"]].merge(
+        frame, validate="one_to_one"
+    )
+    effects = (
+        predictor.scaler.transform(selected[["x", "y"]]).to_numpy() - center
+    ) * coef
+    # Attribute each input and its missing indicator to the original feature.
+    expected = effects[:, :2] + effects[:, 2:]
+    actual = (
+        tables["contributions"]
+        .set_index(["timestamp", "asset_id", "feature"])
+        .contribution.unstack("feature")
+        .loc[pd.MultiIndex.from_frame(selected[["timestamp", "asset_id"]]), ["x", "y"]]
+    )
+    np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-14)
     assert metadata["attribution"]["background"]["kind"] == "historical_reference"
     assert metadata["attribution"]["background"]["root_seed"] == 1
     assert (
