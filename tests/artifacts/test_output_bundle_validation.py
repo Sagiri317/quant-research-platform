@@ -104,7 +104,9 @@ def test_projected_iterator_closes_source_on_rejection(tmp_path, monkeypatch):
 def test_unrelated_files_do_not_invalidate_declared_members(tmp_path):
     root, frame, _ = native_bundle(tmp_path)
     (root / "notes.txt").write_text("Research notes")
-    pd.testing.assert_frame_equal(read_predictions(root)[0], frame, check_dtype=False)
+    pd.testing.assert_frame_equal(
+        read_predictions(root)[0], frame, check_dtype=False, check_exact=True
+    )
 
 
 def test_read_parses_one_manifest_and_projects_only_consumed_scores(
@@ -241,10 +243,12 @@ def test_prediction_writer_statistics_prune_actual_decoding(tmp_path, monkeypatc
     ):
         decoded.clear()
         selected, _ = read_predictions(root, time_window=window)
-        pd.testing.assert_frame_equal(selected, expected.reset_index(drop=True))
+        pd.testing.assert_frame_equal(
+            selected, expected.reset_index(drop=True), check_exact=True
+        )
         assert decoded == [1]
     decoded.clear()
-    pd.testing.assert_frame_equal(read_predictions(root)[0], frame)
+    pd.testing.assert_frame_equal(read_predictions(root)[0], frame, check_exact=True)
     assert decoded == [0, 1, 2]
 
 

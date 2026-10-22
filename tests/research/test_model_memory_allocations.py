@@ -234,7 +234,15 @@ def test_collected_training_releases_chunks_and_preserves_source(
         .reset_index(drop=True)
     )
     pd.testing.assert_frame_equal(prepared.training, expected, check_exact=True)
+    for column in ("x", "z"):
+        pd.testing.assert_extension_array_equal(
+            prepared.training[column].array, expected[column].array, check_exact=True
+        )
     assert prepared.row_counts["rows_input"] == len(source)
     assert prepared.row_counts["rows_after_input_label_dropna"] == len(expected)
     prepared.training.loc[0, "x"] = -999.0
     pd.testing.assert_frame_equal(source, before, check_exact=True)
+    for column in ("x", "z"):
+        pd.testing.assert_extension_array_equal(
+            source[column].array, before[column].array, check_exact=True
+        )

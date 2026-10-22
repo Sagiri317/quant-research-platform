@@ -34,7 +34,11 @@ def test_manifest_actual_model_and_paths(tmp_path):
     assert manifest["metadata"] == metadata
     assert "run_id" not in manifest
     pd.testing.assert_frame_equal(
-        read_predictions(root)[0], frame, check_flags=False, check_dtype=False
+        read_predictions(root)[0],
+        frame,
+        check_flags=False,
+        check_dtype=False,
+        check_exact=True,
     )
 
 
@@ -134,7 +138,7 @@ def test_timestamp_normalization_and_readback(tmp_path, kind):
     )
     actual, _ = read_predictions(root)
     pd.testing.assert_frame_equal(actual, expected, check_exact=True)
-    pd.testing.assert_frame_equal(frame, before)
+    pd.testing.assert_frame_equal(frame, before, check_exact=True)
 
 
 def test_writer_collision_preserves_bytes_and_closes_unconsumed_source(tmp_path):

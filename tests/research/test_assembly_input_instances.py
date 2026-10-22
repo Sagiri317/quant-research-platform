@@ -135,7 +135,9 @@ def test_native_features_reuse_without_recomputation_preserves_model_contract(
         "feature_missing_momentum_20d",
         "feature_observed_momentum_20d",
     ]
-    pd.testing.assert_frame_equal(actual[columns], read_dataset(produced)[columns])
+    pd.testing.assert_frame_equal(
+        actual[columns], read_dataset(produced)[columns], check_exact=True
+    )
     assert actual.feature_observed_momentum_20d.tolist() == [1.0, 0.0, 1.0, 1.0]
     assert mask_unobserved_features(
         actual, ["feature_momentum_20d"], actual.columns
@@ -158,7 +160,7 @@ def test_native_features_reuse_without_recomputation_preserves_model_contract(
             "output_root": str(tmp_path / "reused_again"),
         }
     )
-    pd.testing.assert_frame_equal(actual, read_dataset(repeated))
+    pd.testing.assert_frame_equal(actual, read_dataset(repeated), check_exact=True)
     assert (
         inspect_dataset(repeated).manifest["producer_diagnostics"][
             "reused_feature_transforms"

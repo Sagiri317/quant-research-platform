@@ -25,10 +25,13 @@ def test_empty_stock_master_preserves_only_real_observations():
     )
     expected = bars.rename(columns={"source_asset_id": "asset_id"})
     columns = ["asset_id", "timestamp", "close"]
+    observed = actual.loc[:, columns].sort_values(columns[:2]).reset_index(drop=True)
+    expected = expected.loc[:, columns].sort_values(columns[:2]).reset_index(drop=True)
     pd.testing.assert_frame_equal(
-        actual.loc[:, columns].sort_values(columns[:2]).reset_index(drop=True),
-        expected.loc[:, columns].sort_values(columns[:2]).reset_index(drop=True),
-        check_dtype=False,
+        observed, expected, check_dtype=False, check_exact=True
+    )
+    pd.testing.assert_extension_array_equal(
+        observed.close.array, expected.close.array, check_dtype=False, check_exact=True
     )
     assert len(actual) == 17
     assert actual.delisting_date_unresolved.all()
@@ -62,8 +65,19 @@ def test_later_unknown_delisting_is_a_local_barrier_without_rewriting_history():
         ),
     )
     affected = actual.asset_id.eq("000001") & actual.timestamp.ge(dates[3])
-    pd.testing.assert_frame_equal(actual.loc[~affected], baseline.loc[~affected])
-    assert actual.loc[affected, "close"].equals(baseline.loc[affected, "close"])
+    calculated = ["period_return", "turnover"]
+    left, right = (
+        panel.loc[~affected].drop(columns=calculated) for panel in (actual, baseline)
+    )
+    pd.testing.assert_frame_equal(left, right, check_exact=True)
+    for column in left.select_dtypes(include="floating"):
+        pd.testing.assert_extension_array_equal(
+            left[column].array, right[column].array, check_exact=True
+        )
+    pd.testing.assert_frame_equal(
+        actual.loc[~affected, calculated], baseline.loc[~affected, calculated]
+    )
+    assert actual.close.equals(baseline.close)
     assert actual.loc[affected, "delisting_date_unresolved"].all()
     assert actual.loc[affected, "delisting_date"].isna().all()
     assert actual.loc[affected, "listing_age_trading_days"].isna().all()

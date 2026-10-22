@@ -435,9 +435,14 @@ def test_research_dataset_session_complete_chunks_preserve_output(
         ),
         ignore_index=True,
     ).sort_values(["market_id", "asset_id", "timestamp"])
-    pd.testing.assert_frame_equal(
-        default.reset_index(drop=True), tiny.reset_index(drop=True)
+    expected = frame.sort_values(["market_id", "asset_id", "timestamp"]).reset_index(
+        drop=True
     )
+    expected["timestamp"] = expected.timestamp.dt.as_unit("ns")
+    for actual in (default, tiny):
+        pd.testing.assert_frame_equal(
+            actual.reset_index(drop=True), expected, check_exact=True
+        )
     assert (
         inspect_dataset(tiny_root).file_count > inspect_dataset(default_root).file_count
     )
@@ -778,7 +783,6 @@ def test_named_feature_recipe_assembles_complete_sessions_and_persists_identity(
     from quant_research_platform.research.features.transforms import (
         a_share_feature_pipeline,
     )
-    from quant_research_platform.storage.datasets.schema import data_spec_payload
 
     layout = StorageLayout(project_root=tmp_path)
     transform = FeatureTransformSpec(recipe, ("factor",))
@@ -834,7 +838,7 @@ def test_named_feature_recipe_assembles_complete_sessions_and_persists_identity(
         spec=source,
     )
     window = TimeWindow("2020-01-03", "2020-01-03")
-    assemble_research_dataset(
+    output = assemble_research_dataset(
         inputs={
             item.data_id: layout.processed_data_root(
                 item.market_id, item.kind, item.data_id
@@ -851,7 +855,7 @@ def test_named_feature_recipe_assembles_complete_sessions_and_persists_identity(
     )
     saved = pd.concat(
         read_dataset(
-            layout.research_dataset_root(MarketId("a_share"), "recipe_case"),
+            output,
             time_window=window,
             mode=DatasetReadMode.CHUNKED,
         ),
@@ -892,7 +896,7 @@ def test_named_feature_recipe_assembles_complete_sessions_and_persists_identity(
     independent = (residual - residual.mean()) / residual.std(ddof=0)
     np.testing.assert_allclose(feature, independent, rtol=1e-12, atol=1e-14)
     assert np.mean(feature * (size - size.mean())) == pytest.approx(0.0, abs=1e-14)
-    assert data_spec_payload(datasets.get("recipe_case"))["feature_transforms"] == [
+    assert inspect_dataset(output).spec["feature_transforms"] == [
         {
             "recipe_id": recipe,
             "source_columns": ["factor"],

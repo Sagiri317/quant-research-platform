@@ -330,11 +330,29 @@ def test_real_label_free_assembly_predicts_without_trial(tmp_path):
     )
 
 
-@pytest.mark.parametrize("transform", ["identity", "rank", "zscore"])
+@pytest.mark.parametrize(
+    "transform,expected",
+    [
+        ("identity", [1.0, np.nan, 3.0]),
+        ("rank", [1.0, np.nan, 2.0]),
+        ("zscore", [-1.0, np.nan, 1.0]),
+    ],
+)
 def test_evaluation_masks_imputed_features_before_cross_section_transform(
-    tmp_path, transform
+    tmp_path, monkeypatch, transform, expected
 ):
+    from quant_research_platform.research.evaluations import engine
     from tests.research.crypto_evaluation_test_support import write_evaluation_input
+
+    normalize = engine.normalize_signal_frame
+    normalized_values = []
+
+    def record_normalization(*args, **kwargs):
+        result = normalize(*args, **kwargs)
+        normalized_values.extend(result.sort_values("asset_id")["x"].tolist())
+        return result
+
+    monkeypatch.setattr(engine, "normalize_signal_frame", record_normalization)
 
     frame = pd.DataFrame(
         {
@@ -375,6 +393,9 @@ def test_evaluation_masks_imputed_features_before_cross_section_transform(
             )
         )
     )
+    # Observed values [1, 3] have ranks [1, 2], mean 2 and population SD 1.
+    # IC alone cannot detect an affine change caused by including the fill value.
+    np.testing.assert_allclose(normalized_values, expected, rtol=1e-14, atol=1e-14)
     assert tables["metrics"].n_obs.tolist() == [2]
     assert tables["metrics"].ic.tolist() == pytest.approx([1.0])
 

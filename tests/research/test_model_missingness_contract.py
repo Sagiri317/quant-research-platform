@@ -128,7 +128,9 @@ def test_native_missing_training_column_roundtrips_without_imputation(
     assert scaler.native_missing
     assert scaler.columns == ("x", "z")
     assert scaler.medians == ()
-    pd.testing.assert_frame_equal(scaler.transform(data[["x", "z"]]), data[["x", "z"]])
+    pd.testing.assert_frame_equal(
+        scaler.transform(data[["x", "z"]]), data[["x", "z"]], check_exact=True
+    )
     frozen = scaler.to_payload()
     saved_model = (case.root / "predictor.pkl").read_bytes()
 
@@ -136,7 +138,7 @@ def test_native_missing_training_column_roundtrips_without_imputation(
     future.loc[future.index[:2], "x"] = np.nan
     future.loc[future.index[1], "z"] = 10000.0
     pd.testing.assert_frame_equal(
-        scaler.transform(future[["x", "z"]]), future[["x", "z"]]
+        scaler.transform(future[["x", "z"]]), future[["x", "z"]], check_exact=True
     )
     direct = case.result.prediction_model.predict(future[["x", "z"]])
     assert np.isnan(direct[0])

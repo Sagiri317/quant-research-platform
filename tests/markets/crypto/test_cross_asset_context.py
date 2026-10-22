@@ -135,9 +135,15 @@ def test_information_union_preserves_complete_keys_and_exact_nullable_values(
         ["timestamp", "asset_id"], ignore_index=True
     )
     pd.testing.assert_frame_equal(combined, expected, check_exact=True)
+    pd.testing.assert_extension_array_equal(
+        combined.value.array, expected.value.array, check_exact=True
+    )
     assert not combined.duplicated(["market_id", "asset_id", "timestamp"]).any()
     for original, saved in zip((base, sol), snapshots, strict=True):
         pd.testing.assert_frame_equal(original, saved, check_exact=True)
+        pd.testing.assert_extension_array_equal(
+            original.value.array, saved.value.array, check_exact=True
+        )
 
 
 @pytest.mark.parametrize("empty_kind", ("one", "both", "no_schema", "duplicate"))

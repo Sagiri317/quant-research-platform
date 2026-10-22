@@ -98,9 +98,19 @@ def test_atomic_binary_publication_does_not_replace(tmp_path):
     assert list(tmp_path.iterdir()) == [path]
 
 
-@pytest.mark.parametrize("dtype", ["Float64", "Int64", "boolean", "category"])
+@pytest.mark.parametrize(
+    "dtype, stored_dtype",
+    [
+        ("Float64", "Float64"),
+        ("Int64", "Int64"),
+        ("boolean", "boolean"),
+        ("category", "int64"),
+    ],
+)
 @pytest.mark.parametrize("mode", list(DatasetReadMode))
-def test_empty_bare_projection_preserves_declared_pandas_dtype(tmp_path, dtype, mode):
+def test_empty_bare_projection_preserves_stored_pandas_dtype(
+    tmp_path, dtype, stored_dtype, mode
+):
     frame = make_default_dataset_frame().iloc[:2].copy()
     values = [True, False] if dtype == "boolean" else [1, 2]
     frame["value"] = pd.Series(values, dtype=dtype, index=frame.index)
@@ -118,9 +128,6 @@ def test_empty_bare_projection_preserves_declared_pandas_dtype(tmp_path, dtype, 
         if mode is DatasetReadMode.CHUNKED
         else result
     )
-    expected = (
-        read_dataset(path, spec=make_processed_dataset_spec(), columns=("value",))
-        .iloc[:0]
-        .reset_index(drop=True)
-    )
+    # Bare numeric categories persist as int64 in Parquet.
+    expected = pd.DataFrame({"value": pd.Series(dtype=stored_dtype)})
     pd.testing.assert_frame_equal(actual, expected)

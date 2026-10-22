@@ -254,14 +254,12 @@ def test_atomic_chunk_failure_closes_source_and_preserves_primary(
     assert list(tmp_path.iterdir()) == []
 
 
-@pytest.mark.parametrize("message", (None, "", "custom_rejection"))
-def test_existing_output_error_preserves_contract_and_exception_chain(
-    tmp_path, message
-):
-    error = OutputAlreadyExistsError(message)
-    assert isinstance(error, ValueError)
-    assert error.failure_code == "output_already_exists"
-    assert str(error) == (message or "output_already_exists")
+def test_existing_output_error_preserves_contract_and_exception_chain(tmp_path):
+    for message in (None, "", "custom_rejection"):
+        error = OutputAlreadyExistsError(message)
+        assert isinstance(error, ValueError)
+        assert error.failure_code == "output_already_exists"
+        assert str(error) == (message or "output_already_exists")
     source, target = tmp_path / "source", tmp_path / "target"
     source.write_bytes(b"candidate")
     target.write_bytes(b"old_good")

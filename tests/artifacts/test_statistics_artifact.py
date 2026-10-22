@@ -435,7 +435,7 @@ def test_research_statistics_tables_round_trip_by_factor_case(
     for member in statistics.STATISTICS_TABLE_GROUPS["factor"]:
         with artifact.table(member) as actual:
             pd.testing.assert_frame_equal(
-                actual, tables[member.removesuffix(".parquet")]
+                actual, tables[member.removesuffix(".parquet")], check_exact=True
             )
 
 
@@ -858,7 +858,10 @@ def test_legal_internal_model_name_survives_joint_test_publication(
     artifact = statistics.read_statistics_artifact(root)
     with artifact.table("model_reality_checks.parquet") as actual:
         pd.testing.assert_frame_equal(
-            actual, checks.assign(reason=checks.reason.fillna("")), check_dtype=False
+            actual,
+            checks.assign(reason=checks.reason.fillna("")),
+            check_dtype=False,
+            check_exact=True,
         )
         assert family in set(actual.family_id)
 

@@ -46,7 +46,7 @@ def test_research_dataset_spec_requires_base_input_in_inputs(
 
 def test_research_dataset_key_coverage_is_defensively_copied() -> None:
     source = {"factors": "sparse"}
-    spec = make_dummy_research_dataset_spec(key_coverage=source)
+    spec = replace(make_dummy_research_dataset_spec(), key_coverage=source)
     source["factors"] = "strict"
     assert spec.key_coverage["factors"] == "sparse"
 
@@ -250,36 +250,6 @@ def test_research_dataset_role_separation_is_enforced(
         replace(spec, **{field_name: (bad_column,)})
 
 
-def test_output_row_order_is_stable_sort_by_primary_key(tmp_path: Path) -> None:
-    layout = StorageLayout(project_root=tmp_path)
-    processed_catalog = make_dummy_processed_catalog()
-    dataset_catalog = make_research_dataset_catalog(make_dummy_research_dataset_spec())
-    write_dummy_processed_inputs(layout, processed_catalog, reverse_base=True)
-    assemble_research_dataset(
-        inputs={
-            item.data_id: layout.processed_data_root(
-                item.market_id, item.kind, item.data_id
-            )
-            for item in processed_catalog.list()
-            if item.data_id in dataset_catalog.get("dummy_dataset").input_data_ids
-        },
-        output_root=layout.research_dataset_root(
-            dataset_catalog.get("dummy_dataset").market_id, "dummy_dataset"
-        ),
-        dataset_catalog=dataset_catalog,
-        dataset_id="dummy_dataset",
-        time_window=TimeWindow("2024-01-02", "2024-01-03"),
-    )
-    result = read_dataset(tmp_path / "data/research/dummy_market/dummy_dataset")
-    ordered_keys = result.loc[:, ["market_id", "asset_id", "timestamp"]]
-    assert ordered_keys["market_id"].tolist() == ["dummy_market", "dummy_market"]
-    assert ordered_keys["asset_id"].tolist() == ["asset_a", "asset_b"]
-    assert ordered_keys["timestamp"].tolist() == [
-        pd.Timestamp("2024-01-02"),
-        pd.Timestamp("2024-01-03"),
-    ]
-
-
 def test_persisted_research_sessions_are_complete_across_small_read_batches(
     tmp_path: Path,
 ) -> None:
@@ -297,7 +267,7 @@ def test_persisted_research_sessions_are_complete_across_small_read_batches(
                 "can_exit": True,
                 "market_type": 4,
             }
-            for asset in range(3)
+            for asset in reversed(range(3))
             for date, timestamp in enumerate(dates)
         ]
     )
@@ -338,7 +308,9 @@ def test_persisted_research_sessions_are_complete_across_small_read_batches(
         iter_complete_session_frames(measured_batches(), timestamp_column="timestamp")
     )
     assert [session["timestamp"].iloc[0] for session in sessions] == list(dates)
-    assert [len(session) for session in sessions] == [3] * len(dates)
+    assert [session["asset_id"].tolist() for session in sessions] == [
+        ["asset_000", "asset_001", "asset_002"]
+    ] * len(dates)
     assert len(batch_sizes) > len(dates)
     assert max(batch_sizes) < 3
     assert sum(batch_sizes) == 9

@@ -30,7 +30,7 @@ def test_common_rank_ic_restricts_asset_rows_not_just_dates():
     assert count == 3
     assert own["first"].iloc[0] != own["second"].iloc[0]
     assert paired["first"].iloc[0] == paired["second"].iloc[0] == -0.5
-    pd.testing.assert_frame_equal(frame, original)
+    pd.testing.assert_frame_equal(frame, original, check_exact=True)
     frame["second"] = np.nan
     paired, count = _common_model_rank_ic(
         frame, family_ids=("first", "second"), label_column="label"

@@ -165,7 +165,9 @@ def test_processed_benchmark_target_streams_exact_dates_and_requires_global_cove
             timestamp_column="timestamp",
         )
     )
-    pd.testing.assert_frame_equal(pd.concat(streamed, ignore_index=True), expected)
+    pd.testing.assert_frame_equal(
+        pd.concat(streamed, ignore_index=True), expected, check_exact=True
+    )
     single = pd.concat(
         iter_benchmark_weight_snapshots(index_info, (weights.iloc[:128],)),
         ignore_index=True,
