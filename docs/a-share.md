@@ -410,13 +410,8 @@ Adjprcwd
 
 `adj_open = Opnprc * Adjprcwd / Clsprc`
 
-价值因子的市值分母：
-
-`Dsmvtl3 total_market_cap`
-
-规模/流动性使用：
-
-`Dsmvosd float_market_cap`
+价值因子的市值分母使用 `Dsmvtl3 total_market_cap`。
+规模暴露、分组、换手率和组合权重等用途的市值口径见第 5.19 节。
 
 CSMAR 字段单位依据本地 `data/reference/股票市场交易(升级测试) 数据库说明书.pdf`
 的 76 页版本：PDF 第 21–24 页（正文第 17–20 页），表三 `TRDNEW_Capchg`
