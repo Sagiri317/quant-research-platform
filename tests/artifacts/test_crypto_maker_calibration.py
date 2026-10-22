@@ -230,7 +230,9 @@ def test_fractional_maker_fills_publish_and_read_back(
         root, validate_tables=validate_maker_calibration
     )
     with artifact.table("crypto_maker_samples.parquet") as actual:
-        pd.testing.assert_frame_equal(actual, tables["crypto_maker_samples"])
+        pd.testing.assert_frame_equal(
+            actual, tables["crypto_maker_samples"], check_exact=True
+        )
 
 
 @pytest.mark.parametrize(
@@ -279,7 +281,7 @@ def test_mature_shared_maker_tape_round_trip_and_rejects_corruption(
     for member in statistics.STATISTICS_TABLE_GROUPS["crypto_maker_calibration"]:
         with artifact.table(member) as actual:
             pd.testing.assert_frame_equal(
-                actual, tables[member.removesuffix(".parquet")]
+                actual, tables[member.removesuffix(".parquet")], check_exact=True
             )
     assert "crypto_maker_fills.parquet" not in artifact._members
     if mutation is None:

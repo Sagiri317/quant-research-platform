@@ -54,7 +54,17 @@ def test_public_narrow_panel_retains_preceding_suspension_state(
         )
         output = read_dataset(path)
         outputs.append(output.loc[output.timestamp.ge(dates[3])].reset_index(drop=True))
-    pd.testing.assert_frame_equal(outputs[0], outputs[1], check_exact=True)
+    # Copied prices/state are exact; turnover and reopening returns are calculated.
+    calculated = ["period_return", "turnover"]
+    left, right = (output.drop(columns=calculated) for output in outputs)
+    pd.testing.assert_frame_equal(left, right, check_exact=True)
+    for column in left.select_dtypes(include="floating"):
+        pd.testing.assert_extension_array_equal(
+            left[column].array, right[column].array, check_exact=True
+        )
+    pd.testing.assert_frame_equal(
+        outputs[0][calculated], outputs[1][calculated], rtol=1e-13, atol=1e-15
+    )
     rows = outputs[1].loc[outputs[1].asset_id.eq("000001")].set_index("timestamp")
     if barrier in {"unknown", "raw_missing"}:
         assert pd.isna(rows.loc[dates[3], "close"])
@@ -848,7 +858,12 @@ def test_optional_source_absence_does_not_discover_neighboring_inputs(tmp_path):
         tmp_path / "present", "market_panel_1d", supplied, sessions[0], sessions[-1]
     )
     assert len(read_dataset(second)) == 15
-    pd.testing.assert_frame_equal(read_dataset(first), restored)
+    reread = read_dataset(first)
+    pd.testing.assert_frame_equal(reread, restored, check_exact=True)
+    for column in restored.select_dtypes(include="floating"):
+        pd.testing.assert_extension_array_equal(
+            reread[column].array, restored[column].array, check_exact=True
+        )
 
 
 @pytest.mark.parametrize("failure", ("present_invalid", "required_absent"))

@@ -338,7 +338,7 @@ def test_native_mask_assembly_fit_predict_score_and_evaluation(tmp_path):
     )
     assembled = read_dataset(derived)
     pd.testing.assert_frame_equal(
-        assembled.loc[:, frame.columns], frame, check_dtype=False
+        assembled.loc[:, frame.columns], frame, check_dtype=False, check_exact=True
     )
 
     def selected(name):

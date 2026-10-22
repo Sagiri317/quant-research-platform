@@ -73,7 +73,12 @@ def test_joint_calendar_quote_gap_blocks_native_publication_and_preserves_output
     with pytest.raises(ValueError, match="a_share_trading_calendar_unknown_session"):
         publish()
     assert not root.exists()
-    pd.testing.assert_frame_equal(read_dataset(old_root), before)
+    after = read_dataset(old_root)
+    pd.testing.assert_frame_equal(after, before, check_exact=True)
+    for column in before.select_dtypes(include="floating"):
+        pd.testing.assert_extension_array_equal(
+            after[column].array, before[column].array, check_exact=True
+        )
 
 
 @pytest.mark.parametrize("state", ["O", "C"])

@@ -217,14 +217,11 @@ def write_dummy_processed_inputs(
     *,
     include_extensions: bool = False,
     drop_factor_key: str | None = None,
-    reverse_base: bool = False,
     truncate_factors: bool = False,
     extra_factor_key: bool = False,
     factor_values: Sequence[object] | None = None,
 ) -> None:
     base = _dummy_base_frame()
-    if reverse_base:
-        base = base.iloc[::-1].reset_index(drop=True)
     factor_frame = _with_optional_columns(
         _dummy_base_frame().assign(factor_1=list(factor_values or [1.0, 2.0])),
         include_extensions=include_extensions,

@@ -38,7 +38,7 @@ def test_ordinary_missing_quote_uses_past_anchor_and_recovers():
     assert result.close.iloc[0] == 12.0
     assert result.research_open_mark_kind.iloc[0] == "ordinary_missing_quote"
     assert result.research_open_mark_at.iloc[0] == pd.Timestamp("2023-01-01")
-    pd.testing.assert_frame_equal(missing.panel, original)
+    pd.testing.assert_frame_equal(missing.panel, original, check_exact=True)
     recovered = marks.project(mark_view("2023-01-03", 13.0, 14.0))
     assert recovered.open.iloc[0] == 13.0
     assert recovered.research_open_mark_at.isna().all()

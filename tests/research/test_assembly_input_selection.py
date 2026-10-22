@@ -75,7 +75,7 @@ def test_assembly_persists_scientific_input_selection(tmp_path, storage):
         .astype({"timestamp": "datetime64[ns]"})
         .reset_index(drop=True)
     )
-    pd.testing.assert_frame_equal(read_dataset(output), expected)
+    pd.testing.assert_frame_equal(read_dataset(output), expected, check_exact=True)
     # Persisted selectors remain descriptive; replay is an explicit new operation.
     replay = assembler.assemble(
         {
@@ -84,7 +84,7 @@ def test_assembly_persists_scientific_input_selection(tmp_path, storage):
             "output_root": str(tmp_path / "replayed"),
         }
     )
-    pd.testing.assert_frame_equal(read_dataset(replay), expected)
+    pd.testing.assert_frame_equal(read_dataset(replay), expected, check_exact=True)
 
 
 @pytest.mark.parametrize(

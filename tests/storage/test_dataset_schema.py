@@ -94,10 +94,20 @@ def test_dataset_global_extension_dtype_survives_read_scopes(
         (pd.concat(chunked, ignore_index=True), expected),
         (windowed, expected.loc[expected["timestamp"].dt.year == 2015]),
     ):
+        observed = observed.sort_values(["asset_id", "timestamp"]).reset_index(
+            drop=True
+        )
+        selected = selected.sort_values(["asset_id", "timestamp"]).reset_index(
+            drop=True
+        )
         pd.testing.assert_frame_equal(
-            observed.sort_values(["asset_id", "timestamp"]).reset_index(drop=True),
-            selected.sort_values(["asset_id", "timestamp"]).reset_index(drop=True),
+            observed, selected, check_dtype=False, check_exact=True
+        )
+        pd.testing.assert_extension_array_equal(
+            observed["value"].array,
+            selected["value"].array,
             check_dtype=False,
+            check_exact=True,
         )
 
 
@@ -177,6 +187,7 @@ def test_logical_category_scalar_codec_round_trips_supported_values(
     value: object,
 ) -> None:
     payload = dataset_schema._typed_category_value_payload(value)
+    assert dataset_schema._typed_category_value(payload) == value
     assert (
         dataset_schema._typed_category_value_payload(
             dataset_schema._typed_category_value(payload)
@@ -415,6 +426,24 @@ def test_arrow_scalar_dtypes_are_stable_across_storage_read_boundaries(
     assert str(materialized["value"].dtype) == expected_dtype
     assert {str(chunk["value"].dtype) for chunk in chunks} == {expected_dtype}
     assert str(windowed["value"].dtype) == expected_dtype
+
+    expected = frame.loc[:, ["timestamp", "value"]]
+    for observed, selected in (
+        (materialized, expected),
+        (pd.concat(chunks, ignore_index=True), expected),
+        (windowed, expected.loc[expected["timestamp"].dt.year == 2015]),
+    ):
+        observed = observed.sort_values("timestamp").reset_index(drop=True)
+        selected = selected.sort_values("timestamp").reset_index(drop=True)
+        pd.testing.assert_frame_equal(
+            observed, selected, check_dtype=False, check_exact=True
+        )
+        pd.testing.assert_extension_array_equal(
+            observed["value"].array,
+            selected["value"].array,
+            check_dtype=False,
+            check_exact=True,
+        )
 
 
 @pytest.mark.parametrize("arrow_type", (pa.float32(), pa.float64()))

@@ -2973,7 +2973,11 @@ def test_complete_chain_index_info_fixture_has_native_price_and_return_identitie
     total_returns = {"csi500": "H00905", "csi1000": "H00852"}
     with pytest.raises(CapturedIndexInfo):
         a_share_raw.write_a_share_raw_fixture(
-            layout, benchmark_total_return_indices=total_returns
+            layout,
+            benchmark_total_return_indices=total_returns,
+            formal_dataset_start="2020-01-02",
+            history_end="2020-01-02",
+            validation_start="2020-01-02",
         )
     result = interim.materialize_interim_data(
         output_roots={

@@ -1415,12 +1415,13 @@ def test_repeated_partial_fills_preserve_registered_rights_through_native_roundt
     from quant_research_platform.contracts.portfolios import (
         PortfolioCashFlow,
         PortfolioDiagnostic,
+        PortfolioRightsAdjustment,
     )
     from quant_research_platform.research.portfolios.accounting import (
         EquityEntitlements,
     )
 
-    dates = pd.bdate_range("2024-01-02", periods=325)
+    dates = pd.bdate_range("2024-01-02", periods=325) + pd.Timedelta(milliseconds=1)
     life = pd.Timestamp("2000-01-01")
     entitlements = EquityEntitlements()
     units, lives = pd.Series({"a": Fraction()}, dtype=object), pd.Series({"a": life})
@@ -1484,6 +1485,23 @@ def test_repeated_partial_fills_preserve_registered_rights_through_native_roundt
             events, pd.DataFrame(), units, lives, end, phase="end"
         )
         rights += adjustments
+        if sequence == 323:
+            rights += (
+                PortfolioRightsAdjustment(
+                    "recovery",
+                    end.value,
+                    "a",
+                    "2000-01-01",
+                    units.a,
+                    units.a,
+                    0.0,
+                    None,
+                    None,
+                    0.0,
+                    "b" * 64,
+                    phase="end",
+                ),
+            )
         cash += paid
         if paid:
             flows += (
@@ -1543,8 +1561,13 @@ def test_repeated_partial_fills_preserve_registered_rights_through_native_roundt
         "dividend",
         "stock_distribution",
         "unlock",
+        "recovery",
     }
-    assert all(row.entitlement_quantity == registered for row in rights)
+    assert all(
+        row.entitlement_quantity == registered
+        for row in rights
+        if row.kind != "recovery"
+    )
     final = next(
         row
         for row in restored[-1].valuations

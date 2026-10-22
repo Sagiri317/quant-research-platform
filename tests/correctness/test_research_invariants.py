@@ -223,13 +223,13 @@ def test_training_eligibility_is_label_availability_not_a_fixed_gap() -> None:
 def test_training_selector_requires_eligible_finite_features_and_target() -> None:
     frame = pd.DataFrame(
         {
-            "timestamp": pd.to_datetime(["2024-01-01", "2024-01-01", "2024-01-02"]),
-            "eligible": [True, False, True],
-            "feature": [1.0, 2.0, np.nan],
-            "model_target": [0.1, 0.2, 0.3],
-            "label_available_at": pd.to_datetime(
-                ["2024-01-02", "2024-01-02", "2024-01-02"]
+            "timestamp": pd.to_datetime(
+                ["2024-01-01", "2024-01-01", "2024-01-02", "2024-01-02"]
             ),
+            "eligible": [True, False, True, True],
+            "feature": [1.0, 2.0, np.nan, 4.0],
+            "model_target": [0.1, 0.2, 0.3, np.nan],
+            "label_available_at": pd.to_datetime(["2024-01-02"] * 4),
         }
     )
 

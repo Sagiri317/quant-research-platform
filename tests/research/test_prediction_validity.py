@@ -204,7 +204,9 @@ def test_mixed_feature_families_keep_structural_failure_out_of_models(
     )
     reused_frame = read_dataset(reused)
     for column in reused_frame:
-        pd.testing.assert_series_equal(reused_frame[column], values[column])
+        pd.testing.assert_series_equal(
+            reused_frame[column], values[column], check_exact=True
+        )
     model = fit(
         {
             "market_id": "a_share",

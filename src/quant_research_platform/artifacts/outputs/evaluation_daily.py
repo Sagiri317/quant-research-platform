@@ -211,12 +211,21 @@ def validate_daily_counts(metrics, coverage, strata, *, spec, science):
             or (frame.n_obs.to_numpy() > aligned.domain_rows.to_numpy()).any()
         ):
             raise ValueError("evaluation_daily_coverage_mismatch")
-        if (
-            name == "metrics"
-            and science.get("sample_scope", "own") == "common"
-            and not (frame.n_obs.to_numpy() == aligned.domain_rows.to_numpy()).all()
-        ):
-            raise ValueError("evaluation_common_metric_count_mismatch")
+        if name == "metrics" and science.get("sample_scope", "own") == "common":
+            # Coverage counts source rows. Identity/rank need one observation;
+            # zscore needs two before the common-domain intersection.
+            minimum_support = frame.signal.map(
+                {
+                    signal.signal_id: 2 if signal.transform == "zscore" else 1
+                    for signal in spec.signals
+                }
+            ).to_numpy()
+            domain_rows = aligned.domain_rows.to_numpy()
+            guaranteed = domain_rows >= minimum_support
+            if not (
+                frame.n_obs.to_numpy()[guaranteed] == domain_rows[guaranteed]
+            ).all():
+                raise ValueError("evaluation_common_metric_count_mismatch")
         if (
             name == "daily_strata"
             and (frame.stratum_rows.to_numpy() > aligned.mature_rows.to_numpy()).any()

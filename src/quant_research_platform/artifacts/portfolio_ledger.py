@@ -151,8 +151,8 @@ def write_portfolio_ledger_artifact(
                 records = buffers[name]
                 if not records:
                     return
-                frame = pd.DataFrame.from_records(
-                    (
+                table = pa.Table.from_pylist(
+                    [
                         {
                             key: encode_exact_numeric(value)
                             if key in _EXACT_FIELDS
@@ -160,11 +160,8 @@ def write_portfolio_ledger_artifact(
                             for key, value in record.items()
                         }
                         for record in records
-                    ),
-                    columns=PORTFOLIO_LEDGER_TABLE_COLUMNS[name],
-                )
-                table = pa.Table.from_pandas(
-                    frame, schema=_SCHEMAS[name], preserve_index=False
+                    ],
+                    schema=_SCHEMAS[name],
                 )
                 writers[name](table)
                 records.clear()

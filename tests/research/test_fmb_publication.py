@@ -35,7 +35,7 @@ def test_fmb_identity_publishes_periods_and_undefined_summary(tmp_path, unit):
             feature_columns=("factor",),
             target_column="label",
         )
-        pd.testing.assert_frame_equal(mature, frame)
+        pd.testing.assert_frame_equal(mature, frame, check_exact=True)
         records.extend(
             _fama_macbeth_period_records(
                 frame, return_column="label", factors=("factor",), core_factors=()

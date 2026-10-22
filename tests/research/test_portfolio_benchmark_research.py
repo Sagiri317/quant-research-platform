@@ -208,7 +208,7 @@ def test_local_invalid_level_and_missing_reference_preserve_other_results(
         )
     )
     with persisted.table("portfolio_benchmark_intervals.parquet") as restored:
-        pd.testing.assert_frame_equal(restored, intervals)
+        pd.testing.assert_frame_equal(restored, intervals, check_exact=True)
 
 
 def test_endpoint_interval_percent_hand_math_and_complete_subinterval_coverage(
@@ -794,7 +794,9 @@ def test_requested_risk_free_defines_alpha_and_missing_rf_blocks_without_fallbac
         )
     )
     with restored.table("portfolio_market_exposure.parquet") as rows:
-        pd.testing.assert_frame_equal(rows, zero["portfolio_market_exposure"])
+        pd.testing.assert_frame_equal(
+            rows, zero["portfolio_market_exposure"], check_exact=True
+        )
     invalid = zero["portfolio_market_exposure"].copy()
     invalid.loc[invalid.coefficient_id.eq("alpha"), "p_value"] = 0.0
     with pytest.raises(ValueError, match="statistics_exposure_inference_invalid"):
@@ -1101,7 +1103,9 @@ def test_market_exposure_roundoff_and_small_signals_persist(tmp_path, case, unit
         )
     )
     with artifact.table("portfolio_market_exposure.parquet") as saved:
-        pd.testing.assert_frame_equal(saved, tables["portfolio_market_exposure"])
+        pd.testing.assert_frame_equal(
+            saved, tables["portfolio_market_exposure"], check_exact=True
+        )
         rows = saved.set_index("coefficient_id").loc[
             ["market_return_intercept", "beta"]
         ]
