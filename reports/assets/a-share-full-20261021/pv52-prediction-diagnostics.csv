@@ -1,5 +1,5 @@
 case,selection_group,sample_role,prediction_id,observation_count,status,reason,mean,standard_error,t_statistic,p_value,ci_lower,ci_upper,bootstrap_status,bootstrap_reason,bootstrap_lower,bootstrap_upper,bootstrap_block_size,bootstrap_repetitions,bootstrap_seed,input_date_count
-pv_expanded,global,development_oos,pv_expanded__global,1008,UNDEFINED,selection_reuses_evaluation_window,0.1171453634191683,,,,,,UNDEFINED,selection_reuses_evaluation_window,,,20,2000,734271750,1193
-pv_expanded,quarterly,development_oos,pv_expanded__quarterly,1008,UNDEFINED,incomplete_session_clock,0.11313390271849062,,,,,,UNDEFINED,incomplete_session_clock,,,20,2000,1289924512,1193
-pv_expanded,global,holdout_reassessment,pv_expanded__global,147,UNDEFINED,incomplete_session_clock,0.0640549326731574,,,,,,UNDEFINED,incomplete_session_clock,,,20,2000,4168281736,464
-pv_expanded,quarterly,holdout_reassessment,pv_expanded__quarterly,147,UNDEFINED,incomplete_session_clock,0.05029884167364221,,,,,,UNDEFINED,incomplete_session_clock,,,20,2000,4267728875,464
+pv_expanded,global,development_oos,pv_expanded__global,1008,UNDEFINED,selection_reuses_evaluation_window,0.11712180788997423,,,,,,UNDEFINED,selection_reuses_evaluation_window,,,20,2000,734271750,1193
+pv_expanded,quarterly,development_oos,pv_expanded__quarterly,1008,UNDEFINED,incomplete_session_clock,0.11425654358952046,,,,,,UNDEFINED,incomplete_session_clock,,,20,2000,1289924512,1193
+pv_expanded,global,holdout_reassessment,pv_expanded__global,147,UNDEFINED,incomplete_session_clock,0.06402582459501095,,,,,,UNDEFINED,incomplete_session_clock,,,20,2000,4168281736,464
+pv_expanded,quarterly,holdout_reassessment,pv_expanded__quarterly,147,UNDEFINED,incomplete_session_clock,0.05023407204985915,,,,,,UNDEFINED,incomplete_session_clock,,,20,2000,4267728875,464
