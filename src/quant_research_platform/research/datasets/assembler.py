@@ -71,10 +71,7 @@ def _assemble_research_dataset_from_sessions(
             "label_semantics", {}
         )
         for label, facts in semantics.items():
-            if (
-                label not in spec.label_availability_columns
-                or label not in session.logical_columns
-            ):
+            if label not in spec.label_columns or label not in session.logical_columns:
                 continue
             if label in label_semantics and label_semantics[label] != facts:
                 raise ValueError("research_label_semantics_conflict")
@@ -139,6 +136,7 @@ def _iter_joined_processed_chunks(
             timestamps = strict_timestamp_series(
                 frame.timestamp, error="invalid_time_chunk_timestamp_values"
             )
+            frame["timestamp"] = timestamps
             order = timestamps.argsort(kind="mergesort")
             auxiliary[data_id] = (
                 frame.iloc[order].reset_index(drop=True),
@@ -168,7 +166,11 @@ def _iter_joined_processed_chunks(
                 yield chunk.sort_values(
                     list(physical_order), kind="mergesort", ignore_index=True
                 )
-            pending = frame
+            pending = frame.assign(
+                timestamp=strict_timestamp_series(
+                    frame.timestamp, error="invalid_time_chunk_timestamp_values"
+                )
+            )
         if pending is None:
             # An empty base still has no authority to hide auxiliary extra keys.
             for data_id, auxiliary in auxiliary_through(stop).items():

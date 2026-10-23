@@ -240,18 +240,19 @@ def test_public_factor_statistics_projects_custom_native_or_bare_input(
 
 
 def test_nonstreaming_statistics_reject_callback_before_publishing(tmp_path):
-    tables, metadata, _ = _factor_tables(tmp_path)
+    metadata = {
+        "sample_role": "validation",
+        "window": {"start": "2020-01-01", "end": "2020-01-02"},
+    }
 
-    def repeat(on_table):
-        for name, frame in tables.items():
-            on_table(name, frame)
-            on_table(name, frame)
+    def forbidden_callback(on_table):
+        raise AssertionError("callback must not run")
 
     with pytest.raises(ValueError, match="statistics_tables_invalid"):
         write_statistics_artifact(
             tmp_path / "unpublished",
             metadata=metadata,
-            tables=repeat,
+            tables=forbidden_callback,
             table_group="factor",
         )
     assert not (tmp_path / "unpublished").exists()

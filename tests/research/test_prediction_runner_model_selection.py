@@ -619,3 +619,59 @@ def test_score_retains_only_predictions_and_matches_full_join(tmp_path, monkeypa
     assert len(reads) == len(config["predictions"])
     assert len(retained) == len(config["candidate_ids"])
     assert all(reference() is None for reference in retained)
+
+
+@pytest.mark.parametrize("prefix", ["ic", "rankic"])
+@pytest.mark.parametrize("missing", ["mean", "std"])
+def test_selection_ir_requires_known_mean_and_std(tmp_path, prefix, missing):
+    _cases, config = candidates(tmp_path, algorithms=("linear_regression",))
+    scores = score(config)
+    selection_config = {
+        "scores": str(scores),
+        "output": str(tmp_path / "selection.json"),
+        "selection_metric": "validation_mse",
+        "selection_direction": "minimize",
+        "tie_break_order": config["candidate_ids"],
+        "refit_windows": [{"start": "2020-01-01", "end": "2020-01-06"}],
+        "refit_cutoff": "2020-01-06",
+    }
+    selected = select(selection_config)
+    assert read_selection(selected)["selected_model_id"] == "linear_regression"
+    payload = json.loads(scores.read_text())
+    metrics = payload["metrics"][0]
+    # Artifact prerequisites, not ratio reconstruction: 0.5 / 0.25 = 2.
+    metrics.update(
+        {
+            f"validation_{prefix}": 0.5,
+            f"validation_{prefix}_reason": None,
+            f"validation_std_{prefix}": 0.25,
+            f"validation_std_{prefix}_reason": None,
+            f"validation_{prefix}ir": 2.0,
+            f"validation_{prefix}ir_reason": None,
+        }
+    )
+    scores.write_text(json.dumps(payload))
+    selection_config["output"] = str(tmp_path / "defined-selection.json")
+    assert read_selection(select(selection_config))["metrics"][0] == metrics
+    absent = f"validation_{prefix}" if missing == "mean" else f"validation_std_{prefix}"
+    metrics[absent] = None
+    metrics[f"{absent}_reason"] = "nonfinite_result"
+    metrics[f"validation_{prefix}ir"] = None
+    metrics[f"validation_{prefix}ir_reason"] = "nonfinite_result"
+    scores.write_text(json.dumps(payload))
+    selection_config["output"] = str(tmp_path / "unknown-selection.json")
+    selected = select(selection_config)
+    frozen = read_selection(selected)
+    assert frozen["metrics"][0] == metrics
+    # Unknown inputs remain allowed; only claiming their derived IR is rejected.
+    metrics[f"validation_{prefix}ir"] = 2.0
+    metrics[f"validation_{prefix}ir_reason"] = None
+    scores.write_text(json.dumps(payload))
+    selection_config["output"] = str(tmp_path / "invalid-selection.json")
+    with pytest.raises(ValueError, match="^invalid_model_metadata$"):
+        select(selection_config)
+    frozen["metrics"][0] = metrics
+    frozen["families"][0]["trial_metrics"][0] = metrics
+    selected.write_text(json.dumps(frozen))
+    with pytest.raises(ValueError, match="^invalid_model_metadata$"):
+        read_selection(selected)

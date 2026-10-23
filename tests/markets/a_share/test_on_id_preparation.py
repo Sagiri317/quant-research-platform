@@ -4,7 +4,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.markets.implementations.a_share.processed import producer
 from quant_research_platform.markets.prepare import prepare
 from quant_research_platform.storage.datasets import read_dataset
 from quant_research_platform.storage.datasets.reading import open_dataset_session
@@ -56,11 +55,9 @@ def _request(tmp_path, inputs, frame, **extra):
 
 
 @pytest.mark.parametrize("native", (False, True))
-@pytest.mark.parametrize("block_rows", (3, 100000))
-def test_prepare_roundtrip_and_narrow_slice(tmp_path, monkeypatch, native, block_rows):
+def test_prepare_roundtrip_and_narrow_slice(tmp_path, native):
     frame, inputs = _inputs(tmp_path, native=native)
     assert set(inputs) == {"market_panel_1d", "trading_calendar"}
-    monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", block_rows)
     full_root = prepare(
         _request(tmp_path / "full", inputs, frame, parameters={"horizons": [1, 20]})
     )

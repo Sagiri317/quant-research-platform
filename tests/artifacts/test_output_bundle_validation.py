@@ -155,7 +155,7 @@ def test_projection_does_not_decode_or_validate_an_unused_score(tmp_path):
         ("future_selection", "model_selection_after_fit_cutoff"),
         ("outside_training", "model_training_window_outside_declared_fit"),
         ("fitting_state", "prediction_training_facts_invalid"),
-        ("duplicate_recipe", "prediction_training_facts_invalid"),
+        ("forbidden_input_columns", "prediction_training_facts_invalid"),
     ],
 )
 def test_compact_prediction_facts_preserve_science_without_fitting_state(

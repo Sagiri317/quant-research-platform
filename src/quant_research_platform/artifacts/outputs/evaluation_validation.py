@@ -684,6 +684,12 @@ def validate_evaluation_artifact_structure(
         group_spread_summary["group_monotonicity_score_reason"],
         allowed=GROUP_SPREAD_REASON_CODES,
     )
+    for statistic in ("ic", "rankic"):
+        counts = ic_summary[f"valid_{statistic}_count"]
+        defined_ir = ic_summary[f"{statistic}ir"].notna()
+        std = ic_summary[f"std_{statistic}"]
+        if (defined_ir & (counts.lt(2) | std.isna() | std.le(0))).any():
+            raise ValueError("invalid_evaluation_summary_values")
 
 
 def validate_metric_group_counts(metrics, grouped_label_values, *, spec):

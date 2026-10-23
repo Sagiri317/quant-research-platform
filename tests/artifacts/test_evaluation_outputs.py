@@ -178,11 +178,26 @@ def test_evaluation_publishes_numeric_members_and_reads_only_requested_summaries
         read_evaluation_outputs(output, tables=("ic_summary",))
 
 
-@pytest.mark.parametrize("member", ["ic_summary", "group_spread_summary"])
-def test_evaluation_summary_uniqueness_at_publication_and_read(tmp_path, member):
+@pytest.mark.parametrize(
+    ("member", "statistic", "failure"),
+    [("ic_summary", None, "duplicate"), ("group_spread_summary", None, "duplicate")]
+    + [
+        ("ic_summary", statistic, failure)
+        for statistic in ("ic", "rankic")
+        for failure in ("count", "zero_std", "missing_std")
+    ],
+)
+def test_evaluation_summary_invariants_at_publication_and_read(
+    tmp_path, member, statistic, failure
+):
     spec = _spec()
     with build_evaluation_result_from_frames(
-        (_frame(),),
+        (
+            _frame(),
+            _frame().assign(
+                timestamp=pd.Timestamp("2020-01-03"), label=[5.0, 3.0, 2.0]
+            ),
+        ),
         spec=spec,
         asset_column="asset_id",
         source_columns_by_kind={"feature": ("feature",)},
@@ -190,11 +205,28 @@ def test_evaluation_summary_uniqueness_at_publication_and_read(tmp_path, member)
         chunks = list(result.output_chunks)
         summaries = result.summaries()
         position = 1 if member == "ic_summary" else 2
-        duplicated = pd.concat([summaries[position]] * 2, ignore_index=True)
+        changed = summaries[position].copy()
+        if failure == "duplicate":
+            changed = pd.concat([changed] * 2, ignore_index=True)
+            error = f"duplicate_evaluation_{member}_keys"
+        else:
+            assert changed[f"valid_{statistic}_count"].iloc[0] == 2
+            assert changed[f"std_{statistic}"].iloc[0] > 0
+            assert pd.notna(changed[f"{statistic}ir"].iloc[0])
+            changed[f"{statistic}ir"] = 42.0
+            if failure == "count":
+                changed[f"valid_{statistic}_count"] = 1
+            else:
+                changed[f"std_{statistic}"] = (
+                    0.0 if failure == "zero_std" else float("nan")
+                )
+                if failure == "missing_std":
+                    changed[f"std_{statistic}_reason"] = "nonfinite_result"
+            error = "invalid_evaluation_summary_values"
         broken = list(summaries)
-        broken[position] = duplicated
+        broken[position] = changed
         output = tmp_path / "invalid"
-        with pytest.raises(ValueError, match=f"duplicate_evaluation_{member}_keys"):
+        with pytest.raises(ValueError, match=error):
             write_evaluation_outputs_from_chunks(
                 chunks,
                 summary_factory=lambda: tuple(broken),
@@ -208,6 +240,7 @@ def test_evaluation_summary_uniqueness_at_publication_and_read(tmp_path, member)
             spec=spec,
             output_path=tmp_path / "valid",
         )
-    duplicated.to_parquet(valid / f"{member}.parquet", index=False)
-    with pytest.raises(ValueError, match=f"duplicate_evaluation_{member}_keys"):
+    read_evaluation_outputs(valid, tables=(member,))
+    changed.to_parquet(valid / f"{member}.parquet", index=False)
+    with pytest.raises(ValueError, match=error):
         read_evaluation_outputs(valid, tables=(member,))

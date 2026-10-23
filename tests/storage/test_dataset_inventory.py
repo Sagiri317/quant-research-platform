@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -70,14 +69,9 @@ def test_dataset_session_inventory_preserves_numeric_part_order(tmp_path: Path) 
         spec=make_processed_dataset_spec("inventory_numeric_order"),
     )
     parts = sorted(filesystem_glob(root / "data", "**/part-*.parquet"))
-    part_indices = tuple(range(998, 998 + len(parts)))
+    part_indices = tuple(range(999, 999 + len(parts)))
     for path, part_index in zip(parts, part_indices, strict=True):
         filesystem_rename(path, path.with_name(f"part-{part_index}.parquet"))
-    manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(
-        Path(native_filesystem_path(manifest_path)).read_text(encoding="utf-8")
-    )
-    filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
     session = dataset_reading.open_dataset_session(root, columns=None, time_window=None)
     expected = [f"part-{part_index}.parquet" for part_index in part_indices]
     assert [path.name for path in session.all_paths] == expected

@@ -409,7 +409,7 @@ def test_inventory_limit_duration_has_exact_execution_boundary(
 
 
 def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav(
-    tmp_path, monkeypatch
+    tmp_path,
 ):
     from quant_research_platform.artifacts import statistics as statistics_module
     from quant_research_platform.artifacts.crypto_hft import (

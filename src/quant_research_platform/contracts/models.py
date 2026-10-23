@@ -717,7 +717,15 @@ def _validate_model_selection_trial_record(trial: object) -> None:
             or (count == 0 and any(v is not None for v in (std, ratio, positive)))
             or (count > 0 and positive is None)
             or ((ratio is None) != (reason is not None))
-            or (ratio is not None and (count < 2 or std == 0))
+            or (
+                ratio is not None
+                and (
+                    count < 2
+                    or trial[f"validation_{prefix}"] is None
+                    or std is None
+                    or std == 0
+                )
+            )
             or (
                 reason is not None
                 and (

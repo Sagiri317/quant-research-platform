@@ -161,97 +161,177 @@ def test_non_a_share_named_scenario_keeps_input_semantics_and_requires_real_colu
         )
 
 
-def test_research_dataset_assembles_intraday_timestamp_window(tmp_path: Path) -> None:
-    layout = StorageLayout(project_root=tmp_path)
-    primary_key = PLATFORM_ASSET_TIME_KEY
-    factor_spec = ProcessedDataSpec(
-        data_id="minute_factors",
-        market_id=MarketId("crypto"),
-        kind=ProcessedDataKind.FACTOR,
-        frequency=DataFrequency.MINUTE,
-        grain=DataGrain.ASSET_TIMESTAMP,
-        column_roles={
-            "market_id": ColumnRole.KEY,
-            "asset_id": ColumnRole.KEY,
-            "timestamp": ColumnRole.TIMESTAMP,
-            "minute_factor": ColumnRole.FACTOR,
-        },
-        primary_key=primary_key,
-        partition_columns=("year",),
+@pytest.mark.parametrize("storage", ["native", "aware_base", "aware_auxiliary"])
+def test_research_dataset_assembles_intraday_timestamp_window(tmp_path, storage):
+    from quant_research_platform.contracts.data import DataSpec
+
+    timestamps = pd.date_range("2026-07-06", periods=3, freq="min")
+    inputs = {}
+    for name, column, role in (
+        ("base", "minute_factor", "factor"),
+        ("auxiliary", "minute_label", "label"),
+    ):
+        frame = pd.DataFrame(
+            {
+                "asset_id": ["asset_a", "asset_b"] * 3,
+                "timestamp": timestamps.repeat(2),
+                column: range(6),
+            }
+        )
+        if storage == "native" or storage == "aware_" + name:
+            frame["timestamp"] = frame.timestamp.dt.tz_localize("UTC").dt.tz_convert(
+                "Asia/Shanghai"
+            )
+        declaration = {
+            "data_id": name,
+            "frequency": "1m",
+            "grain": "asset_timestamp",
+            "primary_key": ("asset_id", "timestamp"),
+            "partition_columns": ("year",),
+            "column_roles": {"asset_id": "key", "timestamp": "timestamp", column: role},
+        }
+        if storage == "native":
+            root = tmp_path / name
+            write_dataset(root, frame, spec=DataSpec(**declaration))
+            inputs[name] = str(root)
+        else:
+            root = tmp_path / (name + ".parquet")
+            frame.to_parquet(root, index=False)
+            inputs[name] = {"path": str(root), "spec": declaration}
+    root = assembler_module.assemble(
+        {
+            "market_id": "crypto",
+            "dataset_id": "minute_research",
+            "inputs": inputs,
+            "base_input_data_id": "base",
+            "factor_columns": ["minute_factor"],
+            "label_columns": ["minute_label"],
+            "time_window": {
+                "start": "2026-07-06T00:01:00",
+                "end": "2026-07-06T00:02:00",
+            },
+            "output_root": str(tmp_path / "output"),
+        }
     )
-    label_spec = ProcessedDataSpec(
-        data_id="minute_labels",
-        market_id=MarketId("crypto"),
-        kind=ProcessedDataKind.LABEL,
-        frequency=DataFrequency.MINUTE,
-        grain=DataGrain.ASSET_TIMESTAMP,
-        column_roles={
-            "market_id": ColumnRole.KEY,
-            "asset_id": ColumnRole.KEY,
-            "timestamp": ColumnRole.TIMESTAMP,
-            "minute_label": ColumnRole.LABEL,
-        },
-        primary_key=primary_key,
-        partition_columns=("year",),
+    result = read_dataset(root)
+    expected = pd.DataFrame(
+        {
+            "asset_id": ["asset_a", "asset_b"] * 2,
+            "timestamp": timestamps[1:].repeat(2).as_unit("ns"),
+            "minute_factor": [2, 3, 4, 5],
+            "minute_label": [2, 3, 4, 5],
+        }
     )
-    processed_catalog = ProcessedDataCatalog((factor_spec, label_spec))
-    dataset_catalog = make_research_dataset_catalog(
-        data_id="minute_research",
-        market_id="crypto",
-        input_data_ids=("minute_factors", "minute_labels"),
-        base_input_data_id="minute_factors",
-        factor_columns=("minute_factor",),
-        label_columns=("minute_label",),
-        filter_columns=(),
-        context_columns=(),
-        frequency=DataFrequency.MINUTE,
-        grain=DataGrain.ASSET_TIMESTAMP,
+    pd.testing.assert_frame_equal(result, expected)
+
+
+@pytest.mark.parametrize("mapped", [False, True])
+def test_assembled_label_semantics_survive_model_fit_without_maturity_mapping(
+    tmp_path, mapped
+):
+    from quant_research_platform.contracts.data import DataSpec
+    from quant_research_platform.contracts.models import (
+        ModelSpec,
+        _prediction_loss_reason,
+        model_spec_payload,
     )
-    timestamps = pd.to_datetime(
-        ["2026-07-06T00:00:00", "2026-07-06T00:01:00", "2026-07-06T00:02:00"]
-    )
-    keys = pd.DataFrame(
+    from quant_research_platform.research.models.persisted import load_model
+    from quant_research_platform.research.models.production import fit
+
+    frame = pd.DataFrame(
         [
-            {"market_id": "crypto", "asset_id": asset_id, "timestamp": timestamp}
-            for timestamp in timestamps
-            for asset_id in ("asset_a", "asset_b")
+            dict(
+                timestamp=time,
+                asset_id=str(asset),
+                x=float(asset),
+                label=0.1 + 0.2 * asset,
+                label_available_at=time,
+                eligible=True,
+                unused_label=0.4,
+            )
+            for time in pd.date_range("2024-01-02", periods=3, freq="min")
+            for asset in range(4)
         ]
     )
-    for spec, value_column in (
-        (factor_spec, "minute_factor"),
-        (label_spec, "minute_label"),
-    ):
-        frame = keys.assign(**{value_column: range(len(keys))})
-        write_dataset(
-            layout.processed_data_root(spec.market_id, spec.kind, spec.data_id),
-            frame,
-            spec=spec,
+    semantics = {
+        "label": {"horizon_minutes": 1, "price_basis": "mid"},
+        "unused_label": {"horizon_minutes": 2, "price_basis": "last"},
+    }
+    availability = {"label": "label_available_at"} if mapped else {}
+    source = tmp_path / "source"
+    write_dataset(
+        source,
+        frame,
+        spec=DataSpec(
+            data_id="source",
+            frequency="1m",
+            grain="asset_timestamp",
+            primary_key=("asset_id", "timestamp"),
+            partition_columns=("year",),
+            column_roles={
+                "asset_id": "key",
+                "timestamp": "timestamp",
+                "x": "factor",
+                "label": "label",
+                "label_available_at": "context",
+                "eligible": "mask",
+                "unused_label": "label",
+            },
+            column_units={"label": "decimal_return"},
+            label_availability_columns=availability,
+        ),
+        metadata={"producer_diagnostics": {"label_semantics": semantics}},
+    )
+    window = {"start": "2024-01-02", "end": "2024-01-02"}
+    output = assembler_module.assemble(
+        {
+            "market_id": "crypto",
+            "dataset_id": "selected",
+            "inputs": {"source": str(source)},
+            "factor_columns": ["x"],
+            "label_columns": ["label"],
+            "context_columns": ["label_available_at"],
+            "filter_columns": ["eligible"],
+            "time_window": window,
+            "output_root": str(tmp_path / "assembled"),
+        }
+    )
+    saved = inspect_dataset(output)
+    assert saved.spec["label_availability_columns"] == availability
+    assert saved.manifest["producer_diagnostics"].get("label_semantics") == {
+        "label": {"horizon_minutes": 1, "price_basis": "mid"}
+    }
+    assert "unused_label" not in read_dataset(output)
+    model = fit(
+        {
+            "inputs": str(output),
+            "output": str(tmp_path / "model"),
+            "model": model_spec_payload(
+                ModelSpec(
+                    model_id="simple",
+                    model_algorithm="linear_regression",
+                    input_factor_columns=("x",),
+                    target_column="label",
+                )
+            ),
+            "market_id": "crypto",
+            "fit_windows": [window],
+            "fit_cutoff": "2024-01-03",
+        }
+    )
+    _, facts = load_model(model)
+    assert facts["target_definition"] == {
+        "source_label": "label",
+        "target_transform": "raw",
+        "target_clip": "none",
+        "label_semantics": {"horizon_minutes": 1, "price_basis": "mid"},
+    }
+    assert (
+        _prediction_loss_reason(
+            facts, "label", saved.spec, inspect_dataset(source).manifest
         )
-    assemble_research_dataset(
-        inputs={
-            item.data_id: layout.processed_data_root(
-                item.market_id, item.kind, item.data_id
-            )
-            for item in processed_catalog.list()
-            if item.data_id in dataset_catalog.get("minute_research").input_data_ids
-        },
-        output_root=layout.research_dataset_root(
-            dataset_catalog.get("minute_research").market_id, "minute_research"
-        ),
-        dataset_catalog=dataset_catalog,
-        dataset_id="minute_research",
-        time_window=TimeWindow("2026-07-06T00:01:00", "2026-07-06T00:02:00"),
+        is None
     )
-    result = pd.concat(
-        read_dataset(
-            layout.research_dataset_root(MarketId("crypto"), "minute_research"),
-            time_window=TimeWindow("2026-07-06T00:01:00", "2026-07-06T00:02:00"),
-            mode=DatasetReadMode.CHUNKED,
-        ),
-        ignore_index=True,
-    )
-    assert len(result) == 4
-    assert sorted(result["timestamp"].unique()) == list(timestamps[1:])
 
 
 def test_assembly_keeps_nanosecond_windows_through_persisted_inputs(
@@ -449,7 +529,7 @@ def test_research_dataset_session_complete_chunks_preserve_output(
 
 
 def test_research_chunk_view_prunes_top_level_multi_year_physical_paths(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
     processed_catalog = make_demo_processed_catalog()

@@ -87,7 +87,7 @@ def test_excluded_cap_does_not_destroy_independent_market_beta(cap):
     assert result.beta["good"] == pytest.approx(1.0)
 
 
-@pytest.mark.parametrize("cap", [np.nan, 0.0, -1.0, np.inf, True])
+@pytest.mark.parametrize("cap", [100.0, np.nan, 0.0, -1.0, np.inf, True])
 def test_required_member_bad_cap_keeps_proxy_uncertainty(cap):
     state = MarketModelRiskState(window=2, residual_window=2, min_fresh_fraction=1.0)
     panel = pd.DataFrame(
@@ -99,14 +99,25 @@ def test_required_member_bad_cap_keeps_proxy_uncertainty(cap):
             eligible=True,
         )
     )
-    for returns in ([0.01, 0.02], [0.03, -0.01], [-0.02, 0.04]):
+    for returns in ([0.01, 0.02], [-0.02, 0.04]):
         panel["period_return"] = returns
         state.observe(panel)
     panel["float_market_cap"] = [100.0, cap]
+    panel["period_return"] = [0.04, 0.02]
     result = state.observe(panel)
-    assert result.beta.isna().all()
+    # Today's proxy uses yesterday's valid weights: market return .01 -> .03.
+    assert result.beta.loc[["good", "required"]].tolist() == pytest.approx(
+        [3.0, -1.0], rel=1e-12, abs=1e-14
+    )
     panel["float_market_cap"] = 100.0
-    assert state.observe(panel).beta.isna().all()
+    panel["period_return"] = [0.02, 0.0]
+    result = state.observe(panel)
+    if cap == 100.0:
+        assert result.beta.loc[["good", "required"]].tolist() == pytest.approx(
+            [1.0, 1.0], rel=1e-12, abs=1e-14
+        )
+    else:
+        assert result.beta.isna().all()
 
 
 @pytest.mark.parametrize("shrinkage", [0.0, 0.2, 1.0])

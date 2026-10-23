@@ -117,17 +117,21 @@ def test_manifest_writer_rejects_existing_target_file(tmp_path: Path) -> None:
     assert manifest.read_text(encoding="utf-8") == '{"existing": true}\n'
 
 
-@pytest.mark.parametrize("ancestor", ["plain", "docs", "mydocs"])
-def test_exact_storage_layout_accepts_project_ancestor_names(tmp_path, ancestor):
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "plain/project/data/processed/a_share/factor/ancestor",
+        "docs/project/data/processed/a_share/factor/ancestor",
+        "mydocs/project/data/processed/a_share/factor/ancestor",
+        "project/docs/shared",
+    ],
+)
+def test_storage_layout_accepts_project_ancestor_names_and_arbitrary_paths(
+    tmp_path, relative_path
+):
     from quant_research_platform.storage.datasets import read_dataset
 
-    root = make_dataset_artifact_root(tmp_path / ancestor / "project", "ancestor")
+    root = tmp_path / relative_path
     frame = make_default_dataset_frame()
     write_dataset(root, frame, spec=make_processed_dataset_spec("ancestor"))
     assert len(read_dataset(root)) == len(frame)
-    write_dataset(
-        tmp_path / "project" / "docs" / "shared",
-        frame,
-        spec=make_processed_dataset_spec("ancestor"),
-    )
-    assert len(read_dataset(tmp_path / "project" / "docs" / "shared")) == len(frame)
