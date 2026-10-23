@@ -3275,3 +3275,255 @@ pv52_without_activity_liquidity,holdout,quarterly,pv52_without_activity_liquidit
 pv52_without_activity_liquidity,holdout,quarterly,pv52_without_activity_liquidity__lightgbm_regressor,head_mean_raw_return,147,464,-0.022973011946136636,"{""not_defined"": 317}",descriptive_only
 pv52_without_activity_liquidity,holdout,quarterly,pv52_without_activity_liquidity__lightgbm_regressor,pool_mean_raw_return,464,464,0.02139447961392485,"{""not_defined"": 0}",descriptive_only
 pv52_without_activity_liquidity,holdout,quarterly,pv52_without_activity_liquidity__lightgbm_regressor,head_excess_raw_return,147,464,-0.0029629531168606,"{""not_defined"": 317}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__equal_weight_rank_ensemble,rankic,1193,1193,0.09999647927005677,{},descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__equal_weight_rank_ensemble,mse,1193,1193,0.998047263714956,{},descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__equal_weight_rank_ensemble,oos_r2,1193,1193,0.0018689656054954593,{},descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__equal_weight_rank_ensemble,head_coverage,1193,1193,0.9959624608458773,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__equal_weight_rank_ensemble,head_mean_raw_return,1193,1193,0.017420948259606578,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__equal_weight_rank_ensemble,pool_mean_raw_return,1193,1193,0.011715255454006868,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__equal_weight_rank_ensemble,head_excess_raw_return,1193,1193,0.005705692805599712,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__ic_weighted_rank_ensemble,rankic,1193,1193,0.10572455225949678,{},descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__ic_weighted_rank_ensemble,mse,1193,1193,0.9978253109749089,{},descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__ic_weighted_rank_ensemble,oos_r2,1193,1193,0.002094101831447881,{},descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__ic_weighted_rank_ensemble,head_coverage,1193,1193,0.9965595712735215,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__ic_weighted_rank_ensemble,head_mean_raw_return,1193,1193,0.017584374011772295,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__ic_weighted_rank_ensemble,pool_mean_raw_return,1193,1193,0.011715255454006868,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__ic_weighted_rank_ensemble,head_excess_raw_return,1193,1193,0.005869118557765428,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__linear_regression,rankic,1193,1193,0.1090494417562286,{},descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__linear_regression,mse,1193,1193,0.9969900247793934,{},descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__linear_regression,oos_r2,1193,1193,0.0029392931443215156,{},descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__linear_regression,head_coverage,1193,1193,0.9968518854374313,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__linear_regression,head_mean_raw_return,1193,1193,0.019849753998318096,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__linear_regression,pool_mean_raw_return,1193,1193,0.011715255454006868,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__linear_regression,head_excess_raw_return,1193,1193,0.008134498544311227,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__huber_regression,rankic,1193,1193,0.11144587225544561,{},descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__huber_regression,mse,1193,1193,1.0124496955631643,{},descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__huber_regression,oos_r2,1193,1193,-0.01251786460204844,{},descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__huber_regression,head_coverage,1193,1193,0.9974203955603808,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__huber_regression,head_mean_raw_return,1193,1193,0.01821831766497584,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__huber_regression,pool_mean_raw_return,1193,1193,0.011715255454006868,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__huber_regression,head_excess_raw_return,1193,1193,0.006503062210968973,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__ridge_regression,rankic,1193,1193,0.11285997541148957,{},descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__ridge_regression,mse,1193,1193,0.9958449050676711,{},descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__ridge_regression,oos_r2,1193,1193,0.004077246218176664,{},descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__ridge_regression,head_coverage,1193,1193,0.9952451218173609,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__ridge_regression,head_mean_raw_return,1193,1193,0.019115167167649397,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__ridge_regression,pool_mean_raw_return,1193,1193,0.011715255454006868,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__ridge_regression,head_excess_raw_return,1193,1193,0.007399911713642527,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__lasso_regression,rankic,1193,1193,0.11302214314121907,{},descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__lasso_regression,mse,1193,1193,0.9959876940499112,{},descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__lasso_regression,oos_r2,1193,1193,0.003933400425945414,{},descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__lasso_regression,head_coverage,1193,1193,0.9947682554351875,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__lasso_regression,head_mean_raw_return,1193,1193,0.019154773312868356,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__lasso_regression,pool_mean_raw_return,1193,1193,0.011715255454006868,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__lasso_regression,head_excess_raw_return,1193,1193,0.007439517858861486,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__xgboost_regressor,rankic,1193,1193,0.11918113445279362,{},descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__xgboost_regressor,mse,1193,1193,0.9947470892735552,{},descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__xgboost_regressor,oos_r2,1193,1193,0.005192120802720977,{},descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__xgboost_regressor,head_coverage,1193,1193,0.9935439017636912,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__xgboost_regressor,head_mean_raw_return,1193,1193,0.02110163606910553,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__xgboost_regressor,pool_mean_raw_return,1193,1193,0.011715255454006868,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__xgboost_regressor,head_excess_raw_return,1193,1193,0.009386380615098663,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__decision_tree_regressor,rankic,1193,1193,0.10125624437547776,{},descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__decision_tree_regressor,mse,1193,1193,0.996724992633658,{},descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__decision_tree_regressor,oos_r2,1193,1193,0.003196136428108555,{},descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__decision_tree_regressor,head_coverage,1193,1193,0.9942258860804398,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__decision_tree_regressor,head_mean_raw_return,1193,1193,0.020663633980594162,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__decision_tree_regressor,pool_mean_raw_return,1193,1193,0.011715255454006868,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__decision_tree_regressor,head_excess_raw_return,1193,1193,0.008948378526587293,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__lightgbm_regressor,rankic,1193,1193,0.11346770548791231,{},descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__lightgbm_regressor,mse,1193,1193,0.9959546330985365,{},descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__lightgbm_regressor,oos_r2,1193,1193,0.003982800086392583,{},descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__lightgbm_regressor,head_coverage,1193,1193,0.9943137985274317,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__lightgbm_regressor,head_mean_raw_return,1193,1193,0.020369326673753105,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__lightgbm_regressor,pool_mean_raw_return,1193,1193,0.011715255454006868,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,global,pv52_without_risk_path__lightgbm_regressor,head_excess_raw_return,1193,1193,0.008654071219746238,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__equal_weight_rank_ensemble,rankic,1193,1193,0.09999647927005677,{},descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__equal_weight_rank_ensemble,mse,1193,1193,0.998047263714956,{},descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__equal_weight_rank_ensemble,oos_r2,1193,1193,0.0018689656054954593,{},descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__equal_weight_rank_ensemble,head_coverage,1193,1193,0.9959624608458773,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__equal_weight_rank_ensemble,head_mean_raw_return,1193,1193,0.017420948259606578,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__equal_weight_rank_ensemble,pool_mean_raw_return,1193,1193,0.011715255454006868,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__equal_weight_rank_ensemble,head_excess_raw_return,1193,1193,0.005705692805599712,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__ic_weighted_rank_ensemble,rankic,1193,1193,0.10572455225949678,{},descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__ic_weighted_rank_ensemble,mse,1193,1193,0.9978253109749089,{},descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__ic_weighted_rank_ensemble,oos_r2,1193,1193,0.002094101831447881,{},descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__ic_weighted_rank_ensemble,head_coverage,1193,1193,0.9965595712735215,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__ic_weighted_rank_ensemble,head_mean_raw_return,1193,1193,0.017584374011772295,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__ic_weighted_rank_ensemble,pool_mean_raw_return,1193,1193,0.011715255454006868,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__ic_weighted_rank_ensemble,head_excess_raw_return,1193,1193,0.005869118557765428,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__linear_regression,rankic,1193,1193,0.1090494417562286,{},descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__linear_regression,mse,1193,1193,0.9969900247793934,{},descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__linear_regression,oos_r2,1193,1193,0.0029392931443215156,{},descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__linear_regression,head_coverage,1193,1193,0.9968518854374313,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__linear_regression,head_mean_raw_return,1193,1193,0.019849753998318096,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__linear_regression,pool_mean_raw_return,1193,1193,0.011715255454006868,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__linear_regression,head_excess_raw_return,1193,1193,0.008134498544311227,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__huber_regression,rankic,1193,1193,0.11088402897407187,{},descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__huber_regression,mse,1193,1193,1.0088735268524014,{},descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__huber_regression,oos_r2,1193,1193,-0.008948134188934165,{},descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__huber_regression,head_coverage,1193,1193,0.9974883269905662,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__huber_regression,head_mean_raw_return,1193,1193,0.01767355116152967,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__huber_regression,pool_mean_raw_return,1193,1193,0.011715255454006868,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__huber_regression,head_excess_raw_return,1193,1193,0.005958295707522802,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__ridge_regression,rankic,1193,1193,0.11265953402486602,{},descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__ridge_regression,mse,1193,1193,0.995315274745718,{},descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__ridge_regression,oos_r2,1193,1193,0.004611410948389555,{},descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__ridge_regression,head_coverage,1193,1193,0.9952893500829018,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__ridge_regression,head_mean_raw_return,1193,1193,0.018876881584543148,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__ridge_regression,pool_mean_raw_return,1193,1193,0.011715255454006868,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__ridge_regression,head_excess_raw_return,1193,1193,0.0071616261305362805,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__lasso_regression,rankic,1193,1193,0.11133788125631697,{},descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__lasso_regression,mse,1193,1193,0.9961084014995388,{},descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__lasso_regression,oos_r2,1193,1193,0.0038115878227942095,{},descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__lasso_regression,head_coverage,1193,1193,0.9958033920716974,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__lasso_regression,head_mean_raw_return,1193,1193,0.018962373519689085,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__lasso_regression,pool_mean_raw_return,1193,1193,0.011715255454006868,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__lasso_regression,head_excess_raw_return,1193,1193,0.007247118065682216,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__xgboost_regressor,rankic,1193,1193,0.11698611979909873,{},descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__xgboost_regressor,mse,1193,1193,0.9950681808366432,{},descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__xgboost_regressor,oos_r2,1193,1193,0.004871029239632973,{},descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__xgboost_regressor,head_coverage,1193,1193,0.9936696264586325,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__xgboost_regressor,head_mean_raw_return,1193,1193,0.020972840174681977,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__xgboost_regressor,pool_mean_raw_return,1193,1193,0.011715255454006868,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__xgboost_regressor,head_excess_raw_return,1193,1193,0.009257584720675107,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__decision_tree_regressor,rankic,1193,1193,0.10125624437547776,{},descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__decision_tree_regressor,mse,1193,1193,0.996724992633658,{},descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__decision_tree_regressor,oos_r2,1193,1193,0.003196136428108555,{},descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__decision_tree_regressor,head_coverage,1193,1193,0.9942258860804398,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__decision_tree_regressor,head_mean_raw_return,1193,1193,0.020663633980594162,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__decision_tree_regressor,pool_mean_raw_return,1193,1193,0.011715255454006868,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__decision_tree_regressor,head_excess_raw_return,1193,1193,0.008948378526587293,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__lightgbm_regressor,rankic,1193,1193,0.11346770548791231,{},descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__lightgbm_regressor,mse,1193,1193,0.9959546330985365,{},descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__lightgbm_regressor,oos_r2,1193,1193,0.003982800086392583,{},descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__lightgbm_regressor,head_coverage,1193,1193,0.9943137985274317,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__lightgbm_regressor,head_mean_raw_return,1193,1193,0.020369326673753105,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__lightgbm_regressor,pool_mean_raw_return,1193,1193,0.011715255454006868,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,development,quarterly,pv52_without_risk_path__lightgbm_regressor,head_excess_raw_return,1193,1193,0.008654071219746238,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__equal_weight_rank_ensemble,rankic,464,464,0.10312188364993273,{},descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__equal_weight_rank_ensemble,mse,464,464,0.9981108880201425,{},descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__equal_weight_rank_ensemble,oos_r2,464,464,0.0023972833924797376,{},descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__equal_weight_rank_ensemble,head_coverage,464,464,0.9974890640350825,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__equal_weight_rank_ensemble,head_mean_raw_return,464,464,0.026833292758653315,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__equal_weight_rank_ensemble,pool_mean_raw_return,464,464,0.02139447961392485,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__equal_weight_rank_ensemble,head_excess_raw_return,464,464,0.005438813144728466,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__ic_weighted_rank_ensemble,rankic,464,464,0.09854791366019536,{},descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__ic_weighted_rank_ensemble,mse,464,464,0.9990185698365994,{},descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__ic_weighted_rank_ensemble,oos_r2,464,464,0.0014862398247676033,{},descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__ic_weighted_rank_ensemble,head_coverage,464,464,0.9979774457738858,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__ic_weighted_rank_ensemble,head_mean_raw_return,464,464,0.026356409888155373,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__ic_weighted_rank_ensemble,pool_mean_raw_return,464,464,0.02139447961392485,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__ic_weighted_rank_ensemble,head_excess_raw_return,464,464,0.004961930274230524,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__linear_regression,rankic,464,464,0.11445272698232674,{},descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__linear_regression,mse,464,464,0.9969780205521941,{},descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__linear_regression,oos_r2,464,464,0.0035553508953328023,{},descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__linear_regression,head_coverage,464,464,0.9983348246071597,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__linear_regression,head_mean_raw_return,464,464,0.03002988274951415,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__linear_regression,pool_mean_raw_return,464,464,0.02139447961392485,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__linear_regression,head_excess_raw_return,464,464,0.0086354031355893,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__huber_regression,rankic,464,464,0.11380715099054274,{},descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__huber_regression,mse,464,464,1.0130248281919736,{},descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__huber_regression,oos_r2,464,464,-0.012493869337759365,{},descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__huber_regression,head_coverage,464,464,0.9987032090106056,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__huber_regression,head_mean_raw_return,464,464,0.02788504194683122,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__huber_regression,pool_mean_raw_return,464,464,0.02139447961392485,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__huber_regression,head_excess_raw_return,464,464,0.006490562332906376,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__ridge_regression,rankic,464,464,0.11307330835827568,{},descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__ridge_regression,mse,464,464,0.9964587331624699,{},descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__ridge_regression,oos_r2,464,464,0.00405583182655125,{},descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__ridge_regression,head_coverage,464,464,0.9983945406313018,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__ridge_regression,head_mean_raw_return,464,464,0.028610021355904743,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__ridge_regression,pool_mean_raw_return,464,464,0.02139447961392485,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__ridge_regression,head_excess_raw_return,464,464,0.0072155417419798975,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__lasso_regression,rankic,464,464,0.11416615200894517,{},descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__lasso_regression,mse,464,464,0.9966115177685767,{},descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__lasso_regression,oos_r2,464,464,0.003909821278682078,{},descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__lasso_regression,head_coverage,464,464,0.9969899844847941,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__lasso_regression,head_mean_raw_return,464,464,0.02926985292954782,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__lasso_regression,pool_mean_raw_return,464,464,0.02139447961392485,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__lasso_regression,head_excess_raw_return,464,464,0.00787537331562297,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__xgboost_regressor,rankic,464,464,0.12208974086025136,{},descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__xgboost_regressor,mse,464,464,0.9941025658883192,{},descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__xgboost_regressor,oos_r2,464,464,0.0064142496233529755,{},descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__xgboost_regressor,head_coverage,464,464,0.9966245652831961,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__xgboost_regressor,head_mean_raw_return,464,464,0.03096094245840633,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__xgboost_regressor,pool_mean_raw_return,464,464,0.02139447961392485,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__xgboost_regressor,head_excess_raw_return,464,464,0.009566462844481479,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__decision_tree_regressor,rankic,464,464,0.10029911103533036,{},descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__decision_tree_regressor,mse,464,464,0.9975928127653078,{},descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__decision_tree_regressor,oos_r2,464,464,0.002927767160859606,{},descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__decision_tree_regressor,head_coverage,464,464,0.9963711784290193,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__decision_tree_regressor,head_mean_raw_return,464,464,0.029767819465566777,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__decision_tree_regressor,pool_mean_raw_return,464,464,0.02139447961392485,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__decision_tree_regressor,head_excess_raw_return,464,464,0.008373339851641933,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__lightgbm_regressor,rankic,464,464,0.11943209207713161,{},descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__lightgbm_regressor,mse,464,464,0.9942681964570641,{},descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__lightgbm_regressor,oos_r2,464,464,0.006250778168988783,{},descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__lightgbm_regressor,head_coverage,464,464,0.9973255497770098,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__lightgbm_regressor,head_mean_raw_return,464,464,0.030715436451716954,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__lightgbm_regressor,pool_mean_raw_return,464,464,0.02139447961392485,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,global,pv52_without_risk_path__lightgbm_regressor,head_excess_raw_return,464,464,0.009320956837792105,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__equal_weight_rank_ensemble,rankic,464,464,0.10312188364993273,{},descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__equal_weight_rank_ensemble,mse,464,464,0.9981108880201425,{},descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__equal_weight_rank_ensemble,oos_r2,464,464,0.0023972833924797376,{},descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__equal_weight_rank_ensemble,head_coverage,464,464,0.9974890640350825,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__equal_weight_rank_ensemble,head_mean_raw_return,464,464,0.026833292758653315,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__equal_weight_rank_ensemble,pool_mean_raw_return,464,464,0.02139447961392485,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__equal_weight_rank_ensemble,head_excess_raw_return,464,464,0.005438813144728466,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__ic_weighted_rank_ensemble,rankic,464,464,0.09854791366019536,{},descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__ic_weighted_rank_ensemble,mse,464,464,0.9990185698365994,{},descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__ic_weighted_rank_ensemble,oos_r2,464,464,0.0014862398247676033,{},descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__ic_weighted_rank_ensemble,head_coverage,464,464,0.9979774457738858,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__ic_weighted_rank_ensemble,head_mean_raw_return,464,464,0.026356409888155373,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__ic_weighted_rank_ensemble,pool_mean_raw_return,464,464,0.02139447961392485,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__ic_weighted_rank_ensemble,head_excess_raw_return,464,464,0.004961930274230524,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__linear_regression,rankic,464,464,0.11445272698232674,{},descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__linear_regression,mse,464,464,0.9969780205521941,{},descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__linear_regression,oos_r2,464,464,0.0035553508953328023,{},descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__linear_regression,head_coverage,464,464,0.9983348246071597,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__linear_regression,head_mean_raw_return,464,464,0.03002988274951415,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__linear_regression,pool_mean_raw_return,464,464,0.02139447961392485,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__linear_regression,head_excess_raw_return,464,464,0.0086354031355893,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__huber_regression,rankic,464,464,0.11402440361770111,{},descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__huber_regression,mse,464,464,1.0135333148181234,{},descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__huber_regression,oos_r2,464,464,-0.012999771915415815,{},descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__huber_regression,head_coverage,464,464,0.9986431436634595,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__huber_regression,head_mean_raw_return,464,464,0.028110454186190115,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__huber_regression,pool_mean_raw_return,464,464,0.02139447961392485,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__huber_regression,head_excess_raw_return,464,464,0.006715974572265267,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__ridge_regression,rankic,464,464,0.11490501959300882,{},descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__ridge_regression,mse,464,464,0.9968620736597211,{},descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__ridge_regression,oos_r2,464,464,0.0036690757841973446,{},descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__ridge_regression,head_coverage,464,464,0.9983564815975268,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__ridge_regression,head_mean_raw_return,464,464,0.029978263132533933,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__ridge_regression,pool_mean_raw_return,464,464,0.02139447961392485,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__ridge_regression,head_excess_raw_return,464,464,0.008583783518609087,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__lasso_regression,rankic,464,464,0.11600985423291171,{},descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__lasso_regression,mse,464,464,0.996586002491042,{},descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__lasso_regression,oos_r2,464,464,0.003943314859580331,{},descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__lasso_regression,head_coverage,464,464,0.9983009086474985,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__lasso_regression,head_mean_raw_return,464,464,0.03008196758481817,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__lasso_regression,pool_mean_raw_return,464,464,0.02139447961392485,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__lasso_regression,head_excess_raw_return,464,464,0.008687487970893321,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__xgboost_regressor,rankic,464,464,0.12208974086025136,{},descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__xgboost_regressor,mse,464,464,0.9941025658883192,{},descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__xgboost_regressor,oos_r2,464,464,0.0064142496233529755,{},descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__xgboost_regressor,head_coverage,464,464,0.9966245652831961,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__xgboost_regressor,head_mean_raw_return,464,464,0.03096094245840633,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__xgboost_regressor,pool_mean_raw_return,464,464,0.02139447961392485,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__xgboost_regressor,head_excess_raw_return,464,464,0.009566462844481479,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__decision_tree_regressor,rankic,464,464,0.10029911103533036,{},descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__decision_tree_regressor,mse,464,464,0.9975928127653078,{},descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__decision_tree_regressor,oos_r2,464,464,0.002927767160859606,{},descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__decision_tree_regressor,head_coverage,464,464,0.9963711784290193,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__decision_tree_regressor,head_mean_raw_return,464,464,0.029767819465566777,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__decision_tree_regressor,pool_mean_raw_return,464,464,0.02139447961392485,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__decision_tree_regressor,head_excess_raw_return,464,464,0.008373339851641933,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__lightgbm_regressor,rankic,464,464,0.11943209207713161,{},descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__lightgbm_regressor,mse,464,464,0.9942681964570641,{},descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__lightgbm_regressor,oos_r2,464,464,0.006250778168988783,{},descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__lightgbm_regressor,head_coverage,464,464,0.9973255497770098,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__lightgbm_regressor,head_mean_raw_return,464,464,0.030715436451716954,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__lightgbm_regressor,pool_mean_raw_return,464,464,0.02139447961392485,"{""not_defined"": 0}",descriptive_only
+pv52_without_risk_path,holdout,quarterly,pv52_without_risk_path__lightgbm_regressor,head_excess_raw_return,464,464,0.009320956837792105,"{""not_defined"": 0}",descriptive_only

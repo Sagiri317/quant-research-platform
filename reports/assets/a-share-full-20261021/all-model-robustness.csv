@@ -155,3 +155,15 @@ pv52_without_activity_liquidity,holdout,global,model_confidence_set,UNDEFINED,in
 pv52_without_activity_liquidity,holdout,quarterly,spa_reality_check,UNDEFINED,incomplete_session_clock,147,464
 pv52_without_activity_liquidity,holdout,quarterly,stepm_superior_models,UNDEFINED,incomplete_session_clock,147,464
 pv52_without_activity_liquidity,holdout,quarterly,model_confidence_set,UNDEFINED,incomplete_session_clock,147,464
+pv52_without_risk_path,development,global,spa_reality_check,UNDEFINED,exploratory_selection_excluded,1193,1193
+pv52_without_risk_path,development,global,stepm_superior_models,UNDEFINED,exploratory_selection_excluded,1193,1193
+pv52_without_risk_path,development,global,model_confidence_set,UNDEFINED,exploratory_selection_excluded,1193,1193
+pv52_without_risk_path,development,quarterly,spa_reality_check,DEFINED,,1193,1193
+pv52_without_risk_path,development,quarterly,stepm_superior_models,DEFINED,,1193,1193
+pv52_without_risk_path,development,quarterly,model_confidence_set,DEFINED,,1193,1193
+pv52_without_risk_path,holdout,global,spa_reality_check,DEFINED,,464,464
+pv52_without_risk_path,holdout,global,stepm_superior_models,DEFINED,,464,464
+pv52_without_risk_path,holdout,global,model_confidence_set,DEFINED,,464,464
+pv52_without_risk_path,holdout,quarterly,spa_reality_check,DEFINED,,464,464
+pv52_without_risk_path,holdout,quarterly,stepm_superior_models,DEFINED,,464,464
+pv52_without_risk_path,holdout,quarterly,model_confidence_set,DEFINED,,464,464
