@@ -1,5 +1,5 @@
 file,type,rows,bytes,sha256
-all-case-status.csv,csv,17.0,2419,f0ef36912dbb21fe9513332f90d5f9b02c6031814b1d0fdb42ed183a51aa7cec
+all-case-status.csv,csv,17.0,2434,4e0f30df651e630bfc34e06f560beb96da5e6d82887212210d470cf208bb8624
 all-factor-daily-coverage.csv,csv,91746.0,11378365,b2eff938df4e2eec2454d255287ece26f3440038ec277e7ecd5f5420e7af7873
 all-factor-group-spread-summary.csv,csv,12408.0,2506388,6b35c375b4ab368e11735f3db613decc7793bed55887a169cac611d705c28919
 all-factor-ic-summary.csv,csv,13896.0,3757750,94c57eb81e3c8b62646918e878932e79550b8d4ad070160b10466d76fee71fab
@@ -7,7 +7,7 @@ all-model-family-descriptive-summary.csv,csv,3024.0,466613,fc0c6f35adaf300402d29
 all-model-final-selections.csv,csv,216.0,30967,9b6a65dbce6d2702c28178e1490fcaac97701ce60d9ba20c5212e0b103ff7856
 all-model-robustness.csv,csv,144.0,12949,2dd6786a8c345aff4c4f18f4cc8bc699db98048223e479e4e8160efeb60b72b8
 all-model-selected-summary.csv,csv,48.0,11482,d781a2b5d62836c2d95cfb7e729fbe21a6aca902062a68065dc1dc0d04693432
-all-portfolio-performance-summary.csv,csv,190.0,118945,e473bdfffe78a372569490d60963a66bb94259597d0f3a9cab2e8a99046e95a3
+all-portfolio-performance-summary.csv,csv,200.0,125437,e9d88406e7707aaf9c8a2efe4fd215a0107860b35e0d9659609d1434275440c8
 core6-coefficients.csv,csv,3840.0,1167677,bcfbba4e5c13e1812eb352359c4a5e4c5e80708c85469767110668baa2b83487
 core6-native-importance.csv,csv,216.0,34556,3ac56ca6402d3adcd9b64d6404369356c6b00bb4c983333049def1cd4be9ecea
 core6-permutation-summary.csv,csv,240.0,38732,556003f880b9362e7c5e63aac5b11e27b3238f8472e1d15658b3cb0a9171b9a0
@@ -61,11 +61,11 @@ expectations-mechanisms-90d-model-reality-checks.csv,csv,116.0,22767,9e07c597123
 expectations-mechanisms-90d-native-importance.csv,csv,1536.0,318669,e112bd9491d6e24c6670ce3f1330f2b75fc769c2bea865669993954dfc2ff55d
 expectations-mechanisms-90d-permutation-summary.csv,csv,1664.0,343524,0747ceed229eee66eb292d024033ca2bbf335e43528824816da8b5a6d02d62e7
 expectations-mechanisms-90d-portfolio-attribution-coverage.csv,csv,220.0,27880,c5ff25510e64456da1848a7c7cd3c939544392100b3150c94de3801b1f5d2248
-expectations-mechanisms-90d-portfolio-capacity-summary.csv,csv,360.0,39710,f4402b0cc284630790f2c9904b847659155247e4fd805bed167775181cb32b52
-expectations-mechanisms-90d-portfolio-daily.csv,csv,4830.0,1458992,42bee0d55fa5e860ca91aefa0c6bf8f3259734a8684ce1dd055b88a8c6762287
-expectations-mechanisms-90d-portfolio-group-comparison.csv,csv,5.0,2338,bb3a23e51ed73fff90c1503778516a986d75787b7dd208e6023178a0bdde9702
-expectations-mechanisms-90d-portfolio-performance.csv,csv,360.0,49414,13eb504e4a74d7737afcea7612f6218e1eb78be0642bf324fe21e4af4f9f6b46
-expectations-mechanisms-90d-portfolio-robustness.csv,csv,21.0,2619,aa65d0e85d131b6438d84c4c87c6056327c6b773d31ce1dfc670d40a1cdc2e97
+expectations-mechanisms-90d-portfolio-capacity-summary.csv,csv,1080.0,121512,aa3451021c1105d833e5fbb85187c2f47da2c4075abdfbe39675889f88fc8c95
+expectations-mechanisms-90d-portfolio-daily.csv,csv,16950.0,5099350,1f900d7750082cd4714c5d44e34dcc23df650c7010bece24529ddf452cb3e730
+expectations-mechanisms-90d-portfolio-group-comparison.csv,csv,10.0,4194,67447e1b38a565a02feab173064c77fb9279c51f02e6b6c1e7bbf9f950c6ca14
+expectations-mechanisms-90d-portfolio-performance.csv,csv,720.0,98751,8af113cbe24db8d865f3c4e44e730269e4347a8b7595245438e8d2f6ed17de92
+expectations-mechanisms-90d-portfolio-robustness.csv,csv,42.0,5147,c1ddf5c6337e9c53b909f11ab0fbe1de731a2c10765719ada8d33086c289fd2e
 expectations-mechanisms-90d-prediction-diagnostics.csv,csv,4.0,1375,0f88e67e5efaeec62c2426f3b759cec4620823304c954adfa6bb7dd177513b26
 expectations-mechanisms-90d-summary.csv,csv,7680.0,1528628,c10f45789fd7d478a778f38bc387627abdc96f5aa42890960e5eebaf8e7ee143
 factor-20d-processed-strata.csv,csv,21022.0,5255986,157c82ad803ae6ee19ff3e233e997dd1b6bec8f9bf75822e83e611ad67c79ef9
