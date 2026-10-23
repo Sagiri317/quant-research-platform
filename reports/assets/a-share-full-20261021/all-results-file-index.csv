@@ -1,5 +1,5 @@
 file,type,rows,bytes,sha256
-all-case-status.csv,csv,17.0,2506,80f2ada9a084e7f97ee06c39c9db5814d983be454125ba001216ed08a3a555ba
+all-case-status.csv,csv,17.0,2562,ee9227ba448e1cfe773866e942cf1ca7265cb38c2ae750b1ce426d6150971913
 all-factor-daily-coverage.csv,csv,91746.0,11286618,928506d39e0e50b92464e5efacc3621d04c8b0d5cd2cbfb2460008bdcaacf40f
 all-factor-group-spread-summary.csv,csv,12408.0,2493979,14b1ab5618dcb7936b564e6ad4ba00780cbc4359905b4fba0916a403b687fffc
 all-factor-ic-summary.csv,csv,13896.0,3743853,880eaf9713b6e06ea71fb94047f83b80443cdac63bbb0c56a431e7fb5f836dbb
@@ -7,7 +7,7 @@ all-model-family-descriptive-summary.csv,csv,3276.0,512291,3eaee6cb222faae73a968
 all-model-final-selections.csv,csv,234.0,34117,8c0abf9ac9c763ab3ce84c9a408066ec5799aa1e5f85feb599054ebaa2ba193a
 all-model-robustness.csv,csv,156.0,14200,a463ebdfe774451fc7fe2961768ecd4950a8ec9f16f89766cc5427b59275ceeb
 all-model-selected-summary.csv,csv,52.0,12318,6b8c249b877ba65e6ac10e73413e57360c99407efb5be7de8cbd27a98356b2ae
-all-portfolio-performance-summary.csv,csv,230.0,144474,222659ee55db2a0b0ba2e0552c4b24394c5dd4fa339495a12a69260ee03444c7
+all-portfolio-performance-summary.csv,csv,240.0,151089,9a6e49a35c6665066adb38e46968fd93ee96aba9beeb5abc7a9adb9fd8f146b3
 core6-coefficients.csv,csv,3840.0,1163836,6a21d2d643a86b26989de28086af9c71560028a5eac571c90af1525b7755220c
 core6-native-importance.csv,csv,216.0,34339,7298442dbf1cf08867330fb5b6c199e3b6069e45fcf63cb210c1e58cd6184844
 core6-permutation-summary.csv,csv,240.0,38491,edc599f46c65964e195766e5dfad3e97a8a2e43284417e8e0dd68a2943eb805b
@@ -47,7 +47,7 @@ expectations-mechanisms-180d-model-group-comparison.csv,csv,18.0,6014,5e0077b42a
 expectations-mechanisms-180d-model-reality-checks.csv,csv,116.0,22859,3963975f628154024284ce671038e1c573a6f0e6361387c05a341b18c2c9ed0f
 expectations-mechanisms-180d-native-importance.csv,csv,1536.0,320100,f2380ba7e594ba848053db2568e5e61bfbbbcad941dd7b0a56a9d69aae472cbb
 expectations-mechanisms-180d-permutation-summary.csv,csv,1664.0,345126,4069753db1afada39ec3abcdcd09afbb12dc675a679727bc6acedaffdeca7d6e
-expectations-mechanisms-180d-portfolio-attribution-coverage.csv,csv,220.0,27894,1f636f696d2a752e9da13995a9cb57cadf9dffb8d49ef8da319e67de1aa36cae
+expectations-mechanisms-180d-portfolio-attribution-coverage.csv,csv,390.0,50027,b15d94d45b277e6fd6e0fb990a83ad18cca77ab6fcc107079c7e0fdc526aa6b5
 expectations-mechanisms-180d-portfolio-capacity-summary.csv,csv,1080.0,121967,ea75dd7d75c5c48c67601d9495d70a3a373a6d32af69ef7f909a438181113769
 expectations-mechanisms-180d-portfolio-daily.csv,csv,16950.0,5090501,8bd4a1014fa60a3d3ff8df3438f800d4215c8a312490295dcb71bfd6b40b0752
 expectations-mechanisms-180d-portfolio-group-comparison.csv,csv,10.0,3660,03dd9e7dca07933a2b55164f2da7509eb9858a205c24c41ee3dcdcde1534bb5c
@@ -198,6 +198,12 @@ pv52-without-activity-liquidity-model-group-comparison.csv,csv,18.0,5841,6b1ce32
 pv52-without-activity-liquidity-model-reality-checks.csv,csv,116.0,25447,ac022e21fdcff7032c4294da2d17036268e437b0b4a7d581f9718578ba192865
 pv52-without-activity-liquidity-native-importance.csv,csv,1276.0,273387,9da62deb9654b9b8ec98483d815b18abfb357d65e9adfb0d3d7078944b2911f6
 pv52-without-activity-liquidity-permutation-summary.csv,csv,1392.0,292502,8266b7623a1734fd25064f8bbb8e3ee7d97b64a662d8e19a3d61a185bb125933
+pv52-without-activity-liquidity-portfolio-attribution-coverage.csv,csv,220.0,28544,ee7c94a4452520015946ff6b69263a79c3559328247e3886fed6d50c54d2d7bb
+pv52-without-activity-liquidity-portfolio-capacity-summary.csv,csv,360.0,37988,37b1d4d2ee044243bd40b1ae6fb89803daec14bd177a4d995bc3708aae5b9c54
+pv52-without-activity-liquidity-portfolio-daily.csv,csv,4830.0,1465636,89b3e8988ce436319d8c097f28d3b0d8d79159e38fdcb631400180df7c653ddf
+pv52-without-activity-liquidity-portfolio-group-comparison.csv,csv,5.0,1811,ae6f7a0501db542506cbdd5bc33f4f488abc293a4601dafd2d1a7c391868ec45
+pv52-without-activity-liquidity-portfolio-performance.csv,csv,360.0,50589,e541df0f760d45371a2ae7e011e2bad25fc4d67cb748b9de05dbb953732f92bb
+pv52-without-activity-liquidity-portfolio-robustness.csv,csv,21.0,2680,4ff17650543aac59092cf89578b12184722a81ef49385ea2e72c4f7f9602b942
 pv52-without-activity-liquidity-prediction-diagnostics.csv,csv,4.0,1157,cf9934c2c9b67e2d21061d7e46bd0ab5c19440e49b32f3fb46f13410cb827794
 pv52-without-activity-liquidity-summary.csv,csv,3828.0,777571,44f438d0ca4357b07156642a3689ed19c307a7799e0f87b763abaf832473d44a
 pv52-without-size-price-coefficients.csv,csv,31360.0,10801475,223f376dba6dc8f44aaf7cba4af17de893b20a03102773a6570596f6bfbf1839
