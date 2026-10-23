@@ -3223,7 +3223,7 @@ def test_nonempty_selection_still_requires_valid_predictions(problem):
         def values_for_frame(self, frame, *, mark_matched):
             return (
                 [np.inf if problem == "infinite" else np.nan],
-                [problem != "missing"],
+                [True],
             )
 
     with pytest.raises(

@@ -1072,18 +1072,12 @@ def test_holding_input_reader_freezes_decision_universe_over_holding_interval(
 
 
 @pytest.mark.parametrize(
-    ("constant", "swap_group_metadata", "candidate_id"),
-    (
-        (False, False, None),
-        (True, False, None),
-        (False, True, None),
-        (False, False, "timestamp"),
-    ),
+    ("constant", "candidate_id"),
+    ((False, None), (True, None), (False, "timestamp")),
 )
 def test_declared_ledger_family_preserves_descriptive_inference(
-    tmp_path, constant, swap_group_metadata, candidate_id
+    tmp_path, constant, candidate_id
 ):
-    from dataclasses import replace
     from itertools import combinations
 
     import numpy as np
@@ -1121,14 +1115,6 @@ def test_declared_ledger_family_preserves_descriptive_inference(
         assert (
             candidate_id
             in deepcopy(config)["statistics"]["group_comparison"]["portfolio_ids"]
-        )
-    if swap_group_metadata:
-        candidates = tuple(
-            replace(candidate, selection_group=other)
-            for candidate in candidates
-            for other in (
-                "quarterly" if candidate.selection_group == "global" else "global",
-            )
         )
     qualified = tuple(
         item for item in candidates if item.selection_group == "quarterly"

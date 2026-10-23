@@ -1278,10 +1278,9 @@ def test_unobserved_initial_market_preserves_unknown_age_and_proven_252_sessions
             )
 
 
-@pytest.mark.parametrize("batch_rows", (6, 3000))
 @pytest.mark.parametrize("unknown_quote", (False, True))
 def test_factor_warmup_uses_own_sessions_across_closure_and_migration(
-    tmp_path, monkeypatch, batch_rows, unknown_quote
+    tmp_path, unknown_quote
 ):
     dates = pd.bdate_range("2020-01-02", periods=300).as_unit("ns")
     source = _synthetic_interim_frames(dates)
@@ -1345,7 +1344,6 @@ def test_factor_warmup_uses_own_sessions_across_closure_and_migration(
         panel,
         spec=panel_spec,
     )
-    monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", batch_rows)
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
     with producer.produce_a_share_processed_data(
         spec,

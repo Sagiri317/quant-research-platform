@@ -1103,9 +1103,8 @@ def test_imputed_native_importance_has_no_grouped_direction(tmp_path, monkeypatc
     )
 
 
-@pytest.mark.parametrize("repeats", [2, 7])
 def test_permutation_releases_predictions_before_next_intervention(
-    tmp_path, monkeypatch, repeats
+    tmp_path, monkeypatch
 ):
     import weakref
 
@@ -1113,7 +1112,7 @@ def test_permutation_releases_predictions_before_next_intervention(
 
     _, _, config = _case(tmp_path)
     _permutation(config)
-    config["permutation"].update(groups={"x": ["x"], "y": ["y"]}, repeats=repeats)
+    config["permutation"].update(groups={"x": ["x"], "y": ["y"]}, repeats=2)
     original = owner._output
     references = []
 
@@ -1127,6 +1126,6 @@ def test_permutation_releases_predictions_before_next_intervention(
 
     monkeypatch.setattr(owner, "_output", tracked)
     _, tables = read_explanation(explain(config))
-    assert len(references) == 1 + 2 * repeats
+    assert len(references) == 5
     assert not any(reference() is not None for reference in references)
     assert tables["permutation_repeats"].status.eq("DEFINED").all()

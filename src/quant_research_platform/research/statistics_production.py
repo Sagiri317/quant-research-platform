@@ -1930,8 +1930,32 @@ def _factor_statistics_from_evaluations(config):
             if any(head is not None and not head.empty for head in heads.values()):
                 raise ValueError("evaluation_daily_dates_mismatch")
         input_counts[scope] = date_count
+    stratum_domains = {
+        kind: sorted(
+            {key[4] for key in series if key[3] == kind},
+            key=lambda value: (value is not None, value or ""),
+        )
+        for kind in binding["strata"].get("kinds", [])
+        if "stratified_ic" in analyses
+    }
     tables = {}
     if "stratified_ic" in analyses:
+        # The joint family includes strata absent from an individual scope.
+        # Keep them empty: neither observations nor dates may be manufactured.
+        for kind, strata in stratum_domains.items():
+            for stratum in strata:
+                for signal in binding["signals"]:
+                    for scope in sorted(scopes):
+                        series.setdefault(
+                            (
+                                signal["signal_id"],
+                                binding["strata"]["primary_label"],
+                                scope,
+                                kind,
+                                stratum,
+                            ),
+                            {"ic": [], "rankic": [], "pairs": 0, "dates": 0},
+                        )
         rows = []
         for key, values in series.items():
             for statistic in ("ic", "rankic"):
@@ -2050,14 +2074,7 @@ def _factor_statistics_from_evaluations(config):
                 }
                 for _, metadata, _ in entries
             },
-            "stratum_domains": {
-                kind: sorted(
-                    {key[4] for key in series if key[3] == kind},
-                    key=lambda value: (value is not None, value or ""),
-                )
-                for kind in binding["strata"].get("kinds", [])
-                if "stratified_ic" in analyses
-            },
+            "stratum_domains": stratum_domains,
             "input_date_counts": input_counts,
             "inference_scope": "exploratory",
             "formal_selection_qualification": "not_established",

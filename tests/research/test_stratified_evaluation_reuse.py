@@ -179,9 +179,9 @@ def test_missing_total_cap_is_local_to_size_strata(tmp_path, missing):
     assert size.stratum_rows.sum() == len(frame)
 
 
-@pytest.mark.parametrize("workers", [1, 2])
+@pytest.mark.parametrize("workers,filtered", [(1, False), (2, True)])
 def test_native_own_common_strata_and_persisted_reduction(
-    tmp_path, monkeypatch, workers
+    tmp_path, monkeypatch, workers, filtered
 ):
     _, config = _fixture(tmp_path)
     config["workers"] = workers
@@ -191,6 +191,12 @@ def test_native_own_common_strata_and_persisted_reduction(
             **config,
             "output": str(tmp_path / "common"),
             "sample_scope": "common",
+            "inputs": {
+                "path": config["inputs"],
+                "row_filters": [["asset_id", "in", ["a", "b"]]],
+            }
+            if filtered
+            else config["inputs"],
             "evaluation": {
                 **config["evaluation"],
                 "evaluation_id": "different-nickname",
@@ -213,16 +219,25 @@ def test_native_own_common_strata_and_persisted_reduction(
     assert common_tables["metrics"].rankic.tolist() == pytest.approx([1.0])
     assert own_tables["daily_coverage"].domain_rows.tolist() == [4]
     assert common_tables["daily_coverage"].domain_rows.tolist() == [2]
-    assert (
-        own_tables["daily_strata"].stratum_rows.tolist()
-        == common_tables["daily_strata"].stratum_rows.tolist()
-    )
+    if filtered:
+        assert common_manifest["metadata"]["stratum_domains"] == {
+            "industry": ["A"],
+            "size": ["2", "3"],
+            "liquidity": ["3"],
+        }
+    else:
+        assert (
+            own_tables["daily_strata"].stratum_rows.tolist()
+            == common_tables["daily_strata"].stratum_rows.tolist()
+        )
     assert own_tables["daily_strata"].stratum.isna().any()
     assert "<NA>" in own_tables["daily_strata"].stratum.dropna().tolist()
-    assert (
-        own_manifest["metadata"]["input_facts"]
-        == common_manifest["metadata"]["input_facts"]
-    )
+    own_facts = own_manifest["metadata"]["input_facts"]
+    common_facts = common_manifest["metadata"]["input_facts"]
+    assert (own_facts["selector"] != common_facts["selector"]) == filtered
+    assert {key: value for key, value in own_facts.items() if key != "selector"} == {
+        key: value for key, value in common_facts.items() if key != "selector"
+    }
     from quant_research_platform.research import statistics_production as production
 
     def forbidden(*args, **kwargs):
@@ -249,6 +264,45 @@ def test_native_own_common_strata_and_persisted_reduction(
         assert all_rows["mean"].notna().all()
         assert all_rows.observation_count.eq(1).all()
         assert set(all_rows.observation_pairs) == {2, 3}
+        # The joint family retains absent strata without inventing a daily row.
+        expected = {
+            ("industry", None): (1, 0),
+            ("industry", "<NA>"): (0, 0),
+            ("industry", "A"): (2, 2),
+            ("size", "1"): (1, 0 if filtered else 1),
+            ("size", "2"): (1, 1),
+            ("size", "3"): (1, 1 if filtered else 0),
+            ("liquidity", "2"): (2, 0 if filtered else 2),
+            ("liquidity", "3"): (1, 2 if filtered else 0),
+        }
+        assert len(result) == 36  # (all + 8 strata) × 2 scopes × IC/RankIC
+        assert result.input_date_count.eq(1).all()
+        for row in result.loc[~result.stratification.eq("all")].itertuples():
+            stratum = None if pd.isna(row.stratum) else row.stratum
+            key = (row.stratification, stratum)
+            pairs = expected[key][row.sample_scope == "common"]
+            absent = (
+                filtered
+                and row.sample_scope == "common"
+                and key
+                in {
+                    ("industry", None),
+                    ("industry", "<NA>"),
+                    ("size", "1"),
+                    ("liquidity", "2"),
+                }
+            )
+            assert row.observed_date_count == (0 if absent else 1)
+            assert row.observation_pairs == pairs
+            assert row.observation_count == (1 if pairs == 2 else 0)
+            assert row.status == "UNDEFINED"
+            assert row.reason == (
+                "insufficient_dates_for_hac"
+                if pairs == 2
+                else "incomplete_session_clock"
+            )
+            assert row.mean == pytest.approx(1.0) if pairs == 2 else pd.isna(row.mean)
+            assert pd.isna(row.p_value) and pd.isna(row.fdr_adjusted_p_value)
 
 
 def test_common_final_domain_labels_only_and_missing_dates(tmp_path):
@@ -525,7 +579,7 @@ def test_hac20_by_is_one_full_family_and_alt_policy_applies(tmp_path):
             "label": rng.normal(size=n * len(dates)),
             "label_available_at": pd.Timestamp("2023-01-02"),
             "eligible": True,
-            "industry_level1_code": ["A"] * 6 * len(dates) + ["B"] * 6 * len(dates),
+            "industry_level1_code": (["A"] * 6 + ["B"] * 6) * len(dates),
             "total_market_cap": np.tile(np.arange(n, dtype=float), len(dates)),
             "amount": rng.uniform(size=n * len(dates)),
         }
@@ -539,13 +593,17 @@ def test_hac20_by_is_one_full_family_and_alt_policy_applies(tmp_path):
         availability={"label": "label_available_at"},
         units={"label": "decimal_return"},
     )
-    config["strata"]["kinds"] = ["size"]
+    config["strata"]["kinds"] = ["industry"]
     own = evaluate(config)
     common = evaluate(
         {
             **config,
             "output": str(tmp_path / "common"),
             "sample_scope": "common",
+            "inputs": {
+                "path": config["inputs"],
+                "row_filters": [["asset_id", "in", [f"a{i}" for i in range(6)]]],
+            },
             "comparison_inputs": [
                 {"inputs": config["inputs"], "signal_columns": ["z"]}
             ],
@@ -568,8 +626,8 @@ def test_hac20_by_is_one_full_family_and_alt_policy_applies(tmp_path):
                 inference = hac_mean(values, max_lags=20)
                 expected.append((scope, kind, statistic, inference))
     adjusted = fdr_adjust(
-        [row[3].p_value for row in expected], method="BY"
-    ).adjusted_p_values
+        [row[3].p_value for row in expected] + [1.0, 1.0], method="BY"
+    ).adjusted_p_values[:-2]
     per_layer = np.concatenate(
         [
             fdr_adjust(
@@ -578,15 +636,15 @@ def test_hac20_by_is_one_full_family_and_alt_policy_applies(tmp_path):
             for index in range(0, len(expected), 2)
         ]
     )
-    assert np.max(np.abs(adjusted - per_layer)) > 0.1
+    assert not np.allclose(adjusted, per_layer, rtol=1e-6, atol=1e-12)
     for lag, method in ((20, "BY"), (1, "BH")):
         expected = [
             (scope, kind, statistic, hac_mean(values, max_lags=lag))
             for (scope, kind, statistic), values in numeric_sequences.items()
         ]
         adjusted = fdr_adjust(
-            [row[3].p_value for row in expected], method=method
-        ).adjusted_p_values
+            [row[3].p_value for row in expected] + [1.0, 1.0], method=method
+        ).adjusted_p_values[:-2]
         output = factor_statistics(
             {
                 "evaluation_inputs": [str(own), str(common)],
@@ -598,6 +656,25 @@ def test_hac20_by_is_one_full_family_and_alt_policy_applies(tmp_path):
         artifact = read_statistics_artifact(output)
         with artifact.table("factor_stratified_diagnostics.parquet") as result:
             assert result.hac_lag.eq(lag).all() and result.fdr_method.eq(method).all()
+            assert len(result) == 12  # 2 scopes × (all, A, B) × IC/RankIC
+            absent = result.loc[
+                result.sample_scope.eq("common") & result.stratum.eq("B")
+            ]
+            assert len(absent) == 2
+            assert absent.status.eq("UNDEFINED").all()
+            assert absent.reason.eq("incomplete_session_clock").all()
+            assert absent.input_date_count.eq(28).all()
+            assert (
+                absent[
+                    ["observed_date_count", "observation_count", "observation_pairs"]
+                ]
+                .eq(0)
+                .all()
+                .all()
+            )
+            assert (
+                absent[["mean", "p_value", "fdr_adjusted_p_value"]].isna().all().all()
+            )
             assert result.defined_hypothesis_count.eq(len(expected)).all()
             for (scope, kind, statistic, inference), p in zip(
                 expected, adjusted, strict=True
@@ -784,17 +861,17 @@ def test_common_does_not_renormalize_selected_ranks(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "change",
+    "change,error",
     (
-        {"hac_lag": -1},
-        {"hac_lag": True},
-        {"fdr_method": "holm"},
-        {"fdr_alpha": 0.0},
-        {"fdr_alpha": 1.0},
+        ({"hac_lag": -1}, "factor_statistics_policy_invalid"),
+        ({"hac_lag": True}, "factor_statistics_policy_invalid"),
+        ({"fdr_method": "holm"}, "fdr_input_invalid"),
+        ({"fdr_alpha": 0.0}, "alpha_invalid"),
+        ({"fdr_alpha": 1.0}, "alpha_invalid"),
     ),
 )
 def test_invalid_persisted_policy_fails_before_member_scans(
-    tmp_path, monkeypatch, change
+    tmp_path, monkeypatch, change, error
 ):
     from quant_research_platform.artifacts.outputs import evaluation as outputs
 
@@ -802,7 +879,7 @@ def test_invalid_persisted_policy_fails_before_member_scans(
         raise AssertionError("invalid policy must not read")
 
     monkeypatch.setattr(outputs, "_iter_evaluation_member_batches", forbidden)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=f"^{error}$"):
         factor_statistics(
             {
                 "evaluation_inputs": ["not-opened"],

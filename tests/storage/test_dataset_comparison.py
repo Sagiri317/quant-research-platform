@@ -41,9 +41,7 @@ def test_iter_frame_chunks_reuses_bounded_frame_storage() -> None:
     )
 
 
-def test_compare_treats_file_boundaries_as_layout_only(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_compare_treats_file_boundaries_as_layout_only(tmp_path: Path) -> None:
     left = make_dataset_artifact_root(tmp_path, "layout_left")
     right = make_dataset_artifact_root(tmp_path, "layout_right")
     frame = make_default_dataset_frame()

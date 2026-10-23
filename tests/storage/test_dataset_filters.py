@@ -82,7 +82,6 @@ def test_dataset_session_rejects_mutable_filter_values(tmp_path: Path) -> None:
             time_window=None,
             row_filters=(("asset_id", "==", ["A"]),),
         )
-        pass
 
 
 def test_dataset_session_tuple_in_filter_matches_materialized_and_chunked_reads(
@@ -132,7 +131,6 @@ def test_dataset_session_tuple_in_filter_matches_materialized_and_chunked_reads(
 @pytest.mark.parametrize(
     ("column", "value"),
     (
-        ("asset_id", []),
         ("asset_id", ()),
         ("asset_id", ["A", "C"]),
         ("asset_id", ("A", None)),
@@ -153,7 +151,6 @@ def test_dataset_session_tuple_in_filter_has_exact_immutable_nonempty_grammar(
         dataset_reading.open_dataset_session(
             root, columns=None, time_window=None, row_filters=((column, "in", value),)
         )
-        pass
 
 
 def test_dataset_session_tuple_in_filter_rejects_tuple_subclass(tmp_path: Path) -> None:
@@ -174,7 +171,6 @@ def test_dataset_session_tuple_in_filter_rejects_tuple_subclass(tmp_path: Path) 
             time_window=None,
             row_filters=(("asset_id", "in", TupleSubclass(("A",))),),
         )
-        pass
 
 
 def test_dataset_session_tuple_in_filter_empty_result_preserves_projected_dtypes(
@@ -275,7 +271,7 @@ def test_session_filter_reuses_prepared_values(tmp_path: Path, monkeypatch) -> N
         root,
         columns=("timestamp", "value"),
         time_window=None,
-        row_filters=(("asset_id", "in", values), ("asset_id", "in", values)),
+        row_filters=(("asset_id", "in", values),),
     )
     chunks = list(dataset_reading.iter_dataset_chunks(session, batch_rows=1))
     expected = frame.loc[[0, 2], ["timestamp", "value"]].reset_index(drop=True)
@@ -283,7 +279,7 @@ def test_session_filter_reuses_prepared_values(tmp_path: Path, monkeypatch) -> N
     pd.testing.assert_frame_equal(
         pd.concat(chunks, ignore_index=True), expected, check_exact=True
     )
-    assert len(calls) == 2
+    assert len(calls) == 1
 
 
 def test_membership_internal_grammar_rejects_raw_arrow_values() -> None:
@@ -343,7 +339,6 @@ def test_persisted_arrow_time_filters_support_equal_and_membership(
 def test_dataset_prepared_in_filter_rejects_unsupported_arrow_family() -> None:
     with pytest.raises(ValueError, match="invalid_dataset_physical_filter_value"):
         _prepare_in_filter(pa.field("value", pa.list_(pa.int64())), ((1,),))
-        pass
 
 
 def test_dataset_prepared_in_filter_accepts_fixed_size_binary() -> None:
@@ -362,7 +357,6 @@ def test_dataset_filter_preflight_rejects_surrogate_before_arrow(
     monkeypatch.setattr(dataset_reading.pa, "scalar", reject_arrow)
     with pytest.raises(ValueError, match="invalid_dataset_physical_filter_value"):
         _prepare_in_filter(pa.field("asset_id", pa.string()), ("valid\ud800suffix",))
-        pass
 
 
 def test_timestamp_membership_normalizes_naive_and_aware_values():

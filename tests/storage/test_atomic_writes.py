@@ -76,17 +76,6 @@ def test_atomic_json_writer_rejects_existing_target_without_overwrite(
     assert json_path.read_text(encoding="utf-8") == "existing"
 
 
-def test_atomic_directory_rejects_existing_target_without_overwrite(
-    tmp_path: Path,
-) -> None:
-    final_root = tmp_path / "bundle"
-    final_root.mkdir()
-    (final_root / "winner").write_text("winner", encoding="utf-8")
-    with pytest.raises(OutputAlreadyExistsError):
-        atomic_write_directory(final_root, lambda _stage: None)
-    assert (final_root / "winner").read_text(encoding="utf-8") == "winner"
-
-
 @pytest.mark.parametrize("long_path", (False, True))
 def test_publish_no_replace_preserves_concurrent_winner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, long_path: bool

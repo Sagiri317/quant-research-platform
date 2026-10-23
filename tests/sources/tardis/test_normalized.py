@@ -325,7 +325,7 @@ def test_early_close_does_not_read_unrequested_tail(tmp_path, monkeypatch, damag
             list(full)
 
 
-def test_consumer_failure_stays_primary_without_tail_validation(tmp_path, monkeypatch):
+def test_consumer_failure_stays_primary_without_tail_validation(tmp_path):
     from quant_research_platform.policy.lifecycle import closing_iterator
     from quant_research_platform.sources.tardis.normalized import _publish_dataset
 

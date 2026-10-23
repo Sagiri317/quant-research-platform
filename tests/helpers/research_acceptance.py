@@ -13,6 +13,9 @@ from quant_research_platform.artifacts.portfolio_ledger import (
     read_portfolio_ledger_artifact,
     summarize_portfolio_ledger,
 )
+from quant_research_platform.markets.implementations.a_share.ids import (
+    FORMAL_BENCHMARKS,
+)
 from quant_research_platform.markets.implementations.a_share.processed.catalog import (
     processed_catalog,
 )
@@ -86,6 +89,11 @@ def prepare_a_share_acceptance(root: Path):
         )
         assert not receipt.skipped, receipt.skipped
         paths.update({name: Path(path) for name, path in outputs.items()})
+    index_info = read_dataset(paths["index_info"]).set_index("source_asset_id")
+    assert len(index_info) == 4
+    for code, (benchmark, name) in FORMAL_BENCHMARKS.items():
+        assert index_info.loc[code, "index_name"] == name
+        assert index_info.loc[indices[benchmark], "index_name"] == f"{name}全收益"
     history = {"start": "2016-04-21", "end": "2019-10-31"}
     for name in processed_names:
         spec = catalog.get(name)

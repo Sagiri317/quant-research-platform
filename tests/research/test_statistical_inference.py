@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from math import erfc, sqrt
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -398,7 +400,9 @@ def test_fama_macbeth_uses_period_cross_sections_then_hac() -> None:
     expected_mean = 0.549
     assert slope.standard_error == pytest.approx(se)
     assert slope.t_statistic == pytest.approx(expected_mean / se)
-    assert slope.p_value == pytest.approx(2 * norm.sf(abs(expected_mean / se)))
+    assert slope.p_value == pytest.approx(
+        erfc(abs(expected_mean / se) / sqrt(2)), rel=1e-10, abs=0.0
+    )
     assert (slope.ci_lower, slope.ci_upper) == pytest.approx(
         (expected_mean - norm.ppf(0.975) * se, expected_mean + norm.ppf(0.975) * se)
     )

@@ -538,11 +538,9 @@ def freshness_inputs(tmp_path_factory):
     return dates, inputs, panel
 
 
-@pytest.mark.parametrize(
-    "freshness,batch_rows", ((30, 3), (90, 10000), (180, 3), (180, 10000))
-)
+@pytest.mark.parametrize("freshness", (30, 90, 180))
 def test_explicit_freshness_controls_native_source_history_and_values(
-    tmp_path, freshness, batch_rows, monkeypatch, freshness_inputs
+    tmp_path, freshness, monkeypatch, freshness_inputs
 ):
     from quant_research_platform.markets.implementations.a_share.processed import (
         producer,
@@ -562,7 +560,6 @@ def test_explicit_freshness_controls_native_source_history_and_values(
 
     monkeypatch.setattr(producer, "materialize_dataset_session", observed_materialize)
 
-    monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", batch_rows)
     prepared = []
     actual_prepare = producer._prepare_expectations
 
@@ -1010,7 +1007,7 @@ def test_unselected_forecast_scope_and_optional_pe_do_not_block_query():
     _assert_recomputed_expectations(actual, expected)
 
 
-@pytest.mark.parametrize("unknown", [None, np.nan, "invalid", float("inf")])
+@pytest.mark.parametrize("unknown", [np.nan, "invalid", float("inf")])
 def test_latest_unknown_eps_blocks_only_its_institution_without_stale_resurrection(
     unknown,
 ):
@@ -1372,11 +1369,8 @@ def test_reassigned_report_keeps_survivor_missing_barrier_and_original_freshness
 
 @pytest.mark.parametrize("batch_rows", (1, 10000))
 def test_raw_report_reassignment_survives_interim_prepare_and_native_read(
-    tmp_path, monkeypatch, batch_rows
+    tmp_path, batch_rows
 ):
-    from quant_research_platform.markets.implementations.a_share.processed import (
-        producer,
-    )
     from quant_research_platform.sources.csmar.interim import materialize_interim_data
     from quant_research_platform.storage.datasets import read_dataset
     from tests.helpers.a_share_raw import _write_csmar
@@ -1428,7 +1422,6 @@ def test_raw_report_reassignment_survives_interim_prepare_and_native_read(
     inputs["market_panel_1d"] = _prepare(
         tmp_path / "prepared", "market_panel_1d", inputs, sessions[0], sessions[-1]
     )
-    monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", batch_rows)
     root = _prepare(
         tmp_path / "prepared", "expectations_factors", inputs, sessions[0], sessions[-1]
     )

@@ -2562,19 +2562,19 @@ def test_index_source_null_numeric_values_persist_without_claiming_complete_weig
 
 
 @pytest.mark.parametrize(
-    "data_id,raw_column,bad_value,reason",
+    "data_id,raw_column,bad_value",
     [
-        (data_id, raw_column, value, reason)
-        for data_id, raw_column, reason in (
-            ("index_weights", "Weight", "invalid_index_weight"),
-            ("index_market", "Idxtrd08", "invalid_index_return"),
+        (data_id, raw_column, value)
+        for data_id, raw_column in (
+            ("index_weights", "Weight"),
+            ("index_market", "Idxtrd08"),
         )
         for value in ("invalid-number", float("inf"), -float("inf"))
     ]
-    + [("index_weights", "Weight", -1.0, "invalid_index_weight")],
+    + [("index_weights", "Weight", -1.0)],
 )
 def test_nullable_index_source_invalid_numeric_values_stay_local(
-    data_id, raw_column, bad_value, reason
+    data_id, raw_column, bad_value
 ):
     rows = _nullable_index_numeric_rows(data_id)
     rows[0][raw_column] = bad_value
@@ -2946,53 +2946,6 @@ def test_index_info_name_is_a_required_source_fact(tmp_path):
         interim.normalize_raw_frame(
             _collect_raw_export(path, "index_info"), "index_info"
         )
-
-
-def test_complete_chain_index_info_fixture_has_native_price_and_return_identities(
-    tmp_path, monkeypatch
-):
-    from quant_research_platform.markets.implementations.a_share.ids import (
-        FORMAL_BENCHMARKS,
-    )
-    from quant_research_platform.storage.datasets.reading import read_dataset
-    from tests.helpers import a_share_raw
-    from tests.helpers.paths import StorageLayout
-
-    layout = StorageLayout(tmp_path)
-    writer = a_share_raw._write_csmar
-
-    class CapturedIndexInfo(Exception):
-        pass
-
-    def write_index(root, data_id, rows, **kwargs):
-        if data_id == "index_info":
-            writer(root, data_id, rows, **kwargs)
-            raise CapturedIndexInfo
-
-    monkeypatch.setattr(a_share_raw, "_write_csmar", write_index)
-    total_returns = {"csi500": "H00905", "csi1000": "H00852"}
-    with pytest.raises(CapturedIndexInfo):
-        a_share_raw.write_a_share_raw_fixture(
-            layout,
-            benchmark_total_return_indices=total_returns,
-            formal_dataset_start="2020-01-02",
-            history_end="2020-01-02",
-            validation_start="2020-01-02",
-        )
-    result = interim.materialize_interim_data(
-        output_roots={
-            key: layout.interim_data_root("csmar", key) for key in ("index_info",)
-        },
-        raw_root=layout.raw_source_root("csmar"),
-        data_ids=("index_info",),
-    )
-    saved = read_dataset(result.artifact_roots["index_info"]).set_index(
-        "source_asset_id"
-    )
-    assert len(saved) == 4
-    for code, (benchmark, name) in FORMAL_BENCHMARKS.items():
-        assert saved.loc[code, "index_name"] == name
-        assert saved.loc[total_returns[benchmark], "index_name"] == f"{name}全收益"
 
 
 @pytest.mark.parametrize("chunksize", [1, 100])

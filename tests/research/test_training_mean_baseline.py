@@ -143,10 +143,19 @@ def test_saved_training_mean_must_be_a_finite_number(tmp_path, invalid):
 
 @pytest.mark.parametrize("baseline", [None, "evaluation_mean", 1, []])
 def test_baseline_configuration_rejects_unknown_choices(tmp_path, baseline):
-    *_, config = _case(tmp_path)
-    config["evaluation"]["baseline"] = baseline
+    output = tmp_path / "unpublished"
+    config = {
+        "dataset": str(tmp_path / "not_opened"),
+        "output": str(output),
+        "window": {"start": "2020-01-01", "end": "2020-01-02"},
+        "analyses": ["model_losses"],
+        "evaluation": {"primary_label": "label", "baseline": baseline},
+        "statistics": {},
+        "periods": [],
+    }
     with pytest.raises(ValueError, match="model_statistics_baseline_invalid"):
         model_statistics(config)
+    assert not output.exists()
 
 
 def test_training_mean_zero_error_has_explicit_undefined_r2():

@@ -413,9 +413,6 @@ def test_inspect_and_fingerprint_detect_schema_mismatch_across_parts(
     bad_part.parent.mkdir(parents=True)
     bad_frame = make_default_dataset_frame().assign(extra=1)
     dataset_writing.write_parquet_file(_persisted_table(bad_frame), bad_part)
-    manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ValueError, match="dataset_schema_mismatch"):
         inspect_dataset(root)
     with pytest.raises(ValueError, match="dataset_schema_mismatch"):

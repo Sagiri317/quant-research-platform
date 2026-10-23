@@ -97,7 +97,6 @@ def test_open_dataset_session_preserves_missing_manifest_preflight(
     monkeypatch.setattr(dataset_reading, "read_qrp_json_file", reject_metadata_read)
     with pytest.raises(ValueError, match="dataset_manifest_missing"):
         dataset_reading.open_dataset_session(root, columns=None, time_window=None)
-        pass
     assert metadata_reads == 0
 
 

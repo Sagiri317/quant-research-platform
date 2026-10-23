@@ -12,6 +12,7 @@ from itertools import chain
 
 import pandas as pd
 
+from quant_research_platform.contracts.ids import validate_input_market
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
 from quant_research_platform.contracts.time import (
@@ -455,6 +456,7 @@ def _selected_context_session(root, columns, time_window):
     """Project the chosen definition while leaving absent values locally unknown."""
     options = _dataset_input_options(root, time_window=time_window)
     session = open_dataset_session(**{**options, "columns": None})
+    validate_input_market(session.spec, MARKET_ID)
     keys = ("market_id", "asset_id", "timestamp")
     selected = options.get("columns")
     support = {*keys, "segment_id", "timestamp_ms", "observed_utc"}
@@ -671,6 +673,7 @@ def produce_information_panel(
         ):
             raise ValueError("data_operation_input_columns_missing")
         session = open_dataset_session(**{**options, "columns": spec.required_columns})
+        validate_input_market(session.spec, MARKET_ID)
         sessions.append(_ordered_native_session(session))
         identities[data_id] = str(session.root)
     batch_rows = DEFAULT_BATCH_ROWS

@@ -99,14 +99,9 @@ def test_real_endpoint_facts_and_fixed_twenty_session_clock():
     )
 
 
-def test_native_producer_persists_observed_endpoint_labels_without_execution(
-    tmp_path, monkeypatch
-):
+def test_native_producer_persists_observed_endpoint_labels_without_execution(tmp_path):
     import pytest
 
-    from quant_research_platform.markets.implementations.a_share.processed import (
-        producer,
-    )
     from quant_research_platform.markets.prepare import prepare
     from quant_research_platform.storage.datasets import read_dataset
     from quant_research_platform.storage.datasets.reading import open_dataset_session
@@ -154,7 +149,6 @@ def test_native_producer_persists_observed_endpoint_labels_without_execution(
     source = _input(tmp_path, "market_panel_1d", panel, native=True)
     source["row_filters"] = [["selected", "==", True]]
     source["columns"] = ["adj_open", "filling_flag", "is_trading"]
-    monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", 15)
     request = dict(
         market_id="a_share",
         data_id="forward_returns",

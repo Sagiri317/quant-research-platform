@@ -286,7 +286,6 @@ def test_noncanonical_year_partition_is_rejected_with_and_without_window(
     for window in (None, TimeWindow("2014-01-01", "2014-12-31")):
         with pytest.raises(ValueError, match="invalid_dataset_part_files"):
             dataset_reading.open_dataset_session(root, columns=None, time_window=window)
-            pass
 
 
 @pytest.mark.parametrize(
@@ -344,7 +343,6 @@ def test_physical_filter_rejects_nonfinite_or_schema_incompatible_scalar(
         dataset_reading.open_dataset_session(
             root, columns=None, time_window=None, row_filters=(("value", "==", value),)
         )
-        pass
 
 
 @pytest.mark.parametrize(
@@ -402,7 +400,6 @@ def test_physical_membership_preserves_generic_exact_scalar_semantics(
 def test_physical_membership_rejects_null_filter_member_before_sort() -> None:
     with pytest.raises(ValueError, match="invalid_dataset_physical_filter_value"):
         _prepare_in_filter(pa.field("value", pa.int64()), (1, None))
-        pass
 
 
 @pytest.mark.parametrize("operator", ("==", ">="))
@@ -525,7 +522,6 @@ def test_session_metadata_reader_rejects_invalid_json(
     filesystem_write_bytes(root / "_manifest" / "manifest.json", b" ")
     with pytest.raises(ValueError, match="qrp_json_invalid"):
         dataset_reading.open_dataset_session(root, columns=None, time_window=None)
-        pass
 
 
 def test_dataset_native_disk_failure_removes_partial_candidate_and_preserves_published(

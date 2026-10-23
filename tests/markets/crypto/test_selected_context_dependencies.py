@@ -351,3 +351,81 @@ def test_cross_asset_lag_requires_persisted_source_segment_only_when_selected(tm
                 "target_assets": ["btc_usdt"],
             },
         )
+
+
+@pytest.mark.parametrize("route", ["spot", "union"])
+@pytest.mark.parametrize("declared_market", [None, "crypto", "a_share"])
+def test_native_context_respects_explicit_market(tmp_path, route, declared_market):
+    from quant_research_platform.contracts.data import DataSpec, ProcessedDataSpec
+    from quant_research_platform.markets.implementations.crypto.ids import (
+        HFT_INFORMATION_PANEL_DATA_ID,
+        HFT_SOL_PANEL_DATA_ID,
+    )
+    from quant_research_platform.storage.datasets.writing import write_dataset
+    from tests.markets.crypto.test_local_data_dependencies import _panel
+
+    if route == "spot":
+        frames = {HFT_PANEL_DATA_ID: panel(), HFT_SPOT_PANEL_DATA_ID: panel(spot=True)}
+        output_id = HFT_SPOT_CONTEXT_DATA_ID
+    else:
+        base = pd.concat(_panel(count=5), ignore_index=True)
+        frames = {
+            HFT_PANEL_DATA_ID: base,
+            HFT_SOL_PANEL_DATA_ID: base.assign(asset_id="sol_usdt"),
+        }
+        output_id = HFT_INFORMATION_PANEL_DATA_ID
+    inputs = {}
+    for data_id, frame in frames.items():
+        frame = frame.assign(market_id=declared_market or "crypto")
+        roles = dict.fromkeys(frame.columns, "context")
+        roles.update(market_id="key", asset_id="key", timestamp="timestamp")
+        fields = dict(
+            data_id=data_id,
+            frequency="tick",
+            grain="asset_timestamp",
+            column_roles=roles,
+            primary_key=KEYS,
+            partition_columns=("year",),
+        )
+        source_spec = (
+            DataSpec(**fields)
+            if declared_market is None
+            else ProcessedDataSpec(**fields, market_id=declared_market, kind="panel")
+        )
+        root = tmp_path / data_id
+        write_dataset(root, frame, spec=source_spec)
+        frames[data_id] = read_dataset(root)
+        inputs[data_id] = str(root)
+    output = tmp_path / "output"
+    config = {
+        "market_id": "crypto",
+        "data_id": output_id,
+        "inputs": inputs,
+        "time_window": {
+            "start": frame.timestamp.min().isoformat(),
+            "end": frame.timestamp.max().isoformat(),
+        },
+        "output_root": str(output),
+    }
+    if route == "spot":
+        config.update(
+            factor_columns=["spot_perp_basis"], parameters={"max_age_ms": 200}
+        )
+    if declared_market == "a_share":
+        with pytest.raises(ValueError, match="input_market_mismatch"):
+            prepare(config)
+        assert not output.exists()
+        return
+    result = read_dataset(prepare(config))
+    assert set(result.market_id) == {"crypto"}
+    if route == "spot":
+        assert result.spot_perp_basis.tolist() == pytest.approx(
+            frames[HFT_SPOT_PANEL_DATA_ID].mid / frames[HFT_PANEL_DATA_ID].mid - 1
+        )
+    else:
+        expected = pd.concat(frames.values(), ignore_index=True).sort_values(
+            ["timestamp", "asset_id"], ignore_index=True
+        )
+        pd.testing.assert_frame_equal(
+            result[expected.columns], expected, check_exact=True
+        )

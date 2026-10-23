@@ -4,7 +4,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.markets.implementations.a_share.processed import producer
 from quant_research_platform.markets.implementations.a_share.processed.catalog import (
     processed_catalog,
 )
@@ -17,10 +16,9 @@ from tests.helpers.a_share_sources import (
 )
 
 
-@pytest.mark.parametrize("block_rows", (30, 65536))
 @pytest.mark.parametrize("history_start", ("2009-11-02", "2019-11-01"))
 def test_native_narrow_outputs_equal_full_with_actual_history_and_lookahead(
-    tmp_path, monkeypatch, block_rows, history_start
+    tmp_path, history_start
 ):
     dates = pd.bdate_range(history_start, periods=180).as_unit("ns")
     source = _synthetic_interim_frames(dates)
@@ -41,7 +39,6 @@ def test_native_narrow_outputs_equal_full_with_actual_history_and_lookahead(
     inputs["market_panel_1d"] = _prepare(
         tmp_path / "full", "market_panel_1d", inputs, dates[0], dates[-1]
     )
-    monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", block_rows)
     references = {}
     for name in ("price_volume_facts", "execution_mask", "forward_returns"):
         spec = processed_catalog().get(name)

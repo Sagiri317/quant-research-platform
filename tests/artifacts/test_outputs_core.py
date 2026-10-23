@@ -73,11 +73,12 @@ def test_metadata_rejected_before_publish_and_after_read(tmp_path, field, value)
 
 
 @pytest.mark.parametrize("key", ["Authorization", "auth", "private_key"])
-def test_manifest_rejects_credentials(tmp_path, key):
-    _, frame, metadata = native_bundle(tmp_path)
+def test_manifest_rejects_credentials(key):
+    metadata = make_price_volume_prediction_output_frame().attrs["prediction_metadata"]
+    metadata["model_facts"]["model"]["model_algorithm"] = "ridge_regression"
     metadata["model_facts"]["model"]["hyperparameters"][key] = "secret-value"
     metadata["model_facts"]["candidate_parameters"][key] = "secret-value"
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="output_manifest_metadata_invalid"):
         output_manifest_payload(
             definition_id="prediction_outputs",
             metadata=metadata,
@@ -98,7 +99,8 @@ def test_manifest_rejects_credentials(tmp_path, key):
     ],
 )
 def test_writer_validates_actual_rows_and_global_keys(tmp_path, mutation):
-    root, frame, metadata = native_bundle(tmp_path)
+    frame = make_price_volume_prediction_output_frame()
+    metadata = frame.attrs["prediction_metadata"]
     if mutation == "before":
         frame["timestamp"] = pd.Timestamp("2014-01-02")
     elif mutation == "after":
