@@ -1,6 +1,6 @@
 # A 股量价、预期与财务信息的联合检验
 
-**本轮重算从2026年10月21日开始。本文已汇总12项配置的模型结果和11项配置的200个账户绩效；17项研究尚未全部完成，三项财务资格研究已确认受阻。进度快照截至2026年10月23日19:54。**
+**本轮重算从2026年10月21日开始。本文已汇总12项配置的模型结果和11项配置的200个账户绩效；17项研究尚未全部完成，三项财务资格研究已确认受阻。进度快照截至2026年10月23日21:24。**
 
 这项研究根据当时可见的价格、成交、分析师预期和财务信息，为股票未来约一个月的相对收益打分，再检查这些分数能否改善实际组合。**Core6、PV25、PV52分别表示6、25、52个价格与成交量相关因子**，不是股票数量；“非金融”表示另选不含金融行业的研究样本。2019—2023年用于开发，2024—2025年用于冻结模型的历史检验。这段历史已在以前的研究中使用，本轮是重新计算，不能称为一次全新的未见样本试验。
 
@@ -25,9 +25,9 @@
 
 ## 全部结果总览：哪些已经完成，哪些仍不能作结论
 
-本节以**2026年10月23日19:54（北京时间）的进度快照**为准，随后复读了当时已经成功落盘的统计。17项配置全部列出，不以收益、显著性或是否成功为筛选条件。这里的“完成”分为模型、账户、绩效统计和归因四件事：账本生成成功之后，还可能正在计算绩效或归因；归因统计完成，也可能全部保留未定义状态。
+本节以**2026年10月23日21:24（北京时间）的进度快照**为准，随后复读了当时已经成功落盘的统计。17项配置全部列出，不以收益、显著性或是否成功为筛选条件。这里的“完成”分为模型、账户、绩效统计和归因四件事：账本生成成功之后，还可能正在计算绩效或归因；归因统计完成，也可能全部保留未定义状态。
 
-目前12项配置已有完整模型统计和解释，7项已完成两期全部账户统计；三项财务资格研究已实际终态受阻，另外两项消融尚未完成季度拟合。已发布绩效覆盖11项配置、200个账户：其中9项有两期各10个，另2项只有固定检验期10个。其他账户继续执行或等待统计，不能把暂无结果记成收益0。
+目前12项配置已有完整模型统计和解释，8项已完成两期全部账户统计；三项财务资格研究已实际终态受阻，另外两项消融尚未完成季度拟合。已发布绩效覆盖11项配置、200个账户：其中9项有两期各10个，另2项只有固定检验期10个。其他账户继续执行或等待统计，不能把暂无结果记成收益0。
 
 | 研究配置 | 因子数 | 季度拟合 | 最终模型 | 账本成功 | 已发布绩效 | 已发布归因 | 状态 |
 |---|---|---|---|---|---|---|---|
@@ -37,14 +37,14 @@
 | PV25加路径 | 28 | 480/480 | 12 | 20/20 | 开发、固定检验 | 开发、固定检验 | 模型、解释、两期账户统计完成 |
 | PV52加路径 | 55 | 480/480 | 11 | 20/20 | 开发、固定检验 | 开发、固定检验 | 模型、解释、两期账户统计完成 |
 | PV52去规模价格 | 49 | 480/480 | 12 | 20/20 | 固定检验 | 固定检验 | 模型和解释完成，账户或统计继续 |
-| PV52去趋势反转 | 43 | 480/480 | 12 | 11/20 | 暂无 | 暂无 | 模型和解释完成，账户或统计继续 |
-| PV52去活跃流动性 | 29 | 359/480 | 0 | 0/20 | 暂无 | 暂无 | 季度拟合进行中 |
+| PV52去趋势反转 | 43 | 480/480 | 12 | 17/20 | 暂无 | 暂无 | 模型和解释完成，账户或统计继续 |
+| PV52去活跃流动性 | 29 | 460/480 | 0 | 0/20 | 暂无 | 暂无 | 季度拟合进行中 |
 | PV52去风险路径 | 35 | 0/480 | 0 | 0/20 | 暂无 | 暂无 | 等待上游队列 |
 | 非金融PV25 | 25 | 480/480 | 12 | 20/20 | 开发、固定检验 | 开发、固定检验 | 模型、解释、两期账户统计完成 |
 | 非金融PV25加四预期（90日） | 29 | 480/480 | 13 | 20/20 | 开发、固定检验 | 开发、固定检验 | 模型、解释、两期账户统计完成 |
-| 非金融PV25加四预期（180日） | 29 | 480/480 | 13 | 20/20 | 开发、固定检验 | 固定检验 | 模型和解释完成，账户或统计继续 |
+| 非金融PV25加四预期（180日） | 29 | 480/480 | 13 | 20/20 | 开发、固定检验 | 开发、固定检验 | 模型、解释、两期账户统计完成 |
 | 非金融PV25加七预期（90日） | 32 | 480/480 | 13 | 20/20 | 开发、固定检验 | 固定检验 | 模型和解释完成，账户或统计继续 |
-| 非金融PV25加七预期（180日） | 32 | 480/480 | 13 | 19/20 | 固定检验 | 暂无 | 模型和解释完成，账户或统计继续 |
+| 非金融PV25加七预期（180日） | 32 | 480/480 | 13 | 19/20 | 固定检验 | 固定检验 | 模型和解释完成，账户或统计继续 |
 | 财务资格PV25加财务 | 44 | 480/480 | 0 | 0/20 | 暂无 | 暂无 | 终态受阻：无最终选型依据 |
 | 财务资格PV25加财务、预期 | 48 | 480/480 | 0 | 0/20 | 暂无 | 暂无 | 终态受阻：无最终选型依据 |
 | 财务资格内PV25 | 25 | 480/480 | 0 | 0/20 | 暂无 | 暂无 | 终态受阻：无最终选型依据 |
@@ -449,7 +449,7 @@ Q冠军等权的年化收益低于前文PV25的37.49%，这段历史没有呈现
 
 两期分别覆盖全部1,193和464个成熟标签日期，括号为Bartlett滞后20的HAC 95%区间；G开发期仍因重复使用选择窗口而只作描述。相对90日配置，固定检验均值在G下由0.1200变为0.1211，在Q下由0.1216变为0.1225；但Q开发期均值从0.1205降至0.1168。不能只挑固定检验的上升就确定180日更好，也不能把日均相关的变化解释为收益率增加。实际可用报告、模型输入和选择结果都可能随保鲜期变化，仍须按预定共同样本和配对统计检验差异，保留多重比较限制。完整状态与区间见[原生预测统计](assets/a-share-full-20261021/expectations-180d-prediction-diagnostics.csv)。
 
-26份原生解释已完整复读，1,508组置换均值和标准差完成三次重复的独立复算，18,560行季度系数汇总已按行数核对。26,624条抽样解释中有17条因加性抵消精度不足而未定义，均来自两个XGBoost候选，其余26,607条贡献已定义；阅读[贡献汇总](assets/a-share-full-20261021/expectations-180d-summary.csv)时，应同时看其中的有效观察数和抽样总数。另附[季度系数](assets/a-share-full-20261021/expectations-180d-coefficients.csv)、[同组置换](assets/a-share-full-20261021/expectations-180d-permutation-summary.csv)及[原生重要性](assets/a-share-full-20261021/expectations-180d-native-importance.csv)。两期账户绩效已在后文补齐，开发期归因仍在运行；预定跨方案联合检验尚未完成，不能作显著增量结论。
+26份原生解释已完整复读，1,508组置换均值和标准差完成三次重复的独立复算，18,560行季度系数汇总已按行数核对。26,624条抽样解释中有17条因加性抵消精度不足而未定义，均来自两个XGBoost候选，其余26,607条贡献已定义；阅读[贡献汇总](assets/a-share-full-20261021/expectations-180d-summary.csv)时，应同时看其中的有效观察数和抽样总数。另附[季度系数](assets/a-share-full-20261021/expectations-180d-coefficients.csv)、[同组置换](assets/a-share-full-20261021/expectations-180d-permutation-summary.csv)及[原生重要性](assets/a-share-full-20261021/expectations-180d-native-importance.csv)。两期账户绩效与归因已全部完成；行业、风格和残差拆分仍无已定义区间，原因见后文。预定跨方案联合检验尚未完成，不能作显著增量结论。
 
 ## 新增量价路径和消融：预测覆盖相同，结果仍有差别
 
@@ -546,7 +546,7 @@ PV52加路径的Q主组合固定检验年化23.81%、回撤38.42%，对应PV52�
 
 ### 归因完成与归因可解释是两件事
 
-以下仅列本次新增并已读到的归因阶段，每行合计该期10个账户；计数针对行业、风格或残差中的任一类，三类不能相加。七个阶段均没有已定义的行业、风格或残差拆分区间。四预期90日的两期归因、七预期90日的固定检验归因已补齐；尚未发布的其他阶段继续运行，不预判其结果。
+以下仅列本次新增并已读到的归因阶段，每行合计该期10个账户；计数针对行业、风格或残差中的任一类，三类不能相加。九个阶段均没有已定义的行业、风格或残差拆分区间。四预期90日和180日的两期归因、七预期90日和180日的固定检验归因已补齐；尚未发布的其他阶段继续运行，不预判其结果。
 
 | 配置 | 阶段 | 公司行动调整 | 研究估值 | 持仓因子拟合不可识别 | 持仓暴露不完整 |
 |---|---|---|---|---|---|
@@ -557,6 +557,8 @@ PV52加路径的Q主组合固定检验年化23.81%、回撤38.42%，对应PV52�
 | 非金融PV25加四预期（180日） | 固定检验期 | 3455 | 980 | 280 | 115 |
 | 非金融PV25加四预期（90日） | 开发期 | 5988 | 6078 | 54 | 0 |
 | 非金融PV25加七预期（90日） | 固定检验期 | 3469 | 957 | 282 | 122 |
+| 非金融PV25加四预期（180日） | 开发期 | 5953 | 6106 | 61 | 0 |
+| 非金融PV25加七预期（180日） | 固定检验期 | 3450 | 980 | 284 | 116 |
 
 净值可以核算，不代表利润来源已经解释。这里继续保留公司行动及研究估值近似；本次新增核验没有独立逐事件重演这100份原始账本。各账户的36项原生绩效、容量敏感性、稳健性和逐日净值均可从文末索引复查。
 
@@ -1036,7 +1038,7 @@ G 在开发期结束后，依据整段开发期表现选择参数，因此其开
 | 非金融PV25加四预期（90日） | [绩效](assets/a-share-full-20261021/pv-nf-expectations-portfolio-performance.csv)、[逐日](assets/a-share-full-20261021/pv-nf-expectations-portfolio-daily.csv)、[G/Q](assets/a-share-full-20261021/pv-nf-expectations-portfolio-group-comparison.csv)、[稳健性](assets/a-share-full-20261021/pv-nf-expectations-portfolio-robustness.csv)、[容量](assets/a-share-full-20261021/pv-nf-expectations-portfolio-capacity-summary.csv)、[归因覆盖](assets/a-share-full-20261021/pv-nf-expectations-portfolio-attribution-coverage.csv) |
 | 非金融PV25加四预期（180日） | [绩效](assets/a-share-full-20261021/expectations-180d-portfolio-performance.csv)、[逐日](assets/a-share-full-20261021/expectations-180d-portfolio-daily.csv)、[G/Q](assets/a-share-full-20261021/expectations-180d-portfolio-group-comparison.csv)、[稳健性](assets/a-share-full-20261021/expectations-180d-portfolio-robustness.csv)、[容量](assets/a-share-full-20261021/expectations-180d-portfolio-capacity-summary.csv)、[归因覆盖](assets/a-share-full-20261021/expectations-180d-portfolio-attribution-coverage.csv) |
 | 非金融PV25加七预期（90日） | [绩效](assets/a-share-full-20261021/expectations-mechanisms-90d-portfolio-performance.csv)、[逐日](assets/a-share-full-20261021/expectations-mechanisms-90d-portfolio-daily.csv)、[G/Q](assets/a-share-full-20261021/expectations-mechanisms-90d-portfolio-group-comparison.csv)、[稳健性](assets/a-share-full-20261021/expectations-mechanisms-90d-portfolio-robustness.csv)、[容量](assets/a-share-full-20261021/expectations-mechanisms-90d-portfolio-capacity-summary.csv)、[归因覆盖](assets/a-share-full-20261021/expectations-mechanisms-90d-portfolio-attribution-coverage.csv) |
-| 非金融PV25加七预期（180日） | [绩效](assets/a-share-full-20261021/expectations-mechanisms-180d-portfolio-performance.csv)、[逐日](assets/a-share-full-20261021/expectations-mechanisms-180d-portfolio-daily.csv)、[G/Q](assets/a-share-full-20261021/expectations-mechanisms-180d-portfolio-group-comparison.csv)、[稳健性](assets/a-share-full-20261021/expectations-mechanisms-180d-portfolio-robustness.csv)、[容量](assets/a-share-full-20261021/expectations-mechanisms-180d-portfolio-capacity-summary.csv) |
+| 非金融PV25加七预期（180日） | [绩效](assets/a-share-full-20261021/expectations-mechanisms-180d-portfolio-performance.csv)、[逐日](assets/a-share-full-20261021/expectations-mechanisms-180d-portfolio-daily.csv)、[G/Q](assets/a-share-full-20261021/expectations-mechanisms-180d-portfolio-group-comparison.csv)、[稳健性](assets/a-share-full-20261021/expectations-mechanisms-180d-portfolio-robustness.csv)、[容量](assets/a-share-full-20261021/expectations-mechanisms-180d-portfolio-capacity-summary.csv)、[归因覆盖](assets/a-share-full-20261021/expectations-mechanisms-180d-portfolio-attribution-coverage.csv) |
 
 ### 单因子、事件、分层和截面回归
 

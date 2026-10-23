@@ -1,5 +1,5 @@
 file,type,rows,bytes,sha256
-all-case-status.csv,csv,17.0,2434,4e0f30df651e630bfc34e06f560beb96da5e6d82887212210d470cf208bb8624
+all-case-status.csv,csv,17.0,2448,a3dfc7394029280fe68a43e042e25f20a05412824fb0cf8eca05e441f7a2fe61
 all-factor-daily-coverage.csv,csv,91746.0,11378365,b2eff938df4e2eec2454d255287ece26f3440038ec277e7ecd5f5420e7af7873
 all-factor-group-spread-summary.csv,csv,12408.0,2506388,6b35c375b4ab368e11735f3db613decc7793bed55887a169cac611d705c28919
 all-factor-ic-summary.csv,csv,13896.0,3757750,94c57eb81e3c8b62646918e878932e79550b8d4ad070160b10466d76fee71fab
@@ -33,7 +33,7 @@ expectations-180d-model-group-comparison.csv,csv,18.0,5630,d92facb84dd40bc9a313e
 expectations-180d-model-reality-checks.csv,csv,116.0,20538,757d6665ed3a34c0fcb29502207cda0c7caa15dae4fa9ae20a07ad6e0ea7f854
 expectations-180d-native-importance.csv,csv,1392.0,258799,a67947cc0fa606a2851279c3e35eed84e899fcb9548cc2ffdc41aa9b3c58fdc1
 expectations-180d-permutation-summary.csv,csv,1508.0,277163,98e24e0242f7a43cae75c0b5d19dfb746d6d35cd7541e81f1e54e6287713060a
-expectations-180d-portfolio-attribution-coverage.csv,csv,220.0,25690,73e955cf7cdaa42d71591e29bc8cf2350089fad37ed3ff8f2720bb50db3fb8ba
+expectations-180d-portfolio-attribution-coverage.csv,csv,390.0,46123,3d66d2d3fe440e810417f2507afa92557c17b8cfa708411d76b9947b693d1112
 expectations-180d-portfolio-capacity-summary.csv,csv,1080.0,108963,809485bc614f4bc9007cd0ee0546c8dd34447bd22062b6a8bd49b7b975759c3c
 expectations-180d-portfolio-daily.csv,csv,16950.0,4925380,87c436eb91117ada51484f4da2d7dfb1385b0a051335df9e2ef01edd538c0444
 expectations-180d-portfolio-group-comparison.csv,csv,10.0,4128,61ca221952ba9a89a61cd4377ef76b95de32af2413578a6a93ed9603935bdd93
@@ -47,6 +47,7 @@ expectations-mechanisms-180d-model-group-comparison.csv,csv,18.0,6033,98debab50f
 expectations-mechanisms-180d-model-reality-checks.csv,csv,116.0,22976,29af970441a5be08ceaae30ebaf9f48900a460beac74e442f9e198bdb7f3a1d7
 expectations-mechanisms-180d-native-importance.csv,csv,1536.0,321637,562c923ef621da98b1793135c24ca90fa62dc74a6b207f7f04e6399885cbc9ee
 expectations-mechanisms-180d-permutation-summary.csv,csv,1664.0,346791,7f23b62ee0f6e41bd25df311610e5b5c19e85abb4b549f24095acb71fc7a25df
+expectations-mechanisms-180d-portfolio-attribution-coverage.csv,csv,220.0,28115,fb452da1a16cb7972ea6b3847ba39385afbaa40c43bbd99679e716fbb052d061
 expectations-mechanisms-180d-portfolio-capacity-summary.csv,csv,360.0,40847,a160c2915e1d64b420363b9527ebf4be0ce14f1c370b04327a31a7327777cf6d
 expectations-mechanisms-180d-portfolio-daily.csv,csv,4830.0,1463901,9b6b3822691fb009d41c3455f8d6d593160d3c25e9e1e6ee4a9f806d418e33d6
 expectations-mechanisms-180d-portfolio-group-comparison.csv,csv,5.0,1804,07fb144d0d35222a948d61063e3c9eb18ee48d053d6918f0b5b03650bb5e22da
