@@ -1,0 +1,5 @@
+case,stage,selection_group,prediction_id,observation_count,status,reason,mean,standard_error,t_statistic,p_value,ci_lower,ci_upper,bootstrap_status,bootstrap_reason,bootstrap_lower,bootstrap_upper,bootstrap_block_size,bootstrap_repetitions,bootstrap_seed,input_date_count
+pv52_without_trend_reversal,development,global,pv52_without_trend_reversal__global,1008,UNDEFINED,selection_reuses_evaluation_window,0.11458755767816071,,,,,,UNDEFINED,selection_reuses_evaluation_window,,,20,2000,3473463945,1193
+pv52_without_trend_reversal,development,quarterly,pv52_without_trend_reversal__quarterly,1008,UNDEFINED,incomplete_session_clock,0.1132476402229952,,,,,,UNDEFINED,incomplete_session_clock,,,20,2000,597936507,1193
+pv52_without_trend_reversal,holdout,global,pv52_without_trend_reversal__global,147,UNDEFINED,incomplete_session_clock,0.04087328915779825,,,,,,UNDEFINED,incomplete_session_clock,,,20,2000,293887623,464
+pv52_without_trend_reversal,holdout,quarterly,pv52_without_trend_reversal__quarterly,147,UNDEFINED,incomplete_session_clock,0.03682748256309023,,,,,,UNDEFINED,incomplete_session_clock,,,20,2000,340247975,464

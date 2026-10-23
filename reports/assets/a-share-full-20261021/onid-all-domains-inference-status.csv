@@ -1,0 +1,9 @@
+domain,stage,inference_rows,defined,undefined,BY_5pct_rows
+all,development,1320,1296,24,778
+all,holdout,1320,1272,48,722
+fundamental-90,development,1152,0,1152,0
+fundamental-90,holdout,1152,0,1152,0
+nonfinancial-180,development,768,768,0,401
+nonfinancial-180,holdout,768,768,0,396
+nonfinancial-90,development,768,768,0,412
+nonfinancial-90,holdout,768,768,0,395
