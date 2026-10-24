@@ -1,5 +1,5 @@
 file,type,rows,bytes,sha256
-all-case-status.csv,csv,17.0,2616,872411fcb4fe3ce1b14bac20bf49ef4979e6a089e103f664be614554a2992756
+all-case-status.csv,csv,17.0,2639,9e0d186138d52cec1b7680610c2474d78f96f65b9088203b42e780fca35ba8be
 all-factor-daily-coverage.csv,csv,91746.0,11286618,928506d39e0e50b92464e5efacc3621d04c8b0d5cd2cbfb2460008bdcaacf40f
 all-factor-group-spread-summary.csv,csv,12408.0,2493979,14b1ab5618dcb7936b564e6ad4ba00780cbc4359905b4fba0916a403b687fffc
 all-factor-ic-summary.csv,csv,13896.0,3743853,880eaf9713b6e06ea71fb94047f83b80443cdac63bbb0c56a431e7fb5f836dbb
@@ -7,7 +7,7 @@ all-model-family-descriptive-summary.csv,csv,3528.0,552690,8bc3ae7bc6519730d2b25
 all-model-final-selections.csv,csv,252.0,36998,7d90ca5f0f211be18d8b32039a7890259fb1a94807cde868a5690679ce3d8eef
 all-model-robustness.csv,csv,168.0,15254,238dbdf9103340eaa29a302b918d6e12489b26ecfdacc36fb42da9f7652c3386
 all-model-selected-summary.csv,csv,56.0,13377,c442a2f08717ba920633928ac5892872d62218ce06bef390887d0a93197ebb96
-all-portfolio-performance-summary.csv,csv,270.0,170445,03ff3d9e5d950ff39612c8b56eaa3d1d04d03f66ccb249e2053cd927df55eb12
+all-portfolio-performance-summary.csv,csv,280.0,176756,6c21177b28c7ad4fd1aadf0ea50b8ffad46f83120444b762d6d1575dbc426f47
 core6-coefficients.csv,csv,3840.0,1163836,6a21d2d643a86b26989de28086af9c71560028a5eac571c90af1525b7755220c
 core6-native-importance.csv,csv,216.0,34339,7298442dbf1cf08867330fb5b6c199e3b6069e45fcf63cb210c1e58cd6184844
 core6-permutation-summary.csv,csv,240.0,38491,edc599f46c65964e195766e5dfad3e97a8a2e43284417e8e0dd68a2943eb805b
@@ -213,11 +213,11 @@ pv52-without-risk-path-model-reality-checks.csv,csv,116.0,21543,20d1002d82956dd0
 pv52-without-risk-path-native-importance.csv,csv,1540.0,303581,100666233f88d45f3a22fa67e25db2e5d24a6ac821812c5e8d9a2da7a3f6733c
 pv52-without-risk-path-permutation-summary.csv,csv,1680.0,324787,6ebcde4f5abf80de2c3d4546fd2c5230252b6dbc90435119dd49f8e5dacf9654
 pv52-without-risk-path-portfolio-attribution-coverage.csv,csv,220.0,26574,9f8e8a4d7c76df89d9b88dca4a9c027221fe5e23a3cc87af2870615d8022e70c
-pv52-without-risk-path-portfolio-capacity-summary.csv,csv,360.0,39202,0cb28c9127d027a0acaa59449bd499a5f1a7939e669269cb4ba202c4d73264b0
-pv52-without-risk-path-portfolio-daily.csv,csv,4830.0,1434516,d79630adcf5c6d61891fe611544b520de293cfcd76bb6864fe81831c9f3c5799
-pv52-without-risk-path-portfolio-group-comparison.csv,csv,5.0,1758,9cd384cad726419a67ff88db965b7cad5422180c78eebd4fefcf68aab994387e
-pv52-without-risk-path-portfolio-performance.csv,csv,360.0,47143,3e03d2b620cba6dc37a0b8ddde6067edf7b61d7e3b1d756f9515a1a64a2e406f
-pv52-without-risk-path-portfolio-robustness.csv,csv,21.0,2500,d48b4f3faecec4ce6fb751aa8e120f6a813727b87ed9471b377ff03b9589c70b
+pv52-without-risk-path-portfolio-capacity-summary.csv,csv,1080.0,116563,b01a12d3dab68e68e1ccfdfd860a64e378c2990c5c2229e4e0ba6d75b5032726
+pv52-without-risk-path-portfolio-daily.csv,csv,16950.0,4993217,1e9302d491aef531978c8156ac26691e1d58581cf3e645561d749e4d4375ad44
+pv52-without-risk-path-portfolio-group-comparison.csv,csv,10.0,3642,235bbdf85577a22f099caae0e14582a04f736d3ee426b916a66f8277e47dd6b2
+pv52-without-risk-path-portfolio-performance.csv,csv,720.0,94249,2ef7cf7fec790b749711f38f83ff6024729faa951fdd4b11b2ebaeac7236ac4f
+pv52-without-risk-path-portfolio-robustness.csv,csv,42.0,4908,3d197068f4867e614a9632fe292781c59d4ac19840e0e4cdb92772f741fc6998
 pv52-without-risk-path-prediction-diagnostics.csv,csv,4.0,1331,9f9e8a7ded54608b00ae5c0a36d2dd5bc4a3dd9325d773d1682abd8055db1664
 pv52-without-risk-path-summary.csv,csv,7700.0,1431662,29ee1e6f7b89d693864cfa3fd3c6ed3329bd4a87636f419e1e729e741912a647
 pv52-without-size-price-coefficients.csv,csv,31360.0,10801475,223f376dba6dc8f44aaf7cba4af17de893b20a03102773a6570596f6bfbf1839
