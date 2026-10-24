@@ -1,0 +1,16 @@
+base,challenger,planned,defined,BY_significant,Q_holdout_mean_min,Q_holdout_mean_max,Q_holdout_observation_min,Q_holdout_observation_max
+core6,pv25,36,27,0,-0.0040631729864513,0.0035901606844803,464.0,464.0
+pv25,pv_expanded,36,0,0,-0.0110084399442835,0.022002581767307,147.0,147.0
+pv25,pv25_path,36,25,0,-0.0019122168827449,0.0033298938938825,464.0,464.0
+pv_expanded,pv_expanded_path,36,0,0,-0.0028061610853662,0.0092183846007435,147.0,147.0
+pv_expanded,pv52_without_size_price,36,0,0,-0.0021914237289832,0.0293913172621613,147.0,147.0
+pv_expanded,pv52_without_trend_reversal,36,0,0,-0.0264533793243139,0.0030971061704645,147.0,147.0
+pv_expanded,pv52_without_activity_liquidity,36,0,0,-0.009654299478874,0.0087834880952169,147.0,147.0
+pv_expanded,pv52_without_risk_path,36,0,0,-0.018551193681016,0.0018435391671546,147.0,147.0
+pv_nf25,pv_nf_expectations,36,25,0,-0.0033650505431511,0.0014259779966106,464.0,464.0
+pv_nf_expectations,expectations_180d,36,25,0,-0.0002455963198099,0.0010804852954693,464.0,464.0
+pv_nf_expectations,expectations_mechanisms_90d,36,23,0,-9.529259643047115e-05,0.0004297415763527,464.0,464.0
+expectations_180d,expectations_mechanisms_180d,36,24,0,-0.0005531942864951,0.0004140525497155,464.0,464.0
+fusion_nf_pv25,fusion_nf_core,36,0,0,,,0.0,0.0
+fusion_nf_core,fusion_nf_expectations,36,0,0,,,0.0,0.0
+pv_nf25,fusion_nf_pv25,36,0,0,,,,
