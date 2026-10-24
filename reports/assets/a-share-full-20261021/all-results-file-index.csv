@@ -1,5 +1,5 @@
 file,type,rows,bytes,sha256
-all-case-status.csv,csv,17.0,2639,9e0d186138d52cec1b7680610c2474d78f96f65b9088203b42e780fca35ba8be
+all-case-status.csv,csv,17.0,2641,3a6dd61df5ade43e1f50dfdc25d35df97aca1aa486497c33016504de875d9dff
 all-factor-daily-coverage.csv,csv,91746.0,11286618,928506d39e0e50b92464e5efacc3621d04c8b0d5cd2cbfb2460008bdcaacf40f
 all-factor-group-spread-summary.csv,csv,12408.0,2493979,14b1ab5618dcb7936b564e6ad4ba00780cbc4359905b4fba0916a403b687fffc
 all-factor-ic-summary.csv,csv,13896.0,3743853,880eaf9713b6e06ea71fb94047f83b80443cdac63bbb0c56a431e7fb5f836dbb
@@ -212,7 +212,7 @@ pv52-without-risk-path-model-group-comparison.csv,csv,18.0,5663,636efd16268a5633
 pv52-without-risk-path-model-reality-checks.csv,csv,116.0,21543,20d1002d82956dd0528306c9a662082a8eb71d20eb9768dc7bdcd1d84661174d
 pv52-without-risk-path-native-importance.csv,csv,1540.0,303581,100666233f88d45f3a22fa67e25db2e5d24a6ac821812c5e8d9a2da7a3f6733c
 pv52-without-risk-path-permutation-summary.csv,csv,1680.0,324787,6ebcde4f5abf80de2c3d4546fd2c5230252b6dbc90435119dd49f8e5dacf9654
-pv52-without-risk-path-portfolio-attribution-coverage.csv,csv,220.0,26574,9f8e8a4d7c76df89d9b88dca4a9c027221fe5e23a3cc87af2870615d8022e70c
+pv52-without-risk-path-portfolio-attribution-coverage.csv,csv,390.0,47687,4ebecebcd20f6b39b66b2b39107e482e6aa10e35fb1669fcd4c3fb7cb660ddd0
 pv52-without-risk-path-portfolio-capacity-summary.csv,csv,1080.0,116563,b01a12d3dab68e68e1ccfdfd860a64e378c2990c5c2229e4e0ba6d75b5032726
 pv52-without-risk-path-portfolio-daily.csv,csv,16950.0,4993217,1e9302d491aef531978c8156ac26691e1d58581cf3e645561d749e4d4375ad44
 pv52-without-risk-path-portfolio-group-comparison.csv,csv,10.0,3642,235bbdf85577a22f099caae0e14582a04f736d3ee426b916a66f8277e47dd6b2
