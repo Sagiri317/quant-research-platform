@@ -1,0 +1,799 @@
+{
+  "generated_at_utc": "2026-10-25T03:44:06.311260+00:00",
+  "source_head": "357303c9a8d0401e7d51b65223f619c3aa211dd0",
+  "analysis_script_sha256": "e03b1058307191273096d8ea7bdadd32a803ac5df785a351caaf0d01b707c32b",
+  "protocol_sha256": "2d55c06788dee671a5103cde3c275dfaefd02b6c002a10d36de3366226407385",
+  "calendar_evidence_sha256": "f0181955ed512aba2a940c54560bc08e2beb9371cbb96de2bd0ab12d52b51528",
+  "units": {
+    "returns": "decimal",
+    "max_drawdown": "positive_loss_fraction",
+    "cagr_difference": "difference_of_geometric_annualized_returns",
+    "mean_difference": "daily_arithmetic_return_difference"
+  },
+  "protocol": {
+    "declared_at_utc": "2026-10-24T16:56:20.175827+00:00",
+    "scope": "exploratory_existing_historical_accounts_not_new_confirmatory_holdout",
+    "estimand": "challenger_minus_base_daily_execution_costs_net_return",
+    "portfolio": "champion_equal",
+    "family_size": 60,
+    "comparisons": [
+      {
+        "base": "core6",
+        "challenger": "pv25",
+        "stage": "development",
+        "group": "global"
+      },
+      {
+        "base": "core6",
+        "challenger": "pv25",
+        "stage": "development",
+        "group": "quarterly"
+      },
+      {
+        "base": "core6",
+        "challenger": "pv25",
+        "stage": "holdout",
+        "group": "global"
+      },
+      {
+        "base": "core6",
+        "challenger": "pv25",
+        "stage": "holdout",
+        "group": "quarterly"
+      },
+      {
+        "base": "pv25",
+        "challenger": "pv_expanded",
+        "stage": "development",
+        "group": "global"
+      },
+      {
+        "base": "pv25",
+        "challenger": "pv_expanded",
+        "stage": "development",
+        "group": "quarterly"
+      },
+      {
+        "base": "pv25",
+        "challenger": "pv_expanded",
+        "stage": "holdout",
+        "group": "global"
+      },
+      {
+        "base": "pv25",
+        "challenger": "pv_expanded",
+        "stage": "holdout",
+        "group": "quarterly"
+      },
+      {
+        "base": "pv25",
+        "challenger": "pv25_path",
+        "stage": "development",
+        "group": "global"
+      },
+      {
+        "base": "pv25",
+        "challenger": "pv25_path",
+        "stage": "development",
+        "group": "quarterly"
+      },
+      {
+        "base": "pv25",
+        "challenger": "pv25_path",
+        "stage": "holdout",
+        "group": "global"
+      },
+      {
+        "base": "pv25",
+        "challenger": "pv25_path",
+        "stage": "holdout",
+        "group": "quarterly"
+      },
+      {
+        "base": "pv_expanded",
+        "challenger": "pv_expanded_path",
+        "stage": "development",
+        "group": "global"
+      },
+      {
+        "base": "pv_expanded",
+        "challenger": "pv_expanded_path",
+        "stage": "development",
+        "group": "quarterly"
+      },
+      {
+        "base": "pv_expanded",
+        "challenger": "pv_expanded_path",
+        "stage": "holdout",
+        "group": "global"
+      },
+      {
+        "base": "pv_expanded",
+        "challenger": "pv_expanded_path",
+        "stage": "holdout",
+        "group": "quarterly"
+      },
+      {
+        "base": "pv_expanded",
+        "challenger": "pv52_without_size_price",
+        "stage": "development",
+        "group": "global"
+      },
+      {
+        "base": "pv_expanded",
+        "challenger": "pv52_without_size_price",
+        "stage": "development",
+        "group": "quarterly"
+      },
+      {
+        "base": "pv_expanded",
+        "challenger": "pv52_without_size_price",
+        "stage": "holdout",
+        "group": "global"
+      },
+      {
+        "base": "pv_expanded",
+        "challenger": "pv52_without_size_price",
+        "stage": "holdout",
+        "group": "quarterly"
+      },
+      {
+        "base": "pv_expanded",
+        "challenger": "pv52_without_trend_reversal",
+        "stage": "development",
+        "group": "global"
+      },
+      {
+        "base": "pv_expanded",
+        "challenger": "pv52_without_trend_reversal",
+        "stage": "development",
+        "group": "quarterly"
+      },
+      {
+        "base": "pv_expanded",
+        "challenger": "pv52_without_trend_reversal",
+        "stage": "holdout",
+        "group": "global"
+      },
+      {
+        "base": "pv_expanded",
+        "challenger": "pv52_without_trend_reversal",
+        "stage": "holdout",
+        "group": "quarterly"
+      },
+      {
+        "base": "pv_expanded",
+        "challenger": "pv52_without_activity_liquidity",
+        "stage": "development",
+        "group": "global"
+      },
+      {
+        "base": "pv_expanded",
+        "challenger": "pv52_without_activity_liquidity",
+        "stage": "development",
+        "group": "quarterly"
+      },
+      {
+        "base": "pv_expanded",
+        "challenger": "pv52_without_activity_liquidity",
+        "stage": "holdout",
+        "group": "global"
+      },
+      {
+        "base": "pv_expanded",
+        "challenger": "pv52_without_activity_liquidity",
+        "stage": "holdout",
+        "group": "quarterly"
+      },
+      {
+        "base": "pv_expanded",
+        "challenger": "pv52_without_risk_path",
+        "stage": "development",
+        "group": "global"
+      },
+      {
+        "base": "pv_expanded",
+        "challenger": "pv52_without_risk_path",
+        "stage": "development",
+        "group": "quarterly"
+      },
+      {
+        "base": "pv_expanded",
+        "challenger": "pv52_without_risk_path",
+        "stage": "holdout",
+        "group": "global"
+      },
+      {
+        "base": "pv_expanded",
+        "challenger": "pv52_without_risk_path",
+        "stage": "holdout",
+        "group": "quarterly"
+      },
+      {
+        "base": "pv_nf25",
+        "challenger": "pv_nf_expectations",
+        "stage": "development",
+        "group": "global"
+      },
+      {
+        "base": "pv_nf25",
+        "challenger": "pv_nf_expectations",
+        "stage": "development",
+        "group": "quarterly"
+      },
+      {
+        "base": "pv_nf25",
+        "challenger": "pv_nf_expectations",
+        "stage": "holdout",
+        "group": "global"
+      },
+      {
+        "base": "pv_nf25",
+        "challenger": "pv_nf_expectations",
+        "stage": "holdout",
+        "group": "quarterly"
+      },
+      {
+        "base": "pv_nf_expectations",
+        "challenger": "expectations_180d",
+        "stage": "development",
+        "group": "global"
+      },
+      {
+        "base": "pv_nf_expectations",
+        "challenger": "expectations_180d",
+        "stage": "development",
+        "group": "quarterly"
+      },
+      {
+        "base": "pv_nf_expectations",
+        "challenger": "expectations_180d",
+        "stage": "holdout",
+        "group": "global"
+      },
+      {
+        "base": "pv_nf_expectations",
+        "challenger": "expectations_180d",
+        "stage": "holdout",
+        "group": "quarterly"
+      },
+      {
+        "base": "pv_nf_expectations",
+        "challenger": "expectations_mechanisms_90d",
+        "stage": "development",
+        "group": "global"
+      },
+      {
+        "base": "pv_nf_expectations",
+        "challenger": "expectations_mechanisms_90d",
+        "stage": "development",
+        "group": "quarterly"
+      },
+      {
+        "base": "pv_nf_expectations",
+        "challenger": "expectations_mechanisms_90d",
+        "stage": "holdout",
+        "group": "global"
+      },
+      {
+        "base": "pv_nf_expectations",
+        "challenger": "expectations_mechanisms_90d",
+        "stage": "holdout",
+        "group": "quarterly"
+      },
+      {
+        "base": "expectations_180d",
+        "challenger": "expectations_mechanisms_180d",
+        "stage": "development",
+        "group": "global"
+      },
+      {
+        "base": "expectations_180d",
+        "challenger": "expectations_mechanisms_180d",
+        "stage": "development",
+        "group": "quarterly"
+      },
+      {
+        "base": "expectations_180d",
+        "challenger": "expectations_mechanisms_180d",
+        "stage": "holdout",
+        "group": "global"
+      },
+      {
+        "base": "expectations_180d",
+        "challenger": "expectations_mechanisms_180d",
+        "stage": "holdout",
+        "group": "quarterly"
+      },
+      {
+        "base": "fusion_nf_pv25",
+        "challenger": "fusion_nf_core",
+        "stage": "development",
+        "group": "global"
+      },
+      {
+        "base": "fusion_nf_pv25",
+        "challenger": "fusion_nf_core",
+        "stage": "development",
+        "group": "quarterly"
+      },
+      {
+        "base": "fusion_nf_pv25",
+        "challenger": "fusion_nf_core",
+        "stage": "holdout",
+        "group": "global"
+      },
+      {
+        "base": "fusion_nf_pv25",
+        "challenger": "fusion_nf_core",
+        "stage": "holdout",
+        "group": "quarterly"
+      },
+      {
+        "base": "fusion_nf_core",
+        "challenger": "fusion_nf_expectations",
+        "stage": "development",
+        "group": "global"
+      },
+      {
+        "base": "fusion_nf_core",
+        "challenger": "fusion_nf_expectations",
+        "stage": "development",
+        "group": "quarterly"
+      },
+      {
+        "base": "fusion_nf_core",
+        "challenger": "fusion_nf_expectations",
+        "stage": "holdout",
+        "group": "global"
+      },
+      {
+        "base": "fusion_nf_core",
+        "challenger": "fusion_nf_expectations",
+        "stage": "holdout",
+        "group": "quarterly"
+      },
+      {
+        "base": "pv_nf25",
+        "challenger": "fusion_nf_pv25",
+        "stage": "development",
+        "group": "global"
+      },
+      {
+        "base": "pv_nf25",
+        "challenger": "fusion_nf_pv25",
+        "stage": "development",
+        "group": "quarterly"
+      },
+      {
+        "base": "pv_nf25",
+        "challenger": "fusion_nf_pv25",
+        "stage": "holdout",
+        "group": "global"
+      },
+      {
+        "base": "pv_nf25",
+        "challenger": "fusion_nf_pv25",
+        "stage": "holdout",
+        "group": "quarterly"
+      }
+    ],
+    "statistics": {
+      "hac_lag": 20,
+      "stationary_bootstrap_block": 20,
+      "bootstrap_repetitions": 2000,
+      "seed": 42,
+      "confidence": 0.95,
+      "fdr_method": "BY",
+      "alpha": 0.05,
+      "undefined_p_internal_placeholder": 1,
+      "undefined_p_public": null
+    },
+    "restrictions": [
+      "global_development_descriptive_only",
+      "no_missing_interval_fill_or_compaction",
+      "all_declared_comparisons_retained_in_BY",
+      "financial_account_absence_is_blocked",
+      "comparison_of_selected_recipes_not_causal_factor_increment",
+      "GQ_duplicates_retained_not_independent_evidence",
+      "NAV_calendar_and_native_identity_required"
+    ]
+  },
+  "planned_comparisons": 60,
+  "descriptive_comparisons": 48,
+  "HAC_defined": 36,
+  "undefined": 24,
+  "uncorrected_p_le_005": 5,
+  "BY_significant": 0,
+  "minimum_p": 0.0009638306713738247,
+  "minimum_BY_p": 0.2706361585234663,
+  "reasons": {
+    "DEFINED": 36,
+    "retrospective_global_development_selection": 12,
+    "required_account_unavailable": 12
+  },
+  "sources": [
+    {
+      "case": "core6",
+      "stage": "development",
+      "rows": 2424,
+      "canonical_selected_sha256": "e69817b23b974f5229e9922b8d5cef59fa5cb6ec5d4ef5eb7c41ee71a2b45907",
+      "output": "data/research/a-share-full-20261021/statistics/portfolio-performance-core6-development__locked_quantity",
+      "request_sha256": "5460e5816f5908155d48c6faa4b20eec4ed25a79a6eab149b96353ec6150da9c",
+      "native_manifest_sha256": "24fd1816c253ffc4b6a5d6e5bb151da9599ddef17c97c20c502d5b5fee1c51d5",
+      "native_daily_sha256": "3db56fa3be00e477a6a3f0383650997faa80c96c1d4d9f7d4baaeb4265423466",
+      "public_file": "core6-portfolio-daily.csv",
+      "public_file_sha256": "2300401df83e97033d629d43a1f780d5cc532c3bcae5af0f578de06ed7cd29ae",
+      "public_native_exact_match": true
+    },
+    {
+      "case": "core6",
+      "stage": "holdout",
+      "rows": 966,
+      "canonical_selected_sha256": "cf30fdd540b294dbfb6f4879d6ba4d0900ed5552372544c88268a7fcf2982051",
+      "output": "data/research/a-share-full-20261021/statistics/portfolio-performance-core6-holdout",
+      "request_sha256": "6faf33a342a3dc746765e9605ff9ffa8746706729917341604e685b5a8429500",
+      "native_manifest_sha256": "a92023d6b9bd5f0080503a2f4fed8cb9cead81166b4711269d47279cdd4589ab",
+      "native_daily_sha256": "34451876a6ff31fe7dc5f72cc0ee171fddd68005a2245d65d0be313cb4d39e17",
+      "public_file": "core6-portfolio-daily.csv",
+      "public_file_sha256": "2300401df83e97033d629d43a1f780d5cc532c3bcae5af0f578de06ed7cd29ae",
+      "public_native_exact_match": true
+    },
+    {
+      "case": "pv25",
+      "stage": "development",
+      "rows": 2424,
+      "canonical_selected_sha256": "d13700334e806132032fd04a95917121fc0433eb651a057cde8e20da2c10d4bc",
+      "output": "data/research/a-share-full-20261021/statistics/portfolio-performance-pv25-development__locked_quantity",
+      "request_sha256": "2da7f195bd05c138d6ba771ed2da3d6ba0a124316d45304c92e2ebb410d5ed05",
+      "native_manifest_sha256": "730445b8bc51abaa22d9027d445ea33d2ecf6ad75daf2f8cc5257a311e549bf4",
+      "native_daily_sha256": "03f0b3f1107e0fac6e92d5ed15c0190f1369e343337fbea0db4f99b53f1de251",
+      "public_file": "pv25-portfolio-daily.csv",
+      "public_file_sha256": "ac61b9789353009639698a8d2268b61691b961eb576f18584dd9cbbc6350e60b",
+      "public_native_exact_match": true
+    },
+    {
+      "case": "pv25",
+      "stage": "holdout",
+      "rows": 966,
+      "canonical_selected_sha256": "f2a3bb0f217efc212c313db6e7bef098191dbb67d4084e4e439987f0189d4775",
+      "output": "data/research/a-share-full-20261021/statistics/portfolio-performance-pv25-holdout",
+      "request_sha256": "056945c479c9419ccf68e7bddf095fba9b36e778ff312252889d48751c1d7057",
+      "native_manifest_sha256": "ed224c31000525d7114026721a86d3e0738e705aa55c04ea591e621973b90298",
+      "native_daily_sha256": "ce6ea76ceec8af9b7df0c8faa8fdda9addbe14e0f20e64b4107abcf9dea8bbb3",
+      "public_file": "pv25-portfolio-daily.csv",
+      "public_file_sha256": "ac61b9789353009639698a8d2268b61691b961eb576f18584dd9cbbc6350e60b",
+      "public_native_exact_match": true
+    },
+    {
+      "case": "pv_expanded",
+      "stage": "development",
+      "rows": 2424,
+      "canonical_selected_sha256": "e2376f675fb18c8efdaac5e3f751f6c8e0a0963c0a8571d4f2da17b1f42a8c0a",
+      "output": "data/research/a-share-full-20261021/statistics/portfolio-performance-pv_expanded__history_state-development",
+      "request_sha256": "8ea1d1da94f5dad7b228694d4ebbb37e40838924fee5ddb98909cb7b9163204a",
+      "native_manifest_sha256": "f49cd5c1ac558f1e4319121a9906b9d874dfcea54f66c28a2ce5abf2e7558d01",
+      "native_daily_sha256": "88cdf211e292d1c29b316b31de5ef85ef19c4b9089391361888cc95b34fb9f9a",
+      "public_file": "pv52-portfolio-daily.csv",
+      "public_file_sha256": "761dcdeaa93abcde717ef45e6966b0add1e7f18b12a1ef75417f7f6d6c17550d",
+      "public_native_exact_match": true
+    },
+    {
+      "case": "pv_expanded",
+      "stage": "holdout",
+      "rows": 966,
+      "canonical_selected_sha256": "fd81d8d5938699afb0f599d661339672dbd56c36675b3e6b86f1fab1dd4d4580",
+      "output": "data/research/a-share-full-20261021/statistics/portfolio-performance-pv_expanded__history_state-holdout",
+      "request_sha256": "10d4ac4590d7f7e2153a3a2eda49637bc0b0dcca0713591a567e09050bb8786d",
+      "native_manifest_sha256": "1ceb5119c3326f4a5204b748736536422a467baf78b7e582d3df11fc41eb968a",
+      "native_daily_sha256": "c98d9ed015cfa86de4f2560cf83032546c7e7a9db851e1c5b626821fb682a30d",
+      "public_file": "pv52-portfolio-daily.csv",
+      "public_file_sha256": "761dcdeaa93abcde717ef45e6966b0add1e7f18b12a1ef75417f7f6d6c17550d",
+      "public_native_exact_match": true
+    },
+    {
+      "case": "pv25_path",
+      "stage": "development",
+      "rows": 2424,
+      "canonical_selected_sha256": "78b0f4bff01282cb0ea5b61fb25f67b8f8f498f91bf35e1963fb389ae4ed6f98",
+      "output": "data/research/a-share-full-20261021/statistics/portfolio-performance-pv25_path-development",
+      "request_sha256": "5515365e55fa7cf31912bd6a377e029a771e4813af8752730c0935efe32fb0d8",
+      "native_manifest_sha256": "b0adb9c93523a067dd5bc4a229cac76cb5c068eb296a8a199d8655a8852aa8e6",
+      "native_daily_sha256": "ce2c8cd935fbea011dd95c10392b5b6f534603062c2af00d19c5bf141a110e82",
+      "public_file": "pv25-path-portfolio-daily.csv",
+      "public_file_sha256": "5d9c4afa2ff6e650fe827696828189ee3d5ed29a4eb6f100af569fa6ca1b8473",
+      "public_native_exact_match": true
+    },
+    {
+      "case": "pv25_path",
+      "stage": "holdout",
+      "rows": 966,
+      "canonical_selected_sha256": "148b03ab648232baabc95419a5f46630196ae02f4d2d2483b2fae279017b61af",
+      "output": "data/research/a-share-full-20261021/statistics/portfolio-performance-pv25_path-holdout",
+      "request_sha256": "9a56e8dfb794ad877c5654ae7c5572a587a40381390a78edeac67270ddbb8bfc",
+      "native_manifest_sha256": "9b40177f7a4451096d834641476649dadbeb0db0fb03b0384e1d3a43c24b2cb6",
+      "native_daily_sha256": "e8ef18f98d4734a4c4f854152e081fb51208bfc096421ef913ffd6b8253781f8",
+      "public_file": "pv25-path-portfolio-daily.csv",
+      "public_file_sha256": "5d9c4afa2ff6e650fe827696828189ee3d5ed29a4eb6f100af569fa6ca1b8473",
+      "public_native_exact_match": true
+    },
+    {
+      "case": "pv_expanded_path",
+      "stage": "development",
+      "rows": 2424,
+      "canonical_selected_sha256": "687ba597bb95c103edb5fc603cba81339b7f20d04f2db16738fa151f464523ac",
+      "output": "data/research/a-share-full-20261021/statistics/portfolio-performance-pv_expanded_path__history_state-development",
+      "request_sha256": "022a6128fa0e12cb0689398867113104ea736de010e1ab825d53c3430be1b4a2",
+      "native_manifest_sha256": "9a055e6f26a2597be9aa0957ada518679a8039bde6ead7ddb8dbd1a47e44537d",
+      "native_daily_sha256": "589e768429a286772d43b80e54ce991ac04df7ec84d50d11ffedb14d99eb44ae",
+      "public_file": "pv52-path-portfolio-daily.csv",
+      "public_file_sha256": "03aa8b96da4914ad7ada8eb2c883cb816f9fdc36b0dddab13899eee68b0ad693",
+      "public_native_exact_match": true
+    },
+    {
+      "case": "pv_expanded_path",
+      "stage": "holdout",
+      "rows": 966,
+      "canonical_selected_sha256": "98f9a0aa6f56ec9b338cbca3efbeb4b00644ae8beab022c635285518a1be3e9d",
+      "output": "data/research/a-share-full-20261021/statistics/portfolio-performance-pv_expanded_path__history_state-holdout",
+      "request_sha256": "1806fef513410de0a3a71b07118e9e4e50fa6af44fd4b26208f780d572f574ee",
+      "native_manifest_sha256": "f7ebc39b8ceba8556e8fe6a1b1ccb6007706cdde84881e89f143c9ab48f07fc6",
+      "native_daily_sha256": "c204993c54e12f68b4c805c01b85931231dd01e51da7b091a7865518d7b7524c",
+      "public_file": "pv52-path-portfolio-daily.csv",
+      "public_file_sha256": "03aa8b96da4914ad7ada8eb2c883cb816f9fdc36b0dddab13899eee68b0ad693",
+      "public_native_exact_match": true
+    },
+    {
+      "case": "pv52_without_size_price",
+      "stage": "development",
+      "rows": 2424,
+      "canonical_selected_sha256": "51a3096264d55d22b85da9686689b363166e38d49ae9d69a2cd43b8bacf07e24",
+      "output": "data/research/a-share-full-20261021/statistics/portfolio-performance-pv52_without_size_price__history_state-development",
+      "request_sha256": "a4908a57a4acd1df0dd610bddb3fb682970a19d40a1e27f2cc50bbdd8ef778b9",
+      "native_manifest_sha256": "e5d9c656bec21289380d9d1f6ba00d6e60647cd3669a198e2b7701fec65cdfa4",
+      "native_daily_sha256": "ad73841d75cf6dca7ca45efc60bab0fb7be43a22eb01a3e3d99314ad60773212",
+      "public_file": "pv52-without-size-price-portfolio-daily.csv",
+      "public_file_sha256": "b90c0688e405cbdf2578e62b246a5a673c92875e1f63a8f1f5c1a5cd84fdb53d",
+      "public_native_exact_match": true
+    },
+    {
+      "case": "pv52_without_size_price",
+      "stage": "holdout",
+      "rows": 966,
+      "canonical_selected_sha256": "98b44ffb4522837c59d47bb9d345e4cb2aa7481ac477432c9d010260f0a28291",
+      "output": "data/research/a-share-full-20261021/statistics/portfolio-performance-pv52_without_size_price__history_state-holdout",
+      "request_sha256": "b168137a6a9fc9926f3bae2841b7de544fbe4d1d539b6193a16fec90d137f8f9",
+      "native_manifest_sha256": "1dfec84d94cefc5becd06ba75abe34e85ef771b0cc82039e2a7cba4a4561b13c",
+      "native_daily_sha256": "2c38dfa0c37e554026affa0843d446e780d699380378cb0eae845572a190f1ef",
+      "public_file": "pv52-without-size-price-portfolio-daily.csv",
+      "public_file_sha256": "b90c0688e405cbdf2578e62b246a5a673c92875e1f63a8f1f5c1a5cd84fdb53d",
+      "public_native_exact_match": true
+    },
+    {
+      "case": "pv52_without_trend_reversal",
+      "stage": "development",
+      "rows": 2424,
+      "canonical_selected_sha256": "320047b1ac125c492debf9cf1983f90916ba43b0e3b5369cc7928dcd1b5b997d",
+      "output": "data/research/a-share-full-20261021/statistics/portfolio-performance-pv52_without_trend_reversal__history_state-development",
+      "request_sha256": "92b458966cb4125b46bfc5868acdcd29905a81ed80558d192df674b83f83a6af",
+      "native_manifest_sha256": "9e5e55fa330c674b1ab47428e7a3712ccabc3545400f390cbd7bc393b5366259",
+      "native_daily_sha256": "84e999930610c527ecbad6c68a374e92542242dd9bb3c068922cdd1615b54d39",
+      "public_file": "pv52-without-trend-reversal-portfolio-daily.csv",
+      "public_file_sha256": "dc48d6ca57d62ce3a01158220855e0abaf9d4580f3195a510c0ebc9f9de0008f",
+      "public_native_exact_match": true
+    },
+    {
+      "case": "pv52_without_trend_reversal",
+      "stage": "holdout",
+      "rows": 966,
+      "canonical_selected_sha256": "6c02e1608e599ec8759ef7410b72be7e09fba2032479ec375fcc957d12ef558b",
+      "output": "data/research/a-share-full-20261021/statistics/portfolio-performance-pv52_without_trend_reversal__history_state-holdout",
+      "request_sha256": "b5c869a2612d0a0eda4d507cc6f8447cc4acede3b927e32384c79eac6b5e2ae1",
+      "native_manifest_sha256": "abf937e49a0a147d4e864182cb8a702ee1c3266d3d32f394be86156b876fee50",
+      "native_daily_sha256": "3447df537297776d9d8a1ef03398603764d9b43e235fe5e540f302bcbdec3f0b",
+      "public_file": "pv52-without-trend-reversal-portfolio-daily.csv",
+      "public_file_sha256": "dc48d6ca57d62ce3a01158220855e0abaf9d4580f3195a510c0ebc9f9de0008f",
+      "public_native_exact_match": true
+    },
+    {
+      "case": "pv52_without_activity_liquidity",
+      "stage": "development",
+      "rows": 2424,
+      "canonical_selected_sha256": "8a6e83f1ee6b33b30a75bf32550ae755a9267cfb861bc0583aa56c02aab3aa37",
+      "output": "data/research/a-share-full-20261021/statistics/portfolio-performance-pv52_without_activity_liquidity__history_state-development",
+      "request_sha256": "0ff08471476c8dc1718f85c7a597f452326ab163fd58a14664b544fcf7646d0f",
+      "native_manifest_sha256": "bf9999bc4b38724225c9da7b72a473f7e45ebc458b5d68b46cb7b954a6b48fdc",
+      "native_daily_sha256": "a0479ee2e3fc222609070885bd593f8c9c1dabbc382b93ad0faccc8e8a5b0ab6",
+      "public_file": "pv52-without-activity-liquidity-portfolio-daily.csv",
+      "public_file_sha256": "598571b5848a39c76044c27e644d0deee35ba0da5cbe60d013522ed46176deda",
+      "public_native_exact_match": true
+    },
+    {
+      "case": "pv52_without_activity_liquidity",
+      "stage": "holdout",
+      "rows": 966,
+      "canonical_selected_sha256": "1bfe704246f4e9d38be062a0d482f4c955e9e0f314844e75317e43e3c251b8f9",
+      "output": "data/research/a-share-full-20261021/statistics/portfolio-performance-pv52_without_activity_liquidity__history_state-holdout",
+      "request_sha256": "a5a7aa9fbf42975e25b0566bd2400dcf932b7f23ac1198f334c7fdf90a4abd4b",
+      "native_manifest_sha256": "921e73490724e6314fb5aa7ad06b19528bc1b9a93f6da9a34ae3f9c5d700049e",
+      "native_daily_sha256": "332e899749a31c2763d838254942523081878ceaefca83a4943ac88d65206f8a",
+      "public_file": "pv52-without-activity-liquidity-portfolio-daily.csv",
+      "public_file_sha256": "598571b5848a39c76044c27e644d0deee35ba0da5cbe60d013522ed46176deda",
+      "public_native_exact_match": true
+    },
+    {
+      "case": "pv52_without_risk_path",
+      "stage": "development",
+      "rows": 2424,
+      "canonical_selected_sha256": "9734b06ff8085d80cd4869fd7213bf9000d57fa7b65124a18a6cc1e531a4fc9e",
+      "output": "data/research/a-share-full-20261021/statistics/portfolio-performance-pv52_without_risk_path-development",
+      "request_sha256": "f4df20aad9dadadb118b9d549f15e739bfebfe99b4f9333f97d63ccfa330228e",
+      "native_manifest_sha256": "b48c7a82e1ec8dce0e41be6bd3f2746e9e2a9f109e74b5f8210e4ebfce88f55b",
+      "native_daily_sha256": "4f909175e8ab1c4942134a48d5ee580bfa55032156af165f96ec0d15c4429f8c",
+      "public_file": "pv52-without-risk-path-portfolio-daily.csv",
+      "public_file_sha256": "fa4409fdd126fd12e73c1dfc2f10ecebf3c788755eedd51d611340cc10148168",
+      "public_native_exact_match": true
+    },
+    {
+      "case": "pv52_without_risk_path",
+      "stage": "holdout",
+      "rows": 966,
+      "canonical_selected_sha256": "76ecf25ae6c61afee195c5a73dce4747b2744c548f1b9de1082c3dff707e238b",
+      "output": "data/research/a-share-full-20261021/statistics/portfolio-performance-pv52_without_risk_path-holdout",
+      "request_sha256": "b89cc6fc603160cddc96b2f7ee64ee6242ae269288600742611da9d86068aa43",
+      "native_manifest_sha256": "6523273043084d3a1abd66c3f0c7234fefaf9dd812bf2d0ec68ab18cc559a27f",
+      "native_daily_sha256": "5c188ba0f114c89510a6b9e7967105ed61858c2db94a96152457b74af6080796",
+      "public_file": "pv52-without-risk-path-portfolio-daily.csv",
+      "public_file_sha256": "fa4409fdd126fd12e73c1dfc2f10ecebf3c788755eedd51d611340cc10148168",
+      "public_native_exact_match": true
+    },
+    {
+      "case": "pv_nf25",
+      "stage": "development",
+      "rows": 2424,
+      "canonical_selected_sha256": "6d16980268b18900487e584b78162bc89fb956ed3c2ac5a40513df12766d1972",
+      "output": "data/research/a-share-full-20261021/statistics/portfolio-performance-pv_nf25-development__locked_quantity",
+      "request_sha256": "4ccbcbeff370f102889a774c69bc7806c9c3680018d77b289ae148755d90fe54",
+      "native_manifest_sha256": "58e6e304a56b8db127aca039aa17afd0ad7955f7ead3d4839206ce6eb03e3add",
+      "native_daily_sha256": "2a1748b047c4f29bc8ec1154eb70adadf017bbad749ec9b88492e16b6c528a32",
+      "public_file": "pv-nf25-portfolio-daily.csv",
+      "public_file_sha256": "5713cb2a06a2b855f57aaaf622e3782e82479f0d16fa857aaac40a2d988538cc",
+      "public_native_exact_match": true
+    },
+    {
+      "case": "pv_nf25",
+      "stage": "holdout",
+      "rows": 966,
+      "canonical_selected_sha256": "250beb3c7d52ded45929f1f57f9c4302754374fd4e40924b81b9ecde92947145",
+      "output": "data/research/a-share-full-20261021/statistics/portfolio-performance-pv_nf25-holdout",
+      "request_sha256": "6398f1e037e79b4ccb92bf225dccdf22115bc806e39af5d79d77e9f04f7c5002",
+      "native_manifest_sha256": "82ff0c40e8aaeba40211cf1ee5796c5f86d45cbbd940ffb65587e23a3c950e41",
+      "native_daily_sha256": "9c061ca0e8bc9e5750e103cf61ff75612ddae1dad5494ef6c6f1b465594368f6",
+      "public_file": "pv-nf25-portfolio-daily.csv",
+      "public_file_sha256": "5713cb2a06a2b855f57aaaf622e3782e82479f0d16fa857aaac40a2d988538cc",
+      "public_native_exact_match": true
+    },
+    {
+      "case": "pv_nf_expectations",
+      "stage": "development",
+      "rows": 2424,
+      "canonical_selected_sha256": "fdb2a9d5900e4f6619972b4422e0da8a65d83f6ee5e9849a13d983010f768c40",
+      "output": "data/research/a-share-full-20261021/statistics/portfolio-performance-pv_nf_expectations-development",
+      "request_sha256": "6ac021b3ffd7ce7195c795c0d000affcd5e3ccf2df83b98c94b8cc97a128dad8",
+      "native_manifest_sha256": "98fe8eb04d3f71255171ebaa32e7ab633d140569f390dd4b71c0da72ed76f14b",
+      "native_daily_sha256": "ec0b68699912c6fa94c24d3c65f9c44407de4ef229497c6a8ee8e9a9b0ff1862",
+      "public_file": "pv-nf-expectations-portfolio-daily.csv",
+      "public_file_sha256": "5f8f2f262ab2d9368e5106473a63b39a98a61718e2ed678d937e3c575b38b2fa",
+      "public_native_exact_match": true
+    },
+    {
+      "case": "pv_nf_expectations",
+      "stage": "holdout",
+      "rows": 966,
+      "canonical_selected_sha256": "2bfa87d087e277254d845c7519e81f4c111e7e1892fdb58a3fb953634a4acee0",
+      "output": "data/research/a-share-full-20261021/statistics/portfolio-performance-pv_nf_expectations-holdout",
+      "request_sha256": "f6110b3af8e838da36b48b6f1a72b2170b12d876146cb6314a2c4fb1e4702a3c",
+      "native_manifest_sha256": "e614247ae0665e0a97f3c9d9427b9bc1d43e364bbc4a574bacec81491acda107",
+      "native_daily_sha256": "8e2c3da0f5d47457c0081ba947854a820c51a6e5bb50b0063b4bb057b0087d29",
+      "public_file": "pv-nf-expectations-portfolio-daily.csv",
+      "public_file_sha256": "5f8f2f262ab2d9368e5106473a63b39a98a61718e2ed678d937e3c575b38b2fa",
+      "public_native_exact_match": true
+    },
+    {
+      "case": "expectations_180d",
+      "stage": "development",
+      "rows": 2424,
+      "canonical_selected_sha256": "89eb806e3ec874d99cda14fa491364de988415caa3852d13c5937e9a1096d044",
+      "output": "data/research/a-share-full-20261021/statistics/portfolio-performance-expectations_180d-development",
+      "request_sha256": "3683d02310225540b4ca5bce0a96e7b5a83fab22612e98706a4b8ada3dc4c85e",
+      "native_manifest_sha256": "45ef59cdd279e22eec3a0085a6c071ea41686800b946f69c569605508322d562",
+      "native_daily_sha256": "82ff5610bf82f8f31f4eca2d6961b67dc7d974a054bce67bfcf2fff515757c14",
+      "public_file": "expectations-180d-portfolio-daily.csv",
+      "public_file_sha256": "87c436eb91117ada51484f4da2d7dfb1385b0a051335df9e2ef01edd538c0444",
+      "public_native_exact_match": true
+    },
+    {
+      "case": "expectations_180d",
+      "stage": "holdout",
+      "rows": 966,
+      "canonical_selected_sha256": "e5d355f6429fd53d0b9b3be19e7a3b50af04c803c5765a5f09035490884c4561",
+      "output": "data/research/a-share-full-20261021/statistics/portfolio-performance-expectations_180d-holdout",
+      "request_sha256": "19ed1e780798b8f68cd263c9b6f74a0b94302c3985b2612690a6d6b6fd9a1274",
+      "native_manifest_sha256": "581136638b991d8494f962497d982318d0a21318c051cf5fbd5479209aa56d98",
+      "native_daily_sha256": "cf60dab80f99573b337c2953b5017c0ed3ac80d83286721590488b61ce851882",
+      "public_file": "expectations-180d-portfolio-daily.csv",
+      "public_file_sha256": "87c436eb91117ada51484f4da2d7dfb1385b0a051335df9e2ef01edd538c0444",
+      "public_native_exact_match": true
+    },
+    {
+      "case": "expectations_mechanisms_90d",
+      "stage": "development",
+      "rows": 2424,
+      "canonical_selected_sha256": "5d027120b166a6cccb87c27de0eb382d22514a1d0eb8a000e46aa530a185f05a",
+      "output": "data/research/a-share-full-20261021/statistics/portfolio-performance-expectations_mechanisms_90d-development",
+      "request_sha256": "20d231f142ee1eaf9ccae5fbccb611693a2076dd890025d127ceda2a125f47d2",
+      "native_manifest_sha256": "9d3a2691ec6418e3fbb72126fadb16a40c20ab2c4e10e2b49da3df87cd3e8344",
+      "native_daily_sha256": "b5c529ea3843ba443b404247354c113bdc562bb9d89478dca0e59cc6d4f89285",
+      "public_file": "expectations-mechanisms-90d-portfolio-daily.csv",
+      "public_file_sha256": "1f900d7750082cd4714c5d44e34dcc23df650c7010bece24529ddf452cb3e730",
+      "public_native_exact_match": true
+    },
+    {
+      "case": "expectations_mechanisms_90d",
+      "stage": "holdout",
+      "rows": 966,
+      "canonical_selected_sha256": "258848017d87967463fc01d6bd9bd745da836bb416d83b34cabd7457855ef040",
+      "output": "data/research/a-share-full-20261021/statistics/portfolio-performance-expectations_mechanisms_90d-holdout",
+      "request_sha256": "2850c8e002adeea4abcda7d102acc5fee597092f37f370e57ad62d9f121e6efe",
+      "native_manifest_sha256": "73aa6d61e7b50c7c812a81b8a2ea7440c1a338c3df87616af2190efc3cdce5e6",
+      "native_daily_sha256": "d7a6fb1b20e3dbf4a2482a06a29de8836e4f1e2e64de1f9d5a54d9a33b53b3ad",
+      "public_file": "expectations-mechanisms-90d-portfolio-daily.csv",
+      "public_file_sha256": "1f900d7750082cd4714c5d44e34dcc23df650c7010bece24529ddf452cb3e730",
+      "public_native_exact_match": true
+    },
+    {
+      "case": "expectations_mechanisms_180d",
+      "stage": "development",
+      "rows": 2424,
+      "canonical_selected_sha256": "47b3e1fd9cccf45949f98a2a4b13fa499a99c9f38d4ef9e08d37b2c587bef9fb",
+      "output": "data/research/a-share-full-20261021/statistics/portfolio-performance-expectations_mechanisms_180d-development",
+      "request_sha256": "b012281fe19bfa9584ee0a7a46ea0c8c42913b4e67a33c17111aa19fefeb1d25",
+      "native_manifest_sha256": "f0249f275ed6b79265afdb6a6e67948bfdb75cb05414e13fe6bb8a73249b5805",
+      "native_daily_sha256": "d74e52cc111726de9e7ec2ff584a009b9732a311dfb90547bce9500774fa5724",
+      "public_file": "expectations-mechanisms-180d-portfolio-daily.csv",
+      "public_file_sha256": "0b5676ce9fb2d6a4cdbbaf9af2314baa8870b1ef8613f04a5b328df56d87e46b",
+      "public_native_exact_match": true
+    },
+    {
+      "case": "expectations_mechanisms_180d",
+      "stage": "holdout",
+      "rows": 966,
+      "canonical_selected_sha256": "915bdb85b9d62377a2c57f09ad47e784b0a0d5cf0dfa73c9c18c2cffb15cb36b",
+      "output": "data/research/a-share-full-20261021/statistics/portfolio-performance-expectations_mechanisms_180d-holdout",
+      "request_sha256": "d2e3d2abc629f5efb5a047e3143748e750e35b53af73d21afb502a9fdb2f2348",
+      "native_manifest_sha256": "de85d00238d087c1680b2b3c5ba42fd010837843a7af2da0b6c4c0affc216459",
+      "native_daily_sha256": "2aacea839965bef69ebc9e553cff3d8b561d90867b0c9066d8af239570dd2107",
+      "public_file": "expectations-mechanisms-180d-portfolio-daily.csv",
+      "public_file_sha256": "0b5676ce9fb2d6a4cdbbaf9af2314baa8870b1ef8613f04a5b328df56d87e46b",
+      "public_native_exact_match": true
+    }
+  ],
+  "validation": {
+    "native_public_selected_rows_exact": 47460,
+    "account_metric_checks": 168,
+    "independent_HAC": 36,
+    "independent_BY": "PASS",
+    "hand_calculation_self_check": "PASS",
+    "full_clock_and_NAV_return": "PASS"
+  },
+  "outputs": {
+    "next-economic-comparison.csv": "2a1203480989418f5852486ff7280e5cf044df998a3b94d4dd9628e2e505313b",
+    "next-economic-daily.csv": "5cc54c026d309e2889ea0516a6a863c8dda7ffd078f58e96ee356d63e37df0a7"
+  },
+  "publication": {
+    "text_encoding": "UTF-8",
+    "line_endings": "LF",
+    "numeric_cells_changed": false,
+    "normalization_script_sha256": "158b13713f5a179b44d7387b34393b7d44c61c39d8aa980f5089a6d833250f4d"
+  }
+}

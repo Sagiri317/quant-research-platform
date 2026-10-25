@@ -1,0 +1,296 @@
+{
+  "checked_at_utc": "2026-10-25T03:47:22.207814+00:00",
+  "status": "BLOCKED_REQUIRED_NEW_MARKET_PERIOD_UNAVAILABLE",
+  "historical_evaluation_end": "2025-12-31",
+  "new_model_fits_started": 0,
+  "new_unseen_period_evaluations_started": 0,
+  "local_source_inventory": [
+    {
+      "dataset": "adjustment",
+      "metadata_files": 1,
+      "latest_declared_date": "2026-09-01"
+    },
+    {
+      "dataset": "analyst_forecast",
+      "metadata_files": 3,
+      "latest_declared_date": null
+    },
+    {
+      "dataset": "equity_changes",
+      "metadata_files": 2,
+      "latest_declared_date": "2025-12-31"
+    },
+    {
+      "dataset": "financial_balance",
+      "metadata_files": 1,
+      "latest_declared_date": "2026-08-31"
+    },
+    {
+      "dataset": "financial_cashflow",
+      "metadata_files": 1,
+      "latest_declared_date": "2026-08-28"
+    },
+    {
+      "dataset": "financial_income",
+      "metadata_files": 1,
+      "latest_declared_date": "2026-08-29"
+    },
+    {
+      "dataset": "index_info",
+      "metadata_files": 1,
+      "latest_declared_date": null
+    },
+    {
+      "dataset": "index_market",
+      "metadata_files": 13,
+      "latest_declared_date": "2025-12-31"
+    },
+    {
+      "dataset": "index_membership",
+      "metadata_files": 13,
+      "latest_declared_date": "2025-12-31"
+    },
+    {
+      "dataset": "index_weights",
+      "metadata_files": 6,
+      "latest_declared_date": "2025-12-31"
+    },
+    {
+      "dataset": "industry_classification",
+      "metadata_files": 1,
+      "latest_declared_date": "2026-09-02"
+    },
+    {
+      "dataset": "industry_classification_annual",
+      "metadata_files": 1,
+      "latest_declared_date": "2025-12-31"
+    },
+    {
+      "dataset": "industry_classification_sets",
+      "metadata_files": 1,
+      "latest_declared_date": null
+    },
+    {
+      "dataset": "industry_classification_versions",
+      "metadata_files": 1,
+      "latest_declared_date": "2026-09-07"
+    },
+    {
+      "dataset": "listing_status_changes",
+      "metadata_files": 1,
+      "latest_declared_date": null
+    },
+    {
+      "dataset": "market_bars_1d",
+      "metadata_files": 16,
+      "latest_declared_date": "2025-12-31"
+    },
+    {
+      "dataset": "market_cap",
+      "metadata_files": 1,
+      "latest_declared_date": "2026-09-09"
+    },
+    {
+      "dataset": "special_treatment_changes",
+      "metadata_files": 1,
+      "latest_declared_date": null
+    },
+    {
+      "dataset": "stock_info_annual",
+      "metadata_files": 1,
+      "latest_declared_date": "2026-04-21"
+    },
+    {
+      "dataset": "stock_info_changes",
+      "metadata_files": 1,
+      "latest_declared_date": null
+    },
+    {
+      "dataset": "stock_master",
+      "metadata_files": 1,
+      "latest_declared_date": "2026-09-02"
+    },
+    {
+      "dataset": "trading_calendar",
+      "metadata_files": 1,
+      "latest_declared_date": "2026-12-31"
+    },
+    {
+      "dataset": "trading_no_limit",
+      "metadata_files": 1,
+      "latest_declared_date": "2026-09-08"
+    }
+  ],
+  "remote_current_research_inputs": [
+    {
+      "host": "first",
+      "source_metadata": [
+        {
+          "dataset": "market_bars_1d",
+          "status": "AVAILABLE",
+          "date_min": "2011-01-03",
+          "date_max": "2025-12-31",
+          "row_count": 14690287,
+          "native_manifest_canonical_sha256": "999ffbc55ff44b3a5d37d38cc01922c36c15fec247d0480e8b7f5f413319dce9"
+        },
+        {
+          "dataset": "index_market",
+          "status": "AVAILABLE",
+          "date_min": "2011-01-03",
+          "date_max": "2025-12-31",
+          "row_count": 10693339,
+          "native_manifest_canonical_sha256": "92bd93f1f614ca0d159677ab2b38d6216f243eeffe5ec7da9d76b5a14e605199"
+        }
+      ]
+    },
+    {
+      "host": "second",
+      "source_metadata": [
+        {
+          "dataset": "market_bars_1d",
+          "status": "AVAILABLE",
+          "date_min": "2011-01-03",
+          "date_max": "2025-12-31",
+          "row_count": 14690287,
+          "native_manifest_canonical_sha256": "999ffbc55ff44b3a5d37d38cc01922c36c15fec247d0480e8b7f5f413319dce9"
+        },
+        {
+          "dataset": "index_market",
+          "status": "AVAILABLE",
+          "date_min": "2011-01-03",
+          "date_max": "2025-12-31",
+          "row_count": 10693339,
+          "native_manifest_canonical_sha256": "92bd93f1f614ca0d159677ab2b38d6216f243eeffe5ec7da9d76b5a14e605199"
+        }
+      ]
+    }
+  ],
+  "source_metadata": [
+    {
+      "path": "data/raw/csmar/daily_market/csmar__market_bars_1d__all__full__part-00__export-20260902.metadata.json",
+      "sha256": "08a557359404bb535b0985ab02b866e9e48e41ca168dfd26c530ee0b7e4aeb0c"
+    },
+    {
+      "path": "data/raw/csmar/daily_market/csmar__market_bars_1d__all__full__part-01__export-20260902.metadata.json",
+      "sha256": "b6f71c1112dc1ceb28c856428f1d7acd07d083d928f19d197880880a0e465746"
+    },
+    {
+      "path": "data/raw/csmar/daily_market/csmar__market_bars_1d__all__full__part-02__export-20260902.metadata.json",
+      "sha256": "c7500b0366609d9ac977e19390b683fe278e788fa52e40c79e7bcd86982a02bd"
+    },
+    {
+      "path": "data/raw/csmar/daily_market/csmar__market_bars_1d__all__full__part-03__export-20260902.metadata.json",
+      "sha256": "878686919bc99bb7c491f61f2009d8cda4d7c4b7c676d991ecaf3decf511c02c"
+    },
+    {
+      "path": "data/raw/csmar/daily_market/csmar__market_bars_1d__all__full__part-04__export-20260902.metadata.json",
+      "sha256": "8cb40104d1b2a0dc9d7f35c06e92e6d136178e8ccf8a0da95a74aaa85f317a5c"
+    },
+    {
+      "path": "data/raw/csmar/daily_market/csmar__market_bars_1d__all__full__part-05__export-20260902.metadata.json",
+      "sha256": "c4cec0845b23a42232c800c5d927f53c2289a61d1480d42911c8325189b55b91"
+    },
+    {
+      "path": "data/raw/csmar/daily_market/csmar__market_bars_1d__all__full__part-06__export-20260902.metadata.json",
+      "sha256": "83fc83173aaf4612ccf81db0e9e2fe9318e0f9c7d7ddd25ea8faad31e21ed414"
+    },
+    {
+      "path": "data/raw/csmar/daily_market/csmar__market_bars_1d__all__full__part-07__export-20260902.metadata.json",
+      "sha256": "77e3026b4694347c61b56f29d6c713aeda9f07b94afe341b34f0d310f3bdda2a"
+    },
+    {
+      "path": "data/raw/csmar/daily_market/csmar__market_bars_1d__all__full__part-08__export-20260902.metadata.json",
+      "sha256": "8b75f4b14bc210c98201ae2aee7a5044263ecd1a9adb7d1528316ebad4c56a11"
+    },
+    {
+      "path": "data/raw/csmar/daily_market/csmar__market_bars_1d__all__full__part-09__export-20260902.metadata.json",
+      "sha256": "136458cb509419c750250d488ed2ffe7567302cdbec71dd781495d2b6ae49262"
+    },
+    {
+      "path": "data/raw/csmar/daily_market/csmar__market_bars_1d__all__full__part-10__export-20260902.metadata.json",
+      "sha256": "79f4377b80b37c6fa3ad8108360f2a9f648426f39ac98010e88dd4fda47888ae"
+    },
+    {
+      "path": "data/raw/csmar/daily_market/csmar__market_bars_1d__all__full__part-11__export-20260902.metadata.json",
+      "sha256": "03dff80b5d379f859f221adbfd68ec456be058fa8ba997e2756aa9add978c2a2"
+    },
+    {
+      "path": "data/raw/csmar/daily_market/csmar__market_bars_1d__all__full__part-12__export-20260902.metadata.json",
+      "sha256": "93c48b610f7e318c51cafee7b8a6c5dbf9ba2a9271bfc930359aff25bc325c98"
+    },
+    {
+      "path": "data/raw/csmar/daily_market/csmar__market_bars_1d__all__full__part-13__export-20260902.metadata.json",
+      "sha256": "5517b47816f880a834064964060d3d4f183b0114e848f27c2c5cacacbef21c3a"
+    },
+    {
+      "path": "data/raw/csmar/daily_market/csmar__market_bars_1d__all__full__part-14__export-20260902.metadata.json",
+      "sha256": "d49ed2e96a97315769d85f12a28c31d9f288c6960e49d321116b1eb5634e27e4"
+    },
+    {
+      "path": "data/raw/csmar/daily_market/csmar__market_bars_1d__all__full__part-15__export-20260902.metadata.json",
+      "sha256": "eea15fca4f252fe767fe6d2800c4ced49abc56ec5a277a059bdd73f1e52cda7a"
+    },
+    {
+      "path": "data/raw/csmar/index_market/csmar__index_market__all__full__part-00__export-20260902.metadata.json",
+      "sha256": "d72ae8923e2af2667fab8e65ed5517188dc2d8f21eb1fe55b8a3c98f23c3680c"
+    },
+    {
+      "path": "data/raw/csmar/index_market/csmar__index_market__all__full__part-01__export-20260902.metadata.json",
+      "sha256": "6f502d367d0bcc4c266fe40975911b9749dfb8a840bd8f71e6521bf5cc65a843"
+    },
+    {
+      "path": "data/raw/csmar/index_market/csmar__index_market__all__full__part-02__export-20260902.metadata.json",
+      "sha256": "d48cf161bbf739af69cb20b701170e9a4bb4a6bd66db033f078c900a5d5c654e"
+    },
+    {
+      "path": "data/raw/csmar/index_market/csmar__index_market__all__full__part-03__export-20260902.metadata.json",
+      "sha256": "62c0d7c45571766e5f197af2d2f7b50c378b75d5e607ebee0612a1daad981ab3"
+    },
+    {
+      "path": "data/raw/csmar/index_market/csmar__index_market__all__full__part-04__export-20260902.metadata.json",
+      "sha256": "fc62a3fd1ef9162106d435d97247718521f886586bdab6b8e43db29400a9bdb0"
+    },
+    {
+      "path": "data/raw/csmar/index_market/csmar__index_market__all__full__part-05__export-20260902.metadata.json",
+      "sha256": "05b5c989b61b54436d7101fa535f9c0ef674b5a88d074e6725695aa5e80584d1"
+    },
+    {
+      "path": "data/raw/csmar/index_market/csmar__index_market__all__full__part-06__export-20260902.metadata.json",
+      "sha256": "3cbd296c57941a9c79cef947b849dfe7f6761bfae383525880c7a0db1c4436a7"
+    },
+    {
+      "path": "data/raw/csmar/index_market/csmar__index_market__all__full__part-07__export-20260902.metadata.json",
+      "sha256": "7b86fd63aecc463800658dab927c5e9ae170f170c2e9b83898aee87ae141907d"
+    },
+    {
+      "path": "data/raw/csmar/index_market/csmar__index_market__all__full__part-08__export-20260902.metadata.json",
+      "sha256": "e8cc546687b9b1b9eddc858069dfd902df7c441e1aa07596c3e4365ab51645b2"
+    },
+    {
+      "path": "data/raw/csmar/index_market/csmar__index_market__all__full__part-09__export-20260902.metadata.json",
+      "sha256": "942ab42a9809fb6190bb86591ccd98a5d7222024cf57edcb7504a2684dd7f377"
+    },
+    {
+      "path": "data/raw/csmar/index_market/csmar__index_market__all__full__part-10__export-20260902.metadata.json",
+      "sha256": "8cf056a3ab1695984341f032842e522e053bae4e1b26d1ac7634ac1fe3dd6cf9"
+    },
+    {
+      "path": "data/raw/csmar/index_market/csmar__index_market__all__full__part-11__export-20260902.metadata.json",
+      "sha256": "45ba2b96235934a004f996ca5ce4bb3a6826c53bc0c16f62514793aff2fb183f"
+    },
+    {
+      "path": "data/raw/csmar/index_market/csmar__index_market__all__full__part-12__export-20260902.metadata.json",
+      "sha256": "3cce114f7bb5d0da9461476641b314cb1b3dc09fd469775332cf5aa20ac7fa8c"
+    }
+  ],
+  "interpretation": "2026 dates in static, financial or calendar sources do not supply a new stock/index daily-market evaluation period.",
+  "next_step": "Obtain an actual post-2025 market period and verify it has not been used for training, selection or analysis before evaluating frozen existing candidates.",
+  "coverage_limit": "Checked local CSMAR raw-source metadata and both hosts current native research inputs; did not scan unrelated directories or acquire new external data.",
+  "analysis_script_sha256": "57c86f6f6bb1c7eee7163bae9bc7d6f27141300efdbeb2525e4c3b8a05e937cb",
+  "publication": {
+    "text_encoding": "UTF-8",
+    "line_endings": "LF",
+    "numeric_cells_changed": false,
+    "normalization_script_sha256": "158b13713f5a179b44d7387b34393b7d44c61c39d8aa980f5089a6d833250f4d"
+  }
+}

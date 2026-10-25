@@ -1,0 +1,674 @@
+{
+  "status": "PASS_NATIVE_LEDGER_STATISTICS_AND_INDEPENDENT_RECALCULATION",
+  "interpretation": "历史探索性压力情景，不是实际市场成本估计，不重新选型或调参",
+  "window": {
+    "start": "2024-01-01",
+    "end": "2025-12-31"
+  },
+  "sample_role": "holdout_reassessment",
+  "plan_sha256": "ba549fc70ace36f43ea86d9dbdf26bdc987f7ddfc1c01c54149a828c41157ce1",
+  "model_id": "pv25__xgboost_regressor__c0",
+  "candidate_id": "quarterly_pv25__champion_equal",
+  "source_head": "73c229c09030491b609098b0ef77463feb31df73",
+  "source_sha256": {
+    "src/quant_research_platform/research/portfolios/production.py": "dfa39cabb657e04d841622002dc9fb2331e8fb340bb37f78ecfc3e97e53c2f44",
+    "src/quant_research_platform/research/portfolios/diagnostics.py": "7517a2e36df8c5b5c5b0465a094493d29d1eb442f30a91f5d9c9574968770ca1",
+    "src/quant_research_platform/artifacts/portfolio_ledger.py": "8bdf903e84622c8875fe0fe30815f58e35414689864087b775512086c440aee4",
+    "src/quant_research_platform/markets/implementations/a_share/execution.py": "380a662aa1e05adff1f1be940e8e7d7f2fe94c2d341c1f49c97ce88dcc11e2d7"
+  },
+  "baseline_compute_comparison": [
+    {
+      "file": "research/portfolios/__init__.py",
+      "same": true
+    },
+    {
+      "file": "research/portfolios/accounting.py",
+      "same": true
+    },
+    {
+      "file": "research/portfolios/comparison.py",
+      "same": true
+    },
+    {
+      "file": "research/portfolios/construction.py",
+      "same": true
+    },
+    {
+      "file": "research/portfolios/diagnostics.py",
+      "same": true
+    },
+    {
+      "file": "research/portfolios/optimizer.py",
+      "same": true
+    },
+    {
+      "file": "research/portfolios/production.py",
+      "same": true
+    },
+    {
+      "file": "research/portfolios/risk.py",
+      "same": true
+    },
+    {
+      "file": "research/portfolios/schedules.py",
+      "same": true
+    },
+    {
+      "file": "contracts/portfolios.py",
+      "same": true
+    },
+    {
+      "file": "compute/portfolio_economics.py",
+      "same": true
+    },
+    {
+      "file": "markets/implementations/a_share/execution.py",
+      "same": true
+    },
+    {
+      "file": "markets/implementations/a_share/portfolio_sessions.py",
+      "same": true
+    }
+  ],
+  "baseline_ledger_writer_change": "原冻结源码与当前源码的账本经济计算13份文件逐字一致。账本写入器从DataFrame中间转换改为按同一schema直接构建Arrow表；原基准及新账本均已由当前原生读取器全量验证。",
+  "remote_scripts_sha256": {
+    "run_scenarios.py": "2c676921e1b2208d8896442154e997b401280bbb6e1adbdb44ca9ee7f974c4af",
+    "verify.py": "c9f8fd29aedcebb13df0994983de6872bad21b9f4d76c24824073594ecace970",
+    "input_identity.py": "27996b945647d27f3494d1c02f7ff760ba19790ba063a0389e8955e42bdcbace"
+  },
+  "inputs_equal_between_hosts": true,
+  "input_identity": {
+    "dataset": {
+      "files": 73,
+      "bytes": 3060848555,
+      "sha256": "52aa1ee2dd7d535547259c88ae331f3a02e4c8c5f755857a8bde8a07ef85238f"
+    },
+    "panel": {
+      "files": 243,
+      "bytes": 942026454,
+      "sha256": "e7d4534059d3e2658a08036ee122110a180f8c2c18b7ef0e9381aabaa7d9ddbc"
+    },
+    "execution": {
+      "files": 187,
+      "bytes": 6416198,
+      "sha256": "570c0f96ca4df191b8e8c80f73267dec7ec2da53c7d112ea98360861da6f59c3"
+    },
+    "calendar": {
+      "files": 39,
+      "bytes": 326244,
+      "sha256": "aeee550ed39a8168508e1ea5970b6649ff7333fa6ef54d1972f8bc3f750a0647"
+    },
+    "fees": {
+      "files": 6,
+      "bytes": 21202,
+      "sha256": "0d8d960535f92ffe8e631d7054254585b5732691839ae306f1c058ab23cb03e6"
+    },
+    "market_bars": {
+      "files": 1226,
+      "bytes": 727127981,
+      "sha256": "789631d891eb37bfcb9183db07427204004b7779d0b2dac2821dea262275e7f6"
+    },
+    "stock_master": {
+      "files": 31,
+      "bytes": 327317,
+      "sha256": "5040d9f7a621f0b356046b79f9fbbd71c03130c8b5c6dcc668b036ab00bfa273"
+    },
+    "corporate_actions": {
+      "files": 74,
+      "bytes": 1077986,
+      "sha256": "27e84f53698b9bb96e3a79274afa35f7a79746471609fc9ef8037c279d6beed5"
+    },
+    "prediction": {
+      "files": 2,
+      "bytes": 22367052,
+      "sha256": "ea976f7ac5799eddff982cd08c824544c2981bdcf36febc171de04ec41a2bcbc"
+    },
+    "selection": {
+      "files": 1,
+      "bytes": 189169,
+      "sha256": "a4afc1bfb3c1c7aefec11acc045c07199c71d4d042ee32c3f161c60daea40f62"
+    }
+  },
+  "compute_wall_seconds": 4281.459399938583,
+  "operation_times": [
+    {
+      "scenario": "capital_1e8",
+      "backtest": {
+        "operation": "backtest",
+        "returncode": 0,
+        "wall_seconds": 1980.9216828346252,
+        "cpu_seconds": 1955.6517760000002,
+        "peak_rss_kib": 3612780
+      },
+      "statistics": {
+        "operation": "statistics-portfolio",
+        "returncode": 0,
+        "wall_seconds": 163.15167045593262,
+        "cpu_seconds": 160.059765,
+        "peak_rss_kib": 744140
+      }
+    },
+    {
+      "scenario": "capital_2e9",
+      "backtest": {
+        "operation": "backtest",
+        "returncode": 0,
+        "wall_seconds": 2029.8975219726562,
+        "cpu_seconds": 2001.928421,
+        "peak_rss_kib": 3612148
+      },
+      "statistics": {
+        "operation": "statistics-portfolio",
+        "returncode": 0,
+        "wall_seconds": 174.64998579025269,
+        "cpu_seconds": 172.008367,
+        "peak_rss_kib": 849368
+      }
+    },
+    {
+      "scenario": "slippage_15bps",
+      "backtest": {
+        "operation": "backtest",
+        "returncode": 0,
+        "wall_seconds": 1968.2103836536407,
+        "cpu_seconds": 1960.1994260000001,
+        "peak_rss_kib": 3612268
+      },
+      "statistics": {
+        "operation": "statistics-portfolio",
+        "returncode": 0,
+        "wall_seconds": 167.92310619354248,
+        "cpu_seconds": 165.03637300000003,
+        "peak_rss_kib": 774120
+      }
+    }
+  ],
+  "verification": [
+    {
+      "scenario": "baseline",
+      "native_ledger_read": "PASS",
+      "intervals": 483,
+      "ledger_members_sha256": {
+        "cashflows.parquet": "a8c8a33a000a7e67ed551ddfc648eedb9e079e0d76ee28234dd90e7db625c962",
+        "diagnostics.parquet": "10172f8649a0ab53afc77237cace0fa4eb57e526981bf809b98334187d90b57b",
+        "manifest.json": "c965f273ef8fe457a8d94bfb0e49413293fabc08c8c14baff85dc087b778aeed",
+        "rights_adjustments.parquet": "5d605c2d7ceaeb67e7ef61c014cad6f25c865612caa26993c6ef01752f919ce4",
+        "trades.parquet": "362b1d70e01d51961ff27d772c3b6755c722c5905d543cbb5aee7cd0153e2b0f",
+        "valuations.parquet": "bc3639d344226eaf7b46ad56530ac8d11f34fc548876b55caec7f99e2af6a596"
+      },
+      "ledger_rows": {
+        "trades": 131648,
+        "cashflows": 717478,
+        "valuations": 1695921,
+        "diagnostics": 2935252,
+        "rights_adjustments": 5514
+      },
+      "independent_metrics": {
+        "terminal_nav": 1840839014.5669138,
+        "capital_return": 0.8408390145669138,
+        "cagr": 0.37489368855381144,
+        "annualized_volatility": 0.3805351693009226,
+        "sharpe": 1.0253632143370681,
+        "max_drawdown": -0.3928908546032793,
+        "cost": 75630502.06607136,
+        "net_pnl": 840839014.5669138,
+        "gross_pnl": 916469516.6329852,
+        "realized_turnover": 0.04809376852468447,
+        "mean_cash_weight_post": 0.007425973483809743,
+        "terminal_cash_weight_post": 1.8696929365063248e-05,
+        "terminal_cash_post": 34424.91295588693
+      },
+      "cost_components": {
+        "commission_cost": 16200995.461072452,
+        "transfer_fee_cost": 540033.1820357485,
+        "slippage_cost": 27001659.10178742,
+        "impact_cost": 18623585.7521669,
+        "stamp_duty_cost": 13264228.569008842
+      },
+      "assumptions": {
+        "initial_nav": 1000000000.0,
+        "slippage_bps": 5.0,
+        "impact_bps": 25.0,
+        "adv_participation": 0.05,
+        "adv_sensitivities": [
+          0.01,
+          0.02,
+          0.05,
+          0.1
+        ]
+      },
+      "statistics_checks": [],
+      "wall_seconds": 105.96131944656372
+    },
+    {
+      "scenario": "capital_1e8",
+      "native_ledger_read": "PASS",
+      "intervals": 483,
+      "ledger_members_sha256": {
+        "cashflows.parquet": "fe3aa92ecfa7494b485d9c37884f4d73aada2dd523ddcc30990b756a8a1a9a7d",
+        "diagnostics.parquet": "2d1a808aefdee1e3cfc825eb07991aa0eda5f3fe13d2dfef53450e87bb48b883",
+        "manifest.json": "050887dca7be2b20fea77505c1add2edce4a694cd627b9d048ba88ddbeb63091",
+        "rights_adjustments.parquet": "23ad19514598814cda2ddb6096600c0a26b63745469c182035169673bbb704a0",
+        "trades.parquet": "31cf6346c8b3a71b24e7c24c7f45f7f9b944500a98e0e6c1aaa010ad2d774d22",
+        "valuations.parquet": "4ad7822547f3ebaee28824d7fc48794c274a6abb33b907612d2db87bad713088"
+      },
+      "ledger_rows": {
+        "trades": 130996,
+        "cashflows": 714527,
+        "valuations": 1681572,
+        "diagnostics": 2907356,
+        "rights_adjustments": 5343
+      },
+      "independent_metrics": {
+        "terminal_nav": 182830249.96493256,
+        "capital_return": 0.8283024996493256,
+        "cagr": 0.3700004926211087,
+        "annualized_volatility": 0.38048178768946095,
+        "sharpe": 1.0160711390567454,
+        "max_drawdown": -0.3928381478784214,
+        "cost": 6362783.936483407,
+        "net_pnl": 82830249.96493256,
+        "gross_pnl": 89193033.90141597,
+        "realized_turnover": 0.048725686274462374,
+        "mean_cash_weight_post": 0.006740397914098918,
+        "terminal_cash_weight_post": 1.883276312775987e-05,
+        "terminal_cash_post": 3443.724965819408
+      },
+      "cost_components": {
+        "commission_cost": 1634702.4914582758,
+        "transfer_fee_cost": 54490.0830486092,
+        "slippage_cost": 2724504.15243046,
+        "impact_cost": 610793.9010817553,
+        "stamp_duty_cost": 1338293.3084643076
+      },
+      "assumptions": {
+        "initial_nav": 100000000.0,
+        "slippage_bps": 5.0,
+        "impact_bps": 25.0,
+        "adv_participation": 0.05,
+        "adv_sensitivities": [
+          0.01,
+          0.02,
+          0.05,
+          0.1
+        ]
+      },
+      "statistics_checks": [
+        "daily_nav_before",
+        "daily_nav_post",
+        "daily_nav_end",
+        "daily_cash_post",
+        "daily_cash_weight_post",
+        "daily_net_return",
+        "daily_realized_turnover",
+        "metric_terminal_nav",
+        "metric_capital_return",
+        "metric_cagr",
+        "metric_annualized_volatility",
+        "metric_sharpe",
+        "metric_max_drawdown",
+        "metric_cost",
+        "metric_net_pnl",
+        "metric_gross_pnl",
+        "metric_realized_turnover",
+        "metric_mean_cash_weight_post",
+        "metric_terminal_cash_weight_post",
+        "metric_terminal_cash_post"
+      ],
+      "native_statistics_read": "PASS",
+      "exported_members": {
+        "portfolio_daily.parquet": {
+          "rows": 483,
+          "excluded_columns": []
+        },
+        "portfolio_performance.parquet": {
+          "rows": 36,
+          "excluded_columns": []
+        },
+        "portfolio_capacity.parquet": {
+          "rows": 780,
+          "excluded_columns": [
+            "bottleneck_asset_id"
+          ]
+        },
+        "portfolio_capacity_summary.parquet": {
+          "rows": 36,
+          "excluded_columns": []
+        }
+      },
+      "statistics_members_sha256": {
+        "manifest.json": "fc74b9e68ea4e8ee8c8b2afd76b1c7f19289793a304b686fa8b28d6b4e8c77e1",
+        "portfolio_capacity.parquet": "3109fd6ef8ae80f48d32a910919fc07df37c2114dfd4cdfe455e10669af794b5",
+        "portfolio_capacity_summary.parquet": "20e145bce38ada49378bcdce4b8f89951f61bf16604a9fd86adf448356037f58",
+        "portfolio_daily.parquet": "4bc16b37af781b02a16145d0ff50d74cb37cf7971a2548fe06b37496c30e6421",
+        "portfolio_performance.parquet": "6cf6b04f8a176b2ef9d00b6573780df34f220730d33b9d5a009b3ecb8728adfa"
+      },
+      "statistics_request_sha256": "00cf844a6c648896dd6ab4f8eaf558c49828b00c7ae8e0310135b26481530acd",
+      "wall_seconds": 104.38512635231018
+    },
+    {
+      "scenario": "capital_2e9",
+      "native_ledger_read": "PASS",
+      "intervals": 483,
+      "ledger_members_sha256": {
+        "cashflows.parquet": "51ce0f95f52cabe864ea13a640d2557ccfbdb656ace6867e4e4f118c0d69eee3",
+        "diagnostics.parquet": "d98bb24fdab28b200fb9b17772d875adf2cd6c3755e0848c91c8ef1820ec8659",
+        "manifest.json": "4b6dfe65d2d63b032a070b8f1134c68b6ca4b3eca38a1630575385362fb4b5c3",
+        "rights_adjustments.parquet": "83f0733380f6ab54535b062e97f5164436d5424440e3f966f337fdb5df8c33c1",
+        "trades.parquet": "94c2fcbb832ed247a59699db483c4346e2e81f7fd49e03b7dd705276a07f3c67",
+        "valuations.parquet": "afac902be1528a11a80f1d9029baad598941e5e000f2ccc6e2a812d0d5aab01b"
+      },
+      "ledger_rows": {
+        "trades": 134307,
+        "cashflows": 730877,
+        "valuations": 1751538,
+        "diagnostics": 3050046,
+        "rights_adjustments": 5805
+      },
+      "independent_metrics": {
+        "terminal_nav": 3699818992.795352,
+        "capital_return": 0.8499094963976761,
+        "cagr": 0.37842410788762226,
+        "annualized_volatility": 0.37860242050489723,
+        "sharpe": 1.0354562924695594,
+        "max_drawdown": -0.3878708705801437,
+        "cost": 149991739.57226485,
+        "net_pnl": 1699818992.795352,
+        "gross_pnl": 1849810732.367617,
+        "realized_turnover": 0.04475434439268401,
+        "mean_cash_weight_post": 0.011573081877704724,
+        "terminal_cash_weight_post": 1.138820311936944e-05,
+        "terminal_cash_post": 42138.219884738566
+      },
+      "cost_components": {
+        "commission_cost": 30229182.83252669,
+        "transfer_fee_cost": 1007639.4277508899,
+        "slippage_cost": 50381971.38754449,
+        "impact_cost": 43655567.64147266,
+        "stamp_duty_cost": 24717378.282970104
+      },
+      "assumptions": {
+        "initial_nav": 2000000000.0,
+        "slippage_bps": 5.0,
+        "impact_bps": 25.0,
+        "adv_participation": 0.05,
+        "adv_sensitivities": [
+          0.01,
+          0.02,
+          0.05,
+          0.1
+        ]
+      },
+      "statistics_checks": [
+        "daily_nav_before",
+        "daily_nav_post",
+        "daily_nav_end",
+        "daily_cash_post",
+        "daily_cash_weight_post",
+        "daily_net_return",
+        "daily_realized_turnover",
+        "metric_terminal_nav",
+        "metric_capital_return",
+        "metric_cagr",
+        "metric_annualized_volatility",
+        "metric_sharpe",
+        "metric_max_drawdown",
+        "metric_cost",
+        "metric_net_pnl",
+        "metric_gross_pnl",
+        "metric_realized_turnover",
+        "metric_mean_cash_weight_post",
+        "metric_terminal_cash_weight_post",
+        "metric_terminal_cash_post"
+      ],
+      "native_statistics_read": "PASS",
+      "exported_members": {
+        "portfolio_daily.parquet": {
+          "rows": 483,
+          "excluded_columns": []
+        },
+        "portfolio_performance.parquet": {
+          "rows": 36,
+          "excluded_columns": []
+        },
+        "portfolio_capacity.parquet": {
+          "rows": 812,
+          "excluded_columns": [
+            "bottleneck_asset_id"
+          ]
+        },
+        "portfolio_capacity_summary.parquet": {
+          "rows": 36,
+          "excluded_columns": []
+        }
+      },
+      "statistics_members_sha256": {
+        "manifest.json": "f32509e45158fb9cc15ab27fdefb2cded47f36e9bc5b91bd48bed35959aee2b3",
+        "portfolio_capacity.parquet": "111d2c19560bb4dc69951fb5787f97e35c2999c21928edfffa9a4605e2355f8f",
+        "portfolio_capacity_summary.parquet": "e01870de8998a682ede9e745ccedbc3e3511b9b61097d17475b420f87c92ce0c",
+        "portfolio_daily.parquet": "cd03ffe44b74cf5f2b4fdbf68a3284f0176006357a16365e776f4be785c47a1c",
+        "portfolio_performance.parquet": "ef146170bec32cba773b0966ac662e4a0d5a32db9c3e67c60279748c2d441541"
+      },
+      "statistics_request_sha256": "2807620db3d04a5efb7ceb62cc61c1e31fe199a4f924ca649edc629211723451",
+      "wall_seconds": 111.67656517028809
+    },
+    {
+      "scenario": "slippage_15bps",
+      "native_ledger_read": "PASS",
+      "intervals": 483,
+      "ledger_members_sha256": {
+        "cashflows.parquet": "5bafc58ac14243ec4e5ebaeb80152b8a7a834da39264a5b317778ea480fdef55",
+        "diagnostics.parquet": "9186ebef6371cc9fd963fdc888c42c126da649e6f47d85658424aceb02ea7922",
+        "manifest.json": "2446734fa1cdc416eade00a39c8907a2329dac79326321acda8b536392c740b6",
+        "rights_adjustments.parquet": "a2b69f9634eac352c032278fa527f71bcec5e13c8d4ca9f7d500485fd05882a8",
+        "trades.parquet": "c025c5b2413ef0dc5d4b0eb60629b117b9c5c468c5f22dda8ba4c1a5b8a84b86",
+        "valuations.parquet": "8ce018e868025d11c92c3e9ba6ee437ae12331152573f6db2a47309b02b214ab"
+      },
+      "ledger_rows": {
+        "trades": 131435,
+        "cashflows": 716531,
+        "valuations": 1692534,
+        "diagnostics": 2935490,
+        "rights_adjustments": 5553
+      },
+      "independent_metrics": {
+        "terminal_nav": 1759390743.6546476,
+        "capital_return": 0.7593907436546476,
+        "cagr": 0.34281169339016637,
+        "annualized_volatility": 0.3805102424168671,
+        "sharpe": 0.9633351584333816,
+        "max_drawdown": -0.39463833778053337,
+        "cost": 126138545.18136863,
+        "net_pnl": 759390743.6546476,
+        "gross_pnl": 885529288.8360162,
+        "realized_turnover": 0.04810745541465096,
+        "mean_cash_weight_post": 0.007325697252140697,
+        "terminal_cash_weight_post": 1.871749815698373e-05,
+        "terminal_cash_post": 32937.80819521094
+      },
+      "cost_components": {
+        "commission_cost": 15788433.328064514,
+        "transfer_fee_cost": 526281.110935484,
+        "slippage_cost": 78942166.64032258,
+        "impact_cost": 17948472.261745602,
+        "stamp_duty_cost": 12933191.840300458
+      },
+      "assumptions": {
+        "initial_nav": 1000000000.0,
+        "slippage_bps": 15.0,
+        "impact_bps": 25.0,
+        "adv_participation": 0.05,
+        "adv_sensitivities": [
+          0.01,
+          0.02,
+          0.05,
+          0.1
+        ]
+      },
+      "statistics_checks": [
+        "daily_nav_before",
+        "daily_nav_post",
+        "daily_nav_end",
+        "daily_cash_post",
+        "daily_cash_weight_post",
+        "daily_net_return",
+        "daily_realized_turnover",
+        "metric_terminal_nav",
+        "metric_capital_return",
+        "metric_cagr",
+        "metric_annualized_volatility",
+        "metric_sharpe",
+        "metric_max_drawdown",
+        "metric_cost",
+        "metric_net_pnl",
+        "metric_gross_pnl",
+        "metric_realized_turnover",
+        "metric_mean_cash_weight_post",
+        "metric_terminal_cash_weight_post",
+        "metric_terminal_cash_post"
+      ],
+      "native_statistics_read": "PASS",
+      "exported_members": {
+        "portfolio_daily.parquet": {
+          "rows": 483,
+          "excluded_columns": []
+        },
+        "portfolio_performance.parquet": {
+          "rows": 36,
+          "excluded_columns": []
+        },
+        "portfolio_capacity.parquet": {
+          "rows": 828,
+          "excluded_columns": [
+            "bottleneck_asset_id"
+          ]
+        },
+        "portfolio_capacity_summary.parquet": {
+          "rows": 36,
+          "excluded_columns": []
+        }
+      },
+      "statistics_members_sha256": {
+        "manifest.json": "727359196410a652a8adac5e282ec1b49bd1318a5cab3130822bb0a8ca9792cf",
+        "portfolio_capacity.parquet": "4e998b73180e5e9237a59f5e545b2ddc3c0e63f789dded71535c6db9f469bb69",
+        "portfolio_capacity_summary.parquet": "f1df9d4133e4d03399752cf3d76857556ac828878951247408ad8e7108913c67",
+        "portfolio_daily.parquet": "0aff4866130d71ba65cefd670a324d11e66ee004cb3adcc45c545bef4e5890eb",
+        "portfolio_performance.parquet": "1b4873fcf838212594b6ec518765c130d1fed62b3e5a8bec7b5347345b77075d"
+      },
+      "statistics_request_sha256": "1119e16cb346cdb81f6d5ebe26c035f18e388b5927b86c4943c7c3e6b20242ce",
+      "wall_seconds": 105.95712161064148
+    }
+  ],
+  "independent_checks": [
+    "baseline_terminal_nav",
+    "baseline_capital_return",
+    "baseline_cagr",
+    "baseline_annualized_volatility",
+    "baseline_sharpe",
+    "baseline_max_drawdown",
+    "baseline_cost",
+    "baseline_net_pnl",
+    "baseline_gross_pnl",
+    "baseline_realized_turnover",
+    "baseline_mean_cash_weight_post",
+    "baseline_terminal_cash_weight_post",
+    "baseline_terminal_cash_post",
+    "baseline_daily_nav_before",
+    "baseline_daily_nav_post",
+    "baseline_daily_nav_end",
+    "baseline_daily_cash_post",
+    "baseline_daily_cash_weight_post",
+    "baseline_daily_net_return",
+    "baseline_daily_realized_turnover",
+    "capital_1e8_daily_nav_before",
+    "capital_1e8_daily_nav_post",
+    "capital_1e8_daily_nav_end",
+    "capital_1e8_daily_cash_post",
+    "capital_1e8_daily_cash_weight_post",
+    "capital_1e8_daily_net_return",
+    "capital_1e8_daily_realized_turnover",
+    "capital_1e8_metric_terminal_nav",
+    "capital_1e8_metric_capital_return",
+    "capital_1e8_metric_cagr",
+    "capital_1e8_metric_annualized_volatility",
+    "capital_1e8_metric_sharpe",
+    "capital_1e8_metric_max_drawdown",
+    "capital_1e8_metric_cost",
+    "capital_1e8_metric_net_pnl",
+    "capital_1e8_metric_gross_pnl",
+    "capital_1e8_metric_realized_turnover",
+    "capital_1e8_metric_mean_cash_weight_post",
+    "capital_1e8_metric_terminal_cash_weight_post",
+    "capital_1e8_metric_terminal_cash_post",
+    "capital_2e9_daily_nav_before",
+    "capital_2e9_daily_nav_post",
+    "capital_2e9_daily_nav_end",
+    "capital_2e9_daily_cash_post",
+    "capital_2e9_daily_cash_weight_post",
+    "capital_2e9_daily_net_return",
+    "capital_2e9_daily_realized_turnover",
+    "capital_2e9_metric_terminal_nav",
+    "capital_2e9_metric_capital_return",
+    "capital_2e9_metric_cagr",
+    "capital_2e9_metric_annualized_volatility",
+    "capital_2e9_metric_sharpe",
+    "capital_2e9_metric_max_drawdown",
+    "capital_2e9_metric_cost",
+    "capital_2e9_metric_net_pnl",
+    "capital_2e9_metric_gross_pnl",
+    "capital_2e9_metric_realized_turnover",
+    "capital_2e9_metric_mean_cash_weight_post",
+    "capital_2e9_metric_terminal_cash_weight_post",
+    "capital_2e9_metric_terminal_cash_post",
+    "slippage_15bps_daily_nav_before",
+    "slippage_15bps_daily_nav_post",
+    "slippage_15bps_daily_nav_end",
+    "slippage_15bps_daily_cash_post",
+    "slippage_15bps_daily_cash_weight_post",
+    "slippage_15bps_daily_net_return",
+    "slippage_15bps_daily_realized_turnover",
+    "slippage_15bps_metric_terminal_nav",
+    "slippage_15bps_metric_capital_return",
+    "slippage_15bps_metric_cagr",
+    "slippage_15bps_metric_annualized_volatility",
+    "slippage_15bps_metric_sharpe",
+    "slippage_15bps_metric_max_drawdown",
+    "slippage_15bps_metric_cost",
+    "slippage_15bps_metric_net_pnl",
+    "slippage_15bps_metric_gross_pnl",
+    "slippage_15bps_metric_realized_turnover",
+    "slippage_15bps_metric_mean_cash_weight_post",
+    "slippage_15bps_metric_terminal_cash_weight_post",
+    "slippage_15bps_metric_terminal_cash_post"
+  ],
+  "outputs": {
+    "next-capacity-summary.csv": {
+      "rows": 4,
+      "sha256": "cda01c516aa8aa9ccadbda3aa8a47c9bcc13a590c788c6529cf85c30ac45f991"
+    },
+    "next-capacity-daily.csv": {
+      "rows": 1932,
+      "sha256": "0c67bd420bf732dacda09843d904c4b373da6fbb1ceb41259a994ca8940f7139"
+    },
+    "next-capacity-native-summary.csv": {
+      "rows": 144,
+      "sha256": "fe62a41fe0912da2f3cc43d8e270e7cf32b7d0b9c044a1e45824e883e1ca5fae"
+    },
+    "next-capacity-cost-components.csv": {
+      "rows": 20,
+      "sha256": "9cf3f6bda7d21af84206a2901c6729e38784bd0fccccc3368793998c597cdf6a"
+    }
+  },
+  "limits": [
+    "只检验预先固定的三个历史执行压力情景，未训练新模型或选择最优规模。",
+    "固定滑点15 bps是压力假设，不是实际市场成本估计；其他费用和冲击系数不变。",
+    "ADV缺失与原公司行动、研究估值约定继续生效；容量未定义仍保留。",
+    "规模场景的实际成交与持仓已重新回放，但结果不能直接解释为完整市场容量上限。"
+  ],
+  "publication": {
+    "text_encoding": "UTF-8",
+    "line_endings": "LF",
+    "numeric_cells_changed": false,
+    "normalization_script_sha256": "158b13713f5a179b44d7387b34393b7d44c61c39d8aa980f5089a6d833250f4d"
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "status": "PASS",
+  "source_head": "73c229c09030491b609098b0ef77463feb31df73",
+  "scope": "PV52 nine families, G/Q, 2019-2023 development and 2024-2025 historical holdout, through existing mature-label endpoints.",
+  "mature_dates": 1657,
+  "missing_prediction_dates": 502,
+  "nine_families_share_same_missing_dates": true,
+  "missing_dates_with_positive_mature_labels": 502,
+  "missing_dates_with_all_residual_features_unavailable": 502,
+  "missing_dates_with_both_risk_features_unavailable": 218,
+  "native_factor_replay": {
+    "compared_rows": 7753669,
+    "max_absolute_difference": {
+      "beta_252d": 0.0,
+      "residual_volatility_60d": 0.0
+    },
+    "daily_rows": 1699,
+    "observe_sha256": "19e163e041b45c41ab1f8dc4846b10cb1b3fd8030697d2dc0d17dd0aefa24579",
+    "instrumentation": "One callback inserted after the existing market completeness gate; all produced factor keys, missingness and numeric values compared with existing persisted factors for 2019-2025; outputs discarded after comparison."
+  },
+  "previous_2023_daily_rows_rechecked": 199,
+  "previous_2023_q3_dates_rechecked": 64,
+  "native_input_bindings": {
+    ".run/a-share-full-20261021/scope.json": "c1e7fe0d35ef875f14afe1b774e1d3739f8d6c9a88dbd3f8bcbe985e5501cc86",
+    ".run/a-share-full-20261021/configs/model-pv_expanded__history_state-development-global.json": "92265c3116f3513c113ef8ff12543d7a4c932668ff472a5b7486d325b06d3826",
+    "data/research/a-share-full-20261021/statistics/model-pv_expanded__history_state-development-global/manifest.json": "da032ef2c0c45566aa014c7e632129970d574c40d2ce1b1648b87efe3e6f2aee",
+    "data/research/a-share-full-20261021/statistics/model-pv_expanded__history_state-development-global/model_losses.parquet": "45ae41a8a1075a1e6352d49bb83db6547cb4cbda4f72ad04a2f12d14996af4dd",
+    "data/research/a-share-full-20261021/statistics/model-pv_expanded__history_state-development-global/model_prediction_metrics.parquet": "f61d23604790f5c019d98e3c53d5778b46c2d7a11ff418366550fb15b5502d29",
+    ".run/a-share-full-20261021/configs/model-pv_expanded__history_state-development-quarterly.json": "a5e9daac3bfa50c4a3cbf1cc4e5a998996c9742a3b465f9ce507cc11c91f1352",
+    "data/research/a-share-full-20261021/statistics/model-pv_expanded__history_state-development-quarterly/manifest.json": "21ee80b6e8763b8fcbeac2d9e96e17f799634ff1b437d16cb8e0bfc7d96b5df8",
+    "data/research/a-share-full-20261021/statistics/model-pv_expanded__history_state-development-quarterly/model_losses.parquet": "cb60cc7b044093a5864a2cb79fdc560ff57c9522e656b6e0b36b7112a26e2fb2",
+    "data/research/a-share-full-20261021/statistics/model-pv_expanded__history_state-development-quarterly/model_prediction_metrics.parquet": "903306f0205560421dbfc091a24f455f78a758187073de216ba2cc99c94abf8d",
+    ".run/a-share-full-20261021/configs/model-pv_expanded__history_state-holdout-global.json": "774bf28e4cfd6f13fa53d11dbc2535807bebf1d5c218665e16ca65f4f697bf3b",
+    "data/research/a-share-full-20261021/statistics/model-pv_expanded__history_state-holdout-global/manifest.json": "230533657f1c03e6932968441583c77dcb9a5dacb118daf3e7dbc7b768c89b43",
+    "data/research/a-share-full-20261021/statistics/model-pv_expanded__history_state-holdout-global/model_losses.parquet": "5736df2e04be5c10c7b0146c012a734c6a4dc1e2991e82e1a3ff61fc9a08df15",
+    "data/research/a-share-full-20261021/statistics/model-pv_expanded__history_state-holdout-global/model_prediction_metrics.parquet": "fe77439d96cace405763e78950765271a5759cf0d165ac7d87a1cc3d38437997",
+    ".run/a-share-full-20261021/configs/model-pv_expanded__history_state-holdout-quarterly.json": "8140eb8a632552fc58f15f868115d7b1cead3f3f66d3948ef845ccdc82f31ffc",
+    "data/research/a-share-full-20261021/statistics/model-pv_expanded__history_state-holdout-quarterly/manifest.json": "fb13aa221f8d36d2563de51b26eae96843bdef614e61b669bd14b35fbe4ce6b1",
+    "data/research/a-share-full-20261021/statistics/model-pv_expanded__history_state-holdout-quarterly/model_losses.parquet": "23c5229f33e612d87c521980f2a527a3c9a47fd3bcb9f93c24330a2ff8bfa4f2",
+    "data/research/a-share-full-20261021/statistics/model-pv_expanded__history_state-holdout-quarterly/model_prediction_metrics.parquet": "98de4e4617a42654bd1a5fe0056ee3ad3839a2a1449e8cab697be3fe4da0b921",
+    ".run/a-share-full-20261021/configs/prepare-market-model.json": "5d54742eac86064e01156bb28ba22a2760094caaebab6edb5a1ea28cc3247b92"
+  },
+  "local_input_sha256": {
+    "champion-daily.csv": "aa5d7136f162746434bfd7a1d7125d0939ef4d24500dbcbb516cfa9ff6099acf",
+    "family-daily.csv": "9da92aa24fb1f9b61ab26da6b7da2d32f224e4ebfa1bafcc50307d697ae407fe",
+    "features-daily.csv": "62d2a0d4386c51527be3a982fdd90a7d976dc92a64ef067f5203d9462ed57640",
+    "market-state-daily.csv": "a4443360718a4c964832a7e151e3db2d43a344d6de36331f5e6cbd186c7965c8",
+    "result.json": "ae5bcdf95b6d1bdede1b01e50bf962b7ee729d09794079d2425c20689be967df"
+  },
+  "limitations": [
+    "No new predictions, factor publications, model fits or backtests were produced.",
+    "Data gaps and existing window thresholds were preserved; no zero-fill, missing-date removal or threshold relaxation.",
+    "Counts diagnose input availability under the current full-membership market proxy; they do not establish whether vendor data can be recovered.",
+    "Quote and lagged-completeness reason counts can overlap and must not be added as disjoint causes."
+  ],
+  "outputs": {
+    "next-coverage-daily.csv": "cefbab6b1cfbeee8bcaa2a40148884f132d46c55918ceaea501fdd0f89d1c8ec",
+    "next-coverage-market-state.csv": "a4443360718a4c964832a7e151e3db2d43a344d6de36331f5e6cbd186c7965c8",
+    "next-coverage-summary.csv": "dc4fbcdc2a20165c4b886356258f2cffcc926e14d55ea982c1dc461f82463378"
+  },
+  "publication": {
+    "text_encoding": "UTF-8",
+    "line_endings": "LF",
+    "numeric_cells_changed": false,
+    "normalization_script_sha256": "158b13713f5a179b44d7387b34393b7d44c61c39d8aa980f5089a6d833250f4d"
+  }
+}

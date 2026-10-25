@@ -1,0 +1,210 @@
+{
+  "generated_at_utc": "2026-10-25T03:43:55.531067+00:00",
+  "source_head": "357303c9a8d0401e7d51b65223f619c3aa211dd0",
+  "analysis_script_sha256": "1b066f02cc0117452a88f3e7c4a07c78527487b12fedd67e294865e8cf08948b",
+  "protocol": {
+    "declared_at_utc": "2026-10-25T03:40:01.850311+00:00",
+    "strategy": "quarterly_pv25__champion_equal",
+    "stages": [
+      "development",
+      "holdout"
+    ],
+    "reference_total_return_codes": [
+      "H00300",
+      "H00905",
+      "H00852"
+    ],
+    "return_clock": "trading_day_open",
+    "scope": "exploratory_historical_comparison",
+    "missing_native_open": "existing_same_source_same_date_price_open_times_total_close_divided_by_price_close",
+    "hypotheses": "intercept_and_beta_for_each_of_three_references_and_two_periods",
+    "family_size": 12,
+    "HAC_lag": 20,
+    "confidence": 0.95,
+    "FDR": "BY",
+    "minimum_observations": 60,
+    "risk_free_input": null,
+    "no_new_model_selection": true
+  },
+  "protocol_sha256": "9bc1354880a2cad89c6a2d66e648a4801b58da3ef0bd9245ebafacf2940e1d92",
+  "selected_private_source_sha256": "b7451c3d1ba537c5204298cb66767eb16b7674344cac16e8b934b87133a51dd2",
+  "source_files": [
+    {
+      "path": "data/raw/csmar/index_market/csmar__index_market__all__full__part-00__export-20260902.csv",
+      "sha256": "36c5579679b988eb2eaf99a66b5807059fb2773522ca89e05d02f61fcd456cd6",
+      "selected_rows": 2181
+    },
+    {
+      "path": "data/raw/csmar/index_market/csmar__index_market__all__full__part-01__export-20260902.csv",
+      "sha256": "65422a8af664f8e6240b86b2405edecdc64c129ee77f6e8c9e265f64d3bbf038",
+      "selected_rows": 0
+    },
+    {
+      "path": "data/raw/csmar/index_market/csmar__index_market__all__full__part-02__export-20260902.csv",
+      "sha256": "8f97b61e81fbd3016ef02d836942b4bb4ad9c7628ad3c4e1b68fa11d12393e96",
+      "selected_rows": 1994
+    },
+    {
+      "path": "data/raw/csmar/index_market/csmar__index_market__all__full__part-03__export-20260902.csv",
+      "sha256": "9cd762e89714021ea10198158433d872ed08e3fcb581ea1cbe81509d5a84ab46",
+      "selected_rows": 1827
+    },
+    {
+      "path": "data/raw/csmar/index_market/csmar__index_market__all__full__part-04__export-20260902.csv",
+      "sha256": "b636d2b33ba16afe00b6714540c49520b4d5ba3c1a1d0fc3633b8a3bb1d3141b",
+      "selected_rows": 2916
+    },
+    {
+      "path": "data/raw/csmar/index_market/csmar__index_market__all__full__part-05__export-20260902.csv",
+      "sha256": "beca17e3418e071f2d06dd9f57cab2136923ea177d3bfd9471559524420c71b2",
+      "selected_rows": 2181
+    },
+    {
+      "path": "data/raw/csmar/index_market/csmar__index_market__all__full__part-06__export-20260902.csv",
+      "sha256": "c4505bcde2d7421faa8a4e66a5c1cd05aed9b5e854edeb792ac2469a6f0e4fad",
+      "selected_rows": 0
+    },
+    {
+      "path": "data/raw/csmar/index_market/csmar__index_market__all__full__part-07__export-20260902.csv",
+      "sha256": "c4f7b8f506fe0ba21944086e64d26dc9f87fd414044108ee15d72f8c8aeb332d",
+      "selected_rows": 0
+    },
+    {
+      "path": "data/raw/csmar/index_market/csmar__index_market__all__full__part-08__export-20260902.csv",
+      "sha256": "cb31dce3df57163f529cad0929b408a41de95bbf0586dec31545c0d652478151",
+      "selected_rows": 0
+    },
+    {
+      "path": "data/raw/csmar/index_market/csmar__index_market__all__full__part-09__export-20260902.csv",
+      "sha256": "d4249408e9b8d1ecce22930168dd5a013f6020df6de3eb50be27fe40b041832e",
+      "selected_rows": 2925
+    },
+    {
+      "path": "data/raw/csmar/index_market/csmar__index_market__all__full__part-10__export-20260902.csv",
+      "sha256": "d45448f366f84226751e4acf3b4081ad3c0a294ff21378696512e6ef166a65af",
+      "selected_rows": 0
+    },
+    {
+      "path": "data/raw/csmar/index_market/csmar__index_market__all__full__part-11__export-20260902.csv",
+      "sha256": "de8d83a29c1911622a0a218b5a5998a6f299ae13f52572badb0a5f45951ba5bf",
+      "selected_rows": 2916
+    },
+    {
+      "path": "data/raw/csmar/index_market/csmar__index_market__all__full__part-12__export-20260902.csv",
+      "sha256": "ec66a74d8fca10c9ffa0b7ca951018f66a846e68e8818596b4778f49cf970583",
+      "selected_rows": 2925
+    }
+  ],
+  "account_source": {
+    "file": "pv25-portfolio-daily.csv",
+    "sha256": "ac61b9789353009639698a8d2268b61691b961eb576f18584dd9cbbc6350e60b",
+    "native_binding": "next-economic-evidence.json"
+  },
+  "references": [
+    {
+      "reference_id": "csi300",
+      "reference_name": "沪深300",
+      "price_code": "000300",
+      "total_return_code": "H00300",
+      "endpoint_count": 1697,
+      "derived_endpoint_count": 1697,
+      "native_endpoint_count": 0,
+      "missing_endpoint_count": 0,
+      "private_series_sha256": "14b4123fe7097bebce359dababfc6692c015764f13c6b967a3cd0fd1d5c18465"
+    },
+    {
+      "reference_id": "csi500",
+      "reference_name": "中证500",
+      "price_code": "000905",
+      "total_return_code": "H00905",
+      "endpoint_count": 1697,
+      "derived_endpoint_count": 1697,
+      "native_endpoint_count": 0,
+      "missing_endpoint_count": 0,
+      "private_series_sha256": "64b866a89eb861821a5dd85ddcfaefc2a7dc9e9e75b00f218c4fe1ec616eefa6"
+    },
+    {
+      "reference_id": "csi1000",
+      "reference_name": "中证1000",
+      "price_code": "000852",
+      "total_return_code": "H00852",
+      "endpoint_count": 1697,
+      "derived_endpoint_count": 1697,
+      "native_endpoint_count": 0,
+      "missing_endpoint_count": 0,
+      "private_series_sha256": "497634a1019600aaaa758670f6fa421ad2470758afd7633b313e4fe5c8b75abf"
+    }
+  ],
+  "comparison_method": {
+    "analysis_scope": "exploratory_descriptive",
+    "causal_identification": "not_established",
+    "portfolio_return_basis": "strategy_net",
+    "portfolio_cost_basis": "execution_costs",
+    "portfolio_timestamp_basis": "trading_day_open",
+    "control_design_matching": "not_established",
+    "reference_facts": {
+      "csi300": {
+        "valuation_currency": "CNY",
+        "timestamp_basis": "trading_day_open",
+        "return_basis": "gross_total_return",
+        "cost_basis": "frictionless",
+        "return_unit": null
+      },
+      "csi500": {
+        "valuation_currency": "CNY",
+        "timestamp_basis": "trading_day_open",
+        "return_basis": "gross_total_return",
+        "cost_basis": "frictionless",
+        "return_unit": null
+      },
+      "csi1000": {
+        "valuation_currency": "CNY",
+        "timestamp_basis": "trading_day_open",
+        "return_basis": "gross_total_return",
+        "cost_basis": "frictionless",
+        "return_unit": null
+      }
+    },
+    "risk_free_facts": null,
+    "exposure_hypothesis_family": "all_declared_candidate_reference_episode_fold_intercepts_and_betas",
+    "exposure_fdr_method": "BY",
+    "annualization": "complete_daily_axis_only",
+    "annualization_periods": 252.0,
+    "annualization_minimum_observations": 2,
+    "missing_policy": "no_fill_complete_path_required",
+    "regime_inference": "descriptive_only_no_compressed_hac",
+    "regime_label_timing": "ex_post_descriptive"
+  },
+  "derivation": "total_return_open = same_day_price_open * same_day_total_return_close / same_day_price_close; native_open_preferred; ex_post_only; source_precision_retained",
+  "validation": {
+    "calendar_complete": "PASS",
+    "benchmark_endpoint_coverage": "PASS",
+    "compound_return": "PASS",
+    "native_comparison_tables": "PASS",
+    "independent_HAC_regressions": 6,
+    "hypotheses_in_single_BY_family": 12,
+    "independent_BY_formula": "PASS"
+  },
+  "limitations": [
+    "exploratory_historical_analysis",
+    "market_return_intercept_is_not_risk_free_adjusted_alpha",
+    "single_index_regression_does_not_identify_industry_style_or_stock_selection_alpha",
+    "frictionless_index_against_net_strategy",
+    "derived_open_has_published_input_precision"
+  ],
+  "outputs": {
+    "next-benchmark-summary.csv": "fe1248baf75d5bbb15ddc3dd3b59ad8d87f5088414ab8a7bdaeedd920e41665d",
+    "next-benchmark-curves.csv": "237f380a4403d657304b14c31b7e5f6027ae1ad731ddc5292c231090c9601e50",
+    "next-benchmark-market-exposure.csv": "4b9bd41aef8fdf252dad8d0f6181b4f0c95d4d083f18a6a68bbccefbe229838e",
+    "next-benchmark-metrics.csv": "9c79aba80f325d7673bb6c882319efb90e1e01d969a83fbd6c7769327173c455",
+    "next-benchmark-intervals.csv": "87745cdba770187629683642f5e02cb47b0052ce21167ecb3e0d0af41caa6593",
+    "next-benchmark-curves.png": "f561a28d31587722556106b1818120361c9e7aff602cad4beff6c01bf040e41a",
+    "next-benchmark-curves.svg": "5175b41aeb02a05412b621547c51b1d6c3fe5418439dfd2c07708e450be77700"
+  },
+  "publication": {
+    "text_encoding": "UTF-8",
+    "line_endings": "LF",
+    "numeric_cells_changed": false,
+    "normalization_script_sha256": "158b13713f5a179b44d7387b34393b7d44c61c39d8aa980f5089a6d833250f4d"
+  }
+}
