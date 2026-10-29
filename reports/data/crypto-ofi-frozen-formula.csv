@@ -1,0 +1,3 @@
+asset_id,model_id,input,target,input_median,input_training_mean,input_training_population_scale,intercept,standardized_ofi_coefficient,missing_indicator_coefficient,training_target_mean
+btc_usdt,ofi_ols,ofi_100ms,future_mid_return_500ms,0.0,-0.009686176746526609,7.017193597397384,1.4528479294376437e-08,6.821769335699885e-06,0.0,1.4528479293469321e-08
+eth_usdt,ofi_ols,ofi_100ms,future_mid_return_500ms,0.0,0.014240619498848906,171.3832466574724,6.223924988430479e-08,8.404661990574274e-06,0.0,6.223924988430455e-08
