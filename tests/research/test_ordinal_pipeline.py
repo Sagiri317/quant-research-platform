@@ -6,24 +6,19 @@ import pytest
 
 from quant_research_platform.artifacts.outputs.evaluation import read_evaluation_outputs
 from quant_research_platform.contracts.evaluations import EvaluationSpec
-from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.research.evaluations.engine import _evaluation_strata
 from quant_research_platform.research.evaluations.runner import evaluate
-from quant_research_platform.research.models.trial_selection import (
-    evaluate_model_trial_metrics_from_chunks,
-)
 from quant_research_platform.research.portfolios.construction import (
     build_simple_target_weights,
 )
 from quant_research_platform.research.signals.normalization import (
     normalize_signal_frame,
 )
-from tests.research.crypto_evaluation_test_support import (
+from tests.research.evaluation_test_support import (
     evaluation_config,
     write_evaluation_input,
 )
-from tests.research.direct_model_test_support import fit_frame, predict_frame
 
 
 @pytest.mark.parametrize(
@@ -123,124 +118,6 @@ def test_native_evaluation_keeps_order_ties_and_pair_domain(
     )
 
 
-def test_native_rank_model_state_prediction_and_trial_labels(tmp_path):
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.Timestamp("2020-01-01"),
-            "asset_id": list("abcde"),
-            "x": pd.array([2**53 + v for v in [0, 1, 1, 2, 3]], dtype="Int64"),
-            "label": [0, 1, 1, 2, 3],
-            "label_available_at": pd.Timestamp("2020-01-01"),
-            "eligible": True,
-        }
-    )
-    spec = ModelSpec(
-        model_id="ordinal",
-        model_algorithm="ic_weighted_rank_ensemble",
-        input_factor_columns=("x",),
-        target_column="label",
-        random_seed=19,
-    )
-    case = fit_frame(tmp_path / "fit", frame, spec)
-    future = (
-        frame.assign(timestamp=pd.Timestamp("2020-01-02"))
-        .iloc[[4, 1, 3, 0, 2]]
-        .reset_index(drop=True)
-    )
-    predictions, prediction_path, _ = predict_frame(
-        tmp_path / "pred",
-        future,
-        case,
-        window={"start": "2020-01-02", "end": "2020-01-02"},
-    )
-    expected = pd.Series([-0.4, -0.1, -0.1, 0.2, 0.4], index=list("abcde"))
-    np.testing.assert_allclose(
-        predictions.prediction_score, expected.reindex(predictions.asset_id), atol=1e-15
-    )
-    assert case.result.metadata["rank_parameters"]["weights"] == [1.0]
-    trial = (
-        predictions.rename(columns={"prediction_score": "prediction"})
-        .merge(frame[["asset_id", "x"]], on="asset_id")
-        .rename(columns={"x": "target"})
-    )
-    metrics = evaluate_model_trial_metrics_from_chunks(
-        [trial.iloc[:2], trial.iloc[2:]],
-        model_id="ordinal",
-        label_column="target",
-        prediction_column="prediction",
-    )
-    assert metrics["validation_rankic"] == pytest.approx(1.0)
-    from quant_research_platform.artifacts.explanations import read_explanation
-    from quant_research_platform.research.models.explanations import explain
-
-    # Rank diagnostics are translation-invariant even when labels are native integers.
-    future["label"] = future["label"] + 2**53
-    path = tmp_path / "explain-input.parquet"
-    future.to_parquet(path, index=False)
-    output = explain(
-        {
-            "model": str(case.root),
-            "inputs": str(path),
-            "input_spec": case.config["input_spec"],
-            "output": str(tmp_path / "explained"),
-            "window": {"start": "2020-01-02", "end": "2020-01-02"},
-            "sample_role": "test",
-            "methods": ["permutation"],
-            "output_space": "model_output",
-            "selection": {"max_rows": 5, "max_dates": 1, "root_seed": 17},
-            "permutation": {
-                "metrics": ["rankic"],
-                "cutoff": "2020-01-03",
-                "axis": "within_timestamp",
-                "groups": {"x": ["x"]},
-                "repeats": 1,
-                "root_seed": 12,
-            },
-        }
-    )
-    _, tables = read_explanation(output)
-    assert tables["permutation_repeats"].baseline.tolist() == pytest.approx([1.0])
-    import json
-
-    from quant_research_platform.research.models.trial_selection import (
-        read_selection,
-        score,
-        select,
-    )
-
-    window = {"start": "2020-01-02", "end": "2020-01-02"}
-    scores = score(
-        {
-            "predictions": [str(prediction_path)],
-            "candidate_ids": ["ordinal"],
-            "labels": str(path),
-            "label_spec": case.config["input_spec"],
-            "validation_windows": [window],
-            "scoring_window": window,
-            "cutoff": "2020-01-03",
-            "selection_group": "quarterly",
-            "validation_axis": "cross_sectional",
-            "label_unit": "decimal_return",
-            "output": str(tmp_path / "scores.json"),
-        }
-    )
-    assert json.loads(scores.read_text())["metrics"][0][
-        "validation_rankic"
-    ] == pytest.approx(1.0)
-    selected = select(
-        {
-            "scores": str(scores),
-            "output": str(tmp_path / "selection.json"),
-            "selection_metric": "validation_rankic",
-            "selection_direction": "maximize",
-            "tie_break_order": ["ordinal"],
-            "refit_windows": [{"start": "2020-01-01", "end": "2020-01-02"}],
-            "refit_cutoff": "2020-01-03",
-        }
-    )
-    assert read_selection(selected)["selected_model_id"] == "ordinal"
-
-
 def test_quantile_boundary_and_local_invalid_strata_preserve_order():
     signal = pd.Series([2**63, 2**63 + 1, 2**63 + 2], index=list("abc"), dtype="uint64")
     weights = build_simple_target_weights(
@@ -273,7 +150,7 @@ def test_native_response_uses_exact_frozen_integer_boundaries(tmp_path):
     frame = pd.DataFrame(
         {
             "timestamp": pd.date_range("2020-01-01", periods=4, freq="s"),
-            "asset_id": "btc",
+            "asset_id": "asset_a",
             "x": values,
             "label": [0.0001, 0.0002, 0.0003, 0.0004],
             "label_available_at": pd.Timestamp("2020-01-01 01:00:00"),
@@ -308,7 +185,7 @@ def test_native_response_uses_exact_frozen_integer_boundaries(tmp_path):
     ]:
         spec = EvaluationSpec(
             evaluation_id="ordinal",
-            market_id="crypto",
+            market_id="other_market",
             research_dataset_id="ordinal",
             signals=(
                 SignalSpec(

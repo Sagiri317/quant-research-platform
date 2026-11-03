@@ -325,25 +325,6 @@ def test_choice_scope_diagnostic_does_not_change_materialized_facts(
     }
 
 
-def test_funding_consumption_rejects_boolean_coverage_time(tmp_path):
-    from quant_research_platform.sources.binance.funding import (
-        read_funding_observations,
-    )
-    from tests.sources.test_binance_funding import _write
-
-    _write(
-        tmp_path / "raw",
-        metadata_changes={
-            "coverage": {"start_ns": False, "end_ns": 100, "status": "COMPLETE"},
-        },
-    )
-    with pytest.raises(ValueError, match="binance_funding_coverage_invalid"):
-        with read_funding_observations(
-            (tmp_path / "funding/BTCUSDT",), symbol="BTCUSDT"
-        ):
-            pass
-
-
 @pytest.mark.parametrize("method", ["read", "read1", "readinto", "readinto1"])
 def test_digest_reader_counts_every_consumed_byte_through_binary_methods(
     tmp_path, method

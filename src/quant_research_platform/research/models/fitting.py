@@ -39,11 +39,6 @@ from quant_research_platform.research.features.transforms import (
     model_observed_input_mask,
 )
 from quant_research_platform.research.filtering import apply_filter_mode
-from quant_research_platform.research.models.rank_ensemble import (
-    ICWeightedRankEnsemble,
-    RankEnsemblePredictor,
-    rank_model_parameters,
-)
 from quant_research_platform.research.models.scaler import (
     LinearScaledPredictor,
     ModelMatrixScaler,
@@ -66,10 +61,10 @@ class PreparedTraining:
     filter_metadata: dict[str, object]
     input_columns: tuple[str, ...]
     training_weighting: TrainingWeighting
-    rank_inputs: bool
     native_missing: bool = False
     trading_sessions: object = None
     training_scaling: bool = True
+    sequence_context: pd.DataFrame | None = None
 
     @cached_property
     def preprocessing(self):
@@ -79,8 +74,6 @@ class PreparedTraining:
             self.training_weighting,
             trading_sessions=self.trading_sessions,
         )
-        if self.rank_inputs:
-            return weights, None, self.training
         matrix = self.training.loc[:, self.input_columns]
         scaler = ModelMatrixScaler.fit(
             matrix,
@@ -94,13 +87,13 @@ class PreparedTraining:
 def prediction_callable(input_columns: tuple[str, ...], prediction_model: object):
     """Build the model-owned prediction callable used by selection and output."""
 
+    from quant_research_platform.research.models.neural import SequencePredictor
+
+    if isinstance(prediction_model, SequencePredictor):
+        return prediction_model.prediction_function()
+
     def predict_from_model(frame: pd.DataFrame) -> np.ndarray:
-        columns = input_columns
-        if isinstance(
-            prediction_model, (RankEnsemblePredictor, ICWeightedRankEnsemble)
-        ):
-            columns = tuple(dict.fromkeys(("timestamp", *input_columns)))
-        predicted = prediction_model.predict(frame.loc[:, list(columns)])
+        predicted = prediction_model.predict(frame.loc[:, list(input_columns)])
         return np.asarray(predicted, dtype="float64")
 
     return predict_from_model
@@ -119,9 +112,36 @@ def validate_model_state(predictor: object, metadata: dict[str, object]) -> None
         random_seed=metadata["random_seed"],
         training_weighting=metadata["training_weighting"],
         training_scaling=metadata["training_scaling"],
-        huber_target_scale=metadata.get("huber_target_scale", 1.0),
     )
-    if spec.model_algorithm == "linear_regression":
+    if spec.model_algorithm in {"lstm_regressor", "transformer_regressor"}:
+        import torch
+
+        from quant_research_platform.research.models.neural import (
+            SequencePredictor,
+            _network,
+            _ordered_context,
+            sequence_parameters,
+        )
+
+        if type(predictor) is not SequencePredictor or (
+            predictor.algorithm != spec.model_algorithm
+            or predictor.parameters
+            != sequence_parameters(spec.model_algorithm, dict(spec.hyperparameters))
+            or not np.isfinite(predictor.target_mean)
+            or not np.isfinite(predictor.target_scale)
+            or predictor.target_scale <= 0
+        ):
+            raise ValueError("model_state_metadata_mismatch")
+        with torch.random.fork_rng():
+            network = _network(
+                predictor.algorithm, len(predictor.scaler.columns), predictor.parameters
+            )
+        network.load_state_dict(predictor.state)
+        if not all(torch.isfinite(value).all() for value in predictor.state.values()):
+            raise ValueError("model_state_metadata_mismatch")
+        _ordered_context(predictor.history, spec.input_columns)
+        importance = None
+    elif spec.model_algorithm == "linear_regression":
         if type(predictor) is not LinearScaledPredictor:
             raise ValueError("model_state_metadata_mismatch")
         try:
@@ -134,34 +154,6 @@ def validate_model_state(predictor: object, metadata: dict[str, object]) -> None
         ):
             raise ValueError("model_state_metadata_mismatch")
         importance = feature_importance.linear_feature_importance(spec, coefficients)
-    elif spec.model_algorithm in {
-        "equal_weight_rank_ensemble",
-        "ic_weighted_rank_ensemble",
-    }:
-        expected_type = (
-            RankEnsemblePredictor
-            if spec.model_algorithm == "equal_weight_rank_ensemble"
-            else ICWeightedRankEnsemble
-        )
-        if type(predictor) is not expected_type:
-            raise ValueError("model_state_metadata_mismatch")
-        parameters = rank_model_parameters(predictor)
-        if isinstance(predictor, RankEnsemblePredictor):
-            if any(direction not in (-1.0, 1.0) for direction in predictor.directions):
-                raise ValueError("model_state_metadata_mismatch")
-        elif not np.isclose(
-            sum(abs(weight) for weight in predictor.weights),
-            1.0,
-            rtol=0.0,
-            atol=1e-12,
-        ):
-            raise ValueError("model_state_metadata_mismatch")
-        if (
-            metadata.get("rank_parameters") != parameters
-            or metadata["scaler"] is not None
-        ):
-            raise ValueError("model_state_metadata_mismatch")
-        importance = feature_importance.estimator_feature_importance(spec, predictor)
     else:
         if type(predictor) is not ScaledPredictor:
             raise ValueError("model_state_metadata_mismatch")
@@ -170,8 +162,6 @@ def validate_model_state(predictor: object, metadata: dict[str, object]) -> None
         )
         actual = predictor.estimator
         if type(actual) is not type(expected):
-            raise ValueError("model_state_metadata_mismatch")
-        if getattr(actual, "qrp_huber_target_scale_", 1.0) != spec.huber_target_scale:
             raise ValueError("model_state_metadata_mismatch")
         actual_parameters, expected_parameters = (
             actual.get_params(deep=False),
@@ -205,7 +195,11 @@ def validate_model_state(predictor: object, metadata: dict[str, object]) -> None
         if not inputs_match:
             raise ValueError("model_state_metadata_mismatch")
         importance = feature_importance.estimator_feature_importance(spec, predictor)
-    if isinstance(predictor, (LinearScaledPredictor, ScaledPredictor)):
+    from quant_research_platform.research.models.neural import SequencePredictor
+
+    if isinstance(
+        predictor, (LinearScaledPredictor, ScaledPredictor, SequencePredictor)
+    ):
         if (
             type(predictor.scaler) is not ModelMatrixScaler
             or predictor.scaler.scaling != spec.training_scaling
@@ -237,6 +231,19 @@ def _fit_model_result(
 ) -> ModelFitResult:
     if spec.model_algorithm == "linear_regression":
         result = _fit_linear_model_result(prepared_training, spec)
+    elif spec.model_algorithm in {"lstm_regressor", "transformer_regressor"}:
+        from quant_research_platform.research.models.neural import fit_sequence
+
+        predictor = fit_sequence(prepared_training, spec)
+        result = ModelFitResult(
+            metadata=model_metadata(
+                spec,
+                filter_metadata=prepared_training.filter_metadata,
+                row_counts=prepared_training.row_counts,
+                scaler=predictor.scaler,
+            ),
+            prediction_model=predictor,
+        )
     else:
         result = _fit_estimator_model_result(
             prepared_training, spec, estimator=estimator
@@ -322,11 +329,6 @@ def model_metadata(
         "dependency_status": estimators.require_model_dependency(spec.model_algorithm),
         "training_weighting": spec.training_weighting.payload(),
         "training_scaling": spec.training_scaling,
-        **(
-            {"huber_target_scale": spec.huber_target_scale}
-            if spec.huber_target_scale != 1.0
-            else {}
-        ),
         "scaler": None if scaler is None else scaler.to_payload(),
     }
     if feature_importance is not None:
@@ -364,8 +366,6 @@ def _fit_estimator_model_result(
         resolved_hyperparameters=resolved_hyperparameters,
         scaler=predictor.scaler if isinstance(predictor, ScaledPredictor) else None,
     )
-    if isinstance(predictor, (RankEnsemblePredictor, ICWeightedRankEnsemble)):
-        metadata["rank_parameters"] = rank_model_parameters(predictor)
     result = ModelFitResult(metadata=metadata, prediction_model=predictor)
     return result
 
@@ -379,9 +379,7 @@ def _legal_training_rows(
     declared_columns=(),
 ):
     """Select all legal rows without learning preprocessing."""
-    validity = model_input_validity_columns(
-        spec.input_columns, spec.model_algorithm, declared_columns
-    )
+    validity = model_input_validity_columns(spec.input_columns, declared_columns)
     columns = tuple(dict.fromkeys((*spec.input_columns, *validity)))
     missing = sorted(set(columns).difference(frame.columns))
     if missing:
@@ -415,7 +413,7 @@ def _collect_training_frame(
     trading_calendar=None,
 ) -> PreparedTraining:
     validity_columns = model_input_validity_columns(
-        spec.input_columns, spec.model_algorithm, declared_columns
+        spec.input_columns, declared_columns
     )
     required = set((*spec.input_columns, *validity_columns))
     required.add(spec.target_column)
@@ -450,6 +448,7 @@ def _collect_training_frame(
     filter_columns_used: list[str] = []
     filter_definition = ""
     retained: list[pd.DataFrame] = []
+    sequence_context = []
     with closing_iterator(
         iter(
             iter_model_work_frames(frames, required=required, work_columns=work_columns)
@@ -457,6 +456,21 @@ def _collect_training_frame(
     ) as work_frames:
         for chunk in work_frames:
             chunk = chunk.reset_index(drop=True)
+            if spec.model_algorithm in {"lstm_regressor", "transformer_regressor"}:
+                observed = model_observed_input_mask(
+                    chunk, spec.input_columns, declared_columns
+                )
+                observed &= pd.to_datetime(chunk.timestamp).le(
+                    pd.Timestamp(fitting_cutoff)
+                )
+                context = mask_unobserved_features(
+                    chunk, spec.input_columns, declared_columns
+                )
+                sequence_context.append(
+                    context.loc[
+                        observed, ["asset_id", "timestamp", *spec.input_columns]
+                    ]
+                )
             filtered, metadata = _legal_training_rows(
                 chunk,
                 spec,
@@ -569,11 +583,10 @@ def _collect_training_frame(
         filter_metadata,
         spec.input_columns,
         spec.training_weighting,
-        spec.model_algorithm
-        in {"equal_weight_rank_ensemble", "ic_weighted_rank_ensemble"},
         _native_missing(spec),
         sessions,
         spec.training_scaling,
+        pd.concat(sequence_context, ignore_index=True) if sequence_context else None,
     )
 
 
@@ -588,46 +601,23 @@ def _fit_predictor(
     )
     weights, scaler, matrix = prepared_training.preprocessing
     weights = weights.copy()
-    if spec.model_algorithm in {
-        "equal_weight_rank_ensemble",
-        "ic_weighted_rank_ensemble",
-    }:
-        return estimator.fit(
-            prepared_training.training.copy(deep=True), y, sample_weight=weights
-        )
     from sklearn.exceptions import ConvergenceWarning
 
     scaled_matrix = matrix.copy(deep=True)
-    target_scale = spec.huber_target_scale
-    if target_scale != 1.0:
-        alpha = estimator.alpha
-        scaled_alpha = alpha / target_scale
-        with np.errstate(over="ignore", invalid="ignore", under="ignore"):
-            y *= target_scale
-        if (
-            not np.isfinite(y).all()
-            or not np.isfinite(scaled_alpha)
-            or (alpha != 0 and scaled_alpha == 0)
-        ):
-            raise ValueError("model_huber_target_scale_unrepresentable")
-        estimator.set_params(alpha=scaled_alpha)
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", ConvergenceWarning)
             estimator.fit(scaled_matrix, y, sample_weight=weights)
+            if spec.model_algorithm == "xgboost_regressor":
+                import json
+
+                device = json.loads(estimator.get_booster().save_config())["learner"][
+                    "generic_param"
+                ]["device"]
+                if not device.startswith("cuda"):
+                    raise RuntimeError("model_cuda_unavailable")
     except ConvergenceWarning:
         raise ValueError("model_fit_non_converged") from None
-    if target_scale != 1.0:
-        # H(s*y, s*beta, s*sigma; alpha/s) = s*H(y, beta, sigma; alpha).
-        estimator.coef_ /= target_scale
-        estimator.intercept_ /= target_scale
-        estimator.scale_ /= target_scale
-        estimator.set_params(alpha=alpha)
-        estimator.qrp_huber_target_scale_ = target_scale
-        if not np.isfinite(
-            np.r_[estimator.coef_, estimator.intercept_, estimator.scale_]
-        ).all():
-            raise ValueError("model_huber_target_scale_unrepresentable")
     return ScaledPredictor(estimator, scaler)
 
 
@@ -686,14 +676,13 @@ def _strict_non_negative_count_value(value: object) -> int:
 
 
 def _native_missing(spec):
-    if spec.model_algorithm == "linear_regression":
-        return False
-    estimator = estimators.build_estimator_from_model_spec(spec)
     if spec.model_algorithm in {
-        "equal_weight_rank_ensemble",
-        "ic_weighted_rank_ensemble",
+        "linear_regression",
+        "lstm_regressor",
+        "transformer_regressor",
     }:
         return False
+    estimator = estimators.build_estimator_from_model_spec(spec)
     from sklearn.utils import get_tags
 
     return bool(get_tags(estimator).input_tags.allow_nan)

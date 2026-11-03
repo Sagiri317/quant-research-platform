@@ -310,7 +310,7 @@ def test_public_model_analysis_subsets_require_only_used_inputs(
 
 @pytest.mark.parametrize("change", ["assets", "labels", "row_order"])
 def test_saved_evaluation_pair_uses_declared_science_and_daily_values(tmp_path, change):
-    from tests.research.crypto_evaluation_test_support import write_evaluation_input
+    from tests.research.evaluation_test_support import write_evaluation_input
 
     frame, config = _fixture(tmp_path)
     own = evaluate(config)
@@ -386,7 +386,7 @@ def test_native_evaluation_ignores_null_payload_and_dictionary_encoding(
     from quant_research_platform.artifacts.outputs.evaluation import (
         read_evaluation_outputs,
     )
-    from tests.research.crypto_evaluation_test_support import write_evaluation_input
+    from tests.research.evaluation_test_support import write_evaluation_input
 
     frame, config = _fixture(tmp_path)
     if encoding == "categories":

@@ -26,7 +26,6 @@ from quant_research_platform.research.features.transforms import (
     feature_observation_columns,
     mask_unobserved_features,
 )
-from quant_research_platform.research.models.rank_ensemble import _label_predictions
 from quant_research_platform.research.models.trial_selection import _mean_squared_error
 from quant_research_platform.research.protocols.a_share import (
     _inference_blocker,
@@ -481,12 +480,6 @@ def build_a_share_statistics_tables(
                                     mature[primary_label],
                                     raw_mature,
                                     head_fraction=head_fraction,
-                                    label_predictions=_label_predictions(
-                                        eligible_scores,
-                                        metadata.get("rank_parameters", {}).get(
-                                            "label_calibration"
-                                        ),
-                                    ),
                                     loss_reason=loss_reason,
                                     baseline_prediction=(
                                         (
@@ -766,7 +759,6 @@ def _prediction_quality(
     raw_returns,
     *,
     head_fraction,
-    label_predictions=None,
     loss_reason=None,
     baseline_prediction=0.0,
 ):
@@ -774,12 +766,9 @@ def _prediction_quality(
     scores = scores.loc[np.isfinite(scores)]
     paired = target.reindex(scores.index)
     valid = np.isfinite(paired)
-    predictions = (
-        scores if label_predictions is None else label_predictions.reindex(scores.index)
-    )
     count = int(valid.sum())
     mse = (
-        _mean_squared_error(predictions.loc[valid], paired.loc[valid])
+        _mean_squared_error(scores.loc[valid], paired.loc[valid])
         if loss_reason is None
         else None
     )

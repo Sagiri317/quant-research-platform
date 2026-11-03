@@ -15,7 +15,15 @@ def prepare_source(config: Mapping):
         or not required <= set(config)
         or set(config)
         - required
-        - {"start_date", "end_date", "chunksize", "fee_csv", "fee_sidecar"}
+        - {
+            "start_date",
+            "end_date",
+            "chunksize",
+            "fee_csv",
+            "fee_sidecar",
+            "instruments",
+            "revision",
+        }
     ):
         raise ValueError("source_prepare_fields_invalid")
     if type(config["raw_root"]) is not str or not config["raw_root"]:
@@ -45,10 +53,17 @@ def prepare_source(config: Mapping):
         from quant_research_platform.sources.reference.interim import (
             materialize_interim_data,
         )
+    elif source == "venvoo":
+        from quant_research_platform.sources.venvoo import materialize_interim_data
+
+        if not {"instruments", "revision", "start_date", "end_date"} <= set(config):
+            raise ValueError("level2_source_scope_required")
     else:
         raise ValueError("source_prepare_source_invalid")
     if "chunksize" in config and source != "csmar":
         raise ValueError("source_prepare_chunksize_not_consumed")
+    if source != "venvoo" and {"instruments", "revision"} & set(config):
+        raise ValueError("source_prepare_level2_parameters_not_consumed")
     for key in ("fee_csv", "fee_sidecar"):
         if key in config and (
             source != "reference" or type(config[key]) is not str or not config[key]
@@ -56,7 +71,15 @@ def prepare_source(config: Mapping):
             raise ValueError("source_prepare_fee_files_invalid")
     kwargs = {
         key: config[key]
-        for key in ("start_date", "end_date", "chunksize", "fee_csv", "fee_sidecar")
+        for key in (
+            "start_date",
+            "end_date",
+            "chunksize",
+            "fee_csv",
+            "fee_sidecar",
+            "instruments",
+            "revision",
+        )
         if key in config
     }
     return materialize_interim_data(

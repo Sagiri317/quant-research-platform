@@ -186,7 +186,7 @@ def run_a_share_acceptance(project_root: Path):
     model_specs = [
         dict(item)
         for item in research_configuration()["models"]
-        if item["model_algorithm"] in {"equal_weight_rank_ensemble", "ridge_regression"}
+        if item["model_algorithm"] in {"linear_regression", "lasso_regression"}
     ]
     models, predictions, configurations = {}, {}, {}
     for model in model_specs:

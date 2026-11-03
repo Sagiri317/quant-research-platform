@@ -65,7 +65,7 @@ def native_comparison(tmp_path_factory):
         "global": {"start": "2019-01-02", "end": "2019-02-28"},
     }
     models, predictions, selections = {}, {}, {}
-    for algorithm in ("linear_regression", "equal_weight_rank_ensemble"):
+    for algorithm in ("linear_regression", "lasso_regression"):
         model = fit(
             {
                 "market_id": "a_share",
@@ -77,6 +77,9 @@ def native_comparison(tmp_path_factory):
                     "input_factor_columns": [factor],
                     "target_column": "forward_return_20d",
                     "random_seed": 42,
+                    "hyperparameters": {"alpha": 1e-4}
+                    if algorithm == "lasso_regression"
+                    else {},
                 },
                 "fit_windows": [{"start": "2018-08-01", "end": "2018-10-31"}],
                 "fit_cutoff": "2018-10-31",

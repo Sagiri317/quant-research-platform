@@ -11,26 +11,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.artifacts.crypto_hft import write_crypto_episode_artifact
-from quant_research_platform.artifacts.portfolio_ledger import (
-    write_portfolio_ledger_artifact,
-)
 from quant_research_platform.artifacts.statistics import (
     read_statistics_artifact,
     write_statistics_artifact,
 )
 from quant_research_platform.contracts.portfolios import (
     PortfolioCandidateSpec,
-    PortfolioCapital,
-    PortfolioDiagnostic,
-)
-from quant_research_platform.markets.implementations.crypto.execution import (
-    PortfolioEconomics,
-    _record_execution_result,
 )
 from quant_research_platform.research.portfolios.comparison import comparison_tables
 from quant_research_platform.research.portfolios.diagnostics import (
-    crypto_statistics,
     portfolio_statistics,
 )
 from tests.helpers.benchmark_references import reference_input
@@ -41,8 +30,6 @@ def _axis(returns, dates):
     return pd.DataFrame(
         {
             "candidate_id": "strategy",
-            "execution_mode": "continuous",
-            "episode_id": "continuous",
             "fold_id": "",
             "sample_role": "test",
             "start_at": dates[:-1],
@@ -65,7 +52,6 @@ def _compare(axis, references, **options):
     metadata = {
         "window": {"start": str(axis.start_at.min()), "end": str(axis.end_at.max())},
         "sample_role": "test",
-        "execution_mode": "continuous",
         "candidate_ids": ["strategy"],
     }
     tables = comparison_tables(
@@ -422,176 +408,6 @@ assert 'arch' not in sys.modules
     assert completed.returncode == 0, completed.stderr
 
 
-def _crypto_account(
-    root, *, partial=False, mode="continuous", short=False, negative=False, dates=None
-):
-    dates = (
-        dates
-        if dates is not None
-        else pd.date_range(
-            "2024-01-01T23:55:00" if short else "2024-01-01",
-            periods=3,
-            freq="5min" if short else "D",
-        )
-    )
-    capital = PortfolioCapital("crypto", 1000.0, "USDT", "linear_perpetual")
-
-    def produce(emit):
-        account = PortfolioEconomics(capital, "btc_usdt", emit)
-        account.mark(
-            dates[0].value,
-            100.0,
-            diagnostics=(
-                PortfolioDiagnostic("btc_usdt", None, "oos_window_start", number=0.0),
-            ),
-        )
-        account.fill(
-            timestamp_ns=dates[0].value,
-            order_id="entry",
-            quantity=-20.0 if negative else 1.0,
-            price=100.0,
-            mark_price=100.0,
-            fee=1.0,
-        )
-        account.mark(
-            dates[1].value,
-            200.0 if negative else 110.0,
-            diagnostics=()
-            if short
-            else (
-                PortfolioDiagnostic(
-                    "btc_usdt",
-                    None,
-                    "utc_day_boundary",
-                    number=float(dates[1].value // pd.Timedelta(days=1).value),
-                ),
-            ),
-        )
-        if not partial:
-            account.mark(
-                dates[2].value,
-                210.0 if negative else 120.0,
-                diagnostics=(
-                    PortfolioDiagnostic("btc_usdt", None, "oos_window_end", number=0.0),
-                ),
-            )
-        _record_execution_result(
-            account,
-            {
-                "simulation": "comparison_fixture",
-                "net_pnl": None if partial else -2201.0 if negative else 19.0,
-                "created_orders": 1,
-                "filled_orders": 1,
-                "selection_status": "PARTIAL" if partial else "COMPLETE",
-                "account_path_status": "PARTIAL" if partial else "COMPLETE",
-                "account_stop_reason": "execution_unknown" if partial else None,
-                "account_stop_ns": dates[1].value + 1 if partial else None,
-            },
-            dates[-1].value,
-            210.0 if negative else 120.0,
-        )
-
-    metadata = {
-        "window": {"start": dates[0].isoformat(), "end": dates[-1].isoformat()},
-        "sample_role": "test",
-        "execution_mode": mode,
-        "execution_style": "taker",
-        "execution": {"position_size": 20.0, "taker_fee_bps": 0.0},
-    }
-    if mode == "continuous":
-        write_portfolio_ledger_artifact(
-            root, capital=capital, metadata=metadata, produce=produce
-        )
-    else:
-
-        def episodes(emit):
-            emit(
-                start_ns=dates[0].value,
-                stop_ns=dates[-1].value + 1,
-                termination="PLANNED_END",
-                stop_reasons=["planned_oos_end"],
-                produce=produce,
-            )
-
-        write_crypto_episode_artifact(
-            root, capital=capital, metadata=metadata, produce=episodes
-        )
-    return dates
-
-
-@pytest.mark.parametrize("mode", ["continuous", "independent_segments"])
-@pytest.mark.parametrize(
-    "partial, short, negative",
-    [
-        (False, False, False),
-        (True, False, False),
-        (False, True, False),
-        (False, False, True),
-    ],
-)
-def test_crypto_native_axis_partial_short_and_negative_equity(
-    tmp_path, mode, partial, short, negative
-):
-    ledger = tmp_path / "ledger"
-    dates = _crypto_account(
-        ledger, partial=partial, mode=mode, short=short, negative=negative
-    )
-    ref = reference_input(
-        tmp_path / "reference.parquet",
-        [100.0, 105.0, 110.0],
-        dates=dates,
-        currency="USDT",
-        clock="utc",
-    )
-    artifact = read_statistics_artifact(
-        crypto_statistics(
-            {
-                "ledger": str(ledger),
-                "output": str(tmp_path / "statistics"),
-                "analyses": ["benchmark_comparison", "market_exposure"],
-                "comparison_benchmarks": [ref],
-                "market_exposure": {
-                    "hac_lag": 0,
-                    "confidence": 0.95,
-                    "minimum_observations": 3,
-                },
-            }
-        )
-    )
-    assert "crypto_portfolio_daily.parquet" not in artifact._members
-    with artifact.table("portfolio_benchmark_intervals.parquet") as rows:
-        assert rows.start_at.iloc[0] == dates[0] and rows.end_at.iloc[-1] == dates[-1]
-        assert not rows.episode_id.eq("all").any()
-        if partial:
-            assert (
-                rows.status.iloc[-1] == "UNDEFINED"
-                and rows.reason.iloc[-1] == "execution_unknown"
-            )
-        elif negative:
-            assert (
-                rows.portfolio_return.iloc[0] < -1 and rows.portfolio_wealth.iloc[0] < 0
-            )
-            assert rows.portfolio_reason.iloc[-1] == "nonpositive_start_nav"
-        elif short:
-            assert len(rows) == 1
-            assert rows.portfolio_return.iloc[0] == pytest.approx(0.019)
-            assert rows.relative_wealth.iloc[0] == pytest.approx(1.019 / 1.1)
-        else:
-            assert rows.portfolio_return.tolist() == pytest.approx([0.009, 10 / 1009])
-            assert rows.relative_wealth.iloc[-1] == pytest.approx(1.019 / 1.1)
-    with artifact.table("portfolio_benchmark_metrics.parquet") as metrics:
-        if partial or negative:
-            assert metrics.status.eq("UNDEFINED").all()
-        if short:
-            assert (
-                metrics.loc[metrics.metric_id.eq("tracking_error"), "status"]
-                .eq("UNDEFINED")
-                .all()
-            )
-    with artifact.table("portfolio_market_exposure.parquet") as exposure:
-        assert exposure.status.eq("UNDEFINED").all()
-
-
 def test_missing_input_keeps_declared_units_but_rejects_bad_selector(tmp_path):
     dates = pd.bdate_range("2024-01-02", periods=4)
     ref = reference_input(
@@ -812,80 +628,6 @@ def test_requested_risk_free_defines_alpha_and_missing_rf_blocks_without_fallbac
     assert (
         missing["portfolio_market_exposure"].reason.eq("incomplete_paired_path").all()
     )
-
-
-@pytest.mark.parametrize(
-    "policy",
-    [
-        {"annualization_periods": -365},
-        {"annualization_minimum_observations": -1},
-        {"annualization_periods": True},
-        {"annualization_minimum_observations": 2.5},
-    ],
-)
-def test_comparison_only_crypto_validates_consumed_annualization_policy(
-    tmp_path, policy
-):
-    ledger = tmp_path / "ledger"
-    dates = _crypto_account(ledger)
-    ref = reference_input(
-        tmp_path / "reference.parquet",
-        [100.0, 105.0, 110.0],
-        dates=dates,
-        currency="USDT",
-        clock="utc",
-    )
-    with pytest.raises(ValueError, match="crypto_statistics_annualization_invalid"):
-        crypto_statistics(
-            {
-                "ledger": str(ledger),
-                "output": str(tmp_path / "statistics"),
-                "analyses": ["benchmark_comparison"],
-                "comparison_benchmarks": [ref],
-                "statistics": policy,
-            }
-        )
-
-
-@pytest.mark.parametrize("mode", ["continuous", "independent_segments"])
-def test_crypto_non_daily_known_endpoints_preserve_actual_25hour_interval(
-    tmp_path, mode
-):
-    dates = pd.DatetimeIndex(
-        [
-            "2024-01-01T12:00:00.000000123",
-            "2024-01-01T13:00:00.000000123",
-            "2024-01-02T13:00:00.000000123",
-        ]
-    )
-    ledger = tmp_path / "ledger"
-    _crypto_account(ledger, mode=mode, short=True, dates=dates)
-    ref = reference_input(
-        tmp_path / "reference.parquet",
-        [100.0, 105.0, 110.0],
-        dates=dates,
-        currency="USDT",
-        clock="utc",
-    )
-    artifact = read_statistics_artifact(
-        crypto_statistics(
-            {
-                "ledger": str(ledger),
-                "output": str(tmp_path / "statistics"),
-                "analyses": ["benchmark_comparison"],
-                "comparison_benchmarks": [ref],
-            }
-        )
-    )
-    with artifact.table("portfolio_benchmark_intervals.parquet") as rows:
-        assert len(rows) == 1
-        assert rows.start_at.iloc[0] == dates[0] and rows.end_at.iloc[0] == dates[-1]
-        assert rows.portfolio_return.iloc[0] == pytest.approx(0.019)
-        assert rows.benchmark_return.iloc[0] == pytest.approx(0.1)
-        assert rows.status.eq("DEFINED").all()
-    with artifact.table("portfolio_benchmark_metrics.parquet") as metrics:
-        row = metrics.set_index("metric_id").loc["tracking_error"]
-        assert row.status == "UNDEFINED" and row.reason == "incomplete_daily_axis"
 
 
 @pytest.mark.parametrize("mutation", ["filter", "value", "timestamp"])
@@ -1132,143 +874,3 @@ def test_market_exposure_roundoff_and_small_signals_persist(tmp_path, case, unit
             expected = 1e-10 * unit if case == "small_alpha" else 1e-8
             assert rows.loc[key, "value"] == pytest.approx(expected, rel=0.01, abs=0)
             assert rows.loc[key, "p_value"] < 0.01
-
-
-def test_native_ledger_self_reference_has_no_roundoff_significance(tmp_path):
-    dates = pd.date_range("2024-01-01", periods=253)
-    market = np.resize([0.01, -0.02, 0.03, 0.005, -0.01], 252)
-    prices = np.r_[100.0, 100.0 * np.cumprod(1 + market)]
-    capital = PortfolioCapital("synthetic", "1000", "USDT", "linear_perpetual")
-
-    def produce(emit):
-        account = PortfolioEconomics(capital, "btc_usdt", emit)
-        account.mark(
-            dates[0].value,
-            prices[0],
-            diagnostics=(
-                PortfolioDiagnostic("btc_usdt", None, "oos_window_start", number=0.0),
-            ),
-        )
-        account.fill(
-            timestamp_ns=dates[0].value,
-            order_id="entry",
-            quantity=10.0,
-            price=100.0,
-            mark_price=100.0,
-            fee=0.0,
-        )
-        for index, timestamp in enumerate(dates[1:], start=1):
-            terminal = index == len(dates) - 1
-            account.mark(
-                timestamp.value,
-                prices[index],
-                diagnostics=(
-                    PortfolioDiagnostic(
-                        "btc_usdt",
-                        None,
-                        "oos_window_end" if terminal else "utc_day_boundary",
-                        number=0.0
-                        if terminal
-                        else float(timestamp.value // pd.Timedelta(days=1).value),
-                    ),
-                ),
-            )
-        _record_execution_result(
-            account,
-            {
-                "simulation": "self_reference",
-                "net_pnl": float((prices[-1] - 100) * 10),
-                "created_orders": 1,
-                "filled_orders": 1,
-                "selection_status": "COMPLETE",
-                "account_path_status": "COMPLETE",
-                "account_stop_reason": None,
-                "account_stop_ns": None,
-            },
-            dates[-1].value,
-            prices[-1],
-        )
-
-    ledger = write_portfolio_ledger_artifact(
-        tmp_path / "ledger",
-        capital=capital,
-        metadata={
-            "window": {"start": dates[0].isoformat(), "end": dates[-1].isoformat()},
-            "sample_role": "test",
-            "execution_mode": "continuous",
-            "execution_style": "taker",
-            "execution": {"position_size": 10.0, "taker_fee_bps": 0.0},
-        },
-        produce=produce,
-    )
-    reference = reference_input(
-        tmp_path / "market.parquet", prices, dates=dates, clock="utc", currency="USDT"
-    )
-    config = {
-        "ledger": str(ledger),
-        "output": str(tmp_path / "initial"),
-        "analyses": ["benchmark_comparison"],
-        "comparison_benchmarks": [reference],
-    }
-    initial = crypto_statistics(config)
-    reference = {
-        "reference_id": "actual-persisted-strategy",
-        "input": {
-            "path": str(initial / "portfolio_benchmark_intervals.parquet"),
-            "spec": {
-                "data_id": "actual_native_returns",
-                "frequency": "1d",
-                "grain": "asset_timestamp",
-                "primary_key": ["start_at", "candidate_id"],
-                "partition_columns": [],
-                "column_roles": {
-                    "start_at": "timestamp",
-                    "end_at": "context",
-                    "candidate_id": "key",
-                    "portfolio_return": "context",
-                },
-                "column_units": {"portfolio_return": "decimal"},
-            },
-            "row_filters": [["candidate_id", "==", "synthetic"]],
-        },
-        "representation": "interval_simple_return",
-        "start_column": "start_at",
-        "end_column": "end_at",
-        "value_column": "portfolio_return",
-        "valuation_currency": "USDT",
-        "timestamp_basis": "utc",
-        "return_basis": "strategy_net",
-        "cost_basis": "execution_costs",
-    }
-    artifact = read_statistics_artifact(
-        crypto_statistics(
-            {
-                **config,
-                "output": str(tmp_path / "self-reference"),
-                "analyses": ["market_exposure"],
-                "comparison_benchmarks": [reference],
-                "market_exposure": {
-                    "hac_lag": 1,
-                    "confidence": 0.95,
-                    "minimum_observations": 60,
-                },
-            }
-        )
-    )
-    with artifact.table("portfolio_market_exposure.parquet") as rows:
-        estimates = rows.set_index("coefficient_id").loc[
-            ["market_return_intercept", "beta"]
-        ]
-        np.testing.assert_allclose(estimates.value, [0, 1], rtol=1e-13, atol=0)
-        assert estimates.status.eq("DEFINED").all()
-        assert estimates.inference_status.eq("UNDEFINED").all()
-        assert estimates.inference_reason.eq("zero_residual_variance").all()
-        assert estimates.defined_hypothesis_count.eq(0).all()
-        assert estimates.planned_hypothesis_count.eq(2).all()
-        assert estimates.standard_error.eq(0).all()
-        assert (
-            estimates[["t_statistic", "p_value", "fdr_adjusted_p_value"]]
-            .isna()
-            .all()
-            .all()
-        )

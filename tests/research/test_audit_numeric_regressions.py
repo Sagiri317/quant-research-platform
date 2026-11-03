@@ -199,54 +199,6 @@ def test_distinct_positive_price_labels_keep_distinct_model_targets(tmp_path):
     np.testing.assert_allclose(_a_share_model_target(first), [-1, 1], rtol=1e-15)
 
 
-@pytest.mark.parametrize("capital_value", (1000.0, 1e6))
-def test_perpetual_published_pnl_keeps_small_cost_and_funding(tmp_path, capital_value):
-    from quant_research_platform.artifacts.portfolio_ledger import (
-        read_portfolio_ledger_artifact,
-        summarize_portfolio_ledger,
-        write_portfolio_ledger_artifact,
-    )
-    from quant_research_platform.contracts.portfolios import (
-        FundingEvent,
-        PortfolioCapital,
-    )
-    from quant_research_platform.markets.implementations.crypto.execution import (
-        PortfolioEconomics,
-    )
-
-    capital = PortfolioCapital("fee", capital_value, "USDT", "linear_perpetual")
-    metadata = {
-        "sample_role": "validation",
-        "window": {"start": "1970-01-01", "end": "1970-01-02"},
-    }
-
-    def produce(emit):
-        economics = PortfolioEconomics(capital, "asset", emit)
-        economics.fill(
-            timestamp_ns=1,
-            order_id="open",
-            quantity=1.0,
-            price=100.0,
-            mark_price=100.0,
-            fee=1.0,
-        )
-        economics.funding(FundingEvent(2, 0.01, 100.0), mark_price=economics.last_mark)
-        economics.funding(FundingEvent(3, 0.01, 100.0), mark_price=economics.last_mark)
-        summary = economics.mark(4, 100.0)
-        assert summary["net_pnl"] == -3.0
-        assert summary["gross_pnl"] == 0.0
-
-    root = write_portfolio_ledger_artifact(
-        tmp_path / "ledger", capital=capital, metadata=metadata, produce=produce
-    )
-    artifact = read_portfolio_ledger_artifact(root)
-    result = summarize_portfolio_ledger(artifact.capital, artifact.iter_chunks())
-    assert result["net_pnl"] == -3.0
-    assert result["gross_pnl"] == 0.0
-    assert result["fees"] == 1.0
-    assert result["funding"] == -2.0
-
-
 @pytest.mark.parametrize("initial_nav", (100.0, 1000.0))
 @pytest.mark.parametrize("trade", (False, True))
 def test_public_builder_small_nav_cash_and_fee_publish(

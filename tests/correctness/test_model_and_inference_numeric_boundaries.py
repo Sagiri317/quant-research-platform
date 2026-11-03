@@ -6,25 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.research.models.rank_ensemble import (
-    _label_calibration,
-    _training_rank_correlations,
-)
 from quant_research_platform.research.statistics import fama_macbeth_period
-
-
-def test_rank_direction_uses_mass_of_defined_cross_sections():
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(["2020-01-01"] * 2 + ["2020-01-02"] * 3),
-            "x": [1.0, 1.0, 1.0, 2.0, 3.0],
-            "y": [1.0, 2.0, 1.0, 3.0, 2.0],
-        }
-    )
-    result = dict(
-        _training_rank_correlations(frame, ("x",), "y", [2.0, 1.0, 0.5, 0.5, 0.5])
-    )
-    assert result == {"x": 0.5}
 
 
 @pytest.mark.parametrize("weighted", (False, True))
@@ -81,49 +63,6 @@ def test_bootstrap_mean_preserves_ordinary_unit_scaling():
     assert actual.upper * 100 == pytest.approx(scaled.upper, rel=1e-12, abs=1e-14)
 
 
-def test_rank_training_keeps_nullable_raw_domains_and_first_undefined_factor():
-    from quant_research_platform.research.models.rank_ensemble import (
-        EqualWeightRankEnsembleFactory,
-        ICWeightedRankEnsembleFactory,
-    )
-
-    frame = pd.DataFrame(
-        {
-            "x0": pd.array([1, None, 2, 3], dtype="Int64"),
-            "x1": pd.array([None, 2, 3, 4], dtype="Float64"),
-            "timestamp": pd.to_datetime(["2020-01-01"] * 2 + ["2020-01-02"] * 2),
-            "label": [1.0, 2.0, 3.0, 4.0],
-        }
-    ).iloc[[2, 0, 3, 1]]
-    for factory in (EqualWeightRankEnsembleFactory, ICWeightedRankEnsembleFactory):
-        model = factory(("x0", "x1"), "label").fit(frame, frame.label.to_numpy())
-        np.testing.assert_array_equal(model.predict(frame), [-0.25, 0.0, 0.25, 0.0])
-        assert _label_calibration(model.predict(frame), frame.label, None) == (2.5, 2.0)
-    invalid = frame.assign(x0=np.nan, x1="invalid")
-    with pytest.raises(
-        ValueError, match="^ensemble_direction_undefined:x0:no_valid_training_rankic$"
-    ):
-        EqualWeightRankEnsembleFactory(("x0", "x1"), "label").fit(
-            invalid, invalid.label.to_numpy()
-        )
-
-
-def test_exact_zero_rank_correlation_stays_zero():
-    from quant_research_platform.research.models.rank_ensemble import (
-        ICWeightedRankEnsemble,
-    )
-
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(["2020-01-01"] * 2 + ["2020-01-02"] * 2),
-            "x": [1.0, 2.0, 1.0, 2.0],
-            "y": [1.0, 2.0, 2.0, 1.0],
-        }
-    )
-    with pytest.raises(ValueError, match="all_ensemble_correlations_zero"):
-        ICWeightedRankEnsemble.fit(frame, input_columns=("x",), label_column="y")
-
-
 def test_joint_loss_tests_preserve_legal_internal_looking_model_name():
     from quant_research_platform.research.statistics import (
         spa_reality_check,
@@ -147,35 +86,6 @@ def test_joint_loss_tests_preserve_legal_internal_looking_model_name():
         expected.observation_count,
         expected.status,
         expected.reason,
-    )
-
-
-@pytest.mark.parametrize("mode", ("ordinary", "constant"))
-def test_rank_label_calibration_matches_full_fraction_accumulation(mode):
-    rng = np.random.default_rng(193)
-    scores = rng.normal(size=37)
-    labels = rng.normal(size=37)
-    weights = rng.uniform(0.01, 2, size=37)
-    if mode == "constant":
-        scores[:] = 0.125
-    triples = [
-        (Fraction(x), Fraction(y), Fraction(w))
-        for x, y, w in zip(scores, labels, weights, strict=True)
-    ]
-    mass = sum(w for x, y, w in triples)
-    xbar = sum(x * w for x, y, w in triples) / mass
-    ybar = sum(y * w for x, y, w in triples) / mass
-    variance = sum(w * (x - xbar) ** 2 for x, y, w in triples)
-    slope = (
-        sum(w * (x - xbar) * (y - ybar) for x, y, w in triples) / variance
-        if variance
-        else Fraction()
-    )
-    np.testing.assert_allclose(
-        _label_calibration(scores, labels, weights),
-        (float(ybar - slope * xbar), float(slope)),
-        rtol=2e-14,
-        atol=0,
     )
 
 

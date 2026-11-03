@@ -8,7 +8,7 @@ from quant_research_platform.artifacts.outputs.evaluation import read_evaluation
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.research.evaluations.runner import evaluate
-from tests.research.crypto_evaluation_test_support import (
+from tests.research.evaluation_test_support import (
     evaluation_config,
     write_evaluation_input,
 )

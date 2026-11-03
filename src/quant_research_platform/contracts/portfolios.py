@@ -53,13 +53,11 @@ PORTFOLIO_ECONOMIC_SUMMARY_FIELDS = frozenset(
         "valuation_currency",
         "candidate_id",
         "fees",
-        "funding",
         "turnover",
         "fill_events",
         "fill_quantity",
         "fill_quantity_reason",
         "valuation_timestamp_ns",
-        "inventory_revaluation_pnl",
     }
 )
 PORTFOLIO_DECISION_REASON_SIMPLE = "simple_rule"
@@ -106,7 +104,7 @@ class PortfolioCapital:
     candidate_id: str
     initial_capital: float
     valuation_currency: str
-    valuation_method: Literal["cash_equity", "linear_perpetual"]
+    valuation_method: Literal["cash_equity"]
 
     def __post_init__(self) -> None:
         if (
@@ -116,7 +114,7 @@ class PortfolioCapital:
             or not self.valuation_currency.isascii()
             or not self.valuation_currency.isalpha()
             or not self.valuation_currency.isupper()
-            or self.valuation_method not in {"cash_equity", "linear_perpetual"}
+            or self.valuation_method != "cash_equity"
         ):
             raise ValueError("portfolio_capital_invalid")
         value = strict_finite_float(
@@ -155,7 +153,6 @@ class PortfolioValuation:
     quantity: float | Fraction
     value: float
     mark_price: float | Fraction = 1.0
-    cost_basis: float = 0.0
     lifecycle_id: str | None = None
     receivable: float = 0.0
     locked_quantity: float | Fraction = 0.0
@@ -224,7 +221,6 @@ class PortfolioLedgerBatch:
                     "quantity",
                     "value",
                     "mark_price",
-                    "cost_basis",
                     "receivable",
                     "locked_quantity",
                 ),
@@ -291,8 +287,6 @@ class PortfolioLedgerBatch:
             or row.kind
             not in {
                 "principal",
-                "realized_pnl",
-                "funding",
                 "recovery",
                 "dividend",
                 "commission_cost",
@@ -302,10 +296,7 @@ class PortfolioLedgerBatch:
                 "impact_cost",
             }
             or (row.fill_id is not None and row.fill_id not in fills)
-            or (
-                (row.kind in {"funding", "recovery", "dividend"})
-                != (row.fill_id is None)
-            )
+            or ((row.kind in {"recovery", "dividend"}) != (row.fill_id is None))
             for row in self.cashflows
         ):
             raise ValueError("portfolio_ledger_cashflow_invalid")
@@ -332,17 +323,14 @@ class PortfolioLedgerBatch:
                 expected = (
                     float(
                         row.quantity * Fraction(row.mark_price)
-                        - Fraction(row.cost_basis)
                         + Fraction(row.receivable)
                     )
                     if isinstance(row.quantity, Fraction)
-                    else fma(row.quantity, row.mark_price, -row.cost_basis)
-                    + row.receivable
+                    else fma(row.quantity, row.mark_price, row.receivable)
                 )
             except OverflowError:
                 raise ValueError("portfolio_ledger_valuation_invalid") from None
-            # Cost and final values round independently; the product need not fit.
-            tolerance = ulp(row.cost_basis) + ulp(row.value) + ulp(expected)
+            tolerance = ulp(row.value) + ulp(expected)
             if (
                 row.receivable < 0
                 or row.locked_quantity < 0
@@ -372,7 +360,6 @@ class PortfolioLedgerBatch:
         if any(
             row.quantity != row.value
             or row.mark_price != 1.0
-            or row.cost_basis != 0.0
             or row.receivable != 0
             or row.locked_quantity != 0
             for row in self.valuations
@@ -625,78 +612,6 @@ class PortfolioLedgerBatch:
             raise ValueError("portfolio_ledger_diagnostic_invalid")
 
 
-@dataclass(frozen=True, slots=True)
-class FundingEvent:
-    """A caller-declared settlement time and actual, possibly missing observations.
-
-    The time belongs to the explicit research funding calendar. Rate and mark are
-    settlement evidence, not information available to an earlier trade decision.
-    """
-
-    timestamp_ns: int
-    rate: float | None
-    mark_price: float | None
-
-    def __post_init__(self) -> None:
-        if type(self.timestamp_ns) is not int or self.timestamp_ns < 0:
-            raise ValueError("portfolio_funding_timestamp_invalid")
-        if self.rate is not None:
-            object.__setattr__(
-                self,
-                "rate",
-                strict_finite_float(self.rate, error="portfolio_funding_rate_invalid"),
-            )
-        if self.mark_price is not None:
-            mark = strict_finite_float(
-                self.mark_price, error="portfolio_funding_mark_invalid"
-            )
-            if mark <= 0:
-                raise ValueError("portfolio_funding_mark_invalid")
-            object.__setattr__(self, "mark_price", mark)
-
-
-@dataclass(frozen=True, slots=True)
-class FundingForecast:
-    """Known funding coverage and expected cash per long unit, not settlements.
-
-    Equal availability and horizon replace earlier knowledge without asserting
-    any future coverage. Such an observation cannot contain cashflows.
-    """
-
-    available_at_ns: int
-    known_until_ns: int
-    cashflows: tuple[tuple[int, float | None], ...]
-
-    def __post_init__(self) -> None:
-        if (
-            type(self.available_at_ns) is not int
-            or type(self.known_until_ns) is not int
-            or not 0 <= self.available_at_ns <= self.known_until_ns
-            or type(self.cashflows) is not tuple
-        ):
-            raise ValueError("portfolio_funding_forecast_coverage_invalid")
-        previous = self.available_at_ns
-        normalized = []
-        for item in self.cashflows:
-            if (
-                type(item) is not tuple
-                or len(item) != 2
-                or type(item[0]) is not int
-                or not previous < item[0] <= self.known_until_ns
-            ):
-                raise ValueError("portfolio_funding_forecast_events_invalid")
-            amount = (
-                None
-                if item[1] is None
-                else strict_finite_float(
-                    item[1], error="portfolio_funding_forecast_cashflow_invalid"
-                )
-            )
-            normalized.append((item[0], amount))
-            previous = item[0]
-        object.__setattr__(self, "cashflows", tuple(normalized))
-
-
 def portfolio_notional_tolerance(nav: float) -> float:
     return abs(nav) * (ulp(1.0) * 512.0)
 
@@ -744,11 +659,7 @@ def validate_portfolio_transition(
         for phase in ("before", "after", "end")
     }
     before, after, end = (phases[phase] for phase in ("before", "after", "end"))
-    tolerance = portfolio_notional_tolerance(
-        sum(row.value for row in before.values())
-        if capital.valuation_method == "cash_equity"
-        else capital.initial_capital
-    )
+    tolerance = portfolio_notional_tolerance(sum(row.value for row in before.values()))
     if previous is None:
         if not isclose(
             sum(row.value for row in before.values()),
@@ -780,17 +691,13 @@ def validate_portfolio_transition(
                     and current.timestamp_ns < old.timestamp_ns
                 ):
                     raise ValueError("portfolio_ledger_cross_session_timing_invalid")
-                if (
-                    (old.cost_basis if old else 0.0)
-                    != (current.cost_basis if current else 0.0)
-                    or (old.receivable if old else 0.0)
-                    != (current.receivable if current else 0.0)
-                    or not _quantity_equal(
-                        old.locked_quantity if old else 0.0,
-                        current.locked_quantity if current else 0.0,
-                    )
+                if (old.receivable if old else 0.0) != (
+                    current.receivable if current else 0.0
+                ) or not _quantity_equal(
+                    old.locked_quantity if old else 0.0,
+                    current.locked_quantity if current else 0.0,
                 ):
-                    raise ValueError("portfolio_ledger_cost_basis_invalid")
+                    raise ValueError("portfolio_ledger_entitlement_continuity_invalid")
                 if (
                     old is not None
                     and current is not None
@@ -798,14 +705,14 @@ def validate_portfolio_transition(
                     and old.lifecycle_id != current.lifecycle_id
                 ):
                     raise ValueError("portfolio_held_lifecycle_unproven")
-                if capital.valuation_method == "cash_equity" and not isclose(
+                if not isclose(
                     old.share_value if old else 0.0,
                     current.share_value if current else 0.0,
                     rel_tol=0.0,
                     abs_tol=tolerance,
                 ):
                     raise ValueError("portfolio_ledger_cross_session_value_invalid")
-            if capital.valuation_method == "cash_equity" and not isclose(
+            if not isclose(
                 sum(row.value for row in previous.values()),
                 sum(row.value for row in before.values()),
                 rel_tol=0.0,
@@ -835,19 +742,17 @@ def validate_portfolio_transition(
     for flow in batch.cashflows:
         flows_by_asset[flow.asset_id].append(flow)
     for diagnostic in batch.diagnostics:
-        if (
-            capital.valuation_method == "cash_equity"
-            and diagnostic.name in diagnostics_by_asset[diagnostic.asset_id]
-        ):
+        if diagnostic.name in diagnostics_by_asset[diagnostic.asset_id]:
             raise ValueError("portfolio_ledger_diagnostic_keys_invalid")
         diagnostics_by_asset[diagnostic.asset_id][diagnostic.name] = diagnostic
+    daily_targets = any(row.name == "target_notional" for row in batch.diagnostics)
     for asset, initial in before.items():
         post, final = after[asset], end[asset]
         if not initial.timestamp_ns <= post.timestamp_ns <= final.timestamp_ns:
             raise ValueError("portfolio_ledger_execution_timing_invalid")
         trades = trades_by_asset[asset]
         flows = flows_by_asset[asset]
-        if capital.valuation_method == "cash_equity":
+        if daily_targets:
             diagnostics = diagnostics_by_asset[asset]
             rights_quantity = sum(
                 (
@@ -931,27 +836,27 @@ def validate_portfolio_transition(
                     != (reason is not None)
                 ):
                     raise ValueError("portfolio_ledger_direction_invalid")
-            if any(
-                (asset != PORTFOLIO_CASH_ASSET_ID and row.quantity < 0)
-                or row.value < -tolerance
-                or row.cost_basis != 0.0
-                for row in (initial, post, final)
-            ):
-                raise ValueError("portfolio_ledger_notional_invalid")
-            principal = sum(row.amount for row in flows if row.kind == "principal")
-            if not isclose(
-                principal,
-                -sum(row.notional for row in trades),
-                rel_tol=0.0,
-                abs_tol=tolerance,
-            ):
-                raise ValueError("portfolio_ledger_principal_invalid")
-            if any(
-                row.kind in {"funding", "realized_pnl"} or row.amount > 0.0
-                for row in flows
-                if row.kind not in {"principal", "recovery", "dividend"}
-            ):
-                raise ValueError("portfolio_ledger_cost_invalid")
+        if any(
+            (asset != PORTFOLIO_CASH_ASSET_ID and row.quantity < 0)
+            or row.value < -tolerance
+            for row in (initial, post, final)
+        ):
+            raise ValueError("portfolio_ledger_notional_invalid")
+        principal = sum(row.amount for row in flows if row.kind == "principal")
+        if not isclose(
+            principal,
+            -sum(row.notional for row in trades),
+            rel_tol=0.0,
+            abs_tol=tolerance,
+        ):
+            raise ValueError("portfolio_ledger_principal_invalid")
+        if any(
+            row.amount > 0.0
+            for row in flows
+            if row.kind not in {"principal", "recovery", "dividend"}
+        ):
+            raise ValueError("portfolio_ledger_cost_invalid")
+        if daily_targets:
             if (
                 initial.quantity != 0
                 and initial.mark_price != post.mark_price
@@ -966,30 +871,7 @@ def validate_portfolio_transition(
                 for trade in trades
             ):
                 raise ValueError("portfolio_ledger_return_state_invalid")
-        elif asset != PORTFOLIO_CASH_ASSET_ID:
-            if any(row.kind == "principal" for row in flows):
-                raise ValueError("portfolio_perpetual_principal_cashflow_invalid")
-            terms = (
-                initial.cost_basis,
-                *(row.notional for row in trades),
-                *(row.amount for row in flows if row.kind == "realized_pnl"),
-            )
-            # Each stored monetary term rounds independently; add without cancellation.
-            rounding = sum(
-                (Fraction(ulp(value)) / 2 for value in (*terms, post.cost_basis)),
-                Fraction(),
-            )
-            if (
-                abs(
-                    Fraction(post.cost_basis)
-                    - sum((Fraction(value) for value in terms), Fraction())
-                )
-                > max(Fraction(tolerance), rounding)
-                or final.quantity != post.quantity
-                or final.cost_basis != post.cost_basis
-            ):
-                raise ValueError("portfolio_ledger_cost_basis_invalid")
-    if capital.valuation_method == "cash_equity":
+    if daily_targets:
         target_notionals = tuple(
             diagnostics_by_asset[asset]["target_notional"].number
             for asset in before

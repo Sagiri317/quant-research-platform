@@ -1,4 +1,4 @@
-"""Real eleven-model prediction, explanation, persistence and PIT regressions."""
+"""Real model prediction, explanation, persistence and PIT regressions."""
 
 import copy
 import json
@@ -15,16 +15,8 @@ from tests.research.direct_model_test_support import fit_frame, predict_frame
 
 _ALGORITHMS = {
     "linear_regression": "affine",
-    "ridge_regression": "affine",
     "lasso_regression": "affine",
-    "huber_regression": "affine",
-    "decision_tree_regressor": "tree_shap_path",
-    "random_forest_regressor": "tree_shap_path",
-    "gradient_boosting_regressor": "tree_shap_path",
     "xgboost_regressor": "native_tree",
-    "lightgbm_regressor": "native_tree",
-    "equal_weight_rank_ensemble": "rank",
-    "ic_weighted_rank_ensemble": "rank",
 }
 
 
@@ -45,18 +37,7 @@ def _case(tmp_path, algorithm="linear_regression", *, parameters=None):
     )
     params = {
         "lasso_regression": {"alpha": 0.001},
-        "huber_regression": {"max_iter": 1000},
-        "decision_tree_regressor": {"max_depth": 3},
-        "random_forest_regressor": {"n_estimators": 4, "max_depth": 3, "n_jobs": 1},
-        "gradient_boosting_regressor": {"n_estimators": 4, "max_depth": 2},
         "xgboost_regressor": {"n_estimators": 4, "max_depth": 2, "n_jobs": 1},
-        "lightgbm_regressor": {
-            "n_estimators": 4,
-            "max_depth": 2,
-            "n_jobs": 1,
-            "verbosity": -1,
-            "min_child_samples": 2,
-        },
     }.get(algorithm, {})
     params.update(parameters or {})
     if params.get("objective") == "reg:logistic":
@@ -91,9 +72,7 @@ def _case(tmp_path, algorithm="linear_regression", *, parameters=None):
 
 
 @pytest.mark.parametrize("algorithm", list(_ALGORITHMS))
-def test_real_eleven_models_roundtrip_matches_production_prediction(
-    tmp_path, algorithm
-):
+def test_real_models_roundtrip_matches_production_prediction(tmp_path, algorithm):
     case, frame, config = _case(tmp_path, algorithm)
     predictions, _, _ = predict_frame(
         tmp_path / "predict", frame, case, window=config["window"]
@@ -231,98 +210,7 @@ def test_additivity_preserves_tiny_signal_but_rejects_severe_relative_loss():
     )
 
 
-@pytest.mark.parametrize("columns", [("x",), ("x", "y")])
-def test_rank_input_evidence_survives_mixed_numeric_persistence(tmp_path, columns):
-    from quant_research_platform.reports import plots
-
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.Timestamp("2020-01-01"),
-            "asset_id": list("abcd"),
-            "x": pd.array([2**53, 2**53 + 1, 2**53 + 2, None], dtype="Int64"),
-            "y": pd.array([0.1, 0.2, 0.3, 0.4], dtype="Float32"),
-            "label": [0.0, 1.0, 2.0, 3.0],
-            "eligible": True,
-            "label_available_at": pd.Timestamp("2020-01-01"),
-        }
-    )
-    if len(columns) == 1:
-        frame = frame.iloc[:3].copy()
-    case = fit_frame(
-        tmp_path / "fit",
-        frame,
-        ModelSpec(
-            model_id="rank",
-            model_algorithm="equal_weight_rank_ensemble",
-            input_factor_columns=columns,
-            target_column="label",
-        ),
-    )
-    frame["timestamp"] = pd.Timestamp("2020-01-02")
-    window = {"start": "2020-01-02", "end": "2020-01-02"}
-    predictions, _, _ = predict_frame(tmp_path / "predict", frame, case, window=window)
-    source = tmp_path / "future.parquet"
-    frame.to_parquet(source, index=False)
-    output = explain(
-        {
-            "model": str(case.root),
-            "inputs": str(source),
-            "input_spec": case.config["input_spec"],
-            "output": str(tmp_path / "explained"),
-            "window": window,
-            "methods": ["rank"],
-            "selection": {"max_rows": 4, "max_dates": 1},
-            "sample_role": "test",
-            "output_space": "model_output",
-        }
-    )
-    # Consumers need only the artifact, not the original observations or model.
-    source.unlink()
-    _, tables = read_explanation(output)
-    rows = tables["contributions"].set_index(["asset_id", "feature"])
-    assert rows.loc[("a", "x"), "input_value"] == "9007199254740992"
-    assert rows.loc[("b", "x"), "input_value"] == "9007199254740993"
-    assert rows.loc[("c", "x"), "input_value"] == "9007199254740994"
-    # Average rank centered by (n + 1) / 2, divided by n, then equal weights.
-    expected = pd.DataFrame({"x": [-1 / 3, 0, 1 / 3]}, index=list("abc"))
-    if len(columns) == 2:
-        assert pd.isna(rows.loc[("d", "x"), "input_value"])
-        saved_y = rows.xs("y", level="feature").input_value
-        assert saved_y.iloc[0] == "0.10000000149011612"
-        assert saved_y.map(float).tolist() == [float(value) for value in frame.y]
-        expected.loc["d", "x"] = 0
-        expected["y"] = [-3 / 8, -1 / 8, 1 / 8, 3 / 8]
-        expected /= 2
-        assert (
-            plots.plot(
-                {
-                    "kind": "explanation_waterfall",
-                    "inputs": str(output),
-                    "output": str(tmp_path / "waterfall.svg"),
-                    "timestamp": "2020-01-02",
-                    "asset_id": "d",
-                }
-            )
-            .stat()
-            .st_size
-            > 1000
-        )
-    np.testing.assert_allclose(
-        rows.contribution.unstack("feature").loc[expected.index, columns],
-        expected,
-        rtol=1e-14,
-        atol=1e-16,
-    )
-    for actual in (predictions, tables["predictions"]):
-        np.testing.assert_allclose(
-            actual.set_index("asset_id").loc[expected.index, "prediction_score"],
-            expected.sum(axis=1),
-            rtol=1e-14,
-            atol=1e-16,
-        )
-
-
-@pytest.mark.parametrize("algorithm", list(_ALGORITHMS)[:4])
+@pytest.mark.parametrize("algorithm", ["linear_regression", "lasso_regression"])
 def test_linear_shap_uses_exact_explicit_historical_mean(tmp_path, algorithm):
     case, frame, config = _case(tmp_path, algorithm)
     config["methods"] = ["linear_shap"]
@@ -370,16 +258,8 @@ def test_linear_shap_uses_exact_explicit_historical_mean(tmp_path, algorithm):
     )
 
 
-@pytest.mark.parametrize(
-    "algorithm",
-    [
-        "decision_tree_regressor",
-        "random_forest_regressor",
-        "gradient_boosting_regressor",
-    ],
-)
-def test_real_tree_interventional_shap(tmp_path, algorithm):
-    case, frame, config = _case(tmp_path, algorithm)
+def test_real_tree_interventional_shap(tmp_path):
+    case, frame, config = _case(tmp_path, "xgboost_regressor")
     config["methods"] = ["tree_shap_interventional"]
     config["background"] = {
         "inputs": config["inputs"],
@@ -400,7 +280,8 @@ def test_real_tree_interventional_shap(tmp_path, algorithm):
         .contribution.unstack("feature")
     )
     selected = frame.set_index(["timestamp", "asset_id"]).loc[predictions.index]
-    np.testing.assert_allclose(predictions.base_value, baseline, rtol=1e-12, atol=1e-14)
+    # XGBoost predicts in float32; SHAP accumulates the tree contributions separately.
+    np.testing.assert_allclose(predictions.base_value, baseline, rtol=1e-6, atol=1e-9)
     for key, row in selected.iterrows():
         only_x = predictor.predict(background.assign(x=row.x)).mean()
         only_y = predictor.predict(background.assign(y=row.y)).mean()
@@ -418,31 +299,6 @@ def test_real_tree_interventional_shap(tmp_path, algorithm):
         .le(tables["predictions"].additivity_tolerance)
         .all()
     )
-
-
-@pytest.mark.parametrize(
-    "algorithm", ["equal_weight_rank_ensemble", "ic_weighted_rank_ensemble"]
-)
-def test_rank_keeps_full_context_before_sampling_and_frozen_calibration(
-    tmp_path, algorithm
-):
-    case, _, config = _case(tmp_path, algorithm)
-    config["selection"].update(max_rows=2, asset_ids=["a"])
-    metadata, tables = read_explanation(explain(config))
-    assert metadata["context_row_count"] == 24
-    assert len(tables["predictions"]) == 2
-    assert tables["predictions"].asset_id.eq("a").all()
-    config["output"] += "-calibrated"
-    config["output_space"] = "calibrated_label"
-    calibrated_meta, calibrated = read_explanation(explain(config))
-    intercept, slope = case.result.prediction_model.label_calibration
-    np.testing.assert_allclose(
-        calibrated["contributions"].contribution,
-        tables["contributions"].contribution * slope,
-    )
-    np.testing.assert_allclose(calibrated["predictions"].base_value, intercept)
-    assert calibrated_meta["unit"] == "decimal_return"
-    assert metadata["unit"] == "dimensionless_rank_score"
 
 
 def test_native_importance_needs_no_inputs_shap_or_fitting(tmp_path, monkeypatch):
@@ -537,16 +393,6 @@ def test_permutation_maturity_grouped_values_determinism_and_units(tmp_path):
     assert rows.loc[~rows.metric.eq("mse"), "status"].eq("DEFINED").all()
 
 
-def test_permutation_requires_calibrated_rank_mse(tmp_path):
-    _, _, config = _case(tmp_path, "equal_weight_rank_ensemble")
-    _permutation(config)
-    with pytest.raises(ValueError, match="mse_requires_label_output"):
-        explain(config)
-    config["output_space"] = "calibrated_label"
-    _, tables = read_explanation(explain(config))
-    assert tables["permutation_summary"].status.eq("DEFINED").all()
-
-
 @pytest.mark.parametrize("step_seconds", [86400, 0.1])
 def test_temporal_blocks_split_episodes_and_reject_gaps(tmp_path, step_seconds):
     _, frame, config = _case(tmp_path)
@@ -603,7 +449,7 @@ def test_nonidentity_xgboost_raw_margin_units_and_no_silent_fallback(tmp_path):
 @pytest.mark.parametrize(
     "change,reason",
     [
-        ({"methods": ["rank"]}, "rank_model_required"),
+        ({"methods": ["unknown"]}, "methods_invalid"),
         ({"methods": ["affine", "linear_shap"]}, "single_attribution"),
         ({"output_space": "prediction_rank_score"}, "output_space_invalid"),
         ({"unconsumed": 1}, "config_fields_invalid"),
@@ -614,63 +460,6 @@ def test_reject_unsupported_or_unused_options(tmp_path, change, reason):
     config.update(change)
     with pytest.raises(ValueError, match=reason):
         explain(config)
-
-
-def test_rank_hand_calculation_ties_missing_values_and_single_asset(tmp_path):
-    case, frame, config = _case(tmp_path, "equal_weight_rank_ensemble")
-    future = frame.loc[
-        frame.timestamp.eq("2020-01-06") & frame.asset_id.isin(["a", "b", "c"])
-    ].copy()
-    future["x"] = [1.0, 1.0, 3.0]
-    future["y"] = [np.nan, 4.0, 2.0]
-    future.to_parquet(config["inputs"], index=False)
-    config["selection"].update(asset_ids=["a"], max_rows=1)
-    _, tables = read_explanation(explain(config))
-    weights = np.asarray(case.result.prediction_model.directions) / 2
-    actual = tables["contributions"].set_index("feature").contribution
-    assert actual["x"] == pytest.approx(-weights[0] / 6)
-    assert actual["y"] == 0
-    config["output"] += "-single"
-    future.iloc[:1].to_parquet(config["inputs"], index=False)
-    _, single = read_explanation(explain(config))
-    assert single["contributions"].contribution.eq(0).all()
-    assert single["summary"].absolute_share.isna().all()
-
-
-def test_ic_rank_undefined_ic_feature_retains_zero_importance(tmp_path):
-    _, frame, _ = _case(tmp_path)
-    frame["y"] = 1.0
-    spec = ModelSpec(
-        model_id="ic",
-        model_algorithm="ic_weighted_rank_ensemble",
-        input_feature_columns=("x", "y"),
-        target_column="label",
-        random_seed=19,
-    )
-    case = fit_frame(tmp_path / "ic", frame.loc[frame.timestamp.le("2020-01-05")], spec)
-    source = tmp_path / "constant.parquet"
-    frame.to_parquet(source, index=False)
-    config = {
-        "model": str(case.root),
-        "inputs": str(source),
-        "input_spec": case.config["input_spec"],
-        "output": str(tmp_path / "excluded"),
-        "methods": ["native_importance", "rank"],
-        "window": {"start": "2020-01-06", "end": "2020-01-10"},
-        "sample_role": "test",
-        "selection": {"max_rows": 24, "max_dates": 3, "root_seed": 17},
-        "output_space": "model_output",
-    }
-    _, tables = read_explanation(explain(config))
-    excluded = tables["native_importance"].set_index("feature").loc["y"]
-    assert excluded.status == "DEFINED"
-    assert excluded.value == 0.0
-    assert (
-        tables["contributions"]
-        .loc[lambda x: x.feature.eq("y"), "contribution"]
-        .eq(0)
-        .all()
-    )
 
 
 def test_only_selected_permutation_metrics_are_computed(tmp_path, monkeypatch):
@@ -742,7 +531,7 @@ def test_read_rejects_tampered_explanation_values(tmp_path, subtests):
             for value in ("None", "nan", "inf", "not-a-number")
         ),
     ):
-        with subtests.test(member=member, column=column, value=value):
+        with subtests.test(member=member, column=column, value=str(value)):
             changed = {name: frame.copy() for name, frame in tables.items()}
             changed[member].loc[0, column] = value
             with pytest.raises(ValueError, match=error):
@@ -790,7 +579,8 @@ def test_shap_nonfinite_row_is_explicit_without_hiding_other_predictions(
 ):
     import shap
 
-    _, _, config = _case(tmp_path, "decision_tree_regressor")
+    _, _, config = _case(tmp_path, "xgboost_regressor")
+    config["methods"] = ["tree_shap_path"]
     original = shap.TreeExplainer.__call__
 
     def partially_nonfinite(self, *args, **kwargs):
@@ -881,13 +671,13 @@ def test_read_rejects_missing_or_relabelled_scientific_metadata(tmp_path, mutati
 
 
 def test_read_binds_explanation_method_to_actual_model_kind(tmp_path):
-    _, _, config = _case(tmp_path, "equal_weight_rank_ensemble")
+    _, _, config = _case(tmp_path)
     output = explain(config)
     path = output / "metadata.json"
     metadata = json.loads(path.read_text())
-    metadata.update(model_algorithm="linear_regression", unit=metadata["label_unit"])
+    metadata["model_algorithm"] = "xgboost_regressor"
     path.write_text(json.dumps(metadata))
-    with pytest.raises(ValueError, match="rank_model_required"):
+    with pytest.raises(ValueError, match="linear_model_required"):
         read_explanation(output)
 
 

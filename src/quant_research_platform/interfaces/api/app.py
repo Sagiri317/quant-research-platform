@@ -123,12 +123,8 @@ def create_app(*, project_root: Path | None = None) -> FastAPI:
         return evidence(queries.inspect, path)
 
     @app.get("/api/portfolio-curve", operation_id="read_portfolio_curve")
-    def portfolio_curve(
-        path: str, stride: int = Query(1, ge=1), execution_mode: str = "continuous"
-    ) -> dict[str, object]:
-        return evidence(
-            queries.portfolio_curve, path, stride=stride, execution_mode=execution_mode
-        )
+    def portfolio_curve(path: str, stride: int = Query(1, ge=1)) -> dict[str, object]:
+        return evidence(queries.portfolio_curve, path, stride=stride)
 
     return app
 

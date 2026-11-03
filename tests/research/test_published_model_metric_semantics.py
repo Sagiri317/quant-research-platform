@@ -73,7 +73,7 @@ def _case(root, algorithm="linear_regression", *, intercept=0.1, slope=0.2):
 
 @pytest.mark.parametrize(
     "algorithm",
-    ["equal_weight_rank_ensemble", "ic_weighted_rank_ensemble", "linear_regression"],
+    ["linear_regression"],
 )
 def test_frozen_label_scale_matches_selection_and_statistics(tmp_path, algorithm):
     frame, case, prediction, metadata, config = _case(tmp_path, algorithm)
@@ -106,27 +106,13 @@ def test_frozen_label_scale_matches_selection_and_statistics(tmp_path, algorithm
         assert metrics.head_selected_count.eq(1).all()
     after, _ = read_predictions(prediction)
     pd.testing.assert_frame_equal(before, after)
-    if "rank_ensemble" in algorithm:
-        assert metadata["model_metadata"]["rank_parameters"][
-            "label_calibration"
-        ] == pytest.approx([0.1, 0.2], rel=2e-14, abs=0)
-        assert before.prediction_score.iloc[:4].tolist() == [
-            -0.375,
-            -0.125,
-            0.125,
-            0.375,
-        ]
-    else:
-        assert "rank_parameters" not in metadata["model_metadata"]
-        np.testing.assert_allclose(
-            before.prediction_score,
-            frame.loc[frame.timestamp.ge("2020-01-03"), "label"],
-        )
+    np.testing.assert_allclose(
+        before.prediction_score,
+        frame.loc[frame.timestamp.ge("2020-01-03"), "label"],
+    )
 
 
-@pytest.mark.parametrize(
-    "algorithm", ["equal_weight_rank_ensemble", "ic_weighted_rank_ensemble"]
-)
+@pytest.mark.parametrize("algorithm", ["linear_regression"])
 def test_each_prediction_period_uses_its_own_training_calibration(tmp_path, algorithm):
     first, _, _, first_meta, config = _case(tmp_path / "first", algorithm)
     second, _, _, second_meta, other = _case(
@@ -148,8 +134,8 @@ def test_each_prediction_period_uses_its_own_training_calibration(tmp_path, algo
         }
     )
     assert (
-        first_meta["model_metadata"]["rank_parameters"]
-        != second_meta["model_metadata"]["rank_parameters"]
+        first_meta["model_metadata"]["training_target_mean"]
+        != second_meta["model_metadata"]["training_target_mean"]
     )
     with read_statistics_artifact(model_statistics(config)).table(
         "model_prediction_metrics.parquet"
@@ -159,14 +145,12 @@ def test_each_prediction_period_uses_its_own_training_calibration(tmp_path, algo
         assert metrics.target_count.eq(4).all()
 
 
-def test_negative_label_calibration_does_not_reverse_fixed_head():
+def test_negative_raw_returns_do_not_reverse_fixed_head():
     scores = pd.Series([-1.0, 0.0, 1.0])
     labels = 2 - 3 * scores
-    result = _prediction_quality(
-        scores, labels, labels, head_fraction=0.2, label_predictions=labels
-    )
-    assert result["mse"] == 0.0
-    assert result["oos_r2"] == 1.0
+    result = _prediction_quality(scores, labels, labels, head_fraction=0.2)
+    assert result["mse"] == pytest.approx((36 + 4 + 4) / 3)
+    assert result["oos_r2"] == pytest.approx(1 - 44 / 30)
     assert result["head_mean_raw_return"] == -1.0
 
 

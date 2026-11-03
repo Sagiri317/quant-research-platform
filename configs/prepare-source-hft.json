@@ -1,0 +1,24 @@
+{
+  "source_id": "venvoo",
+  "raw_root": "data/raw/venvoo",
+  "outputs": {
+    "hft_quotes": "data/interim/venvoo/hft_quotes",
+    "hft_orders": "data/interim/venvoo/hft_orders",
+    "hft_trades": "data/interim/venvoo/hft_trades"
+  },
+  "start_date": "2018-02-14",
+  "end_date": "2018-02-14",
+  "revision": "5c609748679ac8d3ec056446b7e6bd599bc3dfb5",
+  "instruments": [
+    {
+      "wind_code": "000001.SZ",
+      "asset_id": "000001.SZ",
+      "exchange": "SZSE"
+    },
+    {
+      "wind_code": "600000.SH",
+      "asset_id": "600000.SH",
+      "exchange": "SSE"
+    }
+  ]
+}

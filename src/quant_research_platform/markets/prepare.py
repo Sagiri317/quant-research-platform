@@ -3,7 +3,6 @@
 import json
 from collections.abc import Mapping
 from dataclasses import replace
-from functools import partial
 from pathlib import Path
 
 from quant_research_platform.contracts.json_codec import qrp_json_mapping_snapshot
@@ -80,119 +79,14 @@ def prepare(config: Mapping) -> Path:
         spec = catalog.get(config["data_id"])
         producer = produce_a_share_processed_data
         kwargs = {"source_catalog": InterimDataCatalog(specs.values())}
-    elif market == "crypto":
-        from quant_research_platform.markets.implementations.crypto.ids import (
-            HFT_CROSS_ASSET_DATA_ID,
-            HFT_DERIVATIVE_DATA_ID,
-            HFT_EXTERNAL_DATA_IDS,
-            HFT_INFORMATION_PANEL_DATA_ID,
-            HFT_PANEL_DATA_ID,
-            HFT_SOL_PANEL_DATA_ID,
-            HFT_SPOT_CONTEXT_DATA_ID,
-            HFT_SPOT_PANEL_DATA_ID,
-        )
-        from quant_research_platform.markets.implementations.crypto.processed import (
-            producer as crypto,
-        )
-        from quant_research_platform.markets.implementations.crypto.processed.catalog import (  # noqa: E501
-            hft_processed_catalog,
-        )
-        from quant_research_platform.sources.binance.ids import (
-            FUTURES_MARKET_TYPE,
-            RESEARCH_SYMBOLS,
-            SPOT_MARKET_TYPE,
-        )
-        from quant_research_platform.sources.binance.replay import (
-            ReconstructionStats,
-            iter_agg_trades,
-            iter_reconstructed_depth,
-        )
-        from quant_research_platform.sources.market import open_market_source
+        from quant_research_platform.research.protocols.a_share_hft import DATA_IDS
 
-        catalog = hft_processed_catalog()
-        spec = catalog.get(config["data_id"])
-        kwargs = {"source_catalog": None}
-        if spec.data_id in (
-            HFT_PANEL_DATA_ID,
-            HFT_SPOT_PANEL_DATA_ID,
-            HFT_SOL_PANEL_DATA_ID,
-            HFT_DERIVATIVE_DATA_ID,
-        ):
-            if (
-                not isinstance(source, Mapping)
-                or "root" not in source
-                or set(source) - {"root", "archive_paths"}
-                or type(source["root"]) is not str
-                or not source["root"]
-            ):
-                raise ValueError("native_source_request_invalid")
-            paths = source.get("archive_paths")
-            if paths is not None and (
-                type(paths) is not list
-                or not paths
-                or any(type(p) is not str or not p for p in paths)
-                or len(set(paths)) != len(paths)
-            ):
-                raise ValueError("native_source_archive_paths_invalid")
-            opener = partial(
-                open_market_source,
-                archive_paths=None if paths is None else tuple(paths),
+        if spec.data_id in DATA_IDS:
+            from quant_research_platform.markets.implementations.a_share.high_frequency import (  # noqa: E501
+                produce,
             )
-            kwargs["raw_root"] = Path(source["root"])
-            if spec.data_id == HFT_DERIVATIVE_DATA_ID:
-                producer = crypto.produce_derivative_processed_data
-                kwargs["open_archive"] = opener
-            else:
-                producer = crypto.produce_hft_processed_data
-                kwargs.update(
-                    open_run=opener,
-                    reconstruct_depth=iter_reconstructed_depth,
-                    read_trades=iter_agg_trades,
-                    make_stats=ReconstructionStats,
-                    panel_id=spec.data_id,
-                    market_type=SPOT_MARKET_TYPE
-                    if spec.data_id == HFT_SPOT_PANEL_DATA_ID
-                    else FUTURES_MARKET_TYPE,
-                    symbols=("SOLUSDT",)
-                    if spec.data_id == HFT_SOL_PANEL_DATA_ID
-                    else RESEARCH_SYMBOLS,
-                )
-        else:
-            if spec.data_id in HFT_EXTERNAL_DATA_IDS.values():
-                from quant_research_platform.sources.tardis.normalized import (
-                    SCHEMA_ID,
-                    iter_records,
-                )
 
-                if (
-                    not isinstance(source, Mapping)
-                    or set(source) != {"root", "archives"}
-                    or type(source["root"]) is not str
-                    or not source["root"]
-                ):
-                    raise ValueError("normalized_source_request_invalid")
-                producer = crypto.produce_normalized_context
-                kwargs.update(
-                    raw_root=Path(source["root"]),
-                    read_records=iter_records,
-                    source_schema_id=SCHEMA_ID,
-                    archives=source["archives"],
-                )
-            elif source is not None:
-                raise ValueError("processed_source_not_consumed")
-            else:
-                producer = {
-                    HFT_SPOT_CONTEXT_DATA_ID: crypto.produce_spot_perp_context,
-                    HFT_INFORMATION_PANEL_DATA_ID: crypto.produce_information_panel,
-                    HFT_CROSS_ASSET_DATA_ID: crypto.produce_cross_asset_context,
-                }.get(spec.data_id, crypto.produce_hft_processed_data)
-            if producer is crypto.produce_hft_processed_data:
-                kwargs.update(
-                    open_run=None,
-                    reconstruct_depth=None,
-                    read_trades=None,
-                    make_stats=None,
-                )
+            producer, kwargs = produce, {}
     else:
         raise ValueError("data_operation_market_invalid")
     spec = _configured_spec(spec, config)
@@ -225,28 +119,9 @@ def prepare(config: Mapping) -> Path:
     return output
 
 
-def _asset_ids(value, *, field):
-    if (
-        type(value) is not list
-        or not value
-        or any(
-            type(item) is not str or item not in {"btc_usdt", "eth_usdt", "sol_usdt"}
-            for item in value
-        )
-        or len(set(value)) != len(value)
-    ):
-        raise ValueError(f"data_operation_{field}_invalid")
-    return value
-
-
 def _configured_spec(spec, config):
     """Apply only options consumed by this explicitly requested mathematical recipe."""
     from quant_research_platform.contracts.columns import ColumnRole
-    from quant_research_platform.markets.implementations.crypto import ids
-    from quant_research_platform.research.protocols.crypto_hft import (
-        HFT_DERIVATIVE_CHANNELS,
-        derivative_channels,
-    )
 
     parameters = config.get("parameters", {})
     if type(parameters) is not dict:
@@ -265,24 +140,7 @@ def _configured_spec(spec, config):
         "expectations_factors": {"freshness_days"},
         "price_volume_facts": {"min_fresh_fraction"},
         "market_model_factors": {"min_fresh_fraction"},
-        ids.HFT_DERIVATIVE_DATA_ID: {"max_age_ms", "input_delay_ms"},
-        ids.HFT_SPOT_CONTEXT_DATA_ID: {"max_age_ms", "input_delay_ms"},
-        ids.HFT_CROSS_ASSET_DATA_ID: {
-            "max_age_ms",
-            "input_delay_ms",
-            "information_assets",
-            "target_assets",
-        },
-        ids.HFT_PANEL_DATA_ID: {"asset_ids"},
-        ids.HFT_SPOT_PANEL_DATA_ID: {"asset_ids"},
-        ids.HFT_SOL_PANEL_DATA_ID: {"asset_ids"},
-        ids.HFT_INFORMATION_STATE_DATA_ID: {"asset_ids"},
-        ids.HFT_FACTOR_DATA_ID: {"asset_ids"},
-        ids.HFT_LABEL_DATA_ID: {"asset_ids"},
-        **{
-            name: {"max_age_ms", "input_delay_ms"}
-            for name in ids.HFT_EXTERNAL_DATA_IDS.values()
-        },
+        "hft_panel": {"max_gap_seconds"},
     }.get(spec.data_id, set())
     if set(parameters) - dynamic:
         raise ValueError("data_operation_parameter_not_consumed")
@@ -296,92 +154,14 @@ def _configured_spec(spec, config):
         or parameters["freshness_days"] <= 0
     ):
         raise ValueError("data_operation_freshness_days_invalid")
-    if "input_delay_ms" in parameters and (
-        type(parameters["input_delay_ms"]) is not int
-        or parameters["input_delay_ms"] < 0
+    if "max_gap_seconds" in parameters and (
+        type(parameters["max_gap_seconds"]) not in (int, float)
+        or not 0 < parameters["max_gap_seconds"] < float("inf")
     ):
-        raise ValueError("data_operation_input_delay_ms_invalid")
-    if "max_age_ms" in parameters:
-        ages = parameters["max_age_ms"]
-        if spec.data_id == ids.HFT_DERIVATIVE_DATA_ID:
-            if (
-                type(ages) is not dict
-                or not ages
-                or not set(ages) <= set(HFT_DERIVATIVE_CHANNELS)
-            ):
-                raise ValueError("data_operation_max_age_ms_invalid")
-            ages = list(ages.values())
-        else:
-            ages = [ages]
-        if any(type(age) is not int or age <= 0 for age in ages):
-            raise ValueError("data_operation_max_age_ms_invalid")
-    for field in ("asset_ids", "information_assets", "target_assets"):
-        if field in parameters:
-            _asset_ids(parameters[field], field=field)
+        raise ValueError("hft_max_gap_seconds_invalid")
     actual = {**json.loads(spec.parameters_json), **parameters}
-    if (
-        spec.data_id
-        in {
-            ids.HFT_PANEL_DATA_ID,
-            ids.HFT_SPOT_PANEL_DATA_ID,
-            ids.HFT_SOL_PANEL_DATA_ID,
-        }
-        and "asset_ids" in actual
-    ):
-        supported = (
-            {"sol_usdt"}
-            if spec.data_id == ids.HFT_SOL_PANEL_DATA_ID
-            else {"btc_usdt", "eth_usdt"}
-        )
-        if not set(actual["asset_ids"]) <= supported:
-            raise ValueError("data_operation_asset_ids_invalid")
-    if "max_age_ms" in dynamic:
-        if "max_age_ms" not in actual:
-            raise ValueError("data_operation_max_age_ms_required")
-        actual.setdefault("input_delay_ms", 0)
-    if spec.data_id == ids.HFT_CROSS_ASSET_DATA_ID and not {
-        "information_assets",
-        "target_assets",
-    } <= set(actual):
-        raise ValueError("data_operation_cross_asset_scopes_required")
     if "base_panel" in config:
-        allowed = {
-            ids.HFT_FACTOR_DATA_ID,
-            ids.HFT_LABEL_DATA_ID,
-            ids.HFT_INFORMATION_STATE_DATA_ID,
-            ids.HFT_CROSS_ASSET_DATA_ID,
-        }
-        panel = config["base_panel"]
-        if (
-            spec.data_id not in allowed
-            or type(panel) is not str
-            or panel
-            not in {
-                ids.HFT_PANEL_DATA_ID,
-                ids.HFT_SOL_PANEL_DATA_ID,
-                ids.HFT_INFORMATION_PANEL_DATA_ID,
-            }
-        ):
-            raise ValueError("data_operation_base_panel_invalid")
-        spec = replace(
-            spec, processed_input_data_ids=(panel, *spec.processed_input_data_ids[1:])
-        )
-    if spec.data_id in ids.HFT_EXTERNAL_DATA_IDS.values():
-        from quant_research_platform.markets.implementations.crypto.processed.producer import (  # noqa: E501
-            EXTERNAL_INSTRUMENTS,
-        )
-
-        venue = next(
-            key
-            for key, value in ids.HFT_EXTERNAL_DATA_IDS.items()
-            if value == spec.data_id
-        )
-        instrument = EXTERNAL_INSTRUMENTS[venue]
-        actual.update(
-            venue=venue,
-            symbols=instrument["symbols"],
-            base_units_per_amount=instrument["base_units_per_amount"],
-        )
+        raise ValueError("data_operation_parameter_not_consumed")
     if "factor_columns" in config:
         factors = config["factor_columns"]
         if (
@@ -437,36 +217,6 @@ def _configured_spec(spec, config):
                 for name, role in spec.column_roles.items()
                 if role != ColumnRole.FACTOR
             }
-            if spec.data_id == ids.HFT_DERIVATIVE_DATA_ID:
-                channels = derivative_channels(factors)
-                roles = {
-                    name: role
-                    for name, role in roles.items()
-                    if name in spec.primary_key
-                    or any(name.startswith(channel + "_") for channel in channels)
-                }
-            elif spec.data_id in ids.HFT_EXTERNAL_DATA_IDS.values():
-                from quant_research_platform.research.protocols.crypto_hft import (
-                    external_channels,
-                )
-
-                channels = external_channels(factors)
-                prefixes = tuple(kind.removesuffix("s") + "_" for kind in channels)
-                roles = {
-                    name: role
-                    for name, role in roles.items()
-                    if name in spec.primary_key
-                    or any(
-                        name.split("_", 1)[1].startswith(prefix) for prefix in prefixes
-                    )
-                }
-            elif spec.data_id == ids.HFT_CROSS_ASSET_DATA_ID:
-                assets = {name.split("_", 1)[0] for name in factors}
-                roles = {
-                    name: role
-                    for name, role in roles.items()
-                    if name in spec.primary_key or name.split("_", 1)[0] in assets
-                }
             # Scientific input order is explicit; supporting keys never become factors.
             roles.update((name, ColumnRole.FACTOR) for name in factors)
             spec = replace(
@@ -497,15 +247,14 @@ def _configured_spec(spec, config):
             or not set(labels) <= set(spec.label_availability_columns)
         ):
             raise ValueError("data_operation_label_columns_invalid")
-        from quant_research_platform.research.protocols import a_share, crypto_hft
+        from quant_research_platform.research.protocols import a_share, a_share_hft
 
         definitions = {
             item.output_column: item
             for item in (
-                a_share.label_catalog()
-                if spec.market_id == "a_share"
-                else crypto_hft.label_catalog()
-            ).list()
+                *a_share.label_catalog().list(),
+                *a_share_hft.label_catalog().list(),
+            )
         }
         selected = [definitions[name] for name in labels]
         label_fields = {
@@ -532,10 +281,6 @@ def _configured_spec(spec, config):
         )
         if "labels" in actual:
             actual["labels"] = [item.to_manifest() for item in selected]
-    if spec.data_id == ids.HFT_DERIVATIVE_DATA_ID and not set(
-        derivative_channels(spec.required_columns)
-    ) <= set(actual["max_age_ms"]):
-        raise ValueError("data_operation_max_age_ms_invalid")
     if spec.market_id == "a_share" and spec.data_id == "price_volume_facts":
         from quant_research_platform.research.factors.engine import factor_lookback_bars
         from quant_research_platform.research.protocols.a_share import factor_catalog

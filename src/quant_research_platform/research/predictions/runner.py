@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 from quant_research_platform.contracts.json_codec import _strict_config
 from quant_research_platform.contracts.models import (
@@ -20,6 +21,7 @@ from quant_research_platform.contracts.time import (
 from quant_research_platform.research.features.transforms import (
     model_input_validity_columns,
 )
+from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.research.models.fitting import (
     prediction_callable,
 )
@@ -54,6 +56,15 @@ def predict(config: Mapping) -> Path:
         raise ValueError("prediction_asset_ids_invalid")
     result, facts = load_model(Path(config["model"]))
     _validate_model_prediction_window(facts, window)
+    sequence = result.metadata["model_algorithm"] in {
+        "lstm_regressor",
+        "transformer_regressor",
+    }
+    read_window = (
+        PredictionWindow(start=facts["fit_windows"][-1]["end"], end=window.end)
+        if sequence
+        else window
+    )
     from quant_research_platform.contracts.filtering import required_filter_columns
 
     source = config["inputs"]
@@ -61,7 +72,7 @@ def predict(config: Mapping) -> Path:
         if isinstance(source, Mapping):
             raise ValueError("duplicate_input_spec")
         source = {"path": source, "spec": config["input_spec"]}
-    options = _dataset_input_options(source, time_window=window)
+    options = _dataset_input_options(source, time_window=read_window)
     selected_columns = options.get("columns")
     options.setdefault("columns", ("timestamp", "asset_id"))
     session = open_dataset_session(**options)
@@ -80,7 +91,6 @@ def predict(config: Mapping) -> Path:
                 *result.metadata["input_columns"],
                 *model_input_validity_columns(
                     tuple(result.metadata["input_columns"]),
-                    result.metadata["model_algorithm"],
                     session.spec["column_roles"],
                 ),
                 *required_filter_columns(result.metadata["sample_filter_mode"]),
@@ -92,6 +102,9 @@ def predict(config: Mapping) -> Path:
     from quant_research_platform.runtime.dataframes import iter_complete_time_frames
 
     def outputs():
+        predict_values = prediction_callable(
+            tuple(result.metadata["input_columns"]), result.prediction_model
+        )
         with closing_iterator(
             iter_complete_time_frames(iter(frames), timestamp_column="timestamp")
         ) as source:
@@ -99,18 +112,28 @@ def predict(config: Mapping) -> Path:
                 usable = prediction_rows(
                     frame,
                     result.metadata,
-                    window,
+                    read_window,
                     declared_columns=session.spec["column_roles"],
+                    include_context=sequence,
                 )
                 if usable.empty:
                     continue
-                values = prediction_callable(
-                    tuple(result.metadata["input_columns"]), result.prediction_model
-                )(usable)
+                values = predict_values(usable)
                 if values.shape != (len(usable),) or not np.isfinite(values).all():
                     raise ValueError("invalid_prediction_values")
-                output = usable.loc[:, ["timestamp", "asset_id"]].copy()
-                output["prediction_score"] = values
+                output = usable.assign(prediction_score=values)
+                if sequence:
+                    output, _ = apply_filter_mode(
+                        output,
+                        mode=result.metadata["sample_filter_mode"],
+                        metadata_key="sample_filter_mode",
+                    )
+                    output = output.loc[output.timestamp.ge(pd.Timestamp(window.start))]
+                    if output.empty:
+                        continue
+                output = output.loc[
+                    :, ["timestamp", "asset_id", "prediction_score"]
+                ].copy()
                 ranks = output.groupby("timestamp", sort=False).prediction_score.rank(
                     method="average"
                 )
@@ -165,11 +188,6 @@ def predict(config: Mapping) -> Path:
         metadata["model_metadata"]["training_target_mean"] = result.metadata[
             "training_target_mean"
         ]
-    calibration = result.metadata.get("rank_parameters", {}).get("label_calibration")
-    if calibration is not None:
-        metadata["model_metadata"]["rank_parameters"] = {
-            "label_calibration": calibration
-        }
     from quant_research_platform.artifacts.outputs.prediction import (
         write_prediction_outputs,
     )

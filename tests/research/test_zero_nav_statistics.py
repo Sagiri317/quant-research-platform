@@ -283,7 +283,6 @@ def test_zero_nav_rights_recovery_persists_amounts_and_undefined_returns(
     metadata = statistics_metadata(
         TimeWindow(window["start"], window["end"]),
         sample_role=access,
-        execution_mode="continuous",
         candidate_ids=[c.candidate_id for c in candidates],
         comparison_portfolio_ids=manifest["statistics"]["group_comparison"][
             "portfolio_ids"
@@ -479,7 +478,7 @@ def test_zero_value_retained_units_are_counted_in_valuation_diagnostics():
 @pytest.mark.parametrize(
     "value", [0.0, -0.0, 1.5, float.fromhex("0x0.0000000000001p-1022")]
 )
-def test_float_quantity_encoding_preserves_crypto_type_and_bits(value):
+def test_float_quantity_encoding_preserves_other_market_type_and_bits(value):
     from quant_research_platform.contracts.validation import (
         decode_exact_numeric,
         encode_exact_numeric,

@@ -1,0 +1,14 @@
+{
+  "market_id": "a_share",
+  "dataset_id": "a_share_hft",
+  "inputs": {
+    "hft_panel": "data/processed/a_share/hft_panel",
+    "hft_factors": "data/processed/a_share/hft_factors",
+    "hft_labels": "data/processed/a_share/hft_labels"
+  },
+  "time_window": {
+    "start": "2018-02-14",
+    "end": "2018-02-14"
+  },
+  "output_root": "data/research/a_share/a_share_hft"
+}

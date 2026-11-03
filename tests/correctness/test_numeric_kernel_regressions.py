@@ -148,11 +148,9 @@ def test_covariance_shrinkage_matches_independent_oracle(shrinkage):
 def test_ordinary_kernels_use_vectorized_paths_and_independent_oracles():
     from quant_research_platform.compute.dataframe import cross_section
     from quant_research_platform.research.features import transforms
-    from quant_research_platform.research.models import rank_ensemble
 
     rng = np.random.default_rng(52)
     values = rng.normal(size=(504, 5)) * 0.01
-    weights = np.exp2(-np.arange(503, -1, -1) / 126)
     correlation, reason = cross_section._pearson_correlation_result(
         values[:, 0], values[:, 1]
     )
@@ -160,27 +158,6 @@ def test_ordinary_kernels_use_vectorized_paths_and_independent_oracles():
     assert correlation == pytest.approx(
         np.corrcoef(values[:, :2].T)[0, 1], rel=2e-14, abs=1e-16
     )
-    scores = rng.uniform(-0.5, 0.5, 504)
-    labels = 0.01 * scores + rng.normal(0, 0.02, 504)
-    design = np.column_stack((np.ones(504), scores))
-    expected = np.linalg.lstsq(
-        design * np.sqrt(weights[:, None]), labels * np.sqrt(weights), rcond=None
-    )[0]
-    calibration = rank_ensemble._label_calibration(scores, labels, weights)
-    np.testing.assert_allclose(calibration, expected, rtol=2e-14, atol=1e-17)
-    # Centered ordinary targets may have a zero intercept; that alone is not
-    # ill conditioning and must not force arbitrary-precision fitting.
-    symmetric_scores = np.array([-0.375, -0.125, 0.125, 0.375])
-    np.testing.assert_allclose(
-        rank_ensemble._label_calibration(
-            symmetric_scores, 0.02 * symmetric_scores, None
-        ),
-        (0.0, 0.02),
-        rtol=2e-14,
-        atol=1e-18,
-    )
-    residual = labels - design @ calibration
-    np.testing.assert_allclose(design.T @ (weights * residual), 0, atol=1e-14)
     industries = pd.Series(np.arange(504) % 7)
     sizes = rng.normal(20, 2, 504)
     target = rng.normal(size=504)

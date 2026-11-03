@@ -18,7 +18,7 @@ def fit_frame(
     spec,
     *,
     cutoff=None,
-    market_id="crypto",
+    market_id="other_market",
     parameters=None,
     trading_calendar=None,
 ):
@@ -105,9 +105,7 @@ def predict_frame(root, frame, case, *, window):
     return prediction, output, metadata
 
 
-def candidates(
-    tmp_path, *, algorithms=("linear_regression", "ic_weighted_rank_ensemble")
-):
+def candidates(tmp_path, *, algorithms=("linear_regression", "lasso_regression")):
     stamps = pd.date_range("2020-01-01", periods=6).repeat(3)
     frame = pd.DataFrame(
         {
@@ -131,6 +129,7 @@ def candidates(
             input_factor_columns=("x",),
             target_column="label",
             random_seed=19,
+            hyperparameters={"alpha": 0.001} if algorithm == "lasso_regression" else {},
         )
         case = fit_frame(
             tmp_path / algorithm,

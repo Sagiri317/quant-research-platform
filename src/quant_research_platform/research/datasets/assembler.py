@@ -712,10 +712,11 @@ def assemble(config: Mapping) -> Path:
         from quant_research_platform.research.protocols.a_share import (
             research_dataset_catalog,
         )
-    elif config["market_id"] == "crypto":
-        from quant_research_platform.research.protocols.crypto_hft import (
-            build_hft_research_dataset_catalog as research_dataset_catalog,
-        )
+
+        if config["dataset_id"] == "a_share_hft":
+            from quant_research_platform.research.protocols.a_share_hft import (
+                research_dataset_catalog,
+            )
     else:
         research_dataset_catalog = None
     defaults = (
@@ -907,7 +908,11 @@ def assemble(config: Mapping) -> Path:
     business_columns = set((*factors, *labels, *filters, *context))
     recipe = config.get(
         "feature_recipe",
-        "a_share_canonical" if config["market_id"] == "a_share" and factors else None,
+        "a_share_canonical"
+        if config["market_id"] == "a_share"
+        and config["dataset_id"] != "a_share_hft"
+        and factors
+        else None,
     )
     groups = config.get("feature_groups", ["raw", "processed"] if recipe else ["raw"])
     if (

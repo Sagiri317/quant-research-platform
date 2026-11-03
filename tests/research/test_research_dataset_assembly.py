@@ -200,7 +200,7 @@ def test_research_dataset_assembles_intraday_timestamp_window(tmp_path, storage)
             inputs[name] = {"path": str(root), "spec": declaration}
     root = assembler_module.assemble(
         {
-            "market_id": "crypto",
+            "market_id": "other_market",
             "dataset_id": "minute_research",
             "inputs": inputs,
             "base_input_data_id": "base",
@@ -285,7 +285,7 @@ def test_assembled_label_semantics_survive_model_fit_without_maturity_mapping(
     window = {"start": "2024-01-02", "end": "2024-01-02"}
     output = assembler_module.assemble(
         {
-            "market_id": "crypto",
+            "market_id": "other_market",
             "dataset_id": "selected",
             "inputs": {"source": str(source)},
             "factor_columns": ["x"],
@@ -314,7 +314,7 @@ def test_assembled_label_semantics_survive_model_fit_without_maturity_mapping(
                     target_column="label",
                 )
             ),
-            "market_id": "crypto",
+            "market_id": "other_market",
             "fit_windows": [window],
             "fit_cutoff": "2024-01-03",
         }
@@ -347,7 +347,7 @@ def test_assembly_keeps_nanosecond_windows_through_persisted_inputs(
     }
     source = ProcessedDataSpec(
         data_id="nanosecond_input",
-        market_id=MarketId("crypto"),
+        market_id=MarketId("other_market"),
         kind=ProcessedDataKind.PANEL,
         frequency=DataFrequency.TICK,
         grain=DataGrain.ASSET_TIMESTAMP,
@@ -357,7 +357,7 @@ def test_assembly_keeps_nanosecond_windows_through_persisted_inputs(
     )
     dataset = make_research_dataset_catalog(
         data_id="nanosecond_research",
-        market_id="crypto",
+        market_id="other_market",
         input_data_ids=(source.data_id,),
         base_input_data_id=source.data_id,
         factor_columns=("factor",),
@@ -369,7 +369,7 @@ def test_assembly_keeps_nanosecond_windows_through_persisted_inputs(
     times = pd.Timestamp("2020-01-01") + pd.to_timedelta([1, 2], unit="ns")
     frame = pd.DataFrame(
         {
-            "market_id": "crypto",
+            "market_id": "other_market",
             "asset_id": "asset",
             "timestamp": times,
             "factor": [1.0, 2.0],
@@ -400,7 +400,9 @@ def test_assembly_keeps_nanosecond_windows_through_persisted_inputs(
     result = pd.concat(
         tuple(
             read_dataset(
-                layout.research_dataset_root(MarketId("crypto"), "nanosecond_research"),
+                layout.research_dataset_root(
+                    MarketId("other_market"), "nanosecond_research"
+                ),
                 time_window=window,
                 mode=DatasetReadMode.CHUNKED,
             )
@@ -1117,7 +1119,7 @@ def test_auxiliary_timestamp_units_preserve_nanosecond_window(
             }
     root = assembler_module.assemble(
         {
-            "market_id": "crypto",
+            "market_id": "other_market",
             "dataset_id": "units",
             "inputs": inputs,
             "base_input_data_id": "base",

@@ -81,7 +81,7 @@ def test_time_series_pearson_preserves_units(scale):
         pd.DataFrame({"signal": left, "label": right}),
         spec=EvaluationSpec(
             evaluation_id="extreme_units",
-            market_id=MarketId("crypto"),
+            market_id=MarketId("other_market"),
             research_dataset_id="fixture",
             signals=(
                 SignalSpec(
@@ -160,7 +160,7 @@ def test_real_number_boundaries_reject_wrong_numeric_kinds(value):
                     allow_null=nullable,
                 )
     with pytest.raises(ValueError):
-        PortfolioCapital("synthetic", value, "USDT", "linear_perpetual")
+        PortfolioCapital("synthetic", value, "CNY", "cash_equity")
     with pytest.raises(ValueError):
         build_simple_target_weights(
             pd.Series([value, 2], index=["a", "b"], dtype=object),
@@ -497,7 +497,7 @@ def test_pearson_rounding_counterexamples_reach_published_consumers(
         spec = EvaluationSpec(
             evaluation_id="rounding",
             market_id=MarketId(
-                "crypto" if kind == "single_asset_time_series" else "a_share"
+                "other_market" if kind == "single_asset_time_series" else "a_share"
             ),
             research_dataset_id="synthetic",
             signals=(

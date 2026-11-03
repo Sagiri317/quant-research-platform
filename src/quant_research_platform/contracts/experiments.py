@@ -138,7 +138,6 @@ def training_availability_columns(label_column: str) -> tuple[str, ...]:
             "forward_return_",
             "future_mid_return_",
             "future_mid_direction_",
-            "maker_bid_sell_pressure_proxy_",
         )
     ):
         return (f"{label_column}_available_at",)

@@ -35,7 +35,7 @@ def test_single_asset_insufficient_pairs_publish_with_rankic_not_applicable(
 
     spec = EvaluationSpec(
         evaluation_id="single_undefined",
-        market_id=MarketId("crypto"),
+        market_id=MarketId("other_market"),
         research_dataset_id="hft_research",
         signals=(make_artifact_signal_spec(),),
         label_columns=("label",),
@@ -98,7 +98,7 @@ def test_nanosecond_evaluation_diagnostics_survive_actual_writer_roundtrip(
     )
     spec = EvaluationSpec(
         evaluation_id="nanosecond_eval",
-        market_id=MarketId("crypto"),
+        market_id=MarketId("other_market"),
         research_dataset_id="hft_research",
         signals=(make_artifact_signal_spec(),),
         label_columns=("label",),
@@ -188,7 +188,7 @@ def test_single_asset_time_series_evaluation_is_stable_across_chunks() -> None:
     frame = pd.DataFrame(
         {
             "timestamp": pd.date_range("2026-01-01", periods=4, freq="100ms"),
-            "asset_id": ["btc_usdt"] * 4,
+            "asset_id": ["asset_a"] * 4,
             "feature": [1.0, 2.0, 3.0, 4.0],
             "label": [2.0, 4.0, 6.0, 8.0],
             "eligible": [True] * 4,
@@ -196,7 +196,7 @@ def test_single_asset_time_series_evaluation_is_stable_across_chunks() -> None:
     )
     spec = EvaluationSpec(
         evaluation_id="single_asset_time_series",
-        market_id=MarketId("crypto"),
+        market_id=MarketId("other_market"),
         research_dataset_id="hft_research",
         signals=(make_artifact_signal_spec(),),
         label_columns=("label",),
@@ -245,7 +245,7 @@ def test_single_asset_time_series_values_are_chunk_stable(case: str) -> None:
     frame = pd.DataFrame(
         {
             "timestamp": pd.date_range("2026-01-01", periods=row_count, freq="100ms"),
-            "asset_id": ["btc_usdt"] * row_count,
+            "asset_id": ["asset_a"] * row_count,
             "feature": feature,
             "label": label,
             "eligible": [True] * row_count,
@@ -253,7 +253,7 @@ def test_single_asset_time_series_values_are_chunk_stable(case: str) -> None:
     )
     spec = EvaluationSpec(
         evaluation_id="single_asset_chunk_stable",
-        market_id=MarketId("crypto"),
+        market_id=MarketId("other_market"),
         research_dataset_id="hft_research",
         signals=(make_artifact_signal_spec(),),
         label_columns=("label",),
@@ -469,7 +469,7 @@ def test_evaluation_failure_closes_source_with_traceback_retained(
     tmp_path, monkeypatch, cleanup_fails
 ):
     from quant_research_platform.research.evaluations import runner
-    from tests.research.crypto_evaluation_test_support import (
+    from tests.research.evaluation_test_support import (
         evaluation_config,
         write_evaluation_input,
     )
@@ -590,7 +590,7 @@ def test_persisted_unfiltered_evaluation_keeps_ineligible_mature_labels(tmp_path
     )
     from quant_research_platform.contracts.signals import SignalSpec
     from quant_research_platform.research.evaluations.runner import evaluate
-    from tests.research.crypto_evaluation_test_support import (
+    from tests.research.evaluation_test_support import (
         evaluation_config,
         write_evaluation_input,
     )
@@ -634,7 +634,9 @@ def test_persisted_unfiltered_evaluation_keeps_ineligible_mature_labels(tmp_path
             assert manifest["metadata"][field] == config[field]
 
 
-def test_explicit_crypto_direction_reaches_native_metadata_metrics_and_groups(tmp_path):
+def test_explicit_other_market_direction_reaches_native_metadata_metrics_and_groups(
+    tmp_path,
+):
     from dataclasses import replace
 
     from quant_research_platform.artifacts.outputs.evaluation import (
@@ -647,7 +649,7 @@ def test_explicit_crypto_direction_reaches_native_metadata_metrics_and_groups(tm
     label = "future_mid_return_500ms"
     spec = EvaluationSpec(
         evaluation_id="direction",
-        market_id="crypto",
+        market_id="other_market",
         research_dataset_id="fixture",
         signals=tuple(
             SignalSpec(
@@ -725,7 +727,7 @@ def _write_count_evaluation(tmp_path, count):
 
     spec = EvaluationSpec(
         evaluation_id="count_summary",
-        market_id=MarketId("crypto"),
+        market_id=MarketId("other_market"),
         research_dataset_id="hft_research",
         signals=(make_artifact_signal_spec(),),
         label_columns=("label",),
@@ -823,7 +825,7 @@ def test_evaluation_early_failure_closes_native_source_without_gc(
     from quant_research_platform.contracts.signals import SignalSpec
     from quant_research_platform.policy.lifecycle import closing_iterator
     from quant_research_platform.research.evaluations import runner
-    from tests.research.crypto_evaluation_test_support import (
+    from tests.research.evaluation_test_support import (
         evaluation_config,
         write_evaluation_input,
     )
@@ -892,7 +894,7 @@ def test_single_asset_cancel_preserves_close_failure(monkeypatch):
     frame = pd.DataFrame(
         {
             "timestamp": pd.date_range("2026-01-01", periods=2),
-            "asset_id": ["btc_usdt"] * 2,
+            "asset_id": ["asset_a"] * 2,
             "feature": [1.0, 2.0],
             "label": [2.0, 4.0],
             "eligible": [True, True],
@@ -900,7 +902,7 @@ def test_single_asset_cancel_preserves_close_failure(monkeypatch):
     )
     spec = EvaluationSpec(
         evaluation_id="cancel",
-        market_id=MarketId("crypto"),
+        market_id=MarketId("other_market"),
         research_dataset_id="hft_research",
         signals=(make_artifact_signal_spec(),),
         label_columns=("label",),
@@ -953,7 +955,7 @@ def explicit_evaluation(tmp_path):
     from quant_research_platform.contracts.signals import SignalSpec
     from quant_research_platform.research.models.production import fit
     from quant_research_platform.research.predictions.runner import predict
-    from tests.research.crypto_evaluation_test_support import (
+    from tests.research.evaluation_test_support import (
         evaluation_config,
         write_evaluation_input,
     )
@@ -962,7 +964,7 @@ def explicit_evaluation(tmp_path):
     frame = pd.DataFrame(
         {
             "timestamp": times,
-            "asset_id": "btc_usdt",
+            "asset_id": "asset_a",
             "x": np.arange(1.0, 9.0),
             "spread": np.arange(1.0, 9.0) / 100,
             "short": np.arange(1.0, 9.0) * 2,
@@ -986,7 +988,7 @@ def explicit_evaluation(tmp_path):
         {
             "inputs": str(inputs),
             "output": str(tmp_path / "model"),
-            "market_id": "crypto",
+            "market_id": "other_market",
             "model": {
                 "model_id": "linear",
                 "model_algorithm": "linear_regression",
@@ -1013,7 +1015,7 @@ def explicit_evaluation(tmp_path):
     )
     spec = EvaluationSpec(
         evaluation_id="pairwise",
-        market_id="crypto",
+        market_id="other_market",
         research_dataset_id="fixture",
         signals=(
             SignalSpec(
@@ -1052,7 +1054,7 @@ def test_prediction_alias_owns_only_unconsumed_input_columns(
         write_prediction_outputs,
     )
     from quant_research_platform.research.evaluations import runner
-    from tests.research.crypto_evaluation_test_support import write_evaluation_input
+    from tests.research.evaluation_test_support import write_evaluation_input
 
     frame, _spec, config = explicit_evaluation
     frame = frame.loc[frame.x.notna()].copy()
@@ -1153,7 +1155,7 @@ def test_direct_evaluation_preserves_each_mature_pair_and_late_label_invariance(
     )
     from quant_research_platform.artifacts.outputs.prediction import read_predictions
     from quant_research_platform.research.evaluations.runner import evaluate
-    from tests.research.crypto_evaluation_test_support import (
+    from tests.research.evaluation_test_support import (
         assert_pairwise_maturity_and_ic,
         write_evaluation_input,
     )
@@ -1215,7 +1217,7 @@ def test_direct_evaluation_does_not_requalify_saved_predictions(
         read_evaluation_outputs,
     )
     from quant_research_platform.research.evaluations.runner import evaluate
-    from tests.research.crypto_evaluation_test_support import write_evaluation_input
+    from tests.research.evaluation_test_support import write_evaluation_input
 
     frame, _spec, config = explicit_evaluation
     _, expected = read_evaluation_outputs(evaluate(config))
@@ -1255,7 +1257,7 @@ def test_direct_evaluation_pairs_actual_prediction_keys_with_current_mature_labe
         write_prediction_outputs,
     )
     from quant_research_platform.research.evaluations import runner
-    from tests.research.crypto_evaluation_test_support import (
+    from tests.research.evaluation_test_support import (
         assert_pairwise_maturity_and_ic,
     )
 
@@ -1267,7 +1269,7 @@ def test_direct_evaluation_pairs_actual_prediction_keys_with_current_mature_labe
     else:
         extra = predictions.iloc[[0]].copy()
         if damage == "extra":
-            extra.asset_id = "eth_usdt"
+            extra.asset_id = "asset_b"
         else:
             extra.timestamp = frame.timestamp.iloc[4]
         predictions = pd.concat((predictions, extra)).sort_values(
@@ -1331,7 +1333,7 @@ def test_prediction_windows_only_constrain_their_actual_pairs(
     )
     from quant_research_platform.contracts.signals import SignalSpec
     from quant_research_platform.research.evaluations.runner import evaluate
-    from tests.research.crypto_evaluation_test_support import (
+    from tests.research.evaluation_test_support import (
         assert_pairwise_maturity_and_ic,
     )
 
@@ -1541,12 +1543,12 @@ def test_evaluation_preserves_each_explicit_prediction_asset_scope(
     from quant_research_platform.artifacts.outputs.prediction import read_predictions
     from quant_research_platform.research.evaluations.runner import evaluate
     from quant_research_platform.research.predictions.runner import predict
-    from tests.research.crypto_evaluation_test_support import write_evaluation_input
+    from tests.research.evaluation_test_support import write_evaluation_input
 
     frame, _spec, config = explicit_evaluation
-    eth = frame.copy()
-    eth.asset_id = "eth_usdt"
-    both = pd.concat((frame, eth)).sort_values(["timestamp", "asset_id"])
+    asset_b = frame.copy()
+    asset_b.asset_id = "asset_b"
+    both = pd.concat((frame, asset_b)).sort_values(["timestamp", "asset_id"])
     inputs = write_evaluation_input(
         tmp_path / "two-assets",
         both,
@@ -1562,7 +1564,7 @@ def test_evaluation_preserves_each_explicit_prediction_asset_scope(
             "model": metadata["model"],
             "prediction_window": config["window"],
             "sample_role": "validation",
-            "asset_ids": ["btc_usdt"],
+            "asset_ids": ["asset_a"],
         }
     )
     # The factor retains both assets, so a single-asset IC would be ill-defined;
@@ -1798,7 +1800,7 @@ def test_direct_evaluation_uses_current_label_domain(
     )
     from quant_research_platform.artifacts.outputs.prediction import read_predictions
     from quant_research_platform.research.evaluations.runner import evaluate
-    from tests.research.crypto_evaluation_test_support import (
+    from tests.research.evaluation_test_support import (
         assert_pairwise_maturity_and_ic,
         write_evaluation_input,
     )
@@ -1814,7 +1816,7 @@ def test_direct_evaluation_uses_current_label_domain(
     elif change == "ineligible":
         frame["eligible"] = False
     else:
-        frame["asset_id"] = "eth_usdt"
+        frame["asset_id"] = "asset_b"
     inputs = write_evaluation_input(
         tmp_path / "current-domain",
         frame,
@@ -1853,7 +1855,7 @@ def test_prediction_only_evaluation_needs_no_factor_or_model_input(
         read_evaluation_outputs,
     )
     from quant_research_platform.research.evaluations.runner import evaluate
-    from tests.research.crypto_evaluation_test_support import write_evaluation_input
+    from tests.research.evaluation_test_support import write_evaluation_input
 
     frame, _spec, config = explicit_evaluation
     inputs = write_evaluation_input(

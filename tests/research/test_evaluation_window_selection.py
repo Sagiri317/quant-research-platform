@@ -12,7 +12,7 @@ from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.research.evaluations.runner import evaluate
 from quant_research_platform.research.statistics_production import factor_statistics
 from quant_research_platform.storage.datasets import inventory
-from tests.research.crypto_evaluation_test_support import (
+from tests.research.evaluation_test_support import (
     evaluation_config,
     write_evaluation_input,
 )
@@ -270,7 +270,7 @@ def test_native_operation_domains_share_discovery_and_persisted_consumers(tmp_pa
         {
             "inputs": str(source),
             "output": str(tmp_path / "model"),
-            "market_id": "crypto",
+            "market_id": "other_market",
             "label_unit": "decimal_return",
             "model": {
                 "model_id": "linear",
@@ -329,7 +329,7 @@ def test_native_operation_domains_share_discovery_and_persisted_consumers(tmp_pa
     assert read_selection(selection)["selected_model_id"] == "linear"
     assembled = assemble(
         {
-            "market_id": "crypto",
+            "market_id": "other_market",
             "dataset_id": "selected",
             "inputs": {"source": str(source)},
             "time_window": window,

@@ -408,7 +408,7 @@ def test_declared_lifecycle_key_is_kept_and_auxiliary_key_order_is_irrelevant(tm
 
 
 def test_actual_market_values_cannot_conflict_with_declared_market(tmp_path):
-    root, _ = _source(tmp_path, _frame(3).assign(market_id="crypto"))
+    root, _ = _source(tmp_path, _frame(3).assign(market_id="other_market"))
     with pytest.raises(ValueError, match="research_dataset_market_mismatch"):
         assembler.assemble(_config(tmp_path, root))
     assert not (tmp_path / "assembled").exists()

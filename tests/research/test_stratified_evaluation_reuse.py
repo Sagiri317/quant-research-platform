@@ -13,7 +13,7 @@ from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.research.evaluations.runner import evaluate
 from quant_research_platform.research.statistics_production import factor_statistics
-from tests.research.crypto_evaluation_test_support import (
+from tests.research.evaluation_test_support import (
     evaluation_config,
     write_evaluation_input,
 )

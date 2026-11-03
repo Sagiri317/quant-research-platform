@@ -1,0 +1,12 @@
+{
+  "market_id": "a_share",
+  "data_id": "hft_labels",
+  "inputs": {
+    "hft_panel": "data/processed/a_share/hft_panel"
+  },
+  "time_window": {
+    "start": "2018-02-14",
+    "end": "2018-02-14"
+  },
+  "output_root": "data/processed/a_share/hft_labels"
+}

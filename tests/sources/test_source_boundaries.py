@@ -2,7 +2,6 @@
 
 import pytest
 
-from quant_research_platform.sources.market import open_market_source
 from quant_research_platform.sources.reference import interim
 from tests.helpers.paths import StorageLayout
 from tests.helpers.source_preparation import prepared_source_evidence
@@ -10,81 +9,6 @@ from tests.sources.reference.test_interim import (
     _file_bytes,
     _write_reference_root,
 )
-
-
-@pytest.mark.parametrize("damage", ["root_file", "manifest_directory", "run_directory"])
-def test_present_crypto_source_is_invalid(tmp_path, damage):
-    root = tmp_path / "source"
-    if damage == "root_file":
-        root.write_text("not a source directory")
-    else:
-        root.mkdir()
-        (root / ("run.json" if damage == "run_directory" else "manifest.json")).mkdir()
-    with pytest.raises(ValueError):
-        with open_market_source(root):
-            pass
-
-
-@pytest.mark.parametrize(
-    "location,archive_paths",
-    [("absent", None), ("absent", ("declared",)), (".", None)],
-)
-def test_absent_crypto_source_does_not_consume_unrelated_data(
-    tmp_path, location, archive_paths
-):
-    (tmp_path / "unrelated.json").write_text("{}")
-    with pytest.raises(FileNotFoundError):
-        with open_market_source(tmp_path / location, archive_paths=archive_paths):
-            pass
-
-
-@pytest.mark.parametrize(
-    "damage", ["root_file", "missing_manifest", "invalid_json", "manifest_directory"]
-)
-def test_present_selected_archive_is_invalid(tmp_path, damage):
-    archive = tmp_path / "declared"
-    if damage == "root_file":
-        archive.write_text("not an archive directory")
-    else:
-        archive.mkdir()
-        if damage == "invalid_json":
-            (archive / "manifest.json").write_text("not JSON")
-        elif damage == "manifest_directory":
-            (archive / "manifest.json").mkdir()
-    with pytest.raises(ValueError):
-        with open_market_source(tmp_path, archive_paths=(archive.name,)):
-            pytest.fail("present invalid archives cannot be treated as absent")
-
-
-@pytest.mark.parametrize("manifest_directory", [False, True])
-def test_selected_manifest_windows_directory_error_preserves_real_denial(
-    tmp_path, monkeypatch, manifest_directory
-):
-    from quant_research_platform.storage import manifests
-
-    archive = tmp_path / "declared"
-    archive.mkdir()
-    manifest = archive / "manifest.json"
-    if manifest_directory:
-        manifest.mkdir()
-    else:
-        manifest.write_text("{}")
-    primary = PermissionError("controlled_manifest_open_denial")
-
-    def denied(path, *args, **kwargs):
-        assert path == manifest
-        raise primary
-
-    monkeypatch.setattr(manifests, "open_filesystem_file", denied)
-    expected = ValueError if manifest_directory else PermissionError
-    with pytest.raises(expected) as caught:
-        with open_market_source(tmp_path, archive_paths=(archive.name,)):
-            pytest.fail("manifest open must fail")
-    if manifest_directory:
-        assert str(caught.value) == "tardis_manifest_invalid"
-        assert caught.value.__cause__ is primary
-    else:
-        assert caught.value is primary
 
 
 @pytest.mark.parametrize(

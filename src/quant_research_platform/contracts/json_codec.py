@@ -101,8 +101,8 @@ def canonical_identity_bytes(value: object) -> bytes:
             if not math.isfinite(item):
                 raise ValueError("canonical_json_nonfinite_number")
             return _frame(b"r", struct.pack(">d", 0.0 if item == 0.0 else item))
-        if type(item) is str:
-            return _frame(b"s", _utf8_bytes(item))
+        if isinstance(item, str):
+            return _frame(b"s", _utf8_bytes(str(item)))
         if type(item) is bytes:
             return _frame(b"b", item)
         if item is pd.NaT:
@@ -133,7 +133,7 @@ def canonical_identity_bytes(value: object) -> bytes:
         active.add(identity)
         try:
             if type(item) is dict:
-                if any(type(key) is not str for key in item):
+                if any(not isinstance(key, str) for key in item):
                     raise ValueError("canonical_json_non_string_key")
                 keys = sorted(item, key=_utf8_bytes)
                 payload = b"".join(
@@ -193,8 +193,9 @@ def _json_native_mapping(
     result: dict[str, Any] = {}
     try:
         for key, item in value.items():
-            if type(key) is not str:
+            if not isinstance(key, str):
                 raise ValueError("qrp_json_non_string_key")
+            key = str(key)
             if not key.isascii():
                 _utf8_bytes(key)
             result[key] = _json_native_value(
@@ -216,7 +217,8 @@ def _json_native_value(
     allow_mapping: bool = False,
 ) -> Any:
     kind = type(value)
-    if kind is str:
+    if isinstance(value, str):
+        value = str(value)
         if not value.isascii():
             _utf8_bytes(value)
         return value

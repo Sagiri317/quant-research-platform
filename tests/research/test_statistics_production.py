@@ -586,7 +586,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
             spec,
             config,
             TimeWindow(dates[0], cutoff),
-            selected="stats_demo_equal_weight_rank_ensemble",
+            selected="stats_demo_linear_regression",
         )
         for entry in model["model_entries"].values():
             entry["model_metadata"]["input_columns"] = [CORE6_FACTORS[0]]

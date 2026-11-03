@@ -6,7 +6,6 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.models import (
-    _model_spec,
     _validate_model_prediction_window,
     validate_model_facts,
 )
@@ -108,7 +107,6 @@ def _validate_prediction_training_facts(facts, realized):
         "selection_cutoff",
     }:
         raise ValueError("prediction_model_facts_invalid")
-    spec = _model_spec(facts["model"])
     fields = {
         "training_asset_ids",
         "train_start",
@@ -116,12 +114,6 @@ def _validate_prediction_training_facts(facts, realized):
         "label_availability_column",
         "label_available_max",
     }
-    is_rank = spec.model_algorithm in {
-        "equal_weight_rank_ensemble",
-        "ic_weighted_rank_ensemble",
-    }
-    if is_rank:
-        fields.add("rank_parameters")
     if type(realized) is dict and "training_target_mean" in realized:
         fields.add("training_target_mean")
         if type(realized["training_target_mean"]) not in {
@@ -136,20 +128,6 @@ def _validate_prediction_training_facts(facts, realized):
         or not realized["label_availability_column"]
     ):
         raise ValueError("prediction_label_availability_invalid")
-    if is_rank:
-        parameters = realized["rank_parameters"]
-        if type(parameters) is not dict or set(parameters) != {"label_calibration"}:
-            raise ValueError("prediction_label_calibration_invalid")
-        calibration = parameters["label_calibration"]
-        if (
-            type(calibration) is not list
-            or len(calibration) != 2
-            or any(
-                type(value) not in {int, float} or not np.isfinite(value)
-                for value in calibration
-            )
-        ):
-            raise ValueError("prediction_label_calibration_invalid")
     validate_model_facts(facts, realized)
 
 

@@ -379,8 +379,8 @@ def test_explicit_native_fit_prediction_and_backtest_roundtrip(
         tmp_path / "learning",
         training,
         ModelSpec(
-            model_id="ridge",
-            model_algorithm="ridge_regression",
+            model_id="linear",
+            model_algorithm="lasso_regression",
             input_factor_columns=("signal",),
             target_column="label",
             random_seed=42,
@@ -402,7 +402,7 @@ def test_explicit_native_fit_prediction_and_backtest_roundtrip(
             "candidate_id": "native",
             "selection_group": "global",
             "construction": "quantile_equal_weight",
-            "prediction_selector": "ridge",
+            "prediction_selector": "linear",
             "rebalance_schedule": "daily",
             "top_quantile": 0.5,
             "benchmark_id": None,
@@ -440,7 +440,7 @@ def test_explicit_native_fit_prediction_and_backtest_roundtrip(
         predictions, prediction_metadata = read_predictions(predicted)
         metrics = evaluate_model_trial_metrics_from_chunks(
             [predictions.assign(label=predictions.prediction_score)],
-            model_id="ridge",
+            model_id="linear",
             label_column="label",
             prediction_column="prediction_score",
         )
@@ -450,8 +450,8 @@ def test_explicit_native_fit_prediction_and_backtest_roundtrip(
                 "market_id": "a_share",
                 "target_column": "label",
                 "cutoff": "2023-12-31",
-                "candidate_ids": ["ridge"],
-                "candidates": [{**fitted.facts, "model_id": "ridge"}],
+                "candidate_ids": ["linear"],
+                "candidates": [{**fitted.facts, "model_id": "linear"}],
                 "metrics": [metrics],
             },
         )
@@ -461,7 +461,7 @@ def test_explicit_native_fit_prediction_and_backtest_roundtrip(
                 "output": str(tmp_path / "selection.json"),
                 "selection_metric": "validation_mse",
                 "selection_direction": "minimize",
-                "tie_break_order": ["ridge"],
+                "tie_break_order": ["linear"],
                 "refit_windows": fitted.facts["fit_windows"],
                 "refit_cutoff": "2023-12-31",
             }

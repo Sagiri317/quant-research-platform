@@ -22,8 +22,8 @@ from quant_research_platform.research.models.production import fit
 from quant_research_platform.research.models.trial_selection import score
 from quant_research_platform.research.predictions.runner import predict
 from tests.correctness.test_direct_model_operations import data, fit_config, input_spec
-from tests.research.crypto_evaluation_test_support import evaluation_config
 from tests.research.direct_model_test_support import candidates
+from tests.research.evaluation_test_support import evaluation_config
 
 
 def test_existing_predictions_score_and_evaluate_without_model_or_trial(tmp_path):
@@ -43,7 +43,7 @@ def test_existing_predictions_score_and_evaluate_without_model_or_trial(tmp_path
     assert scored["common_rows"] == 4
     spec = EvaluationSpec(
         evaluation_id="posthoc",
-        market_id="crypto",
+        market_id="other_market",
         research_dataset_id="synthetic",
         signals=(
             SignalSpec(signal_id="p", source_kind="prediction", source_column="p"),
@@ -210,7 +210,7 @@ def test_shared_prediction_lookup_preserves_exact_key_and_consumer_coverage():
 
 @pytest.mark.parametrize("axis", ["cross_sectional", "single_asset_time_series"])
 def test_all_ineligible_dates_remain_in_evaluation_domain(tmp_path, axis):
-    from tests.research.crypto_evaluation_test_support import write_evaluation_input
+    from tests.research.evaluation_test_support import write_evaluation_input
 
     frame = pd.DataFrame(
         {
@@ -227,7 +227,7 @@ def test_all_ineligible_dates_remain_in_evaluation_domain(tmp_path, axis):
     )
     spec = EvaluationSpec(
         evaluation_id="empty_day",
-        market_id="crypto",
+        market_id="other_market",
         research_dataset_id="synthetic",
         signals=(SignalSpec(signal_id="x", source_kind="feature", source_column="x"),),
         label_columns=("label",),
@@ -304,7 +304,7 @@ def test_real_label_free_assembly_predicts_without_trial(tmp_path):
     window = {"start": "2020-01-04", "end": "2020-01-04"}
     assembled = assemble(
         {
-            "market_id": "crypto",
+            "market_id": "other_market",
             "dataset_id": "custom_research",
             "inputs": {"custom_factors": str(raw)},
             "factor_columns": ["x"],
@@ -342,7 +342,7 @@ def test_evaluation_masks_imputed_features_before_cross_section_transform(
     tmp_path, monkeypatch, transform, expected
 ):
     from quant_research_platform.research.evaluations import engine
-    from tests.research.crypto_evaluation_test_support import write_evaluation_input
+    from tests.research.evaluation_test_support import write_evaluation_input
 
     normalize = engine.normalize_signal_frame
     normalized_values = []

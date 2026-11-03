@@ -470,7 +470,7 @@ def test_explicit_prediction_family_statistics_need_no_models_or_selection(
         assert len(losses) == 6
         assert losses.groupby("family_id").observation_count.first().to_dict() == {
             "linear_regression": 2,
-            "ic_weighted_rank_ensemble": 2,
+            "lasso_regression": 2,
         }
         assert losses.common_observation_count.eq(2).all()
     # The omitted analysis list is exactly the explicit default, including
@@ -535,109 +535,6 @@ def test_explicit_prediction_family_statistics_need_no_models_or_selection(
         ValueError, match="statistics_prediction_family_coverage_missing"
     ):
         model_statistics(broken)
-
-
-@pytest.mark.parametrize(
-    "analyses", [["performance"], ["annualized"], ["execution"], ["cost_sensitivity"]]
-)
-def test_crypto_analyses_require_only_selected_policy_and_keep_real_coverage(
-    tmp_path, analyses
-):
-    from quant_research_platform.markets.implementations.crypto.execution import (
-        PortfolioEconomics,
-        _record_execution_result,
-    )
-    from quant_research_platform.research.portfolios.diagnostics import (
-        crypto_statistics,
-    )
-
-    capital = PortfolioCapital("crypto", 1000.0, "USDT", "linear_perpetual")
-    dates = pd.date_range("2024-01-01", periods=3)
-
-    def produce(emit):
-        economic = PortfolioEconomics(capital, "btc_usdt", emit)
-        for index, timestamp in enumerate(dates):
-            name = (
-                "oos_window_start"
-                if index == 0
-                else "oos_window_end"
-                if index == 2
-                else "utc_day_boundary"
-            )
-            number = (
-                float(timestamp.value // pd.Timedelta(days=1).value)
-                if index == 1
-                else 0.0
-            )
-            economic.mark(
-                timestamp.value,
-                100.0,
-                diagnostics=(
-                    PortfolioDiagnostic("btc_usdt", None, name, number=number),
-                ),
-            )
-        _record_execution_result(
-            economic,
-            {
-                "simulation": "descriptive",
-                "net_pnl": 0.0,
-                "created_orders": 0,
-                "filled_orders": 0,
-                "selection_status": "COMPLETE",
-            },
-            dates[-1].value,
-            100.0,
-        )
-
-    source = write_portfolio_ledger_artifact(
-        tmp_path / "crypto",
-        capital=capital,
-        metadata={
-            "window": {"start": dates[0].isoformat(), "end": dates[-1].isoformat()},
-            "sample_role": "validation",
-            "execution_mode": "continuous",
-            "execution_style": "taker",
-            "execution": {"position_size": 1.0, "taker_fee_bps": 0.0},
-        },
-        produce=produce,
-    )
-    config = {
-        "ledger": str(source),
-        "output": str(tmp_path / "statistics"),
-        "analyses": analyses,
-    }
-    if analyses == ["annualized"]:
-        config["statistics"] = {
-            "annualization_minimum_observations": 2,
-            "annualization_periods": 365.0,
-        }
-    elif analyses == ["cost_sensitivity"]:
-        config["statistics"] = {
-            "fee_scenarios_bps": [0.0, 1.0],
-            "additional_spread_scenarios_bps": [0.0],
-        }
-    artifact = read_statistics_artifact(crypto_statistics(config))
-    requested = {
-        "performance": {
-            "crypto_portfolio_intervals.parquet",
-            "crypto_portfolio_daily.parquet",
-            "crypto_portfolio_statistics.parquet",
-        },
-        "annualized": {
-            "crypto_portfolio_daily.parquet",
-            "crypto_portfolio_statistics.parquet",
-        },
-        "execution": {"crypto_execution_diagnostics.parquet"},
-        "cost_sensitivity": {"crypto_cost_sensitivity.parquet"},
-    }[analyses[0]] | {"crypto_portfolio_coverage.parquet"}
-    assert set(artifact._members) == requested
-    with artifact.table("crypto_portfolio_coverage.parquet") as coverage:
-        assert coverage.kind.eq("covered").all()
-        assert coverage.start_at.iloc[0] == dates[0]
-        assert coverage.stop_at.iloc[-1] == dates[-1] + pd.Timedelta(1, "ns")
-    if "crypto_portfolio_statistics.parquet" in requested:
-        with artifact.table("crypto_portfolio_statistics.parquet") as values:
-            assert ("sharpe" in set(values.metric_id)) == ("annualized" in analyses)
 
 
 @pytest.mark.parametrize("sample_role", [None, "walk_forward_oos"])

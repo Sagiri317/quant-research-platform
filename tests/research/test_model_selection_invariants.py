@@ -50,7 +50,7 @@ def test_native_score_selection_is_invariant_to_label_name(tmp_path, target):
     frame.loc[12, "mature"] = pd.Timestamp("2020-01-06")
     spec = ProcessedDataSpec(
         data_id="input",
-        market_id="crypto",
+        market_id="other_market",
         kind="panel",
         frequency="1d",
         grain="asset_timestamp",
@@ -81,7 +81,7 @@ def test_native_score_selection_is_invariant_to_label_name(tmp_path, target):
             {
                 "inputs": str(train_path),
                 "output": str(tmp_path / f"{model_id}-model"),
-                "market_id": "crypto",
+                "market_id": "other_market",
                 "model": {
                     "model_id": model_id,
                     "model_algorithm": "linear_regression",

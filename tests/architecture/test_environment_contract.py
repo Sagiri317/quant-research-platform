@@ -11,6 +11,7 @@ GITIGNORE = PROJECT_ROOT / ".gitignore"
 
 CONDA_NAMES = {
     "arch": "arch-py",
+    "torch": "pytorch",
     "matplotlib": "matplotlib-base",
 }
 

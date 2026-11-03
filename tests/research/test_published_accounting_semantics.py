@@ -212,7 +212,7 @@ def test_late_corporate_disclosure_preserves_prefix_and_persisted_nav(
         for name, floats in (
             ("trades", ("notional",)),
             ("cashflows", ("amount",)),
-            ("valuations", ("value", "cost_basis", "receivable")),
+            ("valuations", ("value", "receivable")),
             ("diagnostics", ("number",)),
             (
                 "rights_adjustments",
@@ -398,7 +398,7 @@ def test_native_writer_and_reader_enforce_zero_share_receivable_continuity(
     error = (
         "portfolio_held_lifecycle_unproven"
         if direction == "relabel"
-        else "portfolio_ledger_cost_basis_invalid"
+        else "portfolio_ledger_entitlement_continuity_invalid"
     )
     with pytest.raises(ValueError, match=error):
         ledger.write_portfolio_ledger_artifact(

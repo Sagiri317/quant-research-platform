@@ -7,14 +7,7 @@ import pytest
 from quant_research_platform.markets.implementations.a_share.processed.catalog import (
     processed_catalog,
 )
-from quant_research_platform.markets.implementations.crypto import ids
-from quant_research_platform.markets.implementations.crypto.processed.catalog import (
-    hft_processed_catalog,
-)
 from quant_research_platform.markets.prepare import _configured_spec
-from quant_research_platform.research.protocols.crypto_hft import (
-    HFT_DERIVATIVE_CHANNELS,
-)
 
 
 @pytest.mark.parametrize(
@@ -63,131 +56,6 @@ def test_bad_factor_selection_never_silently_removes_requested_column(factors):
     with pytest.raises(ValueError, match="factor_columns_invalid"):
         _configured_spec(
             processed_catalog().get("fundamental_factors"), {"factor_columns": factors}
-        )
-
-
-@pytest.mark.parametrize("delay", [-1, True, 0.5])
-def test_auxiliary_input_delay_rejects_invalid_values(delay):
-    with pytest.raises(ValueError, match="input_delay_ms_invalid"):
-        _configured_spec(
-            hft_processed_catalog().get(ids.HFT_SPOT_CONTEXT_DATA_ID),
-            {"parameters": {"max_age_ms": 1000, "input_delay_ms": delay}},
-        )
-
-
-def test_derivative_ages_are_channel_specific_and_all_selected_channels_required():
-    base = hft_processed_catalog().get(ids.HFT_DERIVATIVE_DATA_ID)
-    ages = dict.fromkeys(HFT_DERIVATIVE_CHANNELS, 15000)
-    spec = _configured_spec(
-        base, {"parameters": {"max_age_ms": ages, "input_delay_ms": 100}}
-    )
-    actual = json.loads(spec.parameters_json)
-    assert actual == {"max_age_ms": ages, "input_delay_ms": 100}
-    assert spec.column_roles == base.column_roles
-    for bad in (
-        500,
-        {**ages, "openInterest": 0},
-        {key: value for key, value in ages.items() if key != "openInterest"},
-    ):
-        with pytest.raises(ValueError, match="max_age_ms_invalid"):
-            _configured_spec(base, {"parameters": {"max_age_ms": bad}})
-
-
-def test_selected_derivative_requires_only_its_actual_channel_age():
-    spec = _configured_spec(
-        hft_processed_catalog().get(ids.HFT_DERIVATIVE_DATA_ID),
-        {
-            "factor_columns": ["log_open_interest"],
-            "parameters": {"max_age_ms": {"openInterest": 15000}},
-        },
-    )
-    assert json.loads(spec.parameters_json)["max_age_ms"] == {"openInterest": 15000}
-    assert "openInterest_age_ms" in spec.required_columns
-    assert "premiumIndex_age_ms" not in spec.required_columns
-
-
-@pytest.mark.parametrize(
-    "ages",
-    [
-        {},
-        {"premiumIndex": 15000},
-        {"openInterest": 0},
-        {"openInterest": -1},
-        {"openInterest": True},
-        {"openInterest": 1.5},
-        {"openInterest": 15000, "unknown": 15000},
-    ],
-)
-def test_selected_derivative_rejects_missing_or_invalid_actual_channel_age(ages):
-    with pytest.raises(ValueError, match="max_age_ms_invalid"):
-        _configured_spec(
-            hft_processed_catalog().get(ids.HFT_DERIVATIVE_DATA_ID),
-            {
-                "factor_columns": ["log_open_interest"],
-                "parameters": {"max_age_ms": ages},
-            },
-        )
-
-
-@pytest.mark.parametrize("values", [[], ["sol_usdt", "sol_usdt"], ["unknown"], [True]])
-def test_cross_asset_scope_is_explicit_and_ordered(values):
-    with pytest.raises(ValueError, match="information_assets_invalid"):
-        _configured_spec(
-            hft_processed_catalog().get(ids.HFT_CROSS_ASSET_DATA_ID),
-            {
-                "parameters": {
-                    "max_age_ms": 200,
-                    "information_assets": values,
-                    "target_assets": ["btc_usdt"],
-                }
-            },
-        )
-
-
-def test_sol_information_and_target_panels_are_explicit_inputs():
-    base = hft_processed_catalog().get(ids.HFT_INFORMATION_STATE_DATA_ID)
-    spec = _configured_spec(
-        base,
-        {
-            "base_panel": ids.HFT_SOL_PANEL_DATA_ID,
-            "parameters": {"asset_ids": ["sol_usdt"]},
-        },
-    )
-    assert spec.processed_input_data_ids == (ids.HFT_SOL_PANEL_DATA_ID,)
-    assert json.loads(spec.parameters_json)["asset_ids"] == ["sol_usdt"]
-    spec = _configured_spec(
-        hft_processed_catalog().get(ids.HFT_CROSS_ASSET_DATA_ID),
-        {
-            "base_panel": ids.HFT_INFORMATION_PANEL_DATA_ID,
-            "parameters": {
-                "max_age_ms": 200,
-                "information_assets": ["sol_usdt", "btc_usdt"],
-                "target_assets": ["eth_usdt"],
-            },
-        },
-    )
-    assert json.loads(spec.parameters_json)["information_assets"] == [
-        "sol_usdt",
-        "btc_usdt",
-    ]
-    assert spec.processed_input_data_ids[0] == ids.HFT_INFORMATION_PANEL_DATA_ID
-
-
-def test_external_unit_rules_cannot_be_overridden_by_configuration():
-    base = hft_processed_catalog().get(ids.HFT_EXTERNAL_DATA_IDS["okx"])
-    actual = json.loads(
-        _configured_spec(base, {"parameters": {"max_age_ms": 1000}}).parameters_json
-    )
-    assert actual["base_units_per_amount"]
-    with pytest.raises(ValueError, match="parameter_not_consumed"):
-        _configured_spec(
-            base,
-            {
-                "parameters": {
-                    "max_age_ms": 1000,
-                    "base_units_per_amount": {"btc_usdt": 999},
-                }
-            },
         )
 
 

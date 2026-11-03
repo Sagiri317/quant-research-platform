@@ -1,0 +1,14 @@
+{
+  "market_id": "a_share",
+  "data_id": "hft_panel",
+  "inputs": {
+    "hft_quotes": "data/interim/venvoo/hft_quotes",
+    "hft_orders": "data/interim/venvoo/hft_orders",
+    "hft_trades": "data/interim/venvoo/hft_trades"
+  },
+  "time_window": {
+    "start": "2018-02-14",
+    "end": "2018-02-14"
+  },
+  "output_root": "data/processed/a_share/hft_panel"
+}

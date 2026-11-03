@@ -139,8 +139,7 @@ def evaluate(config):
 
         validate_response_diagnostics(response, signals=spec.signals)
         if (
-            str(spec.market_id) != "crypto"
-            or spec.evaluation_axis != "single_asset_time_series"
+            spec.evaluation_axis != "single_asset_time_series"
             or config["sample_scope"] != "own"
             or config.get("strata")
             or any(signal.transform != "identity" for signal in spec.signals)

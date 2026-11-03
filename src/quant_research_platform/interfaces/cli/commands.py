@@ -90,6 +90,14 @@ def fit(config: Config) -> None:
     _echo_result(fit(read_qrp_json_file(config)[1]))
 
 
+@app.command("run-quarterly")
+def run_quarterly(config: Config) -> None:
+    """Fit, predict and evaluate explicit expanding quarterly windows."""
+    from quant_research_platform.research.rolling import run_quarterly
+
+    _echo_result(run_quarterly(read_qrp_json_file(config)[1]))
+
+
 @app.command("predict")
 def predict(config: Config) -> None:
     """Predict with a saved model without fitting."""
@@ -146,34 +154,14 @@ def plot(config: Config) -> None:
     _echo_result(plot(read_qrp_json_file(config)[1]))
 
 
-@app.command("backtest-crypto-taker")
-def backtest_crypto_taker(config: Config) -> None:
-    """Backtest one Crypto taker portfolio from explicit event inputs."""
-    from quant_research_platform.markets.implementations.crypto.portfolio import (
-        backtest_taker,
+@app.command("backtest-hft")
+def backtest_hft(config: Config) -> None:
+    """Backtest independent A-share stock-day inventory accounts."""
+    from quant_research_platform.markets.implementations.a_share.hft_portfolio import (
+        backtest,
     )
 
-    _echo_result(backtest_taker(read_qrp_json_file(config)[1]))
-
-
-@app.command("backtest-crypto-maker")
-def backtest_crypto_maker(config: Config) -> None:
-    """Backtest one Crypto maker portfolio with its declared calibration."""
-    from quant_research_platform.markets.implementations.crypto.portfolio import (
-        backtest_maker,
-    )
-
-    _echo_result(backtest_maker(read_qrp_json_file(config)[1]))
-
-
-@app.command("calibrate-crypto-maker")
-def calibrate_crypto_maker(config: Config) -> None:
-    """Calibrate Crypto maker responses on the declared historical samples."""
-    from quant_research_platform.markets.implementations.crypto.portfolio import (
-        calibrate_maker,
-    )
-
-    _echo_result(calibrate_maker(read_qrp_json_file(config)[1]))
+    _echo_result(backtest(read_qrp_json_file(config)[1]))
 
 
 @app.command("statistics-factors")
@@ -192,16 +180,6 @@ def statistics_portfolio(config: Config) -> None:
     )
 
     _echo_result(portfolio_statistics(read_qrp_json_file(config)[1]))
-
-
-@app.command("statistics-crypto")
-def statistics_crypto(config: Config) -> None:
-    """Compute selected Crypto portfolio statistics from existing ledgers."""
-    from quant_research_platform.research.portfolios.diagnostics import (
-        crypto_statistics,
-    )
-
-    _echo_result(crypto_statistics(read_qrp_json_file(config)[1]))
 
 
 @app.command("statistics-model")

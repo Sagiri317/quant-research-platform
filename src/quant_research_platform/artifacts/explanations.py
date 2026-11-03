@@ -21,15 +21,12 @@ from quant_research_platform.storage.parquet import (
     parquet_table_writer,
 )
 
-LINEAR_EXPLANATION_ALGORITHMS = frozenset(
-    {"linear_regression", "ridge_regression", "lasso_regression", "huber_regression"}
-)
+LINEAR_EXPLANATION_ALGORITHMS = frozenset({"linear_regression", "lasso_regression"})
 
 ATTRIBUTION_METHODS = frozenset(
     {
         "affine",
         "linear_shap",
-        "rank",
         "native_tree",
         "tree_shap_path",
         "tree_shap_interventional",
@@ -133,24 +130,19 @@ _KEYS = {
 
 def validate_attribution_method(method, algorithm):
     """Bind the requested attribution to the existing model capability facts."""
-    facts = _model_algorithm_facts(algorithm)
+    _model_algorithm_facts(algorithm)
     linear = algorithm in LINEAR_EXPLANATION_ALGORITHMS
-    rank = facts.input_kind == "rank_ensemble_inputs"
     if method in {"affine", "linear_shap"} and not linear:
         raise ValueError("explanation_linear_model_required")
-    if method == "rank" and not rank:
-        raise ValueError("explanation_rank_model_required")
-    if method == "native_tree" and facts.dependency_package not in {
-        "xgboost",
-        "lightgbm",
-    }:
-        raise ValueError("explanation_native_tree_not_supported")
-    if method in {"tree_shap_path", "tree_shap_interventional"} and (linear or rank):
+    if (
+        method in {"native_tree", "tree_shap_path", "tree_shap_interventional"}
+        and algorithm != "xgboost_regressor"
+    ):
         raise ValueError("explanation_tree_model_required")
 
 
 def attribution_relative_tolerance(method, feature_count):
-    """Tree backends accumulate float32 paths; affine/rank paths use float64."""
+    """Tree backends accumulate float32 paths; affine paths use float64."""
     return float(
         5e-5
         if method in {"native_tree", "tree_shap_path", "tree_shap_interventional"}
@@ -217,27 +209,14 @@ def _validate(metadata, tables, *, partial=False):
         raise ValueError("explanation_single_attribution_method_required")
     if attribution or "permutation" in methods:
         space = metadata.get("output_space")
-        rank = metadata["model_algorithm"] in {
-            "equal_weight_rank_ensemble",
-            "ic_weighted_rank_ensemble",
-        }
-        unit = (
-            "raw_margin"
-            if space == "raw_margin"
-            else "dimensionless_rank_score"
-            if rank and space == "model_output"
-            else metadata["label_unit"]
-        )
+        unit = "raw_margin" if space == "raw_margin" else metadata["label_unit"]
         if (
-            space not in {"model_output", "raw_margin", "calibrated_label"}
+            space not in {"model_output", "raw_margin"}
             or metadata.get("unit") != unit
             or type(metadata.get("sample_role")) is not str
             or not metadata["sample_role"].strip()
-            or space == "calibrated_label"
-            and not rank
             or space == "raw_margin"
-            and metadata["model_algorithm"]
-            not in {"xgboost_regressor", "lightgbm_regressor"}
+            and metadata["model_algorithm"] != "xgboost_regressor"
         ):
             raise ValueError("explanation_output_metadata_invalid")
     if attribution:
@@ -246,7 +225,6 @@ def _validate(metadata, tables, *, partial=False):
         validate_attribution_method(method, metadata["model_algorithm"])
         baseline, background = {
             "affine": ("training_scaled_zero", "none"),
-            "rank": ("zero_centered_cross_section_rank", "none"),
             "linear_shap": ("historical_reference_expectation", "historical_reference"),
             "tree_shap_interventional": (
                 "historical_reference_expectation",

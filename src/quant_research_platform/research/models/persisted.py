@@ -24,11 +24,7 @@ from quant_research_platform.storage.atomic import (
 
 def save_model(path: Path, result: ModelFitResult, *, facts: dict, trial: dict) -> Path:
     """Publish one already-fitted predictor and its scientific facts atomically."""
-    metadata = validate_model_metadata_core(
-        result.metadata,
-        rank_calibration="label_calibration"
-        in result.metadata.get("rank_parameters", {}),
-    )
+    metadata = validate_model_metadata_core(result.metadata)
     validate_model_state(result.prediction_model, metadata)
     validate_model_facts(facts, metadata)
     if (
@@ -59,10 +55,7 @@ def load_model(path: Path) -> tuple[ModelFitResult, dict]:
     if set(payload) != {"model_metadata", "facts", "trial_id"}:
         raise ValueError("model_manifest_invalid")
     metadata = payload["model_metadata"]
-    metadata = validate_model_metadata_core(
-        metadata,
-        rank_calibration="label_calibration" in metadata.get("rank_parameters", {}),
-    )
+    metadata = validate_model_metadata_core(metadata)
     validate_model_facts(payload["facts"], metadata)
     with (path / "predictor.pkl").open("rb") as handle:
         predictor = pickle.load(handle)

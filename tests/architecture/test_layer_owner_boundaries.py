@@ -124,8 +124,8 @@ def test_owner_layer_import_boundaries_are_enforced(
         ),
         (
             SOURCE_ROOT / "research/example.py",
-            "from ..sources import tardis\n",
-            "quant_research_platform.sources.tardis",
+            "from ..sources import venvoo\n",
+            "quant_research_platform.sources.venvoo",
         ),
         (
             SOURCE_ROOT / "reports/example.py",
@@ -199,9 +199,7 @@ def test_contract_direction_gate_rejects_each_high_level_owner(owner):
 @pytest.mark.parametrize(
     "module",
     (
-        "quant_research_platform.markets.implementations.crypto.ids.VALUE",
         "quant_research_platform.markets.implementations.a_share.ids.VALUE",
-        "quant_research_platform.sources.binance.ids.VALUE",
         "quant_research_platform.sources.choice.ids.VALUE",
         "quant_research_platform.sources.csmar.ids.VALUE",
     ),

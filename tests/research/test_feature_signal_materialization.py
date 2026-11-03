@@ -39,7 +39,7 @@ def test_signal_overlap_sets_preserve_unique_contract_and_error_order(
     assert _cross_signal_id_column_overlaps(signals) == literal_overlaps
     arguments = dict(
         evaluation_id="case",
-        market_id="crypto",
+        market_id="other_market",
         research_dataset_id="case",
         signals=signals,
         label_columns=("label",),
@@ -75,7 +75,7 @@ def test_signal_overlap_requires_unique_declarations(ids, columns, error):
     with pytest.raises(ValueError, match=f"^{error}$"):
         EvaluationSpec(
             evaluation_id="case",
-            market_id="crypto",
+            market_id="other_market",
             research_dataset_id="case",
             signals=signals,
             label_columns=("label",),

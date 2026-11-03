@@ -27,7 +27,12 @@ from tests.research.test_published_model_metric_semantics import (
 )
 
 
-@pytest.mark.parametrize("algorithm", ["linear_regression", "decision_tree_regressor"])
+@pytest.mark.parametrize(
+    "algorithm",
+    [
+        "linear_regression",
+    ],
+)
 @pytest.mark.parametrize("half_life, expected", [(None, 4.0), (1, 14 / 3)])
 def test_mean_uses_only_actual_training_rows_and_weights(
     tmp_path, algorithm, half_life, expected

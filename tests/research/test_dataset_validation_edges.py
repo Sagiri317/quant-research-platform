@@ -136,7 +136,7 @@ def test_evaluation_key_validation_has_one_owner_per_invariant(
     frame = pd.DataFrame(
         dict(
             timestamp=dates,
-            asset_id="btc_usdt",
+            asset_id="asset_a",
             x=[1.0, 2.0, 3.0, 4.0],
             y=[2.0, 4.0, 6.0, 8.0],
             available=dates,
@@ -190,7 +190,7 @@ def test_evaluation_key_validation_has_one_owner_per_invariant(
         cutoff="2024-01-02",
         evaluation=dict(
             evaluation_id="proof",
-            market_id="crypto",
+            market_id="other_market",
             research_dataset_id="proof",
             signals=[dict(signal_id="x", source_kind="factor", source_column="x")],
             label_columns=["y"],

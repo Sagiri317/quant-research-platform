@@ -61,7 +61,7 @@ def test_disjoint_refit_counts_and_predictions_ignore_gap_and_late_labels(tmp_pa
         },
     }
     config = {
-        "market_id": "crypto",
+        "market_id": "other_market",
         "inputs": str(source),
         "input_spec": spec,
         "model": {

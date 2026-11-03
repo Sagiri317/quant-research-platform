@@ -177,7 +177,7 @@ def test_failed_fit_records_failure_without_model(tmp_path):
     )
 
 
-def test_actual_refit_sample_count_resolves_regularization_and_seed_is_explicit(
+def test_actual_refit_sample_count_resolves_child_weight_and_seed_is_explicit(
     tmp_path,
 ):
     from quant_research_platform.contracts.models import ModelSpec
@@ -185,15 +185,15 @@ def test_actual_refit_sample_count_resolves_regularization_and_seed_is_explicit(
 
     frame = pd.read_parquet(data(tmp_path))
     spec = ModelSpec(
-        model_id="ridge-fixed",
-        model_algorithm="ridge_regression",
+        model_id="xgboost-fixed",
+        model_algorithm="xgboost_regressor",
         input_feature_columns=("x",),
         target_column="label",
         random_seed=81,
     )
     options = {
         "fit_cutoff": "2020-01-06",
-        "candidate_parameters": {"regularization_strength": 0.25},
+        "candidate_parameters": {"min_child_weight_fraction": 0.25, "n_estimators": 2},
     }
     first = fit_model(
         [frame],
@@ -207,8 +207,8 @@ def test_actual_refit_sample_count_resolves_regularization_and_seed_is_explicit(
         fit_windows=[{"start": "2020-01-01", "end": "2020-01-06"}],
         **options,
     )
-    assert first.metadata["resolved_hyperparameters"]["alpha"] == 0.25 * 9
-    assert refit.metadata["resolved_hyperparameters"]["alpha"] == 0.25 * 18
+    assert first.metadata["resolved_hyperparameters"]["min_child_weight"] == 0.25 * 9
+    assert refit.metadata["resolved_hyperparameters"]["min_child_weight"] == 0.25 * 18
     assert first.metadata["random_seed"] == refit.metadata["random_seed"] == 81
 
 

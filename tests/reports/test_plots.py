@@ -35,12 +35,9 @@ def curve(values=(100, 0, 25), *, stride=1):
         source_reference="ledger-identity",
         initial_capital=values[0],
         valuation_currency="CNY",
-        execution_mode="continuous",
-        episode_id="continuous",
         stride=stride,
         source_point_count=len(values),
         displayed_point_count=len(values),
-        boundaries=[],
         points=[
             dict(
                 timestamp_ns=pd.Timestamp("2026-01-01").value + i * 10**9,
@@ -73,72 +70,15 @@ def test_retrospective_curve_discloses_selection_mode():
     assert "回顾性选择（描述性曲线）" in fig._suptitle.get_text()
 
 
-def test_independent_episodes_and_sampled_drawdown():
-    data = curve((1000, 1099))
-    data.update(
-        execution_mode="independent_segments",
-        episodes=[
-            {**curve((1000, 1099)), "episode_id": "first"},
-            {**curve((1000, 1048), stride=2), "episode_id": "second"},
-        ],
-    )
+def test_sampled_curve_has_no_derived_drawdown():
+    data = curve((1000, 1048), stride=2)
     fig, axes = plots.plot_portfolio_curve(data, sample_role="test", timezone="UTC")
-    assert len(axes) == 4
-    np.testing.assert_array_equal(axes[0].lines[0].get_ydata(), [1000, 1099])
-    np.testing.assert_array_equal(axes[2].lines[0].get_ydata(), [1000, 1048])
-    assert not axes[3].lines
-    np.testing.assert_array_equal(axes[3].dataLim.intervalx, axes[2].dataLim.intervalx)
-    assert "UNDEFINED" in axes[3].texts[0].get_text()
+    assert len(axes) == 2
+    np.testing.assert_array_equal(axes[0].lines[0].get_ydata(), [1000, 1048])
+    assert not axes[1].lines
+    np.testing.assert_array_equal(axes[1].dataLim.intervalx, axes[0].dataLim.intervalx)
+    assert "UNDEFINED" in axes[1].texts[0].get_text()
     fig.canvas.draw()
-
-
-def test_partial_episode_keeps_other_complete_episode_drawdown():
-    partial = {
-        **curve((1000, 980), stride=2),
-        "episode_id": "partial",
-        "status": "PARTIAL",
-        "account_stop_reason": "execution_unknown",
-        "account_stop_ns": pd.Timestamp("2026-01-01T00:00:02").value,
-    }
-    data = {
-        **curve((1000, 1099)),
-        "status": "PARTIAL",
-        "execution_mode": "independent_segments",
-        "episodes": [{**curve((1000, 1099)), "episode_id": "complete"}, partial],
-    }
-    figure, axes = plots.plot_portfolio_curve(data, sample_role="test", timezone="UTC")
-    assert "完整账本派生回撤" in axes[1].texts[0].get_text()
-    assert len(axes[1].lines) == 1 and not axes[3].lines
-    assert len(axes[2].texts) == 1
-    assert "抽样净值" in axes[2].texts[0].get_text()
-    assert "known_prefix" in axes[2].texts[0].get_text()
-    figure.canvas.draw()
-
-
-def test_recovered_market_gap_keeps_complete_sibling_drawdown():
-    recovered = {
-        **curve((1000, 980, 1005)),
-        "episode_id": "recovered",
-        "status": "PARTIAL",
-        "account_path_status": "COMPLETE",
-        "market_observation_status": "PARTIAL",
-        "market_observation_reason": "crypto_execution_book_coverage_incomplete",
-        "first_market_gap_ns": pd.Timestamp("2026-01-01T00:00:00.5").value,
-    }
-    data = {
-        **curve((1000, 1099)),
-        "status": "PARTIAL",
-        "execution_mode": "independent_segments",
-        "episodes": [{**curve((1000, 1099)), "episode_id": "complete"}, recovered],
-    }
-    figure, axes = plots.plot_portfolio_curve(data, sample_role="test", timezone="UTC")
-    assert len(axes[1].lines) == 1 and not axes[3].lines
-    np.testing.assert_array_equal(axes[3].dataLim.intervalx, axes[2].dataLim.intervalx)
-    np.testing.assert_array_equal(axes[2].lines[0].get_ydata(), [1000, 980, 1005])
-    assert axes[2].lines[0].get_linestyle() == "None"
-    assert "market_observation" in axes[2].texts[0].get_text()
-    assert "known_prefix" not in axes[2].texts[0].get_text()
-    figure.canvas.draw()
 
 
 def test_blocked_curve_and_metric_availability():
@@ -343,11 +283,7 @@ def test_long_source_footer_present_and_inside_every_figure():
         assert 0 <= box.y0 < box.y1 <= figure.bbox.height
 
 
-def test_crypto_negative_equity_is_displayed_without_clipping():
-    data = {**curve((100, -20, -5)), "valuation_method": "linear_perpetual"}
-    _, axes = plots.plot_portfolio_curve(data, sample_role="test", timezone="UTC")
-    np.testing.assert_array_equal(axes[0].lines[0].get_ydata(), [100, -20, -5])
-    np.testing.assert_allclose(axes[1].lines[0].get_ydata(), [0, -1.2, -1.05])
+def test_cash_equity_curve_rejects_negative_nav():
     with pytest.raises(ValueError, match="plot_nav_negative"):
         plots.plot_portfolio_curve(
             curve((100, -20)), sample_role="test", timezone="UTC"
@@ -500,7 +436,7 @@ def test_ic_cannot_relabel_validation_as_test():
         )
 
 
-def test_series_keeps_independent_episodes_in_separate_panels():
+def test_series_uses_explicit_group_columns():
     rows = [
         dict(timestamp="2026-01-01", value=value, candidate_id="c", episode_id=episode)
         for episode, value in (("one", 1), ("two", 2))
@@ -511,6 +447,7 @@ def test_series_keeps_independent_episodes_in_separate_panels():
         value_columns=["value"],
         title="原生统计",
         units="数值",
+        group_columns=["episode_id"],
         **TIMED,
     )
     assert len(axes) == 2
@@ -519,14 +456,14 @@ def test_series_keeps_independent_episodes_in_separate_panels():
 
 
 @pytest.mark.parametrize(
-    "valuation_method,expected_hour",
-    [("linear_perpetual", 8), ("cash_equity", 0)],
+    "kind,expected_hour",
+    [("a_share_hft", 8), (None, 0)],
 )
-def test_curve_clock_distinguishes_crypto_epoch_from_daily_civil_dates(
-    valuation_method, expected_hour
+def test_curve_clock_distinguishes_hft_instants_from_daily_civil_dates(
+    kind, expected_hour
 ):
     data = curve((100, 110))
-    data["valuation_method"] = valuation_method
+    data["kind"] = kind
     _, axes = plots.plot_portfolio_curve(
         data, sample_role="test", timezone="Asia/Shanghai"
     )
@@ -568,7 +505,7 @@ def test_plot_clocks_preserve_dst_instants_and_naive_wall_time(
         times = times.tz_localize(None)
         timestamps = times.astype(str).tolist()
     data = curve((100, 110, 105))
-    data["valuation_method"] = "linear_perpetual" if aware else "cash_equity"
+    data["kind"] = "a_share_hft" if aware else None
     for point, timestamp in zip(data["points"], times, strict=True):
         point["timestamp_ns"] = timestamp.value
     _, curve_axes = plots.plot_portfolio_curve(
@@ -836,8 +773,6 @@ def test_native_metric_plot_preserves_each_comparison_identity(
 
     row = {
         "candidate_id": "candidate",
-        "execution_mode": "continuous",
-        "episode_id": "continuous",
         "fold_id": "fold-one",
         "reference_id": "reference-one",
         "reference_kind": "benchmark",
@@ -866,7 +801,6 @@ def test_native_metric_plot_preserves_each_comparison_identity(
             "sample_role": "test",
             "window": {"start": "2024-01-01", "end": "2024-01-03"},
             "candidate_ids": ["candidate"],
-            "execution_mode": "continuous",
         },
         table_group="portfolio",
         tables={
@@ -912,7 +846,7 @@ def test_factor_ic_consumes_native_daily_strata_and_filters(tmp_path, monkeypatc
         read_evaluation_outputs,
     )
     from quant_research_platform.research.evaluations.runner import evaluate
-    from tests.research.crypto_evaluation_test_support import write_evaluation_input
+    from tests.research.evaluation_test_support import write_evaluation_input
     from tests.research.test_stratified_evaluation_reuse import _fixture
 
     frame, config = _fixture(tmp_path, days=3)
@@ -1001,7 +935,7 @@ def test_series_keeps_native_missing_and_literal_strata_separate(tmp_path, monke
         read_evaluation_outputs,
     )
     from quant_research_platform.research.evaluations.runner import evaluate
-    from tests.research.crypto_evaluation_test_support import write_evaluation_input
+    from tests.research.evaluation_test_support import write_evaluation_input
     from tests.research.test_stratified_evaluation_reuse import _fixture
 
     frame, config = _fixture(tmp_path)
@@ -1239,65 +1173,6 @@ def test_date_panels_keep_unavailable_edges_without_fabricating_values(kind, val
         assert axis.get_xlim()[0] <= expected[0] < expected[-1] <= axis.get_xlim()[1]
         assert str(axis.xaxis.get_major_formatter()._tz) == "America/New_York"
     fig.canvas.draw()
-
-
-def test_native_partial_crypto_returns_keep_undefined_date_domain(
-    tmp_path, monkeypatch
-):
-    from matplotlib.dates import date2num
-
-    from quant_research_platform.artifacts.statistics import read_statistics_artifact
-    from quant_research_platform.research.portfolios.diagnostics import (
-        crypto_statistics,
-    )
-    from tests.research.test_portfolio_benchmark_research import _crypto_account
-
-    ledger = tmp_path / "ledger"
-    _crypto_account(ledger, partial=True)
-    source = crypto_statistics(
-        {
-            "ledger": str(ledger),
-            "output": str(tmp_path / "statistics"),
-            "analyses": ["performance"],
-        }
-    )
-    artifact = read_statistics_artifact(source)
-    with artifact.table("crypto_portfolio_daily.parquet") as frame:
-        selected = frame.loc[frame.status.eq("UNDEFINED")].copy()
-    assert len(selected) == 1
-    assert selected.net_return.isna().all()
-    assert selected.reason.tolist() == ["utc_boundary_valuation_missing"]
-    member = source / "crypto_portfolio_daily.parquet"
-    original_bytes = member.read_bytes()
-    original = plots.plot_returns
-
-    def observed(rows, **kwargs):
-        fig, axes = original(rows, **kwargs)
-        expected = date2num(selected.end_at)
-        np.testing.assert_array_equal(
-            axes[0].dataLim.intervalx, [expected[0], expected[0]]
-        )
-        assert axes[0].collections[0].get_offsets().mask.all()
-        assert sum(p.get_height() for p in axes[1].patches) == 0
-        assert "utc_boundary_valuation_missing" in axes[0].texts[0].get_text()
-        fig.savefig(tmp_path / "undefined-returns.png")
-        return fig, axes
-
-    monkeypatch.setattr(plots, "plot_returns", observed)
-    before = plt.get_fignums()
-    output = plots.plot(
-        {
-            "kind": "returns",
-            "inputs": str(member),
-            "output": str(tmp_path / "undefined-returns.svg"),
-            "timezone": "UTC",
-            "sample_role": "test",
-            "row_filters": [["status", "==", "UNDEFINED"]],
-        }
-    )
-    assert output.stat().st_size > 1000
-    assert member.read_bytes() == original_bytes
-    assert plt.get_fignums() == before
 
 
 def test_series_default_identity_preserves_null_and_literal_from_parquet(

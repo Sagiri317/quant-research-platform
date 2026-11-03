@@ -10,7 +10,6 @@ dependencies:
   - pandas>=3.0,<4
   - pyarrow>=24,<25
   - pydantic>=2.13,<3
-  - psutil>=7.2,<8
   - scikit-learn>=1.9,<2
   - threadpoolctl>=3.5,<4
   - typer>=0.26,<1
@@ -23,6 +22,5 @@ dependencies:
   - statsmodels>=0.15,<0.16
   - arch-py>=8,<9
   - matplotlib-base>=3.11,<4
-  - websockets>=16,<17
   - xgboost>=3,<4
-  - lightgbm>=4.6,<5
+  - pytorch>=2.12,<3

@@ -14,31 +14,32 @@ from quant_research_platform.contracts.models import (
 )
 from quant_research_platform.research.models import estimators, fitting
 
-ALGORITHMS = (
-    "random_forest_regressor",
-    "xgboost_regressor",
-    "lightgbm_regressor",
-)
+ALGORITHMS = ("xgboost_regressor",)
 
 
 @pytest.mark.parametrize("algorithm", ALGORITHMS)
 @pytest.mark.parametrize("requested", [-1000, -1, 1, 65536, None, 0, True, 1.5, "2"])
 def test_library_thread_parameters_are_not_hardware_gated(algorithm, requested):
     params = {"n_jobs": requested}
-    invalid = type(requested) not in {int, type(None)} or (
-        requested == 0 and algorithm == "random_forest_regressor"
-    )
+    invalid = type(requested) not in {int, type(None)}
     if invalid:
         with pytest.raises(ValueError, match="invalid_model_thread_count"):
             _spec(algorithm, params)
         return
     spec = _spec(algorithm, params)
     assert estimators.build_estimator_from_model_spec(spec).n_jobs == requested
-    assert estimators.resolved_model_hyperparameters(spec) == params
-    assert _resolved_model_hyperparameters_match(algorithm, params, params)
-    assert _resolved_model_hyperparameters_match(algorithm, params, {"n_jobs": 2})
+    assert estimators.resolved_model_hyperparameters(spec) == {
+        **params,
+        "device": "cuda",
+        "tree_method": "hist",
+    }
+    resolved = {**params, "device": "cuda", "tree_method": "hist"}
+    assert _resolved_model_hyperparameters_match(algorithm, params, resolved)
+    assert _resolved_model_hyperparameters_match(
+        algorithm, params, {**resolved, "n_jobs": 2}
+    )
     assert not _resolved_model_hyperparameters_match(
-        algorithm, {**params, "n_estimators": 2}, {**params, "n_estimators": 3}
+        algorithm, {**params, "n_estimators": 2}, {**resolved, "n_estimators": 3}
     )
 
 
@@ -58,16 +59,15 @@ def _spec(algorithm, params):
         (algorithm, requested)
         for algorithm in ALGORITHMS
         for requested in [-1, None, 1, 0]
-        if requested != 0 or algorithm != "random_forest_regressor"
     ]
-    + [("linear_regression", None), ("ridge_regression", None)],
+    + [
+        ("linear_regression", None),
+    ],
 )
 def test_actual_fit_preserves_thread_configuration_and_metadata(
     algorithm, requested, monkeypatch
 ):
     params = {"n_estimators": 2, "n_jobs": requested} if algorithm in ALGORITHMS else {}
-    if algorithm == "lightgbm_regressor":
-        params.update(verbosity=-1, min_child_samples=1)
     spec = _spec(algorithm, params)
     if algorithm in ALGORITHMS:
         default = replace(spec, hyperparameters={})
@@ -109,7 +109,11 @@ def test_actual_fit_preserves_thread_configuration_and_metadata(
     assert observed == [before]
     assert threadpool_info() == before
     validate_model_metadata_core(result.metadata)
-    assert result.metadata["resolved_hyperparameters"] == params
+    assert result.metadata["resolved_hyperparameters"] == (
+        {**params, "device": "cuda", "tree_method": "hist"}
+        if algorithm == "xgboost_regressor"
+        else params
+    )
     assert np.isfinite(result.prediction_model.predict(frame[["x"]])).all()
     if algorithm in ALGORITHMS:
         assert result.prediction_model.n_jobs == requested

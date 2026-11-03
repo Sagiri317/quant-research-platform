@@ -53,66 +53,6 @@ def test_native_prediction_preserves_raw_units_rank_and_family(tmp_path: Path) -
     assert output == tmp_path / "future" / "prediction"
 
 
-@pytest.mark.parametrize("tree_values", [(1.0, 2.0, 3.0), (0.1, -0.1, 0.001)])
-def test_forest_parallel_prediction_respects_error_bound_and_fitted_state(
-    monkeypatch, tree_values
-):
-    import pickle
-    import threading
-    from fractions import Fraction
-
-    from joblib import parallel_config
-    from joblib.parallel import get_active_backend
-    from sklearn.ensemble import RandomForestRegressor, _forest
-
-    from quant_research_platform.research.models.scaler import (
-        ModelMatrixScaler,
-        ScaledPredictor,
-    )
-
-    frame = pd.DataFrame({"x": [0.0, 1.0]})
-    forest = RandomForestRegressor(
-        n_estimators=3, n_jobs=3, bootstrap=False, random_state=0
-    ).fit(frame, [0.0, 0.0])
-    for tree, value in zip(forest.estimators_, tree_values, strict=True):
-        tree.tree_.value.fill(value)
-    fitted = ScaledPredictor(forest, ModelMatrixScaler.fit(frame))
-    frozen_state = pickle.dumps(fitted)
-    actual_accumulate = _forest._accumulate_prediction
-    caller = threading.current_thread()
-    tree_positions = {id(tree): index for index, tree in enumerate(forest.estimators_)}
-    completed = [threading.Event() for _ in forest.estimators_]
-    predecessors = {0: None, 1: 2, 2: 0}
-
-    def accumulate(predict, *args):
-        position = tree_positions[id(predict.__self__)]
-        if threading.current_thread() is not caller:
-            previous = predecessors[position]
-            if previous is not None:
-                assert completed[previous].wait(10), "forest worker did not finish"
-        actual_accumulate(predict, *args)
-        completed[position].set()
-
-    monkeypatch.setattr(_forest, "_accumulate_prediction", accumulate)
-    predict = prediction_callable(("x",), fitted)
-    with parallel_config(backend="threading", n_jobs=3):
-        outer_backend, outer_jobs = get_active_backend()
-        first = predict(frame)
-        expected = float(sum(map(Fraction, tree_values)) / len(tree_values))
-        # Forward error for two additions and one final division; the budget scales
-        # with actual tree magnitudes, so ordinary data keep a near-epsilon bound.
-        eps = np.finfo(float).eps
-        gamma = 3 * eps / (1 - 3 * eps)
-        budget = gamma * sum(abs(value) for value in tree_values) / len(tree_values)
-        np.testing.assert_allclose(first, expected, rtol=0, atol=budget)
-        for event in completed:
-            event.clear()
-        np.testing.assert_allclose(predict(frame), expected, rtol=0, atol=budget)
-        assert get_active_backend() == (outer_backend, outer_jobs)
-    assert forest.n_jobs == 3
-    assert pickle.dumps(fitted) == frozen_state
-
-
 def test_a_share_model_ladder_fits_and_predicts_each_retained_algorithm() -> None:
     specs = configured_models("pv_all")
     dates = pd.date_range("2020-01-01", periods=12, freq="D")
@@ -158,7 +98,7 @@ def test_a_share_model_ladder_fits_and_predicts_each_retained_algorithm() -> Non
             spec,
             estimator=build_estimator_from_model_spec(spec),
         )
-        columns = tuple(dict.fromkeys((*spec.input_columns, "timestamp")))
+        columns = tuple(dict.fromkeys((*spec.input_columns, "timestamp", "asset_id")))
         prediction = prediction_callable(spec.input_columns, result.prediction_model)(
             frame.loc[:, list(columns)]
         )
@@ -168,10 +108,7 @@ def test_a_share_model_ladder_fits_and_predicts_each_retained_algorithm() -> Non
 
 @pytest.mark.parametrize(
     ("model_algorithm", "expected_package", "wrong_package"),
-    (
-        ("linear_regression", "internal", "sklearn"),
-        ("ridge_regression", "sklearn", "internal"),
-    ),
+    (("linear_regression", "internal", "sklearn"),),
 )
 def test_native_prediction_binds_backend_package_to_actual_model_owner(
     tmp_path, model_algorithm: str, expected_package: str, wrong_package: str

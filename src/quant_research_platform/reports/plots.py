@@ -219,28 +219,20 @@ def _times(values, timezone):
 
 @_styled
 def plot_portfolio_curve(curve, *, sample_role, timezone):
-    """Plot query NAV with OOS markers and full-resolution descriptive drawdown.
-
-    Independent episodes stay in separate panels. Sampled or incompletely observed
-    curves cannot supply a full drawdown path. Recovered endpoints remain visible.
-    """
+    """Plot one native account and derive drawdown only from its complete curve."""
     if (
         sample_role is not None
         and "sample_role" in curve
         and curve["sample_role"] != sample_role
     ):
         raise ValueError("plot_sample_role_mismatch")
-    epoch_timezone = (
-        "UTC" if curve.get("valuation_method") == "linear_perpetual" else None
-    )
-    parts = curve.get("episodes", [curve])
+    epoch_timezone = "UTC" if curve.get("kind") == "a_share_hft" else None
     figure, axes = _figure(
-        2 * len(parts),
-        ratios=[3, 1] * len(parts) if parts else None,
+        2,
+        ratios=[3, 1],
         title=f"净值与回撤 | {curve['candidate_id']} | "
         + {
             "DEFINED": "已定义",
-            "PARTIAL": "部分已知",
             "UNDEFINED": "未定义",
             "BLOCKED": "受阻",
             "FAILED": "失败",
@@ -255,186 +247,95 @@ def plot_portfolio_curve(curve, *, sample_role, timezone):
         ),
         sample_role=sample_role,
     )
-    if curve["status"] not in {"DEFINED", "PARTIAL"}:
+    if curve["status"] != "DEFINED":
         for axis in axes:
             _note(axis, f"{curve['status']}: {curve['reason']}")
         return figure, axes
-    for index, part in enumerate(parts):
-        nav_axis, dd_axis = axes[2 * index : 2 * index + 2]
-        points = part["points"]
-        values = [_number(row["nav"]) for row in points]
-        if curve.get("valuation_method", "cash_equity") != "linear_perpetual" and any(
-            value < 0 for value in values
-        ):
-            raise ValueError("plot_nav_negative")
-        times = _times(
-            [
-                pd.Timestamp(row["timestamp_ns"], unit="ns", tz=epoch_timezone)
-                for row in points
-            ],
-            timezone,
-        )
-        if not times.is_monotonic_increasing:
-            raise ValueError("plot_timestamp_order_invalid")
-        episode = (
-            "连续回测" if part["episode_id"] == "continuous" else part["episode_id"]
-        )
-        label = f"{curve['candidate_id']} | {episode}"
-        nav_axis.set_title(label, fontsize=9)
-        displayed, scale = _scale(values)
-        market_partial = part.get("market_observation_status") == "PARTIAL"
-        nav_axis.plot(
-            times,
-            displayed,
-            color="#2F6690",
-            marker=".",
-            markersize=3,
-            linewidth=1,
-            linestyle="None" if market_partial else "-",
-        )
-        nav_axis.set_ylabel(f"净值（{curve['valuation_currency']}{scale}）")
-        nav_axis.ticklabel_format(axis="y", style="plain", useOffset=False)
-        if not scale and values and max(values) >= 10000:
-            from matplotlib.ticker import FuncFormatter
+    nav_axis, dd_axis = axes
+    points = curve["points"]
+    values = [_number(row["nav"]) for row in points]
+    if any(value < 0 for value in values):
+        raise ValueError("plot_nav_negative")
+    times = _times(
+        [
+            pd.Timestamp(row["timestamp_ns"], unit="ns", tz=epoch_timezone)
+            for row in points
+        ],
+        timezone,
+    )
+    if not times.is_monotonic_increasing:
+        raise ValueError("plot_timestamp_order_invalid")
+    nav_axis.set_title(curve["candidate_id"], fontsize=9)
+    displayed, scale = _scale(values)
+    nav_axis.plot(
+        times,
+        displayed,
+        color="#2F6690",
+        marker=".",
+        markersize=3,
+        linewidth=1,
+        linestyle="-",
+    )
+    nav_axis.set_ylabel(f"净值（{curve['valuation_currency']}{scale}）")
+    nav_axis.ticklabel_format(axis="y", style="plain", useOffset=False)
+    if not scale and values and max(values) >= 10000:
+        from matplotlib.ticker import FuncFormatter
 
-            nav_axis.yaxis.set_major_formatter(
-                FuncFormatter(lambda value, _: f"{value / 10000:g}")
-            )
-            nav_axis.set_ylabel(f"账户净值（万 {curve['valuation_currency']}）")
-        dd_axis.set_ylabel("回撤（%）")
-        from matplotlib.ticker import PercentFormatter
-
-        dd_axis.yaxis.set_major_formatter(PercentFormatter(1))
-        full_resolution = part["stride"] == 1 and part["source_point_count"] == part[
-            "displayed_point_count"
-        ] == len(points)
-        account_partial = part.get("account_path_status") == "PARTIAL" or (
-            part.get("status", curve["status"]) == "PARTIAL" and not market_partial
+        nav_axis.yaxis.set_major_formatter(
+            FuncFormatter(lambda value, _: f"{value / 10000:g}")
         )
-        if full_resolution and values and not market_partial:
-            peak = _number(curve["initial_capital"])
-            if peak <= 0:
-                raise ValueError("plot_initial_capital_invalid")
-            drawdowns = []
-            for value in values:
-                peak = max(peak, value)
-                ratio = value / peak - 1 if peak > 0 else math.nan
-                drawdowns.append(ratio if math.isfinite(ratio) else math.nan)
-            dd_axis.plot(
-                times, drawdowns, color="#934b4b", marker=".", markersize=3, linewidth=1
+        nav_axis.set_ylabel(f"账户净值（万 {curve['valuation_currency']}）")
+    dd_axis.set_ylabel("回撤（%）")
+    from matplotlib.ticker import PercentFormatter
+
+    dd_axis.yaxis.set_major_formatter(PercentFormatter(1))
+    full_resolution = curve["stride"] == 1 and curve["source_point_count"] == curve[
+        "displayed_point_count"
+    ] == len(points)
+    if full_resolution and values:
+        peak = _number(curve["initial_capital"])
+        if peak <= 0:
+            raise ValueError("plot_initial_capital_invalid")
+        drawdowns = []
+        for value in values:
+            peak = max(peak, value)
+            ratio = value / peak - 1 if peak > 0 else math.nan
+            drawdowns.append(ratio if math.isfinite(ratio) else math.nan)
+        dd_axis.plot(
+            times, drawdowns, color="#934b4b", marker=".", markersize=3, linewidth=1
+        )
+        _note(
+            dd_axis,
+            "完整账本派生回撤；正式最大回撤以统计产物为准",
+        )
+    else:
+        _note(
+            dd_axis,
+            "UNDEFINED：需要未抽样完整曲线" if values else "UNDEFINED：没有净值点",
+        )
+    if not full_resolution:
+        _note(
+            nav_axis,
+            f"抽样净值：{curve['displayed_point_count']}/"
+            f"{curve['source_point_count']} 点；步长={curve['stride']}",
+        )
+    for axis in (nav_axis, dd_axis):
+        _time_axis(axis, timezone, times)
+        if "window" in curve:
+            from quant_research_platform.contracts.time import (
+                TimeWindow,
+                time_window_timestamp_interval,
             )
-            _note(
-                dd_axis,
-                "已知前缀的局部回撤；全窗回撤未定义"
-                if account_partial
-                else "完整账本派生回撤；正式最大回撤以统计产物为准",
+
+            start, stop, _closed = time_window_timestamp_interval(
+                TimeWindow(**curve["window"])
             )
-        else:
-            _note(
-                dd_axis,
-                "UNDEFINED：市场观测存在缺口，完整路径回撤不可知"
-                if market_partial
-                else "UNDEFINED：需要未抽样完整曲线"
-                if values
-                else "UNDEFINED：没有净值点",
-            )
-        notes = []
-        if not full_resolution:
-            notes.append(
-                f"抽样净值：{part['displayed_point_count']}/"
-                f"{part['source_point_count']} 点；步长={part['stride']}"
-            )
-        if market_partial:
-            gap = _times(
-                [
-                    pd.Timestamp(
-                        part["first_market_gap_ns"], unit="ns", tz=epoch_timezone
-                    )
-                ],
-                timezone,
-            )[0]
-            notes.append(
-                f"PARTIAL / market_observation；{part['market_observation_reason']}；"
-                f"首个缺口：{gap.isoformat()}；仅显示已知净值点"
-            )
-        if account_partial:
-            stop = _times(
-                [pd.Timestamp(part["account_stop_ns"], unit="ns", tz=epoch_timezone)],
-                timezone,
-            )[0]
-            notes.append(
-                f"PARTIAL / known_prefix；停止原因：{part['account_stop_reason']}；"
-                f"停止时点：{stop.isoformat()}"
-            )
-        if notes:
-            _note(nav_axis, "\n".join(notes))
-        boundaries = part["boundaries"]
-        starts = {
-            row["window_index"]: row["timestamp_ns"]
-            for row in boundaries
-            if row["kind"] == "oos_window_start"
-        }
-        ends = {
-            row["window_index"]: row["timestamp_ns"]
-            for row in boundaries
-            if row["kind"] == "oos_window_end"
-        }
-        indices = sorted(starts.keys() & ends.keys())
-        for axis in (nav_axis, dd_axis):
-            for position, window in enumerate(indices):
-                start, stop = _times(
-                    [
-                        pd.Timestamp(starts[window], unit="ns", tz=epoch_timezone),
-                        pd.Timestamp(ends[window], unit="ns", tz=epoch_timezone),
-                    ],
+            axis.set_xlim(
+                _times(
+                    [pd.Timestamp(value, tz=epoch_timezone) for value in (start, stop)],
                     timezone,
                 )
-                axis.axvspan(
-                    start,
-                    stop,
-                    color="#a7d8be",
-                    alpha=0.25,
-                    label="预测窗口" if position == 0 else None,
-                )
-            for position, (left, right) in enumerate(
-                zip(indices, indices[1:], strict=False)
-            ):
-                if ends[left] < starts[right]:
-                    start, stop = _times(
-                        [
-                            pd.Timestamp(ends[left], unit="ns", tz=epoch_timezone),
-                            pd.Timestamp(starts[right], unit="ns", tz=epoch_timezone),
-                        ],
-                        timezone,
-                    )
-                    axis.axvspan(
-                        start,
-                        stop,
-                        color="#cccccc",
-                        alpha=0.3,
-                        label="空档" if position == 0 else None,
-                    )
-            if indices:
-                axis.legend(fontsize=8, loc="lower left")
-            _time_axis(axis, timezone, times)
-            if "window" in part:
-                from quant_research_platform.contracts.time import (
-                    TimeWindow,
-                    time_window_timestamp_interval,
-                )
-
-                start, stop, _closed = time_window_timestamp_interval(
-                    TimeWindow(**part["window"])
-                )
-                axis.set_xlim(
-                    _times(
-                        [
-                            pd.Timestamp(value, tz=epoch_timezone)
-                            for value in (start, stop)
-                        ],
-                        timezone,
-                    )
-                )
+            )
     return figure, axes
 
 
@@ -455,7 +356,6 @@ def plot_metric_comparison(rows, *, metric_id, units, source_reference, sample_r
         "gross_pnl": "毛损益",
         "net_pnl": "净损益",
         "fees": "手续费",
-        "funding": "资金费",
         "turnover": "换手",
         "tracking_error": "跟踪误差",
         "information_ratio": "信息比率",
@@ -544,9 +444,7 @@ def _groups(rows, sample_role, group_columns=()):
             raise ValueError("plot_sample_role_mismatch")
         key = tuple(
             (name, _group_value(row[name]))
-            for name in dict.fromkeys(
-                ("candidate_id", "execution_mode", "episode_id", *group_columns)
-            )
+            for name in dict.fromkeys(("candidate_id", *group_columns))
             if name in row
         )
         groups[key].append(row)
@@ -563,7 +461,7 @@ def _groups(rows, sample_role, group_columns=()):
 def plot_returns(rows, *, source_reference, sample_role, timezone):
     """Plot persisted periodic net returns and their descriptive distribution.
 
-    Accept portfolio_daily or crypto_portfolio_daily rows. Undefined returns are
+    Accept daily portfolio rows. Undefined returns are
     omitted from the distribution and explicitly counted; never fill or compound.
     """
     groups = _groups(rows, sample_role)
@@ -1139,7 +1037,7 @@ def plot(config):
     config = qrp_json_mapping_snapshot(config)
     required = {"kind", "inputs", "output"}
     optional = {
-        "curve": {"execution_mode"},
+        "curve": set(),
         "metrics": {"metric_id", "units"},
         "returns": set(),
         "factor_ic": {"summary"},
@@ -1252,9 +1150,7 @@ def plot(config):
     elif kind == "curve":
         from quant_research_platform.interfaces.queries import portfolio_curve
 
-        curve = portfolio_curve(
-            source, execution_mode=config.get("execution_mode", "continuous")
-        )
+        curve = portfolio_curve(source)
         figure, _axes = plot_portfolio_curve(
             curve, sample_role=config["sample_role"], timezone=config["timezone"]
         )
@@ -1285,8 +1181,6 @@ def plot(config):
                 )
                 common_columns = (
                     "candidate_id",
-                    "execution_mode",
-                    "episode_id",
                     "sample_role",
                 )
                 fields = {

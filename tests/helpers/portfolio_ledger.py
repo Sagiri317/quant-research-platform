@@ -446,33 +446,3 @@ def ledger_frame(*, account, **kwargs):
             **kwargs,
         )
     )
-
-
-def capture_fill_rows(emit, on_batch=None):
-    """Join canonical trades, cashflows and delayed diagnostics for assertions."""
-    pending = {}
-
-    def capture(batch):
-        if on_batch is not None:
-            on_batch(batch)
-        for trade in batch.trades:
-            pending[trade.fill_id] = {
-                "fill_id": trade.fill_id,
-                "order_id": trade.order_id,
-                "fill_qty": abs(trade.quantity),
-                "fill_price": abs(trade.notional / trade.quantity),
-                "notional": abs(trade.notional),
-            }
-        resolved = set()
-        for diagnostic in batch.diagnostics:
-            if diagnostic.fill_id is not None:
-                pending[diagnostic.fill_id][diagnostic.name] = (
-                    diagnostic.text
-                    if diagnostic.text is not None
-                    else diagnostic.number
-                )
-                resolved.add(diagnostic.fill_id)
-        for identity in resolved:
-            emit(pending.pop(identity))
-
-    return capture

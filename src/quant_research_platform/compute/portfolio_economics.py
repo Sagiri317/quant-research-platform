@@ -51,59 +51,31 @@ class _LedgerEconomics:
 
     def __init__(self, capital):
         self.capital = capital
-        self.position_value = None
         self.positions = None
         self.totals = {
             name: Fraction()
-            for name in ("net_pnl", "fees", "funding", "turnover", "fill_quantity")
+            for name in ("net_pnl", "fees", "turnover", "fill_quantity")
         }
         self.fill_events = 0
         self.timestamp_ns = 0
 
     def consume(self, batch):
         end = [row for row in batch.valuations if row.phase == "end"]
-        equity = self.capital.valuation_method == "cash_equity"
-        if equity:
-            current = cash_equity_positions(end)
-            if self.positions is None:
-                self.positions = cash_equity_positions(
-                    row for row in batch.valuations if row.phase == "before"
-                )
-            increment = dict.fromkeys(self.totals, 0)
-            increment["net_pnl"] = cash_equity_pnl(
-                self.positions, current, batch.cashflows, batch.rights_adjustments
+        current = cash_equity_positions(end)
+        if self.positions is None:
+            self.positions = cash_equity_positions(
+                row for row in batch.valuations if row.phase == "before"
             )
-            self.positions = current
-        else:
-            position = sum(
-                (
-                    Fraction(row.value)
-                    for row in end
-                    if row.asset_id != PORTFOLIO_CASH_ASSET_ID
-                ),
-                Fraction(),
-            )
-            if self.position_value is None:
-                self.position_value = sum(
-                    (
-                        Fraction(row.value)
-                        for row in batch.valuations
-                        if row.phase == "before"
-                        and row.asset_id != PORTFOLIO_CASH_ASSET_ID
-                    ),
-                    Fraction(),
-                )
-            increment = dict.fromkeys(self.totals, 0)
-            increment["net_pnl"] = position - self.position_value
+        increment = dict.fromkeys(self.totals, 0)
+        increment["net_pnl"] = cash_equity_pnl(
+            self.positions, current, batch.cashflows, batch.rights_adjustments
+        )
+        self.positions = current
         for row in batch.cashflows:
             if row.amount:
                 amount = Fraction(row.amount)
-                if not equity:
-                    increment["net_pnl"] += amount
                 if row.kind.endswith("_cost"):
                     increment["fees"] -= amount
-                elif row.kind == "funding":
-                    increment["funding"] += amount
         for row in batch.trades:
             increment["turnover"] += abs(Fraction(row.notional))
             increment["fill_quantity"] += abs(Fraction(row.quantity))
@@ -112,15 +84,11 @@ class _LedgerEconomics:
                 self.totals[name] += amount
         increment["fill_events"] = len(batch.trades)
         self.fill_events += len(batch.trades)
-        if not equity:
-            self.position_value = position
         self.timestamp_ns = max(row.timestamp_ns for row in end)
         return increment
 
     def summary(self):
-        net, fees, funding = (
-            self.totals[name] for name in ("net_pnl", "fees", "funding")
-        )
+        net, fees = (self.totals[name] for name in ("net_pnl", "fees"))
         fill_quantity = finite_exact_float(self.totals["fill_quantity"])
         capital_return = finite_exact_float(
             net / Fraction(self.capital.initial_capital)
@@ -135,7 +103,7 @@ class _LedgerEconomics:
             "fill_quantity_reason": "nonfinite_result"
             if fill_quantity is None
             else None,
-            "gross_pnl": float(net + fees - funding),
+            "gross_pnl": float(net + fees),
             "nav": float(Fraction(self.capital.initial_capital) + net),
             "capital_return": capital_return,
             "capital_return_reason": "nonfinite_result"

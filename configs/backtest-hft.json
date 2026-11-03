@@ -1,0 +1,21 @@
+{
+  "panel": "data/processed/a_share/hft_panel",
+  "predictions": "results/hft/predictions",
+  "fee_schedule": "data/processed/a_share/fee_schedule",
+  "window": {
+    "start": "2018-02-14T05:00:00",
+    "end": "2018-02-14T06:57:00"
+  },
+  "parameters": {
+    "initial_capital": 100000.0,
+    "initial_inventory": 1000,
+    "maximum_inventory": 2000,
+    "lot_size": 100,
+    "buy_threshold": 0.001,
+    "sell_threshold": -0.001,
+    "latency_ms": 1,
+    "participation_rate": 0.05,
+    "minimum_commission": 5.0
+  },
+  "output": "results/hft/accounts"
+}

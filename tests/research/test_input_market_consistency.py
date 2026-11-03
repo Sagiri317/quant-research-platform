@@ -55,7 +55,7 @@ def _fit_request(source, output):
     return dict(
         inputs=source,
         output=str(output),
-        market_id="crypto",
+        market_id="other_market",
         model=dict(
             model_id="linear",
             model_algorithm="linear_regression",
@@ -68,7 +68,7 @@ def _fit_request(source, output):
     )
 
 
-@pytest.mark.parametrize("market", ["crypto", None, "a_share"])
+@pytest.mark.parametrize("market", ["other_market", None, "a_share"])
 @pytest.mark.parametrize(
     "operation", ["fit", "predict", "explain", "evaluate", "score", "statistics"]
 )
@@ -89,7 +89,7 @@ def test_known_market_conflicts_fail_and_unknown_remains_usable(
                 evaluation=dict(
                     evaluation_id="market",
                     research_dataset_id="synthetic_market",
-                    market_id="crypto",
+                    market_id="other_market",
                     signals=[
                         dict(signal_id="x", source_kind="factor", source_column="x")
                     ],
@@ -101,7 +101,7 @@ def test_known_market_conflicts_fail_and_unknown_remains_usable(
             ),
         )
     else:
-        matching = _input(tmp_path / "matching", "crypto")
+        matching = _input(tmp_path / "matching", "other_market")
         model = fit(_fit_request(matching, tmp_path / "model"))
         prediction_config = dict(
             model=str(model),
@@ -179,7 +179,7 @@ def test_known_market_conflicts_fail_and_unknown_remains_usable(
         assert function(config) == output
 
 
-@pytest.mark.parametrize("evaluation_market", ["crypto", "a_share"])
+@pytest.mark.parametrize("evaluation_market", ["other_market", "a_share"])
 def test_prediction_facts_bind_evaluation_when_input_market_is_unknown(
     tmp_path, evaluation_market
 ):
@@ -229,7 +229,7 @@ def test_prediction_facts_bind_evaluation_when_input_market_is_unknown(
         ]
 
 
-@pytest.mark.parametrize("peer_market", ["a_share", None, "crypto"])
+@pytest.mark.parametrize("peer_market", ["a_share", None, "other_market"])
 def test_common_evaluation_reuses_market_boundary_for_comparison_input(
     tmp_path, peer_market
 ):
@@ -252,7 +252,7 @@ def test_common_evaluation_reuses_market_boundary_for_comparison_input(
         window=dict(start="2020-01-04", end="2020-01-05"),
         cutoff="2020-01-05",
     )
-    if peer_market == "crypto":
+    if peer_market == "other_market":
         with pytest.raises(ValueError, match="input_market_mismatch"):
             evaluate(request)
         assert not output.exists()
@@ -265,14 +265,14 @@ def test_common_evaluation_reuses_market_boundary_for_comparison_input(
         ]
 
 
-@pytest.mark.parametrize("second_market", ["crypto", "a_share"])
+@pytest.mark.parametrize("second_market", ["other_market", "a_share"])
 def test_statistics_reconciles_prediction_markets_with_unknown_label_market(
     tmp_path, second_market
 ):
     source = _input(tmp_path / "input", None)
     window = dict(start="2020-01-04", end="2020-01-05")
     predictions = []
-    for model_id, market in (("linear", "crypto"), ("other", second_market)):
+    for model_id, market in (("linear", "other_market"), ("other", second_market)):
         request = _fit_request(source, tmp_path / model_id)
         request["model"]["model_id"] = model_id
         request["market_id"] = market

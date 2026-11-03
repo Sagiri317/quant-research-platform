@@ -123,67 +123,10 @@ Choice 普通读取核验所选响应的结构及请求坐标；显式审计与�
 缺少真实版本、含糊的同日冲突或覆盖不足只影响实际依赖该事实的目标；
 不能补造旧原件的时间、版本或完成字段，也不等待无关的全供应商历史保证才使用已合格范围。
 
-### Binance
+### Venvoo A 股 Level-2
 
-Binance 原生录制读取器仅使用录制清单声明的 gzip JSONL 成员；
-历史归档、辅助状态与资金费按各自显式清单和实际使用的研究所需关系读取。
-不提供独立 JSONL 封装或分钟线适配入口；详细来源约定见 [加密资产](crypto.md)。
-
-### Tardis
-
-Tardis 历史下载与导入按连续切片范围运行，保留 Binance 官方实时采集；
-实现就绪状态与输入资格分别记录，不能把下载完成写成研究链已接入。
-公开免费数据可直接请求；需要 API key 而没有授权时明确权限不足，不自动注册或购买。
-Binance Futures 原生历史归档的不可变原始字节保存在
-`data/raw/tardis/binance-futures/<archive-id>/`；清单绑定供应商、
-交易场所、UTC 起始日期与连续切片范围、原生频道及频率、文件路径与字节哈希、
-稳定行序和可证明的缺口/有效区间。归档和研究均不限制为一天；原件文件名中的日期仅用于寻址。
-原生行是供应商 UTC 前缀与 JSON，空行表示供应商断线，因此压缩原件使用
-`tardis__binance-futures__YYYY-MM-DD__minutes-HHHH-HHHH.txt.gz`，不称为 JSONL。
-原生压缩字节不改写，清单、缺口与观察区间旁文件各有精确哈希。
-有结束时间的 Binance 使用按可信 UTC 日期/小时分片排除完整未来成员；所选小时内仍按采集顺序
-读取时钟，保留回拨后的范围内记录，包括跨整点回拨重新写入旧小时的记录。
-同一流不同小时的采集序号包络可以重叠，读取按实际 `capture_seq` 归并；文件内倒序和实际重复序号仍拒绝。
-范围外原始载荷与 coverage 不参与本次计算，未知分片路径按现有读取规则处理。
-这些哈希属于采集/导入证据；普通回读解析实际使用记录和连续性所需观察区间，
-支持提前关闭游标。清单摘要只描述所选来源。
-行序表示供应商归档中的位置，与本机录制的原始 capture_seq 分开记录。
-归档完整性、价格表示资格、盘口连续覆盖和研究完成是不同检查，不能相互替代。
-单次研究默认使用一份有明确来源身份的输入，不自动拼接另一来源补洞。
-同一市场的录制与历史归档复用 L2、PANEL、因子、标签、模型和账本责任模块。
-
-Tardis 原生连续性记录保留原字节，包括 depth 重复/过期更新。
-显式多归档集合逐原件绑定精确身份，按实际覆盖跨度及请求窗口路由。
-原件的本地 source_sequence/event/segment/observation 可重新起算；
-统一来源模块为持久化 observation/segment 标识加入原件身份，并保留每段真实缺口。
-按窗口选取的 funding 原件分别验证实际 coverage，不以跨月包络推断未知结算。
-
-下载校验只推进 depth update-id 高水位，旧更新不倒退高水位、不制造新的连续性；
- Binance book engine 负责丢弃不适用的更新。
-断连关闭观察区间，后续更新使用新的观察身份；前向 sequence 缺口仍形成缺口。
-Tardis aggTrade ID 非单调时关闭受影响的成交观察区间，记录
-`native_sequence_non_monotonic` 缺口并保留原生归档。诊断保存频道、slice offset、
-行号和前后 ID，不输出原始价格、数量或完整原始载荷。
-前向 ID 跳号按来源适配器约定处理：Tardis 原生导入记录缺口，官方录制读取器
-仅验证单调性。[Binance 聚合成交流说明](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/ws-streams/market#aggregate-trade-streams)
-定义聚合 ID；该定义本身不证明订阅消息逐 ID 加一；[Tardis 来源说明](https://docs.tardis.dev/historical-data-details/binance-futures)
-也不能替代该保证。适配器的检查差异需要结合原始消息核对，各适配器沿用自身的缺口判定规则。
-
-来源适用域按 [Tardis 历史频道说明](https://docs.tardis.dev/historical-data-details/binance-futures)
-和原件清单中的频道/频率共同决定。只给出变更日期而没有精确时刻的深度、markPrice
-过渡日由现有来源模块拒绝，不能推定在 UTC 零点切换。
-[OKX 面值调整公告](https://www.okx.com/zh-hans/help/adjustment-of-face-value-for-usdt-margined-perpetual-swap-futures-trading)
-给出的调整半小时区间保持为不确定域；区间外才使用已经证明的合约乘数。
-[Tardis 数量说明](https://docs.tardis.dev/faq/data)中的 `amount` 可能是合约数、基础资产或
-报价金额，须按场所、品种、时段和实际单位归一；当前接口字段名不能证明全历史单位。
-[历史合约元数据](https://docs.tardis.dev/api/instruments-metadata-api) 的字段和变更记录
-也只能在其声明的保证范围内使用，不能把一个字段的历史保证推广到所有字段。
-这些限制保留不确定域的局部失败，不否定域外已通过原件、单位、身份及覆盖校验的输入。
-
-Binance Spot 和期货辅助状态的原生归档由配置显式选择，格式和使用边界见 [加密资产](crypto.md)。
-Bybit 与 OKX 规范化来源在 `data/raw/tardis/<exchange>/` 下按配置选择归档，
-其中 exchange 为 `bybit` 或 `okex-swap`；每份归档保存不可变 `data.csv.gz` 与 `manifest.json`。
-清单绑定场所、品种、数据类型、日期、观测范围及压缩原件哈希；只证明观测行，不证明原生消息连续性。
+获批账号在 Hugging Face 下载明确日期的 Parquet 后，`prepare-source` 从本地按股票和日期选择读取。
+源清单记录仓库 revision、所选文件哈希及显式证券映射。单位、事件时钟与缺失边界见 [A 股高频](a-share-hft.md)。
 
 ### 规范原始输入与归档
 
@@ -311,7 +254,7 @@ reference 可以在一个请求中明确多个 outputs，各表独立发布与�
 费率有效区间保留。需要选择其他合法费率文件时，成对给出 `fee_csv` 与 `fee_sidecar`，
 路径直接解释；省略时使用参考目录默认。内容、哈希、字节数、
 行数、单位与覆盖证明仍由来源模块检查，改文件名不能制造新年代的合法覆盖。
-CSMAR、reference 与资金费率导入按实际使用字节记录来源 SHA256；reference 核对
+CSMAR、reference 与 Venvoo 导入按实际使用字节记录来源 SHA256；reference 核对
 声明哈希、字节数与行数。输出按原子发布约定验收。
 
 产物根可以命名为 data，实际结构及来源声明决定其含义。单独的数据子目录缺少必需结构
@@ -329,7 +272,7 @@ CSMAR、reference 与资金费率导入按实际使用字节记录来源 SHA256�
 - `market_id`、`asset_id`、`timestamp` 是平台资产时间键词汇；具体表可能只使用约定声明的子集，不能盲目给所有表添加同一主键。`source_asset_id` 是供应商代码，不能仅凭字符串直接当跨市场/跨生命周期资产身份。角色全集与键校验见 [contracts/columns.py](../src/quant_research_platform/contracts/columns.py)。
 - `timestamp` 必须结合表的经济含义解释：可能是日频会话坐标、事件时间或来源除权日期，不能统一当作信息可用时间。公告、经济生效、观察/下载、本地接收和标签成熟是不同坐标。具体时区和精度以来源/市场约定为准；有时区时刻规范为 UTC，不用运行机器时区猜测无时区字段。
 - `label_available_at` 或约定映射的 `<label>_available_at` 是标签可用于拟合/评分的真实下界。标签预测期限的单位由 `horizon_unit` 声明，目前为 `market_sessions` 或 `milliseconds`；`lookahead`、`entry_rule`、`exit_rule` 和 `label_timing` 不能由列名猜测。见 [contracts/labels.py](../src/quant_research_platform/contracts/labels.py) 和 [contracts/experiments.py](../src/quant_research_platform/contracts/experiments.py)。
-- A 股日频标签经济开盘事件与 EOD 复权成熟时点分别保存；退出会话 UTC 07:00 是当前现代交易时钟的收盘下界，不能写成开盘即可用。加密资产本地可见、交易所事件和资金费结算时钟由 [加密资产约定](crypto.md) 定义。
+- A 股日频标签经济开盘事件与 EOD 复权成熟时点分别保存；退出会话 UTC 07:00 是当前现代交易时钟的收盘下界，不能写成开盘即可用。高频保留供应商事件时间，没有接收时钟。
 - `eligible` 描述所声明研究选择，`can_enter`/`can_exit` 描述相应执行条件；真实观测、缺失伴随列描述数据事实。它们互不替代，不用交易许可来证明价格标签不存在。完整 PANEL/因子/标签列见 [A 股 catalog](../src/quant_research_platform/markets/implementations/a_share/processed/catalog.py)。
 
 ### 单位与缺失
@@ -338,12 +281,11 @@ CSMAR、reference 与资金费率导入按实际使用字节记录来源 SHA256�
 A 股 raw 价格为原股价格、数量为真实股数；复权价格及复权账本单位属于另一经济坐标。
 总市值、流通市值、流通股数分别使用，log 变换不改变其来源口径。具体来源倍率见
 [A 股价格、收益与市值口径](a-share.md#55-价格收益与市值口径)。
-加密资产数量须证明基础资产/合约数/报价金额及乘数；资金费率与已入账资金费金额不同。
 收益以比例表达时 0.01 表示 1%，不得二次百分比换算。
 
 NULL/NaN 只表示该字段没有数值，不能单独区分未采集、源缺失、结构不可计算、损坏、缺行、未知或不适用。
 真实 0 不等于缺失，未知也不等于 False；来源诊断、状态和观测伴随列保存原因。
-标签不可插补；模型缺失处理按 [拟合与预处理约定](a-share.md#514-正式模型层级与预处理)在合法训练域估计并冻结。`feature_`、`feature_missing_`、`feature_observed_`
+标签不可插补；模型缺失处理按 [拟合与预处理约定](a-share.md#514-模型与预处理)在合法训练域估计并冻结。`feature_`、`feature_missing_`、`feature_observed_`
 的现有输出关系由 [FeatureTransformSpec](../src/quant_research_platform/contracts/features.py) 定义，
 特征支持列不自动成为模型 X，模型列序由拟合约定保存。规范特征以 missing/observed 两位区分普通缺失与结构不可用，
 模型按实际使用的完整列族判断样本资格，数值 NULL 本身不足以判断。
@@ -397,7 +339,7 @@ INTERIM 主键为 `source_asset_id, timestamp, report_type, data_source, subject
 的 `_dataset_input_options` 和各操作入口为准，不保证所有独立参数都接受此对象。
 
 - `files` 选择成员，`columns` 保持明确列序，`years` 为离散年份集合；同时给年份与窗口取交集。
-- `time_window` 由 [TimeWindow](../src/quant_research_platform/contracts/time.py) 定义；日频结束日期含全天，不能因此改写加密资产半开观察区间。
+- `time_window` 由 [TimeWindow](../src/quant_research_platform/contracts/time.py) 定义；日期结束边界含全天，精确时间保留纳秒。
 - `row_filters` 是现有 `==`/`in` 有限物理筛选，不是任意表达式引擎，也不证明样本研究适用条件。
 - `spec` 为裸 Parquet 补足本操作真实需要的角色、键、单位和标签成熟映射，不能用声明替代来源证据。
 - 选择输出窗口不缩短公式回看、标签端点或完整截面。排除的报价保持未知，不压紧交易会话轴。
@@ -417,7 +359,6 @@ INTERIM 主键为 `source_asset_id, timestamp, report_type, data_source, subject
 | explain | 冻结模型、明确样本、方法和合法背景 | 独立解释数值与元数据；[explanations.py](../src/quant_research_platform/artifacts/explanations.py)，绘图无需加载模型 |
 | evaluate | 明确信号、标签、窗口、成熟截止、比较/分层选择 | EVAL 日表和摘要；[contracts/evaluations.py](../src/quant_research_platform/contracts/evaluations.py)、[evaluation.py](../src/quant_research_platform/artifacts/outputs/evaluation.py) |
 | calibrate / backtest | 显式预测、账户/执行/来源、历史校准输入与回测窗口 | 校准产物或 PORT；[contracts/portfolios.py](../src/quant_research_platform/contracts/portfolios.py)、[portfolio_ledger.py](../src/quant_research_platform/artifacts/portfolio_ledger.py) |
-| 加密资产 calibrate / backtest | 明确独立分段、盘口/事件、信号、执行参数、实际依赖资金费 | 独立分段及同一经济账本；[crypto_hft.py](../src/quant_research_platform/artifacts/crypto_hft.py)、[加密资产约定](crypto.md) |
 | statistics-* | 已算模型/因子/组合数值、明确比较集合与 analyses | 统计表及推断状态；[statistics.py](../src/quant_research_platform/artifacts/statistics.py)，未选择分析不要求其专用输入 |
 | plot | 已发布数值、series、明确用途与新图片路径 | PNG/SVG/PDF；[plots.py](../src/quant_research_platform/reports/plots.py)，不补数、不代算正式指标 |
 
@@ -453,7 +394,7 @@ NAV 量纲的浮点舍入容差；精确股数、生命周期、应收和锁定�
 边界并列全部入组，再检查目标/收益可用性。`raw_return_label` 可显式指定，默认只在输入存在
 `forward_return_20d` 时使用该列，否则收益指标未定义；标准化目标与原始收益使用不同单位。
 元数据 `prediction_metrics` 保存解析后的头部比例、原始收益列和聚合口径。
-MSE 使用标签尺度预测：rank 模型使用各次训练冻结的 `label_calibration`，普通回归输出不重复缩放；原始排序分数继续用于 IC 和头部选择。
+MSE 使用标签单位的模型输出，不重复缩放；排序指标与头部选择保持各自定义。
 训练从实际使用的 spec/manifest 冻结 `facts.target_definition`：源标签、目标 transform、clip 以及所选源标签的 `label_semantics`；PRED 的 `model_facts` 原样携带。
 普通标签记录源列本身、不追加变换；`model_target` 记录 `forward_return_20d` 及实际 `target_transform`/`target_clip`。
 不绑定路径、data ID、hash 或整份 spec，不在后来从训练源回读补造历史事实。

@@ -189,7 +189,10 @@ def test_schema_inventory_uses_full_posix_path_order_for_prefix_names(tmp_path, 
     )
 
 
-def test_schema_inventory_keeps_all_explicit_dataset_paths(tmp_path: Path) -> None:
+@pytest.mark.parametrize("nested", [False, True])
+def test_schema_inventory_keeps_all_explicit_dataset_paths(
+    tmp_path: Path, nested
+) -> None:
     while len(str(tmp_path)) <= 270:
         tmp_path /= "segment_" + "a" * 32
     assert len(str(tmp_path)) > 260
@@ -239,7 +242,11 @@ def test_schema_inventory_keeps_all_explicit_dataset_paths(tmp_path: Path) -> No
     )
     expected = {}
     for rows, (spec, logical_root, layer, kind) in enumerate(specs, start=1):
-        root = logical_root / f"sample-{rows}"
+        root = (
+            logical_root / f"sample-{rows}"
+            if nested
+            else tmp_path / "data" / layer / f"custom-{rows}"
+        )
         frame = pd.DataFrame(
             {
                 "market_id": ["a_share"] * rows,

@@ -20,7 +20,6 @@ def test_market_calculations_use_source_contracts_except_explicit_operations(
         if edge.path.is_relative_to(MARKET_ROOT)
         and edge.module.startswith("quant_research_platform.sources")
         and not is_ids_contract_import(edge.module)
-        and edge.path != MARKET_ROOT / "crypto/portfolio.py"
     ]
 
     assert violations == []

@@ -464,117 +464,6 @@ def test_writer_cleanup_preserves_primary(tmp_path, tables, metadata, monkeypatc
     assert not (tmp_path / "statistics").exists()
 
 
-@pytest.fixture
-def crypto_tables():
-    row = dict(
-        candidate_id="candidate",
-        execution_mode="continuous",
-        episode_id="continuous",
-        kind="oos",
-        fold_id="fold_1",
-        metric_id="net_pnl",
-        start_at=pd.Timestamp("2023-01-02"),
-        end_at=pd.Timestamp("2023-01-03"),
-        stop_at=pd.Timestamp("2023-01-03"),
-        start_nav=100.0,
-        end_nav=110.0,
-        gross_pnl=10.0,
-        net_pnl=10.0,
-        fees=0.0,
-        funding=0.0,
-        turnover=100.0,
-        fill_events=1,
-        net_return=0.1,
-        status="DEFINED",
-        reason="",
-        value=0.2,
-        observation_count=1,
-        text="",
-        fee_bps=1.0,
-        additional_spread_bps=0.0,
-        cost_delta=0.0,
-        method="fixed_turnover_rescaling",
-    )
-    result = {
-        member.removesuffix(".parquet"): pd.DataFrame(
-            [
-                {
-                    column: row[column]
-                    for column in statistics.STATISTICS_TABLE_COLUMNS[member]
-                }
-            ]
-        )
-        for member in statistics.STATISTICS_TABLE_GROUPS["crypto_portfolio"]
-        if member.startswith("crypto_")
-    }
-    result["crypto_portfolio_coverage"].loc[0, "kind"] = "covered"
-    result["crypto_execution_diagnostics"].loc[0, ["value", "text"]] = [
-        float("nan"),
-        "estimated_queue_ahead",
-    ]
-    return result
-
-
-@pytest.mark.parametrize(
-    "member",
-    (
-        "crypto_portfolio_daily.parquet",
-        "crypto_portfolio_statistics.parquet",
-        "crypto_execution_diagnostics.parquet",
-    ),
-)
-@pytest.mark.parametrize(
-    "mutation", ("defined_null", "undefined_value", "reason", "status")
-)
-def test_crypto_status_measurements_are_rejected_at_write_and_read(
-    tmp_path, crypto_tables, crypto_metadata, member, mutation
-):
-    frame = crypto_tables[member.removesuffix(".parquet")]
-    if mutation == "defined_null":
-        frame.loc[
-            0, "net_return" if member == "crypto_portfolio_daily.parquet" else "value"
-        ] = float("nan")
-        if "text" in frame:
-            frame.loc[0, "text"] = ""
-    elif mutation == "undefined_value":
-        frame.loc[0, ["status", "reason"]] = ["UNDEFINED", "missing_measurement"]
-    elif mutation == "reason":
-        frame.loc[0, "reason"] = "contradicts_defined_status"
-    else:
-        frame.loc[0, "status"] = "UNKNOWN"
-    _assert_rejected_at_write_and_read(
-        tmp_path, crypto_tables, crypto_metadata, member, table_group="crypto_portfolio"
-    )
-
-
-def test_crypto_text_diagnostics_and_undefined_daily_are_preserved(
-    tmp_path, crypto_tables, crypto_metadata
-):
-    daily = crypto_tables["crypto_portfolio_daily"]
-    daily.loc[0, ["end_nav", "net_return", "status", "reason"]] = [
-        float("nan"),
-        float("nan"),
-        "UNDEFINED",
-        "utc_boundary_valuation_missing",
-    ]
-    root = statistics.write_statistics_artifact(
-        tmp_path / "crypto",
-        metadata=crypto_metadata,
-        tables=crypto_tables,
-        table_group="crypto_portfolio",
-    )
-    artifact = statistics.read_statistics_artifact(root)
-    with artifact.table("crypto_execution_diagnostics.parquet") as frame:
-        assert frame.loc[0, "status"] == "DEFINED"
-        assert pd.isna(frame.loc[0, "value"])
-        assert frame.loc[0, "text"] == "estimated_queue_ahead"
-    with artifact.table("crypto_portfolio_daily.parquet") as frame:
-        assert frame.loc[0, "status"] == "UNDEFINED"
-        assert pd.isna(frame.loc[0, "net_return"])
-        assert frame.loc[0, "start_nav"] == 100.0
-        assert "benchmark_return" not in frame
-
-
 @pytest.mark.parametrize("name", ("prediction_diagnostics", "model_comparison"))
 def test_undefined_model_inference_preserves_descriptive_mean(
     tmp_path, tables, metadata, name
@@ -748,16 +637,6 @@ def _test_statistics_metadata(metadata, tables):
     return {**metadata, "sample_role": "test"}
 
 
-@pytest.fixture
-def crypto_metadata(metadata):
-    return {
-        **metadata,
-        "sample_role": "test",
-        "execution_mode": "continuous",
-        "candidate_ids": ["candidate"],
-    }
-
-
 @pytest.mark.parametrize("boundary", ("access", "outside", "factor_history"))
 def test_research_statistics_bind_sample_role_and_explicit_window(
     tmp_path, tables, metadata, boundary
@@ -792,31 +671,6 @@ def test_statistics_table_group_matches_declared_members(tmp_path, tables, metad
     path.write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="statistics_artifact_members_invalid"):
         statistics.read_statistics_artifact(root)
-
-
-@pytest.mark.parametrize("boundary", ("candidate", "execution_mode", "date"))
-def test_crypto_statistics_bind_candidate_mode_and_window(
-    tmp_path, crypto_tables, crypto_metadata, boundary
-):
-    frame = crypto_tables["crypto_portfolio_daily"]
-    if boundary == "candidate":
-        frame["candidate_id"] = "other_candidate"
-        error = "statistics_candidate_id_mismatch"
-    elif boundary == "execution_mode":
-        frame["execution_mode"] = "independent_segments"
-        frame["episode_id"] = "1672617600000000000_1672704000000000000"
-        error = "statistics_execution_mode_mismatch"
-    else:
-        frame["end_at"] = pd.Timestamp("2030-01-01")
-        error = "statistics_table_window_mismatch"
-    _assert_rejected_at_write_and_read(
-        tmp_path,
-        crypto_tables,
-        crypto_metadata,
-        "crypto_portfolio_daily.parquet",
-        table_group="crypto_portfolio",
-        error=error,
-    )
 
 
 def test_legal_internal_model_name_survives_joint_test_publication(
@@ -1044,9 +898,10 @@ def test_native_model_persistence_preserves_std_reason_in_statistics(
         & frame.asset_id.eq("asset_2"),
         "label",
     ] = 0.1 if varying_ic else 0.0
+    frame.loc[frame.timestamp.eq(dates[0]), "label"] = [-1.0, 0.0, 1.0]
     spec = ModelSpec(
         model_id="rank",
-        model_algorithm="equal_weight_rank_ensemble",
+        model_algorithm="linear_regression",
         input_factor_columns=("x",),
         target_column="label",
     )

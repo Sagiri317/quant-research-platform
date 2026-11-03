@@ -12,7 +12,6 @@ from quant_research_platform.research.models import fitting
 from quant_research_platform.research.models.estimators import (
     build_estimator_from_model_spec,
 )
-from quant_research_platform.research.models.rank_ensemble import RankEnsemblePredictor
 
 
 def test_fitting_counts_raw_filter_and_label_rows_once() -> None:
@@ -47,18 +46,6 @@ def test_fitting_counts_raw_filter_and_label_rows_once() -> None:
     assert model_result.metadata["rows_after_input_label_dropna"] == 2
 
 
-def test_rank_missing_contributes_neutral_without_renormalization() -> None:
-    predictor = RankEnsemblePredictor(columns=("x", "y"), directions=(1.0, 1.0))
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(["2019-01-01"] * 2),
-            "x": [1.0, 2.0],
-            "y": [np.nan, 4.0],
-        }
-    )
-    assert predictor.predict(frame).tolist() == pytest.approx([-0.125, 0.125])
-
-
 def test_convergence_warning_is_a_model_fit_failure() -> None:
     from sklearn.exceptions import ConvergenceWarning
 
@@ -67,8 +54,8 @@ def test_convergence_warning_is_a_model_fit_failure() -> None:
             warnings.warn("not converged", ConvergenceWarning, stacklevel=2)
 
     spec = ModelSpec(
-        model_id="ridge_warning",
-        model_algorithm="ridge_regression",
+        model_id="linear_warning",
+        model_algorithm="lasso_regression",
         input_factor_columns=("x",),
         target_column="label",
         hyperparameters={"alpha": 1.0},
@@ -125,36 +112,11 @@ def test_training_retention_preserves_all_legal_rows_and_same_day_order():
     )
 
 
-def test_equal_rank_single_undefined_direction_names_required_input():
-    from quant_research_platform.research.models.rank_ensemble import (
-        EqualWeightRankEnsembleFactory,
-    )
-
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(["2024-01-02"] * 3),
-            "valid": [1.0, 2.0, 3.0],
-            "constant": [1.0] * 3,
-            "label": [1.0, 2.0, 3.0],
-        }
-    )
-    estimator = EqualWeightRankEnsembleFactory(("valid", "constant"), "label")
-    with pytest.raises(
-        ValueError,
-        match="ensemble_direction_undefined:constant:no_valid_training_rankic",
-    ):
-        estimator.fit(frame, frame.label.to_numpy())
-    frame["constant"] = [3.0, 2.0, 1.0]
-    fitted = estimator.fit(frame, frame.label.to_numpy())
-    assert fitted.columns == ("valid", "constant")
-    assert fitted.directions == (1.0, -1.0)
-
-
 def test_shared_preprocessing_matches_independent_candidate_states(monkeypatch):
     specs = tuple(
         ModelSpec(
-            model_id=f"ridge_{index}",
-            model_algorithm="ridge_regression",
+            model_id=f"linear_{index}",
+            model_algorithm="lasso_regression",
             input_factor_columns=("x",),
             target_column="label",
             hyperparameters={"alpha": alpha},
@@ -248,13 +210,10 @@ def test_shared_preprocessing_matches_independent_candidate_states(monkeypatch):
         )
 
 
-@pytest.mark.parametrize(
-    "algorithm", ("ridge_regression", "equal_weight_rank_ensemble")
-)
-def test_estimator_mutation_cannot_change_shared_preprocessing(algorithm):
+def test_estimator_mutation_cannot_change_shared_preprocessing():
     spec = ModelSpec(
         model_id="isolated",
-        model_algorithm=algorithm,
+        model_algorithm="lasso_regression",
         input_factor_columns=("x",),
         target_column="label",
     )

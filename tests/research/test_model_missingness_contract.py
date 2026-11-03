@@ -33,7 +33,7 @@ def frame():
     )
 
 
-def spec(algorithm="ridge_regression"):
+def spec(algorithm="lasso_regression"):
     return ModelSpec(
         model_id=algorithm,
         model_algorithm=algorithm,
@@ -46,9 +46,6 @@ def spec(algorithm="ridge_regression"):
     "algorithm",
     [
         "linear_regression",
-        "ridge_regression",
-        "decision_tree_regressor",
-        "random_forest_regressor",
     ],
 )
 def test_train_only_missingness_roundtrip(tmp_path, algorithm):
@@ -56,7 +53,9 @@ def test_train_only_missingness_roundtrip(tmp_path, algorithm):
     case = fit_frame(tmp_path / "model", data, spec(algorithm))
     assert case.result.metadata["rows_after_input_label_dropna"] == 6
     scaler = case.result.prediction_model.scaler
-    if algorithm in {"linear_regression", "ridge_regression"}:
+    if algorithm in {
+        "linear_regression",
+    }:
         assert scaler.medians == (5.0, 6.0)
         assert scaler.transform(data[["x", "z"]]).shape == (6, 4)
     else:
@@ -79,10 +78,7 @@ def test_train_only_missingness_roundtrip(tmp_path, algorithm):
     "algorithm",
     [
         "linear_regression",
-        "ridge_regression",
         "lasso_regression",
-        "huber_regression",
-        "gradient_boosting_regressor",
     ],
 )
 def test_imputed_model_cannot_learn_an_all_missing_feature_median(algorithm):
@@ -99,20 +95,13 @@ def test_imputed_model_cannot_learn_an_all_missing_feature_median(algorithm):
 @pytest.mark.parametrize(
     "algorithm",
     [
-        "decision_tree_regressor",
-        "random_forest_regressor",
         "xgboost_regressor",
-        "lightgbm_regressor",
     ],
 )
 def test_native_missing_training_column_roundtrips_without_imputation(
     tmp_path, algorithm
 ):
-    parameters = {"max_depth": 2}
-    if algorithm != "decision_tree_regressor":
-        parameters.update(n_estimators=4, n_jobs=1)
-    if algorithm == "lightgbm_regressor":
-        parameters.update(min_child_samples=1, verbosity=-1)
+    parameters = {"max_depth": 2, "n_estimators": 4, "n_jobs": 1}
     model = replace(spec(algorithm), hyperparameters=parameters)
     data = frame().assign(x=np.arange(1.0, 7.0) * 1000, z=np.nan)
     data = pd.concat(
@@ -155,7 +144,10 @@ def test_native_missing_training_column_roundtrips_without_imputation(
     )
     method = (
         "native_tree"
-        if algorithm in {"xgboost_regressor", "lightgbm_regressor"}
+        if algorithm
+        in {
+            "xgboost_regressor",
+        }
         else "tree_shap_path"
     )
     _, tables = read_explanation(
@@ -190,7 +182,7 @@ def test_native_missing_training_column_roundtrips_without_imputation(
     assert (case.root / "predictor.pkl").read_bytes() == saved_model
 
 
-@pytest.mark.parametrize("algorithm", ["ridge_regression", "decision_tree_regressor"])
+@pytest.mark.parametrize("algorithm", ["linear_regression", "xgboost_regressor"])
 @pytest.mark.parametrize("technical_fill", [False, True])
 def test_all_original_training_inputs_missing_has_no_training_samples(
     algorithm, technical_fill
@@ -218,15 +210,6 @@ def test_all_original_training_inputs_missing_has_no_training_samples(
             fit_cutoff="2024-01-03",
             declared_columns=data.columns,
         )
-
-
-def test_rank_all_missing_column_keeps_declared_zero_weight(tmp_path):
-    data = frame().assign(z=np.nan)
-    case = fit_frame(tmp_path / "rank", data, spec("ic_weighted_rank_ensemble"))
-    predictor = case.result.prediction_model
-    weights = dict(zip(predictor.columns, predictor.weights, strict=True))
-    assert weights["x"] == pytest.approx(1.0)
-    assert weights["z"] == 0.0
 
 
 def test_decay_uses_explicit_missing_session_not_observation_count():

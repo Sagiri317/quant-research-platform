@@ -1,4 +1,4 @@
-"""Read-only inventory for the legacy project data/{interim,processed,research} layout.
+"""Read-only inventory under project data/{interim,processed,research}.
 
 This diagnostic scans that layout only; it is not a dataset admission interface.
 """
@@ -222,9 +222,16 @@ def _inventory_item_from_session(
     }
     dtypes = {column: dtypes[column] for column in columns}
     logical_root = artifact_root.relative_to(project_root).as_posix()
-    layer, _, kind, artifact_id = _logical_identifiers(logical_root)
+    layer = artifact_root.relative_to(project_root / "data").parts[0]
+    kind = (
+        spec_payload["kind"]
+        if layer == "processed"
+        else "research_dataset"
+        if layer == "research"
+        else "interim"
+    )
     return {
-        "artifact_id": artifact_id,
+        "artifact_id": spec_payload["data_id"],
         "layer": layer,
         "kind": kind,
         "logical_relative_root": logical_root,
@@ -250,22 +257,6 @@ def _inventory_item_from_session(
         ),
         "warnings": [],
     }
-
-
-def _logical_identifiers(logical_root: str) -> tuple[str, str, str, str]:
-    parts = tuple(logical_root.split("/"))
-    if len(parts) < 2 or parts[0] != "data" or any(not part for part in parts):
-        raise ValueError("invalid_inventory_root")
-    layer = parts[1]
-    if layer in {"interim", "research"} and len(parts) >= 4:
-        kind = "interim" if layer == "interim" else "research_dataset"
-        artifact_id = parts[3]
-    elif layer == "processed" and len(parts) >= 5:
-        kind = parts[3]
-        artifact_id = parts[4]
-    else:
-        raise ValueError("invalid_inventory_root")
-    return layer, parts[2], kind, artifact_id
 
 
 def _schema_hash(

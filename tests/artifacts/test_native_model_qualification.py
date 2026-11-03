@@ -16,14 +16,14 @@ def native_models(tmp_path_factory):
     inputs = data(tmp_path)
     config = fit_config(tmp_path, inputs)
     good = fit(config)
-    ridge = fit(
+    lasso = fit(
         {
             **config,
-            "output": str(tmp_path / "ridge"),
-            "model": {**config["model"], "model_algorithm": "ridge_regression"},
+            "output": str(tmp_path / "lasso"),
+            "model": {**config["model"], "model_algorithm": "lasso_regression"},
         }
     )
-    return good, ridge
+    return good, lasso
 
 
 @pytest.mark.parametrize(
@@ -39,7 +39,7 @@ def native_models(tmp_path_factory):
 def test_model_reader_rejects_wrong_learning_evidence_without_changing_good_model(
     tmp_path, mutation, native_models
 ):
-    good, ridge = native_models
+    good, lasso = native_models
     protected = {
         path: path.read_bytes() for path in good.parent.rglob("*") if path.is_file()
     }
@@ -47,7 +47,7 @@ def test_model_reader_rejects_wrong_learning_evidence_without_changing_good_mode
     shutil.copytree(good, bad)
     model = json.loads((bad / "model.json").read_text())
     if mutation == "wrong_predictor":
-        shutil.copyfile(ridge / "predictor.pkl", bad / "predictor.pkl")
+        shutil.copyfile(lasso / "predictor.pkl", bad / "predictor.pkl")
     elif mutation == "seed":
         model["facts"]["model"]["random_seed"] += 1
     elif mutation == "parameters":

@@ -1,0 +1,54 @@
+{
+  "inputs": "results/core6-dataset",
+  "output": "results/core6-quarterly",
+  "market_id": "a_share",
+  "models": [
+    {
+      "model_id": "pv_all_linear_regression",
+      "model_algorithm": "linear_regression",
+      "input_factor_columns": [],
+      "input_feature_columns": [
+        "feature_momentum_252_20",
+        "feature_missing_momentum_252_20",
+        "feature_reversal_5d",
+        "feature_missing_reversal_5d",
+        "feature_volatility_20d",
+        "feature_missing_volatility_20d",
+        "feature_amihud_20d",
+        "feature_missing_amihud_20d",
+        "feature_turnover_20d",
+        "feature_missing_turnover_20d",
+        "feature_log_float_market_cap",
+        "feature_missing_log_float_market_cap"
+      ],
+      "sample_filter_mode": "eligible",
+      "hyperparameters": {},
+      "random_seed": 42,
+      "training_scaling": true,
+      "target_column": "model_target"
+    }
+  ],
+  "training_start": "2014-01-01",
+  "rolling_window": {
+    "start": "2018-01-01",
+    "end": "2023-12-31"
+  },
+  "evaluation_cutoff": "2024-03-31",
+  "label_unit": "dimensionless",
+  "evaluation": {
+    "evaluation_id": "core6-quarterly",
+    "market_id": "a_share",
+    "research_dataset_id": "pv_all",
+    "signals": [
+      {
+        "signal_id": "model",
+        "source_kind": "prediction",
+        "source_column": "model_score"
+      }
+    ],
+    "label_columns": [
+      "model_target"
+    ],
+    "evaluation_axis": "cross_sectional"
+  }
+}

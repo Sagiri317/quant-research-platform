@@ -273,8 +273,8 @@ def test_execution_mask_is_a_separate_future_fact() -> None:
 
 def test_supervised_fit_uses_only_mature_training_rows_and_scaler() -> None:
     spec = ModelSpec(
-        model_id="ridge",
-        model_algorithm="ridge_regression",
+        model_id="linear",
+        model_algorithm="lasso_regression",
         input_feature_columns=("feature",),
         target_column="model_target",
         hyperparameters={"alpha": 1.0},
@@ -325,7 +325,7 @@ def test_supervised_fit_uses_only_mature_training_rows_and_scaler() -> None:
 
 @pytest.mark.parametrize(
     "algorithm",
-    ("linear_regression", "equal_weight_rank_ensemble", "ic_weighted_rank_ensemble"),
+    ("linear_regression",),
 )
 def test_fixed_model_parameters_agree_with_fitting_and_metadata(algorithm):
     from dataclasses import replace
@@ -366,41 +366,6 @@ def test_fixed_model_parameters_agree_with_fitting_and_metadata(algorithm):
     metadata["resolved_hyperparameters"] = {"fit_intercept": False}
     with pytest.raises(ValueError, match="^invalid_model_metadata$"):
         validate_model_metadata_core(metadata)
-
-
-def test_rank_ensembles_learn_direction_and_keep_missing_neutral() -> None:
-    spec = ModelSpec(
-        model_id="rank",
-        model_algorithm="equal_weight_rank_ensemble",
-        input_factor_columns=("factor_a", "factor_b"),
-        target_column="model_target",
-    )
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(["2024-01-01"] * 3 + ["2024-01-02"] * 3),
-            "asset_id": ["a", "b", "c"] * 2,
-            "factor_a": [1.0, 2.0, 3.0, 1.0, 2.0, 3.0],
-            "factor_b": [3.0, 2.0, 1.0, 3.0, 2.0, np.nan],
-            "model_target": [1.0, 2.0, 3.0, 1.0, 2.0, 3.0],
-            "model_target_available_at": pd.to_datetime(
-                ["2024-01-02"] * 3 + ["2024-01-03"] * 3
-            ),
-            "eligible": True,
-        }
-    )
-    result = _fit_model_result(
-        _collect_training_frame([frame], spec, fitting_cutoff="2024-01-02"),
-        spec,
-        estimator=build_estimator_from_model_spec(spec),
-    )
-    fitted = result
-    predictions = fitted.prediction_model.predict(
-        frame.loc[:, ["timestamp", "factor_a", "factor_b"]]
-    )
-    assert fitted.prediction_model.directions == (1.0, -1.0)
-    assert predictions[-1] == pytest.approx(1.0 / 6.0)
-    assert np.isfinite(predictions).all()
-    assert fitted.metadata["scaler"] is None
 
 
 def test_future_price_does_not_change_a_past_price_volume_factor() -> None:

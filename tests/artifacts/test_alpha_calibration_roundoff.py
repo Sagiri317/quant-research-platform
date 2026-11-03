@@ -54,8 +54,8 @@ def test_rank_and_open_return_roundoff_survives_final_json_and_freeze(
         tmp_path / "fit",
         training,
         ModelSpec(
-            model_id="ridge",
-            model_algorithm="ridge_regression",
+            model_id="linear",
+            model_algorithm="linear_regression",
             input_factor_columns=("signal",),
             target_column="label",
             random_seed=42,

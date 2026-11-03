@@ -42,14 +42,9 @@ from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.features.transforms import (
     model_input_validity_columns,
 )
+from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.research.models.fitting import prediction_callable
 from quant_research_platform.research.models.persisted import load_model
-from quant_research_platform.research.models.rank_ensemble import (
-    ICWeightedRankEnsemble,
-    RankEnsemblePredictor,
-    _label_predictions,
-    _rank_frame_columns,
-)
 from quant_research_platform.research.models.scaler import LinearScaledPredictor
 from quant_research_platform.research.models.trial_selection import (
     _mean_squared_error,
@@ -102,10 +97,6 @@ def _session(source, input_spec, result, facts, *, window, labels=False):
             raise ValueError("duplicate_input_spec")
         source = {"path": source, "spec": input_spec}
     options = _dataset_input_options(source, time_window=window)
-    # Input row selection defines a different rank intervention domain. Keep this
-    # operation's domain complete; select display/scoring assets only afterwards.
-    if options.get("row_filters"):
-        raise ValueError("explanation_input_row_filters_not_supported")
     selected_columns = options.get("columns")
     options.setdefault("columns", ("timestamp", "asset_id"))
     session = open_dataset_session(**options)
@@ -130,7 +121,6 @@ def _prediction_frames(session, result, window, *, extra=()):
                 *metadata["input_columns"],
                 *model_input_validity_columns(
                     tuple(metadata["input_columns"]),
-                    metadata["model_algorithm"],
                     session.spec["column_roles"],
                 ),
                 *required_filter_columns(metadata["sample_filter_mode"]),
@@ -144,7 +134,12 @@ def _prediction_frames(session, result, window, *, extra=()):
     ) as source:
         for frame in source:
             usable = prediction_rows(
-                frame, metadata, window, declared_columns=session.spec["column_roles"]
+                frame,
+                metadata,
+                window,
+                declared_columns=session.spec["column_roles"],
+                include_context=metadata["model_algorithm"]
+                in {"lstm_regressor", "transformer_regressor"},
             )
             for _, block in usable.groupby("timestamp", sort=True):
                 yield block
@@ -178,10 +173,19 @@ def _context(session, result, window, selection, *, extra=()):
     return context, seen
 
 
-def _selected_indices(context, selection):
+def _selected_indices(context, selection, *, window=None):
     indices = np.arange(len(context))
+    if window is not None:
+        indices = indices[prediction_window_mask(context.timestamp, window)]
+        dates = context.iloc[indices].timestamp.drop_duplicates().to_numpy()
+        limit = selection["max_dates"]
+        if limit is not None and len(dates) > limit:
+            dates = np.random.default_rng(
+                derive_seed(selection["root_seed"], "explanation_dates")
+            ).choice(dates, limit, replace=False)
+            indices = indices[context.iloc[indices].timestamp.isin(dates)]
     if selection.get("asset_ids") is not None:
-        indices = indices[context.asset_id.isin(selection["asset_ids"])]
+        indices = indices[context.iloc[indices].asset_id.isin(selection["asset_ids"])]
     if len(indices) > selection["max_rows"]:
         indices = np.sort(
             np.random.default_rng(
@@ -279,38 +283,19 @@ def _identity_output(result):
             "reg:pseudohubererror",
             "reg:quantileerror",
         }
-    if algorithm == "lightgbm_regressor":
-        objective = str(
-            estimator.booster_.params.get("objective", "regression")
-        ).split()[0]
-        return objective in {
-            "regression",
-            "regression_l1",
-            "huber",
-            "fair",
-            "quantile",
-            "mape",
-        }
     return True
 
 
 def _output(result, frame, output_space, *, intervention=False):
     predictor = result.prediction_model
     raw = prediction_callable(tuple(result.metadata["input_columns"]), predictor)(frame)
-    if output_space == "calibrated_label":
-        calibration = getattr(predictor, "label_calibration", None)
-        if calibration is None:
-            raise ValueError("explanation_frozen_calibration_required")
-        explained = _label_predictions(raw, calibration)
-    elif output_space == "raw_margin":
+    if output_space == "raw_margin":
         matrix = predictor.scaler.transform(
             frame.loc[:, result.metadata["input_columns"]]
         )
         algorithm = result.metadata["model_algorithm"]
         if algorithm == "xgboost_regressor":
             explained = predictor.estimator.predict(matrix, output_margin=True)
-        elif algorithm == "lightgbm_regressor":
-            explained = predictor.estimator.predict(matrix, raw_score=True)
         else:
             raise ValueError("explanation_raw_margin_not_supported")
     elif output_space == "model_output":
@@ -346,122 +331,94 @@ def _attributions(result, context, indices, method, background, output_space):
         "implementation": "qrp",
         "background": {"kind": "none"},
     }
-    if method == "rank":
-        if not isinstance(predictor, (RankEnsemblePredictor, ICWeightedRankEnsemble)):
-            raise ValueError("explanation_rank_model_required")
-        weights = (
-            np.asarray(predictor.directions) / len(predictor.columns)
-            if isinstance(predictor, RankEnsemblePredictor)
-            else np.asarray(predictor.weights)
-        )
-        contributions = np.zeros((len(selected), len(columns)))
-        ranks = _rank_frame_columns(context, predictor.columns)[indices]
-        contributions[:, [columns.index(c) for c in predictor.columns]] = (
-            ranks * weights
-        )
-        base = np.zeros(len(selected))
-        method_facts["baseline"] = "zero_centered_cross_section_rank"
-    else:
-        if not hasattr(predictor, "scaler"):
-            raise ValueError("explanation_method_not_supported_for_model")
-        matrix = predictor.scaler.transform(selected.loc[:, columns])
-        if method in {"affine", "linear_shap"}:
-            coefficients, intercept = _linear_parameters(predictor)
-            if method == "affine":
-                values = matrix.to_numpy(dtype="float64", copy=False)
-                with np.errstate(over="ignore", invalid="ignore", under="ignore"):
-                    contributions = values * coefficients
-                contributions[:, coefficients == 0] = 0.0
-                base = np.full(len(matrix), intercept)
-                method_facts["baseline"] = (
-                    "training_scaled_zero"
-                    if predictor.scaler.scaling
-                    else "unscaled_input_zero"
-                )
-            else:
-                import shap
-
-                masker = shap.maskers.Independent(
-                    background[0], max_samples=len(background[0])
-                )
-                values = shap.LinearExplainer((coefficients, intercept), masker)(matrix)
-                contributions, base = values.values, values.base_values
-                method_facts.update(
-                    implementation=f"shap:{version('shap')}",
-                    baseline="historical_reference_expectation",
-                    background=background[1],
-                )
-        elif method in {"native_tree", "tree_shap_path", "tree_shap_interventional"}:
-            if output_space == "model_output" and not _identity_output(result):
-                raise ValueError("explanation_nonidentity_link_requires_raw_margin")
-            estimator = predictor.estimator
-            if method == "native_tree":
-                if algorithm == "xgboost_regressor":
-                    import xgboost
-
-                    booster = estimator.get_booster()
-                    if estimator.get_xgb_params().get("booster", "gbtree") not in (
-                        None,
-                        "gbtree",
-                    ):
-                        raise ValueError("explanation_xgboost_booster_not_supported")
-                    end = getattr(estimator, "best_iteration", None)
-                    values = booster.predict(
-                        xgboost.DMatrix(matrix),
-                        pred_contribs=True,
-                        iteration_range=(0, end + 1 if end is not None else 0),
-                    )
-                    implementation = f"xgboost:{version('xgboost')}:pred_contribs"
-                elif algorithm == "lightgbm_regressor":
-                    if estimator.booster_.params.get("linear_tree", False):
-                        raise ValueError(
-                            "explanation_lightgbm_linear_tree_not_supported"
-                        )
-                    values = estimator.predict(matrix, pred_contrib=True)
-                    implementation = f"lightgbm:{version('lightgbm')}:pred_contrib"
-                else:
-                    raise ValueError("explanation_native_tree_not_supported")
-                contributions, base = (
-                    np.asarray(values)[:, :-1],
-                    np.asarray(values)[:, -1],
-                )
-                method_facts.update(
-                    implementation=implementation,
-                    baseline="model_internal_tree_expectation",
-                    background={"kind": "model_internal_tree_statistics"},
-                )
-            else:
-                import shap
-
-                interventional = method == "tree_shap_interventional"
-                data = (
-                    shap.maskers.Independent(
-                        background[0], max_samples=len(background[0])
-                    )
-                    if interventional
-                    else None
-                )
-                explainer = shap.TreeExplainer(
-                    estimator,
-                    data=data,
-                    feature_perturbation="interventional"
-                    if interventional
-                    else "tree_path_dependent",
-                    model_output="raw",
-                )
-                values = explainer(matrix, check_additivity=False)
-                contributions, base = values.values, values.base_values
-                method_facts.update(
-                    implementation=f"shap:{version('shap')}",
-                    baseline="historical_reference_expectation"
-                    if interventional
-                    else "model_internal_tree_expectation",
-                    background=background[1]
-                    if interventional
-                    else {"kind": "model_internal_tree_statistics"},
-                )
+    if not hasattr(predictor, "scaler"):
+        raise ValueError("explanation_method_not_supported_for_model")
+    matrix = predictor.scaler.transform(selected.loc[:, columns])
+    if method in {"affine", "linear_shap"}:
+        coefficients, intercept = _linear_parameters(predictor)
+        if method == "affine":
+            values = matrix.to_numpy(dtype="float64", copy=False)
+            with np.errstate(over="ignore", invalid="ignore", under="ignore"):
+                contributions = values * coefficients
+            contributions[:, coefficients == 0] = 0.0
+            base = np.full(len(matrix), intercept)
+            method_facts["baseline"] = (
+                "training_scaled_zero"
+                if predictor.scaler.scaling
+                else "unscaled_input_zero"
+            )
         else:
-            raise ValueError("explanation_method_invalid")
+            import shap
+
+            masker = shap.maskers.Independent(
+                background[0], max_samples=len(background[0])
+            )
+            values = shap.LinearExplainer((coefficients, intercept), masker)(matrix)
+            contributions, base = values.values, values.base_values
+            method_facts.update(
+                implementation=f"shap:{version('shap')}",
+                baseline="historical_reference_expectation",
+                background=background[1],
+            )
+    elif method in {"native_tree", "tree_shap_path", "tree_shap_interventional"}:
+        if output_space == "model_output" and not _identity_output(result):
+            raise ValueError("explanation_nonidentity_link_requires_raw_margin")
+        estimator = predictor.estimator
+        if method == "native_tree":
+            import xgboost
+
+            booster = estimator.get_booster()
+            if estimator.get_xgb_params().get("booster", "gbtree") not in (
+                None,
+                "gbtree",
+            ):
+                raise ValueError("explanation_xgboost_booster_not_supported")
+            end = getattr(estimator, "best_iteration", None)
+            values = booster.predict(
+                xgboost.DMatrix(matrix),
+                pred_contribs=True,
+                iteration_range=(0, end + 1 if end is not None else 0),
+            )
+            implementation = f"xgboost:{version('xgboost')}:pred_contribs"
+            contributions, base = (
+                np.asarray(values)[:, :-1],
+                np.asarray(values)[:, -1],
+            )
+            method_facts.update(
+                implementation=implementation,
+                baseline="model_internal_tree_expectation",
+                background={"kind": "model_internal_tree_statistics"},
+            )
+        else:
+            import shap
+
+            interventional = method == "tree_shap_interventional"
+            data = (
+                shap.maskers.Independent(background[0], max_samples=len(background[0]))
+                if interventional
+                else None
+            )
+            explainer = shap.TreeExplainer(
+                estimator,
+                data=data,
+                feature_perturbation="interventional"
+                if interventional
+                else "tree_path_dependent",
+                model_output="raw",
+            )
+            values = explainer(matrix, check_additivity=False)
+            contributions, base = values.values, values.base_values
+            method_facts.update(
+                implementation=f"shap:{version('shap')}",
+                baseline="historical_reference_expectation"
+                if interventional
+                else "model_internal_tree_expectation",
+                background=background[1]
+                if interventional
+                else {"kind": "model_internal_tree_statistics"},
+            )
+    else:
+        raise ValueError("explanation_method_invalid")
     contributions = np.asarray(contributions, dtype="float64")
     if getattr(getattr(predictor, "scaler", None), "medians", ()):
         contributions = (
@@ -469,15 +426,6 @@ def _attributions(result, context, indices, method, background, output_space):
         )
         method_facts["missing_indicators"] = "aggregated_with_original_feature"
     base = np.broadcast_to(np.asarray(base, dtype="float64"), (len(selected),)).copy()
-    if output_space == "calibrated_label":
-        intercept, slope = predictor.label_calibration
-        contributions *= slope
-        base = intercept + slope * base
-        method_facts["calibration"] = {
-            "intercept": intercept,
-            "slope": slope,
-            "source": "saved_training_calibration",
-        }
     if contributions.shape != (len(selected), len(columns)):
         raise ValueError("explanation_contributions_invalid")
     relative = attribution_relative_tolerance(method, len(columns))
@@ -545,26 +493,9 @@ def _native_importance(result, facts):
             signed = dict(
                 zip(result.metadata["input_columns"], coefficients, strict=True)
             )
-    elif isinstance(predictor, (RankEnsemblePredictor, ICWeightedRankEnsemble)):
-        weights = (
-            np.asarray(predictor.directions) / len(predictor.columns)
-            if isinstance(predictor, RankEnsemblePredictor)
-            else predictor.weights
-        )
-        signed = dict(zip(predictor.columns, weights, strict=True))
-        kind = "absolute_rank_weight"
-    elif algorithm == "xgboost_regressor":
+    else:
         kind = "xgboost_" + (predictor.estimator.importance_type or "gain")
         unit = "normalized_native_importance"
-    elif algorithm == "lightgbm_regressor":
-        kind = "lightgbm_" + predictor.estimator.importance_type
-        unit = (
-            "split_count"
-            if predictor.estimator.importance_type == "split"
-            else "native_gain"
-        )
-    else:
-        kind, unit = "normalized_impurity_decrease", "dimensionless"
     return pd.DataFrame(
         [
             {
@@ -749,12 +680,7 @@ def _permutation(
     loss_reason=None,
 ):
     target = result.metadata["target_column"]
-    rank = isinstance(
-        result.prediction_model, (RankEnsemblePredictor, ICWeightedRankEnsemble)
-    )
-    if "mse" in config["metrics"] and (
-        output_space == "raw_margin" or rank and output_space != "calibrated_label"
-    ):
+    if "mse" in config["metrics"] and output_space == "raw_margin":
         raise ValueError("explanation_mse_requires_label_output")
     selected = pd.Series(False, index=frame.index)
     selected.iloc[indices] = True
@@ -1015,12 +941,21 @@ def explain(config: Mapping) -> Path:
             and selection["max_dates"] is not None
         ):
             raise ValueError("explanation_temporal_requires_contiguous_window")
+        sequence = result.metadata["model_algorithm"] in {
+            "lstm_regressor",
+            "transformer_regressor",
+        }
+        context_window = (
+            PredictionWindow(facts["fit_windows"][-1]["end"], window.end)
+            if sequence
+            else window
+        )
         session = _session(
             config["inputs"],
             config.get("input_spec"),
             result,
             facts,
-            window=window,
+            window=context_window,
             labels=permutation is not None,
         )
         availability = None
@@ -1033,16 +968,25 @@ def explain(config: Mapping) -> Path:
             extra.extend((result.metadata["target_column"], availability))
             if permutation["axis"] == "temporal_blocks":
                 extra.append(permutation["episode_column"])
-        context, dates = _context(session, result, window, selection, extra=extra)
-        indices = _selected_indices(context, selection)
-        rank = isinstance(
-            result.prediction_model, (RankEnsemblePredictor, ICWeightedRankEnsemble)
+        context, dates = _context(
+            session,
+            result,
+            context_window,
+            {**selection, "max_dates": None} if sequence else selection,
+            extra=extra,
         )
+        selectable, _ = apply_filter_mode(
+            context,
+            mode=result.metadata["sample_filter_mode"],
+            metadata_key="sample_filter_mode",
+        )
+        positions = _selected_indices(
+            selectable, selection, window=window if sequence else None
+        )
+        indices = selectable.index.to_numpy()[positions]
         unit = (
             "raw_margin"
             if config["output_space"] == "raw_margin"
-            else "dimensionless_rank_score"
-            if rank and config["output_space"] == "model_output"
             else facts["label_unit"]
         )
         metadata.update(

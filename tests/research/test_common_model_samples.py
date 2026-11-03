@@ -72,7 +72,7 @@ def test_single_selected_model_has_no_invented_comparison():
     assert set(robustness["reason"]) == {"no_comparison_models"}
 
 
-def test_crypto_comparison_intersects_exact_keys_without_mutating_full_outputs(
+def test_other_market_comparison_intersects_exact_keys_without_mutating_full_outputs(
     tmp_path,
 ):
     import json
@@ -87,7 +87,7 @@ def test_crypto_comparison_intersects_exact_keys_without_mutating_full_outputs(
     frame = pd.DataFrame(
         {
             "timestamp": stamps,
-            "asset_id": "btc_usdt",
+            "asset_id": "asset_a",
             "eligible": True,
             "label_available_at": stamps,
             "label": [0.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 4.0],
@@ -148,7 +148,7 @@ def test_crypto_comparison_intersects_exact_keys_without_mutating_full_outputs(
     assert before == [(path / "prediction.parquet").read_bytes() for path in paths]
 
     # Different assets at identical timestamps have no common observations.
-    disjoint = frame.iloc[4:].assign(asset_id="eth_usdt")
+    disjoint = frame.iloc[4:].assign(asset_id="asset_b")
     _, other, _ = predict_frame(tmp_path / "other", disjoint, cases[1], window=window)
     pd.concat([frame.iloc[4:], disjoint]).to_parquet(labels, index=False)
     output = tmp_path / "disjoint.json"

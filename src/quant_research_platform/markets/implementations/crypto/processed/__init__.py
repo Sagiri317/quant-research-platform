@@ -1,1 +1,0 @@
-"""Crypto processed data owner."""

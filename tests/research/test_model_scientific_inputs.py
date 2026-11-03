@@ -25,8 +25,8 @@ from quant_research_platform.research.models.trial_selection import (
     score,
 )
 from quant_research_platform.research.predictions.runner import predict
-from tests.research.crypto_evaluation_test_support import evaluation_config
 from tests.research.direct_model_test_support import fit_frame
+from tests.research.evaluation_test_support import evaluation_config
 
 
 def _training():
@@ -34,7 +34,7 @@ def _training():
     return pd.DataFrame(
         dict(
             timestamp=dates,
-            asset_id="btc",
+            asset_id="asset_a",
             x=[1.0, 2.0, 3.0],
             label=[1.0, 2.0, 3.0],
             eligible=True,
@@ -63,7 +63,7 @@ def test_single_asset_score_checks_final_domain_without_restricting_predictions(
         [
             (date, asset, float(4 + j + offset), float(6 - j + offset), True, date)
             for j, date in enumerate(pd.date_range("2024-01-04", periods=3))
-            for asset, offset in [("btc", 0), ("eth", 100)]
+            for asset, offset in [("asset_a", 0), ("asset_b", 100)]
         ],
         columns=[
             "timestamp",
@@ -75,9 +75,9 @@ def test_single_asset_score_checks_final_domain_without_restricting_predictions(
         ],
     )
     if scope == "transfer":
-        frame = frame.loc[frame.asset_id.eq("eth")]
+        frame = frame.loc[frame.asset_id.eq("asset_b")]
     if scope == "mature_only":
-        frame.loc[frame.asset_id.eq("btc"), "label_available_at"] = pd.Timestamp(
+        frame.loc[frame.asset_id.eq("asset_a"), "label_available_at"] = pd.Timestamp(
             "2024-02-01"
         )
     source = tmp_path / "future.parquet"
@@ -102,7 +102,7 @@ def test_single_asset_score_checks_final_domain_without_restricting_predictions(
                         **request,
                         "model": str(second.root),
                         "output": str(tmp_path / "second_prediction"),
-                        "asset_ids": ["eth"],
+                        "asset_ids": ["asset_b"],
                     }
                 )
             )
@@ -138,7 +138,7 @@ def test_single_asset_score_checks_final_domain_without_restricting_predictions(
 @pytest.mark.parametrize("split", [False, True])
 def test_single_asset_metric_rejects_second_asset_within_or_across_chunks(split):
     frame = _training().assign(
-        prediction=[1.0, 2.0, 3.0], asset_id=["btc", "btc", "eth"]
+        prediction=[1.0, 2.0, 3.0], asset_id=["asset_a", "asset_a", "asset_b"]
     )
     chunks = [frame.iloc[:2], frame.iloc[2:]] if split else [frame]
     with pytest.raises(
@@ -156,7 +156,7 @@ def test_single_asset_metric_rejects_second_asset_within_or_across_chunks(split)
 def _evaluation(column):
     return EvaluationSpec(
         evaluation_id="features",
-        market_id="crypto",
+        market_id="other_market",
         research_dataset_id="synthetic",
         signals=(
             SignalSpec(signal_id="signal", source_kind="feature", source_column=column),
@@ -355,7 +355,7 @@ def test_model_freezes_only_consumed_declared_units_before_predicting(
     future = (
         _training()
         .iloc[[0]]
-        .assign(timestamp=pd.Timestamp("2024-01-04"), asset_id="eth", x=100.0)
+        .assign(timestamp=pd.Timestamp("2024-01-04"), asset_id="asset_b", x=100.0)
     )
     path = tmp_path / "future.parquet"
     future.to_parquet(path, index=False)
@@ -387,41 +387,6 @@ def test_model_freezes_only_consumed_declared_units_before_predicting(
         assert read_predictions(predict(request))[0].prediction_score.iloc[
             0
         ] == pytest.approx(100.0)
-
-
-def test_ordinary_prefixed_rank_feature_preserves_missing_neutral_domain(tmp_path):
-    frame = _training().assign(
-        timestamp=pd.Timestamp("2024-01-01"),
-        asset_id=list("abc"),
-        label_available_at=pd.Timestamp("2024-01-01"),
-    )
-    frame = frame.rename(columns={"x": "feature_x"})
-    frame.loc[1, "feature_x"] = np.nan
-    case = fit_frame(
-        tmp_path,
-        frame,
-        ModelSpec(
-            model_id="rank",
-            model_algorithm="equal_weight_rank_ensemble",
-            input_feature_columns=("feature_x",),
-            target_column="label",
-            random_seed=1,
-        ),
-    )
-    assert case.result.metadata["rows_after_input_label_dropna"] == 2
-    source = tmp_path / "future.parquet"
-    frame.assign(timestamp=pd.Timestamp("2024-01-02")).to_parquet(source, index=False)
-    output = predict(
-        dict(
-            model=str(case.root),
-            inputs=str(source),
-            input_spec=case.config["input_spec"],
-            output=str(tmp_path / "prediction"),
-            prediction_window={"start": "2024-01-02", "end": "2024-01-02"},
-        )
-    )
-    saved = read_predictions(output)[0].set_index("asset_id")
-    assert len(saved) == 2 and "b" not in saved.index
 
 
 def test_canonical_observation_projection_matches_factor_statistics(tmp_path):

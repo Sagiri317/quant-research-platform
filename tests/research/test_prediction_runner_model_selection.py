@@ -397,7 +397,9 @@ def test_each_frozen_family_winner_can_refit_but_family_change_cannot(tmp_path):
 
 @pytest.mark.parametrize(
     "algorithm",
-    ["linear_regression", "equal_weight_rank_ensemble", "ic_weighted_rank_ensemble"],
+    [
+        "linear_regression",
+    ],
 )
 def test_output_asset_projection_preserves_full_current_cross_section(
     tmp_path, algorithm
@@ -422,12 +424,12 @@ def test_output_asset_projection_preserves_full_current_cross_section(
 
 
 @pytest.mark.parametrize("explicit_scope", [True, False, "multi"])
-def test_crypto_validation_axis_follows_current_samples(tmp_path, explicit_scope):
+def test_other_market_validation_axis_follows_current_samples(tmp_path, explicit_scope):
     stamps = pd.date_range("2020-01-01", periods=6)
     frame = pd.DataFrame(
         {
             "timestamp": stamps,
-            "asset_id": "btc",
+            "asset_id": "asset_a",
             "eligible": True,
             "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
             "label": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
@@ -444,14 +446,16 @@ def test_crypto_validation_axis_follows_current_samples(tmp_path, explicit_scope
     training = frame.iloc[:3]
     if explicit_scope == "multi":
         training = pd.concat(
-            [training, training.assign(asset_id="eth")], ignore_index=True
+            [training, training.assign(asset_id="asset_b")], ignore_index=True
         )
     case = fit_frame(tmp_path / "single", training, spec)
     if explicit_scope:
         case_config = {
             **case.config,
             "output": str(tmp_path / "explicit"),
-            "asset_ids": ["btc", "eth"] if explicit_scope == "multi" else ["btc"],
+            "asset_ids": ["asset_a", "asset_b"]
+            if explicit_scope == "multi"
+            else ["asset_a"],
         }
         model = fit(case_config)
     else:
@@ -543,16 +547,8 @@ def test_score_retains_only_predictions_and_matches_full_join(tmp_path, monkeypa
     for path in config["predictions"]:
         predictions, metadata = read_predictions(path)
         selected = predictions.set_index(["timestamp", "asset_id"]).loc[expected_keys]
-        calibration = (
-            artifact.prediction_model_metadata(metadata)
-            .get("rank_parameters", {})
-            .get("label_calibration")
-        )
-        economic = selected.prediction_score
-        if calibration is not None:
-            economic = calibration[0] + calibration[1] * economic
         target = labels.set_index(["timestamp", "asset_id"]).loc[expected_keys, "label"]
-        loss = (economic - target) ** 2
+        loss = (selected.prediction_score - target) ** 2
         expected_losses[metadata["model_id"]] = (
             loss.groupby(level="timestamp").mean().mean()
         )

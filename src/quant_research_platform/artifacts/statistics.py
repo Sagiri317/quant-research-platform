@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from fractions import Fraction
@@ -441,136 +441,6 @@ _ARROW_SCHEMAS = {
             pa.field("observation_count", pa.int64()),
         ]
     ),
-    "crypto_maker_samples.parquet": pa.schema(
-        [
-            pa.field("fold_id", pa.string()),
-            pa.field("side", pa.string()),
-            pa.field("sample_id", pa.int64()),
-            pa.field("decision_at", pa.timestamp("ns")),
-            pa.field("prediction_end", pa.timestamp("ns")),
-            pa.field("label_available_at", pa.timestamp("ns")),
-            pa.field("price_prediction", pa.float64()),
-            pa.field("observed_return", pa.float64()),
-            pa.field("forecast_error", pa.float64()),
-            pa.field("filled_quantity", pa.float64()),
-            pa.field("quote_quantity", pa.float64()),
-            pa.field("terminal_reason", pa.string()),
-            pa.field("book_segment_id", pa.string()),
-            pa.field("trade_observation_id", pa.string()),
-            pa.field("initial_book_event_id", pa.int64()),
-            pa.field("initial_bid_index", pa.int64()),
-            pa.field("initial_ask_index", pa.int64()),
-            pa.field("event_start", pa.int64()),
-            pa.field("event_end", pa.int64()),
-        ]
-    ),
-    "crypto_maker_events.parquet": pa.schema(
-        [
-            pa.field("fold_id", pa.string()),
-            pa.field("event_id", pa.int64()),
-            pa.field("event_at", pa.timestamp("ns")),
-            pa.field("event_kind", pa.string()),
-            pa.field("context_id", pa.string()),
-            pa.field("side", pa.string()),
-            pa.field("level_index", pa.int64()),
-            pa.field("price_index", pa.int64()),
-            pa.field("quantity", pa.float64()),
-            pa.field("known_price_bound", pa.int64(), nullable=False),
-        ]
-    ),
-    "crypto_maker_calibration.parquet": pa.schema(
-        [
-            pa.field("fold_id", pa.string()),
-            pa.field("side", pa.string()),
-            pa.field("price_unit", pa.string()),
-            pa.field("sample_count", pa.int64()),
-            pa.field("zero_fill_count", pa.int64()),
-            pa.field("post_only_rejection_count", pa.int64()),
-            pa.field("excluded_decisions", pa.int64()),
-            pa.field("minimum_samples", pa.int64()),
-            pa.field("status", pa.string()),
-            pa.field("reason", pa.string()),
-        ]
-    ),
-    "crypto_portfolio_intervals.parquet": pa.schema(
-        [
-            pa.field("candidate_id", pa.string()),
-            pa.field("execution_mode", pa.string()),
-            pa.field("episode_id", pa.string()),
-            pa.field("kind", pa.string()),
-            pa.field("start_at", pa.timestamp("ns")),
-            pa.field("end_at", pa.timestamp("ns")),
-            pa.field("start_nav", pa.float64()),
-            pa.field("end_nav", pa.float64()),
-            pa.field("gross_pnl", pa.float64()),
-            pa.field("net_pnl", pa.float64()),
-            pa.field("fees", pa.float64()),
-            pa.field("funding", pa.float64()),
-            pa.field("turnover", pa.float64()),
-            pa.field("fill_events", pa.int64()),
-        ]
-    ),
-    "crypto_portfolio_daily.parquet": pa.schema(
-        [
-            pa.field("candidate_id", pa.string()),
-            pa.field("execution_mode", pa.string()),
-            pa.field("episode_id", pa.string()),
-            pa.field("fold_id", pa.string()),
-            pa.field("start_at", pa.timestamp("ns")),
-            pa.field("end_at", pa.timestamp("ns")),
-            pa.field("start_nav", pa.float64()),
-            pa.field("end_nav", pa.float64()),
-            pa.field("net_return", pa.float64()),
-            pa.field("status", pa.string()),
-            pa.field("reason", pa.string()),
-        ]
-    ),
-    "crypto_portfolio_statistics.parquet": pa.schema(
-        [
-            pa.field("candidate_id", pa.string()),
-            pa.field("execution_mode", pa.string()),
-            pa.field("episode_id", pa.string()),
-            pa.field("metric_id", pa.string()),
-            pa.field("value", pa.float64()),
-            pa.field("observation_count", pa.int64()),
-            pa.field("status", pa.string()),
-            pa.field("reason", pa.string()),
-        ]
-    ),
-    "crypto_execution_diagnostics.parquet": pa.schema(
-        [
-            pa.field("candidate_id", pa.string()),
-            pa.field("execution_mode", pa.string()),
-            pa.field("episode_id", pa.string()),
-            pa.field("metric_id", pa.string()),
-            pa.field("value", pa.float64()),
-            pa.field("text", pa.string()),
-            pa.field("status", pa.string()),
-            pa.field("reason", pa.string()),
-        ]
-    ),
-    "crypto_cost_sensitivity.parquet": pa.schema(
-        [
-            pa.field("candidate_id", pa.string()),
-            pa.field("execution_mode", pa.string()),
-            pa.field("episode_id", pa.string()),
-            pa.field("fee_bps", pa.float64()),
-            pa.field("additional_spread_bps", pa.float64()),
-            pa.field("cost_delta", pa.float64()),
-            pa.field("net_pnl", pa.float64()),
-            pa.field("method", pa.string()),
-        ]
-    ),
-    "crypto_portfolio_coverage.parquet": pa.schema(
-        [
-            pa.field("candidate_id", pa.string(), nullable=False),
-            pa.field("execution_mode", pa.string(), nullable=False),
-            pa.field("start_at", pa.timestamp("ns"), nullable=False),
-            pa.field("stop_at", pa.timestamp("ns"), nullable=False),
-            pa.field("kind", pa.string(), nullable=False),
-            pa.field("reason", pa.string(), nullable=False),
-        ]
-    ),
 }
 _COMPARISON_MEMBERS = (
     "portfolio_benchmark_intervals.parquet",
@@ -580,8 +450,6 @@ _COMPARISON_MEMBERS = (
 )
 _COMPARISON_IDENTITY = (
     "candidate_id",
-    "execution_mode",
-    "episode_id",
     "fold_id",
     "reference_id",
     "reference_kind",
@@ -698,28 +566,10 @@ STATISTICS_TABLE_GROUPS = {
         "portfolio_exposures.parquet",
         "holding_factor_returns.parquet",
     ),
-    "crypto_maker_calibration": (
-        "crypto_maker_samples.parquet",
-        "crypto_maker_events.parquet",
-        "crypto_maker_calibration.parquet",
-    ),
-    "crypto_portfolio": (
-        *_COMPARISON_MEMBERS,
-        "crypto_portfolio_intervals.parquet",
-        "crypto_portfolio_daily.parquet",
-        "crypto_portfolio_statistics.parquet",
-        "crypto_execution_diagnostics.parquet",
-        "crypto_cost_sensitivity.parquet",
-        "crypto_portfolio_coverage.parquet",
-    ),
 }
 _EMPTY_TABLE_MEMBERS = frozenset(
     {
         *_COMPARISON_MEMBERS,
-        "crypto_maker_events.parquet",
-        "crypto_maker_samples.parquet",
-        "crypto_portfolio_daily.parquet",
-        "crypto_portfolio_intervals.parquet",
         "fama_macbeth_periods.parquet",
         "holding_factor_returns.parquet",
         "model_comparison.parquet",
@@ -802,31 +652,18 @@ def write_statistics_artifact(
     output_path: Path,
     *,
     metadata: dict,
-    tables: Mapping[str, pd.DataFrame] | Callable[..., None],
+    tables: Mapping[str, pd.DataFrame],
     table_group: str = "research",
-    validate_tables=None,
 ) -> Path:
     if table_group not in STATISTICS_TABLE_GROUPS:
         raise ValueError("statistics_tables_invalid")
     _validate_metadata(metadata)
     known_members = tuple(STATISTICS_TABLE_GROUPS[table_group])
     expected = {member.removesuffix(".parquet") for member in known_members}
-    calibration = table_group == "crypto_maker_calibration"
-    if callable(tables) and not calibration:
-        raise ValueError("statistics_tables_invalid")
-    if calibration and not callable(validate_tables):
-        raise ValueError("statistics_business_validator_required")
-    if not callable(tables) and (
-        not isinstance(tables, Mapping)
-        or not tables
-        or set(tables) - expected
-        or (calibration and set(tables) != expected)
-    ):
+    if not isinstance(tables, Mapping) or not tables or set(tables) - expected:
         raise ValueError("statistics_tables_invalid")
     members = tuple(
-        member
-        for member in known_members
-        if callable(tables) or member.removesuffix(".parquet") in tables
+        member for member in known_members if member.removesuffix(".parquet") in tables
     )
     expected = {member.removesuffix(".parquet") for member in members}
 
@@ -866,18 +703,10 @@ def write_statistics_artifact(
                     )
                 )
 
-            if callable(tables):
-                tables(on_table=append)
-            else:
-                for name, frame in tables.items():
-                    append(name, frame)
+            for name, frame in tables.items():
+                append(name, frame)
             if set(writers) != set(members):
                 raise ValueError("statistics_tables_invalid")
-        if callable(validate_tables):
-            validate_tables(
-                StatisticsArtifact(dict(metadata), staging, table_group, members),
-                metadata,
-            )
         write_manifest(
             staging / "manifest.json",
             {
@@ -892,7 +721,7 @@ def write_statistics_artifact(
     return Path(output_path)
 
 
-def read_statistics_artifact(path: Path, *, validate_tables=None) -> StatisticsArtifact:
+def read_statistics_artifact(path: Path) -> StatisticsArtifact:
     root = Path(path)
     _, manifest = read_qrp_json_file(root / "manifest.json")
     group = manifest.get("table_group")
@@ -911,17 +740,12 @@ def read_statistics_artifact(path: Path, *, validate_tables=None) -> StatisticsA
         )
         or len(set(declared)) != len(declared)
         or declared != [member for member in known if member in declared]
-        or (group == "crypto_maker_calibration" and declared != list(known))
     ):
         raise ValueError("statistics_artifact_members_invalid")
     members = tuple(declared)
     metadata = manifest.get("metadata")
     _validate_metadata(metadata)
     artifact = StatisticsArtifact(metadata, root, group, members)
-    if group == "crypto_maker_calibration":
-        if not callable(validate_tables):
-            raise ValueError("statistics_business_validator_required")
-        validate_tables(artifact, metadata)
     return artifact
 
 
@@ -951,13 +775,6 @@ def _validate_table_binding(frame, *, member, metadata):
         and not frame.sample_role.eq(metadata["sample_role"]).all()
     ):
         raise ValueError("statistics_sample_role_mismatch")
-    if member in STATISTICS_TABLE_GROUPS["crypto_maker_calibration"]:
-        return  # Fold maturity and event references are checked by its producer.
-    if (
-        "execution_mode" in frame
-        and not frame.execution_mode.eq(metadata.get("execution_mode")).all()
-    ):
-        raise ValueError("statistics_execution_mode_mismatch")
     if "candidate_id" in frame:
         valid = frame.candidate_id.isin(metadata.get("candidate_ids", []))
         if member == "portfolio_robustness.parquet":
@@ -978,17 +795,7 @@ def _validate_table_binding(frame, *, member, metadata):
     )
     for column in _TIMESTAMP_COLUMNS[member]:
         valid = frame[column].ge(start)
-        endpoint = member == "crypto_portfolio_coverage.parquet" and column == "stop_at"
-        upper = (
-            pd.Timestamp(stop) + pd.Timedelta(1, "ns")
-            if inclusive and endpoint
-            else stop
-        )
-        valid &= (
-            frame[column].le(upper)
-            if inclusive or endpoint
-            else frame[column].lt(upper)
-        )
+        valid &= frame[column].le(stop) if inclusive else frame[column].lt(stop)
         if not valid.all():
             raise ValueError("statistics_table_window_mismatch")
 
@@ -1021,9 +828,6 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
                 member in {"prediction_diagnostics.parquet", "model_comparison.parquet"}
                 and column
                 in {"bootstrap_block_size", "bootstrap_repetitions", "bootstrap_seed"}
-                or member == "crypto_maker_events.parquet"
-                and column == "price_index"
-                and result[column].isna().any()
             ),
         )
         if values.lt(0).any():
@@ -1368,20 +1172,13 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
             raise ValueError("statistics_model_loss_invalid")
     if member in _COMPARISON_MEMBERS:
         if (
-            not result.execution_mode.isin(("continuous", "independent_segments")).all()
-            or not result.reference_kind.isin(("benchmark", "control")).all()
-            or result[["candidate_id", "episode_id", "reference_id", "sample_role"]]
+            not result.reference_kind.isin(("benchmark", "control")).all()
+            or result[["candidate_id", "reference_id", "sample_role"]]
             .eq("")
             .any()
             .any()
         ):
             raise ValueError("statistics_comparison_identity_invalid")
-        continuous = result.execution_mode.eq("continuous")
-        if (
-            continuous & ~result.episode_id.eq("continuous")
-            | ~continuous & ~result.episode_id.str.fullmatch(r"[0-9]+_[0-9]+")
-        ).any():
-            raise ValueError("statistics_episode_id_invalid")
         suffix = {
             "portfolio_benchmark_intervals.parquet": ("start_at", "end_at"),
             "portfolio_benchmark_metrics.parquet": ("metric_id",),
@@ -1481,104 +1278,6 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
             .any()
         ):
             raise ValueError("statistics_exposure_inference_invalid")
-    if member in {
-        "crypto_portfolio_daily.parquet",
-        "crypto_portfolio_statistics.parquet",
-        "crypto_execution_diagnostics.parquet",
-    }:
-        if not result.status.isin(("DEFINED", "UNDEFINED")).all():
-            raise ValueError("statistics_table_status_invalid")
-        defined = result.status.eq("DEFINED")
-        value_column = (
-            "net_return" if member == "crypto_portfolio_daily.parquet" else "value"
-        )
-        has_value = result[value_column].notna()
-        if member == "crypto_execution_diagnostics.parquet":
-            has_text = result.text.str.strip().ne("")
-            invalid_value = defined & ~(has_value ^ has_text) | ~defined & (
-                has_value | has_text
-            )
-        else:
-            invalid_value = defined.ne(has_value)
-        if (
-            invalid_value.any()
-            or result.loc[defined, "reason"].ne("").any()
-            or result.loc[~defined, "reason"].str.strip().eq("").any()
-        ):
-            raise ValueError("statistics_table_status_value_invalid")
-        if member == "crypto_portfolio_daily.parquet" and (
-            result.loc[defined, ["start_nav", "end_nav"]].isna().any().any()
-            or result.loc[defined, "start_nav"].le(0).any()
-        ):
-            raise ValueError("statistics_table_status_value_invalid")
-    if (
-        member in STATISTICS_TABLE_GROUPS["crypto_portfolio"]
-        and member not in _COMPARISON_MEMBERS
-    ):
-        if not result.execution_mode.isin(("continuous", "independent_segments")).all():
-            raise ValueError("statistics_execution_mode_invalid")
-        if result.candidate_id.str.strip().eq("").any():
-            raise ValueError("statistics_candidate_id_invalid")
-        if member == "crypto_portfolio_coverage.parquet":
-            keys = ("candidate_id", "execution_mode", "start_at", "stop_at", "kind")
-            covered = result.kind.eq("covered")
-            if (
-                not result.kind.isin(("covered", "missing")).all()
-                or not result.start_at.lt(result.stop_at).all()
-                or result.loc[covered, "reason"].ne("").any()
-                or result.loc[~covered, "reason"].str.strip().eq("").any()
-            ):
-                raise ValueError("statistics_coverage_invalid")
-        else:
-            aggregate = result.episode_id.eq("all")
-            continuous = result.execution_mode.eq("continuous")
-            valid_episode = result.episode_id.str.fullmatch(r"[0-9]+_[0-9]+")
-            if (
-                ~aggregate & continuous & ~result.episode_id.eq("continuous")
-                | ~aggregate & ~continuous & ~valid_episode
-            ).any():
-                raise ValueError("statistics_episode_id_invalid")
-            aggregate_metrics = {
-                "crypto_portfolio_statistics.parquet": (
-                    "covered_seconds",
-                    "missing_seconds",
-                    "coverage_fraction",
-                    "episode_count",
-                    "truncated_episode_count",
-                    "fees",
-                    "funding",
-                    "turnover",
-                    "fill_events",
-                    "fill_quantity",
-                    "known_prefix_fees",
-                    "known_prefix_turnover",
-                    "known_prefix_fill_events",
-                    "known_prefix_fill_quantity",
-                ),
-                "crypto_execution_diagnostics.parquet": (
-                    "funding_required_decisions",
-                    "funding_covered_decisions",
-                    "funding_decision_coverage",
-                    "funding_selection_status",
-                ),
-            }
-            if aggregate.any() and (
-                member not in aggregate_metrics
-                or not result.loc[aggregate, "metric_id"]
-                .isin(aggregate_metrics[member])
-                .all()
-            ):
-                raise ValueError("statistics_cross_episode_metric_invalid")
-            suffix = {
-                "crypto_portfolio_intervals.parquet": ("kind", "start_at", "end_at"),
-                "crypto_portfolio_daily.parquet": ("fold_id", "start_at", "end_at"),
-                "crypto_portfolio_statistics.parquet": ("metric_id",),
-                "crypto_execution_diagnostics.parquet": ("metric_id",),
-                "crypto_cost_sensitivity.parquet": ("fee_bps", "additional_spread_bps"),
-            }[member]
-            keys = ("candidate_id", "execution_mode", "episode_id", *suffix)
-        if result.duplicated(list(keys)).any():
-            raise ValueError("statistics_table_duplicate_keys")
     if member in STATISTICS_TABLE_GROUPS["portfolio"] and member not in (
         "portfolio_group_comparison.parquet",
         *_COMPARISON_MEMBERS,

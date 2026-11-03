@@ -142,8 +142,11 @@ BENCHMARK_WEIGHTS_COLUMNS = (
 
 
 def processed_catalog() -> ProcessedDataCatalog:
+    from quant_research_platform.research.protocols.a_share_hft import processed_specs
+
     return ProcessedDataCatalog(
         (
+            *processed_specs(),
             _spec(
                 MARKET_PANEL_ID,
                 ProcessedDataKind.PANEL,

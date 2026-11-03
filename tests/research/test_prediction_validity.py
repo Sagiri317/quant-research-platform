@@ -19,8 +19,6 @@ from tests.research.direct_model_test_support import fit_frame, predict_frame
 @pytest.mark.parametrize(
     "algorithm,input_column",
     [
-        ("equal_weight_rank_ensemble", "x"),
-        ("equal_weight_rank_ensemble", "feature_x"),
         ("linear_regression", "feature_x"),
         ("linear_regression", "feature_missing_x"),
         ("linear_regression", "x"),
@@ -93,11 +91,8 @@ def test_transform_prediction_publication_keeps_real_domain(
     "algorithm,impute,groups",
     [
         ("linear_regression", True, ("processed", "pre_neutral")),
-        ("decision_tree_regressor", False, ("processed", "pre_neutral")),
         ("linear_regression", False, ("missing", "observed")),
-        ("equal_weight_rank_ensemble", True, ("processed", "pre_neutral")),
         ("linear_regression", True, ("pre_neutral", "pre_neutral")),
-        ("equal_weight_rank_ensemble", False, ("raw", "raw")),
         ("linear_regression", False, ("processed", "pre_neutral", "raw")),
     ],
 )
@@ -233,7 +228,7 @@ def test_mixed_feature_families_keep_structural_failure_out_of_models(
     ]
     assert fitted.metadata["rows_after_input_label_dropna"] == len(expected)
     assert fitted.metadata["input_columns"] == [*factors, *features]
-    if algorithm == "decision_tree_regressor":
+    if algorithm == "xgboost_regressor":
         assert fitted.prediction_model.scaler.native_missing
     elif algorithm == "linear_regression" and f"feature_{x}" in inputs:
         index = fitted.metadata["input_columns"].index(f"feature_{x}")
@@ -337,9 +332,7 @@ def test_identity_features_keep_ordinary_missing_dates(
         ModelSpec(
             model_id="identity",
             model_algorithm=(
-                "decision_tree_regressor"
-                if identity and not impute
-                else "linear_regression"
+                "xgboost_regressor" if identity and not impute else "linear_regression"
             ),
             input_factor_columns=("y",),
             input_feature_columns=(column,),

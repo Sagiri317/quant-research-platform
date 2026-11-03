@@ -75,7 +75,7 @@ def test_metadata_rejected_before_publish_and_after_read(tmp_path, field, value)
 @pytest.mark.parametrize("key", ["Authorization", "auth", "private_key"])
 def test_manifest_rejects_credentials(key):
     metadata = make_price_volume_prediction_output_frame().attrs["prediction_metadata"]
-    metadata["model_facts"]["model"]["model_algorithm"] = "ridge_regression"
+    metadata["model_facts"]["model"]["model_algorithm"] = "lasso_regression"
     metadata["model_facts"]["model"]["hyperparameters"][key] = "secret-value"
     metadata["model_facts"]["candidate_parameters"][key] = "secret-value"
     with pytest.raises(ValueError, match="output_manifest_metadata_invalid"):

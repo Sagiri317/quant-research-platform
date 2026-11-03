@@ -17,8 +17,6 @@ class ImportEdge:
 def is_ids_contract_import(module: str) -> bool:
     owners = (
         "quant_research_platform.markets.implementations.a_share.ids",
-        "quant_research_platform.markets.implementations.crypto.ids",
-        "quant_research_platform.sources.binance.ids",
         "quant_research_platform.sources.choice.ids",
         "quant_research_platform.sources.csmar.ids",
     )

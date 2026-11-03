@@ -36,7 +36,6 @@ from quant_research_platform.contracts.validation import (
     strict_timestamp_series,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.research.models.rank_ensemble import _label_predictions
 from quant_research_platform.runtime.dataframes import iter_complete_time_frames
 from quant_research_platform.storage.datasets.reading import (
     _dataset_input_options,
@@ -132,7 +131,6 @@ def evaluate_model_trial_metrics_from_chunks(
     label_column: str,
     prediction_column: str,
     validation_axis: EvaluationAxis = "cross_sectional",
-    label_calibration: tuple[float, float] | None = None,
     label_prediction_column: str | None = None,
 ) -> dict[str, object]:
     """Evaluate time-ordered chunks, including timestamps split across chunks."""
@@ -179,7 +177,7 @@ def evaluate_model_trial_metrics_from_chunks(
             values["economic"] = (
                 frame[label_prediction_column].to_numpy(dtype="float64")
                 if label_prediction_column is not None
-                else _label_predictions(values["prediction"], label_calibration)
+                else values["prediction"].to_numpy(dtype="float64")
             )
             if validation_axis == "single_asset_time_series":
                 assets = frame["asset_id"]
@@ -530,9 +528,6 @@ def score(config):
             predictions = predictions.set_index(["timestamp", "asset_id"])
             joined = predictions.loc[predictions.index.isin(labels.index)]
             del predictions, actual_keys
-            calibration = model_metadata.get("rank_parameters", {}).get(
-                "label_calibration"
-            )
             reason = _prediction_loss_reason(
                 facts,
                 target,
@@ -542,9 +537,7 @@ def score(config):
             )
             mse_reason = mse_reason or reason
             joined["prediction_label_value"] = (
-                _label_predictions(joined.prediction_score, calibration)
-                if reason is None
-                else np.nan
+                joined.prediction_score if reason is None else np.nan
             )
             pieces.append(joined)
             training_windows.extend(facts["fit_windows"])

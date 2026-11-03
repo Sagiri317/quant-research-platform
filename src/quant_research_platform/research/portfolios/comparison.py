@@ -34,8 +34,6 @@ COMPARISON_TABLES = (
 )
 IDENTITY_COLUMNS = (
     "candidate_id",
-    "execution_mode",
-    "episode_id",
     "fold_id",
     "reference_id",
     "reference_kind",
@@ -427,7 +425,7 @@ def comparison_tables(
         },
         "risk_free_facts": None if rf is None else rf[1],
         "exposure_hypothesis_family": (
-            "all_declared_candidate_reference_episode_fold_intercepts_and_betas"
+            "all_declared_candidate_reference_fold_intercepts_and_betas"
         ),
         "exposure_fdr_method": "BY",
         "annualization": "complete_daily_axis_only",
@@ -446,8 +444,6 @@ def comparison_tables(
     records = {name: [] for name in COMPARISON_TABLES}
     group_columns = [
         "candidate_id",
-        "execution_mode",
-        "episode_id",
         "fold_id",
         "sample_role",
     ]

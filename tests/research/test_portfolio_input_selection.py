@@ -707,7 +707,7 @@ def test_stage_configuration_rejects_non_json_types_before_opening_inputs(
         "corporate_actions",
     ],
 )
-@pytest.mark.parametrize("market", [None, "a_share", "crypto"])
+@pytest.mark.parametrize("market", [None, "a_share", "other_market"])
 def test_public_portfolio_respects_explicit_input_market(tmp_path, name, market):
     from quant_research_platform.artifacts.portfolio_ledger import (
         read_portfolio_ledger_artifact,
@@ -729,7 +729,7 @@ def test_public_portfolio_respects_explicit_input_market(tmp_path, name, market)
         ),
         market=market,
     )
-    if market == "crypto":
+    if market == "other_market":
         with pytest.raises(ValueError, match="^input_market_mismatch$"):
             production.backtest(config)
     else:
@@ -737,7 +737,7 @@ def test_public_portfolio_respects_explicit_input_market(tmp_path, name, market)
         assert len(list(ledger.iter_chunks())) == 3
 
 
-@pytest.mark.parametrize("market", [None, "a_share", "crypto"])
+@pytest.mark.parametrize("market", [None, "a_share", "other_market"])
 def test_risk_context_checks_only_consumed_declared_market(tmp_path, market):
     from contextlib import ExitStack
 
@@ -763,7 +763,7 @@ def test_risk_context_checks_only_consumed_declared_market(tmp_path, market):
     root = tmp_path / "risk"
     write_dataset(root, frame, spec=spec)
     with ExitStack() as channels:
-        if market == "crypto":
+        if market == "other_market":
             with pytest.raises(ValueError, match="^input_market_mismatch$"):
                 production._risk_context_input_sessions(
                     roots=(root,),
@@ -795,7 +795,7 @@ def test_risk_context_checks_only_consumed_declared_market(tmp_path, market):
         )
 
 
-@pytest.mark.parametrize("market", [None, "a_share", "crypto"])
+@pytest.mark.parametrize("market", [None, "a_share", "other_market"])
 def test_benchmark_consumption_respects_declared_market(tmp_path, market):
     from quant_research_platform.contracts.data import ProcessedDataSpec
     from quant_research_platform.storage.datasets import write_dataset
@@ -831,14 +831,14 @@ def test_benchmark_consumption_respects_declared_market(tmp_path, market):
     weights = production._iter_benchmark_weights(
         root, "index", pd.DatetimeIndex(["2023-01-02"])
     )
-    if market == "crypto":
+    if market == "other_market":
         with pytest.raises(ValueError, match="^input_market_mismatch$"):
             list(weights)
     else:
         assert [row.to_dict() for row in weights] == [{"a": 1.0}]
 
 
-@pytest.mark.parametrize("market", [None, "a_share", "crypto"])
+@pytest.mark.parametrize("market", [None, "a_share", "other_market"])
 def test_equity_event_consumption_respects_declared_market(tmp_path, market):
     from tests.research.test_portfolio_missing_predictions import _replace_public_input
     from tests.sources.reference.test_equity_events import native_equity_inputs
@@ -860,7 +860,7 @@ def test_equity_event_consumption_respects_declared_market(tmp_path, market):
         calendar=calendar,
         time_window=TimeWindow("2022-12-30", "2023-01-06"),
     )
-    if market == "crypto":
+    if market == "other_market":
         with pytest.raises(ValueError, match="^input_market_mismatch$"):
             list(views)
     else:

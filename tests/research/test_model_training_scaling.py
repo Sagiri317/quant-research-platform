@@ -15,14 +15,8 @@ from tests.research.direct_model_test_support import fit_frame
 
 ALGORITHMS = (
     "linear_regression",
-    "ridge_regression",
     "lasso_regression",
-    "huber_regression",
-    "decision_tree_regressor",
-    "random_forest_regressor",
-    "gradient_boosting_regressor",
     "xgboost_regressor",
-    "lightgbm_regressor",
 )
 
 
@@ -42,21 +36,11 @@ def _frame():
 
 
 def _spec(algorithm, choice=None):
-    parameters = {}
-    if algorithm == "huber_regression":
-        parameters["max_iter"] = 1000
-    if algorithm in ALGORITHMS[4:]:
-        parameters["max_depth"] = 2
-    if algorithm in ALGORITHMS[5:]:
-        parameters["n_estimators"] = 4
-    if algorithm in {
-        "random_forest_regressor",
-        "xgboost_regressor",
-        "lightgbm_regressor",
-    }:
-        parameters["n_jobs"] = 1
-    if algorithm == "lightgbm_regressor":
-        parameters.update(min_child_samples=1, verbosity=-1)
+    parameters = (
+        {"n_jobs": 1, "n_estimators": 4, "max_depth": 2}
+        if algorithm == "xgboost_regressor"
+        else {}
+    )
     return ModelSpec(
         model_id=algorithm,
         model_algorithm=algorithm,
@@ -88,7 +72,7 @@ def _expected(data, native, scaling):
 @pytest.mark.parametrize(
     "algorithm,choice",
     [(algorithm, None) for algorithm in ALGORITHMS]
-    + [(algorithm, algorithm not in ALGORITHMS[:4]) for algorithm in ALGORITHMS],
+    + [(algorithm, algorithm not in ALGORITHMS[:2]) for algorithm in ALGORITHMS],
 )
 def test_actual_estimator_inputs_and_native_roundtrip(
     tmp_path, monkeypatch, algorithm, choice
@@ -96,12 +80,9 @@ def test_actual_estimator_inputs_and_native_roundtrip(
     spec = _spec(algorithm, choice)
     data = _frame().astype({"x": "Int64", "z": "Float64"})
     original_data = data.copy(deep=True)
-    expected_scaling = algorithm in ALGORITHMS[:4] if choice is None else choice
+    expected_scaling = algorithm in ALGORITHMS[:2] if choice is None else choice
     native = algorithm in {
-        "decision_tree_regressor",
-        "random_forest_regressor",
         "xgboost_regressor",
-        "lightgbm_regressor",
     }
     expected = _expected(data, native, expected_scaling)
     captured = []
@@ -164,7 +145,7 @@ def test_scaling_independent_of_missingness_and_all_missing_columns():
     for scaling in (False, True):
         native = _collect_training_frame(
             [data],
-            _spec("decision_tree_regressor", scaling),
+            _spec("xgboost_regressor", scaling),
             fitting_cutoff="2024-01-03",
         )
         matrix = native.preprocessing[2]
@@ -173,7 +154,7 @@ def test_scaling_independent_of_missingness_and_all_missing_columns():
         with pytest.raises(ValueError, match="model_training_feature_all_missing"):
             _ = _collect_training_frame(
                 [data],
-                _spec("gradient_boosting_regressor", scaling),
+                _spec("lasso_regression", scaling),
                 fitting_cutoff="2024-01-03",
             ).preprocessing
 
@@ -181,22 +162,10 @@ def test_scaling_independent_of_missingness_and_all_missing_columns():
 @pytest.mark.parametrize("value", [0, 1, "true", []])
 def test_scaling_flag_is_strict_boolean(value):
     with pytest.raises((ValueError, TypeError), match="training_scaling"):
-        replace(_spec("ridge_regression"), training_scaling=value)
+        replace(_spec("lasso_regression"), training_scaling=value)
 
 
-def test_rank_keeps_own_rules():
-    spec = ModelSpec(
-        model_id="rank",
-        model_algorithm="equal_weight_rank_ensemble",
-        input_factor_columns=("x",),
-        target_column="label",
-    )
-    assert spec.training_scaling is False
-    with pytest.raises(ValueError, match="training_scaling"):
-        replace(spec, training_scaling=True)
-
-
-@pytest.mark.parametrize("algorithm", ALGORITHMS[:4])
+@pytest.mark.parametrize("algorithm", ALGORITHMS[:2])
 def test_unscaled_coefficients_do_not_sum_mixed_units(tmp_path, algorithm):
     case = fit_frame(tmp_path / "fit", _frame(), _spec(algorithm, False))
     predictor = case.result.prediction_model
@@ -239,7 +208,7 @@ def test_unscaled_coefficients_do_not_sum_mixed_units(tmp_path, algorithm):
     assert tables["predictions"].status.eq("DEFINED").all()
 
 
-@pytest.mark.parametrize("algorithm", ALGORITHMS[4:6] + ALGORITHMS[7:])
+@pytest.mark.parametrize("algorithm", ("xgboost_regressor",))
 @pytest.mark.parametrize("scaling", [False, True])
 def test_native_all_missing_column_scaling_roundtrip(tmp_path, algorithm, scaling):
     data = _frame().assign(z=np.nan)
@@ -259,9 +228,7 @@ def test_native_all_missing_column_scaling_roundtrip(tmp_path, algorithm, scalin
     assert np.isfinite(scores[[1, 3, 4]]).all()
 
 
-@pytest.mark.parametrize(
-    "algorithm", ["ridge_regression", "gradient_boosting_regressor"]
-)
+@pytest.mark.parametrize("algorithm", ["lasso_regression", "xgboost_regressor"])
 @pytest.mark.parametrize("choice", [None, False, True])
 def test_cli_json_uses_same_resolved_scaling(tmp_path, algorithm, choice):
     import json
@@ -289,7 +256,7 @@ def test_cli_json_uses_same_resolved_scaling(tmp_path, algorithm, choice):
         == case.result.prediction_model.scaler.to_payload()
     )
     assert facts["model"]["training_scaling"] == case.facts["model"].get(
-        "training_scaling", algorithm == "ridge_regression"
+        "training_scaling", algorithm == "lasso_regression"
     )
     np.testing.assert_allclose(
         result.prediction_model.predict(_frame()[["x", "z"]]),

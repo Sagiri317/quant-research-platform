@@ -63,6 +63,19 @@ def test_strict_writer_is_deterministic_and_rejects_non_json_values() -> None:
         render_qrp_json_object({"schema_id": "x", "value": (1, 2)})
 
 
+def test_string_subclasses_preserve_json_content_and_identity():
+    class Version(str):
+        pass
+
+    payload = {Version("version"): Version("2.12.0+cu130")}
+    assert parse_qrp_json_object(render_qrp_json_object(payload).encode()) == {
+        "version": "2.12.0+cu130"
+    }
+    assert canonical_identity_bytes(payload) == canonical_identity_bytes(
+        {"version": "2.12.0+cu130"}
+    )
+
+
 def test_typed_canonical_identity_keeps_types_distinct() -> None:
     timestamp = pd.Timestamp("2026-01-01", tz="UTC")
     values = (

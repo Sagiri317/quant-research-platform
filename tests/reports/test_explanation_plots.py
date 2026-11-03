@@ -35,8 +35,8 @@ def explanation_fixture(root, *, native_only=False, undefined=False):
     metadata = {
         "kind": "MODEL_EXPLANATION",
         "model": "frozen-model",
-        "model_id": "analytical-rank",
-        "model_algorithm": "equal_weight_rank_ensemble",
+        "model_id": "analytical-linear",
+        "model_algorithm": "linear_regression",
         "input_columns": features,
         "input_units": dict.fromkeys(features, "dimensionless"),
         "target_column": "future_rank_label",
@@ -49,7 +49,7 @@ def explanation_fixture(root, *, native_only=False, undefined=False):
                 "feature": features,
                 "value": [0.5, 0.3, 0.2, None],
                 "signed_value": [0.5, -0.3, 0.2, None],
-                "kind": ["absolute_rank_weight"] * 4,
+                "kind": ["absolute_standardized_coefficient"] * 4,
                 "unit": ["dimensionless"] * 4,
                 "status": ["DEFINED"] * 3 + ["NOT_APPLICABLE"],
                 "reason": [""] * 3 + ["excluded_at_fit"],
@@ -58,17 +58,17 @@ def explanation_fixture(root, *, native_only=False, undefined=False):
     }
     if not native_only:
         metadata.update(
-            methods=["native_importance", "rank"],
+            methods=["native_importance", "affine"],
             sample_role="test",
             output_space="model_output",
             unit="dimensionless_rank_score",
             attribution={
-                "method": "rank",
-                "baseline": "zero_centered_cross_section_rank",
+                "method": "affine",
+                "baseline": "training_scaled_zero",
                 "implementation": "qrp",
                 "background": {"kind": "none"},
                 "additivity_relative_tolerance": attribution_relative_tolerance(
-                    "rank", len(features)
+                    "affine", len(features)
                 ),
             },
             aggregation="equal_timestamp_means",

@@ -24,10 +24,6 @@ from quant_research_platform.research.features.transforms import (
 from quant_research_platform.research.labels.forward_returns import (
     add_forward_return_labels,
 )
-from quant_research_platform.research.models.rank_ensemble import (
-    EqualWeightRankEnsembleFactory,
-    ICWeightedRankEnsembleFactory,
-)
 from quant_research_platform.research.models.scaler import (
     equal_timestamp_sample_weights,
 )
@@ -35,7 +31,7 @@ from quant_research_platform.research.portfolios.risk import (
     FactorRiskConfig,
     FactorRiskState,
 )
-from quant_research_platform.research.protocols import a_share, crypto_hft
+from quant_research_platform.research.protocols import a_share
 from quant_research_platform.research.statistics import (
     cscv_pbo,
     probabilistic_and_deflated_sharpe,
@@ -191,27 +187,6 @@ def test_equal_timestamp_decay_is_one_frozen_model_contract():
         model_spec_payload(decayed)
     )
     assert model_spec_payload(decayed)["training_weighting"]["half_life_periods"] == 756
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(
-                np.repeat(pd.date_range("2020-01-01", periods=3), 3)
-            ),
-            "x": [1.0, 2.0, 3.0] * 3,
-            "y": [-1.0, -2.0, -3.0] * 2 + [1.0, 2.0, 3.0],
-        }
-    )
-    weights = equal_timestamp_sample_weights(
-        frame.timestamp,
-        weighting,
-        trading_sessions=pd.date_range(frame.timestamp.min(), frame.timestamp.max()),
-    )
-    for factory in (EqualWeightRankEnsembleFactory, ICWeightedRankEnsembleFactory):
-        plain = factory(("x",), "y").fit(frame, frame.y.to_numpy())
-        decayed = factory(("x",), "y").fit(
-            frame, frame.y.to_numpy(), sample_weight=weights
-        )
-        assert plain.predict(frame)[0] > 0
-        assert decayed.predict(frame)[0] < 0
 
 
 def test_canonical_pipeline_is_executable_without_a_scenario_bypass():
@@ -236,28 +211,22 @@ def test_canonical_pipeline_is_executable_without_a_scenario_bypass():
     )
 
 
-def test_crypto_labels_have_one_horizon_and_maturity_catalog():
-    from quant_research_platform.markets.implementations.crypto.ids import (
-        HFT_LABEL_DATA_ID,
+def test_hft_labels_and_profile_share_one_maturity_catalog():
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        catalog as processed,
     )
-    from quant_research_platform.markets.implementations.crypto.processed import (
-        catalog as processed_catalog,
-    )
-
-    catalog = crypto_hft.label_catalog()
-    assert len(catalog.list()) == 9
     from quant_research_platform.profiles.research import research_profile
+    from quant_research_platform.research.protocols import a_share_hft
 
-    profile = research_profile("crypto_binance_hft")
-    assert profile.labels.list() == catalog.list()
-    spec = processed_catalog.hft_processed_catalog().get(HFT_LABEL_DATA_ID)
-    assert json.loads(spec.parameters_json)["labels"] == [
-        item.to_manifest() for item in catalog.list()
-    ]
+    catalog = a_share_hft.label_catalog()
+    assert research_profile("a_share_level2").labels.list() == catalog.list()
+    spec = processed.processed_catalog().get("hft_labels")
     for item in catalog.list():
         assert item.horizon_unit == "milliseconds"
-        assert crypto_hft.label_horizon_ms(item.output_column) == item.horizon
-        assert item.available_at_column in spec.required_columns
+        assert (
+            spec.label_availability_columns[item.output_column]
+            == item.available_at_column
+        )
     assert all(
         item.horizon_unit == "market_sessions"
         for item in a_share.label_catalog().list()
@@ -294,7 +263,7 @@ def test_prepared_training_rows_are_exact_and_cutoff_scoped():
         }
     )
 
-    for algorithm in ("linear_regression", "ridge_regression"):
+    for algorithm in ("linear_regression",):
         model = ModelSpec(
             model_id=algorithm,
             model_algorithm=algorithm,

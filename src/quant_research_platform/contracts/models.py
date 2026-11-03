@@ -43,29 +43,15 @@ class _ModelAlgorithmFacts:
     """Capability facts only; research parameters belong to a protocol."""
 
     dependency_package: str | None = None
-    input_kind: str = "feature_inputs"
     parallel: bool = False
 
 
 _MODEL_ALGORITHM_FACTS = {
     "linear_regression": _ModelAlgorithmFacts(),
-    "ridge_regression": _ModelAlgorithmFacts("sklearn"),
     "lasso_regression": _ModelAlgorithmFacts("sklearn"),
-    "huber_regression": _ModelAlgorithmFacts("sklearn"),
-    "decision_tree_regressor": _ModelAlgorithmFacts("sklearn"),
-    "random_forest_regressor": _ModelAlgorithmFacts(
-        "sklearn",
-        parallel=True,
-    ),
-    "gradient_boosting_regressor": _ModelAlgorithmFacts("sklearn"),
     "xgboost_regressor": _ModelAlgorithmFacts("xgboost", parallel=True),
-    "lightgbm_regressor": _ModelAlgorithmFacts("lightgbm", parallel=True),
-    "equal_weight_rank_ensemble": _ModelAlgorithmFacts(
-        input_kind="rank_ensemble_inputs",
-    ),
-    "ic_weighted_rank_ensemble": _ModelAlgorithmFacts(
-        input_kind="rank_ensemble_inputs",
-    ),
+    "lstm_regressor": _ModelAlgorithmFacts("torch"),
+    "transformer_regressor": _ModelAlgorithmFacts("torch"),
 }
 MODEL_SELECTION_METRIC_DIRECTIONS = {
     "validation_ic": "maximize",
@@ -76,6 +62,49 @@ _PARALLEL_MODEL_ALGORITHMS = frozenset(
     algorithm for algorithm, facts in _MODEL_ALGORITHM_FACTS.items() if facts.parallel
 )
 DEFAULT_MODEL_THREAD_COUNT = -1
+
+
+def sequence_parameters(algorithm, parameters):
+    defaults = {
+        "sequence_length": 20,
+        "hidden_size": 32,
+        "num_layers": 1,
+        "batch_size": 256,
+        "epochs": 10,
+        "learning_rate": 0.001,
+        "dropout": 0.0,
+        "device": "cuda",
+    }
+    if algorithm == "transformer_regressor":
+        defaults["n_heads"] = 4
+    if set(parameters) - set(defaults):
+        raise ValueError("sequence_parameters_unknown")
+    defaults.update(parameters)
+    for name in (
+        "sequence_length",
+        "hidden_size",
+        "num_layers",
+        "batch_size",
+        "epochs",
+    ):
+        if type(defaults[name]) is not int or defaults[name] < 1:
+            raise ValueError(f"sequence_parameter_invalid: {name}")
+    for name in ("learning_rate", "dropout"):
+        value = defaults[name]
+        if type(value) not in (int, float) or not np.isfinite(value):
+            raise ValueError(f"sequence_parameter_invalid: {name}")
+    if defaults["learning_rate"] <= 0 or not 0 <= defaults["dropout"] < 1:
+        raise ValueError("sequence_optimizer_parameters_invalid")
+    device = defaults["device"]
+    if type(device) is not str or not (
+        device == "cuda" or device.startswith("cuda:") and device[5:].isdigit()
+    ):
+        raise ValueError("model_cuda_required")
+    if algorithm == "transformer_regressor":
+        heads = defaults["n_heads"]
+        if type(heads) is not int or heads < 1 or defaults["hidden_size"] % heads:
+            raise ValueError("transformer_heads_invalid")
+    return defaults
 
 
 def _model_algorithm_facts(algorithm: str) -> _ModelAlgorithmFacts:
@@ -151,6 +180,11 @@ def _resolved_model_hyperparameters_match(
         if algorithm in _PARALLEL_MODEL_ALGORITHMS:
             expected.pop("n_jobs", None)
             actual.pop("n_jobs", None)
+        if algorithm == "xgboost_regressor":
+            expected.setdefault("device", "cuda")
+            expected.setdefault("tree_method", "hist")
+        if algorithm in {"lstm_regressor", "transformer_regressor"}:
+            expected = sequence_parameters(algorithm, expected)
         return canonical_identity_bytes(actual) == canonical_identity_bytes(expected)
     except (TypeError, ValueError):
         return False
@@ -191,7 +225,6 @@ class ModelSpec:
     random_seed: int = DEFAULT_ROOT_SEED
     training_scaling: bool | None = None
     training_weighting: TrainingWeighting = field(default_factory=TrainingWeighting)
-    huber_target_scale: float = 1.0
 
     def __post_init__(self) -> None:
         hyperparameters = _freeze_model_hyperparameters(self.hyperparameters)
@@ -209,42 +242,20 @@ class ModelSpec:
             and "n_jobs" in hyperparameters
         ):
             jobs = hyperparameters["n_jobs"]
-            if jobs is not None and (
-                type(jobs) is not int
-                or (jobs == 0 and self.model_algorithm == "random_forest_regressor")
-            ):
+            if jobs is not None and type(jobs) is not int:
                 raise ValueError("invalid_model_thread_count")
         scaling = self.training_scaling
         if scaling is None:
             scaling = self.model_algorithm in {
                 "linear_regression",
-                "ridge_regression",
                 "lasso_regression",
-                "huber_regression",
+                "lstm_regressor",
+                "transformer_regressor",
             }
         if type(scaling) is not bool:
             raise ValueError("model_training_scaling_invalid")
-        if scaling and self.model_algorithm in {
-            "equal_weight_rank_ensemble",
-            "ic_weighted_rank_ensemble",
-        }:
-            raise ValueError("rank_model_training_scaling_not_supported")
         object.__setattr__(self, "training_scaling", scaling)
-        if (
-            type(self.huber_target_scale) not in {int, float}
-            or not isfinite(self.huber_target_scale)
-            or self.huber_target_scale <= 0
-            or (
-                self.huber_target_scale != 1.0
-                and self.model_algorithm != "huber_regression"
-            )
-        ):
-            raise ValueError("model_huber_target_scale_invalid")
-        if hyperparameters and self.model_algorithm in {
-            "linear_regression",
-            "equal_weight_rank_ensemble",
-            "ic_weighted_rank_ensemble",
-        }:
+        if hyperparameters and self.model_algorithm == "linear_regression":
             raise ValueError("model_hyperparameters_not_supported")
         validate_sample_filter_mode(self.sample_filter_mode, owner="model")
         _validate_column_tuple(
@@ -279,17 +290,25 @@ class ModelSpec:
         ):
             raise ValueError("model_random_seed_conflicts_with_random_state")
         object.__setattr__(self, "hyperparameters", hyperparameters)
+        if self.model_algorithm == "xgboost_regressor":
+            device = hyperparameters.get("device", "cuda")
+            if type(device) is not str or not (
+                device == "cuda" or device.startswith("cuda:") and device[5:].isdigit()
+            ):
+                raise ValueError("model_cuda_required")
+            if hyperparameters.get("tree_method", "hist") != "hist":
+                raise ValueError("xgboost_cuda_hist_required")
+        if self.model_algorithm in {"lstm_regressor", "transformer_regressor"}:
+            sequence_parameters(
+                self.model_algorithm, _thaw_model_hyperparameters(hyperparameters)
+            )
 
     @property
     def input_columns(self) -> tuple[str, ...]:
         return (*self.input_factor_columns, *self.input_feature_columns)
 
 
-def validate_model_metadata_core(
-    value: object,
-    *,
-    rank_calibration: bool = False,
-) -> dict[str, object]:
+def validate_model_metadata_core(value: object) -> dict[str, object]:
     """Validate the shared persisted model metadata contract."""
 
     if type(value) is not dict:
@@ -344,9 +363,7 @@ def validate_model_metadata_core(
     allowed = required | {
         "feature_importance",
         "feature_importance_status",
-        "rank_parameters",
         "training_target_mean",
-        "huber_target_scale",
     }
     if set(metadata).difference(allowed):
         raise ValueError("invalid_model_metadata")
@@ -444,7 +461,6 @@ def validate_model_metadata_core(
             random_seed=metadata["random_seed"],
             training_weighting=metadata["training_weighting"],
             training_scaling=metadata["training_scaling"],
-            huber_target_scale=metadata.get("huber_target_scale", 1.0),
         )
     except (TypeError, ValueError) as exc:
         raise ValueError("invalid_model_metadata") from exc
@@ -527,10 +543,6 @@ def validate_model_metadata_core(
             or any(value != 1 for value in scaler["weighted_population_scale"])
         ):
             raise ValueError("invalid_model_metadata")
-    rank_algorithms = {
-        "equal_weight_rank_ensemble",
-        "ic_weighted_rank_ensemble",
-    }
     feature_keys = {
         key
         for key in ("feature_importance", "feature_importance_status")
@@ -543,13 +555,7 @@ def validate_model_metadata_core(
         if (
             type(importance) is not dict
             or not importance
-            or (
-                not set(importance).issubset(metadata["input_columns"])
-                or (
-                    metadata["model_algorithm"] not in rank_algorithms
-                    and set(importance) != set(metadata["input_columns"])
-                )
-            )
+            or set(importance) != set(metadata["input_columns"])
             or any(
                 type(value) not in {int, float} or not np.isfinite(float(value))
                 for value in importance.values()
@@ -562,51 +568,6 @@ def validate_model_metadata_core(
             or not metadata["feature_importance_status"]
         ):
             raise ValueError("invalid_model_metadata")
-    rank_parameters = metadata.get("rank_parameters")
-    if metadata["model_algorithm"] in rank_algorithms:
-        expected = (
-            {"columns", "directions"}
-            if metadata["model_algorithm"] == "equal_weight_rank_ensemble"
-            else {"columns", "weights"}
-        )
-        if rank_calibration:
-            expected.add("label_calibration")
-        if type(rank_parameters) is not dict or set(rank_parameters) != expected:
-            raise ValueError("invalid_model_metadata")
-        if rank_calibration:
-            calibration = rank_parameters["label_calibration"]
-            if (
-                type(calibration) is not list
-                or len(calibration) != 2
-                or any(
-                    type(value) not in {int, float} or not np.isfinite(value)
-                    for value in calibration
-                )
-            ):
-                raise ValueError("invalid_model_metadata")
-        rank_columns = rank_parameters["columns"]
-        if (
-            type(rank_columns) is not list
-            or not rank_columns
-            or len(set(rank_columns)) != len(rank_columns)
-            or not set(rank_columns).issubset(metadata["input_columns"])
-            or (
-                metadata["model_algorithm"] == "equal_weight_rank_ensemble"
-                and rank_columns != metadata["input_columns"]
-            )
-        ):
-            raise ValueError("invalid_model_metadata")
-        value_key = "directions" if "directions" in expected else "weights"
-        values = rank_parameters[value_key]
-        if type(values) is not list or len(values) != len(rank_columns):
-            raise ValueError("invalid_model_metadata")
-        if any(
-            type(item) not in {int, float} or not np.isfinite(float(item))
-            for item in values
-        ):
-            raise ValueError("invalid_model_metadata")
-    elif rank_parameters is not None:
-        raise ValueError("invalid_model_metadata")
     return metadata
 
 
@@ -756,11 +717,6 @@ def model_spec_payload(spec: object) -> dict[str, object]:
         "random_seed": spec.random_seed,
         "training_weighting": spec.training_weighting.payload(),
         "training_scaling": spec.training_scaling,
-        **(
-            {"huber_target_scale": spec.huber_target_scale}
-            if spec.huber_target_scale != 1.0
-            else {}
-        ),
     }
 
 
@@ -798,23 +754,18 @@ def _fit_windows(values, cutoff):
 
 def _resolve_candidate_parameters(algorithm, parameters, n_train):
     values = dict(parameters)
-    for name, target, algorithms in (
-        ("regularization_strength", "alpha", {"ridge_regression", "huber_regression"}),
-        ("min_child_weight_fraction", "min_child_weight", {"xgboost_regressor"}),
-    ):
-        if name not in values:
-            continue
-        value = values.pop(name)
+    if "min_child_weight_fraction" in values:
+        value = values.pop("min_child_weight_fraction")
         if (
-            algorithm not in algorithms
-            or target in values
+            algorithm != "xgboost_regressor"
+            or "min_child_weight" in values
             or type(value) not in {int, float}
             or not np.isfinite(value)
             or value < 0
         ):
             raise ValueError("model_sample_scaled_parameters_invalid")
-        values[target] = n_train * value
-        if not np.isfinite(values[target]):
+        values["min_child_weight"] = n_train * value
+        if not np.isfinite(values["min_child_weight"]):
             raise ValueError("model_sample_scaled_parameters_unrepresentable")
     return values
 
@@ -900,7 +851,6 @@ def validate_model_facts(facts, metadata=None, *, expected=None):
                 raise ValueError("model_facts_metadata_mismatch")
         if (
             spec.training_weighting.payload() != metadata["training_weighting"]
-            or spec.huber_target_scale != metadata.get("huber_target_scale", 1.0)
             or list(spec.input_columns) != metadata["input_columns"]
         ):
             raise ValueError("model_facts_metadata_mismatch")

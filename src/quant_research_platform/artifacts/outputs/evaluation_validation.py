@@ -316,8 +316,7 @@ def validate_evaluation_output_metadata_shape(
             signals=signals,
         )
         if (
-            metadata["market_id"] != "crypto"
-            or metadata["evaluation_axis"] != "single_asset_time_series"
+            metadata["evaluation_axis"] != "single_asset_time_series"
             or metadata["sample_scope"] != "own"
             or metadata["strata"]
             or any(signal.transform != "identity" for signal in signals)

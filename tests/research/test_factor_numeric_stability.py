@@ -320,10 +320,7 @@ def test_signed_rolling_baselines_keep_zero_masks_without_erasing_small_values()
 
 
 @pytest.mark.parametrize("scale", (1e4, 1e6))
-def test_signed_amount_cancellation_persists_rank_direction(tmp_path, scale):
-    from quant_research_platform.research.models.rank_ensemble import (
-        EqualWeightRankEnsembleFactory,
-    )
+def test_signed_amount_cancellation_persists_factor_order(tmp_path, scale):
 
     dates = pd.bdate_range("2020-01-02", periods=20).as_unit("ns")
     returns = [0.01, 0.01, -0.01] + [0.0] * 17
@@ -374,20 +371,11 @@ def test_signed_amount_cancellation_persists_rank_direction(tmp_path, scale):
             saved[column], [-value, value], rtol=1e-12, atol=1e-14
         )
         assert saved[column].iloc[0] < 0.0 < saved[column].iloc[1]
-    saved["label"] = [-1.0, 1.0]
-    model = EqualWeightRankEnsembleFactory(columns, "label").fit(
-        saved, saved.label.to_numpy()
-    )
-    assert model.directions == (1.0, 1.0)
-    assert model.predict(saved)[0] < model.predict(saved)[1]
 
 
-def test_trend_efficiency_cancellation_survives_producer_persistence_and_rank_model(
+def test_trend_efficiency_cancellation_survives_producer_persistence(
     tmp_path,
 ):
-    from quant_research_platform.research.models.rank_ensemble import (
-        EqualWeightRankEnsembleFactory,
-    )
 
     dates = pd.bdate_range("2024-01-02", periods=60).as_unit("ns")
     sequences = {
@@ -428,14 +416,6 @@ def test_trend_efficiency_cancellation_survives_producer_persistence_and_rank_mo
         assert values[asset] == pytest.approx(expected, rel=1e-12, abs=1e-14)
     assert 0.0 < values["small"] < values["larger"] < values["ordinary"]
     assert values[["missing", "zero"]].isna().all()
-    training = final.loc[final.asset_id.isin(("small", "larger"))].copy()
-    training["label"] = training.asset_id.map({"small": 1.0, "larger": 2.0})
-    model = EqualWeightRankEnsembleFactory(("trend_efficiency_60d",), "label").fit(
-        training, training.label.to_numpy()
-    )
-    assert model.directions == (1.0,)
-    scores = pd.Series(model.predict(training), index=training.asset_id)
-    assert scores["small"] < scores["larger"]
 
 
 @pytest.mark.parametrize(

@@ -31,12 +31,6 @@ from quant_research_platform.research.models import fitting
 from quant_research_platform.research.models.estimators import (
     build_estimator_from_model_spec,
 )
-from quant_research_platform.research.models.rank_ensemble import (
-    ICWeightedRankEnsemble,
-    RankEnsemblePredictor,
-    _label_calibration,
-    rank_model_parameters,
-)
 from quant_research_platform.storage.atomic import reject_if_exists
 from quant_research_platform.storage.datasets.reading import (
     _dataset_input_options,
@@ -104,23 +98,6 @@ def fit_model(
     result = fitting._fit_model_result(
         prepared, spec, estimator=build_estimator_from_model_spec(spec)
     )
-    if isinstance(
-        result.prediction_model, (RankEnsemblePredictor, ICWeightedRankEnsemble)
-    ):
-        calibration = _label_calibration(
-            fitting.prediction_callable(spec.input_columns, result.prediction_model)(
-                prepared.training
-            ),
-            prepared.training[spec.target_column].to_numpy(dtype="float64"),
-            prepared.preprocessing[0],
-        )
-        # Rank stays rank. Economic consumers use this training-only calibration.
-        result.prediction_model = replace(
-            result.prediction_model, label_calibration=calibration
-        )
-        result.metadata["rank_parameters"] = rank_model_parameters(
-            result.prediction_model
-        )
     return result
 
 

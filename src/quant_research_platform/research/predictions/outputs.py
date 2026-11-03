@@ -13,8 +13,10 @@ from quant_research_platform.research.features.transforms import (
 from quant_research_platform.research.filtering import apply_filter_mode
 
 
-def prediction_rows(frame, metadata, window, *, declared_columns=()):
-    """The model's own economic prediction domain, independent of competitors."""
+def prediction_rows(
+    frame, metadata, window, *, declared_columns=(), include_context=False
+):
+    """Observed inputs; sequence context retains temporarily ineligible rows."""
     if (
         frame.loc[:, ["timestamp", "asset_id"]].isna().any(axis=None)
         or frame.duplicated(["timestamp", "asset_id"]).any()
@@ -26,11 +28,15 @@ def prediction_rows(frame, metadata, window, *, declared_columns=()):
     mask = prediction_window_mask(timestamps, window)
     scoped = frame.loc[mask].copy()
     scoped["timestamp"] = timestamps.loc[mask]
-    filtered, _ = apply_filter_mode(
-        scoped, mode=metadata["sample_filter_mode"], metadata_key="sample_filter_mode"
-    )
+    filtered = scoped
+    if not include_context:
+        filtered, _ = apply_filter_mode(
+            scoped,
+            mode=metadata["sample_filter_mode"],
+            metadata_key="sample_filter_mode",
+        )
     validity = model_input_validity_columns(
-        tuple(metadata["input_columns"]), metadata["model_algorithm"], declared_columns
+        tuple(metadata["input_columns"]), declared_columns
     )
     for column in tuple(dict.fromkeys((*metadata["input_columns"], *validity))):
         strict_finite_numeric_series(

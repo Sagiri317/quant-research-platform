@@ -1,13 +1,12 @@
 # quant-research-platform
 
-quant-research-platform 是一个本地量化研究项目，覆盖 A 股日频选股与 Binance BTC/ETH 永续合约的高频预测和回测。它把数据准备、因子构建、模型训练、样本外评价和交易核算连接起来，便于检查一项预测改善能否转化为费用后的收益。
+quant-research-platform 是一个本地量化研究项目，覆盖 A 股日频选股与 Level-2 高频预测和库存回测。它把数据准备、因子构建、模型训练、样本外评价和交易核算连接起来，便于检查一项预测改善能否转化为费用后的收益。
 
 ## 研究报告
 
 - [A 股日频量价研究](reports/A股量价研究报告.md)：6/25/52 因子、四块消融、九类模型与 PV25 组合回测。
-- [加密资产高频微观结构研究](reports/加密资产高频研究报告.md)：OFI 基线、14→29 多尺度因子、500ms 收益预测与交易验证。
 
-两篇报告介绍研究方法、主要结果和限制，附有对应的汇总数据。市场规则与计算方法见 `docs/`，操作示例见 `configs/`。供应商原始数据和本地运行目录不随仓库分发。
+报告记录历史实验的研究方法、主要结果和限制，附有对应的汇总数据。市场规则与计算方法见 `docs/`，操作示例见 `configs/`。供应商原始数据和本地运行目录不随仓库分发。
 
 ## 如何使用
 
@@ -18,20 +17,18 @@ qrp prepare-source --config configs/prepare-source.json
 qrp prepare --config configs/prepare-financial.json
 qrp assemble --config <组装配置.json>
 qrp fit --config configs/fit-a-share.json
+qrp run-quarterly --config configs/quarterly-a-share.json
+qrp backtest-hft --config configs/backtest-hft.json
 qrp predict --config configs/predict-a-share.json
 qrp explain --config configs/explain-model.json
 qrp score --config <验证评分配置.json>
 qrp select --config <候选选择配置.json>
 qrp calibrate --config <A股校准配置.json>
 qrp backtest --config <A股组合配置.json>
-qrp calibrate-crypto-maker --config <maker校准配置.json>
-qrp backtest-crypto-taker --config <taker配置.json>
-qrp backtest-crypto-maker --config <maker配置.json>
 qrp evaluate --config <评估配置.json>
 qrp statistics-model --config <模型统计配置.json>
 qrp statistics-factors --config <因子统计配置.json>
 qrp statistics-portfolio --config <A股组合统计配置.json>
-qrp statistics-crypto --config <Crypto组合统计配置.json>
 qrp plot --config configs/plot-risk.json
 qrp inspect <已发布产物目录>
 ```
@@ -50,7 +47,8 @@ model_path = fit(read_qrp_json_file("configs/fit-a-share.json")[1])
 最终拟合只使用这些窗口中、截至拟合时已成熟的样本；可以加入符合条件的新日期，但不会填平窗口间的空档。
 
 保存的模型可以加载后多次预测。预测不会重新训练，评分不会重新训练，选出模型也不会自动执行最终拟合。
-滚动向前研究（walk-forward）需要逐轮明确拟合、决策、预测和评价窗口。
+`run-quarterly` 用 `training_start` 与 `rolling_window` 按季度扩展训练并执行预测、评价，示例为 2014 起训练、2018—2023 滚动。
+若二者同日开始，首季度积累初始训练样本，从第二季度产生样本外预测；2014 年以前的原始数据只用于因子预热。
 同一日期的样本可以先用于评价，待标签成熟后再进入后续训练；窗口用途随本次操作记录。
 计算会检查拟合截止、标签成熟和校准时点。直接使用 Parquet 时，还需声明列角色、单位、主键和信息可用时间。
 
@@ -71,11 +69,14 @@ model_path = fit(read_qrp_json_file("configs/fit-a-share.json")[1])
 未选择的统计分析不会读取其专用输入；模型解释等严格接口也会拒绝用不到的选项。
 候选顺序可能决定同分时的选择，输入列顺序则决定模型接收特征的排列，不能自行排序或去重。
 
+当前模型为 OLS、LASSO、XGBoost、LSTM、Transformer；后三者要求 CUDA，不能静默降级到 CPU。
+高频数据接入、因子、标签、T+1 库存账户与使用限制见 [A 股高频](docs/a-share-hft.md)。
+
 ## 只读查询与图表
 
 ```text
 qrp catalog factors --profile a_share_csmar_choice
-qrp catalog labels --profile crypto_binance_hft
+qrp catalog labels --profile a_share_level2
 qrp catalog dataset pv_all
 ```
 
@@ -89,7 +90,6 @@ HTTP `create_app(project_root=...)` 提供 catalog、数据集要求、
 `series` 明确选择现有数值列，可展示基准、年度/月度、滚动风险、分组、暴露归因、覆盖、暂估、ON/ID及小时序列。
 `explanation_summary` 与 `explanation_waterfall` 读取已发布解释产物，不加载模型或 SHAP。
 不会从采样曲线重算正式指标。缺失值不补零，未知区间不连线，独立分段的账户结果不拼接。
-加密资产账户的负权益保持原值。图表同时标明实际窗口和样本用途。
 
 ## 常用术语
 
@@ -107,12 +107,11 @@ HTTP `create_app(project_root=...)` 提供 catalog、数据集要求、
 ## 文档与验证
 
 [研究方法与接口索引](docs/specifications.md)按主题列出接口、字段与市场规则。
-想了解研究结论，可先读前面的两篇报告；要复现实验或修改实现，再查下列详细文档。
+想了解研究结论，可先读前面的研究报告；要复现实验或修改实现，再查下列详细文档。
 
 - [架构、API 与读写边界](docs/architecture.md)
 - [来源与数据资格](docs/data.md)
 - [A 股计算方法与交易规则](docs/a-share.md)
-- [加密资产事件、单位与执行规则](docs/crypto.md)
 
 环境配置见 [environment.yml](environment.yml) 和 [pyproject.toml](pyproject.toml)，项目运行使用独立 Conda 环境。
 

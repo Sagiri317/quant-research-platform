@@ -10,21 +10,14 @@ from quant_research_platform.markets.implementations.a_share.processed import pr
 from quant_research_platform.markets.implementations.a_share.processed.catalog import (
     processed_catalog,
 )
-from quant_research_platform.markets.implementations.crypto.ids import (
-    HFT_LABEL_DATA_ID,
-    HFT_PANEL_DATA_ID,
-)
-from quant_research_platform.markets.implementations.crypto.processed.catalog import (
-    hft_processed_catalog,
-)
 from quant_research_platform.markets.prepare import prepare
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
 from quant_research_platform.storage.datasets.reading import open_dataset_session
 from tests.helpers.a_share_sources import _calendar_input
 
 
-def _input(root, name, frame, *, native, crypto=False):
-    catalog = hft_processed_catalog() if crypto else processed_catalog()
+def _input(root, name, frame, *, native):
+    catalog = processed_catalog()
     spec = catalog.get(name)
     roles = {column: spec.column_roles.get(column, "context") for column in frame}
     spec = replace(spec, column_roles=roles)
@@ -278,62 +271,6 @@ def test_label_selection_is_nonempty_unique_and_names_values(tmp_path, labels):
 
 
 @pytest.mark.parametrize("native", [False, True])
-@pytest.mark.parametrize(
-    "label,fields,expected",
-    [
-        ("future_mid_return_500ms", {"mid": np.arange(10.0, 16.0)}, 0.5),
-        ("future_mid_direction_500ms", {"mid": np.arange(10.0, 16.0)}, 1.0),
-        (
-            "maker_bid_sell_pressure_proxy_500ms",
-            {"best_bid_qty": 10.0, "observed_taker_sell_volume_100ms": 1.0},
-            0.5,
-        ),
-    ],
-)
-def test_crypto_exact_label_selection_does_not_require_sibling_family(
-    tmp_path, native, label, fields, expected
-):
-    dates = pd.date_range("2024-01-02", periods=6, freq="100ms").as_unit("ns")
-    frame = pd.DataFrame(
-        {
-            "market_id": "crypto",
-            "asset_id": "btc_usdt",
-            "timestamp": dates,
-            "segment_id": "s1",
-            **fields,
-        }
-    )
-    source = _input(tmp_path, HFT_PANEL_DATA_ID, frame, native=native, crypto=True)
-    source["columns"] = list(fields)
-    result_root = prepare(
-        _request(
-            tmp_path,
-            HFT_LABEL_DATA_ID,
-            {HFT_PANEL_DATA_ID: source},
-            dates[0].isoformat(),
-            dates[0].isoformat(),
-            market="crypto",
-            label_columns=[label],
-            parameters={"asset_ids": ["btc_usdt"]},
-        )
-    )
-    result = read_dataset(result_root)
-    assert result[label].tolist() == [expected]
-    assert result[label + "_available_at"].tolist() == [dates[5]]
-    assert set(result) == {
-        "market_id",
-        "asset_id",
-        "timestamp",
-        label,
-        label + "_available_at",
-    }
-    metadata = open_dataset_session(result_root).manifest
-    assert [item["output_column"] for item in metadata["parameters"]["labels"]] == [
-        label
-    ]
-
-
-@pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize("history_start", [0, 10])
 def test_selected_factor_keeps_actual_history_before_output_window(
     tmp_path, native, history_start
@@ -541,69 +478,3 @@ def test_prepare_freshness_rejects_nonpositive_or_noninteger_values(
     )
     with pytest.raises(ValueError, match="data_operation_freshness_days_invalid"):
         prepare(request)
-
-
-@pytest.mark.parametrize("native", [False, True])
-def test_prepare_source_member_selection_keeps_only_selected_assets_and_history(
-    tmp_path, native
-):
-    from tests.helpers.a_share_sources import (
-        _source_catalog,
-        _synthetic_interim_frames,
-        _write_inputs,
-    )
-
-    dates = pd.bdate_range("2023-01-09", periods=4).as_unit("ns")
-    frames = _synthetic_interim_frames(dates)
-    sources = _write_inputs(tmp_path / "source", frames)
-    selected = {
-        "path": str(sources["market_bars_1d"]),
-        "files": ["data/year=2023/part-000.parquet"],
-    }
-    if native:
-        (sources["market_bars_1d"] / "data" / "unselected.parquet").write_bytes(
-            b"not parquet"
-        )
-    else:
-        root = tmp_path / "bare"
-        root.mkdir()
-        frames["market_bars_1d"].to_parquet(root / "selected.parquet", index=False)
-        (root / "unselected.parquet").write_bytes(b"not parquet")
-        spec = _source_catalog().get("market_bars_1d")
-        selected.update(
-            path=str(root),
-            files=["selected.parquet"],
-            spec={
-                "data_id": spec.data_id,
-                "frequency": str(spec.frequency),
-                "grain": str(spec.grain),
-                "primary_key": list(spec.primary_key),
-                "partition_columns": [],
-                "column_roles": {
-                    name: str(role) for name, role in spec.column_roles.items()
-                },
-            },
-        )
-    selected.update(
-        years=[2023],
-        row_filters=[["source_asset_id", "==", "000001"]],
-        time_window={"start": str(dates[0].date()), "end": str(dates[-1].date())},
-    )
-    inputs = {
-        name: str(sources[name])
-        for name in processed_catalog().get("market_panel_1d").source_input_data_ids
-    }
-    inputs["market_bars_1d"] = selected
-    output = prepare(
-        _request(
-            tmp_path,
-            "market_panel_1d",
-            inputs,
-            str(dates[-1].date()),
-            str(dates[-1].date()),
-        )
-    )
-    result = read_dataset(output)
-    assert result.asset_id.tolist() == ["000001"]
-    assert result.timestamp.tolist() == [dates[-1]]
-    assert result.close.tolist() == [14.0]

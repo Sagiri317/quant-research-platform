@@ -15,7 +15,10 @@ from tests.research.direct_model_test_support import candidates, fit_frame
 
 
 @pytest.mark.parametrize(
-    "algorithm", ["linear_regression", "equal_weight_rank_ensemble"]
+    "algorithm",
+    [
+        "linear_regression",
+    ],
 )
 def test_native_open_prediction_is_causal_label_free_and_full_cross_section(
     tmp_path, monkeypatch, algorithm

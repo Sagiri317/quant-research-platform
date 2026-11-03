@@ -84,21 +84,8 @@ def test_catalog_cli_is_read_only_and_outputs_native_catalog():
         ("backtest", "research.portfolios.production", "backtest"),
         ("calibrate", "research.portfolios.production", "calibrate"),
         ("plot", "reports.plots", "plot"),
-        (
-            "backtest-crypto-taker",
-            "markets.implementations.crypto.portfolio",
-            "backtest_taker",
-        ),
-        (
-            "backtest-crypto-maker",
-            "markets.implementations.crypto.portfolio",
-            "backtest_maker",
-        ),
-        (
-            "calibrate-crypto-maker",
-            "markets.implementations.crypto.portfolio",
-            "calibrate_maker",
-        ),
+        ("backtest-hft", "markets.implementations.a_share.hft_portfolio", "backtest"),
+        ("run-quarterly", "research.rolling", "run_quarterly"),
         ("statistics-factors", "research.statistics_production", "factor_statistics"),
         ("statistics-model", "research.statistics_production", "model_statistics"),
         (
@@ -106,7 +93,6 @@ def test_catalog_cli_is_read_only_and_outputs_native_catalog():
             "research.portfolios.diagnostics",
             "portfolio_statistics",
         ),
-        ("statistics-crypto", "research.portfolios.diagnostics", "crypto_statistics"),
         ("evaluate", "research.evaluations.runner", "evaluate"),
     ),
 )

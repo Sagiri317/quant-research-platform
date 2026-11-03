@@ -209,7 +209,7 @@ def test_requested_comparison_keeps_common_rank_without_unrequested_loss_hashes(
         tmp_path,
         {"start": "2020-01-04", "end": "2020-01-06"},
         saved_candidates,
-        algorithms=("linear_regression", "ic_weighted_rank_ensemble"),
+        algorithms=("linear_regression", "lasso_regression"),
     )
     config.update(
         analyses=["prediction_hac", "model_comparison"],

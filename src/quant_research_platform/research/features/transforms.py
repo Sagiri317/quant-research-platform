@@ -12,7 +12,6 @@ from quant_research_platform.contracts.features import (
     FEATURE_PREFIXES,
     FeatureTransformSpec,
 )
-from quant_research_platform.contracts.models import _model_algorithm_facts
 from quant_research_platform.contracts.validation import strict_finite_numeric_series
 
 
@@ -85,19 +84,14 @@ def mask_unobserved_features(
     return result
 
 
-def model_input_validity_columns(input_columns, model_algorithm, declared_columns):
+def model_input_validity_columns(input_columns, declared_columns):
     """Own structural and direct-input validity for every model consumer."""
-    direct = (
-        ()
-        if _model_algorithm_facts(model_algorithm).input_kind == "rank_ensemble_inputs"
-        else input_columns
-    )
     return tuple(
         dict.fromkeys(
             (
                 *canonical_feature_validity_columns(input_columns, declared_columns),
                 *feature_observation_columns(input_columns, declared_columns),
-                *direct,
+                *input_columns,
             )
         )
     )

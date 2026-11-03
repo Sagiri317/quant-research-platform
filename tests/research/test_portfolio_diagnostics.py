@@ -513,7 +513,7 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
             rtol=1e-12,
             atol=0,
         )
-    metadata.update(comparison_metadata, execution_mode="continuous")
+    metadata.update(comparison_metadata)
     participation = deepcopy(config)["execution_assumptions"]["adv_sensitivities"]
     assert list(
         owned["portfolio_capacity"][["candidate_id", "participation"]].itertuples(
@@ -1654,7 +1654,6 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
         )
         contract = {
             **metadata("pv_all_portfolio_statistics"),
-            "execution_mode": "continuous",
             "candidate_ids": [c.candidate_id for c in candidates],
             "comparison_portfolio_ids": config["statistics"]["group_comparison"][
                 "portfolio_ids"

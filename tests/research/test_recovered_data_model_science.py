@@ -164,7 +164,7 @@ def _mutate(facts, name):
     else:
         facts["model"][name] = {
             "random_seed": 987,
-            "model_algorithm": "ridge_regression",
+            "model_algorithm": "lasso_regression",
             "input_factor_columns": ["other", "x"],
             "sample_filter_mode": "unfiltered",
             "training_weighting": {"method": "equal_timestamp", "half_life_periods": 3},
