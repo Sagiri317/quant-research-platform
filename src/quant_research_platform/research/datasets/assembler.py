@@ -1,4 +1,6 @@
-"""Research dataset assembly from processed datasets."""
+"""Join declared processed inputs and materialize selected research features and
+labels.
+"""
 
 from __future__ import annotations
 
@@ -24,9 +26,6 @@ from quant_research_platform.contracts.validation import (
 )
 from quant_research_platform.markets.implementations.a_share.ids import MARKET_ID
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.research.datasets.validation import (
-    validate_research_dataset,
-)
 from quant_research_platform.research.features.transforms import (
     apply_feature_transforms,
     canonical_feature_validity_columns,
@@ -157,7 +156,6 @@ def _iter_joined_processed_chunks(
                     base_frame=pending,
                     diagnostics=diagnostics,
                 )
-                validate_research_dataset(chunk, dataset_spec)
                 yield chunk.sort_values(
                     list(physical_order), kind="mergesort", ignore_index=True
                 )
@@ -180,7 +178,6 @@ def _iter_joined_processed_chunks(
             base_frame=pending,
             diagnostics=diagnostics,
         )
-        validate_research_dataset(chunk, dataset_spec)
         yield chunk.sort_values(
             list(physical_order), kind="mergesort", ignore_index=True
         )
@@ -195,13 +192,17 @@ def _join_processed_inputs(
 ) -> pd.DataFrame:
     base = dataset_spec.base_input_data_id
     assembled = base_frame.reset_index(drop=True)
-    validate_research_dataset(assembled, dataset_spec, require_all_columns=False)
+    for frame in (base_frame, *input_frames.values()):
+        if (
+            "market_id" in frame
+            and not frame.market_id.eq(str(dataset_spec.market_id)).all()
+        ):
+            raise ValueError("research_dataset_market_mismatch")
     base_keys = _scalar_keys(assembled, dataset_spec.primary_key)
     for input_data_id in dataset_spec.input_data_ids:
         if input_data_id == base:
             continue
         input_frame = input_frames[input_data_id]
-        validate_research_dataset(input_frame, dataset_spec, require_all_columns=False)
         positions = _input_key_positions(
             base_keys,
             input_frame,
@@ -244,21 +245,7 @@ def _ordered_input_data_ids(
 
 
 def _scalar_keys(frame: pd.DataFrame, columns: tuple[str, ...]) -> list[tuple]:
-    # Extract columns independently; NumPy row coercion can change key identity.
-    return list(
-        zip(
-            *(
-                [
-                    value.item()
-                    if isinstance(value, (np.integer, np.floating, np.bool_))
-                    else value
-                    for value in frame[column].tolist()
-                ]
-                for column in columns
-            ),
-            strict=True,
-        )
-    )
+    return list(frame.loc[:, list(columns)].itertuples(index=False, name=None))
 
 
 def _input_key_positions(
@@ -281,8 +268,6 @@ def _input_key_positions(
     policy = dataset_spec.key_coverage.get(input_data_id, "strict")
     if policy == "sparse":
         return positions
-    if policy != "strict":
-        raise ValueError(f"invalid_research_key_coverage: {input_data_id}={policy}")
     missing = positions.count(-1)
     if missing:
         raise ValueError(f"missing_research_input_keys: {input_data_id}: {missing}")

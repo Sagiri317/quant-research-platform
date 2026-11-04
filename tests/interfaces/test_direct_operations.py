@@ -86,8 +86,8 @@ def test_catalog_cli_is_read_only_and_outputs_native_catalog():
         ("plot", "reports.plots", "plot"),
         ("backtest-hft", "research.portfolios.high_frequency", "backtest"),
         ("run-quarterly", "research.rolling", "run_quarterly"),
-        ("statistics-factors", "research.statistics_production", "factor_statistics"),
-        ("statistics-model", "research.statistics_production", "model_statistics"),
+        ("statistics-factors", "research.factors.statistics", "factor_statistics"),
+        ("statistics-model", "research.models.statistics", "model_statistics"),
         (
             "statistics-portfolio",
             "research.portfolios.diagnostics",

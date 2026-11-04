@@ -358,7 +358,11 @@ class PreparedTradeCost:
             raise ValueError("a_share_trade_cost_inputs_invalid")
         positive = np.maximum(amounts, 0.0)
         totals = self.totals(positive, adv20)
-        marginal_impact = 1.5 * self.impact_bps / 10_000.0 * np.sqrt(positive / adv20)
+        marginal_impact = (
+            1.5 * self.impact_bps / 10_000.0 * np.sqrt(positive / adv20)
+            if self.impact_bps
+            else np.zeros_like(amounts)
+        )
         linear = sum(self.rates) + self.slippage_bps / 10_000.0
         gradient = linear + marginal_impact
         extended = totals + np.minimum(amounts, 0.0) * linear

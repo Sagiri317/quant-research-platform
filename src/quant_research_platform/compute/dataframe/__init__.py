@@ -1,1 +1,1 @@
-"""DataFrame reference compute backend."""
+"""Cross-sectional numerical kernels over long-format pandas panels."""

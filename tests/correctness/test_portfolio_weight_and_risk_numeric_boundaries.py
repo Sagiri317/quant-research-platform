@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import quant_research_platform.research.portfolios.daily as daily
 from quant_research_platform.artifacts.portfolio_ledger import (
     read_portfolio_ledger_artifact,
 )
@@ -26,7 +27,6 @@ from quant_research_platform.markets.implementations.a_share.execution import (
     prepare_trade_cost,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.research.portfolios import production
 from quant_research_platform.research.portfolios.attribution import (
     holding_attribution,
 )
@@ -331,9 +331,9 @@ def test_native_panel_feeds_risk_state_and_holding_attribution(tmp_path):
         current = saved.loc[saved.timestamp.eq(day)]
         if previous is not None:
             state.observe_return_session(
-                production._factor_return_cross(exposures=previous, panel=current)
+                daily._factor_return_cross(exposures=previous, panel=current)
             )
-        previous = production._enhanced_risk_cross(
+        previous = daily._enhanced_risk_cross(
             panel=current, risk_frames=[], style_columns=()
         )
     estimate = state.estimate()
@@ -439,7 +439,7 @@ def test_native_simple_production_and_ledger_keep_positive_capital_target(
         benchmark_id=None,
     )
     alpha = dataset.set_index("asset_id").signal
-    account, adv, optimized, delta, _snapshot = production._build_session(
+    account, adv, optimized, delta, _snapshot = daily._build_session(
         candidate=candidate,
         decision_timestamp=dates[0],
         next_timestamp=dates[1],
@@ -602,9 +602,7 @@ def test_lagged_risk_preserves_prior_eligibility_and_resets_new_life():
     assets = [f"a{i:02d}" for i in range(12)]
     panel = _panel(assets, dates[:1])
     panel["industry_level1_code"] = "one"
-    previous = production._enhanced_risk_cross(
-        panel=panel, risk_frames=[], style_columns=()
-    )
+    previous = daily._enhanced_risk_cross(panel=panel, risk_frames=[], style_columns=())
     state = FactorRiskState(
         style_columns=(),
         config=FactorRiskConfig(
@@ -623,7 +621,7 @@ def test_lagged_risk_preserves_prior_eligibility_and_resets_new_life():
     current.loc[current.asset_id.eq(assets[0]), "period_return"] = 0.5
     current.loc[current.asset_id.eq(assets[1]), "period_return"] = 0.11
     current.loc[current.asset_id.isin(assets[:2]), "has_252_trading_sessions"] = False
-    cross = production._factor_return_cross(exposures=previous, panel=current)
+    cross = daily._factor_return_cross(exposures=previous, panel=current)
     assert cross.eligible.all()
     assert pd.isna(cross.set_index("asset_id").loc[assets[0], "asset_return"])
     fitted = state.fit_return_session(cross)

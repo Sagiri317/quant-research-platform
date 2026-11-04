@@ -264,11 +264,7 @@ def _table_records(root: Path, name: str) -> Iterator[dict[str, object]]:
     with closing_iterator(chunks):
         for chunk in chunks:
             records = chunk.to_pylist()
-            for yielded_value in records:
-                try:
-                    yield yielded_value
-                except GeneratorExit:
-                    return
+            yield from records
 
 
 class _LedgerValidation:
@@ -403,10 +399,7 @@ def _iter_batches(
                 tables[name] = tuple(records)
             batch = PortfolioLedgerBatch(sequence, **tables)
             validation.observe(batch)
-            try:
-                yield batch
-            except GeneratorExit:
-                return
+            yield batch
             sequence += 1
         if not sequence or any(group is not None for group in pending.values()):
             raise ValueError("portfolio_ledger_sequence_invalid")

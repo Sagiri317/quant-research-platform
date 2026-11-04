@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import quant_research_platform.research.portfolios.daily as daily
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.execution import (
     market_name_for_type,
@@ -17,9 +18,6 @@ from quant_research_platform.markets.implementations.a_share.processed.catalog i
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.filtering import a_share_eligibility
-from quant_research_platform.research.portfolios import (
-    production as portfolio_production,
-)
 from quant_research_platform.research.protocols.a_share import factor_catalog
 from quant_research_platform.runtime.dataframes import iter_complete_session_frames
 from quant_research_platform.storage.datasets.reading import (
@@ -239,12 +237,12 @@ def test_persisted_panel_market_codes_reach_real_fee_mapping(tmp_path):
     ) as (frames, metadata):
         write_dataset(root, frames, spec=spec, metadata=metadata)
     with closing_iterator(
-        portfolio_production._iter_input_sessions(root, columns, window)
+        daily._iter_input_sessions(root, columns, window)
     ) as sessions:
         for timestamp in (dates[0], dates[64], dates[65]):
-            panel = portfolio_production._read_next_session(
-                sessions, columns, timestamp
-            ).set_index("asset_id")
+            panel = daily._read_next_session(sessions, columns, timestamp).set_index(
+                "asset_id"
+            )
             assert {
                 asset: market_name_for_type(panel.loc[asset, "market_type"])
                 for asset in panel.index
@@ -1058,7 +1056,7 @@ def test_asynchronous_own_market_label_endpoints_and_mask_batches(
     assert dates[2] not in panel.index
     mask = saved["execution_mask"].query("asset_id == '000001'").set_index("timestamp")
     execution_at = panel.index[panel.index > dates[1]][0]
-    actual_mask = portfolio_production._mask_values(
+    actual_mask = daily._mask_values(
         mask.loc[[dates[1]]].reset_index().assign(execution_at=execution_at),
         pd.Index(["000001"]),
         execution_at,
@@ -1754,7 +1752,7 @@ def test_native_lifecycle_history_does_not_join_relisting(
     factors = results["price_volume_facts"]
     assert pd.isna(factors.loc[dates[old_sessions + gap], "reversal_1d"])
     assert factors.loc[dates[old_sessions + gap + 2], "reversal_1d"] == 0.0
-    from quant_research_platform.research.portfolios.production import (
+    from quant_research_platform.research.portfolios.daily import (
         _completed_calibration_rows,
     )
 

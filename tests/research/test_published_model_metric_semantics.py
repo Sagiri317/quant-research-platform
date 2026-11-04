@@ -10,13 +10,13 @@ from quant_research_platform.artifacts.outputs.prediction import read_prediction
 from quant_research_platform.artifacts.statistics import read_statistics_artifact
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.research.evaluations.runner import evaluate
+from quant_research_platform.research.factors.statistics import factor_statistics
 from quant_research_platform.research.models.explanations import explain
-from quant_research_platform.research.models.trial_selection import score
-from quant_research_platform.research.statistics_production import (
+from quant_research_platform.research.models.statistics import (
     _prediction_quality,
-    factor_statistics,
     model_statistics,
 )
+from quant_research_platform.research.models.trial_selection import score
 from tests.research.direct_model_test_support import fit_frame, predict_frame
 
 
@@ -214,7 +214,7 @@ def test_ic_only_cross_target_avoids_all_loss_calculation(tmp_path, monkeypatch)
         pytest.fail("IC-only statistics must not calculate unused prediction losses")
 
     monkeypatch.setattr(
-        "quant_research_platform.research.statistics_production._prediction_quality",
+        "quant_research_platform.research.models.statistics._prediction_quality",
         forbidden,
     )
     artifact = read_statistics_artifact(model_statistics(config))

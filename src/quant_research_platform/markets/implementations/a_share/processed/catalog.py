@@ -1,4 +1,4 @@
-"""A-share market-fact bindings for the common processed-data DAG."""
+"""Declare A-share processed tables, their columns, units, and required inputs."""
 
 from __future__ import annotations
 

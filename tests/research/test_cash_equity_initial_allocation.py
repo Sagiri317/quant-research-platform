@@ -6,12 +6,12 @@ from dataclasses import replace
 import pandas as pd
 import pytest
 
+import quant_research_platform.research.portfolios.daily as daily
 from quant_research_platform.artifacts.portfolio_ledger import (
     read_portfolio_ledger_artifact,
     write_portfolio_ledger_artifact,
 )
 from quant_research_platform.contracts.portfolios import PortfolioCapital
-from quant_research_platform.research.portfolios import production
 from quant_research_platform.research.portfolios.optimizer import OptimizerConfig
 from tests.helpers.portfolio_inputs import decision_inputs
 from tests.research.test_portfolio_production import _build_producer, _enhanced_inputs
@@ -28,7 +28,7 @@ def test_unequal_capacity_can_fund_a_proportional_risk_improving_stock_leg():
     args["optimizer_config"] = OptimizerConfig(
         active_name_limit=0.1, style_active_limit=0.001, tracking_error_limit=0.1
     )
-    account, _, optimized, _, ledger = production._build_session(**args)
+    account, _, optimized, _, ledger = daily._build_session(**args)
     assert optimized is None
     # Buying 10/30 breaches the style band; buying 10/10 preserves it and
     # reduces both name shortfalls from 0.5 to 0.4 within actual capacity.
@@ -56,7 +56,7 @@ def test_initial_actual_purchase_exempts_turnover_but_preserves_fees_capacity_an
             frames["execution"].timestamp.eq("2023-01-03"), "can_enter"
         ] = False
     attempts = []
-    original = production._build_session
+    original = daily._build_session
 
     def observe(**kwargs):
         result = original(**kwargs)
@@ -70,8 +70,8 @@ def test_initial_actual_purchase_exempts_turnover_but_preserves_fees_capacity_an
         )
         return result
 
-    monkeypatch.setattr(production, "_build_session", observe)
-    calibration = production.AlphaCalibration(
+    monkeypatch.setattr(daily, "_build_session", observe)
+    calibration = daily.AlphaCalibration(
         1.0, 0.0, 1.0, 1.0, 0.5, -1.0, 1.0, 0.0, 1.0, 6, 6, None
     )
     if capacity == 10.0:

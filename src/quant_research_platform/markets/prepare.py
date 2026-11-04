@@ -108,11 +108,8 @@ def prepare(config: Mapping) -> Path:
                 "time_window": dict(config["time_window"]),
                 **json.loads(spec.parameters_json),
             }
-            for frame in data:
-                try:
-                    yield frame
-                except GeneratorExit:
-                    return
+            for frame in data:  # noqa: UP028 - This scope owns the iterator's close.
+                yield frame
         metadata.update(producer_metadata)
 
     write_dataset(output, frames(), spec=spec, metadata=metadata)

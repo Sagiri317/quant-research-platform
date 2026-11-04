@@ -8,6 +8,7 @@ from math import log
 import numpy as np
 import pandas as pd
 
+import quant_research_platform.research.portfolios.daily as daily
 from quant_research_platform.catalog.processed import (
     InterimDataCatalog,
     ProcessedDataCatalog,
@@ -30,7 +31,6 @@ from quant_research_platform.markets.implementations.a_share.execution import (
     fee_schedule_from_frame,
     prepare_trade_cost,
 )
-from quant_research_platform.research.portfolios import production
 from quant_research_platform.research.risk import (
     FactorRiskEstimate,
 )
@@ -867,12 +867,12 @@ def decision_inputs(*, benchmark=(0.5, 0.5), holdings=None, fee_rate=0.0):
         0.2,
         252.0,
     )
-    enhanced = production._EnhancedDecision(
+    enhanced = daily._EnhancedDecision(
         pd.Series(benchmark, index=assets),
         alpha,
         pd.DataFrame({"asset_id": assets, "style": 1.0}),
         risk,
-        production.AlphaCalibration(
+        daily.AlphaCalibration(
             1.0, 0.0, 1.0, 1.0, 0.5, -1.0, 1.0, 0.0, 1.0, 6, 6, None
         ),
     )

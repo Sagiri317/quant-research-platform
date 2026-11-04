@@ -1,4 +1,7 @@
-"""Dataset reading implementation."""
+"""Read selected native dataset members with bounded windows and column projection.
+
+Preserve declared logical dtypes and member order. Filters are applied before
+materialization, while required structural columns remain available for checks."""
 
 from __future__ import annotations
 
@@ -721,10 +724,7 @@ def iter_dataset_chunks(
             if filtered.empty:
                 continue
             yielded = True
-            try:
-                yield filtered
-            except GeneratorExit:
-                return
+            yield filtered
     if not yielded:
         yield _empty_frame(context, context.logical_columns)
 
@@ -752,18 +752,13 @@ def iter_declared_parquet_member_batches(
         )
     ) as batches:
         for batch in batches:
-            # Observer failures remain outside the consumer-close boundary.
-            for frame in _arrow_batch_to_bounded_pandas(
+            yield from _arrow_batch_to_bounded_pandas(
                 batch,
                 batch_rows=rows_per_batch,
                 dtype_overrides=dtype_overrides,
                 persisted_frame_observer=persisted_frame_observer,
                 batch_observer=batch_observer,
-            ):
-                try:
-                    yield frame
-                except GeneratorExit:
-                    return
+            )
 
 
 def iter_dataset_file_batches(
@@ -839,10 +834,7 @@ def iter_dataset_file_batches(
             )
         ) as member_batches:
             for frame in member_batches:
-                try:
-                    yield path, frame
-                except GeneratorExit:
-                    return
+                yield path, frame
     if observed_rows != expected_rows:
         raise ValueError("dataset_selected_partition_incomplete")
 
@@ -1201,7 +1193,4 @@ def _iter_dataset_session_frames(session, columns):
         ) as frames:
             for frame in frames:
                 if not frame.empty:
-                    try:
-                        yield frame
-                    except GeneratorExit:
-                        return
+                    yield frame

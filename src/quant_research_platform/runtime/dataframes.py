@@ -55,10 +55,7 @@ def iter_complete_time_frames(
                     if len(pending) == 1
                     else pd.concat(pending, ignore_index=True)
                 )
-                try:
-                    yield complete
-                except GeneratorExit:
-                    return
+                yield complete
                 emitted_max = (
                     pd.Timestamp(timestamps.iloc[last_start - 1])
                     if last_start
@@ -73,16 +70,10 @@ def iter_complete_time_frames(
                 if len(pending) == 1
                 else pd.concat(pending, ignore_index=True)
             )
-            try:
-                yield complete
-            except GeneratorExit:
-                return
+            yield complete
         elif first_empty is not None:
             empty = first_empty.iloc[:0].copy()
-            try:
-                yield empty
-            except GeneratorExit:
-                return
+            yield empty
 
 
 def iter_complete_session_frames(
@@ -96,10 +87,7 @@ def iter_complete_session_frames(
     ) as complete_frames:
         for frame in complete_frames:
             if frame.empty:
-                try:
-                    yield frame
-                except GeneratorExit:
-                    return
+                yield frame
                 continue
             timestamps = strict_timestamp_series(
                 frame[timestamp_column], error="invalid_time_chunk_timestamp_values"
@@ -108,13 +96,7 @@ def iter_complete_session_frames(
             start = 0
             for stop in stops:
                 session = frame.iloc[start:stop]
-                try:
-                    yield session
-                except GeneratorExit:
-                    return
+                yield session
                 start = int(stop)
             session = frame.iloc[start:]
-            try:
-                yield session
-            except GeneratorExit:
-                return
+            yield session

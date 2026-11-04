@@ -4,11 +4,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import quant_research_platform.research.portfolios.daily as daily
 from quant_research_platform.contracts.portfolios import (
     PortfolioCandidateSpec,
     PortfolioTargetBlocked,
 )
-from quant_research_platform.research.portfolios import production
 from quant_research_platform.research.portfolios.construction import (
     _neutrality_context,
     build_simple_target_weights,
@@ -89,7 +89,7 @@ def test_missing_index_reference_preserves_positions_and_cash(missing):
         industry_level1_code="A",
         total_market_cap=1000.0,
     )
-    account, _, _, _, ledger = production._build_session(**inputs)
+    account, _, _, _, ledger = daily._build_session(**inputs)
     assert account.nav_after == 100.0
     assert ledger.post_trade_notional.tolist() == [50.0, 50.0]
     assert ledger.executed_delta_notional.eq(0.0).all()
@@ -132,7 +132,7 @@ def test_simple_index_producer_uses_current_snapshot_without_risk_or_calibration
         frames["benchmark"].asset_id.eq("b"), b_weight, 1 - b_weight
     )
     observed = []
-    original = production._neutrality_context
+    original = daily._neutrality_context
 
     def context(*args, **kwargs):
         result = original(*args, **kwargs)
@@ -144,9 +144,9 @@ def test_simple_index_producer_uses_current_snapshot_without_risk_or_calibration
             "Simple index neutrality must not request enhanced risk/calibration"
         )
 
-    monkeypatch.setattr(production, "_neutrality_context", context)
-    monkeypatch.setattr(production, "FactorRiskState", forbidden)
-    monkeypatch.setattr(production, "_enhanced_decision", forbidden)
+    monkeypatch.setattr(daily, "_neutrality_context", context)
+    monkeypatch.setattr(daily, "FactorRiskState", forbidden)
+    monkeypatch.setattr(daily, "_enhanced_decision", forbidden)
     batches, calls = _build_producer(
         tmp_path,
         monkeypatch,

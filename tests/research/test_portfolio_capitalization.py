@@ -14,7 +14,7 @@ from quant_research_platform.research.portfolios.construction import (
     _neutrality_context,
     build_simple_target_weights,
 )
-from quant_research_platform.research.portfolios.production import _enhanced_risk_cross
+from quant_research_platform.research.portfolios.daily import _enhanced_risk_cross
 from quant_research_platform.research.risk import (
     FactorRiskConfig,
     FactorRiskState,
@@ -221,7 +221,7 @@ def test_candidate_size_selection_is_persistable_and_validated():
 def test_backtest_risk_reads_only_configured_capitalization(
     tmp_path, monkeypatch, weight_column
 ):
-    from quant_research_platform.research.portfolios import production
+    import quant_research_platform.research.portfolios.daily as daily
     from quant_research_platform.research.protocols.a_share import RISK_STYLE_COLUMNS
     from tests.helpers.portfolio_inputs import portfolio_inputs as _inputs
     from tests.research.test_portfolio_production import _build_producer
@@ -254,14 +254,14 @@ def test_backtest_risk_reads_only_configured_capitalization(
         RISK_STYLE_COLUMNS,
     )
     observed = []
-    original = production._enhanced_risk_cross
+    original = daily._enhanced_risk_cross
 
     def cross(**kwargs):
         result = original(**kwargs)
         observed.append(result)
         return result
 
-    monkeypatch.setattr(production, "_enhanced_risk_cross", cross)
+    monkeypatch.setattr(daily, "_enhanced_risk_cross", cross)
     batches, _ = _build_producer(
         tmp_path,
         monkeypatch,
@@ -288,7 +288,7 @@ def test_backtest_risk_reads_only_configured_capitalization(
 def test_simple_production_reads_selected_size_and_keeps_reference(
     tmp_path, monkeypatch, column
 ):
-    from quant_research_platform.research.portfolios import production
+    import quant_research_platform.research.portfolios.daily as daily
     from tests.helpers.portfolio_inputs import portfolio_inputs as _inputs
     from tests.research.test_portfolio_production import _build_producer
 
@@ -300,14 +300,14 @@ def test_simple_production_reads_selected_size_and_keeps_reference(
     if column == "float_market_cap":
         frames["dataset"] = frames["dataset"].drop(columns="total_market_cap")
     observed = []
-    original = production._neutrality_context
+    original = daily._neutrality_context
 
     def context(*args, **kwargs):
         result = original(*args, **kwargs)
         observed.append((kwargs["size_market_cap"].tolist(), result))
         return result
 
-    monkeypatch.setattr(production, "_neutrality_context", context)
+    monkeypatch.setattr(daily, "_neutrality_context", context)
     candidate = PortfolioCandidateSpec(
         "size",
         "global",
@@ -334,7 +334,7 @@ def test_simple_production_reads_selected_size_and_keeps_reference(
 
 
 def test_missing_size_nonrebalance_marks_undefined_and_preserves_account():
-    from quant_research_platform.research.portfolios.production import _build_session
+    from quant_research_platform.research.portfolios.daily import _build_session
     from tests.helpers.portfolio_inputs import decision_inputs as _decision_inputs
 
     inputs = _decision_inputs()
@@ -379,7 +379,7 @@ def test_panel_selection_cannot_reintroduce_excluded_risk_capitalization(
     from quant_research_platform.markets.implementations.a_share import (
         portfolio_sessions,
     )
-    from quant_research_platform.research.portfolios.production import (
+    from quant_research_platform.research.portfolios.daily import (
         _ENHANCED_PANEL_COLUMNS,
     )
     from tests.helpers.portfolio_inputs import closed_market_inputs as _native_inputs

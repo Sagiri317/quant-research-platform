@@ -1,4 +1,4 @@
-"""Response DTOs shared by the public API and CLI adapters."""
+"""Typed catalog and dataset-requirement responses for public query interfaces."""
 
 from __future__ import annotations
 

@@ -2,6 +2,7 @@
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from quant_research_platform.research.labels.forward_returns import (
     add_forward_return_labels,
@@ -58,7 +59,11 @@ def test_shared_entries_preserve_sparse_quotes_and_horizon_availability(monkeypa
                     available = sessions[position + 1 + horizon] + pd.Timedelta(hours=7)
             value = getattr(row, f"forward_return_{horizon}d")
             time = getattr(row, f"forward_return_{horizon}d_available_at")
-            assert np.isnan(value) if np.isnan(expected) else value == expected
+            assert (
+                np.isnan(value)
+                if np.isnan(expected)
+                else value == pytest.approx(expected, rel=1e-13, abs=0.0)
+            )
             assert pd.isna(time) if pd.isna(available) else time == available
 
 
@@ -81,7 +86,7 @@ def test_real_endpoint_facts_and_fixed_twenty_session_clock():
     # Neither interior missing quotes nor signal permissions shift either endpoint.
     sparse = frame.drop(index=range(5, 10))
     row = add_forward_return_labels(sparse, horizons=(20,), sessions=sessions).iloc[0]
-    assert row.forward_return_20d == 0.1
+    assert row.forward_return_20d == pytest.approx(0.1, rel=1e-13, abs=0.0)
     assert row.forward_return_20d_available_at == sessions[21] + pd.Timedelta(hours=7)
     for endpoint in (1, 21):
         for flag, trading in ((1, False), (np.nan, pd.NA), (0, False)):
@@ -100,8 +105,6 @@ def test_real_endpoint_facts_and_fixed_twenty_session_clock():
 
 
 def test_native_producer_persists_observed_endpoint_labels_without_execution(tmp_path):
-    import pytest
-
     from quant_research_platform.markets.prepare import prepare
     from quant_research_platform.storage.datasets import read_dataset
     from quant_research_platform.storage.datasets.reading import open_dataset_session

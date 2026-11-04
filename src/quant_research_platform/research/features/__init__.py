@@ -1,1 +1,1 @@
-"""Generic feature research helpers."""
+"""Feature transformations and observation-validity rules shared by model consumers."""

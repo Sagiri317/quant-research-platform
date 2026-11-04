@@ -16,7 +16,7 @@ from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.portfolios.construction import (
     build_simple_target_weights,
 )
-from quant_research_platform.research.portfolios.production import _validate_windows
+from quant_research_platform.research.portfolios.daily import _validate_windows
 
 
 @pytest.mark.parametrize(
@@ -275,7 +275,7 @@ def test_neutral_projection_satisfies_kkt_on_active_and_boundary_assets():
 def test_empty_calculable_neutral_pool_exits_to_cash(
     missing,
 ):
-    from quant_research_platform.research.portfolios.production import _build_session
+    from quant_research_platform.research.portfolios.daily import _build_session
     from tests.helpers.portfolio_inputs import decision_inputs as _decision_inputs
 
     inputs = _decision_inputs()
@@ -401,7 +401,7 @@ def test_enhanced_nonrebalance_unknown_industry_preserves_held_account(
 
 @pytest.mark.parametrize("schedule", ["daily", "weekly-last-trading-day"])
 def test_unheld_missing_cap_does_not_make_known_exposures_undefined(schedule):
-    from quant_research_platform.research.portfolios.production import _build_session
+    from quant_research_platform.research.portfolios.daily import _build_session
     from tests.helpers.portfolio_inputs import decision_inputs as _decision_inputs
 
     inputs = _decision_inputs(benchmark=(0.5, 0.5, 0.0))

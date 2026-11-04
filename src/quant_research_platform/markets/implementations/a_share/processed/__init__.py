@@ -1,1 +1,1 @@
-"""A-share processed data calculations and materialization."""
+"""Construct and publish A-share panels, factors, labels, and execution facts."""

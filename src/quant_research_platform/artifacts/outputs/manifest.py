@@ -1,4 +1,4 @@
-"""Output manifest payload builders."""
+"""Build output manifests and validate explicitly selected bundle members."""
 
 from __future__ import annotations
 

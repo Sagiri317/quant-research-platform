@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.research.portfolios import production
+import quant_research_platform.research.portfolios.daily as daily
 from quant_research_platform.research.portfolios.attribution import (
     HoldingFactorInputs,
     holding_attribution,
@@ -138,7 +138,7 @@ def test_enhanced_decision_preprocesses_before_joint_style_selection():
     )
 
     def exposures(frame):
-        return production._enhanced_decision(
+        return daily._enhanced_decision(
             benchmark_weights=pd.Series(1 / len(frame), index=frame.asset_id),
             alpha=pd.Series(0.0, index=frame.asset_id),
             factor_risk=state,

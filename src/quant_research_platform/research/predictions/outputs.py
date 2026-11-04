@@ -1,4 +1,4 @@
-"""Select each model's own eligible prediction domain."""
+"""Select valid prediction rows while retaining causal context for sequence models."""
 
 from quant_research_platform.contracts.time import prediction_window_mask
 from quant_research_platform.contracts.validation import (
@@ -16,7 +16,9 @@ from quant_research_platform.research.filtering import apply_filter_mode
 def prediction_rows(
     frame, metadata, window, *, declared_columns=(), include_context=False
 ):
-    """Observed inputs; sequence context retains temporarily ineligible rows."""
+    """Select observed model inputs while retaining temporarily ineligible
+    sequence context.
+    """
     if (
         frame.loc[:, ["timestamp", "asset_id"]].isna().any(axis=None)
         or frame.duplicated(["timestamp", "asset_id"]).any()

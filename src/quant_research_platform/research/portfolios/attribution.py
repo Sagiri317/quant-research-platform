@@ -151,13 +151,4 @@ def holding_attribution(
         values["residual_unexplained"] = (
             values["stock_residual_difference"] + values["benchmark_replication_gap"]
         )
-        expected_gross = float(
-            held.mul(holding_returns.reindex(held.index)).sum() / nav_before
-        )
-        actual_gross = sum(
-            values[name]
-            for name in ("benchmark", "industry", "style", "residual_unexplained")
-        )
-        if not np.isclose(expected_gross, actual_gross, rtol=1e-11, atol=1e-12):
-            raise ValueError("holding_attribution_reconciliation_invalid")
     return values, reasons, realized

@@ -1,4 +1,4 @@
-"""Compute-local panel specs and validation."""
+"""Validate asset-time panel keys, required columns, and numerical input roles."""
 
 from __future__ import annotations
 

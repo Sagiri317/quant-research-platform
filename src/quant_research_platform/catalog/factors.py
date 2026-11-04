@@ -1,4 +1,4 @@
-"""Factor catalog registry."""
+"""Look up factor definitions with unique identifiers and output columns."""
 
 from __future__ import annotations
 

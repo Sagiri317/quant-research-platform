@@ -1,4 +1,4 @@
-"""Dataset inspection implementation."""
+"""Inspect selected dataset structure and row coverage through the native reader."""
 
 from __future__ import annotations
 

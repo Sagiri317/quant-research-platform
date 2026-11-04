@@ -577,9 +577,7 @@ def test_degenerate_alpha_diagnostics_survive_ledger_and_freeze(
         calibrate_expected_alpha,
         frozen_alpha_calibration,
     )
-    from quant_research_platform.research.portfolios.production import (
-        _ALPHA_DIAGNOSTICS,
-    )
+    from quant_research_platform.research.portfolios.daily import _ALPHA_DIAGNOSTICS
 
     dates = pd.date_range("2019-07-01", periods=6, freq="MS")
     inputs = pd.DataFrame(

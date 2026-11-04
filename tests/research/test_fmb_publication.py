@@ -6,7 +6,7 @@ import pytest
 
 from quant_research_platform.artifacts import statistics
 from quant_research_platform.contracts.experiments import legal_training_rows
-from quant_research_platform.research.statistics_production import (
+from quant_research_platform.research.factors.statistics import (
     _fama_macbeth_period_records,
     _fama_macbeth_summary,
 )
@@ -156,7 +156,7 @@ def test_core_fmb_signed_factors_survive_publication(tmp_path):
 
 def test_native_fmb_varying_scale_identity_has_no_false_intercept_inference(tmp_path):
     from quant_research_platform.contracts.data import DataSpec
-    from quant_research_platform.research.statistics_production import factor_statistics
+    from quant_research_platform.research.factors.statistics import factor_statistics
     from quant_research_platform.storage.datasets import write_dataset
 
     dates = pd.bdate_range("2020-01-01", periods=21)

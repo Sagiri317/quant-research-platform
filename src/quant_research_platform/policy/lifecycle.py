@@ -1,4 +1,4 @@
-"""Small standard-library lifecycle contexts shared across pure owners."""
+"""Close owned iterators while preserving the original processing failure."""
 
 from __future__ import annotations
 
@@ -13,6 +13,9 @@ def closing_iterator[T](iterator: T) -> Iterator[T]:
     primary = None
     try:
         yield iterator
+    except GeneratorExit:
+        # Cancellation is control flow; a failed close must still reach the caller.
+        raise
     except BaseException as error:
         primary = error
         raise

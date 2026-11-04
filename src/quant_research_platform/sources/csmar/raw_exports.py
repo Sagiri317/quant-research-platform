@@ -1,4 +1,4 @@
-"""CSMAR raw export inspection and source-local IO helpers."""
+"""Select CSMAR export members and stream their validated source records."""
 
 from __future__ import annotations
 
@@ -187,10 +187,7 @@ def iter_private_export_chunks(
                 return
             emitted = True
             frame = _raw_frame(pending, header)
-            try:
-                yield frame
-            except GeneratorExit:
-                return
+            yield frame
 
 
 def _iter_csv_records(
@@ -247,10 +244,7 @@ def _iter_csv_records(
             row = [record[position] for position in selected_positions]
             del record
             _yield_value = (header, row)
-            try:
-                yield _yield_value
-            except GeneratorExit:
-                return
+            yield _yield_value
             del row
 
 

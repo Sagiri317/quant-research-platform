@@ -1,1 +1,3 @@
-"""Portfolio accounting, construction, optimization and production owners."""
+"""Construct trading targets, execute native accounts, and analyze their economic
+ledgers.
+"""

@@ -8,6 +8,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import quant_research_platform.research.portfolios.daily as daily
+import quant_research_platform.research.portfolios.production as portfolio_production
 from quant_research_platform.artifacts.portfolio_ledger import (
     read_portfolio_ledger_artifact,
     write_portfolio_ledger_artifact,
@@ -19,7 +21,6 @@ from quant_research_platform.contracts.portfolios import (
 from quant_research_platform.markets.implementations.a_share.calendar import (
     unified_trading_sessions,
 )
-from quant_research_platform.research.portfolios import production
 from quant_research_platform.research.portfolios.calibration import (
     alpha_calibration_intervals,
 )
@@ -127,7 +128,7 @@ def enhanced_config(tmp_path_factory):
             for x in [-0.4, -0.2, 0.0, 0.2, 0.4]
         ]
     ).to_parquet(root / "observations.parquet", index=False)
-    calibration = production.calibrate(
+    calibration = portfolio_production.calibrate(
         dict(
             observations=str(root / "observations.parquet"),
             scheduled_intervals=str(root / "intervals.parquet"),
@@ -205,11 +206,11 @@ def test_native_receivable_stays_in_nav_and_never_funds_buys(
     config["output"] = str(tmp_path / "ledger")
     if override:
         config["optimizer_config"] = override
-    artifact = read_portfolio_ledger_artifact(production.backtest(config))
+    artifact = read_portfolio_ledger_artifact(portfolio_production.backtest(config))
     batches = list(artifact.iter_chunks())
     assert len(batches) == 3
     assert artifact.metadata["optimizer_config"] == asdict(
-        production.OptimizerConfig(**override)
+        daily.OptimizerConfig(**override)
     )
     assert (
         artifact.metadata["initial_turnover_policy"]
@@ -317,7 +318,9 @@ def test_native_missing_predictions_hold_or_exit_without_new_target_context(
         config["inputs"]["benchmark"] = str(tmp_path / "benchmark")
     config["output"] = str(tmp_path / "ledger")
     batches = list(
-        read_portfolio_ledger_artifact(production.backtest(config)).iter_chunks()
+        read_portfolio_ledger_artifact(
+            portfolio_production.backtest(config)
+        ).iter_chunks()
     )
     last = batches[-1]
     assert _facts(last)["decision_skip_reason"] == "all_predictions_missing"
@@ -349,7 +352,7 @@ def test_native_new_target_with_missing_industry_skips_and_keeps_account(
     )
     config["inputs"]["panel"] = str(tmp_path / "panel")
     config["output"] = str(tmp_path / "ledger")
-    artifact = read_portfolio_ledger_artifact(production.backtest(config))
+    artifact = read_portfolio_ledger_artifact(portfolio_production.backtest(config))
     batches = list(artifact.iter_chunks())
     assert len(batches) == 3
     assert not batches[-1].trades
@@ -366,13 +369,13 @@ def test_native_new_target_with_missing_industry_skips_and_keeps_account(
 def test_cash_missing_stock_exposure_keeps_te_and_persists_local_undefined(tmp_path):
     args = _decision_inputs(holdings=(0.5, 0.4))
     args["cash"] = 10.0
-    args["optimizer_config"] = production.OptimizerConfig(active_name_limit=0.2)
+    args["optimizer_config"] = daily.OptimizerConfig(active_name_limit=0.2)
     enhanced = args["enhanced_decision"]
     args["enhanced_decision"] = replace(
         enhanced, expected_alpha=enhanced.expected_alpha * 0.0
     )
     enhanced.exposures.loc[enhanced.exposures.asset_id.eq("a"), "style"] = np.nan
-    account, adv, optimized, delta, ledger = production._build_session(**args)
+    account, adv, optimized, delta, ledger = daily._build_session(**args)
     assert optimized is None
     assert ledger.executed_delta_notional.eq(0.0).all()
     assert account.post_trade_cash == 10.0
@@ -380,7 +383,7 @@ def test_cash_missing_stock_exposure_keeps_te_and_persists_local_undefined(tmp_p
         ledger.attrs["decision_availability"]["decision_skip_reason"]
         == "optimizer_stock_exposure_unavailable"
     )
-    batch = production._ledger_batch(
+    batch = daily._ledger_batch(
         account=account,
         asset_ledger=ledger,
         sequence=0,
@@ -402,7 +405,7 @@ def test_cash_missing_stock_exposure_keeps_te_and_persists_local_undefined(tmp_p
         endpoint_events=pd.DataFrame(),
         corporate_events=pd.DataFrame(),
         endpoint_corporate_events=pd.DataFrame(),
-        entitlements=production.EquityEntitlements(),
+        entitlements=daily.EquityEntitlements(),
         execution_lives=args["next_panel"].set_index("asset_id").listing_date,
     )
     artifact = read_portfolio_ledger_artifact(
@@ -452,7 +455,7 @@ def test_missing_prediction_independent_exit_needs_no_neutrality_context(neutral
     args["panel"]["industry_level1_code"] = pd.NA
     # Index size facts come from PANEL, not the research-pool dataset.
     args["panel"]["total_market_cap"] = args["dataset"]["total_market_cap"]
-    account, _, _, _, ledger = production._build_session(**args)
+    account, _, _, _, ledger = daily._build_session(**args)
     assert ledger.executed_delta_notional.tolist() == [0.0, -50.0]
     assert account.post_trade_cash == 50.0
     assert (
@@ -481,8 +484,8 @@ def test_enhanced_budget_reserves_receivable_without_renormalizing_nav(receivabl
     args.update(
         cash=10.0 - receivable, decision_receivable=receivable, receivable=receivable
     )
-    args["optimizer_config"] = production.OptimizerConfig(active_name_limit=0.2)
-    account, _, optimized, _, ledger = production._build_session(**args)
+    args["optimizer_config"] = daily.OptimizerConfig(active_name_limit=0.2)
+    account, _, optimized, _, ledger = daily._build_session(**args)
     assert optimized is not None
     assert optimized.weights.sum() == pytest.approx(1.0 - receivable / 100.0)
     assert account.nav_after == pytest.approx(100.0)
@@ -497,14 +500,14 @@ def test_enhanced_budget_reserves_receivable_without_renormalizing_nav(receivabl
 def test_integer_execution_rechecks_risk_without_rewriting_prior_decision():
     args = _decision_inputs(holdings=(0.45, 0.45))
     args["cash"] = 10.0
-    args["optimizer_config"] = production.OptimizerConfig(active_name_limit=0.1)
-    _, _, expected, decision, _ = production._build_session(**args)
+    args["optimizer_config"] = daily.OptimizerConfig(active_name_limit=0.1)
+    _, _, expected, decision, _ = daily._build_session(**args)
     assert expected is not None
     # B doubles overnight and cannot be sold. Buying A reduces the maximum name
     # deviation from 27.5/145 to 17.5/145, but cannot reach the ten-percent band.
     args["next_panel"].loc[args["next_panel"].asset_id.eq("b"), "open"] = 0.02
     args["execution"].loc[args["execution"].asset_id.eq("b"), "can_exit"] = False
-    account, _, optimized, actual_decision, ledger = production._build_session(**args)
+    account, _, optimized, actual_decision, ledger = daily._build_session(**args)
     pd.testing.assert_series_equal(optimized.weights, expected.weights)
     pd.testing.assert_series_equal(actual_decision, decision)
     assert ledger.executed_quantity.tolist() == [1000, 0]
@@ -525,7 +528,7 @@ def test_lot_adjustment_reaches_risk_band_after_overnight_price_change(slope):
     args["enhanced_decision"] = replace(
         enhanced, calibration=replace(enhanced.calibration, slope=slope)
     )
-    account, _, optimized, _, ledger = production._build_session(**args)
+    account, _, optimized, _, ledger = daily._build_session(**args)
     assert (optimized is not None) == (slope > 0)
     # 4500 shares each become 135 and 90 in value. Selling 600 A and buying
     # 1400 B gives 117/118, within 0.5%, with the same 235 total capital.
@@ -567,9 +570,7 @@ def test_unreachable_risk_repair_does_not_scan_every_available_lot():
         # available lot uniquely minimizes the remaining squared deviation.
         return account, {}, (1.0, float((capacity - quantity) ** 2), float(quantity**2))
 
-    selected = production._repair_stock_allocation(
-        empty, empty, empty, step, step, evaluate
-    )
+    selected = daily._repair_stock_allocation(empty, empty, empty, step, step, evaluate)
     assert selected[0].asset_ledger.executed_quantity.tolist() == [capacity]
     assert selected[2][:2] == (1.0, 0.0)
 
@@ -634,7 +635,7 @@ def test_missing_new_target_context_does_not_cancel_independent_exit(kind, reaso
         args["dataset"]["total_market_cap"] = np.nan
     # Index size facts come from PANEL, not the research-pool dataset.
     args["panel"]["total_market_cap"] = args["dataset"]["total_market_cap"]
-    account, _, optimized, _, ledger = production._build_session(**args)
+    account, _, optimized, _, ledger = daily._build_session(**args)
     assert optimized is None
     assert ledger.executed_delta_notional.tolist() == [
         50.0 if kind == "industry" else 0.0,
@@ -671,7 +672,7 @@ def test_every_construction_reserves_receivable_in_executable_target(
             neutrality=neutrality,
         )
         args["enhanced_decision"] = None
-    account, _, optimized, _, ledger = production._build_session(**args)
+    account, _, optimized, _, ledger = daily._build_session(**args)
     assert optimized is None
     assert (ledger.target_notional / account.nav_before).sum() == pytest.approx(0.9)
     assert (ledger.target_notional / account.nav_before).tolist() == pytest.approx(
@@ -703,7 +704,7 @@ def test_partial_missing_target_keeps_held_weight_and_reserves_receivable():
         risk_style_columns=(),
     )
     args["alpha"].loc["a"] = np.nan
-    account, _, _, _, ledger = production._build_session(**args)
+    account, _, _, _, ledger = daily._build_session(**args)
     assert (ledger.target_notional / account.nav_before).tolist() == pytest.approx(
         [0.45, 0.45]
     )
@@ -734,7 +735,7 @@ def test_half_step_budgets_new_leg_before_mixing_and_keeps_missing_holdings(
     )
     if partial:
         args["alpha"].loc["a"] = np.nan
-    account, _, _, _, ledger = production._build_session(**args)
+    account, _, _, _, ledger = daily._build_session(**args)
     expected_buy = (20.0 - receivable) / 2.0
     assert ledger.target_notional.sum() == pytest.approx(80.0 + expected_buy)
     actual_buy = 4.0 if receivable == 10.0 and not partial else expected_buy
@@ -761,7 +762,7 @@ def test_half_step_neutrality_preserves_budgeted_stock_gross():
         risk_style_columns=(),
         neutrality="size",
     )
-    account, _, _, _, ledger = production._build_session(**args)
+    account, _, _, _, ledger = daily._build_session(**args)
     assert ledger.raw_target_weight.sum() == pytest.approx(0.85)
     assert ledger.target_weight.sum() == pytest.approx(0.85)
     assert ledger.target_notional.sum() == pytest.approx(85.0)
@@ -785,7 +786,7 @@ def test_missing_float_cap_blocks_only_dependent_target_and_keeps_exit(construct
     )
     args["dataset"].loc[args["dataset"].asset_id.eq("a"), "float_market_cap"] = np.nan
     args["dataset"].loc[args["dataset"].asset_id.eq("b"), "eligible"] = False
-    account, _, _, _, ledger = production._build_session(**args)
+    account, _, _, _, ledger = daily._build_session(**args)
     if construction == "quantile_float_cap":
         assert (
             ledger.attrs["decision_availability"]["decision_skip_reason"]
@@ -812,7 +813,7 @@ def test_invalid_float_cap_blocks_only_dependent_target(invalid):
     )
     args["dataset"].loc[args["dataset"].asset_id.eq("a"), "float_market_cap"] = invalid
     args["dataset"].loc[args["dataset"].asset_id.eq("b"), "eligible"] = False
-    account, _, _, _, ledger = production._build_session(**args)
+    account, _, _, _, ledger = daily._build_session(**args)
     assert ledger.executed_delta_notional.tolist() == [0.0, -50.0]
     assert account.post_trade_cash == 50.0
 
@@ -841,7 +842,7 @@ def test_empty_lawful_stock_domain_preserves_cash_and_proven_exits(
     )
     args["dataset"]["eligible"] = False
     args["dataset"][["total_market_cap", "float_market_cap"]] = np.nan
-    account, _, optimized, _, ledger = production._build_session(**args)
+    account, _, optimized, _, ledger = daily._build_session(**args)
     assert optimized is None
     assert ledger.attrs["decision_availability"]["decision_status"] == "AVAILABLE"
     assert ledger.target_notional.eq(0.0).all()
@@ -860,10 +861,10 @@ def test_empty_lawful_stock_domain_preserves_cash_and_proven_exits(
 def test_zero_stock_optimizer_target_keeps_undefined_stock_exposure_local():
     args = _decision_inputs()
     args["dataset"]["eligible"] = False
-    args["optimizer_config"] = production.OptimizerConfig(
+    args["optimizer_config"] = daily.OptimizerConfig(
         active_name_limit=1.0, tracking_error_limit=1.0, target_turnover_limit=1.0
     )
-    account, _, optimized, _, ledger = production._build_session(**args)
+    account, _, optimized, _, ledger = daily._build_session(**args)
     assert optimized is not None
     assert ledger.attrs["decision_availability"]["decision_status"] == "AVAILABLE"
     assert ledger.post_trade_notional.eq(0.0).all()
@@ -906,7 +907,9 @@ def test_native_half_step_cash_and_receivable_payment_control(
     write_dataset(tmp_path / "ca", ca, spec=_interim_specs().get("corporate_actions"))
     config["inputs"]["corporate_actions"] = str(tmp_path / "ca")
     batches = list(
-        read_portfolio_ledger_artifact(production.backtest(config)).iter_chunks()
+        read_portfolio_ledger_artifact(
+            portfolio_production.backtest(config)
+        ).iter_chunks()
     )
     last = batches[-1]
     after = [row for row in last.valuations if row.phase == "after"]
@@ -939,7 +942,9 @@ def test_native_missing_selected_float_cap_preserves_account(enhanced_config, tm
     write_dataset(tmp_path / "data", data, spec=_data_spec())
     config["inputs"]["dataset"] = str(tmp_path / "data")
     batches = list(
-        read_portfolio_ledger_artifact(production.backtest(config)).iter_chunks()
+        read_portfolio_ledger_artifact(
+            portfolio_production.backtest(config)
+        ).iter_chunks()
     )
     last = batches[-1]
     assert not last.trades
@@ -998,7 +1003,9 @@ def test_native_receivable_only_asset_has_no_stock_context_dependency(
     config["inputs"]["panel"] = str(tmp_path / "panel")
     config["output"] = str(tmp_path / "ledger")
     batches = list(
-        read_portfolio_ledger_artifact(production.backtest(config)).iter_chunks()
+        read_portfolio_ledger_artifact(
+            portfolio_production.backtest(config)
+        ).iter_chunks()
     )
     last = batches[-1]
     before = next(
@@ -1025,7 +1032,7 @@ def test_optimizer_stock_domain_excludes_zero_current_and_reference_names():
     args = _decision_inputs(benchmark=(1.0, 0.0), holdings=(0.9, 0.0))
     enhanced = args["enhanced_decision"]
     enhanced.exposures.loc[enhanced.exposures.asset_id.eq("b"), "style"] = np.nan
-    assets = production._optimizer_assets(
+    assets = daily._optimizer_assets(
         benchmark_weights=enhanced.benchmark_weights,
         current_weights=args["holdings"] / 100.0,
         cash=0.0,

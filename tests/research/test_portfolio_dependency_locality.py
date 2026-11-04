@@ -6,7 +6,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.research.portfolios import calibration, production
+import quant_research_platform.research.portfolios.daily as daily
+from quant_research_platform.research.portfolios import calibration
 from tests.helpers.portfolio_inputs import decision_inputs as _decision_inputs
 from tests.helpers.portfolio_inputs import portfolio_inputs as _inputs
 from tests.research.test_portfolio_production import _build_producer
@@ -119,7 +120,7 @@ def test_unavailable_selected_cap_preserves_independent_proven_exit(cap):
     )
     args["dataset"].loc[args["dataset"].asset_id.eq("a"), "float_market_cap"] = cap
     args["dataset"].loc[args["dataset"].asset_id.eq("b"), "eligible"] = False
-    account, _, _, _, ledger = production._build_session(**args)
+    account, _, _, _, ledger = daily._build_session(**args)
     assert ledger.executed_delta_notional.tolist() == [0.0, -50.0]
     assert account.post_trade_cash == 50.0
     assert (
@@ -187,7 +188,7 @@ def test_partial_saved_prediction_matches_context_without_requiring_extra_scores
         primary_key=("timestamp", "asset_id"),
         prediction_column="prediction_rank_score",
     )
-    result = production._prediction_alpha(context, lookup)
+    result = daily._prediction_alpha(context, lookup)
     assert pd.isna(result.loc["a"])
     assert result.loc["b"] == 0.5
     assert pd.isna(result.loc["excluded"])
@@ -352,6 +353,6 @@ def test_unselected_typed_bad_cap_is_not_a_target_dependency(cap):
         object
     )
     args["dataset"].loc[args["dataset"].asset_id.eq("a"), "float_market_cap"] = cap
-    account, _, _, _, ledger = production._build_session(**args)
+    account, _, _, _, ledger = daily._build_session(**args)
     assert ledger.executed_delta_notional.tolist() == [-50.0, 50.0]
     assert account.post_trade_cash == 0.0

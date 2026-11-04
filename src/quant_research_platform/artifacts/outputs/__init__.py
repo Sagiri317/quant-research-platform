@@ -1,1 +1,1 @@
-"""Local output writers and readers live in their scientific owners."""
+"""Persist prediction and evaluation tables with validated native manifests."""

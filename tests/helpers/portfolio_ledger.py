@@ -408,7 +408,7 @@ def ledger_frame(*, account, prices, **kwargs):
     from quant_research_platform.research.portfolios.accounting import (
         EquityEntitlements,
     )
-    from quant_research_platform.research.portfolios.production import _ledger_batch
+    from quant_research_platform.research.portfolios.daily import _ledger_batch
 
     returns = kwargs.pop("returns")
     quoted = pd.DataFrame(

@@ -1,4 +1,4 @@
-"""Numeric evaluation publication validates the complete primary-key domain."""
+"""Evaluation readers validate persisted members without reopening unrelated data."""
 
 import json
 from pathlib import Path
@@ -46,11 +46,8 @@ def _frame():
     )
 
 
-@pytest.mark.parametrize("duplicate", ["metrics", "grouped_label_values"])
-@pytest.mark.parametrize("across_chunks", [False, True])
-def test_evaluation_rejects_duplicate_keys_before_publication(
-    tmp_path: Path, duplicate, across_chunks
-):
+@pytest.mark.parametrize("member", ["metrics", "grouped_label_values"])
+def test_evaluation_read_rejects_duplicate_keys(tmp_path: Path, member):
     spec = _spec()
     with build_evaluation_result_from_frames(
         (_frame(),),
@@ -58,35 +55,18 @@ def test_evaluation_rejects_duplicate_keys_before_publication(
         asset_column="asset_id",
         source_columns_by_kind={"feature": ("feature",)},
     ) as result:
-        original = list(result.output_chunks)
-        assert len(original) == 1
-        metrics, grouped, metadata = original[0]
-        repeated = (
-            metrics if duplicate == "metrics" else metrics.iloc[:0],
-            grouped if duplicate == "grouped_label_values" else grouped.iloc[:0],
-            metadata,
-        )
-        chunks = (
-            (*original, repeated)
-            if across_chunks
-            else [
-                (
-                    pd.concat([metrics, repeated[0]], ignore_index=True),
-                    pd.concat([grouped, repeated[1]], ignore_index=True),
-                    metadata,
-                )
-            ]
-        )
         output = tmp_path / "evaluation"
-        with pytest.raises(ValueError, match=f"duplicate_evaluation_{duplicate}_keys"):
-            write_evaluation_outputs_from_chunks(
-                chunks,
-                summary_factory=result.summaries,
-                spec=spec,
-                output_path=output,
-            )
-    assert not output.exists()
-    assert not list(tmp_path.glob(".a-*"))
+        write_evaluation_outputs_from_chunks(
+            result.output_chunks,
+            summary_factory=result.summaries,
+            spec=spec,
+            output_path=output,
+        )
+    _, tables = read_evaluation_outputs(output, tables=(member,))
+    repeated = pd.concat([tables[member]] * 2, ignore_index=True)
+    repeated.to_parquet(output / f"{member}.parquet", index=False, row_group_size=1)
+    with pytest.raises(ValueError, match=f"duplicate_evaluation_{member}_keys"):
+        read_evaluation_outputs(output, tables=(member,))
 
 
 def test_evaluation_publishes_numeric_members_and_reads_only_requested_summaries(
@@ -187,7 +167,7 @@ def test_evaluation_publishes_numeric_members_and_reads_only_requested_summaries
         for failure in ("count", "zero_std", "missing_std")
     ],
 )
-def test_evaluation_summary_invariants_at_publication_and_read(
+def test_evaluation_read_checks_summary_invariants(
     tmp_path, member, statistic, failure
 ):
     spec = _spec()
@@ -223,17 +203,6 @@ def test_evaluation_summary_invariants_at_publication_and_read(
                 if failure == "missing_std":
                     changed[f"std_{statistic}_reason"] = "nonfinite_result"
             error = "invalid_evaluation_summary_values"
-        broken = list(summaries)
-        broken[position] = changed
-        output = tmp_path / "invalid"
-        with pytest.raises(ValueError, match=error):
-            write_evaluation_outputs_from_chunks(
-                chunks,
-                summary_factory=lambda: tuple(broken),
-                spec=spec,
-                output_path=output,
-            )
-        assert not output.exists()
         valid = write_evaluation_outputs_from_chunks(
             chunks,
             summary_factory=lambda: summaries,

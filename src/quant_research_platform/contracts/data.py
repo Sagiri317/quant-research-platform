@@ -1,4 +1,6 @@
-"""Processed data frequency and grain contracts."""
+"""Declare dataset schemas, partitioning, frequencies, units, and source
+dependencies.
+"""
 
 from __future__ import annotations
 

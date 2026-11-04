@@ -1,4 +1,6 @@
-"""Formal simple portfolio target construction."""
+"""Construct long-only targets from eligible scores, capitalization, and
+neutrality limits.
+"""
 
 from __future__ import annotations
 

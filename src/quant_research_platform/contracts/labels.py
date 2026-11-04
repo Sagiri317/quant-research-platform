@@ -1,4 +1,4 @@
-"""Label definition contracts."""
+"""Define label identities, return horizons, and required input columns."""
 
 from __future__ import annotations
 

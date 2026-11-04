@@ -14,13 +14,13 @@ from quant_research_platform.artifacts.outputs.prediction import (
 from quant_research_platform.artifacts.statistics import read_statistics_artifact
 from quant_research_platform.research.models.persisted import load_model
 from quant_research_platform.research.models.production import fit
+from quant_research_platform.research.models.statistics import model_statistics
 from quant_research_platform.research.models.trial_selection import (
     read_selection,
     score,
     select,
 )
 from quant_research_platform.research.predictions.runner import predict
-from quant_research_platform.research.statistics_production import model_statistics
 from quant_research_platform.storage.datasets import write_dataset
 from tests.helpers.research_configuration import CORE6_FACTORS
 from tests.helpers.research_specs import make_demo_research_dataset_spec

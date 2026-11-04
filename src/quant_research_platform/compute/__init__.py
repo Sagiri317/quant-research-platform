@@ -1,1 +1,3 @@
-"""Dataframe, tensor, portfolio-math, and performance compute kernels."""
+"""Numerical kernels for panels, cross sections, rolling risk, and portfolio
+economics.
+"""

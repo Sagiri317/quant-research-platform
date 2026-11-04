@@ -3,11 +3,11 @@
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.research.statistics import cross_sectional_rank_ic
-from quant_research_platform.research.statistics_production import (
+from quant_research_platform.research.models.statistics import (
     _common_model_rank_ic,
     _model_comparison,
 )
+from quant_research_platform.research.statistics import cross_sectional_rank_ic
 
 
 def test_common_rank_ic_restricts_asset_rows_not_just_dates():

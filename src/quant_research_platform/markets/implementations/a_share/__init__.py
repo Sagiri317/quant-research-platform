@@ -1,1 +1,1 @@
-"""A-share calendar, processed data, masks, and market bindings."""
+"""A-share trading calendars, market facts, execution rules, and lifecycle evidence."""

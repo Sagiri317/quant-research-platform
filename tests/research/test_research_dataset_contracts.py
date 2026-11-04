@@ -51,33 +51,61 @@ def test_research_dataset_key_coverage_is_defensively_copied() -> None:
     assert spec.key_coverage["factors"] == "sparse"
 
 
-def test_research_dataset_validation_preserves_declared_primary_key_order() -> None:
-    from quant_research_platform.research.datasets.validation import (
-        validate_research_dataset,
-    )
+@pytest.mark.parametrize("case", ("valid", "wrong_market", "missing_asset_key"))
+def test_assembler_preserves_primary_key_order_and_checks_market(tmp_path, case):
+    from quant_research_platform.research.datasets.assembler import assemble
 
-    spec = replace(
-        make_dummy_research_dataset_spec(),
-        primary_key=("asset_id", "market_id", "timestamp"),
-    )
     frame = pd.DataFrame(
         {
-            "market_id": ["dummy_market", "dummy_market"],
+            "market_id": "other" if case == "wrong_market" else "dummy_market",
             "asset_id": ["asset_a", "asset_b"],
             "timestamp": pd.to_datetime(["2024-01-02", "2024-01-03"]),
             "factor_1": [1.0, 2.0],
         }
     )
-    validate_research_dataset(frame, spec, require_all_columns=False)
-    with pytest.raises(ValueError, match="research_dataset_market_mismatch"):
-        validate_research_dataset(
-            frame.assign(market_id="other"), spec, require_all_columns=False
+    source = tmp_path / "source.parquet"
+    frame.to_parquet(source, index=False)
+    keys = ["asset_id", "market_id", "timestamp"]
+    if case == "missing_asset_key":
+        keys.remove("asset_id")
+    config = dict(
+        market_id="dummy_market",
+        dataset_id="key_order",
+        inputs={
+            "base": {
+                "path": str(source),
+                "spec": dict(
+                    data_id="source",
+                    frequency="1d",
+                    grain="asset_timestamp",
+                    primary_key=keys,
+                    partition_columns=[],
+                    column_roles={
+                        "asset_id": "key",
+                        "market_id": "key",
+                        "timestamp": "timestamp",
+                        "factor_1": "factor",
+                    },
+                ),
+            }
+        },
+        time_window={"start": "2024-01-02", "end": "2024-01-03"},
+        output_root=str(tmp_path / "assembled"),
+    )
+    if case != "valid":
+        error = (
+            "research_dataset_market_mismatch"
+            if case == "wrong_market"
+            else "invalid_research_dataset_primary_key"
         )
-    with pytest.raises(ValueError, match="invalid_research_dataset_primary_key"):
-        validate_research_dataset(
-            frame,
-            replace(spec, primary_key=("market_id", "timestamp")),
-            require_all_columns=False,
+        with pytest.raises(ValueError, match=error):
+            assemble(config)
+    else:
+        output = assemble(config)
+        restored = read_dataset(output)
+        assert list(restored.columns) == [*keys, "factor_1"]
+        pd.testing.assert_frame_equal(
+            restored, frame.loc[:, restored.columns], check_dtype=False
         )
 
 

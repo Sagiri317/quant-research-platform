@@ -8,7 +8,7 @@ import io
 import json
 import os
 import sys
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 from quant_research_platform.policy.lifecycle import closing_iterator
@@ -76,7 +76,6 @@ def write_csv_snapshot(
     columns: tuple[str, ...],
     rows: Iterable[tuple[object, ...]],
     metadata: dict[str, object],
-    validate: Callable[[Path], object],
 ) -> None:
     """Publish caller-provided rows atomically."""
     if (
@@ -120,7 +119,6 @@ def write_csv_snapshot(
                 "metadata": metadata,
             },
         )
-        validate(staging)
 
     atomic_write_directory(root, write)
 
@@ -196,11 +194,7 @@ def iter_csv_snapshot(
                 yield value
 
         with closing_iterator(decoded_rows()) as rows:
-            for row in rows:
-                try:
-                    yield row
-                except GeneratorExit:
-                    return
+            yield from rows
         if count != manifest["row_count"] or (
             verify_bytes
             and (

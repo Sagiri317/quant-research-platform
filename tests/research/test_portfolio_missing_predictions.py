@@ -6,13 +6,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import quant_research_platform.research.portfolios.daily as daily
+import quant_research_platform.research.portfolios.production as portfolio_production
 from quant_research_platform.artifacts.portfolio_ledger import (
     read_portfolio_ledger_artifact,
     write_portfolio_ledger_artifact,
 )
 from quant_research_platform.contracts.portfolios import PortfolioCapital
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.research.portfolios import production
 from quant_research_platform.research.portfolios.accounting import EquityEntitlements
 from tests.helpers.portfolio_inputs import decision_inputs as _decision_inputs
 from tests.helpers.portfolio_inputs import portfolio_inputs as _inputs
@@ -136,7 +137,7 @@ def test_missing_new_asset_cannot_enter(tmp_path, monkeypatch):
 def test_enhanced_missing_hold_infeasibility_keeps_unavailable_position(tmp_path):
     args = _decision_inputs(holdings=(0.6, 0.4))
     args["alpha"].loc["a"] = np.nan
-    account, adv, optimized, delta, ledger = production._build_session(**args)
+    account, adv, optimized, delta, ledger = daily._build_session(**args)
     assert optimized is None
     assert account.asset_ledger.executed_delta_notional.eq(0.0).all()
     assert (
@@ -148,7 +149,7 @@ def test_enhanced_missing_hold_infeasibility_keeps_unavailable_position(tmp_path
         == "UNCHANGED"
     )
     life = args["next_panel"].set_index("asset_id").listing_date
-    batch = production._ledger_batch(
+    batch = daily._ledger_batch(
         account=account,
         asset_ledger=ledger,
         sequence=0,
@@ -188,9 +189,9 @@ def test_numerical_or_input_failure_is_never_a_skipped_decision(monkeypatch, err
     def invalid(*args, **kwargs):
         raise ValueError(error)
 
-    monkeypatch.setattr(production, "optimize_portfolio", invalid)
+    monkeypatch.setattr(daily, "optimize_portfolio", invalid)
     with pytest.raises(ValueError, match=f"^{error}$"):
-        production._build_session(**_decision_inputs())
+        daily._build_session(**_decision_inputs())
 
 
 def test_partial_missing_neutral_decision_projects_with_fixed_missing_weight():
@@ -205,7 +206,7 @@ def test_partial_missing_neutral_decision_projects_with_fixed_missing_weight():
     )
     args["enhanced_decision"] = None
     args["alpha"].loc["a"] = np.nan
-    result = production._build_session(**args)
+    result = daily._build_session(**args)
     assert result[0].asset_ledger.executed_delta_notional.eq(0.0).all()
     assert result[4].attrs["decision_availability"]["decision_skip_reason"] is None
     assert result[4].attrs["decision_availability"]["decision_status"] == "PARTIAL"
@@ -223,10 +224,8 @@ def test_unreachable_risk_target_still_reduces_excess_within_hard_bounds(
 ):
     args = _decision_inputs(holdings=(1.0, 0.0))
     args["assumptions"] = replace(args["assumptions"], adv_participation=capacity)
-    args["optimizer_config"] = production.OptimizerConfig(
-        target_turnover_limit=turnover
-    )
-    account, _, optimized, _, ledger = production._build_session(**args)
+    args["optimizer_config"] = daily.OptimizerConfig(target_turnover_limit=turnover)
+    account, _, optimized, _, ledger = daily._build_session(**args)
     assert optimized is None
     assert account.asset_ledger.executed_delta_notional.tolist() == [-10.0, 10.0]
     facts = ledger.attrs["realized_constraints"]
@@ -257,7 +256,7 @@ def test_neutrality_diagnostics_use_stock_leg_and_disclose_unknown_reference(unk
         industry_standard_id="fixture",
         industry_level1_code=["A", None if unknown else "B"],
     )
-    account, _, _, _, ledger = production._build_session(**args)
+    account, _, _, _, ledger = daily._build_session(**args)
     assert account.post_trade_cash == 50.0
     diagnostics = ledger.attrs["neutrality_exposures"]
     assert diagnostics["benchmark_unknown_industry_weight"] == (
@@ -294,7 +293,7 @@ def test_prediction_domain_ignores_original_input_missingness(
                 frame[f"feature_{name}"].notna().astype(int)
             )
             frame[f"feature_{name}"] = frame[f"feature_{name}"].fillna(0.0)
-    result = production._prediction_alpha(
+    result = daily._prediction_alpha(
         frame,
         _Forecasts(lambda *_: False),
     )
@@ -431,7 +430,7 @@ def test_public_sparse_prediction_continues_native_accounting(tmp_path, case):
             ).reindex(columns=frame.columns)
 
         _replace_public_input(tmp_path, config, "corporate_actions", actions)
-    artifact = read_portfolio_ledger_artifact(production.backtest(config))
+    artifact = read_portfolio_ledger_artifact(portfolio_production.backtest(config))
     batches = list(artifact.iter_chunks())
     assert len(batches) == 3
     assert artifact.capital.valuation_currency == "CNY"
@@ -493,7 +492,7 @@ def test_public_prediction_selection_cannot_extend_declaration(tmp_path):
     config = _public_prediction_config(tmp_path, empty=True)
     config["predictions"][0]["window"] = {"start": "2023-01-02", "end": "2023-01-09"}
     with pytest.raises(ValueError, match="portfolio_prediction_window_invalid"):
-        production.backtest(config)
+        portfolio_production.backtest(config)
 
 
 @pytest.mark.parametrize("cutoff", ["fit_cutoff", "selection_cutoff"])

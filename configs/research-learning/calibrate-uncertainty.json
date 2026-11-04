@@ -1,0 +1,14 @@
+{
+  "dataset": "data/research/return_prediction",
+  "predictions": "results/learning/calibration-predictions",
+  "window": {
+    "start": "2020-01-02",
+    "end": "2020-11-30"
+  },
+  "label": "forward_return_1d",
+  "cutoff": "2020-12-31",
+  "alpha": 0.1,
+  "unit": "decimal_return",
+  "block": "timestamp",
+  "output": "results/learning/conformal.json"
+}

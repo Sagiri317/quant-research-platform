@@ -1,4 +1,6 @@
-"""A-share portfolio-only session and lifecycle evidence projections."""
+"""Align portfolio sessions with market closures, listing lives, and equity
+entitlements.
+"""
 
 from __future__ import annotations
 
@@ -549,10 +551,7 @@ def iter_portfolio_sessions(
                 current_rights,
                 current_corporate,
             )
-            try:
-                yield result
-            except GeneratorExit:
-                return
+            yield result
 
 
 def _qualify_equity_events(events, recognition, stocks, lineage):

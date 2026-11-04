@@ -11,6 +11,7 @@ from quant_research_platform.artifacts.portfolio_ledger import (
     summarize_portfolio_ledger,
 )
 from quant_research_platform.artifacts.statistics import read_statistics_artifact
+from quant_research_platform.research.models.statistics import model_statistics
 from quant_research_platform.research.models.trial_selection import (
     read_selection,
 )
@@ -19,7 +20,6 @@ from quant_research_platform.research.portfolios.production import backtest
 from quant_research_platform.research.risk import (
     FactorRiskConfig,
 )
-from quant_research_platform.research.statistics_production import model_statistics
 from tests.helpers.research_acceptance import run_a_share_acceptance
 from tests.helpers.statistics_artifacts import (
     portfolio_statistics_config,
@@ -100,10 +100,10 @@ def test_native_enhancement_obeys_capacity_and_postcost_limits(source_chain):
 def test_native_turnover_boundary_keeps_integer_holdings_and_reports_remaining_risk(
     source_chain, tmp_path, monkeypatch
 ):
-    from quant_research_platform.research.portfolios import production
+    import quant_research_platform.research.portfolios.daily as daily
 
     rejected = []
-    solve = production.optimize_portfolio
+    solve = daily.optimize_portfolio
 
     def observe_solution(assets, **kwargs):
         try:
@@ -113,7 +113,7 @@ def test_native_turnover_boundary_keeps_integer_holdings_and_reports_remaining_r
                 rejected.append((assets.copy(), kwargs["config"].target_turnover_limit))
             raise
 
-    monkeypatch.setattr(production, "optimize_portfolio", observe_solution)
+    monkeypatch.setattr(daily, "optimize_portfolio", observe_solution)
     original = source_chain.enhanced_configs["global"]
     # The real initial allocation is exempt from turnover, so it can fill.
     # Later price drift forces sales larger than the tiny turnover budget.

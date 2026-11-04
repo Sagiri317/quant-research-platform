@@ -1,4 +1,7 @@
-"""Time value marker types for QRP contracts."""
+"""Normalize research time windows and derive precise timestamp filter bounds.
+
+Date-only end bounds include the entire day. Aware datetimes are normalized to
+UTC; open prediction windows are distinct from bounded research intervals."""
 
 from __future__ import annotations
 
@@ -10,7 +13,7 @@ import pandas as pd
 
 @dataclass(frozen=True)
 class TimeWindow:
-    """Closed logical time interval used for dataset reads and inspection."""
+    """Bound a research interval; date-only end bounds include the entire final day."""
 
     start: date | datetime
     end: date | datetime

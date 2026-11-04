@@ -7,10 +7,11 @@ from dataclasses import asdict
 import pandas as pd
 import pytest
 
+import quant_research_platform.research.portfolios.daily as daily
+import quant_research_platform.research.portfolios.production as portfolio_production
 from quant_research_platform.contracts.data import DataSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share import portfolio_sessions
-from quant_research_platform.research.portfolios import production
 
 
 @pytest.mark.parametrize("selected_assets", [[], ["a0"]])
@@ -41,7 +42,7 @@ def test_portfolio_bar_read_preserves_selected_history_and_empty_dates(
             },
             stock_master_root=layout["stock_master"],
             panel_root=roots["market_panel_1d"],
-            panel_columns=production._PANEL_COLUMNS,
+            panel_columns=daily._PANEL_COLUMNS,
             calendar=calendar,
             time_window=TimeWindow("2023-01-02", "2023-01-04"),
         )
@@ -98,7 +99,7 @@ def test_session_inputs_intersect_years_source_window_history_files_and_filters(
         "row_filters": [["chosen", "==", True]],
     }
     frames = list(
-        production._iter_input_sessions(
+        daily._iter_input_sessions(
             source,
             ("asset_id", "timestamp", "value"),
             TimeWindow("2022-01-01", "2024-01-01"),
@@ -113,7 +114,7 @@ def test_session_inputs_intersect_years_source_window_history_files_and_filters(
     }
     assert (
         list(
-            production._iter_input_sessions(
+            daily._iter_input_sessions(
                 {**source, "years": []},
                 ("asset_id", "timestamp", "value"),
                 TimeWindow("2022-01-01", "2024-01-01"),
@@ -160,7 +161,7 @@ def test_raw_rights_entitlement_is_independent_of_adjusted_panel_history(
                 ],
             },
             panel_root=panel,
-            panel_columns=production._PANEL_COLUMNS,
+            panel_columns=daily._PANEL_COLUMNS,
             calendar=calendar,
             time_window=TimeWindow("2023-01-06", "2023-01-06"),
         )
@@ -248,7 +249,7 @@ def test_calibration_selection_preserves_duplicate_observations(
         "time_window": {"start": "2023-01-01", "end": "2023-01-31"},
         "row_filters": [["include", "==", True]],
     }
-    result = production.calibrate(
+    result = portfolio_production.calibrate(
         {
             "observations": options,
             "scheduled_intervals": schedule,
@@ -262,7 +263,7 @@ def test_calibration_selection_preserves_duplicate_observations(
             "output": str(tmp_path / "calibration.json"),
         }
     )
-    expected = production.calibrate_expected_alpha(
+    expected = daily.calibrate_expected_alpha(
         observations.loc[observations.include],
         scheduled_intervals=intervals.iloc[:6],
         trading_sessions=days,
@@ -277,7 +278,7 @@ def test_calibration_selection_preserves_duplicate_observations(
     assert saved["intercept"] == pytest.approx(0.00025, rel=1e-12, abs=0)
     assert saved["valid_rebalance_dates"] == saved["scheduled_rebalance_dates"] == 6
     with pytest.raises(ValueError, match="portfolio_input_business_columns_excluded"):
-        production.calibrate(
+        portfolio_production.calibrate(
             {
                 "observations": {**options, "columns": ["prediction_rank_score"]},
                 "scheduled_intervals": schedule,
@@ -323,7 +324,7 @@ def test_risk_context_selection_uses_selected_columns_not_unrelated_schema(tmp_p
         spec=spec,
     )
     with ExitStack() as stack:
-        contexts = production._risk_context_input_sessions(
+        contexts = daily._risk_context_input_sessions(
             roots=({"path": str(root), "columns": ["value"]},),
             style_columns=("value",),
             time_window=TimeWindow("2023-01-01", "2023-01-03"),
@@ -336,7 +337,7 @@ def test_risk_context_selection_uses_selected_columns_not_unrelated_schema(tmp_p
         ExitStack() as stack,
         pytest.raises(ValueError, match="portfolio_risk_context_schema_invalid"),
     ):
-        production._risk_context_input_sessions(
+        daily._risk_context_input_sessions(
             roots=({"path": str(root), "columns": ["unrelated"]},),
             style_columns=("value",),
             time_window=TimeWindow("2023-01-01", "2023-01-03"),
@@ -448,7 +449,7 @@ def test_bounded_backtest_ignores_future_bad_keys_and_keeps_required_history(
 
     def backtest(end):
         return list(
-            production.backtest_a_share(
+            daily.backtest_a_share(
                 candidate=PortfolioCandidateSpec(
                     selection_group="global",
                     prediction_selector="champion",
@@ -548,7 +549,7 @@ def test_future_lifecycle_and_rights_keys_do_not_affect_current_sessions(
                 stock_master_root=roots["stock_master"],
                 equity_events_root=roots.get("equity_events"),
                 panel_root=roots["panel"],
-                panel_columns=production._PANEL_COLUMNS,
+                panel_columns=daily._PANEL_COLUMNS,
                 calendar=calendar,
                 time_window=TimeWindow("2023-01-02", end),
             )
@@ -611,7 +612,7 @@ def test_corporate_amount_selection_preserves_cash_and_structural_companions(tmp
             market_bars_root=inputs["market_bars"],
             stock_master_root=inputs["stock_master"],
             panel_root=inputs["panel"],
-            panel_columns=production._PANEL_COLUMNS,
+            panel_columns=daily._PANEL_COLUMNS,
             corporate_actions_root={"path": str(root), "columns": columns},
             calendar=calendar,
             time_window=TimeWindow("2023-01-02", "2023-01-06"),
@@ -660,7 +661,7 @@ def test_portfolio_upper_bound_preserves_narrower_panel_and_execution_selectors(
             stock_master_root=inputs["stock_master"],
             panel_root=selected("panel", ["open", "close", "amount"]),
             execution_root=selected("execution", ["can_enter", "can_exit"]),
-            panel_columns=production._PANEL_COLUMNS,
+            panel_columns=daily._PANEL_COLUMNS,
             calendar=calendar,
             time_window=TimeWindow("2023-01-02", "2023-01-05"),
         )
@@ -677,7 +678,9 @@ def test_portfolio_upper_bound_preserves_narrower_panel_and_execution_selectors(
     assert views[-1].execution.execution_at.isna().all()
 
 
-@pytest.mark.parametrize("operation", [production.backtest, production.calibrate])
+@pytest.mark.parametrize(
+    "operation", [portfolio_production.backtest, portfolio_production.calibrate]
+)
 def test_stage_configuration_rejects_non_json_types_before_opening_inputs(
     tmp_path, operation
 ):
@@ -730,9 +733,9 @@ def test_public_portfolio_respects_explicit_input_market(tmp_path, name, market)
     )
     if market == "other_market":
         with pytest.raises(ValueError, match="^input_market_mismatch$"):
-            production.backtest(config)
+            portfolio_production.backtest(config)
     else:
-        ledger = read_portfolio_ledger_artifact(production.backtest(config))
+        ledger = read_portfolio_ledger_artifact(portfolio_production.backtest(config))
         assert len(list(ledger.iter_chunks())) == 3
 
 
@@ -764,14 +767,14 @@ def test_risk_context_checks_only_consumed_declared_market(tmp_path, market):
     with ExitStack() as channels:
         if market == "other_market":
             with pytest.raises(ValueError, match="^input_market_mismatch$"):
-                production._risk_context_input_sessions(
+                daily._risk_context_input_sessions(
                     roots=(root,),
                     style_columns=("style",),
                     time_window=TimeWindow("2023-01-02", "2023-01-02"),
                     retained=channels,
                 )
         else:
-            inputs = production._risk_context_input_sessions(
+            inputs = daily._risk_context_input_sessions(
                 roots=(root,),
                 style_columns=("style",),
                 time_window=TimeWindow("2023-01-02", "2023-01-02"),
@@ -784,7 +787,7 @@ def test_risk_context_checks_only_consumed_declared_market(tmp_path, market):
                 ],
             )
         assert (
-            production._risk_context_input_sessions(
+            daily._risk_context_input_sessions(
                 roots=(root,),
                 style_columns=(),
                 time_window=TimeWindow("2023-01-02", "2023-01-02"),
@@ -827,7 +830,7 @@ def test_benchmark_consumption_respects_declared_market(tmp_path, market):
     )
     root = tmp_path / "benchmark"
     write_dataset(root, frame, spec=spec)
-    weights = production._iter_benchmark_weights(
+    weights = daily._iter_benchmark_weights(
         root, "index", pd.DatetimeIndex(["2023-01-02"])
     )
     if market == "other_market":
@@ -855,7 +858,7 @@ def test_equity_event_consumption_respects_declared_market(tmp_path, market):
         stock_master_root=inputs["stock_master"],
         equity_events_root=inputs["equity_events"],
         panel_root=inputs["panel"],
-        panel_columns=production._PANEL_COLUMNS,
+        panel_columns=daily._PANEL_COLUMNS,
         calendar=calendar,
         time_window=TimeWindow("2022-12-30", "2023-01-06"),
     )

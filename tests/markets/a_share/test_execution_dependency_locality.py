@@ -6,7 +6,7 @@ import pytest
 from quant_research_platform.markets.implementations.a_share.execution import (
     derive_execution_mask,
 )
-from quant_research_platform.research.portfolios.production import _mask_values
+from quant_research_platform.research.portfolios.daily import _mask_values
 from quant_research_platform.storage.datasets import read_dataset
 from tests.helpers.a_share_sources import (
     _prepare,

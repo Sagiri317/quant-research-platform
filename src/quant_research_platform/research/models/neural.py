@@ -1,4 +1,4 @@
-"""CUDA sequence regressors with causal, per-asset observation histories."""
+"""Sequence regressors with causal histories and CPU fallback when CUDA is absent."""
 
 from collections import deque
 from dataclasses import dataclass
@@ -64,17 +64,6 @@ def _network(algorithm, width, parameters):
     return Network()
 
 
-def _cuda(parameters):
-    import torch
-
-    device = torch.device(parameters["device"])
-    if not torch.cuda.is_available() or (
-        device.index is not None and device.index >= torch.cuda.device_count()
-    ):
-        raise RuntimeError("model_cuda_unavailable")
-    return device
-
-
 def _ordered_context(frame, columns):
     context = frame.loc[:, ["asset_id", "timestamp", *columns]].copy()
     if context.asset_id.isna().any() or context.asset_id.map(type).ne(str).any():
@@ -102,8 +91,9 @@ class SequencePredictor:
 
     def prediction_function(self):
         import torch
+        from stable_baselines3.common.utils import get_device
 
-        device = _cuda(self.parameters)
+        device = get_device(self.parameters["device"])
         # Loading weights must not consume the caller's random stream.
         with torch.random.fork_rng():
             network = _network(
@@ -188,9 +178,10 @@ class SequencePredictor:
 
 def fit_sequence(prepared, spec):
     import torch
+    from stable_baselines3.common.utils import get_device
 
     parameters = sequence_parameters(spec.model_algorithm, dict(spec.hyperparameters))
-    device = _cuda(parameters)
+    device = get_device(parameters["device"])
     weights, scaler, _ = prepared.preprocessing
     context = _ordered_context(prepared.sequence_context, spec.input_columns)
     matrix = scaler.transform(context.loc[:, spec.input_columns]).to_numpy(

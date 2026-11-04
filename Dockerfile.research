@@ -1,0 +1,17 @@
+ARG BASE_IMAGE=quay.io/condaforge/miniforge3:latest
+FROM ${BASE_IMAGE}
+
+COPY environment.yml /opt/qrp/environment.yml
+RUN conda env create --prefix /opt/qrp-env --file /opt/qrp/environment.yml --yes \
+    && conda clean --all --yes
+ENV PATH="/opt/qrp-env/bin:${PATH}" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    HOME=/tmp
+
+COPY src /opt/qrp/src
+# 注册源码到隔离解释器；python -I 不依赖 PYTHONPATH 或当前目录。
+RUN python -c "import pathlib, site; pathlib.Path(site.getsitepackages()[0], 'qrp.pth').write_text('/opt/qrp/src\n')" \
+    && python -I -c "import quant_research_platform; import torch, gymnasium, stable_baselines3"
+USER 1000:1000
+WORKDIR /tmp
+CMD ["python", "-I", "-c", "import quant_research_platform"]

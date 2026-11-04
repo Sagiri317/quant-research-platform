@@ -1,0 +1,7 @@
+**
+!Dockerfile.research
+!environment.yml
+!src/
+!src/**
+**/__pycache__
+**/*.pyc

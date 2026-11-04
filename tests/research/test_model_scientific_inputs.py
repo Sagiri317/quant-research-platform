@@ -391,7 +391,7 @@ def test_model_freezes_only_consumed_declared_units_before_predicting(
 
 def test_canonical_observation_projection_matches_factor_statistics(tmp_path):
     from quant_research_platform.artifacts.statistics import read_statistics_artifact
-    from quant_research_platform.research.statistics_production import factor_statistics
+    from quant_research_platform.research.factors.statistics import factor_statistics
 
     frame = _canonical()
     case = fit_frame(tmp_path, frame, _linear(column="feature_x", feature=True))

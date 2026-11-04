@@ -1,4 +1,4 @@
-"""Research dataset catalog."""
+"""Look up research dataset definitions and their declared input requirements."""
 
 from __future__ import annotations
 

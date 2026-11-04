@@ -664,40 +664,17 @@ def test_native_response_pair_domain_and_independent_members(tmp_path, empty):
 
 
 @pytest.mark.parametrize("change", ["empty_metrics", "missing_common"])
-def test_response_pair_contract_at_publication_and_selected_read(tmp_path, change):
+def test_response_pair_contract_at_selected_read(tmp_path, change):
     import json
 
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    from quant_research_platform.artifacts.outputs.evaluation import (
-        write_evaluation_outputs_from_chunks,
-    )
     from quant_research_platform.artifacts.outputs.evaluation_daily import DAILY_SCHEMAS
-    from quant_research_platform.research.evaluations.engine import (
-        build_evaluation_result_from_frames,
-    )
 
     root = evaluate(_native_config(tmp_path))
     members = ("response_metrics", "response_groups")
     manifest, tables = read_evaluation_outputs(root, tables=members)
-    science = {
-        key: manifest["metadata"][key]
-        for key in (
-            "window",
-            "cutoff",
-            "sample_role",
-            "sample_scope",
-            "input_facts",
-            "comparison_inputs",
-            "strata",
-            "stratum_domains",
-            "optional_member_rows",
-            "response_diagnostics",
-            "common_rule",
-        )
-    }
-    science["optional_member_rows"] = dict.fromkeys(members, 0)
 
     def altered(name, frame):
         if change == "empty_metrics":
@@ -709,31 +686,6 @@ def test_response_pair_contract_at_publication_and_selected_read(tmp_path, chang
         if change == "empty_metrics"
         else "evaluation_response_common_count_mismatch"
     )
-    unpublished = tmp_path / "invalid"
-    with build_evaluation_result_from_frames(
-        [_frame()],
-        spec=_spec(),
-        asset_column="asset_id",
-        source_columns_by_kind={"feature": ("score",)},
-        response_diagnostics=_response(),
-    ) as result:
-        chunks = [
-            (
-                metrics,
-                grouped,
-                {**facts, **{name: altered(name, facts[name]) for name in members}},
-            )
-            for metrics, grouped, facts in result.output_chunks
-        ]
-        with pytest.raises(ValueError, match=f"^{error}$"):
-            write_evaluation_outputs_from_chunks(
-                chunks,
-                summary_factory=result.summaries,
-                spec=_spec(),
-                output_path=unpublished,
-                metadata=science,
-            )
-    assert not unpublished.exists()
     # Each member remains locally valid; only their consumed relationship is broken.
     for name in members:
         frame = altered(name, tables[name])

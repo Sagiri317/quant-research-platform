@@ -586,7 +586,7 @@ def test_statistics_compares_selected_science_without_reopening_ancestors(
     tmp_path, mutation
 ):
     from quant_research_platform.artifacts.statistics import read_statistics_artifact
-    from quant_research_platform.research.statistics_production import model_statistics
+    from quant_research_platform.research.models.statistics import model_statistics
 
     case, scoring, request = _selection(tmp_path)
     selection = select(request)

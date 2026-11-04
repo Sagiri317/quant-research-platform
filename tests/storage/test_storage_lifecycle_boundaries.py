@@ -24,7 +24,6 @@ _PRIMARY_EXCEPTION_TYPES = (
     MemoryError,
     KeyboardInterrupt,
     SystemExit,
-    GeneratorExit,
 )
 
 
@@ -211,7 +210,7 @@ def _install_parquet_stubs(monkeypatch, handle, parquet):
     monkeypatch.setattr(physical.pq, "ParquetFile", lambda _handle, **_kwargs: parquet)
 
 
-def test_opened_parquet_close_preserves_generator_exit(
+def test_opened_parquet_close_surfaces_failure_on_cancellation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
 
@@ -245,11 +244,9 @@ def test_opened_parquet_close_preserves_generator_exit(
             raise RuntimeError("close_failed")
 
     _install_parquet_stubs(monkeypatch, Handle(), Parquet())
-    primary = GeneratorExit()
-    with pytest.raises(GeneratorExit) as caught:
+    with pytest.raises(RuntimeError, match="close_failed"):
         with physical._opened_parquet(Path("part.parquet")):
-            raise primary
-    assert caught.value is primary
+            raise GeneratorExit()
 
 
 @pytest.mark.parametrize(

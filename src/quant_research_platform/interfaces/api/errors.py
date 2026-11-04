@@ -1,4 +1,6 @@
-"""Common API error envelope helpers."""
+"""Translate query failures into consistent HTTP status codes and sanitized error
+bodies.
+"""
 
 from __future__ import annotations
 

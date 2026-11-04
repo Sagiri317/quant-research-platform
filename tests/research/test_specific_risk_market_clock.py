@@ -57,15 +57,15 @@ def test_specific_risk_distinguishes_market_closure_from_missing_open_observatio
 def test_producer_advances_risk_clock_through_whole_open_market_data_gap(
     tmp_path, monkeypatch, missing_panel
 ):
-    from quant_research_platform.research.portfolios import production
+    import quant_research_platform.research.portfolios.daily as daily
     from tests.research.test_portfolio_production import (
         _build_producer,
         _enhanced_inputs,
     )
 
-    estimate = production.FactorRiskState.estimate
+    estimate = daily.FactorRiskState.estimate
     frames, fees, window, candidate = _enhanced_inputs(monkeypatch)
-    monkeypatch.setattr(production.FactorRiskState, "estimate", estimate)
+    monkeypatch.setattr(daily.FactorRiskState, "estimate", estimate)
     gap = pd.Timestamp("2022-12-20")
     if missing_panel:
         for name in ("panel", "dataset", "execution"):
@@ -75,7 +75,7 @@ def test_producer_advances_risk_clock_through_whole_open_market_data_gap(
             "nan"
         )
     clocks = []
-    original = production.FactorRiskState.observe_return_session
+    original = daily.FactorRiskState.observe_return_session
 
     def observe(state, cross, **kwargs):
         previous = state._session_count
@@ -87,7 +87,7 @@ def test_producer_advances_risk_clock_through_whole_open_market_data_gap(
             assert not state._factor_rows
         clocks.append((state._session_count, dict(state._specific_session_counts)))
 
-    monkeypatch.setattr(production.FactorRiskState, "observe_return_session", observe)
+    monkeypatch.setattr(daily.FactorRiskState, "observe_return_session", observe)
     stream, _ = _build_producer(
         tmp_path,
         monkeypatch,

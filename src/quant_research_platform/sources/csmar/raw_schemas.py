@@ -1,4 +1,4 @@
-"""Internal provider raw-file parsing helpers."""
+"""Parse CSMAR export filenames, headers, and CSV records with consumed-byte hashes."""
 
 from __future__ import annotations
 
@@ -147,10 +147,7 @@ def iter_export_csv_records(
         _CsvRecords(Path(path), content_hashes=content_hashes)
     ) as records:
         for record in records:
-            try:
-                yield record
-            except GeneratorExit:
-                return
+            yield record
             del record
 
 

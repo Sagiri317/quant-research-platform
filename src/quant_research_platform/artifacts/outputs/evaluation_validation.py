@@ -1,4 +1,4 @@
-"""Evaluation output validation."""
+"""Validate evaluation units, sample counts, windows, and cross-table relationships."""
 
 from __future__ import annotations
 
@@ -449,59 +449,6 @@ def validate_evaluation_output_metadata_shape(
     return metadata
 
 
-def validate_evaluation_diagnostics_consistency(
-    *,
-    evaluation_diagnostics: EvaluationDiagnostics,
-    spec: EvaluationSpec,
-    rows_input: int,
-    rows_after_filter_mode: int,
-    rows_after_signal_label_dropna: int,
-    metric_rows: int,
-    grouped_label_value_rows: int,
-    ic_summary_rows: int,
-    group_spread_summary_rows: int,
-    timestamp_count: int,
-    min_timestamp: str | None,
-    max_timestamp: str | None,
-    skipped_timestamp_count: int,
-    filter_columns_used: tuple[str, ...],
-    filter_definition_value: str,
-) -> None:
-    if not (
-        0 <= rows_after_filter_mode <= rows_input
-        and 0
-        <= rows_after_signal_label_dropna
-        <= rows_after_filter_mode * len(spec.signals) * len(spec.label_columns)
-    ):
-        raise ValueError("evaluation_diagnostics_inconsistent")
-    validate_filter_metadata(
-        mode=spec.filter_mode,
-        columns=list(filter_columns_used),
-        definition=filter_definition_value,
-        error_name="evaluation_diagnostics_inconsistent",
-    )
-    expected = {
-        "filter_mode": spec.filter_mode,
-        "filter_columns_used": tuple(required_filter_columns(spec.filter_mode)),
-        "filter_definition": filter_definition(spec.filter_mode),
-        "rows_input": rows_input,
-        "rows_after_filter_mode": rows_after_filter_mode,
-        "rows_after_signal_label_dropna": rows_after_signal_label_dropna,
-        "metric_rows": metric_rows,
-        "grouped_label_value_rows": grouped_label_value_rows,
-        "ic_summary_rows": ic_summary_rows,
-        "group_spread_summary_rows": group_spread_summary_rows,
-        "timestamp_count": timestamp_count,
-        "min_timestamp": min_timestamp,
-        "max_timestamp": max_timestamp,
-        "skipped_timestamp_count": skipped_timestamp_count,
-        "n_groups": spec.n_groups,
-    }
-    for key, value in expected.items():
-        if getattr(evaluation_diagnostics, key) != value:
-            raise ValueError("evaluation_diagnostics_inconsistent")
-
-
 def validate_evaluation_artifact_structure(
     *,
     metrics: pd.DataFrame,
@@ -709,7 +656,7 @@ def validate_metric_group_counts(metrics, grouped_label_values, *, spec):
 
 
 def _validate_correlation_metrics(metrics, *, spec):
-    """Own correlation values, counts and undefined reasons for all daily tables."""
+    """Check correlation values, valid counts, and undefined reasons in daily tables."""
     _validate_signal_label_membership(metrics, spec=spec)
     strict_non_negative_count_series(metrics["n_obs"])
     for column in ("ic", "rankic"):

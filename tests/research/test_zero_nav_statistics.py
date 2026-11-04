@@ -417,11 +417,11 @@ def test_undefined_return_pair_preserves_other_pairs_and_fdr_family(
 
 
 def test_zero_value_retained_units_are_counted_in_valuation_diagnostics():
+    from quant_research_platform.research.portfolios.daily import (
+        RESEARCH_VALUATION_POLICY,
+    )
     from quant_research_platform.research.portfolios.diagnostics import (
         _research_valuation_observation,
-    )
-    from quant_research_platform.research.portfolios.production import (
-        RESEARCH_VALUATION_POLICY,
     )
 
     diagnostics = [

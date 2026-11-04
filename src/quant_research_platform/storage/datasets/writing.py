@@ -1,4 +1,4 @@
-"""Dataset writing implementation."""
+"""Validate streamed dataset batches and atomically publish a new immutable table."""
 
 from __future__ import annotations
 
@@ -33,10 +33,7 @@ from quant_research_platform.storage.datasets.paths import (
     timestamp_column_from_spec_payload,
     timestamp_primary_key_column_from_spec,
 )
-from quant_research_platform.storage.datasets.reading import (
-    _arrow_batch_to_bounded_pandas,
-    iter_frame_chunks,
-)
+from quant_research_platform.storage.datasets.reading import iter_frame_chunks
 from quant_research_platform.storage.datasets.schema import (
     arrow_type_has_null,
     arrow_type_resolves_null,
@@ -46,12 +43,9 @@ from quant_research_platform.storage.datasets.schema import (
     logical_dtype_payload_from_frame,
     merge_dataset_metadata,
     merge_logical_dtype_payloads,
-    pandas_dtype_overrides_from_logical_payload,
-    parse_logical_dtype_metadata,
     physical_schema_columns,
     physical_schema_from_schema,
     validate_frame_objects,
-    validate_persisted_logical_schema,
 )
 from quant_research_platform.storage.datasets.types import DatasetInspection
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
@@ -84,10 +78,6 @@ class _WriteStats:
     _schema: list[dict[str, Any]] | None = None
     _arrow_schema: pa.Schema | None = None
     _logical_dtype_plan: dict[str, Any] | None = None
-    _dtype_plans: dict[bytes, tuple[dict[str, Any], dict[str, object]]] = field(
-        default_factory=dict
-    )
-    _dtype_schemas: set[tuple[bytes, pa.Schema]] = field(default_factory=set)
     _frame_dtype_bytes: dict[bytes, bytes] = field(default_factory=dict)
     _summary_observer: DatasetSummaryObserver = field(init=False)
 
@@ -180,32 +170,9 @@ class _WriteStats:
             physical_schema = self._arrow_schema
         return table.cast(physical_schema, safe=True)
 
-    def observe_file(
-        self, path: Path, table: pa.Table, *, batch_rows: int = DEFAULT_BATCH_ROWS
-    ) -> None:
-        """Check the canonical stream and closed footer without decoding it again."""
-        metadata = inspect_dataset_part(path)
-        if metadata.schema != table.schema.remove_metadata():
-            raise ValueError("dataset_schema_mismatch")
-        if metadata.row_count != table.num_rows:
-            raise ValueError("dataset_row_count_mismatch")
-        raw = metadata.logical_dtype_payload
-        if raw != (table.schema.metadata or {}).get(b"qrp.logical-dtypes"):
-            raise ValueError("dataset_logical_dtype_mismatch")
-        if raw not in self._dtype_plans:
-            logical_payload = parse_logical_dtype_metadata(raw)
-            self.observe_logical_dtype_payload(logical_payload)
-            self._dtype_plans[raw] = (
-                logical_payload,
-                pandas_dtype_overrides_from_logical_payload(
-                    logical_payload, columns=tuple(metadata.schema.names)
-                ),
-            )
-        logical_payload, overrides = self._dtype_plans[raw]
-        dtype_schema = (raw, metadata.schema)
-        if dtype_schema not in self._dtype_schemas:
-            validate_persisted_logical_schema(metadata.schema, logical_payload)
-            self._dtype_schemas.add(dtype_schema)
+    def observe_file(self, path: Path) -> None:
+        """Record the physical schema and size reported by the closed Parquet part."""
+        metadata = inspect_dataset_part(path, require_logical_dtypes=False)
         physical_schema = physical_schema_from_schema(metadata.schema)
         if self._schema is None:
             self._schema = physical_schema
@@ -213,21 +180,6 @@ class _WriteStats:
             self.schema_hash = canonical_json_hash(physical_schema)
         elif physical_schema != self._schema:
             raise ValueError("dataset_schema_mismatch")
-        for batch in table.to_batches(max_chunksize=batch_rows):
-            for _ in _arrow_batch_to_bounded_pandas(
-                batch,
-                batch_rows=batch_rows,
-                dtype_overrides=overrides,
-                persisted_frame_observer=lambda frame: (
-                    _validate_persisted_categorical_values(frame, logical_payload)
-                ),
-                batch_observer=lambda observed, frame: (
-                    self._summary_observer.observe_batch(observed, frame=frame)
-                ),
-            ):
-                pass
-            _raise_accumulated_failures(self)
-        self.row_count = self._summary_observer.row_count
         partition = relative_partition_label(self.data_root, path)
         self.file_count += 1
         self.file_size_bytes += metadata.file_size_bytes
@@ -239,6 +191,7 @@ class _WriteStats:
     def dtype_metadata(self, payload: dict[str, Any]) -> bytes:
         identity = canonical_identity_bytes(payload)
         if identity not in self._frame_dtype_bytes:
+            self.observe_logical_dtype_payload(payload)
             self._frame_dtype_bytes[identity] = logical_dtype_metadata_bytes(payload)
         return self._frame_dtype_bytes[identity]
 
@@ -392,7 +345,7 @@ def _write_contents(
                 schema.with_metadata(table.schema.metadata), safe=True
             )
             write_parquet_file(resolved, pending, timestamp_column=timestamp_column)
-            accumulator.observe_file(pending, resolved, batch_rows=batch_rows)
+            accumulator.observe_file(pending)
         pending_parts.clear()
 
     saw_empty_schema = False
@@ -409,7 +362,7 @@ def _write_contents(
                 accumulator.table_for_frame(
                     frame, schema=None, object_string_columns=object_string_columns
                 )
-                accumulator.observe_logical_dtype_payload(logical_dtypes)
+                accumulator.dtype_metadata(logical_dtypes)
                 saw_empty_schema = True
                 continue
             for partition, partition_frame in partition_frames(
@@ -425,6 +378,11 @@ def _write_contents(
                 persisted = table.replace_schema_metadata(
                     {b"qrp.logical-dtypes": accumulator.dtype_metadata(logical_dtypes)}
                 )
+                accumulator._summary_observer.observe_batch(
+                    persisted, frame=partition_frame
+                )
+                accumulator.row_count = accumulator._summary_observer.row_count
+                _raise_accumulated_failures(accumulator)
                 part_index = part_indices.get(partition, 0)
                 part_indices[partition] = part_index + 1
                 path = partition_part_path(root, partition, part_index)
@@ -437,8 +395,7 @@ def _write_contents(
                     pending_parts.append(path)
                 else:
                     observe_pending()
-                    accumulator.observe_file(path, persisted, batch_rows=batch_rows)
-                _raise_accumulated_failures(accumulator)
+                    accumulator.observe_file(path)
     if pending_parts:
         observe_pending()
     if pending_parts:
@@ -455,7 +412,7 @@ def _write_contents(
             {b"qrp.logical-dtypes": logical_dtype_metadata_bytes(logical_dtypes)}
         )
         write_parquet_file(table, path, timestamp_column=timestamp_column)
-        accumulator.observe_file(path, table, batch_rows=batch_rows)
+        accumulator.observe_file(path)
     return accumulator
 
 
@@ -494,35 +451,6 @@ def _canonical_storage_schema(schema: pa.Schema) -> pa.Schema:
             for field in schema
         ]
     )
-
-
-def _validate_persisted_categorical_values(
-    frame: pd.DataFrame, logical_dtypes: Mapping[str, Any]
-) -> None:
-    actual = logical_dtype_payload_from_frame(frame)
-    actual_by_name = {item["name"]: item for item in actual["columns"]}
-    for expected in logical_dtypes["columns"]:
-        if expected["kind"] != "categorical":
-            continue
-        observed = actual_by_name.get(expected["name"])
-        if observed is not None and observed["kind"] != "categorical":
-            # Parquet decodes non-string dictionary values as their primitive type.
-            # The shared batch converter checks their domain before casting.
-            continue
-        if (
-            observed is None
-            or observed["kind"] != "categorical"
-            or observed["ordered"] != expected["ordered"]
-        ):
-            raise ValueError("dataset_categorical_domain_mismatch")
-        expected_values = {
-            canonical_identity_bytes(value) for value in expected["categories"]
-        }
-        observed_values = {
-            canonical_identity_bytes(value) for value in observed["categories"]
-        }
-        if not observed_values.issubset(expected_values):
-            raise ValueError("dataset_categorical_domain_mismatch")
 
 
 def write_parquet_file(

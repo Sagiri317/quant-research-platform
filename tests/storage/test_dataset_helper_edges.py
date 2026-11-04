@@ -117,7 +117,6 @@ def test_exact_key_index_classifies_typed_exact_duplicates_and_conflicts() -> No
 @pytest.mark.parametrize(
     ("namespace", "value_columns", "error"),
     (
-        ("", (), "invalid_exact_key_namespace"),
         ("grammar", ("value", "value"), "invalid_dataset_comparison_columns"),
         ("grammar", ("asset_id",), "invalid_dataset_comparison_columns"),
         ("grammar", ("missing",), "missing_dataset_comparison_column"),

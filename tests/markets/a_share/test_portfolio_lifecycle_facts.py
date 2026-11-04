@@ -1,9 +1,9 @@
 import pandas as pd
 import pytest
 
+import quant_research_platform.research.portfolios.daily as daily
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share import portfolio_sessions
-from quant_research_platform.research.portfolios import production
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
 from tests.helpers.portfolio_inputs import _interim_specs
 from tests.helpers.portfolio_inputs import closed_market_inputs as _native_inputs
@@ -27,7 +27,7 @@ def test_native_delisting_evidence_is_lifecycle_scoped_and_not_backfilled(
             market_bars_root=inputs["market_bars"],
             stock_master_root=inputs["stock_master"],
             panel_root=roots["market_panel_1d"],
-            panel_columns=production._PANEL_COLUMNS,
+            panel_columns=daily._PANEL_COLUMNS,
             calendar=calendar,
             time_window=TimeWindow("2022-12-30", "2023-01-06"),
         )
@@ -47,7 +47,7 @@ def test_relisting_does_not_replace_confirmed_old_equity_identity(tmp_path):
             market_bars_root=inputs["market_bars"],
             stock_master_root=inputs["stock_master"],
             panel_root=roots["market_panel_1d"],
-            panel_columns=production._PANEL_COLUMNS,
+            panel_columns=daily._PANEL_COLUMNS,
             calendar=calendar,
             time_window=TimeWindow("2022-12-30", "2023-01-06"),
         )

@@ -1,1 +1,1 @@
-"""File writers for local outputs and review-safe evidence."""
+"""Publish and read immutable research artifacts with their scientific metadata."""

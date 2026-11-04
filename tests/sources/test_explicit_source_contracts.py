@@ -100,10 +100,10 @@ def test_explicit_fee_pair_ignores_historical_name_and_checks_content(tmp_path):
         .replace(b"2019-01-01", b"2026-01-01")
         .replace(b"2025-12-31", b"2027-12-31")
     )
-    metadata = json.loads(sidecar.read_text())
+    metadata = json.loads(sidecar.read_text(encoding="utf-8"))
     metadata["file_sha256"] = hashlib.sha256(csv.read_bytes()).hexdigest()
     metadata["file_bytes"] = csv.stat().st_size
-    sidecar.write_text(json.dumps(metadata))
+    sidecar.write_text(json.dumps(metadata), encoding="utf-8")
     config = {
         "source_id": "reference",
         "raw_root": str(raw),
@@ -118,9 +118,9 @@ def test_explicit_fee_pair_ignores_historical_name_and_checks_content(tmp_path):
     assert saved.end_date.max() == pd.Timestamp("2027-12-31")
     with pytest.raises(ValueError):
         read_dataset(tmp_path / "data" / "data")
-    metadata = json.loads(sidecar.read_text())
+    metadata = json.loads(sidecar.read_text(encoding="utf-8"))
     metadata["file_sha256"] = "0" * 64
-    sidecar.write_text(json.dumps(metadata))
+    sidecar.write_text(json.dumps(metadata), encoding="utf-8")
     config["outputs"][interim.A_SHARE_FEE_SCHEDULE_DATA_ID] = str(tmp_path / "bad")
     with pytest.raises(ValueError, match="a_share_fee_source_metadata_invalid"):
         prepare_source(config)

@@ -1,4 +1,6 @@
-"""Common factor-risk estimation primitives."""
+"""Estimate rolling factor and specific risk using lagged exposures and
+market-session clocks.
+"""
 
 from __future__ import annotations
 
@@ -54,8 +56,6 @@ class FactorRiskConfig:
                     self, name, max(2, ceil(self.min_fresh_fraction * window))
                 )
         for name in (
-            "factor_window",
-            "specific_window",
             "minimum_factor_dates",
             "minimum_specific_dates",
             "minimum_cross_section",
@@ -274,8 +274,6 @@ class FactorRiskState:
                 frame.loc[:, list(self.style_columns)].to_numpy(dtype="float64"),
             )
         )
-        if design.shape[1] != len(exposure_columns):
-            raise ValueError("factor_risk_exposure_columns_invalid")
         p = design.shape[1]
         if len(frame) < max(self.config.minimum_cross_section, 5 * p):
             return None, tuple(current_industries)
@@ -557,23 +555,21 @@ def _ewma_covariance(
     columns: tuple[str, ...],
 ) -> pd.DataFrame:
     weights = _ewma_weights(ages, half_life)
-    # Anchor before centering so a constant column retains exact zero variance.
-    centered = values - values[0]
-    centered -= np.average(centered, axis=0, weights=weights)
-    weighted = centered * np.sqrt(weights[:, None])
-    if diagonal_shrinkage == 1:
-        covariance = np.diag(np.sum(weighted * weighted, axis=0))
-    else:
-        covariance = weighted.T @ weighted
-        covariance = (
-            1 - diagonal_shrinkage
-        ) * covariance + diagonal_shrinkage * np.diag(np.diag(covariance))
-    covariance *= annualization_factor
+    with np.errstate(over="ignore", invalid="ignore"):
+        # Anchor before centering so a constant column retains exact zero variance.
+        centered = values - values[0]
+        centered -= np.average(centered, axis=0, weights=weights)
+        weighted = centered * np.sqrt(weights[:, None])
+        if diagonal_shrinkage == 1:
+            covariance = np.diag(np.sum(weighted * weighted, axis=0))
+        else:
+            covariance = weighted.T @ weighted
+            covariance = (
+                1 - diagonal_shrinkage
+            ) * covariance + diagonal_shrinkage * np.diag(np.diag(covariance))
+        covariance *= annualization_factor
     if not np.isfinite(covariance).all():
         raise ValueError("factor_risk_covariance_non_finite")
-    covariance = _validated_covariance(
-        covariance, error_prefix="factor_risk_covariance"
-    )
     return pd.DataFrame(covariance, index=columns, columns=columns)
 
 

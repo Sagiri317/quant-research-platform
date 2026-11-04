@@ -1,4 +1,4 @@
-"""A-share low-frequency research protocol."""
+"""Declare A-share research catalogs and validate model-family and sample semantics."""
 
 from __future__ import annotations
 

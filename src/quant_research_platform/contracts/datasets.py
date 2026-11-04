@@ -1,4 +1,4 @@
-"""Research dataset contracts."""
+"""Declare research datasets assembled from selected factors, features, and labels."""
 
 from __future__ import annotations
 
@@ -235,8 +235,6 @@ def _validate_feature_transforms(
         for transform in feature_transforms
         for column in transform.output_columns
     )
-    if len(set(transformed_features)) != len(transformed_features):
-        raise ValueError("feature_transform_outputs_must_not_contain_duplicates")
     undeclared_outputs = sorted(set(transformed_features).difference(feature_columns))
     if undeclared_outputs:
         raise ValueError(

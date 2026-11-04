@@ -31,7 +31,6 @@ from quant_research_platform.storage.datasets.schema import (
 )
 from quant_research_platform.storage.identity import (
     filesystem_exists,
-    filesystem_mkdir,
     native_filesystem_path,
 )
 from tests.storage.dataset_test_support import (
@@ -111,27 +110,6 @@ def test_dataset_global_extension_dtype_survives_read_scopes(
         )
 
 
-def test_writer_rejects_missing_persisted_logical_dtype_metadata(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "missing_logical_dtype")
-
-    def write_without_metadata(table, path, **_kwargs):
-        filesystem_mkdir(path.parent, parents=True, exist_ok=True)
-        pq.write_table(
-            table.replace_schema_metadata(None), native_filesystem_path(path)
-        )
-        return path
-
-    monkeypatch.setattr(dataset_writing, "write_parquet_file", write_without_metadata)
-    with pytest.raises(ValueError, match="dataset_logical_dtypes_missing"):
-        write_dataset(
-            root,
-            make_default_dataset_frame(),
-            spec=make_processed_dataset_spec("missing_logical_dtype"),
-        )
-
-
 @pytest.mark.parametrize(
     "payload",
     (
@@ -144,7 +122,7 @@ def test_logical_dtype_metadata_rejects_unknown_and_noncanonical_payloads(
     payload: bytes,
 ) -> None:
     with pytest.raises(ValueError, match="dataset_logical_dtypes_invalid"):
-        dataset_writing.parse_logical_dtype_metadata(payload)
+        dataset_schema.parse_logical_dtype_metadata(payload)
 
 
 @pytest.mark.parametrize(
@@ -1134,10 +1112,9 @@ def test_null_resolution_preserves_map_key_order_contract():
 def test_writer_dtype_work_depends_on_distinct_metadata_not_parts(
     tmp_path, monkeypatch, changed
 ):
-    work = {"validate": 0, "categories": 0, "encode": 0, "physical": 0}
+    work = {"validate": 0, "categories": 0, "encode": 0}
     validate = dataset_schema.validate_logical_dtype_payload
     encode = dataset_writing.encode_logical_category_value
-    physical = dataset_writing.validate_persisted_logical_schema
 
     def checked(payload, **kwargs):
         work["validate"] += 1
@@ -1150,15 +1127,8 @@ def test_writer_dtype_work_depends_on_distinct_metadata_not_parts(
         work["encode"] += 1
         return encode(value)
 
-    def compatible(*args):
-        work["physical"] += 1
-        return physical(*args)
-
     monkeypatch.setattr(dataset_schema, "validate_logical_dtype_payload", checked)
     monkeypatch.setattr(dataset_writing, "encode_logical_category_value", encoded)
-    monkeypatch.setattr(
-        dataset_writing, "validate_persisted_logical_schema", compatible
-    )
     counts = []
     for parts in (1, 3):
         for key in work:
@@ -1184,8 +1154,6 @@ def test_writer_dtype_work_depends_on_distinct_metadata_not_parts(
         assert len(observed["value"].cat.categories) == 2 + int(changed and parts > 1)
     if changed:
         assert counts[1]["encode"] == 2 + 3
-        assert counts[1]["physical"] == 2
     else:
         assert counts[0] == counts[1]
         assert counts[1]["encode"] == 2
-        assert counts[1]["physical"] == 1

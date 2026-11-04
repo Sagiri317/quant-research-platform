@@ -276,7 +276,9 @@ def calibrate_expected_alpha(
 
 
 def alpha_interval_semantics(rebalance_schedule):
-    """Only the scientific return horizon, independent of candidate identity."""
+    """Return the scientific holding-return horizon independently of candidate
+    identity.
+    """
     if (
         type(rebalance_schedule) is not str
         or rebalance_schedule not in REBALANCE_SCHEDULES

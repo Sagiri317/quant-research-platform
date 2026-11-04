@@ -431,10 +431,6 @@ def test_decay_rejects_truly_unrepresentable_positive_weights():
 
 
 def test_forward_labels_preserve_key_domain_and_input_isolation():
-    class HashableList(list):
-        def __hash__(self):
-            return 1
-
     sessions = pd.date_range("2024-01-01", periods=3)
     frame = pd.DataFrame(
         {
@@ -451,7 +447,7 @@ def test_forward_labels_preserve_key_domain_and_input_isolation():
     assert result.asset_id.dtype == frame.asset_id.dtype
     assert result.forward_return_1d.iloc[0] == 0.5
     pd.testing.assert_frame_equal(frame, original)
-    for bad_key in (HashableList([1]), ([1],), None):
+    for bad_key in ([1], ([1],), None):
         bad = frame.copy()
         bad["asset_id"] = pd.Series([bad_key] * 3, dtype="object")
         with pytest.raises(ValueError, match="invalid_forward_return_asset_key"):

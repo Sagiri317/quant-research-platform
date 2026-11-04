@@ -1034,7 +1034,7 @@ def test_holding_input_reader_freezes_decision_universe_over_holding_interval(
             atol=1e-14,
         )
         # Daily risk still requires and validates its own return input.
-        from quant_research_platform.research.portfolios.production import (
+        from quant_research_platform.research.portfolios.daily import (
             _enhanced_risk_cross,
         )
 

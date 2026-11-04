@@ -1,9 +1,8 @@
-"""Internal CSMAR source contracts and provider field mapping helpers."""
+"""Validate CSMAR table fields and map provider names into canonical interim columns."""
 
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
 from dataclasses import dataclass
 from numbers import Integral, Real
 from types import MappingProxyType
@@ -515,27 +514,6 @@ COLUMN_ALIASES = {
 }
 
 
-def _validate_mapping_facts(
-    mappings: Mapping[str, Mapping[str, str]],
-    aliases_by_dataset: Mapping[str, Mapping[str, tuple[str, ...]]],
-) -> None:
-    for dataset, mapping in mappings.items():
-        aliases = aliases_by_dataset.get(dataset, {})
-        if len(mapping.values()) != len(set(mapping.values())):
-            raise ValueError("invalid_csmar_column_mapping_facts")
-        alias_owners: dict[str, str] = {}
-        for primary, provider_aliases in aliases.items():
-            if primary not in mapping:
-                raise ValueError("invalid_csmar_column_mapping_facts")
-            for alias in provider_aliases:
-                if alias in mapping or alias in alias_owners:
-                    raise ValueError("invalid_csmar_column_mapping_facts")
-                alias_owners[alias] = primary
-    if set(aliases_by_dataset).difference(mappings):
-        raise ValueError("invalid_csmar_column_mapping_facts")
-
-
-_validate_mapping_facts(COLUMN_MAPPINGS, COLUMN_ALIASES)
 COLUMN_MAPPINGS = MappingProxyType(
     {name: MappingProxyType(dict(values)) for name, values in COLUMN_MAPPINGS.items()}
 )

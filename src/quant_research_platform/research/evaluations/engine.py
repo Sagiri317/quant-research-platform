@@ -1,4 +1,6 @@
-"""Spec-driven evaluation orchestration for compute kernels."""
+"""Compute signal-label metrics, daily strata, and response diagnostics on
+aligned samples.
+"""
 
 from __future__ import annotations
 
@@ -23,8 +25,6 @@ from quant_research_platform.contracts.evaluations import (
     EVALUATION_METRICS_COLUMNS,
     EvaluationDiagnostics,
     EvaluationSpec,
-    strict_non_negative_count_series,
-    strict_non_negative_count_value,
 )
 from quant_research_platform.contracts.filtering import (
     filter_definition,
@@ -78,7 +78,7 @@ class _EvaluationStreamingState:
             str(column) for column in metadata["filter_columns_used"]
         )
         self._filter_definition = str(metadata["filter_definition"])
-        fact_count = strict_non_negative_count_value(metadata["timestamp_count"])
+        fact_count = metadata["timestamp_count"]
         if fact_count:
             fact_min = pd.Timestamp(metadata["min_timestamp"])
             fact_max = pd.Timestamp(metadata["max_timestamp"])
@@ -93,9 +93,7 @@ class _EvaluationStreamingState:
                 if self._max_timestamp is None
                 else max(self._max_timestamp, fact_max)
             )
-        self._skipped_timestamp_count += strict_non_negative_count_value(
-            metadata["skipped_timestamp_count"]
-        )
+        self._skipped_timestamp_count += metadata["skipped_timestamp_count"]
         if not metrics.empty:
             self._metric_rows += len(metrics)
             for row in metrics.itertuples(index=False, name=None):
@@ -433,10 +431,8 @@ def _iter_single_asset_time_series_output_chunks(
     )
     with closing_iterator(work_frames):
         for filtered, filter_metadata, ordinal_signals in work_frames:
-            rows_input += strict_non_negative_count_value(filter_metadata["rows_input"])
-            rows_after_filter += strict_non_negative_count_value(
-                filter_metadata["rows_after_filter_mode"]
-            )
+            rows_input += filter_metadata["rows_input"]
+            rows_after_filter += filter_metadata["rows_after_filter_mode"]
             filter_columns_used = tuple(
                 str(column) for column in filter_metadata["filter_columns_used"]
             )
@@ -618,10 +614,7 @@ def _iter_evaluation_output_chunks(
             )
             if summary_state is not None:
                 summary_state.consume(*output)
-            try:
-                yield output
-            except GeneratorExit:
-                return
+            yield output
 
 
 def _evaluate_filtered_frame(
@@ -679,16 +672,14 @@ def _evaluate_filtered_frame(
             .sort_values(["timestamp", "signal", "label"], kind="stable")
             .reset_index(drop=True)
         )
-    n_obs = strict_non_negative_count_series(metrics["n_obs"])
+    n_obs = metrics["n_obs"]
     skipped_timestamps.update(
         pd.Timestamp(value)
         for value in metrics.loc[n_obs.lt(2), "timestamp"].drop_duplicates()
     )
     metadata = {
-        "rows_input": strict_non_negative_count_value(filter_metadata["rows_input"]),
-        "rows_after_filter_mode": strict_non_negative_count_value(
-            filter_metadata["rows_after_filter_mode"]
-        ),
+        "rows_input": filter_metadata["rows_input"],
+        "rows_after_filter_mode": filter_metadata["rows_after_filter_mode"],
         "filter_columns_used": list(filter_metadata["filter_columns_used"]),
         "filter_definition": str(filter_metadata["filter_definition"]),
         "timestamp_count": timestamp_count,
@@ -771,14 +762,11 @@ def _iter_evaluation_work_frames(
                 source_columns_by_kind=source_columns_by_kind,
             )
 
-            try:
-                yield (
-                    normalized,
-                    filter_metadata,
-                    _ordinal_signal_frame(observed, spec, asset_column),
-                )
-            except GeneratorExit:
-                return
+            yield (
+                normalized,
+                filter_metadata,
+                _ordinal_signal_frame(observed, spec, asset_column),
+            )
 
 
 def _ordinal_signal_frame(frame, spec, asset_column):

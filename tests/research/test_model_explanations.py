@@ -106,6 +106,56 @@ def test_real_models_roundtrip_matches_production_prediction(tmp_path, algorithm
         assert Path(config["model"], "predictor.pkl").read_bytes() == before
 
 
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_xgboost_prediction_keeps_missing_values_and_best_iteration(device):
+    from xgboost import XGBRegressor
+
+    from quant_research_platform.research.models.scaler import (
+        ModelMatrixScaler,
+        ScaledPredictor,
+    )
+
+    matrix = pd.DataFrame({"x": [-999.0, -1.0, 1.0, 3.0] * 8})
+    target = np.tile([0.1, 0.3, 0.7, 0.9], 8)
+    estimator = XGBRegressor(
+        device=device,
+        n_jobs=1,
+        n_estimators=12,
+        max_depth=2,
+        objective="reg:logistic",
+        missing=-999.0,
+        early_stopping_rounds=2,
+    )
+    estimator.fit(matrix, target, eval_set=[(matrix, 1 - target)], verbose=False)
+    assert estimator.best_iteration < estimator.get_booster().num_boosted_rounds() - 1
+    actual_device = json.loads(estimator.get_booster().save_config())["learner"][
+        "generic_param"
+    ]["device"]
+    predictor = ScaledPredictor(
+        estimator, ModelMatrixScaler.fit(matrix, missing="native", scaling=False)
+    )
+    reference = copy.deepcopy(estimator).set_params(device="cpu")
+    query = matrix.iloc[:4]
+    actual = predictor.predict(query)
+    margin = predictor._predict_matrix(query, output_margin=True)
+    contributions = predictor._predict_matrix(query, pred_contribs=True)
+    np.testing.assert_allclose(actual, reference.predict(query), rtol=1e-6, atol=1e-7)
+    np.testing.assert_allclose(
+        margin, reference.predict(query, output_margin=True), rtol=1e-6, atol=1e-7
+    )
+    np.testing.assert_allclose(contributions.sum(axis=1), margin, rtol=1e-6, atol=1e-7)
+    np.testing.assert_allclose(actual, 1 / (1 + np.exp(-margin)), rtol=1e-6)
+    np.testing.assert_allclose(
+        actual, predictor._predict_matrix(query.replace(-999.0, np.nan)), rtol=1e-6
+    )
+    assert (
+        json.loads(estimator.get_booster().save_config())["learner"]["generic_param"][
+            "device"
+        ]
+        == actual_device
+    )
+
+
 @pytest.mark.parametrize("target", [1e-5, 1e-7, 1e-9])
 def test_small_affine_output_keeps_real_contributions_and_residual(tmp_path, target):
     from math import fsum
@@ -172,13 +222,18 @@ def test_small_affine_output_keeps_real_contributions_and_residual(tmp_path, tar
     assert saved.explained_output == predictor.predict(frame[["x", "y"]])[0]
     assert saved.base_value == predictor.coefficients[0]
     np.testing.assert_array_equal(tables["contributions"].contribution, [0.01, 0.02])
-    assert saved.additivity_residual == fsum(
-        [*predictor.coefficients, -saved.explained_output]
+    assert saved.additivity_residual == pytest.approx(
+        fsum([*predictor.coefficients, -saved.explained_output]),
+        rel=1e-12,
+        abs=2 * np.spacing(abs(saved.explained_output)),
     )
     assert 0 < abs(saved.additivity_residual) <= saved.additivity_tolerance
     assert tables["summary"].observation_count.eq(1).all()
     tables["predictions"].loc[0, "additivity_tolerance"] = abs(
         saved.additivity_residual
+    )
+    tables["predictions"].loc[0, "additivity_residual"] = np.nextafter(
+        saved.additivity_residual, 0
     )
     _, stricter = read_explanation(
         write_explanation(tmp_path / "stricter", metadata=metadata, tables=tables)
@@ -577,8 +632,9 @@ def test_cli_is_same_explain_operation(tmp_path):
 def test_shap_nonfinite_row_is_explicit_without_hiding_other_predictions(
     tmp_path, monkeypatch
 ):
-    import shap
+    from quant_research_platform.research.models.explanations import _import_shap
 
+    shap = _import_shap()
     _, _, config = _case(tmp_path, "xgboost_regressor")
     config["methods"] = ["tree_shap_path"]
     original = shap.TreeExplainer.__call__

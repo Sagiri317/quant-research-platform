@@ -37,10 +37,7 @@ def _directory_entries(directory: Path) -> Iterator[tuple[Path, bool, bool]]:
             except (FileNotFoundError, NotADirectoryError) as error:
                 raise ValueError("invalid_dataset_part_files") from error
             value = (path, is_directory, is_alias)
-            try:
-                yield value
-            except GeneratorExit:
-                return
+            yield value
 
 
 class DatasetSessionInventory:

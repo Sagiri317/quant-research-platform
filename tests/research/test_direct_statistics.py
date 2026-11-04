@@ -9,7 +9,7 @@ from quant_research_platform.artifacts.statistics import (
 )
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.research.statistics_production import (
+from quant_research_platform.research.factors.statistics import (
     build_a_share_factor_statistics_tables,
 )
 from quant_research_platform.storage.datasets import write_dataset
@@ -159,7 +159,7 @@ def test_public_factor_statistics_projects_custom_native_or_bare_input(
     tmp_path, bare, intraday, omit_fdr_defaults
 ):
     from quant_research_platform.contracts.data import DataSpec
-    from quant_research_platform.research.statistics_production import factor_statistics
+    from quant_research_platform.research.factors.statistics import factor_statistics
     from quant_research_platform.storage.datasets import read_dataset
 
     _, _, _, metadata, _ = _factor_input(tmp_path)
@@ -262,12 +262,10 @@ def test_nonstreaming_statistics_reject_callback_before_publishing(tmp_path):
 def test_public_statistics_rejects_unused_nested_options_before_reading(
     tmp_path, operation
 ):
+    from quant_research_platform.research.factors.statistics import factor_statistics
+    from quant_research_platform.research.models.statistics import model_statistics
     from quant_research_platform.research.portfolios.diagnostics import (
         portfolio_statistics,
-    )
-    from quant_research_platform.research.statistics_production import (
-        factor_statistics,
-        model_statistics,
     )
 
     common = {
@@ -330,7 +328,7 @@ def test_unselected_family_keeps_planned_inference_members_without_fake_predicti
     tmp_path,
     selection_reason,
 ):
-    from quant_research_platform.research.statistics_production import (
+    from quant_research_platform.research.models.statistics import (
         _selection_trial_rows,
         build_a_share_statistics_tables,
     )
@@ -432,7 +430,7 @@ def test_unselected_family_keeps_planned_inference_members_without_fake_predicti
 def test_factor_statistics_complete_batches_preserve_dates_and_masks(
     tmp_path, monkeypatch, analyses, empty_labels
 ):
-    from quant_research_platform.research import statistics_production as production
+    import quant_research_platform.research.factors.statistics as factor_stats
     from quant_research_platform.storage.datasets import read_dataset
 
     _, _, _, _, dates = _factor_input(tmp_path)
@@ -479,7 +477,7 @@ def test_factor_statistics_complete_batches_preserve_dates_and_masks(
             "fama_macbeth_core_factors": [],
         },
     }
-    original = production.iter_dataset_chunks
+    original = factor_stats.iter_dataset_chunks
     artifacts = []
     closed = []
     for batch_rows in (1000, 7):
@@ -490,10 +488,10 @@ def test_factor_statistics_complete_batches_preserve_dates_and_masks(
             finally:
                 closed.append(batch_rows)
 
-        monkeypatch.setattr(production, "iter_dataset_chunks", chunks)
+        monkeypatch.setattr(factor_stats, "iter_dataset_chunks", chunks)
         artifacts.append(
             read_statistics_artifact(
-                production.factor_statistics(
+                factor_stats.factor_statistics(
                     {**config, "output": str(tmp_path / f"result-{batch_rows}")}
                 )
             )
@@ -539,7 +537,7 @@ def test_factor_statistics_complete_batches_preserve_dates_and_masks(
 
 
 def test_factor_statistics_empty_selected_window_is_undefined(tmp_path):
-    from quant_research_platform.research.statistics_production import factor_statistics
+    from quant_research_platform.research.factors.statistics import factor_statistics
 
     _factor_input(tmp_path)
     config = {
@@ -592,7 +590,7 @@ def test_factor_statistics_empty_selected_window_is_undefined(tmp_path):
 
 
 def test_selected_statistics_consumes_saved_predictions_without_historical_x(tmp_path):
-    from quant_research_platform.research.statistics_production import (
+    from quant_research_platform.research.models.statistics import (
         build_a_share_statistics_tables,
     )
     from quant_research_platform.storage.datasets.reading import open_dataset_session
@@ -651,7 +649,7 @@ def test_selected_statistics_consumes_saved_predictions_without_historical_x(tmp
 def test_public_factor_statistics_preserves_equal_weight_with_bad_cap(
     tmp_path, invalid_cap
 ):
-    from quant_research_platform.research.statistics_production import factor_statistics
+    from quant_research_platform.research.factors.statistics import factor_statistics
     from quant_research_platform.storage.datasets import read_dataset
 
     tables, metadata, _ = _factor_tables(tmp_path)

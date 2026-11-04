@@ -55,9 +55,7 @@ def test_writer_rejects_mixed_incompatible_category_values(tmp_path: Path) -> No
         pd.date_range("2020-01-01", periods=3, tz="America/New_York").as_unit("ns"),
     ),
 )
-def test_nonstring_categorical_native_roundtrip(
-    tmp_path, monkeypatch, categories, ordered
-):
+def test_nonstring_categorical_native_roundtrip(tmp_path, categories, ordered):
     frame = make_default_dataset_frame()
     frame["timestamp"] = frame["timestamp"].astype("datetime64[ns]")
     frame["asset_id"] = pd.Categorical(
@@ -78,30 +76,6 @@ def test_nonstring_categorical_native_roundtrip(
         actual.sort_values("asset_id").reset_index(drop=True),
         frame.sort_values("asset_id").reset_index(drop=True),
     )
-    canonical_table = dataset_writing._WriteStats.table_for_frame
-    invalid = (
-        99 if isinstance(categories, list) else categories[-1] + pd.Timedelta(days=1)
-    )
-
-    def corrupt_domain(owner, source, **kwargs):
-        table = canonical_table(owner, source, **kwargs)
-        position = table.schema.get_field_index("value")
-        values = pa.array(
-            [invalid] * table.num_rows, type=table.schema.field("value").type
-        )
-        return table.set_column(position, "value", values)
-
-    monkeypatch.setattr(dataset_writing._WriteStats, "table_for_frame", corrupt_domain)
-    invalid_root = make_dataset_artifact_root(tmp_path, "invalid_domain")
-    with pytest.raises(ValueError, match="dataset_categorical_domain_mismatch"):
-        write_dataset(
-            invalid_root,
-            frame,
-            spec=make_processed_dataset_spec(
-                "invalid_domain", value_role=ColumnRole.CONTEXT
-            ),
-        )
-    assert not filesystem_exists(invalid_root)
 
 
 def test_object_null_prefix_has_chunk_independent_schema(tmp_path):

@@ -213,7 +213,7 @@ def test_benchmark_normalization_rejects_fact_mutations(
 
 @pytest.mark.parametrize("raw_weight", (0.3333333, 0.3333334))
 def test_rounded_benchmark_weights_publish_as_unit_portfolio(tmp_path, raw_weight):
-    from quant_research_platform.research.portfolios.production import (
+    from quant_research_platform.research.portfolios.daily import (
         _iter_benchmark_weights,
     )
     from quant_research_platform.storage.datasets.writing import write_dataset

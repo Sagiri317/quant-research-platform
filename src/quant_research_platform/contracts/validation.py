@@ -1,4 +1,6 @@
-"""Shared contract validation helpers."""
+"""Validate identifiers, column selections, numeric values, and timestamps at
+boundaries.
+"""
 
 from __future__ import annotations
 

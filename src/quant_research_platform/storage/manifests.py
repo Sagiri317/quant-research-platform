@@ -1,4 +1,4 @@
-"""Manifest helpers."""
+"""Read strict JSON metadata and atomically publish manifests with credential checks."""
 
 from __future__ import annotations
 

@@ -1,1 +1,1 @@
-"""Cross-cutting privacy, resources, logging, records, and metrics payloads."""
+"""Storage batch defaults and timestamp-complete DataFrame streams."""

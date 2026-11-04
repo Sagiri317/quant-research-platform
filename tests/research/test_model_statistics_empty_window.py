@@ -6,8 +6,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+import quant_research_platform.research.models.statistics as model_stats
 from quant_research_platform.artifacts.statistics import read_statistics_artifact
-from quant_research_platform.research import statistics_production
 from tests.research.direct_model_test_support import candidates
 
 
@@ -74,10 +74,10 @@ def test_model_statistics_rejects_window_without_observations(
     )
     if empty_stream:
         monkeypatch.setattr(
-            statistics_production, "iter_dataset_chunks", lambda session: iter(())
+            model_stats, "iter_dataset_chunks", lambda session: iter(())
         )
     with pytest.raises(ValueError, match="statistics_model_observations_empty"):
-        statistics_production.model_statistics(config)
+        model_stats.model_statistics(config)
     assert not Path(config["output"]).exists()
 
 
@@ -95,7 +95,7 @@ def test_model_statistics_keeps_sparse_windows_and_skips_empty_frames(
             "window": {"start": "2020-01-07", "end": "2020-01-08"},
         }
     )
-    original = statistics_production.iter_complete_session_frames
+    original = model_stats.iter_complete_session_frames
 
     def with_empty_frames(*args, **kwargs):
         for frame in original(*args, **kwargs):
@@ -103,10 +103,8 @@ def test_model_statistics_keeps_sparse_windows_and_skips_empty_frames(
             yield frame
             yield frame.iloc[:0]
 
-    monkeypatch.setattr(
-        statistics_production, "iter_complete_session_frames", with_empty_frames
-    )
-    saved = read_statistics_artifact(statistics_production.model_statistics(config))
+    monkeypatch.setattr(model_stats, "iter_complete_session_frames", with_empty_frames)
+    saved = read_statistics_artifact(model_stats.model_statistics(config))
     with saved.table("prediction_diagnostics.parquet") as diagnostics:
         assert diagnostics.input_date_count.tolist() == [3]
         assert diagnostics.observation_count.tolist() == [3]
@@ -120,7 +118,7 @@ def test_model_statistics_preserves_observed_dates_with_undefined_labels(
         tmp_path, {"start": "2020-01-04", "end": "2020-01-06"}, saved_candidates
     )
     config["label_cutoff"] = "2020-01-03"
-    saved = read_statistics_artifact(statistics_production.model_statistics(config))
+    saved = read_statistics_artifact(model_stats.model_statistics(config))
     with saved.table("prediction_diagnostics.parquet") as diagnostics:
         assert diagnostics.input_date_count.tolist() == [3]
         assert diagnostics.observation_count.tolist() == [0]
@@ -137,7 +135,7 @@ def test_model_statistics_keeps_constant_labels_explicitly_undefined(
         saved_candidates,
         constant=True,
     )
-    saved = read_statistics_artifact(statistics_production.model_statistics(config))
+    saved = read_statistics_artifact(model_stats.model_statistics(config))
     with saved.table("prediction_diagnostics.parquet") as diagnostics:
         assert diagnostics.input_date_count.tolist() == [3]
         assert diagnostics.observation_count.tolist() == [0]
@@ -170,7 +168,7 @@ def test_invalid_requested_configuration_precedes_input_read(
         "periods": [],
     }
     with pytest.raises(ValueError, match="model_statistics_policy_invalid"):
-        statistics_production.model_statistics(config)
+        model_stats.model_statistics(config)
     assert not Path(config["output"]).exists()
 
 
@@ -190,7 +188,7 @@ def test_prediction_only_skips_unrequested_comparison_and_domain_work(
         "_model_comparison",
         "_paired_group_rankic",
     ):
-        monkeypatch.setattr(statistics_production, name, unexpected)
+        monkeypatch.setattr(model_stats, name, unexpected)
     original = pd.DataFrame.from_records
 
     def records(*args, **kwargs):
@@ -198,7 +196,7 @@ def test_prediction_only_skips_unrequested_comparison_and_domain_work(
         return original(*args, **kwargs)
 
     monkeypatch.setattr(pd.DataFrame, "from_records", records)
-    artifact = read_statistics_artifact(statistics_production.model_statistics(config))
+    artifact = read_statistics_artifact(model_stats.model_statistics(config))
     assert set(artifact._members) == {"prediction_diagnostics.parquet"}
 
 
@@ -216,7 +214,7 @@ def test_requested_comparison_keeps_common_rank_without_unrequested_loss_hashes(
         comparison_model_id="linear_regression",
     )
     config["statistics"].update(bootstrap_block=1, bootstrap_repetitions=10)
-    original = statistics_production._common_model_rank_ic
+    original = model_stats._common_model_rank_ic
     calls = []
 
     def common(*args, **kwargs):
@@ -226,9 +224,9 @@ def test_requested_comparison_keeps_common_rank_without_unrequested_loss_hashes(
     def unexpected(*args, **kwargs):
         raise AssertionError("unrequested loss domain hash")
 
-    monkeypatch.setattr(statistics_production, "_common_model_rank_ic", common)
-    monkeypatch.setattr(statistics_production, "canonical_json_hash", unexpected)
-    artifact = read_statistics_artifact(statistics_production.model_statistics(config))
+    monkeypatch.setattr(model_stats, "_common_model_rank_ic", common)
+    monkeypatch.setattr(model_stats, "canonical_json_hash", unexpected)
+    artifact = read_statistics_artifact(model_stats.model_statistics(config))
     assert len(calls) == 3
     assert set(artifact._members) == {
         "prediction_diagnostics.parquet",

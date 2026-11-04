@@ -1,4 +1,6 @@
-"""Dataset IO public and internal types."""
+"""Typed read modes and results for dataset writes, inspection, fingerprints, and
+comparison.
+"""
 
 from __future__ import annotations
 

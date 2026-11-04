@@ -141,7 +141,7 @@ def test_common_source_domain_and_transformed_observation_counts(
     import pyarrow.parquet as pq
 
     from quant_research_platform.artifacts.statistics import read_statistics_artifact
-    from quant_research_platform.research.statistics_production import factor_statistics
+    from quant_research_platform.research.factors.statistics import factor_statistics
 
     frame = pd.DataFrame(
         {

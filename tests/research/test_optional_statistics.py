@@ -20,8 +20,8 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioValuation,
 )
 from quant_research_platform.research import statistics
+from quant_research_platform.research.factors.statistics import factor_statistics
 from quant_research_platform.research.portfolios.diagnostics import portfolio_statistics
-from quant_research_platform.research.statistics_production import factor_statistics
 
 
 def _cash_ledger(root, *, candidate=None, dates=None):
@@ -123,7 +123,7 @@ def _cash_ledger(root, *, candidate=None, dates=None):
 def test_ledger_only_analyses_do_not_open_market_inputs(
     tmp_path, monkeypatch, analyses
 ):
-    from quant_research_platform.research.portfolios import production
+    import quant_research_platform.research.portfolios.daily as daily
     from quant_research_platform.storage.datasets import reading
 
     ledger = tmp_path / "ledger"
@@ -133,7 +133,7 @@ def test_ledger_only_analyses_do_not_open_market_inputs(
         raise AssertionError("unrequested market data read")
 
     monkeypatch.setattr(reading, "read_dataset", unexpected)
-    monkeypatch.setattr(production, "open_dataset_session", unexpected)
+    monkeypatch.setattr(daily, "open_dataset_session", unexpected)
     config = {
         "ledgers": [str(ledger)],
         "window": window,
@@ -258,7 +258,7 @@ def test_rank_ic_only_uses_declared_maturity_and_no_market_cap(
         yield from original(session, **kwargs)
 
     monkeypatch.setattr(
-        "quant_research_platform.research.statistics_production.iter_dataset_chunks",
+        "quant_research_platform.research.factors.statistics.iter_dataset_chunks",
         observed,
     )
     config = {
@@ -426,7 +426,7 @@ def test_explicit_prediction_family_statistics_need_no_models_or_selection(
 ):
     from copy import deepcopy
 
-    from quant_research_platform.research.statistics_production import model_statistics
+    from quant_research_platform.research.models.statistics import model_statistics
 
     scoring = deepcopy(standalone_predictions)
     config = {
@@ -475,7 +475,7 @@ def test_explicit_prediction_family_statistics_need_no_models_or_selection(
         assert losses.common_observation_count.eq(2).all()
     # The omitted analysis list is exactly the explicit default, including
     # independent HAC and bootstrap diagnostics for every direct family.
-    from quant_research_platform.research.statistics_production import _MODEL_ANALYSES
+    from quant_research_platform.research.models.statistics import _MODEL_ANALYSES
 
     explicit = read_statistics_artifact(
         model_statistics(
@@ -559,7 +559,7 @@ def test_portfolio_statistics_role_is_optional_description(tmp_path, sample_role
 def test_comparison_only_supports_simple_and_enhanced_without_risk(
     tmp_path, monkeypatch, mixed
 ):
-    from quant_research_platform.research.portfolios import production
+    import quant_research_platform.research.portfolios.daily as daily
     from tests.helpers.benchmark_references import reference_input
 
     ledger = tmp_path / "cash"
@@ -590,8 +590,8 @@ def test_comparison_only_supports_simple_and_enhanced_without_risk(
     def unexpected(*args, **kwargs):
         raise AssertionError("comparison opened construction or risk inputs")
 
-    monkeypatch.setattr(production, "_iter_input_sessions", unexpected)
-    monkeypatch.setattr(production, "_read_materialized", unexpected)
+    monkeypatch.setattr(daily, "_iter_input_sessions", unexpected)
+    monkeypatch.setattr(daily, "_read_materialized", unexpected)
     artifact = read_statistics_artifact(portfolio_statistics(config))
     assert set(artifact._members) == {
         "portfolio_benchmark_intervals.parquet",

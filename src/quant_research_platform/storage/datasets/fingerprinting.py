@@ -1,4 +1,6 @@
-"""Dataset fingerprinting implementation."""
+"""Compute streamed dataset summaries and content fingerprints for explicit
+selections.
+"""
 
 from __future__ import annotations
 

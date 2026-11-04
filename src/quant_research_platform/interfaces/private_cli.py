@@ -1,4 +1,4 @@
-"""Private local-data diagnostics CLI."""
+"""Inspect explicitly selected local schemas without publishing private table rows."""
 
 from __future__ import annotations
 

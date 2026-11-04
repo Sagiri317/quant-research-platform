@@ -4,6 +4,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import quant_research_platform.research.factors.statistics as factor_stats
+import quant_research_platform.research.models.statistics as model_stats
 from quant_research_platform.artifacts.outputs.prediction import (
     prediction_model_metadata,
 )
@@ -15,13 +17,14 @@ from quant_research_platform.artifacts.statistics import (
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.research import statistics_production
-from quant_research_platform.research.protocols import a_share
-from quant_research_platform.research.randomness import derive_seed
-from quant_research_platform.research.statistics_production import (
+from quant_research_platform.research.factors.statistics import (
     build_a_share_factor_statistics_tables,
+)
+from quant_research_platform.research.models.statistics import (
     build_a_share_statistics_tables,
 )
+from quant_research_platform.research.protocols import a_share
+from quant_research_platform.research.randomness import derive_seed
 from quant_research_platform.storage.datasets import write_dataset
 from tests.helpers.paths import StorageLayout
 from tests.helpers.research_configuration import (
@@ -137,7 +140,7 @@ def test_family_comparison_production_matches_oracles_on_persisted_common_date_l
     for selection in model["selections"].values():
         selection["cutoff"] = str(cutoff)
     metadata = {
-        **statistics_production._model_target_metadata(
+        **model_stats._model_target_metadata(
             config, spec, TimeWindow(dates[0], cutoff)
         ),
         "selection_cutoffs": [str(cutoff)],
@@ -420,8 +423,8 @@ def test_robustness_joint_exclusion_preserves_individual_hac(monkeypatch):
         pytest.fail("robustness runs must not enter the formal joint test domain")
 
     for name in ("spa_reality_check", "stepm_superior_models", "model_confidence_set"):
-        monkeypatch.setattr(statistics_production, name, forbidden)
-    comparison, checks, robustness = statistics_production._model_comparison(
+        monkeypatch.setattr(model_stats, name, forbidden)
+    comparison, checks, robustness = model_stats._model_comparison(
         values,
         family_ids=("baseline", "challenger"),
         benchmark_id="baseline",
@@ -438,7 +441,7 @@ def test_robustness_joint_exclusion_preserves_individual_hac(monkeypatch):
     assert checks.status.eq("UNDEFINED").all()
     assert robustness.reason.eq("expectations_robustness_excluded").all()
     assert checks.value.isna().all()
-    factors = statistics_production._factor_summary(
+    factors = factor_stats._factor_summary(
         values.reset_index(names="timestamp"),
         factors=("baseline", "challenger"),
         families={"expectations": ("baseline", "challenger")},
@@ -454,8 +457,8 @@ def test_robustness_joint_exclusion_preserves_individual_hac(monkeypatch):
 def test_empty_fama_macbeth_periods_do_not_invent_dates_or_coefficients(
     core_factors,
 ) -> None:
-    periods = pd.DataFrame(columns=statistics_production._FAMA_MACBETH_PERIOD_COLUMNS)
-    summary = statistics_production._fama_macbeth_summary(
+    periods = pd.DataFrame(columns=factor_stats._FAMA_MACBETH_PERIOD_COLUMNS)
+    summary = factor_stats._fama_macbeth_summary(
         periods, factors=("factor",), core_factors=core_factors, max_lags=19
     )
     assert periods.empty
@@ -479,7 +482,7 @@ def test_empty_fama_macbeth_periods_do_not_invent_dates_or_coefficients(
             "total_market_cap": [1.0, 2.0, 3.0, 4.0],
         }
     )
-    records = statistics_production._fama_macbeth_period_records(
+    records = factor_stats._fama_macbeth_period_records(
         frame, return_column="label", factors=("factor",), core_factors=core_factors
     )
     assert [row["regression_id"] for row in records] == summary.regression_id.tolist()
@@ -730,7 +733,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         # The declared 25-date window has five unavailable dates. Preserve the
         # HAC oracle separately on an explicitly bounded complete 20-date input.
         complete_summary = (
-            statistics_production._fama_macbeth_summary(
+            factor_stats._fama_macbeth_summary(
                 persisted_periods,
                 factors=(CORE6_FACTORS[0],),
                 core_factors=(),
@@ -903,8 +906,8 @@ def test_model_inference_uses_selection_information_before_calling_backends(
             "stepm_superior_models",
             "model_confidence_set",
         ):
-            monkeypatch.setattr(statistics_production, name, forbidden)
-    summary = statistics_production._prediction_summary(
+            monkeypatch.setattr(model_stats, name, forbidden)
+    summary = model_stats._prediction_summary(
         values.rename(columns={"baseline": "__prediction_alpha__"}),
         prediction_id="prediction",
         inference_blocker=blocker,
@@ -913,7 +916,7 @@ def test_model_inference_uses_selection_information_before_calling_backends(
         repetitions=100,
         seed=17,
     )
-    comparison, checks, robustness = statistics_production._model_comparison(
+    comparison, checks, robustness = model_stats._model_comparison(
         values.set_index("timestamp"),
         family_ids=("baseline", "challenger"),
         benchmark_id="baseline",
@@ -971,7 +974,7 @@ def test_paired_model_rankic_consumes_explicit_comparison_config(has_observation
         columns=columns,
     )
 
-    paired = statistics_production._paired_group_rankic(
+    paired = model_stats._paired_group_rankic(
         losses.assign(**{"global": -losses.loss, "quarterly": -losses.loss}),
         selection_group="quarterly",
         family_ids=families,
@@ -1098,7 +1101,7 @@ def test_model_family_names_preserve_factor_statistics_and_native_names(
                 return (len(dates) * len(assets) * 2 - len(self.matched), 0)
 
         metadata = {
-            **statistics_production._model_target_metadata(
+            **model_stats._model_target_metadata(
                 config,
                 spec,
                 TimeWindow(dates[0], cutoff),
@@ -1176,7 +1179,7 @@ def test_model_family_names_preserve_factor_statistics_and_native_names(
         assert set(tables["model_trials"].family_id) == set(families)
         quarterly_losses = losses.copy()
         quarterly_losses["loss"] *= np.repeat([0.7, 0.8, 0.9], len(families))
-        paired = statistics_production._paired_group_rankic(
+        paired = model_stats._paired_group_rankic(
             quarterly_losses.assign(
                 **{"global": -losses.loss, "quarterly": -quarterly_losses.loss}
             ),
@@ -1246,7 +1249,7 @@ def test_factor_fmb_weightings_match_independent_weighted_normal_equations():
         }
     )
     records = pd.DataFrame(
-        statistics_production._fama_macbeth_period_records(
+        factor_stats._fama_macbeth_period_records(
             frame, return_column="y", factors=("x",), core_factors=()
         )
     )
@@ -1279,7 +1282,7 @@ def test_factor_fmb_weightings_match_independent_weighted_normal_equations():
         changed["total_market_cap"] = changed.total_market_cap.astype(object)
         changed.loc[0, "total_market_cap"] = invalid_cap
         actual = pd.DataFrame(
-            statistics_production._fama_macbeth_period_records(
+            factor_stats._fama_macbeth_period_records(
                 changed, return_column="y", factors=("x",), core_factors=()
             )
         )
@@ -1488,7 +1491,7 @@ def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_pat
                 },
                 selections={"explicit_horizon": selection},
                 period_windows={"explicit_horizon": window},
-                trial_rows=statistics_production._selection_trial_rows(
+                trial_rows=model_stats._selection_trial_rows(
                     {"final": selection}, "global"
                 ),
                 config=config,
@@ -1502,7 +1505,7 @@ def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_pat
         write_statistics_artifact(
             root / "statistics", metadata=statistics_metadata(window), tables=tables
         )
-        public_output = statistics_production.model_statistics(
+        public_output = model_stats.model_statistics(
             {
                 **config,
                 "evaluation": {"primary_label": primary},
@@ -1605,13 +1608,13 @@ def test_fmb_invalid_real_weights_only_remove_weighted_observations(
         }
     )
     baseline = pd.DataFrame(
-        statistics_production._fama_macbeth_period_records(
+        factor_stats._fama_macbeth_period_records(
             frame, return_column="y", factors=("x",), core_factors=()
         )
     )
     frame.at[0, "total_market_cap"] = invalid_cap
     actual = pd.DataFrame(
-        statistics_production._fama_macbeth_period_records(
+        factor_stats._fama_macbeth_period_records(
             frame, return_column="y", factors=("x",), core_factors=()
         )
     )

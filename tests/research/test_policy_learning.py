@@ -1,0 +1,418 @@
+"""Learned decisions share real account, causality and persistence rules."""
+
+from dataclasses import asdict
+
+import numpy as np
+import pandas as pd
+import pytest
+import torch
+
+from quant_research_platform.artifacts.portfolio_ledger import (
+    read_portfolio_ledger_artifact,
+    summarize_portfolio_ledger,
+)
+from quant_research_platform.contracts.data import DataSpec, ProcessedDataSpec
+from quant_research_platform.contracts.json_codec import parse_qrp_json_object
+from quant_research_platform.contracts.policies import PolicyDecision
+from quant_research_platform.contracts.portfolios import (
+    ExecutionAssumptions,
+    PortfolioCandidateSpec,
+)
+from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.research.policies.cost_aware import (
+    backtest_cost_model,
+    differentiable_returns,
+    fit_cost_model,
+)
+from quant_research_platform.research.policies.environments import TradingEnv
+from quant_research_platform.research.policies.reinforcement import (
+    backtest_policy,
+    train_policy,
+)
+from quant_research_platform.research.portfolios.high_frequency import inventory_batches
+from quant_research_platform.storage.datasets import read_dataset, write_dataset
+from tests.helpers.high_frequency import daily_view, write_daily_inputs
+from tests.helpers.portfolio_inputs import _interim_specs, closed_market_inputs
+from tests.helpers.research_specs import make_demo_research_dataset_spec
+from tests.research.test_hft_portfolio import parameters, quotes, schedule
+
+
+def hft_episode(root, *, day="2024-01-02", task="execution"):
+    panel = pd.concat(
+        [quotes(date, assets=("a",)) for date in ("2024-01-02", "2024-01-03")],
+        ignore_index=True,
+    )
+    daily = write_daily_inputs(root / "daily", panel)
+    roles = dict.fromkeys(panel.columns, "context")
+    roles.update(timestamp="timestamp", asset_id="key", eligible="mask")
+    spec = ProcessedDataSpec(
+        data_id="hft_panel",
+        market_id="a_share",
+        kind="panel",
+        frequency="tick",
+        grain="asset_timestamp",
+        column_roles=roles,
+        primary_key=("timestamp", "asset_id"),
+        partition_columns=(),
+    )
+    write_dataset(root / "quotes", panel, spec=spec)
+    fees = pd.DataFrame([asdict(rule) for rule in schedule().rules])
+    fees["effective_date"] = pd.to_datetime(fees.effective_date)
+    fees["end_date"] = pd.to_datetime(fees.end_date)
+    fees["included_in"] = fees.included_in.astype("string")
+    write_dataset(
+        root / "fees", fees, spec=_interim_specs().get("a_share_fee_schedule")
+    )
+    params = parameters(("a",))
+    del params["buy_threshold"], params["sell_threshold"]
+    episode = {
+        "kind": "hft",
+        "task": task,
+        "asset_ids": ["a"],
+        "feature_columns": ["mid", "ask_vol1"],
+        "window": {"start": day + "T01:30:00", "end": day + "T01:30:06"},
+        "account": {
+            "panel": str(root / "quotes"),
+            "fee_schedule": str(root / "fees"),
+            "daily_inputs": daily,
+            "parameters": params,
+        },
+        "risk_aversion": 0.0,
+        "unfinished_penalty_bps": 100.0,
+    }
+    if task == "execution":
+        episode["order"] = {"asset_id": "a", "quantity": -100}
+    else:
+        episode["unfinished_penalty_bps"] = 0
+    return episode
+
+
+def test_interactive_quote_account_observes_then_executes_and_keeps_t1():
+    panel = quotes("2024-01-02", assets=("a",))
+    stream = inventory_batches(
+        [(daily_view(panel), panel, pd.DataFrame())],
+        schedule(),
+        parameters(("a",)),
+        TimeWindow("2024-01-02", "2024-01-02"),
+        decision_columns=("mid",),
+    )
+    events = []
+    event = next(stream)
+    while not isinstance(event, PolicyDecision):
+        events.append(event)
+        event = next(stream)
+    assert event.timestamp == panel.timestamp.iloc[0]
+    assert not any(batch.trades for batch in events)
+    event = stream.send(pd.Series({"a": 200.0}))
+    bought = []
+    while not isinstance(event, PolicyDecision):
+        bought.extend(event.trades)
+        event = next(stream)
+    assert [trade.quantity for trade in bought] == [100]
+    assert bought[0].timestamp_ns > int(bought[0].order_id)
+    assert event.quantities["a"] == 200
+    assert event.sellable["a"] == 100
+    event = stream.send(pd.Series({"a": 0.0}))
+    remaining = [event, *stream]
+    assert sum(trade.quantity for batch in remaining for trade in batch.trades) == -100
+    assert [
+        row.quantity
+        for row in remaining[-1].valuations
+        if row.phase == "end" and row.asset_id == "a"
+    ] == [100]
+
+
+def test_execution_env_reward_equals_hand_shortfall_and_native_ledger(tmp_path):
+    episode = hft_episode(tmp_path / "inputs")
+    env = TradingEnv([episode])
+    try:
+        observation, _ = env.reset(seed=1)
+        assert env.observation_space.contains(observation)
+        total_reward = 0
+        done = False
+        while not done:
+            _, reward, done, truncated, info = env.step(np.array([1.0]))
+            total_reward += reward
+            assert not truncated
+        assert info["completion_rate"] == 1
+        assert info["implementation_shortfall_bps"] == pytest.approx(10)
+        assert total_reward == pytest.approx(-0.001)
+    finally:
+        env.close()
+    output = backtest_policy(
+        {
+            "episode": episode,
+            "strategy": "immediate",
+            "output": str(tmp_path / "comparison"),
+        }
+    )
+    ledger = read_portfolio_ledger_artifact(output / "ledger")
+    summary = summarize_portfolio_ledger(ledger.capital, ledger.iter_chunks())
+    assert summary["net_pnl"] == pytest.approx(-1)
+    assert summary["nav"] == pytest.approx(4999)
+
+
+@pytest.mark.parametrize("n_envs", [1, 2])
+def test_real_ppo_roundtrip_and_later_native_backtest(tmp_path, n_envs):
+    episode = hft_episode(tmp_path / "inputs", task="inventory")
+    model = train_policy(
+        {
+            "episodes": [episode],
+            "output": str(tmp_path / "ppo"),
+            "fit_cutoff": "2024-01-02T07:00:00",
+            "timesteps": 8,
+            "seed": 1,
+            "device": "cpu",
+            "n_envs": n_envs,
+            "threads": 1,
+            "ppo": {
+                "n_steps": 4,
+                "batch_size": 4,
+                "n_epochs": 1,
+                "policy_kwargs": {"net_arch": [8]},
+            },
+        }
+    )
+    facts = parse_qrp_json_object((model / "policy.json").read_bytes())
+    assert facts["actual_timesteps"] == 8
+    later = {
+        **episode,
+        "window": {"start": "2024-01-03T01:30:00", "end": "2024-01-03T01:30:06"},
+    }
+    output = backtest_policy(
+        {
+            "episode": later,
+            "output": str(tmp_path / "later"),
+            "strategy": "ppo",
+            "policy": str(model),
+            "device": "cpu",
+        }
+    )
+    assert list(read_portfolio_ledger_artifact(output / "ledger").iter_chunks())
+    with pytest.raises(ValueError, match="not_out_of_sample"):
+        backtest_policy(
+            {
+                "episode": episode,
+                "output": str(tmp_path / "invalid"),
+                "strategy": "ppo",
+                "policy": str(model),
+            }
+        )
+
+
+def test_cost_objective_uses_drifted_weights_and_two_sided_cost():
+    class Equal(torch.nn.Module):
+        def forward(self, features, previous):
+            return torch.tensor([0.5, 0.5], dtype=features.dtype)
+
+    returns, turnover = differentiable_returns(
+        Equal(), torch.zeros(2, 2, 1), torch.tensor([[0.1, -0.1], [0.0, 0.0]]), 0.01
+    )
+    # First all-cash entry trades 1; the 55/45 drift then requires 0.1 turnover.
+    assert turnover.tolist() == pytest.approx([1, 0.1])
+    assert returns.tolist() == pytest.approx([-0.01, -0.001], abs=1e-7)
+
+
+def test_delayed_mother_order_cannot_reverse_or_overfill_after_partial_fills():
+    panel = quotes(
+        "2024-01-02", assets=("a",), clocks=tuple(f"01:30:0{i}" for i in range(5))
+    )
+    panel["bid_vol1"] = 100.0
+    params = parameters(("a",))
+    params.update(initial_inventory={"a": 300}, latency_ms=2000)
+    stream = inventory_batches(
+        [(daily_view(panel), panel, pd.DataFrame())],
+        schedule(),
+        params,
+        TimeWindow("2024-01-02", "2024-01-02"),
+        decision_columns=("mid",),
+        execution_order={"asset_id": "a", "quantity": -200},
+    )
+    targets = iter((100.0, 300.0, 100.0))
+    trades = []
+    try:
+        event = next(stream)
+        while True:
+            if isinstance(event, PolicyDecision):
+                event = stream.send(pd.Series({"a": next(targets)}))
+            else:
+                trades.extend(event.trades)
+                event = next(stream)
+    except StopIteration:
+        pass
+    finally:
+        stream.close()
+    assert [trade.quantity for trade in trades] == [-100, -100]
+    assert all(
+        trade.timestamp_ns - int(trade.order_id) >= 2_000_000_000 for trade in trades
+    )
+
+
+def test_daily_policy_and_cost_model_use_native_account_roundtrip(
+    tmp_path, monkeypatch
+):
+    inputs, _, _, _ = closed_market_inputs(
+        tmp_path / "daily-inputs", fault="normal_open", open_assets=0
+    )
+    inputs.pop("risk_context")
+    assets = [f"a{i}" for i in range(6)]
+    candidate = PortfolioCandidateSpec(
+        "learned", "global", "quantile_equal_weight", "champion", "daily", 0.5, None
+    )
+    assumptions = ExecutionAssumptions(100_000.0, 0.0, 0.0, 1.0, (1.0,), 0.0)
+    episode = {
+        "kind": "daily",
+        "task": "portfolio",
+        "asset_ids": assets,
+        "feature_columns": ["signal"],
+        "window": {"start": "2022-12-30", "end": "2023-01-06"},
+        "account": {
+            "inputs": {key: str(value) for key, value in inputs.items()},
+            "candidate": asdict(candidate),
+            "assumptions": asdict(assumptions),
+            "input_window": {"start": "2022-12-01", "end": "2023-01-06"},
+            "formal_dataset_window": {"start": "2022-12-30", "end": "2023-01-06"},
+        },
+        "risk_aversion": 0.0,
+        "unfinished_penalty_bps": 0.0,
+    }
+    output = backtest_policy(
+        {
+            "episode": episode,
+            "strategy": "equal_weight",
+            "output": str(tmp_path / "equal"),
+        }
+    )
+    ledger = read_portfolio_ledger_artifact(output / "ledger")
+    assert any(batch.trades for batch in ledger.iter_chunks())
+    daily_model = train_policy(
+        {
+            "episodes": [episode],
+            "output": str(tmp_path / "daily-ppo"),
+            "fit_cutoff": "2023-01-07",
+            "timesteps": 4,
+            "seed": 1,
+            "device": "cpu",
+            "n_envs": 1,
+            "threads": 1,
+            "ppo": {"n_steps": 4, "batch_size": 4, "n_epochs": 1},
+        }
+    )
+    assert (daily_model / "policy.zip").is_file()
+    stamps = pd.bdate_range("2022-12-20", periods=5)
+    frame = pd.DataFrame(
+        {
+            "timestamp": stamps[:-1].repeat(6),
+            "asset_id": assets * 4,
+            "eligible": True,
+            "signal": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0] * 4,
+            "label": [0.001, 0.002, 0.003, 0.004, 0.005, 0.006] * 4,
+            "label_available_at": stamps[1:].repeat(6),
+            "return_end_at": stamps[1:].repeat(6),
+        }
+    )
+    spec = DataSpec(
+        data_id="cost_learning",
+        frequency="1d",
+        grain="asset_timestamp",
+        primary_key=("timestamp", "asset_id"),
+        partition_columns=(),
+        column_roles={
+            "timestamp": "timestamp",
+            "asset_id": "key",
+            "eligible": "mask",
+            "signal": "factor",
+            "label": "label",
+            "label_available_at": "context",
+            "return_end_at": "context",
+        },
+        column_units={"label": "decimal_return"},
+        label_availability_columns={"label": "label_available_at"},
+    )
+    write_dataset(tmp_path / "training", frame, spec=spec)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 0)
+    model = fit_cost_model(
+        {
+            "dataset": str(tmp_path / "training"),
+            "feature_columns": ["signal"],
+            "asset_ids": assets,
+            "label": "label",
+            "return_end_column": "return_end_at",
+            "window": {"start": "2022-12-20", "end": "2022-12-23"},
+            "cutoff": "2022-12-28",
+            "cost_bps": 10.0,
+            "risk_aversion": 1.0,
+            "epochs": 2,
+            "learning_rate": 0.01,
+            "hidden_sizes": [4],
+            "device": "cuda",
+            "threads": 1,
+            "seed": 1,
+            "output": str(tmp_path / "cost-model"),
+        }
+    )
+    assert parse_qrp_json_object((model / "model.json").read_bytes())["device"] == "cpu"
+    output = backtest_cost_model(
+        {
+            "model": str(model),
+            "episode": episode,
+            "output": str(tmp_path / "cost-ledger"),
+            "device": "cuda",
+        }
+    )
+    ledger = read_portfolio_ledger_artifact(output)
+    assert any(batch.trades for batch in ledger.iter_chunks())
+    assert np.isfinite(
+        summarize_portfolio_ledger(ledger.capital, ledger.iter_chunks())["nav"]
+    )
+    data = read_dataset(inputs["dataset"]).rename(columns={"signal": "feature_signal"})
+    data["feature_observed_signal"] = data.asset_id.ne("a0").astype(float)
+    observed_spec = make_demo_research_dataset_spec(
+        data_id="observed",
+        factor_columns=(),
+        feature_columns=("feature_signal",),
+        label_columns=("label",),
+        filter_columns=("eligible",),
+        context_columns=("float_market_cap", "feature_observed_signal"),
+    )
+    write_dataset(tmp_path / "observed", data, spec=observed_spec)
+    episode["feature_columns"] = ["feature_signal"]
+    episode["account"]["inputs"]["dataset"] = str(tmp_path / "observed")
+    env = TradingEnv([episode])
+    try:
+        observation, _ = env.reset(seed=1)
+        assert np.isnan(env.decision.features.loc["a0", "feature_signal"])
+        assert observation[0] == observation[len(assets)] == 0
+        assert observation[1] == observation[len(assets) + 1] == 1
+    finally:
+        env.close()
+
+
+def test_hft_observation_rejects_nonquote_context(tmp_path):
+    episode = hft_episode(tmp_path)
+    panel = read_dataset(tmp_path / "quotes").assign(future_context=1.0)
+    roles = dict.fromkeys(panel.columns, "context")
+    roles.update(timestamp="timestamp", asset_id="key", eligible="mask")
+    write_dataset(
+        tmp_path / "future",
+        panel,
+        spec=ProcessedDataSpec(
+            data_id="hft_panel",
+            market_id="a_share",
+            kind="panel",
+            frequency="tick",
+            grain="asset_timestamp",
+            column_roles=roles,
+            primary_key=("timestamp", "asset_id"),
+            partition_columns=(),
+        ),
+    )
+    episode["account"]["panel"] = str(tmp_path / "future")
+    episode["feature_columns"] = ["future_context"]
+    env = TradingEnv([episode])
+    try:
+        with pytest.raises(ValueError, match="feature_role_required"):
+            env.reset(seed=1)
+    finally:
+        env.close()

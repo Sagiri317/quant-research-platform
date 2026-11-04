@@ -1,0 +1,11 @@
+{
+  "intervals": "results/learning/uncertainty-features",
+  "dataset": "data/research/return_prediction",
+  "window": {
+    "start": "2021-01-04",
+    "end": "2021-03-31"
+  },
+  "label": "forward_return_1d",
+  "cutoff": "2021-04-30",
+  "output": "results/learning/uncertainty-evaluation.json"
+}

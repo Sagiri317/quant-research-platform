@@ -10,7 +10,7 @@ from quant_research_platform.artifacts.statistics import read_statistics_artifac
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.research.evaluations.runner import evaluate
-from quant_research_platform.research.statistics_production import factor_statistics
+from quant_research_platform.research.factors.statistics import factor_statistics
 from quant_research_platform.storage.datasets import inventory
 from tests.research.evaluation_test_support import (
     evaluation_config,
@@ -101,10 +101,11 @@ def test_unselected_year_is_not_discovered_and_eval_feeds_statistics(
     def forbidden(*args, **kwargs):
         raise AssertionError("statistics must consume the persisted evaluation")
 
-    from quant_research_platform.research import statistics_production
+    import quant_research_platform.research.datasets.statistics as statistics_inputs
+    import quant_research_platform.research.factors.statistics as factor_stats
 
-    monkeypatch.setattr(statistics_production, "open_dataset_session", forbidden)
-    monkeypatch.setattr(statistics_production, "read_dataset", forbidden)
+    monkeypatch.setattr(statistics_inputs, "open_dataset_session", forbidden)
+    monkeypatch.setattr(factor_stats, "read_dataset", forbidden)
     statistic = read_statistics_artifact(
         factor_statistics(
             {
@@ -220,13 +221,13 @@ def test_native_operation_domains_share_discovery_and_persisted_consumers(tmp_pa
     from quant_research_platform.research.datasets.assembler import assemble
     from quant_research_platform.research.models.explanations import explain
     from quant_research_platform.research.models.production import fit
+    from quant_research_platform.research.models.statistics import model_statistics
     from quant_research_platform.research.models.trial_selection import (
         read_selection,
         score,
         select,
     )
     from quant_research_platform.research.predictions.runner import predict
-    from quant_research_platform.research.statistics_production import model_statistics
     from quant_research_platform.storage.datasets import read_dataset
 
     stamps = pd.date_range("2020-01-01", periods=6).repeat(3)

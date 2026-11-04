@@ -1,4 +1,4 @@
-"""Named A-share feature recipe contracts."""
+"""Declare ordered feature transformations and named A-share feature recipes."""
 
 from __future__ import annotations
 

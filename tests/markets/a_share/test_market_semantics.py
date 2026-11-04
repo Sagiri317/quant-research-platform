@@ -582,6 +582,7 @@ def test_industry_cutover_uses_valid_versions_without_backfill(cutover) -> None:
             ),
         }
     )
+    panel["asset_id"] = panel["asset_id"].astype(object)
     for column in (
         "industry_standard_id",
         "industry_level1_code",
@@ -946,6 +947,7 @@ def test_special_treatment_pit_and_late_older_events_persist(tmp_path, reverse):
             "trading_status_code": 0,
         }
     )
+    panel["asset_id"] = panel["asset_id"].astype(object)
     actual = _apply_special_treatment(panel, restored)
     assert actual["is_st"].tolist() == [False, True, False, False, False, False]
     assert actual["is_pt"].tolist() == [False] * 6
@@ -973,6 +975,7 @@ def test_special_treatment_equal_effective_conflict_is_local_to_unknown_field():
             "trading_status_code": [0],
         }
     )
+    panel["asset_id"] = panel["asset_id"].astype(object)
     assert _apply_special_treatment(panel, history)["is_st"].tolist() == [True]
     panel["timestamp"] = pd.to_datetime(["2020-01-02"]).as_unit("ns")
     actual = _apply_special_treatment(panel, history)
@@ -1006,6 +1009,7 @@ def test_special_treatment_shared_availability_and_repeated_state(reverse):
             "trading_status_code": 0,
         }
     )
+    panel["asset_id"] = panel["asset_id"].astype(object)
     actual = _apply_special_treatment(panel, history)
     assert actual["is_st"].tolist() == [False, True, False]
     assert actual["is_pt"].tolist() == [False, False, True]
@@ -1019,6 +1023,7 @@ def test_public_snapshots_preserve_unknown_barriers_and_actual_publication():
         dtype="datetime64[ns]",
     )
     panel = pd.DataFrame({"asset_id": "000001", "timestamp": dates})
+    panel["asset_id"] = panel["asset_id"].astype(object)
     for column in (
         "industry_standard_id",
         "industry_level1_code",
@@ -1527,6 +1532,7 @@ def test_industry_batch_join_preserves_asset_order_and_unknown_barriers():
             "timestamp": [dates[1], dates[1], dates[0], dates[0], dates[0], dates[2]],
         }
     )
+    panel["asset_id"] = panel["asset_id"].astype(object)
     for column in (
         "industry_standard_id",
         "industry_level1_code",
@@ -1757,6 +1763,7 @@ def test_industry_frontier_discards_superseded_cross_standard_conflicts(
             ),
         }
     )
+    panel["asset_id"] = panel["asset_id"].astype(object)
     for column in (
         "industry_standard_id",
         "industry_level1_code",

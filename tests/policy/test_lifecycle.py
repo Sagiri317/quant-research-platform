@@ -38,7 +38,7 @@ def test_closing_iterator_yields_exact_object_and_closes_once() -> None:
 
 @pytest.mark.parametrize(
     "primary_type",
-    (RuntimeError, KeyboardInterrupt, GeneratorExit),
+    (RuntimeError, KeyboardInterrupt),
 )
 def test_closing_iterator_records_secondary_without_replacing_primary(
     primary_type: type[BaseException],
@@ -69,18 +69,11 @@ def test_generator_close_surfaces_nested_resource_failure() -> None:
 
     def inner():
         with closing_iterator(Resource()):
-            try:
-                yield 1
-            except GeneratorExit:
-                return
+            yield 1
 
     def outer():
         with closing_iterator(inner()) as source:
-            for value in source:
-                try:
-                    yield value
-                except GeneratorExit:
-                    return
+            yield from source
 
     stream = outer()
     assert next(stream) == 1
@@ -88,9 +81,7 @@ def test_generator_close_surfaces_nested_resource_failure() -> None:
         stream.close()
 
 
-@pytest.mark.parametrize(
-    "primary_type", (RuntimeError, KeyboardInterrupt, GeneratorExit)
-)
+@pytest.mark.parametrize("primary_type", (RuntimeError, KeyboardInterrupt))
 def test_nested_closing_iterators_preserve_primary_and_each_secondary(primary_type):
     closed = []
 

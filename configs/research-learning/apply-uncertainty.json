@@ -1,0 +1,10 @@
+{
+  "calibration": "results/learning/conformal.json",
+  "predictions": "results/learning/later-predictions",
+  "window": {
+    "start": "2021-01-04",
+    "end": "2021-03-31"
+  },
+  "cost": 0.001,
+  "output": "results/learning/uncertainty-features"
+}

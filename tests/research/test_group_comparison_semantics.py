@@ -7,17 +7,17 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import quant_research_platform.research.models.statistics as model_stats
 from quant_research_platform.artifacts.statistics import (
     read_statistics_artifact,
     write_statistics_artifact,
 )
 from quant_research_platform.contracts.portfolios import PortfolioCandidateSpec
-from quant_research_platform.research import statistics_production
-from quant_research_platform.research.portfolios.diagnostics import portfolio_statistics
-from quant_research_platform.research.statistics_production import (
+from quant_research_platform.research.models.statistics import (
     _paired_group_rankic,
     model_statistics,
 )
+from quant_research_platform.research.portfolios.diagnostics import portfolio_statistics
 from quant_research_platform.storage.datasets import write_dataset
 from tests.research.test_optional_statistics import _cash_ledger
 from tests.workflows.test_portfolio_workflow_integration import _statistics_request
@@ -59,14 +59,14 @@ def test_native_comparison_reuses_the_single_dataset_scan(
     paired_sources, tmp_path, monkeypatch
 ):
     _case, configs, _paths = paired_sources
-    actual_chunks = statistics_production.iter_dataset_chunks
+    actual_chunks = model_stats.iter_dataset_chunks
     scans = []
 
     def counted_chunks(*args, **kwargs):
         scans.append(1)
         yield from actual_chunks(*args, **kwargs)
 
-    monkeypatch.setattr(statistics_production, "iter_dataset_chunks", counted_chunks)
+    monkeypatch.setattr(model_stats, "iter_dataset_chunks", counted_chunks)
     model_statistics({**configs["quarterly"], "output": str(tmp_path / "right")})
     assert len(scans) == 1
 

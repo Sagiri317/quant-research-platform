@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 from scipy.optimize import linprog
 
+import quant_research_platform.research.portfolios.daily as daily
 from quant_research_platform.artifacts.portfolio_ledger import (
     read_portfolio_ledger_artifact,
     write_portfolio_ledger_artifact,
@@ -18,7 +19,7 @@ from quant_research_platform.contracts.portfolios import (
 from quant_research_platform.markets.implementations.a_share.execution import (
     PreparedTradeCost,
 )
-from quant_research_platform.research.portfolios import optimizer, production
+from quant_research_platform.research.portfolios import optimizer
 from tests.helpers.optimizer import with_cash_asset
 from tests.helpers.portfolio_inputs import decision_inputs as _decision_inputs
 
@@ -216,7 +217,7 @@ def test_zero_cash_has_the_same_legal_sell_to_cash_domain(cash):
             enhanced, expected_alpha=pd.Series([-0.1, -0.2], index=["a", "b"])
         ),
     )
-    account, _, result, _, ledger = production._build_session(**args)
+    account, _, result, _, ledger = daily._build_session(**args)
     assert result is not None
     assert result.weights.tolist() == pytest.approx([0.495, 0.495, 0.01], abs=1e-10)
     # With a positive cash offset each 100-share sale would cross the target;
@@ -261,7 +262,7 @@ def test_actual_constraint_diagnostics_depend_on_account_and_available_facts(
         args["panel"] = args["panel"].drop(columns="is_nonfinancial_industry")
     args["next_panel"].loc[args["next_panel"].asset_id.eq("a"), "open"] = 0.015
     args["execution"]["can_exit"] = False
-    account, adv, result, delta, ledger = production._build_session(**args)
+    account, adv, result, delta, ledger = daily._build_session(**args)
     assert account.nav_after == 125.0
     assert ledger.post_trade_notional.tolist() == [75.0, 50.0]
     facts = ledger.attrs["realized_constraints"]
@@ -277,7 +278,7 @@ def test_actual_constraint_diagnostics_depend_on_account_and_available_facts(
         assert facts["realized_tracking_error"] == pytest.approx(np.sqrt(0.0002))
     if branch != "optimized":
         assert result is None
-    batch = production._ledger_batch(
+    batch = daily._ledger_batch(
         account=account,
         asset_ledger=ledger,
         sequence=0,
@@ -299,7 +300,7 @@ def test_actual_constraint_diagnostics_depend_on_account_and_available_facts(
         endpoint_events=pd.DataFrame(),
         corporate_events=pd.DataFrame(),
         endpoint_corporate_events=pd.DataFrame(),
-        entitlements=production.EquityEntitlements(),
+        entitlements=daily.EquityEntitlements(),
         execution_lives=args["next_panel"].set_index("asset_id").listing_date,
     )
     path = write_portfolio_ledger_artifact(

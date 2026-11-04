@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 import numpy as np
@@ -195,11 +196,38 @@ class ScaledPredictor:
 
     def predict(self, frame: pd.DataFrame) -> np.ndarray:
         predictions = np.asarray(
-            self.estimator.predict(self.scaler.transform(frame)),
+            self._predict_matrix(self.scaler.transform(frame)),
             dtype="float64",
         )
         predictions[frame.isna().all(axis=1)] = np.nan
         return predictions
+
+    def _predict_matrix(self, matrix, *, output_margin=False, pred_contribs=False):
+        from sklearn.linear_model import Lasso
+
+        estimator = self.estimator
+        if isinstance(estimator, Lasso):
+            return estimator.predict(matrix)
+        from xgboost import DMatrix
+
+        booster = estimator.get_booster()
+        device = json.loads(booster.save_config())["learner"]["generic_param"]["device"]
+        if device == "cpu" and not pred_contribs:
+            return estimator.predict(matrix, output_margin=output_margin)
+        # Pandas inputs need DMatrix for GPU prediction and tree contributions.
+        end = getattr(estimator, "best_iteration", None)
+        return booster.predict(
+            DMatrix(
+                matrix,
+                missing=estimator.missing,
+                nthread=estimator.n_jobs,
+                feature_types=estimator.feature_types,
+                enable_categorical=estimator.enable_categorical,
+            ),
+            output_margin=output_margin,
+            pred_contribs=pred_contribs,
+            iteration_range=(0, end + 1 if end is not None else 0),
+        )
 
     def __getattr__(self, name: str) -> object:
         return getattr(object.__getattribute__(self, "estimator"), name)

@@ -28,9 +28,7 @@ from quant_research_platform.storage.datasets.schema import (
     logical_dtype_payload_from_frame,
 )
 from quant_research_platform.storage.identity import (
-    filesystem_exists,
     filesystem_glob,
-    filesystem_iterdir,
     filesystem_stat,
     filesystem_walk,
     filesystem_write_bytes,
@@ -665,13 +663,12 @@ def test_comparison_projects_logical_dtypes_and_always_includes_primary_key(
     assert projected.status == ("SCHEMA_MISMATCH" if column == "asset_id" else "MATCH")
 
 
-@pytest.mark.parametrize("mode", ("materialized", "chunked", "writer"))
+@pytest.mark.parametrize("mode", ("materialized", "chunked"))
 @pytest.mark.parametrize("timestamp", [False, True])
 def test_physical_values_cannot_be_reinterpreted_by_forged_logical_dtype(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, timestamp: bool
+    tmp_path: Path, mode: str, timestamp: bool
 ) -> None:
     from quant_research_platform.contracts.columns import ColumnRole
-    from quant_research_platform.storage.datasets import writing
     from quant_research_platform.storage.datasets.schema import (
         logical_dtype_metadata_bytes,
     )
@@ -703,35 +700,22 @@ def test_physical_values_cannot_be_reinterpreted_by_forged_logical_dtype(
         metadata[b"qrp.logical-dtypes"] = logical_dtype_metadata_bytes(logical)
         return (table.replace_schema_metadata(metadata), logical)
 
-    if mode == "writer":
-        original_write = writing.write_parquet_file
-
-        def forged_write(table, path, **kwargs):
-            forged, _logical = forge(table)
-            return original_write(forged, path, **kwargs)
-
-        monkeypatch.setattr(writing, "write_parquet_file", forged_write)
-        with pytest.raises(ValueError, match="dataset_logical_dtype_mismatch"):
-            write_dataset(root, frame, spec=spec)
-        assert not filesystem_exists(root)
-        assert not tuple(filesystem_iterdir(root.parent))
-    else:
-        write_dataset(root, frame, spec=spec)
-        part = next(filesystem_glob(root / "data", "**/*.parquet"))
-        with pq.ParquetFile(native_filesystem_path(part)) as parquet:
-            forged, logical = forge(parquet.read())
-        pq.write_table(forged, native_filesystem_path(part), compression="zstd")
-        manifest_path = root / "_manifest" / "manifest.json"
-        manifest = json.loads(
-            Path(native_filesystem_path(manifest_path)).read_text(encoding="utf-8")
-        )
-        manifest["logical_dtypes"] = logical
-        manifest["file_size_bytes"] = filesystem_stat(part).st_size
-        filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
-        with pytest.raises(ValueError, match="dataset_logical_dtype_mismatch"):
-            result = dataset_reading.read_dataset(root, mode=DatasetReadMode(mode))
-            if mode == "chunked":
-                tuple(result)
+    write_dataset(root, frame, spec=spec)
+    part = next(filesystem_glob(root / "data", "**/*.parquet"))
+    with pq.ParquetFile(native_filesystem_path(part)) as parquet:
+        forged, logical = forge(parquet.read())
+    pq.write_table(forged, native_filesystem_path(part), compression="zstd")
+    manifest_path = root / "_manifest" / "manifest.json"
+    manifest = json.loads(
+        Path(native_filesystem_path(manifest_path)).read_text(encoding="utf-8")
+    )
+    manifest["logical_dtypes"] = logical
+    manifest["file_size_bytes"] = filesystem_stat(part).st_size
+    filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="dataset_logical_dtype_mismatch"):
+        result = dataset_reading.read_dataset(root, mode=DatasetReadMode(mode))
+        if mode == "chunked":
+            tuple(result)
     assert _file_bytes(original_root) == original_bytes
 
 
@@ -937,7 +921,7 @@ def test_parquet_early_close_preserves_cleanup_and_consumer_failure(
 
 
 @pytest.mark.parametrize("observer_kind", ("persisted", "batch"))
-def test_declared_reader_preserves_observer_generator_exit(
+def test_declared_reader_preserves_observer_failure(
     tmp_path, monkeypatch, observer_kind
 ):
     path = tmp_path / "observer.parquet"
@@ -958,7 +942,7 @@ def test_declared_reader_preserves_observer_generator_exit(
             closed.append(True)
             raise OSError("observer_native_close")
 
-    primary = GeneratorExit("observer_primary")
+    primary = ValueError("observer_primary")
 
     def observer(*args):
         raise primary
@@ -970,7 +954,7 @@ def test_declared_reader_preserves_observer_generator_exit(
         batch_observer=observer if observer_kind == "batch" else None,
         batch_rows=128,
     )
-    with pytest.raises(GeneratorExit) as caught:
+    with pytest.raises(ValueError) as caught:
         next(frames)
     assert caught.value is primary
     assert any("OSError" in note for note in getattr(primary, "__notes__", ()))
@@ -1187,21 +1171,3 @@ def test_membership_does_not_round_queries_into_matches(kind):
             batch, [("value", "in", prepared)]
         )
         assert result.num_rows == expected
-
-
-def test_comparison_rechecks_dtype_structure_after_schema_hash_collision(
-    tmp_path, monkeypatch
-):
-    from quant_research_platform.storage.datasets import comparison
-
-    roots = [
-        make_dataset_artifact_root(tmp_path / str(index), "dtype_exact")
-        for index in range(2)
-    ]
-    for root, dtype in zip(roots, ("int64", "Int64"), strict=True):
-        frame = make_default_dataset_frame().iloc[:2].copy()
-        frame["value"] = frame["value"].astype(dtype)
-        write_dataset(root, frame, spec=make_processed_dataset_spec("dtype_exact"))
-    assert compare_datasets(*roots).status == "SCHEMA_MISMATCH"
-    monkeypatch.setattr(comparison, "canonical_json_hash", lambda _value: "a" * 64)
-    assert compare_datasets(*roots).status == "SCHEMA_MISMATCH"

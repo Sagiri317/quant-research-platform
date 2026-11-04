@@ -8,9 +8,9 @@ from quant_research_platform.contracts.data import DataSpec, ProcessedDataSpec
 from quant_research_platform.research.evaluations.runner import evaluate
 from quant_research_platform.research.models.explanations import explain
 from quant_research_platform.research.models.production import fit
+from quant_research_platform.research.models.statistics import model_statistics
 from quant_research_platform.research.models.trial_selection import score
 from quant_research_platform.research.predictions.runner import predict
-from quant_research_platform.research.statistics_production import model_statistics
 from quant_research_platform.storage.datasets.writing import write_dataset
 
 

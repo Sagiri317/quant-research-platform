@@ -1148,7 +1148,7 @@ def plot(config):
                 **common,
             )
     elif kind == "curve":
-        from quant_research_platform.interfaces.queries import portfolio_curve
+        from quant_research_platform.artifacts.portfolio_curve import portfolio_curve
 
         curve = portfolio_curve(source)
         figure, _axes = plot_portfolio_curve(

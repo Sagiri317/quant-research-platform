@@ -1,1 +1,1 @@
-"""QRP spec-first read-only FastAPI app."""
+"""Expose catalog and local artifact queries through a read-only FastAPI application."""

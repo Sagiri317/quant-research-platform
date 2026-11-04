@@ -4,10 +4,10 @@ import json
 import pandas as pd
 import pytest
 
+import quant_research_platform.research.portfolios.daily as daily
 from quant_research_platform.contracts.portfolios import EQUITY_EVENT_COLUMNS
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share import portfolio_sessions
-from quant_research_platform.research.portfolios import production
 from quant_research_platform.sources.prepare import prepare_source
 from quant_research_platform.sources.reference import interim
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
@@ -218,7 +218,7 @@ def test_native_source_to_session_carries_recovery_without_forged_panel_row(
         stock_master_root=layout["stock_master"],
         equity_events_root=layout["equity_events"],
         panel_root=roots["market_panel_1d"],
-        panel_columns=production._PANEL_COLUMNS,
+        panel_columns=daily._PANEL_COLUMNS,
         calendar=calendar,
         time_window=TimeWindow("2022-12-30", "2023-01-06"),
     )
@@ -256,7 +256,7 @@ def test_calendar_coalesced_rights_events_do_not_use_event_id_as_order(tmp_path)
         stock_master_root=layout["stock_master"],
         equity_events_root=layout["equity_events"],
         panel_root=roots["market_panel_1d"],
-        panel_columns=production._PANEL_COLUMNS,
+        panel_columns=daily._PANEL_COLUMNS,
         calendar=calendar,
         time_window=TimeWindow("2022-12-30", "2023-01-06"),
     )
@@ -485,7 +485,7 @@ def test_narrow_session_does_not_coalesce_different_historical_event_sessions(tm
             stock_master_root=layout["stock_master"],
             equity_events_root=layout["equity_events"],
             panel_root=roots["market_panel_1d"],
-            panel_columns=production._PANEL_COLUMNS,
+            panel_columns=daily._PANEL_COLUMNS,
             calendar=calendar,
             time_window=TimeWindow("2023-01-06", "2023-01-06"),
         )
@@ -507,7 +507,7 @@ def test_future_event_attachment_does_not_change_prior_session_event_proof(tmp_p
                 stock_master_root=current_layout["stock_master"],
                 equity_events_root=current_layout["equity_events"],
                 panel_root=roots["market_panel_1d"],
-                panel_columns=production._PANEL_COLUMNS,
+                panel_columns=daily._PANEL_COLUMNS,
                 calendar=calendar,
                 time_window=TimeWindow("2022-12-30", "2023-01-06"),
             )
@@ -569,7 +569,7 @@ def test_equity_events_require_terminated_origin_at_actual_recognition(tmp_path,
         stock_master_root=layout["stock_master"],
         equity_events_root=layout["equity_events"],
         panel_root=roots["market_panel_1d"],
-        panel_columns=production._PANEL_COLUMNS,
+        panel_columns=daily._PANEL_COLUMNS,
         calendar=calendar,
         time_window=TimeWindow("2023-01-06", "2023-01-06"),
     )
@@ -626,7 +626,7 @@ def test_proved_conversion_qualifies_external_successor_but_not_active_distribut
         stock_master_root=layout["stock_master"],
         equity_events_root=layout["equity_events"],
         panel_root=roots["market_panel_1d"],
-        panel_columns=production._PANEL_COLUMNS,
+        panel_columns=daily._PANEL_COLUMNS,
         calendar=calendar,
         time_window=TimeWindow("2022-12-30", "2023-01-06"),
     )
@@ -666,7 +666,7 @@ def test_circular_conversion_cannot_revive_the_extinguished_original_life(tmp_pa
         stock_master_root=layout["stock_master"],
         equity_events_root=layout["equity_events"],
         panel_root=roots["market_panel_1d"],
-        panel_columns=production._PANEL_COLUMNS,
+        panel_columns=daily._PANEL_COLUMNS,
         calendar=calendar,
         time_window=TimeWindow("2022-12-30", "2023-01-06"),
     )

@@ -1,0 +1,30 @@
+{
+  "dataset": "data/research/nonoverlapping_returns",
+  "feature_columns": [
+    "feature_momentum_20d",
+    "feature_volatility_20d"
+  ],
+  "asset_ids": [
+    "000001",
+    "600000"
+  ],
+  "label": "interval_return",
+  "return_end_column": "return_end_at",
+  "window": {
+    "start": "2020-01-02",
+    "end": "2020-11-30"
+  },
+  "cutoff": "2020-12-31",
+  "cost_bps": 10.0,
+  "risk_aversion": 1.0,
+  "epochs": 100,
+  "learning_rate": 0.001,
+  "hidden_sizes": [
+    32,
+    16
+  ],
+  "device": "cpu",
+  "threads": 2,
+  "seed": 42,
+  "output": "results/learning/cost-model"
+}

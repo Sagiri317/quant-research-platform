@@ -1274,10 +1274,7 @@ def _iter_normalized_interim_frames(
                 if skip_duplicate:
                     continue
                 emitted_rows += len(pruned)
-                try:
-                    yield pruned
-                except GeneratorExit:
-                    return
+                yield pruned
         if len(content_hashes) != completed_before + 1:
             raise ValueError("csmar_raw_export_incomplete_read")
     if pending:

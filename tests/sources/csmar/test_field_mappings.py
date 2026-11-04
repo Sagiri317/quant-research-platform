@@ -92,34 +92,15 @@ def test_mapping_collision_precedes_missing_required_column_error() -> None:
         field_mappings.map_columns(frame, "adjustment")
 
 
-def test_mapping_facts_reject_duplicate_canonical_targets_before_frame_checks() -> None:
-    with pytest.raises(ValueError, match="invalid_csmar_column_mapping_facts"):
-        field_mappings._validate_mapping_facts(
-            {"adjustment": {"Symbol": "stock_code", "TradingDate": "stock_code"}},
-            {},
-        )
-
-
-@pytest.mark.parametrize(
-    "aliases",
-    (
-        {"MissingPrimary": ("ProviderAlias",)},
-        {"Symbol": ("ProviderAlias",), "TradingDate": ("ProviderAlias",)},
-        {"Symbol": ("TradingDate",)},
-    ),
-)
-def test_mapping_facts_reject_invalid_alias_ownership_before_frame_checks(
-    aliases: dict[str, tuple[str, ...]],
-) -> None:
-    with pytest.raises(ValueError, match="invalid_csmar_column_mapping_facts"):
-        field_mappings._validate_mapping_facts(
-            {"adjustment": {"Symbol": "stock_code", "TradingDate": "trade_date"}},
-            {"adjustment": aliases},
-        )
-
-
 def test_all_registered_mapping_facts_are_self_consistent() -> None:
+    assert set(field_mappings.COLUMN_ALIASES) <= set(field_mappings.COLUMN_MAPPINGS)
     for dataset, mappings in field_mappings.COLUMN_MAPPINGS.items():
+        assert len(set(mappings.values())) == len(mappings)
+        aliases = field_mappings.COLUMN_ALIASES.get(dataset, {})
+        assert set(aliases) <= set(mappings)
+        provider_aliases = [name for values in aliases.values() for name in values]
+        assert len(set(provider_aliases)) == len(provider_aliases)
+        assert not set(provider_aliases) & set(mappings)
         frame = pd.DataFrame(
             columns=tuple(
                 dict.fromkeys(

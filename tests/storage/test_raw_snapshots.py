@@ -30,12 +30,6 @@ def test_csv_acceptance_verifies_consumed_digest_without_draining_on_close(
         columns=("value",),
         rows=((1,), (2,)),
         metadata={"source": "synthetic"},
-        validate=lambda path: list(
-            iter_csv_snapshot(
-                path,
-                expected_manifest=read_manifest(path / "response.metadata.json"),
-            )
-        ),
     )
     manifest = read_manifest(root / "response.metadata.json")
     if changed:
@@ -119,12 +113,6 @@ def test_raw_manifest_validates_consumed_size_rows_and_digest(tmp_path, field):
         columns=("value",),
         rows=((1,), (2,)),
         metadata={"revision": 1},
-        validate=lambda path: list(
-            iter_csv_snapshot(
-                path,
-                expected_manifest=read_manifest(path / "response.metadata.json"),
-            )
-        ),
     )
     manifest = read_manifest(root / "response.metadata.json")
     assert list(iter_csv_snapshot(root, expected_manifest=manifest)) == [(1,), (2,)]
@@ -150,7 +138,5 @@ def test_raw_snapshot_long_cell_and_record_roundtrip(tmp_path):
             )
         )
 
-    write_csv_snapshot(
-        root, columns=("value",), rows=((value,),), metadata={}, validate=read
-    )
+    write_csv_snapshot(root, columns=("value",), rows=((value,),), metadata={})
     assert read(root) == [(value,)]

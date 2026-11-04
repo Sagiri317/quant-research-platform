@@ -1,4 +1,4 @@
-"""Interim and processed data catalogs."""
+"""Look up interim and processed table definitions by data identifier."""
 
 from __future__ import annotations
 

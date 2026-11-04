@@ -27,8 +27,6 @@ class ExactPrimaryKeyIndex:
         return self._primary_key
 
     def _namespace(self, namespace: str) -> dict[bytes, bytes | None]:
-        if not isinstance(namespace, str) or not namespace:
-            raise ValueError("invalid_exact_key_namespace")
         return self._namespaces.get(namespace, {})
 
     def _insert_rows(self, rows: Iterable[tuple[str, bytes, bytes | None]]) -> int:
@@ -65,7 +63,6 @@ class ExactPrimaryKeyIndex:
         return keys
 
     def add_table(self, table: pa.Table, *, namespace: str = "dataset") -> int:
-        self._namespace(namespace)
         keys = self._key_table(table)
         return table.num_rows - self._insert_rows(
             self._payload_rows(keys, namespace=namespace)
@@ -93,9 +90,7 @@ class ExactPrimaryKeyIndex:
         validation_column: str | None = None,
         retain_values: bool = True,
     ) -> int:
-        self._validate_comparison_table_grammar(
-            table, namespace=namespace, value_columns=(value_column,)
-        )
+        self._validate_comparison_table_grammar(table, value_columns=(value_column,))
         keys = self._key_table(table)
 
         def rows():
@@ -124,8 +119,6 @@ class ExactPrimaryKeyIndex:
     ):
         source = self._namespace(source_namespace)
         matched = self._namespace(matched_namespace)
-        if source_namespace == matched_namespace:
-            raise ValueError("invalid_exact_key_namespace")
         values, found = (
             array("d", [math.nan]) * table.num_rows,
             bytearray(table.num_rows),
@@ -141,8 +134,6 @@ class ExactPrimaryKeyIndex:
                 payload = matched.get(key)
             if payload is None:
                 continue
-            if len(payload) != 8:
-                raise ValueError("invalid_exact_float_value")
             values[position], found[position] = (struct.unpack(">d", payload)[0], 1)
             if mark_matched and key not in matched:
                 pending.setdefault(key, payload)
@@ -225,7 +216,7 @@ class ExactPrimaryKeyIndex:
         value_columns: Sequence[str],
     ):
         selected = self._validate_comparison_table_grammar(
-            table, namespace=namespace, value_columns=value_columns
+            table, value_columns=value_columns
         )
         keys = self._key_table(table)
         return self._comparison_payload_rows(
@@ -270,10 +261,8 @@ class ExactPrimaryKeyIndex:
         )
 
     def _validate_comparison_table_grammar(
-        self, table: pa.Table, *, namespace: str, value_columns: Sequence[str]
+        self, table: pa.Table, *, value_columns: Sequence[str]
     ) -> tuple[str, ...]:
-        if not isinstance(namespace, str) or not namespace:
-            raise ValueError("invalid_exact_key_namespace")
         selected = tuple(str(column) for column in value_columns)
         if len(selected) != len(set(selected)) or any(
             column in self._primary_key for column in selected

@@ -1222,9 +1222,9 @@ can_enter / can_exit 未来执行列
 |---|---|---|
 | OLS | `linear_regression` | NumPy/BLAS |
 | LASSO | `lasso_regression` | scikit-learn |
-| XGBoost | `xgboost_regressor` | CUDA，`tree_method=hist` |
-| LSTM | `lstm_regressor` | PyTorch CUDA |
-| Transformer | `transformer_regressor` | PyTorch CUDA |
+| XGBoost | `xgboost_regressor` | CUDA / CPU，默认 `tree_method=hist` |
+| LSTM | `lstm_regressor` | PyTorch CUDA / CPU |
+| Transformer | `transformer_regressor` | PyTorch CUDA / CPU |
 
 单次 fit 只训练一个明确模型，不自动展开参数搜索。候选输入列、标签、种子、权重及窗口随原生模型保存。
 `training_scaling` 在线性和序列模型默认开启，XGBoost 默认关闭。缩放器只用合法训练样本估计，预测冻结沿用。
@@ -1234,7 +1234,7 @@ can_enter / can_exit 未来执行列
 LSTM 和 Transformer 按资产构造截至当前时点的观察序列，`sequence_length` 表示观察条数，不是日历天数。
 历史不足时使用已有前缀，不补未来。模型保存训练历史尾部、缩放器、网络权重和目标均值/尺度；输出恢复标签原单位。
 默认参数由 `sequence_parameters` 定义，可配置隐藏宽度、层数、dropout、训练 epoch、batch_size、学习率；Transformer 另有 n_heads。
-GPU 不可用明确失败，不切换 CPU。固定种子不承诺跨 CUDA/库版本逐位相同。
+GPU 不可用时使用 CPU，也可通过 `device=cpu` 明确选择 CPU。固定种子不承诺跨设备或库版本逐位相同。
 
 #### 5.14.1 等时点样本权重
 
@@ -2009,8 +2009,6 @@ ADV sensitivity = 1%, 2%, 5%, 10%  # 参与率敏感性
 = 净经济结果
 ```
 
-机构研究不模拟散户 5-RMB 最低佣金。
-
 #### 冲击
 
 对交易名义金额：
@@ -2390,7 +2388,7 @@ paired group 比较继续使用其声明的自助法种子。
 - ON：上述各收盘到下一开盘的 h 个对数收益之和。
 - endpoint：t+1 开盘到 t+h+1 开盘的简单收益，两端要求 `filling_flag=0`、`is_trading=True` 且有限正 `adj_open`。
 
-`expm1(ID+ON)` 与 endpoint 在科学数值误差内对账；这不要求独立浮点运算逐位一致。
+`expm1(ID+ON)` 与 endpoint 的恒等关系由独立手算测试覆盖，运行时不重复对账，也不要求独立浮点运算逐位一致。
 pre-entry、ID、ON 与 endpoint 均不由 can_enter/can_exit 决定；完整分解 qualified 同时要求合法端点及两个分量。
 ON/ID 内部已确认停牌沿用估值/零路径约定，不因此将停牌端点认作真实成交价格。
 内部 close 缺失可以令分解未知而端点仍合法；缺退出 open 不能抹掉已经完整的 ID。

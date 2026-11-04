@@ -1,0 +1,28 @@
+{
+  "dataset": "data/research/factor_search",
+  "columns": [
+    "momentum_20d",
+    "volatility_20d"
+  ],
+  "baseline_columns": [],
+  "label": "forward_return_1d",
+  "train_window": {
+    "start": "2018-01-01",
+    "end": "2019-11-29"
+  },
+  "validation_window": {
+    "start": "2020-01-02",
+    "end": "2020-11-30"
+  },
+  "train_cutoff": "2019-12-31",
+  "selection_cutoff": "2020-12-31",
+  "method": "random",
+  "budget": 100,
+  "max_depth": 3,
+  "windows": [
+    5,
+    20
+  ],
+  "seed": 42,
+  "output": "results/learning/search.json"
+}

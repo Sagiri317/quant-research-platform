@@ -1,4 +1,4 @@
-"""Factor definition contracts."""
+"""Define factor identities, required inputs, parameters, and ordered factor sets."""
 
 from __future__ import annotations
 

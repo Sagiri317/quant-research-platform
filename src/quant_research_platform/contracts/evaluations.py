@@ -1,4 +1,4 @@
-"""Evaluation contracts for QRP."""
+"""Declare evaluation metrics, grouping, sample filters, and response diagnostics."""
 
 from __future__ import annotations
 

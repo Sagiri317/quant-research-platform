@@ -97,10 +97,7 @@ def iter_dataset_part_batches(
                     if batch.schema.remove_metadata() != schema:
                         batch = batch.cast(schema)
                     filtered = _filter_arrow_batch(batch, parquet_filters)
-                    try:
-                        yield filtered
-                    except GeneratorExit:
-                        return
+                    yield filtered
 
 
 @contextmanager

@@ -39,3 +39,22 @@ def test_prepared_cost_value_and_marginal_rate_match_closed_form(side, fee):
         )
     with pytest.raises(ValueError, match="a_share_trade_cost_inputs_invalid"):
         prepared.trade(-25.0, 400.0)
+
+
+def test_zero_impact_gradient_does_not_require_adv():
+    from dataclasses import replace
+
+    prepared = prepare_trade_cost(
+        date(2023, 1, 4),
+        "shanghai",
+        "buy",
+        _schedule(),
+        ExecutionAssumptions(100.0, 2.0, 0.0, 1.0, (1.0,)),
+    )
+    amount = np.array([-25.0, 0.0, 25.0, 100.0])
+    adv = np.full(4, np.nan)
+    values, gradients = prepared.totals_and_gradients(amount, adv)
+    assert values == pytest.approx(0.0006 * amount)
+    assert gradients == pytest.approx(np.full(4, 0.0006))
+    with pytest.raises(ValueError, match="a_share_trade_cost_inputs_invalid"):
+        replace(prepared, impact_bps=1.0).totals_and_gradients(amount, adv)

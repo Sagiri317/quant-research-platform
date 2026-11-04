@@ -17,7 +17,7 @@ from quant_research_platform.research.portfolios.calibration import (
     calibrate_expected_alpha,
     frozen_alpha_calibration,
 )
-from quant_research_platform.research.portfolios.production import (
+from quant_research_platform.research.portfolios.daily import (
     _ALPHA_DIAGNOSTICS,
     _completed_calibration_rows,
 )

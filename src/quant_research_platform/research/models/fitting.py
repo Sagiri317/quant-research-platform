@@ -1,4 +1,4 @@
-"""Supervised model fitting owners."""
+"""Fit supported predictors on legal samples and validate saved estimator state."""
 
 from __future__ import annotations
 
@@ -195,17 +195,12 @@ def validate_model_state(predictor: object, metadata: dict[str, object]) -> None
         if not inputs_match:
             raise ValueError("model_state_metadata_mismatch")
         importance = feature_importance.estimator_feature_importance(spec, predictor)
-    from quant_research_platform.research.models.neural import SequencePredictor
-
-    if isinstance(
-        predictor, (LinearScaledPredictor, ScaledPredictor, SequencePredictor)
+    if (
+        type(predictor.scaler) is not ModelMatrixScaler
+        or predictor.scaler.scaling != spec.training_scaling
+        or predictor.scaler.to_payload() != metadata["scaler"]
     ):
-        if (
-            type(predictor.scaler) is not ModelMatrixScaler
-            or predictor.scaler.scaling != spec.training_scaling
-            or predictor.scaler.to_payload() != metadata["scaler"]
-        ):
-            raise ValueError("model_state_metadata_mismatch")
+        raise ValueError("model_state_metadata_mismatch")
     saved_importance = metadata.get("feature_importance")
     if (importance is None) != (saved_importance is None) or (
         importance is not None
@@ -304,13 +299,9 @@ def model_metadata(
         "sample_filter_mode": spec.sample_filter_mode,
         "filter_columns_used": list(filter_metadata["filter_columns_used"]),
         "filter_definition": str(filter_metadata["filter_definition"]),
-        "rows_input": _strict_non_negative_count_value(filter_metadata["rows_input"]),
-        "rows_after_filter_mode": _strict_non_negative_count_value(
-            filter_metadata["rows_after_filter_mode"]
-        ),
-        "rows_after_input_label_dropna": _strict_non_negative_count_value(
-            row_counts["rows_after_input_label_dropna"]
-        ),
+        "rows_input": filter_metadata["rows_input"],
+        "rows_after_filter_mode": filter_metadata["rows_after_filter_mode"],
+        "rows_after_input_label_dropna": row_counts["rows_after_input_label_dropna"],
         "training_asset_ids": row_counts.get("training_asset_ids", []),
         "train_start": row_counts["train_start"],
         "train_end": row_counts["train_end"],
@@ -478,10 +469,8 @@ def _collect_training_frame(
                 availability_column=availability_columns[0],
                 declared_columns=declared_columns,
             )
-            rows_input += _strict_non_negative_count_value(metadata["rows_input"])
-            rows_after_filter += _strict_non_negative_count_value(
-                metadata["rows_after_filter_mode"]
-            )
+            rows_input += metadata["rows_input"]
+            rows_after_filter += metadata["rows_after_filter_mode"]
             filter_columns_used = list(metadata["filter_columns_used"])
             filter_definition = str(metadata["filter_definition"])
             selected_columns = [
@@ -608,14 +597,6 @@ def _fit_predictor(
         with warnings.catch_warnings():
             warnings.simplefilter("error", ConvergenceWarning)
             estimator.fit(scaled_matrix, y, sample_weight=weights)
-            if spec.model_algorithm == "xgboost_regressor":
-                import json
-
-                device = json.loads(estimator.get_booster().save_config())["learner"][
-                    "generic_param"
-                ]["device"]
-                if not device.startswith("cuda"):
-                    raise RuntimeError("model_cuda_unavailable")
     except ConvergenceWarning:
         raise ValueError("model_fit_non_converged") from None
     return ScaledPredictor(estimator, scaler)
@@ -634,10 +615,7 @@ def iter_model_work_frames(
                 raise ValueError(f"missing_model_columns: {', '.join(missing)}")
             selected = [column for column in work_columns if column in frame.columns]
             yielded_value = frame.loc[:, selected]
-            try:
-                yield yielded_value
-            except GeneratorExit:
-                return
+            yield yielded_value
 
 
 def model_training_read_columns(
@@ -667,12 +645,6 @@ def model_training_read_columns(
             )
         )
     )
-
-
-def _strict_non_negative_count_value(value: object) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        raise ValueError("invalid_model_metadata_count")
-    return value
 
 
 def _native_missing(spec):

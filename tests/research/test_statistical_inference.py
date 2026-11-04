@@ -351,7 +351,7 @@ def test_fama_macbeth_uses_period_cross_sections_then_hac() -> None:
                     "total_market_cap": float(asset),
                 }
             )
-    from quant_research_platform.research.statistics_production import (
+    from quant_research_platform.research.factors.statistics import (
         _fama_macbeth_period_records,
         _fama_macbeth_summary,
     )
@@ -471,7 +471,7 @@ def test_nav_roundoff_is_explicit_and_retains_resolvable_variation():
 def test_white_lm_preserves_exact_auxiliary_fit_without_unused_f_warning():
     from scipy.stats import chi2
 
-    from quant_research_platform.research.statistics_production import (
+    from quant_research_platform.research.factors.statistics import (
         _fama_macbeth_period_records,
     )
 
@@ -681,7 +681,7 @@ def test_small_sample_risk_matches_independent_center(exponent):
 def test_fama_macbeth_preserves_small_factor_units_and_rejects_collinearity():
     from decimal import Decimal, localcontext
 
-    from quant_research_platform.research.statistics_production import (
+    from quant_research_platform.research.factors.statistics import (
         _fama_macbeth_period_records,
     )
 
@@ -799,7 +799,7 @@ def test_empty_summary_still_validates_confidence(confidence):
 
 @pytest.mark.parametrize("lag", [-1, True, 1.5])
 def test_factor_configuration_rejects_invalid_lag_before_opening_data(tmp_path, lag):
-    from quant_research_platform.research.statistics_production import factor_statistics
+    from quant_research_platform.research.factors.statistics import factor_statistics
 
     with pytest.raises(ValueError, match="factor_statistics_policy_invalid"):
         factor_statistics(
@@ -912,10 +912,10 @@ def test_fmb_multifactor_unrelated_slopes_are_numerical_zero(weighted):
 
 @pytest.mark.parametrize("weighted", (False, True))
 def test_fmb_supports_const_factor_and_reserves_only_intercept(weighted):
-    from quant_research_platform.research.statistics import cross_sectional_rank_ic
-    from quant_research_platform.research.statistics_production import (
+    from quant_research_platform.research.factors.statistics import (
         _fama_macbeth_period_records,
     )
+    from quant_research_platform.research.statistics import cross_sectional_rank_ic
 
     frame = pd.DataFrame(
         {

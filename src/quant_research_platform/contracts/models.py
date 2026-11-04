@@ -97,9 +97,11 @@ def sequence_parameters(algorithm, parameters):
         raise ValueError("sequence_optimizer_parameters_invalid")
     device = defaults["device"]
     if type(device) is not str or not (
-        device == "cuda" or device.startswith("cuda:") and device[5:].isdigit()
+        device in {"cpu", "cuda", "auto"}
+        or device.startswith("cuda:")
+        and device[5:].isdigit()
     ):
-        raise ValueError("model_cuda_required")
+        raise ValueError("model_device_invalid")
     if algorithm == "transformer_regressor":
         heads = defaults["n_heads"]
         if type(heads) is not int or heads < 1 or defaults["hidden_size"] % heads:
@@ -290,14 +292,6 @@ class ModelSpec:
         ):
             raise ValueError("model_random_seed_conflicts_with_random_state")
         object.__setattr__(self, "hyperparameters", hyperparameters)
-        if self.model_algorithm == "xgboost_regressor":
-            device = hyperparameters.get("device", "cuda")
-            if type(device) is not str or not (
-                device == "cuda" or device.startswith("cuda:") and device[5:].isdigit()
-            ):
-                raise ValueError("model_cuda_required")
-            if hyperparameters.get("tree_method", "hist") != "hist":
-                raise ValueError("xgboost_cuda_hist_required")
         if self.model_algorithm in {"lstm_regressor", "transformer_regressor"}:
             sequence_parameters(
                 self.model_algorithm, _thaw_model_hyperparameters(hyperparameters)
@@ -771,7 +765,7 @@ def _resolve_candidate_parameters(algorithm, parameters, n_train):
 
 
 def validate_model_facts(facts, metadata=None, *, expected=None):
-    """Own scientific recipe validation and comparison, independent of storage paths."""
+    """Validate and compare scientific model recipes independently of storage paths."""
     required = {
         "model",
         "market_id",

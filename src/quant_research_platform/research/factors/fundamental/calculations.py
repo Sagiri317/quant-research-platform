@@ -1,4 +1,6 @@
-"""Pure common fundamental factor mathematics."""
+"""Calculate fundamental ratios and growth signals from point-in-time accounting
+facts.
+"""
 
 from __future__ import annotations
 

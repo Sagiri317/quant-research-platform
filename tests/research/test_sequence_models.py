@@ -1,11 +1,11 @@
-"""Real CUDA training, causal sequences and native model round trips."""
+"""Real CPU fallback training, causal sequences, and native model round trips."""
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from quant_research_platform.artifacts.outputs.prediction import read_predictions
-from quant_research_platform.contracts.models import ModelSpec
+from quant_research_platform.research.models.fitting import prediction_callable
 from quant_research_platform.research.models.persisted import load_model
 from quant_research_platform.research.models.production import fit
 from quant_research_platform.research.predictions.runner import predict
@@ -13,11 +13,13 @@ from tests.correctness.test_direct_model_operations import data, fit_config, inp
 
 
 @pytest.mark.parametrize("algorithm", ["lstm_regressor", "transformer_regressor"])
-def test_cuda_sequence_roundtrip_causality_and_asset_isolation(tmp_path, algorithm):
+def test_sequence_cpu_fallback_roundtrip_causality_and_asset_isolation(
+    tmp_path, algorithm, monkeypatch
+):
     import torch
 
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA hardware required for the real training path")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 0)
     inputs = data(tmp_path)
     original = pd.read_parquet(inputs)
     hidden = original.timestamp.eq("2020-01-06") & original.asset_id.eq("a")
@@ -109,15 +111,16 @@ def test_cuda_sequence_roundtrip_causality_and_asset_isolation(tmp_path, algorit
     assert tables["permutation_summary"].observation_count.iloc[0] == len(scored)
 
 
-@pytest.mark.parametrize(
-    "algorithm", ["xgboost_regressor", "lstm_regressor", "transformer_regressor"]
-)
-def test_cuda_models_reject_cpu_configuration(algorithm):
-    with pytest.raises(ValueError, match="model_cuda_required"):
-        ModelSpec(
-            model_id="gpu",
-            model_algorithm=algorithm,
-            input_feature_columns=("x",),
-            target_column="y",
-            hyperparameters={"device": "cpu"},
-        )
+def test_xgboost_cpu_training_and_native_roundtrip(tmp_path):
+    inputs = data(tmp_path)
+    config = fit_config(tmp_path, inputs)
+    config["model"].update(
+        model_algorithm="xgboost_regressor",
+        hyperparameters={"device": "cpu", "n_estimators": 3, "max_depth": 2},
+    )
+    result, _ = load_model(fit(config))
+    assert result.prediction_model.estimator.get_params()["device"] == "cpu"
+    predict_frame = prediction_callable(
+        tuple(result.metadata["input_columns"]), result.prediction_model
+    )
+    assert np.isfinite(predict_frame(pd.read_parquet(inputs))).all()

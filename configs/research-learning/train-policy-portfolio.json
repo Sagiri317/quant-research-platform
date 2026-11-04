@@ -1,0 +1,82 @@
+{
+  "episodes": [
+    {
+      "kind": "daily",
+      "task": "portfolio",
+      "asset_ids": [
+        "000001",
+        "600000"
+      ],
+      "feature_columns": [
+        "feature_momentum_20d",
+        "feature_volatility_20d"
+      ],
+      "window": {
+        "start": "2020-01-02",
+        "end": "2020-12-30"
+      },
+      "account": {
+        "inputs": {
+          "dataset": "data/research/policy_features",
+          "panel": "data/processed/a_share/market_panel_1d",
+          "execution": "data/processed/a_share/execution_mask",
+          "calendar": "data/interim/csmar/trading_calendar",
+          "fees": "data/processed/a_share/fee_schedule",
+          "market_bars": "data/interim/csmar/market_bars_1d",
+          "stock_master": "data/interim/csmar/stock_master",
+          "corporate_actions": "data/interim/csmar/corporate_actions",
+          "equity_events": "data/interim/reference/a_share_equity_events"
+        },
+        "candidate": {
+          "candidate_id": "learned",
+          "selection_group": "global",
+          "construction": "quantile_equal_weight",
+          "prediction_selector": "policy",
+          "rebalance_schedule": "daily",
+          "top_quantile": 0.2,
+          "benchmark_id": null
+        },
+        "assumptions": {
+          "initial_nav": 1000000.0,
+          "slippage_bps": 2.0,
+          "impact_bps": 5.0,
+          "adv_participation": 0.05,
+          "adv_sensitivities": [
+            1.0
+          ],
+          "minimum_commission": 5.0
+        },
+        "input_window": {
+          "start": "2019-01-01",
+          "end": "2021-03-31"
+        },
+        "formal_dataset_window": {
+          "start": "2020-01-02",
+          "end": "2021-03-31"
+        }
+      },
+      "risk_aversion": 1.0,
+      "unfinished_penalty_bps": 0.0
+    }
+  ],
+  "output": "results/learning/portfolio-policy",
+  "fit_cutoff": "2021-01-01",
+  "timesteps": 100000,
+  "seed": 42,
+  "device": "cpu",
+  "n_envs": 4,
+  "threads": 2,
+  "ppo": {
+    "n_steps": 256,
+    "batch_size": 256,
+    "n_epochs": 10,
+    "learning_rate": 0.0003,
+    "gamma": 0.99,
+    "policy_kwargs": {
+      "net_arch": [
+        64,
+        64
+      ]
+    }
+  }
+}

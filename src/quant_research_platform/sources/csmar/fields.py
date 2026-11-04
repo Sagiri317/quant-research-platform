@@ -1,4 +1,4 @@
-"""CSMAR source/interim field catalog helpers."""
+"""Describe CSMAR provider fields and their canonical interim column roles."""
 
 from __future__ import annotations
 

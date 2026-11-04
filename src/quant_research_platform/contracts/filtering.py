@@ -1,4 +1,4 @@
-"""Research sample filtering contracts and helpers."""
+"""Declare eligibility scopes and validate evaluation filtering modes."""
 
 from __future__ import annotations
 

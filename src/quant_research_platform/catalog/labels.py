@@ -1,4 +1,4 @@
-"""Label catalog."""
+"""Look up label definitions by their declared identifiers."""
 
 from __future__ import annotations
 

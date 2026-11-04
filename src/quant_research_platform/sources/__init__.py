@@ -1,1 +1,1 @@
-"""Vendor sources and native input owners."""
+"""Normalize explicitly selected vendor exports and public reference facts."""

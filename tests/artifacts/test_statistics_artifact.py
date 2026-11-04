@@ -678,7 +678,7 @@ def test_legal_internal_model_name_survives_joint_test_publication(
 ):
     import numpy as np
 
-    from quant_research_platform.research.statistics_production import _model_comparison
+    from quant_research_platform.research.models.statistics import _model_comparison
 
     family = "__benchmark_loss__"
     dates = pd.bdate_range("2023-01-02", periods=40)
@@ -726,7 +726,7 @@ def test_paired_rankic_and_champion_diagnostics_reach_native_artifacts(
 ):
     import numpy as np
 
-    from quant_research_platform.research import statistics_production as production
+    import quant_research_platform.research.models.statistics as model_stats
 
     dates = pd.bdate_range("2023-01-02", periods=5)
     permutations = {
@@ -744,7 +744,7 @@ def test_paired_rankic_and_champion_diagnostics_reach_native_artifacts(
             }
         )
         ranks[group] = (
-            production.cross_sectional_rank_ic(
+            model_stats.cross_sectional_rank_ic(
                 frame, value_columns=("prediction",), label_column="label"
             )
             .set_index("timestamp")
@@ -802,8 +802,8 @@ def test_paired_rankic_and_champion_diagnostics_reach_native_artifacts(
             if "sample_role" in table:
                 table["sample_role"] = access
         selected["model_losses"] = losses[group]
-        selected["prediction_diagnostics"] = production._prediction_summary(
-            ranks[group].to_frame(production._PREDICTION_COLUMN),
+        selected["prediction_diagnostics"] = model_stats._prediction_summary(
+            ranks[group].to_frame(model_stats._PREDICTION_COLUMN),
             prediction_id=f"factors_only_{group}_persisted_predictions",
             inference_blocker="selection_reuses_evaluation_window"
             if group == "global" and access == "validation"
@@ -814,7 +814,7 @@ def test_paired_rankic_and_champion_diagnostics_reach_native_artifacts(
             seed=42,
         )
         if group == "quarterly":
-            selected["model_group_comparison"] = production._paired_group_rankic(
+            selected["model_group_comparison"] = model_stats._paired_group_rankic(
                 losses[group].assign(
                     **{
                         "global": -losses["global"].loss,
@@ -871,15 +871,13 @@ def test_native_model_persistence_preserves_std_reason_in_statistics(
     import numpy as np
 
     from quant_research_platform.contracts.models import ModelSpec
+    from quant_research_platform.research.models.statistics import _selection_trial_rows
     from quant_research_platform.research.models.trial_selection import (
         read_selection,
         score,
         select,
     )
     from quant_research_platform.research.predictions.runner import predict
-    from quant_research_platform.research.statistics_production import (
-        _selection_trial_rows,
-    )
     from tests.research.direct_model_test_support import fit_frame
 
     dates = pd.date_range("2020-01-01", periods=5)
@@ -1149,9 +1147,7 @@ def test_prediction_loss_reasons_are_validated_on_write_and_read(
 def test_paired_group_fdr_methods_reach_native_artifact(
     tmp_path, tables, metadata, method
 ):
-    from quant_research_platform.research.statistics_production import (
-        _paired_group_rankic,
-    )
+    from quant_research_platform.research.models.statistics import _paired_group_rankic
 
     metadata = _test_statistics_metadata(metadata, tables)
     left = pd.DataFrame(

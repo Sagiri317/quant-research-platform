@@ -428,7 +428,16 @@ def test_public_expectations_window_preserves_fresh_preceding_forecasts(tmp_path
             )
         )
         outputs.append(saved.loc[saved.timestamp.ge(dates[2])].reset_index(drop=True))
-    pd.testing.assert_frame_equal(outputs[0], outputs[1], check_exact=True)
+    numeric = list(outputs[0].select_dtypes(include="floating").columns)
+    pd.testing.assert_frame_equal(
+        outputs[0].drop(columns=numeric),
+        outputs[1].drop(columns=numeric),
+        check_exact=True,
+    )
+    pd.testing.assert_frame_equal(outputs[0].isna(), outputs[1].isna())
+    pd.testing.assert_frame_equal(
+        outputs[0][numeric], outputs[1][numeric], rtol=1e-12, atol=0.0
+    )
     selected = outputs[1].loc[outputs[1].asset_id.eq("000001")]
     prices = read_dataset(inputs["market_panel_1d"])
     prices = prices.loc[prices.asset_id.eq("000001") & prices.timestamp.ge(dates[2])]

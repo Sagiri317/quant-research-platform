@@ -8,11 +8,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import quant_research_platform.research.factors.statistics as factor_stats
+import quant_research_platform.research.models.statistics as model_stats
 from quant_research_platform.artifacts.statistics import (
     read_statistics_artifact,
     write_statistics_artifact,
 )
-from quant_research_platform.research import statistics_production as production
 from quant_research_platform.research.evaluations.runner import (
     _evaluation_source_facts,
     evaluate,
@@ -23,8 +24,8 @@ from tests.research.test_stratified_evaluation_reuse import _fixture
 
 
 def test_hac_failure_keeps_mean_and_independent_bootstrap(tmp_path):
-    frame = pd.DataFrame({production._PREDICTION_COLUMN: [1.0, 2.0, 4.0]})
-    result = production._prediction_summary(
+    frame = pd.DataFrame({model_stats._PREDICTION_COLUMN: [1.0, 2.0, 4.0]})
+    result = model_stats._prediction_summary(
         frame,
         prediction_id="one",
         inference_blocker=None,
@@ -55,9 +56,9 @@ def test_bootstrap_failure_keeps_hac(tmp_path, monkeypatch):
     def undefined(*args, **kwargs):
         raise ValueError("bootstrap_inference_undefined")
 
-    monkeypatch.setattr(production, "stationary_bootstrap_mean_ci", undefined)
-    result = production._prediction_summary(
-        pd.DataFrame({production._PREDICTION_COLUMN: [1.0, 2.0, 4.0]}),
+    monkeypatch.setattr(model_stats, "stationary_bootstrap_mean_ci", undefined)
+    result = model_stats._prediction_summary(
+        pd.DataFrame({model_stats._PREDICTION_COLUMN: [1.0, 2.0, 4.0]}),
         prediction_id="one",
         inference_blocker=None,
         max_lags=0,
@@ -131,7 +132,7 @@ def test_relocated_source_can_reduce_existing_daily_facts(tmp_path):
             "output": str(tmp_path / "common"),
         }
     )
-    root = production.factor_statistics(
+    root = factor_stats.factor_statistics(
         {
             "evaluation_inputs": [str(own), str(common)],
             "output": str(tmp_path / "statistics"),
@@ -279,9 +280,9 @@ def test_public_model_analysis_subsets_require_only_used_inputs(
     randomized = analysis not in {"model_losses", "prediction_hac"}
     if randomized and seed_mode == "null":
         with pytest.raises(ValueError, match="model_statistics_config_invalid"):
-            production.model_statistics(config)
+            model_stats.model_statistics(config)
         return
-    artifact = read_statistics_artifact(production.model_statistics(config))
+    artifact = read_statistics_artifact(model_stats.model_statistics(config))
     assert set(artifact._members) == members
     if "prediction_diagnostics.parquet" in members:
         with artifact.table("prediction_diagnostics.parquet") as saved:
@@ -339,7 +340,7 @@ def test_saved_evaluation_pair_uses_declared_science_and_daily_values(tmp_path, 
     }
     # These are separate daily-statistic series, not paired raw observations.
     # Selecting their original inputs belongs to the caller.
-    output = production.factor_statistics(reduction)
+    output = factor_stats.factor_statistics(reduction)
     with read_statistics_artifact(output).table(
         "factor_stratified_diagnostics.parquet"
     ) as result:
@@ -354,7 +355,7 @@ def test_saved_evaluation_pair_uses_declared_science_and_daily_values(tmp_path, 
 
 def test_paired_group_requires_its_bootstrap_inputs_before_reading(tmp_path):
     with pytest.raises(ValueError, match="model_statistics_policy_invalid"):
-        production.model_statistics(
+        model_stats.model_statistics(
             {
                 "dataset": "missing",
                 "output": str(tmp_path / "statistics"),
@@ -501,10 +502,10 @@ def test_public_prediction_inference_is_local_to_consumed_family(tmp_path):
         ],
     }
     both = read_statistics_artifact(
-        production.model_statistics({**config, "output": str(tmp_path / "both")})
+        model_stats.model_statistics({**config, "output": str(tmp_path / "both")})
     )
     single = read_statistics_artifact(
-        production.model_statistics(
+        model_stats.model_statistics(
             {
                 **config,
                 "output": str(tmp_path / "single"),
@@ -578,7 +579,7 @@ def test_selected_prediction_checks_only_its_selection_path(tmp_path, retrospect
         inputs["model_entries"]["explicit_period", family]["model_facts"][
             "selection_cutoff"
         ] = str(dates[-1])
-    tables = production.build_a_share_statistics_tables(
+    tables = model_stats.build_a_share_statistics_tables(
         dataset_path=tmp_path / "input",
         dataset_spec=spec,
         dataset_session=session,

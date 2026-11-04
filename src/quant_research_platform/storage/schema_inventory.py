@@ -93,10 +93,7 @@ def write_schema_inventory(
                 chunk = prefix + "\n".join(
                     "  " + line for line in rendered.splitlines()
                 )
-                try:
-                    yield chunk
-                except GeneratorExit:
-                    return
+                yield chunk
         if not found:
             raise ValueError("schema_inventory_no_datasets_found")
         yield '\n  ],\n  "schema_id": "qrp-schema-inventory"\n}\n'

@@ -1,1 +1,1 @@
-"""Generic research algorithms independent of concrete markets and sources."""
+"""Compute datasets, signals, models, trading decisions, and statistical evidence."""

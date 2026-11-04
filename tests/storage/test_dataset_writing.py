@@ -702,9 +702,7 @@ def test_writer_rejects_unresolved_nested_nulls_without_publishing(tmp_path, val
     assert list(root.parent.iterdir()) == []
 
 
-@pytest.mark.parametrize(
-    "primary_type", (RuntimeError, KeyboardInterrupt, SystemExit, GeneratorExit)
-)
+@pytest.mark.parametrize("primary_type", (RuntimeError, KeyboardInterrupt))
 @pytest.mark.parametrize("close_failure", (False, True))
 def test_pending_nested_parquet_failure_closes_resources_and_preserves_primary(
     tmp_path, monkeypatch, primary_type, close_failure

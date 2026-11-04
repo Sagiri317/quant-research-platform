@@ -1,4 +1,4 @@
-"""Internal A-share trading calendar helpers."""
+"""Derive A-share trading sessions, listing age, and intraday session membership."""
 
 from __future__ import annotations
 
@@ -210,7 +210,10 @@ def _sorted_unique_sessions(values: pd.Series) -> pd.DatetimeIndex:
 
 
 def continuous_session(timestamps, exchange):
-    """Shanghai introduced the closing auction on 2018-08-20."""
+    """Classify timestamps into continuous trading sessions under historical
+    exchange hours.
+    Shanghai closing-auction minutes are excluded from 2018-08-20 onward.
+    """
     local = (
         pd.to_datetime(timestamps).dt.tz_localize("UTC").dt.tz_convert("Asia/Shanghai")
     )

@@ -508,7 +508,7 @@ def test_fee_costs_are_side_aware_and_stamp_transition_is_exact(tmp_path: Path) 
 
 
 def test_production_units_mark_price_changes_without_changing_entitlements():
-    from quant_research_platform.research.portfolios.production import _unit_values
+    from quant_research_platform.research.portfolios.daily import _unit_values
 
     units = pd.Series({"a": float(6), "b": float(3)}, dtype=object)
     original = units.copy(deep=True)

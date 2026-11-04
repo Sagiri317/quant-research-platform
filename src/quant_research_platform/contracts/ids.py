@@ -1,4 +1,4 @@
-"""Stable platform identifiers."""
+"""Define market identifiers and reject conflicting explicit market declarations."""
 
 from __future__ import annotations
 

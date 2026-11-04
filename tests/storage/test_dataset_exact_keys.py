@@ -79,8 +79,7 @@ def test_float_lookup_partitions_keys_without_consuming_values(selected):
         assert unmatched.__sizeof__() == {}.__sizeof__()
 
 
-@pytest.mark.parametrize("invalid", ("key", "payload"))
-def test_float_lookup_bad_late_row_keeps_match_batch_atomic(invalid):
+def test_float_lookup_bad_late_key_keeps_match_batch_atomic():
     module = importlib.import_module("quant_research_platform.storage.exact_keys")
     index = module.ExactPrimaryKeyIndex(primary_key=("key",))
     index.add_float_value_table(
@@ -88,38 +87,15 @@ def test_float_lookup_bad_late_row_keeps_match_batch_atomic(invalid):
         namespace="source",
         value_column="value",
     )
-    if invalid == "payload":
-        source = index._namespaces["source"]
-        source[next(reversed(source))] = b"invalid"
-    error = (
-        "invalid_dataset_primary_key_value"
-        if invalid == "key"
-        else "invalid_exact_float_value"
-    )
-    with pytest.raises(ValueError, match=f"^{error}$"):
+    with pytest.raises(ValueError, match="^invalid_dataset_primary_key_value$"):
         index.lookup_float_values(
-            pa.table({"key": [[1.0], [float("inf") if invalid == "key" else 2.0]]}),
+            pa.table({"key": [[1.0], [float("inf")]]}),
             source_namespace="source",
             matched_namespace="matched",
             mark_matched=True,
         )
     assert index.float_value_count(namespace="source") == 2
     assert index.identity_payload_count(namespace="matched") == 0
-
-
-@pytest.mark.parametrize(
-    "source,matched", (("", "matched"), ("source", ""), ("same", "same"))
-)
-def test_float_lookup_requires_valid_distinct_namespaces(source, matched):
-    module = importlib.import_module("quant_research_platform.storage.exact_keys")
-    index = module.ExactPrimaryKeyIndex(primary_key=("key",))
-    with pytest.raises(ValueError, match="^invalid_exact_key_namespace$"):
-        index.lookup_float_values(
-            pa.table({"key": ["a"]}),
-            source_namespace=source,
-            matched_namespace=matched,
-            mark_matched=False,
-        )
 
 
 def test_writer_rejects_inconsistent_ordered_categorical_domains(

@@ -27,8 +27,6 @@ def partition_timestamp_series(
     timestamp = strict_timestamp_series(
         frame[timestamp_column], error="invalid_partition_timestamp"
     )
-    if timestamp.isna().any():
-        raise ValueError("missing_partition_timestamp_column")
     return timestamp
 
 

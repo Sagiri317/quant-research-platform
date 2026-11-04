@@ -259,20 +259,14 @@ def _json_native_value(
 
 
 def _frame(tag: bytes, payload: bytes) -> bytes:
-    if len(tag) != 1:
-        raise AssertionError("canonical_json_tag_must_be_one_byte")
     return tag + _uint64(len(payload)) + payload
 
 
 def _uint64(value: int) -> bytes:
-    if value < 0 or value >= 1 << (_LENGTH_BYTES * 8):
-        raise ValueError("canonical_json_value_too_large")
     return value.to_bytes(_LENGTH_BYTES, byteorder="big", signed=False)
 
 
 def _timestamp_payload(value: pd.Timestamp) -> bytes:
-    if pd.isna(value):
-        raise ValueError("canonical_json_invalid_timestamp")
     unit = value.unit
     integer_value = int(value.asm8.view("i8"))
     return b"".join(
@@ -285,8 +279,6 @@ def _timestamp_payload(value: pd.Timestamp) -> bytes:
 
 
 def _datetime_payload(value: datetime) -> bytes:
-    if pd.isna(value):
-        raise ValueError("canonical_json_invalid_timestamp")
     components = (
         value.year,
         value.month,

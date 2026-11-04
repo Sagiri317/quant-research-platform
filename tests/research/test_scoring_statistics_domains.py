@@ -14,9 +14,9 @@ from quant_research_platform.artifacts.outputs.prediction import (
 from quant_research_platform.artifacts.statistics import read_statistics_artifact
 from quant_research_platform.contracts.data import DataSpec
 from quant_research_platform.contracts.models import ModelSpec
+from quant_research_platform.research.models.statistics import model_statistics
 from quant_research_platform.research.models.trial_selection import score, select
 from quant_research_platform.research.predictions.runner import predict
-from quant_research_platform.research.statistics_production import model_statistics
 from quant_research_platform.storage.datasets import write_dataset
 from tests.research.direct_model_test_support import fit_frame
 

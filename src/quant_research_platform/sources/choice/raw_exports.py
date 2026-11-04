@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import re
 import threading
-from collections import deque
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -217,16 +216,6 @@ class ChoiceRawSession:
                 columns=(*_PREFIX, *response.Indicators),
                 rows=observed_rows(),
                 metadata=metadata,
-                validate=lambda staging: deque(
-                    _validated_rows(
-                        staging,
-                        request,
-                        metadata,
-                        require_complete=False,
-                        verify_bytes=True,
-                    ),
-                    maxlen=0,
-                ),
             )
             if response.ErrorCode != 0:
                 raise RuntimeError(f"choice_query_failed:{response.ErrorCode}")
@@ -314,9 +303,11 @@ def _response_rows(endpoint: str, response: Any) -> Iterator[tuple[object, ...]]
     if endpoint == "ctr":
         if type(response.Data) is not dict:
             raise ValueError("choice_ctr_shape_invalid")
-        for key, values in response.Data.items():
+        for count, (key, values) in enumerate(response.Data.items()):
             if type(key) is not str or type(values) is not list or len(values) != width:
                 raise ValueError("choice_ctr_shape_invalid")
+            if key != str(count):
+                raise ValueError("choice_saved_ctr_key_invalid")
             yield (key, None, *values)
     elif endpoint == "css":
         if type(response.Data) is not dict or list(response.Data) != response.Codes:
@@ -405,7 +396,6 @@ def _validated_rows(
     request: ChoiceRequest,
     metadata: dict[str, object],
     *,
-    require_complete: bool = True,
     manifest=None,
     verify_bytes: bool = False,
     content_hashes: list[str] | None = None,
@@ -477,10 +467,7 @@ def _validated_rows(
             if verify_bytes:
                 _observe_scope(scope, response["Indicators"], row[2:], request.cutoff)
             count += 1
-            try:
-                yield row
-            except GeneratorExit:
-                return
+            yield row
     if request.endpoint != "ctr" and count != len(response["Codes"]) * len(
         response["Dates"]
     ):
@@ -497,5 +484,5 @@ def _validated_rows(
         "COMPLETE" if response["ErrorCode"] == 0 else "FAILED"
     ):
         raise ValueError("choice_saved_status_invalid")
-    if require_complete and response["ErrorCode"] != 0:
+    if response["ErrorCode"] != 0:
         raise RuntimeError(f"choice_query_failed:{response['ErrorCode']}")

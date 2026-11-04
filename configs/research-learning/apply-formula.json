@@ -1,0 +1,13 @@
+{
+  "search": "results/learning/search.json",
+  "dataset": "data/research/factor_search",
+  "input_window": {
+    "start": "2020-11-01",
+    "end": "2021-03-31"
+  },
+  "output_window": {
+    "start": "2021-01-04",
+    "end": "2021-03-31"
+  },
+  "output": "results/learning/discovered-factor"
+}

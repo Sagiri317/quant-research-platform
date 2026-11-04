@@ -1,1 +1,1 @@
-"""Queryable catalogs for QRP platform objects."""
+"""Immutable catalogs of data, factor, and label definitions."""

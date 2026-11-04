@@ -1,1 +1,1 @@
-"""Shared policy rules for QRP outputs."""
+"""Shared resource-lifetime and evidence-sharing rules."""

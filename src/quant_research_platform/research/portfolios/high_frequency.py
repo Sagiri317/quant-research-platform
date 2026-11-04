@@ -18,6 +18,7 @@ from quant_research_platform.contracts.json_codec import (
     canonical_json_hash,
 )
 from quant_research_platform.contracts.models import _validate_model_prediction_window
+from quant_research_platform.contracts.policies import PolicyDecision, policy_target
 from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_CASH_ASSET_ID,
     PORTFOLIO_LEDGER_COST_COLUMNS,
@@ -57,7 +58,7 @@ from quant_research_platform.storage.datasets.reading import (
 )
 
 
-def _parameters(value):
+def _parameters(value, *, policy=False):
     params = _strict_config(
         value,
         {
@@ -70,7 +71,8 @@ def _parameters(value):
             "participation_rate",
             "minimum_commission",
             "restore_at",
-        },
+        }
+        - ({"buy_threshold", "sell_threshold"} if policy else set()),
         set(),
     )
     for name in ("initial_inventory", "maximum_inventory"):
@@ -95,7 +97,7 @@ def _parameters(value):
         params[name] = strict_finite_float(params[name], error="hft_parameter_invalid")
     if (
         params["initial_capital"] <= 0
-        or params["buy_threshold"] <= params["sell_threshold"]
+        or (not policy and params["buy_threshold"] <= params["sell_threshold"])
         or params["latency_ms"] < 0
         or not 0 < params["participation_rate"] <= 1
         or params["minimum_commission"] < 0
@@ -142,8 +144,14 @@ def _decisions(quotes, predictions, latency_ns):
     return result
 
 
-def inventory_batches(sessions, schedule, params, window):
-    """Share one cash pool and carry holdings; today's buys unlock next session."""
+def inventory_batches(
+    sessions, schedule, params, window, *, decision_columns=None, execution_order=None
+):
+    """Yield quote-account transitions with shared cash and next-session sellability.
+
+    Interactive callers receive PolicyDecision events after current-quote accounting
+    and send share targets for strictly subsequent eligible quotes. Execution latency,
+    lot sizes, liquidity, fees, and T+1 constraints remain active."""
     lower, upper, closed = time_window_timestamp_interval(window)
     lower, upper = pd.Timestamp(lower), pd.Timestamp(upper)
     assets = pd.Index(sorted(params["maximum_inventory"]), name="asset_id")
@@ -160,6 +168,7 @@ def inventory_batches(sessions, schedule, params, window):
     entitlements = EquityEntitlements()
     valuation_marks = ResearchValuationMarks()
     latency_ns = int(params["latency_ms"] * 1_000_000)
+    remaining_order = None if execution_order is None else execution_order["quantity"]
     assumptions = ExecutionAssumptions(
         params["initial_capital"], 0.0, 0.0, 1.0, (1.0,), params["minimum_commission"]
     )
@@ -343,15 +352,29 @@ def inventory_batches(sessions, schedule, params, window):
                 ),
             ),
         )
-        predictions = predictions.loc[
-            predictions.timestamp.ge(lower)
-            & (
-                predictions.timestamp.le(upper)
-                if closed
-                else predictions.timestamp.lt(upper)
-            )
-        ]
-        decisions = _decisions(quotes, predictions, latency_ns)
+        if decision_columns is None:
+            predictions = predictions.loc[
+                predictions.timestamp.ge(lower)
+                & (
+                    predictions.timestamp.le(upper)
+                    if closed
+                    else predictions.timestamp.lt(upper)
+                )
+            ]
+        interactive = decision_columns is not None
+        decisions = {} if interactive else _decisions(quotes, predictions, latency_ns)
+        destinations = (
+            {
+                (signal_at, asset): (execution_at, asset)
+                for (execution_at, asset), (signal_at, _) in _decisions(
+                    quotes,
+                    quotes[["timestamp", "asset_id"]].assign(prediction_score=0.0),
+                    latency_ns,
+                ).items()
+            }
+            if interactive
+            else {}
+        )
         if params["restore_at"] is None:
             restore_at = None
         else:
@@ -384,7 +407,16 @@ def inventory_batches(sessions, schedule, params, window):
                     signal_times[asset] = int(restore_at.value)
                 elif (int(at.value), asset) in decisions:
                     signal_at, score = decisions[int(at.value), asset]
-                    if score > params["buy_threshold"]:
+                    if interactive:
+                        targets[asset] = score
+                        if execution_order is not None:
+                            # Delayed targets cannot reverse or overfill a mother order.
+                            targets[asset] = np.clip(
+                                score,
+                                units[asset] + min(0, remaining_order),
+                                units[asset] + max(0, remaining_order),
+                            )
+                    elif score > params["buy_threshold"]:
                         targets[asset] = params["maximum_inventory"][asset]
                     elif score < params["sell_threshold"]:
                         targets[asset] = 0.0
@@ -485,6 +517,8 @@ def inventory_batches(sessions, schedule, params, window):
                         if getattr(row, name)
                     )
                     units[row.asset_id] += quantity
+                    if execution_order is not None:
+                        remaining_order -= quantity
                     if quantity > 0:
                         bought_today[row.asset_id] += quantity
                     diagnostics.append(
@@ -515,6 +549,33 @@ def inventory_batches(sessions, schedule, params, window):
                     )
                 )
             yield emit(at, trades=trades, flows=flows, diagnostics=diagnostics)
+            if interactive and any(
+                (int(at.value), asset) in destinations for asset in current.index
+            ):
+                target = yield PolicyDecision(
+                    at,
+                    current.reindex(assets).loc[:, list(decision_columns)].copy(),
+                    units.reindex(assets).copy(),
+                    (units - locked - bought_today).clip(lower=0.0).reindex(assets),
+                    marks.reindex(assets).copy(),
+                    cash,
+                    fsum(row.value for row in values(at).values()),
+                )
+                target = policy_target(
+                    target, assets, maximum=params["maximum_inventory"]
+                )
+                if execution_order is not None:
+                    other_assets = assets.difference([execution_order["asset_id"]])
+                    if (
+                        not target.reindex(other_assets)
+                        .eq(units.reindex(other_assets))
+                        .all()
+                    ):
+                        raise ValueError("policy_execution_off_mandate")
+                for asset in current.index:
+                    destination = destinations.get((int(at.value), asset))
+                    if destination is not None:
+                        decisions[destination] = (int(at.value), float(target[asset]))
         if closing <= upper if closed else closing < upper:
             marks = projected.close.reindex(units.index).astype("float64")
             rights = entitlements.register(
@@ -674,34 +735,33 @@ def statistics_tables(ledgers, *, window, config):
     }
 
 
-def backtest(config):
-    """Publish one continuous multi-stock account with shared equity handling."""
-    config = _strict_config(
-        config,
-        {
-            "panel",
-            "predictions",
-            "fee_schedule",
-            "daily_inputs",
-            "window",
-            "parameters",
-            "output",
-        },
-        set(),
+def inventory_inputs(config, window, *, prediction_path=None, decision_columns=None):
+    """Open the same explicit market inputs for training and native backtests."""
+    from quant_research_platform.research.features.transforms import (
+        mask_unobserved_features,
     )
+    from quant_research_platform.research.protocols.a_share_hft import PANEL_COLUMNS
+
     daily = _strict_config(
         config["daily_inputs"],
         {"panel", "calendar", "market_bars", "stock_master", "corporate_actions"},
         {"equity_events"},
     )
-    params = _parameters(config["parameters"])
-    window = TimeWindow(**config["window"])
     start, end = pd.Timestamp(window.start).date(), pd.Timestamp(window.end).date()
     panel = open_dataset_session(
         **_dataset_input_options(config["panel"], time_window=TimeWindow(start, end))
     )
     if panel.spec.get("market_id") != "a_share" or panel.spec["data_id"] != "hft_panel":
         raise ValueError("hft_panel_required")
+    if decision_columns is not None and any(
+        panel.spec["column_roles"].get(column) not in {"feature", "factor"}
+        and not (
+            panel.spec["column_roles"].get(column) == "context"
+            and column in PANEL_COLUMNS
+        )
+        for column in decision_columns
+    ):
+        raise ValueError("policy_observation_feature_role_required")
     fee_frame = read_dataset(Path(config["fee_schedule"]))
     schedule = fee_schedule_from_frame(
         fee_frame,
@@ -739,18 +799,49 @@ def backtest(config):
                     quotes = materialize_dataset_session(
                         panel.filtered_view(day_window)
                     )
-                    predictions, facts = read_predictions(
-                        Path(config["predictions"]), time_window=day_window
-                    )
-                    if facts["model_facts"]["market_id"] != "a_share":
-                        raise ValueError("hft_prediction_market_mismatch")
-                    _validate_model_prediction_window(
-                        facts["model_facts"], PredictionWindow(window.start, window.end)
-                    )
+                    if decision_columns is not None:
+                        quotes = mask_unobserved_features(
+                            quotes, decision_columns, panel.spec["column_roles"]
+                        )
+                    predictions = pd.DataFrame()
+                    if prediction_path is not None:
+                        predictions, facts = read_predictions(
+                            Path(prediction_path), time_window=day_window
+                        )
+                        if facts["model_facts"]["market_id"] != "a_share":
+                            raise ValueError("hft_prediction_market_mismatch")
+                        _validate_model_prediction_window(
+                            facts["model_facts"],
+                            PredictionWindow(window.start, window.end),
+                        )
                 yield view, quotes, predictions
 
+    return sessions(), schedule
+
+
+def backtest(config):
+    """Publish one continuous multi-stock account with shared equity handling."""
+    config = _strict_config(
+        config,
+        {
+            "panel",
+            "predictions",
+            "fee_schedule",
+            "daily_inputs",
+            "window",
+            "parameters",
+            "output",
+        },
+        set(),
+    )
+    params = _parameters(config["parameters"])
+    window = TimeWindow(**config["window"])
+    sessions, schedule = inventory_inputs(
+        config, window, prediction_path=config["predictions"]
+    )
+
     def produce(emit):
-        with closing_iterator(sessions()) as inputs:
+        with closing_iterator(sessions) as inputs:
             for batch in inventory_batches(inputs, schedule, params, window):
                 emit(batch)
 

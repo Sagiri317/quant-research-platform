@@ -14,11 +14,11 @@ from quant_research_platform.contracts.models import (
     TrainingWeighting,
     validate_model_metadata_core,
 )
-from quant_research_platform.research.predictions.runner import predict
-from quant_research_platform.research.statistics_production import (
+from quant_research_platform.research.models.statistics import (
     _prediction_quality,
     model_statistics,
 )
+from quant_research_platform.research.predictions.runner import predict
 from quant_research_platform.storage.datasets import write_dataset
 from tests.research.direct_model_test_support import fit_frame
 from tests.research.test_published_model_metric_semantics import (

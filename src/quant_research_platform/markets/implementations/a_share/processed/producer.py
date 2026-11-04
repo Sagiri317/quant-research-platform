@@ -1,4 +1,4 @@
-"""A-share processed target producers."""
+"""Prepare selected A-share outputs while preserving full mathematical input windows."""
 
 from __future__ import annotations
 
@@ -942,11 +942,7 @@ def _benchmark_frames(source, session):
         with closing_iterator(
             iter_benchmark_weight_snapshots(source["index_info"], frames)
         ) as normalized:
-            for _yield_value in normalized:
-                try:
-                    yield _yield_value
-                except GeneratorExit:
-                    return
+            yield from normalized
 
 
 def _processed_axis(

@@ -1,4 +1,6 @@
-"""Estimator factories for supervised model algorithms."""
+"""Construct supported estimators from explicit algorithms, hyperparameters, and
+seeds.
+"""
 
 from __future__ import annotations
 

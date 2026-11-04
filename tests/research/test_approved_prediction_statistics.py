@@ -8,19 +8,19 @@ from quant_research_platform.compute.dataframe.cross_section import (
     _compute_ic_and_grouped_label_values,
 )
 from quant_research_platform.compute.panels import ComputePanelSpec
-from quant_research_platform.research.statistics import time_series_inference_summary
-from quant_research_platform.research.statistics_production import (
+from quant_research_platform.research.models.statistics import (
     _model_comparison,
     _prediction_quality,
     _prediction_summary,
 )
+from quant_research_platform.research.statistics import time_series_inference_summary
 
 
 def test_no_selected_family_retains_undefined_statistics(tmp_path):
     from types import SimpleNamespace
 
     from quant_research_platform.contracts.time import TimeWindow
-    from quant_research_platform.research.statistics_production import (
+    from quant_research_platform.research.models.statistics import (
         build_a_share_statistics_tables,
     )
     from tests.research.test_direct_statistics import _factor_input
@@ -150,9 +150,7 @@ def test_group_assignments_do_not_replace_missing_top_label():
 
 def test_missing_session_blocks_inference_but_keeps_descriptive_mean():
     values = [0.1, 0.3, np.nan, -0.2, 0.4]
-    from quant_research_platform.research.statistics_production import (
-        _PREDICTION_COLUMN,
-    )
+    from quant_research_platform.research.models.statistics import _PREDICTION_COLUMN
 
     summary = _prediction_summary(
         pd.DataFrame({_PREDICTION_COLUMN: values}),
@@ -198,7 +196,7 @@ def test_model_statistics_resolves_bootstrap_default_and_persists_head_metrics(
     tmp_path, repetitions
 ):
     from quant_research_platform.artifacts.statistics import read_statistics_artifact
-    from quant_research_platform.research.statistics_production import model_statistics
+    from quant_research_platform.research.models.statistics import model_statistics
     from tests.research.direct_model_test_support import candidates
 
     _, scoring = candidates(tmp_path)

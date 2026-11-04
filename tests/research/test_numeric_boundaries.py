@@ -4,7 +4,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.research import statistics, statistics_production
+import quant_research_platform.research.factors.statistics as factor_stats
+from quant_research_platform.research import statistics
 from quant_research_platform.research.risk import (
     FactorRiskConfig,
     FactorRiskState,
@@ -118,7 +119,7 @@ def test_bh_by_reuse_individual_hac_and_keep_full_family_order(monkeypatch):
         return native(values, **kwargs)
 
     monkeypatch.setattr(statistics, "hac_mean", observed)
-    actual = statistics_production._factor_summary(
+    actual = factor_stats._factor_summary(
         frame,
         factors=("b", "a", "constant", "diagnostic"),
         families={"declared": planned},

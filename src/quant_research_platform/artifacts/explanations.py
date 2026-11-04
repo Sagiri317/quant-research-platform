@@ -390,7 +390,7 @@ def _validate(metadata, tables, *, partial=False):
             )
             if (
                 reason
-                or residual != row.additivity_residual
+                or abs(row.additivity_residual) > row.additivity_tolerance
                 or not abs(residual) <= row.additivity_tolerance <= tolerance
             ):
                 raise ValueError("explanation_additivity_failed")

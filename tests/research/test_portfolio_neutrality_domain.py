@@ -7,7 +7,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.research.portfolios import production
+import quant_research_platform.research.portfolios.daily as daily
+import quant_research_platform.research.portfolios.production as portfolio_production
 from tests.helpers.portfolio_inputs import decision_inputs
 
 
@@ -57,7 +58,7 @@ def test_integer_fills_repair_simple_industry_bands_after_price_drift():
         industry_standard_id="fixture", industry_level1_code=["A", "B"]
     )
     args["next_panel"].loc[args["next_panel"].asset_id.eq("b"), "open"] = 0.02
-    account, _, _, delta, ledger = production._build_session(**args)
+    account, _, _, delta, ledger = daily._build_session(**args)
     stock = ledger.post_trade_notional
     assert abs(stock.iloc[0] / stock.sum() - 0.5) <= 0.005 + 1e-8
     assert ledger.attrs["realized_constraints"]["execution_constraints_status"] == (
@@ -84,7 +85,7 @@ def test_simple_infeasible_frozen_name_still_reduces_other_industry_deviations()
         industry_standard_id="fixture", industry_level1_code=["A", "B", "C"]
     )
     args["alpha"].loc["a"] = np.nan
-    _, _, _, _, ledger = production._build_session(**args)
+    _, _, _, _, ledger = daily._build_session(**args)
     np.testing.assert_allclose(ledger.post_trade_notional, [60.0, 20.0, 20.0])
     assert ledger.executed_quantity.tolist() == [0, -1000, 1000]
     facts = ledger.attrs["realized_constraints"]
@@ -97,7 +98,7 @@ def test_unavailable_context_exits_without_blocking_known_pool(missing):
     args = _inputs(missing)
     source = args["dataset"].copy(deep=True)
     predictions = args["alpha"].copy(deep=True)
-    account, _, _, _, ledger = production._build_session(**args)
+    account, _, _, _, ledger = daily._build_session(**args)
     assert ledger.attrs["decision_availability"]["decision_skip_reason"] is None
     assert ledger.attrs["decision_availability"]["missing_prediction_count"] == 0
     # The target fixes A:B at 1:2; fills keep sub-share residue and round buys.
@@ -121,7 +122,7 @@ def test_unavailable_context_exits_without_blocking_known_pool(missing):
 def test_fixed_missing_forecasts_keep_holdings_when_no_risk_improvement_is_possible():
     args = _inputs("industry")
     args["alpha"].loc["a"] = np.nan
-    _, _, _, _, ledger = production._build_session(**args)
+    _, _, _, _, ledger = daily._build_session(**args)
     assert ledger.attrs["decision_availability"]["decision_skip_reason"] is None
     assert ledger.attrs["decision_availability"]["decision_status"] == "PARTIAL"
     assert ledger.attrs["realized_constraints"]["execution_constraints_status"] == (
@@ -140,7 +141,7 @@ def test_fixed_missing_forecasts_keep_holdings_when_no_risk_improvement_is_possi
 def test_partial_forecast_rebalances_known_names_with_nonzero_fixed_weight():
     args = _inputs("industry")
     args["candidate"] = replace(args["candidate"], neutrality="industry")
-    _, _, _, _, ledger = production._build_session(**args)
+    _, _, _, _, ledger = daily._build_session(**args)
     assert ledger.attrs["decision_availability"]["decision_skip_reason"] is None
     assert ledger.attrs["decision_availability"]["decision_status"] == "PARTIAL"
     # c is fixed at 1/3; the remaining 2/3 follows A:B = 1:2.
@@ -159,7 +160,7 @@ def test_unknown_industry_keeps_signal_target_while_integer_fills_respect_known_
     args["alpha"].loc["c"] = unknown_score
     args["holdings"] = pd.Series({"a": 30.0, "b": 30.0, "c": 40.0})
     args["held_units"] = args["holdings"] / 0.01
-    _, _, _, delta, ledger = production._build_session(**args)
+    _, _, _, delta, ledger = daily._build_session(**args)
     assert delta["c"] == pytest.approx(expected - 0.4, abs=1e-8)
     actual = ledger.set_index("asset_id").post_trade_notional
     # Risk takes precedence over the requested trade direction after rounding.
@@ -183,7 +184,7 @@ def test_industry_loss_alone_requests_no_exit_off_schedule(can_exit):
     )
     args["execution"].loc[args["execution"].asset_id.eq("c"), "can_exit"] = can_exit
     args["alpha"].loc["c"] = 2.0
-    _, _, _, delta, ledger = production._build_session(**args)
+    _, _, _, delta, ledger = daily._build_session(**args)
     assert delta["c"] == 0.0
     assert ledger.set_index("asset_id").loc[
         "c", "post_trade_notional"
@@ -199,7 +200,7 @@ def test_all_industries_unknown_keeps_trading_and_available_size(neutrality):
     args["candidate"] = replace(args["candidate"], neutrality=neutrality)
     args["panel"]["industry_level1_code"] = pd.NA
     args["alpha"].loc["c"] = 0.0
-    _, _, _, _, ledger = production._build_session(**args)
+    _, _, _, _, ledger = daily._build_session(**args)
     assert ledger.attrs["decision_availability"]["decision_skip_reason"] is None
     facts = ledger.attrs["neutrality_exposures"]
     for kind in ("benchmark", "target", "realized"):
@@ -219,8 +220,8 @@ def test_non_neutral_account_does_not_depend_on_context_pool():
     reference = deepcopy(args)
     reference["panel"]["industry_level1_code"] = "known"
     reference["dataset"]["total_market_cap"] = np.nan
-    actual = production._build_session(**args)
-    expected = production._build_session(**reference)
+    actual = daily._build_session(**args)
+    expected = daily._build_session(**reference)
     pd.testing.assert_frame_equal(actual[4], expected[4], check_exact=True)
     assert actual[4].attrs == expected[4].attrs
 
@@ -281,7 +282,7 @@ def test_public_neutral_pool_persists_known_ratios_and_unknown_holdings(tmp_path
     _replace_public_input(
         tmp_path, config, "fees", lambda frame: frame.assign(rate=0.0)
     )
-    artifact = read_portfolio_ledger_artifact(production.backtest(config))
+    artifact = read_portfolio_ledger_artifact(portfolio_production.backtest(config))
     assert artifact.metadata["neutrality_reference_domain"] == (
         "capitalization_available_research_pool"
     )
@@ -349,7 +350,7 @@ def test_public_neutral_pool_persists_known_ratios_and_unknown_holdings(tmp_path
             }
         )
     )
-    candidate = production.PortfolioCandidateSpec(
+    candidate = daily.PortfolioCandidateSpec(
         **{
             **artifact.metadata["candidate"],
             "risk_style_columns": tuple(

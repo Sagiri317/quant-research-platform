@@ -357,7 +357,7 @@ def test_native_plot_preserves_uncomputable_daily_reason(tmp_path):
             "units": "dimensionless",
         }
     )
-    text = output.read_text()
+    text = output.read_text(encoding="utf-8")
     assert "insufficient_complete_utc_days" in text
     restored = pd.read_parquet(source)
     assert restored.value.isna().all()
@@ -748,11 +748,11 @@ def test_plot_risk_example_consumes_native_comparisons_and_unavailable_reason(tm
     )
 
     example = Path(__file__).resolve().parents[2] / "configs" / "plot-risk.json"
-    config = json.loads(example.read_text())
+    config = json.loads(example.read_text(encoding="utf-8"))
     member = source / Path(config["inputs"]).name
     before = member.read_bytes()
     config.update(inputs=str(member), output=str(tmp_path / "risk.svg"))
-    rendered = plots.plot(config).read_text()
+    rendered = plots.plot(config).read_text(encoding="utf-8")
     assert "没有所选指标" not in rendered
     assert "跟踪误差" in rendered
     assert all(item["reference_id"] in rendered for item in references)

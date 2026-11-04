@@ -264,9 +264,6 @@ def _canonical_stock_master(frame: pd.DataFrame) -> pd.DataFrame:
             result[column] = strict_timestamp_series(
                 result[column], error="invalid_stock_master_date", allow_null=True
             ).dt.normalize()
-    result["listing_date"] = strict_timestamp_series(
-        result["listing_date"], error="invalid_stock_master_date", allow_null=True
-    ).dt.normalize()
     if "delisting_date" not in result:
         result["delisting_date"] = pd.NaT
     result["delisting_date_unresolved"] = (
@@ -481,10 +478,6 @@ def _asof_join_stock_master(panel: pd.DataFrame, stocks: pd.DataFrame) -> pd.Dat
 
 
 def _asof_market_cap(panel: pd.DataFrame, caps: pd.DataFrame) -> pd.DataFrame:
-    panel = panel.copy()
-    panel["asset_id"] = strict_string_series(
-        panel["asset_id"], error="invalid_market_cap_asset_id"
-    )
     return pd.merge_asof(
         panel.sort_values("timestamp", kind="stable"),
         caps.loc[
@@ -666,10 +659,6 @@ def _asof_industry(
 ) -> pd.DataFrame:
     if history is None:
         return panel
-    panel = panel.copy()
-    panel["asset_id"] = strict_string_series(
-        panel["asset_id"], error="invalid_industry_asset_id"
-    )
     if industry_snapshots is not None:
         snapshots = industry_snapshots.loc[
             industry_snapshots["source_asset_id"].isin(panel["asset_id"])
@@ -765,9 +754,9 @@ def _asof_industry(
     )
     # Only a frontier consumed by this panel can block its output. Historical
     # computation rows are included in the panel and cannot use a future repair.
-    valid_standard = current["_industry_known"].fillna(False) & ~current[
+    valid_standard = current["_industry_known"].fillna(False) & current[
         "_industry_standard_conflict"
-    ].fillna(False)
+    ].fillna(False).eq(False)
     valid_standard &= _industry_version_active_mask(
         current["industry_standard_id_industry"],
         current["timestamp"],
@@ -1139,9 +1128,6 @@ def _apply_special_treatment(
     history: pd.DataFrame | None,
 ) -> pd.DataFrame:
     result = panel.copy()
-    result["asset_id"] = strict_string_series(
-        result["asset_id"], error="invalid_special_treatment_asset_id"
-    )
     status = result["trading_status_code"].astype("Int64")
     known = status.between(0, 16).fillna(False)
     result["is_st"] = status.isin(ST_STATUS_CODES).astype("boolean").where(known)

@@ -1703,22 +1703,6 @@ def test_native_evaluation_consumed_timestamp_must_be_typed_and_in_window(
             "nat": pd.NaT,
             "outside": pd.Timestamp("2024-01-03"),
         }[damage]
-        changed = (
-            (broken, groups, diagnostics)
-            if member == "metrics"
-            else (metrics, broken, diagnostics)
-        )
-        with pytest.raises(
-            ValueError, match="timestamp|outside_window|primary_key_null"
-        ):
-            write_evaluation_outputs_from_chunks(
-                [changed],
-                summary_factory=result.summaries,
-                spec=spec,
-                output_path=tmp_path / "bad",
-                metadata=science,
-            )
-    assert not (tmp_path / "bad").exists()
     broken.to_parquet(root / f"{member}.parquet", index=False)
     with pytest.raises(ValueError, match="timestamp|outside_window|primary_key_null"):
         read_evaluation_outputs(root, tables=(member,))
@@ -1768,15 +1752,6 @@ def test_native_evaluation_groups_bind_to_their_actual_metric_pair(tmp_path, dam
             broken.loc[broken.index[0], "n_obs"] += 1
         else:
             broken = broken.iloc[1:]
-        with pytest.raises(ValueError, match="metric_group_observations_mismatch"):
-            write_evaluation_outputs_from_chunks(
-                [(metrics, broken, diagnostics)],
-                summary_factory=result.summaries,
-                spec=spec,
-                output_path=tmp_path / "bad",
-                metadata=science,
-            )
-    assert not (tmp_path / "bad").exists()
     broken.to_parquet(root / "grouped_label_values.parquet", index=False)
     with pytest.raises(
         ValueError, match="metric_group_observations_mismatch|row_count_mismatch"

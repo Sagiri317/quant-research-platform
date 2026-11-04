@@ -1,4 +1,4 @@
-"""Research sample filtering implementation."""
+"""Derive research eligibility from the facts required by each declared sample scope."""
 
 from __future__ import annotations
 

@@ -331,8 +331,8 @@ def test_quote_ledger_statistics_use_daily_closes_and_native_query(tmp_path, par
     import matplotlib
 
     matplotlib.use("Agg")
+    from quant_research_platform.artifacts.portfolio_curve import portfolio_curve
     from quant_research_platform.artifacts.statistics import read_statistics_artifact
-    from quant_research_platform.interfaces.queries import portfolio_curve
     from quant_research_platform.reports.plots import plot
     from quant_research_platform.research.portfolios.diagnostics import (
         portfolio_statistics,

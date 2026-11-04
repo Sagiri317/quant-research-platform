@@ -1,4 +1,6 @@
-"""Production portfolio diagnostics builders."""
+"""Compute ledger-based performance, attribution, valuation, and portfolio
+comparisons.
+"""
 
 from __future__ import annotations
 
@@ -130,7 +132,7 @@ def iter_holding_factor_inputs(
 ):
     """Stream aligned inputs, retaining only decision/entry/end prices."""
     from quant_research_platform.contracts.time import TimeWindow
-    from quant_research_platform.research.portfolios.production import (
+    from quant_research_platform.research.portfolios.daily import (
         _ENHANCED_PANEL_COLUMNS,
         _iter_input_sessions,
         _risk_context_input_sessions,
@@ -255,8 +257,6 @@ def iter_holding_factor_inputs(
                     panel_window.pop(timestamp, None)
                 position += 1
             take_panels(interval.end_at)
-            if len(panel_window) > 3:
-                raise ValueError("holding_price_window_invalid")
             if benchmark is not None and stamp(benchmark) < interval.decision_at:
                 raise ValueError("holding_benchmark_calendar_misaligned")
             weights = (
@@ -355,10 +355,7 @@ def iter_holding_factor_inputs(
                 reason,
                 frozenset(closed_assets),
             )
-            try:
-                yield result
-            except GeneratorExit:
-                return
+            yield result
             panel_window.pop(interval.decision_at, None)
             if benchmark is not None and stamp(benchmark) == interval.decision_at:
                 benchmark = next(benchmarks, None)
@@ -375,7 +372,7 @@ def build_portfolio_statistics_tables(
     iter_portfolio_sessions,
     comparison_metadata=None,
 ):
-    from quant_research_platform.research.portfolios.production import (
+    from quant_research_platform.research.portfolios.daily import (
         _iter_input_sessions,
         _read_materialized,
     )

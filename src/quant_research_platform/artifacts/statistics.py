@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -663,48 +663,31 @@ def write_statistics_artifact(
     members = tuple(
         member for member in known_members if member.removesuffix(".parquet") in tables
     )
-    expected = {member.removesuffix(".parquet") for member in members}
 
     def write(staging):
-        with closing_iterator(ExitStack()) as output:
-            writers = {}
-
-            def append(table_name, frame):
-                if table_name not in expected:
-                    raise ValueError("statistics_tables_invalid")
-                member = f"{table_name}.parquet"
-                if member not in writers:
-                    handle = output.enter_context(
-                        closing_iterator(open_filesystem_file(staging / member, "xb"))
-                    )
-                    writers[member] = output.enter_context(
-                        parquet_table_writer(
-                            handle,
-                            compression="zstd",
+        for name, frame in tables.items():
+            member = f"{name}.parquet"
+            validated = _validated_frame(frame, member=member, metadata=metadata)
+            with closing_iterator(
+                open_filesystem_file(staging / member, "xb")
+            ) as handle:
+                with parquet_table_writer(
+                    handle,
+                    compression="zstd",
+                    schema=_ARROW_SCHEMAS[member],
+                    statistics=tuple(
+                        column
+                        for column in ("fold_id", "side", "event_id", "sample_id")
+                        if column in _TABLE_COLUMNS[member]
+                    ),
+                ) as writer:
+                    writer(
+                        pa.Table.from_pandas(
+                            validated,
                             schema=_ARROW_SCHEMAS[member],
-                            statistics=tuple(
-                                column
-                                for column in (
-                                    "fold_id",
-                                    "side",
-                                    "event_id",
-                                    "sample_id",
-                                )
-                                if column in _TABLE_COLUMNS[member]
-                            ),
+                            preserve_index=False,
                         )
                     )
-                validated = _validated_frame(frame, member=member, metadata=metadata)
-                writers[member](
-                    pa.Table.from_pandas(
-                        validated, schema=_ARROW_SCHEMAS[member], preserve_index=False
-                    )
-                )
-
-            for name, frame in tables.items():
-                append(name, frame)
-            if set(writers) != set(members):
-                raise ValueError("statistics_tables_invalid")
         write_manifest(
             staging / "manifest.json",
             {

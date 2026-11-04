@@ -28,10 +28,17 @@
 - `research.portfolios.high_frequency.backtest(config)`：A 股多股票共享现金、连续跨日的日内库存账户
 - `research.rolling.run_quarterly(config)`：明确训练起点及滚动窗的季度 fit/predict/evaluate
 - `research.evaluations.runner.evaluate(config)`：显式信号、标签、时间窗和成熟截止评估
-- `research.statistics_production.model_statistics(config)`：显式模型与预测集合统计
-- `research.statistics_production.factor_statistics(config)`：显式因子与标签统计
+- `research.models.statistics.model_statistics(config)`：显式模型与预测集合统计
+- `research.factors.statistics.factor_statistics(config)`：显式因子与标签统计
 - `research.portfolios.diagnostics.portfolio_statistics(config)`：显式账本和比较集合
 - `reports.plots.plot(config)`：已算数值到新图片
+- `research.policies.reinforcement.train_policy(config)` / `backtest_policy(config)`：PPO 策略训练与冻结账户回放
+- `research.policies.cost_aware.fit_cost_model(config)` / `backtest_cost_model(config)`：连续权重训练近似与原生日频验证
+- `research.factors.search.search_factors(config)` / `apply_formula(config)`：训练域搜索、验证域选型与冻结应用
+- `research.predictions.uncertainty.calibrate_uncertainty(config)` / `apply_uncertainty(config)` / `evaluate_uncertainty(config)`：冻结残差区间及独立覆盖评价
+- `agents.runner.run_agent(config)`：在固定协议和预算下调用研究操作；生成 Python 只进入隔离容器
+
+这些新增操作的配置、产物、单位、资源安排和验证边界见[策略学习与研究 agent](research-learning.md)。
 
 各阶段的 config 使用 JSON 值，包括路径字符串和时间窗口对象；底层 Python 存储 API
 还可直接接收 Path、DataSpec、TimeWindow。复杂选择、窗口、风险、执行与候选设置均按严格 JSON 解析。
@@ -48,7 +55,9 @@ CLI 用非零退出码区分非法请求（2）、执行失败（1）和必需�
 
 来源模块统一处理格式、列投影、单位和来源记录。
 读取模块解码所选文件与列；计算模块检查公式、信息可用时点、标签成熟、采样与配对范围。
-写入模块检查结构定义、跨批次主键和覆盖关系，通过后原子发布。
+通用数据写入入口检查外部输入的结构和跨批次主键，再原子发布。
+评估引擎生成的表与汇总直接保存，写入器不重算计数或重复校验已生成的科学结果；
+读取外部评估产物时检查所消费成员的结构、主键、样本范围及必要的成员关系。
 无需逐层重读同一批输入，但新增连接、域和账本关系必须真实检查。
 
 拟合使用声明训练窗口内的全部合法样本，先按真实可用时点、
@@ -103,6 +112,9 @@ score/select 各写自己的 JSON；
 使用方核实际需要的选型、校准时点及产物成员。
 
 产物写入完成后原子发布，临时目录保持未完成状态；新输出拒绝覆盖已有产物。
+数据集写入直接复用输入分块和对应 Arrow 表生成统计，不将自己的输出转回 pandas 复验。
+关闭文件后读取 footer 记录 Parquet 实际 schema、行数和大小；输入校验由写入入口负责，
+外部文件的结构与类型校验由读取入口负责。显式检查和比较按请求运行。
 失败和中断保留真实试验记录；只尝试过（attempted）不能补写成成功。明确复用已完成片段时，必须核对其实际研究范围，
 不接受暂存（staging）或失败片段，已有试验记录不可改写。
 
@@ -159,7 +171,8 @@ Matplotlib与中文字体只在绘图时加载，缺字体明确报错。
 直接 API、原子发布、原生回读及下游使用保留必要的真实链路，重复场景合并到同一规则测试。
 主键、枚举、整数单位、列序与精确时间坐标按其离散约定比较；金额、收益、统计估计及数值解
 按经济量纲、算法误差和容差比较，不将独立浮点计算的逐位一致作为通用准入。
-同一持久化值及其缺失掩码无损往返；普通金融量纲下可分辨的权益、排名和样本变化仍须保留。
+持久化测试检查研究所需的值、缺失含义和时间精度，不把内存表示逐位相同推广为所有计算的要求；
+普通金融量纲下可分辨的权益、排名和样本变化仍须保留。
 数值测试不承担整个浮点表示范围的金融运算保证。
 验证包括相关行为测试、格式和静态检查、回归测试与代码审查；实际执行范围随变更记录，真实数据回放单独记录。
 
@@ -376,11 +389,17 @@ A 股比较按 252 日年化。高频连续账户先汇总真实日末净值，�
 匹配比较要求相同根种子、数据域、样本资格和抽样/置换配置；不能仅凭相同随机种子声称支持集相同。
 跨环境数值结果按对应算法的误差约定验证。
 
+策略学习及公式搜索的 PPO 复用 SB3 的随机数管理，成本感知网络复用 PyTorch；
+这些显式训练操作会设置当前进程的数值库随机状态。调用者需要彼此独立的随机流时，
+分别启动操作进程，并为每次运行明确种子。训练事实记录所用种子，不承诺跨设备逐位相同。
+
 ## 冻结模型解释
 
 Python `research.models.explanations.explain(config)` 与 CLI `qrp explain --config ...` 共享入口。
 解释读取现有 MODEL，不拟合、不改缩放器、不重新选择模型。输出独立 EXPLAIN，预测、组合和统计都不依赖它。
 `explain` 可选依赖组提供 SHAP；只选模型原生重要性时不需要 SHAP 或输入数据。
+SHAP 导入会初始化其绘图配色；仅在导入期间忽略该模块 `set_bad/set_over/set_under` 的已知弃用提示，其他告警保留，待上游替换接口后移除此处处理。
+XGBoost 的 CPU 模型保留原位预测，GPU 模型对 Pandas 输入直接使用 DMatrix；普通预测、raw margin 和原生树贡献共用缺失值及最佳轮次设置，不修改模型设备。
 
 必需字段是 `model`、`output`、非空 `methods`。只有 `native_importance` 时不传数据选项。
 贡献方法一次选择一个：`affine`、`linear_shap`、`native_tree`、`tree_shap_path`、`tree_shap_interventional`；

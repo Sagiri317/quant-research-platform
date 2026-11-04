@@ -190,10 +190,7 @@ def _raw_requests(raw_root: Path, *, data_ids):
                 raw_metadata,
                 manifest,
             )
-            try:
-                yield _yield_value
-            except GeneratorExit:
-                return
+            yield _yield_value
 
 
 def _encode(value: object) -> bytes:
@@ -554,10 +551,7 @@ def _rows(index, data_id, end, diagnostics=None) -> Iterator[tuple[object, ...]]
                 continue
             if data_id == FIRST_DISCLOSURE_DATA_ID:
                 _yield_value = (pair[0][:6], pair[1], first.isoformat())
-                try:
-                    yield _yield_value
-                except GeneratorExit:
-                    return
+                yield _yield_value
                 continue
             for public_date, revised, values in _report_versions(
                 index, pair, first, end, tuple(FINANCIAL_FIELDS[data_id])
@@ -572,10 +566,7 @@ def _rows(index, data_id, end, diagnostics=None) -> Iterator[tuple[object, ...]]
                     f"correction@{public_date}" if revised else "original",
                     *values,
                 )
-                try:
-                    yield _yield_value
-                except GeneratorExit:
-                    return
+                yield _yield_value
 
 
 def _frames(rows, spec):

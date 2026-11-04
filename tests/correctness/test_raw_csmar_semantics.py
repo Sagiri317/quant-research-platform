@@ -3709,7 +3709,7 @@ def test_optional_reference_conflicts_preserve_consumed_facts(tmp_path, subtests
 
 def test_unconsumed_index_name_conflict_does_not_block_benchmark_publication(tmp_path):
     from quant_research_platform.markets.prepare import prepare
-    from quant_research_platform.research.portfolios.production import (
+    from quant_research_platform.research.portfolios.daily import (
         _iter_benchmark_weights,
     )
     from quant_research_platform.storage.datasets import read_dataset

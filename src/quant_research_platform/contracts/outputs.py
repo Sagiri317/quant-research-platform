@@ -1,4 +1,4 @@
-"""Output contracts for QRP."""
+"""Declare prediction and evaluation bundle members and their metadata."""
 
 from __future__ import annotations
 

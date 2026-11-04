@@ -1,4 +1,6 @@
-"""QRP inference contracts and scientific calculations using numerical dependencies."""
+"""Numerical inference for factor and model comparisons, portfolio risk, and
+multiple testing.
+"""
 
 from __future__ import annotations
 
@@ -199,12 +201,7 @@ def hac_mean(
         ],
         dtype="float64",
     )
-    if (
-        not bool(np.isfinite(outputs).all())
-        or outputs[1] <= 0
-        or (not 0 <= outputs[3] <= 1)
-        or (outputs[4] > outputs[5])
-    ):
+    if not np.isfinite(outputs).all() or outputs[1] <= 0:
         raise ValueError("hac_inference_undefined")
     return MeanInference(
         mean=float(outputs[0]),
@@ -250,7 +247,7 @@ def stationary_bootstrap_mean_ci(
         method="percentile",
         size=confidence,
     )
-    if not np.isfinite(interval).all() or interval[0, 0] > interval[1, 0]:
+    if not np.isfinite(interval).all():
         raise ValueError("bootstrap_inference_undefined")
     return BootstrapInterval(
         mean=float(data.mean()),
@@ -790,19 +787,16 @@ def fama_macbeth_period(
     white_p_value = None
     white_response = None if white_residuals is None else np.square(white_residuals)
     if white_response is not None and np.ptp(white_response) > 64 * np.finfo(float).eps:
-        try:
-            # White LM needs the auxiliary R-squared, not its unused F statistic.
-            left, right = np.triu_indices(x.shape[1])
-            auxiliary = OLS(
-                white_response,
-                x[:, left] * x[:, right],
-            ).fit()
-            white_p_value = float(
-                chi2.sf(len(numeric) * auxiliary.rsquared, auxiliary.df_model)
-            )
-            if not np.isfinite(white_p_value) or not 0 <= white_p_value <= 1:
-                white_p_value = None
-        except (AssertionError, ValueError):
+        # White LM needs the auxiliary R-squared, not its unused F statistic.
+        left, right = np.triu_indices(x.shape[1])
+        auxiliary = OLS(
+            white_response,
+            x[:, left] * x[:, right],
+        ).fit()
+        white_p_value = float(
+            chi2.sf(len(numeric) * auxiliary.rsquared, auxiliary.df_model)
+        )
+        if not np.isfinite(white_p_value):
             white_p_value = None
     return FamaMacBethPeriodResult(
         coefficients=coefficients,

@@ -1,4 +1,4 @@
-"""Column roles used by portable data contracts."""
+"""Declare column roles and validate the asset-time axis consumed by research."""
 
 from __future__ import annotations
 

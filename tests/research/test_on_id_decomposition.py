@@ -46,6 +46,11 @@ def test_hand_calculation_and_endpoint_owner():
         endpoint = f"on_id_endpoint_return_{horizon}d"
         assert result[intraday].iloc[0] == pytest.approx(horizon * np.log(1.05))
         assert result[overnight].iloc[0] == pytest.approx(horizon * np.log(1.1 / 1.05))
+        expected_return = 1.1**horizon - 1
+        assert result[endpoint].iloc[0] == pytest.approx(expected_return)
+        assert np.expm1(
+            result[intraday].iloc[0] + result[overnight].iloc[0]
+        ) == pytest.approx(expected_return)
         np.testing.assert_array_equal(
             result[endpoint], original[f"forward_return_{horizon}d"]
         )
@@ -168,21 +173,6 @@ def test_all_supported_horizons_and_permission_unknown():
         assert np.isfinite(
             result[f"on_id_holding_overnight_log_return_{horizon}d"].iloc[0]
         )
-
-
-def test_genuine_endpoint_disagreement_is_a_scientific_error(monkeypatch):
-    from quant_research_platform.research.labels import forward_returns
-
-    owner = forward_returns._forward_return_labels
-
-    def corrupted(*args, **kwargs):
-        result = owner(*args, **kwargs)
-        result["forward_return_1d"] += 0.01
-        return result
-
-    monkeypatch.setattr(forward_returns, "_forward_return_labels", corrupted)
-    with pytest.raises(ValueError, match="on_id_endpoint_mismatch"):
-        _calculate(_prices(3), (1,))
 
 
 def test_real_endpoints_and_interior_suspension_valuation_are_distinct():

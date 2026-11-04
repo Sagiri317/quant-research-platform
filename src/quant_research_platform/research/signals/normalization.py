@@ -1,4 +1,6 @@
-"""Signal materialization and normalization for research workflows."""
+"""Apply declared signal direction and normalization without changing sample
+identity.
+"""
 
 from __future__ import annotations
 

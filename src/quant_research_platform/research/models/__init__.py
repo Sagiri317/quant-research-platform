@@ -1,1 +1,1 @@
-"""Model fitting, selection, scaling and persistence owners."""
+"""Fit, select, persist, explain, and statistically compare supervised models."""

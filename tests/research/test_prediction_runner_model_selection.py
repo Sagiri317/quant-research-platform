@@ -279,9 +279,7 @@ def test_failed_attempt_stays_in_complete_candidate_score(tmp_path, failed_famil
         from quant_research_platform.artifacts.statistics import (
             read_statistics_artifact,
         )
-        from quant_research_platform.research.statistics_production import (
-            model_statistics,
-        )
+        from quant_research_platform.research.models.statistics import model_statistics
 
         statistics = model_statistics(
             {

@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import quant_research_platform.research.portfolios.daily as daily
 from quant_research_platform.artifacts.portfolio_ledger import (
     read_portfolio_ledger_artifact,
     write_portfolio_ledger_artifact,
@@ -20,7 +21,6 @@ from quant_research_platform.markets.implementations.a_share.calendar import (
     unified_trading_sessions,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.research.portfolios import production
 from quant_research_platform.research.portfolios.accounting import (
     ResearchValuationMarks,
 )
@@ -58,7 +58,7 @@ def _ledger(layout, roots):
         def coverage_counts(self):
             return 0, 0
 
-    return production.backtest_a_share(
+    return daily.backtest_a_share(
         candidate=candidate,
         inputs=layout,
         output_window=TimeWindow("2022-12-30", "2023-01-06"),
@@ -247,7 +247,7 @@ def test_native_partial_quote_becomes_phase_ordered_research_anchor(tmp_path, ph
             market_bars_root=layout["market_bars"],
             stock_master_root=layout["stock_master"],
             panel_root=roots["market_panel_1d"],
-            panel_columns=production._PANEL_COLUMNS,
+            panel_columns=daily._PANEL_COLUMNS,
             calendar=calendar,
             time_window=TimeWindow("2022-12-30", "2023-01-06"),
         )
@@ -307,7 +307,7 @@ def test_future_lifecycle_append_cannot_change_previous_ledger_prefix(tmp_path):
                 market_bars_root=layout["market_bars"],
                 stock_master_root=layout["stock_master"],
                 panel_root=layout["panel"],
-                panel_columns=production._PANEL_COLUMNS,
+                panel_columns=daily._PANEL_COLUMNS,
                 calendar=calendar,
                 time_window=TimeWindow("2022-12-30", "2023-01-06"),
             )
@@ -329,7 +329,7 @@ def test_closed_calendar_validates_only_consumed_history(tmp_path):
                 market_bars_root=layout["market_bars"],
                 stock_master_root=layout["stock_master"],
                 panel_root=layout["panel"],
-                panel_columns=production._PANEL_COLUMNS,
+                panel_columns=daily._PANEL_COLUMNS,
                 calendar=calendar,
                 time_window=window,
             )
@@ -538,7 +538,7 @@ def test_asset_ordered_source_parts_preserve_portfolio_sessions(tmp_path):
                 market_bars_root=selected_layout["market_bars"],
                 stock_master_root=selected_layout["stock_master"],
                 panel_root=roots["market_panel_1d"],
-                panel_columns=production._PANEL_COLUMNS,
+                panel_columns=daily._PANEL_COLUMNS,
                 calendar=calendar,
                 time_window=TimeWindow("2022-12-30", "2023-01-06"),
                 execution_root=roots["execution_mask"],
@@ -727,7 +727,7 @@ def test_alpha_uses_native_normal_carry_endpoints(
             return 0, 0
 
     completed = {}
-    original = production._completed_calibration_rows
+    original = daily._completed_calibration_rows
 
     def observe(pending, endpoint):
         if (
@@ -745,11 +745,11 @@ def test_alpha_uses_native_normal_carry_endpoints(
         completed[pending[2]] = rows
         return rows
 
-    monkeypatch.setattr(production, "_completed_calibration_rows", observe)
+    monkeypatch.setattr(daily, "_completed_calibration_rows", observe)
     final = []
 
     def produce(emit):
-        for batch in production.backtest_a_share(
+        for batch in daily.backtest_a_share(
             candidate=candidate,
             inputs=layout,
             output_window=TimeWindow("2022-12-30", "2023-01-06"),

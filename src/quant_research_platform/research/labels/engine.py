@@ -1,4 +1,4 @@
-"""Common label dispatch for market-session research datasets."""
+"""Dispatch selected label calculations on a supplied market-session axis."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""One persisted-row summary observer shared by writer and inspection."""
+"""Summarize keys, dates and missing values during writing or explicit inspection."""
 
 from __future__ import annotations
 
@@ -32,8 +32,10 @@ class DatasetSummaryObserver:
     def __post_init__(self) -> None:
         self.null_count_summary = {column: 0 for column in self.primary_key}
 
-    def observe_batch(self, batch: pa.RecordBatch, *, frame: pd.DataFrame) -> None:
-        table = pa.Table.from_batches([batch])
+    def observe_batch(
+        self, batch: pa.RecordBatch | pa.Table, *, frame: pd.DataFrame
+    ) -> None:
+        table = batch if isinstance(batch, pa.Table) else pa.Table.from_batches([batch])
         duplicates = self.exact_key_index.add_table(table)
         self._observe_frame(frame, batch=batch, duplicates=duplicates)
 
@@ -51,7 +53,7 @@ class DatasetSummaryObserver:
         }
 
     def _observe_frame(
-        self, frame: pd.DataFrame, *, batch: pa.RecordBatch, duplicates: int
+        self, frame: pd.DataFrame, *, batch: pa.RecordBatch | pa.Table, duplicates: int
     ) -> None:
         self.row_count += int(len(frame))
         self.duplicate_primary_key_count += int(duplicates)
@@ -80,7 +82,7 @@ class DatasetSummaryObserver:
         )
 
     def _observe_numeric_profiles(
-        self, frame: pd.DataFrame, *, batch: pa.RecordBatch
+        self, frame: pd.DataFrame, *, batch: pa.RecordBatch | pa.Table
     ) -> None:
         if frame.empty:
             return

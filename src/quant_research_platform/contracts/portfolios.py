@@ -1,4 +1,6 @@
-"""Common portfolio contracts and market-policy bindings."""
+"""Define portfolio capital, execution assumptions, and validated economic ledger
+events.
+"""
 
 from __future__ import annotations
 
@@ -65,6 +67,7 @@ PORTFOLIO_DECISION_REASON_SIMPLE = "simple_rule"
 PORTFOLIO_DECISION_REASON_ENHANCED = "enhanced_optimizer"
 PORTFOLIO_DECISION_REASON_BENCHMARK = "enhanced_benchmark_only"
 PORTFOLIO_DECISION_REASON_MAINTENANCE = "benchmark_maintenance"
+PORTFOLIO_DECISION_REASON_POLICY = "external_policy"
 PORTFOLIO_BLOCK_REASONS = frozenset(
     {
         "market_blocked",
@@ -85,6 +88,7 @@ PORTFOLIO_DECISION_REASONS = frozenset(
         PORTFOLIO_DECISION_REASON_ENHANCED,
         PORTFOLIO_DECISION_REASON_BENCHMARK,
         PORTFOLIO_DECISION_REASON_MAINTENANCE,
+        PORTFOLIO_DECISION_REASON_POLICY,
     }
 )
 PORTFOLIO_LEDGER_COST_COLUMNS = (

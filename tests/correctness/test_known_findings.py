@@ -20,9 +20,7 @@ from quant_research_platform.research.models.scaler import (
     LinearScaledPredictor,
     ModelMatrixScaler,
 )
-from quant_research_platform.research.portfolios.production import (
-    _mask_values,
-)
+from quant_research_platform.research.portfolios.daily import _mask_values
 from quant_research_platform.research.protocols.a_share import label_definitions
 from quant_research_platform.research.statistics import (
     hac_mean,

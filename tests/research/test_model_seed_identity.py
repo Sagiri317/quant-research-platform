@@ -34,16 +34,8 @@ def test_native_estimator_defaults_and_nan_pass_typed_state_checks(algorithm, tm
     )
     frame["label_available_at"] = frame.timestamp + pd.Timedelta(days=1)
     params = {}
-    if algorithm in {
-        "xgboost_regressor",
-    }:
-        params.update(n_estimators=2, max_depth=2)
-    if algorithm in {
-        "xgboost_regressor",
-    }:
-        params["n_jobs"] = 1
-    if algorithm == "lasso_regression":
-        params["alpha"] = 0.0
+    if algorithm == "xgboost_regressor":
+        params.update(n_estimators=2, max_depth=2, n_jobs=1)
     spec = ModelSpec(
         model_id="probe",
         model_algorithm=algorithm,
@@ -61,8 +53,6 @@ def test_native_estimator_defaults_and_nan_pass_typed_state_checks(algorithm, tm
     fitted = case.result
     metadata = validate_model_metadata_core(fitted.metadata)
     predictor = pickle.loads(pickle.dumps(fitted.prediction_model))
-    if algorithm == "lasso_regression":
-        predictor.estimator.alpha = -0.0
     fitting.validate_model_state(predictor, metadata)
 
 

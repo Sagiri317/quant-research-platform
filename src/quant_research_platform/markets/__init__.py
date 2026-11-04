@@ -1,1 +1,1 @@
-"""Generic market domain abstractions and session-window utilities."""
+"""Market-specific preparation, trading calendars, and execution rules."""

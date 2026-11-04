@@ -6,7 +6,8 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from fastapi import FastAPI, Query
 
-from quant_research_platform.interfaces import queries
+import quant_research_platform.artifacts.portfolio_curve as curves
+import quant_research_platform.interfaces.queries as queries
 from quant_research_platform.interfaces.api.errors import (
     ApiError,
     register_api_error_handlers,
@@ -124,7 +125,7 @@ def create_app(*, project_root: Path | None = None) -> FastAPI:
 
     @app.get("/api/portfolio-curve", operation_id="read_portfolio_curve")
     def portfolio_curve(path: str, stride: int = Query(1, ge=1)) -> dict[str, object]:
-        return evidence(queries.portfolio_curve, path, stride=stride)
+        return evidence(curves.portfolio_curve, path, stride=stride)
 
     return app
 

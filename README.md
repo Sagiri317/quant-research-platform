@@ -2,6 +2,10 @@
 
 quant-research-platform 是一个本地量化研究项目，覆盖 A 股日频选股与 Level-2 高频预测和库存回测。它把数据准备、因子构建、模型训练、样本外评价和交易核算连接起来，便于检查一项预测改善能否转化为费用后的收益。
 
+也支持执行、库存与组合的 PPO 策略学习、公式因子搜索、冻结不确定性估计和成本感知配置。
+独立研究 agent 可在固定协议与预算下调用这些操作，生成的 Python 只在隔离容器运行。
+入口、示例和证据边界见[策略学习与研究 agent](docs/research-learning.md)。
+
 ## 研究报告
 
 - [A 股日频量价研究](reports/A股量价研究报告.md)：6/25/52 因子、四块消融、九类模型与 PV25 组合回测。
@@ -69,7 +73,8 @@ model_path = fit(read_qrp_json_file("configs/fit-a-share.json")[1])
 未选择的统计分析不会读取其专用输入；模型解释等严格接口也会拒绝用不到的选项。
 候选顺序可能决定同分时的选择，输入列顺序则决定模型接收特征的排列，不能自行排序或去重。
 
-当前模型为 OLS、LASSO、XGBoost、LSTM、Transformer；后三者要求 CUDA，不能静默降级到 CPU。
+监督预测模型为 OLS、LASSO、XGBoost、LSTM、Transformer；支持 GPU 的模型在 CUDA 不可用时使用 CPU，也可显式选择 CPU。
+策略学习的 PPO、公式搜索和成本感知网络采用相同的设备回退约定。
 高频数据接入、因子、标签、T+1 库存账户与使用限制见 [A 股高频](docs/a-share-hft.md)。
 
 ## 只读查询与图表
@@ -112,6 +117,7 @@ HTTP `create_app(project_root=...)` 提供 catalog、数据集要求、
 - [架构、API 与读写边界](docs/architecture.md)
 - [来源与数据资格](docs/data.md)
 - [A 股计算方法与交易规则](docs/a-share.md)
+- [策略学习、公式搜索、不确定性与研究 agent](docs/research-learning.md)
 
 环境配置见 [environment.yml](environment.yml) 和 [pyproject.toml](pyproject.toml)，项目运行使用独立 Conda 环境。
 

@@ -8,7 +8,7 @@ from typing import Annotated
 
 import typer
 
-from quant_research_platform.interfaces import queries
+import quant_research_platform.interfaces.queries as queries
 from quant_research_platform.policy.share_safety import sanitize_shared_text
 from quant_research_platform.profiles.research import (
     A_SHARE_PROFILE_ID,
@@ -167,7 +167,7 @@ def backtest_hft(config: Config) -> None:
 @app.command("statistics-factors")
 def statistics_factors(config: Config) -> None:
     """Compute selected factor statistics from data or saved daily evaluations."""
-    from quant_research_platform.research.statistics_production import factor_statistics
+    from quant_research_platform.research.factors.statistics import factor_statistics
 
     _echo_result(factor_statistics(read_qrp_json_file(config)[1]))
 
@@ -185,7 +185,7 @@ def statistics_portfolio(config: Config) -> None:
 @app.command("statistics-model")
 def statistics_model(config: Config) -> None:
     """Compute selected statistics for explicit models and predictions."""
-    from quant_research_platform.research.statistics_production import model_statistics
+    from quant_research_platform.research.models.statistics import model_statistics
 
     _echo_result(model_statistics(read_qrp_json_file(config)[1]))
 
@@ -202,6 +202,92 @@ def evaluate(config: Config) -> None:
 def inspect(path: Path) -> None:
     """Read one explicitly selected artifact's native metadata."""
     _echo_result(queries.inspect(path))
+
+
+@app.command("train-policy")
+def train_policy(config: Config) -> None:
+    """Train PPO using native account transitions."""
+    from quant_research_platform.research.policies.reinforcement import train_policy
+
+    _echo_result(train_policy(read_qrp_json_file(config)[1]))
+
+
+@app.command("backtest-policy")
+def backtest_policy(config: Config) -> None:
+    """Evaluate a frozen policy or execution baseline in the native account."""
+    from quant_research_platform.research.policies.reinforcement import backtest_policy
+
+    _echo_result(backtest_policy(read_qrp_json_file(config)[1]))
+
+
+@app.command("search-factors")
+def search_factors(config: Config) -> None:
+    """Search causal formulas using fixed training and validation windows."""
+    from quant_research_platform.research.factors.search import search_factors
+
+    _echo_result(search_factors(read_qrp_json_file(config)[1]))
+
+
+@app.command("apply-formula")
+def apply_formula(config: Config) -> None:
+    """Compute a selected formula on a later explicit window."""
+    from quant_research_platform.research.factors.search import apply_formula
+
+    _echo_result(apply_formula(read_qrp_json_file(config)[1]))
+
+
+@app.command("calibrate-uncertainty")
+def calibrate_uncertainty(config: Config) -> None:
+    """Calibrate a frozen interval using mature prediction residuals."""
+    from quant_research_platform.research.predictions.uncertainty import (
+        calibrate_uncertainty,
+    )
+
+    _echo_result(calibrate_uncertainty(read_qrp_json_file(config)[1]))
+
+
+@app.command("apply-uncertainty")
+def apply_uncertainty(config: Config) -> None:
+    """Publish intervals and conservative scores without reading labels."""
+    from quant_research_platform.research.predictions.uncertainty import (
+        apply_uncertainty,
+    )
+
+    _echo_result(apply_uncertainty(read_qrp_json_file(config)[1]))
+
+
+@app.command("evaluate-uncertainty")
+def evaluate_uncertainty(config: Config) -> None:
+    """Measure interval coverage on explicit mature observations."""
+    from quant_research_platform.research.predictions.uncertainty import (
+        evaluate_uncertainty,
+    )
+
+    _echo_result(evaluate_uncertainty(read_qrp_json_file(config)[1]))
+
+
+@app.command("fit-cost-model")
+def fit_cost_model(config: Config) -> None:
+    """Fit a differentiable allocator with turnover costs."""
+    from quant_research_platform.research.policies.cost_aware import fit_cost_model
+
+    _echo_result(fit_cost_model(read_qrp_json_file(config)[1]))
+
+
+@app.command("backtest-cost-model")
+def backtest_cost_model(config: Config) -> None:
+    """Evaluate a cost-aware allocator with actual share accounting."""
+    from quant_research_platform.research.policies.cost_aware import backtest_cost_model
+
+    _echo_result(backtest_cost_model(read_qrp_json_file(config)[1]))
+
+
+@app.command("research-agent")
+def research_agent(config: Config) -> None:
+    """Run one externally configured, budgeted research agent."""
+    from quant_research_platform.agents.runner import run_agent
+
+    _echo_result(run_agent(read_qrp_json_file(config)[1]))
 
 
 def _echo_result(result) -> None:

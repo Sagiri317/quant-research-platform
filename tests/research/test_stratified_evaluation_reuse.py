@@ -12,7 +12,7 @@ from quant_research_platform.artifacts.statistics import read_statistics_artifac
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.research.evaluations.runner import evaluate
-from quant_research_platform.research.statistics_production import factor_statistics
+from quant_research_platform.research.factors.statistics import factor_statistics
 from tests.research.evaluation_test_support import (
     evaluation_config,
     write_evaluation_input,
@@ -238,15 +238,16 @@ def test_native_own_common_strata_and_persisted_reduction(
     assert {key: value for key, value in own_facts.items() if key != "selector"} == {
         key: value for key, value in common_facts.items() if key != "selector"
     }
-    from quant_research_platform.research import statistics_production as production
+    import quant_research_platform.research.datasets.statistics as dataset_stats
+    import quant_research_platform.research.factors.statistics as factor_stats
 
     def forbidden(*args, **kwargs):
         raise AssertionError("persisted reduction must not rescan or recompute")
 
-    monkeypatch.setattr(production, "read_dataset", forbidden)
-    monkeypatch.setattr(production, "open_dataset_session", forbidden)
-    monkeypatch.setattr(production, "cross_sectional_rank_ic", forbidden)
-    monkeypatch.setattr(production, "fama_macbeth_period", forbidden)
+    monkeypatch.setattr(factor_stats, "read_dataset", forbidden)
+    monkeypatch.setattr(dataset_stats, "open_dataset_session", forbidden)
+    monkeypatch.setattr(factor_stats, "cross_sectional_rank_ic", forbidden)
+    monkeypatch.setattr(factor_stats, "fama_macbeth_period", forbidden)
     output = factor_statistics(
         {
             "evaluation_inputs": [str(own), str(common)],
@@ -1215,7 +1216,7 @@ def test_summary_valid_count_cannot_exceed_declared_dates(tmp_path):
         read_evaluation_outputs(output, tables=("ic_summary",))
 
 
-def test_daily_key_memory_is_one_date_for_producer_and_consumer(tmp_path, monkeypatch):
+def test_daily_reader_key_memory_is_one_date(tmp_path, monkeypatch):
     from quant_research_platform.artifacts.outputs import evaluation as artifacts
     from quant_research_platform.research.evaluations import runner
 
@@ -1235,12 +1236,11 @@ def test_daily_key_memory_is_one_date_for_producer_and_consumer(tmp_path, monkey
     monkeypatch.setattr(artifacts._EvaluationDateKeys, "add_table", observe)
     monkeypatch.setattr(runner, "ExactPrimaryKeyIndex", forbidden)
     output = evaluate(config)
-    producer_max = max(sizes)
-    sizes.clear()
+    assert not sizes
     read_evaluation_outputs(
         output, tables=("metrics", "daily_coverage", "daily_strata")
     )
-    assert max(sizes) == producer_max == 8
+    assert max(sizes) == 8
 
 
 @pytest.mark.parametrize("member", ["metrics", "daily_coverage", "daily_strata"])

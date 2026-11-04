@@ -1,1 +1,1 @@
-"""Concrete market implementations built on the generic market domain."""
+"""Implement supported markets using shared data and research contracts."""

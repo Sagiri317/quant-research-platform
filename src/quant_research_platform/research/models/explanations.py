@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Mapping
 from decimal import Decimal
 from importlib.metadata import version
@@ -58,6 +59,19 @@ from quant_research_platform.storage.datasets.reading import (
     iter_dataset_chunks,
     open_dataset_session,
 )
+
+
+def _import_shap():
+    with warnings.catch_warnings():
+        # shortcut: ignore SHAP color setup warnings until it replaces the setters.
+        warnings.filterwarnings(
+            "ignore",
+            r"The set_(bad|over|under) function will be deprecated",
+            PendingDeprecationWarning,
+            r"shap\.plots\.colors\._colors$",
+        )
+        import shap
+    return shap
 
 
 def _positive(value, name, *, allow_none=False):
@@ -295,7 +309,7 @@ def _output(result, frame, output_space, *, intervention=False):
         )
         algorithm = result.metadata["model_algorithm"]
         if algorithm == "xgboost_regressor":
-            explained = predictor.estimator.predict(matrix, output_margin=True)
+            explained = predictor._predict_matrix(matrix, output_margin=True)
         else:
             raise ValueError("explanation_raw_margin_not_supported")
     elif output_space == "model_output":
@@ -348,7 +362,7 @@ def _attributions(result, context, indices, method, background, output_space):
                 else "unscaled_input_zero"
             )
         else:
-            import shap
+            shap = _import_shap()
 
             masker = shap.maskers.Independent(
                 background[0], max_samples=len(background[0])
@@ -365,20 +379,12 @@ def _attributions(result, context, indices, method, background, output_space):
             raise ValueError("explanation_nonidentity_link_requires_raw_margin")
         estimator = predictor.estimator
         if method == "native_tree":
-            import xgboost
-
-            booster = estimator.get_booster()
             if estimator.get_xgb_params().get("booster", "gbtree") not in (
                 None,
                 "gbtree",
             ):
                 raise ValueError("explanation_xgboost_booster_not_supported")
-            end = getattr(estimator, "best_iteration", None)
-            values = booster.predict(
-                xgboost.DMatrix(matrix),
-                pred_contribs=True,
-                iteration_range=(0, end + 1 if end is not None else 0),
-            )
+            values = predictor._predict_matrix(matrix, pred_contribs=True)
             implementation = f"xgboost:{version('xgboost')}:pred_contribs"
             contributions, base = (
                 np.asarray(values)[:, :-1],
@@ -390,7 +396,7 @@ def _attributions(result, context, indices, method, background, output_space):
                 background={"kind": "model_internal_tree_statistics"},
             )
         else:
-            import shap
+            shap = _import_shap()
 
             interventional = method == "tree_shap_interventional"
             data = (

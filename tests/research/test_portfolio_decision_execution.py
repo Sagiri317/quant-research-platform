@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import quant_research_platform.research.portfolios.daily as daily
 from quant_research_platform.artifacts.portfolio_ledger import (
     read_portfolio_ledger_artifact,
     summarize_portfolio_ledger,
@@ -15,18 +16,17 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioCandidateSpec,
     PortfolioCapital,
 )
-from quant_research_platform.research.portfolios import production
 from tests.helpers.portfolio_inputs import decision_inputs as _decision_inputs
 
 
 def test_future_execution_changes_actual_constraints_without_changing_target(tmp_path):
     base = _decision_inputs()
     base["execution"].loc[base["execution"].asset_id.eq("a"), "can_exit"] = False
-    baseline = production._build_session(**base)
+    baseline = daily._build_session(**base)
     changed = _decision_inputs()
     changed["next_panel"].loc[changed["next_panel"].asset_id.eq("a"), "open"] = 0.015
     changed["execution"].loc[changed["execution"].asset_id.eq("a"), "can_exit"] = False
-    account, adv, optimized, delta, snapshot = production._build_session(**changed)
+    account, adv, optimized, delta, snapshot = daily._build_session(**changed)
     pd.testing.assert_series_equal(optimized.weights, baseline[2].weights)
     pd.testing.assert_series_equal(delta, baseline[3])
     assert optimized.weights.tolist() == pytest.approx([0.505, 0.495, 0.0])
@@ -45,7 +45,7 @@ def test_future_execution_changes_actual_constraints_without_changing_target(tmp
     assert account.nav_after == 125.0 and account.post_trade_cash == 0.0
     changed["execution"]["can_exit"] = True
     tradable, _, tradable_target, tradable_delta, tradable_snapshot = (
-        production._build_session(**changed)
+        daily._build_session(**changed)
     )
     pd.testing.assert_series_equal(tradable_target.weights, optimized.weights)
     pd.testing.assert_series_equal(tradable_delta, delta)
@@ -56,7 +56,7 @@ def test_future_execution_changes_actual_constraints_without_changing_target(tmp
     assert tradable.asset_ledger.executed_delta_notional.tolist() == pytest.approx(
         [-12.0, 12.0]
     )
-    batch = production._ledger_batch(
+    batch = daily._ledger_batch(
         account=account,
         asset_ledger=snapshot,
         sequence=0,
@@ -78,7 +78,7 @@ def test_future_execution_changes_actual_constraints_without_changing_target(tmp
         endpoint_events=pd.DataFrame(),
         corporate_events=pd.DataFrame(),
         endpoint_corporate_events=pd.DataFrame(),
-        entitlements=production.EquityEntitlements(),
+        entitlements=daily.EquityEntitlements(),
         execution_lives=changed["next_panel"].set_index("asset_id").listing_date,
     )
     path = write_portfolio_ledger_artifact(
@@ -103,14 +103,14 @@ def test_future_execution_changes_actual_constraints_without_changing_target(tmp
 
 def test_known_fees_cannot_make_frozen_holding_exceed_decision_limit(monkeypatch):
     captured = []
-    solve = production.optimize_portfolio
+    solve = daily.optimize_portfolio
 
     def observe(*args, **kwargs):
         result = solve(*args, **kwargs)
         captured.append(result)
         return result
 
-    monkeypatch.setattr(production, "optimize_portfolio", observe)
+    monkeypatch.setattr(daily, "optimize_portfolio", observe)
     for rate in (0.0, 0.001):
         inputs = _decision_inputs(
             benchmark=(0.5, 0.25, 0.25), holdings=(0.505, 0.245, 0.25), fee_rate=rate
@@ -121,7 +121,7 @@ def test_known_fees_cannot_make_frozen_holding_exceed_decision_limit(monkeypatch
         )
         inputs["amount_history"].pop(("a", pd.Timestamp("2000-01-01")))
         if rate:
-            account, _, optimized, _, ledger = production._build_session(**inputs)
+            account, _, optimized, _, ledger = daily._build_session(**inputs)
             # Frozen a is already at .505. Any strictly positive fee c would
             # make its net weight .505/(1-c) > .505, so only zero-cost no-trade
             # is feasible. The correct optimizer returns that optimum.
@@ -135,7 +135,7 @@ def test_known_fees_cannot_make_frozen_holding_exceed_decision_limit(monkeypatch
                 == "SATISFIED"
             )
         else:
-            account, _, _, _, _ = production._build_session(**inputs)
+            account, _, _, _, _ = daily._build_session(**inputs)
             assert (
                 account.asset_ledger.set_index("asset_id").loc[
                     "a", "post_trade_notional"
@@ -162,12 +162,12 @@ def test_exact_zero_active_missing_risk_is_zero_but_future_active_is_undefined(m
         enhanced.risk.specific_variance.loc["a"] = np.nan
     else:
         enhanced.exposures.loc[enhanced.exposures.asset_id.eq("a"), "style"] = np.nan
-    _, _, optimized, _, snapshot = production._build_session(**inputs)
+    _, _, optimized, _, snapshot = daily._build_session(**inputs)
     assert optimized.predicted_tracking_error == 0.0
     assert snapshot.attrs["realized_constraints"]["realized_tracking_error"] == 0.0
     inputs["next_panel"].loc[inputs["next_panel"].asset_id.eq("a"), "open"] = 0.015
     inputs["execution"]["can_exit"] = False
-    _, _, changed, _, snapshot = production._build_session(**inputs)
+    _, _, changed, _, snapshot = daily._build_session(**inputs)
     pd.testing.assert_series_equal(changed.weights, optimized.weights)
     facts = snapshot.attrs["realized_constraints"]
     assert facts["realized_constraints_status"] == "UNDEFINED"
@@ -193,7 +193,7 @@ def test_frozen_nonzero_missing_risk_skips_target_and_keeps_real_account(missing
         enhanced.risk.specific_variance.loc["a"] = np.nan
     else:
         enhanced.exposures.loc[enhanced.exposures.asset_id.eq("a"), "style"] = np.nan
-    account, _, optimized, _, ledger = production._build_session(**inputs)
+    account, _, optimized, _, ledger = daily._build_session(**inputs)
     assert optimized is None
     assert account.nav_after == 100.0
     assert ledger.executed_delta_notional.eq(0.0).all()
@@ -230,7 +230,7 @@ def test_zero_nav_neutrality_has_no_defined_weights_or_exposures():
         held_units=inputs["held_units"] * 0,
         nav=0.0,
     )
-    account, _, _, _, snapshot = production._build_session(**inputs)
+    account, _, _, _, snapshot = daily._build_session(**inputs)
     assert account.nav_after == 0.0
     assert snapshot.realized_weight.isna().all()
     assert snapshot.target_weight.isna().all()
@@ -247,9 +247,9 @@ def test_zero_nav_neutrality_has_no_defined_weights_or_exposures():
 
 def test_future_zero_nav_keeps_valid_target_and_reports_undefined_actual_risk():
     inputs = _decision_inputs()
-    baseline = production._build_session(**inputs)
+    baseline = daily._build_session(**inputs)
     inputs["next_panel"]["open"] = 0.0
-    account, _, optimized, _, snapshot = production._build_session(**inputs)
+    account, _, optimized, _, snapshot = daily._build_session(**inputs)
     pd.testing.assert_series_equal(optimized.weights, baseline[2].weights)
     assert account.nav_after == 0.0
     assert snapshot.executed_delta_notional.eq(0.0).all()
@@ -269,7 +269,7 @@ def test_invalid_risk_is_not_downgraded_to_missing_target(invalid):
     else:
         enhanced.exposures.loc[enhanced.exposures.asset_id.eq("a"), "style"] = np.inf
     with pytest.raises(ValueError, match="optimizer_risk_invalid"):
-        production._build_session(**inputs)
+        daily._build_session(**inputs)
 
 
 @pytest.mark.parametrize("missing", ["specific", "exposure"])
@@ -287,7 +287,7 @@ def test_integer_fees_do_not_turn_missing_active_risk_into_defined_zero(
         enhanced.risk.specific_variance.loc["a"] = np.nan
     else:
         enhanced.exposures.loc[enhanced.exposures.asset_id.eq("a"), "style"] = np.nan
-    account, _, optimized, _, ledger = production._build_session(**inputs)
+    account, _, optimized, _, ledger = daily._build_session(**inputs)
     assert optimized is not None
     # The continuous benchmark target is reachable; integer fills and fees
     # cannot establish exactly zero active exposure to the missing risk.
@@ -321,7 +321,7 @@ def test_genuine_tiny_future_active_weight_still_requires_missing_risk(
     inputs["next_panel"].loc[inputs["next_panel"].asset_id.eq("a"), "open"] = 0.01 * (
         1.0 + relative_move
     )
-    account, _, optimized, _, ledger = production._build_session(**inputs)
+    account, _, optimized, _, ledger = daily._build_session(**inputs)
     assert optimized is not None
     assert optimized.predicted_tracking_error == 0.0
     active = (

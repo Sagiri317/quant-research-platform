@@ -278,7 +278,7 @@ def test_factor_inference_counts_original_dates_with_no_mature_or_finite_factor(
         write_statistics_artifact,
     )
     from quant_research_platform.contracts.time import TimeWindow
-    from quant_research_platform.research.statistics_production import (
+    from quant_research_platform.research.factors.statistics import (
         build_a_share_factor_statistics_tables,
     )
     from quant_research_platform.storage.datasets import write_dataset
@@ -349,9 +349,7 @@ def test_factor_inference_counts_original_dates_with_no_mature_or_finite_factor(
 
 
 def test_valid_observation_clock_keeps_order_under_date_gaps():
-    from quant_research_platform.research.statistics_production import (
-        _prediction_summary,
-    )
+    from quant_research_platform.research.models.statistics import _prediction_summary
 
     values = np.sin(np.arange(25)) / 2
     regular = pd.DataFrame(
@@ -400,10 +398,8 @@ def test_ordinary_fit_preserves_zero_coefficient(weighted):
 def test_test_set_keeps_rankic_by_and_explicit_exploratory_exclusion():
     from copy import deepcopy
 
+    from quant_research_platform.research.models.statistics import _paired_group_rankic
     from quant_research_platform.research.protocols import a_share
-    from quant_research_platform.research.statistics_production import (
-        _paired_group_rankic,
-    )
     from tests.helpers.research_configuration import A_SHARE_MODEL_ALGORITHMS
     from tests.helpers.statistics_artifacts import statistics_config
 

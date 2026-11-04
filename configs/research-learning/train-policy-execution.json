@@ -1,0 +1,74 @@
+{
+  "episodes": [
+    {
+      "kind": "hft",
+      "task": "execution",
+      "asset_ids": [
+        "000001",
+        "600000"
+      ],
+      "feature_columns": [
+        "mid",
+        "bid_vol1",
+        "ask_vol1"
+      ],
+      "window": {
+        "start": "2018-02-12T05:00:00",
+        "end": "2018-02-12T06:57:00"
+      },
+      "account": {
+        "panel": "data/processed/a_share/hft_panel",
+        "fee_schedule": "data/processed/a_share/fee_schedule",
+        "daily_inputs": {
+          "panel": "data/processed/a_share/market_panel_1d",
+          "calendar": "data/interim/csmar/trading_calendar",
+          "market_bars": "data/interim/csmar/market_bars_1d",
+          "stock_master": "data/interim/csmar/stock_master",
+          "corporate_actions": "data/interim/csmar/corporate_actions",
+          "equity_events": "data/interim/reference/a_share_equity_events"
+        },
+        "parameters": {
+          "initial_capital": 100000.0,
+          "initial_inventory": {
+            "000001": 1000,
+            "600000": 1000
+          },
+          "maximum_inventory": {
+            "000001": 2000,
+            "600000": 2000
+          },
+          "latency_ms": 1,
+          "participation_rate": 0.05,
+          "minimum_commission": 5.0,
+          "restore_at": null
+        }
+      },
+      "risk_aversion": 0.001,
+      "unfinished_penalty_bps": 100.0,
+      "order": {
+        "asset_id": "000001",
+        "quantity": -500
+      }
+    }
+  ],
+  "output": "results/learning/execution-policy",
+  "fit_cutoff": "2018-02-13T00:00:00",
+  "timesteps": 100000,
+  "seed": 42,
+  "device": "cpu",
+  "n_envs": 4,
+  "threads": 2,
+  "ppo": {
+    "n_steps": 256,
+    "batch_size": 256,
+    "n_epochs": 10,
+    "learning_rate": 0.0003,
+    "gamma": 0.99,
+    "policy_kwargs": {
+      "net_arch": [
+        64,
+        64
+      ]
+    }
+  }
+}

@@ -18,6 +18,7 @@ SOURCE_ROOT = Path("src/quant_research_platform")
 PACKAGE_PREFIX = "quant_research_platform"
 LAYER_BOUNDARIES = {
     "contracts": (
+        "quant_research_platform.agents",
         "quant_research_platform.artifacts",
         "quant_research_platform.catalog",
         "quant_research_platform.profiles",
@@ -59,8 +60,18 @@ LAYER_BOUNDARIES = {
     ),
     "runtime": ("quant_research_platform.reports",),
     # Direct operation owners may compose science, native readers and writers.
-    "research": ("quant_research_platform.reports", "quant_research_platform.sources"),
-    "reports": ("quant_research_platform.research", "quant_research_platform.sources"),
+    "research": (
+        "quant_research_platform.agents",
+        "quant_research_platform.interfaces",
+        "quant_research_platform.reports",
+        "quant_research_platform.sources",
+    ),
+    "reports": (
+        "quant_research_platform.agents",
+        "quant_research_platform.interfaces",
+        "quant_research_platform.research",
+        "quant_research_platform.sources",
+    ),
     "compute": (
         "quant_research_platform.reports",
         "quant_research_platform.artifacts",

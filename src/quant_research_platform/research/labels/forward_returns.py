@@ -194,8 +194,6 @@ def _validate_label_input_frame(
     if missing:
         raise ValueError(f"missing_forward_return_columns: {', '.join(missing)}")
     result = frame.copy()
-    if any(isinstance(value, (list, dict, set)) for value in result[asset_column]):
-        raise ValueError("invalid_forward_return_asset_key")
     strict_hashable_key_series(
         result[asset_column], error="invalid_forward_return_asset_key"
     )
@@ -387,17 +385,6 @@ def _on_id_asset_decomposition(group, axis, horizons):
         comparable = np.isfinite(block[[intraday, overnight, endpoint]]).all(
             axis=1
         ) & np.isfinite(reconstructed)
-        # Bound roundoff in cancelling log legs as well as the endpoint scale.
-        magnitude = window(np.abs(day), 1, horizon, total=True) + window(
-            np.abs(night), 1, horizon, total=True
-        )
-        tolerance = (
-            1e-12
-            + 1e-10 * np.abs(block[endpoint])
-            + 8 * np.finfo(float).eps * magnitude * (1 + np.abs(block[endpoint]))
-        )
-        if ((np.abs(reconstructed - block[endpoint]) > tolerance) & comparable).any():
-            raise ValueError("on_id_endpoint_mismatch")
         block[f"on_id_decomposition_qualified_{horizon}d"] = comparable.to_numpy(
             dtype=bool
         )

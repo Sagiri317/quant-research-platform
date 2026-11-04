@@ -1,4 +1,6 @@
-"""Common factor dispatch and dependency-window calculations."""
+"""Dispatch selected factor calculations and determine their required historical
+windows.
+"""
 
 from __future__ import annotations
 

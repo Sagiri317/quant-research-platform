@@ -1,4 +1,4 @@
-"""A-share PIT financial facts; factor mathematics lives in ``research``."""
+"""Build point-in-time financial events from reports and disclosure timestamps."""
 
 from __future__ import annotations
 

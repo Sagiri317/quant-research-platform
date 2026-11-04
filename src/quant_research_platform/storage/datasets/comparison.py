@@ -1,4 +1,4 @@
-"""Dataset comparison implementation."""
+"""Compare selected schemas, primary-key domains, and persisted values exactly."""
 
 from __future__ import annotations
 
@@ -57,8 +57,8 @@ def compare_datasets(
         same_schema = (
             left_context.logical_columns == right_context.logical_columns
             and left_schema == right_schema
-            and key_columns == tuple(right_context.spec["primary_key"])
         )
+        same_keys = key_columns == tuple(right_context.spec["primary_key"])
         index = ExactPrimaryKeyIndex(primary_key=key_columns)
         changed = 0
 
@@ -99,7 +99,7 @@ def compare_datasets(
                         columns, spec=context.spec, time_window=context.time_window
                     ),
                     batch_rows=DEFAULT_BATCH_ROWS,
-                    batch_observer=index_batch if same_schema else None,
+                    batch_observer=index_batch if same_schema and same_keys else None,
                 )
             ) as batches:
                 for path, frame in batches:
@@ -132,15 +132,11 @@ def compare_datasets(
             key: {"left": left[key], "right": right[key]}
             for key in ("schema_hash", "row_count", "key_columns")
         }
-        if (
-            left["schema_hash"] != right["schema_hash"]
-            or left_context.logical_columns != right_context.logical_columns
-            or left_schema != right_schema
-        ):
+        if not same_schema:
             status = "SCHEMA_MISMATCH"
         elif left["row_count"] != right["row_count"]:
             status = "ROW_COUNT_MISMATCH"
-        elif left["key_columns"] != right["key_columns"]:
+        elif not same_keys:
             status = "KEY_MISMATCH"
         else:
             missing, extra = index.difference_counts(

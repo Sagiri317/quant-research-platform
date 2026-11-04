@@ -3,6 +3,7 @@
 import pandas as pd
 import pytest
 
+import quant_research_platform.research.portfolios.daily as daily
 from quant_research_platform.artifacts.portfolio_ledger import (
     read_portfolio_ledger_artifact,
     write_portfolio_ledger_artifact,
@@ -21,7 +22,6 @@ from quant_research_platform.contracts.portfolios import (
 )
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share import portfolio_sessions
-from quant_research_platform.research.portfolios import production
 from quant_research_platform.research.portfolios.accounting import EquityEntitlements
 from quant_research_platform.research.portfolios.attribution import (
     HoldingFactorInputs,
@@ -139,7 +139,7 @@ def test_active_share_recovery_requires_terminated_holder_entitlement(tmp_path):
             stock_master_root=layout["stock_master"],
             equity_events_root=layout["equity_events"],
             panel_root=roots["market_panel_1d"],
-            panel_columns=production._PANEL_COLUMNS,
+            panel_columns=daily._PANEL_COLUMNS,
             calendar=calendar,
             time_window=TimeWindow("2022-12-30", "2023-01-06"),
         )

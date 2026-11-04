@@ -594,10 +594,10 @@ def test_explicit_native_fit_prediction_and_backtest_roundtrip(
     )
     assert ledger.metadata["selection_mode"] == selection_mode
     if selection_mode == "retrospective":
+        from quant_research_platform.artifacts.portfolio_curve import portfolio_curve
         from quant_research_platform.artifacts.statistics import (
             read_statistics_artifact,
         )
-        from quant_research_platform.interfaces.queries import portfolio_curve
         from quant_research_platform.research.portfolios.diagnostics import (
             portfolio_statistics,
         )

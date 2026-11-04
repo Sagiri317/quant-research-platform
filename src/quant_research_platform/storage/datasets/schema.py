@@ -1,4 +1,6 @@
-"""Dataset schema, metadata, and payload validation helpers."""
+"""Validate dataset declarations and convert between logical pandas and Arrow
+schemas.
+"""
 
 from __future__ import annotations
 
@@ -414,7 +416,7 @@ def _promote_compatible_logical_dtype(
 def pandas_dtype_overrides_from_logical_payload(
     payload: Mapping[str, Any], *, columns: tuple[str, ...]
 ) -> dict[str, object]:
-    """Construct pandas dtypes from an already admitted logical declaration."""
+    """Construct pandas dtypes from a validated logical declaration."""
     selected = set(columns)
     result: dict[str, object] = {}
     for descriptor in payload["columns"]:

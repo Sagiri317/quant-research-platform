@@ -1,4 +1,4 @@
-"""Small immutable tuple-backed catalog base."""
+"""Store ordered catalog entries immutably; subclasses validate their identities."""
 
 from __future__ import annotations
 

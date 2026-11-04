@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import quant_research_platform.research.portfolios.daily as daily
 from quant_research_platform.artifacts.portfolio_ledger import (
     read_portfolio_ledger_artifact,
     write_portfolio_ledger_artifact,
@@ -31,11 +32,7 @@ from quant_research_platform.markets.implementations.a_share.execution import (
     fee_schedule_from_frame,
     prepare_trade_cost,
 )
-from quant_research_platform.research.portfolios import (
-    accounting,
-    calibration,
-    production,
-)
+from quant_research_platform.research.portfolios import accounting, calibration
 from quant_research_platform.research.portfolios.accounting import (
     ResearchValuationMarks,
     execute_stock_target,
@@ -101,7 +98,7 @@ def test_enhanced_decision_requires_history_for_current_industry_domain() -> Non
     )
 
     def decision():
-        return production._enhanced_decision(
+        return daily._enhanced_decision(
             benchmark_weights=pd.Series(1 / len(cross), index=cross.asset_id),
             alpha=pd.Series(0.0, index=cross.asset_id),
             factor_risk=state,
@@ -166,7 +163,7 @@ def _build_producer(
     candidate: PortfolioCandidateSpec | None = None,
     prediction_window: TimeWindow | None = None,
     final_calibrations=None,
-    frozen_calibration: production.AlphaCalibration | None = None,
+    frozen_calibration: daily.AlphaCalibration | None = None,
     typed_batches: bool = False,
     construction: str = "quantile_equal_weight",
     identity_overrides=None,
@@ -271,7 +268,7 @@ def _build_producer(
                 )
             return iter((selected.copy(),))
         if target_id == "fee":
-            assert columns == production._FEE_COLUMNS
+            assert columns == daily._FEE_COLUMNS
             assert time_window is None
             return fee_frame.copy()
         if target_id == "calendar":
@@ -368,10 +365,10 @@ def _build_producer(
     )
     monkeypatch.setattr(market_sessions, "_portfolio_session_evidence", source_evidence)
     monkeypatch.setattr(market_sessions, "open_dataset_session", input_session)
-    monkeypatch.setattr(production, "open_dataset_session", input_session)
+    monkeypatch.setattr(daily, "open_dataset_session", input_session)
     monkeypatch.setattr(dataset_reading, "iter_dataset_file_batches", file_batches)
     monkeypatch.setattr(
-        production,
+        daily,
         "materialize_dataset_session",
         lambda session: fake_read_dataset(
             session.root, columns=session.logical_columns
@@ -387,7 +384,7 @@ def _build_producer(
     )
 
     def output():
-        chunks = production.backtest_a_share(
+        chunks = daily.backtest_a_share(
             candidate=candidate,
             inputs={
                 "dataset": roots["dataset"],
@@ -553,8 +550,8 @@ def test_benchmark_stream_keeps_future_snapshot_across_missing_sessions(monkeypa
         finally:
             observed.append("closed")
 
-    monkeypatch.setattr(production, "_iter_input_sessions", snapshots)
-    weights = list(production._iter_benchmark_weights(None, "csi500", sessions))
+    monkeypatch.setattr(daily, "_iter_input_sessions", snapshots)
+    weights = list(daily._iter_benchmark_weights(None, "csi500", sessions))
     assert [item.empty for item in weights] == [True, False, True, False, True]
     for item in (weights[1], weights[3]):
         np.testing.assert_array_equal(item.to_numpy(), [0.25, 0.75])
@@ -749,7 +746,7 @@ def test_enhanced_holdout_reads_research_sessions_from_prediction_start(
         benchmark_id="csi500",
         risk_style_columns=RISK_STYLE_COLUMNS,
     )
-    calibration = production.AlphaCalibration(
+    calibration = daily.AlphaCalibration(
         slope=1.0,
         intercept=0.0,
         slope_standard_error=1.0,
@@ -764,7 +761,7 @@ def test_enhanced_holdout_reads_research_sessions_from_prediction_start(
         undefined_reason=None,
     )
     risk_dates = []
-    observe_return_session = production.FactorRiskState.observe_return_session
+    observe_return_session = daily.FactorRiskState.observe_return_session
 
     def observe(state, frame, **kwargs):
         risk_dates.append(pd.Timestamp(frame.timestamp.iloc[0]))
@@ -773,8 +770,8 @@ def test_enhanced_holdout_reads_research_sessions_from_prediction_start(
     def reject_recalibration(*args, **kwargs):
         pytest.fail("holdout must retain its frozen alpha calibration")
 
-    monkeypatch.setattr(production.FactorRiskState, "observe_return_session", observe)
-    monkeypatch.setattr(production, "calibrate_expected_alpha", reject_recalibration)
+    monkeypatch.setattr(daily.FactorRiskState, "observe_return_session", observe)
+    monkeypatch.setattr(daily, "calibrate_expected_alpha", reject_recalibration)
     lookup = _PredictionLookup()
     final_calibrations = []
     chunks, _ = _build_producer(
@@ -884,13 +881,13 @@ def test_enhanced_membership_maintenance_keeps_explicit_benchmark_target(
         diagonal_shrinkage=0.2,
         annualization_factor=252.0,
     )
-    original_calibrate = production.calibrate_expected_alpha
+    original_calibrate = daily.calibrate_expected_alpha
     estimates = iter([None, risk, risk, risk])
     monkeypatch.setattr(
-        production.FactorRiskState, "estimate", lambda _self: next(estimates)
+        daily.FactorRiskState, "estimate", lambda _self: next(estimates)
     )
     monkeypatch.setattr(
-        production,
+        daily,
         "calibrate_expected_alpha",
         lambda *args, **kwargs: replace(
             original_calibrate(*args, **kwargs), undefined_reason=None, slope=0.01
@@ -900,7 +897,7 @@ def test_enhanced_membership_maintenance_keeps_explicit_benchmark_target(
     def reject_optimizer(*_args, **_kwargs):
         raise AssertionError("maintenance must execute its explicit benchmark target")
 
-    monkeypatch.setattr(production, "optimize_portfolio", reject_optimizer)
+    monkeypatch.setattr(daily, "optimize_portfolio", reject_optimizer)
     chunks, _calls = _build_producer(
         tmp_path,
         monkeypatch,
@@ -1055,7 +1052,7 @@ def _enhanced_inputs(monkeypatch):
     )
     frames["dataset"]["beta_252d"] = 1.0
     frames["dataset"]["residual_volatility_60d"] = 0.1
-    monkeypatch.setattr(production.FactorRiskState, "estimate", lambda self: risk)
+    monkeypatch.setattr(daily.FactorRiskState, "estimate", lambda self: risk)
     candidate = PortfolioCandidateSpec(
         selection_group="global",
         prediction_selector="champion",
@@ -1077,7 +1074,7 @@ def test_enhanced_calibration_excludes_research_marks(tmp_path, monkeypatch):
         [gap, endpoint_gap]
     )
     frames["panel"].loc[mask, ["open", "close"]] = np.nan
-    actual = production._completed_calibration_rows
+    actual = daily._completed_calibration_rows
     checked = {"entry": False, "endpoint": False}
 
     def observe(pending, panel):
@@ -1089,7 +1086,7 @@ def test_enhanced_calibration_excludes_research_marks(tmp_path, monkeypatch):
             checked["entry"] = True
         return actual(pending, panel)
 
-    monkeypatch.setattr(production, "_completed_calibration_rows", observe)
+    monkeypatch.setattr(daily, "_completed_calibration_rows", observe)
     chunks, _calls = _build_producer(
         tmp_path,
         monkeypatch,
@@ -1131,14 +1128,14 @@ def test_enhanced_calibration_keeps_suspended_weekly_endpoints(tmp_path, monkeyp
     panel.loc[suspended, "is_trading"] = False
     panel.loc[suspended, "amount"] = 0.0
     completed = []
-    original = production._completed_calibration_rows
+    original = daily._completed_calibration_rows
 
     def observe(pending, endpoint):
         rows = original(pending, endpoint)
         completed.extend(rows)
         return rows
 
-    monkeypatch.setattr(production, "_completed_calibration_rows", observe)
+    monkeypatch.setattr(daily, "_completed_calibration_rows", observe)
     final = []
     chunks, _ = _build_producer(
         tmp_path,
@@ -1196,16 +1193,16 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
     )
 
     solver_results = []
-    actual_optimize = production.optimize_portfolio
+    actual_optimize = daily.optimize_portfolio
 
     def observe_optimizer(*args, **kwargs):
         result = actual_optimize(*args, **kwargs)
         solver_results.append(result)
         return result
 
-    monkeypatch.setattr(production, "optimize_portfolio", observe_optimizer)
+    monkeypatch.setattr(daily, "optimize_portfolio", observe_optimizer)
     observed = []
-    actual_build = production._build_session
+    actual_build = daily._build_session
 
     def observe_decision(**kwargs):
         result = actual_build(**kwargs)
@@ -1264,7 +1261,7 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
             )
         return result
 
-    monkeypatch.setattr(production, "_build_session", observe_decision)
+    monkeypatch.setattr(daily, "_build_session", observe_decision)
     chunks, _calls = _build_producer(
         tmp_path,
         monkeypatch,
@@ -1365,7 +1362,7 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
         observed[0][4], observed[1][4], check_exact=False, rtol=2e-12, atol=1e-14
     )
     with monkeypatch.context() as patch:
-        patch.setattr(production, "_build_session", actual_build)
+        patch.setattr(daily, "_build_session", actual_build)
         initial, _ = _build_producer(
             tmp_path / "initial",
             patch,
@@ -1389,7 +1386,7 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
                 first_active.asset_id.eq("__cash__"), "decision_skip_reason"
             ].item()
         )
-        original_calibrate = production.calibrate_expected_alpha
+        original_calibrate = daily.calibrate_expected_alpha
         calibrations = {}
 
         def bounded_calibrate(frame, **kwargs):
@@ -1402,7 +1399,7 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
             calibrations[pd.Timestamp(kwargs["as_of"])] = calibrated
             return calibrated
 
-        patch.setattr(production, "calibrate_expected_alpha", bounded_calibrate)
+        patch.setattr(daily, "calibrate_expected_alpha", bounded_calibrate)
         lookup = _PredictionLookup()
         short, _ = _build_producer(
             tmp_path / "short",
@@ -1429,7 +1426,7 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
         )
     completed = []
     primary = KeyboardInterrupt("calibration_state_interrupted")
-    actual_complete = production._completed_calibration_rows
+    actual_complete = daily._completed_calibration_rows
 
     def observed_completion(*args, **kwargs):
         rows = actual_complete(*args, **kwargs)
@@ -1440,8 +1437,8 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
         return rows
 
     with monkeypatch.context() as patch:
-        patch.setattr(production, "_build_session", actual_build)
-        patch.setattr(production, "_completed_calibration_rows", observed_completion)
+        patch.setattr(daily, "_build_session", actual_build)
+        patch.setattr(daily, "_completed_calibration_rows", observed_completion)
         failing, _ = _build_producer(
             tmp_path / "interrupt",
             patch,
@@ -1476,7 +1473,7 @@ def test_optimizer_assets_keep_residual_cash_as_explicit_current_weight(
             },
         }
     )
-    result = production._optimizer_assets(
+    result = daily._optimizer_assets(
         benchmark_weights=pd.Series(0.5, index=assets[:2]),
         current_weights=pd.Series(
             [0.4, 0.4, 0.1] if removed_member else [0.45, 0.45], index=assets
@@ -1501,7 +1498,7 @@ def test_optimizer_assets_keep_residual_cash_as_explicit_current_weight(
         old = result.set_index("asset_id").loc["old"]
         assert old.current_weight == pytest.approx(0.1)
         assert old.benchmark_weight == 0.0
-        optimized = production.optimize_portfolio(
+        optimized = daily.optimize_portfolio(
             result.assign(is_financial=False),
             factor_covariance=pd.DataFrame(
                 np.eye(len(RISK_STYLE_COLUMNS)) * 0.01,
@@ -1514,7 +1511,7 @@ def test_optimizer_assets_keep_residual_cash_as_explicit_current_weight(
                 np.zeros_like(buys),
                 np.zeros_like(sells),
             ),
-            config=production.OptimizerConfig(),
+            config=daily.OptimizerConfig(),
             nav=100.0,
             assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 0.05, (0.05,)),
             eligibility_column="eligible",
@@ -1572,14 +1569,14 @@ def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
         0.2,
         252.0,
     )
-    enhanced = production._EnhancedDecision(
+    enhanced = daily._EnhancedDecision(
         pd.Series({"a": 0.5, "b": 0.5}),
         alpha,
         pd.DataFrame(
             {"asset_id": ["a", "b"], "industry_CSRC2012:A01": 1.0, "style": [0.1, -0.1]}
         ),
         risk,
-        production.AlphaCalibration(
+        daily.AlphaCalibration(
             1.0, 0.0, 1.0, 1.0, 0.5, -1.0, 1.0, 0.0, 1.0, 6, 6, None
         ),
     )
@@ -1598,30 +1595,30 @@ def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
     )
 
     solver_results = []
-    actual_optimize = production.optimize_portfolio
+    actual_optimize = daily.optimize_portfolio
 
     def observe_optimizer(*args, **kwargs):
         result = actual_optimize(*args, **kwargs)
         solver_results.append(result)
         return result
 
-    monkeypatch.setattr(production, "optimize_portfolio", observe_optimizer)
+    monkeypatch.setattr(daily, "optimize_portfolio", observe_optimizer)
 
     def build():
-        return production._build_session(
+        return daily._build_session(
             candidate=candidate,
             decision_timestamp=pd.Timestamp("2023-01-06"),
             next_timestamp=pd.Timestamp("2023-01-09"),
-            panel=production._portfolio_session_frame(
-                at_date(panel, "2023-01-06"), production._ENHANCED_PANEL_COLUMNS
+            panel=daily._portfolio_session_frame(
+                at_date(panel, "2023-01-06"), daily._ENHANCED_PANEL_COLUMNS
             ),
             next_panel=at_date(panel, "2023-01-09"),
             endpoint_panel=at_date(panel, "2023-01-10"),
             closed_assets=frozenset(),
-            dataset=production._portfolio_session_frame(
-                at_date(frames["dataset"], "2023-01-06"), production._DATASET_COLUMNS
+            dataset=daily._portfolio_session_frame(
+                at_date(frames["dataset"], "2023-01-06"), daily._DATASET_COLUMNS
             ),
-            execution=production._portfolio_session_frame(
+            execution=daily._portfolio_session_frame(
                 at_date(frames["execution"], "2023-01-06"),
                 market_sessions._EXECUTION_COLUMNS,
             ).assign(execution_at=pd.Timestamp("2023-01-09")),
@@ -1654,7 +1651,7 @@ def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
         def fail_optimizer(*args, **kwargs):
             raise ValueError(optimizer_error)
 
-        monkeypatch.setattr(production, "optimize_portfolio", fail_optimizer)
+        monkeypatch.setattr(daily, "optimize_portfolio", fail_optimizer)
         if optimizer_error == "optimizer_trade_adv_unavailable":
             account, _adv, optimized, delta, snapshot = build()
             assert optimized is None
@@ -1995,7 +1992,7 @@ def test_multiple_unquoted_sessions_native_roundtrip_and_absolute_nav_stresses(
             produce=produce,
         )
         ledgers[candidate.candidate_id] = read_portfolio_ledger_artifact(owned_root)
-    intervals = production.holding_intervals(
+    intervals = daily.holding_intervals(
         pd.bdate_range(window.start, window.end), window
     )
     holding_inputs = [
@@ -2325,7 +2322,7 @@ def test_enhanced_risk_fits_styles_on_eligible_and_retains_ineligible_asset_axis
     )
 
     def decide(frame):
-        return production._enhanced_decision(
+        return daily._enhanced_decision(
             benchmark_weights=pd.Series(1 / 120, index=assets[:120]),
             alpha=pd.Series(0.0, index=assets),
             factor_risk=state,
@@ -2435,7 +2432,7 @@ def test_risk_cross_uses_all_a_facts_and_persisted_styles():
             "residual_volatility_60d": [0.01, 0.02],
         }
     )
-    cross = production._enhanced_risk_cross(
+    cross = daily._enhanced_risk_cross(
         panel=panel,
         risk_frames=[facts],
         style_columns=("beta_252d", "residual_volatility_60d"),
@@ -2443,7 +2440,7 @@ def test_risk_cross_uses_all_a_facts_and_persisted_styles():
     assert cross.eligible.tolist() == [True, True]
     assert cross.beta_252d.tolist() == [0.25, 1.5]
     panel.loc[1, "is_st"] = True
-    assert production._enhanced_risk_cross(
+    assert daily._enhanced_risk_cross(
         panel=panel, risk_frames=[facts], style_columns=("beta_252d",)
     ).eligible.tolist() == [True, False]
 
@@ -2645,14 +2642,14 @@ def test_final_alpha_includes_last_mature_session_and_persists_without_fake_trad
         risk_style_columns=RISK_STYLE_COLUMNS,
     )
     observed = []
-    original = production.calibrate_expected_alpha
+    original = daily.calibrate_expected_alpha
 
     def calibrate(frame, **kwargs):
         result = original(frame, **kwargs)
         observed.append((pd.Timestamp(kwargs["as_of"]), result))
         return result
 
-    monkeypatch.setattr(production, "calibrate_expected_alpha", calibrate)
+    monkeypatch.setattr(daily, "calibrate_expected_alpha", calibrate)
     final = []
     chunks, _ = _build_producer(
         tmp_path,
@@ -2772,9 +2769,7 @@ def test_enhanced_risk_scaler_uses_complete_known_industry_domain(extra_style):
     from quant_research_platform.research.portfolios.calibration import (
         AlphaCalibration,
     )
-    from quant_research_platform.research.portfolios.production import (
-        _enhanced_decision,
-    )
+    from quant_research_platform.research.portfolios.daily import _enhanced_decision
     from quant_research_platform.research.risk import (
         FactorRiskConfig,
     )
@@ -2882,7 +2877,7 @@ def test_amount_history_records_invalid_amounts_as_unknown(invalid):
         }
     )
     history = {}
-    production._update_amount_history(panel, history, frozenset(), frozenset())
+    daily._update_amount_history(panel, history, frozenset(), frozenset())
     assert np.isnan(history[("unrelated", pd.Timestamp("2000-01-01"))][0])
 
 
@@ -2890,7 +2885,7 @@ def test_amount_history_keeps_unknown_session_until_it_leaves_adv_window():
     history = {}
     for index in range(40):
         amount = np.nan if index == 20 else 1000.0
-        production._update_amount_history(
+        daily._update_amount_history(
             pd.DataFrame(
                 {
                     "listing_date": pd.Timestamp("2000-01-01"),
@@ -2906,7 +2901,7 @@ def test_amount_history_keeps_unknown_session_until_it_leaves_adv_window():
         if index >= 20:
             assert len(history[("unrelated", pd.Timestamp("2000-01-01"))]) == 20
             assert np.isnan(np.mean(history[("unrelated", pd.Timestamp("2000-01-01"))]))
-    production._update_amount_history(
+    daily._update_amount_history(
         pd.DataFrame(
             {
                 "listing_date": pd.Timestamp("2000-01-01"),
@@ -3041,7 +3036,7 @@ def test_empty_selection_executes_zero_target_without_bypassing_market_facts(
     dataset["feature_x"] = np.nan if empty_reason == "missing_prediction" else 1.0
     dataset["eligible"] = empty_reason != "ineligible"
     lookup = _PredictionLookup(missing=True)
-    alpha = production._prediction_alpha(dataset, lookup)
+    alpha = daily._prediction_alpha(dataset, lookup)
     assert len(lookup.matched) == len(dataset)
     candidate = PortfolioCandidateSpec(
         selection_group="global",
@@ -3106,7 +3101,7 @@ def test_empty_selection_executes_zero_target_without_bypassing_market_facts(
     kwargs["held_units"] = kwargs["holdings"] / kwargs["panel"].set_index(
         "asset_id"
     ).close.reindex(kwargs["holdings"].index)
-    account, _adv, _optimization, _delta, snapshot = production._build_session(**kwargs)
+    account, _adv, _optimization, _delta, snapshot = daily._build_session(**kwargs)
     ledger = account.asset_ledger
     if empty_reason == "missing_prediction":
         assert ledger.executed_delta_notional.eq(0.0).all()
@@ -3159,7 +3154,7 @@ def test_nonempty_selection_still_requires_valid_predictions(problem):
         ValueError,
         match="portfolio_prediction_values_invalid",
     ):
-        production._prediction_alpha(frame, Lookup())
+        daily._prediction_alpha(frame, Lookup())
 
 
 @pytest.mark.parametrize(
@@ -3505,14 +3500,14 @@ def test_unheld_scoring_asset_calibration_binds_signal_entry_and_completion(
             return values, found
 
     completed = {}
-    original = production._completed_calibration_rows
+    original = daily._completed_calibration_rows
 
     def observe(pending, panel):
         rows = original(pending, panel)
         completed[pending[2]] = rows
         return rows
 
-    monkeypatch.setattr(production, "_completed_calibration_rows", observe)
+    monkeypatch.setattr(daily, "_completed_calibration_rows", observe)
     chunks, _ = _build_producer(
         tmp_path / "input",
         monkeypatch,
@@ -3575,12 +3570,12 @@ def test_adv_history_restarts_for_new_listing_but_survives_same_life_closure():
     history = {}
     panel = pd.DataFrame({"asset_id": ["asset"], "listing_date": old, "amount": 10.0})
     for _ in range(20):
-        production._update_amount_history(panel, history, frozenset(), frozenset())
-    production._update_amount_history(
+        daily._update_amount_history(panel, history, frozenset(), frozenset())
+    daily._update_amount_history(
         panel.iloc[:0], history, frozenset({"asset"}), frozenset()
     )
     assert len(history[("asset", old)]) == 20
-    production._update_amount_history(
+    daily._update_amount_history(
         panel.assign(listing_date=new, amount=100.0),
         history,
         frozenset(),
@@ -3743,10 +3738,10 @@ def test_cancelled_life_stale_quote_cannot_revive_rights_or_execution():
     first = marks.project(cancelled)
     later = marks.project(mark_view("2023-01-06", 14.0, 15.0))
     assert first.open.iloc[0] == later.open.iloc[0] == 0.0
-    assert production._unquoted_assets(later) == frozenset({"a"})
+    assert daily._unquoted_assets(later) == frozenset({"a"})
     new_life = marks.project(mark_view("2023-01-07", 20.0, 21.0, life="2023-01-07"))
     assert new_life.open.iloc[0] == 20.0
-    assert not production._unquoted_assets(new_life)
+    assert not daily._unquoted_assets(new_life)
 
 
 @pytest.mark.parametrize("corruption", ("known_adv", "complete_window", "fee", "trade"))
@@ -3824,7 +3819,7 @@ def test_persisted_adv_evidence_and_ledger_prerequisites_reject_fabrication(
 
 @pytest.mark.parametrize("cash", (0.0, 1e-15, 10.0))
 def test_optimizer_assets_always_include_actual_cash(cash):
-    frame = production._optimizer_assets(
+    frame = daily._optimizer_assets(
         benchmark_weights=pd.Series({"a": 1.0}),
         current_weights=pd.Series({"a": 1.0 - cash / 100.0}),
         cash=cash,
@@ -3847,27 +3842,27 @@ def test_adv_history_keeps_open_gap_and_resets_only_unknown_market():
     )
     history = {}
     for _ in range(20):
-        production._update_amount_history(panel, history, frozenset(), frozenset())
-    production._update_amount_history(panel.iloc[1:], history, frozenset(), frozenset())
+        daily._update_amount_history(panel, history, frozenset(), frozenset())
+    daily._update_amount_history(panel.iloc[1:], history, frozenset(), frozenset())
     assert len(history["a", life]) == 20
     assert np.isnan(history["a", life][-1])
     assert list(history["b", life]) == [200.0] * 20
     # Confirmed closures do not advance the missing-slot clock.
     before = list(history["a", life])
     for _ in range(3):
-        production._update_amount_history(
+        daily._update_amount_history(
             panel.iloc[1:], history, frozenset({"a"}), frozenset()
         )
     assert list(history["a", life])[:-1] == before[:-1]
     assert np.isnan(history["a", life][-1])
     for count in range(1, 21):
-        production._update_amount_history(panel, history, frozenset(), frozenset())
+        daily._update_amount_history(panel, history, frozenset(), frozenset())
         assert np.isnan(np.mean(history["a", life])) == (count < 20)
-    production._update_amount_history(panel, history, frozenset(), frozenset({"a"}))
+    daily._update_amount_history(panel, history, frozenset(), frozenset({"a"}))
     assert ("a", life) not in history
     assert list(history["b", life]) == [200.0] * 20
     for count in range(1, 21):
-        production._update_amount_history(panel, history, frozenset(), frozenset())
+        daily._update_amount_history(panel, history, frozenset(), frozenset())
         assert len(history["a", life]) == count
     assert list(history["a", life]) == [100.0] * 20
 
@@ -3965,7 +3960,7 @@ def test_nonoptimizer_target_reports_actual_risk_independently(branch, known_ris
     if branch == "maintenance":
         inputs["target_override"] = pd.Series({"a": 0.5, "b": 0.5})
         inputs["decision_reason"] = PORTFOLIO_DECISION_REASON_MAINTENANCE
-    account, _, optimization, _, ledger = production._build_session(**inputs)
+    account, _, optimization, _, ledger = daily._build_session(**inputs)
     assert optimization is None
     diagnostics = ledger.attrs["realized_constraints"]
     assert account.post_trade_cash == 0.0
@@ -4075,7 +4070,7 @@ def test_endpoint_conversion_requires_mark_for_received_shares(
     )
 
     def build_batch():
-        return production._ledger_batch(
+        return daily._ledger_batch(
             account=account,
             asset_ledger=account.asset_ledger,
             sequence=0,

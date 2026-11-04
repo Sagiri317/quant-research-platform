@@ -3,6 +3,7 @@
 import pandas as pd
 import pytest
 
+from quant_research_platform.artifacts.portfolio_curve import portfolio_curve
 from quant_research_platform.artifacts.portfolio_ledger import (
     write_portfolio_ledger_artifact,
 )
@@ -12,7 +13,6 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioLedgerBatch,
     PortfolioValuation,
 )
-from quant_research_platform.interfaces.queries import portfolio_curve
 
 
 def _published_curve(tmp_path):

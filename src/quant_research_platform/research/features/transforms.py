@@ -1,4 +1,4 @@
-"""Feature transform materialization for research datasets."""
+"""Transform eligible cross sections and preserve declared feature-observation masks."""
 
 from __future__ import annotations
 
@@ -85,7 +85,9 @@ def mask_unobserved_features(
 
 
 def model_input_validity_columns(input_columns, declared_columns):
-    """Own structural and direct-input validity for every model consumer."""
+    """Return structural and direct-input validity columns required by model
+    consumers.
+    """
     return tuple(
         dict.fromkeys(
             (

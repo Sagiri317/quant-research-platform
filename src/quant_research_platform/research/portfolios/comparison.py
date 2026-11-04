@@ -578,25 +578,25 @@ def comparison_tables(
                     else ""
                 )
                 roundoff = np.zeros(planned)
-                if {"start_nav", "end_nav"} <= set(selected):
-                    roundoff += _nav_return_roundoff(
-                        selected.start_nav, selected.end_nav, rp
+                sd = np.nan
+                if complete and planned >= 2:
+                    if {"start_nav", "end_nav"} <= set(selected):
+                        roundoff += _nav_return_roundoff(
+                            selected.start_nav, selected.end_nav, rp
+                        )
+                    if item["representation"] == "endpoint_level":
+                        levels = loaded[item["reference_id"]][0].set_index(
+                            item["timestamp_column"]
+                        )[item["value_column"]]
+                        roundoff += _nav_return_roundoff(
+                            levels.reindex(selected.start_at).to_numpy(),
+                            levels.reindex(selected.end_at).to_numpy(),
+                            rb,
+                        )
+                    roundoff += np.spacing(np.abs(differences))
+                    sd = float(
+                        return_standard_deviation(differences, roundoff=roundoff)
                     )
-                if item["representation"] == "endpoint_level" and complete:
-                    levels = loaded[item["reference_id"]][0].set_index(
-                        item["timestamp_column"]
-                    )[item["value_column"]]
-                    roundoff += _nav_return_roundoff(
-                        levels.reindex(selected.start_at).to_numpy(),
-                        levels.reindex(selected.end_at).to_numpy(),
-                        rb,
-                    )
-                roundoff += np.spacing(np.abs(differences))
-                sd = (
-                    float(return_standard_deviation(differences, roundoff=roundoff))
-                    if complete and planned >= 2
-                    else np.nan
-                )
                 values.update(
                     annualized_return_difference=float(np.mean(differences) * periods)
                     if complete and not annual_reason

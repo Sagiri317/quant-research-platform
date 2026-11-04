@@ -1,4 +1,4 @@
-"""Feature importance extraction for supervised model results."""
+"""Extract coefficient or native importance values with model input-column alignment."""
 
 from __future__ import annotations
 
