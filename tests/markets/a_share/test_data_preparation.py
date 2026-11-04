@@ -438,24 +438,17 @@ def test_public_expectations_window_preserves_fresh_preceding_forecasts(tmp_path
     )
 
 
-@pytest.mark.parametrize(
-    "dataset_ids", (("pv_all", "fusion_nf_core"), ("pv_expanded",))
-)
-def test_explicit_preparation_reaches_eligible_research_dataset(tmp_path, dataset_ids):
+def test_explicit_preparation_reaches_eligible_research_dataset(tmp_path):
     from quant_research_platform.research.datasets.assembler import assemble
     from quant_research_platform.research.protocols.a_share import (
         research_dataset_catalog,
     )
 
-    sessions = pd.bdate_range(
-        "2020-01-02", periods=600 if dataset_ids == ("pv_expanded",) else 400
-    ).as_unit("ns")
+    sessions = pd.bdate_range("2020-01-02", periods=600).as_unit("ns")
     frames = _synthetic_interim_frames(sessions)
-    if dataset_ids == ("pv_expanded",):
-        bars = frames["market_bars_1d"]
-        bars["period_return"] = np.sin(np.arange(len(bars)) / 3) * 0.01
-    if "fusion_nf_core" in dataset_ids:
-        frames.update(_synthetic_financial_frames())
+    bars = frames["market_bars_1d"]
+    bars["period_return"] = np.sin(np.arange(len(bars)) / 3) * 0.01
+    frames.update(_synthetic_financial_frames())
     inputs = _write_inputs(tmp_path / "source", frames)
     steps = [
         "market_panel_1d",
@@ -463,6 +456,7 @@ def test_explicit_preparation_reaches_eligible_research_dataset(tmp_path, datase
         "forward_returns",
     ]
     steps.append("market_model_factors")
+    steps.append("risk_residual_factors")
     for name in steps:
         inputs[name] = _prepare(
             tmp_path / "prepared", name, inputs, sessions[0], sessions[-1]
@@ -470,7 +464,7 @@ def test_explicit_preparation_reaches_eligible_research_dataset(tmp_path, datase
     # Keep native startup, mature, and label-missing branches with full history.
     witness_windows = (sessions[:1], sessions[-23:-20], sessions[-1:])
     # These two recipes consume identical published price/volume inputs.
-    for dataset_id in dataset_ids:
+    for dataset_id in ("pv_all", "fusion_nf_core"):
         if dataset_id == "fusion_nf_core":
             for name in ("fundamental_pit", "fundamental_factors"):
                 inputs[name] = _prepare(
@@ -532,7 +526,7 @@ def test_explicit_preparation_reaches_eligible_research_dataset(tmp_path, datase
         assert {"scenario_universe", "can_enter", "can_exit"}.isdisjoint(output)
         assert output.eligible.any()
         assert output.loc[output.eligible, "model_target"].notna().any()
-        if dataset_id == "pv_expanded":
+        if dataset_id == "pv_all":
             for name in (
                 "share_price",
                 "avg_amount_126d",

@@ -85,22 +85,6 @@ def test_pit_reference_check_accepts_owner_aliases_and_rejects_wrong_owner():
     )
 
 
-def test_configured_model_algorithms_use_the_single_capability_owner() -> None:
-    import json
-
-    from quant_research_platform.contracts.models import _MODEL_ALGORITHM_FACTS
-
-    root = Path(__file__).resolve().parents[2] / "docs" / "research-rosters"
-    configured = {
-        model["model_algorithm"]
-        for path in root.rglob("*.json")
-        for model in json.loads(path.read_text(encoding="utf-8"))["models"]
-    }
-    # A research roster may intentionally use only part of the library capability.
-    assert configured
-    assert configured <= set(_MODEL_ALGORITHM_FACTS)
-
-
 def _canonical_references(tree):
     bindings = {}
     for node in ast.walk(tree):

@@ -6,7 +6,6 @@ import pytest
 
 from quant_research_platform.contracts.portfolios import EQUITY_EVENT_COLUMNS
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.contracts.validation import decode_exact_numeric
 from quant_research_platform.markets.implementations.a_share import portfolio_sessions
 from quant_research_platform.research.portfolios import production
 from quant_research_platform.sources.prepare import prepare_source
@@ -92,12 +91,9 @@ def test_equity_event_raw_to_persisted_normalization_preserves_units_and_dates(
     frame = read_dataset(result.artifact_roots["a_share_equity_events"]).set_index(
         "event_id"
     )
-    assert decode_exact_numeric(frame.loc["quote-1", "value_per_old_unit"]) == 2.5
-    assert decode_exact_numeric(frame.loc["cash", "value_per_old_unit"]) == 3.0
-    assert (
-        decode_exact_numeric(frame.loc["convert", "successor_units_per_old_unit"])
-        == 0.5
-    )
+    assert frame.loc["quote-1", "value_per_old_unit"] == 2.5
+    assert frame.loc["cash", "value_per_old_unit"] == 3.0
+    assert frame.loc["convert", "successor_units_per_old_unit"] == 0.5
     assert frame.timestamp.eq(pd.Timestamp("2023-01-04")).all()
     assert frame.effective_at.eq(pd.Timestamp("2023-01-03")).all()
     assert frame.observed_at.eq(pd.Timestamp("2026-10-13")).all()
@@ -268,8 +264,7 @@ def test_calendar_coalesced_rights_events_do_not_use_event_id_as_order(tmp_path)
         list(source)
 
 
-def test_source_exact_event_values_preserve_cash_and_conversion_units(tmp_path):
-    from fractions import Fraction
+def test_source_numeric_values_preserve_cash_and_conversion_units(tmp_path):
 
     raw = tmp_path / "raw"
 
@@ -300,35 +295,12 @@ def test_source_exact_event_values_preserve_cash_and_conversion_units(tmp_path):
     frame = read_dataset(imported.artifact_roots["a_share_equity_events"]).set_index(
         "event_id"
     )
-    quote = decode_exact_numeric(frame.loc["quote-1", "value_per_old_unit"])
-    multiplier = decode_exact_numeric(
-        frame.loc["conversion", "successor_units_per_old_unit"]
-    )
-    assert quote == Fraction(30.01)
-    assert multiplier == Fraction(1.25)
-    assert float(Fraction(1) / quote * quote) == 1.0
-    assert Fraction(1) / multiplier * multiplier == 1
-
-
-def test_per_share_integer_does_not_round_before_exact_normalization(tmp_path):
-    raw = tmp_path / "raw"
-    shares = 2**53 + 1
-    write_equity_source(
-        raw,
-        events=lambda base: [dict(base, amount_per_share=shares)],
-    )
-    imported = interim.materialize_interim_data(
-        output_roots={
-            key: StorageLayout(tmp_path).interim_data_root("reference", key)
-            for key in ("a_share_equity_events",)
-        },
-        raw_root=raw,
-        data_ids=("a_share_equity_events",),
-    )
-    value = read_dataset(
-        imported.artifact_roots["a_share_equity_events"]
-    ).value_per_old_unit.iloc[0]
-    assert decode_exact_numeric(value) == shares
+    quote = frame.loc["quote-1", "value_per_old_unit"]
+    multiplier = frame.loc["conversion", "successor_units_per_old_unit"]
+    assert quote == 30.01
+    assert multiplier == 1.25
+    assert frame.value_per_old_unit.dtype == "float64"
+    assert frame.successor_units_per_old_unit.dtype == "float64"
 
 
 def test_observation_timezone_does_not_confuse_chinese_publication_date(tmp_path):
@@ -386,7 +358,7 @@ def test_equity_window_selects_before_business_interpretation(
     assert baseline.event_id.tolist() == ["quote-1"]
     assert baseline.timestamp.tolist() == [pd.Timestamp("2023-01-04")]
     assert baseline.observed_at.tolist() == [pd.Timestamp("2026-10-13")]
-    assert decode_exact_numeric(baseline.value_per_old_unit.iloc[0]) == 2.5
+    assert baseline.value_per_old_unit.iloc[0] == 2.5
 
     root = write_equity_source(
         raw,
@@ -735,7 +707,5 @@ def test_explicit_ordinary_holder_share_change_uses_same_lifecycle_without_price
         events, pd.Series(pd.to_datetime(["2023-01-04"])), stocks, {}
     )
     assert qualified.entitlement_proved.all()
-    assert (
-        decode_exact_numeric(qualified.remaining_old_units_per_old_unit.iloc[0]) == 0.16
-    )
+    assert qualified.remaining_old_units_per_old_unit.iloc[0] == 0.16
     assert "shares_per_old_unit" not in qualified

@@ -5,7 +5,6 @@ from __future__ import annotations
 from bisect import bisect_right
 from contextlib import ExitStack
 from dataclasses import dataclass, field
-from fractions import Fraction
 
 import numpy as np
 import pandas as pd
@@ -19,7 +18,6 @@ from quant_research_platform.contracts.portfolios import (
 )
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import (
-    decode_exact_numeric,
     strict_real_numeric_series,
 )
 from quant_research_platform.markets.implementations.a_share.calendar import (
@@ -79,6 +77,7 @@ CORPORATE_ACTION_POLICY = {
     "before_ex_cash_payment_date": "ex_date_open",
     "voluntary_subscription": "none",
     "stock_distribution_availability": "source_settlement_date_or_locked",
+    "fractional_share_policy": "floor_per_event_research_approximation",
 }
 
 
@@ -209,14 +208,6 @@ def iter_portfolio_sessions(
         if rights_session is not None
         else pd.DataFrame(columns=EQUITY_EVENT_COLUMNS)
     )
-    for column in (
-        "value_per_old_unit",
-        "remaining_old_units_per_old_unit",
-        "successor_units_per_old_unit",
-    ):
-        rights[column] = rights[column].map(
-            lambda value: None if pd.isna(value) else decode_exact_numeric(value)
-        )
     if rights.timestamp.isna().any():
         raise ValueError("equity_event_timestamp_invalid")
     rights["entitlement_proved"] = True
@@ -691,7 +682,7 @@ def _corporate_action_events(source, stocks, calendar):
         )
         cash, shares = None, None
         if event.kind == "CA":
-            cash = Fraction(amount) if finite else None
+            cash = float(amount) if finite else None
             # shortcut: Use ex-open until missing/pre-ex payment dates are verified.
             if not settlement_unresolved and (
                 pd.isna(settlement) or settlement < effective
@@ -699,7 +690,7 @@ def _corporate_action_events(source, stocks, calendar):
                 settlement = effective
             proved &= pd.notna(settlement) and settlement >= effective
         elif event.kind == "SD":
-            shares = Fraction(amount) if finite and amount >= 0 else None
+            shares = float(amount) if finite and amount >= 0 else None
             # Sentinel/pre-ex dates do not prove a tradable-share release.
             if pd.notna(settlement) and settlement < effective:
                 settlement = pd.NaT

@@ -1,7 +1,6 @@
 """Amount-ledger recovery and undefined rate persistence after total loss."""
 
 from dataclasses import replace
-from fractions import Fraction
 
 import pandas as pd
 import pytest
@@ -25,10 +24,12 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioValuation,
 )
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.research.portfolios.attribution import (
+    HoldingFactorInputs,
+)
 from quant_research_platform.research.portfolios.diagnostics import (
     _portfolio_statistics_tables,
 )
-from quant_research_platform.research.portfolios.risk import HoldingFactorInputs
 from tests.helpers.statistics_artifacts import (
     portfolio_statistics_config,
     statistics_metadata,
@@ -69,8 +70,8 @@ def test_zero_nav_rights_recovery_persists_amounts_and_undefined_returns(
                     stamp,
                     "asset",
                     phase,
-                    Fraction(quantity),
-                    float(Fraction(quantity) * Fraction(price)),
+                    float(quantity),
+                    float(float(quantity) * float(price)),
                     price,
                     lifecycle_id="2000-01-01",
                 )
@@ -98,7 +99,7 @@ def test_zero_nav_rights_recovery_persists_amounts_and_undefined_returns(
             )
         )
         trades = (
-            (ExecutedTrade("buy", "buy", at, "asset", Fraction(100), initial),)
+            (ExecutedTrade("buy", "buy", at, "asset", float(100), initial),)
             if sequence == 0
             else ()
         )
@@ -475,114 +476,6 @@ def test_zero_value_retained_units_are_counted_in_valuation_diagnostics():
     assert pd.isna(result["estimated_weight_end"])
 
 
-@pytest.mark.parametrize(
-    "value", [0.0, -0.0, 1.5, float.fromhex("0x0.0000000000001p-1022")]
-)
-def test_float_quantity_encoding_preserves_other_market_type_and_bits(value):
-    from quant_research_platform.contracts.validation import (
-        decode_exact_numeric,
-        encode_exact_numeric,
-    )
-
-    restored = decode_exact_numeric(encode_exact_numeric(value))
-    assert type(restored) is float
-    assert restored.hex() == value.hex()
-
-
-@pytest.mark.parametrize(
-    "encoded",
-    ["q:0x2/0x4", "q:0x0/0x2", "q:0x1/-0x2", "q:0x01/0x2", "f:1.0", "1.0", None],
-)
-def test_quantity_encoding_rejects_noncanonical_persistence(encoded):
-    from quant_research_platform.contracts.validation import decode_exact_numeric
-
-    with pytest.raises(ValueError, match="exact_numeric_encoding_invalid"):
-        decode_exact_numeric(encoded)
-
-
-def test_fractional_quantity_native_amount_ledger(tmp_path):
-    from fractions import Fraction
-
-    from quant_research_platform.contracts.validation import (
-        decode_exact_numeric,
-        encode_exact_numeric,
-    )
-
-    mark = Fraction(3, 100)
-    quantity = Fraction(1, 1) / Fraction(mark)
-    assert decode_exact_numeric(encode_exact_numeric(quantity)) == quantity
-    valuations = tuple(
-        row
-        for phase in ("before", "after", "end")
-        for row in (
-            PortfolioValuation(
-                1 if phase == "end" else 0,
-                "asset",
-                phase,
-                Fraction() if phase == "before" else quantity,
-                0.0 if phase == "before" else 1.0,
-                mark,
-            ),
-            PortfolioValuation(
-                1 if phase == "end" else 0,
-                "__cash__",
-                phase,
-                1.0 if phase == "before" else 0.0,
-                1.0 if phase == "before" else 0.0,
-            ),
-        )
-    )
-    batch = PortfolioLedgerBatch(
-        0,
-        (ExecutedTrade("buy", "buy", 0, "asset", quantity, 1.0),),
-        (PortfolioCashFlow("principal", 0, "asset", "buy", "principal", -1.0),),
-        valuations,
-        (
-            PortfolioDiagnostic(
-                "__cash__", None, "decision_reason", text="simple_rule"
-            ),
-            PortfolioDiagnostic("asset", None, "target_notional", 1.0),
-            PortfolioDiagnostic("__cash__", None, "target_notional", 0.0),
-            PortfolioDiagnostic("asset", None, "adv20", 1.0),
-        ),
-    )
-    capital = PortfolioCapital(
-        **{
-            "candidate_id": "exact",
-            "initial_capital": 1.0,
-            "valuation_currency": "CNY",
-            "valuation_method": "cash_equity",
-        }
-    )
-    metadata = {
-        "window": {
-            key: value
-            for key, value in {
-                "start": "1970-01-01",
-                "end": "1970-01-02",
-                "access": "validation",
-            }.items()
-            if key != "access"
-        },
-        "sample_role": "validation",
-    }
-    root = write_portfolio_ledger_artifact(
-        tmp_path / "exact",
-        capital=capital,
-        metadata=metadata,
-        produce=lambda emit: emit(batch),
-    )
-    artifact = read_portfolio_ledger_artifact(root)
-    summary = summarize_portfolio_ledger(artifact.capital, artifact.iter_chunks())
-    assert summary["nav"] == 1.0
-    assert summary["net_pnl"] == 0.0
-    assert summary["fill_quantity"] == float(quantity)
-    assert summary["fill_quantity_reason"] is None
-    restored = list(artifact.iter_chunks())[0]
-    assert restored.trades[0].quantity == quantity
-    assert isinstance(restored.trades[0].quantity, Fraction)
-
-
 @pytest.mark.parametrize("with_calendar", [False, True])
 def test_native_group_descriptions_share_finite_days(tmp_path, with_calendar):
     from dataclasses import asdict
@@ -616,7 +509,7 @@ def test_native_group_descriptions_share_finite_days(tmp_path, with_calendar):
             at, end = dates[i].value, dates[i + 1].value
             valuations = []
             for phase in ("before", "after", "end"):
-                quantity = Fraction(0 if phase == "before" and i == 0 else 100)
+                quantity = float(0 if phase == "before" and i == 0 else 100)
                 price = finish if phase == "end" else start
                 stamp = end if phase == "end" else at
                 cash = 1000.0 if phase == "before" and i == 0 else 0.0
@@ -627,7 +520,7 @@ def test_native_group_descriptions_share_finite_days(tmp_path, with_calendar):
                             "asset",
                             phase,
                             quantity,
-                            float(quantity * Fraction(price)),
+                            float(quantity * float(price)),
                             price,
                             lifecycle_id="2000-01-01",
                         ),
@@ -647,7 +540,7 @@ def test_native_group_descriptions_share_finite_days(tmp_path, with_calendar):
             batches.append(
                 PortfolioLedgerBatch(
                     i,
-                    (ExecutedTrade("buy", "buy", at, "asset", Fraction(100), 1000.0),)
+                    (ExecutedTrade("buy", "buy", at, "asset", float(100), 1000.0),)
                     if i == 0
                     else (),
                     (

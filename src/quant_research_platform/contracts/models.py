@@ -938,7 +938,13 @@ def _validate_target_definition(definition, target):
         or type(definition["target_clip"]) is not str
         or definition["target_transform"]
         not in (
-            {"raw", "date_zscore", "percentile", "industry_size_residual"}
+            {
+                "raw",
+                "date_zscore",
+                "percentile",
+                "industry_size_residual",
+                "risk_residual",
+            }
             if target == "model_target"
             else {"raw"}
         )

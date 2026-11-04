@@ -7,9 +7,15 @@ from quant_research_platform.artifacts.portfolio_ledger import (
     read_portfolio_ledger_artifact,
     write_portfolio_ledger_artifact,
 )
-from quant_research_platform.contracts.portfolios import PortfolioCapital
+from quant_research_platform.contracts.portfolios import (
+    PORTFOLIO_CASH_ASSET_ID,
+    PortfolioCapital,
+)
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share import portfolio_sessions
+from quant_research_platform.research.portfolios.accounting import (
+    ResearchValuationMarks,
+)
 from tests.helpers.portfolio_inputs import portfolio_inputs as _inputs
 from tests.research.test_portfolio_production import _build_producer
 
@@ -21,6 +27,7 @@ def _distribution_batches(
     future_close=90.0,
     payment="2023-01-05",
     stock_distribution=False,
+    stock_ratio=0.5,
     relist=False,
     recovery=None,
     suspended=False,
@@ -33,11 +40,14 @@ def _distribution_batches(
     if relist or recovery or suspended or freeze_ex_date:
         window = TimeWindow("2023-01-03", "2023-01-10")
     fees["rate"] = 0.0
+    frames["panel"]["amount"] = 1_000_000.0
     panel = frames["panel"]
     panel.loc[:, ["open", "close", "adj_open", "adj_close"]] = 100.0
     ex_date = pd.Timestamp("2023-01-05")
     affected = panel.asset_id.eq("b") & panel.timestamp.ge(ex_date)
-    ex_price = (100.0 - cash_dividend) / (1.5 if stock_distribution else 1.0)
+    ex_price = (100.0 - cash_dividend) / (
+        1.0 + stock_ratio if stock_distribution else 1.0
+    )
     panel.loc[affected, ["open", "close"]] = ex_price
     if not stock_distribution:
         # Same prior history, raw opening quote and distribution; only the later
@@ -63,7 +73,10 @@ def _distribution_batches(
     if stock_distribution:
         events.append(
             dict(
-                event, kind="SD", amount=0.5, settlement_date=pd.Timestamp("2023-01-06")
+                event,
+                kind="SD",
+                amount=stock_ratio,
+                settlement_date=pd.Timestamp("2023-01-06"),
             )
         )
     frames["corporate_actions"] = pd.DataFrame(events)
@@ -160,11 +173,12 @@ def _distribution_batches(
         fee_frame=fees,
         output_window=window,
         typed_batches=True,
+        initial_nav=10_000.0,
     )
     batches = list(chunks)
     root = write_portfolio_ledger_artifact(
         tmp_path / "ledger",
-        capital=PortfolioCapital("raw_shares", 100.0, "CNY", "cash_equity"),
+        capital=PortfolioCapital("raw_shares", 10_000.0, "CNY", "cash_equity"),
         metadata={
             "window": {"start": "2023-01-03", "end": str(window.end)},
             "sample_role": "validation",
@@ -173,6 +187,45 @@ def _distribution_batches(
         produce=lambda emit: [emit(batch) for batch in batches],
     )
     return list(read_portfolio_ledger_artifact(root).iter_chunks())
+
+
+def test_daily_distribution_floors_actual_shares_and_persists_rounding_pnl(
+    tmp_path, monkeypatch
+):
+    from quant_research_platform.artifacts.portfolio_ledger import (
+        summarize_portfolio_ledger,
+    )
+
+    batches = _distribution_batches(
+        tmp_path,
+        monkeypatch,
+        stock_distribution=True,
+        stock_ratio=0.501,
+        cash_dividend=0.0,
+    )
+    distributions = [
+        row
+        for batch in batches
+        for row in batch.rights_adjustments
+        if row.kind == "stock_distribution"
+    ]
+    assert len(distributions) == 1
+    event = distributions[0]
+    assert event.entitlement_quantity == 100
+    assert event.quantity_after - event.quantity_before == 50
+    assert event.quantity_rounding_loss == pytest.approx(0.1)
+    assert all(
+        row.quantity.is_integer() and row.locked_quantity.is_integer()
+        for batch in batches
+        for row in batch.valuations
+        if row.asset_id != PORTFOLIO_CASH_ASSET_ID
+    )
+    summary = summarize_portfolio_ledger(
+        PortfolioCapital("raw_shares", 10_000.0, "CNY", "cash_equity"), iter(batches)
+    )
+    loss = -0.1 * 100 / 1.501
+    assert summary["equity_rounding_pnl"] == pytest.approx(loss)
+    assert summary["net_pnl"] == pytest.approx(loss)
 
 
 def _cash(batch, phase):
@@ -196,18 +249,18 @@ def test_future_close_cannot_change_raw_open_sale_or_final_cash(tmp_path, monkey
             if trade.asset_id == "b" and trade.quantity < 0
         ]
         assert len(sales) == 1
-        assert float(sales[0].quantity) == pytest.approx(-1.0)
-        assert sales[0].notional == pytest.approx(-90.0)
+        assert float(sales[0].quantity) == pytest.approx(-100.0)
+        assert sales[0].notional == pytest.approx(-9000.0)
         assert sales[0].timestamp_ns == pd.Timestamp("2023-01-05").value
         assert sum(
             flow.amount
             for batch in batches
             for flow in batch.cashflows
             if flow.kind == "dividend"
-        ) == pytest.approx(10.0)
+        ) == pytest.approx(1000.0)
         outcomes.append((sales[0].notional, _cash(batches[-1], "end")))
     assert outcomes[0] == pytest.approx(outcomes[1])
-    assert outcomes[0][1] == pytest.approx(100.0)
+    assert outcomes[0][1] == pytest.approx(10000.0)
 
 
 @pytest.mark.parametrize(
@@ -225,19 +278,19 @@ def test_dividend_receivable_survives_sale_and_only_settlement_is_cash(
         if any(trade.asset_id == "b" and trade.quantity < 0 for trade in batch.trades)
     )
     after = [row for row in sale_batch.valuations if row.phase == "after"]
-    assert sum(row.value for row in after) == pytest.approx(100.0)
-    assert _cash(sale_batch, "after") == pytest.approx(90.0 if delayed else 100.0)
+    assert sum(row.value for row in after) == pytest.approx(10000.0)
+    assert _cash(sale_batch, "after") == pytest.approx(9000.0 if delayed else 10000.0)
     if delayed:
         claim = next(row for row in after if row.asset_id == "b")
         assert float(claim.quantity) == 0.0
-        assert claim.receivable == pytest.approx(10.0)
-        assert claim.value == pytest.approx(10.0)
-    assert _cash(batches[-1], "end") == pytest.approx(100.0)
+        assert claim.receivable == pytest.approx(1000.0)
+        assert claim.value == pytest.approx(1000.0)
+    assert _cash(batches[-1], "end") == pytest.approx(10000.0)
     dividends = [
         flow for batch in batches for flow in batch.cashflows if flow.kind == "dividend"
     ]
     assert len(dividends) == 1
-    assert dividends[0].amount == pytest.approx(10.0)
+    assert dividends[0].amount == pytest.approx(1000.0)
     assert (
         dividends[0].timestamp_ns
         == pd.Timestamp("2023-01-06" if delayed else "2023-01-05").value
@@ -265,19 +318,19 @@ def test_cash_and_stock_distribution_share_record_base_and_stock_stays_locked(
         for trade in sale_batch.trades
         if trade.asset_id == "b" and trade.quantity < 0
     )
-    assert float(sale.quantity) == pytest.approx(-1.0)
-    assert sale.notional == pytest.approx(-60.0)
+    assert float(sale.quantity) == pytest.approx(-100.0)
+    assert sale.notional == pytest.approx(-6000.0)
     after = next(
         row
         for row in sale_batch.valuations
         if row.phase == "after" and row.asset_id == "b"
     )
-    assert float(after.quantity) == pytest.approx(0.5)
-    assert after.value == pytest.approx(30.0)
-    assert _cash(sale_batch, "after") == pytest.approx(70.0)
+    assert float(after.quantity) == pytest.approx(50.0)
+    assert after.value == pytest.approx(3000.0)
+    assert _cash(sale_batch, "after") == pytest.approx(7000.0)
     assert sum(
         row.value for row in sale_batch.valuations if row.phase == "after"
-    ) == pytest.approx(100.0)
+    ) == pytest.approx(10000.0)
     released_sales = [
         trade
         for batch in batches
@@ -287,9 +340,9 @@ def test_cash_and_stock_distribution_share_record_base_and_stock_stays_locked(
         and trade.quantity < 0
     ]
     assert len(released_sales) == 1
-    assert float(released_sales[0].quantity) == pytest.approx(-0.5)
-    assert released_sales[0].notional == pytest.approx(-30.0)
-    assert _cash(batches[-1], "end") == pytest.approx(100.0)
+    assert float(released_sales[0].quantity) == pytest.approx(-50.0)
+    assert released_sales[0].notional == pytest.approx(-3000.0)
+    assert _cash(batches[-1], "end") == pytest.approx(10000.0)
 
 
 def test_old_lifecycle_dividend_receivable_survives_relisting_until_payment(
@@ -314,11 +367,13 @@ def test_old_lifecycle_dividend_receivable_survives_relisting_until_payment(
         for batch in batches
         for flow in batch.cashflows
         if flow.kind == "dividend"
-    ) == pytest.approx(10.0)
-    assert _cash(batches[-1], "end") == pytest.approx(100.0)
+    ) == pytest.approx(1000.0)
+    assert _cash(batches[-1], "end") == pytest.approx(10000.0)
 
 
-@pytest.mark.parametrize("recovery, expected_cash", [("cash", 100.0), ("cancel", 10.0)])
+@pytest.mark.parametrize(
+    "recovery, expected_cash", [("cash", 10000.0), ("cancel", 1000.0)]
+)
 def test_registered_dividend_is_not_written_off_or_counted_twice_with_terminal_event(
     tmp_path, monkeypatch, recovery, expected_cash
 ):
@@ -330,7 +385,7 @@ def test_registered_dividend_is_not_written_off_or_counted_twice_with_terminal_e
         for batch in batches
         for flow in batch.cashflows
         if flow.kind == "dividend"
-    ) == pytest.approx(10.0)
+    ) == pytest.approx(1000.0)
     assert _cash(batches[-1], "end") == pytest.approx(expected_cash)
     assert sum(
         row.value for row in batches[-1].valuations if row.phase == "end"
@@ -362,15 +417,17 @@ def test_suspended_ex_date_transforms_carried_mark_once_without_opening_trade(
     assert len(opening) == 1
     value = opening[0]
     assert float(value.mark_price) == pytest.approx(expected_price)
-    assert float(value.quantity) == pytest.approx(1.5 if stock_distribution else 1.0)
-    assert value.receivable == pytest.approx(cash_dividend)
-    assert value.value == pytest.approx(100.0)
+    assert float(value.quantity) == pytest.approx(
+        150.0 if stock_distribution else 100.0
+    )
+    assert value.receivable == pytest.approx(100 * cash_dividend)
+    assert value.value == pytest.approx(10000.0)
     assert not any(
         trade.asset_id == "b" and trade.timestamp_ns == ex
         for batch in batches
         for trade in batch.trades
     )
-    assert _cash(batches[-1], "end") == pytest.approx(100.0)
+    assert _cash(batches[-1], "end") == pytest.approx(10000.0)
     quoted = _distribution_batches(
         tmp_path / "quoted",
         monkeypatch,
@@ -398,12 +455,10 @@ def test_suspended_ex_date_transforms_carried_mark_once_without_opening_trade(
 def test_stale_reference_quote_adjusts_once_but_current_quote_is_not_readjusted(
     quote_date, quote_price, expected
 ):
-    from fractions import Fraction
 
-    from quant_research_platform.research.portfolios import production
     from tests.helpers.portfolio_ledger import mark_view
 
-    marks = production._ResearchValuationMarks()
+    marks = ResearchValuationMarks()
     marks.project(mark_view("2023-01-04", 100.0, 100.0))
     ex_view = mark_view("2023-01-05", float("nan"), float("nan"), trading=False)
     ex_view.corporate_events = pd.DataFrame(
@@ -415,7 +470,7 @@ def test_stale_reference_quote_adjusts_once_but_current_quote_is_not_readjusted(
                 available_at=pd.Timestamp("2023-01-03"),
                 kind="cash_dividend",
                 event_id="cash-dividend",
-                cash_per_share=Fraction(10),
+                cash_per_share=float(10),
                 entitlement_proved=True,
                 evidence_identity="d" * 64,
             )
@@ -430,7 +485,7 @@ def test_stale_reference_quote_adjusts_once_but_current_quote_is_not_readjusted(
                 event_id="reference-quote",
                 timestamp=pd.Timestamp(quote_date),
                 effective_at=pd.Timestamp(quote_date),
-                value_per_old_unit=Fraction(quote_price),
+                value_per_old_unit=float(quote_price),
                 entitlement_proved=True,
                 evidence_identity="e" * 64,
             )

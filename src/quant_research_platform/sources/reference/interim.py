@@ -8,7 +8,6 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
-from fractions import Fraction
 from pathlib import Path
 from types import MappingProxyType
 from urllib.parse import urlsplit
@@ -30,7 +29,6 @@ from quant_research_platform.contracts.portfolios import (
     A_SHARE_EQUITY_EVENTS_DATA_ID,
     EQUITY_EVENT_COLUMNS,
 )
-from quant_research_platform.contracts.validation import encode_exact_numeric
 from quant_research_platform.sources.reference.a_share_fees import (
     A_SHARE_FEE_CSV_NAME,
     A_SHARE_FEE_SIDECAR_NAME,
@@ -532,7 +530,7 @@ def _equity_source(reference_root, *, end_date=None):
             or (positive and value == 0)
         ):
             raise ValueError("equity_event_numeric_invalid")
-        return Fraction(value)
+        return float(value)
 
     for event in metadata["events"]:
         if type(event) is not dict or set(event) != keys:
@@ -660,11 +658,11 @@ def _equity_source(reference_root, *, end_date=None):
                 available,
                 observed,
                 "CNY",
-                None if value is None else encode_exact_numeric(value),
-                encode_exact_numeric(Fraction(remaining)),
+                value,
+                remaining,
                 successor,
                 successor_listing,
-                None if ratio is None else encode_exact_numeric(ratio),
+                ratio,
                 evidence,
                 event["source_locator"],
             )
@@ -682,6 +680,13 @@ def _equity_source(reference_root, *, end_date=None):
         frame[column] = (
             pd.to_datetime(frame[column])
             if column in dates
+            else frame[column].astype("float64")
+            if column
+            in {
+                "value_per_old_unit",
+                "remaining_old_units_per_old_unit",
+                "successor_units_per_old_unit",
+            }
             else frame[column].astype("string")
         )
     frame = frame.sort_values(

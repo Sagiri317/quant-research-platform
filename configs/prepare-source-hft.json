@@ -12,12 +12,12 @@
   "instruments": [
     {
       "wind_code": "000001.SZ",
-      "asset_id": "000001.SZ",
+      "asset_id": "000001",
       "exchange": "SZSE"
     },
     {
       "wind_code": "600000.SH",
-      "asset_id": "600000.SH",
+      "asset_id": "600000",
       "exchange": "SSE"
     }
   ]

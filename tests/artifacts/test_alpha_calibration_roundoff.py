@@ -13,7 +13,7 @@ from quant_research_platform.artifacts.portfolio_ledger import (
     summarize_portfolio_ledger,
 )
 from quant_research_platform.contracts.models import ModelSpec
-from quant_research_platform.research.portfolios.accounting import (
+from quant_research_platform.research.portfolios.calibration import (
     calibrate_expected_alpha,
     frozen_alpha_calibration,
 )

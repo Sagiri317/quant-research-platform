@@ -30,6 +30,7 @@ from quant_research_platform.research.factors.price_volume.definitions import (
     PRICE_VOLUME_PATH_FACTORS,
     price_volume_factor_definitions,
 )
+from quant_research_platform.research.factors.residual import RESIDUAL_FACTOR_WINDOWS
 from quant_research_platform.research.filtering import A_SHARE_ELIGIBILITY_FACTS
 from quant_research_platform.research.labels.forward_returns import (
     forward_return_available_at_column,
@@ -38,14 +39,12 @@ from quant_research_platform.research.labels.forward_returns import (
 
 PROTOCOL_ID = "a_share_low_frequency"
 MARKET_MODEL_FACTORS = ("beta_252d", "residual_volatility_60d")
-RESEARCH_DATASET_IDS = {
-    "pv_all": "pv_all",
-    "pv_expanded": "pv_expanded",
-    "pv_nf_expectations": "pv_nf_expectations",
-    "fusion_nf_core": "fusion_nf_core",
-    "fusion_nf_expectations": "fusion_nf_expectations",
-}
-SCENARIO_IDS = tuple(RESEARCH_DATASET_IDS)
+SCENARIO_IDS = (
+    "pv_all",
+    "pv_nf_expectations",
+    "fusion_nf_core",
+    "fusion_nf_expectations",
+)
 LABEL_HORIZONS = (1, 5, 10, 20, 60, 120)
 PRIMARY_LABEL_COLUMN = forward_return_label_column(20)
 MODEL_TARGET_COLUMN = "model_target"
@@ -64,7 +63,6 @@ RISK_STYLE_COLUMNS = (
     "momentum_252_20",
     "residual_volatility_60d",
     "amihud_60d",
-    "earnings_yield",
 )
 
 
@@ -83,9 +81,14 @@ def _inference_blocker(manifest):
 
 def dataset_factor_columns(dataset_id: str) -> tuple[str, ...]:
     """Return the declared factor set for a static dataset definition."""
-    if dataset_id not in RESEARCH_DATASET_IDS:
+    if dataset_id not in SCENARIO_IDS:
         raise ValueError("unknown_a_share_dataset")
-    columns = (*PRICE_VOLUME_LIBRARY, *PRICE_VOLUME_PATH_FACTORS, *MARKET_MODEL_FACTORS)
+    columns = (
+        *PRICE_VOLUME_LIBRARY,
+        *PRICE_VOLUME_PATH_FACTORS,
+        *MARKET_MODEL_FACTORS,
+        *RESIDUAL_FACTOR_WINDOWS,
+    )
     if dataset_id in {"fusion_nf_core", "fusion_nf_expectations"}:
         columns += FUNDAMENTAL_FACTORS
     if dataset_id in {"pv_nf_expectations", "fusion_nf_expectations"}:
@@ -133,6 +136,39 @@ def factor_catalog() -> FactorCatalog:
             *fundamental_factor_definitions(
                 market_id=market_ids.MARKET_ID,
                 required_input_data_id="fundamental_pit",
+            ),
+            *(
+                FactorDefinition(
+                    factor_id=column,
+                    market_id=market_ids.MARKET_ID,
+                    factor_set=FactorSet.STANDARD,
+                    input_columns=tuple(
+                        dict.fromkeys(
+                            (
+                                "period_return",
+                                "listing_date",
+                                "is_trading",
+                                "industry_standard_id",
+                                "industry_level1_code",
+                                "total_market_cap",
+                                *RISK_STYLE_COLUMNS,
+                                *A_SHARE_ELIGIBILITY_FACTS,
+                            )
+                        )
+                    ),
+                    output_column=column,
+                    family="risk_residual",
+                    grain=DataGrain.ASSET_TIMESTAMP,
+                    required_input_data_id="risk_residual_factors",
+                    lookback_window=window,
+                    required_windows=(window,),
+                    description=(
+                        "Return residuals using prior industry and style exposures."
+                    ),
+                    timing_semantics="same_session_close_available_at_next_session",
+                    null_policy="full_window_with_minimum_fresh_fraction",
+                )
+                for column, window in RESIDUAL_FACTOR_WINDOWS.items()
             ),
             *expectations_factor_definitions(
                 market_id=market_ids.MARKET_ID,
@@ -234,13 +270,15 @@ def research_dataset_specs() -> tuple[ResearchDatasetSpec, ...]:
         ]
         if set(factor_columns).intersection(MARKET_MODEL_FACTORS):
             input_data_ids.append("market_model_factors")
+        if set(factor_columns).intersection(RESIDUAL_FACTOR_WINDOWS):
+            input_data_ids.append("risk_residual_factors")
         if scenario_id in {"fusion_nf_core", "fusion_nf_expectations"}:
             input_data_ids.insert(3, "fundamental_factors")
         if scenario_id in {"pv_nf_expectations", "fusion_nf_expectations"}:
             input_data_ids.insert(-1, "expectations_factors")
         specs.append(
             ResearchDatasetSpec(
-                data_id=RESEARCH_DATASET_IDS[scenario_id],
+                data_id=scenario_id,
                 market_id=market_ids.MARKET_ID,
                 input_data_ids=tuple(input_data_ids),
                 base_input_data_id=market_ids.MARKET_PANEL_ID,

@@ -35,6 +35,7 @@ from quant_research_platform.research.factors.price_volume.definitions import (
     PRICE_VOLUME_LIBRARY,
     PRICE_VOLUME_PATH_FACTORS,
 )
+from quant_research_platform.research.factors.residual import RESIDUAL_FACTOR_WINDOWS
 from quant_research_platform.research.labels.forward_returns import (
     forward_return_available_at_column,
     forward_return_label_column,
@@ -224,6 +225,18 @@ def processed_catalog() -> ProcessedDataCatalog:
                 factor_columns=FUNDAMENTAL_FACTORS,
             ),
             _spec(
+                "risk_residual_factors",
+                ProcessedDataKind.FACTOR,
+                (*PLATFORM_ASSET_TIME_KEY, *RESIDUAL_FACTOR_WINDOWS),
+                processed_input_data_ids=(
+                    MARKET_PANEL_ID,
+                    PRICE_VOLUME_DATA_ID,
+                    "market_model_factors",
+                ),
+                source_input_data_ids=("trading_calendar",),
+                factor_columns=tuple(RESIDUAL_FACTOR_WINDOWS),
+            ),
+            _spec(
                 "expectations_factors",
                 ProcessedDataKind.FACTOR,
                 (*PLATFORM_ASSET_TIME_KEY, *ALL_EXPECTATIONS_FACTORS),
@@ -281,6 +294,8 @@ def _spec(
         if forward_return_label_column(horizon) in label_columns
     }
     units = {column: "decimal_return" for column in availability}
+    if data_id == "risk_residual_factors":
+        units.update({column: "decimal_return" for column in factor_columns})
     if "median_forecast_age_days_fy1" in roles:
         units["median_forecast_age_days_fy1"] = "days"
     return ProcessedDataSpec(
@@ -298,7 +313,8 @@ def _spec(
         optional_source_input_data_ids=optional_source_input_data_ids,
         processed_input_data_ids=processed_input_data_ids,
         parameters_json=json.dumps({"min_fresh_fraction": 0.75})
-        if data_id in {PRICE_VOLUME_DATA_ID, "market_model_factors"}
+        if data_id
+        in {PRICE_VOLUME_DATA_ID, "market_model_factors", "risk_residual_factors"}
         else "{}",
     )
 

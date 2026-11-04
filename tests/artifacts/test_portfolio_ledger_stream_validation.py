@@ -1,7 +1,6 @@
 """Publication validates cross-batch identities without replaying child ledgers."""
 
 from dataclasses import fields, replace
-from fractions import Fraction
 
 import pytest
 
@@ -49,16 +48,12 @@ def _batch(sequence):
     )
 
 
-@pytest.mark.parametrize(
-    "invalid", [True, None, float("nan"), float("inf"), "1.0", Fraction(1, 2)]
-)
+@pytest.mark.parametrize("invalid", [True, None, float("nan"), float("inf"), "1.0"])
 def test_rights_adjustment_rejects_invalid_numeric_fields(invalid):
     batch = _batch(0)
     event = batch.rights_adjustments[0]
     for field in fields(event):
-        if field.type not in ("float", "float | Fraction"):
-            continue
-        if isinstance(invalid, Fraction) and field.type == "float | Fraction":
+        if field.type != "float":
             continue
         with pytest.raises(ValueError, match="portfolio_ledger_numeric_invalid"):
             replace(

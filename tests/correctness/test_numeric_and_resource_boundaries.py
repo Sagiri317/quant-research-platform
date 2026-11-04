@@ -579,7 +579,9 @@ def test_capital_weight_units_do_not_change_market_beta(capital):
 
 @pytest.mark.parametrize("scale", [1.0, 1e-4, 1e4])
 def test_risk_style_population_scale_is_unit_invariant(scale):
-    from quant_research_platform.research.portfolios.risk import preprocess_risk_styles
+    from quant_research_platform.research.risk import (
+        preprocess_risk_styles,
+    )
 
     frame = pd.DataFrame(
         {

@@ -5,10 +5,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
-from fractions import Fraction
-from math import ulp
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 
@@ -18,7 +17,6 @@ from quant_research_platform.contracts.time import (
     time_window_timestamp_interval,
 )
 from quant_research_platform.contracts.validation import (
-    finite_exact_float,
     strict_finite_numeric_series,
     strict_integer_series,
 )
@@ -1330,19 +1328,15 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
                 or not result.cash_post.between(0, result.nav_post).all()
             ):
                 raise ValueError("statistics_cash_exposure_invalid")
-            expected_cash_weight = pd.Series(
-                [
-                    finite_exact_float(Fraction(cash) / Fraction(nav))
-                    if nav > 0
-                    else None
-                    for cash, nav in zip(result.cash_post, result.nav_post, strict=True)
-                ],
-                index=result.index,
-                dtype="float64",
+            expected_cash_weight = result.cash_post / result.nav_post.where(
+                result.nav_post > 0
             )
-            if not (
-                result.cash_weight_post.eq(expected_cash_weight)
-                | (result.cash_weight_post.isna() & expected_cash_weight.isna())
+            if not np.isclose(
+                result.cash_weight_post,
+                expected_cash_weight,
+                rtol=1e-12,
+                atol=1e-12,
+                equal_nan=True,
             ).all():
                 raise ValueError("statistics_cash_exposure_invalid")
             positive_start = result.nav_before.gt(0)
@@ -1354,40 +1348,18 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
                 "requested_turnover",
                 "realized_turnover",
             ]
-            expected_return = pd.Series(
-                [
-                    finite_exact_float(
-                        (Fraction(end) - Fraction(start)) / Fraction(start)
-                    )
-                    if start > 0
-                    else None
-                    for start, end in zip(
-                        result.nav_before, result.nav_end, strict=True
-                    )
-                ],
-                index=result.index,
-                dtype="float64",
-            )
-            for actual, expected, start, end in zip(
+            expected_return = (
+                (result.nav_end - result.nav_before)
+                / result.nav_before.where(positive_start)
+            ).replace([np.inf, -np.inf], np.nan)
+            if not np.isclose(
                 result.net_return,
                 expected_return,
-                result.nav_before,
-                result.nav_end,
-                strict=True,
-            ):
-                if pd.isna(actual) or pd.isna(expected):
-                    if pd.isna(actual) and pd.isna(expected):
-                        continue
-                    raise ValueError("statistics_return_status_invalid")
-                # Raw-price PnL cancels before rounding; stored money totals round
-                # independently. Allow their monetary rounding, not a fixed atol.
-                rounding = (
-                    2 * (Fraction(ulp(start)) + Fraction(ulp(end))) / Fraction(start)
-                    + Fraction(ulp(actual))
-                    + Fraction(ulp(expected))
-                )
-                if abs(Fraction(actual) - Fraction(expected)) > rounding:
-                    raise ValueError("statistics_return_status_invalid")
+                rtol=1e-10,
+                atol=1e-12,
+                equal_nan=True,
+            ).all():
+                raise ValueError("statistics_return_status_invalid")
             defined_return = positive_start & result.net_return.notna()
             if (
                 not result.return_status.eq(

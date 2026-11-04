@@ -84,7 +84,7 @@ def test_catalog_cli_is_read_only_and_outputs_native_catalog():
         ("backtest", "research.portfolios.production", "backtest"),
         ("calibrate", "research.portfolios.production", "calibrate"),
         ("plot", "reports.plots", "plot"),
-        ("backtest-hft", "markets.implementations.a_share.hft_portfolio", "backtest"),
+        ("backtest-hft", "research.portfolios.high_frequency", "backtest"),
         ("run-quarterly", "research.rolling", "run_quarterly"),
         ("statistics-factors", "research.statistics_production", "factor_statistics"),
         ("statistics-model", "research.statistics_production", "model_statistics"),

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.validation import (
@@ -206,3 +207,32 @@ def _require_normalized_calendar(calendar: pd.DataFrame) -> pd.DataFrame:
 
 def _sorted_unique_sessions(values: pd.Series) -> pd.DatetimeIndex:
     return pd.DatetimeIndex(sorted(values.dropna().unique()))
+
+
+def continuous_session(timestamps, exchange):
+    """Shanghai introduced the closing auction on 2018-08-20."""
+    local = (
+        pd.to_datetime(timestamps).dt.tz_localize("UTC").dt.tz_convert("Asia/Shanghai")
+    )
+    seconds = (
+        local.dt.hour * 3600
+        + local.dt.minute * 60
+        + local.dt.second
+        + local.dt.microsecond / 1e6
+    )
+    closing = np.where(
+        exchange.eq("SSE") & local.dt.date.lt(pd.Timestamp("2018-08-20").date()),
+        15 * 3600,
+        14 * 3600 + 57 * 60,
+    )
+    return pd.Series(
+        np.select(
+            [
+                seconds.ge(9 * 3600 + 30 * 60) & seconds.lt(11 * 3600 + 30 * 60),
+                seconds.ge(13 * 3600) & seconds.lt(closing),
+            ],
+            ["am", "pm"],
+            default="",
+        ),
+        index=timestamps.index,
+    )

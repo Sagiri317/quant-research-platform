@@ -12,6 +12,7 @@ from quant_research_platform.markets.implementations.a_share import (
 from quant_research_platform.research.protocols.a_share import (
     RISK_STYLE_COLUMNS,
 )
+from tests.helpers.research_configuration import PV25_FACTORS
 from tests.helpers.statistics_artifacts import portfolio_statistics_config
 
 
@@ -249,7 +250,7 @@ def test_simple_only_configuration_reads_its_persisted_risk_context(tmp_path):
     from tests.helpers.portfolio_inputs import _frames, _processed_specs
     from tests.helpers.research_configuration import research_configuration
 
-    config = research_configuration(name="pv_expanded")
+    config = research_configuration(enhanced=False)
     candidates, config = portfolio_statistics_config(configuration=config)
     assert candidates and all(
         candidate.benchmark_id is None for candidate in candidates
@@ -301,7 +302,6 @@ def test_simple_only_configuration_reads_its_persisted_risk_context(tmp_path):
 def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
     tmp_path, monkeypatch
 ):
-    from fractions import Fraction
 
     import numpy as np
     import pandas as pd
@@ -327,7 +327,7 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
     from tests.helpers.research_configuration import research_configuration
 
     candidates, config = portfolio_statistics_config(
-        configuration=research_configuration(name="pv25")
+        configuration=research_configuration(factors=PV25_FACTORS)
     )
     before, after, end, costs = (
         (1000.0, 1040.0, 1005.0),
@@ -399,9 +399,11 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
             "portfolio_ids"
         ],
     }
-    from quant_research_platform.research.portfolios.risk import (
-        FactorRiskState,
+    from quant_research_platform.research.portfolios.attribution import (
         HoldingFactorInputs,
+    )
+    from quant_research_platform.research.risk import (
+        FactorRiskState,
     )
 
     rng = np.random.default_rng(179)
@@ -537,9 +539,9 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
         np.testing.assert_allclose(
             rows.net_return,
             [
-                float(Fraction(1, 25)),
-                float(Fraction(-35, 1040)),
-                float(Fraction(30, 1005)),
+                float(1 / 25),
+                float(-35 / 1040),
+                float(30 / 1005),
             ],
         )
         assert np.prod(1 + rows.net_return) == pytest.approx(1.035)
@@ -557,9 +559,7 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
         assert len(cagr) == len(candidates)
         assert cagr.status.eq("DEFINED").all()
         assert cagr.observation_count.eq(3).all()
-        np.testing.assert_allclose(
-            cagr.value, float(Fraction(207, 200) ** 84 - 1), rtol=1e-12
-        )
+        np.testing.assert_allclose(cagr.value, float((207 / 200) ** 84 - 1), rtol=1e-12)
     with artifact.table("portfolio_attribution.parquet") as attribution:
         assert attribution.status.eq("DEFINED").all()
         actual = (
@@ -785,7 +785,7 @@ def test_holding_input_reader_freezes_decision_universe_over_holding_interval(
         volume=1000.0,
         turnover=0.01,
     )
-    styles = RISK_STYLE_COLUMNS
+    styles = (*RISK_STYLE_COLUMNS, "earnings_yield")
     if relist_step is not None:
         changed = panel.asset_id.eq(assets[-2]) & panel.timestamp.ge(dates[relist_step])
         panel.loc[changed, "listing_date"] = dates[relist_step]
@@ -881,7 +881,9 @@ def test_holding_input_reader_freezes_decision_universe_over_holding_interval(
             first.fitted.asset_returns,
             expected.reindex(first.fitted.asset_returns.index),
         )
-        from quant_research_platform.research.portfolios.risk import holding_attribution
+        from quant_research_platform.research.portfolios.attribution import (
+            holding_attribution,
+        )
 
         values, reasons, exposure = holding_attribution(
             first,
@@ -913,7 +915,7 @@ def test_holding_input_reader_freezes_decision_universe_over_holding_interval(
         with closing_iterator(stream):
             return next(stream)
 
-    five = first_for_styles(RISK_STYLE_COLUMNS[:-1], roots)
+    five = first_for_styles(RISK_STYLE_COLUMNS, roots)
     missing_earnings = risk_data.copy()
     missing_earnings["earnings_yield"] = np.nan
     fundamental_spec = _processed_specs().get("fundamental_factors")
@@ -927,7 +929,7 @@ def test_holding_input_reader_freezes_decision_universe_over_holding_interval(
         spec=fundamental_spec,
     )
     missing_earnings_inputs = {**roots, "fundamental_factors": missing_earnings_root}
-    five_after = first_for_styles(RISK_STYLE_COLUMNS[:-1], missing_earnings_inputs)
+    five_after = first_for_styles(RISK_STYLE_COLUMNS, missing_earnings_inputs)
     pd.testing.assert_series_equal(
         (five.fitted.factor_returns).isna(),
         (five_after.fitted.factor_returns).isna(),
@@ -952,7 +954,7 @@ def test_holding_input_reader_freezes_decision_universe_over_holding_interval(
         rtol=2e-12,
         atol=1e-14,
     )
-    six = first_for_styles(RISK_STYLE_COLUMNS, missing_earnings_inputs)
+    six = first_for_styles(styles, missing_earnings_inputs)
     assert six.fitted is None and six.reason == "holding_factor_fit_unidentified"
     if not st_holding and relist_step is None:
         # Both groups receive the public combined input list. An unselected
@@ -967,7 +969,7 @@ def test_holding_input_reader_freezes_decision_universe_over_holding_interval(
             spec=fundamental_spec,
         )
         sparse_inputs = {**roots, "fundamental_factors": sparse_root}
-        five_sparse = first_for_styles(RISK_STYLE_COLUMNS[:-1], sparse_inputs)
+        five_sparse = first_for_styles(RISK_STYLE_COLUMNS, sparse_inputs)
         pd.testing.assert_series_equal(
             (five.fitted.factor_returns).isna(),
             (five_sparse.fitted.factor_returns).isna(),
@@ -993,7 +995,7 @@ def test_holding_input_reader_freezes_decision_universe_over_holding_interval(
             atol=1e-14,
         )
         with pytest.raises(ValueError, match="holding_risk_context_session_missing"):
-            first_for_styles(RISK_STYLE_COLUMNS, sparse_inputs)
+            first_for_styles(styles, sparse_inputs)
 
         invalid_daily = panel.copy()
         invalid_daily["period_return"] = "vendor-invalid"
@@ -1004,7 +1006,7 @@ def test_holding_input_reader_freezes_decision_universe_over_holding_interval(
             spec=_processed_specs().get("market_panel_1d"),
         )
         five_holding = first_for_styles(
-            RISK_STYLE_COLUMNS[:-1],
+            RISK_STYLE_COLUMNS,
             {**roots, "market_panel_1d": invalid_daily_root},
         )
         pd.testing.assert_series_equal(
@@ -1040,7 +1042,7 @@ def test_holding_input_reader_freezes_decision_universe_over_holding_interval(
             _enhanced_risk_cross(
                 panel=invalid_daily.loc[invalid_daily.timestamp.eq(dates[0])],
                 risk_frames=[risk_data.loc[risk_data.timestamp.eq(dates[0])]],
-                style_columns=RISK_STYLE_COLUMNS[:-1],
+                style_columns=RISK_STYLE_COLUMNS,
             )
     missing_panel = panel.copy()
     missing_panel.loc[
@@ -1094,10 +1096,12 @@ def test_declared_ledger_family_preserves_descriptive_inference(
         PORTFOLIO_LEDGER_COST_COLUMNS,
     )
     from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.research.portfolios.attribution import (
+        HoldingFactorInputs,
+    )
     from quant_research_platform.research.portfolios.diagnostics import (
         _portfolio_statistics_tables,
     )
-    from quant_research_platform.research.portfolios.risk import HoldingFactorInputs
     from tests.helpers.portfolio_ledger import (
         CONTINUOUS_EXECUTION_COLUMNS,
         write_test_sessions,
@@ -1105,7 +1109,7 @@ def test_declared_ledger_family_preserves_descriptive_inference(
     from tests.helpers.research_configuration import research_configuration
 
     dates = pd.bdate_range("2023-01-02", periods=75)
-    configuration = research_configuration(name="pv25")
+    configuration = research_configuration(factors=PV25_FACTORS)
     if candidate_id is not None:
         configuration["portfolios"][0]["candidate_id"] = candidate_id
         configuration["primary_portfolio_id"] = candidate_id
@@ -1425,7 +1429,6 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
     tmp_path,
 ):
     import hashlib
-    from fractions import Fraction
 
     import numpy as np
 
@@ -1457,7 +1460,7 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
     frames = _frames(dates)
     originals = {name: frame.copy(deep=True) for name, frame in frames.items()}
     candidates, config = portfolio_statistics_config(
-        configuration=research_configuration(name="pv25")
+        configuration=research_configuration(factors=PV25_FACTORS)
     )
     manifest = deepcopy(config)
     window = {
@@ -1682,9 +1685,7 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
                     assert row.reason and pd.isna(row.value)
                 else:
                     expected = (
-                        Fraction(71, 1000)
-                        if candidate.benchmark_id == "csi500"
-                        else Fraction(1, 20)
+                        (71 / 1000) if candidate.benchmark_id == "csi500" else (1 / 20)
                     )
                     assert row.status == "DEFINED"
                     assert row.value == pytest.approx(float(expected), abs=1e-14)
@@ -1706,7 +1707,6 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
 )
 def test_registration_bookkeeping_preserves_holding_attribution(tmp_path, kind):
     from dataclasses import replace
-    from fractions import Fraction
 
     from quant_research_platform.artifacts.portfolio_ledger import (
         read_portfolio_ledger_artifact,
@@ -1723,12 +1723,14 @@ def test_registration_bookkeeping_preserves_holding_attribution(tmp_path, kind):
     from quant_research_platform.research.portfolios.accounting import (
         EquityEntitlements,
     )
+    from quant_research_platform.research.portfolios.attribution import (
+        HoldingFactorInputs,
+    )
     from quant_research_platform.research.portfolios.diagnostics import (
         _portfolio_statistics_tables,
     )
-    from quant_research_platform.research.portfolios.risk import (
+    from quant_research_platform.research.risk import (
         FactorReturnFit,
-        HoldingFactorInputs,
     )
 
     dates = pd.date_range("2024-01-01", periods=3)
@@ -1757,7 +1759,7 @@ def test_registration_bookkeeping_preserves_holding_attribution(tmp_path, kind):
         ]
     )
     entitlements = EquityEntitlements()
-    units = pd.Series({"a": Fraction(100)}, dtype=object)
+    units = pd.Series({"a": float(100)}, dtype=object)
     lives = pd.Series({"a": pd.Timestamp("2000-01-01")})
     registration = entitlements.register(
         events,
@@ -1785,18 +1787,16 @@ def test_registration_bookkeeping_preserves_holding_attribution(tmp_path, kind):
                 at.value,
                 "a",
                 phase,
-                Fraction(
-                    150 if kind == "stock_distribution" and phase == "end" else 100
-                ),
+                float(150 if kind == "stock_distribution" and phase == "end" else 100),
                 (150 if kind == "stock_distribution" and phase == "end" else 100)
                 * price
                 + (100 if kind == "dividend" and phase == "end" else 0),
                 price,
                 lifecycle_id="2000-01-01",
                 receivable=100 if kind == "dividend" and phase == "end" else 0,
-                locked_quantity=Fraction(50)
+                locked_quantity=float(50)
                 if kind == "stock_distribution" and phase == "end"
-                else Fraction(),
+                else 0.0,
             ),
             PortfolioValuation(
                 at.value,

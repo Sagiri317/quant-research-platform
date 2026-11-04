@@ -43,6 +43,7 @@ class ResearchDatasetSpec(DataSpec):
             "raw",
             "percentile",
             "industry_size_residual",
+            "risk_residual",
         }:
             raise ValueError("invalid_target_transform")
         if type(self.target_clip) is not str or self.target_clip not in {

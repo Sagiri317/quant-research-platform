@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from quant_research_platform.research.portfolios import risk
+from quant_research_platform.research import risk
 from tests.correctness.test_portfolio_weight_and_risk_numeric_boundaries import (
     _cross,
     _full_wls_fraction_oracle,

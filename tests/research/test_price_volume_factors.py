@@ -1169,7 +1169,9 @@ def test_amplitude_normal_ranges_persist(tmp_path, single_large_range):
 
 
 def test_market_model_positive_prices_persist_usable_risk_styles(tmp_path):
-    from quant_research_platform.research.portfolios.risk import FactorRiskState
+    from quant_research_platform.research.risk import (
+        FactorRiskState,
+    )
     from quant_research_platform.storage.datasets import read_dataset, write_dataset
     from tests.helpers.a_share_catalogs import scientific_catalogs
     from tests.helpers.paths import StorageLayout

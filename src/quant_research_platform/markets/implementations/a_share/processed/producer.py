@@ -180,7 +180,7 @@ def produce_a_share_processed_data(
                 "has_legal_fundamental_pit",
             }
             if any(
-                definition.family in {"price_volume", "market_model"}
+                definition.family in {"price_volume", "market_model", "risk_residual"}
                 for definition in factor_definitions
             ):
                 requested.add("listing_date")
@@ -1213,6 +1213,12 @@ def _compute_processed_frame(
                 .loc[:, list(spec.required_columns)]
             )
         input_frame = dependencies[next(iter(spec.processed_input_data_ids))]
+        if spec.data_id == "risk_residual_factors":
+            keys = ["market_id", "asset_id", "timestamp"]
+            for name in spec.processed_input_data_ids[1:]:
+                input_frame = input_frame.merge(
+                    dependencies[name], on=keys, how="left", validate="one_to_one"
+                )
         if any(
             definition.family == "fundamental"
             and "total_market_cap" in definition.input_columns

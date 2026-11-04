@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.research.portfolios import accounting, production
+from quant_research_platform.research.portfolios import calibration, production
 from tests.helpers.portfolio_inputs import decision_inputs as _decision_inputs
 from tests.helpers.portfolio_inputs import portfolio_inputs as _inputs
 from tests.research.test_portfolio_production import _build_producer
@@ -132,7 +132,7 @@ def test_alpha_window_uses_complete_252_session_clock_and_mature_labels():
     sessions = pd.bdate_range("2023-01-02", "2024-06-28").difference(
         pd.bdate_range("2023-10-02", "2023-10-06")
     )
-    intervals = accounting.alpha_calibration_intervals(sessions, "daily")
+    intervals = calibration.alpha_calibration_intervals(sessions, "daily")
     dates = intervals.timestamp
     frame = pd.DataFrame(
         {
@@ -144,14 +144,14 @@ def test_alpha_window_uses_complete_252_session_clock_and_mature_labels():
     # A missing observation does not compress the complete market clock.
     absent = sessions[-100]
     frame = frame.loc[frame.timestamp.ne(absent)]
-    result = accounting.calibrate_expected_alpha(
+    result = calibration.calibrate_expected_alpha(
         frame,
         as_of=sessions[-1],
         scheduled_intervals=intervals,
         trading_sessions=sessions,
     )
     assert (
-        accounting.alpha_calibration_start(sessions, as_of=sessions[-1])
+        calibration.alpha_calibration_start(sessions, as_of=sessions[-1])
         == sessions[-252]
     )
     assert result.scheduled_rebalance_dates == 250

@@ -7,12 +7,12 @@ import pandas as pd
 import pytest
 
 import quant_research_platform.research.models.fitting as model_fitting
-from quant_research_platform.contracts.models import ModelSpec
+from quant_research_platform.contracts.models import ModelSpec, _model_spec
 from quant_research_platform.research.models.estimators import (
     build_estimator_from_model_spec,
 )
 from quant_research_platform.research.models.fitting import prediction_callable
-from tests.helpers.research_configuration import configured_models
+from tests.helpers.research_configuration import research_configuration
 from tests.helpers.research_processed_inputs import _demo_research_rows
 from tests.research.direct_model_test_support import fit_frame, predict_frame
 
@@ -54,7 +54,7 @@ def test_native_prediction_preserves_raw_units_rank_and_family(tmp_path: Path) -
 
 
 def test_a_share_model_ladder_fits_and_predicts_each_retained_algorithm() -> None:
-    specs = configured_models("pv_all")
+    specs = tuple(_model_spec(item) for item in research_configuration()["models"])
     dates = pd.date_range("2020-01-01", periods=12, freq="D")
     frame = pd.DataFrame(
         {

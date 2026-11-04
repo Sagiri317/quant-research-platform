@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass, fields
-from fractions import Fraction
 from itertools import groupby
 from pathlib import Path
 
@@ -27,10 +26,6 @@ from quant_research_platform.contracts.portfolios import (
 from quant_research_platform.contracts.time import (
     TimeWindow,
     time_window_timestamp_interval,
-)
-from quant_research_platform.contracts.validation import (
-    decode_exact_numeric,
-    encode_exact_numeric,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
@@ -55,18 +50,18 @@ _TABLE_TYPES = {
     "diagnostics": PortfolioDiagnostic,
     "rights_adjustments": PortfolioRightsAdjustment,
 }
-_EXACT_FIELDS = {
+_NUMERIC = {
     "quantity",
     "quantity_before",
     "quantity_after",
     "target_quantity",
+    "quantity_rounding_loss",
+    "target_quantity_rounding_loss",
     "mark_price",
     "locked_quantity",
     "locked_quantity_before",
     "locked_quantity_after",
     "entitlement_quantity",
-}
-_NUMERIC = {
     "notional",
     "amount",
     "value",
@@ -149,18 +144,7 @@ def write_portfolio_ledger_artifact(
                 records = buffers[name]
                 if not records:
                     return
-                table = pa.Table.from_pylist(
-                    [
-                        {
-                            key: encode_exact_numeric(value)
-                            if key in _EXACT_FIELDS
-                            else value
-                            for key, value in record.items()
-                        }
-                        for record in records
-                    ],
-                    schema=_SCHEMAS[name],
-                )
+                table = pa.Table.from_pylist(records, schema=_SCHEMAS[name])
                 writers[name](table)
                 records.clear()
 
@@ -279,12 +263,8 @@ def _table_records(root: Path, name: str) -> Iterator[dict[str, object]]:
     )
     with closing_iterator(chunks):
         for chunk in chunks:
-            if not chunk.schema.remove_metadata().equals(_SCHEMAS[name]):
-                raise ValueError("portfolio_ledger_schema_invalid")
             records = chunk.to_pylist()
             for yielded_value in records:
-                for column in _EXACT_FIELDS.intersection(yielded_value):
-                    yielded_value[column] = decode_exact_numeric(yielded_value[column])
                 try:
                     yield yielded_value
                 except GeneratorExit:
@@ -341,7 +321,7 @@ class _LedgerValidation:
                     event.asset_id,
                     event.lifecycle_id,
                     event.evidence_identity,
-                    encode_exact_numeric(Fraction(event.entitlement_quantity)),
+                    str(float(event.entitlement_quantity)),
                     str(event.entitlement_record_at_ns),
                 )
             ).encode("utf-8")

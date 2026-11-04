@@ -52,10 +52,10 @@ def _native(root, monkeypatch, missing):
     frames, fees, _ = _inputs()
     fees["rate"] = 0.0
     panel = frames["panel"]
-    panel.loc[:, ["open", "close", "adj_open", "adj_close"]] = 100.0
+    panel.loc[:, ["open", "close", "adj_open", "adj_close"]] = 0.01
     panel.loc[
         panel.asset_id.eq("b") & panel.timestamp.ge("2023-01-05"), ["open", "close"]
-    ] = 120.0
+    ] = 0.012
     batches, _ = _build_producer(
         root / "inputs",
         monkeypatch,
@@ -110,7 +110,7 @@ def test_missing_score_holds_exact_shares_across_opening_price_drift(
     bought = next(
         trade.quantity for trade in batches[0].trades if trade.asset_id == "b"
     )
-    assert bought == 1
+    assert bought == 10000
     assert all(not batch.trades for batch in batches[1:])
     assert all(
         row.quantity == bought
@@ -133,15 +133,19 @@ def test_missing_new_asset_cannot_enter(tmp_path, monkeypatch):
     )
 
 
-def test_enhanced_missing_hold_infeasibility_skips_without_relaxation(tmp_path):
+def test_enhanced_missing_hold_infeasibility_keeps_unavailable_position(tmp_path):
     args = _decision_inputs(holdings=(0.6, 0.4))
     args["alpha"].loc["a"] = np.nan
     account, adv, optimized, delta, ledger = production._build_session(**args)
     assert optimized is None
     assert account.asset_ledger.executed_delta_notional.eq(0.0).all()
     assert (
-        ledger.attrs["decision_availability"]["decision_skip_reason"]
+        ledger.attrs["realized_constraints"]["execution_target_repair_reason"]
         == "optimizer_frozen_constraints_infeasible"
+    )
+    assert (
+        ledger.attrs["realized_constraints"]["execution_constraints_status"]
+        == "UNCHANGED"
     )
     life = args["next_panel"].set_index("asset_id").listing_date
     batch = production._ledger_batch(
@@ -214,7 +218,7 @@ def test_partial_missing_neutral_decision_projects_with_fixed_missing_weight():
         (1.0, 0.1, "optimizer_turnover_bounds_infeasible"),
     ],
 )
-def test_proven_economic_bounds_skip_without_solver_relaxation(
+def test_unreachable_risk_target_still_reduces_excess_within_hard_bounds(
     capacity, turnover, reason
 ):
     args = _decision_inputs(holdings=(1.0, 0.0))
@@ -224,8 +228,12 @@ def test_proven_economic_bounds_skip_without_solver_relaxation(
     )
     account, _, optimized, _, ledger = production._build_session(**args)
     assert optimized is None
-    assert account.asset_ledger.executed_delta_notional.eq(0.0).all()
-    assert ledger.attrs["decision_availability"]["decision_skip_reason"] == reason
+    assert account.asset_ledger.executed_delta_notional.tolist() == [-10.0, 10.0]
+    facts = ledger.attrs["realized_constraints"]
+    assert facts["execution_target_repair_reason"] == reason
+    assert facts["execution_constraints_status"] == "IMPROVED"
+    assert facts["realized_name_active_weight"] == pytest.approx(0.4)
+    assert ledger.attrs["decision_availability"]["decision_skip_reason"] is None
 
 
 @pytest.mark.parametrize("unknown", [False, True])
@@ -341,7 +349,8 @@ def _public_prediction_config(tmp_path, *, empty=False, prediction_start="2023-0
         "formal_dataset_window": {"start": "2022-12-01", "end": "2023-01-06"},
         "prediction_window": window,
         "assumptions": {
-            "initial_nav": 100.0,
+            "initial_nav": 1_000_000.0,
+            "minimum_commission": 0.0,
             "slippage_bps": 0.0,
             "impact_bps": 0.0,
             "adv_participation": 1.0,
@@ -435,7 +444,7 @@ def test_public_sparse_prediction_continues_native_accounting(tmp_path, case):
         assert rows.empty == (case == "empty")
         assert all(not batch.trades for batch in batches)
         assert all(
-            row.value == 100.0
+            row.value == 1_000_000.0
             for batch in batches
             for row in batch.valuations
             if row.asset_id == "__cash__"
@@ -456,7 +465,7 @@ def test_public_sparse_prediction_continues_native_accounting(tmp_path, case):
             for row in batch.valuations
             if row.asset_id in bought
         )
-        expected_nav = 100.0 + sum(
+        expected_nav = 1_000_000.0 + sum(
             float(quantity) * 21.0
             for asset, quantity in bought.items()
             if asset.startswith("a")

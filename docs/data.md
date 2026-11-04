@@ -191,8 +191,8 @@ PANEL 在真实交易日轴上实施可用日规则。分类词典、历史资�
 `successor_shares_per_old_share` 为每原股换得的后继实际股份数。
 账本的 `value_per_old_unit`、`remaining_old_units_per_old_unit` 等字段中的 unit
 均指实际股份。
-实际证券生命周期和经济日期必须匹配。金额与数量比例共用规范精确有理数编码，避免中间溢出丢失最终
-可表示的金额；原始 PANEL 行情类型保持不变。每个事件有独立身份；同一旧权益在同一
+实际证券生命周期和经济日期必须匹配。金额、股份权益与换算比例使用 `float64`，直接写入 Parquet 数值列。
+不保存分子、分母或十六进制数值字符串，不读取旧数值编码。每个事件有独立身份；同一旧权益在同一
 确认会话内的多个事件需要可验证的先后顺序；仅有事件 ID 时无法确定经济顺序，相关计算停止。
 NEEQ 官方发布域包括 `neeq.com.cn` 与 `neeq.cc`，依据[官方信息披露入口](https://www.neeq.com.cn/disclosure/overview_information.html)
 及[两网及退市公司信息披露规则](https://www.neeq.com.cn/upload/A0/B0/C1/F190.pdf)；
@@ -365,10 +365,12 @@ INTERIM 主键为 `source_asset_id, timestamp, report_type, data_source, subject
 PORT 的实际表列由 `PORTFOLIO_LEDGER_TABLE_COLUMNS` 从约定类型生成，包含 trades、cashflows、
 valuations、diagnostics、rights_adjustments；不在本文手写第二套完整列。
 `quantity`/`locked_quantity` 是对应账户单位数量，`receivable` 是尚未到账应收，
-`cash_amount`/`amount`/`value` 为约定规定币种金额；精确数量编码与普通浮点金额分别处理。
+`cash_amount`/`amount`/`value` 为约定规定币种金额；实际成交和持仓为整数股，以原生 `float64` 数值列保存。公司行动逐事件向下取整，舍弃数量保存于 `quantity_rounding_loss` 和 `target_quantity_rounding_loss`（各在 `[0,1)`）；两者是披露事实，不计入持仓。价格和金额也采用原生数值列。
+经济汇总及 `performance` 的 `equity_rounding_pnl` 披露按事件阶段估值的舍尾负贡献，不重复扣减总损益；没有同生命周期正估值时该指标为未定义，原因是 `rounding_price_unavailable`。元数据 `corporate_action_policy.fractional_share_policy=floor_per_event_research_approximation` 标明此回测近似。
 具体现金、权益、应收和锁定状态的守恒由同一账本约定核验，不以表存在或字段非空代替。
 原股账户的相邻 `end` 与 `before` 必须保持全账户财富及每项原股估值连续，金额使用
-NAV 量纲的浮点舍入容差；精确股数、生命周期、应收和锁定状态仍遵循各自原约定。
+金额容差 `max(1e-8, abs(nav)*1e-12)`；股份权益比较采用相对 `1e-12`、绝对 `1e-9` 股的容差。
+生命周期、事件、时点和相同持久化值保持原值。分红支付后的应收残余小于 `1e-8` 元时归零。
 即使总 NAV 相同，也不能在边界静默更换各股票的估值或股数。该不变量由原生 PORT
 写入与读取共用的状态转换模块核验，统计使用方不维护另一份财富连续性规则。
 

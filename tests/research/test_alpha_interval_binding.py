@@ -5,7 +5,7 @@ import json
 import pandas as pd
 import pytest
 
-from quant_research_platform.research.portfolios.accounting import (
+from quant_research_platform.research.portfolios.calibration import (
     alpha_calibration_intervals,
     alpha_interval_semantics,
     frozen_alpha_calibration,

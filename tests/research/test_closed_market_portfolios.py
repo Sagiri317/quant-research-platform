@@ -21,12 +21,17 @@ from quant_research_platform.markets.implementations.a_share.calendar import (
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.portfolios import production
+from quant_research_platform.research.portfolios.accounting import (
+    ResearchValuationMarks,
+)
+from quant_research_platform.research.portfolios.attribution import (
+    holding_attribution,
+)
 from quant_research_platform.research.portfolios.diagnostics import (
     iter_holding_factor_inputs,
 )
-from quant_research_platform.research.portfolios.risk import (
+from quant_research_platform.research.risk import (
     FactorRiskConfig,
-    holding_attribution,
 )
 from quant_research_platform.storage.datasets import write_dataset
 from tests.helpers.portfolio_inputs import closed_market_inputs as _native_inputs
@@ -60,7 +65,9 @@ def _ledger(layout, roots):
         input_window=TimeWindow("2022-12-01", "2023-01-06"),
         formal_dataset_window=TimeWindow("2022-12-01", "2023-01-06"),
         prediction_lookup=Predictions(),
-        assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,)),
+        assumptions=ExecutionAssumptions(
+            1_000_000.0, 0.0, 0.0, 1.0, (1.0,), minimum_commission=0.0
+        ),
     )
 
 
@@ -84,7 +91,7 @@ def test_closed_market_ledger_reopens_on_current_target_and_keeps_native_endpoin
         for trade in chunks[2].trades
     )
     assert frames[1].loc["__cash__", "post_trade_notional"] >= 0.0
-    assert frames[1].loc[["a0", "a1", "a2"], "adv20"].tolist() == [1000.0] * 3
+    assert frames[1].loc[["a0", "a1", "a2"], "adv20"].tolist() == [10_000_000.0] * 3
     assert all(
         trade.asset_id not in {"a3", "a4", "a5"}
         for batch in chunks
@@ -97,7 +104,9 @@ def test_closed_market_ledger_reopens_on_current_target_and_keeps_native_endpoin
         assert before.end_notional.sum() == pytest.approx(
             after.pre_trade_notional.sum()
         )
-    capital = PortfolioCapital("closed_market_portfolio", 100.0, "CNY", "cash_equity")
+    capital = PortfolioCapital(
+        "closed_market_portfolio", 1_000_000.0, "CNY", "cash_equity"
+    )
     metadata = {
         "window": {"start": "2022-12-30", "end": "2023-01-06"},
         "sample_role": "validation",
@@ -127,7 +136,9 @@ def test_closed_market_ledger_reopens_on_current_target_and_keeps_native_endpoin
             *chunks[0].trades[1:],
         ),
     )
-    capital = PortfolioCapital("closed_market_portfolio", 100.0, "CNY", "cash_equity")
+    capital = PortfolioCapital(
+        "closed_market_portfolio", 1_000_000.0, "CNY", "cash_equity"
+    )
     metadata = {
         "window": {"start": "2022-12-30", "end": "2023-01-06"},
         "sample_role": "validation",
@@ -250,7 +261,7 @@ def test_native_partial_quote_becomes_phase_ordered_research_anchor(tmp_path, ph
     assert pd.isna(raw["close" if phase == "open" else "open"])
     assert partial.valuation.set_index("asset_id").loc["a0", phase] == 12.0
 
-    marks = production._ResearchValuationMarks()
+    marks = ResearchValuationMarks()
     projected = {
         view.timestamp: marks.project(view).set_index("asset_id") for view in views
     }
@@ -565,7 +576,9 @@ def test_native_ledger_rejects_terminal_relisting_and_preserves_published_artifa
     from hashlib import sha256
 
     layout, roots, _, _ = _native_inputs(tmp_path / "control")
-    capital = PortfolioCapital("closed_market_portfolio", 100.0, "CNY", "cash_equity")
+    capital = PortfolioCapital(
+        "closed_market_portfolio", 1_000_000.0, "CNY", "cash_equity"
+    )
     metadata = {
         "window": {"start": "2022-12-30", "end": "2023-01-06"},
         "sample_role": "validation",
@@ -633,7 +646,7 @@ def test_empty_research_valuation_keeps_boolean_lifecycle_masks():
         unknown_market_assets=frozenset(),
         rights_events=pd.DataFrame(),
     )
-    marks = production._ResearchValuationMarks()
+    marks = ResearchValuationMarks()
     actual = marks.project(view)
     assert actual.empty
     assert {"asset_id", "open", "close"}.issubset(actual.columns)
@@ -647,7 +660,7 @@ def test_empty_research_valuation_keeps_boolean_lifecycle_masks():
 def test_alpha_uses_native_normal_carry_endpoints(
     tmp_path, monkeypatch, fault, rights_proved
 ):
-    from quant_research_platform.research.portfolios.accounting import (
+    from quant_research_platform.research.portfolios.calibration import (
         frozen_alpha_calibration,
     )
     from tests.helpers.portfolio_inputs import _interim_specs, _processed_specs
@@ -743,14 +756,18 @@ def test_alpha_uses_native_normal_carry_endpoints(
             input_window=TimeWindow("2022-12-01", "2023-01-06"),
             formal_dataset_window=TimeWindow("2022-12-01", "2023-01-06"),
             prediction_lookup=Predictions(),
-            assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,)),
+            assumptions=ExecutionAssumptions(
+                1_000_000.0, 0.0, 0.0, 1.0, (1.0,), minimum_commission=0.0
+            ),
             on_final_calibration=final.append,
         ):
             emit(batch)
 
     root = write_portfolio_ledger_artifact(
         tmp_path / "ledger",
-        capital=PortfolioCapital(candidate.candidate_id, 100.0, "CNY", "cash_equity"),
+        capital=PortfolioCapital(
+            candidate.candidate_id, 1_000_000.0, "CNY", "cash_equity"
+        ),
         metadata={"window": {"start": "2022-12-30", "end": "2023-01-06"}},
         produce=produce,
         final_calibration=lambda: final[0],

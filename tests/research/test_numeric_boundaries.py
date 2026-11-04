@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-from fractions import Fraction
-
 import numpy as np
 import pandas as pd
 import pytest
 
 from quant_research_platform.research import statistics, statistics_production
-from quant_research_platform.research.portfolios.risk import (
+from quant_research_platform.research.risk import (
     FactorRiskConfig,
     FactorRiskState,
     _ewma_covariance,
@@ -232,7 +230,9 @@ def test_native_risk_state_keeps_recent_variation_within_factor_window():
     ],
 )
 def test_psd_check_distinguishes_roundoff_from_negative_risk(matrix, expected):
-    from quant_research_platform.research.portfolios.risk import _validated_covariance
+    from quant_research_platform.research.risk import (
+        _validated_covariance,
+    )
 
     if expected:
         np.testing.assert_array_equal(
@@ -276,7 +276,7 @@ def test_native_rank_one_industry_covariance_reaches_actual_optimizer():
         frame.assign(timestamp=pd.Timestamp("2023-01-03"), asset_return=-0.01)
     )
     estimate = state.estimate()
-    expected = float(Fraction(8, 9) * Fraction(0.01) ** 2)
+    expected = float((8 / 9) * 0.01**2)
     np.testing.assert_allclose(
         estimate.factor_covariance, np.full((3, 3), expected), rtol=2e-15, atol=0
     )
@@ -411,7 +411,9 @@ def test_optimizer_risk_roundoff_is_bounded_and_rejects_nonfinite():
 )
 def test_native_zero_shrinkage_has_bounded_nonnegative_neutral_risk(values):
     from quant_research_platform.research.portfolios.optimizer import _risk_variances
-    from quant_research_platform.research.portfolios.risk import _validated_covariance
+    from quant_research_platform.research.risk import (
+        _validated_covariance,
+    )
 
     values = np.asarray(values)
     covariance = _ewma_covariance(

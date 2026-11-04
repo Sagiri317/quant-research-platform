@@ -14,7 +14,7 @@ Python 函数与 `qrp` 命令行使用同一套计算实现。研究配置明确
 
 ```text
 qrp prepare-source --config configs/prepare-source.json
-qrp prepare --config configs/prepare-financial.json
+qrp prepare --config <数据准备配置.json>
 qrp assemble --config <组装配置.json>
 qrp fit --config configs/fit-a-share.json
 qrp run-quarterly --config configs/quarterly-a-share.json
@@ -64,7 +64,7 @@ model_path = fit(read_qrp_json_file("configs/fit-a-share.json")[1])
 [冻结模型解释](configs/explain-model.json)的背景必须落在该模型实际拟合域内；
 [组合基准比较](configs/statistics-benchmark-a-share.json)需替换真实指数代码、时钟、币种及价格/全收益口径，并通过 inputs.calendar 提供覆盖收益区间的完整交易日历。
 组合统计默认只计算绩效，额外分析通过 analyses 选择。
-[研究配置参考](docs/research-rosters/)列出有顺序的模型、候选参数、因子、资产和研究窗口，供设计实验时选用。
+[研究选择](docs/research.md)说明主线、比较方法与证据边界；运行参数在各项操作中明确指定。
 实际运行仍需填写各操作自己的配置。接口会校验字段、类型和必要数值，拒绝重复的 JSON 键。
 未选择的统计分析不会读取其专用输入；模型解释等严格接口也会拒绝用不到的选项。
 候选顺序可能决定同分时的选择，输入列顺序则决定模型接收特征的排列，不能自行排序或去重。

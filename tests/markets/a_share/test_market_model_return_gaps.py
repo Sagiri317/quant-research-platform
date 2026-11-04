@@ -6,9 +6,8 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.compute.market_model import MarketModelRiskState
-from quant_research_platform.research.portfolios.risk import (
+from quant_research_platform.research.risk import (
     FactorRiskState,
-    preprocess_risk_styles,
 )
 from quant_research_platform.storage.datasets import read_dataset
 from tests.helpers.a_share_sources import (
@@ -70,8 +69,7 @@ def test_native_market_model_gap_persists_and_recovers_complete_windows(
         )
         prepared = risk.prepare_exposures(cross)
         pd.testing.assert_frame_equal(prepared[styles], cross[styles])
-        processed = preprocess_risk_styles(prepared, style_columns=tuple(styles))
-        exposures = risk.current_exposures(processed.dropna(subset=styles))
+        exposures = risk.current_exposures(cross)
         assert len(exposures) == 3
     # Exact independent equal-cap regression oracle before and after the barrier.
     returns = bars.pivot(

@@ -1,9 +1,7 @@
 """Adversarial contracts and exact kernel comparisons against independent references."""
 
-import json
 from dataclasses import asdict
 from fractions import Fraction
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -27,11 +25,11 @@ from quant_research_platform.research.labels.forward_returns import (
 from quant_research_platform.research.models.scaler import (
     equal_timestamp_sample_weights,
 )
-from quant_research_platform.research.portfolios.risk import (
+from quant_research_platform.research.protocols import a_share
+from quant_research_platform.research.risk import (
     FactorRiskConfig,
     FactorRiskState,
 )
-from quant_research_platform.research.protocols import a_share
 from quant_research_platform.research.statistics import (
     cscv_pbo,
     probabilistic_and_deflated_sharpe,
@@ -142,24 +140,6 @@ def _reference_residuals(target, industries, sizes):
             for i, (g, y) in enumerate(zip(industries, target, strict=True))
         ]
     )
-
-
-@pytest.mark.parametrize(
-    "name",
-    ["core6", "pv25", "pv_expanded", "fusion_nf_core", "fusion_nf_expectations"],
-)
-def test_research_rosters_select_unique_supported_factors(name):
-    path = (
-        Path(__file__).resolve().parents[2]
-        / "docs/research-rosters/a_share"
-        / (name + ".json")
-    )
-    configuration = json.loads(path.read_text(encoding="utf-8"))
-    factors = configuration["evaluation"]["factors"]
-    assert factors
-    assert len(factors) == len(set(factors))
-    catalog = a_share.factor_catalog()
-    assert set(factors) <= {item.output_column for item in catalog.list()}
 
 
 def test_equal_timestamp_decay_is_one_frozen_model_contract():

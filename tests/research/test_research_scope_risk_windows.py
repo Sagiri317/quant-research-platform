@@ -8,7 +8,7 @@ from quant_research_platform.research.filtering import (
     a_share_eligibility,
     a_share_eligibility_columns,
 )
-from quant_research_platform.research.portfolios.risk import (
+from quant_research_platform.research.risk import (
     FactorRiskConfig,
     FactorRiskState,
 )

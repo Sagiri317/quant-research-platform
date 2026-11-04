@@ -1,7 +1,6 @@
 """Raw-share registration, receivable and economic ledger regressions."""
 
 from dataclasses import replace
-from fractions import Fraction
 
 import pandas as pd
 import pytest
@@ -49,7 +48,7 @@ def _events(*, pay="2024-01-05", stock=False):
 def test_registered_cash_and_stock_use_original_shares_and_sold_shares_keep_dividend():
     state = EquityEntitlements()
     events = pd.concat([_events(), _events(stock=True)])
-    shares = pd.Series({"a": Fraction(100)}, dtype=object)
+    shares = pd.Series({"a": float(100)}, dtype=object)
     lives = pd.Series({"a": pd.Timestamp("2000-01-01")})
     registration = state.register(events, shares, lives, pd.Timestamp("2024-01-02"))
     assert [row.entitlement_quantity for row in registration] == [100, 100]
@@ -77,7 +76,7 @@ def test_registered_cash_and_stock_use_original_shares_and_sold_shares_keep_divi
 def test_dividend_payment_survives_zero_quantity_and_a_new_listing_lifecycle():
     state = EquityEntitlements()
     events = _events()
-    shares = pd.Series({"a": Fraction(100)}, dtype=object)
+    shares = pd.Series({"a": float(100)}, dtype=object)
     lives = pd.Series({"a": pd.Timestamp("2000-01-01")})
     state.register(events, shares, lives, pd.Timestamp("2024-01-02"))
     state.process(events, pd.DataFrame(), shares, lives, pd.Timestamp("2024-01-03"))
@@ -85,7 +84,7 @@ def test_dividend_payment_survives_zero_quantity_and_a_new_listing_lifecycle():
         import copy
 
         sample = copy.deepcopy(state)
-        shares["a"] = Fraction(quantity)
+        shares["a"] = float(quantity)
         lives["a"] = pd.Timestamp("2024-01-04")
         result, identities, cash, records = sample.process(
             events, pd.DataFrame(), shares, lives, pd.Timestamp("2024-01-05")
@@ -100,7 +99,7 @@ def test_same_day_ex_cash_is_spendable_but_delayed_cash_is_a_receivable():
     for pay, expected in (("2024-01-03", 100), ("2024-01-05", 0)):
         state = EquityEntitlements()
         events = _events(pay=pay)
-        shares = pd.Series({"a": Fraction(100)}, dtype=object)
+        shares = pd.Series({"a": float(100)}, dtype=object)
         lives = pd.Series({"a": pd.Timestamp("2000-01-01")})
         state.register(events, shares, lives, pd.Timestamp("2024-01-02"))
         _, _, cash, _ = state.process(
@@ -113,7 +112,7 @@ def test_same_day_ex_cash_is_spendable_but_delayed_cash_is_a_receivable():
 def test_endpoint_dividend_ledger_roundtrip_has_no_double_count(tmp_path):
     state = EquityEntitlements()
     events = _events(pay="2024-01-03")
-    shares = pd.Series({"a": Fraction(100)}, dtype=object)
+    shares = pd.Series({"a": float(100)}, dtype=object)
     lives = pd.Series({"a": pd.Timestamp("2000-01-01")})
     entry, end = pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-03")
     registration = state.register(events, shares, lives, entry)
@@ -132,7 +131,7 @@ def test_endpoint_dividend_ledger_roundtrip_has_no_double_count(tmp_path):
                 at.value,
                 "a",
                 phase,
-                Fraction(100),
+                float(100),
                 100 * mark,
                 mark,
                 lifecycle_id="2000-01-01",
@@ -210,48 +209,11 @@ def test_endpoint_dividend_ledger_roundtrip_has_no_double_count(tmp_path):
         )
 
 
-def test_execution_reserves_unpaid_cash_and_cannot_sell_locked_stock():
-    from datetime import date
-
-    from tests.helpers.portfolio_ledger import execute_continuous_target
-    from tests.research.test_portfolio_ledger import (
-        _a_share_cost,
-        _assumptions,
-        _schedule,
-    )
-
-    account = execute_continuous_target(
-        pd.Series({"a": 0.9, "b": 0.0}),
-        pd.Series({"a": 0.0, "b": 1.0}),
-        nav=1000.0,
-        receivable=100.0,
-        locked_notional=pd.Series({"a": 300.0}),
-        average_daily_volume=pd.Series({"a": 10000.0, "b": 10000.0}),
-        can_enter=pd.Series({"a": True, "b": True}),
-        can_exit=pd.Series({"a": True, "b": True}),
-        execution_date=date(2023, 8, 28),
-        assumptions=_assumptions(),
-        cost_for_trade=_a_share_cost(
-            _schedule(transfer_rate=0.0, broker_rate=0.0, stamp_rate=0.0),
-            {"a": "shanghai", "b": "shanghai"},
-        ),
-        cost_source_identity="0" * 64,
-    )
-    ledger = account.asset_ledger.set_index("asset_id")
-    assert ledger.loc["a", "executed_delta_notional"] == -600
-    assert ledger.loc["a", "reason"] == "locked_shares"
-    assert ledger.loc["b", "executed_delta_notional"] == pytest.approx(600)
-    assert ledger.loc["b", "reason"] == "cash_pro_rata"
-    assert account.pre_trade_cash == 0
-    assert account.post_trade_cash == pytest.approx(0, abs=1e-12)
-    assert account.nav_after == pytest.approx(1000)
-
-
 def test_distribution_without_unlock_date_stays_valued_and_locked():
     state = EquityEntitlements()
     events = _events(stock=True)
     events["settlement_at"] = pd.NaT
-    shares = pd.Series({"a": Fraction(100)}, dtype=object)
+    shares = pd.Series({"a": float(100)}, dtype=object)
     lives = pd.Series({"a": pd.Timestamp("2000-01-01")})
     state.register(events, shares, lives, pd.Timestamp("2024-01-02"))
     shares, lives, _, _ = state.process(
@@ -265,32 +227,134 @@ def test_distribution_without_unlock_date_stays_valued_and_locked():
     assert cash == 0 and changes == ()
 
 
-def test_raw_price_delta_pnl_is_not_difference_of_rounded_position_values():
-    mark = 1.0
-    import math
-
-    from quant_research_platform.compute.portfolio_economics import _LedgerEconomics
-
-    final_mark = math.nextafter(mark, math.inf)
-    capital = PortfolioCapital("delta", 3 * mark, "CNY", "cash_equity")
-    values = tuple(
-        value
-        for phase, price, timestamp in (
-            ("before", mark, 1),
-            ("after", mark, 1),
-            ("end", final_mark, 2),
+def test_separate_distributions_floor_shares_disclose_loss_and_fully_unlock():
+    state = EquityEntitlements()
+    first = _events(stock=True, pay="2024-01-04")
+    second = _events(stock=True, pay="2024-01-05")
+    first["additional_shares_per_share"] = 0.1
+    second["additional_shares_per_share"] = 0.2
+    second["event_id"] = "second"
+    events = pd.concat([first, second])
+    shares = pd.Series({"a": 1001.0})
+    lives = pd.Series({"a": pd.Timestamp("2000-01-01")})
+    state.register(events, shares, lives, pd.Timestamp("2024-01-02"))
+    for day, expected_locked in ((3, 300), (4, 200), (5, 0)):
+        shares, lives, cash, changes = state.process(
+            events, pd.DataFrame(), shares, lives, pd.Timestamp(2024, 1, day)
         )
-        for value in (
-            PortfolioValuation(timestamp, "a", phase, Fraction(3), 3 * price, price),
-            PortfolioValuation(timestamp, PORTFOLIO_CASH_ASSET_ID, phase, 0, 0),
-        )
+        assert state.locked_quantities["a"] == expected_locked
+        assert all(change.locked_quantity_after.is_integer() for change in changes)
+        if day == 3:
+            assert [row.quantity_rounding_loss for row in changes] == pytest.approx(
+                [0.1, 0.2]
+            )
+        assert cash == 0.0
+    assert state.locked_quantities["a"] == 0.0
+    assert shares["a"] == 1301
+
+
+def test_integer_entitlement_does_not_lose_a_share_to_multiplication_roundoff():
+    state = EquityEntitlements()
+    events = _events(stock=True)
+    events["additional_shares_per_share"] = 0.29
+    shares = pd.Series({"a": 100.0})
+    lives = pd.Series({"a": pd.Timestamp("2000-01-01")})
+    state.register(events, shares, lives, pd.Timestamp("2024-01-02"))
+    shares, _, _, changes = state.process(
+        events, pd.DataFrame(), shares, lives, pd.Timestamp("2024-01-03")
     )
-    batch = PortfolioLedgerBatch(0, (), (), values, ())
-    economics = _LedgerEconomics(capital)
-    economics.consume(batch)
-    expected = 3 * (final_mark - mark)
-    assert economics.summary()["gross_pnl"] == pytest.approx(expected, rel=1e-14, abs=0)
-    assert 3 * final_mark - 3 * mark != expected
+    assert shares["a"] == 129
+    assert changes[0].quantity_rounding_loss == 0
+
+
+@pytest.mark.parametrize("kind", ("stock_distribution", "share_change", "conversion"))
+@pytest.mark.parametrize("mark", (10.0, 0.0))
+def test_fractional_rights_roundtrip_and_pnl_without_double_deduction(
+    tmp_path, kind, mark
+):
+    state = EquityEntitlements()
+    entry, end = pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-03")
+    listing = pd.Timestamp("2000-01-01")
+    shares, lives = pd.Series({"a": 1.0}), pd.Series({"a": listing})
+    events, rights = pd.DataFrame(), pd.DataFrame()
+    registration = ()
+    if kind == "stock_distribution":
+        events = _events(stock=True)
+        registration = state.register(events, shares, lives, entry)
+    else:
+        rights = pd.DataFrame(
+            [
+                dict(
+                    event_id="reorganization",
+                    asset_id="a",
+                    listing_date=listing,
+                    kind=kind,
+                    remaining_old_units_per_old_unit=0.5
+                    if kind == "share_change"
+                    else 0,
+                    value_per_old_unit=0.0,
+                    successor_asset_id="b" if kind == "conversion" else None,
+                    successor_listing_date=listing if kind == "conversion" else pd.NaT,
+                    successor_units_per_old_unit=0.5 if kind == "conversion" else 0,
+                    evidence_identity="b" * 64,
+                    entitlement_proved=True,
+                )
+            ]
+        )
+    shares, lives, cash, changes = state.process(
+        events, rights, shares, lives, end, phase="end"
+    )
+    assert cash == 0
+    assert shares.eq(0 if kind != "stock_distribution" else 1).all()
+    assert (
+        sum(
+            row.quantity_rounding_loss + row.target_quantity_rounding_loss
+            for row in changes
+        )
+        == 0.5
+    )
+    valuations = []
+    for phase, at in (("before", entry), ("after", entry), ("end", end)):
+        for asset in shares.index:
+            quantity = float(shares[asset]) if phase == "end" else float(asset == "a")
+            price = mark if phase == "end" else 10.0
+            valuations.append(
+                PortfolioValuation(
+                    at.value,
+                    asset,
+                    phase,
+                    quantity,
+                    quantity * price,
+                    price,
+                    lifecycle_id="2000-01-01",
+                )
+            )
+        valuations.append(
+            PortfolioValuation(at.value, PORTFOLIO_CASH_ASSET_ID, phase, 0, 0)
+        )
+    batch = PortfolioLedgerBatch(
+        0, (), (), tuple(valuations), (), registration + changes
+    )
+    capital = PortfolioCapital("rounding", 10, "CNY", "cash_equity")
+    root = write_portfolio_ledger_artifact(
+        tmp_path / "ledger",
+        capital=capital,
+        metadata={"window": {"start": "2024-01-02", "end": "2024-01-04"}},
+        produce=lambda emit: emit(batch),
+    )
+    reread = tuple(read_portfolio_ledger_artifact(root).iter_chunks())
+    assert reread == (batch,)
+    summary = summarize_portfolio_ledger(capital, iter(reread))
+    assert summary["nav"] == float(shares.sum()) * mark
+    assert summary["net_pnl"] == summary["nav"] - 10
+    assert summary["equity_rounding_pnl"] == (-5 if mark else None)
+    assert summary["equity_rounding_pnl_reason"] == (
+        None if mark else "rounding_price_unavailable"
+    )
+    with pytest.raises(ValueError, match="portfolio_rights_adjustment_invalid"):
+        replace(
+            batch, rights_adjustments=(replace(changes[0], quantity_rounding_loss=1),)
+        )
 
 
 def test_small_dividend_claim_survives_a_large_same_asset_claim_settlement():
@@ -301,7 +365,7 @@ def test_small_dividend_claim_survives_a_large_same_asset_claim_settlement():
     small["event_id"] = "small"
     small["cash_per_share"] = 1e-4
     events = pd.concat([large, small])
-    shares = pd.Series({"a": Fraction(100)}, dtype=object)
+    shares = pd.Series({"a": float(100)}, dtype=object)
     lives = pd.Series({"a": pd.Timestamp("2000-01-01")})
     state.register(events, shares, lives, pd.Timestamp("2024-01-02"))
     state.process(events, pd.DataFrame(), shares, lives, pd.Timestamp("2024-01-03"))
@@ -320,7 +384,7 @@ def test_registered_dividend_survives_share_cancellation_without_double_recovery
 ):
     state = EquityEntitlements()
     events = _events()
-    shares = pd.Series({"a": Fraction(100)}, dtype=object)
+    shares = pd.Series({"a": float(100)}, dtype=object)
     lives = pd.Series({"a": pd.Timestamp("2000-01-01")})
     state.register(events, shares, lives, pd.Timestamp("2024-01-02"))
     shares, lives, cash, _ = state.process(
@@ -363,7 +427,7 @@ def test_gross_raw_price_gain_is_separate_from_cost():
     from quant_research_platform.compute.portfolio_economics import cash_equity_pnl
 
     costs = PortfolioCashFlow("fee", 1, "a", "fill", "commission_cost", -10.0)
-    net = cash_equity_pnl({"a": Fraction(300)}, {"a": Fraction(306)}, (costs,))
+    net = cash_equity_pnl({"a": float(300)}, {"a": float(306)}, (costs,))
     assert float(net) == pytest.approx(-4.0)
     assert float(net) + 10.0 == pytest.approx(6.0)
 
@@ -385,7 +449,7 @@ def test_unquoted_carried_mark_adjusts_cash_and_stock_on_same_original_base():
     )
     assert mark == 6
     assert evidence == ("a" * 64,)
-    assert Fraction(150) * mark + 100 == 1000
+    assert float(150) * mark + 100 == 1000
     assert adjust_carried_share_mark(
         mark,
         events,

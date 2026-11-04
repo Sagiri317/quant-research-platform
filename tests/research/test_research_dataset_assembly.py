@@ -92,7 +92,7 @@ def test_research_dataset_assembles_from_processed_inputs(tmp_path: Path) -> Non
 
 
 @pytest.mark.parametrize(
-    "scenario", ("pv_all", "pv_expanded", "fusion_nf_core", "fusion_nf_expectations")
+    "scenario", ("pv_all", "fusion_nf_core", "fusion_nf_expectations")
 )
 def test_non_a_share_named_scenario_keeps_input_semantics_and_requires_real_columns(
     tmp_path, scenario

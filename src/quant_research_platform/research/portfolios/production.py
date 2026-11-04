@@ -7,8 +7,6 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
-from fractions import Fraction
-from functools import partial
 from pathlib import Path
 from statistics import mean
 
@@ -46,6 +44,9 @@ from quant_research_platform.contracts.validation import (
     strict_finite_float,
     strict_real_numeric_series,
 )
+from quant_research_platform.markets.implementations.a_share.execution import (
+    stock_order_limits,
+)
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.features.transforms import (
     _industry_group_codes,
@@ -55,15 +56,17 @@ from quant_research_platform.research.filtering import (
     a_share_eligibility,
 )
 from quant_research_platform.research.portfolios.accounting import (
-    AlphaCalibration,
     EquityEntitlements,
     ExecutionAccounting,
-    adjust_carried_share_mark,
+    ResearchValuationMarks,
+    execute_stock_target,
+)
+from quant_research_platform.research.portfolios.calibration import (
+    AlphaCalibration,
     alpha_calibration_intervals,
     alpha_calibration_start,
     alpha_interval_semantics,
     calibrate_expected_alpha,
-    execute_continuous_target,
 )
 from quant_research_platform.research.portfolios.construction import (
     _neutrality_context,
@@ -73,21 +76,20 @@ from quant_research_platform.research.portfolios.construction import (
 from quant_research_platform.research.portfolios.optimizer import (
     OptimizationResult,
     OptimizerConfig,
+    _neutrality_bands,
+    _neutrality_risk_limits,
+    _portfolio_risk_limits,
     _project_neutral_target,
-    _risk_active_weights,
-    _risk_variances,
-    _stock_leg_active_exposure,
     optimize_portfolio,
-)
-from quant_research_platform.research.portfolios.risk import (
-    FactorRiskConfig,
-    FactorRiskEstimate,
-    FactorRiskState,
-    preprocess_risk_styles,
 )
 from quant_research_platform.research.portfolios.schedules import (
     holding_intervals,
     is_rebalance_session,
+)
+from quant_research_platform.research.risk import (
+    FactorRiskConfig,
+    FactorRiskEstimate,
+    FactorRiskState,
 )
 from quant_research_platform.storage.datasets.reading import (
     _dataset_input_options,
@@ -166,313 +168,103 @@ _ALPHA_DIAGNOSTICS = {
 }
 
 
-class _ResearchValuationMarks:
-    """Carry unquoted rights, never a tradable quote, in observation order."""
-
-    def __init__(self):
-        self.rights_quotes = {}
-        self.cancelled_lifecycles = set()
-        self.converted_lifecycles = {}
-        self.zero_since = {}
-        self.unproved_rights = set()
-        self.corporate_mark_history = {}
-        self.rights_mark_history = {}
-        self.last = pd.DataFrame(
-            {
-                "listing_date": pd.Series(dtype="datetime64[ns]"),
-                "market_type": pd.Series(dtype="Int64"),
-                "mark_at": pd.Series(dtype="datetime64[ns]"),
-                "mark_price": pd.Series(dtype="float64"),
-                "mark_kind": pd.Series(dtype="string"),
-                "mark_evidence": pd.Series(dtype="string"),
-            }
-        )
-
-    def project(self, view):
-        for frame, history in (
-            (view.corporate_events, self.corporate_mark_history),
-            (view.rights_events, self.rights_mark_history),
-        ):
-            for event in frame.itertuples(index=False):
-                if event.kind == "quote":
-                    continue
-                identity = (event.asset_id, event.listing_date)
-                history.setdefault(identity, {})[event.event_id] = event._asdict()
-        settled_lifecycles = []
-        for event in view.rights_events.itertuples(index=False):
-            identity = (event.asset_id, event.listing_date)
-            if not event.entitlement_proved:
-                self.unproved_rights.add(identity)
-                self.rights_quotes.pop(identity, None)
-                continue
-            if (
-                event.kind == "conversion"
-                and event.successor_asset_id == event.asset_id
-            ):
-                self.converted_lifecycles[identity] = event.successor_listing_date
-            if event.kind == "quote" and identity not in self.cancelled_lifecycles:
-                self.rights_quotes[identity] = event
-            elif (
-                event.kind != "quote"
-                and Fraction(event.remaining_old_units_per_old_unit) == 0
-            ):
-                self.cancelled_lifecycles.add(identity)
-                settled_lifecycles.append(identity)
-                self.rights_quotes.pop(identity, None)
-        observed = view.panel.set_index("asset_id").copy()
-        current = view.valuation.set_index("asset_id").copy()
-        for frame in (observed, current):
-            values = (
-                frame[["open", "close"]]
-                .apply(
-                    strict_real_numeric_series,
-                    error="portfolio_return_invalid",
-                    errors="coerce",
-                )
-                .astype("float64")
-            )
-            frame[["open", "close"]] = values.where(np.isfinite(values) & values.gt(0))
-        if self.rights_quotes:
-            current = current.astype({"open": "object", "close": "object"})
-        for asset, listing in (*self.rights_quotes, *settled_lifecycles):
-            if asset not in current.index and asset not in self.last.index:
-                current.loc[asset, "listing_date"] = listing
-                current.loc[asset, "timestamp"] = view.timestamp
-        present = current.index
-        assets = present.union(self.last.index, sort=False)
-        current = current.reindex(assets)
-        previous = self.last.reindex(assets)
-        absent = ~assets.isin(present)
-        if absent.any():
-            for column in ("listing_date", "market_type"):
-                current.loc[absent, column] = previous.loc[absent, column]
-        current["timestamp"] = view.timestamp
-        if self.converted_lifecycles:
-            for asset in assets:
-                listing = current.loc[asset, "listing_date"]
-                visited = set()
-                while (str(asset), listing) in self.converted_lifecycles:
-                    if listing in visited:
-                        raise ValueError("portfolio_rights_conversion_cycle")
-                    visited.add(listing)
-                    listing = self.converted_lifecycles[str(asset), listing]
-                if visited:
-                    current.loc[asset, "listing_date"] = listing
-                    current.loc[asset, ["open", "close"]] = np.nan
-                    current.loc[asset, "is_trading"] = False
-        same_life = current.listing_date.notna() & current.listing_date.eq(
-            previous.listing_date
-        )
-        same_life &= ~assets.isin(view.unproved_lifecycle_assets)
-        for asset, row in observed.iterrows():
-            if (
-                pd.notna(row.is_trading)
-                and bool(row.is_trading)
-                and pd.notna(row.open)
-                and asset not in view.unproved_lifecycle_assets
-            ):
-                self.unproved_rights.discard((str(asset), row.listing_date))
-        unproved_rights = pd.Series(
-            [
-                (str(asset), listing) in self.unproved_rights
-                for asset, listing in current.listing_date.items()
-            ],
-            index=assets,
-            dtype=bool,
-        )
-        same_life &= ~unproved_rights
-        current.loc[unproved_rights, ["open", "close"]] = np.nan
-        previous = previous.loc[same_life].copy()
-        self.last = previous.copy()
-        observed = observed.loc[
-            observed.is_trading.eq(True).fillna(False)
-            & observed.listing_date.notna()
-            & ~observed.index.isin(view.unproved_lifecycle_assets)
-        ]
-        current["research_previous_listing_date"] = pd.Series(
-            pd.NaT, index=assets, dtype="datetime64[ns]"
-        )
-        for event in view.rights_events.itertuples(index=False):
-            if (
-                event.kind == "conversion"
-                and event.successor_asset_id == event.asset_id
-            ):
-                current.loc[event.asset_id, "research_previous_listing_date"] = (
-                    event.listing_date
-                )
-        for phase in ("open", "close"):
-            column = phase
-            known = observed.loc[current[column].reindex(observed.index).notna()]
-            # Nontrading PANEL rows can contain prepared carry prices. Only an
-            # observed trading quote resets the raw-share valuation anchor.
-            current.loc[~assets.isin(known.index), column] = np.nan
-            # Today's close cannot fill today's missing open.
-            if phase == "close":
-                previous = self.last.reindex(assets)
+def _repair_stock_allocation(target, hold, benchmark, minimum, increment, evaluate):
+    """Keep risk bands first, then stay close to the requested allocation."""
+    requested = evaluate(target)
+    if requested[2][:2] == (0.0, 0.0):
+        return requested
+    alternatives = [
+        (target, requested),
+        (hold, evaluate(hold)),
+        (benchmark, evaluate(benchmark)),
+    ]
+    benchmark_account = alternatives[-1][1][0]
+    change = benchmark - hold
+    moving = change.ne(0.0)
+    if moving.any():
+        reached = (
+            benchmark_account.asset_ledger.set_index("asset_id").post_trade_notional
+            / benchmark_account.nav_before
+        ).reindex(target.index)
+        scale = ((reached - hold).loc[moving] / change.loc[moving]).min()
+        if 0.0 < scale < 1.0:
+            # Preserve the stock-leg mix when per-name capacities differ.
+            proportional = hold + scale * change
+            alternatives.append((proportional, evaluate(proportional)))
+    best_weights, best = min(alternatives, key=lambda item: item[1][2])
+    if not np.isfinite(best[2][0]):
+        return alternatives[1][1]
+    if best[2][0] == 0.0:
+        # Search the feasible endpoint toward the signal, pricing every rounded fill.
+        low, high = 0.0, 1.0
+        anchor = best_weights
+        steps = increment.where(increment > 0, np.inf)
+        while ((target - anchor).abs() * (high - low) >= steps).any():
+            middle = (low + high) / 2.0
+            trial = evaluate(anchor + middle * (target - anchor))
+            if trial[2][0] == 0.0:
+                low = middle
+                if trial[2] < best[2]:
+                    best = trial
             else:
-                previous = previous.reindex(assets)
-            permitted_carry = current.is_trading.eq(False).fillna(False) | assets.isin(
-                view.closed_assets
-            )
-            missing = current[column].isna() & previous.mark_price.notna()
-            current[f"research_{phase}_mark_at"] = pd.Series(
-                pd.NaT, index=assets, dtype="datetime64[ns]"
-            )
-            current[f"research_{phase}_mark_kind"] = pd.Series(
-                pd.NA, index=assets, dtype="string"
-            )
-            current[f"research_{phase}_evidence_identity"] = pd.Series(
-                pd.NA, index=assets, dtype="string"
-            )
-            delisted = pd.Series(
-                [
-                    (str(asset), listing) in view.confirmed_delisted_lifecycles
-                    for asset, listing in current.listing_date.items()
-                ],
-                index=assets,
-                dtype=bool,
-            )
-            cancelled = pd.Series(
-                [
-                    (str(asset), listing) in self.cancelled_lifecycles
-                    for asset, listing in current.listing_date.items()
-                ],
-                index=assets,
-                dtype=bool,
-            )
-            zero = (
-                (delisted & ~assets.isin(known.index)) | cancelled
-            ) & ~unproved_rights
-            if missing.any():
-                for asset in assets[missing & ~zero]:
-                    identity = (str(asset), current.loc[asset, "listing_date"])
-                    try:
-                        adjusted, evidence = adjust_carried_share_mark(
-                            previous.loc[asset, "mark_price"],
-                            pd.DataFrame(
-                                self.corporate_mark_history.get(identity, {}).values()
-                            ),
-                            pd.DataFrame(
-                                self.rights_mark_history.get(identity, {}).values()
-                            ),
-                            asset=str(asset),
-                            listing=identity[1],
-                            timestamp=view.timestamp,
-                            mark_at=previous.loc[asset, "mark_at"],
-                        )
-                    except PortfolioTargetBlocked:
-                        self.unproved_rights.add(identity)
-                        self.last = self.last.drop(asset, errors="ignore")
-                        missing.loc[asset] = False
-                        current.loc[asset, ["open", "close"]] = np.nan
-                        continue
-                    if evidence:
-                        previous = previous.astype({"mark_price": "object"})
-                        current = current.astype({column: "object"})
-                        previous.loc[asset, "mark_price"] = adjusted
-                        previous.loc[asset, "mark_kind"] = "corporate_action_carry"
-                        previous.loc[asset, "mark_evidence"] = ",".join(evidence)
-                        # Keep self.last as the original observed quote. Replay
-                        # all currently known actions, including late earlier
-                        # events, without compounding yesterday's adjusted mark.
-                if previous.mark_price.dtype == object:
-                    current = current.astype({column: "object"})
-                current.loc[missing, column] = previous.loc[missing, "mark_price"]
-                current.loc[missing, f"research_{phase}_mark_at"] = pd.to_datetime(
-                    previous.loc[missing, "mark_at"]
-                )
-                current.loc[missing, f"research_{phase}_mark_kind"] = previous.loc[
-                    missing, "mark_kind"
-                ]
-                current.loc[missing, f"research_{phase}_evidence_identity"] = (
-                    previous.loc[missing, "mark_evidence"]
-                )
-                current.loc[
-                    missing & ~permitted_carry, f"research_{phase}_mark_kind"
-                ] = "ordinary_missing_quote"
-            if zero.any():
-                current.loc[zero, column] = 0.0
-                for asset in assets[zero]:
-                    identity = (str(asset), current.loc[asset, "listing_date"])
-                    current.loc[asset, f"research_{phase}_mark_at"] = (
-                        self.zero_since.setdefault(identity, view.timestamp)
+                high = middle
+        return best
+    # shortcut: local lot improvements are not a global integer feasibility proof;
+    # add an integer solver only when an exact discrete optimum is required.
+    while True:
+        prior_risk = best[2][:2]
+        for asset in target.index:
+            if minimum[asset] <= 0.0:
+                continue
+            for direction in (-1, 1):
+                lots = 1
+                while True:
+                    rows = best[0].asset_ledger.set_index("asset_id")
+                    weights = (
+                        rows.post_trade_notional.reindex(target.index)
+                        / best[0].nav_before
                     )
-                current.loc[zero, f"research_{phase}_mark_kind"] = (
-                    "confirmed_delisting_zero"
-                )
-                current.loc[cancelled, f"research_{phase}_mark_kind"] = (
-                    "extinguished_rights"
-                )
-            if self.rights_quotes:
-                for asset in assets:
-                    event = self.rights_quotes.get(
-                        (str(asset), current.loc[asset, "listing_date"])
+                    step = (
+                        increment[asset]
+                        if rows.loc[asset, "executed_quantity"] != 0
+                        else minimum[asset]
                     )
-                    if event is not None and asset not in known.index:
-                        identity = (str(asset), event.listing_date)
-                        try:
-                            adjusted, evidence = adjust_carried_share_mark(
-                                event.value_per_old_unit,
-                                pd.DataFrame(
-                                    self.corporate_mark_history.get(
-                                        identity, {}
-                                    ).values()
-                                ),
-                                pd.DataFrame(
-                                    self.rights_mark_history.get(identity, {}).values()
-                                ),
-                                asset=str(asset),
-                                listing=current.loc[asset, "listing_date"],
-                                timestamp=view.timestamp,
-                                mark_at=event.effective_at,
-                            )
-                        except PortfolioTargetBlocked:
-                            self.unproved_rights.add((str(asset), event.listing_date))
-                            current.loc[asset, ["open", "close"]] = np.nan
-                            continue
-                        # Rebuild from the original economic quote each time:
-                        # a later disclosure may prove an earlier share action.
-                        current.loc[asset, column] = adjusted
-                        current.loc[asset, f"research_{phase}_mark_at"] = (
-                            event.effective_at
+                    weights.loc[asset] = max(
+                        0.0, weights[asset] + direction * step * lots
+                    )
+                    stock_budget = 1.0 - best[0].receivable / best[0].nav_before
+                    shortage = weights.sum() - stock_budget
+                    if shortage > 1e-12:
+                        # Fund a corrective buy from the largest excess over the signal.
+                        donors = (weights - target).drop(asset)
+                        donors = donors.loc[minimum.reindex(donors.index).gt(0)]
+                        if donors.empty or donors.max() <= 0:
+                            break
+                        donor = donors.idxmax()
+                        donor_step = (
+                            increment[donor]
+                            if rows.loc[donor, "executed_quantity"] != 0
+                            else minimum[donor]
                         )
-                        current.loc[asset, f"research_{phase}_mark_kind"] = (
-                            "evidenced_rights_quote"
-                        )
-                        current.loc[asset, f"research_{phase}_evidence_identity"] = (
-                            ",".join((event.evidence_identity, *evidence))
-                        )
-            known = known.loc[~known.index.isin(assets[cancelled])]
-            if not known.empty:
-                for asset, listing in known.listing_date.items():
-                    identity = (str(asset), listing)
-                    quote = self.rights_quotes.get(identity)
-                    if quote is not None and quote.timestamp <= view.timestamp:
-                        self.rights_quotes.pop(identity)
-                marks = known.loc[:, ["listing_date", "market_type"]].assign(
-                    mark_at=view.timestamp,
-                    mark_price=known[column],
-                    mark_kind=phase,
-                    mark_evidence=pd.NA,
-                )
-                self.last = pd.concat(
-                    (self.last.drop(marks.index, errors="ignore"), marks)
-                )
-        return current.rename_axis("asset_id").reset_index()
+                        reduction = np.ceil(shortage / donor_step) * donor_step
+                        if reduction > weights[donor]:
+                            break
+                        weights.loc[donor] -= reduction
+                    trial = evaluate(weights)
+                    if trial[2] >= best[2]:
+                        break
+                    best = trial
+                    if best[2][0] == 0.0:
+                        return best
+                    # Cross long improving stretches without scanning every lot.
+                    lots *= 2
+        if best[2][:2] == prior_risk:
+            return best
 
 
 def _unit_values(units, prices):
-    """Keep entitlements exact; round only finite monetary valuations."""
-    try:
-        values = pd.Series(
-            {
-                asset: float(Fraction(quantity) * Fraction(prices.loc[asset]))
-                for asset, quantity in units.items()
-            },
-            dtype="float64",
-        )
-    except (OverflowError, ValueError):
-        raise ValueError("portfolio_valuation_unrepresentable") from None
+    """Value actual shares at the supplied raw prices."""
+    values = units.astype("float64") * prices.reindex(units.index).astype("float64")
     if not np.isfinite(values).all():
         raise ValueError("portfolio_valuation_unrepresentable")
     return values
@@ -610,7 +402,7 @@ def backtest_a_share(
     entitlements = EquityEntitlements()
     persisted_endpoint_events = set()
     capital_allocated = False
-    held_units = pd.Series(dtype="object")
+    held_units = pd.Series(dtype="float64")
     held_lives = pd.Series(dtype="datetime64[ns]")
     previous_values = {}
     cash = float(assumptions.initial_nav)
@@ -629,7 +421,7 @@ def backtest_a_share(
     previous_benchmark_assets: frozenset[str] | None = None
     emitted = False
     sequence = 0
-    research_marks = _ResearchValuationMarks()
+    research_marks = ResearchValuationMarks()
     with ExitStack() as input_channels:
         history = TimeWindow(sessions[0], sessions[-1])
         panel_columns = (
@@ -959,7 +751,6 @@ def backtest_a_share(
                         calibration_intervals=calibration_intervals,
                         trading_sessions=trading_sessions,
                         as_of=decision_timestamp,
-                        risk_style_columns=risk_style_columns,
                         frozen_calibration=frozen_calibration,
                     )
                     if maintenance:
@@ -985,7 +776,7 @@ def backtest_a_share(
                     if pd.Timestamp(record_at) <= decision_timestamp:
                         entitlements.register(
                             view.corporate_events,
-                            pd.Series(dtype="object"),
+                            pd.Series(dtype="float64"),
                             pd.Series(dtype="datetime64[ns]"),
                             pd.Timestamp(record_at),
                         )
@@ -1111,7 +902,7 @@ def backtest_a_share(
                     and row.asset_id != PORTFOLIO_CASH_ASSET_ID
                     and (row.quantity != 0.0 or row.receivable != 0.0)
                 },
-                dtype="object",
+                dtype="float64",
             )
             held_lives = pd.Series(
                 {
@@ -1460,7 +1251,6 @@ def _enhanced_decision(
     calibration_intervals: pd.DataFrame,
     trading_sessions: pd.DatetimeIndex,
     as_of: pd.Timestamp,
-    risk_style_columns: tuple[str, ...],
     frozen_calibration: AlphaCalibration | None = None,
 ) -> _EnhancedDecision:
     calibration = frozen_calibration or _calibration_fact(
@@ -1474,19 +1264,7 @@ def _enhanced_decision(
         expected.loc[alpha.notna()] = calibration.slope * alpha.loc[alpha.notna()]
     else:
         expected.loc[alpha.notna()] = 0.0
-    style_cross = current_cross.assign(
-        eligible=current_cross.asset_id.isin(
-            factor_risk.prepare_exposures(current_cross).asset_id
-        )
-    )
-    processed = (
-        preprocess_risk_styles(style_cross, style_columns=risk_style_columns)
-        if not style_cross.empty
-        else style_cross
-    )
-    exposures = factor_risk.current_exposures(
-        processed.dropna(subset=list(risk_style_columns))
-    )
+    exposures = factor_risk.current_exposures(current_cross)
     try:
         risk = factor_risk.estimate()
     except ValueError as exc:
@@ -1707,7 +1485,7 @@ def _build_session(
         if neutrality is not None:
             prediction_eligible &= prediction_eligible.index.isin(neutrality.index)
     optimization: OptimizationResult | None = None
-    assets_frame = None
+    risk_repair_reason = None
     if decision_skip_reason:
         target = holdings.div(nav) if nav > 0 else holdings.multiply(0.0)
     elif nav == 0:
@@ -1786,7 +1564,7 @@ def _build_session(
         except PortfolioTargetBlocked as error:
             if str(error) != "target_neutrality_infeasible":
                 raise
-            decision_skip_reason = str(error)
+            risk_repair_reason = str(error)
     target = target.loc[target.ne(0.0)]
     current = holdings.copy(deep=True)
     assets = pd.Index(
@@ -1795,6 +1573,11 @@ def _build_session(
             | set(target.index)
             | set(held_units.index)
             | set(raw_target.index[raw_target.ne(0)])
+            | (
+                set(neutrality.index).intersection(next_panel.asset_id)
+                if neutrality is not None
+                else set()
+            )
         ),
         dtype="string",
     )
@@ -1848,39 +1631,13 @@ def _build_session(
         for side in ("buy", "sell")
     }
 
-    def cost_for_trade(
-        execution_date,
-        asset,
-        side,
-        notional,
-        adv20,
-        called_assumptions,
-        *,
-        markets=market_by_asset,
-    ):
-        return prepared[markets[asset], side].trade(notional, adv20)
-
-    def cost_totals_for_buys(
-        buy_assets, notionals, adv_values, *, markets=market_by_asset
-    ):
-        totals = np.zeros(len(buy_assets), dtype="float64")
-        for market in set(markets.values()):
-            mask = np.asarray([markets[asset] == market for asset in buy_assets]) & (
-                notionals > 0.0
-            )
-            if mask.any():
-                totals[mask] = prepared[market, "buy"].totals(
-                    notionals[mask], adv_values[mask]
-                )
-        return totals
-
     execution_cash = cash + recovery_cash
     entry = execution_panel.reindex(assets)
     required = held_units.reindex(assets, fill_value=0.0).ne(0)
     if entry.loc[required, "open"].isna().any():
         raise PortfolioTargetBlocked("portfolio_held_return_missing")
     execution_holdings = _unit_values(
-        held_units.reindex(assets, fill_value=Fraction()), entry.open.fillna(0.0)
+        held_units.reindex(assets, fill_value=0.0), entry.open.fillna(0.0)
     )
     execution_nav = float(execution_holdings.sum() + execution_cash + receivable)
     execution_weights = (
@@ -1980,7 +1737,18 @@ def _build_session(
                 "optimizer_held_risk_unavailable",
             }:
                 raise
-            decision_skip_reason = str(error)
+            if str(error) in {
+                "optimizer_frozen_constraints_infeasible",
+                "optimizer_budget_bounds_infeasible",
+                "optimizer_capacity_bounds_infeasible",
+                "optimizer_turnover_bounds_infeasible",
+            }:
+                risk_repair_reason = str(error)
+                target = enhanced_decision.benchmark_weights.reindex(
+                    assets, fill_value=0.0
+                )
+            else:
+                decision_skip_reason = str(error)
         if optimization is not None:
             target = optimization.weights.loc[
                 optimization.weights.index != PORTFOLIO_CASH_ASSET_ID
@@ -1997,29 +1765,47 @@ def _build_session(
     execution_target = target if orders_requested else execution_weights
 
     def account_for(weights):
-        return execute_continuous_target(
-            execution_weights,
-            weights,
-            nav=execution_nav,
-            average_daily_volume=adv,
-            can_enter=masks["can_enter"],
-            can_exit=masks["can_exit"],
+        marks = entry.open.fillna(0.0)
+        quantities = held_units.reindex(assets, fill_value=0.0)
+        target_quantities = pd.Series(
+            {
+                asset: quantities[asset]
+                if weight == execution_weights.get(asset, 0.0)
+                else weight * execution_nav / marks[asset]
+                if marks[asset] > 0
+                else 0.0
+                for asset, weight in weights.reindex(assets, fill_value=0.0).items()
+            },
+            dtype="float64",
+        )
+        capacity = adv * assumptions.adv_participation / marks.where(marks > 0)
+        orders = pd.DataFrame(
+            {
+                "quantity": quantities,
+                "target_quantity": target_quantities,
+                "sellable_quantity": quantities
+                - pd.Series(locked_quantities, dtype="float64").reindex(
+                    assets, fill_value=0.0
+                ),
+                "market_type": execution_panel.market_type.reindex(assets),
+                "mark_price": marks,
+                "buy_price": marks,
+                "sell_price": marks,
+                "buy_capacity": capacity,
+                "sell_capacity": capacity,
+                "adv": adv,
+                "can_enter": masks["can_enter"],
+                "can_exit": masks["can_exit"],
+            }
+        )
+        return execute_stock_target(
+            orders,
+            cash=execution_cash,
             execution_date=next_timestamp.date(),
-            cost_for_trade=cost_for_trade,
-            cost_totals_for_buys=cost_totals_for_buys,
+            fee_schedule=fee_schedule,
             assumptions=assumptions,
-            cost_source_identity=fee_identity,
             unquoted_assets=unquoted_assets,
             receivable=receivable,
-            share_quantities=held_units,
-            locked_share_quantities=pd.Series(locked_quantities, dtype="object"),
-            execution_prices=entry.open.fillna(0.0),
-            locked_notional=_unit_values(
-                pd.Series(locked_quantities, dtype="object").reindex(
-                    assets, fill_value=Fraction()
-                ),
-                entry.open.fillna(0.0),
-            ),
         )
 
     if decision_skip_reason:
@@ -2032,199 +1818,156 @@ def _build_session(
         decision_delta.loc[independent_exits] = (
             -current.div(nav).reindex(assets, fill_value=0.0).loc[independent_exits]
         ).astype("float64")
-    account = account_for(execution_target)
-    asset_ledger = account.asset_ledger
-    asset_ledger.attrs["initial_allocation_attempt"] = float(initializing)
-    if optimization is not None:
-        # Known fees and ADV must admit the target at decision time. Future marks,
-        # rights cash and trading permissions belong only to realized accounting.
-        permitted = pd.Series(True, index=assets)
-        projected_account = execute_continuous_target(
-            current.div(nav),
-            target,
-            nav=nav,
-            receivable=decision_receivable,
-            average_daily_volume=decision_adv,
-            can_enter=permitted,
-            can_exit=permitted,
-            execution_date=next_timestamp.date(),
-            cost_for_trade=partial(cost_for_trade, markets=decision_markets),
-            cost_totals_for_buys=partial(
-                cost_totals_for_buys, markets=decision_markets
-            ),
-            assumptions=assumptions,
-            cost_source_identity=fee_identity,
-        )
-    if assets_frame is not None:
+    if assets_frame is not None or neutrality is not None:
         config = optimizer_config or OptimizerConfig()
-        risk = enhanced_decision.risk
-        benchmark = assets_frame.benchmark_weight.to_numpy(dtype="float64")
-        columns = (
-            tuple(
-                column
-                for column in enhanced_decision.exposures
-                if column
-                not in {"asset_id", "industry_standard_id", "industry_level1_code"}
+        if assets_frame is not None:
+            risk = enhanced_decision.risk
+            benchmark = assets_frame.benchmark_weight.to_numpy(dtype="float64")
+            columns = (
+                tuple(
+                    column
+                    for column in enhanced_decision.exposures
+                    if column
+                    not in {"asset_id", "industry_standard_id", "industry_level1_code"}
+                )
+                if risk is None
+                else tuple(risk.factor_covariance.index)
             )
-            if risk is None
-            else tuple(risk.factor_covariance.index)
+            exposure = assets_frame.loc[:, columns].to_numpy(dtype="float64")
+            specific = assets_frame.specific_variance.to_numpy(dtype="float64")
+            covariance = (
+                None
+                if risk is None
+                else risk.factor_covariance.to_numpy(dtype="float64")
+            )
+            cash_mask = assets_frame.is_cash.to_numpy()
+        else:
+            bands = _neutrality_bands(
+                neutrality,
+                industry_limit=candidate.industry_neutrality_limit,
+                size_limit=candidate.size_neutrality_limit,
+            )
+        requested = execution_target.reindex(assets, fill_value=0.0)
+        exit_notional = execution_holdings.loc[independent_exits].sum()
+        turnover_cap = (
+            (
+                1.0
+                if initializing or assets_frame is None
+                else max(config.target_turnover_limit, exit_notional / execution_nav)
+            )
+            if execution_nav > 0
+            else 0.0
         )
-        exposure = assets_frame.loc[:, columns].to_numpy(dtype="float64")
-        specific = assets_frame.specific_variance.to_numpy(dtype="float64")
-        covariance = (
-            None if risk is None else risk.factor_covariance.to_numpy(dtype="float64")
-        )
-        industry = [i for i, name in enumerate(columns) if name.startswith("industry_")]
-        style = [
-            i for i, name in enumerate(columns) if not name.startswith("industry_")
-        ]
-        tolerance = 1e-8
-        for phase in ("decision", "realized"):
-            if phase == "decision" and optimization is None:
-                continue
-            risk_account = projected_account if phase == "decision" else account
-            diagnostics = {}
-            if risk_account.nav_after <= 0:
-                if phase == "decision":
-                    raise PortfolioTargetBlocked(
-                        "portfolio_post_trade_risk_unavailable"
-                    )
-                diagnostics.update(
-                    realized_constraints_status="UNDEFINED",
-                    realized_constraints_reason="nonpositive_nav",
+
+        def evaluate(weights):
+            result = account_for(weights.where(~weights.index.isin(exit_assets), 0.0))
+            if result.nav_after <= 0:
+                return (
+                    result,
+                    {
+                        "realized_constraints_status": "UNDEFINED",
+                        "realized_constraints_reason": "nonpositive_nav",
+                    },
+                    (np.inf, np.inf, np.inf),
+                )
+            notionals = result.asset_ledger.set_index("asset_id").post_trade_notional
+            notionals.loc[PORTFOLIO_CASH_ASSET_ID] = result.post_trade_cash
+            if assets_frame is not None:
+                facts, violation = _portfolio_risk_limits(
+                    notionals.reindex(assets_frame.asset_id, fill_value=0.0).to_numpy()
+                    / result.nav_after,
+                    benchmark,
+                    exposure,
+                    specific,
+                    covariance,
+                    cash_mask,
+                    columns,
+                    config,
                 )
             else:
-                notionals = risk_account.asset_ledger.set_index(
-                    "asset_id"
-                ).post_trade_notional
-                notionals.loc[PORTFOLIO_CASH_ASSET_ID] = risk_account.post_trade_cash
-                weights = (
-                    notionals.reindex(assets_frame.asset_id, fill_value=0.0).to_numpy()
-                    / risk_account.nav_after
+                facts, violation = _neutrality_risk_limits(
+                    notionals.reindex(assets, fill_value=0.0), neutrality, bands
                 )
-                active = weights - benchmark
-                risk_active = _risk_active_weights(
-                    weights, benchmark, exposure, specific
+            fills = result.asset_ledger.executed_delta_notional
+            turnover = (
+                max(fills.clip(lower=0).sum(), -fills.clip(upper=0).sum())
+                / result.nav_before
+            )
+            if turnover > turnover_cap + 1e-8:
+                violation = (np.inf, np.inf)
+            distance = float(
+                np.square(
+                    notionals.reindex(assets, fill_value=0.0) / result.nav_before
+                    - requested
+                ).sum()
+            )
+            return result, facts, (*violation, distance)
+
+        repair = (
+            orders_requested
+            and execution_nav > 0
+            and not decision_skip_reason
+            and (neutrality is not None or enhanced_decision.risk is not None)
+        )
+        if repair:
+            minimum, increment = (pd.Series(0.0, index=assets) for _ in range(2))
+            known = entry.market_type.isin([1, 4, 16, 32]) & entry.open.gt(0)
+            _, lot, step, _ = stock_order_limits(
+                entry.loc[known, "market_type"], next_timestamp.date()
+            )
+            minimum.loc[known] = lot * entry.loc[known, "open"] / execution_nav
+            increment.loc[known] = step * entry.loc[known, "open"] / execution_nav
+            baseline = evaluate(hold_target)
+            benchmark_target = (
+                (
+                    enhanced_decision.benchmark_weights
+                    if assets_frame is not None
+                    else neutrality.benchmark_weight * requested.sum()
                 )
-                nonzero = risk_active != 0.0
-                risk_complete = (
-                    risk is not None
-                    and np.isfinite(exposure[nonzero]).all()
-                    and np.isfinite(specific[nonzero]).all()
-                    and (specific[nonzero] >= 0.0).all()
-                )
-                cash_mask = assets_frame.is_cash.to_numpy()
-                has_stocks = weights[~cash_mask].sum() > 0.0
-                stock_positive = has_stocks and benchmark[~cash_mask].sum() > 0.0
-                factor_active = _stock_leg_active_exposure(
-                    weights, benchmark, exposure, cash_mask
-                )
-                exposure_complete = stock_positive and np.isfinite(factor_active).all()
-                diagnostics.update(
-                    realized_exposure_status="DEFINED"
-                    if exposure_complete
-                    else "UNDEFINED",
-                    realized_exposure_reason=None
-                    if exposure_complete
-                    else "stock_active_exposure_unavailable"
-                    if stock_positive
-                    else "nonpositive_stock_value",
-                )
-                limits = {
-                    "tracking_error": (None, config.tracking_error_limit),
-                    "name_active_weight": (
-                        np.abs(active[~cash_mask]).max(initial=0.0),
-                        config.active_name_limit,
-                    ),
-                    "industry_active_exposure": (
-                        np.abs(factor_active[industry]).max(initial=0.0)
-                        if stock_positive and np.isfinite(factor_active[industry]).all()
-                        else None,
-                        config.industry_active_limit,
-                    ),
-                    "style_active_exposure": (
-                        np.abs(factor_active[style]).max(initial=0.0)
-                        if stock_positive and np.isfinite(factor_active[style]).all()
-                        else None,
-                        config.style_active_limit,
-                    ),
-                }
-                if risk_complete:
-                    factor, residual = _risk_variances(
-                        risk_active, exposure, covariance, specific
-                    )
-                    diagnostics.update(
-                        realized_factor_variance=factor,
-                        realized_specific_variance=residual,
-                    )
-                    limits["tracking_error"] = (
-                        np.sqrt(factor + residual),
-                        config.tracking_error_limit,
-                    )
-                unavailable = [
-                    name for name, (value, _) in limits.items() if value is None
-                ]
-                breached = [
-                    name
-                    for name, (value, limit) in limits.items()
-                    if value is not None
-                    and (
-                        value**2 > limit**2 + tolerance
-                        if name == "tracking_error"
-                        else value > limit + tolerance
-                    )
-                ]
-                required_unavailable = [
-                    name
-                    for name in unavailable
-                    if has_stocks
-                    or name not in {"industry_active_exposure", "style_active_exposure"}
-                ]
-                if phase == "decision" and (required_unavailable or breached):
-                    decision_skip_reason = (
-                        "portfolio_post_trade_risk_unavailable"
-                        if required_unavailable
-                        else "portfolio_post_trade_constraints_infeasible"
-                    )
-                    optimization = None
-                    account = account_for(hold_target)
-                    asset_ledger = account.asset_ledger
-                    decision_delta = pd.Series(0.0, index=assets)
-                    if nav > 0 and len(independent_exits):
-                        decision_delta.loc[independent_exits] = (
-                            -current.div(nav)
-                            .reindex(assets, fill_value=0.0)
-                            .loc[independent_exits]
-                        ).astype("float64")
-                    continue
-                diagnostics.update(
-                    realized_constraints_status="UNDEFINED"
-                    if unavailable
-                    else "BREACHED"
-                    if breached
-                    else "SATISFIED",
-                    realized_constraints_reason=(
-                        "factor_risk_factor_history_insufficient"
-                        if risk is None
-                        else "active_risk_unavailable"
-                        if not risk_complete
-                        else "stock_active_exposure_unavailable"
-                        if stock_positive
-                        else "nonpositive_stock_value"
-                    )
-                    if unavailable
-                    else ",".join(breached)
-                    if breached
-                    else None,
-                )
-                for name, (value, _) in limits.items():
-                    diagnostics[f"realized_{name}_status"] = (
-                        "UNDEFINED" if value is None else "DEFINED"
-                    )
-                    if value is not None:
-                        diagnostics[f"realized_{name}"] = float(value)
-            if phase == "realized":
-                asset_ledger.attrs["realized_constraints"] = diagnostics
+                .reindex(assets, fill_value=0.0)
+                .where(~independent_exits, 0.0)
+            )
+            corrective_delta = benchmark_target - hold_target
+            buys = corrective_delta.clip(lower=0).sum()
+            sells = -corrective_delta.clip(upper=0).sum()
+            scale = min(
+                1.0,
+                turnover_cap / buys if buys > 0 else 1.0,
+                max(0.0, turnover_cap - exit_notional / execution_nav) / sells
+                if sells > 0
+                else 1.0,
+            )
+            benchmark_target = hold_target + scale * corrective_delta
+            selected = _repair_stock_allocation(
+                requested,
+                hold_target,
+                benchmark_target,
+                minimum,
+                increment,
+                evaluate,
+            )
+            selected[1].update(
+                execution_constraints_status="UNDEFINED"
+                if selected[1]["realized_constraints_status"] == "UNDEFINED"
+                or not np.isfinite(selected[2][0])
+                else "SATISFIED"
+                if selected[2][0] == 0.0
+                else "IMPROVED"
+                if selected[2][:2] < baseline[2][:2]
+                else "UNCHANGED",
+                execution_constraints_reason=selected[1].get(
+                    "realized_constraints_reason"
+                ),
+                execution_target_repair_reason=risk_repair_reason,
+            )
+        else:
+            selected = evaluate(execution_target)
+        account, facts, _ = selected
+        asset_ledger = account.asset_ledger
+        asset_ledger.attrs["realized_constraints"] = facts
+    else:
+        account = account_for(execution_target)
+        asset_ledger = account.asset_ledger
     asset_ledger.attrs["initial_allocation_attempt"] = float(initializing)
     if decision_skip_reason:
         target = hold_target
@@ -2251,7 +1994,7 @@ def _build_session(
         "decision_status": "SKIPPED"
         if decision_skip_reason
         else "PARTIAL"
-        if missing_scores.any()
+        if missing_scores.any() or risk_repair_reason is not None
         else "AVAILABLE",
         "decision_skip_reason": decision_skip_reason,
         "missing_prediction_count": float(missing_scores.sum()),
@@ -2516,23 +2259,16 @@ def _ledger_batch(
     }
 
     # Derive quantities from actual fills, retaining zero-priced unquoted claims.
-    after_units = execution_units.astype("object").copy()
+    after_units = execution_units.astype("float64").copy()
     after_lives = execution_lives.copy()
     fill_quantities = {}
     for row in asset_ledger.itertuples(index=False):
         delta = float(row.executed_delta_notional)
         if delta:
-            quantity = (
-                -Fraction(after_units.get(row.asset_id, 0))
-                if row.post_trade_notional == 0
-                and delta < 0
-                and not entitlements.locked_quantities.get(row.asset_id, 0)
-                else Fraction(delta)
-                / Fraction(mark_frames["entry"].loc[row.asset_id, "open"])
-            )
+            quantity = float(row.executed_quantity)
             fill_quantities[row.asset_id] = quantity
             after_units.loc[row.asset_id] = (
-                Fraction(after_units.get(row.asset_id, 0)) + quantity
+                float(after_units.get(row.asset_id, 0)) + quantity
             )
             after_lives.loc[row.asset_id] = mark_frames["entry"].loc[
                 row.asset_id, "listing_date"
@@ -2590,10 +2326,10 @@ def _ledger_batch(
                 entry_mark = 0.0
             else:
                 raise PortfolioTargetBlocked("portfolio_held_lifecycle_unproven")
-            after_quantity = Fraction(after_units.get(asset, 0))
+            after_quantity = float(after_units.get(asset, 0))
             if not after_quantity and asset in previous_values:
                 lifecycle = previous_values[asset].lifecycle_id
-            end_quantity = Fraction(end_units.get(asset, 0))
+            end_quantity = float(end_units.get(asset, 0))
             end_lifecycle = (
                 pd.Timestamp(end_lives[asset]).date().isoformat()
                 if asset in end_lives
@@ -2611,7 +2347,13 @@ def _ledger_batch(
                     raise PortfolioTargetBlocked("portfolio_held_lifecycle_unproven")
                 end_mark = mark_frames["end"].loc[asset, "open"]
             else:
-                end_mark = 0.0
+                end_mark = (
+                    mark_frames["end"].loc[asset, "open"]
+                    if asset in mark_frames["end"].index
+                    and pd.Timestamp(end_lifecycle)
+                    == mark_frames["end"].loc[asset, "listing_date"]
+                    else 0.0
+                )
             if pd.isna(entry_mark):
                 if (
                     held_units.get(asset, 0)
@@ -2620,7 +2362,7 @@ def _ledger_batch(
                 ):
                     raise PortfolioTargetBlocked("portfolio_held_return_missing")
                 entry_mark = 0.0
-            before_quantity = Fraction(held_units.get(asset, 0))
+            before_quantity = float(held_units.get(asset, 0))
             before_lifecycle = lifecycle
             before_mark = entry_mark
             if asset in previous_values:
@@ -2632,10 +2374,10 @@ def _ledger_batch(
                 )
                 before_lifecycle = prior.lifecycle_id
             else:
-                before = float(before_quantity * Fraction(entry_mark))
+                before = float(before_quantity * float(entry_mark))
             if entry_mark == 0 and fill_id is not None:
                 raise ValueError("portfolio_zero_mark_trade_invalid")
-            after = float(after_quantity * Fraction(entry_mark))
+            after = float(after_quantity * float(entry_mark))
             if pd.isna(end_mark):
                 if end_quantity:
                     raise PortfolioTargetBlocked("portfolio_held_return_missing")
@@ -2655,7 +2397,7 @@ def _ledger_batch(
                     else 0.0,
                     locked_quantity=previous_values[asset].locked_quantity
                     if asset in previous_values
-                    else Fraction(),
+                    else 0.0,
                 ),
                 PortfolioValuation(
                     timestamp,
@@ -2666,7 +2408,7 @@ def _ledger_batch(
                     entry_mark,
                     lifecycle_id=lifecycle,
                     receivable=entry_receivables.get(asset, 0.0),
-                    locked_quantity=entry_locks.get(asset, Fraction()),
+                    locked_quantity=entry_locks.get(asset, 0.0),
                 ),
                 PortfolioValuation(
                     int(end_timestamp.value),
@@ -2678,7 +2420,7 @@ def _ledger_batch(
                     (
                         after_quantity + end_cash
                         if asset == PORTFOLIO_CASH_ASSET_ID
-                        else float(end_quantity * Fraction(end_mark))
+                        else float(end_quantity * float(end_mark))
                         + endpoint_state.receivables.get(asset, 0.0)
                     ),
                     end_mark,
@@ -2686,9 +2428,7 @@ def _ledger_batch(
                     if asset == PORTFOLIO_CASH_ASSET_ID
                     else end_lifecycle,
                     receivable=endpoint_state.receivables.get(asset, 0.0),
-                    locked_quantity=endpoint_state.locked_quantities.get(
-                        asset, Fraction()
-                    ),
+                    locked_quantity=endpoint_state.locked_quantities.get(asset, 0.0),
                 ),
             )
         )
@@ -2975,7 +2715,7 @@ def backtest(config: Mapping) -> Path:
     from quant_research_platform.markets.implementations.a_share import (
         portfolio_sessions,
     )
-    from quant_research_platform.research.portfolios.accounting import (
+    from quant_research_platform.research.portfolios.calibration import (
         frozen_alpha_calibration,
     )
     from quant_research_platform.storage.manifests import read_qrp_json_file

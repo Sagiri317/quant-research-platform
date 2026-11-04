@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from fractions import Fraction
 from types import SimpleNamespace
 
 import numpy as np
@@ -21,9 +20,6 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioValuation,
 )
 from quant_research_platform.contracts.validation import strict_finite_float
-from quant_research_platform.research.portfolios.accounting import (
-    execute_continuous_target as _execute_continuous_target,
-)
 
 
 def mark_view(
@@ -62,25 +58,28 @@ def mark_view(
     )
 
 
-def execute_continuous_target(*args, **kwargs):
-    def totals(assets, amounts, adv):
-        return np.asarray(
-            [
-                kwargs["cost_for_trade"](
-                    kwargs["execution_date"],
-                    asset,
-                    "buy",
-                    float(amount),
-                    float(volume),
-                    kwargs["assumptions"],
-                ).total_cost
-                if amount > 0
-                else 0.0
-                for asset, amount, volume in zip(assets, amounts, adv, strict=True)
-            ]
-        )
-
-    return _execute_continuous_target(*args, cost_totals_for_buys=totals, **kwargs)
+def stock_orders(quantities, targets, *, prices=1.0, capacity=1e12, market_types=1):
+    """Explicit share orders at one synthetic common execution and valuation price."""
+    current = pd.Series(quantities, dtype="object")
+    target = pd.Series(targets, dtype="object")
+    assets = current.index.union(target.index)
+    return pd.DataFrame(
+        {
+            "quantity": current.reindex(assets, fill_value=0),
+            "target_quantity": target.reindex(assets, fill_value=0),
+            "sellable_quantity": current.reindex(assets, fill_value=0),
+            "mark_price": prices,
+            "buy_price": prices,
+            "sell_price": prices,
+            "market_type": market_types,
+            "buy_capacity": capacity,
+            "sell_capacity": capacity,
+            "adv": capacity,
+            "can_enter": True,
+            "can_exit": True,
+        },
+        index=assets,
+    )
 
 
 def session_frame(batch):
@@ -237,6 +236,8 @@ CONTINUOUS_EXECUTION_COLUMNS = (
     "benchmark_weight",
     "asset_specific_variance",
     "decision_reason",
+    "decision_status",
+    "decision_skip_reason",
     "alpha_status",
     "alpha_undefined_reason",
     "alpha_slope",
@@ -403,7 +404,7 @@ def continuous_ledger_batch(
     )
 
 
-def ledger_frame(*, account, **kwargs):
+def ledger_frame(*, account, prices, **kwargs):
     from quant_research_platform.research.portfolios.accounting import (
         EquityEntitlements,
     )
@@ -415,21 +416,18 @@ def ledger_frame(*, account, **kwargs):
             "asset_id": account.asset_ledger.asset_id,
             "research_open_mark_at": pd.NaT,
             "listing_date": pd.Timestamp("2000-01-01"),
-            "open": 1.0,
+            "open": account.asset_ledger.asset_id.map(prices),
         }
     )
     endpoint = quoted.copy()
-    endpoint["open"] = 1.0 + endpoint.asset_id.map(returns).fillna(0.0)
+    endpoint["open"] *= 1.0 + endpoint.asset_id.map(returns).fillna(0.0)
+    quantities = account.asset_ledger.set_index("asset_id").pre_trade_notional / prices
     return session_frame(
         _ledger_batch(
             account=account,
             asset_ledger=account.asset_ledger,
-            held_units=account.asset_ledger.set_index(
-                "asset_id"
-            ).pre_trade_notional.map(Fraction),
-            execution_units=account.asset_ledger.set_index(
-                "asset_id"
-            ).pre_trade_notional.map(Fraction),
+            held_units=quantities,
+            execution_units=quantities,
             previous_values={},
             rights_adjustments=(),
             sequence=0,

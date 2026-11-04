@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.research.portfolios.risk import (
+from quant_research_platform.research.risk import (
     FactorRiskConfig,
     FactorRiskState,
 )
@@ -70,7 +70,9 @@ def test_actual_risk_estimate_retains_tail_after_latest_missing_session(
 
 @pytest.mark.parametrize("half_life", [1.0, 10.0, 63.0])
 def test_ewma_covariance_is_invariant_to_common_missing_age(half_life):
-    from quant_research_platform.research.portfolios.risk import _ewma_covariance
+    from quant_research_platform.research.risk import (
+        _ewma_covariance,
+    )
 
     arguments = dict(
         values=np.array([[0.01, -0.005], [0.0, 0.0]]),
@@ -86,7 +88,9 @@ def test_ewma_covariance_is_invariant_to_common_missing_age(half_life):
 
 
 def test_nonfinite_risk_fails_explicitly():
-    from quant_research_platform.research.portfolios.risk import _ewma_covariance
+    from quant_research_platform.research.risk import (
+        _ewma_covariance,
+    )
 
     with pytest.raises(ValueError, match="factor_risk_covariance_non_finite"):
         _ewma_covariance(

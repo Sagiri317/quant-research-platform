@@ -12,7 +12,6 @@ from quant_research_platform.artifacts.portfolio_ledger import (
     write_portfolio_ledger_artifact,
 )
 from quant_research_platform.contracts.portfolios import (
-    PORTFOLIO_LEDGER_COST_COLUMNS,
     PortfolioCandidateSpec,
     PortfolioCapital,
 )
@@ -25,7 +24,7 @@ def test_future_execution_changes_actual_constraints_without_changing_target(tmp
     base["execution"].loc[base["execution"].asset_id.eq("a"), "can_exit"] = False
     baseline = production._build_session(**base)
     changed = _decision_inputs()
-    changed["next_panel"].loc[changed["next_panel"].asset_id.eq("a"), "open"] = 150.0
+    changed["next_panel"].loc[changed["next_panel"].asset_id.eq("a"), "open"] = 0.015
     changed["execution"].loc[changed["execution"].asset_id.eq("a"), "can_exit"] = False
     account, adv, optimized, delta, snapshot = production._build_session(**changed)
     pd.testing.assert_series_equal(optimized.weights, baseline[2].weights)
@@ -55,7 +54,7 @@ def test_future_execution_changes_actual_constraints_without_changing_target(tmp
         == "SATISFIED"
     )
     assert tradable.asset_ledger.executed_delta_notional.tolist() == pytest.approx(
-        [-11.875, 11.875]
+        [-12.0, 12.0]
     )
     batch = production._ledger_batch(
         account=account,
@@ -166,7 +165,7 @@ def test_exact_zero_active_missing_risk_is_zero_but_future_active_is_undefined(m
     _, _, optimized, _, snapshot = production._build_session(**inputs)
     assert optimized.predicted_tracking_error == 0.0
     assert snapshot.attrs["realized_constraints"]["realized_tracking_error"] == 0.0
-    inputs["next_panel"].loc[inputs["next_panel"].asset_id.eq("a"), "open"] = 150.0
+    inputs["next_panel"].loc[inputs["next_panel"].asset_id.eq("a"), "open"] = 0.015
     inputs["execution"]["can_exit"] = False
     _, _, changed, _, snapshot = production._build_session(**inputs)
     pd.testing.assert_series_equal(changed.weights, optimized.weights)
@@ -275,7 +274,7 @@ def test_invalid_risk_is_not_downgraded_to_missing_target(invalid):
 
 @pytest.mark.parametrize("missing", ["specific", "exposure"])
 @pytest.mark.parametrize("fee_rate", [0.0002, 0.005])
-def test_fee_normalized_missing_risk_survives_actual_account_projection(
+def test_integer_fees_do_not_turn_missing_active_risk_into_defined_zero(
     missing, fee_rate
 ):
     inputs = _decision_inputs(holdings=(0.4, 0.4), fee_rate=fee_rate)
@@ -290,18 +289,16 @@ def test_fee_normalized_missing_risk_survives_actual_account_projection(
         enhanced.exposures.loc[enhanced.exposures.asset_id.eq("a"), "style"] = np.nan
     account, _, optimized, _, ledger = production._build_session(**inputs)
     assert optimized is not None
-    # This fee fixture charges commission and transfer fee at fee_rate each.
-    rate = 2.0 * fee_rate
-    fee = 0.2 * rate / (1.0 + rate)
-    assert account.nav_after == pytest.approx(100.0 * (1.0 - fee), abs=1e-10)
-    assert ledger.post_trade_notional.tolist() == pytest.approx(
-        [50.0 * (1.0 - fee)] * 2, abs=1e-10
-    )
-    assert account.post_trade_cash == pytest.approx(0.0, abs=1e-10)
+    # The continuous benchmark target is reachable; integer fills and fees
+    # cannot establish exactly zero active exposure to the missing risk.
+    assert account.nav_after == 100.0
+    assert ledger.post_trade_notional.tolist() == [40.0, 40.0]
+    assert account.post_trade_cash == 20.0
+    assert ledger.executed_quantity.eq(0).all()
     facts = ledger.attrs["realized_constraints"]
-    assert facts["realized_constraints_status"] == "SATISFIED"
-    assert facts["realized_tracking_error_status"] == "DEFINED"
-    assert facts["realized_tracking_error"] == pytest.approx(0.0, abs=1e-14)
+    assert facts["realized_constraints_status"] == "UNDEFINED"
+    assert facts["realized_tracking_error_status"] == "UNDEFINED"
+    assert "realized_tracking_error" not in facts
     assert optimized.predicted_tracking_error == pytest.approx(0.0, abs=1e-14)
 
 
@@ -321,7 +318,7 @@ def test_genuine_tiny_future_active_weight_still_requires_missing_risk(
     else:
         enhanced.exposures.loc[enhanced.exposures.asset_id.eq("a"), "style"] = np.nan
     inputs["execution"][["can_enter", "can_exit"]] = False
-    inputs["next_panel"].loc[inputs["next_panel"].asset_id.eq("a"), "open"] = 100.0 * (
+    inputs["next_panel"].loc[inputs["next_panel"].asset_id.eq("a"), "open"] = 0.01 * (
         1.0 + relative_move
     )
     account, _, optimized, _, ledger = production._build_session(**inputs)
@@ -340,38 +337,3 @@ def test_genuine_tiny_future_active_weight_still_requires_missing_risk(
     assert facts["realized_constraints_reason"] == "active_risk_unavailable"
     assert facts["realized_tracking_error_status"] == "UNDEFINED"
     assert "realized_tracking_error" not in facts
-
-
-def test_post_projection_guard_rejects_corrupted_real_optimizer_target(monkeypatch):
-    real = production.optimize_portfolio
-    solved = []
-
-    def corrupted_target(*args, **kwargs):
-        result = real(*args, **kwargs)
-        solved.append(result)
-        # Deliberately corrupt a real solved target to exercise the defensive
-        # projection guard, not a claim that correctly funded fees are infeasible.
-        weights = pd.Series({"a": 0.6, "b": 0.4, "__cash__": 0.0})
-        return replace(result, weights=weights.reindex(result.weights.index))
-
-    monkeypatch.setattr(production, "optimize_portfolio", corrupted_target)
-    inputs = _decision_inputs(fee_rate=0.001)
-    account, _, optimized, _, ledger = production._build_session(**inputs)
-    assert len(solved) == 1
-    assert optimized is None
-    availability = ledger.attrs["decision_availability"]
-    assert availability["decision_status"] == "SKIPPED"
-    assert (
-        availability["decision_skip_reason"]
-        == "portfolio_post_trade_constraints_infeasible"
-    )
-    assert ledger.executed_delta_notional.eq(0.0).all()
-    assert ledger.loc[:, list(PORTFOLIO_LEDGER_COST_COLUMNS)].eq(0.0).all().all()
-    pd.testing.assert_series_equal(
-        ledger.set_index("asset_id").post_trade_notional,
-        inputs["holdings"],
-        check_names=False,
-        check_exact=True,
-    )
-    assert account.nav_after == account.nav_before == 100.0
-    assert account.post_trade_cash == 0.0

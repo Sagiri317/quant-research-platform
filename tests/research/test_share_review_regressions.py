@@ -1,6 +1,6 @@
 """Independent synthetic review counterexamples, without private source rows."""
 
-from fractions import Fraction
+from dataclasses import replace
 
 import pandas as pd
 import pytest
@@ -15,6 +15,7 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioValuation,
 )
 from quant_research_platform.research.portfolios.accounting import (
+    ResearchValuationMarks,
     portfolio_interval_economics,
 )
 from tests.research import test_raw_share_corporate_production as corporate
@@ -36,8 +37,8 @@ def test_interval_gross_pnl_accounts_for_each_fee():
                 at,
                 "a",
                 phase,
-                Fraction(quantity),
-                float(Fraction(quantity) * Fraction(mark)),
+                float(quantity),
+                float(float(quantity) * float(mark)),
                 mark,
             ),
             PortfolioValuation(at, "__cash__", phase, cash, cash),
@@ -61,7 +62,7 @@ def test_interval_gross_pnl_accounts_for_each_fee():
     ) + (PortfolioDiagnostic("__cash__", None, "decision_reason", text="simple_rule"),)
     batch = PortfolioLedgerBatch(
         0,
-        (ExecutedTrade("fill", "order", 1, "a", Fraction(3), 3 * price),),
+        (ExecutedTrade("fill", "order", 1, "a", float(3), 3 * price),),
         flows,
         valuations,
         diagnostics,
@@ -90,7 +91,7 @@ def test_unheld_unknown_action_does_not_poison_later_actual_quote(
     batches = corporate._distribution_batches(tmp_path, monkeypatch, suspended=True)
     trades = [trade for batch in batches for trade in batch.trades]
     assert len(trades) == 1
-    assert trades[0].asset_id == "b" and trades[0].quantity == Fraction(10, 9)
+    assert trades[0].asset_id == "b" and trades[0].quantity == 100
     assert pd.Timestamp(trades[0].timestamp_ns) == pd.Timestamp("2023-01-09")
 
 
@@ -98,7 +99,6 @@ def test_unheld_unknown_action_does_not_poison_later_actual_quote(
 def test_late_disclosed_dividend_uses_actual_record_shares_after_sale(
     tmp_path, monkeypatch, unproved
 ):
-    from dataclasses import replace
 
     from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
 
@@ -121,13 +121,13 @@ def test_late_disclosed_dividend_uses_actual_record_shares_after_sale(
     batches = corporate._distribution_batches(
         tmp_path, monkeypatch, payment="2023-01-06"
     )
-    assert batches[0].trades[0].quantity == 1
+    assert batches[0].trades[0].quantity == 100
     assert not batches[0].rights_adjustments
-    assert batches[1].trades[0].quantity == -1
+    assert batches[1].trades[0].quantity == -100
     registration = next(
         event for event in batches[1].rights_adjustments if event.kind == "registration"
     )
-    assert registration.entitlement_quantity == 1
+    assert registration.entitlement_quantity == 100
     assert registration.quantity_before == 0
     assert registration.entitlement_record_at_ns == pd.Timestamp("2023-01-04").value
     assert registration.timestamp_ns == pd.Timestamp("2023-01-06").value
@@ -138,9 +138,9 @@ def test_late_disclosed_dividend_uses_actual_record_shares_after_sale(
             for flow in batch.cashflows
             if flow.kind == "dividend"
         )
-        == 10.0
+        == 1000.0
     )
-    assert corporate._cash(batches[-1], "end") == 100.0
+    assert corporate._cash(batches[-1], "end") == 10000.0
     corrupted = replace(
         registration, entitlement_record_at_ns=registration.timestamp_ns + 1
     )
@@ -171,9 +171,9 @@ def test_fractional_raw_price_never_oversells_locked_actual_shares(
         tmp_path, monkeypatch, cash_dividend=0, stock_distribution=True
     )
     assert [trade.quantity for batch in batches for trade in batch.trades] == [
-        1,
-        -1,
-        Fraction(-1, 2),
+        100,
+        -100,
+        -50,
     ]
     for batch in batches:
         for value in batch.valuations:
@@ -181,122 +181,19 @@ def test_fractional_raw_price_never_oversells_locked_actual_shares(
                 assert value.quantity >= value.locked_quantity
 
 
-@pytest.mark.parametrize("locked", [Fraction(), Fraction(1, 10**17)])
-def test_rounded_zero_notional_preserves_locked_distribution(tmp_path, locked):
-    from quant_research_platform.artifacts.portfolio_ledger import (
-        read_portfolio_ledger_artifact,
-        write_portfolio_ledger_artifact,
-    )
-    from quant_research_platform.contracts.portfolios import (
-        ExecutionAssumptions,
-        TradeCostComponents,
-    )
-    from quant_research_platform.research.portfolios import production
-    from tests.helpers.portfolio_ledger import execute_continuous_target
-
-    # A tiny earlier distribution can remain locked after a larger purchase.
-    quantity = Fraction(1) + Fraction(1, 10**16)
-    units = pd.Series({"a": quantity}, dtype=object)
-    entry, endpoint = pd.Timestamp("2024-01-03"), pd.Timestamp("2024-01-04")
-    life = pd.Timestamp("2000-01-01")
-    account = execute_continuous_target(
-        pd.Series({"a": 1.0}),
-        pd.Series({"a": 0.0}),
-        nav=1.0,
-        average_daily_volume=pd.Series({"a": 100.0}),
-        can_enter=pd.Series({"a": True}),
-        can_exit=pd.Series({"a": True}),
-        execution_date=entry.date(),
-        cost_for_trade=lambda _date, _asset, _side, amount, _volume, _settings: (
-            TradeCostComponents(float(amount), 0.0, 0.0, 0.0, 0.0, 0.0, "f" * 64)
-        ),
-        assumptions=ExecutionAssumptions(1.0, 0.0, 0.0, 1.0, (1.0,)),
-        cost_source_identity="f" * 64,
-        locked_notional=pd.Series({"a": float(locked)}),
-        share_quantities=units,
-        locked_share_quantities=pd.Series({"a": locked}, dtype=object),
-        execution_prices=pd.Series({"a": 1.0}),
-    )
-    assert account.asset_ledger.post_trade_notional.iloc[0] == 0.0
-    assert account.asset_ledger.executed_delta_notional.iloc[0] == -1.0
-    marks = pd.DataFrame(
-        {
-            "asset_id": ["a"],
-            "timestamp": [entry],
-            "open": [1.0],
-            "listing_date": [life],
-            "research_open_mark_at": [pd.NaT],
-        }
-    )
-    prior = PortfolioValuation(
-        entry.value,
-        "a",
-        "end",
-        quantity,
-        1.0,
-        1.0,
-        lifecycle_id="2000-01-01",
-        locked_quantity=locked,
-    )
-    entitlements = production.EquityEntitlements()
-    entitlements.locked_quantities["a"] = locked
-    batch = production._ledger_batch(
-        account=account,
-        asset_ledger=account.asset_ledger,
-        sequence=0,
-        end_timestamp=endpoint,
-        decision_timestamp=entry - pd.Timedelta(days=1),
-        held_units=units,
-        execution_units=units,
-        previous_values={"a": prior},
-        rights_adjustments=(),
-        prediction_rank_score=pd.Series({"a": 0.0}),
-        adv20=pd.Series({"a": 100.0}),
-        enhanced_decision=None,
-        benchmark_weights=None,
-        optimization_result=None,
-        decision_reason="simple_rule",
-        decision_delta=pd.Series({"a": -1.0}),
-        next_panel=marks,
-        endpoint_panel=marks.assign(timestamp=endpoint),
-        endpoint_events=pd.DataFrame(),
-        corporate_events=pd.DataFrame(),
-        endpoint_corporate_events=pd.DataFrame(),
-        entitlements=entitlements,
-        execution_lives=pd.Series({"a": life}),
-    )
-    expected = Fraction(1, 10**16) if locked else Fraction()
-    for value in batch.valuations:
-        if value.asset_id == "a" and value.phase in {"after", "end"}:
-            assert value.quantity == expected
-            assert value.locked_quantity == locked
-    assert batch.trades[0].quantity == expected - quantity
-    assert batch.trades[0].notional == -1.0
-    root = write_portfolio_ledger_artifact(
-        tmp_path / "ledger",
-        capital=PortfolioCapital("locked", 1.0, "CNY", "cash_equity"),
-        metadata={"window": {"start": "2024-01-03", "end": "2024-01-04"}},
-        produce=lambda emit: emit(batch),
-    )
-    assert tuple(read_portfolio_ledger_artifact(root).iter_chunks()) == (batch,)
-
-
 @pytest.mark.parametrize(
     "action", ["share_change", "cash_dividend", "late_earlier_split"]
 )
 def test_late_historical_quote_replays_known_actions_from_original_basis(action):
-    from quant_research_platform.research.portfolios.production import (
-        _ResearchValuationMarks,
-    )
     from tests.helpers.portfolio_ledger import mark_view
 
-    marks = _ResearchValuationMarks()
+    marks = ResearchValuationMarks()
     base = dict(
         asset_id="a",
         listing_date=pd.Timestamp("2020-01-01"),
         entitlement_proved=True,
         evidence_identity="a" * 64,
-        remaining_old_units_per_old_unit=Fraction(1),
+        remaining_old_units_per_old_unit=float(1),
     )
     quote = dict(
         base,
@@ -305,7 +202,7 @@ def test_late_historical_quote_replays_known_actions_from_original_basis(action)
         effective_at=pd.Timestamp("2023-01-03"),
         available_at=pd.Timestamp("2023-01-04"),
         timestamp=pd.Timestamp("2023-01-04"),
-        value_per_old_unit=Fraction(100),
+        value_per_old_unit=float(100),
     )
 
     def view(day, *, rights=(), events=()):
@@ -322,10 +219,10 @@ def test_late_historical_quote_replays_known_actions_from_original_basis(action)
         effective_at=pd.Timestamp("2023-01-05"),
         available_at=pd.Timestamp("2023-01-05"),
         timestamp=pd.Timestamp("2023-01-05"),
-        remaining_old_units_per_old_unit=Fraction(2),
+        remaining_old_units_per_old_unit=float(2),
     )
     if action == "cash_dividend":
-        event.update(kind="cash_dividend", cash_per_share=Fraction(10))
+        event.update(kind="cash_dividend", cash_per_share=float(10))
         ex = marks.project(view("2023-01-05", events=[event]))
         expected = 90
     else:
@@ -361,7 +258,6 @@ def test_late_historical_quote_replays_known_actions_from_original_basis(action)
 def test_native_paired_statistics_defaults_bootstrap_without_overriding_explicit(
     tmp_path, monkeypatch, configured
 ):
-    from dataclasses import replace
 
     from quant_research_platform.contracts.portfolios import PortfolioCandidateSpec
     from quant_research_platform.research.portfolios import diagnostics

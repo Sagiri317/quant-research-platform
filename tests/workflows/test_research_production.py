@@ -16,7 +16,9 @@ from quant_research_platform.research.models.trial_selection import (
 )
 from quant_research_platform.research.portfolios.diagnostics import portfolio_statistics
 from quant_research_platform.research.portfolios.production import backtest
-from quant_research_platform.research.portfolios.risk import FactorRiskConfig
+from quant_research_platform.research.risk import (
+    FactorRiskConfig,
+)
 from quant_research_platform.research.statistics_production import model_statistics
 from tests.helpers.research_acceptance import run_a_share_acceptance
 from tests.helpers.statistics_artifacts import (
@@ -95,7 +97,7 @@ def test_native_enhancement_obeys_capacity_and_postcost_limits(source_chain):
         assert all(value <= 0.05 + 1e-8 for value in participation)
 
 
-def test_native_turnover_boundary_skips_rebalance_and_keeps_marks(
+def test_native_turnover_boundary_keeps_integer_holdings_and_reports_remaining_risk(
     source_chain, tmp_path, monkeypatch
 ):
     from quant_research_platform.research.portfolios import production
@@ -136,8 +138,14 @@ def test_native_turnover_boundary_skips_rebalance_and_keeps_marks(
         )
     )
     batches = list(ledger.iter_chunks())
-    skipped_dates = set()
+    constrained_dates = set()
     for batch in batches:
+        facts = {item.name: item.text for item in batch.diagnostics if item.text}
+        numbers = {
+            item.name: item.number
+            for item in batch.diagnostics
+            if item.number is not None
+        }
         if batch.trades:
             after = {
                 item.asset_id: item.value
@@ -150,19 +158,26 @@ def test_native_turnover_boundary_skips_rebalance_and_keeps_marks(
                 for item in batch.diagnostics
                 if item.name == "benchmark_weight"
             ]
-            assert active and max(map(abs, active)) <= name_limit + 1e-8
-        facts = {item.name: item.text for item in batch.diagnostics if item.text}
-        if facts.get("decision_status") != "SKIPPED":
+            actual = max(map(abs, active))
+            assert numbers["initial_allocation_attempt"] == 1.0
+            assert name_limit + 1e-8 < actual < 0.01
+            assert actual == pytest.approx(numbers["realized_name_active_weight"])
+            assert facts["execution_constraints_status"] == "IMPROVED"
+            assert facts["realized_constraints_status"] == "BREACHED"
+        if facts.get("execution_target_repair_reason") != (
+            "optimizer_turnover_bounds_infeasible"
+        ):
             continue
-        assert facts["decision_skip_reason"] == "optimizer_turnover_bounds_infeasible"
+        assert facts["decision_status"] == "PARTIAL"
+        assert facts["execution_constraints_status"] == "UNCHANGED"
         assert not batch.trades and not batch.cashflows
         assert batch.valuations
         assert any(item.quantity > 0 for item in batch.valuations)
-        skipped_dates.add(pd.Timestamp(batch.valuations[0].timestamp_ns).date())
-    assert skipped_dates
+        constrained_dates.add(pd.Timestamp(batch.valuations[0].timestamp_ns).date())
+    assert constrained_dates
     summary = summarize_portfolio_ledger(ledger.capital, iter(batches))
     assert summary["fees"] > 0 and summary["fill_events"] > 0
-    assert len(rejected) == len(skipped_dates)
+    assert len(rejected) == len(constrained_dates)
     for assets, configured_limit in rejected:
         assert configured_limit == turnover_limit
         stocks = assets.loc[~assets.is_cash]
@@ -176,7 +191,7 @@ def test_native_turnover_boundary_skips_rebalance_and_keeps_marks(
         assert 0.5 * minimum_sale > turnover_limit + 1e-8
 
 
-def test_native_excess_capital_skips_capacity_infeasible_targets(
+def test_native_excess_capital_buys_a_capacity_limited_risk_improving_stock_leg(
     source_chain, tmp_path
 ):
     original = source_chain.enhanced_configs["global"]
@@ -199,15 +214,36 @@ def test_native_excess_capital_skips_capacity_infeasible_targets(
     )
     batches = list(ledger.iter_chunks())
     assert len(batches) > 1
+    initial_fill = False
     for batch in batches:
         facts = {item.name: item.text for item in batch.diagnostics if item.text}
-        assert facts["decision_status"] == "SKIPPED"
-        assert facts["decision_skip_reason"] == "optimizer_capacity_bounds_infeasible"
-        assert not batch.trades and not batch.cashflows
+        numbers = {
+            item.name: item.number
+            for item in batch.diagnostics
+            if item.number is not None
+        }
+        adv = {
+            item.asset_id: item.number
+            for item in batch.diagnostics
+            if item.name == "adv20"
+        }
+        assert all(
+            abs(item.notional) <= 0.05 * adv[item.asset_id] for item in batch.trades
+        )
+        if numbers["initial_allocation_attempt"] == 1.0:
+            assert facts["decision_status"] == "PARTIAL"
+            assert facts["execution_target_repair_reason"] == (
+                "optimizer_capacity_bounds_infeasible"
+            )
+            assert batch.trades
+            assert facts["execution_constraints_status"] == "IMPROVED"
+            assert numbers["realized_name_active_weight"] < 0.01
+            initial_fill = True
         assert batch.valuations
+    assert initial_fill
     summary = summarize_portfolio_ledger(ledger.capital, iter(batches))
-    assert summary["fees"] == 0
-    assert summary["nav"] == ledger.capital.initial_capital
+    assert summary["fees"] > 0 and summary["fill_events"] > 0
+    assert summary["nav"] > 0
 
 
 def test_source_models_reach_paired_native_test_statistics(source_chain, tmp_path):
@@ -291,7 +327,6 @@ def test_source_accounts_reconcile_native_portfolio_statistics(source_chain, tmp
             for name in (
                 "price_volume_facts",
                 "market_model_factors",
-                "fundamental_factors",
             )
         ],
     }
@@ -381,7 +416,7 @@ def test_frozen_alpha_schedules_use_real_mature_prediction_returns(
 ):
     import json
 
-    from quant_research_platform.research.portfolios.accounting import (
+    from quant_research_platform.research.portfolios.calibration import (
         alpha_calibration_intervals,
         frozen_alpha_calibration,
     )

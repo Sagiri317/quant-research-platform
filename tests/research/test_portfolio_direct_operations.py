@@ -1,6 +1,6 @@
 """Native portfolio publication and local missing-input semantics."""
 
-from fractions import Fraction
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -17,19 +17,21 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioLedgerBatch,
     PortfolioValuation,
 )
+from quant_research_platform.research.portfolios.accounting import (
+    ResearchValuationMarks,
+    execute_stock_target,
+)
 from quant_research_platform.research.portfolios.optimizer import (
     OptimizerConfig,
     optimize_portfolio,
 )
-from quant_research_platform.research.portfolios.production import (
-    _ResearchValuationMarks,
-)
 from tests.helpers.optimizer import with_cash_asset
 from tests.helpers.portfolio_ledger import mark_view
+from tests.research.test_portfolio_ledger import _schedule
 
 
 def test_ordinary_missing_quote_uses_past_anchor_and_recovers():
-    marks = _ResearchValuationMarks()
+    marks = ResearchValuationMarks()
     marks.project(mark_view("2023-01-01", 10.0, 11.0))
     missing = mark_view("2023-01-02", np.nan, 12.0)
     original = missing.panel.copy(deep=True)
@@ -46,7 +48,7 @@ def test_ordinary_missing_quote_uses_past_anchor_and_recovers():
 
 @pytest.mark.parametrize("kind", ["no_anchor", "new_life", "unproved"])
 def test_no_trusted_same_life_anchor_never_uses_future_close(kind):
-    marks = _ResearchValuationMarks()
+    marks = ResearchValuationMarks()
     if kind != "no_anchor":
         marks.project(mark_view("2023-01-01", 10.0, 11.0))
     result = marks.project(
@@ -75,9 +77,9 @@ def _account():
                     at,
                     "a",
                     phase,
-                    Fraction(shares),
+                    float(shares),
                     shares * 10.0,
-                    Fraction(10),
+                    float(10),
                     lifecycle_id="2020-01-01",
                 ),
                 PortfolioValuation(at, "__cash__", phase, cash, cash),
@@ -85,7 +87,7 @@ def _account():
         )
     return PortfolioLedgerBatch(
         0,
-        trades=(ExecutedTrade("fill", "order", start, "a", Fraction(5), 50.0),),
+        trades=(ExecutedTrade("fill", "order", start, "a", float(5), 50.0),),
         cashflows=(
             PortfolioCashFlow("principal", start, "a", "fill", "principal", -50.0),
             PortfolioCashFlow("fee", start, "a", "fill", "commission_cost", -1.0),
@@ -189,25 +191,24 @@ def test_frozen_adv_retains_actual_factor_and_specific_risk(limit, passes, monke
 def test_frozen_quantity_is_not_rebalanced_to_old_weight_after_fees():
     from datetime import date
 
-    from quant_research_platform.contracts.portfolios import TradeCostComponents
-    from tests.helpers.portfolio_ledger import execute_continuous_target
+    from tests.helpers.portfolio_ledger import stock_orders
 
     assets = pd.Index(["a", "b"])
-    result = execute_continuous_target(
-        pd.Series([0.4, 0.4], index=assets),
-        pd.Series([0.4, 0.5], index=assets),
-        nav=1000.0,
-        average_daily_volume=pd.Series([np.nan, 10000.0], index=assets),
-        can_enter=pd.Series([pd.NA, True], index=assets, dtype="boolean"),
-        can_exit=pd.Series([pd.NA, True], index=assets, dtype="boolean"),
-        execution_date=date(2023, 1, 1),
-        cost_for_trade=lambda day, asset, side, notional, adv, assumptions: (
-            TradeCostComponents(
-                notional, notional * 0.01, 0.0, 0.0, 0.0, 0.0, "fees.csv"
-            )
+    result = execute_stock_target(
+        stock_orders(
+            (pd.Series([0.4, 0.4], index=assets)) * (1000.0),
+            (pd.Series([0.4, 0.5], index=assets)) * (1000.0),
+            capacity=pd.Series([np.nan, 10000.0], index=assets),
+        ).assign(
+            can_enter=pd.Series([pd.NA, True], index=assets, dtype="boolean"),
+            can_exit=pd.Series([pd.NA, True], index=assets, dtype="boolean"),
         ),
-        assumptions=ExecutionAssumptions(1000.0, 0.0, 0.0, 1.0, (1.0,)),
-        cost_source_identity="fees.csv",
+        cash=float((1000.0) - ((pd.Series([0.4, 0.4], index=assets)) * (1000.0)).sum()),
+        execution_date=date(2023, 1, 1),
+        fee_schedule=_schedule(broker_rate=0.01, transfer_rate=0.0, stamp_rate=0.0),
+        assumptions=replace(
+            ExecutionAssumptions(1000.0, 0.0, 0.0, 1.0, (1.0,)), minimum_commission=0.0
+        ),
         unquoted_assets=frozenset({"a"}),
     )
     ledger = result.asset_ledger.set_index("asset_id")
@@ -269,9 +270,7 @@ def test_unproved_rights_only_block_the_account_that_holds_them(held):
             )
         ]
     )
-    units = pd.Series(
-        {"a": Fraction(2)} if held else {"other": Fraction(3)}, dtype="object"
-    )
+    units = pd.Series({"a": float(2)} if held else {"other": float(3)}, dtype="float64")
     lives = pd.Series({asset: pd.Timestamp("2020-01-01") for asset in units.index})
     if held:
         with pytest.raises(
@@ -289,7 +288,7 @@ def test_unproved_rights_only_block_the_account_that_holds_them(held):
 
 
 def test_unproved_rights_quote_cannot_create_a_valuation_anchor():
-    marks = _ResearchValuationMarks()
+    marks = ResearchValuationMarks()
     marks.project(mark_view("2023-01-01", 10.0, 11.0))
     view = mark_view("2023-01-02", np.nan, np.nan)
     view.rights_events = pd.DataFrame(
@@ -418,7 +417,7 @@ def test_explicit_native_fit_prediction_and_backtest_roundtrip(
         "prediction_window": window,
         "sample_role": "custom-backtest-label",
         "assumptions": {
-            "initial_nav": 100.0,
+            "initial_nav": 1000000.0,
             "slippage_bps": 0.0,
             "impact_bps": 0.0,
             "adv_participation": 1.0,

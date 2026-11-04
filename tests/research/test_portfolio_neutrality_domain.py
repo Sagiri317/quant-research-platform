@@ -41,6 +41,57 @@ def _inputs(missing):
     return args
 
 
+def test_integer_fills_repair_simple_industry_bands_after_price_drift():
+    args = decision_inputs(holdings=(0.45, 0.45))
+    args.update(cash=10.0, enhanced_decision=None)
+    args["candidate"] = replace(
+        args["candidate"],
+        construction="quantile_equal_weight",
+        top_quantile=1.0,
+        benchmark_id=None,
+        risk_style_columns=(),
+        neutrality="industry",
+        industry_neutrality_limit=0.005,
+    )
+    args["panel"] = args["panel"].assign(
+        industry_standard_id="fixture", industry_level1_code=["A", "B"]
+    )
+    args["next_panel"].loc[args["next_panel"].asset_id.eq("b"), "open"] = 0.02
+    account, _, _, delta, ledger = production._build_session(**args)
+    stock = ledger.post_trade_notional
+    assert abs(stock.iloc[0] / stock.sum() - 0.5) <= 0.005 + 1e-8
+    assert ledger.attrs["realized_constraints"]["execution_constraints_status"] == (
+        "SATISFIED"
+    )
+    assert account.post_trade_cash >= 0.0
+    assert ledger.executed_quantity.mod(100).eq(0).all()
+    np.testing.assert_allclose(delta, [0.05, 0.05])
+
+
+def test_simple_infeasible_frozen_name_still_reduces_other_industry_deviations():
+    args = decision_inputs(benchmark=(1 / 3,) * 3, holdings=(0.6, 0.3, 0.1))
+    args["enhanced_decision"] = None
+    args["candidate"] = replace(
+        args["candidate"],
+        construction="quantile_equal_weight",
+        top_quantile=1.0,
+        benchmark_id=None,
+        risk_style_columns=(),
+        neutrality="industry",
+        industry_neutrality_limit=0.01,
+    )
+    args["panel"] = args["panel"].assign(
+        industry_standard_id="fixture", industry_level1_code=["A", "B", "C"]
+    )
+    args["alpha"].loc["a"] = np.nan
+    _, _, _, _, ledger = production._build_session(**args)
+    np.testing.assert_allclose(ledger.post_trade_notional, [60.0, 20.0, 20.0])
+    assert ledger.executed_quantity.tolist() == [0, -1000, 1000]
+    facts = ledger.attrs["realized_constraints"]
+    assert facts["execution_constraints_status"] == "IMPROVED"
+    assert facts["realized_constraints_status"] == "BREACHED"
+
+
 @pytest.mark.parametrize("missing", ["float_market_cap", "total_market_cap"])
 def test_unavailable_context_exits_without_blocking_known_pool(missing):
     args = _inputs(missing)
@@ -49,9 +100,10 @@ def test_unavailable_context_exits_without_blocking_known_pool(missing):
     account, _, _, _, ledger = production._build_session(**args)
     assert ledger.attrs["decision_availability"]["decision_skip_reason"] is None
     assert ledger.attrs["decision_availability"]["missing_prediction_count"] == 0
-    # Exact industry matching fixes the known-pool weights at 1/3 and 2/3.
+    # The target fixes A:B at 1:2; fills keep sub-share residue and round buys.
+    np.testing.assert_allclose(ledger.target_notional, [100 / 3, 200 / 3, 0.0])
     assert ledger.set_index("asset_id").post_trade_notional.to_dict() == pytest.approx(
-        {"a": 100 / 3, "b": 200 / 3, "c": 0.0}, abs=1e-8
+        {"a": 100 / 3, "b": 100 / 3 + 33.0, "c": 100 / 3 - 33.33}, abs=1e-8
     )
     assert account.nav_after == pytest.approx(100.0, abs=1e-10)
     facts = ledger.attrs["neutrality_exposures"]
@@ -66,11 +118,16 @@ def test_unavailable_context_exits_without_blocking_known_pool(missing):
     pd.testing.assert_series_equal(args["alpha"], predictions, check_exact=True)
 
 
-def test_fixed_missing_forecasts_only_skip_when_constraints_are_infeasible():
+def test_fixed_missing_forecasts_keep_holdings_when_no_risk_improvement_is_possible():
     args = _inputs("industry")
     args["alpha"].loc["a"] = np.nan
     _, _, _, _, ledger = production._build_session(**args)
-    assert ledger.attrs["decision_availability"]["decision_skip_reason"] == (
+    assert ledger.attrs["decision_availability"]["decision_skip_reason"] is None
+    assert ledger.attrs["decision_availability"]["decision_status"] == "PARTIAL"
+    assert ledger.attrs["realized_constraints"]["execution_constraints_status"] == (
+        "UNCHANGED"
+    )
+    assert ledger.attrs["realized_constraints"]["execution_target_repair_reason"] == (
         "target_neutrality_infeasible"
     )
     assert ledger.attrs["decision_availability"]["missing_prediction_count"] == 2
@@ -87,27 +144,35 @@ def test_partial_forecast_rebalances_known_names_with_nonzero_fixed_weight():
     assert ledger.attrs["decision_availability"]["decision_skip_reason"] is None
     assert ledger.attrs["decision_availability"]["decision_status"] == "PARTIAL"
     # c is fixed at 1/3; the remaining 2/3 follows A:B = 1:2.
+    np.testing.assert_allclose(ledger.target_notional, [200 / 9, 400 / 9, 100 / 3])
     assert ledger.set_index("asset_id").post_trade_notional.to_dict() == pytest.approx(
-        {"a": 200 / 9, "b": 400 / 9, "c": 100 / 3}, abs=1e-8
+        {"a": 100 / 3 - 11.0, "b": 100 / 3 + 11.0, "c": 100 / 3}, abs=1e-8
     )
 
 
 @pytest.mark.parametrize("unknown_score,expected", [(2.0, 1.0), (-1.0, 1 / 7)])
-def test_unknown_industry_can_buy_or_sell_by_normal_projection(unknown_score, expected):
+def test_unknown_industry_keeps_signal_target_while_integer_fills_respect_known_bands(
+    unknown_score, expected
+):
     args = _inputs("industry")
     args["candidate"] = replace(args["candidate"], neutrality="industry")
     args["alpha"].loc["c"] = unknown_score
+    args["holdings"] = pd.Series({"a": 30.0, "b": 30.0, "c": 40.0})
+    args["held_units"] = args["holdings"] / 0.01
     _, _, _, delta, ledger = production._build_session(**args)
-    assert delta["c"] == pytest.approx(expected - 1 / 3, abs=1e-8)
-    assert ledger.set_index("asset_id").loc[
-        "c", "post_trade_notional"
-    ] == pytest.approx(100 * expected, abs=1e-8)
+    assert delta["c"] == pytest.approx(expected - 0.4, abs=1e-8)
+    actual = ledger.set_index("asset_id").post_trade_notional
+    # Risk takes precedence over the requested trade direction after rounding.
+    assert actual["c"] > 0.0
+    if unknown_score > 0:
+        assert actual["c"] == pytest.approx(100.0)
     facts = ledger.attrs["neutrality_exposures"]
     assert facts["benchmark_unknown_industry_weight"] == 0.5
     assert facts["target_unknown_industry_weight"] == pytest.approx(expected, abs=1e-8)
     if unknown_score < 0:
         # The closest point to (1,0,0) on w_b=2*w_a, sum(w)=1 is (2,4,1)/7.
         assert facts["target_exposure:industry:fixture:A"] == pytest.approx(1 / 3)
+        assert actual["a"] / (actual["a"] + actual["b"]) == pytest.approx(1 / 3)
 
 
 @pytest.mark.parametrize("can_exit", [False, True])
@@ -266,11 +331,13 @@ def test_public_neutral_pool_persists_known_ratios_and_unknown_holdings(tmp_path
         write_statistics_artifact,
     )
     from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.research.portfolios.attribution import (
+        HoldingFactorInputs,
+    )
     from quant_research_platform.research.portfolios.diagnostics import (
         _portfolio_statistics_tables,
         portfolio_statistics,
     )
-    from quant_research_platform.research.portfolios.risk import HoldingFactorInputs
 
     stats = read_statistics_artifact(
         portfolio_statistics(

@@ -156,8 +156,8 @@ def plot(config: Config) -> None:
 
 @app.command("backtest-hft")
 def backtest_hft(config: Config) -> None:
-    """Backtest independent A-share stock-day inventory accounts."""
-    from quant_research_platform.markets.implementations.a_share.hft_portfolio import (
+    """Backtest one continuous A-share inventory account."""
+    from quant_research_platform.research.portfolios.high_frequency import (
         backtest,
     )
 

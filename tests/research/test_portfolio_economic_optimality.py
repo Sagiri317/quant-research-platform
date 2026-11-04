@@ -206,6 +206,9 @@ def test_seed18_real_cost_improves_over_the_proven_no_trade_kink():
 @pytest.mark.parametrize("cash", [0.0, 1e-13, 1e-6])
 def test_zero_cash_has_the_same_legal_sell_to_cash_domain(cash):
     args = _decision_inputs(holdings=((1 - cash / 100) / 2,) * 2)
+    for name in ("panel", "next_panel", "endpoint_panel"):
+        args[name][["open", "close"]] = 0.005
+    args["held_units"] *= 2
     enhanced = args["enhanced_decision"]
     args.update(
         cash=cash,
@@ -216,7 +219,10 @@ def test_zero_cash_has_the_same_legal_sell_to_cash_domain(cash):
     account, _, result, _, ledger = production._build_session(**args)
     assert result is not None
     assert result.weights.tolist() == pytest.approx([0.495, 0.495, 0.01], abs=1e-10)
-    assert account.post_trade_cash == pytest.approx(1.0, abs=1e-8)
+    # With a positive cash offset each 100-share sale would cross the target;
+    # the legal 99-share odd-lot sale yields 0.495 per name instead.
+    expected_cash = 0.99 + cash if cash == 1e-6 else 1.0
+    assert account.post_trade_cash == pytest.approx(expected_cash, abs=1e-8)
     assert ledger.executed_delta_notional.lt(0).all()
 
 
@@ -253,7 +259,7 @@ def test_actual_constraint_diagnostics_depend_on_account_and_available_facts(
     elif branch == "risk_missing":
         args["enhanced_decision"] = replace(enhanced, risk=None)
         args["panel"] = args["panel"].drop(columns="is_nonfinancial_industry")
-    args["next_panel"].loc[args["next_panel"].asset_id.eq("a"), "open"] = 150.0
+    args["next_panel"].loc[args["next_panel"].asset_id.eq("a"), "open"] = 0.015
     args["execution"]["can_exit"] = False
     account, adv, result, delta, ledger = production._build_session(**args)
     assert account.nav_after == 125.0

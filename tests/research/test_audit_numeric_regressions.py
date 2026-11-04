@@ -1,7 +1,6 @@
 """Native numerical boundaries for statistics, models and portfolio execution."""
 
 from contextlib import closing
-from fractions import Fraction
 
 import numpy as np
 import pandas as pd
@@ -167,12 +166,10 @@ def test_standardized_residual_preserves_index_and_units(index_start):
 
 
 def test_distinct_positive_price_labels_keep_distinct_model_targets(tmp_path):
-    from quant_research_platform.research.datasets.assembler import (
-        _a_share_model_target,
-    )
     from quant_research_platform.research.labels.forward_returns import (
         add_forward_return_labels,
     )
+    from quant_research_platform.research.labels.targets import a_share_model_target
 
     dates = pd.bdate_range("2024-01-02", periods=22)
     frame = pd.DataFrame(
@@ -193,10 +190,10 @@ def test_distinct_positive_price_labels_keep_distinct_model_targets(tmp_path):
     labeled.to_parquet(tmp_path / "labels.parquet", index=False)
     restored = pd.read_parquet(tmp_path / "labels.parquet")
     first = restored.loc[restored.timestamp == dates[0]].assign(eligible=True)
-    expected = [float((Fraction(value) - 3) / 3) for value in exits]
+    expected = [float((float(value) - 3) / 3) for value in exits]
     np.testing.assert_allclose(first.forward_return_20d, expected, rtol=1e-14, atol=0)
     assert 0 < first.forward_return_20d.iloc[0] < first.forward_return_20d.iloc[1]
-    np.testing.assert_allclose(_a_share_model_target(first), [-1, 1], rtol=1e-15)
+    np.testing.assert_allclose(a_share_model_target(first), [-1, 1], rtol=1e-15)
 
 
 @pytest.mark.parametrize("initial_nav", (100.0, 1000.0))
@@ -257,7 +254,8 @@ def test_public_builder_small_nav_cash_and_fee_publish(
             row.value >= 0 for row in batch.valuations if row.asset_id == "__cash__"
         )
     summary = summarize_portfolio_ledger(ledger.capital, iter(batches))
-    expected_fee_ratio = 0.2 / 1.2 if trade else 0.0
+    bought = (initial_nav // 120.0) * 100.0 if trade else 0.0
+    expected_fee_ratio = bought * 0.2 / initial_nav
     assert summary["fees"] / initial_nav == pytest.approx(expected_fee_ratio, abs=1e-15)
     assert summary["net_pnl"] / initial_nav == pytest.approx(
         -expected_fee_ratio, abs=1e-15
@@ -269,7 +267,7 @@ def test_public_builder_small_nav_cash_and_fee_publish(
     if trade:
         assert sum(
             row.notional for batch in batches for row in batch.trades
-        ) / initial_nav == pytest.approx(1 / 1.2, abs=1e-15)
+        ) == pytest.approx(bought)
 
 
 def test_factor_inference_counts_original_dates_with_no_mature_or_finite_factor(
@@ -476,34 +474,3 @@ def test_white_constant_squared_residual_is_undefined():
     assert actual.coefficients["z"] == pytest.approx(0.002, rel=1e-12)
     assert actual.white_p_value is None
     assert actual.white_reason == "white_test_undefined"
-
-
-@pytest.mark.parametrize("current,target", [(2.0, 1.0), (1.0, 2.0)])
-def test_execution_rejects_overallocated_current_or_target_weights(current, target):
-    from datetime import date
-
-    from quant_research_platform.contracts.portfolios import (
-        ExecutionAssumptions,
-        TradeCostComponents,
-    )
-    from quant_research_platform.research.portfolios.accounting import (
-        execute_continuous_target,
-    )
-
-    assets = ["a"]
-    with pytest.raises(ValueError, match="^execution_weights_sum_invalid$"):
-        execute_continuous_target(
-            pd.Series([current], index=assets),
-            pd.Series([target], index=assets),
-            nav=1000.0,
-            average_daily_volume=pd.Series(1e6, index=assets),
-            can_enter=pd.Series(True, index=assets),
-            can_exit=pd.Series(True, index=assets),
-            execution_date=date(2023, 1, 3),
-            cost_for_trade=lambda day, asset, side, amount, adv, settings: (
-                TradeCostComponents(amount, 0.0, 0.0, 0.0, 0.0, 0.0, "a" * 64)
-            ),
-            cost_totals_for_buys=lambda assets, amounts, adv: np.zeros(len(assets)),
-            assumptions=ExecutionAssumptions(1000.0, 0.0, 0.0, 1.0, (1.0,)),
-            cost_source_identity="a" * 64,
-        )

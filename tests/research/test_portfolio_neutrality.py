@@ -209,7 +209,11 @@ def test_nonrebalance_blocked_exit_keeps_realized_exposure_unknown(
         if pd.Timestamp(facts["decision_timestamp"]) < pd.Timestamp("2023-01-06"):
             initial_cash.append(batch)
             assert not batch.trades
-            assert all(row.asset_id == "__cash__" for row in batch.valuations)
+            assert all(
+                row.quantity == row.value == 0.0
+                for row in batch.valuations
+                if row.asset_id != "__cash__"
+            )
             for kind in ("target", "realized"):
                 assert facts[f"{kind}_exposure_status"] == "UNDEFINED"
                 assert facts[f"{kind}_exposure_reason"] == "nonpositive_stock_value"

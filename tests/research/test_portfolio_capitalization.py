@@ -15,7 +15,7 @@ from quant_research_platform.research.portfolios.construction import (
     build_simple_target_weights,
 )
 from quant_research_platform.research.portfolios.production import _enhanced_risk_cross
-from quant_research_platform.research.portfolios.risk import (
+from quant_research_platform.research.risk import (
     FactorRiskConfig,
     FactorRiskState,
 )

@@ -1,5 +1,3 @@
-from fractions import Fraction
-
 import pandas as pd
 import pytest
 
@@ -54,7 +52,7 @@ def test_registration_uses_own_market_calendar_and_actual_share_amounts():
     assert event.record_at == pd.Timestamp("2023-01-04")
     assert event.effective_at == pd.Timestamp("2023-01-06")
     assert event.settlement_at == pd.Timestamp("2023-01-09")
-    assert event.cash_per_share == Fraction(0.5)
+    assert event.cash_per_share == 0.5
     assert event.listing_date == pd.Timestamp("2022-01-01")
     assert event.entitlement_proved
     assert events.attrs["corporate_action_policy"]["voluntary_subscription"] == "none"
@@ -272,13 +270,13 @@ def test_proved_holder_transition_replaces_unproved_aggregate_without_early_bloc
     assert len(rights) == 1
     assert rights.kind.iloc[0] == "share_change"
     assert rights.entitlement_proved.iloc[0]
-    assert rights.remaining_old_units_per_old_unit.iloc[0] == Fraction(0.16)
+    assert rights.remaining_old_units_per_old_unit.iloc[0] == 0.16
     from quant_research_platform.research.portfolios.accounting import (
         EquityEntitlements,
     )
 
     state = EquityEntitlements()
-    shares = pd.Series({"000001": Fraction(100)}, dtype="object")
+    shares = pd.Series({"000001": float(100)}, dtype="object")
     lives = pd.Series({"000001": rights.listing_date.iloc[0]})
     adjustments = []
     for view in views:
@@ -291,6 +289,6 @@ def test_proved_holder_transition_replaces_unproved_aggregate_without_early_bloc
         if view.timestamp < pd.Timestamp("2023-01-04"):
             assert shares["000001"] == 100
         adjustments.extend(changes)
-    assert shares["000001"] == 100 * Fraction(0.16)
+    assert shares["000001"] == 100 * 0.16
     assert len(adjustments) == 1
     assert adjustments[0].kind == "recovery"

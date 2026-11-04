@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections import deque
-from fractions import Fraction
 from math import log
 
 import numpy as np
@@ -32,7 +31,9 @@ from quant_research_platform.markets.implementations.a_share.execution import (
     prepare_trade_cost,
 )
 from quant_research_platform.research.portfolios import production
-from quant_research_platform.research.portfolios.risk import FactorRiskEstimate
+from quant_research_platform.research.risk import (
+    FactorRiskEstimate,
+)
 from quant_research_platform.sources.csmar.interim import (
     interim_catalog as csmar_catalog,
 )
@@ -471,9 +472,11 @@ def portfolio_inputs() -> tuple[dict[str, pd.DataFrame], pd.DataFrame, TimeWindo
                 "asset_id": asset,
                 "timestamp": timestamp,
                 "listing_date": dates[0],
-                "open": 100.0 + timestamp.day * (1 if asset == "a" else 2),
-                "adj_open": 100.0 + timestamp.day * (1 if asset == "a" else 2),
-                "adj_close": 100.0 + timestamp.day * (1 if asset == "a" else 2),
+                "open": (100.0 + timestamp.day * (1 if asset == "a" else 2)) / 10000,
+                "adj_open": (100.0 + timestamp.day * (1 if asset == "a" else 2))
+                / 10000,
+                "adj_close": (100.0 + timestamp.day * (1 if asset == "a" else 2))
+                / 10000,
                 "amount": 1000.0,
                 "total_market_cap": 1000.0 if asset == "a" else 2000.0,
                 "market_type": 1,
@@ -483,7 +486,7 @@ def portfolio_inputs() -> tuple[dict[str, pd.DataFrame], pd.DataFrame, TimeWindo
                 "is_pt": False,
                 "listing_age_trading_days": 300,
                 "has_252_trading_sessions": True,
-                "close": 100.0 + timestamp.day * (1 if asset == "a" else 2),
+                "close": (100.0 + timestamp.day * (1 if asset == "a" else 2)) / 10000,
                 "volume": 10.0,
                 "turnover": 0.01,
             }
@@ -593,7 +596,7 @@ def closed_market_inputs(tmp_path, *, fault=None, open_assets=6):
                 else 121.0
                 if asset.startswith("a") and day >= pd.Timestamp("2023-01-05")
                 else 100.0,
-                "amount": 1000.0,
+                "amount": 10_000_000.0,
                 "period_return": 0.0,
                 "total_market_cap": 1000.0,
                 "float_market_cap": 1000.0,
@@ -842,8 +845,8 @@ def decision_inputs(*, benchmark=(0.5, 0.5), holdings=None, fee_rate=0.0):
             "asset_id": assets,
             "listing_date": life,
             "timestamp": day,
-            "open": 100.0,
-            "close": 100.0,
+            "open": 0.01,
+            "close": 0.01,
             "amount": 1000.0,
             "market_type": 1,
             "is_trading": True,
@@ -909,7 +912,7 @@ def decision_inputs(*, benchmark=(0.5, 0.5), holdings=None, fee_rate=0.0):
             }
         ),
         holdings=values,
-        held_units=values.map(lambda value: Fraction(value) / 100),
+        held_units=values.map(lambda value: float(value / 0.01)),
         cash=0.0,
         recovery_cash=0.0,
         decision_receivable=0.0,
@@ -921,7 +924,9 @@ def decision_inputs(*, benchmark=(0.5, 0.5), holdings=None, fee_rate=0.0):
         enhanced_decision=enhanced,
         target_override=None,
         decision_reason="enhanced_optimizer",
-        assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,)),
+        assumptions=ExecutionAssumptions(
+            100.0, 0.0, 0.0, 1.0, (1.0,), minimum_commission=0.0
+        ),
         fee_schedule=fee_schedule_from_frame(fees, content_identity="synthetic"),
         fee_identity="synthetic",
         prepare_trade_cost=prepare_trade_cost,

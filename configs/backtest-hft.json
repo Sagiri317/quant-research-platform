@@ -8,14 +8,28 @@
   },
   "parameters": {
     "initial_capital": 100000.0,
-    "initial_inventory": 1000,
-    "maximum_inventory": 2000,
-    "lot_size": 100,
+    "initial_inventory": {
+      "000001": 1000,
+      "600000": 1000
+    },
+    "maximum_inventory": {
+      "000001": 2000,
+      "600000": 2000
+    },
     "buy_threshold": 0.001,
     "sell_threshold": -0.001,
     "latency_ms": 1,
     "participation_rate": 0.05,
-    "minimum_commission": 5.0
+    "minimum_commission": 5.0,
+    "restore_at": null
   },
-  "output": "results/hft/accounts"
+  "output": "results/hft/ledger",
+  "daily_inputs": {
+    "panel": "data/processed/a_share/market_panel_1d",
+    "calendar": "data/interim/csmar/trading_calendar",
+    "market_bars": "data/interim/csmar/market_bars_1d",
+    "stock_master": "data/interim/csmar/stock_master",
+    "corporate_actions": "data/interim/csmar/corporate_actions",
+    "equity_events": "data/interim/reference/a_share_equity_events"
+  }
 }

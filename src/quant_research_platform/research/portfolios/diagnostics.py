@@ -17,6 +17,10 @@ from quant_research_platform.research.portfolios.accounting import (
     capacity_quantiles,
     portfolio_interval_economics,
 )
+from quant_research_platform.research.portfolios.attribution import (
+    HoldingFactorInputs,
+    holding_attribution,
+)
 from quant_research_platform.research.portfolios.comparison import (
     COMPARISON_ANALYSES,
     _complete_daily,
@@ -28,21 +32,19 @@ from quant_research_platform.research.portfolios.comparison import (
 from quant_research_platform.research.portfolios.comparison import (
     endpoint_return as comparison_endpoint_return,
 )
-from quant_research_platform.research.portfolios.risk import (
-    FactorRiskConfig,
-    FactorRiskState,
-    HoldingFactorInputs,
-    holding_attribution,
-)
+from quant_research_platform.research.portfolios.performance import performance_rows
 from quant_research_platform.research.portfolios.schedules import holding_intervals
 from quant_research_platform.research.protocols.a_share import _inference_blocker
+from quant_research_platform.research.risk import (
+    FactorRiskConfig,
+    FactorRiskState,
+)
 from quant_research_platform.research.statistics import (
     _return_sharpes,
     _validate_bootstrap_configuration,
     _validate_cscv_slice_count,
     cscv_pbo,
     probabilistic_and_deflated_sharpe,
-    return_standard_deviation,
     stationary_bootstrap_mean_ci,
     time_series_inference_summary,
 )
@@ -951,66 +953,12 @@ def _portfolio_statistics_tables(
             raise ValueError("portfolio_statistics_empty_candidate")
         if not {"performance"} & set(analyses):
             continue
-        returns_defined = selected.return_status.eq("DEFINED").all()
         daily_complete = _complete_daily(
             selected.rename(columns={"entry_at": "start_at"}),
             "trading_day_open",
             sessions,
         )
-        count = len(selected)
-        deviation = float(
-            return_standard_deviation(
-                selected.net_return,
-                roundoff=_nav_return_roundoff(
-                    selected.nav_before, selected.nav_end, selected.net_return
-                ),
-            )
-        )
-        economic = economic_totals[candidate_id].summary()
-        endpoint_return = (
-            previous_nav - artifact.capital.initial_capital
-        ) / artifact.capital.initial_capital
-        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
-            cagr = float(np.expm1(np.log1p(endpoint_return) * (252 / count)))
-        if not np.isfinite(cagr):
-            cagr = np.nan
-        values = {
-            "terminal_nav": previous_nav,
-            "capital_return": np.nan
-            if economic["capital_return"] is None
-            else economic["capital_return"],
-            "cagr": cagr,
-            "annualized_volatility": deviation * np.sqrt(252),
-            "sharpe": float(
-                _return_sharpes(
-                    selected.net_return,
-                    roundoff=_nav_return_roundoff(
-                        selected.nav_before, selected.nav_end, selected.net_return
-                    ),
-                )
-                * np.sqrt(252)
-            ),
-            "max_drawdown": float(
-                (
-                    selected.nav_end
-                    / selected.nav_end.cummax().clip(
-                        lower=artifact.capital.initial_capital
-                    )
-                    - 1
-                ).min()
-            ),
-            "mean_cash_weight_post": float(
-                selected.cash_weight_post.mean(skipna=False)
-            ),
-            "terminal_cash_weight_post": float(selected.cash_weight_post.iloc[-1]),
-            "terminal_cash_post": float(selected.cash_post.iloc[-1]),
-            "target_turnover": float(selected.target_turnover.mean(skipna=False)),
-            "requested_turnover": float(selected.requested_turnover.mean(skipna=False)),
-            "realized_turnover": float(selected.realized_turnover.mean(skipna=False)),
-            "gross_pnl": economic["gross_pnl"],
-            "net_pnl": economic["net_pnl"],
-            "cost": economic["fees"],
-        }
+        values = {}
         for name, value in adv_gaps[candidate_id].items():
             values[name] = float(np.sum(value)) if isinstance(value, list) else value
         valuation = pd.DataFrame(valuation_by_candidate[candidate_id])
@@ -1055,57 +1003,16 @@ def _portfolio_statistics_tables(
                         - 1
                     ).min()
                 )
-        undefined_reason = (
-            "nonpositive_start_nav"
-            if selected.nav_before.eq(0).any()
-            else "nonfinite_result"
-            if not returns_defined
-            or selected[
-                [
-                    "gross_return",
-                    "cost_drag",
-                    "target_turnover",
-                    "requested_turnover",
-                    "realized_turnover",
-                    "cash_weight_post",
-                ]
-            ]
-            .isna()
-            .any()
-            .any()
-            else "statistic_not_identified"
-        )
-        for name, value in values.items():
-            missing_daily = not daily_complete and name in {
-                "cagr",
-                "annualized_volatility",
-                "sharpe",
-            }
-            if missing_daily:
-                value = np.nan
-            summary_rows.append(
-                dict(
-                    candidate_id=candidate_id,
-                    metric_id=name,
-                    value=value if np.isfinite(value) else np.nan,
-                    status="DEFINED" if np.isfinite(value) else "UNDEFINED",
-                    reason=""
-                    if np.isfinite(value)
-                    else "incomplete_daily_axis"
-                    if missing_daily
-                    else "nonfinite_result"
-                    if np.isinf(value)
-                    or name
-                    in {
-                        "capital_return",
-                        "cagr",
-                    }
-                    or name.endswith(("_capital_return", "_target_notional"))
-                    else undefined_reason,
-                    observation_count=count,
-                    sample_role=access,
-                )
+        summary_rows.extend(
+            performance_rows(
+                selected,
+                capital=artifact.capital,
+                economic=economic_totals[candidate_id].summary(),
+                daily_complete=daily_complete,
+                sample_role=access,
+                extra_values=values,
             )
+        )
     daily = pd.DataFrame(daily_rows)
     if daily.duplicated(["candidate_id", "entry_at", "end_at"]).any():
         raise ValueError("portfolio_statistics_duplicate_intervals")
@@ -1704,33 +1611,50 @@ def portfolio_statistics(config):
     ledgers, candidates = {}, []
     for path in config["ledgers"]:
         ledger = read_portfolio_ledger_artifact(Path(path))
+        if TimeWindow(**ledger.metadata["window"]) != window:
+            raise ValueError("portfolio_statistics_ledger_window_mismatch")
+        candidate_id = ledger.capital.candidate_id
+        if candidate_id in ledgers:
+            raise ValueError("portfolio_statistics_candidate_set_invalid")
+        ledgers[candidate_id] = ledger
+        if ledger.metadata.get("kind") == "a_share_hft":
+            continue
         values = dict(ledger.metadata["candidate"])
         values["risk_style_columns"] = tuple(values.get("risk_style_columns", ()))
         candidate = PortfolioCandidateSpec(**values)
-        if (
-            candidate.candidate_id in ledgers
-            or ledger.capital.candidate_id != candidate.candidate_id
-        ):
+        if ledger.capital.candidate_id != candidate.candidate_id:
             raise ValueError("portfolio_statistics_candidate_set_invalid")
-        if TimeWindow(**ledger.metadata["window"]) != window:
-            raise ValueError("portfolio_statistics_ledger_window_mismatch")
-        ledgers[candidate.candidate_id] = ledger
         candidates.append(candidate)
     comparison_metadata = {}
-    tables = build_portfolio_statistics_tables(
-        ledgers=ledgers,
-        candidates=tuple(candidates),
-        config={
-            **config,
-            "statistics": policy,
-            "execution_assumptions": {"adv_sensitivities": participation},
-        },
-        time_window=window,
-        unified_trading_sessions=unified_trading_sessions,
-        inputs=config.get("inputs", {}),
-        iter_portfolio_sessions=portfolio_sessions.iter_portfolio_sessions,
-        comparison_metadata=comparison_metadata,
-    )
+    if len(candidates) != len(ledgers):
+        if candidates:
+            raise ValueError("portfolio_statistics_account_clocks_mixed")
+        from quant_research_platform.research.portfolios.high_frequency import (
+            statistics_tables,
+        )
+
+        tables = statistics_tables(ledgers, window=window, config=config)
+        comparison_metadata.update(
+            observation_clock="trading_day_close",
+            cash_observation="end_of_day",
+            turnover_semantics="sum_of_intraday_requests_and_fills_over_start_nav",
+            annualization="complete_trading_days_only",
+        )
+    else:
+        tables = build_portfolio_statistics_tables(
+            ledgers=ledgers,
+            candidates=tuple(candidates),
+            config={
+                **config,
+                "statistics": policy,
+                "execution_assumptions": {"adv_sensitivities": participation},
+            },
+            time_window=window,
+            unified_trading_sessions=unified_trading_sessions,
+            inputs=config.get("inputs", {}),
+            iter_portfolio_sessions=portfolio_sessions.iter_portfolio_sessions,
+            comparison_metadata=comparison_metadata,
+        )
     metadata = {key: value for key, value in config.items() if key != "output"}
     if {"sharpe_inference", "cscv", "group_comparison"}.intersection(analyses):
         metadata["inference_scope"] = "exploratory"

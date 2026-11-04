@@ -57,8 +57,7 @@ def prepare_a_share_acceptance(root: Path):
         "price_volume_facts",
         "forward_returns",
         "market_model_factors",
-        "fundamental_pit",
-        "fundamental_factors",
+        "risk_residual_factors",
         "benchmark_weights",
     )
     catalog = processed_catalog()
@@ -68,12 +67,6 @@ def prepare_a_share_acceptance(root: Path):
         for name in catalog.get(target).source_input_data_ids
     } | {"a_share_fee_schedule", "index_market", "corporate_actions"}
     source_groups = {
-        "choice": {
-            "financial_balance",
-            "financial_income",
-            "financial_cashflow",
-            "financial_first_disclosure",
-        },
         "reference": {"a_share_fee_schedule", "a_share_industry_snapshots"},
     }
     source_groups["csmar"] = required_sources - set.union(*source_groups.values())
@@ -98,17 +91,8 @@ def prepare_a_share_acceptance(root: Path):
     for name in processed_names:
         spec = catalog.get(name)
         selected = (*spec.source_input_data_ids, *spec.processed_input_data_ids)
-        options = {}
-        if name in {"fundamental_pit", "fundamental_factors"}:
-            options["factor_columns"] = ["earnings_yield"]
-            selected = tuple(
-                key
-                for key in selected
-                if key not in {"financial_balance", "financial_cashflow"}
-            )
         paths[name] = prepare(
             {
-                **options,
                 "market_id": "a_share",
                 "data_id": name,
                 "inputs": {key: str(paths[key]) for key in selected},
@@ -190,7 +174,6 @@ def run_a_share_acceptance(project_root: Path):
     ]
     models, predictions, configurations = {}, {}, {}
     for model in model_specs:
-        candidates = model.pop("parameter_candidates", None)
         config = {
             "market_id": "a_share",
             "inputs": str(case.dataset),
@@ -199,8 +182,6 @@ def run_a_share_acceptance(project_root: Path):
             "fit_windows": [train],
             "fit_cutoff": train["end"],
         }
-        if candidates is not None:
-            config["candidate_parameters"] = candidates[0]
         identifier = model["model_id"]
         configurations[identifier] = config
         models[identifier] = fit(config)
@@ -351,7 +332,6 @@ def run_a_share_acceptance(project_root: Path):
                     for name in (
                         "price_volume_facts",
                         "market_model_factors",
-                        "fundamental_factors",
                     )
                 ],
             },
@@ -412,7 +392,7 @@ def run_a_share_acceptance(project_root: Path):
 
 def source_alpha_observations(case, prediction_path, schedule):
     """Pair actual native predictions and execution opens on the declared schedule."""
-    from quant_research_platform.research.portfolios.accounting import (
+    from quant_research_platform.research.portfolios.calibration import (
         alpha_calibration_intervals,
     )
 

@@ -1,7 +1,6 @@
 """Native raw-share valuation and persisted receivable regression evidence."""
 
 from dataclasses import asdict, replace
-from fractions import Fraction
 
 import numpy as np
 import pandas as pd
@@ -14,14 +13,12 @@ from quant_research_platform.contracts.portfolios import (
 )
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.portfolios.accounting import (
+    ResearchValuationMarks,
     portfolio_interval_economics,
 )
 from quant_research_platform.research.portfolios.diagnostics import (
     _portfolio_statistics_tables,
     _research_valuation_observation,
-)
-from quant_research_platform.research.portfolios.production import (
-    _ResearchValuationMarks,
 )
 from tests.helpers.portfolio_ledger import mark_view
 from tests.research import test_raw_share_corporate_production as corporate
@@ -109,29 +106,29 @@ def test_prepared_nonempty_suspension_carry_replays_raw_share_actions(
     )
     for batch in batches:
         economics = portfolio_interval_economics(batch)
-        assert economics["nav_end"] == pytest.approx(100.0)
+        assert economics["nav_end"] == pytest.approx(10000.0)
         assert economics["net_return"] == pytest.approx(0.0, abs=1e-14)
         for value in batch.valuations:
             if value.asset_id == "b" and value.phase == "after" and value.quantity:
                 if pd.Timestamp(value.timestamp_ns) >= pd.Timestamp("2023-01-05"):
-                    assert value.share_value == pytest.approx(90.0)
-                    assert value.receivable == 10.0
+                    assert value.share_value == pytest.approx(9000.0)
+                    assert value.receivable == 1000.0
     sales = [trade for batch in batches for trade in batch.trades if trade.quantity < 0]
     assert len(sales) == 1
     assert pd.Timestamp(sales[0].timestamp_ns) == pd.Timestamp("2023-01-09")
-    assert sales[0].notional == pytest.approx(-90.0)
-    assert corporate._cash(batches[-1], "end") == pytest.approx(100.0)
+    assert sales[0].notional == pytest.approx(-9000.0)
+    assert corporate._cash(batches[-1], "end") == pytest.approx(10000.0)
 
 
 def test_raw_quote_anchor_replays_late_earlier_and_consecutive_actions_once():
-    marks = _ResearchValuationMarks()
+    marks = ResearchValuationMarks()
     marks.project(mark_view("2023-01-03", 100.0, 100.0))
     base = dict(
         asset_id="a",
         listing_date=pd.Timestamp("2020-01-01"),
         entitlement_proved=True,
         evidence_identity="a" * 64,
-        remaining_old_units_per_old_unit=Fraction(2),
+        remaining_old_units_per_old_unit=float(2),
         kind="share_change",
     )
 
@@ -245,7 +242,7 @@ def test_late_corporate_disclosure_preserves_prefix_and_persisted_nav(
     for batches, final_mark in ((first, 80), (changed, 70)):
         for batch in batches:
             economics = portfolio_interval_economics(batch)
-            assert economics["nav_end"] == pytest.approx(100.0)
+            assert economics["nav_end"] == pytest.approx(10000.0)
             assert economics["net_return"] == pytest.approx(0.0, abs=1e-14)
         row = next(
             row
@@ -263,10 +260,10 @@ def test_unquoted_stresses_and_estimated_amount_preserve_confirmed_receivable(
     batch = batches[1]
     economics = portfolio_interval_economics(batch)
     observed = _research_valuation_observation(batch, economics)
-    assert observed["estimated_value_end"] == pytest.approx(90.0, rel=1e-12)
+    assert observed["estimated_value_end"] == pytest.approx(9000.0, rel=1e-12)
     assert observed["estimated_weight_end"] == pytest.approx(0.9, rel=1e-12)
     assert [observed[f"nav_{pct}pct"] for pct in (0, 50, 100)] == pytest.approx(
-        [10.0, 55.0, 100.0], rel=1e-12
+        [1000.0, 5500.0, 10000.0], rel=1e-12
     )
     # Also consume the actual persisted native ledger with its full interval axis.
     tables = _statistics(tmp_path / "ledger")
@@ -295,16 +292,16 @@ def test_adv_missing_sell_amount_and_requested_turnover_exclude_receivable(
         for value in batch.valuations:
             if value.phase == "after" and facts.get((value.asset_id, "block_reason")):
                 if facts[value.asset_id, "block_reason"].text == "adv_unavailable":
-                    assert value.share_value == 90.0
+                    assert value.share_value == 9000.0
                     amounts.append(value.share_value)
                     assert portfolio_interval_economics(batch)[
                         "requested_turnover"
                     ] == pytest.approx(0.9, rel=1e-12)
-    assert amounts == [90.0, 90.0]
+    assert amounts == [9000.0, 9000.0]
     metrics = _statistics(tmp_path / "ledger")["portfolio_performance"].set_index(
         "metric_id"
     )
-    assert metrics.loc["adv_unavailable_sell_target_notional", "value"] == 180.0
+    assert metrics.loc["adv_unavailable_sell_target_notional", "value"] == 18000.0
     assert metrics.loc["adv_unavailable_buy_orders", "value"] == 0
 
 
@@ -321,12 +318,12 @@ def test_native_writer_and_reader_enforce_zero_share_receivable_continuity(
         cashflows=(),
         rights_adjustments=(),
         valuations=tuple(
-            replace(row, quantity=90.0, value=90.0)
+            replace(row, quantity=9000.0, value=9000.0)
             for row in old.valuations
             if row.asset_id == "__cash__"
         ),
         diagnostics=tuple(
-            replace(row, number=90.0) if row.name == "target_notional" else row
+            replace(row, number=9000.0) if row.name == "target_notional" else row
             for row in old.diagnostics
             if row.asset_id == "__cash__"
         ),
@@ -344,9 +341,9 @@ def test_native_writer_and_reader_enforce_zero_share_receivable_continuity(
                 replace(
                     row,
                     asset_id="ghost" if direction == "add" else row.asset_id,
-                    receivable=10.0,
-                    value=10.0,
-                    quantity=Fraction(),
+                    receivable=1000.0,
+                    value=1000.0,
+                    quantity=0.0,
                     mark_price=0.0,
                     lifecycle_id="2023-01-06"
                     if direction == "relabel"
@@ -369,9 +366,9 @@ def test_native_writer_and_reader_enforce_zero_share_receivable_continuity(
             + tuple(
                 replace(
                     row,
-                    receivable=10.0,
-                    value=10.0,
-                    quantity=Fraction(),
+                    receivable=1000.0,
+                    value=1000.0,
+                    quantity=0.0,
                     mark_price=0.0,
                 )
                 for row in old.valuations
@@ -394,7 +391,7 @@ def test_native_writer_and_reader_enforce_zero_share_receivable_continuity(
             for row in bad.diagnostics
         ),
     )
-    capital = PortfolioCapital("raw_shares", 100.0, "CNY", "cash_equity")
+    capital = PortfolioCapital("raw_shares", 10000.0, "CNY", "cash_equity")
     error = (
         "portfolio_held_lifecycle_unproven"
         if direction == "relabel"
@@ -429,7 +426,7 @@ def test_native_writer_and_reader_enforce_zero_share_receivable_continuity(
 
 
 def test_observed_same_price_on_ex_date_is_a_genuine_quote():
-    marks = _ResearchValuationMarks()
+    marks = ResearchValuationMarks()
     marks.project(mark_view("2023-01-04", 100.0, 100.0))
     view = mark_view("2023-01-05", 100.0, 100.0)
     view.corporate_events = pd.DataFrame(
@@ -475,12 +472,12 @@ def test_paid_zero_share_zero_claim_asset_can_leave_native_ledger(
     )
     root = ledger.write_portfolio_ledger_artifact(
         tmp_path / "departed",
-        capital=PortfolioCapital("raw_shares", 100.0, "CNY", "cash_equity"),
+        capital=PortfolioCapital("raw_shares", 10000.0, "CNY", "cash_equity"),
         metadata={"window": {"start": "2023-01-03", "end": "2023-01-10"}},
         produce=lambda emit: [emit(batch) for batch in (*batches[:-1], departed)],
     )
     read = list(ledger.read_portfolio_ledger_artifact(root).iter_chunks())
-    assert portfolio_interval_economics(read[-1])["nav_end"] == 100.0
+    assert portfolio_interval_economics(read[-1])["nav_end"] == 10000.0
 
 
 def test_persisted_adv_buy_gap_smaller_than_claim_keeps_buy_direction(
@@ -506,7 +503,7 @@ def test_persisted_adv_buy_gap_smaller_than_claim_keeps_buy_direction(
             for row in batch.valuations
             if row.asset_id == "b" and row.phase == "after"
         )
-        if claim.receivable == 10.0 and any(
+        if claim.receivable == 1000.0 and any(
             row.asset_id == "b"
             and row.name == "block_reason"
             and row.text == "adv_unavailable"
@@ -515,7 +512,7 @@ def test_persisted_adv_buy_gap_smaller_than_claim_keeps_buy_direction(
             batch = replace(
                 batch,
                 diagnostics=tuple(
-                    replace(row, number=95.0)
+                    replace(row, number=9500.0)
                     if row.asset_id == "b" and row.name == "target_notional"
                     else replace(row, number=0.0)
                     if row.asset_id == "__cash__" and row.name == "target_notional"
@@ -529,22 +526,24 @@ def test_persisted_adv_buy_gap_smaller_than_claim_keeps_buy_direction(
         changed.append(batch)
     root = ledger.write_portfolio_ledger_artifact(
         tmp_path / "buy",
-        capital=PortfolioCapital("raw_shares", 100.0, "CNY", "cash_equity"),
+        capital=PortfolioCapital("raw_shares", 10000.0, "CNY", "cash_equity"),
         metadata={"window": {"start": "2023-01-03", "end": "2023-01-10"}},
         produce=lambda emit: [emit(batch) for batch in changed],
     )
     metrics = _statistics(root)["portfolio_performance"].set_index("metric_id")
     assert metrics.loc["adv_unavailable_buy_orders", "value"] == 1
-    assert metrics.loc["adv_unavailable_buy_target_notional", "value"] == 5
-    assert metrics.loc["adv_unavailable_sell_target_notional", "value"] == 90
+    assert metrics.loc["adv_unavailable_buy_target_notional", "value"] == 500
+    assert metrics.loc["adv_unavailable_sell_target_notional", "value"] == 9000
 
 
 def test_attribution_uses_stock_exposure_while_pending_claim_stays_in_nav(
     tmp_path, monkeypatch
 ):
-    from quant_research_platform.research.portfolios.risk import (
-        FactorReturnFit,
+    from quant_research_platform.research.portfolios.attribution import (
         HoldingFactorInputs,
+    )
+    from quant_research_platform.research.risk import (
+        FactorReturnFit,
     )
 
     original = corporate._build_producer
@@ -624,23 +623,3 @@ def test_attribution_uses_stock_exposure_while_pending_claim_stays_in_nav(
         exposures.entry_at.eq("2023-01-06") & exposures.factor_id.eq("style")
     ]
     assert stock.value.item() == pytest.approx(0.9, rel=1e-12)
-
-
-def test_zero_stress_keeps_claim_smaller_than_stock_amount_roundoff(
-    tmp_path, monkeypatch
-):
-    batches = corporate._distribution_batches(
-        tmp_path, monkeypatch, suspended=True, payment="2023-01-09", cash_dividend=1e-16
-    )
-    first = batches[0]
-    end = next(
-        row for row in first.valuations if row.asset_id == "b" and row.phase == "end"
-    )
-    assert end.receivable == 1e-16
-    assert end.share_value == end.value == 100.0
-    stress = next(
-        row.number
-        for row in first.diagnostics
-        if row.name == "research_valuation_nav_0pct"
-    )
-    assert stress == 1e-16

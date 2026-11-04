@@ -5,11 +5,13 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.research.portfolios import production
-from quant_research_platform.research.portfolios.risk import (
-    FactorRiskConfig,
-    FactorRiskState,
+from quant_research_platform.research.portfolios.attribution import (
     HoldingFactorInputs,
     holding_attribution,
+)
+from quant_research_platform.research.risk import (
+    FactorRiskConfig,
+    FactorRiskState,
     preprocess_risk_styles,
 )
 
@@ -145,7 +147,6 @@ def test_enhanced_decision_preprocesses_before_joint_style_selection():
             calibration_intervals=scheduled,
             trading_sessions=pd.DatetimeIndex([pd.Timestamp("2024-01-02")]),
             as_of=pd.Timestamp("2024-01-02"),
-            risk_style_columns=("a", "b"),
         ).exposures.set_index("asset_id")
 
     full = exposures(cross)

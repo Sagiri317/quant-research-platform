@@ -13,10 +13,12 @@ import pandas as pd
 from quant_research_platform.contracts.portfolios import (
     ExecutionAssumptions,
     TradeCostComponents,
+    _quantity_equal,
 )
 from quant_research_platform.contracts.validation import (
     strict_bool_series,
     strict_finite_numeric_series,
+    strict_integer_series,
     strict_timestamp_series,
 )
 
@@ -30,6 +32,40 @@ _BASES = frozenset({"amount", "face_value"})
 MARKET_TYPE_TO_NAME = MappingProxyType(
     {1: "shanghai", 32: "shanghai", 4: "shenzhen", 16: "shenzhen"}
 )
+
+
+def stock_order_limits(market_types: pd.Series, execution_date: date):
+    """Return limit-order minimum, increment and maximum in shares."""
+    market_types = strict_integer_series(
+        market_types, error="a_share_market_type_invalid"
+    )
+    markets = market_types.map(market_name_for_type)
+    star = market_types.eq(32).to_numpy()
+    growth = market_types.eq(16).to_numpy() & (execution_date >= date(2020, 8, 24))
+    return (
+        markets.to_numpy(),
+        np.where(star, 200, 100),
+        np.where(star, 1, 100),
+        np.where(star, 100_000, np.where(growth, 300_000, 1_000_000)),
+    )
+
+
+def round_stock_orders(requested, minimum, increment, *, sellable=None):
+    """Round orders down; a sell may include the entire odd-share balance."""
+    nearest = np.rint(requested)
+    whole = np.where(_quantity_equal(requested, nearest), nearest, np.floor(requested))
+    rounded = np.where(whole >= minimum, whole // increment * increment, 0.0)
+    if sellable is not None:
+        available = np.floor(sellable)
+        odd = available % increment
+        with_odd = odd + np.maximum(0.0, (whole - odd) // increment) * increment
+        rounded = np.maximum(
+            rounded, np.where((increment > 1) & (whole >= odd), with_odd, 0.0)
+        )
+        rounded = np.where(
+            (available < minimum) & (whole >= available), available, rounded
+        )
+    return rounded
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,9 +274,11 @@ class PreparedTradeCost:
         if (
             amount_values.shape != adv_values.shape
             or not np.isfinite(amount_values).all()
-            or not np.isfinite(adv_values).all()
             or (amount_values < 0).any()
-            or (adv_values <= 0).any()
+            or (
+                self.impact_bps > 0
+                and (not np.isfinite(adv_values).all() or (adv_values <= 0).any())
+            )
         ):
             raise ValueError("a_share_trade_cost_inputs_invalid")
         if face_value_notional is not None:
@@ -262,15 +300,42 @@ class PreparedTradeCost:
         )
         slippage = amount_values * self.slippage_bps / 10_000.0
         impact = (
-            amount_values
-            * self.impact_bps
-            / 10_000.0
-            * np.sqrt(amount_values / adv_values)
+            (
+                amount_values
+                * self.impact_bps
+                / 10_000.0
+                * np.sqrt(amount_values / adv_values)
+            )
+            if self.impact_bps
+            else np.zeros_like(amount_values)
         )
         result = (*fees, slippage, impact)
         if any(not np.isfinite(value).all() or (value < 0).any() for value in result):
             raise ValueError("trade_cost_components_invalid")
         return result
+
+    def stock_components(
+        self, quantities, prices, adv20, minimum, maximum, minimum_commission
+    ):
+        """Charge minimum commission per actual limit order after quantity sizing."""
+        notionals = quantities * prices
+        values = list(self.components(notionals, adv20))
+        full = np.maximum(0.0, np.ceil(quantities / maximum) - 1)
+        last = quantities - full * maximum
+        split = (full > 0) & (last < minimum)
+        middle = np.where(split, maximum + last - minimum, 0.0)
+        full = full - split
+        last = np.where(split, minimum, last)
+
+        def commission(units):
+            return np.where(
+                units > 0,
+                np.maximum(units * prices * self.rates[0], minimum_commission),
+                0.0,
+            )
+
+        values[0] = full * commission(maximum) + commission(middle) + commission(last)
+        return tuple(values)
 
     def totals(self, notional, adv20):
         commission, stamp, transfer, slippage, impact = self.components(notional, adv20)

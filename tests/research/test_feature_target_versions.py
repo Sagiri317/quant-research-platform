@@ -8,7 +8,6 @@ import pytest
 
 from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.research.datasets.assembler import (
-    _a_share_model_target,
     _add_a_share_semantic_columns,
     assemble,
 )
@@ -16,6 +15,7 @@ from quant_research_platform.research.features.transforms import (
     apply_feature_transforms,
     model_observed_input_mask,
 )
+from quant_research_platform.research.labels.targets import a_share_model_target
 from quant_research_platform.research.protocols.a_share import research_dataset_catalog
 
 
@@ -92,14 +92,14 @@ def test_target_constant_single_missing_and_percentile():
             "forward_return_20d": [0.2, 0.2, np.nan, 0.5, np.nan],
         }
     )
-    result = _a_share_model_target(frame)
+    result = a_share_model_target(frame)
     np.testing.assert_allclose(result.iloc[:2], [0, 0])
     assert result.iloc[2:].isna().all()
-    result = _a_share_model_target(frame, transform="percentile")
+    result = a_share_model_target(frame, transform="percentile")
     np.testing.assert_allclose(result.iloc[:2], [0.75, 0.75])
     assert result.iloc[2:].isna().all()
     pd.testing.assert_series_equal(
-        _a_share_model_target(frame, transform="raw"),
+        a_share_model_target(frame, transform="raw"),
         frame.forward_return_20d,
         check_names=False,
     )
@@ -131,6 +131,73 @@ def test_target_residual_uses_only_same_row_exposures_and_actual_clocks():
         _add_a_share_semantic_columns(changed, spec).model_target, result.model_target
     )
     pd.testing.assert_series_equal(result.forward_return_20d, frame.forward_return_20d)
+
+
+def test_nonfinancial_risk_target_persists_orthogonal_returns_and_maturity(tmp_path):
+    from quant_research_platform.research.protocols.a_share import RISK_STYLE_COLUMNS
+    from quant_research_platform.storage.datasets import inspect_dataset, read_dataset
+    from tests.helpers.research_processed_inputs import assembly_config, assembly_source
+
+    # Independent binary signs are orthogonal, including under weights driven
+    # by the seventh sign. The sixth sign is the unexplained return.
+    signs = 2.0 * ((np.arange(128)[:, None] >> np.arange(7)) & 1) - 1
+    residual = 0.001 * signs[:, 5]
+    frame = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": [f"a{i:03d}" for i in range(128)],
+            "timestamp": pd.Timestamp("2024-01-02"),
+            "eligible": True,
+            "industry_standard_id": "test",
+            "industry_level1_code": "A",
+            "total_market_cap": np.where(signs[:, 6] > 0, 4e8, 1e8),
+            **dict(zip(RISK_STYLE_COLUMNS, signs[:, :5].T, strict=True)),
+            "momentum_20d": signs[:, 5],
+            "forward_return_20d": 0.02
+            + signs[:, :5] @ (np.arange(5) / 1000)
+            + residual,
+            "forward_return_20d_available_at": pd.Timestamp("2024-02-01"),
+        }
+    )
+    frame.loc[0, "forward_return_20d_available_at"] = pd.Timestamp("2024-02-04")
+    outsider = frame.iloc[[0]].assign(
+        asset_id="outside",
+        eligible=False,
+        forward_return_20d=10.0,
+        forward_return_20d_available_at=pd.Timestamp("2024-03-01"),
+    )
+    frame = pd.concat([frame, outsider], ignore_index=True)
+    source, _ = assembly_source(
+        tmp_path,
+        frame,
+        units={"forward_return_20d": "decimal_return"},
+        availability={"forward_return_20d": "forward_return_20d_available_at"},
+    )
+    root = assemble(
+        assembly_config(
+            tmp_path,
+            source,
+            label_columns=["model_target", "forward_return_20d"],
+            filter_columns=["eligible"],
+            target_transform="risk_residual",
+        )
+    )
+    saved = read_dataset(root)
+    np.testing.assert_allclose(saved.model_target.iloc[:128], residual, atol=1e-15)
+    assert (
+        saved.model_target_available_at.iloc[:128].eq(pd.Timestamp("2024-02-04")).all()
+    )
+    assert pd.isna(saved.model_target.iloc[-1])
+    assert pd.isna(saved.model_target_available_at.iloc[-1])
+    np.testing.assert_array_equal(saved.forward_return_20d, frame.forward_return_20d)
+    spec = inspect_dataset(root).spec
+    assert spec["target_transform"] == "risk_residual"
+    assert spec["column_units"]["model_target"] == "decimal_return"
+    assert "earnings_yield" not in RISK_STYLE_COLUMNS
+
+    missing = frame.copy()
+    missing.loc[:128, "beta_252d"] = np.nan
+    assert a_share_model_target(missing, transform="risk_residual").isna().all()
 
 
 @pytest.mark.parametrize(

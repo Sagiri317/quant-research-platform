@@ -29,7 +29,9 @@ from quant_research_platform.research.features.transforms import (
     a_share_feature_pipeline,
 )
 from quant_research_platform.research.models.scaler import ModelMatrixScaler
-from quant_research_platform.research.portfolios.risk import preprocess_risk_styles
+from quant_research_platform.research.risk import (
+    preprocess_risk_styles,
+)
 from quant_research_platform.research.statistics import hac_mean
 from quant_research_platform.storage.datasets import (
     inspect_dataset,

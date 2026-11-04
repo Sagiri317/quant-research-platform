@@ -1,7 +1,5 @@
 """Explicit recipe selection and scientific configuration boundaries."""
 
-import json
-
 import pytest
 
 from quant_research_platform.markets.implementations.a_share.processed.catalog import (
@@ -57,15 +55,3 @@ def test_bad_factor_selection_never_silently_removes_requested_column(factors):
         _configured_spec(
             processed_catalog().get("fundamental_factors"), {"factor_columns": factors}
         )
-
-
-def test_research_rosters_declare_one_parameter_source():
-    from tests.helpers.research_configuration import CONFIG_ROOT, model_specs
-
-    for path in CONFIG_ROOT.rglob("*.json"):
-        models = json.loads(path.read_text(encoding="utf-8"))["models"]
-        assert all(
-            not ("parameter_candidates" in model and "hyperparameters" in model)
-            for model in models
-        )
-        assert len(model_specs(models)) == len(models)

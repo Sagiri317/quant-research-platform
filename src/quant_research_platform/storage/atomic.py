@@ -13,7 +13,6 @@ from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage._scratch_ownership import (
     move_path_no_replace,
     open_owned_scratch_file,
-    owned_scratch_name,
     remove_owned_scratch,
 )
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
@@ -48,9 +47,6 @@ def atomic_write_chunks(
         handle = open_owned_scratch_file(temp_path, encoding=encoding)
         claimed_temp = True
         with closing_iterator(handle):
-            require_unaliased_path(
-                final_path.parent, error="invalid_storage_write_path"
-            )
             with closing_iterator(iter(chunks)) as source:
                 for chunk in source:
                     if not isinstance(chunk, str):
@@ -58,7 +54,6 @@ def atomic_write_chunks(
                     handle.write(chunk)
             handle.flush()
             os.fsync(handle.fileno())
-        require_unaliased_path(final_path.parent, error="invalid_storage_write_path")
         publish_no_replace(temp_path, final_path)
     except BaseException as primary:
         _cleanup_claimed(temp_path, claimed_temp, primary)
@@ -92,18 +87,15 @@ def atomic_write_json(path: Path, payload: object) -> Path:
 
 
 def atomic_write_directory[T](root: Path, writer: Callable[[Path], T]) -> T:
-    final_root = require_unaliased_path(Path(root), error="invalid_storage_write_path")
-    require_unaliased_path(final_root.parent, error="invalid_storage_write_path")
-    filesystem_mkdir(final_root.parent, parents=True, exist_ok=True)
+    final_root = Path(root)
     reject_if_exists(final_root)
-    temp_root = final_root.with_name(owned_scratch_name(".a-", uuid4().hex[:12]))
+    filesystem_mkdir(final_root.parent, parents=True, exist_ok=True)
+    temp_root = final_root.with_name(f".a-{uuid4().hex[:12]}")
     claimed_temp = False
     try:
         filesystem_mkdir(temp_root)
         claimed_temp = True
-        require_unaliased_path(final_root.parent, error="invalid_storage_write_path")
         result = writer(temp_root)
-        require_unaliased_path(final_root.parent, error="invalid_storage_write_path")
         publish_no_replace(temp_root, final_root)
     except BaseException as primary:
         _cleanup_claimed(temp_root, claimed_temp, primary)
@@ -112,13 +104,10 @@ def atomic_write_directory[T](root: Path, writer: Callable[[Path], T]) -> T:
 
 
 def _prepare_file_target(path: Path) -> tuple[Path, Path]:
-    final_path = require_unaliased_path(Path(path), error="invalid_storage_write_path")
+    final_path = Path(path)
     reject_if_exists(final_path)
-    require_unaliased_path(final_path.parent, error="invalid_storage_write_path")
     filesystem_mkdir(final_path.parent, parents=True, exist_ok=True)
-    require_unaliased_path(final_path, error="invalid_storage_write_path")
-    temp_path = final_path.with_name(owned_scratch_name(".f-", uuid4().hex[:12]))
-    require_unaliased_path(temp_path, error="invalid_storage_write_path")
+    temp_path = final_path.with_name(f".f-{uuid4().hex[:12]}")
     return (final_path, temp_path)
 
 

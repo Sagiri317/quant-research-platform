@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from fractions import Fraction
+from decimal import Decimal
 from importlib.metadata import version
 from pathlib import Path
 
@@ -576,8 +576,8 @@ def _temporal_step_nanoseconds(value):
     ):
         raise ValueError("explanation_step_seconds_invalid")
     # Interpret declared seconds exactly at the timestamp's nanosecond resolution.
-    nanoseconds = Fraction(str(value)) * 1_000_000_000
-    if nanoseconds.denominator != 1 or nanoseconds > pd.Timedelta.max.value:
+    nanoseconds = Decimal(str(value)) * 1_000_000_000
+    if nanoseconds != int(nanoseconds) or nanoseconds > pd.Timedelta.max.value:
         raise ValueError("explanation_step_seconds_invalid")
     return int(nanoseconds)
 

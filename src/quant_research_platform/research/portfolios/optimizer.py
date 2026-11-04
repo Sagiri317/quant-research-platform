@@ -17,7 +17,9 @@ from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_real_numeric_series,
 )
-from quant_research_platform.research.portfolios.risk import _validated_covariance
+from quant_research_platform.research.risk import (
+    _validated_covariance,
+)
 
 
 @dataclass(frozen=True)
@@ -479,6 +481,121 @@ def _risk_variances(active, exposure, covariance, specific) -> tuple[float, floa
     return factor, residual
 
 
+def _normalized_risk_excess(values, limits):
+    return np.maximum(0.0, values - limits - 1e-8) / np.maximum(limits, 1e-8)
+
+
+def _portfolio_risk_limits(
+    weights, benchmark, exposure, specific, covariance, cash, columns, config
+):
+    """Report post-fee risk and rank only excess beyond the configured bands."""
+    active = _risk_active_weights(weights, benchmark, exposure, specific)
+    nonzero = active != 0.0
+    complete = (
+        covariance is not None
+        and np.isfinite(exposure[nonzero]).all()
+        and np.isfinite(specific[nonzero]).all()
+        and (specific[nonzero] >= 0.0).all()
+    )
+    has_stocks = weights[~cash].sum() > 0.0
+    stock_positive = has_stocks and benchmark[~cash].sum() > 0.0
+    factor_active = _stock_leg_active_exposure(weights, benchmark, exposure, cash)
+    industry = np.array([name.startswith("industry_") for name in columns])
+    exposure_complete = stock_positive and np.isfinite(factor_active).all()
+    diagnostics = {
+        "realized_exposure_status": "DEFINED" if exposure_complete else "UNDEFINED",
+        "realized_exposure_reason": None
+        if exposure_complete
+        else "stock_active_exposure_unavailable"
+        if stock_positive
+        else "nonpositive_stock_value",
+    }
+    limits = {
+        "tracking_error": (None, config.tracking_error_limit),
+        "name_active_weight": (
+            np.abs(weights[~cash] - benchmark[~cash]).max(initial=0.0),
+            config.active_name_limit,
+        ),
+        "industry_active_exposure": (
+            np.abs(factor_active[industry]).max(initial=0.0)
+            if stock_positive and np.isfinite(factor_active[industry]).all()
+            else None,
+            config.industry_active_limit,
+        ),
+        "style_active_exposure": (
+            np.abs(factor_active[~industry]).max(initial=0.0)
+            if stock_positive and np.isfinite(factor_active[~industry]).all()
+            else None,
+            config.style_active_limit,
+        ),
+    }
+    if complete:
+        factor, residual = _risk_variances(active, exposure, covariance, specific)
+        diagnostics.update(
+            realized_factor_variance=factor, realized_specific_variance=residual
+        )
+        limits["tracking_error"] = (
+            np.sqrt(factor + residual),
+            config.tracking_error_limit,
+        )
+    unavailable = [name for name, (value, _) in limits.items() if value is None]
+    breached = []
+    excess = []
+    for name, (value, limit) in limits.items():
+        diagnostics[f"realized_{name}_status"] = (
+            "UNDEFINED" if value is None else "DEFINED"
+        )
+        if value is None:
+            continue
+        diagnostics[f"realized_{name}"] = float(value)
+        value, bound = (
+            (value**2, limit**2) if name == "tracking_error" else (value, limit)
+        )
+        violation = max(0.0, value - bound - 1e-8)
+        values = (
+            np.abs(weights[~cash] - benchmark[~cash])
+            if name == "name_active_weight"
+            else np.abs(factor_active[industry])
+            if name == "industry_active_exposure"
+            else np.abs(factor_active[~industry])
+            if name == "style_active_exposure"
+            else np.array([value])
+        )
+        excess.extend(_normalized_risk_excess(values, bound))
+        if violation > 0:
+            breached.append(name)
+    diagnostics.update(
+        realized_constraints_status="UNDEFINED"
+        if unavailable
+        else "BREACHED"
+        if breached
+        else "SATISFIED",
+        realized_constraints_reason=(
+            "factor_risk_factor_history_insufficient"
+            if covariance is None
+            else "active_risk_unavailable"
+            if not complete
+            else "stock_active_exposure_unavailable"
+            if stock_positive
+            else "nonpositive_stock_value"
+        )
+        if unavailable
+        else ",".join(breached)
+        if breached
+        else None,
+    )
+    required_unavailable = any(
+        has_stocks or name not in {"industry_active_exposure", "style_active_exposure"}
+        for name in unavailable
+    )
+    violation = (
+        (np.inf, np.inf)
+        if required_unavailable
+        else (max(excess, default=0.0), float(np.square(excess).sum()))
+    )
+    return diagnostics, violation
+
+
 def _bounds(
     data: pd.DataFrame,
     *,
@@ -660,22 +777,10 @@ def _validate_config(config: OptimizerConfig) -> None:
         raise ValueError("optimizer_config_invalid")
 
 
-def _project_neutral_target(
-    target, context, *, industry_limit=0.02, size_limit=0.2, fixed_weights=None
-):
-    """Project stock-leg weights within explicit benchmark exposure bands."""
-    for limit in (industry_limit, size_limit):
-        if (
-            isinstance(limit, bool)
-            or not isinstance(limit, int | float)
-            or not np.isfinite(limit)
-            or limit < 0
-        ):
-            raise ValueError("target_neutrality_limit_invalid")
-    q = target.reindex(context.index, fill_value=0.0).to_numpy(dtype="float64")
-    if not np.isfinite(q).all() or np.any(q < 0):
-        raise ValueError("target_weights_invalid")
+def _neutrality_bands(context, *, industry_limit, size_limit):
+    """One stock-leg exposure system for target projection and actual fills."""
     b = context.benchmark_weight.to_numpy(dtype="float64")
+    names = np.asarray(context.columns.drop("benchmark_weight"))
     exposures = (
         context.drop(columns="benchmark_weight").to_numpy(dtype="float64", copy=True).T
     )
@@ -710,6 +815,82 @@ def _project_neutral_target(
             reference = reference[~industry_rows]
             denominators = denominators[~industry_rows]
             limits = limits[~industry_rows]
+            names = names[~industry_rows]
+    return exposures, reference, denominators, limits, names
+
+
+def _neutrality_risk_limits(notionals, context, bands):
+    exposures, reference, denominators, limits, names = bands
+    selected = notionals.reindex(context.index, fill_value=0.0)
+    gross = selected.sum()
+    if gross <= 0.0:
+        return {
+            "realized_constraints_status": "UNDEFINED",
+            "realized_constraints_reason": "nonpositive_stock_value",
+        }, (np.inf, np.inf)
+    weights = selected.to_numpy(dtype="float64") / gross
+    denominators = denominators @ weights
+    values = np.divide(
+        np.abs(exposures @ weights - reference),
+        denominators,
+        out=np.full(len(limits), np.nan),
+        where=denominators > 0,
+    )
+    known = np.isfinite(values)
+    excess = _normalized_risk_excess(values[known], limits[known])
+    breached = names[known][excess > 0]
+    outside = notionals.loc[~notionals.index.isin(context.index)].sum() > 0.0
+    unavailable = (
+        outside
+        or not known.all()
+        or (
+            "industry_known" in context.attrs
+            and not any(name.startswith("industry:") for name in names)
+        )
+    )
+    facts = {
+        "realized_constraints_status": "UNDEFINED"
+        if unavailable
+        else ("BREACHED" if len(breached) else "SATISFIED"),
+        "realized_constraints_reason": "outside_benchmark_domain"
+        if outside
+        else (
+            "no_known_industry_weight"
+            if unavailable
+            else (",".join(breached) if len(breached) else None)
+        ),
+    }
+    for prefix, metric in (("industry:", "industry"), ("size", "style")):
+        mask = np.array([str(name).startswith(prefix) for name in names])
+        if mask.any():
+            defined = bool(known[mask].all())
+            facts[f"realized_{metric}_active_exposure_status"] = (
+                "DEFINED" if defined else "UNDEFINED"
+            )
+            if defined:
+                facts[f"realized_{metric}_active_exposure"] = float(values[mask].max())
+    return facts, (max(excess, default=0.0), float(np.square(excess).sum()))
+
+
+def _project_neutral_target(
+    target, context, *, industry_limit=0.02, size_limit=0.2, fixed_weights=None
+):
+    """Project stock-leg weights within explicit benchmark exposure bands."""
+    for limit in (industry_limit, size_limit):
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int | float)
+            or not np.isfinite(limit)
+            or limit < 0
+        ):
+            raise ValueError("target_neutrality_limit_invalid")
+    q = target.reindex(context.index, fill_value=0.0).to_numpy(dtype="float64")
+    if not np.isfinite(q).all() or np.any(q < 0):
+        raise ValueError("target_weights_invalid")
+    b = context.benchmark_weight.to_numpy(dtype="float64")
+    exposures, reference, denominators, limits, _ = _neutrality_bands(
+        context, industry_limit=industry_limit, size_limit=size_limit
+    )
     exact = exposures[limits == 0]
     bounded = exposures[limits > 0]
     bands = limits[limits > 0]

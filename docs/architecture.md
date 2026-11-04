@@ -25,7 +25,7 @@
 - `research.models.explanations.explain(config)`：明确冻结模型、解释方法及样本，保存独立解释数值
 - `research.models.trial_selection.score(config)` / `select(config)`：完整有序候选的成熟验证评分及明确规则选择
 - `research.portfolios.production.calibrate(config)` / `backtest(config)`：A 股监督校准与实际账户计算
-- `markets.implementations.a_share.hft_portfolio.backtest(config)`：A 股逐股票逐日独立库存账户
+- `research.portfolios.high_frequency.backtest(config)`：A 股多股票共享现金、连续跨日的日内库存账户
 - `research.rolling.run_quarterly(config)`：明确训练起点及滚动窗的季度 fit/predict/evaluate
 - `research.evaluations.runner.evaluate(config)`：显式信号、标签、时间窗和成熟截止评估
 - `research.statistics_production.model_statistics(config)`：显式模型与预测集合统计
@@ -79,7 +79,7 @@ A 股 `backtest.selection_mode` 默认 `causal`；显式 `retrospective` 与 `se
 最终重新拟合保存真实 fit_windows/cutoff，离散窗口之间的空档不填平。
 预测、评估和回测核实际拟合截止、标签成熟及必要校准时点，不要求预先登记未来窗口。
 
-`research-rosters/` 保存因子、模型和窗口等实验设计参考，运行参数由各次操作明确给出。
+`research.md` 说明研究选择；运行参数由各次操作明确给出，测试夹具独立于文档。
 算法能力与数学默认值以对应实现为准。
 
 ## 明确路径与发布
@@ -136,10 +136,10 @@ score/select 各写自己的 JSON；
 性能优化优先复用必要读取，并成批执行数值计算。
 高频按日读取所选股票，因子和标签不跨连续片段。
 
-平均成交额（ADV）仍要求本市场连续20个已知观察，持仓核算保留上市生命周期和精确的权益单位。
+平均成交额（ADV）仍要求本市场连续20个已知观察，持仓核算保留上市生命周期、整股成交和独立股份权益。账户数值使用 `float64`，不维护高精度分数编码。
 缺少成交价时不能生成交易或费用。普通漏报价时，已有持仓只能使用同一生命周期内的可信报价暂估，并披露依据；不能凭估值制造现金。
 冻结持仓仍占用风险和预算。金额有定义不代表比例也有定义：净资产（NAV）为零时，相关比例保留 UNDEFINED，费用和损益（PnL）直接读取账本。
-高频独立账户段不拼接净值或夏普比率（Sharpe）。
+高频使用连续跨日账户，按真实日末净值汇总绩效；不将独立账户的净值或夏普比率（Sharpe）拼接。
 
 统计保留固定候选集合、完整区间、真实有效数量和未定义原因，不删除难以计算的成员来获得显著结果。
 探索性选型的推断限制以实际研究事实声明。DSR/FDR只覆盖本次声明集合，不代表全部人工探索校正。
@@ -360,7 +360,7 @@ A 股通过现有 `inputs.calendar` 明确提供交易会话，每个收益区�
 HAC 完整协方差矩阵还原至原收益坐标（包含截距与斜率交叉项）；操作数尺度内的精确仿射拟合保留点估计、零 SE 和退化区间，
 t/p 为 UNDEFINED，原因 `zero_residual_variance`，不以全局绝对阈值删除可解析的小系数或噪声。
 回归一次以本次候选、参考、独立分段、研究轮次的截距与 beta 为 BY 校正家族，保存计划/有效假设数。
-A 股比较按 252 日年化。高频独立日账户报告资本收益和费用，不拼接成年化曲线。
+A 股比较按 252 日年化。高频连续账户先汇总真实日末净值，仅在完整交易日轴上计算年化绩效。
 未提供无风险收益时截距叫 `market_return_intercept`；请求无风险序列但缺失时不能退回零利率，constant_cash 仅表示现金路径，不提供无风险收益序列。
 按当期实现的市场收益划分环境属于 `ex_post_descriptive`，预先选阈值也不使它成为当期可交易信号。
 这些结果帮助区分市场暴露和相对表现，不单凭正收益或显著截距证明因子因果有效。

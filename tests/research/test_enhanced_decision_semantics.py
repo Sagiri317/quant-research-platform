@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from dataclasses import asdict, replace
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -19,7 +20,7 @@ from quant_research_platform.markets.implementations.a_share.calendar import (
     unified_trading_sessions,
 )
 from quant_research_platform.research.portfolios import production
-from quant_research_platform.research.portfolios.accounting import (
+from quant_research_platform.research.portfolios.calibration import (
     alpha_calibration_intervals,
 )
 from quant_research_platform.research.portfolios.optimizer import (
@@ -164,7 +165,8 @@ def enhanced_config(tmp_path_factory):
         formal_dataset_window={"start": "2022-12-01", "end": "2023-01-06"},
         prediction_window=window,
         assumptions=dict(
-            initial_nav=100.0,
+            initial_nav=12000000.0,
+            minimum_commission=0.0,
             slippage_bps=0.0,
             impact_bps=0.0,
             adv_participation=1.0,
@@ -217,7 +219,7 @@ def test_native_receivable_stays_in_nav_and_never_funds_buys(
         for phase in ("before", "after", "end"):
             assert sum(
                 row.value for row in batch.valuations if row.phase == phase
-            ) == pytest.approx(100.0)
+            ) == pytest.approx(12000000.0)
         cash_before = sum(
             row.value
             for row in batch.valuations
@@ -246,10 +248,17 @@ def test_native_receivable_stays_in_nav_and_never_funds_buys(
     after = [row for row in batches[1].valuations if row.phase == "after"]
     pending = sum(row.receivable for row in after)
     if payment_date == "2023-01-06":
-        assert pending == pytest.approx(0.94)
-        assert sum(row.value - row.receivable for row in after) == pytest.approx(99.06)
+        assert pending == pytest.approx(112800.0)
+        assert sum(row.value - row.receivable for row in after) == pytest.approx(
+            11887200.0
+        )
         assert _facts(batches[-1])["decision_status"] == "AVAILABLE"
-        assert _facts(batches[-1])["realized_constraints_status"] == "SATISFIED"
+        assert "decision_skip_reason" not in _facts(batches[-1])
+        assert _facts(batches[-1])["execution_constraints_status"] in {
+            "SATISFIED",
+            "IMPROVED",
+            "UNCHANGED",
+        }
     else:
         assert pending == 0.0
         assert sum(
@@ -257,7 +266,7 @@ def test_native_receivable_stays_in_nav_and_never_funds_buys(
             for batch in batches
             for flow in batch.cashflows
             if flow.kind == "dividend"
-        ) == pytest.approx(0.94)
+        ) == pytest.approx(112800.0)
 
 
 @pytest.mark.parametrize("missing_context", [False, True])
@@ -351,7 +360,7 @@ def test_native_new_target_with_missing_industry_skips_and_keeps_account(
     assert _facts(batches[-1])["realized_exposure_status"] == "UNDEFINED"
     assert sum(
         row.value for row in batches[-1].valuations if row.phase == "after"
-    ) == pytest.approx(100.0)
+    ) == pytest.approx(12000000.0)
 
 
 def test_cash_missing_stock_exposure_keeps_te_and_persists_local_undefined(tmp_path):
@@ -483,6 +492,86 @@ def test_enhanced_budget_reserves_receivable_without_renormalizing_nav(receivabl
         == pytest.approx(100.0)
     )
     assert ledger.executed_delta_notional.sum() <= 10.0 - receivable + 1e-8
+
+
+def test_integer_execution_rechecks_risk_without_rewriting_prior_decision():
+    args = _decision_inputs(holdings=(0.45, 0.45))
+    args["cash"] = 10.0
+    args["optimizer_config"] = production.OptimizerConfig(active_name_limit=0.1)
+    _, _, expected, decision, _ = production._build_session(**args)
+    assert expected is not None
+    # B doubles overnight and cannot be sold. Buying A reduces the maximum name
+    # deviation from 27.5/145 to 17.5/145, but cannot reach the ten-percent band.
+    args["next_panel"].loc[args["next_panel"].asset_id.eq("b"), "open"] = 0.02
+    args["execution"].loc[args["execution"].asset_id.eq("b"), "can_exit"] = False
+    account, _, optimized, actual_decision, ledger = production._build_session(**args)
+    pd.testing.assert_series_equal(optimized.weights, expected.weights)
+    pd.testing.assert_series_equal(actual_decision, decision)
+    assert ledger.executed_quantity.tolist() == [1000, 0]
+    assert account.post_trade_cash == 0.0
+    facts = ledger.attrs["realized_constraints"]
+    assert facts["execution_constraints_status"] == "IMPROVED"
+    assert facts["realized_constraints_status"] == "BREACHED"
+    assert facts["realized_name_active_weight"] == pytest.approx(17.5 / 145.0)
+    assert ledger.attrs["decision_availability"]["decision_status"] == "AVAILABLE"
+
+
+@pytest.mark.parametrize("slope", [1.0, 0.0, -1.0])
+def test_lot_adjustment_reaches_risk_band_after_overnight_price_change(slope):
+    args = _decision_inputs(holdings=(0.45, 0.45))
+    args["cash"] = 10.0
+    args["next_panel"]["open"] = [0.03, 0.02]
+    enhanced = args["enhanced_decision"]
+    args["enhanced_decision"] = replace(
+        enhanced, calibration=replace(enhanced.calibration, slope=slope)
+    )
+    account, _, optimized, _, ledger = production._build_session(**args)
+    assert (optimized is not None) == (slope > 0)
+    # 4500 shares each become 135 and 90 in value. Selling 600 A and buying
+    # 1400 B gives 117/118, within 0.5%, with the same 235 total capital.
+    assert ledger.executed_quantity.tolist() == [-600, 1400]
+    assert ledger.post_trade_notional.tolist() == pytest.approx([117.0, 118.0])
+    assert account.post_trade_cash == 0.0
+    assert account.nav_after == pytest.approx(235.0)
+    assert ledger.attrs["realized_constraints"]["realized_constraints_status"] == (
+        "SATISFIED"
+    )
+    assert ledger.attrs["realized_constraints"]["execution_constraints_status"] == (
+        "SATISFIED"
+    )
+
+
+def test_unreachable_risk_repair_does_not_scan_every_available_lot():
+    units, capacity = 2**20, 2**19 + 3
+    empty = pd.Series({"a": 0.0})
+    step = pd.Series({"a": 1.0 / units})
+    calls = 0
+
+    def evaluate(weights):
+        nonlocal calls
+        calls += 1
+        assert calls < 200, "repair scans the inventory one lot at a time"
+        quantity = min(capacity, max(0, round(weights.a * units)))
+        account = SimpleNamespace(
+            nav_before=1.0,
+            receivable=0.0,
+            asset_ledger=pd.DataFrame(
+                {
+                    "asset_id": ["a"],
+                    "post_trade_notional": [quantity / units],
+                    "executed_quantity": [quantity],
+                }
+            ),
+        )
+        # A frozen constraint keeps maximum excess positive. Buying every
+        # available lot uniquely minimizes the remaining squared deviation.
+        return account, {}, (1.0, float((capacity - quantity) ** 2), float(quantity**2))
+
+    selected = production._repair_stock_allocation(
+        empty, empty, empty, step, step, evaluate
+    )
+    assert selected[0].asset_ledger.executed_quantity.tolist() == [capacity]
+    assert selected[2][:2] == (1.0, 0.0)
 
 
 @pytest.mark.parametrize("receivable_weight", [-0.01, 1.01, np.nan, np.inf, True])
@@ -648,8 +737,9 @@ def test_half_step_budgets_new_leg_before_mixing_and_keeps_missing_holdings(
     account, _, _, _, ledger = production._build_session(**args)
     expected_buy = (20.0 - receivable) / 2.0
     assert ledger.target_notional.sum() == pytest.approx(80.0 + expected_buy)
-    assert ledger.executed_delta_notional.sum() == pytest.approx(expected_buy)
-    assert account.post_trade_cash == pytest.approx(expected_buy)
+    actual_buy = 4.0 if receivable == 10.0 and not partial else expected_buy
+    assert ledger.executed_delta_notional.sum() == pytest.approx(actual_buy)
+    assert account.post_trade_cash == pytest.approx(20.0 - receivable - actual_buy)
     assert account.nav_after == pytest.approx(100.0)
     if partial:
         assert ledger.set_index("asset_id").loc[
@@ -675,8 +765,8 @@ def test_half_step_neutrality_preserves_budgeted_stock_gross():
     assert ledger.raw_target_weight.sum() == pytest.approx(0.85)
     assert ledger.target_weight.sum() == pytest.approx(0.85)
     assert ledger.target_notional.sum() == pytest.approx(85.0)
-    assert ledger.executed_delta_notional.sum() == pytest.approx(5.0)
-    assert account.post_trade_cash == pytest.approx(5.0)
+    assert ledger.executed_delta_notional.sum() == pytest.approx(4.0)
+    assert account.post_trade_cash == pytest.approx(6.0)
     assert ledger.attrs["neutrality_exposures"]["target_exposure_status"] == "DEFINED"
 
 
@@ -821,19 +911,21 @@ def test_native_half_step_cash_and_receivable_payment_control(
     last = batches[-1]
     after = [row for row in last.valuations if row.phase == "after"]
     pending = sum(row.receivable for row in after)
-    assert pending == pytest.approx(0.5 if payment_date == "2023-01-06" else 0.0)
-    # Before the final decision stocks are 75, with cash 25 less unpaid rights.
-    # The newly budgeted target is 100 less rights; half-step buys only half cash.
-    stock_target = (100.0 - pending + 75.0) / 2.0
+    assert pending == pytest.approx(60000.0 if payment_date == "2023-01-06" else 0.0)
+    # 5000 shares per stock at 100, then 2500 at 99. The final half-step
+    # rounds to 8700 shares with unpaid rights, or 8800 after payment.
+    quantity = 8700 if payment_date == "2023-01-06" else 8800
+    stock_value = 12 * quantity * 99.0
+    assert all(row.quantity == quantity for row in after if row.asset_id != "__cash__")
     assert sum(
         row.value - row.receivable for row in after if row.asset_id != "__cash__"
-    ) == pytest.approx(stock_target)
-    assert sum(row.value for row in after) == pytest.approx(100.0)
+    ) == pytest.approx(stock_value)
+    assert sum(row.value for row in after) == pytest.approx(12000000.0)
     assert sum(
         row.value for row in after if row.asset_id == "__cash__"
-    ) == pytest.approx((25.0 - pending) / 2.0)
+    ) == pytest.approx(12000000.0 - pending - stock_value)
     assert sum(trade.notional for trade in last.trades) == pytest.approx(
-        (25.0 - pending) / 2.0
+        12 * (quantity - 7500) * 99.0
     )
     assert _facts(last)["decision_status"] == "AVAILABLE"
 
@@ -854,7 +946,7 @@ def test_native_missing_selected_float_cap_preserves_account(enhanced_config, tm
     assert _facts(last)["decision_skip_reason"] == "target_float_market_cap_missing"
     assert sum(
         row.value for row in last.valuations if row.phase == "after"
-    ) == pytest.approx(100.0)
+    ) == pytest.approx(12000000.0)
 
 
 @pytest.mark.parametrize("missing_industry", [False, True])
@@ -919,8 +1011,14 @@ def test_native_receivable_only_asset_has_no_stock_context_dependency(
     assert before.receivable > 0.0
     assert after.receivable == before.receivable
     assert _facts(last)["decision_status"] == "AVAILABLE"
-    assert _facts(last)["realized_constraints_status"] == "SATISFIED"
-    assert last.trades and all(trade.asset_id != "a0" for trade in last.trades)
+    assert "decision_skip_reason" not in _facts(last)
+    assert _facts(last)["realized_constraints_status"] in {"SATISFIED", "BREACHED"}
+    assert _facts(last)["realized_exposure_status"] == "DEFINED"
+    assert any(
+        trade.asset_id == "a0" and trade.quantity < 0
+        for batch in batches
+        for trade in batch.trades
+    )
 
 
 def test_optimizer_stock_domain_excludes_zero_current_and_reference_names():

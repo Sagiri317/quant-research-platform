@@ -31,25 +31,34 @@ from quant_research_platform.markets.implementations.a_share.execution import (
     fee_schedule_from_frame,
     prepare_trade_cost,
 )
-from quant_research_platform.research.portfolios import accounting, production
-from quant_research_platform.research.portfolios.risk import (
+from quant_research_platform.research.portfolios import (
+    accounting,
+    calibration,
+    production,
+)
+from quant_research_platform.research.portfolios.accounting import (
+    ResearchValuationMarks,
+    execute_stock_target,
+)
+from quant_research_platform.research.protocols.a_share import RISK_STYLE_COLUMNS
+from quant_research_platform.research.risk import (
     FactorRiskConfig,
     FactorRiskEstimate,
     FactorRiskState,
 )
-from quant_research_platform.research.protocols.a_share import RISK_STYLE_COLUMNS
 from quant_research_platform.storage.datasets import DatasetReadMode
 from quant_research_platform.storage.datasets import reading as dataset_reading
 from quant_research_platform.storage.identity import filesystem_mkdir
 from tests.helpers.portfolio_inputs import portfolio_inputs as _inputs
 from tests.helpers.portfolio_ledger import (
     CONTINUOUS_EXECUTION_COLUMNS,
-    execute_continuous_target,
     ledger_frame,
     mark_view,
     session_frame,
+    stock_orders,
     write_test_sessions,
 )
+from tests.research.test_portfolio_ledger import _schedule
 
 
 def test_enhanced_decision_requires_history_for_current_industry_domain() -> None:
@@ -101,7 +110,6 @@ def test_enhanced_decision_requires_history_for_current_industry_domain() -> Non
             calibration_intervals=scheduled,
             trading_sessions=pd.DatetimeIndex([pd.Timestamp("2020-01-07")]),
             as_of=pd.Timestamp("2020-01-07"),
-            risk_style_columns=("style",),
         )
 
     assert decision().risk is None
@@ -375,6 +383,7 @@ def _build_producer(
         impact_bps=0.0,
         adv_participation=1.0,
         adv_sensitivities=(1.0,),
+        minimum_commission=0.0,
     )
 
     def output():
@@ -565,24 +574,18 @@ def test_float_cap_roundoff_keeps_nonnegative_persisted_cash_target(tmp_path):
     fee_schedule = fee_schedule_from_frame(fee_frame, content_identity="f" * 64)
     assumptions = ExecutionAssumptions(nav, 0.0, 0.0, 1.0, (1.0,))
     execution_date = pd.Timestamp("2023-01-04")
-    account = execute_continuous_target(
-        zero,
-        target,
-        nav=nav,
-        average_daily_volume=adv,
-        can_enter=permitted,
-        can_exit=permitted,
-        execution_date=execution_date.date(),
-        cost_for_trade=lambda timestamp, _asset, side, amount, volume, settings: (
-            prepare_trade_cost(
-                timestamp, "shanghai", side, fee_schedule, settings
-            ).trade(amount, volume)
+    account = execute_stock_target(
+        stock_orders((zero) * (nav), (target) * (nav), capacity=adv).assign(
+            can_enter=permitted, can_exit=permitted
         ),
-        assumptions=assumptions,
-        cost_source_identity="f" * 64,
+        cash=float((nav) - ((zero) * (nav)).sum()),
+        execution_date=execution_date.date(),
+        fee_schedule=fee_schedule,
+        assumptions=replace(assumptions, minimum_commission=0.0),
     )
     frame = ledger_frame(
         account=account,
+        prices=pd.Series(1.0, index=assets),
         decision_timestamp=pd.Timestamp("2023-01-03"),
         returns=zero,
         prediction_rank_score=caps,
@@ -689,7 +692,7 @@ def test_enhanced_producer_uses_benchmark_only_when_risk_is_insufficient(
     assert first["target_notional"].iloc[:2].tolist() == pytest.approx([50.0, 50.0])
     assert first.loc[first["asset_id"].eq("__cash__"), "post_trade_notional"].iloc[
         0
-    ] == pytest.approx(0.0)
+    ] == pytest.approx(0.360160)
 
 
 @pytest.mark.parametrize("missing_session", [None, "2023-01-03", "2023-01-04"])
@@ -820,8 +823,8 @@ def test_enhanced_membership_maintenance_keeps_explicit_benchmark_target(
     frames, fee_frame, _window = _inputs()
     output_window = TimeWindow("2023-01-03", "2023-01-06")
     frames["panel"] = frames["panel"].assign(
-        open=100.0,
-        close=100.0,
+        open=0.01,
+        close=0.01,
         period_return=0.0,
         total_market_cap=1000.0,
         float_market_cap=1000.0,
@@ -829,6 +832,10 @@ def test_enhanced_membership_maintenance_keeps_explicit_benchmark_target(
         industry_level1_code="A01",
         is_nonfinancial_industry=True,
     )
+    for column in RISK_STYLE_COLUMNS:
+        frames["dataset"][column] = frames["dataset"].asset_id.map(
+            {"a": -0.2, "b": 0.2}
+        )
     frames["benchmark"] = pd.DataFrame(
         [
             {
@@ -901,11 +908,13 @@ def test_enhanced_membership_maintenance_keeps_explicit_benchmark_target(
         fee_frame=fee_frame,
         output_window=output_window,
         candidate=candidate,
+        typed_batches=True,
     )
-    sessions = list(chunks)
-    maintenance = next(
-        frame
-        for frame in sessions
+    batches = list(chunks)
+    sessions = [session_frame(batch) for batch in batches]
+    maintenance, native = next(
+        (frame, batch)
+        for frame, batch in zip(sessions, batches, strict=True)
         if frame.decision_timestamp.iloc[0] == pd.Timestamp("2023-01-04")
     )
     indexed = maintenance.set_index("asset_id")
@@ -919,6 +928,14 @@ def test_enhanced_membership_maintenance_keeps_explicit_benchmark_target(
     assert (
         indexed.loc["__cash__", "decision_reason"]
         == PORTFOLIO_DECISION_REASON_MAINTENANCE
+    )
+    assert (
+        next(
+            row.text
+            for row in native.diagnostics
+            if row.name == "realized_constraints_status"
+        )
+        != "UNDEFINED"
     )
     assert indexed.loc["a", "target_notional"] == 0.0
     assert indexed.loc["b", "target_notional"] == pytest.approx(initial_nav)
@@ -937,7 +954,9 @@ def test_enhanced_membership_maintenance_keeps_explicit_benchmark_target(
     if can_sell_removed:
         assert costs > 0.0
     else:
+        # The remaining cash cannot fund another 100-share lot plus its fee.
         assert indexed.loc["b", "executed_delta_notional"] == 0.0
+        assert indexed.loc["b", "block_reason"] == "cash_pro_rata"
     envelope = {
         "capital": PortfolioCapital(
             **{
@@ -955,11 +974,16 @@ def test_enhanced_membership_maintenance_keeps_explicit_benchmark_target(
             }
         },
     }
-    root = write_test_sessions(
+
+    def produce(emit):
+        for batch in batches:
+            emit(batch)
+
+    root = write_portfolio_ledger_artifact(
         tmp_path / "ledger",
         capital=envelope["capital"],
         metadata=envelope["metadata"],
-        ledger_chunks=iter(sessions),
+        produce=produce,
     )
     saved = read_portfolio_ledger_artifact(root)
     loaded = [session_frame(batch) for batch in saved.iter_chunks()]
@@ -978,9 +1002,9 @@ def _enhanced_inputs(monkeypatch):
         for position, timestamp in enumerate(dates.drop_duplicates())
     }
     frames["panel"]["open"] = [
-        100.0 * 1.001 ** date_positions[timestamp]
+        0.01 * 1.001 ** date_positions[timestamp]
         if asset == "a"
-        else 100.0 * 1.003 ** date_positions[timestamp]
+        else 0.01 * 1.003 ** date_positions[timestamp]
         for timestamp, asset in zip(
             frames["panel"]["timestamp"], frames["panel"]["asset_id"], strict=True
         )
@@ -1171,14 +1195,33 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
         PORTFOLIO_LEDGER_COST_COLUMNS,
     )
 
+    solver_results = []
+    actual_optimize = production.optimize_portfolio
+
+    def observe_optimizer(*args, **kwargs):
+        result = actual_optimize(*args, **kwargs)
+        solver_results.append(result)
+        return result
+
+    monkeypatch.setattr(production, "optimize_portfolio", observe_optimizer)
     observed = []
     actual_build = production._build_session
 
     def observe_decision(**kwargs):
-        account, adv, optimization, decision_delta, snapshot = actual_build(**kwargs)
+        result = actual_build(**kwargs)
+        account, adv, optimization, decision_delta, snapshot = result
         if kwargs["decision_timestamp"] == pd.Timestamp("2023-01-06"):
-            assert optimization is not None
-            current = kwargs["holdings"] / kwargs["nav"]
+            assert optimization is solver_results[-1]
+            assert (
+                snapshot.attrs["decision_availability"]["decision_status"]
+                == "AVAILABLE"
+            )
+            assert snapshot.attrs["realized_constraints"][
+                "execution_constraints_status"
+            ] in {"SATISFIED", "IMPROVED", "UNCHANGED"}
+            current = (
+                kwargs["holdings"].reindex(["a", "b"], fill_value=0.0) / kwargs["nav"]
+            )
             # The positive-alpha stock binds the 0.505 post-fee name ceiling.
             # With zero impact, the fee-reserve equation is linear in c/NAV.
             net_target = pd.Series({"a": 0.495, "b": 0.505})
@@ -1208,9 +1251,18 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
                     optimization.weights.copy(),
                     account.nav_before,
                     decision_delta.copy(),
+                    float(
+                        (
+                            kwargs["held_units"]
+                            * kwargs["next_panel"].set_index("asset_id").open
+                        ).sum()
+                        + kwargs["cash"]
+                        + kwargs["recovery_cash"]
+                        + kwargs["receivable"]
+                    ),
                 )
             )
-        return (account, adv, optimization, decision_delta, snapshot)
+        return result
 
     monkeypatch.setattr(production, "_build_session", observe_decision)
     chunks, _calls = _build_producer(
@@ -1227,7 +1279,7 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
     optimized = [
         frame
         for frame in result
-        if frame["decision_reason"].eq("enhanced_optimizer").any()
+        if frame.decision_timestamp.iloc[0] == pd.Timestamp("2023-01-06")
     ]
     assert optimized, [
         (frame["decision_timestamp"].iloc[0], frame["decision_reason"].iloc[-1])
@@ -1238,11 +1290,8 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
     assert session["asset_specific_variance"].iloc[:2].tolist() == pytest.approx(
         [0.01, 0.01]
     )
-    assert (
-        session.loc[session["asset_id"].eq("__cash__")].iloc[0][
-            "predicted_tracking_error"
-        ]
-        >= 0.0
+    assert np.isfinite(
+        session.loc[session.asset_id.eq("__cash__"), "predicted_tracking_error"].iloc[0]
     )
     assert result[0].pre_trade_notional.sum() == pytest.approx(100.0)
     first = result[0]
@@ -1255,6 +1304,9 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
     )
     initial_cost = first.loc[:, list(PORTFOLIO_LEDGER_COST_COLUMNS)].sum().sum()
     assert initial_cost > 0.0
+    assert pd.isna(
+        first.loc[first.asset_id.eq("__cash__"), "decision_skip_reason"].item()
+    )
     assert first.post_trade_notional.sum() + initial_cost == pytest.approx(100.0)
     for row_frame in result:
         if row_frame is not first and row_frame.decision_timestamp.iloc[
@@ -1272,7 +1324,7 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
                 .all()
                 .all()
             )
-    assert optimized[-1].loc[:, list(PORTFOLIO_LEDGER_COST_COLUMNS)].sum().sum() > 0.0
+    assert optimized[-1].loc[:, list(PORTFOLIO_LEDGER_COST_COLUMNS)].sum().sum() == 0.0
     changed = {name: value.copy(deep=True) for name, value in frames.items()}
     future = changed["panel"].timestamp.eq(pd.Timestamp("2023-01-09")) & changed[
         "panel"
@@ -1303,7 +1355,9 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
     pd.testing.assert_series_equal(
         observed[0][2], observed[1][2], check_exact=False, rtol=2e-12, atol=1e-14
     )
-    assert observed[0][3] != observed[1][3]
+    for entry in observed:
+        assert entry[3] == pytest.approx(entry[5])
+    assert observed[1][3] > observed[0][3]
     pd.testing.assert_series_equal(
         (observed[0][4]).isna(), (observed[1][4]).isna(), check_exact=True
     )
@@ -1329,6 +1383,11 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
         ].tolist() == pytest.approx([0.0, 0.0])
         assert (
             first_active.loc[:, list(PORTFOLIO_LEDGER_COST_COLUMNS)].sum().sum() > 0.0
+        )
+        assert pd.isna(
+            first_active.loc[
+                first_active.asset_id.eq("__cash__"), "decision_skip_reason"
+            ].item()
         )
         original_calibrate = production.calibrate_expected_alpha
         calibrations = {}
@@ -1486,8 +1545,8 @@ def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
 ) -> None:
     frames, fee_frame, _window = _inputs()
     panel = frames["panel"].assign(
-        open=100.0,
-        close=100.0,
+        open=0.01,
+        close=0.01,
         period_return=0.0,
         total_market_cap=1000.0,
         float_market_cap=1000.0,
@@ -1534,7 +1593,19 @@ def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
         benchmark_id="csi500",
         risk_style_columns=("style",),
     )
-    assumptions = ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,))
+    assumptions = ExecutionAssumptions(
+        100.0, 0.0, 0.0, 1.0, (1.0,), minimum_commission=0.0
+    )
+
+    solver_results = []
+    actual_optimize = production.optimize_portfolio
+
+    def observe_optimizer(*args, **kwargs):
+        result = actual_optimize(*args, **kwargs)
+        solver_results.append(result)
+        return result
+
+    monkeypatch.setattr(production, "optimize_portfolio", observe_optimizer)
 
     def build():
         return production._build_session(
@@ -1601,12 +1672,16 @@ def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
                 build()
         return
     account, adv, optimized, delta, _snapshot = build()
-    assert optimized is not None and "__cash__" in optimized.weights
+    assert optimized is solver_results[-1] and "__cash__" in optimized.weights
     assert "__cash__" not in set(account.asset_ledger.asset_id)
+    assert _snapshot.attrs["decision_availability"]["decision_status"] == "AVAILABLE"
+    assert account.asset_ledger.executed_quantity.gt(0).any()
+    assert 0.0 <= account.post_trade_cash < 10.0
     if retain_cash:
-        assert optimized.weights.loc["__cash__"] > 0.0
+        assert solver_results[-1].weights.loc["__cash__"] > 0.0
     ledger = ledger_frame(
         account=account,
+        prices=pd.Series(0.01, index=["a", "b"]),
         decision_timestamp=pd.Timestamp("2023-01-06"),
         returns=pd.Series(0.0, index=account.asset_ledger.asset_id),
         prediction_rank_score=alpha,
@@ -1619,7 +1694,7 @@ def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
     )
     cash_row = ledger.loc[ledger.asset_id.eq("__cash__")].iloc[0]
     assert cash_row.target_notional == pytest.approx(
-        optimized.weights.loc["__cash__"] * 100.0
+        100.0 - account.asset_ledger.target_notional.sum()
     )
     assert cash_row.post_trade_notional >= 0.0
     assert ledger.post_trade_notional.sum() + ledger.loc[
@@ -1748,7 +1823,7 @@ def test_simple_producer_unknown_held_quote_carries_without_fabricated_trade(
 
 
 def test_research_marks_are_phase_ordered_and_preserve_life_and_source():
-    marks = production._ResearchValuationMarks()
+    marks = ResearchValuationMarks()
     first = marks.project(mark_view("2023-01-04", 10.0, 11.0))
     missing = mark_view("2023-01-05", np.nan, np.nan, trading=False)
     original = missing.panel.copy(deep=True)
@@ -1771,21 +1846,19 @@ def test_research_marks_are_phase_ordered_and_preserve_life_and_source():
 
 
 def test_missing_open_cannot_borrow_its_future_close():
-    marks = production._ResearchValuationMarks()
+    marks = ResearchValuationMarks()
     marks.project(mark_view("2023-01-04", 10.0, 11.0))
     output = marks.project(mark_view("2023-01-05", np.nan, 12.0))
     assert output.open.iloc[0] == 11.0
     assert output.close.iloc[0] == 12.0
     assert output.research_open_mark_kind.iloc[0] == "ordinary_missing_quote"
-    fresh = production._ResearchValuationMarks().project(
-        mark_view("2023-01-05", np.nan, 12.0)
-    )
+    fresh = ResearchValuationMarks().project(mark_view("2023-01-05", np.nan, 12.0))
     assert fresh.open.isna().all()
 
 
 @pytest.mark.parametrize("invalid", (0.0, -1.0, np.inf, -np.inf))
 def test_research_marks_treat_invalid_raw_price_as_unavailable(invalid):
-    marks = production._ResearchValuationMarks()
+    marks = ResearchValuationMarks()
     marks.project(mark_view("2023-01-04", 10.0, 11.0))
     view = mark_view("2023-01-05", invalid, np.nan)
     view.valuation.loc[:, ["open", "close"]] = np.nan
@@ -1805,11 +1878,11 @@ def test_multiple_unquoted_sessions_native_roundtrip_and_absolute_nav_stresses(
     window = TimeWindow("2023-01-03", "2023-01-09")
     fee["rate"] = 0.0
     b = frames["panel"].asset_id.eq("b")
-    frames["panel"].loc[b, ["open", "close"]] = 10.0
-    frames["panel"].loc[b & frames["panel"].timestamp.eq("2023-01-04"), "close"] = 11.0
+    frames["panel"].loc[b, ["open", "close"]] = 1.0
+    frames["panel"].loc[b & frames["panel"].timestamp.eq("2023-01-04"), "close"] = 1.1
     frames["panel"].loc[
         b & frames["panel"].timestamp.ge("2023-01-09"), ["open", "close"]
-    ] = 12.0
+    ] = 1.2
     suspended = frames["panel"].asset_id.eq("b") & frames["panel"].timestamp.isin(
         pd.to_datetime(["2023-01-05", "2023-01-06"])
     )
@@ -1886,10 +1959,12 @@ def test_multiple_unquoted_sessions_native_roundtrip_and_absolute_nav_stresses(
         read_statistics_artifact,
         write_statistics_artifact,
     )
+    from quant_research_platform.research.portfolios.attribution import (
+        HoldingFactorInputs,
+    )
     from quant_research_platform.research.portfolios.diagnostics import (
         _portfolio_statistics_tables,
     )
-    from quant_research_platform.research.portfolios.risk import HoldingFactorInputs
     from tests.helpers.research_configuration import research_configuration
     from tests.helpers.statistics_artifacts import (
         portfolio_statistics_config,
@@ -2176,7 +2251,7 @@ def test_simple_producer_handles_universe_arrival_and_zero_weight_departure(
     assert len(results) == 2
     assert all(set(frame.asset_id) == {"b", "__cash__"} for frame in results)
     assert [frame.end_notional.sum() for frame in results] == pytest.approx(
-        [100 / 1.0004 * 110 / 108, 100 / 1.0004 * 112 / 108],
+        [9200 * 0.0110 + 0.600256, 9200 * 0.0112 + 0.600256],
         rel=1e-12,
         abs=1e-12,
     )
@@ -2206,11 +2281,11 @@ def test_simple_producer_has_no_executable_output_without_two_lookahead_sessions
 
 
 def test_enhanced_risk_fits_styles_on_eligible_and_retains_ineligible_asset_axis():
-    from quant_research_platform.research.portfolios.risk import (
+    from quant_research_platform.research.protocols.a_share import RISK_STYLE_COLUMNS
+    from quant_research_platform.research.risk import (
         FactorRiskState,
         preprocess_risk_styles,
     )
-    from quant_research_platform.research.protocols.a_share import RISK_STYLE_COLUMNS
 
     axis = np.arange(121, dtype="float64")
     assets = [f"asset_{index:03}" for index in range(121)]
@@ -2259,7 +2334,6 @@ def test_enhanced_risk_fits_styles_on_eligible_and_retains_ineligible_asset_axis
             calibration_intervals=scheduled,
             trading_sessions=pd.DatetimeIndex([pd.Timestamp("2020-01-08")]),
             as_of=pd.Timestamp("2020-01-08"),
-            risk_style_columns=RISK_STYLE_COLUMNS,
         ).exposures.set_index("asset_id")
 
     before = decide(cross)
@@ -2302,7 +2376,7 @@ def test_enhanced_risk_fits_styles_on_eligible_and_retains_ineligible_asset_axis
 
 
 def test_zero_mad_risk_style_preserves_identifiable_factor_return():
-    from quant_research_platform.research.portfolios.risk import (
+    from quant_research_platform.research.risk import (
         FactorRiskState,
         preprocess_risk_styles,
     )
@@ -2420,9 +2494,11 @@ def test_feature_missing_held_asset_keeps_saved_prediction(
 
 
 def test_risk_exposures_separate_same_code_in_different_standards():
-    state = FactorRiskState(style_columns=("style",))
+    state = FactorRiskState(style_columns=())
     cross = pd.DataFrame(
         {
+            "timestamp": pd.Timestamp("2024-01-02"),
+            "total_market_cap": 100.0,
             "asset_id": ["old", "new"],
             "industry_standard_id": ["CSRC2012", "CAPCO"],
             "industry_level1_code": ["A", "A"],
@@ -2439,9 +2515,11 @@ def test_risk_exposures_separate_same_code_in_different_standards():
 
 
 def test_risk_exposures_leave_unknown_industry_assets_unavailable():
-    state = FactorRiskState(style_columns=("style",))
+    state = FactorRiskState(style_columns=())
     cross = pd.DataFrame(
         {
+            "timestamp": pd.Timestamp("2024-01-02"),
+            "total_market_cap": 100.0,
             "asset_id": ["known", "missing_standard", "missing_code"],
             "industry_standard_id": pd.Series(
                 ["CSRC2012", pd.NA, "CAPCO"], dtype="string"
@@ -2531,7 +2609,9 @@ def test_enhanced_producer_skips_only_required_unknown_industry(
 def test_final_alpha_includes_last_mature_session_and_persists_without_fake_trade(
     tmp_path, monkeypatch
 ):
-    from quant_research_platform.research.portfolios.accounting import AlphaCalibration
+    from quant_research_platform.research.portfolios.calibration import (
+        AlphaCalibration,
+    )
 
     frames, fee_frame, _ = _inputs()
     window = TimeWindow("2023-01-03", "2023-01-10")
@@ -2613,7 +2693,7 @@ def test_final_alpha_includes_last_mature_session_and_persists_without_fake_trad
         final_calibration=lambda: final[0],
     )
     artifact = read_portfolio_ledger_artifact(root)
-    restored, cutoff = accounting.frozen_alpha_calibration(
+    restored, cutoff = calibration.frozen_alpha_calibration(
         artifact.final_alpha_calibration,
         cutoff=window.end,
         selection_group=candidate.selection_group,
@@ -2622,64 +2702,12 @@ def test_final_alpha_includes_last_mature_session_and_persists_without_fake_trad
     assert restored == final_state
     assert cutoff == pd.Timestamp(window.end).date().isoformat()
     with pytest.raises(ValueError, match="test_alpha_calibration_binding_invalid"):
-        accounting.frozen_alpha_calibration(
+        calibration.frozen_alpha_calibration(
             artifact.final_alpha_calibration,
             cutoff="2023-01-09",
             selection_group=candidate.selection_group,
             rebalance_schedule=candidate.rebalance_schedule,
         )
-
-
-@pytest.mark.parametrize("nav", [100.0, 1000000000.0])
-@pytest.mark.parametrize(
-    "weight,material",
-    [(1e-15, False), (5e-14, False), (2e-13, True), (1e-08, True)],
-)
-@pytest.mark.parametrize("blocked", ["market", "adv"])
-def test_tiny_blocked_orders_keep_reason_consistent_through_real_writer(
-    tmp_path, nav, weight, material, blocked
-):
-    expected_reason = (
-        None
-        if not material
-        else "market_blocked"
-        if blocked == "market"
-        else "adv_capacity"
-    )
-    _assert_execution_endpoints_roundtrip(
-        tmp_path,
-        nav=nav,
-        current=0.0,
-        target=weight,
-        can_enter=blocked != "market",
-        adv=0.0 if blocked == "adv" else nav,
-        expected_delta=0.0,
-        expected_reason=expected_reason,
-    )
-
-
-@pytest.mark.parametrize("nav", (100.0, 128.0))
-@pytest.mark.parametrize("excess_ulps", (384, 1024))
-def test_budget_roundoff_has_the_same_scope_before_and_after_nav_conversion(
-    tmp_path, nav, excess_ulps
-):
-    def execute_and_roundtrip():
-        _assert_execution_endpoints_roundtrip(
-            tmp_path,
-            nav=nav,
-            current=0.0,
-            target=1.0 + excess_ulps * np.finfo(float).eps,
-            can_enter=True,
-            adv=nav,
-            expected_delta=nav,
-            expected_reason=None,
-        )
-
-    if excess_ulps > 512:
-        with pytest.raises(ValueError, match="execution_weights_sum_invalid"):
-            execute_and_roundtrip()
-    else:
-        execute_and_roundtrip()
 
 
 @pytest.mark.parametrize(
@@ -2691,7 +2719,6 @@ def test_multi_asset_budget_boundary_survives_amount_rounding_and_native_io(
 ):
     from math import fsum, ulp
 
-    from quant_research_platform.contracts.portfolios import TradeCostComponents
     from tests.helpers.portfolio_ledger import continuous_ledger_batch
 
     target = pd.Series(weights, index=["a", "b"])
@@ -2699,19 +2726,17 @@ def test_multi_asset_budget_boundary_survives_amount_rounding_and_native_io(
     adv = pd.Series(nav, index=target.index)
     assert fsum(weights) == 1.0 + 512 * ulp(1.0)
     assert fsum(target * nav) > nav + nav * 512 * ulp(1.0)
-    account = execute_continuous_target(
-        zero,
-        target,
-        nav=nav,
-        average_daily_volume=adv,
-        can_enter=pd.Series(True, index=target.index),
-        can_exit=pd.Series(True, index=target.index),
-        execution_date=pd.Timestamp("2023-01-04").date(),
-        cost_for_trade=lambda _date, _asset, _side, amount, _volume, _settings: (
-            TradeCostComponents(float(amount), 0.0, 0.0, 0.0, 0.0, 0.0, "f" * 64)
+    account = execute_stock_target(
+        stock_orders((zero) * (nav), (target) * (nav), capacity=adv).assign(
+            can_enter=pd.Series(True, index=target.index),
+            can_exit=pd.Series(True, index=target.index),
         ),
-        assumptions=ExecutionAssumptions(nav, 0.0, 0.0, 1.0, (1.0,)),
-        cost_source_identity="f" * 64,
+        cash=float((nav) - ((zero) * (nav)).sum()),
+        execution_date=pd.Timestamp("2023-01-04").date(),
+        fee_schedule=_schedule(broker_rate=0.0, transfer_rate=0.0, stamp_rate=0.0),
+        assumptions=replace(
+            ExecutionAssumptions(nav, 0.0, 0.0, 1.0, (1.0,)), minimum_commission=0.0
+        ),
     )
     assert abs(account.nav_after - nav) <= ulp(nav)
     pd.testing.assert_series_equal(
@@ -2721,6 +2746,7 @@ def test_multi_asset_budget_boundary_survives_amount_rounding_and_native_io(
     )
     frame = ledger_frame(
         account=account,
+        prices=pd.Series(1.0, index=target.index),
         decision_timestamp=pd.Timestamp("2023-01-03"),
         returns=zero,
         prediction_rank_score=zero,
@@ -2741,113 +2767,17 @@ def test_multi_asset_budget_boundary_survives_amount_rounding_and_native_io(
     assert tuple(read_portfolio_ledger_artifact(root).iter_chunks()) == (batch,)
 
 
-@pytest.mark.parametrize(
-    "nav,current,target",
-    [
-        (100.0, 0.7, 0.7000000000000001),
-        (1000000000.0, 0.4176785340482801, 0.41767853404828015),
-        (1000000000.0, 0.41767853404828015, 0.4176785340482801),
-    ],
-)
-def test_adjacent_weights_execute_the_stored_notional_difference(
-    tmp_path, nav, current, target
-):
-    expected_delta = target * nav - current * nav
-    assert expected_delta != (target - current) * nav
-    _assert_execution_endpoints_roundtrip(
-        tmp_path,
-        nav=nav,
-        current=current,
-        target=target,
-        can_enter=True,
-        adv=nav,
-        expected_delta=expected_delta,
-        expected_reason=None,
-    )
-
-
-def _assert_execution_endpoints_roundtrip(
-    tmp_path, *, nav, current, target, can_enter, adv, expected_delta, expected_reason
-):
-    from quant_research_platform.contracts.portfolios import TradeCostComponents
-    from tests.helpers.portfolio_ledger import continuous_ledger_batch
-
-    current_weights = pd.Series({"a": current})
-    target_weights = pd.Series({"a": target})
-    zero = pd.Series({"a": 0.0})
-    assumptions = ExecutionAssumptions(nav, 0.0, 0.0, 1.0, (1.0,))
-    account = execute_continuous_target(
-        current_weights,
-        target_weights,
-        nav=nav,
-        average_daily_volume=pd.Series({"a": adv}),
-        can_enter=pd.Series({"a": can_enter}),
-        can_exit=pd.Series({"a": True}),
-        execution_date=pd.Timestamp("2023-01-04").date(),
-        cost_for_trade=lambda _date, _asset, _side, amount, _volume, _settings: (
-            TradeCostComponents(float(amount), 0.0, 0.0, 0.0, 0.0, 0.0, "f" * 64)
-        ),
-        assumptions=assumptions,
-        cost_source_identity="f" * 64,
-    )
-    frame = ledger_frame(
-        account=account,
-        decision_timestamp=pd.Timestamp("2023-01-03"),
-        returns=zero,
-        prediction_rank_score=zero,
-        adv20=pd.Series({"a": adv}),
-        enhanced_decision=None,
-        benchmark_weights=None,
-        optimization_result=None,
-        decision_reason=PORTFOLIO_DECISION_REASON_SIMPLE,
-        decision_delta=target_weights - current_weights,
-    )
-    row = frame.set_index("asset_id").loc["a"]
-    assert row.pre_trade_notional == current * nav
-    assert row.target_notional == target * nav
-    assert row.executed_delta_notional == expected_delta
-    assert (None if pd.isna(row.block_reason) else row.block_reason) == expected_reason
-    batch = continuous_ledger_batch(frame, 0, end_timestamp=pd.Timestamp("2023-01-05"))
-    envelope = {
-        "capital": PortfolioCapital(
-            **{
-                "candidate_id": "roundoff_ledger",
-                "initial_capital": nav,
-                "valuation_currency": "CNY",
-                "valuation_method": "cash_equity",
-            }
-        ),
-        "metadata": {
-            "window": {
-                "start": "2023-01-03",
-                "end": "2023-01-05",
-                "access": "development",
-            }
-        },
-    }
-    root = write_portfolio_ledger_artifact(
-        tmp_path / "ledger",
-        capital=envelope["capital"],
-        metadata=envelope["metadata"],
-        produce=lambda emit: emit(batch),
-    )
-    artifact = read_portfolio_ledger_artifact(root)
-    (saved,) = tuple(artifact.iter_chunks())
-    assert saved == batch
-    if expected_delta:
-        assert len(saved.trades) == 1
-        assert saved.trades[0].notional == expected_delta
-    else:
-        assert not saved.trades
-
-
 @pytest.mark.parametrize("extra_style", (-10000.0, 10000.0))
 def test_enhanced_risk_scaler_uses_complete_known_industry_domain(extra_style):
-    from quant_research_platform.research.portfolios.accounting import AlphaCalibration
+    from quant_research_platform.research.portfolios.calibration import (
+        AlphaCalibration,
+    )
     from quant_research_platform.research.portfolios.production import (
         _enhanced_decision,
     )
-    from quant_research_platform.research.portfolios.risk import FactorRiskConfig
+    from quant_research_platform.research.risk import (
+        FactorRiskConfig,
+    )
 
     count = 120
     x = np.arange(count, dtype=float)
@@ -2882,7 +2812,6 @@ def test_enhanced_risk_scaler_uses_complete_known_industry_domain(extra_style):
             calibration_intervals=pd.DataFrame(),
             trading_sessions=pd.DatetimeIndex([pd.Timestamp("2020-01-03")]),
             as_of=pd.Timestamp("2020-01-03"),
-            risk_style_columns=("style",),
             frozen_calibration=calibration,
         ).exposures.set_index("asset_id")
 
@@ -3128,7 +3057,7 @@ def test_empty_selection_executes_zero_target_without_bypassing_market_facts(
         return (
             frames["panel"]
             .loc[frames["panel"].timestamp.eq(at)]
-            .assign(open=100.0, close=100.0)
+            .assign(open=0.01, close=0.01)
         )
 
     execution = (
@@ -3276,8 +3205,8 @@ def test_cash_exposure_is_post_execution_ledger_cash(
     if blocked:
         assert row["cash_weight_post"] == 1.0
     elif not fees:
-        assert row["cash_weight_post"] == (
-            0.5 if construction.endswith("half_step") else 0.0
+        assert row["cash_weight_post"] == pytest.approx(
+            0.5032 if construction.endswith("half_step") else 0.0064
         )
     row.update(
         candidate_id="cash_probe",
@@ -3305,7 +3234,7 @@ def test_cash_exposure_is_post_execution_ledger_cash(
 
 @pytest.mark.parametrize("styles", (RISK_STYLE_COLUMNS[:-1], RISK_STYLE_COLUMNS))
 def test_holding_projection_does_not_change_fit_or_specific_risk_history(styles):
-    from quant_research_platform.research.portfolios.risk import (
+    from quant_research_platform.research.portfolios.attribution import (
         HoldingFactorInputs,
         holding_attribution,
     )
@@ -3662,7 +3591,7 @@ def test_adv_history_restarts_for_new_listing_but_survives_same_life_closure():
 
 
 def test_confirmed_delisting_zero_mark_preserves_reliable_same_life_quote():
-    marks = production._ResearchValuationMarks()
+    marks = ResearchValuationMarks()
     marks.project(mark_view("2023-01-04", 10.0, 11.0))
     unknown = mark_view("2023-01-05", np.nan, np.nan, present=False)
     unknown.confirmed_delisted_lifecycles = frozenset(
@@ -3702,10 +3631,10 @@ def test_portfolio_delisting_zero_nav_retains_units_and_recovers_amounts(
             "delisting_date": [pd.NaT, pd.Timestamp("2023-01-05")],
         }
     )
-    frames["panel"].loc[:, ["open", "close"]] = 10.0
+    frames["panel"].loc[:, ["open", "close"]] = 1.0
     frames["panel"].loc[
         frames["panel"].timestamp.ge("2023-01-09"), ["open", "close"]
-    ] = 2.0
+    ] = 0.2
     for name in ("panel", "dataset", "execution"):
         frame = frames[name]
         frames[name] = frame.loc[
@@ -3743,7 +3672,7 @@ def test_portfolio_delisting_zero_nav_retains_units_and_recovers_amounts(
     for batch in batches[1:3]:
         assert not batch.trades and not batch.cashflows
         b = [row for row in batch.valuations if row.asset_id == "b"]
-        assert all(row.quantity == pytest.approx(10.0) for row in b)
+        assert all(row.quantity == pytest.approx(100.0) for row in b)
     assert all(
         row.value == 0.0
         for batch in batches[1:]
@@ -3794,9 +3723,8 @@ def test_portfolio_delisting_zero_nav_retains_units_and_recovers_amounts(
 
 
 def test_cancelled_life_stale_quote_cannot_revive_rights_or_execution():
-    from fractions import Fraction
 
-    marks = production._ResearchValuationMarks()
+    marks = ResearchValuationMarks()
     marks.project(mark_view("2023-01-04", 10.0, 11.0))
     cancelled = mark_view("2023-01-05", 12.0, 13.0)
     cancelled.rights_events = pd.DataFrame(
@@ -3807,7 +3735,7 @@ def test_cancelled_life_stale_quote_cannot_revive_rights_or_execution():
                 "listing_date": pd.Timestamp("2020-01-01"),
                 "kind": "cancel",
                 "entitlement_proved": True,
-                "remaining_old_units_per_old_unit": Fraction(),
+                "remaining_old_units_per_old_unit": 0.0,
                 "successor_asset_id": None,
             }
         ]
@@ -3825,7 +3753,6 @@ def test_cancelled_life_stale_quote_cannot_revive_rights_or_execution():
 def test_persisted_adv_evidence_and_ledger_prerequisites_reject_fabrication(
     tmp_path, monkeypatch, corruption
 ):
-    from fractions import Fraction
 
     from quant_research_platform.contracts.portfolios import (
         ExecutedTrade,
@@ -3883,7 +3810,7 @@ def test_persisted_adv_evidence_and_ledger_prerequisites_reject_fabrication(
         )
     else:
         changes = dict(
-            trades=(ExecutedTrade("fake", "fake", timestamp, "b", Fraction(1), 1.0),),
+            trades=(ExecutedTrade("fake", "fake", timestamp, "b", float(1), 1.0),),
         )
     expected_error = {
         "known_adv": "portfolio_ledger_adv_unavailable_invalid",
@@ -4072,39 +3999,35 @@ def test_persisted_cash_target_keeps_unpaid_dividend_out_of_cash(tmp_path, monke
         if row.name == "target_notional"
     }
     after = {row.asset_id: row for row in sale.valuations if row.phase == "after"}
-    # One share bought for 100, sold ex-dividend for 90; 10 remains a claim.
+    # 100 shares bought at 100, sold at 90; the 1000 dividend remains a claim.
     assert targets["b"] == 0.0
-    assert targets["__cash__"] == 90.0
-    assert after["__cash__"].value == 90.0
+    assert targets["__cash__"] == 9000.0
+    assert after["__cash__"].value == 9000.0
     assert after["b"].quantity == 0
-    assert after["b"].receivable == after["b"].value == 10.0
+    assert after["b"].receivable == after["b"].value == 1000.0
 
 
 @pytest.mark.parametrize("successor_mark", [np.nan, 0.0, 12.0])
 def test_endpoint_conversion_requires_mark_for_received_shares(
     tmp_path, successor_mark
 ):
-    from fractions import Fraction
-
-    from quant_research_platform.contracts.portfolios import TradeCostComponents
 
     entry = pd.Timestamp("2024-01-02")
     endpoint = pd.Timestamp("2024-01-03")
     life = pd.Timestamp("2000-01-01")
     weights = pd.Series({"old": 1.0})
-    account = execute_continuous_target(
-        weights,
-        weights,
-        nav=100.0,
-        average_daily_volume=pd.Series({"old": 1000.0}),
-        can_enter=pd.Series({"old": True}),
-        can_exit=pd.Series({"old": True}),
+    account = execute_stock_target(
+        stock_orders(
+            (weights) * (100.0),
+            (weights) * (100.0),
+            capacity=pd.Series({"old": 1000.0}),
+        ).assign(can_enter=pd.Series({"old": True}), can_exit=pd.Series({"old": True})),
+        cash=float((100.0) - ((weights) * (100.0)).sum()),
         execution_date=entry.date(),
-        cost_for_trade=lambda _date, _asset, _side, amount, _volume, _settings: (
-            TradeCostComponents(float(amount), 0.0, 0.0, 0.0, 0.0, 0.0, "f" * 64)
+        fee_schedule=_schedule(broker_rate=0.0, transfer_rate=0.0, stamp_rate=0.0),
+        assumptions=replace(
+            ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,)), minimum_commission=0.0
         ),
-        assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,)),
-        cost_source_identity="f" * 64,
     )
     entry_panel = pd.DataFrame(
         [
@@ -4142,10 +4065,10 @@ def test_endpoint_conversion_requires_mark_for_received_shares(
                 "listing_date": life,
                 "kind": "conversion",
                 "entitlement_proved": True,
-                "remaining_old_units_per_old_unit": Fraction(0),
+                "remaining_old_units_per_old_unit": float(0),
                 "successor_asset_id": "new",
                 "successor_listing_date": life,
-                "successor_units_per_old_unit": Fraction(1),
+                "successor_units_per_old_unit": float(1),
                 "evidence_identity": "a" * 64,
             }
         ]
@@ -4158,8 +4081,8 @@ def test_endpoint_conversion_requires_mark_for_received_shares(
             sequence=0,
             end_timestamp=endpoint,
             decision_timestamp=entry - pd.Timedelta(days=1),
-            held_units=pd.Series({"old": Fraction(10)}),
-            execution_units=pd.Series({"old": Fraction(10)}),
+            held_units=pd.Series({"old": float(10)}),
+            execution_units=pd.Series({"old": float(10)}),
             previous_values={},
             rights_adjustments=(),
             prediction_rank_score=pd.Series(dtype=float),
@@ -4188,7 +4111,7 @@ def test_endpoint_conversion_requires_mark_for_received_shares(
     batch = build_batch()
     values = {(row.asset_id, row.phase): row for row in batch.valuations}
     assert values["new", "after"].quantity == 0
-    assert values["new", "end"].quantity == Fraction(10)
+    assert values["new", "end"].quantity == float(10)
     assert values["new", "end"].mark_price == successor_mark
     assert values["new", "end"].value == 10 * successor_mark
     assert values["old", "end"].quantity == 0
@@ -4198,9 +4121,9 @@ def test_endpoint_conversion_requires_mark_for_received_shares(
     )
     assert not batch.trades
     (conversion,) = batch.rights_adjustments
-    assert conversion.quantity_before == Fraction(10)
+    assert conversion.quantity_before == float(10)
     assert conversion.quantity_after == 0
-    assert conversion.target_quantity == Fraction(10)
+    assert conversion.target_quantity == float(10)
     root = write_portfolio_ledger_artifact(
         tmp_path / "ledger",
         capital=PortfolioCapital("conversion", 100.0, "CNY", "cash_equity"),

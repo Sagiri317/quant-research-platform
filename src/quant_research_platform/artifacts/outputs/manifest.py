@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from quant_research_platform.artifacts.outputs.evaluation_validation import (
     EVALUATION_ARTIFACTS,
@@ -15,9 +15,6 @@ from quant_research_platform.artifacts.outputs.prediction_validation import (
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
-)
-from quant_research_platform.contracts.outputs import (
-    validate_output_identifier,
 )
 from quant_research_platform.policy.share_safety import (
     evidence_json_value_unsafe_reason,
@@ -53,15 +50,11 @@ def validate_output_manifest(
     output_definition_id = value["output_definition_id"]
     if type(output_definition_id) is not str:
         raise ValueError("output_manifest_definition_id_invalid")
-    try:
-        validate_output_identifier(output_definition_id)
-    except ValueError as exc:
-        raise ValueError("output_manifest_definition_id_invalid") from exc
     if output_definition_id not in _OUTPUT_DEFINITION_FILES:
         raise ValueError("output_manifest_definition_id_invalid")
 
     metadata = value["metadata"]
-    if type(metadata) is not dict or _metadata_contains_schema_id(metadata):
+    if type(metadata) is not dict:
         raise ValueError("output_manifest_metadata_invalid")
     if output_definition_id == "prediction_outputs":
         validate_prediction_output_metadata_shape(metadata)
@@ -84,24 +77,6 @@ def validate_output_manifest(
         raise ValueError("output_manifest_metadata_invalid")
 
     files = value["files"]
-    if type(files) is not list or not files:
-        raise ValueError("output_files_invalid")
-    logical_files: set[str] = set()
-    for item in files:
-        if type(item) is not str or not item or "\\" in item:
-            raise ValueError("output_file_path_invalid")
-        path = PurePosixPath(item)
-        if (
-            path.is_absolute()
-            or len(path.parts) != 1
-            or path.parts[0] in {"", ".", ".."}
-            or path.as_posix() != item
-        ):
-            raise ValueError("output_file_path_invalid")
-        logical_name = item.casefold()
-        if logical_name in logical_files:
-            raise ValueError("output_files_invalid")
-        logical_files.add(logical_name)
     expected_files = list(_OUTPUT_DEFINITION_FILES[output_definition_id])
     if output_definition_id == "evaluation_outputs":
         expected_files.extend(
@@ -117,16 +92,6 @@ def validate_output_manifest(
     if files != expected_files:
         raise ValueError("output_manifest_definition_files_mismatch")
     return value
-
-
-def _metadata_contains_schema_id(value: object) -> bool:
-    if isinstance(value, Mapping):
-        return "schema_id" in value or any(
-            _metadata_contains_schema_id(item) for item in value.values()
-        )
-    if type(value) is list:
-        return any(_metadata_contains_schema_id(item) for item in value)
-    return False
 
 
 def output_manifest_payload(

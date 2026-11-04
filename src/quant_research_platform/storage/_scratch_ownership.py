@@ -89,10 +89,3 @@ def open_owned_scratch_file(path: Path, *, encoding: str | None = None) -> Any:
                 f"scratch cleanup also failed: {type(cleanup_error).__name__}"
             )
         raise
-
-
-def owned_scratch_name(prefix: str, unique: str) -> str:
-    """Return a compact per-operation scratch name."""
-    if not prefix or not unique or any(part in unique for part in ("/", "\\")):
-        raise ValueError("invalid_storage_scratch_name")
-    return f"{prefix}{unique}"

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import asdict, fields, replace
-from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -504,7 +503,7 @@ def test_portfolio_ledger_trust_boundary_mutations_fail_closed(
 def test_unidentified_alpha_survives_publication_and_blocks_freezing(
     tmp_path, observed_dates
 ):
-    from quant_research_platform.research.portfolios.accounting import (
+    from quant_research_platform.research.portfolios.calibration import (
         alpha_calibration_intervals,
         calibrate_expected_alpha,
         frozen_alpha_calibration,
@@ -574,7 +573,7 @@ def test_unidentified_alpha_survives_publication_and_blocks_freezing(
 def test_degenerate_alpha_diagnostics_survive_ledger_and_freeze(
     tmp_path, slope, intercept
 ):
-    from quant_research_platform.research.portfolios.accounting import (
+    from quant_research_platform.research.portfolios.calibration import (
         calibrate_expected_alpha,
         frozen_alpha_calibration,
     )
@@ -700,7 +699,6 @@ def _alpha_payload(calibration, envelope):
 def test_repeated_partial_fills_preserve_registered_rights_through_native_roundtrip(
     tmp_path,
 ):
-    from fractions import Fraction
 
     from quant_research_platform.contracts.portfolios import (
         PortfolioCashFlow,
@@ -711,10 +709,10 @@ def test_repeated_partial_fills_preserve_registered_rights_through_native_roundt
         EquityEntitlements,
     )
 
-    dates = pd.bdate_range("2024-01-02", periods=325) + pd.Timedelta(milliseconds=1)
+    dates = pd.bdate_range("2024-01-02", periods=6) + pd.Timedelta(milliseconds=1)
     life = pd.Timestamp("2000-01-01")
     entitlements = EquityEntitlements()
-    units, lives = pd.Series({"a": Fraction()}, dtype=object), pd.Series({"a": life})
+    units, lives = pd.Series({"a": 0.0}, dtype=object), pd.Series({"a": life})
     cash = 100_000.0
     events = pd.DataFrame(
         [
@@ -722,9 +720,9 @@ def test_repeated_partial_fills_preserve_registered_rights_through_native_roundt
                 event_id=kind,
                 asset_id="a",
                 listing_date=life,
-                record_at=dates[322],
-                effective_at=dates[323],
-                settlement_at=dates[324],
+                record_at=dates[3],
+                effective_at=dates[4],
+                settlement_at=dates[5],
                 available_at=dates[0],
                 entitlement_proved=True,
                 evidence_identity="a" * 64,
@@ -745,29 +743,33 @@ def test_repeated_partial_fills_preserve_registered_rights_through_native_roundt
                 "a",
                 phase,
                 units.a,
-                float(units.a * Fraction(price)) + receivable,
+                float(units.a * float(price)) + receivable,
                 price,
                 lifecycle_id="2000-01-01",
                 receivable=receivable,
-                locked_quantity=entitlements.locked_quantities.get("a", Fraction()),
+                locked_quantity=entitlements.locked_quantities.get("a", 0.0),
             ),
             PortfolioValuation(at.value, "__cash__", phase, cash, cash),
         )
 
-    for sequence in range(324):
+    for sequence in range(5):
         start, end = dates[sequence : sequence + 2]
-        price = round(100.01 + min(sequence, 322) / 100, 2)
-        next_price = round(100.01 + min(sequence + 1, 322) / 100, 2)
+        price = round(100.01 + min(sequence, 3) / 100, 2)
+        next_price = round(100.01 + min(sequence + 1, 3) / 100, 2)
         before = valuation("before", start, price)
         trades, flows = (), ()
-        if sequence < 322:
-            quantity = Fraction(100.0) / Fraction(price)
+        if sequence < 3:
+            quantity = 100.0
             units.a += quantity
-            cash -= 100.0
+            cash -= quantity * price
             fill = f"fill{sequence}"
-            trades = (ExecutedTrade(fill, fill, start.value, "a", quantity, 100.0),)
+            trades = (
+                ExecutedTrade(fill, fill, start.value, "a", quantity, quantity * price),
+            )
             flows = (
-                PortfolioCashFlow(fill, start.value, "a", fill, "principal", -100.0),
+                PortfolioCashFlow(
+                    fill, start.value, "a", fill, "principal", -quantity * price
+                ),
             )
         after = valuation("after", start, price)
         rights = entitlements.register(events, units, lives, end, phase="end")
@@ -775,7 +777,7 @@ def test_repeated_partial_fills_preserve_registered_rights_through_native_roundt
             events, pd.DataFrame(), units, lives, end, phase="end"
         )
         rights += adjustments
-        if sequence == 323:
+        if sequence == 4:
             rights += (
                 PortfolioRightsAdjustment(
                     "recovery",
@@ -826,15 +828,7 @@ def test_repeated_partial_fills_preserve_registered_rights_through_native_roundt
                 rights,
             )
         )
-    registered = sum(
-        (
-            Fraction(100.0) / Fraction(round(100.01 + index / 100, 2))
-            for index in range(322)
-        ),
-        Fraction(),
-    )
-    assert 300 < float(registered) < 400
-    assert registered.denominator.bit_length() > 14_300
+    registered = 300.0
     root = ledger_artifact.write_portfolio_ledger_artifact(
         tmp_path / "portfolio",
         capital=PortfolioCapital("ordinary", 100_000.0, "CNY", "cash_equity"),
@@ -863,11 +857,11 @@ def test_repeated_partial_fills_preserve_registered_rights_through_native_roundt
         for row in restored[-1].valuations
         if row.asset_id == "a" and row.phase == "end"
     )
-    assert final.quantity == registered * Fraction(3, 2)
+    assert final.quantity == registered * (3 / 2)
     assert final.locked_quantity == final.receivable == 0
 
 
-@pytest.mark.parametrize("invalid", [True, None, np.nan, np.inf, "1.0", Fraction(1, 2)])
+@pytest.mark.parametrize("invalid", [True, None, np.nan, np.inf, "1.0"])
 def test_typed_portfolio_ledger_rejects_invalid_numeric_fields(invalid):
     from tests.helpers.portfolio_ledger import continuous_ledger_batch
 
@@ -886,11 +880,9 @@ def test_typed_portfolio_ledger_rejects_invalid_numeric_fields(invalid):
         rows = getattr(batch, table)
         assert rows
         for field in fields(rows[0]):
-            if field.type not in ("float", "float | Fraction", "float | None"):
+            if field.type not in ("float", "float | None"):
                 continue
             if invalid is None and field.type == "float | None":
-                continue
-            if isinstance(invalid, Fraction) and field.type == "float | Fraction":
                 continue
             changed = replace(rows[0], **{field.name: invalid})
             with pytest.raises(ValueError, match="portfolio_ledger_numeric_invalid"):

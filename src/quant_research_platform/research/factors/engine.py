@@ -38,6 +38,24 @@ def calculate_factors_for_panel(
         ]
     if not requested:
         return output_source.loc[:, ["market_id", "asset_id", "timestamp"]].copy()
+    if families == ("risk_residual",):
+        from quant_research_platform.research.protocols.a_share import (
+            RISK_STYLE_COLUMNS,
+        )
+
+        from .residual import calculate_residual_factors
+
+        return _with_keys(
+            output_source,
+            calculate_residual_factors(
+                panel_frame,
+                style_columns=RISK_STYLE_COLUMNS,
+                factor_columns=tuple(item.output_column for item in requested),
+                history_keys=history_keys,
+                min_fresh_fraction=min_fresh_fraction,
+            ),
+            output_columns=tuple(item.output_column for item in requested),
+        )
     if families == ("fundamental",):
         return _with_keys(
             output_source,

@@ -9,7 +9,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.compute.dataframe.cross_section import _stable_zscore
 from quant_research_platform.contracts.columns import (
     ColumnRole,
     _validate_asset_time_key,
@@ -21,8 +20,6 @@ from quant_research_platform.contracts.time import (
     time_window_timestamp_interval,
 )
 from quant_research_platform.contracts.validation import (
-    strict_bool_series,
-    strict_finite_numeric_series,
     strict_timestamp_series,
 )
 from quant_research_platform.markets.implementations.a_share.ids import MARKET_ID
@@ -31,10 +28,6 @@ from quant_research_platform.research.datasets.validation import (
     validate_research_dataset,
 )
 from quant_research_platform.research.features.transforms import (
-    _industry_group_codes,
-    _mad_winsorize,
-    _neutralize_cross_section,
-    _winsorize,
     apply_feature_transforms,
     canonical_feature_validity_columns,
 )
@@ -42,6 +35,8 @@ from quant_research_platform.research.filtering import (
     a_share_eligibility,
     a_share_eligibility_columns,
 )
+from quant_research_platform.research.labels.targets import a_share_model_target
+from quant_research_platform.research.protocols.a_share import RISK_STYLE_COLUMNS
 from quant_research_platform.runtime.dataframes import iter_complete_time_frames
 from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
@@ -324,6 +319,15 @@ def _required_input_columns(spec: ResearchDatasetSpec) -> tuple[str, ...]:
             columns.extend(
                 ("industry_standard_id", "industry_level1_code", "log_total_market_cap")
             )
+        if spec.target_transform == "risk_residual":
+            columns.extend(
+                (
+                    "industry_standard_id",
+                    "industry_level1_code",
+                    "total_market_cap",
+                    *RISK_STYLE_COLUMNS,
+                )
+            )
         columns.extend(
             (
                 "eligible",
@@ -578,7 +582,7 @@ def _add_a_share_semantic_columns(
         maturity = dataset_spec.label_availability_columns.get("forward_return_20d")
         if maturity is None:
             raise ValueError("model_target_label_availability_required")
-        result["model_target"] = _a_share_model_target(
+        result["model_target"] = a_share_model_target(
             result,
             transform=dataset_spec.target_transform,
             clip=dataset_spec.target_clip,
@@ -606,58 +610,6 @@ def _add_a_share_semantic_columns(
                 .where(participating & ~unknown)
             )
     return result
-
-
-def _a_share_model_target(
-    frame: pd.DataFrame, *, transform: str = "date_zscore", clip: str = "none"
-) -> pd.Series:
-    values = strict_finite_numeric_series(
-        frame["forward_return_20d"],
-        error="invalid_a_share_model_target_label",
-        allow_null=True,
-    ).astype("float64")
-    eligible = strict_bool_series(
-        frame["eligible"], error="invalid_a_share_eligibility"
-    )
-    scoped = frame.loc[eligible].copy()
-    scoped["forward_return_20d"] = values.loc[eligible]
-    if transform == "industry_size_residual":
-        sizes = strict_finite_numeric_series(
-            scoped["log_total_market_cap"],
-            error="invalid_neutralization_size",
-            allow_null=True,
-        )
-        scoped = scoped.loc[
-            _industry_group_codes(scoped).notna() & sizes.notna()
-        ].copy()
-    groups = scoped.groupby("timestamp", sort=False).indices
-    if clip == "mad":
-        scoped["forward_return_20d"] = _mad_winsorize(scoped.forward_return_20d, groups)
-    elif clip == "quantile_1_99":
-        scoped["forward_return_20d"] = _winsorize(scoped.forward_return_20d, groups)
-    if transform == "industry_size_residual":
-        scoped["industry_level1_code"] = _industry_group_codes(scoped)
-        scoped = _neutralize_cross_section(
-            scoped,
-            factor_columns=("forward_return_20d",),
-            industry_column="industry_level1_code",
-            size_column="log_total_market_cap",
-            rescale=False,
-            time_groups=groups,
-        )
-    target = pd.Series(np.nan, index=frame.index, dtype="float64")
-    for positions in groups.values():
-        group = scoped.forward_return_20d.iloc[positions]
-        valid = group.dropna()
-        if transform in {"raw", "industry_size_residual"}:
-            target.loc[group.index] = group
-        elif len(valid) >= 2:
-            target.loc[group.index] = (
-                _stable_zscore(group)
-                if transform == "date_zscore"
-                else group.rank(method="average", pct=True)
-            )
-    return target
 
 
 def assemble(config: Mapping) -> Path:
@@ -1163,7 +1115,7 @@ def assemble(config: Mapping) -> Path:
                 elif source_unit is not None:
                     units["feature_" + suffix] = source_unit
     if "model_target" in labels:
-        if spec.target_transform in {"raw", "industry_size_residual"}:
+        if spec.target_transform in {"raw", "industry_size_residual", "risk_residual"}:
             source_unit = consumed_specs[
                 producers["forward_return_20d"]
             ].column_units.get("forward_return_20d")

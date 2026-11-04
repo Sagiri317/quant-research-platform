@@ -3,7 +3,7 @@
 import pandas as pd
 import pytest
 
-from quant_research_platform.research.portfolios.risk import (
+from quant_research_platform.research.risk import (
     FactorRiskConfig,
     FactorRiskState,
 )

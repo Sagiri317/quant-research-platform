@@ -82,7 +82,7 @@ class DatasetSessionInventory:
         self._parts = dict(sorted(self._parts.items(), key=lambda item: item[1]))
 
     def add(self, path: Path) -> None:
-        path = Path(path)
+        path = require_unaliased_path(Path(path), error="invalid_dataset_part_files")
         coordinates = self._validated_coordinates(path, partitioned=None)
         self._register_candidate(path, coordinates)
         if coordinates[0]:
@@ -95,22 +95,12 @@ class DatasetSessionInventory:
         if partition_columns not in ((), ("year",)):
             raise ValueError("unsupported_partitioning")
         require_unaliased_path(self.data_root, error="invalid_dataset_part_files")
-        with closing_iterator(_directory_entries(self.data_root)) as entries:
-            unpartitioned = any(
-                (path.suffix.casefold() == ".parquet" for path, _, _ in entries)
-            )
-        partitioned = partition_columns == ("year",) and (not unpartitioned)
+        partitioned = partition_columns == ("year",)
         if partitioned:
             with closing_iterator(_directory_entries(self.data_root)) as entries:
-                for path, is_directory, _ in entries:
-                    if not path.name.casefold().startswith("year="):
-                        continue
-                    year = parse_year_partition_label(path.name)
-                    if years is not None and year not in years:
-                        continue
-                    require_unaliased_path(path, error="invalid_dataset_part_files")
-                    if is_directory:
-                        on_year(year, path.name)
+                partitioned = not any(
+                    path.suffix.casefold() == ".parquet" for path, _, _ in entries
+                )
         pending = [_directory_entries(self.data_root)]
         try:
             while pending:
@@ -122,16 +112,22 @@ class DatasetSessionInventory:
                     continue
                 if (
                     partitioned
-                    and years is not None
                     and path.parent == self.data_root
                     and path.name.casefold().startswith("year=")
-                    and parse_year_partition_label(path.name) not in years
                 ):
-                    continue
+                    year = parse_year_partition_label(path.name)
+                    if years is not None and year not in years:
+                        continue
+                    if path_is_filesystem_alias(path):
+                        raise ValueError("invalid_dataset_part_files")
+                    if is_directory:
+                        on_year(year, path.name)
                 if is_directory:
                     if not is_alias:
                         pending.append(_directory_entries(path))
                 elif path.suffix.casefold() == ".parquet":
+                    if path_is_filesystem_alias(path):
+                        raise ValueError("invalid_dataset_part_files")
                     coordinates = self._validated_coordinates(
                         path, partitioned=partitioned
                     )
@@ -152,7 +148,6 @@ class DatasetSessionInventory:
     ) -> tuple[int, int, int]:
         candidate = Path(path)
         relative = candidate.relative_to(self.data_root)
-        require_unaliased_path(candidate, error="invalid_dataset_part_files")
         if not Path(native_filesystem_path(candidate)).is_file():
             raise ValueError("invalid_dataset_part_files")
         match = _PART_FILE_PATTERN.fullmatch(candidate.name)

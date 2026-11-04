@@ -4,14 +4,17 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from quant_research_platform.markets.implementations.a_share.high_frequency import (
-    build_panel,
-    compute_factors,
-    compute_labels,
+from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.markets.implementations.a_share.calendar import (
     continuous_session,
+)
+from quant_research_platform.markets.implementations.a_share.processed.high_frequency import (  # noqa: E501
+    build_panel,
 )
 from quant_research_platform.markets.prepare import prepare
 from quant_research_platform.research.datasets.assembler import assemble
+from quant_research_platform.research.factors.microstructure import compute_factors
+from quant_research_platform.research.labels.quote_returns import compute_labels
 from quant_research_platform.research.protocols.a_share_hft import label_catalog
 from quant_research_platform.sources.prepare import prepare_source
 from quant_research_platform.sources.venvoo import (
@@ -20,6 +23,7 @@ from quant_research_platform.sources.venvoo import (
     source_columns,
 )
 from quant_research_platform.storage.datasets.reading import read_dataset
+from tests.helpers.high_frequency import daily_view, write_daily_inputs
 
 INSTRUMENTS = [{"wind_code": "000001.SZ", "asset_id": "000001.SZ", "exchange": "SZSE"}]
 
@@ -106,7 +110,7 @@ def test_sessions_gaps_and_missing_order_history_are_not_zero():
     assert continuous_session(local, pd.Series(["SSE", "SSE"])).tolist() == ["pm", ""]
 
 
-def test_native_source_to_assembled_hft_dataset(tmp_path):
+def test_native_source_to_assembled_hft_dataset(tmp_path, monkeypatch):
     raw = tmp_path / "raw" / "20180214"
     raw.mkdir(parents=True)
     for stream, name in STREAM_FILES.items():
@@ -157,15 +161,15 @@ def test_native_source_to_assembled_hft_dataset(tmp_path):
     assert result.future_mid_return_3s.notna().sum() == 3
     assert result.eligible.all()
 
-    from quant_research_platform.markets.implementations.a_share.hft_portfolio import (
-        backtest,
+    from quant_research_platform.artifacts.portfolio_ledger import (
+        read_portfolio_ledger_artifact,
     )
     from quant_research_platform.research.evaluations.runner import evaluate
     from quant_research_platform.research.models.production import fit
+    from quant_research_platform.research.portfolios import high_frequency
     from quant_research_platform.research.predictions.runner import predict
     from quant_research_platform.sources.reference.interim import fee_schedule_spec
     from quant_research_platform.storage.datasets.writing import write_dataset
-    from quant_research_platform.storage.manifests import read_qrp_json_file
 
     model = fit(
         {
@@ -239,18 +243,36 @@ def test_native_source_to_assembled_hft_dataset(tmp_path):
     )
     fees["included_in"] = fees.included_in.astype("string")
     write_dataset(tmp_path / "fees", fees, spec=fee_schedule_spec())
-    destination = backtest(
+    panel = read_dataset(inputs["hft_panel"])
+    history = panel.assign(
+        timestamp=panel.timestamp - pd.Timedelta(days=1),
+        session_date=panel.session_date - pd.Timedelta(days=1),
+    )
+    quote_reads = []
+    materialize = high_frequency.materialize_dataset_session
+
+    def record_quote_read(session):
+        quote_reads.append(session.time_window)
+        return materialize(session)
+
+    monkeypatch.setattr(
+        high_frequency, "materialize_dataset_session", record_quote_read
+    )
+    destination = high_frequency.backtest(
         {
             "panel": inputs["hft_panel"],
             "predictions": str(predictions),
             "fee_schedule": str(tmp_path / "fees"),
+            "daily_inputs": write_daily_inputs(
+                tmp_path / "daily", pd.concat((history, panel), ignore_index=True)
+            ),
             "window": forecast_window,
             "output": str(tmp_path / "accounts"),
             "parameters": {
                 "initial_capital": 10000.0,
-                "initial_inventory": 100,
-                "maximum_inventory": 200,
-                "lot_size": 100,
+                "initial_inventory": {"000001.SZ": 100},
+                "maximum_inventory": {"000001.SZ": 200},
+                "restore_at": None,
                 "buy_threshold": 0.0,
                 "sell_threshold": -1.0,
                 "latency_ms": 0,
@@ -259,9 +281,10 @@ def test_native_source_to_assembled_hft_dataset(tmp_path):
             },
         }
     )
-    _, summary = read_qrp_json_file(destination / "summary.json")
-    assert len(summary["accounts"]) == 1
-    assert summary["accounts"][0]["fill_events"] == 1
+    ledger = read_portfolio_ledger_artifact(destination)
+    assert len(quote_reads) == 1
+    assert ledger.metadata["account_semantics"] == "shared_cash_continuous_inventory_t1"
+    assert sum(len(batch.trades) for batch in ledger.iter_chunks()) == 1
 
 
 @pytest.mark.parametrize("bad_time", [246000000, -1, 93000000.5])
@@ -285,7 +308,7 @@ def test_inventory_t1_subsequent_quote_fees_and_native_ledger(tmp_path):
         FeeRule,
         FeeSchedule,
     )
-    from quant_research_platform.markets.implementations.a_share.hft_portfolio import (
+    from quant_research_platform.research.portfolios.high_frequency import (
         _parameters,
         inventory_batches,
     )
@@ -324,9 +347,9 @@ def test_inventory_t1_subsequent_quote_fees_and_native_ledger(tmp_path):
     params = _parameters(
         {
             "initial_capital": 10000.0,
-            "initial_inventory": 100,
-            "maximum_inventory": 200,
-            "lot_size": 100,
+            "initial_inventory": {"000001.SZ": 100},
+            "maximum_inventory": {"000001.SZ": 200},
+            "restore_at": None,
             "buy_threshold": 0.5,
             "sell_threshold": -0.5,
             "latency_ms": 0,
@@ -337,7 +360,12 @@ def test_inventory_t1_subsequent_quote_fees_and_native_ledger(tmp_path):
     capital = PortfolioCapital("inventory", 10000.0, "CNY", "cash_equity")
 
     def produce(emit):
-        for batch in inventory_batches(panel, predictions, schedule, params):
+        for batch in inventory_batches(
+            [(daily_view(panel), panel, predictions)],
+            schedule,
+            params,
+            TimeWindow("2018-02-14", "2018-02-14"),
+        ):
             emit(batch)
 
     root = write_portfolio_ledger_artifact(
@@ -377,7 +405,7 @@ def test_sale_requires_cash_to_cover_minimum_commission(
         FeeRule,
         FeeSchedule,
     )
-    from quant_research_platform.markets.implementations.a_share.hft_portfolio import (
+    from quant_research_platform.research.portfolios.high_frequency import (
         _parameters,
         inventory_batches,
     )
@@ -421,9 +449,9 @@ def test_sale_requires_cash_to_cover_minimum_commission(
     params = _parameters(
         dict(
             initial_capital=initial_capital,
-            initial_inventory=100,
-            maximum_inventory=100,
-            lot_size=100,
+            initial_inventory={"stock": 100},
+            maximum_inventory={"stock": 100},
+            restore_at=None,
             buy_threshold=0.5,
             sell_threshold=-0.5,
             latency_ms=0,
@@ -433,7 +461,12 @@ def test_sale_requires_cash_to_cover_minimum_commission(
     )
 
     def produce(emit):
-        for batch in inventory_batches(quotes, predictions, schedule, params):
+        for batch in inventory_batches(
+            [(daily_view(quotes), quotes, predictions)],
+            schedule,
+            params,
+            TimeWindow("2018-02-14", "2018-02-14"),
+        ):
             emit(batch)
 
     path = write_portfolio_ledger_artifact(

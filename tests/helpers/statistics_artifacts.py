@@ -7,6 +7,7 @@ from quant_research_platform.research.statistics_production import _selection_tr
 from quant_research_platform.storage.datasets.schema import data_spec_payload
 from tests.helpers.research_configuration import (
     A_SHARE_MODEL_ALGORITHMS,
+    PV25_FACTORS,
     research_configuration,
 )
 
@@ -163,13 +164,15 @@ def portfolio_statistics_config(sample_role="validation", *, configuration=None)
     from dataclasses import asdict
 
     from quant_research_platform.contracts.portfolios import PortfolioCandidateSpec
-    from quant_research_platform.research.portfolios.risk import FactorRiskConfig
     from quant_research_platform.research.protocols.a_share import (
         EXECUTION_ASSUMPTIONS,
         RISK_STYLE_COLUMNS,
     )
+    from quant_research_platform.research.risk import (
+        FactorRiskConfig,
+    )
 
-    configuration = configuration or research_configuration(name="pv25")
+    configuration = configuration or research_configuration(factors=PV25_FACTORS)
     candidates = tuple(
         PortfolioCandidateSpec(
             **{

@@ -1,7 +1,5 @@
 """Independent monetary-domain checks through the actual portfolio producer."""
 
-from fractions import Fraction
-
 import pandas as pd
 import pytest
 
@@ -25,10 +23,12 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share import portfolio_sessions
 from quant_research_platform.research.portfolios import production
 from quant_research_platform.research.portfolios.accounting import EquityEntitlements
+from quant_research_platform.research.portfolios.attribution import (
+    HoldingFactorInputs,
+)
 from quant_research_platform.research.portfolios.diagnostics import (
     _portfolio_statistics_tables,
 )
-from quant_research_platform.research.portfolios.risk import HoldingFactorInputs
 from quant_research_platform.sources.csmar.interim import interim_catalog
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
 from tests.helpers.portfolio_inputs import portfolio_inputs as _inputs
@@ -41,10 +41,8 @@ from tests.research.test_portfolio_production import _build_producer
 from tests.sources.reference.test_equity_events import native_equity_inputs
 
 
-def test_finite_money_survives_exact_units_and_native_ledger_roundtrip(
-    tmp_path, monkeypatch
-):
-    capital, price = 100.0, 3.0
+def test_integer_shares_and_cash_survive_native_ledger_roundtrip(tmp_path, monkeypatch):
+    capital, price = 300.0, 3.0
     frames, fees, window = _inputs()
     fees["rate"] = 0.0
     frames["panel"].loc[:, ["open", "close"]] = price
@@ -59,7 +57,7 @@ def test_finite_money_survives_exact_units_and_native_ledger_roundtrip(
     )
     batches = list(chunks)
     assert batches
-    expected_units = Fraction(float(capital)) / Fraction(float(price))
+    expected_units = float(float(capital)) / float(float(price))
     assert len(batches[0].trades) == 1
     assert batches[0].trades[0].quantity == expected_units
     assert batches[0].trades[0].notional == capital
@@ -78,7 +76,7 @@ def test_finite_money_survives_exact_units_and_native_ledger_roundtrip(
             elif row.phase != "before" or batch.sequence != 0:
                 assert row.quantity == expected_units
                 assert row.value == capital
-                assert float(row.quantity * Fraction(row.mark_price)) == capital
+                assert float(row.quantity * float(row.mark_price)) == capital
 
     capital_spec = PortfolioCapital(
         **{
@@ -152,7 +150,7 @@ def test_active_share_recovery_requires_terminated_holder_entitlement(tmp_path):
         EquityEntitlements().process(
             pd.DataFrame(),
             events,
-            pd.Series({"000001": Fraction(1)}),
+            pd.Series({"000001": float(1)}),
             pd.Series({"000001": pd.Timestamp("2022-12-01")}),
             pd.Timestamp("2023-01-04"),
         )
@@ -164,7 +162,7 @@ def test_fully_sold_rights_do_not_require_next_lifecycle_linkage(
 ):
     frames, fees, window = _inputs()
     fees["rate"] = 0.0
-    frames["panel"].loc[:, ["open", "close"]] = 10.0
+    frames["panel"].loc[:, ["open", "close"]] = 0.01
     frames["dataset"].loc[
         frames["dataset"].asset_id.eq("b")
         & frames["dataset"].timestamp.ge("2023-01-04"),
@@ -209,23 +207,19 @@ def test_admitted_recovery_reaches_native_statistics_without_losing_money(
     batches = recovered_batches(tmp_path / "source", kind)
     final_nav = float(
         sum(
-            (
-                Fraction(row.value)
-                for row in batches[-1].valuations
-                if row.phase == "end"
-            ),
-            Fraction(),
+            (float(row.value) for row in batches[-1].valuations if row.phase == "end"),
+            0.0,
         )
     )
     fees = float(
         -sum(
             (
-                Fraction(flow.amount)
+                float(flow.amount)
                 for batch in batches
                 for flow in batch.cashflows
                 if flow.kind.endswith("_cost")
             ),
-            Fraction(),
+            0.0,
         )
     )
     candidates, manifest = portfolio_statistics_config(sample_role="validation")
@@ -235,7 +229,7 @@ def test_admitted_recovery_reaches_native_statistics_without_losing_money(
         capital_spec = PortfolioCapital(
             **{
                 "candidate_id": candidate.candidate_id,
-                "initial_capital": 100.0,
+                "initial_capital": 1_000_000.0,
                 "valuation_currency": "CNY",
                 "valuation_method": "cash_equity",
             }
@@ -323,7 +317,7 @@ def test_native_writer_rejects_negative_zero_valued_long_only_rights(tmp_path):
                     stamp,
                     "asset",
                     phase,
-                    Fraction(-1),
+                    float(-1),
                     0.0,
                     0.0,
                     lifecycle_id="2000-01-01",

@@ -1,7 +1,6 @@
 """Many-fill cash conservation and native return publication use money units."""
 
-from dataclasses import asdict, replace
-from fractions import Fraction
+from dataclasses import asdict
 from math import ulp
 
 import numpy as np
@@ -101,8 +100,8 @@ def test_many_fills_conserve_cash_and_publish_native_returns(
             for row in batch.valuations
             if row.asset_id == "__cash__" and row.phase == "before"
         )
-        cash = Fraction(before_cash) + sum(
-            (Fraction(flow.amount) for flow in batch.cashflows), Fraction()
+        cash = float(before_cash) + sum(
+            (float(flow.amount) for flow in batch.cashflows), 0.0
         )
         actual_cash = next(
             row.value
@@ -111,14 +110,14 @@ def test_many_fills_conserve_cash_and_publish_native_returns(
         )
         # Existing weights and NAV each round when reconstructing pretrade cash;
         # the cashflow reduction must not add an error growing with fill count.
-        assert abs(Fraction(actual_cash) - cash) <= 2 * Fraction(ulp(10_000_001.0))
+        assert abs(float(actual_cash) - cash) <= 2 * float(ulp(10000001.0))
         fees_paid = -sum(
             (
-                Fraction(flow.amount)
+                float(flow.amount)
                 for flow in batch.cashflows
                 if flow.kind.endswith("_cost")
             ),
-            Fraction(),
+            0.0,
         )
         asset_reads = 0
         original_getattribute = ExecutedTrade.__getattribute__
@@ -133,7 +132,7 @@ def test_many_fills_conserve_cash_and_publish_native_returns(
             economic = portfolio_interval_economics(batch)
         assert asset_reads <= 2 * len(batch.trades)
         assert economic["net_return"] == pytest.approx(
-            float(-fees_paid / Fraction(economic["nav_before"])), rel=2e-13, abs=0.0
+            float(-fees_paid / float(economic["nav_before"])), rel=2e-13, abs=0.0
         )
     economics_calls = []
 
@@ -155,7 +154,8 @@ def test_many_fills_conserve_cash_and_publish_native_returns(
     assert economics_calls == [batch.sequence for batch in batches]
     assert daily.return_status.eq("DEFINED").all()
     # One purchase of a constant-price asset pool costs 0.04% of bought notional.
-    expected = -0.0002 if construction.endswith("half_step") else -0.0004 / 1.0004
+    shares_per_stock = 50_000 if construction.endswith("half_step") else 99_900
+    expected = -shares_per_stock * count * 0.0004 / 10_000_001.0
     assert daily.net_return.iloc[0] == pytest.approx(expected, rel=2e-13)
 
 
@@ -170,7 +170,7 @@ def _held_batch(sequence, start, end):
                     timestamp,
                     "stock",
                     phase,
-                    Fraction(1),
+                    float(1),
                     mark,
                     mark,
                     lifecycle_id="2000-01-01",
@@ -190,8 +190,7 @@ def _held_batch(sequence, start, end):
     return PortfolioLedgerBatch(sequence, (), (), tuple(values), facts)
 
 
-@pytest.mark.parametrize("kind", ("zero_nav", "tiny_pnl"))
-def test_native_return_states_keep_their_economic_meaning(tmp_path, kind):
+def test_native_zero_nav_return_stays_undefined(tmp_path):
     candidate = PortfolioCandidateSpec(
         "return_states",
         "global",
@@ -201,24 +200,8 @@ def test_native_return_states_keep_their_economic_meaning(tmp_path, kind):
         1.0,
         None,
     )
-    if kind == "zero_nav":
-        capital = 1.0
-        batches = [_held_batch(0, 1.0, 0.0), _held_batch(1, 0.0, 2.0)]
-    else:
-        capital = 1.0
-        # The raw exact mark changes below one NAV ULP; value rounds to one.
-        batch = _held_batch(0, 1.0, 1.0)
-        batches = [
-            replace(
-                batch,
-                valuations=tuple(
-                    replace(row, mark_price=Fraction(1) + Fraction(1, 10**20))
-                    if row.asset_id == "stock" and row.phase == "end"
-                    else row
-                    for row in batch.valuations
-                ),
-            )
-        ]
+    capital = 1.0
+    batches = [_held_batch(0, 1.0, 0.0), _held_batch(1, 0.0, 2.0)]
     daily = _publish(
         tmp_path,
         batches,
@@ -227,16 +210,9 @@ def test_native_return_states_keep_their_economic_meaning(tmp_path, kind):
         window={"start": "2024-01-01", "end": "2024-01-05"},
     )
     last = daily.iloc[-1]
-    if kind == "tiny_pnl":
-        assert last.return_status == "DEFINED" and last.return_reason == ""
-        assert last.net_return == 1e-20
-        assert last.nav_before == last.nav_end == 1.0
-    else:
-        assert last.return_status == "UNDEFINED" and pd.isna(last.net_return)
-        assert last.return_reason == "nonpositive_start_nav"
+    assert last.return_status == "UNDEFINED" and pd.isna(last.net_return)
+    assert last.return_reason == "nonpositive_start_nav"
 
-    # The persisted reader must still reject a fabricated finite return, whether
-    # the real result is tiny or has a zero denominator.
     path = tmp_path / "statistics" / "portfolio_daily.parquet"
     table = pq.read_table(path)
     rows = table.to_pylist()

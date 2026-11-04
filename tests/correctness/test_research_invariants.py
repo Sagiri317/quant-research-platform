@@ -34,18 +34,18 @@ from quant_research_platform.research.models.scaler import (
     ModelMatrixScaler,
     equal_timestamp_sample_weights,
 )
-from quant_research_platform.research.portfolios.accounting import (
+from quant_research_platform.research.portfolios.calibration import (
     calibrate_expected_alpha,
 )
 from quant_research_platform.research.portfolios.optimizer import (
     OptimizerConfig,
     optimize_portfolio,
 )
-from quant_research_platform.research.portfolios.risk import (
+from quant_research_platform.research.protocols.a_share import EXECUTION_ASSUMPTIONS
+from quant_research_platform.research.risk import (
     FactorRiskConfig,
     FactorRiskState,
 )
-from quant_research_platform.research.protocols.a_share import EXECUTION_ASSUMPTIONS
 from tests.helpers.optimizer import with_cash_asset
 from tests.helpers.research_configuration import CORE6_FACTORS, PV25_FACTORS
 
@@ -433,7 +433,7 @@ def test_alpha_calibration_is_schedule_matched_and_non_flipping() -> None:
             "holding_return": [0.01, 0.03] * 6,
         }
     )
-    from quant_research_platform.research.portfolios.accounting import (
+    from quant_research_platform.research.portfolios.calibration import (
         alpha_calibration_intervals,
     )
 
@@ -475,7 +475,7 @@ def test_calibration_weighted_cluster_reference_and_unit_scaling(
     import statsmodels.api as sm
     from statsmodels.stats.sandwich_covariance import cov_cluster
 
-    from quant_research_platform.research.portfolios.accounting import (
+    from quant_research_platform.research.portfolios.calibration import (
         alpha_calibration_intervals,
     )
 
@@ -532,7 +532,7 @@ def test_calibration_weighted_cluster_reference_and_unit_scaling(
 
 
 def test_alpha_calibration_missing_and_stale_date_coverage():
-    from quant_research_platform.research.portfolios.accounting import (
+    from quant_research_platform.research.portfolios.calibration import (
         alpha_calibration_intervals,
     )
 
@@ -565,7 +565,7 @@ def test_alpha_calibration_missing_and_stale_date_coverage():
 
 
 def test_calibration_intervals_use_adjacent_execution_opens_across_holidays():
-    from quant_research_platform.research.portfolios.accounting import (
+    from quant_research_platform.research.portfolios.calibration import (
         alpha_calibration_intervals,
     )
 
@@ -1348,8 +1348,10 @@ def test_fundamental_value_factors_use_panel_total_cap() -> None:
 def test_factor_return_wls_uses_sqrt_cap_statistical_weight():
     import statsmodels.api as sm
 
-    from quant_research_platform.research.portfolios.risk import FactorRiskState
     from quant_research_platform.research.protocols.a_share import RISK_STYLE_COLUMNS
+    from quant_research_platform.research.risk import (
+        FactorRiskState,
+    )
 
     rng = np.random.default_rng(913)
     count = 100
@@ -1387,7 +1389,7 @@ def test_factor_return_wls_uses_sqrt_cap_statistical_weight():
 @pytest.mark.parametrize("constant", [0.0, 2.0])
 @pytest.mark.parametrize("observed_dates", [1, 8])
 def test_alpha_unidentified_statistics_are_not_defined_zero(constant, observed_dates):
-    from quant_research_platform.research.portfolios.accounting import (
+    from quant_research_platform.research.portfolios.calibration import (
         alpha_calibration_intervals,
     )
 

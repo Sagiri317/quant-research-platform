@@ -10,7 +10,9 @@ from quant_research_platform.research.portfolios.optimizer import (
     OptimizerConfig,
     optimize_portfolio,
 )
-from quant_research_platform.research.portfolios.risk import _ewma_covariance
+from quant_research_platform.research.risk import (
+    _ewma_covariance,
+)
 from tests.helpers.optimizer import with_cash_asset
 
 
@@ -122,7 +124,7 @@ def test_required_member_bad_cap_keeps_proxy_uncertainty(cap):
 
 @pytest.mark.parametrize("shrinkage", [0.0, 0.2, 1.0])
 def test_covariance_shrinkage_matches_independent_oracle(shrinkage):
-    from quant_research_platform.research.portfolios import risk
+    from quant_research_platform.research import risk
 
     rng = np.random.default_rng(52)
     values = rng.normal(size=(504, 5)) * 0.01

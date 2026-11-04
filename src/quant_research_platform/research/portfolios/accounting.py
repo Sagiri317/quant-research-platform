@@ -1,55 +1,39 @@
-"""Continuous-weight portfolio construction support and economic ledger."""
+"""Shared stock execution, equity entitlements and holding-period economics."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from datetime import date
-from fractions import Fraction
-from math import fsum
+from math import floor, fsum, ulp
 
 import numpy as np
 import pandas as pd
-from scipy.stats import t as student_t
 
 from quant_research_platform.compute.portfolio_economics import (
     cash_equity_pnl,
     cash_equity_positions,
 )
 from quant_research_platform.contracts.portfolios import (
-    PORTFOLIO_BLOCK_REASONS,
     PORTFOLIO_CASH_ASSET_ID,
     PORTFOLIO_LEDGER_COST_COLUMNS,
-    REBALANCE_SCHEDULES,
     ExecutionAssumptions,
     PortfolioLedgerBatch,
     PortfolioRightsAdjustment,
     PortfolioTargetBlocked,
-    TradeCostComponents,
-    _portfolio_budget_exceeded,
+    _quantity_equal,
     portfolio_notional_tolerance,
 )
 from quant_research_platform.contracts.validation import (
-    finite_exact_float,
+    strict_bool_series,
     strict_finite_float,
     strict_finite_numeric_series,
     strict_real_numeric_series,
 )
-from quant_research_platform.research.portfolios.schedules import is_rebalance_session
-
-_LEDGER_COLUMNS = (
-    "execution_date",
-    "asset_id",
-    "pre_trade_notional",
-    "target_notional",
-    "executed_delta_notional",
-    "post_trade_notional",
-    "reason",
-    "commission_cost",
-    "stamp_duty_cost",
-    "transfer_fee_cost",
-    "slippage_cost",
-    "impact_cost",
+from quant_research_platform.markets.implementations.a_share.execution import (
+    FeeSchedule,
+    prepare_trade_cost,
+    round_stock_orders,
+    stock_order_limits,
 )
 
 
@@ -71,13 +55,11 @@ def adjust_carried_share_mark(
         evidence.append(event.evidence_identity)
         if not event.entitlement_proved:
             raise PortfolioTargetBlocked("portfolio_held_rights_unproved")
-        cash, shares, ratios = grouped.setdefault(
-            effective, [Fraction(), Fraction(), []]
-        )
+        cash, shares, ratios = grouped.setdefault(effective, [0.0, 0.0, []])
         if event.kind == "cash_dividend":
-            cash += Fraction(event.cash_per_share)
+            cash += float(event.cash_per_share)
         elif event.kind == "stock_distribution":
-            shares += Fraction(event.additional_shares_per_share)
+            shares += float(event.additional_shares_per_share)
         else:
             raise PortfolioTargetBlocked("portfolio_held_rights_unproved")
         if cash < 0 or shares < 0:
@@ -97,11 +79,11 @@ def adjust_carried_share_mark(
         ):
             continue
         evidence.append(event.evidence_identity)
-        ratio = Fraction(event.remaining_old_units_per_old_unit)
+        ratio = float(event.remaining_old_units_per_old_unit)
         if not event.entitlement_proved or ratio <= 0:
             raise PortfolioTargetBlocked("portfolio_held_rights_unproved")
-        grouped.setdefault(effective, [Fraction(), Fraction(), []])[2].append(ratio)
-    result = Fraction(mark)
+        grouped.setdefault(effective, [0.0, 0.0, []])[2].append(ratio)
+    result = float(mark)
     for effective in sorted(grouped):
         cash, shares, ratios = grouped[effective]
         result = (result - cash) / (1 + shares)
@@ -112,6 +94,306 @@ def adjust_carried_share_mark(
     return result, tuple(dict.fromkeys(evidence))
 
 
+class ResearchValuationMarks:
+    """Carry unquoted rights, never a tradable quote, in observation order."""
+
+    def __init__(self):
+        self.rights_quotes = {}
+        self.cancelled_lifecycles = set()
+        self.converted_lifecycles = {}
+        self.zero_since = {}
+        self.unproved_rights = set()
+        self.corporate_mark_history = {}
+        self.rights_mark_history = {}
+        self.last = pd.DataFrame(
+            {
+                "listing_date": pd.Series(dtype="datetime64[ns]"),
+                "market_type": pd.Series(dtype="Int64"),
+                "mark_at": pd.Series(dtype="datetime64[ns]"),
+                "mark_price": pd.Series(dtype="float64"),
+                "mark_kind": pd.Series(dtype="string"),
+                "mark_evidence": pd.Series(dtype="string"),
+            }
+        )
+
+    def project(self, view):
+        for frame, history in (
+            (view.corporate_events, self.corporate_mark_history),
+            (view.rights_events, self.rights_mark_history),
+        ):
+            for event in frame.itertuples(index=False):
+                if event.kind == "quote":
+                    continue
+                identity = (event.asset_id, event.listing_date)
+                history.setdefault(identity, {})[event.event_id] = event._asdict()
+        settled_lifecycles = []
+        for event in view.rights_events.itertuples(index=False):
+            identity = (event.asset_id, event.listing_date)
+            if not event.entitlement_proved:
+                self.unproved_rights.add(identity)
+                self.rights_quotes.pop(identity, None)
+                continue
+            if (
+                event.kind == "conversion"
+                and event.successor_asset_id == event.asset_id
+            ):
+                self.converted_lifecycles[identity] = event.successor_listing_date
+            if event.kind == "quote" and identity not in self.cancelled_lifecycles:
+                self.rights_quotes[identity] = event
+            elif (
+                event.kind != "quote"
+                and float(event.remaining_old_units_per_old_unit) == 0
+            ):
+                self.cancelled_lifecycles.add(identity)
+                settled_lifecycles.append(identity)
+                self.rights_quotes.pop(identity, None)
+        observed = view.panel.set_index("asset_id").copy()
+        current = view.valuation.set_index("asset_id").copy()
+        for frame in (observed, current):
+            values = (
+                frame[["open", "close"]]
+                .apply(
+                    strict_real_numeric_series,
+                    error="portfolio_return_invalid",
+                    errors="coerce",
+                )
+                .astype("float64")
+            )
+            frame[["open", "close"]] = values.where(np.isfinite(values) & values.gt(0))
+        for asset, listing in (*self.rights_quotes, *settled_lifecycles):
+            if asset not in current.index and asset not in self.last.index:
+                current.loc[asset, "listing_date"] = listing
+                current.loc[asset, "timestamp"] = view.timestamp
+        present = current.index
+        assets = present.union(self.last.index, sort=False)
+        current = current.reindex(assets)
+        previous = self.last.reindex(assets)
+        absent = ~assets.isin(present)
+        if absent.any():
+            for column in ("listing_date", "market_type"):
+                current.loc[absent, column] = previous.loc[absent, column]
+        current["timestamp"] = view.timestamp
+        if self.converted_lifecycles:
+            for asset in assets:
+                listing = current.loc[asset, "listing_date"]
+                visited = set()
+                while (str(asset), listing) in self.converted_lifecycles:
+                    if listing in visited:
+                        raise ValueError("portfolio_rights_conversion_cycle")
+                    visited.add(listing)
+                    listing = self.converted_lifecycles[str(asset), listing]
+                if visited:
+                    current.loc[asset, "listing_date"] = listing
+                    current.loc[asset, ["open", "close"]] = np.nan
+                    current.loc[asset, "is_trading"] = False
+        same_life = current.listing_date.notna() & current.listing_date.eq(
+            previous.listing_date
+        )
+        same_life &= ~assets.isin(view.unproved_lifecycle_assets)
+        for asset, row in observed.iterrows():
+            if (
+                pd.notna(row.is_trading)
+                and bool(row.is_trading)
+                and pd.notna(row.open)
+                and asset not in view.unproved_lifecycle_assets
+            ):
+                self.unproved_rights.discard((str(asset), row.listing_date))
+        unproved_rights = pd.Series(
+            [
+                (str(asset), listing) in self.unproved_rights
+                for asset, listing in current.listing_date.items()
+            ],
+            index=assets,
+            dtype=bool,
+        )
+        same_life &= ~unproved_rights
+        current.loc[unproved_rights, ["open", "close"]] = np.nan
+        previous = previous.loc[same_life].copy()
+        self.last = previous.copy()
+        observed = observed.loc[
+            observed.is_trading.eq(True).fillna(False)
+            & observed.listing_date.notna()
+            & ~observed.index.isin(view.unproved_lifecycle_assets)
+        ]
+        current["research_previous_listing_date"] = pd.Series(
+            pd.NaT, index=assets, dtype="datetime64[ns]"
+        )
+        for event in view.rights_events.itertuples(index=False):
+            if (
+                event.kind == "conversion"
+                and event.successor_asset_id == event.asset_id
+            ):
+                current.loc[event.asset_id, "research_previous_listing_date"] = (
+                    event.listing_date
+                )
+        for phase in ("open", "close"):
+            column = phase
+            known = observed.loc[current[column].reindex(observed.index).notna()]
+            # Nontrading PANEL rows can contain prepared carry prices. Only an
+            # observed trading quote resets the raw-share valuation anchor.
+            current.loc[~assets.isin(known.index), column] = np.nan
+            # Today's close cannot fill today's missing open.
+            if phase == "close":
+                previous = self.last.reindex(assets)
+            else:
+                previous = previous.reindex(assets)
+            permitted_carry = current.is_trading.eq(False).fillna(False) | assets.isin(
+                view.closed_assets
+            )
+            missing = current[column].isna() & previous.mark_price.notna()
+            current[f"research_{phase}_mark_at"] = pd.Series(
+                pd.NaT, index=assets, dtype="datetime64[ns]"
+            )
+            current[f"research_{phase}_mark_kind"] = pd.Series(
+                pd.NA, index=assets, dtype="string"
+            )
+            current[f"research_{phase}_evidence_identity"] = pd.Series(
+                pd.NA, index=assets, dtype="string"
+            )
+            delisted = pd.Series(
+                [
+                    (str(asset), listing) in view.confirmed_delisted_lifecycles
+                    for asset, listing in current.listing_date.items()
+                ],
+                index=assets,
+                dtype=bool,
+            )
+            cancelled = pd.Series(
+                [
+                    (str(asset), listing) in self.cancelled_lifecycles
+                    for asset, listing in current.listing_date.items()
+                ],
+                index=assets,
+                dtype=bool,
+            )
+            zero = (
+                (delisted & ~assets.isin(known.index)) | cancelled
+            ) & ~unproved_rights
+            if missing.any():
+                for asset in assets[missing & ~zero]:
+                    identity = (str(asset), current.loc[asset, "listing_date"])
+                    try:
+                        adjusted, evidence = adjust_carried_share_mark(
+                            previous.loc[asset, "mark_price"],
+                            pd.DataFrame(
+                                self.corporate_mark_history.get(identity, {}).values()
+                            ),
+                            pd.DataFrame(
+                                self.rights_mark_history.get(identity, {}).values()
+                            ),
+                            asset=str(asset),
+                            listing=identity[1],
+                            timestamp=view.timestamp,
+                            mark_at=previous.loc[asset, "mark_at"],
+                        )
+                    except PortfolioTargetBlocked:
+                        self.unproved_rights.add(identity)
+                        self.last = self.last.drop(asset, errors="ignore")
+                        missing.loc[asset] = False
+                        current.loc[asset, ["open", "close"]] = np.nan
+                        continue
+                    if evidence:
+                        previous.loc[asset, "mark_price"] = adjusted
+                        previous.loc[asset, "mark_kind"] = "corporate_action_carry"
+                        previous.loc[asset, "mark_evidence"] = ",".join(evidence)
+                        # Keep self.last as the original observed quote. Replay
+                        # all currently known actions, including late earlier
+                        # events, without compounding yesterday's adjusted mark.
+                current.loc[missing, column] = previous.loc[missing, "mark_price"]
+                current.loc[missing, f"research_{phase}_mark_at"] = pd.to_datetime(
+                    previous.loc[missing, "mark_at"]
+                )
+                current.loc[missing, f"research_{phase}_mark_kind"] = previous.loc[
+                    missing, "mark_kind"
+                ]
+                current.loc[missing, f"research_{phase}_evidence_identity"] = (
+                    previous.loc[missing, "mark_evidence"]
+                )
+                current.loc[
+                    missing & ~permitted_carry, f"research_{phase}_mark_kind"
+                ] = "ordinary_missing_quote"
+            if zero.any():
+                current.loc[zero, column] = 0.0
+                for asset in assets[zero]:
+                    identity = (str(asset), current.loc[asset, "listing_date"])
+                    current.loc[asset, f"research_{phase}_mark_at"] = (
+                        self.zero_since.setdefault(identity, view.timestamp)
+                    )
+                current.loc[zero, f"research_{phase}_mark_kind"] = (
+                    "confirmed_delisting_zero"
+                )
+                current.loc[cancelled, f"research_{phase}_mark_kind"] = (
+                    "extinguished_rights"
+                )
+            if self.rights_quotes:
+                for asset in assets:
+                    event = self.rights_quotes.get(
+                        (str(asset), current.loc[asset, "listing_date"])
+                    )
+                    if event is not None and asset not in known.index:
+                        identity = (str(asset), event.listing_date)
+                        try:
+                            adjusted, evidence = adjust_carried_share_mark(
+                                event.value_per_old_unit,
+                                pd.DataFrame(
+                                    self.corporate_mark_history.get(
+                                        identity, {}
+                                    ).values()
+                                ),
+                                pd.DataFrame(
+                                    self.rights_mark_history.get(identity, {}).values()
+                                ),
+                                asset=str(asset),
+                                listing=current.loc[asset, "listing_date"],
+                                timestamp=view.timestamp,
+                                mark_at=event.effective_at,
+                            )
+                        except PortfolioTargetBlocked:
+                            self.unproved_rights.add((str(asset), event.listing_date))
+                            current.loc[asset, ["open", "close"]] = np.nan
+                            continue
+                        # Rebuild from the original economic quote each time:
+                        # a later disclosure may prove an earlier share action.
+                        current.loc[asset, column] = adjusted
+                        current.loc[asset, f"research_{phase}_mark_at"] = (
+                            event.effective_at
+                        )
+                        current.loc[asset, f"research_{phase}_mark_kind"] = (
+                            "evidenced_rights_quote"
+                        )
+                        current.loc[asset, f"research_{phase}_evidence_identity"] = (
+                            ",".join((event.evidence_identity, *evidence))
+                        )
+            known = known.loc[~known.index.isin(assets[cancelled])]
+            if not known.empty:
+                for asset, listing in known.listing_date.items():
+                    identity = (str(asset), listing)
+                    quote = self.rights_quotes.get(identity)
+                    if quote is not None and quote.timestamp <= view.timestamp:
+                        self.rights_quotes.pop(identity)
+                marks = known.loc[:, ["listing_date", "market_type"]].assign(
+                    mark_at=view.timestamp,
+                    mark_price=known[column],
+                    mark_kind=phase,
+                    mark_evidence=pd.NA,
+                )
+                self.last = pd.concat(
+                    (self.last.drop(marks.index, errors="ignore"), marks)
+                )
+        return current.rename_axis("asset_id").reset_index()
+
+
+def _whole_share_entitlement(theoretical):
+    if not np.isfinite(theoretical) or theoretical < 0:
+        raise PortfolioTargetBlocked("portfolio_share_entitlement_unrepresentable")
+    nearest = float(round(theoretical))
+    # One multiplication can place an integer entitlement one ULP below itself.
+    if abs(theoretical - nearest) <= ulp(theoretical):
+        return nearest, 0.0
+    whole = float(floor(theoretical))
+    return whole, theoretical - whole
+
+
 class EquityEntitlements:
     """One owner for registered raw-share rights, receivables and share locks."""
 
@@ -119,19 +401,9 @@ class EquityEntitlements:
         self.registered = {}
         self.registration_emitted = set()
         self.completed = set()
-        self._receivables = {}
+        self.receivables = {}
         self.locked_quantities = {}
         self._claims = {}
-
-    @property
-    def receivables(self):
-        values = {
-            asset: finite_exact_float(value)
-            for asset, value in self._receivables.items()
-        }
-        if any(value is None for value in values.values()):
-            raise PortfolioTargetBlocked("portfolio_dividend_amount_unrepresentable")
-        return values
 
     def _adjustment(
         self,
@@ -145,18 +417,21 @@ class EquityEntitlements:
         cash=0.0,
         receivable_after=None,
         locked_after=None,
+        quantity_rounding_loss=0.0,
     ):
         asset = event.asset_id
-        quantity = Fraction(units.get(asset, 0))
+        quantity = float(units.get(asset, 0))
         receivable = self.receivables.get(asset, 0.0)
-        locked = self.locked_quantities.get(asset, Fraction())
-        exact_receivable = (
-            self._receivables.get(asset, Fraction())
+        locked = self.locked_quantities.get(asset, 0.0)
+        next_receivable = (
+            self.receivables.get(asset, 0.0)
             if receivable_after is None
-            else Fraction(receivable_after)
+            else float(receivable_after)
         )
-        rounded_receivable = finite_exact_float(exact_receivable)
-        if rounded_receivable is None or exact_receivable < 0:
+        # Settlement can leave cancellation noise below a currency precision of 1e-8.
+        if stage == "settlement" and abs(next_receivable) < 1e-8:
+            next_receivable = 0.0
+        if not np.isfinite(next_receivable) or next_receivable < 0:
             raise PortfolioTargetBlocked("portfolio_dividend_amount_unrepresentable")
         record = PortfolioRightsAdjustment(
             event_id=f"{event.event_id}:{stage}",
@@ -168,7 +443,7 @@ class EquityEntitlements:
             cash_amount=cash,
             target_asset_id=None,
             target_lifecycle_id=None,
-            target_quantity=Fraction(),
+            target_quantity=0.0,
             evidence_identity=event.evidence_identity,
             kind=(
                 "dividend"
@@ -181,12 +456,13 @@ class EquityEntitlements:
             entitlement_quantity=self.registered[event.event_id],
             entitlement_record_at_ns=int(pd.Timestamp(event.record_at).value),
             receivable_before=receivable,
-            receivable_after=rounded_receivable,
+            receivable_after=next_receivable,
             locked_quantity_before=locked,
             locked_quantity_after=locked if locked_after is None else locked_after,
+            quantity_rounding_loss=quantity_rounding_loss,
         )
         units.loc[asset] = record.quantity_after
-        self._receivables[asset] = exact_receivable
+        self.receivables[asset] = next_receivable
         self.locked_quantities[asset] = record.locked_quantity_after
         return record
 
@@ -200,9 +476,9 @@ class EquityEntitlements:
             ):
                 continue
             quantity = (
-                Fraction(units.get(event.asset_id, 0))
+                float(units.get(event.asset_id, 0))
                 if lives.get(event.asset_id) == event.listing_date
-                else Fraction()
+                else 0.0
             )
             available = pd.Timestamp(event.available_at) <= timestamp
             self.registered[event.event_id] = quantity
@@ -223,13 +499,13 @@ class EquityEntitlements:
         self, corporate_events, rights_events, units, lives, timestamp, *, phase="after"
     ):
         """Apply opening entitlements; a sold original holding keeps its claim."""
-        updated, identities = units.astype("object").copy(), lives.copy()
+        updated, identities = units.astype("float64").copy(), lives.copy()
         adjustments = []
-        cash = Fraction()
+        cash = 0.0
         for event in corporate_events.itertuples(index=False):
             if pd.Timestamp(event.available_at) > timestamp:
                 continue
-            held = Fraction(updated.get(event.asset_id, 0))
+            held = float(updated.get(event.asset_id, 0))
             relevant_holding = (
                 held and identities.get(event.asset_id) == event.listing_date
             )
@@ -247,7 +523,7 @@ class EquityEntitlements:
                     raise PortfolioTargetBlocked(
                         "portfolio_registration_snapshot_missing"
                     )
-                self.registered[event.event_id] = Fraction()
+                self.registered[event.event_id] = 0.0
                 continue
             if not entitlement:
                 continue
@@ -265,10 +541,8 @@ class EquityEntitlements:
             key = (event.event_id, "effective")
             if key not in self.completed:
                 if event.kind == "cash_dividend":
-                    claim = finite_exact_float(
-                        entitlement * Fraction(event.cash_per_share)
-                    )
-                    if claim is None or claim < 0:
+                    claim = entitlement * event.cash_per_share
+                    if not np.isfinite(claim) or claim < 0:
                         raise PortfolioTargetBlocked(
                             "portfolio_dividend_amount_unrepresentable"
                         )
@@ -280,17 +554,15 @@ class EquityEntitlements:
                             timestamp,
                             stage="effective",
                             phase=phase,
-                            receivable_after=self._receivables.get(
-                                event.asset_id, Fraction()
-                            )
-                            + Fraction(claim),
+                            receivable_after=self.receivables.get(event.asset_id, 0.0)
+                            + float(claim),
                         )
                     )
                 elif event.kind == "stock_distribution":
-                    shares = entitlement * Fraction(event.additional_shares_per_share)
-                    if shares < 0 or (
-                        held and identities.get(event.asset_id) != event.listing_date
-                    ):
+                    shares, rounding_loss = _whole_share_entitlement(
+                        entitlement * float(event.additional_shares_per_share)
+                    )
+                    if held and identities.get(event.asset_id) != event.listing_date:
                         raise PortfolioTargetBlocked("portfolio_held_rights_unproved")
                     identities.loc[event.asset_id] = event.listing_date
                     self._claims[event.event_id] = shares
@@ -302,9 +574,8 @@ class EquityEntitlements:
                             stage="effective",
                             phase=phase,
                             quantity_after=held + shares,
-                            locked_after=self.locked_quantities.get(
-                                event.asset_id, Fraction()
-                            )
+                            quantity_rounding_loss=rounding_loss,
+                            locked_after=self.locked_quantities.get(event.asset_id, 0.0)
                             + shares,
                         )
                     )
@@ -319,7 +590,7 @@ class EquityEntitlements:
             ):
                 claim = self._claims.pop(event.event_id)
                 if event.kind == "cash_dividend":
-                    cash += Fraction(claim)
+                    cash += float(claim)
                     adjustments.append(
                         self._adjustment(
                             event,
@@ -328,11 +599,12 @@ class EquityEntitlements:
                             stage="settlement",
                             phase=phase,
                             cash=claim,
-                            receivable_after=self._receivables[event.asset_id]
-                            - Fraction(claim),
+                            receivable_after=self.receivables[event.asset_id]
+                            - float(claim),
                         )
                     )
                 else:
+                    locked = self.locked_quantities[event.asset_id]
                     adjustments.append(
                         self._adjustment(
                             event,
@@ -340,36 +612,38 @@ class EquityEntitlements:
                             timestamp,
                             stage="unlock",
                             phase=phase,
-                            locked_after=self.locked_quantities[event.asset_id] - claim,
+                            locked_after=locked - claim,
                         )
                     )
                 self.completed.add(key)
         for event in rights_events.itertuples(index=False):
             if event.kind == "quote" or (event.event_id, "rights") in self.completed:
                 continue
-            quantity = Fraction(updated.get(event.asset_id, 0))
+            quantity = float(updated.get(event.asset_id, 0))
             if not quantity or identities.get(event.asset_id) != event.listing_date:
                 continue
             if not event.entitlement_proved:
                 raise PortfolioTargetBlocked("portfolio_held_rights_unproved")
             if self.locked_quantities.get(event.asset_id, 0):
                 raise PortfolioTargetBlocked("portfolio_locked_reorganization_unproved")
-            remainder = quantity * Fraction(event.remaining_old_units_per_old_unit)
+            remainder, rounding_loss = _whole_share_entitlement(
+                quantity * float(event.remaining_old_units_per_old_unit)
+            )
             amount = (
-                finite_exact_float(quantity * Fraction(event.value_per_old_unit))
+                quantity * event.value_per_old_unit
                 if event.kind == "cash_recovery"
                 else 0.0
             )
-            if amount is None:
+            if not np.isfinite(amount):
                 raise PortfolioTargetBlocked(
                     "portfolio_recovery_amount_unrepresentable"
                 )
             target = event.successor_asset_id if event.kind == "conversion" else None
             target_life = event.successor_listing_date if target is not None else None
-            target_quantity = (
-                quantity * Fraction(event.successor_units_per_old_unit)
+            target_quantity, target_rounding_loss = _whole_share_entitlement(
+                quantity * float(event.successor_units_per_old_unit)
                 if target is not None
-                else Fraction()
+                else 0.0
             )
             updated.loc[event.asset_id] = remainder
             if target is not None:
@@ -380,7 +654,7 @@ class EquityEntitlements:
                     raise PortfolioTargetBlocked(
                         "portfolio_simultaneous_lifecycles_unrepresentable"
                     )
-                updated.loc[target] = Fraction(updated.get(target, 0)) + target_quantity
+                updated.loc[target] = float(updated.get(target, 0)) + target_quantity
                 identities.loc[target] = target_life
             adjustments.append(
                 PortfolioRightsAdjustment(
@@ -400,825 +674,260 @@ class EquityEntitlements:
                     phase=phase,
                     receivable_before=self.receivables.get(event.asset_id, 0.0),
                     receivable_after=self.receivables.get(event.asset_id, 0.0),
+                    quantity_rounding_loss=rounding_loss,
+                    target_quantity_rounding_loss=target_rounding_loss,
                 )
             )
             self.completed.add((event.event_id, "rights"))
-            cash += Fraction(amount)
-        result = finite_exact_float(cash)
-        if result is None:
+            cash += float(amount)
+        if not np.isfinite(cash):
             raise PortfolioTargetBlocked("portfolio_recovery_amount_unrepresentable")
-        return updated, identities, result, tuple(adjustments)
+        return updated, identities, cash, tuple(adjustments)
 
 
 @dataclass(frozen=True, slots=True)
 class ExecutionAccounting:
-    """One transition value backed by one canonical per-asset notional ledger."""
+    """One stock transition; quantities are authoritative and cash is shared."""
 
-    _execution_date: date
+    execution_date: date
     _asset_ledger: pd.DataFrame
-    _nav_before: float
-    _pre_trade_cash: float
-    _post_trade_cash: float
+    pre_trade_cash: float
+    post_trade_cash: float
     cost_source_identity: str
     receivable: float = 0.0
-
-    def __post_init__(self) -> None:
-        if not isinstance(self._asset_ledger, pd.DataFrame):
-            raise ValueError("execution_ledger_frame_invalid")
-        ledger = self._asset_ledger.copy(deep=True)
-        if type(self._execution_date) is not date:
-            raise ValueError("execution_ledger_date_invalid")
-        if tuple(ledger.columns) != _LEDGER_COLUMNS:
-            raise ValueError("execution_ledger_columns_invalid")
-        if ledger["asset_id"].duplicated().any():
-            raise ValueError("execution_ledger_asset_keys_invalid")
-        if not ledger["asset_id"].is_monotonic_increasing:
-            raise ValueError("execution_ledger_order_invalid")
-        if not bool(
-            ledger["asset_id"]
-            .map(lambda value: type(value) is str and bool(value))
-            .all()
-        ):
-            raise ValueError("execution_ledger_asset_keys_invalid")
-        if not bool(
-            ledger["execution_date"].map(lambda value: type(value) is date).all()
-        ) or not bool(ledger["execution_date"].eq(self._execution_date).all()):
-            raise ValueError("execution_ledger_date_invalid")
-        if set(ledger["reason"].dropna()) - PORTFOLIO_BLOCK_REASONS:
-            raise ValueError("execution_ledger_reason_invalid")
-        raw_numeric = ledger.loc[
-            :,
-            (
-                "pre_trade_notional",
-                "target_notional",
-                "executed_delta_notional",
-                "post_trade_notional",
-                *PORTFOLIO_LEDGER_COST_COLUMNS,
-            ),
-        ]
-        numeric = raw_numeric.apply(
-            strict_finite_numeric_series, error="execution_ledger_numeric_invalid"
-        )
-        for column in numeric.columns:
-            ledger[column] = numeric[column]
-        if (
-            (
-                numeric.loc[
-                    :, ["pre_trade_notional", "target_notional", "post_trade_notional"]
-                ]
-                < 0.0
-            )
-            .any()
-            .any()
-        ):
-            raise ValueError("execution_ledger_notional_invalid")
-        if (numeric.loc[:, list(PORTFOLIO_LEDGER_COST_COLUMNS)] < 0.0).any().any():
-            raise ValueError("execution_ledger_cost_invalid")
-        receivable = _finite_nonnegative(
-            self.receivable, "execution_receivable_invalid"
-        )
-        nav_before = _finite_nonnegative(self._nav_before, "execution_nav_invalid")
-        tolerance = portfolio_notional_tolerance(nav_before)
-        desired = numeric["target_notional"] - numeric["pre_trade_notional"]
-        executed = numeric["executed_delta_notional"]
-        if (
-            ((desired > 0.0) & (executed < 0.0))
-            | ((desired < 0.0) & (executed > 0.0))
-            | ((desired == 0.0) & (executed != 0.0))
-        ).any() or (executed.abs() > desired.abs() + tolerance).any():
-            raise ValueError("execution_ledger_direction_invalid")
-        if (
-            numeric.loc[:, list(PORTFOLIO_LEDGER_COST_COLUMNS)].gt(0.0).any(axis=1)
-            & executed.eq(0.0)
-        ).any():
-            raise ValueError("execution_ledger_phantom_cost_invalid")
-        if not np.allclose(
-            numeric["pre_trade_notional"].to_numpy(dtype="float64")
-            + numeric["executed_delta_notional"].to_numpy(dtype="float64"),
-            numeric["post_trade_notional"].to_numpy(dtype="float64"),
-            rtol=0.0,
-            atol=tolerance,
-        ):
-            raise ValueError("execution_ledger_state_invalid")
-        mismatch = (
-            numeric["target_notional"] - numeric["post_trade_notional"]
-        ).abs() > tolerance
-        if not bool((ledger["reason"].notna() == mismatch).all()):
-            raise ValueError("execution_ledger_reason_invalid")
-        pre_cash = _finite_nonnegative(self._pre_trade_cash, "execution_cash_invalid")
-        post_cash = _finite_nonnegative(self._post_trade_cash, "execution_cash_invalid")
-        total_cost = float(
-            numeric.loc[:, list(PORTFOLIO_LEDGER_COST_COLUMNS)].sum().sum()
-        )
-        nav_after = float(numeric["post_trade_notional"].sum() + post_cash + receivable)
-        if not np.isclose(
-            numeric["pre_trade_notional"].sum() + pre_cash + receivable,
-            nav_before,
-            rtol=0.0,
-            atol=tolerance,
-        ):
-            raise ValueError("execution_pre_trade_state_invalid")
-        if _portfolio_budget_exceeded(numeric["target_notional"], (nav_before,)):
-            raise ValueError("execution_ledger_notional_invalid")
-        if not np.isclose(nav_after, nav_before - total_cost, rtol=0.0, atol=tolerance):
-            raise ValueError("execution_self_financing_invalid")
-        if type(self.cost_source_identity) is not str or not self.cost_source_identity:
-            raise ValueError("execution_fee_identity_invalid")
-        object.__setattr__(self, "_asset_ledger", ledger)
-        object.__setattr__(self, "_nav_before", nav_before)
-        object.__setattr__(self, "_pre_trade_cash", pre_cash)
-        object.__setattr__(self, "_post_trade_cash", post_cash)
 
     @property
     def asset_ledger(self) -> pd.DataFrame:
         return self._asset_ledger.copy(deep=True)
 
     @property
-    def execution_date(self) -> date:
-        return self._execution_date
-
-    @property
     def nav_before(self) -> float:
-        return float(self._nav_before)
+        return fsum(
+            (
+                *self._asset_ledger.pre_trade_notional,
+                self.pre_trade_cash,
+                self.receivable,
+            )
+        )
 
     @property
     def nav_after(self) -> float:
-        return float(
-            self._asset_ledger["post_trade_notional"].sum()
-            + self._post_trade_cash
-            + self.receivable
+        return fsum(
+            (
+                *self._asset_ledger.post_trade_notional,
+                self.post_trade_cash,
+                self.receivable,
+            )
         )
 
-    @property
-    def pre_trade_cash(self) -> float:
-        return float(self._pre_trade_cash)
 
-    @property
-    def post_trade_cash(self) -> float:
-        return float(self._post_trade_cash)
+def execute_stock_target(
+    orders: pd.DataFrame,
+    *,
+    cash: float,
+    execution_date: date,
+    fee_schedule: FeeSchedule,
+    assumptions: ExecutionAssumptions,
+    receivable: float = 0.0,
+    unquoted_assets: frozenset[str] = frozenset(),
+) -> ExecutionAccounting:
+    """Execute share targets sell-first, with lot rules, T+1 locks and one cash pool.
 
-
-@dataclass(frozen=True)
-class AlphaCalibration:
-    slope: float | None
-    intercept: float | None
-    slope_standard_error: float | None
-    slope_t_statistic: float | None
-    slope_pvalue: float | None
-    slope_ci_low: float | None
-    slope_ci_high: float | None
-    weighted_r2: float | None
-    coverage: float
-    valid_rebalance_dates: int
-    scheduled_rebalance_dates: int
-    undefined_reason: str | None
-
-    @property
-    def status(self) -> str:
-        return "UNDEFINED" if self.undefined_reason else "DEFINED"
-
-    @property
-    def inference_status(self) -> str:
-        return "UNDEFINED" if self.slope_t_statistic is None else "DEFINED"
-
-    @property
-    def inference_reason(self) -> str:
-        return self.undefined_reason or (
-            "alpha_calibration_zero_standard_error"
-            if self.slope_t_statistic is None
-            else ""
+    The indexed frame contains quantity, target_quantity, sellable_quantity,
+    market_type, mark_price, buy_price, sell_price, buy_capacity, sell_capacity,
+    adv, can_enter and can_exit. Capacities are shares; adv is currency turnover.
+    """
+    if (
+        type(execution_date) is not date
+        or not isinstance(orders, pd.DataFrame)
+        or not orders.index.is_unique
+        or any(type(asset) is not str or not asset for asset in orders.index)
+    ):
+        raise ValueError("execution_orders_invalid")
+    cash = _finite_nonnegative(cash, "execution_cash_invalid")
+    receivable = _finite_nonnegative(receivable, "execution_receivable_invalid")
+    frame = orders.sort_index().copy()
+    for column in ("quantity", "target_quantity", "sellable_quantity"):
+        frame[column] = strict_finite_numeric_series(
+            frame[column], error="execution_share_inputs_invalid"
+        ).astype("float64")
+        if frame[column].lt(0).any():
+            raise ValueError("execution_share_inputs_invalid")
+    if (frame.sellable_quantity > frame.quantity).any():
+        raise ValueError("execution_share_inputs_invalid")
+    for column in (
+        "mark_price",
+        "buy_price",
+        "sell_price",
+        "buy_capacity",
+        "sell_capacity",
+        "adv",
+    ):
+        frame[column] = strict_finite_numeric_series(
+            frame[column],
+            error="execution_market_inputs_invalid",
+            allow_null=column != "mark_price",
+        ).astype("float64")
+        if frame[column].lt(0).any():
+            raise ValueError("execution_market_inputs_invalid")
+    for column in ("can_enter", "can_exit"):
+        frame[column] = strict_bool_series(
+            frame[column], error="execution_permission_invalid", allow_null=True
         )
-
-    @property
-    def r2_status(self) -> str:
-        return "UNDEFINED" if self.weighted_r2 is None else "DEFINED"
-
-    @property
-    def r2_reason(self) -> str:
-        return self.undefined_reason or (
-            "alpha_calibration_constant_return" if self.weighted_r2 is None else ""
+    desired = frame.target_quantity - frame.quantity
+    desired_values = desired.astype("float64").to_numpy()
+    sellable = frame.sellable_quantity.map(int).to_numpy(dtype="float64")
+    reasons = np.full(len(frame), None, dtype=object)
+    quantity = np.zeros(len(frame), dtype="float64")
+    costs = np.zeros((len(PORTFOLIO_LEDGER_COST_COLUMNS), len(frame)), dtype="float64")
+    prices = np.where(desired_values > 0, frame.buy_price, frame.sell_price)
+    permissions = frame.can_enter.where(desired_values > 0, frame.can_exit)
+    capacities = np.where(desired_values > 0, frame.buy_capacity, frame.sell_capacity)
+    requested = np.abs(desired_values)
+    active = requested > 0
+    unknown = (
+        permissions.isna().to_numpy()
+        | frame.market_type.isna().to_numpy()
+        | ~np.isfinite(prices)
+        | (prices <= 0)
+    )
+    blocked = ~permissions.fillna(False).to_numpy(dtype=bool)
+    missing_capacity = ~np.isfinite(capacities)
+    unquoted = frame.index.isin(unquoted_assets)
+    reasons[active & missing_capacity] = "adv_unavailable"
+    reasons[active & blocked] = "market_blocked"
+    reasons[active & unknown] = "execution_fact_unknown"
+    reasons[active & unquoted] = "research_unquoted_valuation"
+    eligible = active & ~unknown & ~blocked & ~missing_capacity & ~unquoted
+    markets = np.full(len(frame), None, dtype=object)
+    minimum, increment, maximum = (np.full(len(frame), np.nan) for _ in range(3))
+    markets[eligible], minimum[eligible], increment[eligible], maximum[eligible] = (
+        stock_order_limits(frame.loc[eligible, "market_type"], execution_date)
+    )
+    market_masks = {market: markets == market for market in set(markets[eligible])}
+    prepared = {
+        (market, side): prepare_trade_cost(
+            execution_date, market, side, fee_schedule, assumptions
         )
+        for market in market_masks
+        for side in ("buy", "sell")
+    }
+    adv = frame.adv.to_numpy()
+    candidates = np.where(eligible, np.minimum(requested, capacities), 0.0)
+    selling = desired_values < 0
+    candidates = np.where(selling, np.minimum(candidates, sellable), candidates)
+    for sells in (False, True):
+        mask = eligible & (selling == sells)
+        candidates[mask] = round_stock_orders(
+            candidates[mask],
+            minimum[mask],
+            increment[mask],
+            sellable=sellable[mask] if sells else None,
+        )
+    reasons[eligible & (candidates < requested)] = "quantity_rule"
+    reasons[eligible & (capacities < requested)] = "adv_capacity"
+    reasons[eligible & selling & (sellable < requested) & (sellable <= capacities)] = (
+        "locked_shares"
+    )
 
-    @property
-    def benchmark_only(self) -> bool:
-        return self.undefined_reason is not None or self.slope <= 0.0
+    def trade_costs(units, side):
+        result = np.zeros_like(costs)
+        for market, market_mask in market_masks.items():
+            mask = market_mask & (units > 0)
+            if mask.any():
+                result[:, mask] = prepared[market, side].stock_components(
+                    units[mask],
+                    prices[mask],
+                    adv[mask],
+                    minimum[mask],
+                    maximum[mask],
+                    assumptions.minimum_commission,
+                )
+        return result
 
+    sells = np.where(selling, candidates, 0.0)
+    sale_costs = trade_costs(sells, "sell")
+    proceeds = sells * np.where(sells > 0, prices, 0.0) - sale_costs.sum(axis=0)
+    cash_after_sells = cash
+    # Fund fee-heavy odd-lot exits from available cash and other completed sales.
+    for index in np.argsort(-proceeds, kind="stable"):
+        if sells[index] == 0:
+            continue
+        if fsum((cash_after_sells, proceeds[index])) < 0:
+            reasons[index] = "cash_limit"
+            continue
+        quantity[index] = -sells[index]
+        costs[:, index] = sale_costs[:, index]
+        cash_after_sells = fsum((cash_after_sells, proceeds[index]))
+    cash_after_sells = fsum(
+        (cash, *(-quantity * np.where(quantity != 0, prices, 0.0)), *(-costs.ravel()))
+    )
+    buys = np.where(~selling, candidates, 0.0)
 
-def alpha_calibration_intervals(
-    sessions: pd.DatetimeIndex, schedule: str
-) -> pd.DataFrame:
-    """Pair adjacent planned execution opens using the actual trading calendar."""
-    positions = [
-        index
-        for index in range(len(sessions) - 1)
-        if is_rebalance_session(sessions[index], sessions[index + 1], schedule)
-    ]
-    return pd.DataFrame(
+    def scaled_buys(scale):
+        units = np.zeros(len(frame))
+        mask = buys > 0
+        units[mask] = round_stock_orders(
+            buys[mask] * scale, minimum[mask], increment[mask]
+        )
+        values = trade_costs(units, "buy")
+        spend = fsum((*(units * np.where(units > 0, prices, 0.0)), *values.ravel()))
+        return units, values, spend
+
+    bought, buy_costs, spend = scaled_buys(1.0)
+    if spend > cash_after_sells:
+        low, high = 0.0, 1.0
+        while True:
+            middle = (low + high) / 2.0
+            if middle == low or middle == high:
+                break
+            if scaled_buys(middle)[2] <= cash_after_sells:
+                low = middle
+            else:
+                high = middle
+        bought, buy_costs, spend = scaled_buys(low)
+    cash_limited = bought < buys
+    reasons[cash_limited] = np.where(
+        reasons[cash_limited] == "adv_capacity",
+        "adv_capacity+cash_pro_rata",
+        "cash_pro_rata",
+    )
+    quantity += bought
+    costs += buy_costs
+    executed = quantity.astype("int64")
+    notionals = quantity * np.where(quantity != 0, prices, 0.0)
+    post_cash = fsum((cash, *(-notionals), *(-costs.ravel())))
+    if post_cash < 0:
+        tolerance = portfolio_notional_tolerance(cash_after_sells)
+        if post_cash < -tolerance:
+            raise ValueError("execution_cash_invalid")
+        post_cash = 0.0
+    post_quantities = frame.quantity + executed
+    reasons[_quantity_equal(post_quantities, frame.target_quantity)] = None
+    records = pd.DataFrame(
         {
-            "timestamp": sessions[positions[:-1]],
-            "entry_at": sessions[np.asarray(positions[:-1], dtype=int) + 1],
-            "available_at": sessions[np.asarray(positions[1:], dtype=int) + 1],
+            "execution_date": execution_date,
+            "asset_id": frame.index,
+            "pre_trade_notional": frame.quantity.to_numpy()
+            * frame.mark_price.to_numpy(),
+            "target_notional": frame.target_quantity.to_numpy()
+            * frame.mark_price.to_numpy(),
+            "executed_quantity": executed,
+            "executed_delta_notional": notionals,
+            "post_trade_notional": post_quantities.to_numpy()
+            * frame.mark_price.to_numpy(),
+            "reason": reasons,
+            **dict(zip(PORTFOLIO_LEDGER_COST_COLUMNS, costs, strict=True)),
         }
     )
-
-
-def alpha_calibration_start(sessions: pd.DatetimeIndex, *, as_of) -> pd.Timestamp:
-    """Start of the 252-session decision window on the complete market clock."""
-    axis = pd.DatetimeIndex(sessions)
-    cutoff = pd.Timestamp(as_of).normalize()
-    if (
-        axis.empty
-        or axis.hasnans
-        or not axis.is_unique
-        or not axis.is_monotonic_increasing
-        or pd.isna(cutoff)
-    ):
-        raise ValueError("alpha_calibration_calendar_invalid")
-    end = axis.searchsorted(cutoff, side="right")
-    if not end:
-        raise ValueError("alpha_calibration_calendar_invalid")
-    return axis[max(0, end - 252)]
-
-
-def calibrate_expected_alpha(
-    frame: pd.DataFrame,
-    *,
-    alpha_column: str = "prediction_rank_score",
-    return_column: str = "holding_return",
-    as_of: pd.Timestamp,
-    scheduled_intervals: pd.DataFrame,
-    trading_sessions: pd.DatetimeIndex,
-    minimum_coverage: float = 0.8,
-    minimum_valid_dates: int = 6,
-) -> AlphaCalibration:
-    """Calibrate expected alpha with equal-timestamp weighted pooled OLS."""
-
-    required = {"timestamp", alpha_column, return_column}
-    if not isinstance(frame, pd.DataFrame) or not required.issubset(frame.columns):
-        raise ValueError("alpha_calibration_columns_invalid")
-    if (
-        type(minimum_coverage) is not float
-        or not np.isfinite(minimum_coverage)
-        or not 0.0 < minimum_coverage <= 1.0
-        or type(minimum_valid_dates) is not int
-        or minimum_valid_dates <= 0
-    ):
-        raise ValueError("alpha_calibration_configuration_invalid")
-    dates = pd.to_datetime(frame["timestamp"], errors="raise").dt.normalize()
-    cutoff = pd.Timestamp(as_of).normalize()
-    if pd.isna(cutoff) or set(scheduled_intervals) != {
-        "timestamp",
-        "entry_at",
-        "available_at",
-    }:
-        raise ValueError("alpha_calibration_schedule_invalid")
-    intervals = scheduled_intervals.apply(pd.to_datetime, errors="raise")
-    if (
-        intervals.isna().any().any()
-        or intervals.timestamp.duplicated().any()
-        or not (
-            intervals.timestamp.lt(intervals.entry_at)
-            & intervals.entry_at.lt(intervals.available_at)
-        ).all()
-    ):
-        raise ValueError("alpha_calibration_schedule_invalid")
-    scheduled = pd.DatetimeIndex(
-        intervals.loc[
-            intervals.timestamp.ge(
-                alpha_calibration_start(trading_sessions, as_of=cutoff)
-            )
-            & intervals.available_at.le(cutoff),
-            "timestamp",
-        ]
-    )
-    alpha = strict_real_numeric_series(
-        frame[alpha_column], error="alpha_calibration_numeric_invalid"
-    )
-    returns = strict_real_numeric_series(
-        frame[return_column], error="alpha_calibration_numeric_invalid"
-    )
-    valid = alpha.notna() & returns.notna() & np.isfinite(alpha) & np.isfinite(returns)
-    valid_dates = dates.loc[valid].isin(scheduled)
-    date_count = 0 if scheduled.empty else int(dates.loc[valid & valid_dates].nunique())
-    coverage = date_count / max(1, len(scheduled))
-    enough_coverage = date_count >= minimum_valid_dates and coverage >= minimum_coverage
-
-    def undefined(reason: str) -> AlphaCalibration:
-        return AlphaCalibration(
-            slope=None,
-            intercept=None,
-            slope_standard_error=None,
-            slope_t_statistic=None,
-            slope_pvalue=None,
-            slope_ci_low=None,
-            slope_ci_high=None,
-            weighted_r2=None,
-            coverage=coverage,
-            valid_rebalance_dates=date_count,
-            scheduled_rebalance_dates=len(scheduled),
-            undefined_reason=reason,
-        )
-
-    if not enough_coverage:
-        return undefined("alpha_calibration_insufficient_coverage")
-    selected = valid & valid_dates
-    left = alpha.loc[selected].to_numpy(dtype="float64")
-    right = returns.loc[selected].to_numpy(dtype="float64")
-    _, cluster_codes = np.unique(dates.loc[selected].to_numpy(), return_inverse=True)
-    counts = np.bincount(cluster_codes)
-    cluster_count = len(counts)
-    weights = 1.0 / counts[cluster_codes]
-    # Power-of-two scaling preserves inputs; centering avoids raw-moment cancellation.
-    left_exponent = int(np.frexp(np.max(np.abs(left)))[1])
-    right_exponent = int(np.frexp(np.max(np.abs(right)))[1])
-    left = np.ldexp(left, -left_exponent)
-    right = np.ldexp(right, -right_exponent)
-    left_offset, right_offset = left[0], right[0]
-    left_shift, right_shift = left - left_offset, right - right_offset
-    left_mean = (
-        np.sum(np.bincount(cluster_codes, weights=left_shift) / counts) / cluster_count
-    )
-    right_mean = (
-        np.sum(np.bincount(cluster_codes, weights=right_shift) / counts) / cluster_count
-    )
-    centered_left = left_shift - left_mean
-    centered_right = right_shift - right_mean
-    weighted_left = weights * centered_left
-    total_left = centered_left @ weighted_left
-    if total_left == 0.0:
-        return undefined("alpha_calibration_rank_deficient")
-    slope = (weighted_left @ centered_right) / total_left
-    intercept = right_offset + right_mean - slope * (left_offset + left_mean)
-    fitted = intercept + slope * left
-    residual = right - fitted
-    epsilon = np.finfo(np.float64).eps
-    # Include affine operands, not just their possibly cancelled final value.
-    # These are the same scaled coordinates used for the centered fit above.
-    residual_resolution = (
-        8
-        * epsilon
-        * (
-            np.abs(right)
-            + abs(right_offset)
-            + abs(right_mean)
-            + abs(intercept)
-            + np.abs(fitted)
-            + abs(slope) * (np.abs(left) + abs(left_offset) + abs(left_mean))
-        )
-    )
-    resolved_zero = np.abs(residual) <= residual_resolution
-    residual[resolved_zero] = 0.0
-    residual_resolution[resolved_zero] = 0.0
-    score_terms = centered_left * residual
-    scores = np.bincount(cluster_codes, weights=score_terms)
-    # Propagate only this date's active residual and dot-product rounding bounds.
-    score_resolution = np.bincount(
-        cluster_codes, weights=np.abs(centered_left) * residual_resolution
-    ) + (counts * epsilon / (1 - counts * epsilon)) * np.bincount(
-        cluster_codes, weights=np.abs(score_terms)
-    )
-    scores[np.abs(scores) <= score_resolution] = 0.0
-    influence = scores / counts / total_left
-    scaled_standard_error = np.linalg.norm(influence)
-    slope_value = float(np.ldexp(slope, right_exponent - left_exponent))
-    standard_error = float(
-        np.ldexp(scaled_standard_error, right_exponent - left_exponent)
-    )
-    if slope and slope_value == 0.0:
-        raise ValueError("alpha_calibration_slope_unrepresentable")
-    if scaled_standard_error and standard_error == 0.0:
-        raise ValueError("alpha_calibration_standard_error_unrepresentable")
-    t_statistic = (
-        float(slope / scaled_standard_error) if scaled_standard_error else None
-    )
-    if t_statistic is not None:
-        degrees_freedom = max(1, cluster_count - 2)
-        pvalue = float(2.0 * student_t.sf(abs(t_statistic), df=degrees_freedom))
-        critical = float(student_t.ppf(0.975, df=degrees_freedom))
-        ci_low = slope_value - critical * standard_error
-        ci_high = slope_value + critical * standard_error
-    else:
-        pvalue = ci_low = ci_high = None
-    total_variation = centered_right @ (weights * centered_right)
-    residual_variation = residual @ (weights * residual)
-    return AlphaCalibration(
-        slope=slope_value,
-        intercept=float(np.ldexp(intercept, right_exponent)),
-        slope_standard_error=standard_error,
-        slope_t_statistic=t_statistic,
-        slope_pvalue=pvalue,
-        slope_ci_low=ci_low,
-        slope_ci_high=ci_high,
-        weighted_r2=float(1 - residual_variation / total_variation)
-        if total_variation
-        else None,
-        coverage=coverage,
-        valid_rebalance_dates=date_count,
-        scheduled_rebalance_dates=len(scheduled),
-        undefined_reason=None,
-    )
-
-
-def execute_continuous_target(
-    current_weights: pd.Series,
-    target_weights: pd.Series,
-    *,
-    nav: float,
-    average_daily_volume: pd.Series,
-    can_enter: pd.Series,
-    can_exit: pd.Series,
-    execution_date: date,
-    cost_for_trade: Callable[
-        [date, str, str, float, float, ExecutionAssumptions],
-        TradeCostComponents,
-    ],
-    cost_totals_for_buys: Callable[
-        [tuple[str, ...], np.ndarray, np.ndarray], np.ndarray
-    ],
-    assumptions: ExecutionAssumptions,
-    cost_source_identity: str,
-    unquoted_assets: frozenset[str] = frozenset(),
-    receivable: float = 0.0,
-    locked_notional: pd.Series | None = None,
-    share_quantities: pd.Series | None = None,
-    locked_share_quantities: pd.Series | None = None,
-    execution_prices: pd.Series | None = None,
-) -> ExecutionAccounting:
-    """Execute sell-first, cash-constrained continuous-weight orders."""
-
-    if type(execution_date) is not date:
-        raise ValueError("execution_date_invalid")
-    if not callable(cost_for_trade) or not isinstance(
-        assumptions, ExecutionAssumptions
-    ):
-        raise ValueError("execution_inputs_invalid")
-    nav_value = _finite_nonnegative(nav, "execution_nav_invalid")
-    receivable = _finite_nonnegative(receivable, "execution_receivable_invalid")
-    assets = _canonical_assets(current_weights, target_weights, allow_empty=True)
-    current = _weight_values(current_weights, assets, "current_weights_invalid")
-    target = _weight_values(target_weights, assets, "target_weights_invalid")
-    if current.lt(0.0).any() or target.lt(0.0).any():
-        raise ValueError("execution_weights_invalid")
-    weight_bound = 1.0 + portfolio_notional_tolerance(1.0)
-    if (
-        sum(map(float, current)) > weight_bound
-        or sum(map(float, target)) > weight_bound
-    ):
-        raise ValueError("execution_weights_sum_invalid")
-    tolerance = portfolio_notional_tolerance(nav_value)
-    enter = _bool_values(can_enter, assets, "execution_entry_mask_invalid")
-    exit_ = _bool_values(can_exit, assets, "execution_exit_mask_invalid")
-    if not isinstance(unquoted_assets, frozenset) or not unquoted_assets.issubset(
-        assets
-    ):
-        raise ValueError("execution_unquoted_assets_invalid")
-
-    def blocked_reason(asset, permission):
-        if asset in unquoted_assets:
-            return "research_unquoted_valuation"
-        if pd.isna(permission):
-            return "execution_fact_unknown"
-        if not permission:
-            return "market_blocked"
-        return "adv_unavailable" if pd.isna(adv[asset]) else None
-
-    pre_notional = current * nav_value
-    target_notional = target * nav_value
-    locked = (
-        pd.Series(0.0, index=assets)
-        if locked_notional is None
-        else _weight_values(locked_notional, assets, "execution_locked_invalid")
-    )
-    if locked.lt(0).any() or (locked > pre_notional + tolerance).any():
-        raise ValueError("execution_locked_invalid")
-    exact_sale_limits = None
-    if share_quantities is not None:
-        if execution_prices is None or locked_share_quantities is None:
-            raise ValueError("execution_share_inputs_invalid")
-        exact_sale_limits = {}
-        for asset in assets:
-            quantity = Fraction(share_quantities.get(asset, 0))
-            locked_quantity = Fraction(locked_share_quantities.get(asset, 0))
-            price = Fraction(execution_prices.get(asset, 0))
-            if not 0 <= locked_quantity <= quantity or price < 0:
-                raise ValueError("execution_share_inputs_invalid")
-            exact_limit = (quantity - locked_quantity) * price
-            limit = float(exact_limit)
-            if Fraction(limit) > exact_limit:
-                limit = np.nextafter(limit, -np.inf)
-            exact_sale_limits[asset] = limit
-    elif locked_share_quantities is not None or execution_prices is not None:
-        raise ValueError("execution_share_inputs_invalid")
-    desired = target_notional - pre_notional
-    adv = _asset_values(average_daily_volume, assets, "execution_adv_invalid")
-    participation = assumptions.adv_participation
-    capacity = adv * participation
-    records = {
-        str(asset): _empty_ledger_row(
-            asset, execution_date, pre_notional[asset], target_notional[asset]
-        )
-        for asset in assets
-    }
-    sell_delta = pd.Series(0.0, index=assets, dtype="float64")
-    for asset in assets:
-        desired_delta = float(desired[asset])
-        if desired_delta >= 0.0:
-            continue
-        record = records[str(asset)]
-        if reason := blocked_reason(asset, exit_[asset]):
-            record["reason"] = reason
-            continue
-        amount = min(
-            -desired_delta,
-            float(capacity[asset]),
-            max(0.0, float(pre_notional[asset] - locked[asset])),
-            exact_sale_limits[asset] if exact_sale_limits is not None else np.inf,
-        )
-        cost = None
-        if amount > 0.0:
-            cost = _validated_trade_cost(
-                cost_for_trade,
-                execution_date=execution_date,
-                asset=str(asset),
-                side="sell",
-                notional=amount,
-                adv20=float(adv[asset]),
-                source_identity=cost_source_identity,
-                assumptions=assumptions,
-            )
-        sell_delta[asset] = -amount
-        _update_ledger_row(
-            record,
-            executed_delta=-amount,
-            reason=(
-                "locked_shares"
-                if locked[asset] > 0
-                and amount >= pre_notional[asset] - locked[asset] - tolerance
-                else "adv_capacity"
-            )
-            if amount < -desired_delta - tolerance
-            else None,
-            cost=cost,
-        )
-    pre_trade_cash = fsum((nav_value, -receivable, *(-pre_notional)))
-    if -tolerance <= pre_trade_cash < 0.0:
-        pre_trade_cash = 0.0
-    cash_after_sells = fsum(
-        (
-            pre_trade_cash,
-            *(-sell_delta),
-            *(
-                -record[name]
-                for record in records.values()
-                for name in PORTFOLIO_LEDGER_COST_COLUMNS
-            ),
-        )
-    )
-    if cash_after_sells < -tolerance:
-        raise ValueError("execution_cash_after_sells_invalid")
-
-    buy_candidates: dict[str, float] = {}
-    for asset in assets:
-        desired_delta = float(desired[asset])
-        if desired_delta <= 0.0:
-            continue
-        record = records[str(asset)]
-        if reason := blocked_reason(asset, enter[asset]):
-            record["reason"] = reason
-            continue
-        buy_candidates[str(asset)] = min(desired_delta, float(capacity[asset]))
-
-    buy_assets = tuple(buy_candidates)
-    buy_amounts = np.asarray(tuple(buy_candidates.values()), dtype="float64")
-    buy_adv = adv.reindex(buy_assets).to_numpy(dtype="float64")
-
-    def buy_spend_total(scale: float) -> float:
-        amounts = buy_amounts * scale
-        costs = np.asarray(cost_totals_for_buys(buy_assets, amounts, buy_adv))
-        if (
-            costs.shape != amounts.shape
-            or not np.isfinite(costs).all()
-            or (costs < 0).any()
-        ):
-            raise ValueError("execution_cost_provider_invalid")
-        try:
-            return fsum((*amounts, *costs))
-        except OverflowError:
-            # Every term is nonnegative: this trial exceeds any finite cash.
-            return np.inf
-
-    scale = 0.0
-    if buy_candidates and cash_after_sells > 0.0:
-        if buy_spend_total(1.0) <= cash_after_sells:
-            scale = 1.0
-        else:
-            low, high = 0.0, 1.0
-            for _ in range(80):
-                middle = (low + high) / 2.0
-                if middle == low or middle == high:
-                    break
-                if buy_spend_total(middle) <= cash_after_sells:
-                    low = middle
-                else:
-                    high = middle
-            scale = low
-    buy_delta = pd.Series(0.0, index=assets, dtype="float64")
-    for asset, candidate in buy_candidates.items():
-        amount = candidate * scale
-        cost = None
-        if amount > 0.0:
-            cost = _validated_trade_cost(
-                cost_for_trade,
-                execution_date=execution_date,
-                asset=asset,
-                side="buy",
-                notional=amount,
-                adv20=float(adv[asset]),
-                source_identity=cost_source_identity,
-                assumptions=assumptions,
-            )
-        buy_delta[asset] = amount
-        target_delta = float(desired[asset])
-        blocked = amount < target_delta - tolerance
-        if candidate == 0.0 or (
-            candidate < target_delta - tolerance and scale >= 1.0 - 1e-15
-        ):
-            reason = "adv_capacity"
-        elif candidate < target_delta - tolerance and blocked:
-            reason = "adv_capacity+cash_pro_rata"
-        elif candidate < target_delta - tolerance:
-            reason = "adv_capacity"
-        elif blocked:
-            reason = "cash_pro_rata"
-        else:
-            reason = None
-        _update_ledger_row(
-            records[asset],
-            executed_delta=amount,
-            reason=reason,
-            cost=cost,
-        )
-    total_cost = fsum(
-        record[name]
-        for record in records.values()
-        for name in PORTFOLIO_LEDGER_COST_COLUMNS
-    )
-    # Reconcile cash from the same component amounts that become native flows.
-    # Repeated float accumulation loses NAV ULPs as the number of fills grows.
-    post_trade_cash = fsum(
-        (
-            pre_trade_cash,
-            *(-sell_delta),
-            *(-buy_delta),
-            *(
-                -record[name]
-                for record in records.values()
-                for name in PORTFOLIO_LEDGER_COST_COLUMNS
-            ),
-        )
-    )
-    if -tolerance <= post_trade_cash < 0.0:
-        post_trade_cash = 0.0
-    post_trade = pre_notional + sell_delta + buy_delta
-    nav_after = float(post_trade.sum() + post_trade_cash + receivable)
-    expected_nav_after = nav_value - total_cost
-    if post_trade_cash < -tolerance or not np.isfinite(nav_after) or nav_after < 0.0:
-        raise ValueError("execution_cash_invalid")
-    if not np.isclose(nav_after, expected_nav_after, rtol=0.0, atol=tolerance):
-        raise ValueError("execution_self_financing_invalid")
-    for asset in assets:
-        record = records[str(asset)]
-        record["post_trade_notional"] = float(post_trade[asset])
-        if abs(record["target_notional"] - record["post_trade_notional"]) <= tolerance:
-            record["reason"] = None
-    ledger = pd.DataFrame.from_records(
-        [records[str(asset)] for asset in assets],
-        columns=_LEDGER_COLUMNS,
-    )
     return ExecutionAccounting(
-        _execution_date=execution_date,
-        _asset_ledger=ledger,
-        _nav_before=nav_value,
-        _pre_trade_cash=pre_trade_cash,
-        _post_trade_cash=post_trade_cash,
-        cost_source_identity=cost_source_identity,
-        receivable=receivable,
-    )
-
-
-def _empty_ledger_row(
-    asset: str,
-    execution_date: date,
-    pre_trade_notional: float,
-    target_notional: float,
-) -> dict[str, object]:
-    return {
-        "execution_date": execution_date,
-        "asset_id": asset,
-        "pre_trade_notional": float(pre_trade_notional),
-        "target_notional": float(target_notional),
-        "executed_delta_notional": 0.0,
-        "post_trade_notional": float(pre_trade_notional),
-        "reason": None,
-        **{column: 0.0 for column in PORTFOLIO_LEDGER_COST_COLUMNS},
-    }
-
-
-def _update_ledger_row(
-    record: dict[str, object],
-    *,
-    executed_delta: float,
-    reason: str | None,
-    cost: TradeCostComponents | None,
-) -> None:
-    record["executed_delta_notional"] = float(executed_delta)
-    record["reason"] = reason
-    if cost is not None:
-        for column in PORTFOLIO_LEDGER_COST_COLUMNS:
-            record[column] = float(getattr(cost, column))
-
-
-def _canonical_assets(
-    *values: pd.Series,
-    allow_empty: bool = False,
-) -> pd.Index:
-    if not values or any(
-        not isinstance(value, pd.Series)
-        or not value.index.is_unique
-        or any(type(asset) is not str or not asset for asset in value.index)
-        for value in values
-    ):
-        raise ValueError("asset_index_invalid")
-    labels = {asset for value in values for asset in value.index}
-    if not labels and not allow_empty:
-        raise ValueError("asset_index_invalid")
-    return pd.Index(sorted(labels), dtype="string")
-
-
-def _weight_values(values: pd.Series, assets: pd.Index, error: str) -> pd.Series:
-    result = values.reindex(assets, fill_value=0.0)
-    return _numeric_series(result, assets, error)
-
-
-def _numeric_series(values: pd.Series, assets: pd.Index, error: str) -> pd.Series:
-    return strict_finite_numeric_series(values.reindex(assets), error=error)
-
-
-def _asset_values(
-    values: pd.Series,
-    assets: pd.Index,
-    error: str,
-) -> pd.Series:
-    if not isinstance(values, pd.Series) or not values.index.is_unique:
-        raise ValueError(error)
-    result = strict_finite_numeric_series(
-        values.reindex(assets), error=error, allow_null=True
-    ).astype("float64")
-    if result.lt(0.0).any():
-        raise ValueError(error)
-    return result
-
-
-def _bool_values(values: pd.Series, assets: pd.Index, error: str) -> pd.Series:
-    if (
-        not isinstance(values, pd.Series)
-        or not values.index.is_unique
-        or not pd.api.types.is_bool_dtype(values)
-        or any(type(asset) is not str or not asset for asset in values.index)
-    ):
-        raise ValueError(error)
-    if not assets.isin(values.index).all():
-        raise ValueError(error)
-    return values.reindex(assets).astype("boolean")
-
-
-def _validated_trade_cost(
-    cost_for_trade: Callable[
-        [date, str, str, float, float, ExecutionAssumptions],
-        TradeCostComponents,
-    ],
-    *,
-    execution_date: date,
-    asset: str,
-    side: str,
-    notional: float,
-    adv20: float,
-    source_identity: str,
-    assumptions: ExecutionAssumptions,
-) -> TradeCostComponents:
-    value = cost_for_trade(
         execution_date,
-        asset,
-        side,
-        notional,
-        adv20,
-        assumptions,
+        records,
+        cash,
+        post_cash,
+        fee_schedule.content_identity,
+        receivable,
     )
-    if not isinstance(value, TradeCostComponents):
-        raise ValueError("execution_cost_provider_invalid")
-    if value.source_identity != source_identity or value.notional != notional:
-        raise ValueError("execution_cost_provider_identity_mismatch")
-    return value
 
 
 def _finite_nonnegative(value: float, error: str) -> float:
@@ -1267,8 +976,8 @@ def portfolio_interval_economics(batch: PortfolioLedgerBatch) -> dict[str, objec
         fsum(after.values()),
         fsum(end.values()),
     )
-    costs = -sum(
-        Fraction(row.amount)
+    costs = -fsum(
+        row.amount
         for row in batch.cashflows
         if row.kind in PORTFOLIO_LEDGER_COST_COLUMNS
     )
@@ -1286,14 +995,14 @@ def portfolio_interval_economics(batch: PortfolioLedgerBatch) -> dict[str, objec
     traded_quantities, executed = {}, {}
     for trade in batch.trades:
         asset = trade.asset_id
-        traded_quantities[asset] = traded_quantities.get(asset, 0) + Fraction(
+        traded_quantities[asset] = traded_quantities.get(asset, 0) + float(
             trade.quantity
         )
         executed[asset] = executed.get(asset, 0.0) + trade.notional
     rights_change = sum(
         float(
-            (Fraction(post[asset].quantity) - traded_quantities.get(asset, 0))
-            * Fraction(post[asset].mark_price)
+            (float(post[asset].quantity) - traded_quantities.get(asset, 0))
+            * float(post[asset].mark_price)
         )
         + post[asset].receivable
         - initial[asset].value
@@ -1306,7 +1015,7 @@ def portfolio_interval_economics(batch: PortfolioLedgerBatch) -> dict[str, objec
     )
     if not np.isclose(
         a,
-        b + rights_change - float(costs),
+        b + rights_change - costs,
         rtol=0,
         atol=max(tolerance, portfolio_notional_tolerance(a)),
     ):
@@ -1322,32 +1031,27 @@ def portfolio_interval_economics(batch: PortfolioLedgerBatch) -> dict[str, objec
     def ratio(numerator, denominator):
         if denominator == 0:
             return np.nan
-        value = finite_exact_float(Fraction(numerator) / Fraction(denominator))
-        return np.nan if value is None else value
+        value = numerator / denominator
+        return value if np.isfinite(value) else np.nan
 
     net_pnl = cash_equity_pnl(
         cash_equity_positions(row for row in batch.valuations if row.phase == "before"),
         cash_equity_positions(row for row in batch.valuations if row.phase == "end"),
         batch.cashflows,
-        batch.rights_adjustments,
     )
     turnover = (
-        sum((abs(Fraction(value)) for value in executed.values()), Fraction())
-        + abs(sum((Fraction(value) for value in executed.values()), Fraction()))
+        fsum(abs(value) for value in executed.values()) + abs(fsum(executed.values()))
     ) / 2
     requested_stock = [
-        Fraction(target[asset])
-        - Fraction(value.share_value)
-        + Fraction(executed.get(asset, 0.0))
+        float(target[asset])
+        - float(value.share_value)
+        + float(executed.get(asset, 0.0))
         for asset, value in post.items()
         if asset != PORTFOLIO_CASH_ASSET_ID
     ]
     # Requests are measured at the execution open, after nontrade rights changes.
     # The cash leg offsets net stock requests; receivables are never traded cash.
-    requested = (
-        sum(map(abs, requested_stock), Fraction())
-        + abs(sum(requested_stock, Fraction()))
-    ) / 2
+    requested = (fsum(map(abs, requested_stock)) + abs(fsum(requested_stock))) / 2
     return {
         "entry_at": entry,
         "end_at": endpoint,
@@ -1356,7 +1060,7 @@ def portfolio_interval_economics(batch: PortfolioLedgerBatch) -> dict[str, objec
         "cash_post": after[PORTFOLIO_CASH_ASSET_ID],
         "cash_weight_post": ratio(after[PORTFOLIO_CASH_ASSET_ID], a),
         "nav_end": e,
-        "gross_return": ratio(net_pnl + Fraction(costs), b),
+        "gross_return": ratio(net_pnl + costs, b),
         "net_return": ratio(net_pnl, b),
         "cost_drag": ratio(costs, b),
         "target_turnover": 0.5 * sum(abs(value) for value in decision.values())
@@ -1365,96 +1069,3 @@ def portfolio_interval_economics(batch: PortfolioLedgerBatch) -> dict[str, objec
         "requested_turnover": ratio(requested, b),
         "realized_turnover": ratio(turnover, b),
     }
-
-
-def alpha_interval_semantics(rebalance_schedule):
-    """Only the scientific return horizon, independent of candidate identity."""
-    if (
-        type(rebalance_schedule) is not str
-        or rebalance_schedule not in REBALANCE_SCHEDULES
-    ):
-        raise ValueError("unsupported_rebalance_schedule")
-    return {
-        "rebalance_schedule": rebalance_schedule,
-        "return_convention": (
-            "next_execution_open_to_following_rebalance_execution_open"
-        ),
-        "calendar_convention": "a_share_unified_trading_sessions",
-    }
-
-
-def frozen_alpha_calibration(payload, *, cutoff, selection_group, rebalance_schedule):
-    """Validate the final validation calibration bound to its actual group inputs."""
-    if (
-        type(payload) is not dict
-        or set(payload)
-        != {
-            "schema_id",
-            "selection_group",
-            "cutoff",
-            "inputs",
-            "calibration",
-            "interval_semantics",
-        }
-        or (
-            payload["interval_semantics"]
-            != alpha_interval_semantics(rebalance_schedule)
-            or payload["schema_id"] != "qrp-final-alpha-calibration"
-            or payload["selection_group"] != selection_group
-            or pd.Timestamp(payload["cutoff"]) != pd.Timestamp(cutoff)
-            or (type(payload["calibration"]) is not dict)
-            or (
-                set(payload["calibration"])
-                != {field.name for field in fields(AlphaCalibration)}
-            )
-        )
-    ):
-        raise ValueError("test_alpha_calibration_binding_invalid")
-    values = payload["calibration"]
-    calibration = AlphaCalibration(**values)
-    if calibration.status != "DEFINED":
-        raise PortfolioTargetBlocked("test_alpha_calibration_undefined")
-    if calibration.valid_rebalance_dates < 6 or calibration.coverage < 0.8:
-        raise PortfolioTargetBlocked("test_alpha_calibration_insufficient")
-    required = ("slope", "intercept", "slope_standard_error", "coverage")
-    if any(
-        type(values[name]) not in {int, float} or not np.isfinite(values[name])
-        for name in required
-    ):
-        raise ValueError("test_alpha_calibration_statistics_invalid")
-    if (
-        calibration.slope_standard_error < 0
-        or not 0 <= calibration.coverage <= 1
-        or type(calibration.valid_rebalance_dates) is not int
-        or (type(calibration.scheduled_rebalance_dates) is not int)
-        or (calibration.scheduled_rebalance_dates < calibration.valid_rebalance_dates)
-    ):
-        raise ValueError("test_alpha_calibration_statistics_invalid")
-    optional = (
-        "slope_t_statistic",
-        "slope_pvalue",
-        "slope_ci_low",
-        "slope_ci_high",
-        "weighted_r2",
-    )
-    if any(
-        values[name] is not None
-        and (type(values[name]) not in {int, float} or not np.isfinite(values[name]))
-        for name in optional
-    ):
-        raise ValueError("test_alpha_calibration_statistics_invalid")
-    if (
-        (calibration.slope_standard_error == 0)
-        != (calibration.slope_t_statistic is None)
-        or len({values[name] is None for name in optional[:4]}) != 1
-        or (
-            calibration.slope_pvalue is not None
-            and (not 0 <= calibration.slope_pvalue <= 1)
-        )
-        or (
-            calibration.slope_ci_low is not None
-            and calibration.slope_ci_low > calibration.slope_ci_high
-        )
-    ):
-        raise ValueError("test_alpha_calibration_statistics_invalid")
-    return (calibration, payload["cutoff"])

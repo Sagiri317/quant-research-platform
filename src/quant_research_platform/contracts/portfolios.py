@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, replace
-from fractions import Fraction
-from math import fma, fsum, isclose, isfinite, ulp
+from math import fsum, isclose, isfinite
 from typing import Literal
 
 import pandas as pd
@@ -57,6 +56,8 @@ PORTFOLIO_ECONOMIC_SUMMARY_FIELDS = frozenset(
         "fill_events",
         "fill_quantity",
         "fill_quantity_reason",
+        "equity_rounding_pnl",
+        "equity_rounding_pnl_reason",
         "valuation_timestamp_ns",
     }
 )
@@ -74,6 +75,8 @@ PORTFOLIO_BLOCK_REASONS = frozenset(
         "adv_capacity",
         "cash_pro_rata",
         "adv_capacity+cash_pro_rata",
+        "quantity_rule",
+        "cash_limit",
     }
 )
 PORTFOLIO_DECISION_REASONS = frozenset(
@@ -131,7 +134,7 @@ class ExecutedTrade:
     order_id: str
     timestamp_ns: int
     asset_id: str
-    quantity: float | Fraction
+    quantity: float
     notional: float
 
 
@@ -150,17 +153,17 @@ class PortfolioValuation:
     timestamp_ns: int
     asset_id: str
     phase: Literal["before", "after", "end"]
-    quantity: float | Fraction
+    quantity: float
     value: float
-    mark_price: float | Fraction = 1.0
+    mark_price: float = 1.0
     lifecycle_id: str | None = None
     receivable: float = 0.0
-    locked_quantity: float | Fraction = 0.0
+    locked_quantity: float = 0.0
 
     @property
     def share_value(self) -> float:
         """Raw-share notional for cash-equity consumers, excluding receivables."""
-        return float(Fraction(self.quantity) * Fraction(self.mark_price))
+        return self.quantity * self.mark_price
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,21 +183,23 @@ class PortfolioRightsAdjustment:
     timestamp_ns: int
     asset_id: str
     lifecycle_id: str
-    quantity_before: float | Fraction
-    quantity_after: float | Fraction
+    quantity_before: float
+    quantity_after: float
     cash_amount: float
     target_asset_id: str | None
     target_lifecycle_id: str | None
-    target_quantity: float | Fraction
+    target_quantity: float
     evidence_identity: str
     kind: str = "recovery"
     phase: Literal["after", "end"] = "after"
-    entitlement_quantity: float | Fraction = 0.0
+    entitlement_quantity: float = 0.0
     receivable_before: float = 0.0
     receivable_after: float = 0.0
-    locked_quantity_before: float | Fraction = 0.0
-    locked_quantity_after: float | Fraction = 0.0
+    locked_quantity_before: float = 0.0
+    locked_quantity_after: float = 0.0
     entitlement_record_at_ns: int | None = None
+    quantity_rounding_loss: float = 0.0
+    target_quantity_rounding_loss: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,6 +244,8 @@ class PortfolioLedgerBatch:
                     "locked_quantity_before",
                     "locked_quantity_after",
                     "entitlement_quantity",
+                    "quantity_rounding_loss",
+                    "target_quantity_rounding_loss",
                 ),
             ),
         ):
@@ -251,18 +258,6 @@ class PortfolioLedgerBatch:
                     value = getattr(row, name)
                     if value is None and name != "number":
                         raise ValueError("portfolio_ledger_numeric_invalid")
-                    if name in {
-                        "quantity",
-                        "quantity_before",
-                        "quantity_after",
-                        "target_quantity",
-                        "mark_price",
-                        "locked_quantity",
-                        "locked_quantity_before",
-                        "locked_quantity_after",
-                        "entitlement_quantity",
-                    } and isinstance(value, Fraction):
-                        continue
                     if value is not None and (
                         isinstance(value, bool)
                         or not isinstance(value, int | float)
@@ -319,18 +314,8 @@ class PortfolioLedgerBatch:
                 type(row.lifecycle_id) is not str or not row.lifecycle_id
             ):
                 raise ValueError("portfolio_ledger_lifecycle_invalid")
-            try:
-                expected = (
-                    float(
-                        row.quantity * Fraction(row.mark_price)
-                        + Fraction(row.receivable)
-                    )
-                    if isinstance(row.quantity, Fraction)
-                    else fma(row.quantity, row.mark_price, row.receivable)
-                )
-            except OverflowError:
-                raise ValueError("portfolio_ledger_valuation_invalid") from None
-            tolerance = ulp(row.value) + ulp(expected)
+            expected = row.quantity * row.mark_price + row.receivable
+            tolerance = portfolio_notional_tolerance(expected)
             if (
                 row.receivable < 0
                 or row.locked_quantity < 0
@@ -381,9 +366,6 @@ class PortfolioLedgerBatch:
         lives = {asset: value.lifecycle_id for asset, value in before.items()}
         receivables = {asset: value.receivable for asset, value in before.items()}
         locked = {asset: value.locked_quantity for asset, value in before.items()}
-        trade_quantities = defaultdict(list)
-        for trade in self.trades:
-            trade_quantities[trade.asset_id].append(abs(trade.quantity))
         event_ids = set()
         covered_flows = set()
         for phase, prior, current in (("after", before, after), ("end", after, end)):
@@ -426,6 +408,12 @@ class PortfolioLedgerBatch:
                     or event.quantity_after < 0
                     or event.cash_amount < 0
                     or event.target_quantity < 0
+                    or not 0 <= event.quantity_rounding_loss < 1
+                    or not 0 <= event.target_quantity_rounding_loss < 1
+                    or (
+                        event.quantity_rounding_loss
+                        and event.kind not in {"stock_distribution", "recovery"}
+                    )
                     or event.entitlement_quantity < 0
                     or event.receivable_before < 0
                     or event.receivable_after < 0
@@ -461,7 +449,11 @@ class PortfolioLedgerBatch:
                         not in expected_stages[event.kind]
                     ):
                         raise ValueError("portfolio_entitlement_stage_invalid")
-                    if event.target_asset_id is not None or event.target_quantity:
+                    if (
+                        event.target_asset_id is not None
+                        or event.target_quantity
+                        or event.target_quantity_rounding_loss
+                    ):
                         raise ValueError("portfolio_rights_conversion_invalid")
                     if event.entitlement_quantity <= 0:
                         raise ValueError("portfolio_registration_entitlement_invalid")
@@ -544,6 +536,7 @@ class PortfolioLedgerBatch:
                     if (
                         event.target_lifecycle_id is not None
                         or event.target_quantity != 0
+                        or event.target_quantity_rounding_loss != 0
                     ):
                         raise ValueError("portfolio_rights_conversion_invalid")
                 else:
@@ -551,7 +544,8 @@ class PortfolioLedgerBatch:
                     if (
                         target not in assets
                         or not event.target_lifecycle_id
-                        or event.target_quantity <= 0
+                        or event.target_quantity + event.target_quantity_rounding_loss
+                        <= 0
                         or (
                             quantities[target] != 0
                             and lives[target] != event.target_lifecycle_id
@@ -559,7 +553,7 @@ class PortfolioLedgerBatch:
                     ):
                         raise ValueError("portfolio_rights_conversion_invalid")
                     quantities[target] = (
-                        Fraction(quantities[target]) + event.target_quantity
+                        float(quantities[target]) + event.target_quantity
                     )
                     lives[target] = event.target_lifecycle_id
             if phase == "after":
@@ -573,7 +567,6 @@ class PortfolioLedgerBatch:
                 if not _quantity_equal(
                     quantities[asset],
                     current[asset].quantity,
-                    *trade_quantities[asset],
                 ):
                     raise ValueError("portfolio_ledger_position_reconciliation_invalid")
                 if quantities[asset] == 0 and current[asset].quantity == 0:
@@ -613,39 +606,17 @@ class PortfolioLedgerBatch:
 
 
 def portfolio_notional_tolerance(nav: float) -> float:
-    return abs(nav) * (ulp(1.0) * 512.0)
+    """Currency tolerance for independently accumulated portfolio amounts."""
+    return max(1e-8, abs(nav) * 1e-12)
 
 
 def _portfolio_budget_exceeded(notionals, budget_terms) -> bool:
-    notionals, budget_terms = tuple(notionals), tuple(budget_terms)
     requested, budget = fsum(notionals), fsum(budget_terms)
-    if budget == 0.0:
-        return requested > 0.0
-    # Weight aggregation, amount conversion and both monetary sums round separately.
-    rounding = (
-        abs(budget) * (ulp(1.0) / 2)
-        + fsum(ulp(value) for value in (*notionals, *budget_terms, requested, budget))
-        / 2
-    )
-    return requested - budget > portfolio_notional_tolerance(budget) + rounding
+    return requested - budget > portfolio_notional_tolerance(budget)
 
 
-def _quantity_tolerance(*quantities: float | Fraction) -> float:
-    return (
-        max(
-            (ulp(value) for value in quantities if not isinstance(value, Fraction)),
-            default=0.0,
-        )
-        * 512.0
-    )
-
-
-def _quantity_equal(left, right, *scales):
-    if isinstance(left, Fraction) or isinstance(right, Fraction):
-        return Fraction(left) == Fraction(right)
-    return isclose(
-        left, right, rel_tol=0.0, abs_tol=_quantity_tolerance(left, right, *scales)
-    )
+def _quantity_equal(left, right):
+    return abs(left - right) <= 1e-9 + 1e-12 * abs(right)
 
 
 def validate_portfolio_transition(
@@ -765,8 +736,7 @@ def validate_portfolio_transition(
                 if event.phase == "after"
             )
             executable_value = float(
-                (Fraction(initial.quantity) + rights_quantity)
-                * Fraction(post.mark_price)
+                (float(initial.quantity) + rights_quantity) * float(post.mark_price)
             )
             for name in ("alpha_valid_dates", "alpha_scheduled_dates"):
                 diagnostic = diagnostics.get(name)
@@ -832,8 +802,10 @@ def validate_portfolio_transition(
                     or (desired < 0 and executed > 0)
                     or (desired == 0 and executed != 0)
                     or abs(executed) > abs(desired) + tolerance
-                    or (abs(target.number - post.share_value) > tolerance)
-                    != (reason is not None)
+                    or (
+                        abs(target.number - post.share_value) > tolerance
+                        and reason is None
+                    )
                 ):
                     raise ValueError("portfolio_ledger_direction_invalid")
         if any(
@@ -864,7 +836,7 @@ def validate_portfolio_transition(
             ) or any(
                 not isclose(
                     trade.notional,
-                    float(Fraction(trade.quantity) * Fraction(post.mark_price)),
+                    trade.quantity * post.mark_price,
                     rel_tol=0.0,
                     abs_tol=tolerance,
                 )
@@ -1010,7 +982,7 @@ class PortfolioCandidateSpec:
 
 @dataclass(frozen=True, slots=True)
 class ExecutionAssumptions:
-    """Protocol-owned continuous execution parameters.
+    """Stock execution parameters and explicit broker minimum commission.
 
     Statutory commission, stamp duty, and transfer fees are supplied by the
     market fee schedule; they are deliberately not duplicated here.
@@ -1021,6 +993,7 @@ class ExecutionAssumptions:
     impact_bps: float
     adv_participation: float
     adv_sensitivities: tuple[float, ...]
+    minimum_commission: float = 5.0
 
     def __post_init__(self) -> None:
         scalar_values = (
@@ -1028,6 +1001,7 @@ class ExecutionAssumptions:
             self.slippage_bps,
             self.impact_bps,
             self.adv_participation,
+            self.minimum_commission,
         )
         if any(
             isinstance(value, bool) or not isinstance(value, int | float)
@@ -1038,8 +1012,8 @@ class ExecutionAssumptions:
             strict_finite_float(value, error="execution_assumptions_invalid")
             for value in scalar_values
         )
-        initial_nav, slippage_bps, impact_bps, participation = numeric_values
-        if initial_nav <= 0.0 or slippage_bps < 0.0 or impact_bps < 0.0:
+        initial_nav, slippage_bps, impact_bps, participation, minimum = numeric_values
+        if initial_nav <= 0.0 or min(slippage_bps, impact_bps, minimum) < 0.0:
             raise ValueError("execution_assumptions_invalid")
         if participation <= 0.0 or participation > 1.0:
             raise ValueError("execution_assumptions_invalid")
@@ -1066,6 +1040,7 @@ class ExecutionAssumptions:
         object.__setattr__(self, "impact_bps", impact_bps)
         object.__setattr__(self, "adv_participation", participation)
         object.__setattr__(self, "adv_sensitivities", sensitivities)
+        object.__setattr__(self, "minimum_commission", minimum)
 
 
 @dataclass(frozen=True, slots=True)

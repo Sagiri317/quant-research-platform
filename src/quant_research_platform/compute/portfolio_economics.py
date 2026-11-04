@@ -1,61 +1,36 @@
-"""Exact economic reduction shared by portfolio producers and artifact readers."""
+"""Economic reduction shared by portfolio producers and artifact readers."""
 
-from fractions import Fraction
+from math import fsum, isfinite
 
 from quant_research_platform.contracts.portfolios import PORTFOLIO_CASH_ASSET_ID
-from quant_research_platform.contracts.validation import finite_exact_float
 
 
 def cash_equity_positions(rows):
-    """Exact raw-share and receivable values before local cancellation."""
     return {
-        row.asset_id: Fraction(row.quantity) * Fraction(row.mark_price)
-        + Fraction(row.receivable)
+        row.asset_id: row.quantity * row.mark_price + row.receivable
         for row in rows
         if row.asset_id != PORTFOLIO_CASH_ASSET_ID
     }
 
 
-def cash_equity_pnl(previous, current, cashflows, rights_adjustments=()):
-    """Cancel each asset's raw-price/share changes and flows before rounding."""
-    changes = {
-        asset: current.get(asset, 0) - previous.get(asset, 0)
-        for asset in current.keys() | previous.keys()
-    }
-    total = Fraction()
-    for flow in cashflows:
-        if flow.kind.endswith("_cost"):
-            total += Fraction(flow.amount)
-        else:
-            changes[flow.asset_id] = changes.get(flow.asset_id, 0) + Fraction(
-                flow.amount
-            )
-    converted = {
-        asset
-        for event in rights_adjustments
-        if event.target_asset_id is not None
-        for asset in (event.asset_id, event.target_asset_id)
-    }
-    conversion_change = sum((changes.pop(asset, 0) for asset in converted), Fraction())
-    for change in (*changes.values(), conversion_change):
-        value = finite_exact_float(change)
-        if value is None:
-            raise ValueError("portfolio_pnl_unrepresentable")
-        # Monetary increments have bounded dyadic denominators across assets.
-        total += Fraction(value)
-    return total
+def cash_equity_pnl(previous, current, cashflows):
+    """Net change in stock claims plus cash flows, without subtracting total NAVs."""
+    return fsum(
+        (
+            *current.values(),
+            *(-value for value in previous.values()),
+            *(flow.amount for flow in cashflows),
+        )
+    )
 
 
 class _LedgerEconomics:
-    """Accumulate economic facts without subtracting rounded capital or totals."""
-
     def __init__(self, capital):
         self.capital = capital
         self.positions = None
-        self.totals = {
-            name: Fraction()
-            for name in ("net_pnl", "fees", "turnover", "fill_quantity")
-        }
+        self.totals = dict.fromkeys(
+            ("net_pnl", "fees", "turnover", "fill_quantity", "equity_rounding_pnl"), 0.0
+        )
         self.fill_events = 0
         self.timestamp_ns = 0
 
@@ -66,22 +41,40 @@ class _LedgerEconomics:
             self.positions = cash_equity_positions(
                 row for row in batch.valuations if row.phase == "before"
             )
-        increment = dict.fromkeys(self.totals, 0)
-        increment["net_pnl"] = cash_equity_pnl(
-            self.positions, current, batch.cashflows, batch.rights_adjustments
+        increment = {
+            "net_pnl": cash_equity_pnl(self.positions, current, batch.cashflows),
+            "fees": -fsum(
+                row.amount for row in batch.cashflows if row.kind.endswith("_cost")
+            ),
+            "turnover": fsum(abs(row.notional) for row in batch.trades),
+            "fill_quantity": fsum(abs(row.quantity) for row in batch.trades),
+        }
+        marks = (
+            {(row.phase, row.asset_id): row for row in batch.valuations}
+            if batch.rights_adjustments
+            else {}
         )
+        rounding_values = []
+        for event in batch.rights_adjustments:
+            for asset, lifecycle, loss in (
+                (event.asset_id, event.lifecycle_id, event.quantity_rounding_loss),
+                (
+                    event.target_asset_id,
+                    event.target_lifecycle_id,
+                    event.target_quantity_rounding_loss,
+                ),
+            ):
+                if loss:
+                    value = marks[event.phase, asset]
+                    rounding_values.append(
+                        -loss * value.mark_price
+                        if value.mark_price > 0 and value.lifecycle_id == lifecycle
+                        else float("nan")
+                    )
+        increment["equity_rounding_pnl"] = fsum(rounding_values)
         self.positions = current
-        for row in batch.cashflows:
-            if row.amount:
-                amount = Fraction(row.amount)
-                if row.kind.endswith("_cost"):
-                    increment["fees"] -= amount
-        for row in batch.trades:
-            increment["turnover"] += abs(Fraction(row.notional))
-            increment["fill_quantity"] += abs(Fraction(row.quantity))
         for name, amount in increment.items():
-            if amount:
-                self.totals[name] += amount
+            self.totals[name] = fsum((self.totals[name], amount))
         increment["fill_events"] = len(batch.trades)
         self.fill_events += len(batch.trades)
         self.timestamp_ns = max(row.timestamp_ns for row in end)
@@ -89,26 +82,22 @@ class _LedgerEconomics:
 
     def summary(self):
         net, fees = (self.totals[name] for name in ("net_pnl", "fees"))
-        fill_quantity = finite_exact_float(self.totals["fill_quantity"])
-        capital_return = finite_exact_float(
-            net / Fraction(self.capital.initial_capital)
-        )
+        capital_return = net / self.capital.initial_capital
         return {
-            **{
-                name: float(value)
-                for name, value in self.totals.items()
-                if name != "fill_quantity"
-            },
-            "fill_quantity": fill_quantity,
-            "fill_quantity_reason": "nonfinite_result"
-            if fill_quantity is None
+            **self.totals,
+            "equity_rounding_pnl": self.totals["equity_rounding_pnl"]
+            if isfinite(self.totals["equity_rounding_pnl"])
             else None,
-            "gross_pnl": float(net + fees),
-            "nav": float(Fraction(self.capital.initial_capital) + net),
-            "capital_return": capital_return,
-            "capital_return_reason": "nonfinite_result"
-            if capital_return is None
-            else None,
+            "equity_rounding_pnl_reason": None
+            if isfinite(self.totals["equity_rounding_pnl"])
+            else "rounding_price_unavailable",
+            "fill_quantity_reason": None,
+            "gross_pnl": fsum((net, fees)),
+            "nav": fsum((self.capital.initial_capital, net)),
+            "capital_return": capital_return if isfinite(capital_return) else None,
+            "capital_return_reason": None
+            if isfinite(capital_return)
+            else "nonfinite_result",
             "fill_events": self.fill_events,
             "valuation_timestamp_ns": self.timestamp_ns,
         }

@@ -27,16 +27,18 @@ from quant_research_platform.markets.implementations.a_share.execution import (
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.portfolios import production
+from quant_research_platform.research.portfolios.attribution import (
+    holding_attribution,
+)
 from quant_research_platform.research.portfolios.construction import (
     build_simple_target_weights,
 )
 from quant_research_platform.research.portfolios.diagnostics import (
     iter_holding_factor_inputs,
 )
-from quant_research_platform.research.portfolios.risk import (
+from quant_research_platform.research.risk import (
     FactorRiskConfig,
     FactorRiskState,
-    holding_attribution,
 )
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
 from tests.helpers.paths import StorageLayout
@@ -343,7 +345,7 @@ def test_native_panel_feeds_risk_state_and_holding_attribution(tmp_path):
     )
     assert estimate.factor_covariance.loc[
         "industry_CSRC2012:small", "industry_CSRC2012:small"
-    ] == pytest.approx(float(Fraction(2, 9)) * 0.02**2, rel=1e-13)
+    ] == pytest.approx(float(2 / 9) * 0.02**2, rel=1e-13)
     assert estimate.factor_covariance.loc["industry_CSRC2012:large"].eq(0.0).all()
     assert estimate.specific_variance.eq(0.0).all()
     calendar = pd.DataFrame(
@@ -389,6 +391,7 @@ def test_native_simple_production_and_ledger_keep_positive_capital_target(
     tmp_path,
 ):
     assets = ["large", "small"]
+    initial_nav = 100000000.0
     dates = pd.bdate_range("2023-01-02", periods=3)
     layout = StorageLayout(tmp_path)
     specs = _processed_specs()
@@ -452,27 +455,28 @@ def test_native_simple_production_and_ledger_keep_positive_capital_target(
         decision_receivable=0.0,
         receivable=0.0,
         locked_quantities={},
-        cash=1.0,
-        nav=1.0,
+        cash=initial_nav,
+        nav=initial_nav,
         amount_history={
-            (asset, panel.listing_date.iloc[0]): deque([1000.0] * 20, maxlen=20)
+            (asset, panel.listing_date.iloc[0]): deque([1e9] * 20, maxlen=20)
             for asset in assets
         },
         alpha=alpha,
         enhanced_decision=None,
         target_override=None,
         decision_reason=PORTFOLIO_DECISION_REASON_SIMPLE,
-        assumptions=ExecutionAssumptions(1.0, 0.0, 0.0, 1.0, (1.0,)),
+        assumptions=ExecutionAssumptions(initial_nav, 0.0, 0.0, 1.0, (1.0,)),
         fee_schedule=schedule,
         fee_identity=schedule.content_identity,
         prepare_trade_cost=prepare_trade_cost,
         market_name_for_type=lambda _market: "shanghai",
     )
     assert optimized is None
-    expected = float(Fraction(3e8) / (Fraction(1e12) + Fraction(3e8)))
+    expected = float(300000000.0 / (1000000000000.0 + 300000000.0))
     assert expected > 0 and delta.loc["small"] == pytest.approx(expected, rel=1e-13)
     frame = ledger_frame(
         account=account,
+        prices=panel.loc[panel.timestamp.eq(dates[1])].set_index("asset_id").open,
         decision_timestamp=dates[0],
         returns=pd.Series(0.0, index=alpha.index),
         prediction_rank_score=alpha,
@@ -485,7 +489,7 @@ def test_native_simple_production_and_ledger_keep_positive_capital_target(
     )
     ledger_root = write_test_sessions(
         tmp_path / "ledger",
-        capital=PortfolioCapital("capitalization", 1.0, "CNY", "cash_equity"),
+        capital=PortfolioCapital("capitalization", initial_nav, "CNY", "cash_equity"),
         metadata={"window": {"start": "2023-01-02", "end": "2023-01-04"}},
         ledger_chunks=iter((frame,)),
     )
@@ -494,7 +498,9 @@ def test_native_simple_production_and_ledger_keep_positive_capital_target(
     diagnostics = {
         row.name: row.number for row in batch.diagnostics if row.asset_id == "small"
     }
-    assert diagnostics["target_notional"] == pytest.approx(expected, rel=1e-13)
+    assert diagnostics["target_notional"] == pytest.approx(
+        expected * initial_nav, rel=1e-13
+    )
     assert diagnostics["decision_delta_weight"] == pytest.approx(expected, rel=1e-13)
     assert any(
         row.asset_id == "small" and row.phase == "after" and row.value > 0

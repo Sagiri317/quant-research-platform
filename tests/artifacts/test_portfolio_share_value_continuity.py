@@ -1,7 +1,6 @@
 """Raw-share monetary boundaries have one native writer/reader owner."""
 
 from dataclasses import replace
-from fractions import Fraction
 
 import numpy as np
 import pyarrow as pa
@@ -16,7 +15,6 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioLedgerBatch,
     PortfolioValuation,
 )
-from quant_research_platform.contracts.validation import encode_exact_numeric
 
 
 def _batch(sequence, *, a=30.0, b=30.0, receivable=0.0):
@@ -33,9 +31,9 @@ def _batch(sequence, *, a=30.0, b=30.0, receivable=0.0):
                     sequence + 1,
                     "a",
                     phase,
-                    Fraction(3),
+                    float(3),
                     a + receivable,
-                    Fraction(a) / 3,
+                    float(a) / 3,
                     lifecycle_id="life",
                     receivable=receivable,
                 ),
@@ -43,9 +41,9 @@ def _batch(sequence, *, a=30.0, b=30.0, receivable=0.0):
                     sequence + 1,
                     "b",
                     phase,
-                    Fraction(3),
+                    float(3),
                     b,
-                    Fraction(b) / 3,
+                    float(b) / 3,
                     lifecycle_id="life",
                 ),
             )
@@ -94,7 +92,7 @@ def test_native_reader_rejects_changed_adjacent_raw_share_wealth(tmp_path):
     for row in rows:
         if row["sequence"] == 1 and row["asset_id"] == "a":
             row["value"] = 31.0
-            row["mark_price"] = encode_exact_numeric(Fraction(31, 3))
+            row["mark_price"] = 31 / 3
     pq.write_table(pa.Table.from_pylist(rows, schema=table.schema), path)
     path = root / "diagnostics.parquet"
     table = pq.read_table(path)
@@ -123,13 +121,13 @@ def test_native_boundary_accepts_monetary_roundoff_and_unpaid_receivable(tmp_pat
     )
 
 
-def test_native_boundary_does_not_use_monetary_tolerance_for_exact_shares(tmp_path):
+def test_native_boundary_preserves_shares_when_notional_is_unchanged(tmp_path):
     changed = _batch(1)
-    quantity = Fraction(3) + Fraction(1, 10**20)
+    quantity = 3.25
     changed = replace(
         changed,
         valuations=tuple(
-            replace(row, quantity=quantity, mark_price=Fraction(30) / quantity)
+            replace(row, quantity=quantity, mark_price=float(30) / quantity)
             if row.asset_id == "a"
             else row
             for row in changed.valuations

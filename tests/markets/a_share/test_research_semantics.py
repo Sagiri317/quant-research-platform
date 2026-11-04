@@ -245,7 +245,11 @@ def test_a_share_assembler_persists_only_eligible_sample_truth(
         spec=panel_spec,
     )
 
-    for factor_id in ("price_volume_facts", "market_model_factors"):
+    for factor_id in (
+        "price_volume_facts",
+        "market_model_factors",
+        "risk_residual_factors",
+    ):
         factor_spec = processed.get(factor_id)
         factors = keys.copy()
         for column in factor_spec.required_columns:

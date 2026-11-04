@@ -1,5 +1,6 @@
 """Actual initial purchases start from cash and obey ordinary execution costs."""
 
+from collections import deque
 from dataclasses import replace
 
 import pandas as pd
@@ -11,7 +12,32 @@ from quant_research_platform.artifacts.portfolio_ledger import (
 )
 from quant_research_platform.contracts.portfolios import PortfolioCapital
 from quant_research_platform.research.portfolios import production
+from quant_research_platform.research.portfolios.optimizer import OptimizerConfig
+from tests.helpers.portfolio_inputs import decision_inputs
 from tests.research.test_portfolio_production import _build_producer, _enhanced_inputs
+
+
+def test_unequal_capacity_can_fund_a_proportional_risk_improving_stock_leg():
+    args = decision_inputs(holdings=(0.0, 0.0))
+    args.update(cash=100.0, initializing=True)
+    args["enhanced_decision"].exposures["style"] = [-1.0, 1.0]
+    args["amount_history"] = {
+        (asset, pd.Timestamp("2000-01-01")): deque([capacity] * 20)
+        for asset, capacity in (("a", 10.0), ("b", 30.0))
+    }
+    args["optimizer_config"] = OptimizerConfig(
+        active_name_limit=0.1, style_active_limit=0.001, tracking_error_limit=0.1
+    )
+    account, _, optimized, _, ledger = production._build_session(**args)
+    assert optimized is None
+    # Buying 10/30 breaches the style band; buying 10/10 preserves it and
+    # reduces both name shortfalls from 0.5 to 0.4 within actual capacity.
+    assert ledger.executed_quantity.tolist() == [1000, 1000]
+    assert account.post_trade_cash == pytest.approx(80.0)
+    facts = ledger.attrs["realized_constraints"]
+    assert facts["execution_constraints_status"] == "IMPROVED"
+    assert facts["realized_name_active_weight"] == pytest.approx(0.4)
+    assert facts["realized_style_active_exposure"] == pytest.approx(0.0)
 
 
 @pytest.mark.parametrize(
@@ -21,7 +47,7 @@ def test_initial_actual_purchase_exempts_turnover_but_preserves_fees_capacity_an
     tmp_path, monkeypatch, blocked_first, capacity
 ):
     frames, fees, window, candidate = _enhanced_inputs(monkeypatch)
-    frames["panel"].loc[:, ["open", "close", "adj_open", "adj_close"]] = 100.0
+    frames["panel"].loc[:, ["open", "close", "adj_open", "adj_close"]] = 0.01
     frames["panel"]["amount"] = capacity
     fees["rate"] = 0.0
     fees.loc[fees.fee_code.eq("BROKER_COMMISSION"), "rate"] = 0.01
@@ -124,8 +150,8 @@ def test_first_purchase_on_ex_date_does_not_inherit_prior_record_date_dividend(
     frames, fees, window, candidate = _enhanced_inputs(monkeypatch)
     fees["rate"] = 0.0
     panel = frames["panel"]
-    panel.loc[:, ["open", "close", "adj_open", "adj_close"]] = 100.0
-    panel.loc[panel.timestamp.ge("2023-01-04"), ["open", "close"]] = 90.0
+    panel.loc[:, ["open", "close", "adj_open", "adj_close"]] = 0.01
+    panel.loc[panel.timestamp.ge("2023-01-04"), ["open", "close"]] = 0.009
     frames["corporate_actions"] = pd.DataFrame(
         [
             dict(
@@ -135,7 +161,7 @@ def test_first_purchase_on_ex_date_does_not_inherit_prior_record_date_dividend(
                 market_type=1,
                 announcement_date=pd.Timestamp("2023-01-02"),
                 settlement_date=pd.Timestamp("2023-01-05"),
-                amount=10.0,
+                amount=0.001,
             )
             for asset in ("a", "b")
         ]

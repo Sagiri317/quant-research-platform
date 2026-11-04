@@ -781,11 +781,10 @@ def test_native_calendar_evidence_localizes_daily_statistics(tmp_path, cadence):
     ],
 )
 def test_comparison_wealth_matches_independent_prefixes(returns):
-    from fractions import Fraction
 
     from quant_research_platform.research.portfolios.comparison import _wealth
 
-    exact = Fraction(1)
+    exact = float(1)
     expected = []
     for value in returns:
         if not np.isfinite(value):
@@ -793,7 +792,7 @@ def test_comparison_wealth_matches_independent_prefixes(returns):
         if exact is None:
             expected.append(np.nan)
         else:
-            exact *= 1 + Fraction(float(value))
+            exact *= 1 + float(float(value))
             expected.append(float(exact))
     actual = _wealth(returns)
     np.testing.assert_allclose(actual, expected, rtol=2e-12, atol=0, equal_nan=True)

@@ -301,7 +301,9 @@ def test_native_adv_gap_preserves_portfolio_statistics(tmp_path):
         portfolio_statistics,
     )
     from quant_research_platform.research.portfolios.production import backtest
-    from quant_research_platform.research.portfolios.risk import FactorRiskConfig
+    from quant_research_platform.research.risk import (
+        FactorRiskConfig,
+    )
     from tests.helpers.portfolio_inputs import (
         _dataset_spec,
         _frames,
@@ -313,6 +315,7 @@ def test_native_adv_gap_preserves_portfolio_statistics(tmp_path):
     dates = pd.bdate_range("2018-12-01", "2019-02-15")
     frames = _frames(dates)
     panel = frames["market_panel_1d"]
+    panel["amount"] = 1e7
     panel.loc[panel.asset_id.eq("b") & panel.timestamp.eq("2019-01-02"), "amount"] = (
         np.nan
     )
@@ -367,7 +370,7 @@ def test_native_adv_gap_preserves_portfolio_statistics(tmp_path):
         }.items()
     }
     assumptions = {
-        "initial_nav": 100.0,
+        "initial_nav": 1_000_000.0,
         "slippage_bps": 0.0,
         "impact_bps": 0.0,
         "adv_participation": 1.0,

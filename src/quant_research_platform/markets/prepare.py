@@ -82,7 +82,7 @@ def prepare(config: Mapping) -> Path:
         from quant_research_platform.research.protocols.a_share_hft import DATA_IDS
 
         if spec.data_id in DATA_IDS:
-            from quant_research_platform.markets.implementations.a_share.high_frequency import (  # noqa: E501
+            from quant_research_platform.markets.implementations.a_share.processed.high_frequency import (  # noqa: E501
                 produce,
             )
 
@@ -140,6 +140,7 @@ def _configured_spec(spec, config):
         "expectations_factors": {"freshness_days"},
         "price_volume_facts": {"min_fresh_fraction"},
         "market_model_factors": {"min_fresh_fraction"},
+        "risk_residual_factors": {"min_fresh_fraction"},
         "hft_panel": {"max_gap_seconds"},
     }.get(spec.data_id, set())
     if set(parameters) - dynamic:

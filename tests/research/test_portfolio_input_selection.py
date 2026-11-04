@@ -463,7 +463,7 @@ def test_bounded_backtest_ignores_future_bad_keys_and_keeps_required_history(
                 input_window=TimeWindow("2022-12-01", end),
                 formal_dataset_window=TimeWindow("2022-12-01", end),
                 prediction_lookup=Predictions(),
-                assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,)),
+                assumptions=ExecutionAssumptions(1_000_000.0, 0.0, 0.0, 1.0, (1.0,)),
             )
         )
 
@@ -480,7 +480,7 @@ def test_bounded_backtest_ignores_future_bad_keys_and_keeps_required_history(
     assert len(actual) == 3
     assert any(batch.trades for batch in actual)
     first = session_frame(actual[0]).set_index("asset_id")
-    assert first.loc["a0", "adv20"] == 1000.0
+    assert first.loc["a0", "adv20"] == 10_000_000.0
     with pytest.raises(ValueError, match="dataset_primary_key_null"):
         backtest("2023-01-06")
 
@@ -581,7 +581,6 @@ def test_future_lifecycle_and_rights_keys_do_not_affect_current_sessions(
 
 
 def test_corporate_amount_selection_preserves_cash_and_structural_companions(tmp_path):
-    from fractions import Fraction
 
     from quant_research_platform.research.portfolios.accounting import (
         EquityEntitlements,
@@ -619,7 +618,7 @@ def test_corporate_amount_selection_preserves_cash_and_structural_companions(tmp
         )
 
     book = EquityEntitlements()
-    units = pd.Series({"a0": Fraction(100)}, dtype="object")
+    units = pd.Series({"a0": float(100)}, dtype="object")
     lives = pd.Series({"a0": pd.Timestamp("2022-12-01")})
     paid = 0.0
     for view in sessions(["amount"]):

@@ -14,8 +14,8 @@ from quant_research_platform.markets.implementations.a_share.processed.panels im
     _apply_no_limit_exceptions,
     _apply_special_treatment,
 )
-from quant_research_platform.research.datasets.assembler import _a_share_model_target
 from quant_research_platform.research.labels.engine import calculate_labels_for_panel
+from quant_research_platform.research.labels.targets import a_share_model_target
 from quant_research_platform.research.models.scaler import (
     LinearScaledPredictor,
     ModelMatrixScaler,
@@ -119,7 +119,7 @@ def test_only_required_future_facts_determine_realized_target():
             sessions=frame.timestamp.unique(),
         )
         labeled["eligible"] = True
-        return _a_share_model_target(labeled), labeled
+        return a_share_model_target(labeled), labeled
 
     original, labels = targets(panel)
     assert labels.loc[0, "forward_return_20d"] == pytest.approx(31 / 11 - 1)

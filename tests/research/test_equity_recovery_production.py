@@ -105,6 +105,11 @@ def recovered_batches(
         "execution": changed["execution_mask"],
     }
     batches = list(_ledger(layout, roots))
+    if hold_affected:
+        assert any(
+            trade.asset_id == "000001" and trade.quantity > 0
+            for trade in batches[0].trades
+        )
     return batches
 
 
@@ -121,7 +126,9 @@ def recovered_batches(
 )
 def test_actual_reference_evidence_reaches_retained_equity_ledger(tmp_path, kind):
     batches = recovered_batches(tmp_path, kind)
-    capital = PortfolioCapital("closed_market_portfolio", 100.0, "CNY", "cash_equity")
+    capital = PortfolioCapital(
+        "closed_market_portfolio", 1_000_000.0, "CNY", "cash_equity"
+    )
     previous = None
     economics = _LedgerEconomics(capital)
     for batch in batches:
@@ -309,7 +316,9 @@ def test_available_replacement_is_atomic_in_every_wealth_snapshot(
     assert not any(
         trade.asset_id == "000001" for batch in batches[1:] for trade in batch.trades
     )
-    capital = PortfolioCapital("closed_market_portfolio", 100.0, "CNY", "cash_equity")
+    capital = PortfolioCapital(
+        "closed_market_portfolio", 1_000_000.0, "CNY", "cash_equity"
+    )
     previous = None
     for batch in batches:
         previous = validate_portfolio_transition(batch, capital, previous)
@@ -349,7 +358,7 @@ def test_equal_replacement_native_statistics_has_no_artificial_drawdown_or_volat
     ledger = write_portfolio_ledger_artifact(
         tmp_path / "ledger",
         capital=PortfolioCapital(
-            "closed_market_portfolio", 100.0, "CNY", "cash_equity"
+            "closed_market_portfolio", 1_000_000.0, "CNY", "cash_equity"
         ),
         metadata={
             "window": window,
@@ -570,7 +579,9 @@ def test_rights_only_successor_can_settle_to_cash_without_disappearing(tmp_path)
         events_override=events,
         panel_transform=_flat_prices,
     )
-    capital = PortfolioCapital("closed_market_portfolio", 100.0, "CNY", "cash_equity")
+    capital = PortfolioCapital(
+        "closed_market_portfolio", 1_000_000.0, "CNY", "cash_equity"
+    )
     previous = None
     for batch in batches:
         previous = validate_portfolio_transition(batch, capital, previous)
@@ -725,7 +736,7 @@ def test_suspended_forced_share_change_preserves_wealth_with_or_without_quote(tm
     ledger = write_portfolio_ledger_artifact(
         tmp_path / "share-change-ledger",
         capital=PortfolioCapital(
-            "closed_market_portfolio", 100.0, "CNY", "cash_equity"
+            "closed_market_portfolio", 1_000_000.0, "CNY", "cash_equity"
         ),
         metadata={"window": {"start": "2022-12-30", "end": "2023-01-06"}},
         produce=lambda emit: [emit(batch) for batch in unquoted],
